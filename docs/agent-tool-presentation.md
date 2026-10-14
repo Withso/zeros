@@ -196,6 +196,46 @@ delivery shapes.
   cancellation and handle disposal. A live canary must verify actual tool calls
   through the adapter and host, not just that the gateway advertises new tools.
 
+## Model discovery and startup diagnostics
+
+Cursor and Codex retain the last confirmed model catalog while refreshing it.
+Discovery has a 15-minute TTL, one request per cache scope, a five-second budget
+and a 30-second backoff after failure. Credential changes start a new scope;
+model-unavailable errors invalidate it and request one coalesced refresh without
+replaying the turn. A late result from a replaced scope or timed-out flight
+cannot publish. Claude retains its existing discovery policy.
+
+Publish `modelsAccountScoped: true` only after validating a complete response.
+Codex follows all pages within the same budget, at most 32 pages and 2,048 rows;
+Cursor accepts at most 2,048 rows. An empty successful catalog means no eligible
+models. An unavailable or incomplete response preserves the prior snapshot and
+does not claim an empty catalog. Curated labels and saved exact model IDs remain
+stable; account-ineligible choices are disabled. Older peers without the scope
+marker retain capability-only overlays.
+
+Local Personal and organization-local catalogs follow the configured provider
+account. Cloud catalogs belong to an admitted execution, never the engine's
+global Local cache. An optional `chatId` on `AGENT_INIT_AGENT` resolves through
+the engine's current conversation binding; the reply rechecks actor authority
+and that binding. Unknown, disposed and revoked executions return generic
+metadata. Passive initialization never starts a provider process.
+
+After a turn, including a model refusal, the renderer performs a detached
+metadata read keyed by account generation, workspace, chat, execution and bridge.
+A cloud read joins bounded discovery and rechecks lifetime after waiting. Cursor
+native startup stays independent of catalog completion. Late responses cannot
+replace a newer session or metadata snapshot. This read neither authorizes a
+send nor changes a saved model; cloud exact-model refusal remains terminal for
+that attempt. The existing Local Cursor fallback policy is unchanged.
+
+Cloud Codex emits payload-free `cloud_stage` diagnostics for `initialize`,
+`executor_start`, `provider_login`, `environment_add`, `environment_info` and
+`environment_ready`. Each records an ephemeral attempt ID, closed stage/status
+names and elapsed milliseconds. Never include RPC parameters, URLs, paths,
+credentials, account IDs or provider error prose. Observer failures cannot
+change execution. These traces wrap existing work: admission, RPC deadlines,
+readiness checks and retry counts remain authoritative.
+
 ## Response replacement and model fallback
 
 - Claude `supersedes` and `model_refusal_fallback.retracted_message_uuids`

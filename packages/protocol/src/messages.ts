@@ -436,6 +436,8 @@ export interface AgentOpenBoundaryPortMessage extends BaseMessage {
 export interface AgentInitAgentMessage extends BaseMessage {
   type: "AGENT_INIT_AGENT";
   agentId: string;
+  /** Optional conversation route for cloud account-scoped metadata. */
+  chatId?: string;
 }
 
 export interface AgentAuthenticateMessage extends BaseMessage {

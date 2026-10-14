@@ -6,6 +6,7 @@ import { FallbackModelSelection } from "../shared/fallback-model-selection";
 import { exactModelFallbackError, requireExplicitModel } from "../shared/exact-model-selection";
 import {
   AccountModelDiscovery,
+  ACCOUNT_MODEL_TTL_MS,
   type AccountModelState,
 } from "../shared/account-model-discovery";
 import {
@@ -337,6 +338,7 @@ export interface CodexSession {
   exactModelFailure?: Error;
   modelSelection: FallbackModelSelection;
   readonly modelState: AccountModelState;
+  readonly modelDiscovery: AccountModelDiscovery;
   zerosSessionId: string;
   cwd: string;
   env?: Record<string, string>;
@@ -665,6 +667,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private cachedInitialize: InitializeResponse | null = null;
   private readonly modelDiscovery = new AccountModelDiscovery(
     () => this.ctx.authenticationContext?.() ?? "default",
+    { ttlMs: ACCOUNT_MODEL_TTL_MS, timeoutMs: 5_000 },
   );
 
   constructor(ctx: AgentAdapterContext) {
@@ -981,7 +984,36 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async initialize(): Promise<InitializeResponse> {
+    const current = this.modelDiscovery.current();
+    const session = [...this.sessions.values()].find(candidate =>
+      candidate.modelState === current && candidate.runtimeAlive && !this.disposing.has(candidate.zerosSessionId));
+    // Metadata reads never boot a runtime or hold a picker behind the network.
+    // Only an already admitted live session can refresh this account.
+    if (session) void this.discoverModels(session);
     return advertiseAgentCapabilities(this, this.initializeResponse());
+  }
+
+  async initializeSession(sessionId: string): Promise<InitializeResponse> {
+    const session = this.sessions.get(sessionId);
+    const base = buildInitializeResponse();
+    if (!session || !session.runtimeAlive || this.disposing.has(sessionId))
+      return advertiseAgentCapabilities(this, base);
+    const cloud = cloudProviderExecution(session.executionBoundary);
+    if (!cloud) return this.initialize();
+    try { cloudExecutionLifetime(cloud).assertLive(); }
+    catch { return advertiseAgentCapabilities(this, base); }
+    // This explicit metadata read joins the bounded refresh. Otherwise a
+    // refusal would return the old picker snapshot until another user turn.
+    await this.discoverModels(session);
+    if (this.sessions.get(sessionId) !== session || !session.runtimeAlive || this.disposing.has(sessionId))
+      return advertiseAgentCapabilities(this, base);
+    try { cloudExecutionLifetime(cloud).assertLive(); }
+    catch { return advertiseAgentCapabilities(this, base); }
+    const models = session.modelState.models;
+    return advertiseAgentCapabilities(this, {
+      ...base,
+      _meta: { ...base._meta, ...(models !== undefined ? { models, modelsAccountScoped: true } : {}) },
+    });
   }
 
   /** Memoized InitializeResponse so model/list discovery can populate
@@ -992,10 +1024,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
     const models = this.modelDiscovery.current().models;
     if (this.cachedInitialize._meta?.models !== models) {
-      const { models: _previous, ...meta } = this.cachedInitialize._meta ?? {};
+      const { models: _previous, modelsAccountScoped: _previousScope, ...meta } = this.cachedInitialize._meta ?? {};
       this.cachedInitialize = {
         ...this.cachedInitialize,
-        _meta: { ...meta, ...(models ? { models } : {}) },
+        _meta: { ...meta, ...(models !== undefined ? { models, modelsAccountScoped: true } : {}) },
       };
     }
     return this.cachedInitialize;
@@ -1017,23 +1049,45 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  Collapsing those two cases would let an older/leaner `model/list` payload
    *  silently strip the effort and Fast controls off every model. */
   private async discoverModels(session: CodexSession): Promise<void> {
-    return this.modelDiscovery.discover(session.modelState, async () => {
-      const resp = await session.runtime.requestTyped<
+    return session.modelDiscovery.discover(session.modelState, () => this.readModels(session.runtime));
+  }
+
+  private async readModels(runtime: CodexAppServerHandle): Promise<AdvertisedModel[]> {
+      type CatalogPage = {
+        data?: Array<{
+          id?: string;
+          displayName?: string;
+          hidden?: boolean;
+          supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
+          serviceTiers?: Array<{ id?: string }>;
+          additionalSpeedTiers?: string[];
+        }>;
+        nextCursor?: string | null;
+      };
+      const rows: NonNullable<CatalogPage["data"]> = [];
+      const seen = new Set<string>();
+      const deadline = performance.now() + 5_000;
+      let cursor: string | undefined;
+      do {
+        const timeoutMs = Math.ceil(deadline - performance.now());
+        if (timeoutMs <= 0 || seen.size >= 32) throw new Error("Codex model discovery exceeded its budget");
+        const resp = await runtime.requestTyped<
         "model/list",
-        {
-          data?: Array<{
-            id?: string;
-            displayName?: string;
-            hidden?: boolean;
-            supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
-            serviceTiers?: Array<{ id?: string }>;
-            additionalSpeedTiers?: string[];
-          }>;
-        }
-      >("model/list", { includeHidden: false }, { timeoutMs: 5_000 });
+        CatalogPage
+        >("model/list", { includeHidden: false, ...(cursor ? { cursor } : {}) }, { timeoutMs });
+        if (!Array.isArray(resp?.data) || rows.length + resp.data.length > 2_048)
+          throw new Error("Codex model discovery returned an incomplete catalog");
+        rows.push(...resp.data);
+        if (resp.nextCursor != null && (typeof resp.nextCursor !== "string" || !resp.nextCursor || resp.nextCursor.length > 4_096 || seen.has(resp.nextCursor)))
+          throw new Error("Codex model discovery returned an invalid cursor");
+        cursor = resp.nextCursor ?? undefined;
+        if (cursor) seen.add(cursor);
+      } while (cursor);
       const models: AdvertisedModel[] = [];
-      for (const m of resp?.data ?? []) {
-        if (!m?.id || m.hidden) continue;
+      for (const m of rows) {
+        if (typeof m?.id !== "string" || !m.id.trim() || m.id.length > 256)
+          throw new Error("Codex model discovery returned an invalid model");
+        if (m.hidden) continue;
         // An advertised ladder that maps to nothing (Codex offered only
         // none/minimal, which Zeros' composer has no token for) stays an
         // explicit [] — there is genuinely no effort the user could pick that
@@ -1066,7 +1120,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
         });
       }
       return models;
-    });
+  }
+
+  private refreshModelsAfterRejection(session: Pick<CodexSession, "modelDiscovery" | "modelState" | "runtime">, error: unknown): void {
+    if (normalizeProviderError("codex", error).category !== "model-unavailable") return;
+    session.modelDiscovery.invalidate(session.modelState);
+    void session.modelDiscovery.discover(session.modelState, () => this.readModels(session.runtime));
   }
 
   async newSession(opts: {
@@ -1099,7 +1158,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // models immediately (not the bundled fallback). Shared per account + bounded
     // by model/list's own timeout; never throws.
     await this.discoverModels(session);
-    const initialize = await this.initialize();
+    const initialize = await this.initializeSession(session.zerosSessionId);
     const cloud = cloudProviderExecution(session.executionBoundary);
     if (cloud) {
       const exited = !session.runtimeAlive || session.runtime.child.killed ||
@@ -1358,6 +1417,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // a RECOVERABLE transport-closed instead → the renderer rebuilds the
     // session (reboots the child, resumes the thread) and resends the prompt.
     if (!session.runtimeAlive) throw codexDisconnectedFailure();
+    void this.discoverModels(session);
 
     const nativeWorkingTreeReview = isCodexWorkingTreeReviewPrompt(opts.prompt);
     session.modelSelection.beginTurn();
@@ -1577,6 +1637,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       };
     } catch (err) {
       session.activeTurnId = null;
+      this.refreshModelsAfterRejection(session, err);
       if (session.exactModelFailure) throw session.exactModelFailure;
       if (session.cancelRequested) return cancelledTurn();
       if (err instanceof CloudCommandFailureError) throw err;
@@ -2244,8 +2305,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
      *  through listSessions). For kind === "new", a fresh UUID. */
     zerosSessionId?: string;
   }): Promise<{ session: CodexSession; resumedFresh: boolean }> {
-    const modelState = this.modelDiscovery.capture(opts.authenticationContext);
     const zerosSessionId = opts.zerosSessionId ?? randomUUID();
+    const cloudExecution = cloudProviderExecution(opts.executionBoundary);
+    // A cloud credential belongs to this admitted execution, not the engine's
+    // Local provider configuration. Never publish it through the global cache.
+    const modelDiscovery = cloudExecution
+      ? new AccountModelDiscovery(() => cloudExecutionLifetime(cloudExecution).signal.aborted ? "" : zerosSessionId,
+        { ttlMs: ACCOUNT_MODEL_TTL_MS, timeoutMs: 5_000 })
+      : this.modelDiscovery;
+    const modelState = modelDiscovery.capture(cloudExecution ? undefined : opts.authenticationContext);
     try {
       await ensureSessionDir(zerosSessionId);
       await writeSessionMeta(zerosSessionId, {
@@ -2365,7 +2433,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // Disk MCP declarations (stdio AND HTTP) require Customize → Import.
     // Keep provider-installed plugins and the account app bridge in normal
     // chats; restricted actors retain only their explicitly admitted registry.
-    const cloudExecution=cloudProviderExecution(opts.executionBoundary);
     const cloudExtensions = cloudExecution ? cloudCodexCapabilities(cloudExecution).connectedApps : nativeMcpPassthroughEnabled(
       undefined,
       opts.executionBoundary,
@@ -2499,6 +2566,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       if (mismatch) throw mismatch;
     } catch (err) {
       const stage = opts.kind === "resume" ? "loadSession" : "newSession";
+      this.refreshModelsAfterRejection({ modelDiscovery, modelState, runtime }, err);
       const exited = runtime.child.killed || runtime.child.exitCode != null || runtime.child.signalCode != null;
       // Capture actual exit before cleanup itself stops the process. Native
       // exit can race the post-thread admission check before registration.
@@ -2598,6 +2666,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session = {
       modelSelection: new FallbackModelSelection(opts.env?.OPENAI_MODEL?.trim() || threadModel),
       modelState,
+      modelDiscovery,
       accountExtensionsEnabled: !cloudExecution && cloudExtensions,
       accountAppBridgeEnabled,
       excludedMcpServers: new Set(

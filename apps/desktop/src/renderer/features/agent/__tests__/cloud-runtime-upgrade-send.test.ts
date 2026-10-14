@@ -119,7 +119,7 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
     // Exercise post-readiness dispatch; cloud FIFO preparation has its own
     // integration suite and hands off the already-claimed stable bubble id.
     flushBubbleRef: { current: new Map(queued ? [["chat", "accepted-prompt"]] : []) },
-    cloudFlushRef: { current: new Map(queued ? [["chat", entry]] : []) }, cloudCatalogGeneration: () => 1,
+    cloudFlushRef: { current: new Map(queued ? [["chat", entry]] : []) }, refreshModelCatalog: vi.fn(), cloudCatalogGeneration: () => 1,
     beginCloudSendWaitRef: { current: readiness }, classifyCloudAdmissionFailure, cloudAdmissionFailureCode,
     reportCloudAgentRuntimeUpgrade, invalidateCloudAgentRegistry, notifyAgentSendFailure: failureNotice,
     getAgentsSnapshot: () => [], isCloudWorkspace,

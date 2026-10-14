@@ -739,6 +739,7 @@ async function harness(options: Scenario = {}) {
   const finished = vi.fn(),
     completed = vi.fn(),
     pauseQueue = vi.fn(),
+    refreshModelCatalog = vi.fn(),
     sending = new Set<string>();
   let accountGeneration = 1;
   const context: Record<string, unknown> = {
@@ -756,7 +757,7 @@ async function harness(options: Scenario = {}) {
     getStore: useSessionsStore.getState,
     flushBubbleRef: { current: new Map(cloud ? [[CHAT, TURN]] : []) },
     cloudFlushRef: { current: new Map(cloud ? [[CHAT, entryForSend]] : []) },
-    cloudCatalogGeneration: () => accountGeneration,
+    refreshModelCatalog, cloudCatalogGeneration: () => accountGeneration,
     beginCloudSendWaitRef: { current: vi.fn() },
     classifyCloudAdmissionFailure,
     cloudAdmissionFailureCode,
@@ -835,6 +836,7 @@ async function harness(options: Scenario = {}) {
       ),
     finished,
     completed,
+    refreshModelCatalog,
     request,
     historyRead,
     history,
@@ -933,6 +935,18 @@ function expectSingleDispatch(
 }
 
 describe("cloud turn failure visibility across renderer, command runtime, and durable history", () => {
+  it("refreshes only metadata after a cloud provider refuses the model", async () => {
+    const nativeError = {
+      code: "model_not_found", message: "The model test-model does not exist or you do not have access to it.",
+    };
+    expect(normalizeProviderError("codex", nativeError).category).toBe("model-unavailable");
+    const h = await harness({ nativeError });
+    await h.send();
+    expect(slot().failure?.message).toContain("test-model");
+    expect(h.refreshModelCatalog).toHaveBeenCalledExactlyOnceWith(CHAT);
+    expect(h.provider).toHaveBeenCalledTimes(1);
+    expect(mocks.workspace.chats[0]?.model).toBe("test-model");
+  });
   it.each([
     "cloud_agent_credential_expired",
     "cloud_agent_model_not_authorized",

@@ -14,7 +14,7 @@ import { portableCloudWorkloads } from "../../../containment/__tests__/helpers/p
 import { cloudProviderExecution, cloudBootTurnReservation, type CloudBootNativeAuthority } from "../../../cloud-provider-execution";
 import { testCloudBootFixture } from "../../../__tests__/helpers/test-cloud-boot";
 
-const native = vi.hoisted(() => ({ prepareBoot: vi.fn(), runtime: vi.fn(), create: vi.fn(), resume: vi.fn(), send: vi.fn() }));
+const native = vi.hoisted(() => ({ prepareBoot: vi.fn(), runtime: vi.fn(), create: vi.fn(), resume: vi.fn(), send: vi.fn(), models: vi.fn() }));
 vi.mock("../../../containment/cloud-native-boundary", async original => ({
   ...await original<typeof import("../../../containment/cloud-native-boundary")>(),
   CloudNativeBoundary: { prepare: vi.fn(), prepareBoot: native.prepareBoot },
@@ -36,8 +36,9 @@ const agent = () => ({ agentId: "native", send: native.send, close() {} });
 beforeEach(() => {
   vi.stubEnv("CURSOR_API_KEY", ""); vi.stubEnv("CURSOR_RIPGREP_PATH", "/usr/bin/rg");
   native.create.mockReset().mockResolvedValue(agent()); native.resume.mockReset().mockResolvedValue(agent()); native.send.mockReset();
+  native.models.mockReset().mockResolvedValue([{ id: "test-model" }]);
   native.runtime.mockReset().mockImplementation(() => ({ module: { Agent: { create: native.create, resume: native.resume, list: vi.fn(async () => ({ items: [] })) },
-    Cursor: { models: { list: vi.fn(async () => []) } }, platform: { prewarm: vi.fn(async () => ({})) } }, dispose: async () => {} }));
+    Cursor: { models: { list: native.models } }, platform: { prewarm: vi.fn(async () => ({})) } }, dispose: async () => {} }));
 });
 async function setup(operation: "new" | "load" = "new") {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "zeros-cursor-boot-"))); cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -84,6 +85,38 @@ async function setup(operation: "new" | "load" = "new") {
 }
 const blocks = [{ type: "text" as const, text: "Synthetic" }];
 describe("Cursor original boot reservation across native preparation", () => {
+  it.each([false, true])("joins a rejected model refresh without replay and rechecks disposal (dispose=%s)", async dispose => {
+    const f = await setup();
+    await f.adapter.initializeSession(f.sessionId);
+    let release!: (models: unknown[]) => void;
+    native.models.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    native.send.mockRejectedValueOnce(new Error("Cannot use this model: test-model. Available models: composer-2.5. Use Cursor.models.list() to discover valid selections."));
+    await expect(f.adapter.prompt({ sessionId: f.sessionId, prompt: blocks })).rejects.toThrow();
+    await vi.waitFor(() => expect(native.models).toHaveBeenCalledTimes(2));
+    let settled = false;
+    const refresh = f.adapter.initializeSession(f.sessionId).then(result => { settled = true; return result; });
+    await new Promise(resolve => setImmediate(resolve));
+    const returnedBeforeDiscovery = settled;
+    if (dispose) await f.adapter.disposeSession(f.sessionId);
+    release([]);
+    const result = await refresh;
+    expect(returnedBeforeDiscovery).toBe(false);
+    if (dispose) expect(result._meta?.models).toBeUndefined();
+    else expect(result._meta).toMatchObject({ models: [], modelsAccountScoped: true });
+    expect(native.send).toHaveBeenCalledTimes(1);
+    expect(native.models).toHaveBeenCalledTimes(2);
+  });
+  it.each(["new", "load"] as const)("keeps %s cloud model metadata on the admitted execution", async operation => {
+    const f = await setup(operation);
+    expect((await f.adapter.initialize())._meta?.models).toBeUndefined();
+    await vi.waitFor(async () => expect((await f.adapter.initializeSession(f.sessionId))._meta).toMatchObject({
+      modelsAccountScoped: true, models: [{ value: "test-model" }],
+    }));
+    expect((await f.adapter.initializeSession("unrelated-execution"))._meta?.models).toBeUndefined();
+    expect(f.writes).not.toHaveBeenCalled();
+    await f.adapter.disposeSession(f.sessionId);
+    expect((await f.adapter.initializeSession(f.sessionId))._meta?.models).toBeUndefined();
+  });
   it.each(["new", "load"] as const)("%s marks actual native handoff and keeps passive observation separate", async operation => {
     const f = await setup(operation), observer = vi.fn();
     expect(isCloudPreparedBoundary(f.domain)).toBe(true);

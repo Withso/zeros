@@ -145,6 +145,29 @@ describe("familyForModelValue (catalog membership, not substring)", () => {
 });
 
 describe("modelsForAgent (curated catalog)", () => {
+  it("keeps saved curated identities visible but disables models absent from a complete account list", () => {
+    const initialize = { protocolVersion: 1, _meta: { modelsAccountScoped: true, models: [
+      { value: "gpt-6-luna", label: "Provider name", supportsFast: false },
+    ] } };
+    const offered = modelsForAgent("codex", initialize);
+    expect(offered.filter(model => model.selectable !== false).map(model => model.value)).toEqual(["gpt-6-luna"]);
+    expect(resolveModelOption("codex", "gpt-6.1-sol", initialize)).toMatchObject({ value: "gpt-6.1-sol", selectable: false });
+    expect(resolveModelOption("codex", "gpt-6-luna", initialize)).toMatchObject({ label: "GPT-6 Luna", supportsFast: false });
+  });
+
+  it("honors a confirmed empty account list without changing saved default identity", () => {
+    const initialize = { protocolVersion: 1, _meta: { modelsAccountScoped: true, models: [] } };
+    expect(modelsForAgent("cursor", initialize).every(model => model.selectable === false)).toBe(true);
+    expect(resolveModelOption("cursor", "grok-4.7", initialize)).toMatchObject({ value: "grok-4.7", selectable: false });
+    expect(resolveModelOption("cursor", null, initialize)).toMatchObject({ value: "grok-4.7", selectable: false });
+    expect(modelsForAgent("cursor", null).some(model => model.selectable !== false)).toBe(true);
+  });
+
+  it("keeps older unscoped catalogs as capability overlays", () => {
+    const initialize = { protocolVersion: 1, _meta: { models: [{ value: "gpt-6-luna", label: "Luna", supportsFast: false }] } };
+    expect(resolveModelOption("codex", "gpt-6.1-sol", initialize)?.selectable).not.toBe(false);
+    expect(resolveModelOption("codex", "gpt-6-luna", initialize)?.supportsFast).toBe(false);
+  });
   for (const id of ["claude", "codex", "cursor"]) {
     it(`returns a non-empty model list for "${id}" → pill renders`, () => {
       expect(modelsForAgent(id, null).length).toBeGreaterThan(0);

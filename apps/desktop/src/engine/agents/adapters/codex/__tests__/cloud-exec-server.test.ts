@@ -13,6 +13,7 @@ import {CloudCodexExecServer} from "../cloud-exec-server";
 import {CLOUD_CODEX_CONFIG,cloudCodexConfig} from "../cloud-policy";
 import {codexAppServerFeatureArgs} from "../app-server";
 import {createInterface} from "node:readline";
+import {JsonRpcStdioClient} from "../../shared/jsonrpc";
 import type {CloudLegacyProviderExecution as CloudProviderExecution} from "../../../cloud-provider-execution";
 import type {BoundaryProcess,BoundarySpawnRequest} from "../../../containment/types";
 import {createCloudNativeHome} from "../../../containment/cloud-native-home";
@@ -23,6 +24,64 @@ vi.mock("../../../containment/cloud-runtime-root.mjs", async original => ({
 const importedRuntime = (await import("../../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime();
 
 describe.skipIf(process.platform!=="linux")("cloud native executor wire (no model or credential)",()=>{
+  it("connects the pinned app-server to the native executor through environment/add", async () => {
+    const binary = await resolveCodexBinary({});
+    const nativeBinary = path.join(binary.sandboxRuntimeRoot!, "bin/codex");
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-codex-environment-"));
+    const nativeHome = await createCloudNativeHome({ dataRoot: root, conversationId: "environment", provider: "codex", executionId: "startup" });
+    const abort = new AbortController();
+    const domains = new Set<{ stopAndProve(): Promise<void> }>();
+    let closing: Promise<void> | undefined;
+    const close = () => {
+      abort.abort();
+      return closing ??= Promise.all([...domains].map(domain => domain.stopAndProve())).then(() => {});
+    };
+    const lifetime = {
+      signal: abort.signal,
+      assertLive() { if (abort.signal.aborted) throw new Error("retired"); },
+      attach: (domain: { stopAndProve(): Promise<void> }) => { domains.add(domain); },
+      launch: (launch: () => Promise<BoundaryProcess>) => launch(),
+      close,
+    };
+    const execution = { cwd: root, lease: lifetime, lifetime, environment: null, coordinator: {
+      nativeHome,
+      workload: { spawn: async () => {
+        // The helper's environment propagation has its own real-native test
+        // below. This probe isolates the complete app-server/bridge handshake.
+        const child = spawn(nativeBinary, ["exec-server", "--listen", "stdio"], {
+          cwd: root, env: { ...nativeHome.environment(), PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, stdio: ["pipe", "pipe", "pipe"],
+        });
+        const exited = new Promise<{ code: number | null; signal: string | null }>(resolve => child.once("close", (code, signal) => resolve({ code, signal })));
+        const domain = { pid: child.pid!, child, stdin: child.stdin, stdout: child.stdout, stderr: child.stderr,
+          wait: () => exited, signal: async (signal: NodeJS.Signals) => { child.kill(signal); },
+          stopAndProve: async () => { child.kill("SIGKILL"); await exited; } } as BoundaryProcess;
+        domains.add(domain);
+        return domain;
+      } },
+    } } as unknown as CloudProviderExecution;
+    const app = spawn(nativeBinary, ["app-server", ...codexAppServerFeatureArgs(true),
+      ...Object.entries({ ...CLOUD_CODEX_CONFIG, sqlite_home: path.join(nativeHome.paths.codexHome, "sessions/.zeros-state") })
+        .flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])], {
+      cwd: root, env: { ...nativeHome.environment(), PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, stdio: ["pipe", "pipe", "pipe"],
+    });
+    const exited = new Promise<void>(resolve => app.once("close", () => resolve()));
+    app.stderr.resume();
+    const client = new JsonRpcStdioClient(app, { logTag: "offline-environment", defaultTimeoutMs: 6_000 });
+    try {
+      await client.request("initialize", { clientInfo: { name: "qualification", version: "1" }, capabilities: { experimentalApi: true } });
+      client.notify("initialized", {});
+      const bridge = await CloudCodexExecServer.start(execution, nativeBinary);
+      await client.request("environment/add", { environmentId: bridge.environmentId, execServerUrl: bridge.url, connectTimeoutMs: 5_000 });
+      expect(await client.request("environment/info", { environmentId: bridge.environmentId })).toMatchObject({ cwd: `file://${root}` });
+      expect(await client.request("environment/status", { environmentId: bridge.environmentId })).toMatchObject({ status: "ready" });
+    } finally {
+      client.close();
+      app.kill("SIGKILL");
+      await exited;
+      await close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
   it("initializes the real app-server with the complete cloud configuration in an empty physical HOME",async()=>{
     const binary=await resolveCodexBinary({}),root=await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-codex-config-"));
     await mkdir(path.join(root,".codex"));

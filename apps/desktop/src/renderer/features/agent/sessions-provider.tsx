@@ -63,6 +63,8 @@ import type {
   AgentSteeredMessage,
 } from "../../platform/bridge/messages";
 import { useBridge } from "../../platform/bridge/use-bridge";
+import { getActiveBridge } from "../../platform/bridge/active-bridge";
+import { refreshAgentModelCatalog } from "./refresh-agent-model-catalog";
 import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudReplyOwnership } from "../../platform/bridge/cloud-runtime-wire";
@@ -2322,6 +2324,28 @@ export function AgentSessionsProvider({
     ensureSessionRef.current = ensureSession;
   }, [ensureSession]);
 
+  const refreshModelCatalog = useCallback((chatId: string) => {
+    const slot = getStore().sessions[chatId];
+    if (!bridge || !slot?.agentId) return;
+    const agentId = slot.agentId;
+    void refreshAgentModelCatalog({
+      current: () => {
+        const current = getStore().sessions[chatId];
+        if (getActiveBridge() !== bridge || !current || current.agentId !== agentId) return null;
+        return { bridge, key: JSON.stringify([chatId, current.cwd, current.agentId,
+          current.executionId, current.sessionId, current.appliedChatEnvKey, cloudCatalogGeneration()]),
+          initialize: current.initialize };
+      },
+      request: async () => {
+        const response = await bridge.request<AgentAgentInitializedMessage | AgentErrorMessage>({
+          type: "AGENT_INIT_AGENT", agentId, ...(isCloudWorkspace(slot.cwd) ? { chatId } : {}),
+        }, 10_000);
+        return response.type === "AGENT_AGENT_INITIALIZED" ? response.initialize : null;
+      },
+      publish: initialize => getStore().patchSession(chatId, { initialize }),
+    });
+  }, [bridge, getStore]);
+
   const sendPrompt = useCallback<SessionsActions["sendPrompt"]>(
     async (
       chatId,
@@ -3765,48 +3789,6 @@ export function AgentSessionsProvider({
             activeTurnStartedAt: null,
             usage: nextUsage,
           });
-          // Live model-list refresh. Some agents (Claude) only learn their real
-          // model list AFTER the first prompt — query.supportedModels() needs a
-          // live query — so the initialize captured at newSession is the
-          // cold-start floor (`_meta.modelsDynamic` set, no `_meta.models`). Once
-          // discovery lands, the agent-level initialize re-poll carries the live
-          // list; re-fetch it here and patch THIS already-open chat so its picker
-          // stops showing the floor. Fire-and-forget + self-limiting: the guard is
-          // false once models are present (or for static / already-populated
-          // agents like Codex, whose session initialize has models at
-          // newSession), so it stops firing after at most a turn or two.
-          void (async () => {
-            const refreshAgentId = current.agentId;
-            if (!refreshAgentId || !bridge) return;
-            const stale = getStore().sessions[chatId]?.initialize?._meta;
-            const stillFloored =
-              !!stale?.modelsDynamic &&
-              !(Array.isArray(stale.models) && stale.models.length > 0);
-            if (!stillFloored) return;
-            try {
-              const initResp = await bridge.request<
-                AgentAgentInitializedMessage | AgentErrorMessage
-              >({ type: "AGENT_INIT_AGENT", agentId: refreshAgentId, ...(isCloudWorkspace(current.cwd) ? { chatId } : {}) }, 30_000);
-              if (initResp.type === "AGENT_ERROR") return;
-              const freshMeta = initResp.initialize?._meta;
-              if (
-                !Array.isArray(freshMeta?.models) ||
-                freshMeta.models.length === 0
-              ) {
-                return; // discovery not done yet — a later turn retries
-              }
-              // Re-check the chat is still floored before patching (don't clobber
-              // a concurrent update / a live model the user just picked).
-              const cur = getStore().sessions[chatId]?.initialize?._meta;
-              if (!(Array.isArray(cur?.models) && cur.models.length > 0)) {
-                getStore().patchSession(chatId, {
-                  initialize: initResp.initialize,
-                });
-              }
-            } catch {
-              /* best-effort — the picker keeps the cold-start floor */
-            }
-          })();
           // Analytics: a prompt turn completed. Metadata only — model NAME,
           // token counts, cost (best-effort per agent). No content.
           // Read usage with the CANONICAL TurnUsage field names the engine
@@ -3901,6 +3883,9 @@ export function AgentSessionsProvider({
         cancelLatency?.();
         const terminalSlot = getStore().sessions[chatId];
         const ownsTerminalSlot = ownsCloudSend();
+        // Includes model refusals. Refresh only metadata; queued sends and the
+        // saved model stay under their existing admission and user-intent gates.
+        if (ownsTerminalSlot && !stoppedByUser()) refreshModelCatalog(chatId);
         const terminalPrompt =
           terminalSlot && lastUserPrompt(terminalSlot.messages);
         if (
@@ -4086,6 +4071,7 @@ export function AgentSessionsProvider({
       prepareForSend,
       cloudComputerV2,
       retryCloudQueuedPrompt,
+      refreshModelCatalog,
     ],
   );
   sendPromptRef.current = sendPrompt;

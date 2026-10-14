@@ -518,6 +518,10 @@ export interface AgentAdapter {
   /** One-time prep (probe version, boot the SDK/app-server runtime, etc.). */
   initialize(): Promise<InitializeResponse>;
 
+  /** Read metadata for an existing execution without starting a native process.
+   * Cloud account catalogs must not populate provider-wide Local metadata. */
+  initializeSession?(sessionId: string): Promise<InitializeResponse>;
+
   /** Start a new session. Returns the session metadata the UI needs.
    *  `cliBinary` overrides the registry-declared command for this
    *  session only (Settings → Providers → Advanced); omit to use the

@@ -74,7 +74,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
   const provider: any = { ...lifecycle, ...retention, Error, BLANK: {}, useCallback: (fn: unknown) => fn, isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId,
     hasCloudWorkspaceAccountAccess: (organizationId: string) => cloudWorkspaceAccountAccess(account.me, organizationId),
     cloudComputerV2: cloud && cloudWorkspaceAccountAccess(account.me), bridge: { status: "connected" }, getStore: () => store, useWorkspaceStore: { getState: () => workspace },
-    cloudCatalogGeneration: () => 1, cloudWorkspaceDocument: () => doc, prepareForSend: prepare, cloudSendWaitRef: { current: wait },
+    refreshModelCatalog: vi.fn(), cloudCatalogGeneration: () => 1, cloudWorkspaceDocument: () => doc, prepareForSend: prepare, cloudSendWaitRef: { current: wait },
     subscribeCloudWorkspaces: () => () => {}, cloudWorkspaceStopVersion: () => 0, isCloudWorkspaceLifecyclePending,
     cloudSendPreparationRef: { current: { cancel: vi.fn() } }, beginCloudSendWaitRef: { current: null }, hydrateCloudSendRef: { current: null },
     sendQueueRef: { current: queue }, sendingChatsRef: { current: sending }, queueHeldRef: { current: new Set() },
