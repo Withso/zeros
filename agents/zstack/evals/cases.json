@@ -108,6 +108,15 @@
       "symptom": "Named Computers introduced boat-computer:<name>@sha256:<digest> image references. The VM setup helper accepted only boat-template:, so every workspace from a named Computer failed setup_settings_invalid.",
       "rule": "zstack-review \u203a Compatibility: when a producer adds a new identifier form, update every consumer's parser in the same change (search for the old prefix).",
       "check": "pnpm exec vitest run scripts/__tests__/cloud-workspace-setup-helper.test.ts"
+    },
+    {
+      "id": "retention-pagination-test-budget",
+      "kind": "replay",
+      "area": "snapshots-retention",
+      "fixedBy": "pr:474",
+      "symptom": "A retention pagination fixture with 53 durable journals and 153 deletion attempts exceeded the default 5 s test timeout under modest database latency. The listener changed by the PR was never started by this test.",
+      "rule": "playbooks/ci-red.md: trace callback reachability, qualify large database fixtures with bounded transit delay, and adjust only the test budget; prove notification overlap with held work and observed completion.",
+      "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/computer-template-retention.integration.test.ts"
     }
   ]
 }

@@ -21,5 +21,10 @@
 - **A flake twice** becomes a deterministic fix PR. Reproduce it under load,
   find the race (often teardown, not the asserted behavior) and fix the
   fixture without weakening the contract.
+- **Database test timeouts:** first trace whether the changed code actually runs in the failing test,
+  then reproduce with bounded database transit delay. Large lifecycle or pagination fixtures can
+  legitimately exceed the default 5 s test budget. Give only that case a justified bounded timeout,
+  keep every assertion and every production deadline, and test callback overlap with held work and
+  observed completion, never with a sleep or a manual worker tick.
 - **Main red:** the CI incident bot opens a `fix(ci): restore …` PR. A green
   rerun at the same head resolves it; still land the deterministic fix.

@@ -3,6 +3,13 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.1.4
+
+- **A large database fixture hit the 5 s test timeout.** The retention pagination test runs 53 journals and
+  153 deletion attempts and never starts the listener the PR changed. 2 ms of database delay reproduced it.
+  Trace reachability first and separate test budgets from production deadlines (`playbooks/ci-red.md`,
+  case `retention-pagination-test-budget`).
+
 ## 0.1.1
 
 - **Subagents can't know their PR number** when they add an eval case. Use `fixedBy: "pending"` locally
