@@ -5,7 +5,7 @@ import { CloudAgentBootScopeSchema, CloudAgentCredentialRunInfoSchema,
   type CloudAgentBootScope, type CloudAgentCredentialRunInfo } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudAgentProviderSchema } from "@zeros/protocol/cloud-agent-execution";
 import { openSqlite } from "./db/sqlite";
-import { verifiedCloudLocalCommandPredecessor, type CloudLocalCommandPredecessor } from "./cloud-local-command-queue-checkpoint";
+import type { CloudLocalCommandPredecessor } from "./cloud-local-command-queue-checkpoint";
 
 const revision = z.number().int().positive().safe();
 const uuid = z.string().uuid();
@@ -101,6 +101,10 @@ type FenceRow = { mutation_id: string; identity_sha256: string; selectors: strin
 type OperationRow = { request_sha256: string; acknowledgement: string | null; writer_epoch: string };
 type Options = { file: string; scope: CloudAgentBootScope; engineLive(): boolean;
   predecessor?: CloudLocalCommandPredecessor | null | undefined;
+  /** Boot supplies checkpoint custody verification; schema-only consumers
+   * cannot transfer a writer without this verifier and a valid receipt. */
+  verifyPredecessor?(receipt: CloudLocalCommandPredecessor | null | undefined, file: string,
+    db: Sqlite.Database): Readonly<CloudAgentBootScope> | null;
   activity(selectors: readonly Selector[]): unknown;
   /** Trusted current/captured source metadata, recorded before irreversible
    * retirement. Unknown floors can never authorize a later association. */
@@ -159,7 +163,7 @@ export class CloudCredentialStartFences {
         // ledger restored under authenticated predecessor lineage can change
         // the active namespace; native retirement is still the CP gate.
         if (replacing) {
-          const restored = verifiedCloudLocalCommandPredecessor(options.predecessor, options.file, this.db);
+          const restored = options.verifyPredecessor?.(options.predecessor, options.file, this.db);
           if (!restored || encode(restored) !== old.value || restored.organizationId !== this.scope.organizationId ||
               restored.workspaceId !== this.scope.workspaceId || restored.generation > this.scope.generation ||
               restored.writerEpoch === this.scope.writerEpoch || restored.engineInstanceId === this.scope.engineInstanceId)

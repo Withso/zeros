@@ -8,7 +8,8 @@ import { CloudActorAuthorityRegistry } from "../agents/cloud-actor-authority";
 import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
 import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
 import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
-import { restoreCloudLocalCommandCheckpointLedger, type CloudLocalCommandPredecessor } from "../cloud-local-command-queue-checkpoint";
+import { restoreCloudLocalCommandCheckpointLedger, verifiedCloudLocalCommandPredecessor,
+  type CloudLocalCommandPredecessor } from "../cloud-local-command-queue-checkpoint";
 import { CloudCredentialStartFences, type CloudAgentCredentialControlRequest } from "../cloud-local-command-queue-start-fences";
 import { openSqlite } from "../db/sqlite";
 
@@ -17,8 +18,10 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 const successor = (scope: CloudAgentBootScope): CloudAgentBootScope => ({ ...scope,
   engineInstanceId: randomUUID(), bootId: randomUUID(), writerEpoch: randomUUID() });
 function controls(file: string, scope: CloudAgentBootScope, predecessor?: CloudLocalCommandPredecessor | null,
-  synchronize = async () => {}, limits: { maxOperations?: number; maxMutations?: number } = {}) {
+  synchronize = async () => {}, limits: { maxOperations?: number; maxMutations?: number } = {},
+  verifyPredecessor: typeof verifiedCloudLocalCommandPredecessor | null = verifiedCloudLocalCommandPredecessor) {
   const value = new CloudCredentialStartFences({ file, scope, predecessor, ...limits, engineLive: () => true,
+    ...(verifyPredecessor ? { verifyPredecessor } : {}),
     activity: () => ({ complete: true, foreground: 0, reservedLaunches: 0, background: 0, idleHosts: 0, scopes: [] }),
     retire: async () => {}, markDesired: () => {}, readyRevision: () => 2, synchronize,
     associationFloor: () => ({ cacheRevision: 2, connectionRevision: 1 }) });
@@ -87,6 +90,25 @@ async function fixture(legacy = false) {
 }
 
 describe("credential-control custody across verified writer replacement", () => {
+  it.each(["missing", "rejected"] as const)("refuses real predecessor custody when the injected verifier is %s", async mode => {
+    const f = await fixture();
+    const verifyPredecessor = mode === "missing" ? null : vi.fn<typeof verifiedCloudLocalCommandPredecessor>((receipt, file, db) => {
+      expect(receipt).toBe(f.predecessor);
+      expect(file).toBe(f.file);
+      expect(db.inTransaction).toBe(true);
+      return null;
+    });
+    expect(() => controls(f.file, successor(f.scope), f.predecessor, undefined, {}, verifyPredecessor))
+      .toThrow("credential_control_authority_rejected");
+    if (verifyPredecessor) expect(verifyPredecessor).toHaveBeenCalledOnce();
+    expect(inventory(f.file)).toEqual(f.before);
+    const db = openSqlite(f.file, { readonly: true });
+    try {
+      const stored = db.prepare("SELECT value FROM local_credential_control_metadata WHERE key='scope'").get() as { value: string };
+      expect(JSON.parse(stored.value)).toEqual(f.scope);
+    } finally { db.close(); }
+  });
+
   it.each([false, true])("retains every original ACK/fence/floor while activating a fresh namespace (legacy=%s)", async legacy => {
     const f = await fixture(legacy), next = successor(f.scope), value = controls(f.file, next, f.predecessor);
     expect(inventory(f.file)).toEqual(f.before);
