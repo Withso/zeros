@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, open, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,15 @@ import { AlphaTransport } from "../zeros-dev/transport";
 import { ALPHA_ORIGIN } from "../zeros-dev/config";
 import { connectGithub } from "../zeros-dev/github";
 import { executeCommand, parseCommand, type Services } from "../zeros-dev/commands";
+
+/** Check the mode and read the bytes through one descriptor, not a path check-then-read. */
+async function expectPrivate(file: string): Promise<string> {
+  const handle = await open(file, "r");
+  try {
+    expect((await handle.stat()).mode & 0o777).toBe(0o600);
+    return await handle.readFile("utf8");
+  } finally { await handle.close(); }
+}
 
 const account="11111111-1111-4111-8111-111111111111",org="22222222-2222-4222-8222-222222222222";
 const installation="33333333-3333-4333-8333-333333333333",other="44444444-4444-4444-8444-444444444444";
@@ -85,8 +94,7 @@ describe("headless GitHub consent uses the fixture member's normal product conne
       {organizationId:org,accessToken:"synthetic-github-access",action:"connect",installationId:installation},
     ]);
     expect((await f.store.read()).values).toMatchObject({...values,...pins});
-    expect((await stat(f.file)).mode&0o777).toBe(0o600);
-    const saved=await readFile(f.file,"utf8");
+    const saved=await expectPrivate(f.file);
     for(const forbidden of [nonce,"synthetic-github-access","synthetic-github-refresh","zghrb_v1.synthetic.signature"])expect(saved).not.toContain(forbidden);
   });
 
