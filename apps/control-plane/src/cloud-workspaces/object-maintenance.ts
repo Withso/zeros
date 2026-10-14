@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 
 export interface CloudWorkspaceObjectMaintenance {
   scheduleKeyRotation(): Promise<number>;
@@ -33,8 +34,9 @@ export class CloudWorkspaceObjectMaintenanceWorker {
   private readonly rotationBatchSize: number;
   private readonly garbageBatchSize: number;
   private readonly garbageGraceMs: number;
-  private timer: NodeJS.Timeout | null = null;
-  private active: Promise<void> | null = null;
+  private readonly scheduler: CloudWorkerScheduler;
+  private moreWork = false;
+  private sweepPasses = 0;
   private started = false;
   private stopped = false;
 
@@ -53,7 +55,7 @@ export class CloudWorkspaceObjectMaintenanceWorker {
   ) {
     this.workerId =
       options.workerId ?? `cloud-object-maintenance:${randomUUID()}`;
-    this.intervalMs = options.intervalMs ?? 60_000;
+    this.intervalMs = options.intervalMs ?? 300_000;
     this.leaseMs = options.leaseMs ?? 60_000;
     this.maxAttempts = options.maxAttempts ?? 10;
     this.rotationBatchSize = options.rotationBatchSize ?? 100;
@@ -84,6 +86,28 @@ export class CloudWorkspaceObjectMaintenanceWorker {
         "cloud workspace object maintenance configuration is invalid",
       );
     }
+    // An attempted GC can return true after a provider failure. Bound bursts
+    // even when a full batch makes no durable progress.
+    this.scheduler = new CloudWorkerScheduler(
+      this.intervalMs,
+      async (periodic) => {
+        this.sweepPasses = periodic ? 1 : this.sweepPasses + 1;
+        this.moreWork = false;
+        const result = await this.runOnce();
+        this.moreWork =
+          result.processedRotations === this.rotationBatchSize ||
+          result.collectedObjects === this.garbageBatchSize;
+      },
+      (error?: unknown) => {
+        (this.options.logger ?? console).error(
+          `[cloud-workspace] object maintenance tick failed: ${
+            error instanceof Error ? error.name : "unknown"
+          }`,
+        );
+      },
+      async () => this.moreWork && this.sweepPasses < 4 ? 100 : null,
+      { jitter: options.intervalMs === undefined },
+    );
   }
 
   start(): () => Promise<void> {
@@ -91,34 +115,13 @@ export class CloudWorkspaceObjectMaintenanceWorker {
       throw new Error("cloud workspace object maintenance lifecycle is invalid");
     }
     this.started = true;
-    const tick = () => {
-      if (this.stopped) return;
-      const task = this.runOnce()
-        .then(() => undefined)
-        .catch((error) => {
-          (this.options.logger ?? console).error(
-            `[cloud-workspace] object maintenance tick failed: ${
-              error instanceof Error ? error.name : "unknown"
-            }`,
-          );
-        });
-      this.active = task;
-      void task.finally(() => {
-        if (this.active === task) this.active = null;
-        if (this.stopped) return;
-        this.timer = setTimeout(tick, this.intervalMs);
-        this.timer.unref();
-      });
-    };
-    tick();
+    this.scheduler.start();
     return () => this.stop();
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    await this.active;
+    await this.scheduler.stop();
   }
 
   async runOnce(): Promise<CloudWorkspaceObjectMaintenanceResult> {

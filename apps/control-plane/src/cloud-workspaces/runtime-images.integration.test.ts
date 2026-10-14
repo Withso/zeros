@@ -139,8 +139,9 @@ const url = process.env.TEST_DATABASE_URL;
   let artifacts: RuntimeArtifactStore;
   let clock: number;
   let runtimeId: string;
-  const worker = (enabled = true, options: { accountScope?: string } = {}) => new RuntimeImageWorker({ pool, enabled, channel: "alpha",
+  const worker = (enabled = true, options: { accountScope?: string; maintenanceBatchSize?: number } = {}) => new RuntimeImageWorker({ pool, enabled, channel: "alpha",
     mode: "full", accountScope: options.accountScope ?? SCOPE, billingOrg: WALLET, vms, operations, artifacts, snapshots,
+    ...options,
     now: () => clock, wait: async ms => { clock += ms; } });
   const images = () => withSystemTx(pool, async tx => (await tx.query(`SELECT * FROM cloud_runtime_images ORDER BY created_at,image_id`)).rows);
   const lockInput = (overrides: Partial<Parameters<typeof lockReadyRuntimeImage>[1]> = {}) => ({ channel: "alpha" as const, runtimeId,
@@ -223,6 +224,24 @@ const url = process.env.TEST_DATABASE_URL;
     await worker(false).tick();
     expect(snapshots.removed).toEqual([]);
     expect((await images())[0]).toMatchObject({ state: "building", cleanup_lease_until: null });
+  });
+
+  it.each(["beta", "production"])("never scans or removes %s names during an Alpha retirement sweep", async channel => {
+    const name = `zeros-rtimg-${channel}-${runtimeId.slice(3, 15)}-0000cccc`;
+    await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_runtime_images
+      (channel,account_scope,billing_org,runtime_id,base_image_id,base_compatibility_id,snapshot_name,state,deadline_at,
+        builder_sandbox_id,probe_sandbox_id,snapshot_requested_at,snapshot_id,size_bytes,verified_at,ready_at,cleanup_confirmed_at,
+        retire_requested_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,'retiring',clock_timestamp()-interval '1 second',$8,$9,clock_timestamp(),
+        'snap_foreign_channel',1,clock_timestamp(),clock_timestamp(),clock_timestamp(),clock_timestamp())`,
+    [channel, SCOPE, WALLET, runtimeId, runtimeBase.id, runtimeBase.compatibilityId, name, SANDBOXES[20], SANDBOXES[21]]));
+    const get = vi.spyOn(snapshots, "get");
+    const remove = vi.spyOn(snapshots, "remove");
+    await worker(false, { maintenanceBatchSize: 1 }).tick();
+    expect(get).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(vms.calls).toEqual([]);
+    expect((await images())[0]).toMatchObject({ channel, snapshot_name: name, state: "retiring" });
   });
 
   it.each(["building", "ready"] as const)("is not blocked by a prior wallet's %s image under the same account and never touches it", async state => {
@@ -366,6 +385,30 @@ const url = process.env.TEST_DATABASE_URL;
     await worker().tick();
     expect(snapshots.removed).toEqual([oldest.snapshot_name]);
     expect((await images()).map(row => row.state)).toEqual(["retired", "ready", "ready"]);
+  });
+
+  it("bounds retirement pages while preserving the two newest ready images", async () => {
+    const names: string[] = [];
+    for (const [index, digit] of ["b", "c", "d", "e", "f"].entries()) {
+      const runtime = await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit, releaseOrder: index + 2 }));
+      const name = `zeros-rtimg-alpha-${runtime.descriptor.runtimeId.slice(3, 15)}-0000aaaa`;
+      names.push(name);
+      snapshots.saved.set(name, { status: "ready", sourceSandboxId: SANDBOXES[index]!, runtimeId: runtime.descriptor.runtimeId });
+      await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_runtime_images
+        (channel,account_scope,billing_org,runtime_id,base_image_id,base_compatibility_id,snapshot_name,state,deadline_at,
+          builder_sandbox_id,probe_sandbox_id,snapshot_requested_at,snapshot_id,size_bytes,verified_at,ready_at,cleanup_confirmed_at)
+        VALUES ('alpha',$1,$2,$3,$4,$5,$6,'ready',clock_timestamp()+interval '1 hour',$7,$8,clock_timestamp(),
+          $9,1,clock_timestamp(),$10,clock_timestamp())`,
+      [SCOPE, WALLET, runtime.descriptor.runtimeId, runtimeBase.id, runtimeBase.compatibilityId, name,
+        SANDBOXES[index], SANDBOXES[index + 10], `snap_page_${index}`, new Date(clock + index)]));
+    }
+    const bounded = worker(false, { maintenanceBatchSize: 2 });
+    await bounded.tick();
+    expect(snapshots.removed).toHaveLength(2);
+    for (let pass = 0; pass < 3; pass++) await bounded.tick();
+    expect([...snapshots.removed].sort()).toEqual(names.slice(0, 3).sort());
+    expect((await images()).filter(image => image.state === "ready").map(image => image.snapshot_name).sort())
+      .toEqual(names.slice(3).sort());
   });
 
   it("retires a revoked image without letting it use up the newest kept slots", async () => {

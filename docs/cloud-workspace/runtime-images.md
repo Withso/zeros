@@ -36,9 +36,12 @@ removing the image-aware worker.
 
 `runtime-images.ts` owns the producer and named-snapshot lifecycle. Migration
 0141 adds the system-only `cloud_runtime_images` registry, the `runtime-image`
-builder purpose and the nullable Computer source-image pin. The worker ticks
-every 60 seconds, admits one building image per channel, provider account and
-wallet, and records its builder intent before provider I/O. It reads and
+builder purpose and the nullable Computer source-image pin. The worker sweeps
+at startup and every 150–300 seconds with jitter; registry and Computer-builder
+completion notifications wake it sooner. Full retirement pages continue in a
+bounded burst (see [wake performance](wake-performance.md)). It admits one
+building image per channel, provider account and wallet, and records its builder
+intent before provider I/O. It reads and
 changes only rows, journals and names of its own provider account and wallet;
 a wallet rotation keeps the account scope, so a prior wallet's rows never
 block or get touched by the new one. Each attempt has a 60-minute deadline, bounded VM

@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const worker = z.enum(["workos", "outbox", "access", "invitations", "security", "setup", "forks", "checkpoints",
-  "lifecycle", "operations", "retirement", "templates", "runtimeStaging"]);
+  "lifecycle", "operations", "retirement", "templates", "runtimeStaging", "runtimeImages", "objects"]);
 const intervals = z.record(worker, z.number().int().min(100).max(300_000));
 export type WorkerPollIntervals = z.infer<typeof intervals>;
 
@@ -17,6 +17,7 @@ export function loadWorkerPollIntervals(env: NodeJS.ProcessEnv, cloudEnabled = t
       const interval = z.coerce.number().int().min(100).max(300_000).parse(env.CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS);
       for (const name of ["access", "outbox", "forks", "checkpoints", "lifecycle"] as const) legacy[name] = interval;
       legacy.operations = Math.max(5_000, interval);
+      legacy.objects = Math.max(60_000, interval);
     }
     if (cloudEnabled && env.CLOUD_WORKSPACE_SETUP_INTERVAL_MS !== undefined) {
       legacy.setup = z.coerce.number().int().min(100).max(300_000).parse(env.CLOUD_WORKSPACE_SETUP_INTERVAL_MS);
