@@ -7,7 +7,8 @@ import type { AgentValues } from "./config";
 export const EvidenceEventSchema=z.object({
   phase:z.enum(["login","identity","repository","computer_build","computer_wait","workspace_create","workspace_resume","workspace_stop","workspace_delete",
     "workspace_wait","workspace_create_wait","workspace_resume_wait","workspace_stop_wait","workspace_delete_wait",
-    "runtime_connect","agent_send","agent_settled","chat_tail","terminal_run","health_cp","health_db","health_vm","cleanup","scenario"]),
+    "runtime_connect","agent_send","agent_settled","chat_tail","terminal_run","health_cp","health_db","health_vm","cleanup","scenario",
+    "prior_cleanup","computer_pin","credentials_install","credentials_cleanup","agent_claude","agent_codex","agent_cursor","chat_continuity","runtime_disconnect"]),
   outcome:z.enum(["ok","failed","pending","skipped"]),durationMs:z.number().nonnegative().finite(),
   code:z.enum(ERROR_CODES).optional(),count:z.number().int().nonnegative().safe().optional(),exitCode:z.number().int().min(-1).max(255).optional(),
   setup:SetupObservationSchema.optional(),

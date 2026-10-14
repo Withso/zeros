@@ -269,7 +269,7 @@ revision/dirty state from the deployed Alpha source. Explicit chat/terminal/
 Computer-log display uses `zeros.dev-content/v1`, redacts configured secrets,
 URLs, token shapes and terminal controls, and is separate from evidence.
 Provider error bodies/stacks and arbitrary extra diagnostic fields are never
-emitted. Keep all live artifacts private and outside committed source.
+emitted. Keep interactive live artifacts private and outside committed source.
 Use the updated CLI for subsequent receipt reads: older strict CLI versions
 cannot interpret the new wait phases or setup observation. Existing receipts
 without those optional observations remain readable.
@@ -329,3 +329,98 @@ Rollback disables `ZEROS_DEV_AUTH_ENABLED` on Alpha and revokes the dedicated
 test sessions/devices through existing account APIs; retain audit/history and
 cleanup receipts. The old hosted Dev implementation and its billable resources
 remain intact until its inventory is complete and exact cleanup is approved.
+
+## Hourly E2E in Actions
+
+`zeros-dev-e2e.yml` runs on main, hourly at minute 23 or by dispatch, with one
+serialized Alpha fixture and a ten-minute job limit. It uses the normal product
+API and the desktop's RuntimeClient. Local Personal, organization-local and
+Beta/Production paths are not selected.
+
+The owner prepares the fixture through the ordinary setup above, then stores
+`ZEROS_DEV_FIXTURE_B64` as an Actions secret. It is base64-encoded JSON with
+exactly these canonical keys: `ZEROS_DEV_PASSWORD`, `ZEROS_DEV_WORKOS_SUBJECT`,
+`ZEROS_DEV_ACCOUNT_ID`, `ZEROS_DEV_EMAIL`, `ZEROS_DEV_ORGANIZATION_ID`,
+`ZEROS_DEV_REPOSITORY`, `ZEROS_DEV_REPOSITORY_ID`,
+`ZEROS_DEV_GITHUB_INSTALLATION_ID`, and `ZEROS_DEV_DEVICE_PRIVATE_KEY_B64`.
+Use the already-enrolled device for this fixture; keep its key stable across
+hourly receipts. Transfer the envelope through the approved secret-store path,
+without printing it or placing it in arguments, source or artifacts. Access and
+refresh tokens and infrastructure credentials are excluded. Each ephemeral
+runner creates its own canonical mode-0600 `.env.agent` and retires its session.
+
+This repository's Actions logs and hourly receipt artifacts are public.
+Initialization registers stdout-only `::add-mask::` commands for the decoded
+fixture values, device private-key envelope and fields, and native auth tokens
+before validating or writing the fixture. Both raw and JSON-escaped values are
+masked. Mask commands never enter the evidence writer or signed receipt.
+
+The execution step also receives the existing dedicated-test
+`AGENT_RUNTIME_ANTHROPIC_API_KEY`, `AGENT_RUNTIME_CLAUDE_CODE_OAUTH_TOKEN`,
+`AGENT_RUNTIME_OPENAI_API_KEY`, `AGENT_RUNTIME_CODEX_AUTH_JSON` and
+`AGENT_RUNTIME_CURSOR_API_KEY`. These stay in memory, never in `.env.agent`.
+API keys take precedence over native credentials to avoid rotating shared
+test accounts unnecessarily. The normal product credential and org-connection
+routes install fresh IDs for the run, select only the existing canary smoke
+models, and disconnect/revoke exactly those IDs afterward. A foreign selection
+is never overwritten, including during cleanup.
+
+Before enabling `ZEROS_DEV_E2E_ENABLED=true`, configure the required status and
+owner-reviewed repair procedure in [CI](ci.md#hourly-zeros-dev-merge-requirement).
+The first actual successful main lifecycle activates the gate automatically;
+a skipped job cannot activate it. An active Computer must already pin the
+currently qualified runtime/base, confirmed by the build-runtime read. The
+canary does not build or change the durable Computer fixture.
+
+Each run restores its exact signed predecessor artifact before doing work.
+Skipped attempts can be crossed only when job metadata proves the product step
+never ran. An old rerun is refused if a newer run may have touched the fixture.
+Missing, expired, foreign or corrupt executed-run artifacts stop allocation.
+The runner first cleans its signed leftovers through product deletion. A failed
+wake that settled as stopped is recorded and deleted; transient setup or
+unconfirmed provider deletion reports `prior_cleanup`/`cleanup_pending`, and
+no new workspace is allocated. Unknown creates/publications stay unknown;
+there is no prefix scan or direct provider fallback. Do not delete artifacts
+or change the fixture device to bypass this check. The owner must reconcile the
+exact recorded operation through the normal product path when automatic
+recovery cannot prove its outcome.
+
+After that, the scenario creates one `zd-` workspace, proves its Git checkout
+and writes a harmless marker, sends one minimal prompt to each agent, then
+stops and resumes. It checks the marker and hashes of the three durable chat
+histories after reconnecting. It sends no second prompt on an uncertain turn.
+Work is capped at 350 seconds, individual prompts at 60 seconds. A separate
+140-second cleanup reserve protects credential revocation from a work timeout,
+SIGINT or SIGTERM; the whole budget starts before dependency installation.
+An unfinished cleanup or any failed stage keeps the run red.
+
+The signed `zeros-dev-receipt-<workflow-run-id>-<attempt>` artifact contains
+closed phases, timings, setup attempt/claim/error observations and exact cleanup
+intents. Every saved intent is checkpointed before its product mutation with
+atomic replacement, so interruption leaves the last valid signed record.
+Only `receipt.json` is uploaded, with 90-day retention. Agent output, prompts,
+terminal output, tokens and credential values are excluded. The first failure
+survives later disconnect or cleanup failures, which have separate events.
+UTC `activeWindows` and monotonic durations cover completed, verified connected
+work only; they are not a measurement of total VM billable time.
+
+Agents can dispatch and inspect the canary with the normal release automation
+identity; neither operation needs provider keys in the checkout:
+
+```sh
+pnpm agent:gh workflow run zeros-dev-e2e.yml --ref main
+pnpm agent:gh run list --workflow zeros-dev-e2e.yml --branch main --limit 5
+pnpm agent:gh run view <workflow-run-id> --json status,conclusion,jobs,url
+pnpm agent:gh run download <workflow-run-id> --name zeros-dev-receipt-<workflow-run-id>-<attempt> --dir <private-scratch>
+```
+
+Downloaded hourly receipts contain the public metadata listed above, including
+resource IDs and idempotency keys. Disabling the schedule after activation does
+not reset the gate: skipped or stale completed runs remain a refusal for cloud
+changes. A newer run in progress leaves the latest completed result in force,
+including its two-hour freshness limit.
+To roll back enforcement, the owner removes the required status and reverts its
+CI/wrapper gate, then disables the canary. Preserve signed cleanup receipts and
+complete product cleanup before rotating the fixture device or retiring its
+dedicated credentials. No successful live run or 24-hour soak is implied by
+the synthetic workflow tests.

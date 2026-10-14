@@ -86,6 +86,21 @@ function network(overrides: Record<string, Reply> = {}, railwayEnvironment = "al
 const byId = (results: Array<{ id: string }>) => Object.fromEntries(results.map((r) => [r.id, r]));
 
 describe("agent credential check", () => {
+  it("redacts Actions-only envelopes and decoded secrets without adding them to the canonical file's keys",()=>{
+    const device=Buffer.from(JSON.stringify({version:1,privateKey:"synthetic-hourly-private-seed"})).toString("base64");
+    const fixture={ZEROS_DEV_PASSWORD:'synthetic-"hourly-password"',ZEROS_DEV_DEVICE_PRIVATE_KEY_B64:device};
+    const raw=JSON.stringify(fixture);
+    const values={ZEROS_DEV_FIXTURE_B64:Buffer.from(raw).toString("base64"),AGENT_RUNTIME_ANTHROPIC_API_KEY:"synthetic-hourly-claude-key",
+      AGENT_RUNTIME_CLAUDE_CODE_OAUTH_TOKEN:"synthetic-hourly-claude-oauth",AGENT_RUNTIME_OPENAI_API_KEY:"synthetic-hourly-openai-key",
+      AGENT_RUNTIME_CURSOR_API_KEY:"synthetic-hourly-cursor-key",AGENT_RUNTIME_CODEX_AUTH_JSON:JSON.stringify({tokens:{access_token:"synthetic-hourly-access",refresh_token:"synthetic-hourly-refresh",id_token:"synthetic-hourly-id"}})};
+    for(const [key,value] of Object.entries(values)){
+      expect(KNOWN_KEYS).not.toContain(key);
+      expect(redact(`provider echoed ${value}`,values)).not.toContain(value);
+    }
+    const text=[raw,device,fixture.ZEROS_DEV_PASSWORD,JSON.stringify(fixture.ZEROS_DEV_PASSWORD),"synthetic-hourly-private-seed",
+      "synthetic-hourly-access","synthetic-hourly-refresh","synthetic-hourly-id"].join(" ");
+    expect(redact(text,values)).not.toContain("synthetic-");
+  });
   it("redacts every zeros-dev secret before fixtures can be added", () => {
     const secrets = {
       ZEROS_DEV_PASSWORD: 'synthetic-"password"-\\value',

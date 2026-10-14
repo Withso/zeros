@@ -44,6 +44,24 @@ function setup(pinned=fixture,clock:{now?:()=>number;sleep?:(ms:number,signal?:A
 }
 
 describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
+  it.each(["empty", "workspace", "page", "pending", "truncated"])("checks the %s fixture through read-only product lists before an hourly allocation", async condition => {
+    const f = setup();
+    f.fetcher.mockImplementation(async (url, input) => {
+      expect(input?.method).toBe("GET");
+      const value = new URL(String(url));
+      if (value.pathname === `/v1/organizations/${fixture.organizationId}/cloud-workspaces`) {
+        expect(value.search).toBe("?limit=100");
+        return Response.json({ workspaces: condition === "workspace" ? [workspace()] : [], nextCursor: condition === "page" ? "next" : null });
+      }
+      expect(value.pathname).toBe(`/v1/organizations/${fixture.organizationId}/cloud-workspace-management/pending-deletion`);
+      return Response.json({ truncated: condition === "truncated", pendingDeletion: condition === "pending" ? [{ workspaceId: randomUUID(), generation: 1 }] : [] });
+    });
+    if (condition === "empty") await expect(f.api.assertFixtureEmpty()).resolves.toBeUndefined();
+    else await expect(f.api.assertFixtureEmpty()).rejects.toThrow("zeros_dev_cleanup_pending");
+    expect(f.session.whoami).toHaveBeenCalledOnce(); expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.handle.run.create).toBeUndefined();
+  });
+
   it.each(["missing", "different", "different-base", "unqualified", "foreign-build"])("refuses a succeeded Computer with a %s persisted runtime proof",async mode=>{
     const f=setup();await f.api.buildComputer(f.handle);
     const original=f.fetcher.getMockImplementation()!;

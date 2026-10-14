@@ -228,9 +228,11 @@ describe("selective pull-request CI", () => {
       group: "ci-${{ github.event.pull_request.number }}",
       "cancel-in-progress": true,
     });
-    for (const job of Object.values(ci.jobs)) {
+    for (const [id, job] of Object.entries(ci.jobs)) {
       if (job.permissions)
-        expect(job.permissions).toEqual({ contents: "read" });
+        expect(job.permissions).toEqual(id === "ci-gate"
+          ? { contents: "read", actions: "read", "pull-requests": "read" }
+          : { contents: "read" });
       for (const step of job.steps ?? [])
         expect(step.run ?? "").not.toContain("${{");
     }
