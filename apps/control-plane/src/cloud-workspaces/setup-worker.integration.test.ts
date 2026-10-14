@@ -665,6 +665,24 @@ d("cloud workspace setup worker", () => {
     } finally { renewal.resolve(false); release.resolve(); heartbeat.mockRestore(); vi.useRealTimers(); }
   });
 
+  it("does not spend five setup claims on the same incomplete checkpoint and retains its exact rejection", async () => {
+    const seeded = await seedSetup({ v4: true });
+    const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+      phase: "history_restore", name: "CloudCommandRuntimeError", code: "checkpoint_expected_writer_mismatch", errno: null } };
+    const executor = new FakeExecutor([async () => {
+      throw Object.assign(new CloudWorkspaceSetupError("setup_checkpoint_incomplete", "closed", false), { diagnostic });
+    }]);
+    const current = worker(executor);
+    for (let claim = 0; claim < 5; claim++) await current.runOnce();
+    expect(executor.calls).toHaveLength(1);
+    expect((await pool.query("SELECT state,error_code,claim_count FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows)
+      .toEqual([{ state: "failed", error_code: "setup_checkpoint_incomplete", claim_count: 1 }]);
+    expect((await pool.query(`SELECT subject FROM audit_log WHERE action='cloud_workspace.setup_claim_failed'
+      AND subject->>'setupRunId'=$1`, [seeded.setupRunId])).rows).toEqual([{ subject: expect.objectContaining({
+        claimCount: 1, diagnostic: expect.objectContaining({ code: "setup_checkpoint_incomplete", retryable: false, setup: diagnostic }),
+      }) }]);
+  });
+
   it("commits the original claim diagnostic before a retirement failure and retains it on reclaim", async () => {
     const seeded = await seedSetup({ v4: true });
     const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {

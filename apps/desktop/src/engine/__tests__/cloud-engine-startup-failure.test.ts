@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZerosEngine } from "../zeros-engine";
 import { CloudAgentExecutionError } from "../cloud-agent-execution-client";
 import { CloudCredentialControlError } from "../cloud-local-command-queue-start-fences";
+import { CloudCommandRuntimeError } from "../cloud-command-client";
+import { CLOUD_LOCAL_COMMAND_CHECKPOINT_CODES } from "../cloud-local-command-queue-checkpoint";
 import { CLOUD_COMMAND_FAILURE_CATEGORIES } from "@zeros/protocol/cloud-commands";
 import { CLOUD_AGENT_ADMISSION_CODES } from "@zeros/protocol/cloud-agent-execution";
 import { classifyCloudEngineStartupFailure, parseCloudEngineStartupFailure, readCloudEngineStartupFailure,
@@ -92,6 +94,21 @@ describe("cloud engine startup failure publication", () => {
 });
 
 describe("closed startup evidence", () => {
+  it("carries every exact checkpoint rejection through the private record without raw text", async () => {
+    const f = await fixture();
+    expect(CLOUD_ENGINE_STARTUP_CODES.filter(code => code.startsWith("checkpoint_"))).toEqual(CLOUD_LOCAL_COMMAND_CHECKPOINT_CODES);
+    for (const code of CLOUD_LOCAL_COMMAND_CHECKPOINT_CODES) {
+      const error = Object.assign(new CloudCommandRuntimeError(code), { path: "private-path-canary", message: "private-body-canary" });
+      const expected = { phase: "history_restore", name: "CloudCommandRuntimeError", code, errno: null };
+      expect(classifyCloudEngineStartupFailure(error, "history_restore")).toEqual(expected);
+      expect(await writeCloudEngineStartupFailure({ dataRoot: f.directory, engineInstanceId: f.engineInstanceId,
+        phase: "history_restore", error })).toBe(true);
+      expect(await read(f)).toEqual(expected);
+    }
+    expect(classifyCloudEngineStartupFailure(new CloudCommandRuntimeError("checkpoint_private_canary"), "history_restore").code).toBe("unknown");
+    expect(await fs.readFile(f.file, "utf8")).not.toContain("canary");
+  });
+
   it.each(["credential_control_authority_rejected", "credential_control_conflict", "credential_control_limit",
     "credential_control_storage_unavailable", "credential_control_invalid"] as const)(
     "retains the closed credential-fence %s class at boot durability", code => {

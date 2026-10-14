@@ -15,6 +15,9 @@
    For resume bugs, test a real sealed store across fresh engine/writer identities;
    a fresh database cannot expose inherited fences. Require authenticated
    predecessor custody for any atomic scope migration and retain old ACKs.
+   Repeat complete handoffs and an interrupted, unsealed handoff on that same
+   FULL store. Retain closed checkpoint failure sites through setup and cleanup;
+   repeating a claim cannot repair missing lineage or authorize an older writer.
    For packaged imports, reproduce against staged
    sources; a checkout import or bundled CLI can hide a missing source file.
    For periodic disconnects, inspect client retirement timers before blaming

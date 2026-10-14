@@ -41,6 +41,31 @@ async function fixture(acknowledge = true) {
   return { directory, scope, queue, normal, lifecycle, root: path.join(directory, "checkpoint") };
 }
 describe("sealed FULL/NORMAL checkpoint custody", () => {
+  it.each([
+    ["manifest_missing", "checkpoint_manifest_missing"],
+    ["part_hash", "checkpoint_part_hash"],
+    ["foreign_workspace", "checkpoint_workspace_mismatch"],
+    ["seal_missing", "checkpoint_seal_missing"],
+  ])("retains the closed %s rejection without discarding the sealed checkpoint", async (site, code) => {
+    const f = await fixture(), manifest = await f.lifecycle.captureCheckpoint(f.root);
+    const scope = site === "foreign_workspace" ? { ...f.scope, workspaceId: randomUUID() } : f.scope;
+    if (site === "manifest_missing") await unlink(path.join(f.root, "manifest.json"));
+    if (site === "part_hash") {
+      const part = path.join(f.root, manifest.files[0].parts[0]!.path), bytes = await readFile(part);
+      bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1;
+      await writeFile(part, bytes);
+    }
+    const file = path.join(f.directory, "queue.sqlite");
+    if (site === "seal_missing") {
+      const db = openSqlite(file);
+      try { db.prepare("UPDATE local_command_writer_seals SET ack=NULL WHERE writer_epoch=?").run(f.scope.writerEpoch); }
+      finally { db.close(); }
+    }
+    await expect(restoreCloudLocalCommandCheckpointLedger({ root: f.root, file, scope,
+      expectedWriterEpoch: f.scope.writerEpoch })).rejects.toMatchObject({ code });
+    expect((await fs.lstat(f.root)).isDirectory()).toBe(true);
+  });
+
   it("publishes regular children into stable directories across Boat stop/wake checkpoints", async () => {
     const f = await fixture(), { rename } = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     const movedDirectories: string[] = [];

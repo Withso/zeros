@@ -104,6 +104,19 @@ Missing seal, lineage or bytes refuses restore, without selecting an older
 complete snapshot. Replacement is transactional and idempotent; it never
 recreates a native session, command claim or permission resolver.
 
+Checkpoint refusal retains a closed failure site in `engineStartup.code`,
+including `checkpoint_expected_writer_mismatch`, `checkpoint_seal_missing` and
+`checkpoint_part_hash`. The setup parser preserves that first failure through
+cleanup and the per-claim receipt. Missing coverage or an unsealed predecessor
+is `setup_checkpoint_incomplete`; invalid bytes or identity is
+`setup_checkpoint_restore_invalid`. Both end the claim without repeating an
+integrity failure. Only the bounded inventory timeout remains retryable as
+`setup_checkpoint_restore_unavailable`. No error contains paths or artifact
+contents, and no refusal authorizes fallback to an older writer. Deploy the CP
+parser before publishing a runtime with the added closed codes; the diagnostic
+wire shape is unchanged. An authenticated recovery handoff is a separate
+contract, not a side effect of this classification.
+
 Credential-control state in that FULL ledger also survives a stopped VM. A
 fresh CP engine/boot/writer identity alone cannot adopt it. Authenticated
 checkpoint restoration supplies an in-process receipt tied to the exact
