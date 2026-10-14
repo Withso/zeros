@@ -732,6 +732,16 @@ Current entry points:
 
 ## Queue, steering, and Stop ownership
 
+- Settings → General → Follow-up behavior defaults to Queue. Enter uses the
+  saved choice; Command/Ctrl+Enter uses the other choice when composing a new
+  follow-up. Steer submits through the provider's native delivery path immediately;
+  a receipt may still wait for the provider to consume it. Queue waits for both
+  foreground and live background work, including a parent's final report.
+- Restore capability metadata after conversation adoption with the same exact
+  chat/owner/execution fences as model reads. Missing metadata is unknown, not
+  an unsupported capability. Background-work snapshots affect queue ownership
+  synchronously, before a foreground result can release follow-ups; completion
+  of the last task/report releases the queue without requiring another send.
 - Follow-ups belong to the chat's renderer queue until native delivery is
   confirmed. **Stop pauses dispatch and preserves pending messages, payloads,
   and order.** They remain editable/deletable. An admission-stage opening

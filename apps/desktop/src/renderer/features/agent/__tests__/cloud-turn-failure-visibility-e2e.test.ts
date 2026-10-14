@@ -48,6 +48,7 @@ import {
 } from "../local-prompt-recovery";
 import { SendQueue } from "../send-queue";
 import * as lifecycle from "../session-reload-lifecycle";
+import { hasBackgroundAgentWork } from "../background-task-state";
 import { BLANK, mergeWindowedTail, useSessionsStore } from "../sessions-store";
 import { turnFailureForCard } from "../turn-failure";
 import { notifyAgentSendFailure } from "../agent-send-failure-toast";
@@ -744,6 +745,7 @@ async function harness(options: Scenario = {}) {
   let accountGeneration = 1;
   const context: Record<string, unknown> = {
     ...lifecycle,
+    hasBackgroundAgentWork,
     Error,
     DOMException,
     AbortController,

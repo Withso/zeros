@@ -1,6 +1,7 @@
 import { CloudAgentCredentialCards } from "./cloud-agent-credential-cards";
 import { cloudAdmissionForTurn } from "./cloud-admission-failure";
 import { TurnFailureCard } from "./turn-failure-card";
+import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
 import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-send-failure-toast";
 // ──────────────────────────────────────────────────────────
 // AgentChat — messages + tool cards + permission modal + composer
@@ -3314,7 +3315,7 @@ export function AgentChat({
   // the adapter at session creation. Claude, Codex and Cursor support it; an unavailable
   // harness disables its arrow with a tooltip while a turn is in flight.
   const steeringSupported =
-    session.initialize?.agentCapabilities?.steering === true;
+    session.initialize?.agentCapabilities?.steering;
   const steeringAgentName =
     session.agentName ??
     chatThread?.agentName ??
@@ -3640,6 +3641,7 @@ export function AgentChat({
   const runSend = async (
     override?: string,
     extras?: {
+      followUpBehavior?: FollowUpBehavior;
       /** Inline summary imports from prior chats. Serialized
        *  into <from_previous_chat> text blocks and prepended to the
        *  prompt so the agent reads them as opening context. Used by
@@ -3814,7 +3816,7 @@ export function AgentChat({
           if (!capabilitiesBridge) throw new Error("The frame context connection is unavailable.");
           return prepareDesignFrameAttachments(capabilitiesBridge, submittedDesignFrame);
         } : undefined });
-      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent);
+      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent, extras?.followUpBehavior ?? getFollowUpBehavior());
       const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
       if (unchanged) {
         clearComposer(); designFrameContext.pin(undefined);
@@ -4053,6 +4055,9 @@ export function AgentChat({
       bubbleAttachments.length > 0 ? bubbleAttachments : undefined,
       messageSegments && messageSegments.length > 0 ? messageSegments : undefined,
       onAccepted,
+      undefined,
+      undefined,
+      extras?.followUpBehavior ?? getFollowUpBehavior(),
     );
     const submittedDraftUnchanged = override === undefined && snapshot &&
       isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
@@ -4347,8 +4352,10 @@ export function AgentChat({
     modEnter: () => {
       if (editingQueuedRef.current) return false;
       const selected = queueSelectedRef.current;
-      if (selected == null) return false;
-      void sendNowQueued(selected);
+      if (selected != null) void sendNowQueued(selected);
+      else void handleSend(undefined, {
+        followUpBehavior: getFollowUpBehavior() === "queue" ? "steer" : "queue",
+      });
       return true;
     },
     escape: () => {

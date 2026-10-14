@@ -128,6 +128,7 @@ import {
   useShowHiddenWorkspaces,
 } from "./dashboard-settings";
 import { useInternalFeature, useIsInternalUser } from "./internal-features";
+import { FollowUpBehaviorSetting } from "./follow-up-behavior-setting";
 import {
   UserEnvironmentPanel,
   isRepoSectionId,
@@ -902,6 +903,7 @@ function GeneralPanel() {
   return (
     <div className="flex flex-col gap-6">
       <SettingsGroup>
+        <FollowUpBehaviorSetting />
         <SettingsRow
           label="Show hidden workspaces in dashboard"
           hint="Includes hidden workspaces in the Archived list."

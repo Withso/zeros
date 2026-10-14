@@ -501,6 +501,29 @@ export async function runQueueSmoke({ page, check }) {
     await action("edited H", "Delete");
     await expect(page.locator("[data-queued-id]")).toHaveCount(0);
     check(`${provider}: slow steering settles; Stop restores edit/delete; selected sends preserve FIFO`, true);
+    await page.getByRole("button", { name: "Finish turn", exact: true }).click();
+    await expect(page.locator("#queue-status")).toHaveText("ready");
+    await page.getByRole("button", { name: "Reopen conversation", exact: true }).click();
+    await expect(page.locator("#queue-status")).toHaveText("ready");
+    await send("Resumed turn");
+    await send("Resumed follow-up");
+    await expect(row("Resumed follow-up").getByRole("button", { name: "Send now", exact: true })).toBeEnabled();
+    await action("Resumed follow-up", "Send now");
+    await page.getByRole("button", { name: "Confirm delivery", exact: true }).click();
+    await expect(row("Resumed follow-up")).toHaveCount(0);
+    check(`${provider}: reopened conversation restores native steering capability`, true);
+    if (provider === "claude") {
+      await page.getByRole("button", { name: "Start background task", exact: true }).click();
+      await page.getByRole("button", { name: "Finish turn", exact: true }).click();
+      await expect(page.locator("#queue-status")).toHaveText("ready");
+      await send("Wait for background verification");
+      await expect(row("Wait for background verification")).toBeVisible();
+      await expect(page.locator("#queue-prompts")).not.toContainText("Wait for background verification");
+      await page.getByRole("button", { name: "Finish background task", exact: true }).click();
+      await expect(page.locator("#queue-prompts")).toContainText("Wait for background verification");
+      await expect(row("Wait for background verification")).toHaveCount(0);
+      check("Claude queues after its foreground reply while background work remains", true);
+    }
   }
   // Synthetic cloud readiness state on the real queue/composer controls. The
   // actual cloud wake/FIFO lifecycle is covered by cloud-composer-wake.test.ts.

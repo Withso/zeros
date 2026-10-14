@@ -1243,7 +1243,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const incoming = upd.workflows;
       set((state) => {
         const slot = state.sessions[chatId];
-        if (!slot) return state;
+        if (!slot || (slot.executionId ?? slot.sessionId) !== (notification.executionId ?? notification.sessionId)) return state;
         const workflows = incoming.slice(0, MAX_WORKFLOWS_PER_CHAT);
         if (sameWorkflows(slot.workflows, workflows)) return state;
         return {

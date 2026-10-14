@@ -3,7 +3,7 @@ import type { InitializeResponse } from "../../../platform/bridge/agent-events";
 import { refreshAgentModelCatalog, type AgentModelCatalogOwner } from "../refresh-agent-model-catalog";
 
 const catalog = (values: string[], scoped = true): InitializeResponse => ({
-  protocolVersion: 1, _meta: { modelsDynamic: true, modelsAccountScoped: scoped,
+  protocolVersion: 1, agentCapabilities: { steering: true }, _meta: { modelsDynamic: true, modelsAccountScoped: scoped,
     models: values.map(value => ({ value, label: value })) },
 });
 function deferred<T>() {
@@ -13,6 +13,23 @@ function deferred<T>() {
 }
 
 describe("exact-owner model catalog refresh", () => {
+  it.each(["local", "organization-local", "cloud"])("restores steering metadata after a %s conversation is reopened", async placement => {
+    const owner: AgentModelCatalogOwner = { bridge: {}, key: `${placement}/chat/execution`, initialize: null };
+    const initialize: InitializeResponse = { protocolVersion: 1, agentCapabilities: { steering: true } };
+    const publish = vi.fn(), request = vi.fn(async () => initialize);
+    await refreshAgentModelCatalog({ current: () => owner, request, publish });
+    expect(request).toHaveBeenCalledOnce();
+    expect(publish).toHaveBeenCalledExactlyOnceWith(initialize);
+  });
+
+  it("fills missing capabilities without requiring a dynamic model catalog", async () => {
+    const owner = { bridge: {}, key: "cloud/chat/execution", initialize: { protocolVersion: 1 } };
+    const initialize: InitializeResponse = { protocolVersion: 1, agentCapabilities: { steering: true } };
+    const publish = vi.fn();
+    await refreshAgentModelCatalog({ current: () => owner, request: async () => initialize, publish });
+    expect(publish).toHaveBeenCalledExactlyOnceWith(initialize);
+  });
+
   it.each([{ values: [] }, { values: ["previous"] }])("refreshes a populated or empty account snapshot ($values)", async ({ values }) => {
     const owner = { bridge: {}, key: "local/account/chat/execution", initialize: catalog(values) };
     const replacement = catalog([]), publish = vi.fn(), request = vi.fn(async () => replacement);

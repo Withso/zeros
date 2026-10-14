@@ -89,6 +89,11 @@ authentication method, executable override, and gateway URL belong here; API
 keys remain in the OS secret store. `[github]` account selection and browser
 policy are user-only. Repository and worktree schemas exclude account fields.
 
+`preferences.follow_up_behavior` is `"queue"` (the default) or `"steer"` and is
+exposed in Settings → General. It applies to both Local and cloud composers.
+Queue waits for foreground and background work; Steer submits immediately.
+Cmd/Ctrl+Enter uses the alternate behavior for a new follow-up.
+
 Browser storage is a synchronous cache for app startup, with a durable outbox
 for unacknowledged preference edits. The first migration merges under existing
 file choices; `preferences_version = 1` prevents deleted choices from being

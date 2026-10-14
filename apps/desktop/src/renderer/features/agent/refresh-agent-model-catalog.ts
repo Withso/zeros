@@ -17,7 +17,13 @@ export async function refreshAgentModelCatalog(options: {
 }): Promise<void> {
   const owner = options.current();
   const meta = owner?.initialize?._meta;
-  if (!owner || !meta?.modelsDynamic || (meta.modelsAccountScoped !== true && Array.isArray(meta.models) && meta.models.length > 0)) return;
+  if (!owner) return;
+  // Resuming a conversation does not carry InitializeResponse on older wires.
+  // Missing capabilities are unknown, not proof that steering is unsupported.
+  const needsCapabilities = owner.initialize?.agentCapabilities?.steering === undefined;
+  const needsModels = meta?.modelsDynamic &&
+    (meta.modelsAccountScoped === true || !Array.isArray(meta.models) || meta.models.length === 0);
+  if (!needsCapabilities && !needsModels) return;
   const pending = flights.get(owner.bridge) ?? new Map();
   flights.set(owner.bridge, pending);
   const existing = pending.get(owner.key);
@@ -25,7 +31,8 @@ export async function refreshAgentModelCatalog(options: {
   const result = Promise.resolve().then(async () => {
     const initialize = await options.request();
     const models = initialize?._meta?.models;
-    if (!initialize || !Array.isArray(models) || (models.length === 0 && initialize._meta?.modelsAccountScoped !== true)) return;
+    if (!initialize || !needsCapabilities &&
+        (!Array.isArray(models) || models.length === 0 && initialize._meta?.modelsAccountScoped !== true)) return;
     const current = options.current();
     if (current?.bridge !== owner.bridge || current.key !== owner.key || current.initialize !== owner.initialize) return;
     options.publish(initialize);
