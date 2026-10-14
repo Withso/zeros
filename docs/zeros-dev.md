@@ -224,8 +224,16 @@ the owned lock inode and refuse a changed saved receipt. Never copy only the
 receipt to a different account/device to recover it.
 
 `cleanup --run <run-uuid>` and `cleanup --all` preview the signed local allowlist;
-`--apply` invokes ordinary product deletion. Names are only labels. Every write
-rechecks org, creator, workspace, repository, generation and account binding.
+`--apply` invokes ordinary product deletion. The current name must still match
+the signed `zd-` name, in addition to the exact org, creator, workspace,
+repository, generation and account binding; a name alone never authorizes cleanup.
+If an accepted wake or stop remains unconfirmed but the workspace is now
+`stopped`, `ready`, `busy` or `failed`, apply first saves that closed observed
+outcome in the signed receipt. It does not claim the original intent succeeded.
+Deletion then proceeds with its own saved key, reused after a lost response.
+If setup is still transient, cleanup returns `cleanup_pending` immediately;
+rerun the same command after the product reaches a settled state. Planning
+neither changes the receipt's lifecycle history nor issues a deletion.
 An unknown create response must first be reconciled with `workspace create
 --run <same-uuid>`. A deleted row or HTTP 404 alone is not completion: cleanup
 requires the provider-deleted observation and a complete pending-deletion view

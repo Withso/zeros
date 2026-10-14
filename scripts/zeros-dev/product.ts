@@ -113,13 +113,17 @@ export class ProductApi {
     const {workspace}=await this.request(`/v1/cloud-workspaces/${result.id}`,document,{signal});
     this.assertWorkspace(workspace,fixture,run,allowNextGeneration);return workspace;
   }
+  private assertCleanupName(workspace:CloudWorkspaceDocument,run:Run):void{
+    if(workspace.name!==run.create?.body.name||!/^zd-[a-z0-9-]{1,100}$/.test(workspace.name))throw new ZerosDevError("identity_changed");
+  }
   async lifecycle(handle:RunHandle,operation:"wake"|"stop"|"delete",signal?:AbortSignal):Promise<CloudWorkspaceDocument>{
     await this.session.whoami();const fixture=await this.session.fixture();
     const previous=handle.run.lifecycle.at(-1);
-    if(previous&&!previous.confirmed&&previous.operation!==operation)throw new ZerosDevError("operation_conflict");
+    if(previous&&!previous.confirmed&&!previous.settled&&previous.operation!==operation)throw new ZerosDevError("operation_conflict");
     const workspace=await this.workspace(handle.run,signal);
+    if(operation==="delete")this.assertCleanupName(workspace,handle.run);
     if(workspace.status==="deleted"&&operation!=="delete")throw new ZerosDevError("workspace_failed");
-    let intent=previous&&!previous.confirmed?previous:undefined;
+    let intent=previous&&!previous.confirmed&&!previous.settled?previous:undefined;
     if(!intent){
       intent={operation,key:randomUUID(),generation:workspace.generation.number,confirmed:false};
       handle.run.lifecycle.push(intent);await handle.save();
@@ -154,12 +158,18 @@ export class ProductApi {
     if(handle.run.deletionConfirmed)return {planned:0,confirmed:1};
     if(!handle.run.create)return {planned:0,confirmed:0};
     if(!handle.run.create.result)throw new ZerosDevError("command_uncertain"); // reconcile the exact create first
-    await this.session.whoami();await this.workspace(handle.run,signal);
+    await this.session.whoami();const workspace=await this.workspace(handle.run,signal);
+    this.assertCleanupName(workspace,handle.run);
     if(!apply)return {planned:1,confirmed:0};
-    if(handle.run.lifecycle.at(-1)?.operation!=="delete"){
-      // A prior accepted stop/wake may have settled while the CLI was away.
-      const prior=handle.run.lifecycle.at(-1);
-      if(prior&&!prior.confirmed)await this.waitWorkspace(handle,prior.operation==="stop"?"stopped":"running",signal);
+    const prior=handle.run.lifecycle.at(-1);
+    if(prior&&prior.operation!=="delete"&&!prior.confirmed&&!prior.settled){
+      // Wake acceptance does not promise readiness: setup can fail and the CP
+      // can system-stop the workspace. Preserve that observed outcome without
+      // inventing successful completion, then let the explicit delete proceed.
+      const settled=z.enum(["stopped","ready","busy","failed"]).safeParse(workspace.status);
+      if(!settled.success)throw new ZerosDevError("cleanup_pending");
+      prior.settled={status:settled.data,generation:workspace.generation.number};
+      await handle.save();
     }
     await this.lifecycle(handle,"delete",signal);
     try {
