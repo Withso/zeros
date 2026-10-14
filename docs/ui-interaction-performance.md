@@ -149,6 +149,15 @@ Archived workspaces and pending provider storage deletion use the normal catalog
 cadence; neither keeps all workspaces on fast setup polling. Actual startup and
 interactive lifecycle transitions still receive fast refreshes.
 
+The account catalog owns one next-due timeout: 30 seconds for stable rows and
+2 seconds during those transitions, measured from the read's monotonic start.
+Catalog events update the due time; focus and visibility events coalesce with
+that same read. Hidden, signed-out, disabled and pending-network states have no
+passive timer. A slow transcript-cache read does not delay the catalog fallback;
+after it resolves, recheck workspace eligibility before restoring chat metadata.
+Switching A → B → A retires each request identity, so an old response cannot
+clear the current flight, restore another owner's chats or schedule its timer.
+
 Deletion cleanup follows semantic path ownership, not raw equality: include
 normalized descendant cwd keys, but protect a separately registered nested
 repository (the most-specific known owner wins).
