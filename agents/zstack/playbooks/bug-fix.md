@@ -13,6 +13,9 @@
    For worker failures, retain the first closed diagnostic before cleanup and
    across reconciliation. For packaged imports, reproduce against staged
    sources; a checkout import or bundled CLI can hide a missing source file.
+   For periodic disconnects, inspect client retirement timers before blaming
+   server idle limits. Test real server closure, reconnect acknowledgement,
+   durable replay and bounded backoff; distinguish planned rotation in logs.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates

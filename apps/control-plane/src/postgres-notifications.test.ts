@@ -34,6 +34,90 @@ function fixture() {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("shared PostgreSQL notifications", () => {
+  it("does not evict healthy shared LISTEN consumers at the query pool's ten-minute lifetime", async () => {
+    const f = fixture();
+    try {
+      await f.broker.start();
+      await vi.advanceTimersByTimeAsync(0);
+      f.workos.mockClear(); f.hints.notifyAll.mockClear(); f.warn.mockClear();
+      const statements = f.clients[0]!.query.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1_000);
+      expect(f.connect).toHaveBeenCalledOnce();
+      expect(f.clients[0]!.release).not.toHaveBeenCalled();
+      expect(f.broker.healthy()).toBe(true);
+      expect(f.workos).not.toHaveBeenCalled();
+      expect(f.hints.notifyAll).not.toHaveBeenCalled();
+      expect(f.warn).not.toHaveBeenCalled();
+      expect(f.clients[0]!.query).toHaveBeenCalledTimes(statements);
+    } finally { await f.stop(); }
+  });
+
+  it("still retires the held session before 24 hours and replays once on its replacement", async () => {
+    vi.useFakeTimers();
+    const first = client(), replacement = client(), ready = vi.fn(), unavailable = vi.fn();
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValue(replacement);
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const subscription = postgresNotificationSubscription({ connect } as unknown as pg.Pool, {
+      channels: ["test_hint"], onNotification: vi.fn(), onReady: ready, onUnavailable: unavailable,
+    });
+    try {
+      await subscription.start(); info.mockClear();
+      await vi.advanceTimersByTimeAsync(23 * 60 * 60_000 - 1);
+      expect(first.release).not.toHaveBeenCalled();
+      expect(first.query).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(first.release).toHaveBeenCalledExactlyOnceWith(true);
+      expect(unavailable).toHaveBeenCalledOnce();
+      expect(subscription.healthy()).toBe(false);
+      expect(info).toHaveBeenCalledExactlyOnceWith("[database] notification listener rotating at lifetime limit");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(subscription.healthy()).toBe(true);
+      expect(ready).toHaveBeenCalledTimes(2);
+      expect(info).toHaveBeenLastCalledWith("[database] notification listener restored");
+    } finally { await subscription.stop(); }
+    expect(replacement.release).toHaveBeenCalledExactlyOnceWith(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("announces recovery only after all renewed LISTEN acknowledgements, without a reconnect storm", async () => {
+    const f = fixture(), info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await f.broker.start();
+      await vi.advanceTimersByTimeAsync(0);
+      info.mockClear(); f.workos.mockClear(); f.hints.notifyAll.mockClear();
+      const old = f.clients[0]!;
+      old.emit("error", new Error("synthetic private idle close")); old.emit("end");
+      f.connect.mockRejectedValueOnce(new Error("synthetic private reconnect failure"));
+      await vi.advanceTimersByTimeAsync(999);
+      expect(f.connect).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(f.connect).toHaveBeenCalledTimes(2);
+      expect(info).not.toHaveBeenCalled();
+      let acknowledge!: () => void;
+      const renewed = client();
+      renewed.query.mockImplementationOnce(() => new Promise(resolve => { acknowledge = () => resolve({ rows: [] }); }));
+      f.connect.mockImplementationOnce(async () => { f.clients.push(renewed); return renewed; });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(f.connect).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(f.connect).toHaveBeenCalledTimes(3);
+      expect(info).not.toHaveBeenCalled();
+      expect(f.workos).not.toHaveBeenCalled();
+      acknowledge();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(info).toHaveBeenCalledExactlyOnceWith("[database] notification listener restored");
+      expect(f.workos).toHaveBeenCalledOnce();
+      expect(f.hints.notifyAll).toHaveBeenCalledOnce();
+      expect(f.broker.healthy()).toBe(false);
+      old.emit("error", new Error("synthetic late socket error"));
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(f.connect).toHaveBeenCalledTimes(3);
+      expect(info).toHaveBeenCalledTimes(1);
+      expect(old.release).toHaveBeenCalledExactlyOnceWith(true);
+    } finally { await f.stop(); }
+  });
+
   it("serves all four consumers through one checked-out connection", async () => {
     const f = fixture();
     try {

@@ -86,7 +86,7 @@ describe("paused-channel control-plane startup", () => {
     expect(fixture.pool.connect).not.toHaveBeenCalled();
     expect(fixture.createPool).toHaveBeenCalledTimes(2);
     expect(fixture.createPool).toHaveBeenLastCalledWith(expect.any(String), {
-      maxConnections: 2, applicationName: "zeros-notifications",
+      maxConnections: 2, applicationName: "zeros-notifications", keepAlive: true,
     });
     expect(fixture.securityBroker).toHaveBeenCalledExactlyOnceWith(fixture.listenerPool);
     expect(fixture.cloudNotifications.mock.calls[0]![0]).toBe(fixture.listenerPool);
