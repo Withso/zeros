@@ -391,6 +391,12 @@ d("cloud workspace reconciliation", () => {
     });
     const writer=()=>pool.query("SELECT state,sealed_sequence FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1",[boot.writerEpoch]);
     expect((await writer()).rows[0]).toEqual({state:"active",sealed_sequence:null});
+    const stop = provider.stop.bind(provider);
+    provider.stop = async resourceId => {
+      expect((await pool.query("SELECT subject FROM audit_log WHERE action='cloud_workspace.stop_unsealed' AND subject->>'workspaceId'=$1", [fixture.workspaceId])).rows)
+        .toEqual([{ subject: expect.objectContaining({ outcome: "stop_unsealed", generation: 1, writerEpoch: boot.writerEpoch }) }]);
+      return stop(resourceId);
+    };
     await new CloudWorkspaceReconciler({pool,provider,intervalMs:1000}).runOnce();
     expect(provider.stopCount).toBe(1);
     expect((await writer()).rows[0]).toEqual({state:failure?"active":"retired",sealed_sequence:null});

@@ -23,6 +23,7 @@ import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import { readLifecycleDeadlines, type LifecycleWork } from "./lifecycle-deadlines.js";
+import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
 import { runCloudDiagnosticCleanup } from "./cloud-diagnostic-store.js";
 import {
   advanceCloudWorkspaceGenerationTransitionAfterDrain,
@@ -451,6 +452,7 @@ export class CloudWorkspaceReconciler {
            AND (
              checkpoint_request.id IS NULL
              OR checkpoint_request.state = 'succeeded'
+             OR (checkpoint_request.state = 'cancelled' AND checkpoint_request.error_code = 'stop_unsealed')
            )
            AND (
              i.operation <> 'create'
@@ -469,11 +471,17 @@ export class CloudWorkspaceReconciler {
       const row = result.rows[0];
       if (!row) return null;
 
+      if ((row.operation === "stop" || row.operation === "archive" || row.operation === "delete") &&
+          !await prepareCloudWorkspaceStopSeal(tx, {
+            workspaceId: row.workspace_id, organizationId: row.org_id, generation: row.generation,
+            intentId: row.id, operation: row.operation,
+          })) return null;
+
       let desiredState = row.desired_state;
       if (
         row.affects_workspace &&
         row.checkpoint_request_id !== null &&
-        row.checkpoint_request_state === "succeeded" &&
+        ["succeeded", "cancelled"].includes(row.checkpoint_request_state ?? "") &&
         row.current_generation === row.generation &&
         row.desired_state === "running" &&
         ["stop", "archive", "delete"].includes(row.operation)

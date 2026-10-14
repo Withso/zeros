@@ -33,6 +33,15 @@
    paths. Use a separate monotonic clock, closed labels and bounded aggregates;
    never let logging alter authority outcomes or add idle timers. State exactly
    which boundary completed: a valid transport response is not final admission.
+   For stop/resume races, hold the final checkpoint open across a real lease
+   tick. Preserve its lifecycle intent; test every direct provider-stop caller,
+   the native writer seal, and an audited deadline fallback before dispatch.
+   A stop decision is not provider retirement proof or older-checkpoint custody.
+   For migration fixtures, seed historical receipts against the schema at the
+   migration cutoff. A current completion service can require tables that did
+   not exist then; inspect the underlying SQL error before weakening a guard.
+   Checkpoint/stop changes also run `recovery-migration.integration.test.ts`
+   alongside the current-schema content, lease and reconciler suites.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates
