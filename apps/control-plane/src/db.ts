@@ -61,7 +61,7 @@ function observeOwnedConnection(client: Tx) {
 
 export function createPool(
   databaseUrl: string,
-  options: { maxConnections?: number; applicationName?: string } = {},
+  options: { maxConnections?: number; applicationName?: string; keepAlive?: boolean } = {},
 ): pg.Pool {
   const pool = new pg.Pool({
     connectionString: parseDatabaseTarget(databaseUrl).toString(),
@@ -81,6 +81,9 @@ export function createPool(
     idle_in_transaction_session_timeout: 30_000,
     maxLifetimeSeconds: DATABASE_CONNECTION_LIFETIME_SECONDS,
     application_name: options.applicationName ?? "zeros-control-plane",
+    // Transport probes keep an idle LISTEN socket observable without issuing
+    // SQL or adding transactions to the shared database/egress budget.
+    ...(options.keepAlive ? { keepAlive: true, keepAliveInitialDelayMillis: 30_000 } : {}),
   });
   // pg evicts failed idle clients itself, but an unhandled pool error is a
   // process-level crash. Never log the driver error: it may contain SQL/data.

@@ -75,7 +75,16 @@ acquire another connection or interrupt the other consumers. The remaining
 pool slot is budgeted headroom, not a second permanent listener.
 
 The shared session discards failed connections, retries with 1–30 second
-backoff, and retires after ten minutes. Each queue re-reads its durable state
+backoff, and retires after 23 hours, within PlanetScale's 24-hour limit. Its
+held connection has a different lifetime from short query-pool connections:
+reusing their ten-minute limit would disconnect all subscribers every ten
+minutes. TCP keepalive starts after 30 seconds of socket inactivity; it adds
+no SQL queries or transactions and does not defeat a server's SQL idle timeout.
+The listener emits one closed `ready` or `restored` info message after all
+current LISTEN acknowledgements and replay callbacks, plus a `rotating at
+lifetime limit` message for planned retirement. These messages confirm the
+subscription and replay request, not completion of asynchronous queue work.
+Each queue re-reads its durable state
 after LISTEN succeeds, including reconnects; payloads remain hints and never
 carry authority. Security streams wake and stay unhealthy after a lost session
 until a caller explicitly starts them again. A late LISTEN acknowledgement or
@@ -122,8 +131,8 @@ Implemented connection controls and remaining hosted qualification:
   retries; a request already delivered remains uncertain. Retire broken
   checked-out clients, including listener initialization failures and shutdown
   races. Re-establish listening and replay durable records after reconnect.
-- Connections retire after ten minutes, including the continuously checked-out
-  listener. Configure bounded retry/backoff and connection deadlines without
+- Query-pool connections retire after ten minutes; the continuously checked-out
+  listener retires after 23 hours. Configure bounded retry/backoff and connection deadlines without
   blindly retrying writes whose commit result is unknown.
 - Budget connections across all processes, workers, rollout overlap, migration
   jobs and operator sessions. Read actual database limits; small-cluster defaults

@@ -79,7 +79,7 @@ const emailConfig = loadEmailConfig();
 // LISTEN is session-scoped and must bypass transaction poolers. All consumers
 // share one disposable session, in an isolated pool using runtime privileges.
 const listenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
-  maxConnections: 2, applicationName: "zeros-notifications",
+  maxConnections: 2, applicationName: "zeros-notifications", keepAlive: true,
 });
 const securityEventBroker = new PostgresSecurityEventBroker(listenerPool);
 const workosProvider =

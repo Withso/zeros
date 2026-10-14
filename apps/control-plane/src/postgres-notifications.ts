@@ -1,5 +1,9 @@
 import type pg from "pg";
-import { DATABASE_CONNECTION_LIFETIME_SECONDS } from "./db.js";
+
+// A continuously held LISTEN session is not an idle query-pool connection.
+// PlanetScale requires replacement within 24h; keep an hour of headroom rather
+// than interrupting every subscriber at the query pool's ten-minute limit.
+const NOTIFICATION_CONNECTION_LIFETIME_MS = 23 * 60 * 60_000;
 
 type Options = {
   channels: readonly string[];
@@ -96,6 +100,7 @@ type Session = {
   client: pg.PoolClient;
   channels: Set<string>;
   disposed: boolean;
+  announced: boolean;
   dispose: (error?: unknown) => void;
   retirement?: NodeJS.Timeout;
 };
@@ -106,6 +111,7 @@ class SharedListener {
   private syncing: Promise<void> | undefined;
   private retry: NodeJS.Timeout | undefined;
   private retryMs = 1_000;
+  private recovering = false;
 
   constructor(private readonly pool: pg.Pool) {}
 
@@ -136,6 +142,7 @@ class SharedListener {
   }
 
   private failed(error: unknown): void {
+    if (this.subscriptions.size) this.recovering = true;
     for (const subscription of [...this.subscriptions]) {
       if (subscription.options.reconnect === false) this.subscriptions.delete(subscription);
       subscription.disconnected(error);
@@ -158,7 +165,7 @@ class SharedListener {
   private async acquire(): Promise<Session | undefined> {
     const client = await this.pool.connect();
     if (!this.subscriptions.size) { client.release(true); return; }
-    const session: Session = { client, channels: new Set(), disposed: false, dispose: () => {} };
+    const session: Session = { client, channels: new Set(), disposed: false, announced: false, dispose: () => {} };
     const notify = (notice: pg.Notification) => {
       if (session.disposed) return;
       for (const subscription of [...this.subscriptions]) {
@@ -206,13 +213,30 @@ class SharedListener {
       }
       this.retryMs = 1_000;
       if (!session.retirement) {
-        session.retirement = setTimeout(session.dispose, DATABASE_CONNECTION_LIFETIME_SECONDS * 1_000);
+        session.retirement = setTimeout(() => {
+          if (session.disposed) return;
+          this.logStatus("[database] notification listener rotating at lifetime limit");
+          session.dispose();
+        }, NOTIFICATION_CONNECTION_LIFETIME_MS);
         session.retirement.unref();
       }
       for (const subscription of [...this.subscriptions]) {
         if (subscription.options.channels.every(channel => session.channels.has(channel))) subscription.connected();
       }
-      if ([...this.subscriptions].every(subscription => subscription.ready)) return;
+      if ([...this.subscriptions].every(subscription => subscription.ready)) {
+        if (!session.disposed && !session.announced && this.subscriptions.size) {
+          session.announced = true;
+          this.logStatus(this.recovering
+            ? "[database] notification listener restored"
+            : "[database] notification listener ready");
+          this.recovering = false;
+        }
+        return;
+      }
     }
+  }
+
+  private logStatus(message: string): void {
+    try { console.info(message); } catch { /* Observability cannot break listening. */ }
   }
 }
