@@ -10,6 +10,13 @@ where it is encoded.
   schedules and assert each exact error and the capacity bound (`playbooks/ci-red.md`, case
   `warm-context-capacity-commit-order`).
 
+## 0.1.2
+
+- **An empty log queue still woke every second.** Its early return suppressed IPC but left the interval
+  running. The flusher now wakes from enqueue and parks at the circuit deadline. Scheduler tests must
+  count scheduled work after the queue drains and cover pending flights and backoff
+  (`playbooks/bug-fix.md`, case `empty-renderer-log-poll`).
+
 ## 0.1.1
 
 - **Subagents can't know their PR number** when they add an eval case. Use `fixedBy: "pending"` locally
