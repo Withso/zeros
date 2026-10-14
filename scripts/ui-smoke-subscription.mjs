@@ -50,6 +50,12 @@ export async function runSubscriptionSmoke({ page, check }) {
     await expect(page.getByText("AGENT STOPPED", { exact: true })).toHaveCount(
       0,
     );
+    await page.getByRole("button", { name: "Toggle read-only transcript" }).click();
+    await expect(page.locator('[data-authentication-status="required"]')).toHaveCount(1);
+    await expect(page.locator("[data-authentication-notice]")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Toggle read-only transcript" }).click();
+    await expect(page.locator("[data-authentication-notice]")).toBeVisible();
     await page.getByRole("button", { name: "Stale credential hint" }).click();
     await expect(
       page.locator("[data-authentication-notice]"),
@@ -67,9 +73,9 @@ export async function runSubscriptionSmoke({ page, check }) {
         .click();
       await expect(page.locator("#session-status")).toHaveText("auth-required");
       await expect(page.locator("[data-user-prompt]")).toHaveCount(2);
-      await expect(
-        page.getByText("AGENT STOPPED", { exact: true }),
-      ).toBeVisible();
+      await expect(page.getByText("AGENT STOPPED", { exact: true })).toHaveCount(0);
+      await expect(page.locator('[data-authentication-status="required"]')).toHaveCount(1);
+      await expect(page.locator('[data-authentication-status="signed-in"]')).toHaveCount(0);
       await expect(page.locator("[data-authentication-notice]")).toBeVisible();
       before = await counts();
     }
@@ -199,7 +205,8 @@ export async function runSubscriptionSmoke({ page, check }) {
       `${provider}: ordinary sends retain the chat and original context, then settle the blocked turn`,
       true,
     );
-    await expect(page.getByText("AGENT STOPPED", { exact: true })).toHaveCount(
+    await expect(page.getByText("AGENT STOPPED", { exact: true })).toHaveCount(0);
+    await expect(page.locator('[data-authentication-status="signed-in"]')).toHaveCount(
       provider === "claude" ? 2 : 1,
     );
     await expect(page.locator("[data-authentication-notice]")).toHaveCount(0);

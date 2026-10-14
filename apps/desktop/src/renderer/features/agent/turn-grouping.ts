@@ -16,7 +16,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { AgentMessage, AgentTextMessage } from "./use-agent-session";
-import { isLegacyEnvironmentConnection, isRoutineNativeSleep } from "./renderers/tool-readiness";
+import { isLegacyEnvironmentConnection, isRoutineNativeSleep, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 
 export interface Turn {
   /** Renderer-only identity carried by stabilizeTurns while a resident
@@ -79,7 +79,7 @@ function uniqueDurableMessages(messages: AgentMessage[]): AgentMessage[] {
 export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
   const turns: Turn[] = [];
   let current: Turn | null = null;
-  for (const m of uniqueDurableMessages(messages)) {
+  for (const m of withoutRedundantAgentTasks(uniqueDurableMessages(messages))) {
     if (m.kind === "tool" && isLegacyEnvironmentConnection(m)) continue;
     if (m.kind === "error_notice" && m.code === "mcp_startup_status") {
       // Older engines persisted background MCP connection checks as chat

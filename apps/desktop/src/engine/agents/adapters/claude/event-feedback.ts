@@ -14,12 +14,14 @@ export interface ClaudeFeedbackOwner {
 interface Feedback {
   key: string;
   text: string;
+  noticeCode?: string;
   toolId?: string;
   nativeParent?: string;
   insideTool?: boolean;
   activeOnly?: boolean;
 }
 interface Options {
+  emitNotice: (id: string, text: string, code: string) => void;
   emit: (
     id: string,
     text: string,
@@ -46,7 +48,7 @@ export function isClaudeParentProgress(event: Event): boolean {
   );
 }
 
-/** Provider feedback uses ordinary commentary, never invented tools, auth
+/** Provider feedback uses commentary or a typed usage notice, never invented tools, auth
  * verdicts or turn completion. Raw login output and routine hook logs stay
  * private. Keep replay IDs across native results and query replacement. */
 export class ClaudeEventFeedback {
@@ -65,7 +67,11 @@ export class ClaudeEventFeedback {
     this.rows.clear();
   }
   result(): void {
-    this.rows.clear();
+    // A parent result can be followed by autonomous background replies for the
+    // same user send. Usage is one status through those replies, not narration.
+    for (const key of this.rows.keys()) {
+      if (!key.startsWith("rate-limit:")) this.rows.delete(key);
+    }
   }
   stop(): void {
     this.stopped = true;
@@ -102,9 +108,10 @@ export class ClaudeEventFeedback {
     const notice = (
       value: unknown,
       key = `${kind}:${uuid ?? digest(text(value))}`,
+      noticeCode?: string,
     ) => {
       const body = text(value);
-      if (body) this.publish({ key, text: body });
+      if (body) this.publish({ key, text: body, noticeCode });
     };
     const toolNotice = (
       value: unknown,
@@ -222,10 +229,11 @@ export class ClaudeEventFeedback {
         const info = record(event.rate_limit_info);
         if (!info) break;
         const key = `rate-limit:${identity(info.rateLimitType) ?? "account"}`;
+        const code = `claude-${key}`;
         if (info.isUsingOverage === true || info.overageInUse === true) {
-          notice("Claude is using extra usage.", key);
+          notice("Claude is using extra usage.", key, code);
         } else if (info.status === "allowed_warning") {
-          notice("Claude is nearing its usage limit.", key);
+          notice("Claude is nearing its usage limit.", key, code);
         } else if (info.status === "rejected") {
           notice(
             info.overageStatus === "allowed" ||
@@ -233,9 +241,10 @@ export class ClaudeEventFeedback {
               ? "Claude has reached its included usage limit. Extra usage is available."
               : "Claude has reached its usage limit. Wait for the limit to reset before retrying.",
             key,
+            code,
           );
         } else if (info.status === "allowed" && this.rows.has(key)) {
-          notice("Claude usage is available again.", key);
+          notice("Claude usage is available again.", key, code);
         }
         break;
       }
@@ -275,8 +284,15 @@ export class ClaudeEventFeedback {
     const fingerprint = digest(body);
     const previous = this.rows.get(rowKey);
     if (previous?.fingerprint === fingerprint) return true;
-    const id = previous?.id ?? `claude-feedback-${randomUUID()}`;
+    // Notice events are immutable in the shared reducer. A changed usage
+    // state gets a new receipt; its stable code selects the one current UI
+    // status. Commentary still replaces its existing native text identity.
+    const id = (!feedback.noticeCode && previous?.id) || `claude-feedback-${randomUUID()}`;
     boundedSet(this.rows, rowKey, { id, fingerprint }, MAX_ROWS);
+    if (feedback.noticeCode) {
+      this.options.emitNotice(id, body, feedback.noticeCode);
+      return true;
+    }
     this.options.emit(
       id,
       body,

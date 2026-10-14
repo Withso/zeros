@@ -47,6 +47,46 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
   check("The selected model's CLI minimum shows the cloud update note to a prompter only on older runtimes", true);
 
   await page.goto(transcript);
+  const recovery = page.locator("#claude-transcript-recovery");
+  await expect(recovery.locator('[data-authentication-status="signed-in"]')).toHaveText("Signed in");
+  await expect(recovery.locator("[data-agent-group]")).toHaveCount(3);
+  await expect(recovery.locator("[data-provider-usage-notice]")).toHaveCount(1);
+  await expect(recovery).not.toContainText("No conversation found");
+  await expect(recovery).not.toContainText("Background Task");
+  await expect(recovery).not.toContainText("1 message");
+  const usageAtTail = await recovery.evaluate(element => {
+    const notice = element.querySelector("[data-provider-usage-notice]");
+    const report = [...element.querySelectorAll("p")].find(p => p.textContent.includes("The conversation continued."));
+    return !!report && !!(report.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+  check("Recovered Claude turns show Signed in, three real Agent groups and one usage message after the output", usageAtTail);
+  const inlineUsage = await recovery.locator("[data-provider-usage-notice]").evaluate(element => {
+    const style = getComputedStyle(element);
+    return !element.closest("[data-agent-notice]") &&
+      style.backgroundColor === "rgba(0, 0, 0, 0)" &&
+      style.borderTopWidth === "0px" && style.borderBottomWidth === "0px" &&
+      style.paddingLeft === "0px" && style.paddingRight === "0px" &&
+      element.querySelector("button") === null;
+  });
+  check("Usage feedback is a plain inbetween message with no banner surface or action", inlineUsage);
+  await recovery.getByRole("button", { name: "Show settled recovery", exact: true }).click();
+  await expect(recovery.locator("[data-provider-usage-notice]")).toHaveCount(1);
+  await expect(recovery).not.toContainText("No conversation found");
+  await expect(recovery).not.toContainText("message");
+  await recovery.getByRole("button", { name: "Show live recovery", exact: true }).click();
+  const monitor = page.locator("#claude-monitor-activity");
+  await expect(monitor.getByText("Waiting for 2 background tasks", { exact: true })).toBeVisible();
+  await monitor.getByRole("button", { name: "One check running", exact: true }).click();
+  await expect(monitor.getByText("Waiting for 1 background task", { exact: true })).toBeVisible();
+  await monitor.getByRole("button", { name: "Only watcher remains", exact: true }).click();
+  await expect(monitor).toHaveAttribute("data-activity", "idle");
+  await expect(monitor.getByRole("status")).toHaveCount(0);
+  check("Two checks plus a Monitor count 2 then 1, and only the watcher leaves no waiting or working indicator", true);
+  await monitor.getByRole("button", { name: "Claude resumes", exact: true }).click();
+  await expect(monitor).toHaveAttribute("data-activity", "running");
+  await expect(monitor.getByLabel("Agent working", { exact: true })).toBeVisible();
+  check("New parent output resumes activity after an ambient-only wait", true);
+  await monitor.getByRole("button", { name: "Two checks running", exact: true }).click();
   const runIds = ["background-run-1", "background-run-finished", "background-run-2", "background-run-late"];
   for (const id of runIds) {
     const state = page.locator(`#${id}`);
@@ -184,4 +224,12 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
     const widths = await page.locator("[data-agent-notice], [data-agent-group], #claude-chrome-setup").evaluateAll(elements => elements.every(element => element.scrollWidth <= element.clientWidth));
     check(`Claude runtime UI fits its surfaces in ${theme}`, widths);
   }
+
+  for (const params of ["owner=personal", "owner=organization", "owner=organization&placement=cloud", "owner=personal"]) {
+    await page.goto(`${transcript}?${params}`);
+    await expect(page.locator("#claude-transcript-recovery [data-agent-group]")).toHaveCount(3);
+    await expect(page.locator("#claude-transcript-recovery [data-provider-usage-notice]")).toHaveCount(1);
+    await expect(page.locator("#claude-transcript-recovery")).not.toContainText("No conversation found");
+  }
+  check("Transcript status stays consistent across Personal Local, organization-local, cloud and returning to Personal", true);
 }

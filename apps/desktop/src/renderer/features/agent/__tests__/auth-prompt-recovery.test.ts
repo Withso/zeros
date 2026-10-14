@@ -36,7 +36,7 @@ describe("authentication recovery", () => {
     createdAt: 1,
     authRecovery: { text: "Original expanded prompt" },
   };
-  it("shows sign-in only on the blocked tail, then a stopped footer when another message arrives", () => {
+  it("shows sign-in only on the blocked tail, then retains unresolved history when another message arrives", () => {
     const facts = {
       userPrompt: blocked,
       events: [],
@@ -52,6 +52,20 @@ describe("authentication recovery", () => {
       authenticationTurnState({ ...facts, isTail: false, inFlight: true }),
     ).toBe("stopped");
     expect(authenticationTurnState({ ...facts, inFlight: true })).toBeNull();
+  });
+  it("keeps the last auth failure visible as status in a read-only transcript", () => {
+    expect(authenticationTurnState({ userPrompt: blocked, events: [], isTail: true, inFlight: false, readOnly: true })).toBe("stopped");
+  });
+  it("shows a resolved auth state only after confirmed provider recovery", () => {
+    const facts = { userPrompt: blocked, events: [], isTail: false, inFlight: false };
+    expect(authenticationTurnState({ ...facts, recovered: true })).toBe("signed-in");
+    expect(authenticationTurnState({ ...facts, recovered: false })).toBe("stopped");
+  });
+  it("gives the auth notice sole ownership of persisted OAuth errors", () => {
+    const terminal = { id: "terminal", kind: "error_notice", message: "Failed to authenticate: OAuth session expired", severity: "error", recoverable: false,
+      turnFailure: { turnId: blocked.id, kind: "auth-required" }, createdAt: 2 } as AgentMessage;
+    const child = { ...terminal, id: "child", parentToolId: "agent" };
+    expect(authenticationTurnOutput([terminal, child])).toEqual([child]);
   });
   it("carries only consecutive blocked messages as context for a new send, including after reload", () => {
     const next = {

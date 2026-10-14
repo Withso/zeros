@@ -16,6 +16,7 @@ vi.mock("@/renderer/shared/ui/loading", async (importOriginal) => ({
 import { TurnEventList } from "../turn-event-list";
 import type { RendererContext } from "../renderers";
 import type { AgentMessage } from "../use-agent-session";
+import { groupMessagesIntoTurns, isProviderTurnTail } from "../turn-grouping";
 
 const ctx = {
   isStreaming: true,
@@ -78,6 +79,36 @@ function render(isStreaming: boolean): string {
 }
 
 describe("TurnEventList streaming projection", () => {
+  it.each([true, false])("keeps usage at the shared provider turn's tail after steering (streaming=%s)", isStreaming => {
+    const usage: AgentMessage = { id: "usage-before-steer", kind: "error_notice", severity: "warning", recoverable: true,
+      code: "claude-rate-limit:five_hour", message: "Claude is nearing its usage limit.", createdAt: 2 };
+    const turns = groupMessagesIntoTurns([
+      { id: "prompt", kind: "text", role: "user", text: "Inspect the workspace", createdAt: 1 }, usage,
+      { id: "steer", kind: "text", role: "user", steeredTurnId: "prompt", text: "Check the renderer too", createdAt: 3 },
+      { id: "report", kind: "text", role: "agent", phase: "final_answer", text: "Report after steering", createdAt: 4 },
+      { ...usage, id: "usage-after-steer", createdAt: 5 },
+    ]);
+    const html = turns.map((turn, index) => renderToStaticMarkup(createElement(TurnEventList, {
+      events: turn.events, usageEvents: isProviderTurnTail(turns, index) ? turn.providerEvents : null,
+      isActive: true, isStreaming, showActivity: false, ctx,
+    }))).join("");
+    expect(html.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
+    expect(html.indexOf("Report after steering")).toBeLessThan(html.indexOf("Claude is nearing"));
+  });
+
+  it.each([true, false])("places one usage notice after the output, outside the work group (streaming=%s)", isStreaming => {
+    const usage: AgentMessage = { id: "claude-feedback-usage-1", kind: "text", role: "agent", phase: "commentary", text: "Claude is nearing its usage limit.", createdAt: 1 };
+    const answer: AgentMessage = { id: "answer", kind: "text", role: "agent", phase: "final_answer", text: "Confirmed report", createdAt: 4 };
+    const html = renderToStaticMarkup(createElement(TurnEventList, {
+      events: [usage, answer, { ...usage, id: "claude-feedback-usage-2", createdAt: 5 }],
+      isActive: true, isStreaming, showActivity: false, ctx,
+    }));
+    expect(html.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
+    expect(html.indexOf("Confirmed report")).toBeLessThan(html.indexOf("Claude is nearing"));
+    expect(html).not.toContain("1 message");
+    expect(html).not.toContain("2 messages");
+  });
+
   it("places quiet background waiting after the settled output and footer, then resumes the working feed", () => {
     const props = {
       events, isActive: true, isStreaming: false,

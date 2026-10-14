@@ -1,6 +1,5 @@
 import { ClaudeQueryUsage } from "./usage-accounting";
 import { isClaudeBackgroundAcknowledgement, type ClaudeResultOwnership } from "./result-ownership";
-import { claudeActionCategory } from "../shared/provider-error";
 import { boundedStructuredOutput, canonicalResourceLinks, canonicalToolContent, mergeToolContent, type CanonicalToolContent } from "../shared/tool-content";
 // ──────────────────────────────────────────────────────────
 // Claude stream-json → SessionNotification translator
@@ -393,9 +392,10 @@ export class ClaudeStreamTranslator {
    * background_tasks_changed and enriched by the task edge stream. */
   private readonly backgroundTasks = new Map<string, BackgroundTask>();
   /** Process ownership includes ambient tasks, even though the visible map
-   * above excludes them. A level snapshot replaces this set; subsequent edges
-   * enrich/settle it but cannot recreate membership absent from that snapshot. */
-  private readonly liveBackgroundTasks = new Map<string, boolean>();
+   * above excludes them. Keep the native ambient declaration (including its
+   * absence) so a late Monitor join can classify older CLI events without
+   * overriding an explicit false. A level snapshot replaces membership. */
+  private readonly liveBackgroundTasks = new Map<string, boolean | undefined>();
   private hasBackgroundTaskSnapshot = false;
   /** Keep retirement conservative if native membership exceeds our ID budget.
    * The next level replaces this bit, including an authoritative empty set. */
@@ -445,6 +445,8 @@ export class ClaudeStreamTranslator {
   private activityStartedAt: number | null = null;
   private activityStopped = false;
   private readonly ambientTaskIds = new Set<string>();
+  /** Native Monitor identity is a fallback only when ambient is omitted. */
+  private readonly monitorTaskIds = new Set<string>();
   /** Last wire snapshot, retained only to suppress semantically identical
    * provider observations before they cross the engine/renderer bridge. */
   private lastEmittedBackgroundTasks: {
@@ -515,6 +517,12 @@ export class ClaudeStreamTranslator {
   private readonly detachedToolKeys = new Set<string>();
   private readonly lifecycleFrames = new Set<string>();
   private readonly feedback = new ClaudeEventFeedback({
+    emitNotice: (noticeId, message, code) => {
+      this.emit({ sessionId: this.sessionId, update: {
+        sessionUpdate: "error_notice", noticeId, message, code,
+        severity: "warning", recoverable: true,
+      } });
+    },
     emit: (messageId, text, nativeParent, groupId) => {
       const parentToolId = groupId ?? (nativeParent ? this.toolCallIds.get(nativeParent) : undefined);
       if (nativeParent && !parentToolId) {
@@ -562,6 +570,7 @@ export class ClaudeStreamTranslator {
   private readonly agentTasks = new Map<
     string,
     {
+      agentId: string;
       toolCallId: string;
       nativeParent: string;
       pendingToolCallIds: Set<string>;
@@ -720,6 +729,7 @@ export class ClaudeStreamTranslator {
     this.agentTaskEnds.clear();
     this.pausedTaskIds.clear();
     this.ambientTaskIds.clear();
+    this.monitorTaskIds.clear();
     this.workflowNarration.clear();
     this.activityStopped = false;
     this.feedback.beginTurn();
@@ -874,8 +884,10 @@ export class ClaudeStreamTranslator {
     this.emitWorkflows();
   }
 
-  /** Feed a parsed JSON event from Claude's stdout. */
-  feed(rawEvent: unknown): boolean {
+  /** Feed a parsed JSON event from Claude's stdout. The adapter owns user
+   * result correlation; unrelated results still supply transcript and usage,
+   * but cannot park the activity of its pending send. */
+  feed(rawEvent: unknown, options?: { preserveTurnActivity?: boolean }): boolean {
     if (!isObj(rawEvent) || typeof rawEvent.type !== "string") {
       this.onUnknown?.(rawEvent);
       return false;
@@ -959,7 +971,7 @@ export class ClaudeStreamTranslator {
         this.onStreamEvent(event as unknown as ClaudeStreamEvent);
         break;
       case "result":
-        this.onResult(event as unknown as ClaudeResultEvent);
+        this.onResult(event as unknown as ClaudeResultEvent, options?.preserveTurnActivity);
         break;
       default:
         this.onUnknown?.(event);
@@ -1081,12 +1093,11 @@ export class ClaudeStreamTranslator {
       : null;
   }
 
-  /** An explicit setup failure remains actionable if the transport ends before
-   * result. Success, replacement and retraction already clear this candidate. */
+  /** A native failure remains actionable if the transport ends before result.
+   * Success, replacement and retraction already clear this candidate. Synthetic
+   * errors are absent from assistant output, so the terminal notice owns them. */
   get pendingUserActionFailure(): { message: string; code: string } | null {
-    return this.assistantFailure && claudeActionCategory(this.assistantFailure.code)
-      ? this.assistantFailure
-      : null;
+    return this.assistantFailure;
   }
 
   /** Per-turn token/cost usage for LLM analytics. */
@@ -1365,9 +1376,14 @@ export class ClaudeStreamTranslator {
     if (this.terminalTaskIds.has(event.task_id)) return;
     addBoundedSet(this.taskStartedIds, event.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
     if (event.skip_transcript) addBoundedSet(this.skippedTaskRecords, event.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
+    if (event.tool_use_id && this.toolInputs.get(event.tool_use_id)?.name === "Monitor") {
+      addBoundedSet(this.monitorTaskIds, event.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
+    }
     const ambient = this.taskIsAmbient(event);
     if (this.acceptsBackgroundEdge(event.task_id) && (ambient || event.is_backgrounded)) {
-      this.trackBackgroundOwnership(event.task_id, ambient);
+      this.trackBackgroundOwnership(event.task_id,
+        this.hasBackgroundTaskSnapshot && this.liveBackgroundTasks.has(event.task_id)
+          ? this.liveBackgroundTasks.get(event.task_id) : event.ambient);
     }
     if (ambient) {
       addBoundedSet(this.ambientTaskIds, event.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
@@ -1534,9 +1550,9 @@ export class ClaudeStreamTranslator {
       if (this.terminalTaskIds.has(incoming.task_id)) continue;
       if (incoming.task_type === "local_agent" || this.agentTasks.has(incoming.task_id))
         this.bindAgentTask(incoming.task_id, undefined, incoming);
-      const ambient = incoming.ambient === true ||
-        (incoming.ambient == null && this.skippedTaskRecords.has(incoming.task_id));
-      this.trackBackgroundOwnership(incoming.task_id, ambient);
+      const declaredAmbient = typeof incoming.ambient === "boolean" ? incoming.ambient : undefined;
+      const ambient = declaredAmbient ?? this.hasAmbientTaskProvenance(incoming.task_id);
+      this.trackBackgroundOwnership(incoming.task_id, declaredAmbient);
       if (ambient) {
         addBoundedSet(this.ambientTaskIds, incoming.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
         continue;
@@ -1598,24 +1614,41 @@ export class ClaudeStreamTranslator {
     if (this.workflows.size > 0) this.emitWorkflows();
   }
 
-  private trackBackgroundOwnership(taskId: string, ambient: boolean): void {
+  private trackBackgroundOwnership(taskId: string, ambient?: boolean): void {
     if (this.liveBackgroundTasks.size >= MAX_BACKGROUND_TASK_LIFECYCLE && !this.liveBackgroundTasks.has(taskId)) {
       this.backgroundTaskOverflow = true;
       return;
     }
-    this.liveBackgroundTasks.set(taskId, ambient);
+    this.liveBackgroundTasks.set(taskId, typeof ambient === "boolean" ? ambient : undefined);
   }
 
   private acceptsBackgroundEdge(taskId: string): boolean {
     return !this.hasBackgroundTaskSnapshot || this.taskRuns.get(taskId)?.hasBackgroundSnapshot === false || this.liveBackgroundTasks.has(taskId) || this.backgroundTasks.has(taskId);
   }
 
-  private taskIsAmbient(event: ClaudeSystemEvent): boolean {
-    if (this.hasBackgroundTaskSnapshot && event.task_id && this.liveBackgroundTasks.has(event.task_id)) {
-      return this.liveBackgroundTasks.get(event.task_id)!;
+  private hasAmbientTaskProvenance(taskId: string): boolean {
+    return this.skippedTaskRecords.has(taskId) || this.monitorTaskIds.has(taskId);
+  }
+
+  private taskIsAmbient(event: Pick<ClaudeSystemEvent, "task_id" | "ambient" | "skip_transcript">): boolean {
+    const declaredAmbient = typeof event.ambient === "boolean" ? event.ambient : undefined;
+    if (event.task_id && this.liveBackgroundTasks.has(event.task_id) &&
+        (this.hasBackgroundTaskSnapshot || declaredAmbient === undefined)) {
+      return this.liveBackgroundTasks.get(event.task_id) ?? this.hasAmbientTaskProvenance(event.task_id);
     }
-    return event.ambient === true || event.skip_transcript === true ||
-      (event.task_id !== undefined && this.ambientTaskIds.has(event.task_id));
+    return declaredAmbient ?? (event.skip_transcript === true ||
+      (event.task_id !== undefined &&
+        (this.ambientTaskIds.has(event.task_id) || this.hasAmbientTaskProvenance(event.task_id))));
+  }
+
+  private rememberMonitorTask(taskId: string): void {
+    if (!taskId || this.activityStopped || this.terminalTaskIds.has(taskId)) return;
+    addBoundedSet(this.monitorTaskIds, taskId, MAX_BACKGROUND_TASK_LIFECYCLE);
+    if (!this.taskIsAmbient({ task_id: taskId })) return;
+    addBoundedSet(this.ambientTaskIds, taskId, MAX_BACKGROUND_TASK_LIFECYCLE);
+    // A launch identifies the task; only native membership/edges own its
+    // process lifetime. Never resurrect work from a late tool result.
+    if (this.backgroundTasks.delete(taskId)) this.emitBackgroundTasks();
   }
 
   /** Hidden work still has a terminal lifecycle; omitting its row must not
@@ -1842,6 +1875,13 @@ export class ClaudeStreamTranslator {
       status === "completed" || status === "failed" || status === "killed";
     if (this.taskIsAmbient(event)) {
       if (terminal) this.endAmbientTask(event);
+      else if (event.patch?.is_backgrounded === true && this.acceptsBackgroundEdge(event.task_id)) {
+        this.trackBackgroundOwnership(event.task_id,
+          this.hasBackgroundTaskSnapshot && this.liveBackgroundTasks.has(event.task_id)
+            ? this.liveBackgroundTasks.get(event.task_id) : event.ambient);
+      } else if (event.patch?.is_backgrounded === false) {
+        this.liveBackgroundTasks.delete(event.task_id);
+      }
       return;
     }
     if (status === "paused") {
@@ -1887,7 +1927,7 @@ export class ClaudeStreamTranslator {
       this.observedBackgroundTaskIds.has(event.task_id) ||
       explicitlyBackgrounded;
     if (explicitlyBackgrounded && !terminal && !previous && transitionTask && this.acceptsBackgroundEdge(event.task_id)) {
-      this.trackBackgroundOwnership(event.task_id, false);
+      this.trackBackgroundOwnership(event.task_id, event.ambient);
       this.backgroundTasks.set(event.task_id, transitionTask);
       setBoundedMap(
         this.backgroundTaskMetadata,
@@ -2141,6 +2181,7 @@ export class ClaudeStreamTranslator {
     if (!toolCallId || (!existing && !/^(Agent|Task)$/i.test(tool?.name ?? ""))) return;
     const agent = {
       ...existing,
+      agentId: taskId,
       toolCallId,
       nativeParent: existing?.nativeParent ?? this.agentMessageParents.get(taskId) ?? nativeToolUseId!,
       pendingToolCallIds: existing?.pendingToolCallIds ?? new Set<string>(),
@@ -2163,15 +2204,16 @@ export class ClaudeStreamTranslator {
         sessionUpdate: "message_parent_update", messageIds: [toolCallId], parentToolId,
       } });
     }
-    if (publish && (agent.model !== existing?.model || agent.subagentType !== existing?.subagentType || agent.effort !== existing?.effort))
+    if (publish && (agent.agentId !== existing?.agentId || agent.model !== existing?.model || agent.subagentType !== existing?.subagentType || agent.effort !== existing?.effort))
       this.emit({ sessionId: this.sessionId, update: {
         sessionUpdate: "tool_call_update", toolCallId,
         rawOutput: { status: agent.status, ...this.agentMetadata(agent), ...(agent.error ? { message: agent.error } : {}) },
       } });
   }
 
-  private agentMetadata(agent: { model?: string; subagentType?: string; effort?: string }) {
+  private agentMetadata(agent: { agentId?: string; model?: string; subagentType?: string; effort?: string }) {
     return {
+      ...(agent.agentId ? { agentId: agent.agentId } : {}),
       ...(agent.model ? { resolvedModel: agent.model } : {}),
       ...(agent.subagentType ? { subagentType: agent.subagentType } : {}),
       ...(agent.effort ? { effort: agent.effort } : {}),
@@ -2555,6 +2597,10 @@ export class ClaudeStreamTranslator {
       const key = JSON.stringify([event.parent_tool_use_id ?? "", tool.tool_use_id]);
       if (this.retractedTools.has(key)) continue;
       const previous = this.scopedTools.get(key);
+      if (nativeTool?.name === "Monitor" && !tool.is_error && previous?.status !== "failed" &&
+          resultCount === 1 && isObj(event.tool_use_result) && typeof event.tool_use_result.taskId === "string") {
+        this.rememberMonitorTask(event.tool_use_result.taskId);
+      }
       const agentResult =
         resultCount === 1 &&
         /^(Agent|Task)$/i.test(nativeTool?.name ?? "") &&
@@ -2718,7 +2764,7 @@ export class ClaudeStreamTranslator {
     if (
       !claudeParentId &&
       blocks.every((block) => block.type === "text") &&
-      event.error && claudeActionCategory(event.error)
+      event.error
     ) {
       this.transcript.rememberSuppressed(event.message?.id, "", event.uuid);
       return;
@@ -2755,7 +2801,7 @@ export class ClaudeStreamTranslator {
     if (
       stopReason !== "end_turn" ||
       this.activityStopped ||
-      !this.backgroundTasks.size
+      (!this.backgroundTasks.size && !this.liveBackgroundTasks.size)
     )
       return;
     this.sessionActivityState = "idle";
@@ -2816,7 +2862,7 @@ export class ClaudeStreamTranslator {
   }
 
   // ── Result (final) ──────────────────────────────────────
-  private onResult(event: ClaudeResultEvent): void {
+  private onResult(event: ClaudeResultEvent, preserveTurnActivity = false): void {
     if (isClaudeBackgroundAcknowledgement(event)) {
       this.currentTurnUsage = this.queryUsage.record(event);
       return;
@@ -2828,7 +2874,7 @@ export class ClaudeStreamTranslator {
     if (event.subtype === "success" && event.is_error !== true && !hasNativeErrors &&
       (mappedTerminalReason === null || mappedTerminalReason === "end_turn")) this.transcript.final(event.result, event.uuid);
     this.hasSeenResult = true;
-    if (!this.activityStopped) {
+    if (!this.activityStopped && !preserveTurnActivity) {
       this.sessionActivityState = "idle";
       if (this.activityStartedAt !== null || this.lastEmittedBackgroundTasks) this.emitBackgroundTasks();
     }
@@ -3008,7 +3054,7 @@ function retainToolInput(
         : {}),
     };
   }
-  if (!command && !description && !/^(Agent|Task|OfferChromeSetup)$/i.test(name)) return null;
+  if (!command && !description && !/^(Agent|Task|Monitor|OfferChromeSetup)$/i.test(name)) return null;
   return {
     name,
     ...(command ? { command: command.slice(0, MAX_RETAINED_TOOL_TEXT) } : {}),

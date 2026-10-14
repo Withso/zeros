@@ -12,6 +12,8 @@
 // ──────────────────────────────────────────────────────────
 
 import type { AgentToolMessage } from "../use-agent-session";
+import { asDisplayString } from "./raw-output";
+import { toolRecord } from "./native-tool-presentation";
 
 const SUBAGENT_TITLE_PATTERN = /^(agent|task|spawn_?agent|delegate|subagent)$/i;
 
@@ -80,4 +82,30 @@ export function matchSubagent(tool: AgentToolMessage): SubagentInfo | null {
     return { subagentType, description };
   }
   return null;
+}
+
+export function agentReportText(tool: AgentToolMessage): string {
+  const output = toolRecord(tool.rawOutput);
+  // A native async acknowledgement is not the child's report. Retain it in
+  // history, but don't print internal launch instructions into the feed.
+  if (tool.status === "failed" && typeof output.message === "string")
+    return output.message;
+  if (output.status === "async_launched") return "";
+  const text = (tool.content ?? [])
+    .flatMap((block) =>
+      block.type === "content" && block.content.type === "text"
+        ? [block.content.text]
+        : [],
+    )
+    .join("");
+  // Compatibility with older Claude histories that only captured text.
+  if (/^Async agent launched successfully\./.test(text.trim())) return "";
+  if (text) return text;
+  if (typeof output.report === "string") return output.report;
+  if (["completed", "async_launched"].includes(String(output.status)))
+    return "";
+  if (typeof tool.rawOutput === "string") return tool.rawOutput;
+  return tool.status === "failed"
+    ? (asDisplayString(tool.rawOutput) ?? "")
+    : "";
 }

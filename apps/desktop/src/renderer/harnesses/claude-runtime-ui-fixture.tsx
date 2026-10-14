@@ -11,6 +11,8 @@ import { AuthenticationNotice } from "../features/agent/authentication-notice";
 import { authenticationFailureMessage } from "../features/agent/auth-prompt-recovery";
 import { TurnFailureCard } from "../features/agent/turn-failure-card";
 import { turnFailureForCard } from "../features/agent/turn-failure";
+import { agentActivity } from "../features/agent/agent-activity";
+import { BLANK } from "../features/agent/sessions-store";
 import { ProviderConnectionDialog } from "../features/settings/provider-connection-dialog";
 import type { RendererContext } from "../features/agent/renderers/types";
 import { Button } from "../shared/ui/primitives/button";
@@ -43,6 +45,7 @@ export function ClaudeRuntimeUiFixture({ ctx, connected }: { ctx: RendererContex
   const [retries, setRetries] = useState(0);
   const [signIns, setSignIns] = useState(0);
   const [connectionOpen, setConnectionOpen] = useState(false);
+  const [recoveryLive, setRecoveryLive] = useState(true);
   const nestedCtx = { ...ctx, subagentChildren: new Map<string, AgentMessage[]>([
     ["explore", [plan]], ["plan", [childRead]],
   ]) };
@@ -61,8 +64,39 @@ export function ClaudeRuntimeUiFixture({ ctx, connected }: { ctx: RendererContex
     { id: "background-run-2", label: "Run 2 · resumed", ordinal: 2, status: "in_progress" as const, waiting: true },
     { id: "background-run-late", label: "Late run 1 event", ordinal: 2, status: "in_progress" as const, waiting: true },
   ];
+  const recoveryAgents = ["Inspect workspace files", "Review Design guidance", "Check UI behavior"].map((description, index) =>
+    tool(`recovery-agent-${index}`, {
+      status: "in_progress", rawInput: { description, subagent_type: "Explore" },
+      rawOutput: { agentId: `recovery-child-${index}`, resolvedModel: "claude-sonnet-5-5", subagentType: "Explore" },
+    }));
+  const usage: AgentMessage = { id: "usage-before", messageId: "claude-feedback-usage-before", kind: "text", role: "agent",
+    phase: "commentary", text: "Claude is nearing its usage limit.", createdAt: 2 };
+  const recoveredEvents: AgentMessage[] = [
+    { id: "retry-error", kind: "error_notice", severity: "error", recoverable: false, createdAt: 1,
+      message: "Claude session expired mid-turn: No conversation found with session ID: missing-fixture",
+      turnFailure: { turnId: "recovery-prompt", kind: "session-expired" } },
+    usage,
+    ...recoveryAgents,
+    ...recoveryAgents.map((agent, index) => tool(`recovery-background-${index}`, {
+      title: "Background Task", toolKind: "background_task", status: "in_progress",
+      rawInput: { taskId: `recovery-child-${index}`, taskType: "local_agent", subagentType: "Explore" },
+    })),
+    { id: "recovered-report", kind: "text", role: "agent", phase: "final_answer", text: "The conversation continued. The three agents are checking the workspace.", createdAt: 4 },
+    { ...usage, id: "usage-after", messageId: "claude-feedback-usage-after", createdAt: 5 },
+  ];
+  const recoveredFailure = turnFailureForCard({ events: recoveredEvents, turnId: "recovery-prompt", status: "failed" });
   return (
     <div className="flex flex-col gap-6">
+      <section id="claude-transcript-recovery" className="flex flex-col gap-3" aria-label="Transcript recovery">
+        <h2 className="text-fg1 text-sm font-medium">Transcript recovery</h2>
+        <AuthenticationNotice name="Claude Code" resolved onSignIn={() => {}} />
+        <TurnEventList events={recoveredEvents} failureTurnId="recovery-prompt" isActive isStreaming={recoveryLive} showActivity={false} ctx={ctx}
+          footer={recoveredFailure ? <TurnFailureCard failure={recoveredFailure} /> : null} />
+        <Button variant="secondary" className="w-fit" onClick={() => setRecoveryLive(value => !value)}>
+          {recoveryLive ? "Show settled recovery" : "Show live recovery"}
+        </Button>
+      </section>
+      <MonitorActivityFixture ctx={ctx} startedAt={startedAt} />
       <section className="flex flex-col gap-3" aria-label="Background task runs">
         <h2 className="text-fg1 text-sm font-medium">Background task runs</h2>
         <div className="grid gap-4 md:grid-cols-2">
@@ -108,5 +142,35 @@ export function ClaudeRuntimeUiFixture({ ctx, connected }: { ctx: RendererContex
           code: "claude-chrome-setup", message: "Set up Claude in Chrome in Settings to let Claude use your browser." }} ctx={ctx} />
       </section>
     </div>
+  );
+}
+
+function MonitorActivityFixture({ ctx, startedAt }: { ctx: RendererContext; startedAt: number }) {
+  const [state, setState] = useState("two");
+  const tasks = ["Checks", "Baseline comparison"].slice(0, state === "two" ? 2 : state === "one" ? 1 : 0)
+    .map((name) => ({ taskId: name, name, startedAt, updatedAt: startedAt }));
+  const activity = agentActivity({
+    ...BLANK, agentId: "claude", status: "streaming", backgroundTasks: tasks,
+    backgroundActivity: { state: state === "resumed" ? "running" : "idle", startedAt },
+    waitingForBackgroundTasks: tasks.length > 0,
+  });
+  const states = [
+    ["two", "Two checks running"], ["one", "One check running"],
+    ["watcher", "Only watcher remains"], ["resumed", "Claude resumes"],
+  ];
+  return (
+    <section id="claude-monitor-activity" className="flex flex-col gap-3" aria-label="Monitor activity" data-activity={activity ?? "idle"}>
+      <h2 className="text-fg1 text-sm font-medium">Two checks and a passive watcher</h2>
+      <div className="flex flex-wrap gap-2">
+        {states.map(([value, label]) => <Button key={value} variant="secondary" aria-pressed={state === value} onClick={() => setState(value)}>{label}</Button>)}
+      </div>
+      <TurnEventList events={[{
+        id: "monitor-report", kind: "text", role: "agent", phase: "final_answer", createdAt: startedAt,
+        text: state === "two" ? "Two checks are running. I’ll report when they finish."
+          : state === "one" ? "One check has finished. The remaining check is still running."
+          : state === "watcher" ? "Both checks have finished." : "The watcher reported the results. I’m reviewing them.",
+      }]} isActive isStreaming={activity === "running"} activityStartedAt={startedAt}
+        backgroundTasks={activity === "waiting" ? tasks : []} ctx={{ ...ctx, activeTurnStartedAt: startedAt }} />
+    </section>
   );
 }

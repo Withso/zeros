@@ -2,6 +2,42 @@
   "schema": "zeros.zstack-evals/v1",
   "cases": [
     {
+      "id": "claude-monitor-visible-activity",
+      "kind": "replay",
+      "area": "vm-engine-agents",
+      "fixedBy": "pr:480",
+      "symptom": "Two background jobs plus a passive Monitor appeared as three running tasks; streams without ambient activity metadata reproduced the extra count.",
+      "rule": "docs/agent-tool-presentation.md: infer ambient Monitor activity only from native tool/task identity when its explicit flag is absent; retain ownership, notifications and cancellation separately from visible activity.",
+      "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/claude/__tests__/monitor-activity.test.ts apps/desktop/src/engine/agents/adapters/claude-sdk/__tests__/adapter.test.ts apps/desktop/src/renderer/features/agent/__tests__/agent-activity.test.ts"
+    },
+    {
+      "id": "claude-provisional-auth-session",
+      "kind": "replay",
+      "area": "vm-engine-agents",
+      "fixedBy": "c7ebbceeed6dc0ce6f0d4efad61e64b126074560",
+      "symptom": "Failed initial authentication saved Claude's provisional init ID; the next prompt resumed a nonexistent conversation and retained duplicate error text after recovery.",
+      "rule": "Confirm root model work or a successful root result before persisting a new provider binding. Preserve confirmed bindings and derive resolved authentication UI only from subsequent root conversation work.",
+      "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/claude-sdk/__tests__/adapter.test.ts apps/desktop/src/engine/agents/adapters/claude/__tests__/action-errors.test.ts apps/desktop/src/renderer/features/agent/__tests__/auth-prompt-recovery.test.ts apps/desktop/src/renderer/features/agent/__tests__/authentication-notice.test.ts"
+    },
+    {
+      "id": "claude-usage-status-through-history",
+      "kind": "replay",
+      "area": "vm-engine-agents",
+      "fixedBy": "c7ebbceeed6dc0ce6f0d4efad61e64b126074560",
+      "symptom": "Claude usage warnings repeated across background results and appeared inside and after output. Reusing immutable notice IDs also dropped changed statuses, and legacy history used a different message identity.",
+      "rule": "zstack-review: exercise provider updates through the shared history reducer. Keep budget state through a provider turn, emit new receipts for changed status, and project one current notice at the final visual segment in UI and export.",
+      "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/claude/__tests__/sdk-event-feedback.test.ts apps/desktop/src/renderer/features/agent/__tests__/transcript-notices.test.ts apps/desktop/src/renderer/features/agent/__tests__/transcript-format.test.ts apps/desktop/src/renderer/features/agent/__tests__/turn-event-list-streaming.test.ts"
+    },
+    {
+      "id": "claude-agent-lifecycle-duplicate",
+      "kind": "replay",
+      "area": "vm-engine-agents",
+      "fixedBy": "c7ebbceeed6dc0ce6f0d4efad61e64b126074560",
+      "symptom": "A real Claude Agent group and a separate background task row represented the same native child, duplicating its activity in the transcript.",
+      "rule": "docs/agent-tool-presentation.md: hide a background lifecycle row only when an exact native child identity joins it to a visible Agent group. Retain orphan tasks, non-agent tasks, and otherwise unrepresented failures.",
+      "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/claude/__tests__/subagent-ownership.test.ts apps/desktop/src/renderer/features/agent/__tests__/agent-background-presentation.test.ts apps/desktop/src/renderer/features/agent/__tests__/turn-grouping.test.ts"
+    },
+    {
       "id": "boat-saved-tree-real-shape",
       "kind": "replay",
       "area": "snapshots-retention",

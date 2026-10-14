@@ -1,6 +1,47 @@
-import type { AgentToolMessage } from "../use-agent-session";
+import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { toolCompletionUnreported } from "./raw-output";
 import { toolRecord } from "./native-tool-presentation";
+import { agentReportText } from "./subagent";
+
+/** Claude persists task lifecycle records separately from the real Agent call.
+ * Hide only records represented by an exact native child identity in this
+ * window. Orphans and failures not represented by the Agent stay inspectable. */
+export function withoutRedundantAgentTasks(messages: AgentMessage[]): AgentMessage[] {
+  const agents = new Map<string, AgentToolMessage[]>();
+  for (const message of messages) {
+    if (message.kind !== "tool" || !["subagent", "task"].includes(message.toolKind ?? "") || !toolPresentationReady(message)) continue;
+    const id = toolRecord(message.rawOutput).agentId ?? toolRecord(message.rawInput).resume;
+    if (typeof id !== "string" || !id) continue;
+    const matches = agents.get(id) ?? [];
+    matches.push(message);
+    agents.set(id, matches);
+  }
+  if (!agents.size) return messages;
+  const visible = messages.filter(message => {
+    if (message.kind !== "tool" || message.toolKind !== "background_task") return true;
+    const input = toolRecord(message.rawInput);
+    if (input.taskType && input.taskType !== "local_agent") return true;
+    const matches = typeof input.taskId === "string" ? agents.get(input.taskId) : undefined;
+    if (!matches) return true;
+    const unreported = toolCompletionUnreported(message.rawOutput);
+    if (message.status === "failed" || unreported) {
+      const output = toolRecord(message.rawOutput);
+      const details = [output.error, output.summary].filter(
+        (value): value is string => typeof value === "string" && value.trim().length > 0,
+      );
+      // Status can precede the explanation. Hide a failed lifecycle row only
+      // when the matching Agent actually displays all of its failure details,
+      // including histories written before that Agent could be enriched.
+      return !matches.some(agent =>
+        (message.status !== "failed" || agent.status === "failed") &&
+        (!unreported || toolCompletionUnreported(agent.rawOutput)) &&
+        details.every(detail => agentReportText(agent).includes(detail.trim())),
+      );
+    }
+    return false;
+  });
+  return visible.length === messages.length ? messages : visible;
+}
 
 /** Compatibility with Codex builds that persisted exec-server connection
  * bookkeeping as synthetic completed tools. Match that exact record shape;
