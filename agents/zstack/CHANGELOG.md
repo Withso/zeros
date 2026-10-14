@@ -13,13 +13,17 @@ Lessons already encoded:
   published an ID before Claude saved the conversation, so the next send resumed
   a missing session. Confirm root model work or success before persisting a new
   binding, retain existing confirmed bindings, and resolve historical sign-in
-  UI only from real conversation progress (adapter and authentication regressions).
+  UI only from real conversation progress (case `claude-provisional-auth-session`).
 - **Feedback must survive its consumer.** Usage dedupe reset at intermediate
   results, while reusing an immutable notice ID dropped later status changes.
   Keep per-turn budget state, issue new receipts for changed states and project
   one tail notice across background replies and steering. Test the shared reducer,
   saved native message IDs and copied transcripts (`zstack-review`, Claude
-  feedback and renderer regressions).
+  feedback and renderer regressions; case `claude-usage-status-through-history`).
+- **Agent lifecycle records need one presentation owner.** A native child can
+  emit both an Agent group and task lifecycle records. Join by exact child identity
+  before hiding a duplicate; preserve unmatched records and unrepresented failures
+  (`docs/agent-tool-presentation.md`, case `claude-agent-lifecycle-duplicate`).
 - **Provider fixtures can lie.** A synthetic Boat tree passed while the real
   one failed. The rule is to qualify against a real response
   (`zstack-review`, case `boat-saved-tree-real-shape`).
