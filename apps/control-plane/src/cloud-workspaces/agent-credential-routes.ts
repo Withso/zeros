@@ -1,3 +1,4 @@
+import { CloudAgentHistoryRecoveryRequestSchema, CloudAgentHistoryRecoveryResponseSchema } from "./agent-boot-contract.js";
 import { isCloudAgentAdmissionCode } from "./agent-admission-errors.js";
 import {Hono} from "hono";
 import {bodyLimit} from "hono/body-limit";
@@ -170,7 +171,7 @@ const privateRequest=z.object({workspaceId:z.string().uuid(),organizationId:z.st
   ])}).strict();
 export function createCloudAgentExecutionRoutes(service:DatabaseCloudAgentExecutionService):Hono{
   const app=new Hono();app.use(CLOUD_AGENT_EXECUTION_PATH,bodyLimit({maxSize:256*1024}));
-  const bootOperations={bootstrap:[CloudAgentBootCredentialRequestSchema,CloudAgentBootCredentialResponseSchema],
+  const bootOperations={"recover-history":[CloudAgentHistoryRecoveryRequestSchema,CloudAgentHistoryRecoveryResponseSchema],bootstrap:[CloudAgentBootCredentialRequestSchema,CloudAgentBootCredentialResponseSchema],
     sync:[CloudAgentBootSyncRequestSchema,CloudAgentBootSyncResponseSchema],activate:[CloudAgentBootActivateRequestSchema,CloudAgentBootActivateResponseSchema],
     refresh:[CloudAgentBootRefreshRequestSchema,CloudAgentBootRefreshResponseSchema],
     "actor-confirm":[CloudAgentActorConfirmRequestSchema,CloudAgentActorConfirmResponseSchema],
@@ -191,7 +192,7 @@ export function createCloudAgentExecutionRoutes(service:DatabaseCloudAgentExecut
         if(!result.success)return c.json({error:"cloud_validation_authority_unavailable"},503);
         const identity="provenance" in result.data?result.data.provenance.scope:result.data;
         for(const key of ["organizationId","workspaceId","generation","engineInstanceId","bootId","writerEpoch"] as const)
-          if(key in request.data && identity[key]!==request.data[key as keyof typeof request.data])return c.json({error:"cloud_validation_authority_unavailable"},503);
+          if(key in request.data && (identity as Record<string,unknown>)[key]!==request.data[key as keyof typeof request.data])return c.json({error:"cloud_validation_authority_unavailable"},503);
         return c.json({result:result.data});
       }catch(error){
         if(error instanceof CloudWorkspaceEngineAuthorityError)return c.json({error:"engine_authority_rejected"},401);

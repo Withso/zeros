@@ -3,12 +3,12 @@ import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CloudAgentBootScope, CloudAgentCredentialRunInfo } from "@zeros/protocol/cloud-agent-bootstrap";
+import type { CloudAgentBootScope, CloudAgentCredentialRunInfo, CloudAgentHistoryRecoveryResponse } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudActorAuthorityRegistry } from "../agents/cloud-actor-authority";
 import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
 import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
 import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
-import { restoreCloudLocalCommandCheckpointLedger, verifiedCloudLocalCommandPredecessor,
+import { restoreCloudLocalCommandCheckpointLedger, verifiedCloudLocalCommandPredecessor, verifyAndPrepareCloudLocalCommandPredecessor,
   type CloudLocalCommandPredecessor } from "../cloud-local-command-queue-checkpoint";
 import { CloudCredentialStartFences, type CloudAgentCredentialControlRequest } from "../cloud-local-command-queue-start-fences";
 import { openSqlite } from "../db/sqlite";
@@ -90,6 +90,194 @@ async function fixture(legacy = false) {
 }
 
 describe("credential-control custody across verified writer replacement", () => {
+  async function interruptedWriter() {
+    const f = await fixture();
+    let prior: CloudAgentBootScope = f.scope;
+    let predecessor = f.predecessor;
+    for (let cycle = 0; cycle < 4; cycle++) {
+      const next = successor(prior); controls(f.file, next, predecessor).close();
+      await seal(f.file, next, f.root);
+      const restored = await restoreCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file, scope: next, expectedWriterEpoch: next.writerEpoch });
+      cleanup.push(restored.cleanup); predecessor = restored.predecessor; prior = next;
+    }
+    const unsealed = successor(prior), target = successor(unsealed), current = controls(f.file, unsealed, predecessor);
+    const ack = await current.handle({ ...f.request, ...unsealed, mutationId: randomUUID(), controlRequestId: randomUUID() });
+    current.confirmAcknowledgement(ack); current.close();
+    const actors = new CloudActorAuthorityRegistry({ scope: unsealed, engineLive: () => true });
+    const actorSessionId = randomUUID();
+    actors.confirm({ scope: unsealed, actorSessionId, authorityEpoch: 1, confirmedUntilMs: Date.now() + 9_000,
+      actor: { userId: unsealed.fundingOwnerUserId, deviceId: randomUUID(), deviceKeyVersion: 1, role: "owner", fingerprint: "a".repeat(64) },
+      fundingConsentVersion: 1, fundingGrant: { kind: "owner" } });
+    const queue = new CloudLocalCommandQueue({ file: f.file, scope: unsealed, actors, engineLive: () => true,
+      ready: () => true, history: () => ({ recordSequence: 7, eventSequence: 0 }) });
+    const commandId = randomUUID(), userMessageId = randomUUID();
+    queue.handle({ kind: "mutate", mutation: { conversationId: "pending", operationId: randomUUID(), expectedRevision: 0,
+      action: { kind: "enqueue", commandId, payload: { agentId: "claude", userMessageId, modeRevision: 0,
+        model: "claude-sonnet-4-6", prompt: [{ type: "text", text: "Synthetic uncertain request" }] } } }, admissionError: null },
+    { writerEpoch: unsealed.writerEpoch, actorSessionId });
+    const batch = queue.peekMirrorBatch()!;
+    expect(batch.through).toBeGreaterThan(0);
+    queue.acknowledgeMirror({ version: 1, writerEpoch: unsealed.writerEpoch, batchId: batch.batchId, through: batch.through });
+    queue.close(); actors.dispose();
+    const manifest = JSON.parse(readFileSync(path.join(f.root, "manifest.json"), "utf8")) as { seal: { sha256: string } };
+    const { writerEpoch: _targetWriter, ...targetScope } = target;
+    const authorization: CloudAgentHistoryRecoveryResponse = { ...targetScope, version: 1, mode: "boot-owner-v1",
+      recoveryId: randomUUID(), code: "history_recovered_with_gap", coverage: "unknown", predecessor: unsealed,
+      predecessorRetiredAt: new Date().toISOString(), checkpoint: { writerEpoch: prior.writerEpoch, sha256: manifest.seal.sha256 }, mirroredSequence: batch.through };
+    return { ...f, unsealed, target, authorization, commandId, userMessageId, retained: inventory(f.file) };
+  }
+
+  it("recovers an authorized unsealed fifth writer without replacing FULL bytes, ACKs, floors or accepted request IDs", async () => {
+    const f = await interruptedWriter(), bytes = readFileSync(f.file);
+    const { recoverCloudLocalCommandCheckpointLedger } = await import("../cloud-local-command-queue-checkpoint");
+    const recovered = await recoverCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file,
+      scope: f.target, expectedWriterEpoch: f.unsealed.writerEpoch, authorization: f.authorization });
+    cleanup.push(recovered.cleanup);
+    expect(readFileSync(f.file)).toEqual(bytes);
+    expect(inventory(f.file)).toEqual(f.retained);
+    const verify = (receipt: CloudLocalCommandPredecessor | null | undefined, file: string, db: ReturnType<typeof openSqlite>) =>
+      verifiedCloudLocalCommandPredecessor(receipt, file, db, f.target);
+    controls(f.file, f.target, recovered.predecessor, undefined, {}, verify).close();
+    const actors = new CloudActorAuthorityRegistry({ scope: f.target, engineLive: () => true });
+    const queue = new CloudLocalCommandQueue({ file: f.file, scope: f.target, actors, engineLive: () => true,
+      ready: () => true, history: () => ({ recordSequence: 7, eventSequence: 0 }) });
+    queue.close(); actors.dispose();
+    const db = openSqlite(f.file, { readonly: true });
+    try {
+      expect(db.prepare("SELECT id,user_message_id,state,payload FROM local_commands WHERE id=?").get(f.commandId))
+        .toEqual({ id: f.commandId, user_message_id: f.userMessageId, state: "uncertain", payload: null });
+    } finally { db.close(); }
+    expect(inventory(f.file)).toEqual(f.retained);
+  });
+
+  it.each(["controls", "queue", "mixed"] as const)("recovers repeated crashes after the %s commit with the original nonzero mirror floor", async point => {
+    const f = await interruptedWriter();
+    const { recoverCloudLocalCommandCheckpointLedger, cloudLocalCommandHistoryRecoveryCustody } = await import("../cloud-local-command-queue-checkpoint");
+    let target = f.target, authorization = f.authorization;
+    const prepared: NonNullable<CloudAgentHistoryRecoveryResponse["preparedCustody"]> = [];
+    for (let crash = 0; crash < 3; crash++) {
+      const recovered = await recoverCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file,
+        scope: target, expectedWriterEpoch: f.unsealed.writerEpoch, authorization });
+      cleanup.push(recovered.cleanup);
+      controls(f.file, target, recovered.predecessor, undefined, {},
+        (receipt, file, db) => verifyAndPrepareCloudLocalCommandPredecessor(receipt, file, db, target)).close();
+      if (point === "queue" || point === "mixed" && crash !== 1) {
+        const actors = new CloudActorAuthorityRegistry({ scope: target, engineLive: () => true });
+        const queue = new CloudLocalCommandQueue({ file: f.file, scope: target, actors, engineLive: () => true,
+          ready: () => true, history: () => ({ recordSequence: 7, eventSequence: 0 }) });
+        expect(queue.handle({ kind: "claim", conversationId: "pending", executionId: randomUUID(), claimId: randomUUID() },
+          { writerEpoch: target.writerEpoch })).toBeNull();
+        queue.close(); actors.dispose();
+        const db = openSqlite(f.file, { readonly: true });
+        try {
+          expect(db.prepare("SELECT value FROM local_command_metadata WHERE key='mirrorHead'").get()).toEqual({ value: "0" });
+          expect(db.prepare("SELECT state,payload FROM local_commands WHERE id=?").get(f.commandId))
+            .toEqual({ state: "uncertain", payload: null });
+        } finally { db.close(); }
+      }
+      expect(inventory(f.file)).toEqual(f.retained);
+      prepared.push({ scope: target, recoveryId: authorization.recoveryId, retiredAt: new Date().toISOString() });
+      const hints = await cloudLocalCommandHistoryRecoveryCustody(f.file, f.unsealed.writerEpoch);
+      expect(hints).toHaveLength(point === "mixed" && crash === 1 ? 2 : 1);
+      expect(hints).toContainEqual({ writerEpoch: target.writerEpoch, recoveryId: authorization.recoveryId });
+      target = successor(target);
+      const { writerEpoch: _writer, ...identity } = target;
+      authorization = { ...f.authorization, ...identity, recoveryId: randomUUID(),
+        preparedCustody: hints.map(hint => prepared.find(item => item.scope.writerEpoch === hint.writerEpoch)!) };
+    }
+  });
+
+  it.each(["valid", "missing-anchor", "wrong-hash", "foreign-receipt", "changed-record", "missing-record"] as const)(
+    "authenticates an activated unsealed recovery's %s lineage before preserving ACKs and floors", async kind => {
+      const f = await interruptedWriter();
+      const { recoverCloudLocalCommandCheckpointLedger, cloudLocalCommandHistoryRecoveryCustodySha256 } =
+        await import("../cloud-local-command-queue-checkpoint");
+      const recovered = await recoverCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file,
+        scope: f.target, expectedWriterEpoch: f.unsealed.writerEpoch, authorization: f.authorization });
+      cleanup.push(recovered.cleanup);
+      controls(f.file, f.target, recovered.predecessor, undefined, {},
+        (receipt, file, db) => verifyAndPrepareCloudLocalCommandPredecessor(receipt, file, db, f.target)).close();
+      const actors = new CloudActorAuthorityRegistry({ scope: f.target, engineLive: () => true });
+      const queue = new CloudLocalCommandQueue({ file: f.file, scope: f.target, actors, engineLive: () => true,
+        ready: () => true, history: () => ({ recordSequence: 7, eventSequence: 0 }) });
+      expect(queue.handle({ kind: "claim", conversationId: "pending", executionId: randomUUID(), claimId: randomUUID() },
+        { writerEpoch: f.target.writerEpoch })).toBeNull();
+      queue.close(); actors.dispose();
+      const custodySha256 = cloudLocalCommandHistoryRecoveryCustodySha256(recovered.predecessor, f.target)!;
+      expect(custodySha256).toMatch(/^[a-f0-9]{64}$/);
+      const db = openSqlite(f.file);
+      try {
+        if (kind === "changed-record") db.exec("UPDATE local_command_history_recovery_prepares SET document=replace(document,'retainedSha256','forgedSha256')");
+        if (kind === "missing-record") db.exec("DELETE FROM local_command_history_recovery_prepares");
+      } finally { db.close(); }
+      const target = successor(f.target), { writerEpoch: _writer, ...identity } = target;
+      const authorization: CloudAgentHistoryRecoveryResponse = { ...f.authorization, ...identity, recoveryId: randomUUID(),
+        predecessor: f.target, mirroredSequence: 0,
+        ...(kind === "missing-anchor" ? {} : { predecessorRecovery: {
+          recoveryId: kind === "foreign-receipt" ? randomUUID() : f.authorization.recoveryId,
+          custodySha256: kind === "wrong-hash" ? "f".repeat(64) : custodySha256 } }) };
+      const bytes = readFileSync(f.file), before = inventory(f.file);
+      const next = recoverCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file,
+        scope: target, expectedWriterEpoch: f.target.writerEpoch, authorization });
+      if (kind === "valid") {
+        const result = await next; cleanup.push(result.cleanup);
+        expect(inventory(f.file)).toEqual(f.retained);
+      } else await expect(next).rejects.toMatchObject({ name: "CloudCommandRuntimeError" });
+      expect(inventory(f.file)).toEqual(before); expect(readFileSync(f.file)).toEqual(bytes);
+    });
+
+  it.each(["missing-prepare", "foreign-receipt", "floor", "accepted-id", "credential-ack"] as const)(
+    "refuses %s in prepared custody without rewriting the surviving ledger", async kind => {
+      const f = await interruptedWriter();
+      const { recoverCloudLocalCommandCheckpointLedger } = await import("../cloud-local-command-queue-checkpoint");
+      const first = await recoverCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file,
+        scope: f.target, expectedWriterEpoch: f.unsealed.writerEpoch, authorization: f.authorization });
+      cleanup.push(first.cleanup);
+      controls(f.file, f.target, first.predecessor, undefined, {},
+        (receipt, file, db) => verifyAndPrepareCloudLocalCommandPredecessor(receipt, file, db, f.target)).close();
+      const db = openSqlite(f.file);
+      try {
+        if (kind === "missing-prepare") db.exec("DELETE FROM local_command_history_recovery_prepares");
+        if (kind === "floor") db.exec("UPDATE local_command_history_recovery_prepares SET document=json_set(document,'$.mirrorHead',0,'$.journalHead',0)");
+        if (kind === "accepted-id") db.prepare("DELETE FROM local_commands WHERE id=?").run(f.commandId);
+        if (kind === "credential-ack") db.exec("DELETE FROM local_credential_control_operations");
+      } finally { db.close(); }
+      const next = successor(f.target), { writerEpoch: _writer, ...identity } = next;
+      const authorization = { ...f.authorization, ...identity, recoveryId: randomUUID(), preparedCustody: [{ scope: f.target,
+        recoveryId: kind === "foreign-receipt" ? randomUUID() : f.authorization.recoveryId, retiredAt: new Date().toISOString() }] };
+      const before = readFileSync(f.file), retained = inventory(f.file);
+      await expect(recoverCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file,
+        scope: next, expectedWriterEpoch: f.unsealed.writerEpoch, authorization })).rejects.toMatchObject({ name: "CloudCommandRuntimeError" });
+      expect(readFileSync(f.file)).toEqual(before); expect(inventory(f.file)).toEqual(retained);
+    });
+
+  it.each(["source", "target", "ancestor", "floor"] as const)("refuses conflicting recovery %s without installing an older checkpoint", async kind => {
+    const f = await interruptedWriter(), bytes = readFileSync(f.file);
+    const authorization = structuredClone(f.authorization);
+    if (kind === "source") authorization.predecessor.writerEpoch = randomUUID();
+    if (kind === "target") authorization.engineInstanceId = randomUUID();
+    if (kind === "ancestor") authorization.checkpoint.sha256 = "f".repeat(64);
+    if (kind === "floor") authorization.mirroredSequence = 1_000_000;
+    const { recoverCloudLocalCommandCheckpointLedger } = await import("../cloud-local-command-queue-checkpoint");
+    await expect(recoverCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file,
+      scope: f.target, expectedWriterEpoch: f.unsealed.writerEpoch, authorization })).rejects.toMatchObject({ name: "CloudCommandRuntimeError" });
+    expect(readFileSync(f.file)).toEqual(bytes); expect(inventory(f.file)).toEqual(f.retained);
+  });
+
+  it("rechecks the authorized recovery inventory inside the credential-scope transaction", async () => {
+    const f = await interruptedWriter();
+    const { recoverCloudLocalCommandCheckpointLedger } = await import("../cloud-local-command-queue-checkpoint");
+    const recovered = await recoverCloudLocalCommandCheckpointLedger({ root: f.root, file: f.file,
+      scope: f.target, expectedWriterEpoch: f.unsealed.writerEpoch, authorization: f.authorization });
+    cleanup.push(recovered.cleanup);
+    const db = openSqlite(f.file);
+    try { db.prepare("DELETE FROM local_credential_retirement_floors WHERE mutation_id=?").run(f.request.mutationId); }
+    finally { db.close(); }
+    expect(() => controls(f.file, f.target, recovered.predecessor, undefined, {},
+      (receipt, file, db) => verifiedCloudLocalCommandPredecessor(receipt, file, db, f.target)))
+      .toThrow("credential_control_authority_rejected");
+  });
+
   it.each([false, true])("preserves eight sealed handoffs and identifies an unsealed successor (interrupted=%s)", async interrupted => {
     const f = await fixture();
     let scope: CloudAgentBootScope = f.scope;

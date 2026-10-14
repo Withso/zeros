@@ -13,7 +13,8 @@ import { CloudAgentContextCache, createCloudBootAgentExecutionFactory, cloudBoot
   type CloudBootAgentExecutionFactory, type CloudBootAgentSelection, type CloudBootSelectionInput,
   type CloudAgentExecutionLifetime } from "./agents/cloud-provider-execution";
 import { CloudLocalCommandQueue, type CloudLocalCommandHistory } from "./cloud-local-command-queue";
-import { verifiedCloudLocalCommandPredecessor, type CloudLocalCommandPredecessor } from "./cloud-local-command-queue-checkpoint";
+import { verifyAndPrepareCloudLocalCommandPredecessor, cloudLocalCommandHistoryRecoveryId, cloudLocalCommandHistoryRecoveryCustodySha256,
+  type CloudLocalCommandPredecessor } from "./cloud-local-command-queue-checkpoint";
 import { CloudCredentialStartFences, CloudAgentCredentialControlExchangeResponseSchema, CloudCredentialControlError } from "./cloud-local-command-queue-start-fences";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { CloudAgentExecutionError, isTransientCloudAgentAuthorityError,
@@ -238,7 +239,8 @@ export class CloudLocalAgentBootRuntime {
         request: (body, signal) => this.requestContext(body, signal) });
       mkdirSync(path.dirname(this.options.file), { recursive: true, mode: 0o700 });
       this.fencesValue = new CloudCredentialStartFences({ file: this.options.file, scope: this.scope, engineLive: () => this.live(),
-        predecessor: this.options.predecessor, verifyPredecessor: verifiedCloudLocalCommandPredecessor,
+        predecessor: this.options.predecessor,
+        verifyPredecessor: (receipt, file, db) => verifyAndPrepareCloudLocalCommandPredecessor(receipt, file, db, this.scope),
         associationFloor: (provider,credentialId) => this.credentials!.associationFloor(provider,credentialId),
         activity: selectors => this.factory?.bootScopeActivity(selectors) ?? { complete: false, foreground: 0, reservedLaunches: 0, background: 0, idleHosts: 0, scopes: [] },
         retire: selectors => this.factory ? this.factory.retireBootCredentials(selectors) : Promise.reject(new CloudCommandRuntimeError("engine_authority_rejected")),
@@ -294,8 +296,12 @@ export class CloudLocalAgentBootRuntime {
     this.enterStartupPhase("boot_durability");
     this.queueValue!.durability(); await this.options.beforeActivate();
     this.enterStartupPhase("boot_activate");
+    const historyRecoveryId = cloudLocalCommandHistoryRecoveryId(this.options.predecessor);
+    const historyRecoveryCustodySha256 = cloudLocalCommandHistoryRecoveryCustodySha256(this.options.predecessor, this.scope);
+    if (historyRecoveryId && !historyRecoveryCustodySha256) throw new CloudCommandRuntimeError("checkpoint_writer_scope");
     const activated = CloudAgentBootActivateResponseSchema.parse(await this.startupRequest("activate",
-      { ...this.reference(), expectedCacheRevision: credentials.metadata.cacheRevision }, this.controller.signal));
+      { ...this.reference(), expectedCacheRevision: credentials.metadata.cacheRevision,
+        ...(historyRecoveryId && historyRecoveryCustodySha256 ? { historyRecoveryId, historyRecoveryCustodySha256 } : {}) }, this.controller.signal));
     if (!this.live() || Object.entries(this.scope).some(([key, value]) => activated[key as keyof typeof activated] !== value))
       throw new CloudAgentExecutionError("authority_response_invalid");
     // ACK can prove a newer ready floor, but carries no credential material.

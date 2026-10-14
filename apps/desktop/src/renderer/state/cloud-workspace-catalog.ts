@@ -19,6 +19,7 @@ import { ControlPlaneError } from "../features/team/control-plane";
 import type { Project } from "./projects-store";
 import { clearCloudComposerPrs } from "./read-caches";
 import { cloudWorkspaceExecutionRefusal } from "../platform/cloud-workspace-execution";
+import { forgetCloudHistoryRecoveryDismissals } from "./cloud-history-recovery-dismissal";
 
 export const cloudWorkspaceDetails =
   new KeyedAsyncCache<CloudWorkspaceDocument>(128);
@@ -72,6 +73,7 @@ const engineRows = new Map<string, Workspace>();
 
 function publishDocument(doc: CloudWorkspaceDocument): void {
   const key = cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id });
+  if (!canReadCloudWorkspace(doc)) forgetCloudHistoryRecoveryDismissals([key]);
   const previous = cloudWorkspaceDetails.peekSnapshot(key).data;
   if (previous && JSON.stringify(previous) === JSON.stringify(doc)) return;
   cloudWorkspaceDetails.setData(key, doc);

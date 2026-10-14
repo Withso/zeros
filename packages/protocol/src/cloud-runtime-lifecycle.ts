@@ -1,6 +1,14 @@
 import { z } from "zod";
 import { RuntimeIdSchema } from "./cloud-runtime-bundle";
 
+/** Passive receipt of an authorized history gap; never admission authority. */
+export const CloudWorkspaceHistoryRecoverySchema = z.object({
+  recoveryId: z.string().uuid(), code: z.literal("history_recovered_with_gap"), coverage: z.literal("unknown"),
+  generation: z.number().int().positive().safe(), engineInstanceId: z.string().uuid(), bootId: z.string().uuid(),
+  writerEpoch: z.string().uuid(), completedAt: z.string().datetime({ offset: true }),
+}).strict();
+export type CloudWorkspaceHistoryRecovery = z.infer<typeof CloudWorkspaceHistoryRecoverySchema>;
+
 /** Completed restoration is history, separate from active recovery and VM
  * readiness. Older servers omit it; bind it to the exact current generation. */
 export const CloudWorkspaceCheckpointRestoreSchema = z.object({

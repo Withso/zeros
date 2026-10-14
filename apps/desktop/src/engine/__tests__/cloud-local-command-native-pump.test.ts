@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudBootCommandSnapshotSchema, type CloudBootCommandClaim } from "@zeros/protocol/cloud-commands";
 import { CloudAgentBootCredentialResponseSchema, CloudAgentBootSyncResponseSchema, CloudAgentBootActivateResponseSchema,
   CloudAgentBootRefreshResponseSchema, CloudAgentActorConfirmResponseSchema, CloudAgentWarmActorResponseSchema,
-  CloudAgentWarmActorRequestSchema } from "@zeros/protocol/cloud-agent-bootstrap";
+  CloudAgentWarmActorRequestSchema, CloudAgentHistoryRecoveryResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudCommandRuntimeError } from "../cloud-command-client";
 import type { EngineMessage } from "../types";
 import { CloudLocalAgentBootRuntime } from "../cloud-local-command-queue-boot";
@@ -28,6 +28,7 @@ const bootResponses: { [Operation in CloudAgentBootOperation]: { parse(value: un
   bootstrap: CloudAgentBootCredentialResponseSchema, sync: CloudAgentBootSyncResponseSchema,
   activate: CloudAgentBootActivateResponseSchema, refresh: CloudAgentBootRefreshResponseSchema,
   "actor-confirm": CloudAgentActorConfirmResponseSchema, "warm-context": CloudAgentWarmActorResponseSchema,
+  "recover-history": CloudAgentHistoryRecoveryResponseSchema,
 };
 
 const native = vi.hoisted(() => ({ prepare: vi.fn() }));

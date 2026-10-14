@@ -41,6 +41,23 @@ async function fixture(acknowledge = true) {
   return { directory, scope, queue, normal, lifecycle, root: path.join(directory, "checkpoint") };
 }
 describe("sealed FULL/NORMAL checkpoint custody", () => {
+  it("keeps legacy absent/empty recovery inventories equal and binds every nonempty recovery row", async () => {
+    const f = await fixture(), ledger = openSqlite(path.join(f.directory, "queue.sqlite"));
+    const { cloudLocalCommandSealInventory } = await import("../cloud-local-command-queue-checkpoint");
+    try {
+      const { scope, sequence, recordSequence, eventSequence } = f.lifecycle.seal!;
+      const identity = { scope, sequence, recordSequence, eventSequence }, original = cloudLocalCommandSealInventory(ledger, identity);
+      expect(original).toBe(f.lifecycle.seal!.inventorySha256);
+      ledger.exec("CREATE TABLE local_command_history_recovery_prepares(writer_epoch TEXT PRIMARY KEY,document TEXT NOT NULL)");
+      expect(cloudLocalCommandSealInventory(ledger, identity)).toBe(original);
+      ledger.prepare("INSERT INTO local_command_history_recovery_prepares VALUES(?,?)").run(randomUUID(), "{}");
+      const withRow = cloudLocalCommandSealInventory(ledger, identity);
+      expect(withRow).not.toBe(original);
+      ledger.exec("UPDATE local_command_history_recovery_prepares SET document='changed'");
+      expect(cloudLocalCommandSealInventory(ledger, identity)).not.toBe(withRow);
+      await expect(f.lifecycle.captureCheckpoint(f.root)).rejects.toMatchObject({ code: "checkpoint_inventory_hash" });
+    } finally { ledger.close(); }
+  });
   it.each([
     ["manifest_missing", "checkpoint_manifest_missing"],
     ["part_hash", "checkpoint_part_hash"],

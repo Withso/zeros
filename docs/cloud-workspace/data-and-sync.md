@@ -117,6 +117,78 @@ parser before publishing a runtime with the added closed codes; the diagnostic
 wire shape is unchanged. An authenticated recovery handoff is a separate
 contract, not a side effect of this classification.
 
+### Recovery after an unsealed stop
+
+An interrupted stop can positively retire the last writer before it publishes
+a sealed checkpoint. The authenticated `recover-history` boot operation is an
+explicit exception to sealed custody, selected only after strict restore reports
+an expected-writer mismatch or an unsealed writer. The control plane selects
+the persisted source and its acknowledged sealed ancestor; the engine cannot
+request an arbitrary older writer. Authorization requires positive source
+retirement, an exact current target engine/boot, enrollment order and current
+funding owner/epoch. Expiry or revocation alone does not prove retirement.
+
+The surviving FULL ledger, including its WAL, stays in place. The older sealed
+checkpoint proves a floor; it never overwrites newer accepted IDs, credential
+ACKs and tombstones, or edit/delete/incomplete history heads. The verifier checks
+the ancestor, exact file identity, immutable inventory, source journal and CP
+mirror floor. History heads must also be at least as new as retained immutable
+mutation and terminal-command receipts. Missing or corrupt custody still refuses
+restore. This recovery cannot reconstruct a missing FULL ledger or claim that
+unmirrored work was preserved.
+
+Boot rebuilds NORMAL from the latest verified FULL heads, then commits the
+credential namespace and its prepare record together, then opens the queue,
+then asks CP to activate. A crash between these steps may leave at most two
+prepared namespaces. Fresh CP authorization must name those exact local
+observations, positively retired bindings and their immutable original
+source/ancestor/funding tuple. Prepared writers remain reserved and never gain
+a fabricated activation timestamp. Local prepare records are evidence, not
+authority. Every retry rechecks private custody; inherited queued or dispatching
+requests are quarantined and never rerun. ACK/operation quotas and retirement
+floors remain in force across all retained namespaces.
+
+Successor activation, the immutable gap receipt and its audit commit in one CP
+transaction. Lost responses replay that exact receipt. Its closed code is
+`history_recovered_with_gap` and coverage is always `unknown`, never `empty`.
+Activation also pins the canonical prepare record's SHA-256. A later unsealed
+recovery receives that prior committed ID/hash only from its exact source writer;
+the engine follows bounded hash links through the retained records. A local row
+alone never proves activation. Subsequent seals include every nonempty prepare
+row in their inventory, preserving legacy hashes for absent/empty tables. This
+lets later clean restores retain original edit/delete provenance without
+inventing a seal for an unsealed writer. Missing, changed, foreign or cyclic
+lineage refuses before history projection; verification remains bounded to
+4,096 records and the existing inventory time budget.
+The optional workspace `historyRecovery` field is separate from file-checkpoint
+`recovery`. It exposes only a committed receipt and survives later successful
+boots so the user can still see it. Workspace purge cascades both prepared and
+activated recovery rows; the audit remains under normal audit retention.
+
+After the authorized successor is ready or busy and its connection is usable,
+the visible cloud conversation shows this non-blocking warning:
+
+> **Recent history may be incomplete**
+>
+> The workspace recovered after an interrupted stop. Check recent messages and
+> work before retrying a request.
+
+Dismissal is keyed to the exact cloud workspace and recovery receipt, is bounded
+locally, and is pruned on confirmed workspace deletion. Hidden surfaces and Local
+Personal/organization-local placements do not show or poll for this warning.
+The notice grants no send or execution permission.
+
+Roll out migration and CP support before publishing a recovery-capable runtime;
+then qualify the exact base/runtime and rebuild the test Computer through product
+paths. Rehearse a slow stop plus a lease tick, explicit `stop_unsealed`, resume,
+one committed gap audit, no inherited execution and the warning/dismissal flow.
+Also crash after each local prepare step, repeat at least four activated unsealed
+handoffs, and complete the next sealed stop/restore with edit/delete and ACK
+fences intact. Keep prior workspace pins authoritative. Rollback disables new recovery
+admissions by reverting runtime selection; retain the additive table and receipts.
+An older binary may safely refuse an unsealed/prepared ledger, so it is not an
+availability rollback for a workspace already recovered by this protocol.
+
 Credential-control state in that FULL ledger also survives a stopped VM. A
 fresh CP engine/boot/writer identity alone cannot adopt it. Authenticated
 checkpoint restoration supplies an in-process receipt tied to the exact
