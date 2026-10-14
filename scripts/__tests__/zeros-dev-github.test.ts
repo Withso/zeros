@@ -63,7 +63,7 @@ async function fixture(initial:Record<string,string>={}) {
   });
   const store=new AgentFileStore(file),transport=new AlphaTransport(fetcher);
   const session=new ZerosDevSession(store,transport,{now:()=>clock,verifyToken:async()=>({providerSubject:values.ZEROS_DEV_WORKOS_SUBJECT,sessionId:values.ZEROS_DEV_SESSION_ID,
-    tokenId:"fixture",clientId:"client_desktop_fixture",clientKind:"desktop",email:values.ZEROS_DEV_EMAIL,emailVerified:true,displayName:null,authTime:null,issuedAt:now/1000,expiresAt:now/1000+3600})});
+    tokenId:"fixture",clientId:"client_web_fixture",clientKind:"web",email:values.ZEROS_DEV_EMAIL,emailVerified:true,displayName:null,avatarUrl:null,authTime:null,issuedAt:now/1000,expiresAt:now/1000+3600})});
   const api=new ProductApi(session,transport),output:string[]=[];
   const sleep=vi.fn(async(ms:number)=>{clock+=ms;});
   const connect=(signal=AbortSignal.timeout(2000))=>connectGithub(session,api,selection,url=>{output.push(url);},signal,{now:()=>clock,sleep});

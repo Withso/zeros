@@ -51,7 +51,7 @@ import {
 } from "./workos-desktop-revocation.js";
 import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
 import { createDevAuthConfigurationRoutes } from "./dev-auth-configuration.js";
-import { createZerosDevAuthRoutes, zerosDevAuthEnabled, ZEROS_DEV_AUTH_PATH, type ZerosDevAuthDependencies } from "./zeros-dev-auth.js";
+import { createZerosDevAuthRoutes, zerosDevAuthEnabled, ZEROS_DEV_AUTH_PATHS, type ZerosDevAuthDependencies } from "./zeros-dev-auth.js";
 import { DatabaseZerosDevAuthRepository } from "./zeros-dev-auth-repository.js";
 import { ZerosDevWorkOSPasswordProvider } from "./zeros-dev-auth-workos.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
@@ -162,7 +162,9 @@ export function createApp(
   }
   // A disabled test-only endpoint stays absent, including during maintenance.
   // Stale settings on another channel must not reveal an authentication path.
-  if (!zerosDevAuthEnabled(config)) app.all(ZEROS_DEV_AUTH_PATH, c => c.notFound());
+  if (!zerosDevAuthEnabled(config)) {
+    for (const path of Object.values(ZEROS_DEV_AUTH_PATHS)) app.all(path, c => c.notFound());
+  }
   // Readiness stays public even during maintenance; /healthz remains liveness.
   app.route("/", createReleaseIdentityRoutes(config, pool, dependencies));
   if (config.databaseMaintenanceMode) {

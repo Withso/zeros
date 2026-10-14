@@ -8,7 +8,8 @@ and `electron:alpha` retain their current launch paths.
 
 ## Alpha authentication boundary
 
-The control plane registers `POST /auth/zeros-dev/session` only when its
+The control plane registers `POST /auth/zeros-dev/session`, `/refresh` and
+`/revoke` (all under `/auth/zeros-dev`) only when its
 authoritative deployment channel is Alpha, the checked-in cloud channel policy
 allows Alpha, and `ZEROS_DEV_AUTH_ENABLED=true`. Other channels return 404,
 including with stale settings and during database maintenance. VM engines do
@@ -19,18 +20,35 @@ The operator pins `ZEROS_DEV_AUTH_SUBJECT`, `ZEROS_DEV_AUTH_ACCOUNT_ID`,
 `ZEROS_DEV_AUTH_EMAIL` and `ZEROS_DEV_AUTH_ORGANIZATION_ID` in the Alpha CP.
 The account and verified WorkOS identity must already exist, have no staff
 role, and belong to the active nonpersonal test organization. The route never
-creates accounts, roles, memberships, credentials or entitlements. Requests
-contain only a password, a UUID request ID, and Linux device intent. WorkOS must
-issue the existing signed desktop contract; MFA, SSO-only, verification and
-authentication-policy challenges cannot be continued or bypassed here.
+creates accounts, roles, memberships, credentials or entitlements. Login requests
+contain only a password, a UUID request ID, and Linux device intent. WorkOS uses
+the configured confidential `AUTH_WEB_CLIENT_ID`, with its secret kept on the
+control plane. The public desktop client cannot issue this password grant.
+The signed token and recorded session keep their real `web` client kind; the
+ordinary bearer contract already accepts that client on the device, GitHub,
+Computer and runtime routes. Desktop PKCE, refresh and revoke checks remain
+unchanged. MFA, SSO-only, verification and authentication-policy challenges
+cannot be continued or bypassed here.
 
-Requests have a 4 KiB limit and a five-second response deadline. WorkOS bodies
+Login and revoke requests have a 4 KiB limit; refresh allows 70 KiB for a
+refresh token of at most 64 KiB. All have a five-second response deadline. WorkOS bodies
 are bounded at 128 KiB. The endpoint allows five attempts per source and twenty
 globally per minute, with a process backstop and serialized database budgets.
 Railway's trusted edge supplies `X-Real-IP`; other forwarded headers cannot
 select a bucket. Missing or invalid peers share one bucket. Keep the API behind
 that edge: the header alone is not peer authentication. The global cap also
 applies when multiple edges or API replicas are involved.
+
+Refresh and logout require a signed token for the pinned web account and the
+exact session's committed zeros-dev issuance audit. An ordinary web session,
+including another session for the same test user, cannot use these routes.
+Only lifecycle proof may be expired: signature, issuer, audience, required
+claims and `nbf` still validate, and expired tokens remain invalid on product
+APIs. Refresh also requires the WorkOS refresh token and must return the same
+SID; its audit commits before the rotated token is returned. An unknown or
+withheld refresh retires the known session through the tombstone/outbox path.
+Logout retires that one session; it has no global-signout option. Neither route
+accepts a caller-selected subject, client, organization or session ID.
 
 The attempt audit commits before the grant request; the exact session and its
 success audit commit before tokens are returned. Reusing a recorded request ID
@@ -247,11 +265,11 @@ credential or infrastructure token is injected into a VM or template.
 
 The required live qualification is a normal owner-prepared WorkOS password
 grant, each selected agent's completed prompt, terminal exit, stop/resume with
-state intact, and verified product deletion. If WorkOS cannot issue the existing
-desktop contract, stop qualification; there is no alternative issuer, MFA/SSO
+state intact, and verified product deletion. If WorkOS cannot issue the pinned
+web bearer contract, stop qualification; there is no alternative issuer, MFA/SSO
 bypass or role seed. Every recoverable received grant stays under cleanup until
 canonical persistence succeeds, including envelope, identity, verification and
-save failures. Cleanup attempts normal current-session revocation; an attempt
+save failures. Cleanup attempts the fixture's current-session revocation; an attempt
 does not confirm provider retirement. A malformed response with no recoverable
 grant reports `auth_unknown_issuance`. If a save confirmation fails, the harness
 clears only that same session through its owned file lock when its inode checks

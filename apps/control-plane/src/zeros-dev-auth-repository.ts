@@ -4,15 +4,16 @@ import type { AuthTokenClaims } from "./auth-token-contract.js";
 import { withSystemTx, type Tx } from "./db.js";
 import { enqueueWorkOSCommand } from "./workos-command-outbox.js";
 import { workOSProviderErasureFenceStatus } from "./workos-provider-locks.js";
-import type { ZerosDevAuthRequest } from "./zeros-dev-auth.js";
+import type { ZerosDevAuthAttempt } from "./zeros-dev-auth.js";
 import { ZerosDevAuthError, type ZerosDevAuthConfig } from "./zeros-dev-auth-config.js";
 
 export interface ZerosDevAuthRepository {
-  begin(identity: ZerosDevAuthConfig, request: ZerosDevAuthRequest, sourceHash: string): Promise<void>;
-  commit(identity: ZerosDevAuthConfig, request: ZerosDevAuthRequest, claims: AuthTokenClaims): Promise<void>;
-  revoke(identity: ZerosDevAuthConfig, sessionId: string): Promise<void>;
-  finish(identity: ZerosDevAuthConfig, request: ZerosDevAuthRequest, result: ZerosDevAuthOutcome): Promise<void>;
+  begin(identity: ZerosDevAuthConfig, request: ZerosDevAuthAttempt, sourceHash: string, session?: ZerosDevSessionOperation): Promise<void>;
+  commit(identity: ZerosDevAuthConfig, request: ZerosDevAuthAttempt, claims: AuthTokenClaims, operation?: "refresh"): Promise<void>;
+  revoke(identity: ZerosDevAuthConfig, sessionId: string, request?: ZerosDevAuthAttempt): Promise<void>;
+  finish(identity: ZerosDevAuthConfig, request: ZerosDevAuthAttempt, result: ZerosDevAuthOutcome): Promise<void>;
 }
+export type ZerosDevSessionOperation = { sessionId: string; operation: "refresh" | "revoke" };
 
 export type ZerosDevAuthOutcome = {
   outcome: "denied" | "unavailable" | "unknown_issuance";
@@ -45,16 +46,33 @@ async function assertPinnedIdentity(tx: Tx, pin: ZerosDevAuthConfig): Promise<vo
     throw new ZerosDevAuthError("denied");
 }
 
+async function assertIssuedSession(tx: Tx, pin: ZerosDevAuthConfig, session: ZerosDevSessionOperation): Promise<void> {
+  const found = await tx.query(
+    `SELECT session.provider_session_id FROM auth_sessions session
+      WHERE session.provider = 'workos' AND session.provider_session_id = $1
+        AND session.provider_sub = $2 AND session.user_id = $3 AND session.client_kind = 'web'
+        AND (session.status = 'active' OR $5::boolean)
+        AND EXISTS (SELECT 1 FROM audit_log issued
+                     WHERE issued.org_id = $4 AND issued.actor_id = $3
+                       AND issued.action = 'zeros_dev.auth_session_issued'
+                       AND issued.subject->>'sessionId' = $1 AND issued.subject->>'clientKind' = 'web')
+      FOR UPDATE OF session`,
+    [session.sessionId, pin.subject, pin.accountId, pin.organizationId, session.operation === "revoke"],
+  );
+  if (found.rowCount !== 1) throw new ZerosDevAuthError("denied");
+}
+
 export class DatabaseZerosDevAuthRepository implements ZerosDevAuthRepository {
   constructor(private readonly pool: pg.Pool) {}
 
-  async begin(pin: ZerosDevAuthConfig, request: ZerosDevAuthRequest, sourceHash: string): Promise<void> {
+  async begin(pin: ZerosDevAuthConfig, request: ZerosDevAuthAttempt, sourceHash: string, session?: ZerosDevSessionOperation): Promise<void> {
     await withSystemTx(this.pool, async tx => {
       await boundedTransaction(tx);
       // This very low-volume anonymous endpoint has one database-wide budget.
       // A process restart or second API replica cannot evade its rate limit.
       await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('zeros-dev-auth-rate-v1', 0))");
       await assertPinnedIdentity(tx, pin);
+      if (session) await assertIssuedSession(tx, pin, session);
       const result = await tx.query<{ total: string; source: string; repeated: boolean }>(
         `SELECT count(*)::text AS total,
                 count(*) FILTER (WHERE subject->>'source' = $2)::text AS source,
@@ -71,35 +89,45 @@ export class DatabaseZerosDevAuthRepository implements ZerosDevAuthRepository {
       if (budget.repeated) throw new ZerosDevAuthError("denied");
       await audit(tx, pin.organizationId, pin.accountId, "zeros_dev.auth_attempt", {
         requestId: request.requestId, source: sourceHash, deviceId: request.device.id, deviceIntent: request.device.intent,
+        ...(session ? { operation: session.operation, sessionId: session.sessionId } : {}),
       });
     });
   }
 
-  async commit(pin: ZerosDevAuthConfig, request: ZerosDevAuthRequest, claims: AuthTokenClaims): Promise<void> {
+  async commit(pin: ZerosDevAuthConfig, request: ZerosDevAuthAttempt, claims: AuthTokenClaims, operation?: "refresh"): Promise<void> {
     await withSystemTx(this.pool, async tx => {
       await boundedTransaction(tx);
       await assertPinnedIdentity(tx, pin);
-      const session = await tx.query(
+      if (claims.clientKind !== "web" || claims.providerSubject !== pin.subject || claims.email !== pin.email || !claims.emailVerified)
+        throw new ZerosDevAuthError("denied");
+      if (operation) await assertIssuedSession(tx, pin, { sessionId: claims.sessionId, operation });
+      const session = operation ? await tx.query(
+        `UPDATE auth_sessions SET last_token_expires_at = to_timestamp($4)
+          WHERE provider = 'workos' AND provider_session_id = $1 AND provider_sub = $2 AND user_id = $3
+            AND status = 'active' AND client_kind = 'web' RETURNING provider_session_id`,
+        [claims.sessionId, pin.subject, pin.accountId, claims.expiresAt],
+      ) : await tx.query(
         `INSERT INTO auth_sessions (provider, provider_session_id, provider_sub, user_id, client_kind, last_token_expires_at)
-         VALUES ('workos', $1, $2, $3, 'desktop', to_timestamp($4))
+         VALUES ('workos', $1, $2, $3, 'web', to_timestamp($4))
          ON CONFLICT (provider, provider_session_id) DO NOTHING RETURNING provider_session_id`,
         [claims.sessionId, pin.subject, pin.accountId, claims.expiresAt],
       );
       if (session.rowCount !== 1) throw new ZerosDevAuthError("denied");
-      await audit(tx, pin.organizationId, pin.accountId, "zeros_dev.auth_session_issued", {
+      await audit(tx, pin.organizationId, pin.accountId, operation ? "zeros_dev.auth_session_refreshed" : "zeros_dev.auth_session_issued", {
         requestId: request.requestId, deviceId: request.device.id, deviceIntent: request.device.intent,
-        sessionId: claims.sessionId, clientKind: "desktop", authenticationMethod: "Password",
+        sessionId: claims.sessionId, clientKind: claims.clientKind, authenticationMethod: "Password",
       });
     });
   }
 
-  async revoke(pin: ZerosDevAuthConfig, sessionId: string): Promise<void> {
+  async revoke(pin: ZerosDevAuthConfig, sessionId: string, request?: ZerosDevAuthAttempt): Promise<void> {
     await withSystemTx(this.pool, async tx => {
       await boundedTransaction(tx);
+      if (request) await assertIssuedSession(tx, pin, { sessionId, operation: "revoke" });
       await tx.query(
         `INSERT INTO auth_sessions (provider, provider_session_id, provider_sub, user_id, client_kind,
            status, revoked_at, revocation_reason)
-         VALUES ('workos', $1, $2, $3, 'desktop', 'revoked', now(), 'zeros_dev_login_withheld')
+         VALUES ('workos', $1, $2, $3, 'unknown', 'revoked', now(), 'zeros_dev_login_withheld')
          ON CONFLICT (provider, provider_session_id) DO UPDATE
            SET status = 'revoked', revoked_at = COALESCE(auth_sessions.revoked_at, now()),
                revocation_reason = 'zeros_dev_login_withheld'`,
@@ -108,10 +136,11 @@ export class DatabaseZerosDevAuthRepository implements ZerosDevAuthRepository {
       await enqueueWorkOSCommand(tx, { operation: "session.revoke", idempotencyKey: `zeros-dev.revoke.${sessionId}`,
         aggregateKey: `zeros-dev.session.${sessionId}`, aggregateRevision: 1, userId: pin.accountId,
         providerObjectId: sessionId, payload: { sessionId } });
+      if (request) await audit(tx, pin.organizationId, pin.accountId, "zeros_dev.auth_session_revoked", { requestId: request.requestId, sessionId });
     });
   }
 
-  async finish(pin: ZerosDevAuthConfig, request: ZerosDevAuthRequest, result: ZerosDevAuthOutcome): Promise<void> {
+  async finish(pin: ZerosDevAuthConfig, request: ZerosDevAuthAttempt, result: ZerosDevAuthOutcome): Promise<void> {
     await withSystemTx(this.pool, async tx => {
       await boundedTransaction(tx);
       await audit(tx, pin.organizationId, pin.accountId, "zeros_dev.auth_attempt_finished", {
