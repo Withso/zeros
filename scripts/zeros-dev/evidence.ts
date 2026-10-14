@@ -3,16 +3,18 @@ import { redact } from "../agent-env-check.mjs";
 import { ERROR_CODES, ZerosDevError, closedError, diagnosticEvidence } from "./errors";
 import { SetupObservationSchema } from "./setup-observation";
 import { RuntimeObservationSchema } from "./runtime-observation";
+import { AdmissionObservationSchema, type AdmissionObservation } from "./admission-observation";
 import type { AgentValues } from "./config";
 
 export const EvidenceEventSchema=z.object({
   phase:z.enum(["login","identity","repository","computer_build","computer_wait","workspace_create","workspace_resume","workspace_stop","workspace_delete",
     "workspace_wait","workspace_create_wait","workspace_resume_wait","workspace_stop_wait","workspace_delete_wait",
-    "runtime_connect","agent_send","agent_settled","chat_tail","terminal_run","health_cp","health_db","health_vm","cleanup","scenario",
+    "runtime_connect","runtime_admission","agent_send","agent_settled","chat_tail","terminal_run","health_cp","health_db","health_vm","cleanup","scenario",
     "prior_cleanup","computer_selection","computer_pin","credentials_install","credentials_cleanup","agent_claude","agent_codex","agent_cursor","chat_continuity","runtime_disconnect"]),
   outcome:z.enum(["ok","failed","pending","skipped"]),durationMs:z.number().nonnegative().finite(),
   code:z.enum(ERROR_CODES).optional(),count:z.number().int().nonnegative().safe().optional(),exitCode:z.number().int().min(-1).max(255).optional(),
   setup:SetupObservationSchema.optional(),runtime:RuntimeObservationSchema.optional(),
+  admission:AdmissionObservationSchema.optional(),
 }).strict();
 export type EvidenceEvent=z.infer<typeof EvidenceEventSchema>;
 export class Evidence {
@@ -25,9 +27,10 @@ export class Evidence {
     if(!event.success||this.events.length>=256)throw new ZerosDevError("invalid_request");
     this.events.push(event.data);this.write({schema:"zeros.dev-evidence/v1",runId:this.runId,...event.data});
   }
-  async step<T>(phase:EvidenceEvent["phase"],work:()=>Promise<T>):Promise<T>{
+  async step<T>(phase:EvidenceEvent["phase"],work:()=>Promise<T>,admission?:(value:T)=>AdmissionObservation|undefined):Promise<T>{
     const start=this.now();
-    try{const result=await work();this.emit({phase,outcome:"ok",durationMs:Math.max(0,this.now()-start)});return result;}
+    try{const result=await work();const observed=admission?.(result);
+      this.emit({phase,outcome:"ok",durationMs:Math.max(0,this.now()-start),...(observed?{admission:observed}:{})});return result;}
     catch(error){this.emit({phase,outcome:"failed",durationMs:Math.max(0,this.now()-start),code:closedError(error),...diagnosticEvidence(error)});throw error;}
   }
 }

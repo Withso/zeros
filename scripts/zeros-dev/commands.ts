@@ -7,6 +7,7 @@ import type { ZerosDevRuntime } from "./runtime";
 import { parseRepositorySelection, type AgentValues, type RepositorySelection } from "./config";
 import { Evidence, assertNoCredentials, redactContent, type EvidenceEvent } from "./evidence";
 import { ZerosDevError, closedError, diagnosticEvidence } from "./errors";
+import type { AdmissionObservation } from "./admission-observation";
 import type { controlPlaneHealth, controlPlaneLogs, databaseHealth } from "./health";
 
 const COMMANDS = {
@@ -82,7 +83,7 @@ export interface Services {
   source(): Promise<Source>;
   values(): Promise<AgentValues>;
   content(file: string, maxBytes: number): Promise<string>;
-  connect(run: Run, signal: AbortSignal): Promise<ZerosDevRuntime>;
+  connect(run: Run, signal: AbortSignal, onAdmissionEvent?: (event: AdmissionObservation) => void): Promise<ZerosDevRuntime>;
   healthCp(): ReturnType<typeof controlPlaneHealth>;
   healthDb(run: Run): ReturnType<typeof databaseHealth>;
   healthLogs(run: Run): ReturnType<typeof controlPlaneLogs>;
@@ -99,7 +100,11 @@ export async function executeCommand(command: Command, services: Services, signa
   const display = async (kind: "chat" | "terminal" | "computer_log", text: string) => services.write({ schema: "zeros.dev-content/v1", runId, kind, text: redactContent(text, await services.values()) });
   const input = async (file: string, maxBytes: number) => { const text = await services.content(file, maxBytes); assertNoCredentials(text, await services.values()); return text; };
   const runtimeWork = async <T>(run: Run, work: (runtime: ZerosDevRuntime) => Promise<T>) => {
-    const runtime = await evidence.step("runtime_connect", () => services.connect(run, signal));
+    const started = performance.now();
+    const runtime = await evidence.step("runtime_connect", () => services.connect(run, signal, admission => evidence.emit({
+      phase: "runtime_admission", outcome: "pending", code: "runtime_unavailable", count: admission.retryCount,
+      durationMs: Math.max(0, performance.now() - started), admission,
+    })), value => value.admission);
     try { return await work(runtime); } finally { await runtime.dispose(); }
   };
   async function withRun(work: (handle: RunHandle) => Promise<void>, fresh = false) {

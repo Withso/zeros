@@ -141,13 +141,16 @@ async function actionsFixture() {
 }
 
 describe("Actions orchestration through signed files", () => {
-  it.each(["runtime", "setup"] as const)("keeps the first %s observation in the public result and signed artifact after logout fails", async kind => {
+  it.each(["runtime", "setup", "admission"] as const)("keeps the first %s observation in the public result and signed artifact after logout fails", async kind => {
     const f = await actionsFixture();
     const runtime = { phase: "admission" as const, class: "admission_unavailable" as const, status: 500 };
     const setup = { attempt: 5, claimCount: 2, state: "queued" as const, errorCode: "setup_provider_bootstrap_cleanup_unconfirmed" as const };
-    const code = kind === "runtime" ? "runtime_unavailable" : "deadline";
-    const diagnostic = kind === "runtime" ? { runtime } : { setup };
-    f.services.connect.mockRejectedValue(new ZerosDevError(code, undefined, undefined, kind === "setup" ? setup : undefined, kind === "runtime" ? runtime : undefined));
+    const firstFailure = { status: 503 as const, code: "cloud_runtime_temporarily_unavailable" as const, phase: "provider_endpoint" as const, retryAfterMs: 1000 };
+    const admission = { sequence: 1, firstFailure, retryCount: 1, retries: [{ ...firstFailure, attempt: 2 as const, delayMs: 1000 }] };
+    const code = kind === "setup" ? "deadline" : "runtime_unavailable";
+    const diagnostic = kind === "runtime" ? { runtime } : kind === "setup" ? { setup } : { admission };
+    f.services.connect.mockRejectedValue(new ZerosDevError(code, undefined, undefined, kind === "setup" ? setup : undefined,
+      kind === "runtime" ? runtime : undefined, kind === "admission" ? admission : undefined));
     f.services.session.logout.mockRejectedValue(new Error("synthetic-private-logout"));
     expect(await runActions(f.env, f.options as never)).toBe(1);
     expect(f.output).toContainEqual(expect.objectContaining({ phase: "runtime_connect", code, ...diagnostic }));

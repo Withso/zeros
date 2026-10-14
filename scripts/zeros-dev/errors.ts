@@ -1,5 +1,6 @@
 import { SetupObservationSchema, type SetupObservation } from "./setup-observation";
 import { RuntimeObservationSchema, type RuntimeObservation } from "./runtime-observation";
+import { AdmissionObservationSchema, type AdmissionObservation } from "./admission-observation";
 
 /** Only these codes may leave the CLI. Provider errors, bodies and stack traces
  * are never evidence; neither are arbitrary error.code/name/message values. */
@@ -19,18 +20,24 @@ export type ErrorCode = typeof ERROR_CODES[number];
 export class ZerosDevError extends Error {
   readonly setup?: SetupObservation;
   readonly runtime?: RuntimeObservation;
-  constructor(readonly code: ErrorCode, readonly status?: number, readonly retryAfterMs?: number, setup?: SetupObservation, runtime?: RuntimeObservation) {
+  readonly admission?: AdmissionObservation;
+  constructor(readonly code: ErrorCode, readonly status?: number, readonly retryAfterMs?: number, setup?: SetupObservation,
+    runtime?: RuntimeObservation, admission?: AdmissionObservation) {
     super(`zeros_dev_${code}`);
     const parsed = SetupObservationSchema.safeParse(setup);
     if (parsed.success) this.setup = parsed.data;
     const connection = RuntimeObservationSchema.safeParse(runtime);
     if (connection.success) this.runtime = connection.data;
+    const retry = AdmissionObservationSchema.safeParse(admission);
+    if (retry.success) this.admission = retry.data;
   }
 }
-export function diagnosticEvidence(error: unknown): { setup?: SetupObservation; runtime?: RuntimeObservation } {
+export function diagnosticEvidence(error: unknown): { setup?: SetupObservation; runtime?: RuntimeObservation; admission?: AdmissionObservation } {
   if (!(error instanceof ZerosDevError)) return {};
   const runtime = RuntimeObservationSchema.safeParse(error.runtime);
-  return { ...setupEvidence(error), ...(runtime.success ? { runtime: runtime.data } : {}) };
+  const admission = AdmissionObservationSchema.safeParse(error.admission);
+  return { ...setupEvidence(error), ...(runtime.success ? { runtime: runtime.data } : {}),
+    ...(admission.success ? { admission: admission.data } : {}) };
 }
 export function setupEvidence(error: unknown): { setup?: SetupObservation } {
   if (!(error instanceof ZerosDevError)) return {};

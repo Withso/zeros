@@ -32,7 +32,8 @@ function setup() {
 describe("Electron direct provider connection ownership", () => {
   it("opts into the verified direct endpoint and publishes only its exact boot-bound target", async () => {
     const f = setup(), connection = await f.broker.openRuntime(target);
-    expect(f.issueEngineAdmission).toHaveBeenCalledExactlyOnceWith("synthetic-account-token", { ...target, directProviderVersion: 1 });
+    expect(f.issueEngineAdmission).toHaveBeenCalledExactlyOnceWith("synthetic-account-token", { ...target, directProviderVersion: 1 },
+      { assertCurrent: expect.any(Function) });
     expect(connection).toEqual({ kind: "cloud", channel: "direct-provider-websocket", runtimeId: ids[6], ...target,
       generation: 2, engineInstanceId: ids[2], authorityEpoch: 3, connectionSequence: 1, url: directUrl,
       cloudToken: firstToken, expiresAt: now + 120_000, bootScope, remotePort: 47891 });
@@ -47,7 +48,7 @@ describe("Electron direct provider connection ownership", () => {
     const f = setup(), first = await f.broker.openRuntime(target); f.issueEngineAdmission.mockResolvedValueOnce(relay());
     const next = await f.broker.refreshRuntime(first);
     expect(f.issueEngineAdmission).toHaveBeenLastCalledWith("synthetic-account-token", { ...target,
-      directProviderVersion: 1, connectionChannel: "control-plane-websocket" });
+      directProviderVersion: 1, connectionChannel: "control-plane-websocket" }, { assertCurrent: expect.any(Function) });
     expect(next).toMatchObject({ channel: "control-plane-websocket", runtimeId: first.runtimeId, connectionSequence: 2,
       url: bridgeUrl, cloudToken: nextToken, bootScope });
     expect(next.cloudToken).not.toBe(first.cloudToken); expect(f.forbidden).not.toHaveBeenCalled();

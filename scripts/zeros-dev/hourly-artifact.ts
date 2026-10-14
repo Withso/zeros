@@ -8,12 +8,13 @@ import { RunSchema, type RunStore } from "./receipts";
 import { ERROR_CODES, ZerosDevError } from "./errors";
 import { SetupObservationSchema } from "./setup-observation";
 import { RuntimeObservationSchema } from "./runtime-observation";
+import { AdmissionObservationSchema } from "./admission-observation";
 
 export const ExecutionSchema = z.object({ workflowRunId: z.string().regex(/^[1-9][0-9]{0,19}$/), attempt: z.number().int().min(1).max(100),
   sourceSha: z.string().regex(/^[a-f0-9]{40}$/) }).strict();
 export type HourlyExecution = z.infer<typeof ExecutionSchema>;
 const resultSchema = z.object({ success: z.boolean(), code: z.enum(ERROR_CODES).nullable(), runId: z.string().uuid(),
-  setup: SetupObservationSchema.optional(), runtime: RuntimeObservationSchema.optional() }).strict();
+  setup: SetupObservationSchema.optional(), runtime: RuntimeObservationSchema.optional(), admission: AdmissionObservationSchema.optional() }).strict();
 const payloadSchema = z.object({ schema: z.literal("zeros.dev-hourly/v1"), execution: ExecutionSchema, deviceId: z.string().uuid(),
   result: resultSchema,
   runs: z.array(RunSchema).max(3), completedAt: z.string().datetime() }).strict();

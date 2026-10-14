@@ -106,7 +106,8 @@ type ActionsOptions = {
 function productServices(file: AgentFileStore, env: NodeJS.ProcessEnv): ActionsServices {
   const transport = new AlphaTransport(), session = new ZerosDevSession(file, transport), api = new ProductApi(session, transport);
   return { session, api, credentials: new HourlyCredentials(api, actionsMaterials(env)),
-    health: () => controlPlaneHealth(transport), connect: (run, signal) => ZerosDevRuntime.connect(session, api, run, { signal }) };
+    health: () => controlPlaneHealth(transport),
+    connect: (run, signal, onAdmissionEvent) => ZerosDevRuntime.connect(session, api, run, { signal, onAdmissionEvent }) };
 }
 
 export async function runActions(env = process.env, options: ActionsOptions = {}): Promise<number> {

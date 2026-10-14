@@ -6,6 +6,7 @@ import type { ZerosDevRuntime } from "./runtime";
 import { Evidence } from "./evidence";
 import { ZerosDevError } from "./errors";
 import { beforeDeadline } from "./transport";
+import type { AdmissionObservation } from "./admission-observation";
 
 export const HOURLY_WORK_MS = 350_000;
 export const HOURLY_COMPUTER_MS = 300_000;
@@ -13,12 +14,12 @@ export const HOURLY_CLEANUP_MS = 140_000;
 export const HOURLY_TOTAL_MS = 850_000;
 export const HOURLY_PROMPT = "Reply exactly ZEROS_DEV_OK. Do not call any tools.";
 export const HOURLY_AGENTS = ["claude", "codex", "cursor"] as const;
-type Runtime = Pick<ZerosDevRuntime, "prompt" | "tail" | "terminal" | "dispose">;
+type Runtime = Pick<ZerosDevRuntime, "prompt" | "tail" | "terminal" | "dispose" | "admission">;
 type CredentialPort = { install(handle: RunHandle, signal: AbortSignal): Promise<void>; cleanup(handle: RunHandle, signal: AbortSignal): Promise<void> };
 type Options = {
   handle: RunHandle;
   api: Pick<ProductApi, "assertFixtureEmpty" | "ensureRepository" | "computerState" | "readComputerRuntime" | "verifyComputerRuntime" | "buildComputer" | "waitComputer" | "createWorkspace" | "waitWorkspace" | "lifecycle" | "cleanup">;
-  credentials: CredentialPort; connect(run: Run, signal: AbortSignal): Promise<Runtime>; evidence: Evidence;
+  credentials: CredentialPort; connect(run: Run, signal: AbortSignal, onAdmissionEvent?: (event: AdmissionObservation) => void): Promise<Runtime>; evidence: Evidence;
   signal?: AbortSignal; budgetMs?: number; computerMs?: number; workMs?: number; cleanupMs?: number; now?: () => number; monotonic?: () => number;
 };
 
@@ -69,11 +70,12 @@ export async function runHourly(options: Options): Promise<void> {
   const overall = options.signal ? AbortSignal.any([options.signal, budget]) : budget;
   const preparation = AbortSignal.any([overall, AbortSignal.timeout(computerMs)]);
   hourly.startedAt = new Date(now()).toISOString(); await handle.save();
-  const boundedStep = <T>(phase: Parameters<Evidence["step"]>[0], task: () => Promise<T>, bound: AbortSignal) =>
+  const boundedStep = <T>(phase: Parameters<Evidence["step"]>[0], task: () => Promise<T>, bound: AbortSignal,
+    admission?: (value: T) => AdmissionObservation | undefined) =>
     evidence.step(phase, () => {
       if (bound.aborted) throw new ZerosDevError("deadline");
       return beforeDeadline(task(), bound);
-    });
+    }, admission);
   await boundedStep("prior_cleanup", () => api.assertFixtureEmpty(preparation), preparation);
   await boundedStep("repository", () => api.ensureRepository(preparation), preparation);
   const selected = await boundedStep("computer_selection", async () => {
@@ -104,7 +106,10 @@ export async function runHourly(options: Options): Promise<void> {
     boundedStep(phase, task, bound);
   const connected = async (task: (runtime: Runtime) => Promise<void>) => {
     const started = clock(), readyObservedAt = new Date(now()).toISOString();
-    const runtime = await step("runtime_connect", () => connect(handle.run, signal));
+    const runtime = await boundedStep("runtime_connect", () => connect(handle.run, signal, admission => evidence.emit({
+      phase: "runtime_admission", outcome: "pending", code: "runtime_unavailable", count: admission.retryCount,
+      durationMs: Math.max(0, clock() - started), admission,
+    })), signal, value => value.admission);
     let failed: unknown;
     try {
       await task(runtime);

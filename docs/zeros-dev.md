@@ -287,11 +287,27 @@ read, identity, admission, handshake or workspace list), the failure class and
 the HTTP status when available. For example, an admission HTTP 500 reports
 `{phase:"admission",class:"admission_unavailable",status:500}`. Unknown causes
 stay `unknown`; this does not attribute a server error to a provider or the VM.
-The first observation survives cleanup/logout failure, and no harness retry is
-added. Native aborts at the HTTP boundary report `deadline`, retaining the last
+The first observation survives cleanup/logout failure. The shared desktop
+access client retries only HTTP 503 with the exact
+`cloud_runtime_temporarily_unavailable` code, `provider_endpoint` phase,
+`retryable:true` and an integer `Retry-After` of 1–300 seconds. It makes at most
+three requests with fresh device proofs, inside the original 15-second admission
+deadline and caller budget. A delay that cannot fit ends the attempt; it is
+never clamped or used to extend the deadline. Session, runtime and Stop fences
+remain in force. Unknown faults, `service_busy`, auth/integrity refusals and
+unconfirmed cleanup are terminal for this policy.
+
+`runtime_admission` pending events retain the first typed failure and every
+executed retry, with a separate `retryCount`. `sequence` distinguishes admission
+calls within one connection, including refreshes. The successful connection
+event or failed result retains the first admission observation too. A recovered
+connection can pass while its first failure and retry costs stay visible in
+the signed receipt. Connection timings include proofs, waits and all retries;
+the CLI adds no second retry loop. Native aborts at the HTTP boundary report
+`deadline`, retaining the last
 validated setup attempt and claim count during workspace waits.
 Use the updated CLI for subsequent receipt reads: older strict CLI versions
-cannot interpret the new wait phases or setup/runtime observations. Existing receipts
+cannot interpret the new wait phases or setup/runtime/admission observations. Existing receipts
 without those optional observations remain readable.
 
 ## Read-only diagnostics and qualification
