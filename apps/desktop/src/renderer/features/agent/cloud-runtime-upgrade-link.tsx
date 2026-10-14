@@ -4,6 +4,7 @@ import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "../../platform/bridge
 import { cloudWorkspaceDetails, refreshCloudWorkspace } from "../../state/cloud-workspace-catalog";
 import { cloudRuntimeUpgradeAvailability, cloudRuntimeUpgradeAvailabilityKey, loadCloudRuntimeUpgradeAvailability } from "../../state/cloud-runtime-upgrade";
 import { useCachedRead } from "../../state/use-cached-read";
+import { observeCloudRuntimeUpgradeAvailability, useRuntimeUpgradeDocumentVisible } from "../../state/cloud-runtime-upgrade-polling";
 
 /** Local composers retain their existing props, including visibility policy. */
 export function cloudRuntimeUpgradeComposerContext(folder: string, active: boolean): { workspaceFolder?: string; active?: boolean } {
@@ -16,19 +17,17 @@ export function useCloudRuntimeUpgradeLink(folder: string | undefined, active: b
   const target = parseCloudWorkspaceKey(folder);
   const internal = useCloudWorkspaceAccountAccess(target?.organizationId);
   const enabled = internal && active && target !== null;
+  const visible = useRuntimeUpgradeDocumentVisible(enabled);
   const details = useCachedRead(cloudWorkspaceDetails, enabled ? cloudWorkspaceKey(target!) : null,
-    key => refreshCloudWorkspace(parseCloudWorkspaceKey(key)!), { enabled, maxAgeMs: 10_000 });
+    key => refreshCloudWorkspace(parseCloudWorkspaceKey(key)!), { enabled: enabled && visible, maxAgeMs: 10_000 });
   const allowed = enabled && details.data?.capabilities.canManage === true;
   const key = allowed ? cloudRuntimeUpgradeAvailabilityKey(target!, details.data!.generation.number) : null;
   const availability = useCachedRead(cloudRuntimeUpgradeAvailability, key, loadCloudRuntimeUpgradeAvailability,
-    { enabled: allowed, maxAgeMs: 10_000 });
+    { enabled: allowed && visible, maxAgeMs: 10_000 });
   useEffect(() => {
-    if (!allowed || !key) return;
-    const timer = setInterval(() => {
-      void cloudRuntimeUpgradeAvailability.load(key, () => loadCloudRuntimeUpgradeAvailability(key), { force: true }).catch(() => {});
-    }, 30_000);
-    return () => clearInterval(timer);
-  }, [allowed, key]);
+    if (!allowed || !visible || !key) return;
+    return observeCloudRuntimeUpgradeAvailability(key);
+  }, [allowed, visible, key]);
   // The model's required update is informational for every admitted actor.
   // Generic update discovery retains its manager-only reads and visibility.
   if (!enabled || !runtimeUpgradeRequiredForAgents && (!allowed || !availability.data?.updateAvailable)) return null;

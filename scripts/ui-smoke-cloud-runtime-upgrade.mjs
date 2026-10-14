@@ -49,7 +49,9 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
   await expect(details.getByRole("button", { name: /Update runtime/ })).toHaveCount(0);
   const idleDocumentReads = documentReads, idleAvailabilityReads = availabilityReads;
   await page.clock.fastForward(5_001);
-  await expect.poll(() => availabilityReads).toBeGreaterThan(idleAvailabilityReads);
+  expect(availabilityReads).toBe(idleAvailabilityReads);
+  await page.clock.fastForward(25_000);
+  await expect.poll(() => availabilityReads).toBe(idleAvailabilityReads + 1);
   expect(documentReads).toBe(idleDocumentReads);
   await runtime.scrollIntoViewIfNeeded();
   await page.screenshot({ path: ".context/cloud-runtime-auto-update-available.png" });
@@ -111,7 +113,25 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
   await expect(runtime).toBeVisible();
   const nonStaffReads = availabilityReads;
   await page.clock.fastForward(5_001);
-  await expect.poll(() => availabilityReads).toBeGreaterThan(nonStaffReads);
+  expect(availabilityReads).toBe(nonStaffReads);
+  await page.clock.fastForward(25_000);
+  await expect.poll(() => availabilityReads).toBe(nonStaffReads + 1);
+  const retainedRuntimeText = await runtime.textContent();
+  expect(retainedRuntimeText).toBeTruthy();
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  const backgroundReads = availabilityReads;
+  await page.clock.fastForward(60_001);
+  expect(availabilityReads).toBe(backgroundReads);
+  await expect(runtime).toHaveText(retainedRuntimeText);
+  await page.evaluate(() => {
+    Reflect.deleteProperty(document, "visibilityState");
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect.poll(() => availabilityReads).toBe(backgroundReads + 1);
   await page.getByRole("button", { name: "Sign out fixture", exact: true, includeHidden: true }).dispatchEvent("click");
   await expect(details).toHaveCount(0);
   await expect(runtime).toHaveCount(0);
@@ -140,4 +160,5 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
   check("Nonstaff runtime details and composer explain automatic updates, follow wake/readiness, and stay inert while hidden or unauthorized", true);
   check("The agents-required discovery flag supplies one next-wake notice in the model menu", true);
   check("Local chat tabs and model menu retain their behavior, with no runtime discovery or mutation HTTP", true);
+  check("Runtime details share a 30s stable fallback and retain content with no hidden-window reads, then coalesce foreground refresh", true);
 }
