@@ -639,6 +639,27 @@ describe("app assembly — cloud workspace internal capabilities", () => {
     expect(redeem).not.toHaveBeenCalled();
   });
 
+  it("keeps optional checkpoint diagnostics out of the checkpoint and authority budgets", async () => {
+    const invoke = vi.fn(async () => ({ version: 1 }));
+    const app = createApp(config(null), pool, emailConfig as never, {
+      cloudWorkspaceInternalSetupService: {
+        redeem: invoke, registerEngine: invoke, heartbeat: invoke, commitCheckpoint: invoke,
+      },
+    });
+    const post = (path: string) => app.request(`/internal/v1/cloud-workspaces/${path}`, {
+      method: "POST", headers: { authorization: `Bearer zwh_${"d".repeat(43)}`,
+        "content-type": "application/json", "x-real-ip": "203.0.113.95" }, body: "{}",
+    });
+    for (let attempt = 0; attempt < 600; attempt++) await post("engine/checkpoint-progress");
+    expect((await post("engine/checkpoint-progress")).status).toBe(429);
+    // Still reaches each strict parser: diagnostic traffic cannot prevent seal
+    // capture, ordinary synchronization or heartbeat authority from progressing.
+    expect((await post("engine/checkpoints/commit")).status).toBe(422);
+    expect((await post("engine/heartbeat")).status).toBe(422);
+    expect((await post("setup/admission")).status).toBe(401);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it.each(["client-admission", "agent-execution"])("throttles valid-shape v2 %s guesses before service work", async (endpoint) => {
     const invoke = vi.fn(async () => ({ version: 1 }));
     const service = {

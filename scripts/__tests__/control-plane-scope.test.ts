@@ -241,8 +241,17 @@ describe("control-plane database scope diff", () => {
     }
   });
 
+  const fixtureEnvironment = (): NodeJS.ProcessEnv => {
+    const env = { ...process.env };
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+      "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"]) {
+      delete env[key];
+    }
+    return env;
+  };
+
   const git = (cwd: string, ...args: string[]) =>
-    execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+    execFileSync("git", args, { cwd, encoding: "utf8", env: fixtureEnvironment() }).trim();
 
   function repository(): { cwd: string; base: string } {
     const cwd = mkdtempSync(path.join(tmpdir(), "control-plane-scope-"));
@@ -258,6 +267,46 @@ describe("control-plane database scope diff", () => {
     git(cwd, "commit", "--quiet", "-m", "base");
     return { cwd, base: git(cwd, "rev-parse", "HEAD") };
   }
+
+  it("keeps Git fixture repositories and subprocesses isolated from ambient Git routing", () => {
+    const protectedRepository = repository();
+    const gitDirectory = path.join(protectedRepository.cwd, ".git");
+    const metadata = () => ["HEAD", "config", "index", "logs/HEAD"].map((file) =>
+      readFileSync(path.join(gitDirectory, file)),
+    );
+    const before = metadata();
+    const overrides = {
+      GIT_DIR: gitDirectory,
+      GIT_WORK_TREE: protectedRepository.cwd,
+      GIT_INDEX_FILE: path.join(gitDirectory, "index"),
+      GIT_OBJECT_DIRECTORY: path.join(gitDirectory, "objects"),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(gitDirectory, "objects"),
+      GIT_COMMON_DIR: gitDirectory,
+      GIT_CEILING_DIRECTORIES: path.dirname(protectedRepository.cwd),
+    };
+    const saved = new Map(Object.keys(overrides).map((key) => [key, process.env[key]]));
+    try {
+      // Both repositories are disposable. Never use the checkout as this sentinel.
+      Object.assign(process.env, overrides);
+      const { cwd, base } = repository();
+      expect(git(cwd, "rev-parse", "--absolute-git-dir")).toBe(path.join(cwd, ".git"));
+      writeFileSync(path.join(cwd, "README.md"), "isolated fixture\n");
+      git(cwd, "commit", "--quiet", "-am", "fixture docs change");
+      const result = spawnSync(process.execPath, [SCOPE], {
+        cwd, encoding: "utf8",
+        env: { ...fixtureEnvironment(), EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/123/merge",
+          PULL_REQUEST_BASE_SHA: base, CI_FULL_DATABASE: "", GITHUB_STEP_SUMMARY: "" },
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe("database=false\n");
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      expect(metadata()).toEqual(before);
+    }
+  });
 
   it("reports both sides of a rename and every deletion", () => {
     const { cwd, base } = repository();
@@ -299,7 +348,7 @@ describe("control-plane database scope diff", () => {
     const result = spawnSync(process.execPath, [SCOPE], {
       cwd,
       encoding: "utf8",
-      env: { ...process.env, EVENT_NAME: "push", GITHUB_REF: "refs/heads/release/1.2.3", PUSH_BEFORE_SHA: BASE, GITHUB_STEP_SUMMARY: "" },
+      env: { ...fixtureEnvironment(), EVENT_NAME: "push", GITHUB_REF: "refs/heads/release/1.2.3", PUSH_BEFORE_SHA: BASE, GITHUB_STEP_SUMMARY: "" },
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toBe("database=true\n");
@@ -316,7 +365,7 @@ describe("control-plane database scope diff", () => {
     const result = spawnSync(process.execPath, [SCOPE], {
       cwd,
       encoding: "utf8",
-      env: { ...process.env, EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", PUSH_BEFORE_SHA: before, GITHUB_STEP_SUMMARY: "" },
+      env: { ...fixtureEnvironment(), EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", PUSH_BEFORE_SHA: before, GITHUB_STEP_SUMMARY: "" },
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toBe("database=true\n");
@@ -330,7 +379,7 @@ describe("control-plane database scope diff", () => {
     git(cwd, "commit", "--quiet", "-am", "docs only");
     const result = spawnSync(process.execPath, [SCOPE], {
       cwd, encoding: "utf8",
-      env: { ...process.env, EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/123/merge",
+      env: { ...fixtureEnvironment(), EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/123/merge",
         PULL_REQUEST_BASE_SHA: base, CI_FULL_DATABASE: "true", GITHUB_STEP_SUMMARY: summary },
     });
     expect(result.status).toBe(0);
@@ -344,7 +393,7 @@ describe("control-plane database scope diff", () => {
     const { cwd, base } = repository();
     const result = spawnSync(process.execPath, [SCOPE], {
       cwd, encoding: "utf8",
-      env: { ...process.env, EVENT_NAME: "pull_request", PULL_REQUEST_BASE_SHA: base,
+      env: { ...fixtureEnvironment(), EVENT_NAME: "pull_request", PULL_REQUEST_BASE_SHA: base,
         CI_FULL_DATABASE: "unexpected", GITHUB_STEP_SUMMARY: "" },
     });
     expect(result.status).not.toBe(0);

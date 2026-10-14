@@ -89,6 +89,7 @@ import {
   engineLifecycleRequestsPerMinute,
 } from "./cloud-workspaces/engine-heartbeat.js";
 import { engineCheckpointHintRequestsPerMinute } from "./cloud-workspaces/engine-checkpoint-hints.js";
+import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH } from "./cloud-workspaces/checkpoint-progress-contract.js";
 import { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService, releaseCanaryConfiguration, releaseCanaryDesignationConfiguration } from "./cloud-workspaces/release-canaries.js";
 import { createReleaseCanaryAdmissionRoutes, createReleaseCanaryDesignationRoutes } from "./cloud-workspaces/release-canary-routes.js";
 import { cloudAgentCredentialKeys } from "./cloud-workspaces/agent-credentials.js";
@@ -453,6 +454,11 @@ export function createApp(
       60_000,
       internalClientIp,
     );
+    // Optional diagnostics cannot consume the budget that admits seal uploads,
+    // checkpoint completion, ordinary synchronization or heartbeat authority.
+    const engineCheckpointProgressPreAuthLimit = rateLimit(
+      "cloud-workspace-engine-checkpoint-progress-preauth", 600, 60_000, internalClientIp,
+    );
     if (dependencies.cloudGithubReads) {
       app.use(CLOUD_GITHUB_READ_PATH, cloudWorkspaceInternalResponseHeaders);
       app.use(CLOUD_GITHUB_READ_PATH, internalPreAuthLimit);
@@ -478,6 +484,8 @@ export function createApp(
           ? engineLifecyclePreAuthLimit
           : c.req.path === CLOUD_WORKSPACE_ENGINE_CHECKPOINT_HINT_PATH
             ? engineCheckpointHintPreAuthLimit
+            : c.req.path === CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH
+              ? engineCheckpointProgressPreAuthLimit
             : internalPreAuthLimit)(c, next),
       );
     }

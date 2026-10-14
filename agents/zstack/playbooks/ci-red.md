@@ -12,6 +12,13 @@
 
 ## Act
 
+- **Git fixture isolation:** before any Git-bearing check, remove `GIT_DIR`,
+  `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+  `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR` and
+  `GIT_CEILING_DIRECTORIES` from the runner and fixture subprocess environments.
+  `cwd` alone does not isolate Git. Create fixture repositories in fresh temporary
+  directories; reproduce inherited routing only against another disposable
+  repository. Never route a test through the shared checkout's Git metadata.
 - **Cross-package imports:** a value import in a shared schema module can pull
   an engine implementation into the control-plane graph. Run
   `scripts/__tests__/control-plane-scope.test.ts` after changing those imports.

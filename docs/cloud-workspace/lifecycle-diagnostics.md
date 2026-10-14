@@ -1,5 +1,52 @@
 # Lifecycle evidence and idle liveness
 
+## Checkpoint progress evidence
+
+Optional engine stage reports use
+`POST /internal/v1/cloud-workspaces/engine/checkpoint-progress`, authenticated
+with the existing heartbeat credential. The strict heartbeat wire is unchanged;
+an older control plane returns 404 and an older engine sends no report. The
+shared schema is `@zeros/protocol/cloud-checkpoint-progress`, mirrored inside
+the independently deployed control plane.
+
+Reports contain only version 1, exact organization/workspace/generation/engine
+and request UUIDs, sequence 1–64, a closed stage/state/reason, and elapsed
+milliseconds within both 300 seconds and the original request window. The
+`checkpoint_received` stage distinguishes a committed CP delivery from a handler
+that actually began. Stage completion is diagnostic only: it cannot acknowledge
+a seal, complete a checkpoint, renew authority or change a lifecycle deadline.
+A final report after checkpoint completion may be refused because the actual
+completion has already fenced the engine.
+
+The CP accepts reports only for a currently authorized engine and an unexpired,
+delivered request. Workspace and request locks order reports against
+cancellation and revocation. A replacement engine cannot append to the same
+request's existing evidence. UUID spelling is canonicalized before audit lookup.
+Exact duplicate receipts are idempotent; changed reuse of a sequence is refused.
+Older running/completed edges are ignored. An unseen earlier failure can still
+be recorded, and the first accepted failure prevents subsequent cleanup or
+completion from replacing it.
+
+At most 64 closed receipts per request enter `audit_log` under
+`cloud_workspace.checkpoint_progress`, with the server acceptance timestamp and
+no capability, text, stack, paths, output or content. The existing audit retention
+policy applies: operational evidence survives workspace content purge and is
+removed by organization erasure. A separate pre-auth rate budget and short
+transaction-local lock/statement limits keep optional reporting from consuming
+checkpoint ingress capacity. Contention returns a closed diagnostic 503 without
+retry advice; the engine keeps sealing and does not retry the report. No new
+polling, listener, worker or cleanup timer is added. Local Personal and
+organization-local engines do not enter this CP endpoint.
+
+The engine producer observes at most 64 stage edges per exact directive. It
+keeps one transport flight and coalesces the latest pending edge; the first
+failure takes priority over that pending work and is dispatched before cleanup,
+including early idle refusal. Each same-origin report has at most one second
+within the original directive deadline. Reports are never awaited by sealing,
+never retried, and a 404 disables only optional diagnostics. Dispatch before
+cancellation does not guarantee acceptance if cancellation wins at the CP.
+Deploy the CP reader and shared contract before the separately packaged producer.
+
 ## Engine boot-owner startup
 
 Negotiated cloud boot-owner startup retries only the exact bootstrap, initial

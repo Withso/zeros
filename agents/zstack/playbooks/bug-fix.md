@@ -12,6 +12,13 @@
    observe the symptom, say so, and fix only what the evidence supports.
    For worker failures, retain the first closed diagnostic before cleanup and
    across reconciliation, including late heartbeats and expired-claim recovery.
+   For optional lifecycle evidence, test old strict wires and isolate reporting
+   from authority/ingress budgets. Race cancellation against exact-request
+   receipts; canonicalize identifiers before applying replay and storage bounds.
+   For a stalled checkpoint, instrument the actual engine stage before awaiting
+   its gate. Use finite, coalesced observations on an optional bounded transport;
+   a report must never hold up sealing, renew authority, or change heartbeat
+   compatibility. Preserve the first failure before cancellation and cleanup.
    For resume bugs, test a real sealed store across fresh engine/writer identities;
    a fresh database cannot expose inherited fences. Require authenticated
    predecessor custody for any atomic scope migration and retain old ACKs.
