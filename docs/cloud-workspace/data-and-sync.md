@@ -104,6 +104,24 @@ Missing seal, lineage or bytes refuses restore, without selecting an older
 complete snapshot. Replacement is transactional and idempotent; it never
 recreates a native session, command claim or permission resolver.
 
+Credential-control state in that FULL ledger also survives a stopped VM. A
+fresh CP engine/boot/writer identity alone cannot adopt it. Authenticated
+checkpoint restoration supplies an in-process receipt tied to the exact
+restored file, inode, source writer, organization and workspace. After all
+conversation rebuilds succeed, boot rechecks the original seal and ACK in the
+same SQLite transaction that retires the predecessor control scope and
+publishes the new one. CP bootstrap/activation and native retirement checks
+still gate execution; the receipt grants no permission to send or run.
+
+The additive SQLite migration assigns legacy control rows to their **stored
+predecessor** writer, retaining every original request, ACK, fence and retirement
+floor. Active reads and mutations use the current writer namespace; conflicting
+old IDs, stale handles, partial migration and reuse of a retired writer refuse.
+Old rows still count toward the existing total operation, mutation and ACK-byte
+budgets. At most 4,096 control scopes are retained; exhaustion fails closed
+without pruning tombstones. Reopening the same current scope preserves ACKs.
+Local Personal and organization-local engines do not enter this cloud boot path.
+
 Stopped reads are passive and read-authorized. They select the exact persisted
 boot/writer binding and monotonic current restore head, including source identity,
 deletion and incomplete reason. Missing new-mode binding refuses; only an

@@ -10,6 +10,10 @@ import type { CloudLocalCommandQueue } from "../cloud-local-command-queue";
 import type { CloudRuntimeRegistration } from "../cloud-runtime-registration";
 import { CloudAgentAdmissionError, CloudAgentExecutionError, type CloudAgentBootResponses } from "../cloud-agent-execution-client";
 import { CloudAgentBootSyncResponseSchema, CloudAgentBootRefreshResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
+import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
+import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
+import { restoreCloudLocalCommandCheckpointLedger } from "../cloud-local-command-queue-checkpoint";
+import { openSqlite } from "../db/sqlite";
 import ts from "typescript";
 import { ZerosEngine } from "../zeros-engine";
 import { CloudTransport } from "../transport/cloud";
@@ -79,6 +83,44 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
 }
 
 describe("engine boot-mode orchestration", () => {
+  it.each(["new", "same"])("activates the fresh engine writer with a %s VM boot after a stop retains its FULL ledger", async vmBoot => {
+    const f = await fixture();
+    await expect(f.boot.initialize()).resolves.toBe(true);
+    const previous = f.boot.scope;
+    const file = f.options.file, normal = openSqlite(path.join(path.dirname(file), "normal.sqlite"));
+    normal.pragma("journal_mode = WAL"); normal.pragma("synchronous = NORMAL");
+    normal.exec("CREATE TABLE sync_meta(id INTEGER PRIMARY KEY,next_rev INTEGER NOT NULL); INSERT INTO sync_meta VALUES(0,2)");
+    cleanups.push(() => { normal.close(); });
+    const events = new CloudLocalCommandEventStore({ file, queue: f.boot.queue, engineLive: () => true });
+    cleanups.push(() => events.close());
+    const lifecycle = new CloudLocalCommandWriterLifecycle({ file, queue: f.boot.queue, normalDb: () => normal,
+      assertQuiescent: () => {}, heads: (source = normal) => ({ recordSequence: (source.prepare("SELECT next_rev-1 AS rev FROM sync_meta WHERE id=0").get() as { rev: number }).rev,
+        eventSequence: events.head }) });
+    cleanups.push(() => lifecycle.close());
+    await f.boot.quiesceForSeal();
+    await lifecycle.drainAndSeal({ mirror: { flush: async () => {} }, retireNative: async () => {}, waitForWork: async () => {},
+      freezeNormal: () => normal.close(), request: async seal => { const { scope: _scope, ...body } = seal; return { ...body, writerEpoch: previous.writerEpoch }; } });
+    const root = path.join(path.dirname(file), "checkpoint");
+    await lifecycle.captureCheckpoint(root);
+    events.close(); lifecycle.close();
+    await f.boot.dispose();
+    const restored = await restoreCloudLocalCommandCheckpointLedger({ root, file, scope: previous, expectedWriterEpoch: previous.writerEpoch });
+    cleanups.push(restored.cleanup);
+    const successor = { ...previous, engineInstanceId: randomUUID(), bootId: vmBoot === "same" ? previous.bootId : randomUUID(), writerEpoch: randomUUID() };
+    Object.assign(f.f.response, successor);
+    f.request.mockClear(); f.startup.mockClear(); f.install.mockClear();
+    const next = new CloudLocalAgentBootRuntime({ ...f.options,
+      scope: { ...f.options.scope, engineInstanceId: successor.engineInstanceId }, runtimeBootId: successor.bootId,
+      predecessor: restored.predecessor });
+    cleanups.push(() => next.dispose());
+    await expect(next.initialize()).resolves.toBe(true);
+    expect(next.scope).toEqual(successor);
+    expect(next.queue.durability()).toEqual({ journalMode: "wal", synchronous: "full" });
+    expect(f.request.mock.calls.map(([operation]) => operation)).toEqual(["bootstrap", "activate"]);
+    expect(f.install).toHaveBeenCalledOnce();
+    expect(f.startup).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "retry" }));
+  });
+
   it.each([100, 5_000])("shares actor confirmation across sockets and a background renewal delayed by %ims without sharing token admission", async delay => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
     const f = await fixture(); await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);

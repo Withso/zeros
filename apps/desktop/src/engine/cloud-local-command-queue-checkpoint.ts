@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, lstatSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import type { Stats } from "node:fs";
@@ -12,6 +12,7 @@ import { canonicalCloudLocalCommandHistoryJson, canonicalCloudLocalCommandWriter
   type CloudLocalCommandWriterSeal } from "@zeros/protocol/cloud-local-mirror";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { openSqlite } from "./db/sqlite";
+import type { CloudAgentBootScope } from "@zeros/protocol/cloud-agent-bootstrap";
 
 const PART_BYTES = 16 * 1024 * 1024;
 const MAX_BYTES = 2 * 1024 * 1024 * 1024;
@@ -34,6 +35,30 @@ export const CloudLocalCommandCheckpointManifestSchema = z.object({ version: z.l
     context.addIssue({ code: "custom", message: "Invalid sealed checkpoint" });
 });
 export type CloudLocalCommandCheckpointManifest = z.infer<typeof CloudLocalCommandCheckpointManifestSchema>;
+
+/** Custody of the exact restored predecessor, never permission to execute.
+ * Only restoration with authenticated source lineage can mint this receipt;
+ * copying its public fields cannot manufacture one. */
+export type CloudLocalCommandPredecessor = Readonly<{ scope: Readonly<CloudAgentBootScope> }>;
+const restoredPredecessors = new WeakMap<CloudLocalCommandPredecessor, {
+  file: string; dev: number; ino: number; seal: CloudLocalCommandWriterSeal;
+}>();
+
+export function verifiedCloudLocalCommandPredecessor(
+  receipt: CloudLocalCommandPredecessor | null | undefined, file: string, db: Sqlite.Database,
+): Readonly<CloudAgentBootScope> | null {
+  if (!receipt) return null;
+  const proof = restoredPredecessors.get(receipt);
+  if (!proof || proof.file !== path.resolve(file)) return null;
+  try {
+    const current = lstatSync(file);
+    if (!current.isFile() || current.nlink !== 1 || current.dev !== proof.dev || current.ino !== proof.ino) return null;
+    // The FULL writer/seal/ACK must still be the restored one at cutover.
+    // A copied receipt, later writer or rolled-back file cannot authorize it.
+    verifyLedger(db, proof.seal);
+    return receipt.scope;
+  } catch { return null; }
+}
 
 function hash(value: string | Buffer): string { return createHash("sha256").update(value).digest("hex"); }
 function invalid(): never { throw new CloudCommandRuntimeError("command_storage_unavailable"); }
@@ -297,7 +322,8 @@ export async function verifyCloudLocalCommandCheckpoint(input: { root: string; s
  * different writer epoch after rebuilding from the read-only candidate; this
  * operation never claims, replays or resumes an original native execution. */
 export async function restoreCloudLocalCommandCheckpointLedger(input: { root: string; file: string;
-  scope: { organizationId: string; workspaceId: string }; expectedWriterEpoch?: string }): ReturnType<typeof verifyCloudLocalCommandCheckpoint> {
+  scope: { organizationId: string; workspaceId: string }; expectedWriterEpoch?: string }):
+  Promise<Awaited<ReturnType<typeof verifyCloudLocalCommandCheckpoint>> & { predecessor: CloudLocalCommandPredecessor | null }> {
   const verified = await verifyCloudLocalCommandCheckpoint(input);
   const file = path.resolve(input.file), parent = path.dirname(file);
   try {
@@ -329,6 +355,14 @@ export async function restoreCloudLocalCommandCheckpointLedger(input: { root: st
       await fs.rm(`${file}-wal`, { force: true }); await fs.rm(`${file}-shm`, { force: true });
       await fs.rename(temporary, file); await syncDirectory(parent);
     } finally { await fs.rm(temporary, { force: true }); }
-    return verified;
+    let predecessor: CloudLocalCommandPredecessor | null = null;
+    if (input.expectedWriterEpoch !== undefined) {
+      const scope = Object.freeze({ ...verified.manifest.seal.scope });
+      const published = await fs.lstat(file);
+      predecessor = Object.freeze({ scope });
+      restoredPredecessors.set(predecessor, { file, dev: published.dev, ino: published.ino,
+        seal: Object.freeze({ ...verified.manifest.seal, scope }) });
+    }
+    return { ...verified, predecessor };
   } catch (error) { await verified.cleanup(); throw error; }
 }

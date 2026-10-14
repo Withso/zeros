@@ -14,6 +14,7 @@ import {
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
+import * as runtimeAccess from "./runtime-access.js";
 import {
   seedSupportedCloudWorkspaceGeneration,
   seedCanonicalCloudWorkspaceAuthority,
@@ -600,6 +601,121 @@ d("cloud workspace setup worker", () => {
       { version: 1, clocks: [{ ...timings.clocks[0], spans: [{ stage: "repository", startMs: 25, endMs: 10, outcome: "passed" }] }] }]) {
       await expect(pool.query("UPDATE cloud_workspace_setup_runs SET stage_timings=$2 WHERE id=$1", [seeded.setupRunId, invalid])).rejects.toMatchObject({ code: "23514" });
     }
+  });
+
+  it("retains each failed claim's closed stage and timings after retry admission, cleanup, and eventual success", async () => {
+    const seeded = await seedSetup({ v4: true });
+    const timings = { version: 1 as const, clocks: [{ source: "setup" as const, clockId: randomUUID(), startedAt: "2026-10-06T00:00:00.000Z",
+      spans: [{ stage: "engine_readiness" as const, startMs: 10, endMs: 25, outcome: "failed" as const }] }] };
+    const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+      phase: "boot_durability", name: "Error", code: "EIO", errno: -5 } };
+    const claims = async () => (await pool.query(`SELECT subject FROM audit_log
+      WHERE action='cloud_workspace.setup_claim_failed' AND subject->>'setupRunId'=$1
+      ORDER BY (subject->>'executionFence')::bigint`, [seeded.setupRunId])).rows.map(row => row.subject);
+    const executor = new FakeExecutor([
+      async () => { throw Object.assign(new CloudWorkspaceSetupError("setup_engine_readiness_failed", "private-first-canary", true), { timings, diagnostic }); },
+      async () => {
+        // Current-claim telemetry is deliberately reset; its immutable failure
+        // receipt must still exist before another command/cleanup can begin.
+        expect((await pool.query("SELECT stage_timings FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0].stage_timings).toBeNull();
+        expect(await claims()).toHaveLength(1);
+        throw new Error("private-second-canary");
+      },
+      async execution => ({ ...await registeredSuccessfulSetup(execution, ""), timings: { version: 1, clocks: [] } }),
+    ]);
+    const value = worker(executor);
+    await value.runOnce();
+    const first = await claims();
+    expect(first).toEqual([expect.objectContaining({ setupRunId: seeded.setupRunId, executionFence: 1, claimCount: 1,
+      diagnostic: expect.objectContaining({ code: "setup_engine_readiness_failed", phase: "engine_readiness", errorClass: "unknown", setup: diagnostic }), timings })]);
+    for (let index = 0; index < 2; index++) {
+      await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now() WHERE id=$1", [seeded.setupRunId]);
+      await value.runOnce();
+    }
+    const final = await claims();
+    expect(final).toHaveLength(2); expect(final[0]).toEqual(first[0]);
+    expect(final[1]).toMatchObject({ executionFence: 2, claimCount: 2,
+      diagnostic: { code: "setup_unknown_failure", phase: "runtime", errorClass: "unknown" } });
+    expect(JSON.stringify(final)).not.toContain("canary");
+    expect((await pool.query("SELECT state FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0].state).toBe("succeeded");
+  });
+
+  it("keeps the executor's first failure when a pending heartbeat fails afterward", async () => {
+    const seeded = await seedSetup({ v4: true }), entered = new Deferred<void>(), release = new Deferred<void>();
+    const renewal = new Deferred<boolean>();
+    const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+      phase: "boot_durability", name: "CloudCredentialControlError", code: "credential_control_authority_rejected", errno: null } };
+    const current = worker(new FakeExecutor([async () => {
+      entered.resolve(); await release.promise;
+      throw Object.assign(new CloudWorkspaceSetupError("setup_engine_readiness_failed", "synthetic", false), { diagnostic });
+    }]));
+    const heartbeat = vi.spyOn(current as unknown as { renewLease(): Promise<boolean> }, "renewLease").mockReturnValue(renewal.promise);
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const running = current.runOnce(); await entered.promise;
+      await vi.advanceTimersByTimeAsync(4_000); expect(heartbeat).toHaveBeenCalledOnce();
+      release.resolve(); await vi.advanceTimersByTimeAsync(0);
+      renewal.resolve(false); await running;
+      const stored = (await pool.query("SELECT state,error_code FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0];
+      expect(stored).toEqual({ state: "failed", error_code: "setup_engine_readiness_failed" });
+      const receipt = (await pool.query(`SELECT subject FROM audit_log WHERE action='cloud_workspace.setup_claim_failed'
+        AND subject->>'setupRunId'=$1`, [seeded.setupRunId])).rows;
+      expect(receipt).toEqual([{ subject: expect.objectContaining({ diagnostic: expect.objectContaining({
+        retryable: false, setup: diagnostic }) }) }]);
+    } finally { renewal.resolve(false); release.resolve(); heartbeat.mockRestore(); vi.useRealTimers(); }
+  });
+
+  it("commits the original claim diagnostic before a retirement failure and retains it on reclaim", async () => {
+    const seeded = await seedSetup({ v4: true });
+    const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+      phase: "boot_durability", name: "Error", code: "EIO", errno: -5 } };
+    const executor = new FakeExecutor([
+      async () => { throw Object.assign(new CloudWorkspaceSetupError("setup_engine_readiness_failed", "synthetic", true), { diagnostic }); },
+      async execution => registeredSuccessfulSetup(execution, ""),
+    ]);
+    const current = worker(executor), retire = vi.spyOn(runtimeAccess, "retireCloudWorkspaceEngineInstances")
+      .mockRejectedValueOnce(new Error("synthetic retirement failure"));
+    try {
+      await expect(current.runOnce()).rejects.toThrow("synthetic retirement failure");
+      const receipts = async () => (await pool.query(`SELECT subject FROM audit_log WHERE action='cloud_workspace.setup_claim_failed'
+        AND subject->>'setupRunId'=$1 ORDER BY created_at`, [seeded.setupRunId])).rows;
+      const first = await receipts();
+      expect(first).toEqual([{ subject: expect.objectContaining({ executionFence: 1, diagnostic: expect.objectContaining({ setup: diagnostic }) }) }]);
+      await pool.query(`UPDATE cloud_workspace_setup_runs SET lease_expires_at=now()-interval '1 second',
+        last_heartbeat_at=now()-interval '2 seconds' WHERE id=$1`, [seeded.setupRunId]);
+      await current.runOnce(); expect(await receipts()).toEqual(first);
+    } finally { retire.mockRestore(); }
+  });
+
+  it("never re-executes a retained integrity failure when retirement failed before lease reclaim", async () => {
+    const seeded = await seedSetup({ v4: true });
+    const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+      phase: "boot_durability", name: "CloudCredentialControlError", code: "credential_control_authority_rejected", errno: null } };
+    const executor = new FakeExecutor([
+      async () => { throw Object.assign(new CloudWorkspaceSetupError("setup_engine_readiness_failed", "synthetic", false), { diagnostic }); },
+      async execution => registeredSuccessfulSetup(execution, ""),
+    ]);
+    const current = worker(executor), retire = vi.spyOn(runtimeAccess, "retireCloudWorkspaceEngineInstances")
+      .mockRejectedValueOnce(new Error("synthetic retirement failure"));
+    try {
+      await expect(current.runOnce()).rejects.toThrow("synthetic retirement failure");
+      await pool.query(`UPDATE cloud_workspace_setup_runs SET lease_expires_at=now()-interval '1 second',
+        last_heartbeat_at=now()-interval '2 seconds' WHERE id=$1`, [seeded.setupRunId]);
+      await current.runOnce();
+      expect(executor.calls).toHaveLength(1);
+      expect((await pool.query("SELECT state,error_code FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0])
+        .toEqual({ state: "failed", error_code: "setup_engine_readiness_failed" });
+    } finally { retire.mockRestore(); }
+  });
+
+  it.each([1, 3])("records a closed lost-lease receipt for crashed claim %i before reclaim or exhaustion", async claimCount => {
+    const seeded = await seedSetup({ state: "running", claimCount, executionFence: claimCount,
+      leaseOwner: "crashed-worker", leaseExpired: true });
+    await worker(new FakeExecutor([async execution => registeredSuccessfulSetup(execution, "")]), { maxClaims: 3 }).runOnce();
+    const receipts = (await pool.query(`SELECT subject FROM audit_log WHERE action='cloud_workspace.setup_claim_failed'
+      AND subject->>'setupRunId'=$1`, [seeded.setupRunId])).rows;
+    expect(receipts).toEqual([{ subject: expect.objectContaining({ claimCount, executionFence: claimCount,
+      diagnostic: expect.objectContaining({ phase: "runtime", code: "setup_lease_lost", errorClass: "timeout", retryable: true }) }) }]);
   });
 
   describe("durable retry deadlines", () => {

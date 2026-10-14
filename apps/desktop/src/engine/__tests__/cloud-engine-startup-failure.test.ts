@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZerosEngine } from "../zeros-engine";
 import { CloudAgentExecutionError } from "../cloud-agent-execution-client";
+import { CloudCredentialControlError } from "../cloud-local-command-queue-start-fences";
 import { CLOUD_COMMAND_FAILURE_CATEGORIES } from "@zeros/protocol/cloud-commands";
 import { CLOUD_AGENT_ADMISSION_CODES } from "@zeros/protocol/cloud-agent-execution";
 import { classifyCloudEngineStartupFailure, parseCloudEngineStartupFailure, readCloudEngineStartupFailure,
@@ -91,6 +92,13 @@ describe("cloud engine startup failure publication", () => {
 });
 
 describe("closed startup evidence", () => {
+  it.each(["credential_control_authority_rejected", "credential_control_conflict", "credential_control_limit",
+    "credential_control_storage_unavailable", "credential_control_invalid"] as const)(
+    "retains the closed credential-fence %s class at boot durability", code => {
+      expect(classifyCloudEngineStartupFailure(new CloudCredentialControlError(code), "boot_durability"))
+        .toEqual({ phase: "boot_durability", name: "CloudCredentialControlError", code, errno: null });
+    });
+
   it("mirrors the closed admission/validation protocol codes without accepting arbitrary suffixes", () => {
     for (const stage of ["admission", "validation"] as const) {
       expect(CLOUD_ENGINE_STARTUP_CODES.filter(code => code.startsWith(`cloud_${stage}_`)))

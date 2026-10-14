@@ -5,6 +5,7 @@ import { CloudAgentBootScopeSchema, CloudAgentCredentialRunInfoSchema,
   type CloudAgentBootScope, type CloudAgentCredentialRunInfo } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudAgentProviderSchema } from "@zeros/protocol/cloud-agent-execution";
 import { openSqlite } from "./db/sqlite";
+import { verifiedCloudLocalCommandPredecessor, type CloudLocalCommandPredecessor } from "./cloud-local-command-queue-checkpoint";
 
 const revision = z.number().int().positive().safe();
 const uuid = z.string().uuid();
@@ -96,9 +97,10 @@ type Selector = z.infer<typeof CloudAgentCredentialControlSelectorSchema>;
 type Activity = z.infer<typeof CloudAgentCredentialControlActivitySchema>;
 type Phase = CloudAgentCredentialControlAcknowledgement["phase"];
 type FenceRow = { mutation_id: string; identity_sha256: string; selectors: string; fence_epoch: number;
-  phase: Phase; desired_revision: number | null; proof_id: string | null };
-type OperationRow = { request_sha256: string; acknowledgement: string | null };
+  phase: Phase; desired_revision: number | null; proof_id: string | null; writer_epoch: string };
+type OperationRow = { request_sha256: string; acknowledgement: string | null; writer_epoch: string };
 type Options = { file: string; scope: CloudAgentBootScope; engineLive(): boolean;
+  predecessor?: CloudLocalCommandPredecessor | null | undefined;
   activity(selectors: readonly Selector[]): unknown;
   /** Trusted current/captured source metadata, recorded before irreversible
    * retirement. Unknown floors can never authorize a later association. */
@@ -130,6 +132,7 @@ export class CloudCredentialStartFences {
   private readonly maxOperations: number;
   private readonly maxMutations: number;
   private closed = false;
+  private initialized = false;
   constructor(private readonly options: Options) {
     this.scope = Object.freeze(CloudAgentBootScopeSchema.parse(options.scope));
     this.maxOperations = options.maxOperations ?? 2048; this.maxMutations = options.maxMutations ?? 512;
@@ -150,27 +153,89 @@ export class CloudCredentialStartFences {
         this.db.exec("ALTER TABLE local_credential_control_operations ADD COLUMN ack_delivered INTEGER NOT NULL DEFAULT 0");
       this.transaction(() => {
         const old = this.db.prepare("SELECT value FROM local_credential_control_metadata WHERE key='scope'").get() as { value: string } | undefined;
-        // An unverified mixed/rolled-back writer cannot activate inherited
-        // controls or claim that the old native holders have been retired.
-        if (old && old.value !== encode(this.scope)) throw new CloudCredentialControlError("credential_control_authority_rejected");
+        const previous = old ? CloudAgentBootScopeSchema.parse(JSON.parse(old.value)) : null;
+        const replacing = old !== undefined && old.value !== encode(this.scope);
+        // A new CP scope alone is not continuity proof. Only the exact sealed
+        // ledger restored under authenticated predecessor lineage can change
+        // the active namespace; native retirement is still the CP gate.
+        if (replacing) {
+          const restored = verifiedCloudLocalCommandPredecessor(options.predecessor, options.file, this.db);
+          if (!restored || encode(restored) !== old.value || restored.organizationId !== this.scope.organizationId ||
+              restored.workspaceId !== this.scope.workspaceId || restored.generation > this.scope.generation ||
+              restored.writerEpoch === this.scope.writerEpoch || restored.engineInstanceId === this.scope.engineInstanceId)
+            throw new CloudCredentialControlError("credential_control_authority_rejected");
+        }
+        const tables = ["local_credential_start_fences", "local_credential_control_operations", "local_credential_retirement_floors"];
+        const scopedTables = tables.map(table => (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[])
+          .some(column => column.name === "writer_epoch"));
+        const modern = scopedTables.every(Boolean);
+        const hasHistory = !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_credential_control_scopes'").get();
+        // This migration commits as one FULL transaction. A mixed layout or
+        // missing modern history is corruption, not another legacy upgrade.
+        if (scopedTables.some(Boolean) !== modern || hasHistory !== modern)
+          throw new CloudCredentialControlError("credential_control_authority_rejected");
+        if (!old && tables.some(table => !!this.db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get()))
+          throw new CloudCredentialControlError("credential_control_authority_rejected");
+        this.db.exec(`CREATE TABLE IF NOT EXISTS local_credential_control_scopes(
+          writer_epoch TEXT PRIMARY KEY,scope TEXT NOT NULL,revision TEXT NOT NULL,retired INTEGER NOT NULL)`);
+        if (modern) {
+          const current = this.db.prepare("SELECT scope,retired FROM local_credential_control_scopes WHERE writer_epoch=?")
+            .get(previous?.writerEpoch ?? this.scope.writerEpoch) as { scope: string; retired: number } | undefined;
+          if (!old || !current || current.retired !== 0 || current.scope !== old.value)
+            throw new CloudCredentialControlError("credential_control_authority_rejected");
+        }
+        const retained = this.db.prepare("SELECT scope,retired FROM local_credential_control_scopes WHERE writer_epoch=?")
+          .get(this.scope.writerEpoch) as { scope: string; retired: number } | undefined;
+        if (retained && (replacing || retained.retired !== 0 || retained.scope !== encode(this.scope)))
+          throw new CloudCredentialControlError("credential_control_authority_rejected");
+        const oldRevision = (this.db.prepare("SELECT value FROM local_credential_control_metadata WHERE key='revision'").get() as { value: string } | undefined)?.value ?? "0";
+        if (!/^(?:0|[1-9][0-9]*)$/.test(oldRevision) || !Number.isSafeInteger(Number(oldRevision)))
+          throw new CloudCredentialControlError("credential_control_storage_unavailable");
+        if (replacing) {
+          const retired = this.db.prepare(`INSERT INTO local_credential_control_scopes(writer_epoch,scope,revision,retired) VALUES(?,?,?,1)
+            ON CONFLICT(writer_epoch) DO UPDATE SET revision=excluded.revision,retired=1 WHERE retired=0 AND scope=excluded.scope`)
+            .run(previous!.writerEpoch, old.value, oldRevision);
+          if (retired.changes !== 1) throw new CloudCredentialControlError("credential_control_authority_rejected");
+          this.db.prepare("UPDATE local_credential_control_metadata SET value=? WHERE key='scope'").run(encode(this.scope));
+          this.db.prepare("UPDATE local_credential_control_metadata SET value='0' WHERE key='revision'").run();
+        }
+        if (!retained && (this.db.prepare("SELECT count(*) AS n FROM local_credential_control_scopes").get() as { n: number }).n >= 4096)
+          throw new CloudCredentialControlError("credential_control_limit");
+        this.db.prepare("INSERT OR IGNORE INTO local_credential_control_scopes(writer_epoch,scope,revision,retired) VALUES(?,?,?,0)")
+          .run(this.scope.writerEpoch, encode(this.scope), replacing ? "0" : oldRevision);
+        // Additive migration preserves every original ACK, tombstone and
+        // retirement floor. Old epochs stay forensic data, never new grants.
+        for (const table of tables) {
+          const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+          if (!columns.some(column => column.name === "writer_epoch")) {
+            this.db.exec(`ALTER TABLE ${table} ADD COLUMN writer_epoch TEXT`);
+            this.db.prepare(`UPDATE ${table} SET writer_epoch=?`).run(previous?.writerEpoch ?? this.scope.writerEpoch);
+          } else if (this.db.prepare(`SELECT 1 FROM ${table} WHERE writer_epoch IS NULL LIMIT 1`).get())
+            throw new CloudCredentialControlError("credential_control_storage_unavailable");
+          this.db.exec(`CREATE INDEX IF NOT EXISTS ${table}_writer ON ${table}(writer_epoch)`);
+        }
         this.db.prepare("INSERT OR IGNORE INTO local_credential_control_metadata(key,value) VALUES('scope',?)").run(encode(this.scope));
         this.db.prepare("INSERT OR IGNORE INTO local_credential_control_metadata(key,value) VALUES('revision','0')").run();
       });
+      this.initialized = true;
     } catch (error) { this.db.close(); this.closed = true; throw error; }
   }
   private transaction<T>(work: () => T): T {
-    try { return this.db.transaction(work)(); }
+    try { return this.db.transaction(() => { if (this.initialized) this.live(); return work(); })(); }
     catch (error) { if (error instanceof CloudCredentialControlError) throw error;
       throw new CloudCredentialControlError("credential_control_storage_unavailable"); }
   }
   private live(): void {
     let live = false; try { live = !this.closed && this.options.engineLive(); } catch { /* fail closed */ }
+    if (live) live = (this.db.prepare("SELECT value FROM local_credential_control_metadata WHERE key='scope'").get() as { value: string } | undefined)?.value === encode(this.scope);
     if (!live) throw new CloudCredentialControlError("credential_control_authority_rejected");
   }
   private row(id: string): FenceRow | undefined {
-    return this.db.prepare("SELECT * FROM local_credential_start_fences WHERE mutation_id=?").get(id) as FenceRow | undefined;
+    const row = this.db.prepare("SELECT * FROM local_credential_start_fences WHERE mutation_id=?").get(id) as FenceRow | undefined;
+    if (row && row.writer_epoch !== this.scope.writerEpoch) throw new CloudCredentialControlError("credential_control_conflict");
+    return row;
   }
-  private rows(): FenceRow[] { return this.db.prepare("SELECT * FROM local_credential_start_fences").all() as FenceRow[]; }
+  private rows(): FenceRow[] { return this.db.prepare("SELECT * FROM local_credential_start_fences WHERE writer_epoch=?").all(this.scope.writerEpoch) as FenceRow[]; }
   private matches(row: FenceRow, selectors: readonly Selector[]): boolean {
     const recorded = z.array(CloudAgentCredentialControlSelectorSchema).parse(JSON.parse(row.selectors));
     return selectors.some(value => recorded.some(item => value.provider === item.provider && value.credentialId === item.credentialId));
@@ -179,7 +244,7 @@ export class CloudCredentialStartFences {
     try { const value = this.options.readyRevision(); return revision.safeParse(value).success ? value : null; } catch { return null; }
   }
   private desiredRevision(): number {
-    return (this.db.prepare("SELECT coalesce(max(desired_revision),0) AS n FROM local_credential_start_fences").get() as { n: number }).n;
+    return (this.db.prepare("SELECT coalesce(max(desired_revision),0) AS n FROM local_credential_start_fences WHERE writer_epoch=?").get(this.scope.writerEpoch) as { n: number }).n;
   }
   /** No requester is called here. The opaque factory checks this at selection,
    * reservation and immediately before actual native write. Entered native
@@ -195,7 +260,7 @@ export class CloudCredentialStartFences {
         if (row.phase === "released" || row.phase === "ready" || !this.matches(row,[parsed])) return false;
         if (row.phase !== "retired" || !row.proof_id) return true;
         const floor = this.db.prepare(`SELECT cache_revision,connection_revision FROM local_credential_retirement_floors
-          WHERE mutation_id=? AND provider=? AND credential_id=?`).get(row.mutation_id,parsed.provider,parsed.credentialId) as
+          WHERE mutation_id=? AND provider=? AND credential_id=? AND writer_epoch=?`).get(row.mutation_id,parsed.provider,parsed.credentialId,this.scope.writerEpoch) as
           { cache_revision: number | null; connection_revision: number | null } | undefined;
         return !floor || floor.cache_revision === null || floor.connection_revision === null ||
           parsed.cacheRevision <= floor.cache_revision || parsed.connectionRevision <= floor.connection_revision;
@@ -225,7 +290,7 @@ export class CloudCredentialStartFences {
       const hash = digest(request), old = this.db.prepare("SELECT * FROM local_credential_control_operations WHERE request_id=?")
         .get(request.controlRequestId) as OperationRow | undefined;
       if (old) {
-        if (old.request_sha256 !== hash) throw new CloudCredentialControlError("credential_control_conflict");
+        if (old.writer_epoch !== this.scope.writerEpoch || old.request_sha256 !== hash) throw new CloudCredentialControlError("credential_control_conflict");
         if (old.acknowledgement) return CloudAgentCredentialControlAcknowledgementSchema.parse(JSON.parse(old.acknowledgement));
       }
       const identity = digest({ scope: this.scope, mutationId: request.mutationId, fenceEpoch: request.fenceEpoch, selectors: request.selectors });
@@ -247,14 +312,16 @@ export class CloudCredentialStartFences {
             (this.db.prepare("SELECT coalesce(sum(ack_bytes),0) AS n FROM local_credential_control_operations").get() as { n: number }).n >= 32 * 1024 * 1024 ||
             !row && (this.db.prepare("SELECT count(*) AS n FROM local_credential_start_fences").get() as { n: number }).n >= this.maxMutations)
           throw new CloudCredentialControlError("credential_control_limit");
-        this.db.prepare("INSERT INTO local_credential_control_operations(request_id,request_sha256) VALUES(?,?)").run(request.controlRequestId, hash);
+        this.db.prepare("INSERT INTO local_credential_control_operations(request_id,request_sha256,writer_epoch) VALUES(?,?,?)")
+          .run(request.controlRequestId, hash, this.scope.writerEpoch);
       }
       const phase: Phase = request.operation === "release" ? "released" : request.operation === "retire" ? "retiring"
         : request.operation === "publish-desired" ? "waiting-ready" : row?.phase ?? "fenced";
-      this.db.prepare(`INSERT INTO local_credential_start_fences(mutation_id,identity_sha256,selectors,fence_epoch,phase,desired_revision,proof_id)
-        VALUES(?,?,?,?,?,?,?) ON CONFLICT(mutation_id) DO UPDATE SET phase=excluded.phase,desired_revision=excluded.desired_revision`)
+      this.db.prepare(`INSERT INTO local_credential_start_fences(mutation_id,identity_sha256,selectors,fence_epoch,phase,desired_revision,proof_id,writer_epoch)
+        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(mutation_id) DO UPDATE SET phase=excluded.phase,desired_revision=excluded.desired_revision
+        WHERE writer_epoch=excluded.writer_epoch`)
         .run(request.mutationId, identity, encode(request.selectors), request.fenceEpoch, row?.phase === "retired" ? "retired" : phase,
-          request.desiredCacheRevision ?? row?.desired_revision ?? null, row?.proof_id ?? null);
+          request.desiredCacheRevision ?? row?.desired_revision ?? null, row?.proof_id ?? null, this.scope.writerEpoch);
       if (request.operation === "retire") {
         for (const selector of request.selectors) {
           let floor: ReturnType<NonNullable<Options["associationFloor"]>> = null;
@@ -262,8 +329,8 @@ export class CloudCredentialStartFences {
             const value = this.options.associationFloor?.(selector.provider,selector.credentialId);
             if (value && revision.safeParse(value.cacheRevision).success && revision.safeParse(value.connectionRevision).success) floor = value;
           } catch { /* Unknown source cannot authorize re-association. */ }
-          this.db.prepare(`INSERT OR IGNORE INTO local_credential_retirement_floors(mutation_id,provider,credential_id,cache_revision,connection_revision)
-            VALUES(?,?,?,?,?)`).run(request.mutationId,selector.provider,selector.credentialId,floor?.cacheRevision ?? null,floor?.connectionRevision ?? null);
+          this.db.prepare(`INSERT OR IGNORE INTO local_credential_retirement_floors(mutation_id,provider,credential_id,cache_revision,connection_revision,writer_epoch)
+            VALUES(?,?,?,?,?,?)`).run(request.mutationId,selector.provider,selector.credentialId,floor?.cacheRevision ?? null,floor?.connectionRevision ?? null,this.scope.writerEpoch);
         }
       }
       return null;
@@ -275,7 +342,8 @@ export class CloudCredentialStartFences {
       const row = this.row(request.mutationId)!;
       if (phase && row.phase !== "retired") {
         const proof = phase === "retired" ? randomUUID() : null;
-        this.db.prepare("UPDATE local_credential_start_fences SET phase=?,proof_id=? WHERE mutation_id=?").run(phase, proof, request.mutationId);
+        this.db.prepare("UPDATE local_credential_start_fences SET phase=?,proof_id=? WHERE mutation_id=? AND writer_epoch=?")
+          .run(phase, proof, request.mutationId, this.scope.writerEpoch);
         row.phase = phase; row.proof_id = proof;
       }
       const metadata = this.db.prepare("SELECT value FROM local_credential_control_metadata WHERE key='revision'").get() as { value: string };
@@ -290,8 +358,8 @@ export class CloudCredentialStartFences {
         desiredCacheRevision: row.desired_revision, readyCacheRevision: this.readyRevision(), activity, proofId: row.proof_id });
       this.db.prepare("UPDATE local_credential_control_metadata SET value=? WHERE key='revision'").run(String(next));
       const body = encode(acknowledgement);
-      this.db.prepare("UPDATE local_credential_control_operations SET acknowledgement=?,ack_bytes=? WHERE request_id=?")
-        .run(body, Buffer.byteLength(body), request.controlRequestId);
+      this.db.prepare("UPDATE local_credential_control_operations SET acknowledgement=?,ack_bytes=? WHERE request_id=? AND writer_epoch=?")
+        .run(body, Buffer.byteLength(body), request.controlRequestId, this.scope.writerEpoch);
       return acknowledgement;
     });
   }
@@ -335,18 +403,19 @@ export class CloudCredentialStartFences {
   pendingAcknowledgement(): CloudAgentCredentialControlAcknowledgement | null {
     this.live();
     const row = this.db.prepare(`SELECT acknowledgement FROM local_credential_control_operations
-      WHERE acknowledgement IS NOT NULL AND ack_delivered=0 ORDER BY json_extract(acknowledgement,'$.controlRevision') LIMIT 1`)
-      .get() as { acknowledgement: string } | undefined;
+      WHERE writer_epoch=? AND acknowledgement IS NOT NULL AND ack_delivered=0 ORDER BY json_extract(acknowledgement,'$.controlRevision') LIMIT 1`)
+      .get(this.scope.writerEpoch) as { acknowledgement: string } | undefined;
     return row ? CloudAgentCredentialControlAcknowledgementSchema.parse(JSON.parse(row.acknowledgement)) : null;
   }
   confirmAcknowledgement(input: CloudAgentCredentialControlAcknowledgement): void {
     this.live(); const ack = CloudAgentCredentialControlAcknowledgementSchema.parse(input);
     this.transaction(() => {
-      const row = this.db.prepare("SELECT acknowledgement FROM local_credential_control_operations WHERE request_id=?")
-        .get(ack.controlRequestId) as { acknowledgement: string | null } | undefined;
+      const row = this.db.prepare("SELECT acknowledgement FROM local_credential_control_operations WHERE request_id=? AND writer_epoch=?")
+        .get(ack.controlRequestId, this.scope.writerEpoch) as { acknowledgement: string | null } | undefined;
       if (!row?.acknowledgement || digest(JSON.parse(row.acknowledgement)) !== digest(ack))
         throw new CloudCredentialControlError("credential_control_conflict");
-      this.db.prepare("UPDATE local_credential_control_operations SET ack_delivered=1 WHERE request_id=?").run(ack.controlRequestId);
+      this.db.prepare("UPDATE local_credential_control_operations SET ack_delivered=1 WHERE request_id=? AND writer_epoch=?")
+        .run(ack.controlRequestId, this.scope.writerEpoch);
     });
   }
   close(): void { if (!this.closed) { this.closed = true; this.db.close(); } }

@@ -11,7 +11,11 @@
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
    For worker failures, retain the first closed diagnostic before cleanup and
-   across reconciliation. For packaged imports, reproduce against staged
+   across reconciliation, including late heartbeats and expired-claim recovery.
+   For resume bugs, test a real sealed store across fresh engine/writer identities;
+   a fresh database cannot expose inherited fences. Require authenticated
+   predecessor custody for any atomic scope migration and retain old ACKs.
+   For packaged imports, reproduce against staged
    sources; a checkout import or bundled CLI can hide a missing source file.
    For periodic disconnects, inspect client retirement timers before blaming
    server idle limits. Test real server closure, reconnect acknowledgement,

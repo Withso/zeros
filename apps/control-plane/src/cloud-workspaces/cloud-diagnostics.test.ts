@@ -4,6 +4,10 @@ import { classifyCloudFailure, parseSetupDiagnostic, setupDiagnosticSchema, clou
 import { CLOUD_ENGINE_STARTUP_PHASES, CLOUD_ENGINE_STARTUP_NAMES, CLOUD_ENGINE_STARTUP_CODES, CLOUD_ENGINE_STARTUP_ERRNOS,
   parseCloudEngineStartupFailure } from "../../../desktop/src/engine/agents/containment/cloud-engine-startup-failure.mjs";
 describe("bounded cloud diagnostics", () => {
+  it.each(["setup_worker_stopped", "setup_heartbeat_failed", "setup_lease_lost", "setup_timed_out",
+    "setup_unknown_failure", "setup_executor_failure"])("keeps the closed worker failure code %s", code => {
+    expect(classifyCloudFailure({ code }, "runtime").code).toBe(code);
+  });
   it("retains typed causes without messages, stacks, nested bodies or arbitrary codes", () => {
     const canary = "credential-canary-do-not-retain";
     const db = Object.assign(new Error(canary), { code: "40001", detail: canary });

@@ -227,6 +227,30 @@ and `cgroup_retired`. The installer reports a nested setup failure as stage
 installer diagnostic cannot forward a setup check such as `generation_pin`.
 Diagnostics cannot include free text, paths, URLs, stderr or exception fields.
 
+Setup failures also preserve the closed engine startup class and substage,
+including credential-control rejection at `boot_durability`. Each failed owned
+claim records `cloud_workspace.setup_claim_failed` in the append-only audit log,
+keyed by setup run and execution fence. The receipt commits before retirement;
+current-claim timings can then reset on retry without losing earlier evidence.
+Admission cleanup or a later heartbeat cannot replace the first error. A
+reclaimed crash lease records `setup_lease_lost` at the worker's `runtime` phase
+unless an earlier exact-claim receipt exists; it cannot infer an engine stage
+that was never received. Slow-request logs alone cannot prove a boot call was
+skipped. Known credential-control integrity/storage failures are terminal;
+existing classified transient retries retain their original deadlines.
+
+For a resume correction, qualify the new immutable runtime on its exact base,
+then use the product Computer build and verify the persisted `build.runtime_id`
+before creating the test workspace. A restart keeps the generation's runtime
+pin; deploying the CP alone cannot repair an older pinned engine. Qualification
+must cover create, terminal, stop and resume with both fresh and retained
+credential controls, plus 20 consecutive usable wakes with zero setup retries.
+Retain the per-claim diagnostic and timing receipts for any failed attempt.
+Source rollback can stop new selection and revert CP diagnostics without
+altering data. Keep a migrated SQLite ledger on a writer-aware qualified runtime;
+do not downgrade it in place to an older writer-unaware engine or clear its
+fences. Existing generation pins and product recovery checks stay authoritative.
+
 ## Registry, pins and authority
 
 The runtime authority has five registry tables: base compatibility contracts, approved Boat base
