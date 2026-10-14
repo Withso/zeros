@@ -74,6 +74,19 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
   await expect(recovery).not.toContainText("No conversation found");
   await expect(recovery).not.toContainText("message");
   await recovery.getByRole("button", { name: "Show live recovery", exact: true }).click();
+  const monitor = page.locator("#claude-monitor-activity");
+  await expect(monitor.getByText("Waiting for 2 background tasks", { exact: true })).toBeVisible();
+  await monitor.getByRole("button", { name: "One check running", exact: true }).click();
+  await expect(monitor.getByText("Waiting for 1 background task", { exact: true })).toBeVisible();
+  await monitor.getByRole("button", { name: "Only watcher remains", exact: true }).click();
+  await expect(monitor).toHaveAttribute("data-activity", "idle");
+  await expect(monitor.getByRole("status")).toHaveCount(0);
+  check("Two checks plus a Monitor count 2 then 1, and only the watcher leaves no waiting or working indicator", true);
+  await monitor.getByRole("button", { name: "Claude resumes", exact: true }).click();
+  await expect(monitor).toHaveAttribute("data-activity", "running");
+  await expect(monitor.getByLabel("Agent working", { exact: true })).toBeVisible();
+  check("New parent output resumes activity after an ambient-only wait", true);
+  await monitor.getByRole("button", { name: "Two checks running", exact: true }).click();
   const runIds = ["background-run-1", "background-run-finished", "background-run-2", "background-run-late"];
   for (const id of runIds) {
     const state = page.locator(`#${id}`);

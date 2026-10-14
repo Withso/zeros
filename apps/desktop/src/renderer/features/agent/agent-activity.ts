@@ -32,6 +32,11 @@ export function agentActivity(
   // Claude can hold the SDK Result while children finish. A native end_turn
   // parks only the parent presentation; the outstanding send stays cancellable.
   if (slot.status === "streaming") {
+    // Ambient watchers retain the native process, but an idle parent with no
+    // visible work must not keep the transcript or tabs working until Result.
+    if (claude && slot.backgroundActivity?.state === "idle" &&
+        slot.backgroundTasks.length === 0 &&
+        !slot.workflows.some((workflow) => workflow.status === "running")) return null;
     return claude &&
       slot.waitingForBackgroundTasks &&
       slot.backgroundTasks.length > 0 &&

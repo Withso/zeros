@@ -505,6 +505,12 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
 - Keep native task ownership separate from visible activity. Ambient watchers
   (including legacy `skip_transcript` tasks) retain their process while alive,
   but do not activate the waiting count, workflow display or busy indicators.
+  If `ambient` is absent, recognize a native `Monitor` through the start's
+  `tool_use_id` or a single successful `MonitorOutput.taskId`. Never infer this
+  from a description, shell command or MCP tool name. Keep absence distinct
+  from an explicit `false`; the membership declaration wins over the fallback.
+  A parent `end_turn` can park a delayed-result stream with only a watcher
+  remaining. New parent output or a new user send still activates the UI.
   A valid `background_tasks_changed` frame replaces membership, including an
   empty set; metadata edges cannot resurrect a task absent from that snapshot.
   Older providers without membership snapshots retain the edge-based fallback.

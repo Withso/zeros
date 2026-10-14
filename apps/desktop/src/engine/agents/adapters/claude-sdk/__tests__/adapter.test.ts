@@ -2230,6 +2230,97 @@ describe("ClaudeSdkAdapter", () => {
     }
   });
 
+  it.each(["Personal Local", "organization-local", "organization-cloud"])(
+    "keeps a Monitor alive without counting it as work in %s",
+    async (placement) => {
+      const cloud = placement === "organization-cloud";
+      const boundary = cloud ? { status: { actor: "agent-code", backend: "cloud-worker" } } as never : undefined;
+      const execution = cloud ? {
+        mode: "actor-grant-v1", model: "claude-haiku-4-5", customization: null,
+        cwd: "/srv/zeros/workspace",
+        lifetime: { signal: new AbortController().signal, assertLive: vi.fn() },
+        coordinator: { nativeHome: await physicalClaudeHome() }, productServers: [],
+      } as unknown as cloudExecutions.CloudProviderExecution : undefined;
+      const original = cloudExecutions.cloudProviderExecution;
+      const authority = cloud ? vi.spyOn(cloudExecutions, "cloudProviderExecution")
+        .mockImplementation((value) => value === boundary ? execution! : original(value)) : undefined;
+      const runtime = cloud ? admittedClaudeRuntimeFixture() : undefined;
+      const emitted: SessionNotification[] = [];
+      const interrupt = vi.fn(async () => {});
+      const live = makePushableQuery({ interrupt });
+      const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn, idleTimeoutMs: 1_000 });
+      vi.useFakeTimers();
+      try {
+        const { session } = await adapter.newSession({
+          cwd: cloud ? "/srv/zeros/workspace" : path.join(TMP_DATA, placement),
+          executionBoundary: boundary,
+          ...(cloud ? { env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ANTHROPIC_API_KEY: "synthetic-provider-key" } } : {}),
+        });
+        const snapshot = () => emitted.map((note) => note.update)
+          .filter((update) => update.sessionUpdate === "background_tasks_update").at(-1)!;
+        const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Run checks")] });
+        await flushMicrotasks();
+        live.push(initMsg("monitor-session"), {
+          type: "assistant", message: { content: [{ type: "tool_use", id: "monitor-call", name: "Monitor",
+            input: { command: "watch-checks", description: "Wait for checks", timeout_ms: 300_000 } }] },
+        }, {
+          type: "system", subtype: "background_tasks_changed",
+          tasks: ["checks", "baseline", "watch"].map((task_id) => ({ task_id, task_type: "local_bash" })),
+        }, {
+          type: "system", subtype: "task_started", task_id: "watch", tool_use_id: "monitor-call",
+          task_type: "local_bash", is_backgrounded: true,
+        }, {
+          type: "user", tool_use_result: { taskId: "watch", timeoutMs: 300_000 },
+          message: { content: [{ type: "tool_result", tool_use_id: "monitor-call", content: "Monitor started" }] },
+        }, resultOk("monitor-session"));
+        await first;
+        expect(snapshot()).toMatchObject({ tasks: [{ taskId: "checks" }, { taskId: "baseline" }], waiting: true });
+        live.push({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "baseline" }, { task_id: "watch" }] });
+        await flushMicrotasks();
+        expect(snapshot()).toMatchObject({ tasks: [{ taskId: "baseline" }], waiting: true });
+        live.push({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "watch" }] });
+        await flushMicrotasks();
+        expect(snapshot()).toMatchObject({ tasks: [], waiting: false });
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(live.control.closes).toBe(0);
+        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(true);
+
+        const next = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Status")] });
+        await flushMicrotasks();
+        live.push(initMsg("monitor-session"), assistantText("The checks have finished."), resultOk("monitor-session"));
+        await next;
+        expect(snapshot()).toMatchObject({ tasks: [], waiting: false });
+        expect(live.captured).toHaveLength(1);
+
+        // Completion releases ownership, but a new watcher remains cancellable
+        // even though no waiting indicator is shown for it.
+        live.push({ type: "system", subtype: "task_notification", task_id: "watch", status: "completed" });
+        await flushMicrotasks();
+        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(false);
+        live.push({
+          type: "assistant", message: { content: [{ type: "tool_use", id: "second-monitor", name: "Monitor",
+            input: { command: "watch-checks", description: "Wait for checks", timeout_ms: 300_000 } }] },
+        }, {
+          type: "system", subtype: "task_started", task_id: "second-watch", tool_use_id: "second-monitor",
+          task_type: "local_bash", is_backgrounded: true,
+        }, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "second-watch" }] });
+        await flushMicrotasks();
+        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(true);
+        expect(snapshot()).toMatchObject({ tasks: [], waiting: false });
+        await adapter.cancel({ sessionId: session.sessionId });
+        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(false);
+        expect(interrupt).toHaveBeenCalledOnce();
+        expect(live.control.closes).toBe(1);
+        if (runtime) expect(runtime.desktop).not.toHaveBeenCalled();
+      } finally {
+        await adapter.dispose();
+        vi.useRealTimers();
+        runtime?.dispose();
+        authority?.mockRestore();
+      }
+    },
+  );
+
   it.each([false, true])("retains the newest resumed task run across idle teardown and an older completion (ambient=%s)", async (ambient) => {
     vi.useFakeTimers();
     const live = makePushableQuery();

@@ -9,6 +9,12 @@ The pack is introduced: the router, verify, review, eval and learn skills,
 five playbooks, and eleven seed eval cases from real Alpha incidents.
 
 Lessons already encoded:
+- **An omitted activity flag is not an explicit false.** Monitor watchers can
+  arrive as ordinary shell tasks on older Claude streams. Join native tool and
+  task IDs as a fallback, retain explicit membership flags, and keep process
+  ownership separate from the visible 2 → 1 → 0 task count. Native, adapter and
+  browser regressions cover late joins, cancellation and an idle parent with
+  only a watcher remaining (case `claude-monitor-visible-activity`).
 - **Claude init does not confirm a resumable conversation.** Failed sign-in
   published an ID before Claude saved the conversation, so the next send resumed
   a missing session. Confirm root model work or success before persisting a new
