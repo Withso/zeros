@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
-import { CloudComputerV2BuildRequestSchema, type CloudComputerV2BuildSummary } from "@zeros/protocol/cloud-computer-v2";
+import { CloudComputerV2BuildRequestSchema, CloudComputerV2BuildRuntimeSchema, type CloudComputerV2BuildSummary } from "@zeros/protocol/cloud-computer-v2";
 import { CloudWorkspaceDocumentSchema, OptionsSchema, AgentGrantsSchema, CloudAgentBootAvailabilitySchema, type CloudWorkspaceDocument } from "../../apps/desktop/src/renderer/platform/cloud-workspace-contract";
 import { cloudComputerV2StateSchema, cloudComputerV2BuildSchema, buildResult, logSchema } from "../../apps/desktop/src/renderer/features/settings/cloud-computer-v2-contract";
 import type { ZerosDevSession } from "./session";
@@ -9,8 +9,10 @@ import type { Fixture } from "./config";
 import { CreateBodySchema, type Run, type RunHandle } from "./receipts";
 import { AlphaTransport, type JsonRequest } from "./transport";
 import { ZerosDevError } from "./errors";
+import { readSetupProgress, type SetupObservation } from "./setup-observation";
 
 const document=z.object({workspace:CloudWorkspaceDocumentSchema});
+const observedDocument=document.extend({setupProgress:z.unknown().optional()});
 const pendingDeletion=z.object({truncated:z.boolean(),pendingDeletion:z.array(z.object({workspaceId:z.string().uuid(),generation:z.number().int().positive()})).max(500)});
 export type Agent="claude"|"codex"|"cursor";
 type SessionPort=Pick<ZerosDevSession,"fixture"|"whoami"|"accessToken">;
@@ -66,11 +68,22 @@ export class ProductApi {
     const build=await this.request(`${this.computerRoot(fixture)}/builds/${result.id}`,cloudComputerV2BuildSchema,{signal});
     if(build.id!==result.id||build.version!==result.version)throw new ZerosDevError("identity_changed");return build;
   }
-  async waitComputer(run:Run,signal?:AbortSignal){
+  async verifyComputerRuntime(build:Pick<CloudComputerV2BuildSummary,"id"|"version">,signal?:AbortSignal,expectedRuntime?:string):Promise<"confirmed">{
+    if(expectedRuntime!==undefined&&!/^r1-[a-f0-9]{64}$/.test(expectedRuntime))throw new ZerosDevError("invalid_request");
+    const fixture=await this.session.fixture();
+    const proof=await this.request(`${this.computerRoot(fixture)}/builds/${build.id}/runtime`,CloudComputerV2BuildRuntimeSchema,{signal});
+    if(proof.buildId!==build.id||proof.version!==build.version)throw new ZerosDevError("identity_changed");
+    if(!proof.runtimeId||!proof.baseImageId||!proof.selected||proof.runtimeId!==proof.selected.runtimeId||
+      proof.baseImageId!==proof.selected.baseImageId||expectedRuntime!==undefined&&proof.runtimeId!==expectedRuntime)
+      throw new ZerosDevError("runtime_pin_unconfirmed");
+    return "confirmed";
+  }
+  async waitComputer(run:Run,signal?:AbortSignal,expectedRuntime?:string){
     return this.observe(async bound=>{
       const build=await this.readBuild(run,bound);
       if(["failed","cancelled"].includes(build.state))throw new ZerosDevError("computer_failed");
-      return build.state==="succeeded"&&build.templateState==="ready"?build:null;
+      if(build.state!=="succeeded"||build.templateState!=="ready")return null;
+      return {...build,runtimePin:await this.verifyComputerRuntime(build,bound,expectedRuntime)};
     },signal,900_000);
   }
   async computerLog(run:Run,after=0,signal?:AbortSignal){
@@ -136,9 +149,15 @@ export class ProductApi {
     await handle.save();return next;
   }
   async waitWorkspace(handle:RunHandle,target:"running"|"stopped"|"deleted",signal?:AbortSignal):Promise<CloudWorkspaceDocument>{
-    return this.observe(async bound=>{
+    let setup:SetupObservation|undefined;
+    try{return await this.observe(async bound=>{
       const pending=handle.run.lifecycle.at(-1);
-      const row=await this.workspace(handle.run,bound,pending?.operation==="wake"&&!pending.confirmed);
+      const result=handle.run.create?.result;if(!result)throw new ZerosDevError("receipt_missing");
+      const fixture=await this.session.fixture();
+      const observation=await this.request(`/v1/cloud-workspaces/${result.id}?setupProgress=true`,observedDocument,{signal:bound});
+      const row=observation.workspace;
+      this.assertWorkspace(row,fixture,handle.run,pending?.operation==="wake"&&!pending.confirmed);
+      setup=readSetupProgress(observation.setupProgress,row.generation.number);
       if(row.status==="failed"&&target!=="deleted")throw new ZerosDevError("workspace_failed");
       if(target==="running"?!["ready","busy"].includes(row.status):row.status!==target)return null;
       if(target==="deleted"){
@@ -152,7 +171,11 @@ export class ProductApi {
       const expected=target==="running"?"wake":target==="stopped"?"stop":"delete";
       if(pending?.operation===expected)pending.confirmed=true;
       await handle.save();return row;
-    },signal,180_000);
+    },signal,180_000);}catch(error){
+      if(error instanceof ZerosDevError&&["deadline","workspace_failed"].includes(error.code))
+        throw new ZerosDevError(error.code,error.status,error.retryAfterMs,setup);
+      throw error;
+    }
   }
   async cleanup(handle:RunHandle,apply=false,signal?:AbortSignal):Promise<{planned:number;confirmed:number}>{
     if(handle.run.deletionConfirmed)return {planned:0,confirmed:1};
@@ -199,7 +222,9 @@ export class ProductApi {
       let wait=Math.min(5000,500*2**Math.min(poll,4));
       try{const result=await read(signal);if(result!==null)return result;}
       catch(error){if(!(error instanceof ZerosDevError)||error.code!=="rate_limited")throw error;wait=error.retryAfterMs??5000;}
-      try{await this.sleep(wait,signal);}catch{throw new ZerosDevError("deadline");}
+      const remaining=timeoutMs-(this.now()-start);
+      if(remaining<=0)throw new ZerosDevError("deadline");
+      try{await this.sleep(Math.min(wait,remaining),signal);}catch{throw new ZerosDevError("deadline");}
     }
     throw new ZerosDevError("deadline");
   }

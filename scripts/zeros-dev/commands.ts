@@ -6,12 +6,12 @@ import type { Run, RunHandle, RunStore, Source } from "./receipts";
 import type { ZerosDevRuntime } from "./runtime";
 import { parseRepositorySelection, type AgentValues, type RepositorySelection } from "./config";
 import { Evidence, assertNoCredentials, redactContent, type EvidenceEvent } from "./evidence";
-import { ZerosDevError, closedError } from "./errors";
+import { ZerosDevError, closedError, setupEvidence } from "./errors";
 import type { controlPlaneHealth, controlPlaneLogs, databaseHealth } from "./health";
 
 const COMMANDS = {
   login: [], whoami: [], logout: [], "org ensure": [], "repo ensure": [], "github connect": ["repository", "repository-id"],
-  "computer build": ["run", "wait"], "computer status": ["run"], "computer logs": ["run", "after"],
+  "computer build": ["run", "wait", "expect-runtime"], "computer status": ["run"], "computer logs": ["run", "after"],
   "workspace create": ["run", "wait"], "workspace resume": ["run", "wait"], "workspace stop": ["run", "wait"], "workspace delete": ["run", "wait"], "workspace status": ["run"],
   "agent send": ["run", "agent", "model", "prompt-file", "prompt", "continue", "wait"], "chat tail": ["run", "prompt"],
   "terminal run": ["run", "script", "command"], "health cp": ["expect-source"], "health cp-logs": ["run"], "health vm": ["run"], "health db": ["run", "expect-runtime"],
@@ -26,7 +26,7 @@ export const HELP = `Alpha-only Linux zeros-dev (credentials: canonical .env.age
   login | whoami | logout
   github connect --repository OWNER/NAME --repository-id NUMERIC_ID
   org ensure | repo ensure
-  computer build [--run UUID] [--wait]
+  computer build [--run UUID] [--wait] [--expect-runtime r1-SHA256]
   computer status|logs --run UUID [--after N]
   workspace create [--run UUID] [--wait]
   workspace resume|stop|delete|status --run UUID
@@ -138,7 +138,8 @@ export async function executeCommand(command: Command, services: Services, signa
     } else await withRun(async handle => {
       if (name === "computer build") {
         await evidence.step("computer_build", () => services.api.buildComputer(handle, signal));
-        const row = await evidence.step("computer_wait", () => services.api.waitComputer(handle.run, signal)); result({ state: row.state, version: row.version });
+        const row = await evidence.step("computer_wait", () => services.api.waitComputer(handle.run, signal, options["expect-runtime"] as string | undefined));
+        result({ state: row.state, version: row.version, runtimePin: row.runtimePin });
       } else if (name === "computer status") {
         const row = await services.api.readBuild(handle.run, signal); result({ state: row.state, version: row.version, templateState: row.templateState });
       } else if (name === "computer logs") {
@@ -146,11 +147,11 @@ export async function executeCommand(command: Command, services: Services, signa
         await display("computer_log", JSON.stringify(log));
       } else if (name === "workspace create") {
         await evidence.step("workspace_create", () => services.api.createWorkspace(handle, signal));
-        const row = await evidence.step("workspace_wait", () => services.api.waitWorkspace(handle, "running", signal)); result({ status: row.status, generation: row.generation.number });
+        const row = await evidence.step("workspace_create_wait", () => services.api.waitWorkspace(handle, "running", signal)); result({ status: row.status, generation: row.generation.number });
       } else if (name === "workspace resume" || name === "workspace stop" || name === "workspace delete") {
         const action = name === "workspace resume" ? "wake" : name === "workspace stop" ? "stop" : "delete";
         await evidence.step(name.replace(" ", "_") as EvidenceEvent["phase"], () => services.api.lifecycle(handle, action, signal));
-        const row = await evidence.step("workspace_wait", () => services.api.waitWorkspace(handle, action === "wake" ? "running" : action === "stop" ? "stopped" : "deleted", signal));
+        const row = await evidence.step(`${name.replace(" ", "_")}_wait` as EvidenceEvent["phase"], () => services.api.waitWorkspace(handle, action === "wake" ? "running" : action === "stop" ? "stopped" : "deleted", signal));
         result({ status: row.status, generation: row.generation.number, deletionConfirmed: handle.run.deletionConfirmed });
       } else if (name === "workspace status" || name === "health vm") {
         const row = await evidence.step("health_vm", () => services.api.workspace(handle.run, signal));
@@ -183,19 +184,20 @@ export async function executeCommand(command: Command, services: Services, signa
         const health = await sourceCheck();
         services.write({ schema: "zeros.dev-context/v1", runId, deployedSource: health.sourceSha, ready: health.ready });
         if (!health.ready || !health.cloud.enabled) throw new ZerosDevError("service_unavailable");
+        let failure: { error: unknown } | undefined;
         try {
           if (options["build-computer"]) {
             await evidence.step("computer_build", () => services.api.buildComputer(handle, signal));
             await evidence.step("computer_wait", () => services.api.waitComputer(handle.run, signal));
           }
           await evidence.step("workspace_create", () => services.api.createWorkspace(handle, signal));
-          await evidence.step("workspace_wait", () => services.api.waitWorkspace(handle, "running", signal));
+          await evidence.step("workspace_create_wait", () => services.api.waitWorkspace(handle, "running", signal));
           for (const stage of ["before", "after"] as const) {
             if (stage === "after") {
               await evidence.step("workspace_stop", () => services.api.lifecycle(handle, "stop", signal));
-              await evidence.step("workspace_wait", () => services.api.waitWorkspace(handle, "stopped", signal));
+              await evidence.step("workspace_stop_wait", () => services.api.waitWorkspace(handle, "stopped", signal));
               await evidence.step("workspace_resume", () => services.api.lifecycle(handle, "wake", signal));
-              await evidence.step("workspace_wait", () => services.api.waitWorkspace(handle, "running", signal));
+              await evidence.step("workspace_resume_wait", () => services.api.waitWorkspace(handle, "running", signal));
             }
             await runtimeWork(handle.run, async runtime => {
               const marker = `.zeros-dev-${runId}`;
@@ -209,18 +211,21 @@ export async function executeCommand(command: Command, services: Services, signa
             });
           }
           await evidence.step("workspace_stop", () => services.api.lifecycle(handle, "stop", signal));
-          await evidence.step("workspace_wait", () => services.api.waitWorkspace(handle, "stopped", signal));
-        } finally {
+          await evidence.step("workspace_stop_wait", () => services.api.waitWorkspace(handle, "stopped", signal));
+        } catch (error) { failure = { error }; }
+        try {
           // A scenario owns its throwaway. Keep cleanup independent of its
           // expired/SIGINT work signal, but still finite and product-verified.
+          // Its separate evidence must never replace the first failing stage.
           await evidence.step("cleanup", () => services.api.cleanup(handle, true, AbortSignal.timeout(30_000)));
-        }
+        } catch (error) { failure ??= { error }; }
+        if (failure) throw failure.error;
         result({ complete: true, deletionConfirmed: handle.run.deletionConfirmed });
       }
     }, ["computer build", "workspace create", "scenario run smoke"].includes(name));
     return 0;
   } catch (error) {
-    result({ outcome: "failed", code: closedError(error) }); return 1;
+    result({ outcome: "failed", code: closedError(error), ...setupEvidence(error) }); return 1;
   }
 }
 

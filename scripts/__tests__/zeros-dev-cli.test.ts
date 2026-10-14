@@ -7,8 +7,13 @@ import { describe, expect, it, vi } from "vitest";
 import { parseCommand, executeCommand, type Services } from "../zeros-dev/commands";
 import type { RunHandle } from "../zeros-dev/receipts";
 import { runCli } from "../zeros-dev/cli";
+import { ZerosDevError } from "../zeros-dev/errors";
 
 describe("documented zeros-dev Linux command", () => {
+  it("accepts an exact intended runtime for Computer verification without accepting a channel or origin",()=>{
+    const runtime=`r1-${"a".repeat(64)}`;
+    expect(parseCommand(["computer","build","--wait","--expect-runtime",runtime])).toEqual({name:"computer build",options:{wait:true,"expect-runtime":runtime}});
+  });
   it("runs health with identity pins alone and sends no credential or GitHub request",async()=>{
     const root=await mkdtemp(path.join(tmpdir(),"zeros-dev-health-cli-"));
     const rows:unknown[]=[];
@@ -91,6 +96,30 @@ function harness() {
 }
 
 describe("zeros-dev bounded orchestration and evidence", () => {
+  it("keeps the first resume failure when bounded scenario cleanup also fails",async()=>{
+    const f=harness();let runningWaits=0;f.failDelete();
+    const setup={attempt:2,claimCount:3,state:"running" as const,errorCode:"setup_engine_readiness_failed" as const};
+    f.api.waitWorkspace.mockImplementation(async(_handle,target)=>{
+      if(target==="running"&&++runningWaits===2)throw new ZerosDevError("deadline",undefined,undefined,setup);
+      return {status:target==="running"?"ready":"stopped",generation:{number:1,observedState:"running",lastObservedAt:null}};
+    });
+    expect(await executeCommand(parseCommand(["scenario","run","smoke","--run",f.runId,"--agent","codex","--model","fixture-model"])!,f.services,AbortSignal.timeout(1000))).toBe(1);
+    expect(f.rows).toContainEqual(expect.objectContaining({schema:"zeros.dev-result/v1",data:{outcome:"failed",code:"deadline",setup}}));
+    expect(f.handle.run.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({phase:"workspace_resume_wait",code:"deadline",setup}),
+      expect.objectContaining({phase:"cleanup",code:"internal"}),
+    ]));
+  });
+  it("names a resume readiness failure and emits only the closed setup observation",async()=>{
+    const f=harness();
+    f.api.waitWorkspace.mockRejectedValue(new ZerosDevError("deadline",undefined,undefined,
+      {attempt:2,claimCount:3,state:"running",errorCode:"setup_engine_readiness_failed"}));
+    expect(await executeCommand(parseCommand(["workspace","resume","--run",f.runId])!,f.services,AbortSignal.timeout(1000))).toBe(1);
+    expect(f.rows).toContainEqual(expect.objectContaining({schema:"zeros.dev-evidence/v1",phase:"workspace_resume_wait",outcome:"failed",code:"deadline",
+      setup:{attempt:2,claimCount:3,state:"running",errorCode:"setup_engine_readiness_failed"}}));
+    expect(f.rows).toContainEqual(expect.objectContaining({schema:"zeros.dev-result/v1",data:expect.objectContaining({code:"deadline",
+      setup:{attempt:2,claimCount:3,state:"running",errorCode:"setup_engine_readiness_failed"}})}));
+  });
   it("runs a timed create/prompt/terminal/stop/resume/stop scenario and verifies cleanup", async () => {
     const f = harness();
     const code = await executeCommand(parseCommand(["scenario", "run", "smoke", "--run", f.runId, "--agent", "codex", "--model", "fixture-model"])!, f.services, AbortSignal.timeout(1000));

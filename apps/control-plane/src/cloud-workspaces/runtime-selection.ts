@@ -109,26 +109,37 @@ function artifact(row: BundleRow): { descriptor: RuntimeDescriptor; objectKey: s
   return { descriptor: parsed.data, objectKey: row.object_key };
 }
 
-async function lockQualifications(tx: Tx, runtimeId: string, compatibilityId: string, mode: CloudRuntimeQualificationMode, kinds: readonly string[] = REQUIRED_KINDS) {
+async function lockQualifications(tx: Tx, runtimeId: string, compatibilityId: string, mode: CloudRuntimeQualificationMode, kinds: readonly string[] = REQUIRED_KINDS, lockRows = true) {
   const result = await tx.query(`SELECT qualification.credential_kind FROM cloud_runtime_qualifications qualification
     WHERE qualification.runtime_id=$1 AND qualification.base_compatibility_id=$2
       AND qualification.credential_kind=ANY($3::text[]) AND ${runtimeQualificationPredicate("$4")}
-    ORDER BY qualification.credential_kind FOR SHARE OF qualification`, [runtimeId, compatibilityId, kinds, mode]);
+    ORDER BY qualification.credential_kind${lockRows ? " FOR SHARE OF qualification" : ""}`, [runtimeId, compatibilityId, kinds, mode]);
   return kinds.length > 0 && result.rowCount === kinds.length;
 }
 
 /** The caller owns the organization admission transaction. Lock revocable
  * registry rows through generation INSERT; no provider/artifact I/O occurs here. */
 export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualificationMode, baseImageId?: string, additionalKinds: readonly string[] = []) {
+  return resolveCloudRuntimeSelection(tx, mode, baseImageId, additionalKinds, true);
+}
+
+/** Read-only diagnostic snapshot of the builder's selection. It grants no
+ * authority: admissions still use selectCloudRuntime and its revocation locks. */
+export async function observeCloudRuntimeSelection(tx: Tx, mode: CloudRuntimeQualificationMode) {
+  return resolveCloudRuntimeSelection(tx, mode, undefined, [], false);
+}
+
+async function resolveCloudRuntimeSelection(tx: Tx, mode: CloudRuntimeQualificationMode, baseImageId: string | undefined,
+  additionalKinds: readonly string[], lockRows: boolean) {
   // Automatic updates require every delegated kind in addition to the
   // existing three-kind floor. Other callers retain their default selection.
   const requiredKinds = [...new Set([...REQUIRED_KINDS, ...additionalKinds])];
   const base = (await tx.query<BaseRow>(`SELECT base.* FROM cloud_runtime_base_images base
     WHERE base.provider='boat' AND base.revoked_at IS NULL AND ($1::text IS NULL OR base.base_image_id=$1)
-    ORDER BY base.approved_at DESC, base.base_image_id LIMIT 1 FOR SHARE OF base`, [baseImageId ?? null])).rows[0];
+    ORDER BY base.approved_at DESC, base.base_image_id LIMIT 1${lockRows ? " FOR SHARE OF base" : ""}`, [baseImageId ?? null])).rows[0];
   if (!base) return null;
   if (!(await tx.query(`SELECT 1 FROM cloud_runtime_base_contracts contract
-    WHERE contract.base_compatibility_id=$1 AND contract.revoked_at IS NULL FOR SHARE OF contract`,
+    WHERE contract.base_compatibility_id=$1 AND contract.revoked_at IS NULL${lockRows ? " FOR SHARE OF contract" : ""}`,
   [base.base_compatibility_id])).rowCount) return null;
   const bundle = (await tx.query<BundleRow & { release_order: string }>(`SELECT bundle.*, release.release_order FROM cloud_runtime_channel_releases release
     JOIN cloud_runtime_bundles bundle ON bundle.runtime_id=release.runtime_id
@@ -139,9 +150,9 @@ export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualification
         WHERE qualification.runtime_id=bundle.runtime_id AND qualification.base_compatibility_id=$3
           AND qualification.credential_kind=required.kind AND ${runtimeQualificationPredicate("$4")}
       ))
-    ORDER BY release.release_order DESC LIMIT 1 FOR SHARE OF release, bundle`,
+    ORDER BY release.release_order DESC LIMIT 1${lockRows ? " FOR SHARE OF release, bundle" : ""}`,
   [CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, requiredKinds, base.base_compatibility_id, mode])).rows[0];
-  if (!bundle || !await lockQualifications(tx, bundle.runtime_id, base.base_compatibility_id, mode, requiredKinds)) return null;
+  if (!bundle || !await lockQualifications(tx, bundle.runtime_id, base.base_compatibility_id, mode, requiredKinds, lockRows)) return null;
   return { ...artifact(bundle), releaseOrder: BigInt(bundle.release_order), base: { id: base.base_image_id, compatibilityId: base.base_compatibility_id,
     imageRef: base.image_ref, sourceCommit: base.source_commit, architecture: base.architecture, storageMiB: Number(base.storage_mib) },
   pin: { runtimeId: bundle.runtime_id, manifestSha256: bundle.manifest_sha256,

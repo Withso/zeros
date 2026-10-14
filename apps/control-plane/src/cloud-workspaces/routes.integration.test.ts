@@ -952,6 +952,36 @@ d("cloud workspace API contracts", () => {
     return { response, body, key };
   };
 
+  it("adds closed current-generation setup progress only on an authorized opt-in status read",async()=>{
+    await seedV4();await seedTemplate();
+    const created=await createWorkspace();expect(created.response.status).toBe(202);
+    const id=created.body.workspace.id;
+    await withSystemTx(pool,async tx=>{
+      await tx.query("UPDATE cloud_workspaces SET status='setting_up' WHERE id=$1",[id]);
+      await tx.query(`INSERT INTO cloud_workspace_setup_runs(workspace_id,generation,org_id,attempt,state,claim_count,execution_fence,
+        lease_owner,lease_expires_at,last_heartbeat_at,started_at,error_code,log_excerpt)
+        VALUES($1,1,$2,2,'running',3,3,'fixture',now()+interval '5 minutes',now(),now(),'setup_engine_readiness_failed','synthetic-private-log')`,[id,orgId]);
+    });
+    const legacy=await (await request(`/v1/cloud-workspaces/${id}`)).json();
+    expect(legacy.setupProgress).toBeUndefined();expect(legacy.workspace.setupFailure).toBeNull();
+    const response=await request(`/v1/cloud-workspaces/${id}?setupProgress=true`);
+    expect(response.status).toBe(200);expect(response.headers.get("cache-control")).toBe("no-store");
+    const body=await response.json();
+    expect(body.setupProgress).toEqual({generation:1,attempt:2,claimCount:3,state:"running",errorCode:"setup_engine_readiness_failed"});
+    expect((await (await request(`/v1/organizations/${orgId}/cloud-workspaces/${id}?setupProgress=true`)).json()).setupProgress).toEqual(body.setupProgress);
+    expect(JSON.stringify(body)).not.toContain("synthetic-private-log");
+    await withSystemTx(pool,tx=>tx.query("UPDATE cloud_workspace_setup_runs SET error_code='synthetic-private-error' WHERE workspace_id=$1",[id]));
+    expect((await (await request(`/v1/cloud-workspaces/${id}?setupProgress=true`)).json()).setupProgress.errorCode).toBe("compute_reconciliation_failed");
+    await withSystemTx(pool,tx=>tx.query(`UPDATE cloud_workspace_setup_runs SET state='failed',completed_at=now(),
+      lease_owner=NULL,lease_expires_at=NULL WHERE workspace_id=$1`,[id]));
+    const failedLegacy=await (await request(`/v1/cloud-workspaces/${id}`)).json();
+    expect(failedLegacy.workspace.setupFailure).toEqual({code:"compute_reconciliation_failed",hasLog:true});
+    expect(failedLegacy.setupProgress).toBeUndefined();
+    actor=outsider;
+    expect((await request(`/v1/cloud-workspaces/${id}?setupProgress=true`)).status).toBe(404);
+    expect((await request(`/v1/organizations/${randomUUID()}/cloud-workspaces/${id}?setupProgress=true`)).status).toBe(404);
+  });
+
   it("uses the qualified organization grant without a personal repository access proof", async () => {
     await seedV4(); await seedTemplate();
     await pool.query("DELETE FROM cloud_github_source_access WHERE owner_user_id=$1", [owner.id]);

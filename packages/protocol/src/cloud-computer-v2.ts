@@ -268,6 +268,21 @@ export type CloudComputerV2RepositoryManifest = z.infer<
   typeof CloudComputerV2RepositoryManifestSchema
 >;
 
+/** Separate response so deployed strict build-summary clients stay compatible. */
+export const CloudComputerV2BuildRuntimeSchema = z.object({
+  buildId: z.string().uuid(),
+  version: z.number().int().positive().safe(),
+  runtimeId: z.string().regex(/^r1-[a-f0-9]{64}$/).nullable(),
+  baseImageId: z.string().min(1).max(512).nullable(),
+  selected: z.object({
+    runtimeId: z.string().regex(/^r1-[a-f0-9]{64}$/),
+    baseImageId: z.string().min(1).max(512),
+    sourceCommit: z.string().regex(/^[a-f0-9]{40}$/),
+    qualificationMode: z.enum(["full", "smoke"]),
+  }).strict().nullable(),
+}).strict();
+export type CloudComputerV2BuildRuntime = z.infer<typeof CloudComputerV2BuildRuntimeSchema>;
+
 export type CloudComputerV2BuildSummary = {
   id: string;
   version: number;

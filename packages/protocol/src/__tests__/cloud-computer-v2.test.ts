@@ -222,3 +222,20 @@ describe("active Cloud Computer repository metadata", () => {
     }
   });
 });
+
+describe("Cloud Computer runtime observation parity", () => {
+  const proof = { buildId: randomUUID(), version: 1, runtimeId: `r1-${"a".repeat(64)}`, baseImageId: "fixture-base",
+    selected: { runtimeId: `r1-${"a".repeat(64)}`, baseImageId: "fixture-base", sourceCommit: "b".repeat(40), qualificationMode: "smoke" } };
+  it.each([
+    [proof, true], [{ ...proof, runtimeId: null, baseImageId: null, selected: null }, true],
+    [{ ...proof, runtimeId: "unverified" }, false], [{ ...proof, version: Number.MAX_SAFE_INTEGER + 1 }, false],
+    [{ ...proof, selected: { ...proof.selected, qualificationMode: "bypass" } }, false],
+    [{ ...proof, selected: { ...proof.selected, sourceCommit: "foreign" } }, false],
+    [{ ...proof, log: "private-provider-output" }, false],
+  ])("keeps the separate strict observation response aligned (%#)", (value, valid) => {
+    const client = wire.CloudComputerV2BuildRuntimeSchema.safeParse(value);
+    const server = backend.CloudComputerV2BuildRuntimeSchema.safeParse(value);
+    expect(client.success).toBe(valid); expect(server.success).toBe(valid);
+    if (client.success && server.success) expect(client.data).toEqual(server.data);
+  });
+});

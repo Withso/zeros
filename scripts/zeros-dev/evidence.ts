@@ -1,13 +1,16 @@
 import { z } from "zod";
 import { redact } from "../agent-env-check.mjs";
-import { ERROR_CODES, ZerosDevError, closedError } from "./errors";
+import { ERROR_CODES, ZerosDevError, closedError, setupEvidence } from "./errors";
+import { SetupObservationSchema } from "./setup-observation";
 import type { AgentValues } from "./config";
 
 export const EvidenceEventSchema=z.object({
   phase:z.enum(["login","identity","repository","computer_build","computer_wait","workspace_create","workspace_resume","workspace_stop","workspace_delete",
-    "workspace_wait","runtime_connect","agent_send","agent_settled","chat_tail","terminal_run","health_cp","health_db","health_vm","cleanup","scenario"]),
+    "workspace_wait","workspace_create_wait","workspace_resume_wait","workspace_stop_wait","workspace_delete_wait",
+    "runtime_connect","agent_send","agent_settled","chat_tail","terminal_run","health_cp","health_db","health_vm","cleanup","scenario"]),
   outcome:z.enum(["ok","failed","pending","skipped"]),durationMs:z.number().nonnegative().finite(),
   code:z.enum(ERROR_CODES).optional(),count:z.number().int().nonnegative().safe().optional(),exitCode:z.number().int().min(-1).max(255).optional(),
+  setup:SetupObservationSchema.optional(),
 }).strict();
 export type EvidenceEvent=z.infer<typeof EvidenceEventSchema>;
 export class Evidence {
@@ -23,7 +26,7 @@ export class Evidence {
   async step<T>(phase:EvidenceEvent["phase"],work:()=>Promise<T>):Promise<T>{
     const start=this.now();
     try{const result=await work();this.emit({phase,outcome:"ok",durationMs:Math.max(0,this.now()-start)});return result;}
-    catch(error){this.emit({phase,outcome:"failed",durationMs:Math.max(0,this.now()-start),code:closedError(error)});throw error;}
+    catch(error){this.emit({phase,outcome:"failed",durationMs:Math.max(0,this.now()-start),code:closedError(error),...setupEvidence(error)});throw error;}
   }
 }
 
