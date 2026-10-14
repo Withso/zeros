@@ -6,6 +6,11 @@ session itself.
 1. **Verify the handoff.** Match the patch SHA256 to the READY post, check
    whether it touches CI-definition paths, and confirm it applies cleanly to
    current `main`.
+   Authors emit frozen patches with `git diff --binary` from an index (use
+   `git add -N` for new files). An isolated scratch index can preserve the
+   workspace index. Before READY, run `git apply --check --whitespace=error`
+   against the frozen base, then apply in scratch and verify every source hash;
+   include new-file cases. GNU patch alone does not check Git patch metadata.
 2. **Integrate in a separate worktree,** never the checkout that live operator
    runs use. Apply with `git apply --index --whitespace=error`.
 3. **Review the full diff yourself** (`zstack-review`). For a revised patch you
