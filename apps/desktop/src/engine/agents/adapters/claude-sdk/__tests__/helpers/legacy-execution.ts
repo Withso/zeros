@@ -18,7 +18,8 @@ import { testCloudRuntime } from "../../../../__tests__/helpers/test-cloud-runti
  * and cgroup IO are explicit fixtures; Host/proc births are real. This does not
  * qualify native kernel entry. No namespace or provider is started. */
 export async function prepareClaudeCloudWorkload(input: { cwd: string; executionId: string;
-  conversationId: string; provider: "claude" | "codex" | "cursor"; dataRoot?: string }) {
+  conversationId: string; provider: "claude" | "codex" | "cursor"; dataRoot?: string },
+  options: Parameters<typeof portableCloudWorkloads>[1] = {}) {
   const ownRoot = input.dataRoot === undefined;
   const dataRoot = await realpath(input.dataRoot ?? await mkdtemp(path.join(os.tmpdir(), "zeros-claude-consumer-")));
   const configuration = { version: 4 as const, backend: "cloud-worker" as const, profile: "zeros-cloud-worker-v4" as const,
@@ -37,7 +38,7 @@ export async function prepareClaudeCloudWorkload(input: { cwd: string; execution
   let workloads: ReturnType<typeof portableCloudWorkloads>;
   let boundary: CloudExecutionBoundary;
   try {
-    workloads = portableCloudWorkloads(configuration);
+    workloads = portableCloudWorkloads(configuration, options);
     boundary = new CloudExecutionBoundary({ configuration, workloads });
   } finally { guard.mockRestore(); restoreRuntime?.(); }
   const drain = async () => {

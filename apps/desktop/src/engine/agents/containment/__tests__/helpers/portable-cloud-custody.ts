@@ -44,6 +44,8 @@ export function portableKernelProcess(pid: number): CloudWorkloadKernelProcess |
  * Tests must separately mock the deployment brand and runtime resolver. */
 export function portableCloudWorkloads(configuration: CloudWorkerConfiguration, options: {
   maxScopes?: number;
+  /** Explicit census faults for consumers that must retain incomplete-proof cases. */
+  observeProcess?(pid: number): CloudWorkloadKernelProcess | null;
   projectProcess?(member: CloudWorkloadKernelProcess, members: readonly CloudWorkloadKernelProcess[]): CloudWorkloadKernelProcess;
 } = {}) {
   const f = cloudWorkloadKernelFixture(), original = portableKernelProcess(process.pid);
@@ -52,13 +54,14 @@ export function portableCloudWorkloads(configuration: CloudWorkerConfiguration, 
   f.projection.infrastructure = [{ kind: "engine", pid: process.pid, startToken: original.startToken }];
   f.io.identity = () => ({ pid: process.pid, uid: 10003, gid: 10003, euid: 10003, egid: 10003 });
   const observed = new Map<number, string>();
+  const observeProcess = options.observeProcess ?? portableKernelProcess;
   let registry: CloudOwnedWorkloadRegistry | undefined;
   function refresh() {
     const all = new Map<number, CloudWorkloadKernelProcess>();
     const ids = readdirSync("/proc").filter(value => /^[1-9]\d*$/.test(value));
     if (ids.length > 32768) throw new Error("portable process fixture exceeds capacity");
     for (const id of ids) {
-      const member = portableKernelProcess(Number(id));
+      const member = observeProcess(Number(id));
       if (member && member.state !== "Z" && member.state !== "X") all.set(member.pid, member);
     }
     const roots = new Set(registry?.snapshot().scopes.flatMap(scope => scope.processGroups) ?? []);
