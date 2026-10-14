@@ -1,0 +1,9 @@
+{
+  "id": "portable-custody-ambient-cgroups",
+  "kind": "replay",
+  "area": "engine-test-fixtures",
+  "fixedBy": "pr:513",
+  "symptom": "Unrelated host process cgroup reads made the portable custody fixture throw during boot-factory setup or report an empty native-pump teardown unproved.",
+  "rule": "The ci-red playbook requires portable fixtures to retain real process births and owned-group checks while using explicit fake cgroup placement. Never relax production custody or ignore an unreadable original birth to fix a fixture.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/agents/containment/__tests__/portable-cloud-custody.test.ts apps/desktop/src/engine/agents/__tests__/cloud-boot-factory.test.ts apps/desktop/src/engine/__tests__/cloud-local-command-native-pump.test.ts"
+}

@@ -39,6 +39,17 @@
 - **A flake twice** becomes a deterministic fix PR. Reproduce it under load,
   find the race (often teardown, not the asserted behavior) and fix the
   fixture without weakening the contract.
+  Portable cgroup fixtures must sample real births and owned groups without
+  depending on unrelated host cgroup metadata that they replace with fake IO.
+  Capture the closed kernel state before changing a process reader: a dead X
+  task can retain its birth after group/session fields are cleared. Validate
+  live identities strictly, and wait for a complete census across real exits.
+  A busy launch wrapper is not command readiness: hold the launch gap, then
+  await the actual workload's acknowledgement before testing owner handoff.
+- **Shared test helpers:** enumerate and run every direct and transitive importer,
+  including callers reached through other fixture helpers, before READY. Keep
+  fault injection explicit when replacing a reader: incomplete or unavailable
+  observations must still refuse an empty proof in the consuming tests.
 - **Serializable context races:** a losing writer can reuse the committed context,
   observe committed capacity, or exhaust its bounded retries before the winner
   commits. Hold both COMMIT schedules separately from the first INSERT barrier;
