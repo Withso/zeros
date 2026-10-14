@@ -1,0 +1,9 @@
+{
+  "id": "baseline-ingress-fixture-clock",
+  "kind": "replay",
+  "area": "release-dev-environment",
+  "fixedBy": "pr:503",
+  "symptom": "The real HTTPS baseline fixture intermittently counted a request as possible instead of certain when wall-clock calibration overlapped its synthetic turn boundary.",
+  "rule": "Give controlled turn fixtures an event-driven timeline shared with their request counter. Keep real transport and exact-count assertions, and inject calibration uncertainty instead of using sleeps. See the ci-red playbook.",
+  "check": "pnpm exec vitest run scripts/__tests__/cloud-agent-e2e-baseline.test.ts scripts/__tests__/cloud-agent-e2e-ingress.test.ts scripts/__tests__/cloud-agent-e2e-fixture-cp-observations.test.ts scripts/__tests__/cloud-agent-e2e-measurement.test.ts"
+}
