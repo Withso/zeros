@@ -37,6 +37,32 @@ background workers, row locks inside SQL functions and long-lived WebSocket
 callbacks are outside this HTTP helper-span coverage. Use Insights and worker
 measurements alongside it, and do not claim whole-database coverage from it.
 
+Cloud engines additionally emit `[cloud-runtime] renewal-timing` for four
+registration-boundary operations: engine heartbeat, consumed client renewal,
+actor confirmation and warm-context requests. Durations use the engine's
+monotonic clock through response parsing and the registration's scope checks.
+Heartbeat duration includes its foreground listener scan and response handling;
+asynchronous record sync and checkpoint execution are outside the span. An
+actor/context `completed` outcome does not assert the caller's later cache or
+actor-registry acceptance. Client `refused` means a null result; `failed` means
+the boundary caught or propagated an exception, including an HTTP refusal.
+Neither outcome infers a new retry or stop policy.
+
+The reporter retains at most twelve series (four operations × three outcomes),
+with disjoint latency buckets, counts, duration sums and maxima. As with CP
+timing, the final `null` bucket cannot establish a finite p99. It flushes on
+existing work after one active minute, then once at retirement; no timer or
+request is added, and an otherwise quiet partial batch waits for work or
+shutdown. `invalidSpans` counts unavailable or backwards monotonic readings;
+`inFlight` counts observations not finished when the batch was emitted. A
+retired registration ignores late completions. No identity, endpoint, token,
+request body or error text is retained, and a logging failure cannot change a
+renewal result. Initial admission, private credential refresh, legacy agent
+lease requests and final actor/cache admission are outside this coverage.
+Local Personal and organization-local engines never create this registration.
+Runtime rollout is required to observe existing cloud VMs; CP deployment alone
+does not change their pinned runtime.
+
 Before changing pool limits, record a quiet hour and an active workspace-hour
 with exact UTC bounds and the deployed revision. Report Railway CP egress
 separately from request-query counts and latency; outbound database traffic,
