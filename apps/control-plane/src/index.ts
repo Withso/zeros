@@ -38,6 +38,7 @@ import { runServiceBootMigrations, verifyMigrations, type ServiceBootMigrationRe
 import { loadEmailConfig, sendEmailStrict } from "./email.js";
 import { startGithubOauthCleanup } from "./github.js";
 import { createApp } from "./app.js";
+import type { CloudWorkspaceProviderResolver } from "./cloud-workspaces/provider-resolver.js";
 import { DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
 import { DatabaseCloudGithubReads } from "./cloud-workspaces/github-read-proxy.js";
 import { GithubCloudWorkspaceCredentialBroker } from "./cloud-workspaces/github-credentials.js";
@@ -182,6 +183,7 @@ let cloudWorkspaceHealthService:
 let cloudWorkspaceEngineClientAdmissionService:
   | DatabaseCloudWorkspaceEngineClientAdmissionService
   | undefined;
+let cloudWorkspaceProviderResolver: CloudWorkspaceProviderResolver | undefined;
 const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending";
 // Historical Computer retirement holds session locks across provider I/O and
 // query-pool callbacks. WorkOS may independently hold one worker query slot.
@@ -287,6 +289,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     workosEnabled: config.auth.provider === "workos",
     registry,
   });
+  cloudWorkspaceProviderResolver = providerResolver;
   // Provider adapters carry operation stores and template lookups. Sharing an
   // API adapter with a worker would silently cross the pool boundary again.
   const workerDeployment = workerPool === pool ? { provider, registry } : workerPool
@@ -736,6 +739,7 @@ const app = createApp(config, pool, emailConfig, {
     ? { cloudWorkspaceInternalSetupService }
     : {}),
   ...(cloudWorkspaceAccessService ? { cloudWorkspaceAccessService } : {}),
+  ...(cloudWorkspaceProviderResolver ? { cloudWorkspaceProviderResolver } : {}),
   ...(cloudRuntimeServiceAccess ? { cloudRuntimeServiceAccess } : {}),
   ...(cloudWorkspaceRepositoryResolver
     ? { cloudWorkspaceRepositoryResolver }

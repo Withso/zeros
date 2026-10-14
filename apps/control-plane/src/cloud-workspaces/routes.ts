@@ -72,6 +72,7 @@ import type {
   CloudWorkspaceRepositoryResolver,
 } from "./github-repositories.js";
 import { createCloudWorkspaceManagementRoutes } from "./management-routes.js";
+import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import {DatabaseComputeUserFunding} from "./compute-funding.js";
 import {readProComputeUsage} from "./pro-allowance.js";
@@ -1758,6 +1759,7 @@ export function createCloudWorkspaceRoutes(
     forkService?: DatabaseCloudWorkspaceForkService | null;
     replicaService?: DatabaseCloudWorkspaceReplicaService | null;
     engineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService | null;
+    providerResolver?: CloudWorkspaceProviderResolver | null;
     workosEnabled?: boolean;
     setupSecretKeyV1?: string | null;
   } = {},
@@ -1814,6 +1816,7 @@ export function createCloudWorkspaceRoutes(
       "/",
       createCloudWorkspaceManagementRoutes(pool, config, {
         workosEnabled: options.workosEnabled === true,
+        providerResolver: options.providerResolver ?? null,
       }),
     );
   }

@@ -16,6 +16,7 @@ import {
   type CloudProviderIdentity,
   type CloudProviderObservedState,
   type CloudProviderResource,
+  type CloudProviderDeletionRetirement,
   type CloudProviderPreviewAccess,
   type CloudWorkspaceAccessProvider,
   type CloudWorkspaceProvider,
@@ -56,6 +57,13 @@ const DeletionSchema = z.object({
   // Unknown provider stages are not retained as arbitrary diagnostic strings.
   stage: z.unknown().optional(),
   completedAt: z.string().datetime({ offset: true }).nullable(),
+});
+const StorageDeletionSchema = DeletionSchema.extend({
+  status: z.literal("blocked"),
+  stage: z.enum(["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"]),
+  requestedAt: z.string().datetime({ offset: true }),
+  expectedBy: z.string().datetime({ offset: true }).nullable().optional(),
+  completedAt: z.null(),
 });
 const STATES: Record<
   z.infer<typeof SandboxSchema>["state"],
@@ -451,6 +459,53 @@ export class BoatWorkspaceProvider
     const resource = this.resource(record, sandbox);
     if (unmonitored && monitoring() !== false) throw failure("provider_monitoring_unconfirmed");
     return resource;
+  }
+
+  async observeDeletionRetirement(
+    resourceId: string, input: { signal: AbortSignal },
+  ): Promise<CloudProviderDeletionRetirement> {
+    const record = await this.owned(resourceId);
+    if (!record.deletionRequestedAt || !record.deletionOperationId || record.deletedAt || record.lostAt)
+      throw failure("provider_deletion_unconfirmed");
+    input.signal.throwIfAborted();
+    const response = await this.client.request(`/deletion-operations/${record.deletionOperationId}`, {
+      signal: input.signal, timeoutMs: Math.min(this.options.timeoutMs, 5_000),
+    });
+    const parsed = StorageDeletionSchema.safeParse(response.operation);
+    if (!parsed.success || parsed.data.id !== record.deletionOperationId || parsed.data.targetId !== resourceId)
+      throw failure("provider_deletion_unconfirmed");
+    const operation = parsed.data;
+    const requested = Date.parse(operation.requestedAt);
+    const expected = operation.expectedBy == null ? null : Date.parse(operation.expectedBy);
+    if (requested < record.deletionRequestedAt.getTime() - 5_000 || requested > this.now() + 5_000 ||
+        (operation.stage === "waiting_for_uploads" && expected === null) ||
+        (expected !== null && (expected < record.createdAt.getTime() || expected > this.now() + 6 * 3600_000 + 5_000)))
+      throw failure("provider_deletion_unconfirmed");
+    // A 404 alone is not evidence. It qualifies only after the authenticated
+    // journal-bound receipt above proves a documented storage-only stage.
+    let absent = false;
+    try {
+      await this.client.request(`/sandboxes/${resourceId}`, {
+        signal: input.signal, timeoutMs: Math.min(this.options.timeoutMs, 5_000),
+      });
+    } catch (error) {
+      if (error instanceof CloudProviderError && error.code === "provider_not_found" && error.httpStatus === 404) absent = true;
+      else throw error;
+    }
+    if (!absent) throw failure("provider_deletion_unconfirmed");
+    const current = await this.owned(resourceId);
+    if (current.workspaceId !== record.workspaceId || current.generation !== record.generation ||
+        current.deletionOperationId !== record.deletionOperationId ||
+        current.deletionRequestedAt?.getTime() !== record.deletionRequestedAt.getTime() || current.deletedAt || current.lostAt)
+      throw failure("provider_deletion_unconfirmed");
+    input.signal.throwIfAborted();
+    return {
+      workspaceId: record.workspaceId, generation: record.generation, resourceId,
+      deletionOperationId: record.deletionOperationId, stage: operation.stage,
+      requestedAt: new Date(requested).toISOString(),
+      expectedBy: expected === null ? null : new Date(expected).toISOString(),
+      observedAt: new Date(this.now()).toISOString(),
+    };
   }
 
   async inspect(resourceId: string): Promise<CloudProviderResource | null> {

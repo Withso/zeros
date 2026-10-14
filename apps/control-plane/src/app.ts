@@ -67,6 +67,7 @@ import {
 } from "./cloud-workspaces/internal-routes.js";
 import { previewRequestFromEdge, type CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
 import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
+import type { CloudWorkspaceProviderResolver } from "./cloud-workspaces/provider-resolver.js";
 import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks.js";
 import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
 import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
@@ -112,6 +113,7 @@ export type CreateAppDependencies = {
   cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService;
   cloudWorkspaceReplicaService?: DatabaseCloudWorkspaceReplicaService;
   cloudWorkspaceEngineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService;
+  cloudWorkspaceProviderResolver?: CloudWorkspaceProviderResolver;
   cloudWorkspaceHealthService?: CloudWorkspaceReleaseHealthReader;
   securityEventBroker?: PostgresSecurityEventBroker;
   workosProvider?: RailwayWorkOSProvider;
@@ -694,6 +696,7 @@ export function createApp(
         dependencies.cloudWorkspaceAccessService ?? null,
       cloudWorkspaceRepositoryResolver:
         dependencies.cloudWorkspaceRepositoryResolver ?? null,
+      cloudWorkspaceProviderResolver: dependencies.cloudWorkspaceProviderResolver ?? null,
       cloudWorkspaceForkService: dependencies.cloudWorkspaceForkService ?? null,
       cloudWorkspaceReplicaService:
         dependencies.cloudWorkspaceReplicaService ?? null,
