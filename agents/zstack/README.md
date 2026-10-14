@@ -44,6 +44,29 @@ Changes to safety rules in `AGENTS.md` or `RULES.md`, to CI definitions, or to
 credential policy need the owner. Every other pack change goes through normal
 review.
 
+For review at the next pack version: [fold proposed playbook lessons from
+individual fragments](proposals/lesson-fragments.md). Z1 does not change the
+shared playbook anchors or safety ownership.
+
+## Verification tools
+
+`node scripts/zstack/verify.mjs plan` maps the local diff through the shared
+CI policy and lists adjacent tests and required local gates. `run --execute
+--receipt <file>` executes that plan with source fingerprints, bounded child
+processes and a receipt. Full CI suites and native checks unavailable on the
+host remain explicitly unverified. See [the tool guide](tools.md).
+
+`local-ui` uses the existing Playwright app driver. `cloud-health`,
+`cloud-dispatch` and `cloud-status` use zeros-dev and its main-only Actions
+canary. Plans make no live call; dispatch never claims an E2E pass. The cloud
+adapter requires the hourly workflow and helpers from PR #493.
+
+`node scripts/zstack/eval-replay.mjs --case <id>` plans an isolated replay.
+Execution compares the fixed tests with the fix's first-parent source. Seeded
+cases have one exact mutation in `evals/seeds/<id>.json`. Replays write counts
+and hashes, never raw test output. Missing prerequisites and unsupported
+commands stay unverified; a green parent is a miss, not a catch.
+
 ## Provenance
 
 The method draws on pstack, Cursor's plugin of Lauren Tan's engineering

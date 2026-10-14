@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/engine/cloud-local-command-queue-start-fences.ts",
+  "before": "if (run.bootId !== this.scope.bootId || run.writerEpoch !== this.scope.writerEpoch ||",
+  "after": "if (run.bootId !== this.scope.bootId ||"
+}

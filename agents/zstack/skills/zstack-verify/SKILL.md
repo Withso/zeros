@@ -29,7 +29,36 @@ CI's full root and control-plane suites are the authority. Locally, run the
 adjacent suites plus the gates above; don't wait on a full local run before
 handing off. Preview the CI lanes with `pnpm ci:plan`.
 
+The selector can do this bookkeeping:
+
+```sh
+node scripts/zstack/verify.mjs plan --test path/to/adjacent.test.ts
+node scripts/zstack/verify.mjs run --test path/to/adjacent.test.ts --execute --receipt /private/scratch/verify.json
+```
+
+Record `--mode single-session --agent <model>`, or `--mode master-subagents
+--agent <model> --master <model>`, on the command. The selector uses the shared
+CI registry; unknown CI command text is deferred, never executed as shell.
+An incomplete diff or missing adjacent suite blocks execution. A source change
+during verification invalidates the receipt. The local receipt is unsigned
+engineering evidence; CI is still the merge authority.
+
+`node scripts/zstack/verify.mjs local-ui` plans the existing Linux app driver.
+Add `--execute --receipt <file>` to run it, optionally with `--shard 1/3`.
+Remaining shards and macOS proof remain unverified. See `agents/zstack/tools.md`
+for limits and the closed error codes.
+
 ## Live cloud checks on Alpha
+
+For the canary, `node scripts/zstack/verify.mjs cloud-dispatch --source <sha>`
+plans a dispatch of the existing main-only hourly workflow. Explicit execution
+uses the existing automation identity; it reports `dispatch_requested`, never
+a pass. Use `cloud-status --source <sha> --execute --receipt <file>` to observe
+the newest completed trusted run at that exact source, including the executed
+lifecycle and two-hour freshness limit. A newer active run does not erase
+completed evidence. `cloud-health` delegates to zeros-dev's Alpha health check;
+it cannot prove a workspace lifecycle. These commands use the task's existing
+Alpha authorization and never copy model keys into the checkout.
 
 Use the zeros-dev harness against the fixed Alpha fixture (`docs/zeros-dev.md`):
 

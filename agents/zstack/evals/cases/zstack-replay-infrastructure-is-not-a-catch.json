@@ -1,0 +1,9 @@
+{
+  "id": "zstack-replay-infrastructure-is-not-a-catch",
+  "kind": "replay",
+  "area": "engineering verification",
+  "fixedBy": "pr:504",
+  "symptom": "A missing host tool thrown inside a test could count as a caught regression, while a generic ENOENT filter suppressed the real credential-lock race and assertion text quoting error codes.",
+  "rule": "zstack-eval requires matching passing fixed assertions, keeps explicit host and runner prerequisite failures unverified, and never classifies arbitrary product error codes or quoted assertions as infrastructure.",
+  "check": "pnpm test:git scripts/__tests__/zstack-runner.test.ts scripts/__tests__/zstack-replay.test.ts"
+}
