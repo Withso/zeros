@@ -12,7 +12,8 @@ import { parseCloudWorkspaceSetupHookLog, type CloudWorkspaceSetupHookLog } from
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { cloudRuntimePin, cloudRuntimePinValues, requirePinnedCloudRuntime, CloudRuntimeError, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
 import { publicCloudError } from "./public-contract.js";
-import { cloudDiagnosticSchema, type CloudDiagnostic } from "./cloud-diagnostics.js";
+import { cloudDiagnosticSchema, classifyCloudFailure, diagnosticCode, parseSetupDiagnostic,
+  type CloudDiagnostic, type SetupDiagnostic } from "./cloud-diagnostics.js";
 import { tryRetainCloudDiagnosticTx } from "./cloud-diagnostic-store.js";
 import type { CloudRuntimeWitnessRow } from "./runtime-contract.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
@@ -121,6 +122,9 @@ export class CloudWorkspaceSetupError extends Error {
   timings?: SetupTimings | undefined;
   hookLog?: CloudWorkspaceSetupHookLog;
   providerDiagnostic?: CloudDiagnostic;
+  failureDiagnostic?: CloudDiagnostic;
+  diagnostic?: SetupDiagnostic;
+  cleanupDiagnostic?: CloudDiagnostic;
   constructor(
     public readonly code: string,
     message: string,
@@ -152,6 +156,8 @@ export type CloudWorkspaceSetupWorkerOptions = {
 type ClaimedSetup = CloudWorkspaceSetupExecution & {
   claimCount: number;
 };
+type ClaimFailureScope = Pick<ClaimedSetup, "organizationId" | "workspaceId" | "generation" |
+  "setupRunId" | "attempt" | "claimCount" | "executionFence">;
 
 type ClaimDecision =
   | { kind: "none" }
@@ -165,6 +171,9 @@ type SafeSetupFailure = {
   restoreEvidence?: string | undefined;
   hookLog?: CloudWorkspaceSetupHookLog | undefined;
   providerDiagnostic?: CloudDiagnostic | undefined;
+  failureDiagnostic?: CloudDiagnostic | undefined;
+  diagnostic?: SetupDiagnostic | undefined;
+  cleanupDiagnostic?: CloudDiagnostic | undefined;
 };
 
 function safeInteger(
@@ -238,6 +247,8 @@ function safeFailure(error: unknown): SafeSetupFailure {
   if (error instanceof CloudRuntimeError) return { code: error.code, retryable: false };
   if (error instanceof CloudWorkspaceSetupError) {
     const providerDiagnostic = cloudDiagnosticSchema.safeParse(error.providerDiagnostic);
+    const failureDiagnostic = cloudDiagnosticSchema.safeParse(error.failureDiagnostic);
+    const cleanupDiagnostic = cloudDiagnosticSchema.safeParse(error.cleanupDiagnostic);
     return {
       code: /^[a-z][a-z0-9_]{0,127}$/.test(error.code)
         ? error.code
@@ -245,6 +256,9 @@ function safeFailure(error: unknown): SafeSetupFailure {
       retryable: error.retryable,
       timings: parseSetupTimings(error.timings),
       providerDiagnostic: providerDiagnostic.success ? providerDiagnostic.data : undefined,
+      failureDiagnostic: failureDiagnostic.success ? failureDiagnostic.data : undefined,
+      diagnostic: parseSetupDiagnostic(error.diagnostic) ?? undefined,
+      cleanupDiagnostic: cleanupDiagnostic.success ? cleanupDiagnostic.data : undefined,
       hookLog: ["setup_command_failed", "setup_hook_retry_required"].includes(error.code) ? parseCloudWorkspaceSetupHookLog(error.hookLog) ?? undefined : undefined,
       restoreEvidence: classifyCloudRestoreEvidence(error.code, "diagnostic" in error ? error.diagnostic : null) ?? undefined,
     };
@@ -501,6 +515,7 @@ export class CloudWorkspaceSetupWorker {
         github_installation_id: string | null;
         settings_snapshot: unknown;
         settings_snapshot_sha256: Buffer;
+        stage_timings: unknown;
       }>(
         `SELECT sr.id, sr.attempt, sr.state, sr.claim_count,
                 sr.execution_fence, g.provider, g.image_ref, g.source_commit,
@@ -509,7 +524,7 @@ export class CloudWorkspaceSetupWorker {
                 ss.spec_version, ss.repository_forge, ss.repository_owner,
                 ss.repository_name, ss.repository_revision,
                 ss.github_installation_id, ss.settings_snapshot,
-                ss.settings_snapshot_sha256
+                ss.settings_snapshot_sha256, sr.stage_timings
          FROM cloud_workspace_setup_runs sr
          JOIN cloud_workspace_setup_specs ss
            ON ss.workspace_id = sr.workspace_id
@@ -537,19 +552,39 @@ export class CloudWorkspaceSetupWorker {
       const row = selected.rows[0];
       if (!row) return { kind: "processed" };
 
-      if (row.claim_count >= this.maxClaims) {
+      let retainedFailure: CloudDiagnostic | null = null;
+      if (row.state === "running") {
+        // An expired owner may never return an executor result. Record the
+        // observable loss, not an invented engine stage, before resetting its
+        // fence/timings. An earlier exact-claim failure always wins.
+        retainedFailure = await this.auditClaimFailure(tx, { organizationId: workspace.org_id, workspaceId: workspace.id,
+          generation: workspace.current_generation, setupRunId: row.id, attempt: row.attempt,
+          claimCount: row.claim_count, executionFence: safeFence(row.execution_fence) }, {
+          code: "setup_lease_lost", retryable: true, timings: parseSetupTimings(row.stage_timings),
+          failureDiagnostic: classifyCloudFailure({ name: "TimeoutError", code: "setup_lease_lost" }, "runtime"),
+        });
+      }
+
+      if (row.claim_count >= this.maxClaims || retainedFailure?.retryable === false) {
+        // A failed retirement may leave the claim running after its terminal
+        // diagnostic committed. Reclaim may finish cleanup, never rerun the
+        // invalid setup or turn its first failure into a generic exhaustion.
+        const terminalCode = retainedFailure?.retryable === false ? retainedFailure.code : "setup_claims_exhausted";
         await revokeSetupExecutionGrants(tx, {
           workspaceId: workspace.id,
           organizationId: workspace.org_id,
           generation: workspace.current_generation,
         });
+        if (retainedFailure?.retryable === false) await retireCloudWorkspaceEngineInstances(tx, {
+          workspaceId: workspace.id, organizationId: workspace.org_id, generation: workspace.current_generation,
+        });
         await tx.query(
           `UPDATE cloud_workspace_setup_runs
            SET state = 'failed', completed_at = now(), updated_at = now(),
-               error_code = 'setup_claims_exhausted', lease_owner = NULL,
+               error_code = $2, lease_owner = NULL,
                lease_expires_at = NULL
            WHERE id = $1`,
-          [row.id],
+          [row.id, terminalCode],
         );
         const rolledBack = await rollbackCloudWorkspaceGenerationTransition(
           tx,
@@ -557,7 +592,7 @@ export class CloudWorkspaceSetupWorker {
             workspaceId: workspace.id,
             organizationId: workspace.org_id,
             candidateGeneration: workspace.current_generation,
-            errorCode: "setup_claims_exhausted",
+            errorCode: terminalCode,
             errorMessage: "Cloud workspace setup did not complete",
           },
         );
@@ -568,17 +603,17 @@ export class CloudWorkspaceSetupWorker {
           await tx.query(
             `UPDATE cloud_workspaces
              SET status = 'failed', version = version + 1,
-                 last_error_code = 'setup_claims_exhausted',
+                 last_error_code = $2,
                  last_error_message = 'Cloud workspace setup did not complete',
                  updated_at = now()
              WHERE id = $1`,
-            [workspace.id],
+            [workspace.id, terminalCode],
           );
           await failCloudWorkspaceGenerationRollback(tx, {
             workspaceId: workspace.id,
             organizationId: workspace.org_id,
             sourceGeneration: workspace.current_generation,
-            errorCode: "setup_claims_exhausted",
+            errorCode: terminalCode,
             errorMessage: "Cloud workspace setup did not complete",
           });
           await retireCloudWorkspaceRuntimeAccess(tx, {
@@ -598,7 +633,7 @@ export class CloudWorkspaceSetupWorker {
             generation: workspace.current_generation,
             setupRunId: row.id,
             attempt: row.attempt,
-            errorCode: "setup_claims_exhausted",
+            errorCode: terminalCode,
           },
         );
         return { kind: "processed" };
@@ -1006,10 +1041,48 @@ export class CloudWorkspaceSetupWorker {
     });
   }
 
+  private async auditClaimFailure(tx: Tx, setup: ClaimFailureScope, failure: SafeSetupFailure): Promise<CloudDiagnostic> {
+    const retained = await tx.query<{ diagnostic: unknown }>(`SELECT subject->'diagnostic' AS diagnostic FROM audit_log WHERE org_id=$1
+      AND action='cloud_workspace.setup_claim_failed' AND subject->>'setupRunId'=$2
+      AND subject->>'executionFence'=$3 LIMIT 1`, [setup.organizationId, setup.setupRunId, String(setup.executionFence)]);
+    if (retained.rows[0]) return cloudDiagnosticSchema.parse(retained.rows[0].diagnostic);
+    const diagnostic = failure.failureDiagnostic ?? failure.providerDiagnostic ?? {
+      ...classifyCloudFailure({ code: failure.code }, failure.diagnostic?.phase ?? "runtime"),
+      code: diagnosticCode(failure.code) === "compute_reconciliation_failed" ? "setup_unknown_failure" : diagnosticCode(failure.code),
+      retryable: failure.retryable,
+      ...(failure.diagnostic ? { setup: failure.diagnostic } : {}),
+    };
+    await audit(tx, setup.organizationId, null, "cloud_workspace.setup_claim_failed", {
+      workspaceId: setup.workspaceId, generation: setup.generation, setupRunId: setup.setupRunId,
+      attempt: setup.attempt, claimCount: setup.claimCount, executionFence: setup.executionFence,
+      diagnostic, ...(failure.timings ? { timings: failure.timings } : {}),
+      ...(failure.cleanupDiagnostic ? { cleanupDiagnostic: failure.cleanupDiagnostic } : {}),
+    });
+    return diagnostic;
+  }
+
+  private async retainClaimFailure(setup: ClaimedSetup, failure: SafeSetupFailure): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => {
+      await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [setup.organizationId]);
+      await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [setup.workspaceId, setup.organizationId]);
+      const owned = await tx.query(`SELECT id FROM cloud_workspace_setup_runs
+        WHERE id=$1 AND org_id=$2 AND workspace_id=$3 AND generation=$4
+          AND lease_owner=$5 AND execution_fence=$6 AND state='running' FOR UPDATE`,
+      [setup.setupRunId, setup.organizationId, setup.workspaceId, setup.generation, this.workerId, setup.executionFence]);
+      if (!owned.rowCount) return false;
+      // This is an observation receipt, not readiness or lease authority.
+      // Commit before cleanup so its rollback cannot erase the first failure.
+      await this.retainTimings(tx, setup, failure.timings);
+      await this.auditClaimFailure(tx, setup, failure);
+      return true;
+    });
+  }
+
   private async recordFailure(
     setup: ClaimedSetup,
     failure: SafeSetupFailure,
   ): Promise<boolean> {
+    if (!await this.retainClaimFailure(setup, failure)) return false;
     const message = failure.code === CLOUD_WORKSPACE_V2_REQUIRED || failure.code === "cloud_runtime_revoked" || failure.code === "cloud_runtime_unavailable"
       ? publicCloudError(failure.code).message : "Cloud workspace setup did not complete";
     return withSystemTx(this.pool, async (tx) => {
@@ -1071,7 +1144,6 @@ export class CloudWorkspaceSetupWorker {
       );
       const run = owned.rows[0];
       if (!run) return false;
-      await this.retainTimings(tx, setup, failure.timings);
 
       await revokeSetupExecutionGrants(tx, setup);
       await retireCloudWorkspaceEngineInstances(tx, setup);
@@ -1207,12 +1279,12 @@ export class CloudWorkspaceSetupWorker {
   private async execute(setup: ClaimedSetup): Promise<void> {
     const controller = new AbortController();
     this.activeControllers.add(controller);
-    let abortFailure: SafeSetupFailure | null = null;
+    let failure: SafeSetupFailure | null = null;
     let heartbeatInFlight: Promise<void> | null = null;
 
-    const abort = (failure: SafeSetupFailure) => {
-      if (abortFailure) return;
-      abortFailure = failure;
+    const abort = (cause: SafeSetupFailure) => {
+      if (controller.signal.aborted) return;
+      failure ??= cause;
       controller.abort();
     };
     const heartbeat = setInterval(() => {
@@ -1241,10 +1313,12 @@ export class CloudWorkspaceSetupWorker {
     timeout.unref();
 
     let result: CloudWorkspaceSetupResult | null = null;
-    let failure: SafeSetupFailure | null = null;
     let abortListener: (() => void) | null = null;
     const aborted = new Promise<never>((_resolve, reject) => {
-      abortListener = () => reject(SETUP_EXECUTION_ABORTED);
+      abortListener = () => {
+        failure ??= { code: "setup_worker_stopped", retryable: true };
+        reject(SETUP_EXECUTION_ABORTED);
+      };
       if (controller.signal.aborted) {
         abortListener();
         return;
@@ -1267,7 +1341,7 @@ export class CloudWorkspaceSetupWorker {
     try {
       result = await Promise.race([execution, aborted]);
     } catch (error) {
-      if (error !== SETUP_EXECUTION_ABORTED) failure = safeFailure(error);
+      if (error !== SETUP_EXECUTION_ABORTED) failure ??= safeFailure(error);
     } finally {
       if (abortListener) {
         controller.signal.removeEventListener("abort", abortListener);
@@ -1281,18 +1355,9 @@ export class CloudWorkspaceSetupWorker {
       this.activeControllers.delete(controller);
     }
 
-    if (!abortFailure && controller.signal.aborted) {
-      abortFailure = { code: "setup_worker_stopped", retryable: true };
-    }
-    if (abortFailure || failure) {
-      await this.recordFailure(
-        setup,
-        abortFailure ??
-          failure ?? {
-            code: "setup_unknown_failure",
-            retryable: true,
-          },
-      );
+    if (controller.signal.aborted) failure ??= { code: "setup_worker_stopped", retryable: true };
+    if (failure) {
+      await this.recordFailure(setup, failure);
       return;
     }
     if (

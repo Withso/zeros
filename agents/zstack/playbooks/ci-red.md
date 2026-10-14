@@ -12,6 +12,12 @@
 
 ## Act
 
+- **Cross-package imports:** a value import in a shared schema module can pull
+  an engine implementation into the control-plane graph. Run
+  `scripts/__tests__/control-plane-scope.test.ts` after changing those imports.
+  When the implementation belongs to engine boot, keep the shared dependency
+  type-only and inject it there; test absent and rejecting implementations.
+  Do not widen the CI input list merely to hide an unintended dependency.
 - **PR CI:** rerunning only the failed jobs is fine for a flake or infra
   failure. Record that it was a rerun.
 - **Release workflows:** never rerun only the failed jobs. Carried producer

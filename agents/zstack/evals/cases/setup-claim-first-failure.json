@@ -1,0 +1,9 @@
+{
+  "id": "setup-claim-first-failure",
+  "kind": "replay",
+  "area": "cloud-setup-diagnostics",
+  "fixedBy": "pr:491",
+  "symptom": "Retry admission reset current stage timings, cleanup or a later heartbeat could replace the first error, and credential-control startup errors collapsed to unknown.",
+  "rule": "Commit one closed failure receipt per execution fence before retirement, retain it across cleanup and reclaim, preserve the engine class, and never retry proven integrity failures.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/setup-worker.integration.test.ts src/cloud-workspaces/linux-setup-executor.test.ts src/cloud-workspaces/cloud-diagnostics.test.ts"
+}

@@ -27,7 +27,7 @@ const engineStartup = z.object({
     "boot_bootstrap", "boot_credentials", "boot_durability", "boot_activate", "boot_install"]),
   name: z.enum(["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError", "ZodError", "SqliteError",
     "CloudCommandRuntimeError", "CloudRuntimeRequestError", "CloudAgentExecutionError", "CloudAgentAdmissionError",
-    "CloudRuntimeUpgradeRequiredError", "unknown"]),
+    "CloudRuntimeUpgradeRequiredError", "CloudCredentialControlError", "unknown"]),
   code: z.enum(["ENOENT", "ENOTDIR", "EISDIR", "EACCES", "EPERM", "EIO", "EROFS", "ENOSPC", "EDQUOT", "EMFILE", "ENFILE",
     "EEXIST", "ELOOP", "EBUSY", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET",
     "SQLITE_CORRUPT", "SQLITE_NOTADB", "SQLITE_CANTOPEN", "SQLITE_BUSY", "SQLITE_IOERR", "SQLITE_READONLY", "SQLITE_FULL",
@@ -35,6 +35,8 @@ const engineStartup = z.object({
     "cloud_commands_unavailable", "cloud_actor_authority_rejected", "cloud_runtime_upgrade_required", "unknown",
     "cloud_workspace_client_update_required", "cloud_workspace_v2_required", "cloud_agent_model_not_authorized",
     "cloud_agent_credential_required", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required",
+    "credential_control_authority_rejected", "credential_control_conflict", "credential_control_limit",
+    "credential_control_storage_unavailable", "credential_control_invalid",
     ...(["admission", "validation"] as const).flatMap(stage => bootFailureCategories.map(category => `cloud_${stage}_${category}` as const))]),
   errno: z.number().int().refine(value => [-1, -2, -5, -13, -16, -17, -20, -21, -23, -24, -28, -30, -40, -104, -110, -111, -122].includes(value)).nullable(),
 }).strict();
@@ -69,6 +71,7 @@ const codes = new Set([
   "setup_request_invalid", "setup_settings_invalid", "setup_execution_aborted", "setup_readiness_invalid", "setup_helper_response_invalid",
   "setup_helper_response_truncated", "setup_helper_secret_echo", "setup_admission_invalid", "setup_admission_revoke_failed",
   "setup_runtime_install_failed", "setup_runtime_input_invalid",
+  "setup_unknown_failure", "setup_executor_failure", "setup_timed_out", "setup_heartbeat_failed", "setup_lease_lost", "setup_worker_stopped",
 ]);
 export function diagnosticCode(value: unknown): string { return typeof value === "string" && codes.has(value) ? value : "compute_reconciliation_failed"; }
 const sqlState = /^(?:08|22|23|25|28|40|42|53|54|55|57|58|XX)[A-Z0-9]{3}$/;
