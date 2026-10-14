@@ -108,6 +108,15 @@
       "symptom": "Named Computers introduced boat-computer:<name>@sha256:<digest> image references. The VM setup helper accepted only boat-template:, so every workspace from a named Computer failed setup_settings_invalid.",
       "rule": "zstack-review \u203a Compatibility: when a producer adds a new identifier form, update every consumer's parser in the same change (search for the old prefix).",
       "check": "pnpm exec vitest run scripts/__tests__/cloud-workspace-setup-helper.test.ts"
+    },
+    {
+      "id": "empty-renderer-log-poll",
+      "kind": "replay",
+      "area": "desktop-cloud-ui-state",
+      "fixedBy": "pr:477",
+      "symptom": "Renderer logging left a one-second interval running with an empty queue or stalled IPC, despite making no log_submit requests.",
+      "rule": "playbooks/bug-fix.md: exercise the real producer and consumer with a fake clock; assert no scheduled work after the queue drains, and cover pending flights and failure backoff.",
+      "check": "pnpm test:git apps/desktop/src/renderer/platform/observability/logging/__tests__/renderer-log-scheduling.test.ts"
     }
   ]
 }
