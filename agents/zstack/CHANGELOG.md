@@ -3,6 +3,15 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.1.1
+
+- **Subagents can't know their PR number** when they add an eval case. Use `fixedBy: "pending"` locally
+  (`--allow-pending`); the integrator replaces it. CI stays strict (`zstack-eval`, `integrate-pr.md`).
+- **Path-selected PR CI missed a concurrency race** that turned `main` red after #467. Label control-plane
+  concurrency changes `ci:control-plane-db` (`zstack-verify`).
+- **A new identifier form broke a downstream parser.** Named Computer references were rejected by the VM
+  helper. Update every consumer in the same change (case `new-image-ref-form-unhandled-by-vm-helper`).
+
 ## 0.1.0 (Z0)
 
 The pack is introduced: the router, verify, review, eval and learn skills,

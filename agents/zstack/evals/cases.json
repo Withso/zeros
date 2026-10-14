@@ -86,7 +86,7 @@
       "id": "retired-create-request-field",
       "kind": "replay",
       "area": "zeros-dev-e2e",
-      "fixedBy": "pr:472",
+      "fixedBy": "a62dc5dafb73085e078718dfc7c5283ce376920b",
       "symptom": "workspace create sent the retired cloudComputerBuild field, and the control plane refused it with 409 before admission.",
       "rule": "zstack-review \u203a Compatibility: check the current route contract; don't send retired fields.",
       "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-product.test.ts"
@@ -99,6 +99,15 @@
       "symptom": "A resident-host test flaked in teardown because interactive bash ignores SIGTERM, so stopping could not prove the process group empty under load.",
       "rule": "playbooks/ci-red.md: a repeated flake gets a deterministic fix; check teardown before the asserted behavior.",
       "check": "pnpm exec vitest run apps/desktop/src/engine/pty/__tests__/resident-host.test.ts"
+    },
+    {
+      "id": "new-image-ref-form-unhandled-by-vm-helper",
+      "kind": "replay",
+      "area": "vm-image-bootstrap",
+      "fixedBy": "1f586e4b4d70d3d8d57813774e78d5005101560b",
+      "symptom": "Named Computers introduced boat-computer:<name>@sha256:<digest> image references. The VM setup helper accepted only boat-template:, so every workspace from a named Computer failed setup_settings_invalid.",
+      "rule": "zstack-review \u203a Compatibility: when a producer adds a new identifier form, update every consumer's parser in the same change (search for the old prefix).",
+      "check": "pnpm exec vitest run scripts/__tests__/cloud-workspace-setup-helper.test.ts"
     }
   ]
 }

@@ -33,5 +33,9 @@ environment. Each case records:
 ## Extending
 
 - Every escaped bug gets a case in the same PR as its fix.
+- A subagent that doesn't yet know its PR number writes `"fixedBy": "pending"` and validates with
+  `node scripts/zstack/evals.mjs --validate --allow-pending`. The integrator replaces `pending` with `pr:<n>`
+  when opening the PR, and with the merge SHA in a later pack update. CI validates strictly, so a
+  placeholder can never reach `main`.
 - A pack change may not remove a case or make a case's check pass on a
   pre-fix tree.
