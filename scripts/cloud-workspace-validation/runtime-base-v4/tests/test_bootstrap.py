@@ -290,6 +290,98 @@ class BootstrapTests(unittest.TestCase):
         self.app.boot()
         self.assertEqual((self.root / "opt/zeros/disk-epoch").read_text(), "1\n")
 
+    def test_sanitized_empty_markers_boot_once_and_publish_a_fresh_descriptor(self):
+        for name in ("/opt/zeros/disk-epoch", "/opt/zeros/sessions/boot.json", b.ACTIVE):
+            self.app.atomic(name, b"")
+        self.app.boot_id = lambda: "22222222-2222-4222-8222-222222222222"
+        self.app.boot()
+        self.assertEqual(self.app.epoch(), 1)
+        intent = json.loads(self.app.read("/opt/zeros/sessions/boot.json", 256, 0o600))
+        self.assertEqual(intent, {"bootId": self.app.boot_id(), "epoch": 1})
+        self.assertFalse(self.app.path(b.ACTIVE).exists())
+        self.app.boot()
+        self.assertEqual(self.app.epoch(), 1)
+        self.install()
+        active = json.loads(self.app.read(b.ACTIVE, 4096, 0o600))
+        self.assertEqual(active["bootId"], self.app.boot_id())
+        self.assertEqual(active["runtimeId"], self.value["runtime"]["runtimeId"])
+
+    def test_sanitized_boot_retries_preserve_the_epoch_at_each_publication_point(self):
+        self.app.boot_id = lambda: "22222222-2222-4222-8222-222222222222"
+        for point in ("boot_intent_published", "boot_epoch_published", "boot_id_published"):
+            with self.subTest(point=point):
+                for name in ("/opt/zeros/disk-epoch", "/opt/zeros/sessions/boot.json"):
+                    self.app.atomic(name, b"")
+                self.app.atomic("/run/zeros/boot-id", BOOT.encode())
+
+                def crash(stage):
+                    if stage == point: raise Crash()
+
+                self.app.fault = crash
+                with self.assertRaises(Crash): self.app.boot()
+                self.app.fault = lambda _: None
+                self.app.boot()
+                self.app.boot()
+                self.assertEqual(self.app.epoch(), 1)
+                self.assertEqual(self.app.read("/run/zeros/boot-id", 64, 0o600).decode(), self.app.boot_id())
+
+    def test_empty_marker_policy_does_not_accept_nonempty_invalid_contents(self):
+        self.app.boot_id = lambda: "22222222-2222-4222-8222-222222222222"
+        for name in ("/opt/zeros/disk-epoch", "/opt/zeros/sessions/boot.json"):
+            for raw in (b" ", b"\n", b"null", b"{}", b"invalid"):
+                with self.subTest(name=name, raw=raw):
+                    self.app.atomic(name, raw)
+                    with self.assertRaises(b.Failure):
+                        if name.endswith("disk-epoch"): self.app.epoch()
+                        else: self.app.boot()
+            self.app.atomic(name, b"1\n" if name.endswith("disk-epoch") else b"{}")
+
+    def test_empty_marker_policy_still_checks_metadata_before_absence(self):
+        self.app.boot_id = lambda: "22222222-2222-4222-8222-222222222222"
+        other = self.root / "empty-fixture"
+        other.write_bytes(b"")
+        other.chmod(0o600)
+        for name in ("/opt/zeros/disk-epoch", "/opt/zeros/sessions/boot.json"):
+            target = self.app.path(name)
+            for kind in ("mode", "symlink", "hardlink", "fifo"):
+                with self.subTest(name=name, kind=kind):
+                    target.unlink(missing_ok=True)
+                    if kind == "mode":
+                        target.write_bytes(b"")
+                        target.chmod(0o644)
+                    elif kind == "symlink": target.symlink_to(other)
+                    elif kind == "hardlink": os.link(other, target)
+                    else: os.mkfifo(target)
+                    with self.assertRaises((b.Failure, OSError)):
+                        if name.endswith("disk-epoch"): self.app.epoch()
+                        else: self.app.boot()
+                    target.unlink()
+            self.app.atomic(name, b"1\n" if name.endswith("disk-epoch") else b"{}")
+
+    def test_boot_accepts_only_empty_ordinary_retained_projection_entries(self):
+        paths = [self.app.path(b.PERSIST_ROOT + "/files/" + name + "/prior/nested")
+                 for name in ("state", "managed-settings", "home/agent", "home/capture", "home/old")]
+        for target in paths:
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"")
+        self.app.boot()
+        self.app.boot()
+        for target in paths:
+            with self.subTest(path=str(target.relative_to(self.root))):
+                target.write_bytes(b"nonempty residue")
+                with self.assertRaises(b.Failure): self.app.boot()
+                target.write_bytes(b"")
+        target = paths[0]
+        target.unlink()
+        target.symlink_to(paths[1])
+        with self.assertRaises(b.Failure): self.app.boot()
+        target.unlink()
+        os.link(paths[1], target)
+        with self.assertRaises(b.Failure): self.app.boot()
+        target.unlink()
+        os.mkfifo(target)
+        with self.assertRaises(b.Failure): self.app.boot()
+
     def test_restore_without_early_boot_reloads_apparmor_and_recreates_tmpfiles(self):
         self.install()
         previous = self.app.current()
