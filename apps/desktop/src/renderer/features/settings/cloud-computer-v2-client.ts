@@ -1,26 +1,18 @@
+export { cloudComputerV2BuildSchema, cloudComputerV2StateSchema } from "./cloud-computer-v2-contract";
+import { cloudComputerV2BuildSchema, cloudComputerV2StateSchema, uuid, revision, positive, bytes,
+  draftResult, buildResult, cancelResult, activateResult, logSchema } from "./cloud-computer-v2-contract";
 import { z } from "zod";
 import {
   CLOUD_COMPUTER_V2_MAX_LOG_BYTES,
-  CLOUD_COMPUTER_V2_MAX_LOG_ROW_BYTES,
   CLOUD_COMPUTER_V2_MAX_REQUEST_BYTES,
-  CloudComputerV2BuildErrorSchema,
   CloudComputerV2AdminWorkspaceRequestSchema,
   CloudComputerV2BuildRequestSchema,
-  CloudComputerV2BuildStageSchema,
-  CloudComputerV2BuildStateSchema,
-  CloudComputerV2RepositorySchema,
-  CloudComputerV2ActiveRepositorySchema,
   CloudComputerV2RevisionSchema,
   CloudComputerV2SaveDraftSchema,
-  CloudComputerV2TemplateStateSchema,
   CloudComputerV2VersionRequestSchema,
-  type CloudComputerV2ActivateResult,
   type CloudComputerV2BuildLogs,
-  type CloudComputerV2BuildResult,
   type CloudComputerV2BuildSummary,
-  type CloudComputerV2CancelResult,
   type CloudComputerV2DraftInput,
-  type CloudComputerV2DraftResult,
   type CloudComputerV2State,
 } from "@zeros/protocol/cloud-computer-v2";
 import {
@@ -36,134 +28,6 @@ import {
   getOrganizationStoreGeneration,
   getTeamStoreState,
 } from "../team/team-store";
-
-const uuid = z.string().uuid();
-const revision = z.number().int().nonnegative().safe();
-const positive = z.number().int().positive().safe();
-const bytes = (value: string) => new TextEncoder().encode(value).byteLength;
-export const cloudComputerV2BuildSchema: z.ZodType<CloudComputerV2BuildSummary> =
-  z
-    .object({
-      id: uuid,
-      version: positive,
-      configId: uuid,
-      acceptedRevision: revision,
-      state: CloudComputerV2BuildStateSchema,
-      stage: CloudComputerV2BuildStageSchema,
-      errorCode: CloudComputerV2BuildErrorSchema.nullable(),
-      rebuiltFromBuildId: uuid.nullable(),
-      templateState: CloudComputerV2TemplateStateSchema.nullable(),
-      createdAt: z.string().datetime(),
-      startedAt: z.string().datetime().nullable(),
-      completedAt: z.string().datetime().nullable(),
-      cancelRequestedAt: z.string().datetime().nullable(),
-    })
-    .strict();
-
-// Reads have no value or binding-version field. Reject unexpected fields at the
-// transport boundary, rather than letting secret material enter a shared cache.
-export const cloudComputerV2StateSchema: z.ZodType<CloudComputerV2State> = z
-  .object({
-    state: z.enum(["not_built", "building", "active", "failed"]),
-    revision,
-    draft: z
-      .object({
-        configId: uuid.nullable(),
-        repositories: z.array(CloudComputerV2RepositorySchema).max(20),
-        installScript: z
-          .string()
-          .refine((value) => bytes(value) <= 16_384 && !value.includes("\0")),
-        timeoutSeconds: z.number().int().min(1).max(900),
-        environment: z
-          .array(
-            z
-              .object({
-                name: z.string().regex(/^[A-Z_][A-Z0-9_]{0,127}$/),
-                set: z.boolean(),
-              })
-              .strict(),
-          )
-          .max(128),
-      })
-      .strict(),
-    active: cloudComputerV2BuildSchema.nullable(),
-    activeRepositories: z.array(CloudComputerV2ActiveRepositorySchema).max(20).default([]),
-    previous: cloudComputerV2BuildSchema.nullable(),
-    latestBuild: cloudComputerV2BuildSchema.nullable(),
-    unbuiltChanges: z.boolean(),
-    history: z
-      .object({
-        builds: z.array(cloudComputerV2BuildSchema).max(100),
-        nextCursor: z.string().min(1).max(512).nullable(),
-      })
-      .strict(),
-    canManage: z.boolean(),
-  })
-  .strict();
-const draftResult: z.ZodType<CloudComputerV2DraftResult> = z
-  .object({
-    revision,
-    configId: uuid,
-    unbuiltChanges: z.boolean(),
-  })
-  .strict();
-const buildResult: z.ZodType<CloudComputerV2BuildResult> = z
-  .object({
-    revision,
-    build: cloudComputerV2BuildSchema,
-    replayed: z.boolean(),
-  })
-  .strict();
-const cancelResult: z.ZodType<CloudComputerV2CancelResult> = z
-  .object({
-    revision,
-    build: cloudComputerV2BuildSchema,
-    cancelled: z.boolean(),
-    cancelRequested: z.boolean(),
-    alreadyCompleted: z.boolean(),
-  })
-  .strict();
-const activateResult: z.ZodType<CloudComputerV2ActivateResult> = z
-  .object({
-    revision,
-    activeBuildId: uuid,
-    activated: z.literal(true),
-    replayed: z.boolean(),
-  })
-  .strict();
-const logSchema: z.ZodType<CloudComputerV2BuildLogs> = z
-  .object({
-    entries: z
-      .array(
-        z
-          .object({
-            seq: positive,
-            stream: z.enum(["stdout", "stderr", "system"]),
-            stage: CloudComputerV2BuildStageSchema,
-            text: z
-              .string()
-              .refine(
-                (value) => bytes(value) <= CLOUD_COMPUTER_V2_MAX_LOG_ROW_BYTES,
-              ),
-            createdAt: z.string().datetime(),
-          })
-          .strict(),
-      )
-      .max(100),
-    firstSeq: positive.nullable(),
-    lastSeq: positive.nullable(),
-    nextAfter: revision,
-    truncated: z.boolean(),
-    complete: z.boolean(),
-  })
-  .strict()
-  .refine((value) =>
-    value.entries.every(
-      (entry, index) =>
-        entry.seq <= value.nextAfter &&
-        (index === 0 || entry.seq > value.entries[index - 1]!.seq),
-    ),
-  );
 
 const same = <T>(a: T, b: T) => JSON.stringify(a) === JSON.stringify(b);
 function reconcileState(
