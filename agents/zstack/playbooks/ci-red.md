@@ -32,9 +32,12 @@
 - **A flake twice** becomes a deterministic fix PR. Reproduce it under load,
   find the race (often teardown, not the asserted behavior) and fix the
   fixture without weakening the contract.
-- **Serializable capacity races:** a losing writer can either observe committed capacity or exhaust its
-  bounded serialization retries before that commit. Hold both commit schedules and assert their distinct
-  errors plus the final capacity bound. Don't rely on database victim selection or accept any error.
+- **Serializable context races:** a losing writer can reuse the committed context,
+  observe committed capacity, or exhaust its bounded retries before the winner
+  commits. Hold both COMMIT schedules separately from the first INSERT barrier;
+  assert each exact outcome, the stored identity/capacity bound and each caller's
+  original deadline. Uniqueness does not promise both calls succeed. Don't rely
+  on database victim selection, accept any error or widen production retries.
 - **Database test timeouts:** first trace whether the changed code actually runs in the failing test,
   then reproduce with bounded database transit delay. Large lifecycle or pagination fixtures can
   legitimately exceed the default 5 s test budget. Give only that case a justified bounded timeout,
