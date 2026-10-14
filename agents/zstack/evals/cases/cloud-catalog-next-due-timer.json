@@ -1,0 +1,9 @@
+{
+  "id": "cloud-catalog-next-due-timer",
+  "kind": "replay",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:484",
+  "symptom": "A two-second catalog interval woke hidden and stable windows even when no fetch was due; tying the replacement timer to disk-cache restoration also stalled the network fallback.",
+  "rule": "Schedule only the next visible due read, fence each account flight, and release network scheduling independently of disk restoration; revalidate workspace eligibility after the cache await.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/state/__tests__/cloud-catalog-scheduling.test.ts"
+}

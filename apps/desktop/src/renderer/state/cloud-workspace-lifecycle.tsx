@@ -87,7 +87,9 @@ function ActiveCloudWorkspaceLifecycle() {
     if (isLocalDevelopment()) return;
     let alive = true;
     let enabled = false;
-    let lastRefresh = 0;
+    let lastRefresh: number | undefined;
+    let refreshTimer: number | undefined;
+    let refreshFlight: object | undefined;
     let account: string | null = null;
     let authVersion = 0;
     let installed = false;
@@ -113,19 +115,38 @@ function ActiveCloudWorkspaceLifecycle() {
         folders,
       });
     };
+    const cancelRefreshTimer = () => {
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      refreshTimer = undefined;
+    };
+    const canRefresh = () => alive && enabled && !!account &&
+      document.visibilityState !== "hidden";
+    const refreshDelay = () => lastRefresh === undefined ? 0 : Math.max(0,
+      lastRefresh + (cloudCatalogNeedsFastRefresh() ? 2_000 : 30_000) - performance.now());
+    const scheduleRefresh = () => {
+      cancelRefreshTimer();
+      if (!canRefresh() || refreshFlight) return;
+      refreshTimer = window.setTimeout(refresh, Math.ceil(refreshDelay()));
+    };
     const refresh = () => {
-      if (
-        !alive ||
-        !enabled ||
-        !account ||
-        document.visibilityState === "hidden"
-      )
+      cancelRefreshTimer();
+      if (!canRefresh() || refreshFlight) return;
+      if (refreshDelay() > 0) {
+        scheduleRefresh();
         return;
-      const pending = cloudCatalogNeedsFastRefresh();
-      if (Date.now() - lastRefresh < (pending ? 2_000 : 30_000)) return;
-      lastRefresh = Date.now();
+      }
+      lastRefresh = performance.now();
+      const flight = {};
+      refreshFlight = flight;
       const version = authVersion;
       void refreshCloudWorkspaceCatalog()
+        .finally(() => {
+          // Network observation owns this flight, not slower cache restoration.
+          // A retired A1 request cannot clear A2's flight or arm its timer.
+          if (refreshFlight !== flight) return;
+          refreshFlight = undefined;
+          scheduleRefresh();
+        })
         .then(async () => {
           if (!alive || version !== authVersion) return;
           retainAuthorizedCloudTranscriptWorkspaces();
@@ -144,16 +165,24 @@ function ActiveCloudWorkspaceLifecycle() {
           const activeChatId = useWorkspaceStore.getState().activeChatId;
           if (activeChatId && authorized.some(chat => chat.id === activeChatId)) await readCachedCloudTranscriptWindow(activeChatId);
           if (!alive || version !== authVersion) return;
-          if (authorized.length)
+          // The catalog may remove access while the native cache is loading.
+          const stillAuthorized = authorized.filter((row) => {
+            const target = parseCloudWorkspaceKey(row.folder);
+            return target && canReadCloudWorkspace(cloudWorkspaceDocument(target));
+          });
+          if (stillAuthorized.length)
             useWorkspaceStore
               .getState()
-              .dispatch({ type: "MERGE_CHATS", chats: authorized });
+              .dispatch({ type: "MERGE_CHATS", chats: stillAuthorized });
           completeCloudChatCacheRestore(account!);
           persistWorkspaceChatCache(CHATS_STORAGE_KEY, useWorkspaceStore.getState().chats);
           cached = [];
         })
         .catch(() => {});
     };
+    // Local create/lifecycle receipts can change the cadence before the next
+    // fallback. Anchor it to the read start so unrelated events cannot defer it.
+    const offRefreshSchedule = subscribeCloudWorkspaces(scheduleRefresh);
     const offCatalog = subscribeCloudWorkspaceRows((change) => {
       pruneCloudLatencySpans();
       forgetRemovedCloudTranscriptWorkspaces(change.removedWorkspaceIds);
@@ -193,13 +222,15 @@ function ActiveCloudWorkspaceLifecycle() {
       if (!alive) return;
       const next = session?.user.accountId ?? session?.user.sub ?? null;
       if (installed && next === account) return;
+      cancelRefreshTimer();
+      refreshFlight = undefined;
+      lastRefresh = undefined;
       // The first authenticated snapshot validates the saved identity below.
       // Account changes/sign-out discard it; initial auth must not discard it
       // just because no cloud chat has been released into the store yet.
       clear(!installed && next !== null);
       installed = true;
       account = next;
-      lastRefresh = 0;
       restored = false;
       setCloudChatCacheOwner(next);
       setCloudTranscriptCacheOwner(next);
@@ -216,7 +247,8 @@ function ActiveCloudWorkspaceLifecycle() {
         const bridge = getActiveBridge();
         if (bridge instanceof WorkspaceRuntimeClient) bridge.cancelSpeculativeWarmups();
         clearCloudLatencySpans();
-      } else refresh();
+      }
+      refresh();
     };
     const initialVersion = authVersion;
     void getSession()
@@ -231,14 +263,14 @@ function ActiveCloudWorkspaceLifecycle() {
         refresh();
       })
       .catch(() => {});
-    const timer = window.setInterval(refresh, 2_000);
     document.addEventListener("visibilitychange", visibility);
     window.addEventListener("focus", refresh);
     return () => {
       alive = false;
       offCatalog();
+      offRefreshSchedule();
       offAuth();
-      window.clearInterval(timer);
+      cancelRefreshTimer();
       document.removeEventListener("visibilitychange", visibility);
       window.removeEventListener("focus", refresh);
       setCloudChatCacheOwner(null);
