@@ -75,7 +75,7 @@ export function formatLogArgs(args: unknown[]): string {
 
 const queue: RendererLogRecord[] = [];
 let dropped = 0;
-let flushTimer: ReturnType<typeof setInterval> | null = null;
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let flushing = false;
 let installed = false;
 
@@ -161,6 +161,18 @@ function enqueue(level: RendererLogLevel, text: string, tags?: string[]): void {
     clientTimestamp: new Date().toISOString(),
   });
   if (queue.length >= FLUSH_AT) void flush();
+  else scheduleFlush();
+}
+
+function scheduleFlush(): void {
+  if (flushing || flushTimer !== null || queue.length === 0) return;
+  // Producers own the wakeup. Empty queues and pending IPC need no timer;
+  // an open circuit parks the next batch until a real probe is allowed.
+  const delay = Math.max(FLUSH_INTERVAL_MS, circuit.openUntil - Date.now());
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void flush();
+  }, delay);
 }
 
 async function flush(): Promise<void> {
@@ -168,7 +180,14 @@ async function flush(): Promise<void> {
   // Backing off after a run of failures — don't splice, don't drop, don't
   // touch IPC. The queue keeps filling (bounded by MAX_QUEUE) until a probe
   // is due. Checked BEFORE `flushing` so we never early-return while "busy".
-  if (!circuitAllowsAttempt(circuit, Date.now())) return;
+  if (!circuitAllowsAttempt(circuit, Date.now())) {
+    scheduleFlush();
+    return;
+  }
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
   flushing = true;
   try {
     if (dropped > 0) {
@@ -193,6 +212,7 @@ async function flush(): Promise<void> {
     }
   } finally {
     flushing = false;
+    scheduleFlush();
   }
 }
 
@@ -262,7 +282,6 @@ export function initRendererLogCapture(): void {
     ]);
   });
 
-  flushTimer = setInterval(() => void flush(), FLUSH_INTERVAL_MS);
   // Last-gasp flush — fire-and-forget; whatever lands, lands.
   window.addEventListener("pagehide", () => void flush());
 
@@ -272,7 +291,7 @@ export function initRendererLogCapture(): void {
 /** Test-only: restore pristine state. Does NOT unpatch console (tests stub
  *  console themselves); clears queue/timer/flags. */
 export function _resetRendererLogForTests(): void {
-  if (flushTimer) clearInterval(flushTimer);
+  if (flushTimer !== null) clearTimeout(flushTimer);
   flushTimer = null;
   queue.length = 0;
   dropped = 0;
