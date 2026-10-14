@@ -10,6 +10,20 @@ where it is encoded.
   Trace reachability first and separate test budgets from production deadlines (`playbooks/ci-red.md`,
   case `retention-pagination-test-budget`).
 
+## 0.1.3
+
+- **A concurrent last-slot test expected only a capacity refusal.** Bounded SERIALIZABLE retries can run
+  out before the winner commits, which correctly returns transient contention. Control both commit
+  schedules and assert each exact error and the capacity bound (`playbooks/ci-red.md`, case
+  `warm-context-capacity-commit-order`).
+
+## 0.1.2
+
+- **An empty log queue still woke every second.** Its early return suppressed IPC but left the interval
+  running. The flusher now wakes from enqueue and parks at the circuit deadline. Scheduler tests must
+  count scheduled work after the queue drains and cover pending flights and backoff
+  (`playbooks/bug-fix.md`, case `empty-renderer-log-poll`).
+
 ## 0.1.1
 
 - **Subagents can't know their PR number** when they add an eval case. Use `fixedBy: "pending"` locally
