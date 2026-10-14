@@ -6,8 +6,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudOwnedWorkloadRegistry } from "@/engine/agents/containment/cloud-owned-workloads";
 import { createCloudWorkloadCustody } from "@/engine/agents/containment/cloud-workload-custody";
-import { nativeCloudWorkloadIO, type CloudWorkloadKernelProcess } from "@/engine/agents/containment/cloud-workload-cgroup.mjs";
+import type { CloudWorkloadKernelProcess } from "@/engine/agents/containment/cloud-workload-cgroup.mjs";
 import { cloudWorkloadKernelFixture, common, engine, resident, workload, identity, kernelProcess } from "@/engine/agents/containment/__tests__/helpers/cloud-workload-kernel";
+import { portableKernelProcess } from "./helpers/portable-cloud-custody";
 import { ResidentPtyHost } from "@/engine/pty/resident-host";
 import { ResidentPtyClient } from "@/engine/pty/resident-client";
 import { ResidentTerminalService } from "@/engine/pty/resident-service";
@@ -86,7 +87,7 @@ describe.runIf(process.platform === "linux")("actual preserved resident Host and
   it("classifies its original quiet shell after the successor attaches using the same kernel census", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "astra-preserved-census-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
-    const kernel = cloudWorkloadKernelFixture(), birth = nativeCloudWorkloadIO.process(process.pid)!;
+    const kernel = cloudWorkloadKernelFixture(), birth = portableKernelProcess(process.pid)!;
     kernel.projection.infrastructure[1] = { kind: "resident", pid: process.pid, startToken: birth.startToken };
     kernel.groups.get(resident)!.pids = [process.pid]; kernel.processes.delete(102);
     kernel.processes.set(process.pid, { ...birth, directory: resident, uid: 10003 });
@@ -107,7 +108,7 @@ describe.runIf(process.platform === "linux")("actual preserved resident Host and
       if (directory === common && name === "cgroup.procs") {
         const roots = new Set(host["workloads"].snapshot().scopes.flatMap(scope => scope.processGroups));
         const all = readdirSync("/proc").filter(value => /^[1-9]\d*$/.test(value))
-          .map(value => nativeCloudWorkloadIO.process(Number(value)))
+          .map(value => portableKernelProcess(Number(value)))
           .filter((value): value is CloudWorkloadKernelProcess => value !== null)
           .filter(value => !["Z", "X"].includes(value.state));
         const selected = new Set(all.filter(member => roots.has(member.group)).map(member => member.pid));
@@ -120,7 +121,7 @@ describe.runIf(process.platform === "linux")("actual preserved resident Host and
         const members = all.filter(member => selected.has(member.pid));
         kernel.groups.get(workload)!.pids = members.map(member => member.pid);
         for (const member of members) kernel.processes.set(member.pid, { ...member, uid: 10003, directory: workload });
-        const current = nativeCloudWorkloadIO.process(process.pid)!;
+        const current = portableKernelProcess(process.pid)!;
         kernel.processes.set(process.pid, { ...current, uid: 10003, directory: resident });
       }
       return read(directory, name);

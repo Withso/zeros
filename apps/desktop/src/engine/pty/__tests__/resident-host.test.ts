@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomBytes, randomUUID } from "node:crypto";
-import { fork, type ChildProcess } from "node:child_process";
+import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer, type Server } from "node:net";
@@ -188,7 +188,17 @@ describe.runIf(process.platform === "linux")("resident cloud terminals", () => {
   it('reports original resident groups, including foreground commands, without changing session custody',async()=>{
     const f=await setup(),client=await f.connect();
     expect(await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
-    const session=await client.create({sessionId:'observed-work',cwd:f.root,cols:80,rows:24,env:{PATH:'/usr/bin:/bin'},command:'sleep 60 & wait'});
+    const gate=path.join(f.root,'start-workload');execFileSync('mkfifo',[gate]);
+    const session=await client.create({sessionId:'observed-work',cwd:f.root,cols:80,rows:24,
+      env:{PATH:'/usr/bin:/bin',ZEROS_TEST_WORKLOAD_GATE:gate},
+      command:'printf "SHELL_WAITING\\n"; read -r start < "$ZEROS_TEST_WORKLOAD_GATE"; sleep 60 & printf "WORKLOAD_%s\\n" READY; wait'});
+    await expect.poll(async()=>(await client.snapshot(session.sessionId)).data).toContain('SHELL_WAITING');
+    // The Host wrapper may look busy before the actual command starts, then
+    // briefly look like a quiet shell. Hold that launch gap explicitly. A
+    // filesystem gate does not mark terminal input active and mask the proof.
+    await expect.poll(()=>client.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
+    await writeFile(gate,'start\n');
+    await expect.poll(async()=>(await client.snapshot(session.sessionId)).data).toContain('WORKLOAD_READY');
     await expect.poll(async()=>await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:true});
     const nextAuthority=authority(2);f.host.authorize(nextAuthority);const next=await f.connect(nextAuthority);
     expect((await next.list())[0].pid).toBe(session.pid);expect((await next.inspectWorkloads()).busy).toBe(true);
