@@ -1,0 +1,9 @@
+{
+  "id": "worker-independent-session-holders",
+  "kind": "seeded",
+  "area": "control-plane-workers",
+  "fixedBy": "pr:492",
+  "symptom": "A two-slot worker pool passed API saturation tests but could be filled by independent Computer and WorkOS session-lock holders whose callbacks also needed query capacity.",
+  "rule": "The bug-fix playbook requires concurrent provider barriers for all independent session holders, callback and short-worker progress, and a budget that includes dedicated lock pools and deploy overlap.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/computer-retirement.integration.test.ts src/cloud-pool-boot.test.ts src/db.test.ts"
+}

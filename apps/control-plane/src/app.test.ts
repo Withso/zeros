@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 import {Context} from "hono";
 import {HttpError} from "./authz.js";
+import { DatabaseAcquireTimeoutError } from "./db.js";
 
 import { createApp } from "./app.js";
 import type { Config, GithubBackendConfig } from "./config.js";
@@ -92,6 +93,16 @@ function config(github: GithubBackendConfig | null): Config {
   };
 }
 
+it("exposes only liveness and release readiness on a worker process", async () => {
+  const query = vi.fn(async () => ({ rows: [] }));
+  const app = createApp({ ...config(null), processRole: "worker" }, { query } as unknown as pg.Pool, emailConfig as never);
+  expect((await app.request("/healthz")).status).toBe(200);
+  for (const path of ["/v1/me", "/v1/cloud-workspaces", "/v1/auth/events", "/auth/login", "/internal/v1/runtime-bases"]) {
+    expect((await app.request(path)).status).toBe(404);
+  }
+  expect(query).toHaveBeenCalledExactlyOnceWith("SELECT 1");
+});
+
 it("opts the assembled app into scalar query-cost observation without exposing raw request data", async () => {
   const observer = vi.fn();
   const healthPool = { query: async () => ({ command: "SELECT", rowCount: 1, rows: [] }) } as unknown as pg.Pool;
@@ -161,6 +172,17 @@ function workosConfig(): Config {
 }
 
 describe("unexpected error privacy", () => {
+  it("returns a closed retry response for capacity loss, including on customer cloud routes", async () => {
+    for (const path of ["/v1/me", "/v1/cloud-workspaces", "/v1/organizations/example/cloud-workspaces"]) {
+      const app = createApp(config(null), pool, emailConfig as never);
+      const context = new Context(new Request(`https://api.example.test${path}`));
+      const response = await app.errorHandler(new DatabaseAcquireTimeoutError(), context);
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("1");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({ error: { code: "service_busy", message: "Service is temporarily busy" } });
+    }
+  });
   it("projects deliberate customer cloud errors without infrastructure messages or details",async()=>{
     const app=createApp(config(null),pool,emailConfig as never);
     const context=new Context(new Request('https://api.example.test/v1/cloud-workspaces/workspace'),{path:'/v1/cloud-workspaces/workspace'});

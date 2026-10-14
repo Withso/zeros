@@ -278,7 +278,8 @@ describe("database authority configuration", () => {
     expect(loadConfig(baseEnv())).toMatchObject({
       databaseMigrationUrl: baseEnv().DATABASE_URL,
       databaseMigrationsOnBoot: true,
-      databasePoolMax: 10,
+      databasePoolMax: 6,
+      processRole: "combined",
     });
     expect(loadConfig({ ...baseEnv(), DATABASE_MIGRATION_URL: "postgres://migrator@database.test/zeros", DATABASE_MIGRATIONS_ON_BOOT: "false", DATABASE_POOL_MAX: "6" })).toMatchObject({
       databaseMigrationUrl: "postgres://migrator@database.test:5432/zeros",
@@ -312,11 +313,18 @@ describe("database authority configuration", () => {
     expect(() => loadConfig({ ...baseEnv(), SLOW_REQUEST_LOG_MS: value })).toThrow();
   });
 
-  it.each(["1", "2"])("reserves both lock and callback capacity alongside shared LISTEN (max %s)", max => {
+  it.each(["1"])("reserves both lock and callback capacity (max %s)", max => {
     expect(() => loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: max })).toThrow(/DATABASE_POOL_MAX/);
   });
   it("permits two runtime connections when the listener has its own pool", () => {
     expect(loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: "2", DATABASE_LISTEN_URL: baseEnv().DATABASE_URL }).databasePoolMax).toBe(2);
+    expect(loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: "2" }).databasePoolMax).toBe(2);
+  });
+  it("separates API replica and worker roles without changing placement gates", () => {
+    for (const role of ["api", "worker", "combined"]) {
+      expect(loadConfig({ ...baseEnv(), CONTROL_PLANE_PROCESS_ROLE: role }).processRole).toBe(role);
+    }
+    expect(() => loadConfig({ ...baseEnv(), CONTROL_PLANE_PROCESS_ROLE: "all" })).toThrow(/CONTROL_PLANE_PROCESS_ROLE/);
   });
   const psFixture = new URL("postgres://region.horizon.psdb.cloud:5432/zeros?sslmode=verify-full");
   psFixture.username = "app.branchtest";
