@@ -13,7 +13,7 @@ jobs:
   lifecycle:
     if: github.repository == 'Withso/zeros' && github.ref == 'refs/heads/main' && vars.ZEROS_DEV_E2E_ENABLED == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Start the overall budget
         run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "ZEROS_DEV_E2E_START_MS=" + Date.now() + "\n")'

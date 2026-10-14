@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
-import { CloudComputerV2BuildRequestSchema, CloudComputerV2BuildRuntimeSchema, type CloudComputerV2BuildSummary } from "@zeros/protocol/cloud-computer-v2";
+import { CloudComputerV2BuildRequestSchema, CloudComputerV2BuildRuntimeSchema, type CloudComputerV2BuildRuntime, type CloudComputerV2BuildSummary } from "@zeros/protocol/cloud-computer-v2";
 import { CloudWorkspaceDocumentSchema, OptionsSchema, AgentGrantsSchema, CloudAgentBootAvailabilitySchema, type CloudWorkspaceDocument } from "../../apps/desktop/src/renderer/platform/cloud-workspace-contract";
 import { cloudComputerV2StateSchema, cloudComputerV2BuildSchema, buildResult, logSchema } from "../../apps/desktop/src/renderer/features/settings/cloud-computer-v2-contract";
 import type { ZerosDevSession } from "./session";
@@ -16,6 +16,8 @@ const observedDocument=document.extend({setupProgress:z.unknown().optional()});
 const pendingDeletion=z.object({truncated:z.boolean(),pendingDeletion:z.array(z.object({workspaceId:z.string().uuid(),generation:z.number().int().positive()})).max(500)});
 export type Agent="claude"|"codex"|"cursor";
 type SessionPort=Pick<ZerosDevSession,"fixture"|"whoami"|"accessToken">;
+const runtimeTarget = CloudComputerV2BuildRuntimeSchema.shape.selected.unwrap().pick({ runtimeId: true, baseImageId: true });
+export type ComputerRuntimeTarget = z.infer<typeof runtimeTarget>;
 
 export class ProductApi {
   private readonly now:()=>number;
@@ -76,17 +78,29 @@ export class ProductApi {
     const build=await this.request(`${this.computerRoot(fixture)}/builds/${result.id}`,cloudComputerV2BuildSchema,{signal});
     if(build.id!==result.id||build.version!==result.version)throw new ZerosDevError("identity_changed");return build;
   }
-  async verifyComputerRuntime(build:Pick<CloudComputerV2BuildSummary,"id"|"version">,signal?:AbortSignal,expectedRuntime?:string):Promise<"confirmed">{
-    if(expectedRuntime!==undefined&&!/^r1-[a-f0-9]{64}$/.test(expectedRuntime))throw new ZerosDevError("invalid_request");
+  async readComputerRuntime(build:Pick<CloudComputerV2BuildSummary,"id"|"version">,signal?:AbortSignal):Promise<CloudComputerV2BuildRuntime>{
     const fixture=await this.session.fixture();
     const proof=await this.request(`${this.computerRoot(fixture)}/builds/${build.id}/runtime`,CloudComputerV2BuildRuntimeSchema,{signal});
     if(proof.buildId!==build.id||proof.version!==build.version)throw new ZerosDevError("identity_changed");
+    return proof;
+  }
+  async verifyComputerRuntime(build:Pick<CloudComputerV2BuildSummary,"id"|"version">,signal?:AbortSignal,expectedRuntime?:string|ComputerRuntimeTarget):Promise<"confirmed">{
+    if(expectedRuntime!==undefined&&(typeof expectedRuntime==="string"?!/^r1-[a-f0-9]{64}$/.test(expectedRuntime):!runtimeTarget.safeParse(expectedRuntime).success))
+      throw new ZerosDevError("invalid_request");
+    const proof=await this.readComputerRuntime(build,signal);
+    // The hourly run captures a qualified tuple once. A later release or
+    // revocation is a selection race, not permission to chase another build.
+    if(typeof expectedRuntime==="object"){
+      if(!proof.selected)throw new ZerosDevError("runtime_selection_unavailable");
+      if(proof.selected.runtimeId!==expectedRuntime.runtimeId||proof.selected.baseImageId!==expectedRuntime.baseImageId)
+        throw new ZerosDevError("runtime_selection_changed");
+    }
     if(!proof.runtimeId||!proof.baseImageId||!proof.selected||proof.runtimeId!==proof.selected.runtimeId||
-      proof.baseImageId!==proof.selected.baseImageId||expectedRuntime!==undefined&&proof.runtimeId!==expectedRuntime)
+      proof.baseImageId!==proof.selected.baseImageId||typeof expectedRuntime==="string"&&proof.runtimeId!==expectedRuntime)
       throw new ZerosDevError("runtime_pin_unconfirmed");
     return "confirmed";
   }
-  async waitComputer(run:Run,signal?:AbortSignal,expectedRuntime?:string){
+  async waitComputer(run:Run,signal?:AbortSignal,expectedRuntime?:string|ComputerRuntimeTarget){
     return this.observe(async bound=>{
       const build=await this.readBuild(run,bound);
       if(["failed","cancelled"].includes(build.state))throw new ZerosDevError("computer_failed");

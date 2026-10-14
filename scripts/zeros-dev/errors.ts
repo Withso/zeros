@@ -11,7 +11,8 @@ export const ERROR_CODES = [
   "receipt_invalid", "receipt_busy", "receipt_missing", "operation_conflict",
   "computer_required", "computer_failed", "repository_required", "workspace_failed", "workspace_not_running",
   "agent_credential_required", "agent_failed", "permission_required", "command_uncertain",
-  "runtime_unavailable", "runtime_changed", "runtime_pin_unconfirmed", "terminal_failed", "cleanup_pending", "database_unavailable",
+  "runtime_unavailable", "runtime_changed", "runtime_pin_unconfirmed", "runtime_selection_unavailable", "runtime_selection_changed",
+  "terminal_failed", "cleanup_pending", "database_unavailable",
   "database_readonly_required", "input_contains_credentials", "cancelled", "internal", "history_changed", "actions_required", "artifact_invalid",
 ] as const;
 export type ErrorCode = typeof ERROR_CODES[number];

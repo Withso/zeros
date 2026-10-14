@@ -17,7 +17,7 @@ import { Evidence } from "./evidence";
 import { closedError, diagnosticEvidence, ZerosDevError, type ErrorCode } from "./errors";
 import { controlPlaneHealth } from "./health";
 import { HourlyCredentials, actionsMaterials } from "./hourly-credentials";
-import { runHourly, recoverHourlyRun, HOURLY_CLEANUP_MS } from "./hourly";
+import { runHourly, recoverHourlyRun, HOURLY_CLEANUP_MS, HOURLY_TOTAL_MS } from "./hourly";
 import { ExecutionSchema, importHourlyArtifact, exportHourlyArtifact } from "./hourly-artifact";
 import { hourlyContext } from "./hourly-actions.mjs";
 
@@ -127,7 +127,7 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
     const started = Number(env.ZEROS_DEV_E2E_START_MS), wall = Date.now(), anchor = performance.now();
     // The workflow starts this budget before dependency installation. Anchor
     // its remainder once so a wall-clock adjustment cannot extend the run.
-    const remaining = () => 550_000 - Math.max(0, wall - started) - (performance.now() - anchor);
+    const remaining = () => HOURLY_TOTAL_MS - Math.max(0, wall - started) - (performance.now() - anchor);
     if (!Number.isSafeInteger(started) || started > Date.now() + 1000 || remaining() < HOURLY_CLEANUP_MS + 60_000) throw new ZerosDevError("deadline");
     if (!env.GITHUB_WORKSPACE || !env.RUNNER_TEMP) throw new ZerosDevError("actions_required");
     const root = await realpath(env.GITHUB_WORKSPACE), temporary = await realpath(env.RUNNER_TEMP);
@@ -194,7 +194,7 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
       handle.run.hourly = { version: 1, ...execution!, credentials: [], histories: [], activeWindows: [], complete: false }; await handle.save();
       let failed: unknown;
       try {
-        await runHourly({ handle, api, credentials, evidence, workMs: Math.max(1, Math.ceil(remaining() - HOURLY_CLEANUP_MS)),
+        await runHourly({ handle, api, credentials, evidence, budgetMs: Math.max(1, Math.ceil(remaining() - HOURLY_CLEANUP_MS)),
           signal: options.signal, connect: services.connect });
       } catch (error) { failed = error; }
       handle.run.evidence = [...handle.run.evidence, ...evidence.events].slice(-256);
