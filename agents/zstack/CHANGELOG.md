@@ -3,6 +3,13 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.1.3
+
+- **A concurrent last-slot test expected only a capacity refusal.** Bounded SERIALIZABLE retries can run
+  out before the winner commits, which correctly returns transient contention. Control both commit
+  schedules and assert each exact error and the capacity bound (`playbooks/ci-red.md`, case
+  `warm-context-capacity-commit-order`).
+
 ## 0.1.2
 
 - **An empty log queue still woke every second.** Its early return suppressed IPC but left the interval

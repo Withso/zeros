@@ -342,7 +342,7 @@ suite("genuine private boot credential execution",()=>{
     expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts")).rows[0]).toEqual({count:4096});
     expect(await service.boot(engine(),"warm-context",input)).toMatchObject({contextId:first.contextId});
   });
-  it("does not oversubscribe the last context slot with concurrent publishers", async () => {
+  it.each(["committed", "still pending"] as const)("does not oversubscribe the last context slot when the winner is %s", async commitState => {
     const bound = await boot(), sender = await actor();
     const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
       provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
@@ -350,17 +350,49 @@ suite("genuine private boot credential execution",()=>{
     await pool.query(`INSERT INTO cloud_agent_boot_contexts SELECT (jsonb_populate_record(NULL::cloud_agent_boot_contexts,
       to_jsonb(saved)||jsonb_build_object('context_id',gen_random_uuid(),'retired_at',clock_timestamp()))).*
       FROM cloud_agent_boot_contexts saved CROSS JOIN generate_series(1,4094) WHERE saved.context_id=$1`, [first.contextId]);
-    let publications = 0, release!: () => void;
-    const together = new Promise<void>(resolve => { release = resolve; });
-    const reader = interceptQueries(pool, async sql => {
-      if (!sql.startsWith("INSERT INTO cloud_agent_boot_contexts") || ++publications > 2) return;
-      if (publications === 2) release();
-      await together;
+    let loserReady!: () => void, winnerAtCommit!: () => void, winnerFinished!: () => void, allowCommit!: () => void;
+    const bothReadCapacity = new Promise<void>(resolve => { loserReady = resolve; });
+    const atCommit = new Promise<void>(resolve => { winnerAtCommit = resolve; });
+    const committed = new Promise<void>(resolve => { winnerFinished = resolve; });
+    const commitAllowed = new Promise<void>(resolve => { allowCommit = resolve; });
+    let loserPublications = 0;
+    const winnerPool = interceptQueries(pool, async sql => {
+      if (sql.startsWith("INSERT INTO cloud_agent_boot_contexts")) await bothReadCapacity;
+      if (sql === "COMMIT") {
+        winnerAtCommit();
+        if (commitState === "still pending") await commitAllowed;
+      }
     });
-    const reads = new DatabaseCloudAgentExecutionService(reader, keys, false);
-    const results = await Promise.allSettled([1, 2].map(() => reads.boot(engine(), "warm-context", { ...input, conversationId: randomUUID() })));
-    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
-    expect(results.find(result => result.status === "rejected")).toMatchObject({ reason: { status: 429, code: "cloud_validation_execution_limit" } });
+    const loserPool = interceptQueries(pool, async sql => {
+      if (!sql.startsWith("INSERT INTO cloud_agent_boot_contexts")) return;
+      loserPublications++;
+      loserReady();
+      if (commitState === "committed") {
+        // Both observed 4095 records. Commit the winner before allowing this
+        // stale snapshot to write, so its real serialization retry sees 4096.
+        await committed;
+      } else {
+        // Force the observed CI outcome without relying on PostgreSQL victim
+        // selection: all three attempts abort while the winner is uncommitted.
+        await atCommit;
+        throw Object.assign(new Error("synthetic serialization abort before winner commit"), { code: "40001" });
+      }
+    });
+    const winner = new DatabaseCloudAgentExecutionService(winnerPool, keys, false)
+      .boot(engine(), "warm-context", { ...input, conversationId: randomUUID() })
+      .finally(() => { winnerAtCommit(); winnerFinished(); });
+    const loser = new DatabaseCloudAgentExecutionService(loserPool, keys, false)
+      .boot(engine(), "warm-context", { ...input, conversationId: randomUUID() })
+      .finally(() => { loserReady(); allowCommit(); });
+    const results = await Promise.allSettled([winner, loser]);
+    expect(results[0]!.status).toBe("fulfilled");
+    // Capacity is observable only after commit; exhausted serialization retries
+    // are transient contention, not evidence that the final slot is occupied.
+    const refusal = commitState === "committed"
+      ? { status: 429, code: "cloud_validation_execution_limit" }
+      : { status: 503, code: "cloud_agent_credential_busy" };
+    expect(results[1]).toMatchObject({ status: "rejected", reason: refusal });
+    expect(loserPublications).toBe(commitState === "committed" ? 1 : 3);
     expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts")).rows[0]).toEqual({ count: 4096 });
   });
   it("bounds serialization retries without publishing a partial context", async () => {
