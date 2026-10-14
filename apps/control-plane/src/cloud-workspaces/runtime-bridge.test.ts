@@ -405,6 +405,47 @@ describe("portable cloud runtime relay", () => {
     await once(ws, "close");
     expect(revalidate).toHaveBeenCalledTimes(1);
   });
+  it("does not add revalidation latency to the authority deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+    let complete!: (valid: boolean) => void;
+    const revalidate = vi.fn(() => new Promise<boolean>(() => {}))
+      .mockImplementationOnce(() => new Promise<boolean>(resolve => { complete = resolve; }));
+    const f = await fixture({ revalidate, authorityCheckMs: 100 });
+    try {
+      await once(f.connect(), "open");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(revalidate).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(50);
+      complete(true);
+      await vi.advanceTimersByTimeAsync(149);
+      expect(f.relay.stats().retired.authority ?? 0).toBe(0);
+      // The renewed observation began at 100ms, so its 200ms budget ends at
+      // 300ms. Completion at 150ms must not move that boundary to 350ms.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(f.relay.stats().retired.authority).toBe(1);
+    } finally {
+      f.relay.close();
+      vi.useRealTimers();
+    }
+  });
+  it("never revives a stream after a successful revalidation arrives past the whole cap", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+    let complete!: (valid: boolean) => void;
+    const revalidate = vi.fn(() => new Promise<boolean>(resolve => { complete = resolve; }));
+    const f = await fixture({ revalidate, authorityCheckMs: 100 });
+    try {
+      await once(f.connect(), "open");
+      await vi.advanceTimersByTimeAsync(200);
+      expect(f.relay.stats().retired.authority).toBe(1);
+      complete(true);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(f.relay.stats().retired.authority).toBe(1);
+      expect(revalidate).toHaveBeenCalledOnce();
+    } finally {
+      f.relay.close();
+      vi.useRealTimers();
+    }
+  });
   it("isolates a workspace's connection ceiling from another workspace", async () => {
     const resolve = vi.fn(async () => ({
       ...grant,

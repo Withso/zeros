@@ -384,7 +384,7 @@ import { CloudAgentBootCredentialRequestSchema, CloudAgentBootCredentialResponse
   CloudAgentBootSyncRequestSchema, CloudAgentBootActivateRequestSchema, CloudAgentBootActivateResponseSchema,
   CloudAgentBootRefreshRequestSchema, CloudAgentActorConfirmRequestSchema, CloudAgentWarmActorRequestSchema,
   CloudAgentBootRefreshResponseSchema, CloudAgentBootProviderReadySchema, type CloudAgentBootCredentialResponse } from "./agent-boot-contract.js";
-import { assertCurrentCloudEngineAuthority, assertCloudEngineAuthorityDeadline } from "./engine-authority.js";
+import { assertCurrentCloudEngineAuthority, assertCloudEngineAuthorityDeadline, readCurrentCloudEngineAuthority } from "./engine-authority.js";
 import { reserveLocalCloudCommandWriter, activateLocalCloudCommandWriter } from "./commands.js";
 import { readCloudAgentComputeTrust } from "./agent-compute-trust.js";
 import { runtimeCredentialQualificationJoin, runtimeQualifiedNativeCapabilities } from "./runtime-selection.js";
@@ -570,17 +570,16 @@ export class DatabaseCloudAgentBootService {
     for(const field of ["organizationId","workspaceId","generation","engineInstanceId"] as const)
       if(engine[field]!==request.data[field])rejected();
     if(operation==="refresh")return this.refresh(engine,CloudAgentBootRefreshRequestSchema.parse(request.data));
+    if(operation==="actor-confirm"||operation==="warm-context")return this.withReadBinding(engine,operation,request.data,async(tx,row,identity,deadline)=>{
+      const scope=bootScope(row);
+      const actorRequest=operation==="actor-confirm"?CloudAgentActorConfirmRequestSchema.parse(request.data):CloudAgentWarmActorRequestSchema.parse(request.data);
+      const actor=await this.confirmActor(tx,scope,actorRequest.actorSessionId,identity.authorityEpoch,true);
+      actor.confirmedUntilMs=Math.min(actor.confirmedUntilMs,deadline);
+      if(operation==="actor-confirm")return CloudAgentActorConfirmResponseSchema.parse({version:1,mode:"boot-owner-v1",provenance:actor});
+      return this.warmContext(tx,engine,row,identity,actor,CloudAgentWarmActorRequestSchema.parse(request.data));
+    });
     return this.withBinding(engine,operation,request.data,async(tx,row,identity)=>{
       const scope=bootScope(row);
-      if(operation==="actor-confirm"||operation==="warm-context") {
-        const actorRequest=operation==="actor-confirm"?CloudAgentActorConfirmRequestSchema.parse(request.data):CloudAgentWarmActorRequestSchema.parse(request.data);
-        const actor=await this.confirmActor(tx,scope,actorRequest.actorSessionId,identity.authorityEpoch);
-        if(operation==="actor-confirm") {
-          await assertCloudEngineAuthorityDeadline(tx,engine.engineInstanceId,this.workosEnabled);
-          return CloudAgentActorConfirmResponseSchema.parse({version:1,mode:"boot-owner-v1",provenance:actor});
-        }
-        return this.warmContext(tx,engine,row,identity,actor,CloudAgentWarmActorRequestSchema.parse(request.data));
-      }
       const response=await this.synchronize(tx,row,identity);
       await assertCloudEngineAuthorityDeadline(tx,engine.engineInstanceId,this.workosEnabled);
       if(operation!=="activate")return response;
@@ -593,6 +592,57 @@ export class DatabaseCloudAgentBootService {
       await tx.query("UPDATE cloud_workspaces SET agent_command_mode='boot-owner-v1',agent_boot_id=$3 WHERE id=$1 AND org_id=$2",[scope.workspaceId,scope.organizationId,row.id]);
       return CloudAgentBootActivateResponseSchema.parse({...identity,cacheRevision:response.cacheRevision,activated:true});
     });
+  }
+  /** Read the exact versioned boot projection without borrowing a mutation
+   * lock. Warm-context writes only its context record; SERIALIZABLE preserves
+   * its lookup/capacity bound when two callers create a context concurrently.
+   * An abort retries the complete observation, never a provider operation or
+   * credential mutation, and never extends the original ten-second budget. */
+  private async withReadBinding<T>(engine:BootEngineScope,operation:"actor-confirm"|"warm-context",request:Record<string,unknown>,
+    run:(tx:Tx,row:BootRow,identity:z.infer<typeof CloudAgentBootIdentitySchema>,deadline:number)=>Promise<T>):Promise<T> {
+    const deadline=Date.now()+10_000;
+    for(let attempt=0;attempt<3;attempt++) {
+      try {
+        const result=await withSystemTx(this.pool,async tx=>{
+          const authority=await readCurrentCloudEngineAuthority(tx,{...engine,workosEnabled:this.workosEnabled});
+          const row=(await tx.query<BootRow & {runtime_boot_id:string;cloud_local_commands_version:number|null;
+            owner_user_id:string;agent_funding_owner_epoch:string}>(`SELECT binding.*,engine.runtime_boot_id,engine.cloud_local_commands_version,
+              workspace.owner_user_id,workspace.agent_funding_owner_epoch
+            FROM cloud_agent_boot_bindings binding
+            JOIN cloud_workspace_engine_instances engine ON engine.id=binding.engine_instance_id AND engine.workspace_id=binding.workspace_id
+              AND engine.org_id=binding.org_id AND engine.generation=binding.generation
+            JOIN cloud_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.org_id=binding.org_id
+            JOIN cloud_workspace_local_command_writers writer ON writer.workspace_id=binding.workspace_id AND writer.org_id=binding.org_id
+              AND writer.writer_epoch=binding.writer_epoch AND writer.boot_id=binding.boot_id AND writer.engine_instance_id=binding.engine_instance_id
+              AND writer.generation=binding.generation AND writer.funding_owner_user_id=binding.funding_owner_user_id
+              AND writer.funding_owner_epoch=binding.funding_owner_epoch AND writer.state IN ('reserved','active')
+            JOIN users account ON account.id=binding.funding_owner_user_id AND account.auth_status='active' AND account.deleted_at IS NULL
+            WHERE binding.engine_instance_id=$1 AND binding.workspace_id=$2 AND binding.org_id=$3 AND binding.generation=$4
+              AND EXISTS(SELECT 1 FROM user_identities identity WHERE identity.user_id=account.id AND identity.provider='workos'
+                AND identity.status='active' AND identity.email_verified_at IS NOT NULL)`,
+          [engine.engineInstanceId,engine.workspaceId,engine.organizationId,engine.generation])).rows[0];
+          if(!row||!row.credentials_initialized||row.retired_at)rejected();
+          if(row.cloud_local_commands_version!==1)throw new HttpError(409,"cloud_runtime_upgrade_required","cloud_runtime_upgrade_required");
+          const scope=bootScope(row);
+          if(row.runtime_boot_id!==scope.bootId||request.bootId!==scope.bootId||request.writerEpoch!==scope.writerEpoch||
+            row.owner_user_id!==scope.fundingOwnerUserId||readRevision(row.agent_funding_owner_epoch)!==scope.fundingOwnerEpoch||
+            readRevision(row.cache_revision)>readRevision(row.desired_cache_revision))rejected();
+          const identity=CloudAgentBootIdentitySchema.parse({...scope,version:1,mode:"boot-owner-v1",fundingScope:"workspace-roles-v1",authorityEpoch:authority.authorityEpoch});
+          const expiresAt=Math.min(deadline,authority.confirmedUntilMs);
+          if(expiresAt<=Date.now())rejected();
+          const response=await run(tx,row,identity,expiresAt);
+          await assertCloudEngineAuthorityDeadline(tx,engine.engineInstanceId,this.workosEnabled);
+          if(expiresAt<=Date.now())rejected();
+          return response;
+        },operation==="actor-confirm"?{consistentRead:true}:{serializable:true});
+        if(deadline<=Date.now())rejected();
+        return result;
+      } catch(error) {
+        if(operation!=="warm-context"||(error as {code?:string}|null)?.code!=="40001")throw error;
+        if(attempt===2||Date.now()>=deadline)throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");
+      }
+    }
+    return rejected();
   }
   private withBinding<T>(engine:BootEngineScope,operation:CloudAgentBootOperation,request:Record<string,unknown>,
     run:(tx:Tx,row:BootRow,identity:z.infer<typeof CloudAgentBootIdentitySchema>)=>Promise<T>):Promise<T> {
@@ -675,20 +725,52 @@ export class DatabaseCloudAgentBootService {
     }
     throw new HttpError(409,"cloud_validation_credential_refresh_unchanged","cloud_validation_credential_refresh_unchanged");
   }
-  private async confirmActor(tx:Tx,scope:CloudAgentBootScope,actorSessionId:string,authorityEpoch:number):Promise<CloudActorProvenance> {
-    const recorded=await confirmDetachedCloudActor(tx,scope,actorSessionId);
+  private async confirmActor(tx:Tx,scope:CloudAgentBootScope,actorSessionId:string,authorityEpoch:number,consistentRead=false):Promise<CloudActorProvenance> {
+    const recorded=await confirmDetachedCloudActor(tx,scope,actorSessionId,{consistentRead});
     // Non-owner run consent uses the real funding ledger below; never infer
     // shared funding from a renderer role or borrow the funding owner's actor.
-    const fundingGrant=await readCloudAgentFundingConsent(tx,scope,{userId:recorded.actorUserId,role:recorded.role});
+    const fundingGrant=await readCloudAgentFundingConsent(tx,scope,{userId:recorded.actorUserId,role:recorded.role},{passive:consistentRead});
     return CloudActorProvenanceSchema.parse({scope,actor:{userId:recorded.actorUserId,deviceId:recorded.deviceId,deviceKeyVersion:recorded.deviceKeyVersion,
       fingerprint:recorded.fingerprint,role:recorded.role},actorSessionId,authorityEpoch,confirmedUntilMs:recorded.confirmedUntilMs,
       fundingConsentVersion:fundingGrant?1:null,fundingGrant});
   }
+  /** Read the metadata already delivered by bootstrap/sync. A renewal cannot
+   * allocate an adoption, deliver new material or silently publish a new cache
+   * revision. Pending publication stays busy until the real sync completes. */
+  private async readWarmProvider(tx:Tx,row:BootRow,provider:BootProvider) {
+    if(readRevision(row.cache_revision)!==readRevision(row.desired_cache_revision))
+      throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");
+    const scope=bootScope(row),compute=await readCloudAgentComputeTrust(tx,scope.workspaceId);
+    if(compute?.trust!=="zeros-managed")rejected();
+    const consent=(await tx.query<{fingerprint:string}>(`SELECT encode(digest(jsonb_build_array(organization.id,organization.authorization_revision,
+      account.id,account.auth_revision,member.authorization_revision,member.role,member.created_at)::text,'sha256'),'hex') AS fingerprint
+      FROM organization_members member JOIN organizations organization ON organization.id=member.org_id JOIN users account ON account.id=member.user_id
+      WHERE member.org_id=$1 AND member.user_id=$2 AND organization.deleted_at IS NULL AND NOT organization.is_personal`,
+    [scope.organizationId,scope.fundingOwnerUserId])).rows[0];
+    if(!consent)rejected();
+    const selection=await readBootProviderSource(tx,scope,consent.fingerprint,provider,false);
+    if(selection.status!=="ready")rejected();
+    const stored=(await tx.query<{metadata:unknown}>("SELECT metadata FROM cloud_agent_boot_credentials WHERE binding_id=$1 AND provider=$2",[row.id,provider])).rows[0];
+    const parsed=CloudAgentBootProviderReadySchema.innerType().omit({material:true}).safeParse(deliveredBootMetadata(stored?.metadata));
+    const {source,caps,models}=selection;
+    if(!parsed.success||bootSlotNeedsUpgrade(row,parsed.data,{credentialId:source.id,credentialRevision:readRevision(source.revision),
+      connectionRevision:readRevision(source.connection_revision),models,nativeCapabilities:caps})||parsed.data.materialVersion!==source.current_version)
+      throw new HttpError(409,"cloud_runtime_upgrade_required","cloud_runtime_upgrade_required");
+    const adoption=await tx.query(`SELECT adoption.id FROM cloud_agent_adoptions adoption
+      JOIN cloud_agent_adoption_keys key ON key.id=adoption.key_id
+      JOIN cloud_agent_adoption_key_policy policy ON policy.id=1 AND policy.current_key_version=key.key_version
+      WHERE adoption.id=$1 AND key.org_id=$2 AND key.workspace_id=$3 AND key.funding_owner_user_id=$4
+        AND key.provider=$5 AND key.kind=$6 AND key.key_version=$7
+        AND NOT EXISTS(SELECT 1 FROM cloud_agent_adoption_retired_owners retired WHERE retired.user_id=key.funding_owner_user_id)`,
+    [parsed.data.adoptionId,scope.organizationId,scope.workspaceId,scope.fundingOwnerUserId,provider,parsed.data.kind,this.keys.currentKeyVersion]);
+    if(adoption.rowCount!==1)rejected();
+    return parsed.data;
+  }
   private async warmContext(tx:Tx,engine:BootEngineScope,row:BootRow,identity:z.infer<typeof CloudAgentBootIdentitySchema>,actor:CloudActorProvenance,
     request:z.infer<typeof CloudAgentWarmActorRequestSchema>) {
     if(actor.actor.role==="viewer"||!actor.fundingGrant||actor.fundingConsentVersion!==1)rejected();
-    const ready=await this.synchronize(tx,row,identity),provider=ready.providers.find(value=>value.provider===request.provider);
-    if(!provider||provider.status!=="ready"||!provider.models.includes(request.model))rejected();
+    const provider=await this.readWarmProvider(tx,row,request.provider);
+    if(!provider.models.includes(request.model))rejected();
     const values=await resolveCloudComputerExecutionEnvironment(tx,engine,actor.actor.userId,this.settingsEncryption),
       history=customizationHistoryAuthority(engine.organizationId,engine.workspaceId,actor.actor.userId,this.keys),
       key=Buffer.from(this.keys.keys[this.keys.currentKeyVersion]!,"base64url");
@@ -698,12 +780,12 @@ export class DatabaseCloudAgentBootService {
     const environment={version:1 as const,revision:environmentRevision,values,history};
     const previous=(await tx.query<{context_id:string;context_revision:string}>(`SELECT context_id,context_revision FROM cloud_agent_boot_contexts WHERE binding_id=$1
       AND actor_session_id=$2 AND provider=$3 AND conversation_id=$4 AND model=$5 AND cwd=$6 AND retired_at IS NULL AND expires_at>clock_timestamp()
-      ORDER BY created_at DESC,context_id DESC LIMIT 1 FOR UPDATE`,[row.id,request.actorSessionId,request.provider,request.conversationId,request.model,request.cwd])).rows[0];
+      ORDER BY created_at DESC,context_id DESC LIMIT 1`,[row.id,request.actorSessionId,request.provider,request.conversationId,request.model,request.cwd])).rows[0];
     let contextId=previous?.context_id??randomUUID();
     const capture=async()=>admitBootCustomization(tx,{...bootScope(row),contextId,actorSessionId:request.actorSessionId,actorUserId:actor.actor.userId,
       actorDeviceId:actor.actor.deviceId,actorDeviceKeyVersion:actor.actor.deviceKeyVersion,actorFingerprint:actor.actor.fingerprint,
       authorityEpoch:identity.authorityEpoch,fundingGrant:actor.fundingGrant!,provider:request.provider,conversationId:request.conversationId,
-      model:request.model,cwd:request.cwd},request.repositoryServers,this.keys);
+      model:request.model,cwd:request.cwd},request.repositoryServers,this.keys,{consistentRead:true});
     let customization=await capture();
     const gitAuthor=await readGithubGitAuthor(tx,actor.actor.userId);
     const revisionRoot=Buffer.from(this.keys.keys[this.keys.currentKeyVersion]!,"base64url");
@@ -722,7 +804,8 @@ export class DatabaseCloudAgentBootService {
       const count=(await tx.query<{count:number}>("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts WHERE binding_id=$1",[row.id])).rows[0]!.count;
       if(count>=4096)throw new HttpError(429,"cloud_validation_execution_limit","cloud_validation_execution_limit");
     }
-    const current=await this.confirmActor(tx,bootScope(row),request.actorSessionId,identity.authorityEpoch);
+    const current=await this.confirmActor(tx,bootScope(row),request.actorSessionId,identity.authorityEpoch,true);
+    current.confirmedUntilMs=Math.min(current.confirmedUntilMs,actor.confirmedUntilMs);
     if(bootMetadataJson([current.actor,current.fundingGrant])!==bootMetadataJson([actor.actor,actor.fundingGrant])||current.confirmedUntilMs<=Date.now())rejected();
     await assertCloudEngineAuthorityDeadline(tx,engine.engineInstanceId,this.workosEnabled);
     const published=await tx.query(`INSERT INTO cloud_agent_boot_contexts(context_id,binding_id,actor_session_id,provider,conversation_id,model,cwd,context_revision,binding,

@@ -1,3 +1,4 @@
+import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
@@ -6,6 +7,7 @@ import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import {
   assertCurrentCloudEngineAuthority,
   CloudWorkspaceEngineAuthorityError,
+  readCurrentCloudEngineAuthority,
 } from "./engine-authority.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -24,6 +26,37 @@ d("cloud engine authority fence", () => {
       engineInstanceId: f.engineInstanceId, heartbeatToken: f.heartbeatToken, workosEnabled: false };
   });
   const authorize = () => withSystemTx(pool, tx => assertCurrentCloudEngineAuthority(tx, scope));
+
+  it("bounds the read projection by the original transaction and engine lease", async () => {
+    await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp()+interval '4 seconds' WHERE id=$1", [scope.engineInstanceId]);
+    await withSystemTx(pool, async tx => {
+      const clock = (await tx.query<{ started: Date; expires: Date }>(`SELECT transaction_timestamp() AS started,lease_expires_at AS expires
+        FROM cloud_workspace_engine_instances WHERE id=$1`, [scope.engineInstanceId])).rows[0]!;
+      const read = await readCurrentCloudEngineAuthority(tx, scope);
+      expect(read).toMatchObject({ version: 1, engineInstanceId: scope.engineInstanceId, generation: scope.generation });
+      expect(read.confirmedUntilMs).toBe(clock.expires.getTime());
+      expect(read.confirmedUntilMs).toBeLessThanOrEqual(clock.started.getTime() + 10_000);
+    }, { consistentRead: true });
+  });
+
+  it.each(["heartbeat", "workspace", "organization", "generation", "engine"] as const)("refuses a foreign %s in the read projection", async field => {
+    const foreign = { ...scope };
+    if (field === "heartbeat") foreign.heartbeatToken = `zwh_${randomBytes(32).toString("base64url")}`;
+    else if (field === "generation") foreign.generation++;
+    else if (field === "workspace") foreign.workspaceId = randomUUID();
+    else if (field === "organization") foreign.organizationId = randomUUID();
+    else foreign.engineInstanceId = randomUUID();
+    await expect(withSystemTx(pool, tx => readCurrentCloudEngineAuthority(tx, foreign), { consistentRead: true }))
+      .rejects.toBeInstanceOf(CloudWorkspaceEngineAuthorityError);
+  });
+
+  it.each(["lease", "final-checkpoint", "revoked"] as const)("refuses %s engine authority in the read projection", async fence => {
+    if (fence === "lease") await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp() WHERE id=$1", [scope.engineInstanceId]);
+    else if (fence === "final-checkpoint") await pool.query("UPDATE cloud_workspace_engine_instances SET final_checkpoint_at=clock_timestamp() WHERE id=$1", [scope.engineInstanceId]);
+    else await pool.query("UPDATE cloud_workspace_engine_instances SET revoked_at=clock_timestamp(),state='revoked' WHERE id=$1", [scope.engineInstanceId]);
+    await expect(withSystemTx(pool, tx => readCurrentCloudEngineAuthority(tx, scope), { consistentRead: true }))
+      .rejects.toBeInstanceOf(CloudWorkspaceEngineAuthorityError);
+  });
 
   /** Hold the engine row while an exclusive authority check evaluates its
    * predicate and then waits; release after the lease, or after 100 ms. */

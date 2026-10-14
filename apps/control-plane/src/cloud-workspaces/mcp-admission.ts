@@ -77,11 +77,14 @@ function bootRevisions(rows: Awaited<ReturnType<typeof readCustomizationRows>>, 
 /** Called only after the boot endpoint positively confirms the real recorded
  * actor/funding grant. Locking and secret scope stay separate from provider
  * funding; this helper neither stores a fake lease nor grants actor authority. */
-export async function admitBootCustomization(tx: Tx, value: CloudBootCustomizationBinding, repository: CloudMcpServer[], keys: CloudAgentCredentialKeys): Promise<CloudBootCustomizationAdmission> {
+export async function admitBootCustomization(tx: Tx, value: CloudBootCustomizationBinding, repository: CloudMcpServer[], keys: CloudAgentCredentialKeys,
+  options: { consistentRead?: boolean } = {}): Promise<CloudBootCustomizationAdmission> {
   const parsedBinding = CloudBootCustomizationBindingSchema.safeParse(value), parsedRepository = CloudRepositoryMcpSchema.safeParse(repository);
   if (!parsedBinding.success || !parsedRepository.success) return rejected();
   const binding = parsedBinding.data;
-  await lockCustomization(tx, binding.organizationId);
+  // A boot read captures both scope revisions from its coherent snapshot.
+  // Legacy admissions and real customization writers retain their lock.
+  if (!options.consistentRead) await lockCustomization(tx, binding.organizationId);
   const rows = await readCustomizationRows(tx, binding.organizationId, binding.actorUserId);
   if (rows.some(row => row.org_id !== binding.organizationId || (row.owner_user_id !== null && row.owner_user_id !== binding.actorUserId))) return rejected();
   const revisions = bootRevisions(rows, binding.actorUserId);

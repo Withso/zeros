@@ -458,6 +458,23 @@ per-send grant or per-turn CP admit/validate. Background actor renewal,
 credential publication and mirroring continue, with finite authority deadlines.
 This removes foreground dependencies; it does not promise zero total CP traffic.
 
+Actor-confirm observes a coherent, read-only boot projection. Warm-context reads
+the same persisted scope and versions in a serializable transaction, publishing
+only its bounded context record. Neither path takes the funding owner's mutation
+lock or locks authority rows with `FOR UPDATE`. Warm-context accepts only the
+already delivered credential revision and live adoption; pending publication
+must finish through normal sync. Bootstrap, sync, refresh, adoption and removal
+keep their mutation locks, revision checks and revocation publication.
+
+Each observation expires at the earliest of its original request start plus ten
+seconds, its transaction start plus ten seconds, and the engine/auth deadlines.
+A coherent read begun before revocation may finish within that original bound;
+the next renewal observes the revocation. Only serialization aborts (`40001`)
+retry warm-context, with at most three complete attempts under the original
+deadline. Every attempt rereads authority, sources, customization and context
+capacity. Actor confirmation alone cannot renew an expired context. These CP
+paths do not change Local Personal or organization-local authority or lifecycle.
+
 The shared engine protocol advertises `cloud.commands.v1` on `ENGINE_READY` only when the
 engine is registered with the control plane. The authenticated workspace bridge
 exposes these operations (the desktop creation UI is separate):
@@ -863,6 +880,9 @@ and key version, generation, engine lease, and grant authority every five
 seconds, with a hard ten-second renewal deadline. Engine enforcement also
 covers direct provider connections. Renewal checks a previously consumed grant;
 it neither consumes a fresh grant nor writes an audit event on every tick.
+Relay authority uses a coherent read-only projection. Its monotonic deadline
+starts before each authority lookup, including initial resolution; time spent
+waiting for the CP does not extend the lease.
 The admission expiry limits new connections; device and account revocation
 still apply throughout an established connection. A late verification reply
 cannot reopen a closed connection. Historical unbound SSH admission remains
