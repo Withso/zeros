@@ -51,6 +51,13 @@ export const SECRET_KEYS = Object.freeze([
   "ZEROS_DEV_ALPHA_READONLY_DATABASE_URL",
 ]);
 
+// Actions-only input is redacted but never admitted as a canonical .env.agent
+// key or a provider-check input. Agent keys stay in the workflow's memory.
+export const ACTIONS_SECRET_KEYS = Object.freeze([
+  "ZEROS_DEV_FIXTURE_B64", "AGENT_RUNTIME_ANTHROPIC_API_KEY", "AGENT_RUNTIME_CLAUDE_CODE_OAUTH_TOKEN",
+  "AGENT_RUNTIME_OPENAI_API_KEY", "AGENT_RUNTIME_CODEX_AUTH_JSON", "AGENT_RUNTIME_CURSOR_API_KEY",
+]);
+
 /** Every key the template documents. Only these are read from the process
  *  environment when `.env.agent` does not set them. */
 export const KNOWN_KEYS = Object.freeze([
@@ -495,7 +502,10 @@ export async function runProviderChecks(values, deps) {
 export function redact(text, values) {
   let output = text;
   const variants = new Set();
-  for (const key of SECRET_KEYS) {
+  const add = value => {
+    if (typeof value === "string" && value) { variants.add(value); variants.add(JSON.stringify(value).slice(1, -1)); }
+  };
+  for (const key of [...SECRET_KEYS, ...ACTIONS_SECRET_KEYS]) {
     const value = values[key];
     if (typeof value !== "string" || !value) continue;
     // Invalid/short credentials and JSON-escaped passwords are secrets too.
@@ -509,6 +519,24 @@ export function redact(text, values) {
     const key = JSON.parse(decoded)?.privateKey;
     if (typeof key === "string" && key) { variants.add(decoded); variants.add(key); variants.add(JSON.stringify(key).slice(1, -1)); }
   } catch { /* Malformed envelopes are still redacted verbatim above. */ }
+  try {
+    const envelope = values.ZEROS_DEV_FIXTURE_B64;
+    if (typeof envelope === "string" && envelope.length <= 32 * 1024) {
+      const raw = Buffer.from(envelope, "base64").toString("utf8"), fixture = JSON.parse(raw);
+      add(raw);
+      for (const key of SECRET_KEYS) add(fixture[key]);
+      const device = Buffer.from(fixture.ZEROS_DEV_DEVICE_PRIVATE_KEY_B64 ?? "", "base64").toString("utf8");
+      add(device); add(JSON.parse(device)?.privateKey);
+    }
+  } catch { /* A malformed Actions envelope is still a secret. */ }
+  try {
+    const raw = values.AGENT_RUNTIME_CODEX_AUTH_JSON;
+    if (typeof raw === "string" && raw.length <= 64 * 1024) {
+      const cache = JSON.parse(raw);
+      add(cache.OPENAI_API_KEY);
+      for (const name of ["access_token", "refresh_token", "id_token"]) add(cache.tokens?.[name]);
+    }
+  } catch { /* Invalid native cache stays redacted verbatim. */ }
   for (const value of [...variants].sort((a, b) => b.length - a.length)) {
     output = output.split(value).join("[redacted]");
   }

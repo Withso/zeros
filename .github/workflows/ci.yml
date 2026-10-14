@@ -14,7 +14,8 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
 
 # No job here needs a secret. Fork pull requests run arbitrary install scripts,
-# so the token stays read-only; checkout and `git fetch` are its only consumers.
+# so the token stays read-only. The trusted final gate also reads Actions and
+# pull-request review metadata.
 permissions:
   contents: read
 
@@ -1232,6 +1233,10 @@ jobs:
   ci-gate:
     name: zeros/ci-gate
     if: always()
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     needs:
       - scope
       - quality
@@ -1374,6 +1379,29 @@ jobs:
           if (problems.length) fail(`CI selection failed: ${problems.join("; ")}.`);
           console.log("Every selected job succeeded; all skips were proved unselected.");
           NODE
+
+      - name: Checkout trusted hourly policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .hourly-policy
+          persist-credentials: false
+      - name: Require fresh zeros-dev E2E for cloud changes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LEDGER_JSON: ${{ needs.scope.outputs.ledger }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          if [ ! -f .hourly-policy/scripts/ci/zeros-dev-gate.mjs ]; then
+            # The introducing PR has no live workflow at its trusted base.
+            # Every subsequent main-based PR runs only the reviewed policy.
+            echo 'zeros-dev E2E: hourly_not_live (introducing policy)'
+            exit 0
+          fi
+          node .hourly-policy/scripts/ci/zeros-dev-gate.mjs
 
   # Execute the complement of the trusted selection in this same run. Every
   # PR still gets full coverage, including all database and browser shards.

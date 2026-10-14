@@ -11,7 +11,7 @@ export const ERROR_CODES = [
   "computer_required", "computer_failed", "repository_required", "workspace_failed", "workspace_not_running",
   "agent_credential_required", "agent_failed", "permission_required", "command_uncertain",
   "runtime_unavailable", "runtime_changed", "runtime_pin_unconfirmed", "terminal_failed", "cleanup_pending", "database_unavailable",
-  "database_readonly_required", "input_contains_credentials", "cancelled", "internal",
+  "database_readonly_required", "input_contains_credentials", "cancelled", "internal", "history_changed", "actions_required", "artifact_invalid",
 ] as const;
 export type ErrorCode = typeof ERROR_CODES[number];
 export class ZerosDevError extends Error {

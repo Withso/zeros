@@ -398,3 +398,50 @@ The merge request uses `gh pr merge --auto --squash --match-head-commit` with th
 checked head SHA and explicit checked PR title and body. This keeps GitHub's
 squash-message defaults or later PR text changes from introducing a skip marker.
 Do not call `gh pr merge` or the bot merge command directly.
+
+## Hourly zeros dev merge requirement
+
+The owner enables [the Alpha canary](zeros-dev.md#hourly-e2e-in-actions) and adds
+`zeros/dev-e2e` to main's required statuses. First dispatch
+`zeros-dev-e2e-gate.yml` on main to publish that context for open PRs, require
+it in branch protection, then enable the lifecycle workflow. The gate allows
+the initial rollout until a main attempt actually completes both the product
+lifecycle and receipt upload successfully. Skipped jobs cannot count as green,
+and a failed rerun cannot erase a previous successful attempt's activation.
+
+After activation, cloud-selected PRs require the newest completed main canary
+to be green and less than two hours old, measured from its lifecycle job's
+`completed_at`. Newer queued or running attempts leave that completed result
+authoritative. An active rerun uses its previous completed attempt until the
+rerun completes; it cannot renew freshness or hide a completed failure. The
+trusted base's policy also runs at the end of `zeros/ci-gate`, and
+`pnpm agent:merge` reads the current canary again before arming auto-merge.
+PRs selecting no cloud lane receive an alert and pass this gate. Security,
+signing, migration and all other required checks keep their own authority.
+
+`zeros-dev-e2e-gate.yml` refreshes all open PR heads on PR changes, canary start
+and completion, and every fifteen minutes for freshness expiry. It runs only
+trusted main source, has no product/provider secrets, and can write only the
+fixed `zeros/dev-e2e` status. It never checks out or executes PR source. Pending
+status fences the old success during evaluation; the final head is rechecked
+before publication. GitHub can delay event delivery and scheduled jobs, so
+these statuses are observations, not expiring leases. The CI and merge-wrapper
+reads still check the two-hour boundary directly. Monitor the refresher's own
+failed runs; do not treat a stale check display as current evidence.
+
+When the canary is red, only its exact owner-reviewed repair may bypass this
+one gate. Generate a read-only marker plan with
+`node scripts/ci/zeros-dev-gate.mjs --repair-marker`, using the normal scoped
+GitHub token. The master creates the proposed `.github/ci-incidents/<digest>.json`
+marker in the repair's first commit, then removes it with the fix and retained
+regression. The marker binds the canary source SHA, run and attempt; it uses the
+closed `hourly_marker` contract. An admin's approval must apply to the exact
+current repair head. A label, PR prose, retained marker, different failing
+attempt, stale review or missing regression cannot authorize an exception.
+The Preflight incident bot's writer contract stays unchanged. Refresh the
+status after approval by dispatching `zeros-dev-e2e-gate.yml` on main.
+
+These workflows and gate definitions need the owner's merge. Rollback is an
+owner removal of the required status and a normal revert of the CI/wrapper
+enforcement; disabling `ZEROS_DEV_E2E_ENABLED` alone keeps an activated gate
+closed. Retain lifecycle artifacts for cleanup recovery.

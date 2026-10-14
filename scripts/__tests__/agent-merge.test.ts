@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 import { decideMerge, runAgentMerge } from "../agent-merge.mjs";
+import { createHourlyRepairMarker } from "../ci/zeros-dev-gate.mjs";
 
 const HEAD = "a".repeat(40);
 const REPOSITORY = "Withso/zeros";
@@ -88,6 +89,8 @@ function fakeGh(snapshot = fixture()) {
     if (args[0] === "pr" && args[1] === "checks")
       return json(snapshot.requiredChecks);
     if (args[0] === "api" && args[1] === "user") return json(snapshot.viewer);
+    if (args[0] === "api" && args[1].includes("/actions/workflows/zeros-dev-e2e.yml/runs"))
+      return json({ total_count: 0, workflow_runs: [] });
     if (args[0] === "api" && args[1].includes("/files?"))
       return json([snapshot.files]);
     if (args[0] === "api" && args[1] === "graphql") {
@@ -126,6 +129,56 @@ function json(value: unknown, status = 0) {
 }
 
 describe("agent merge decision", () => {
+  it.each([404, 403, 500])("proves a removed hourly repair marker through gh's HTTP %s response", async status => {
+    const snapshot = fixture(), first = "b".repeat(40);
+    snapshot.files = [
+      { filename: "apps/control-plane/src/cloud-workspaces/routes.ts", status: "modified" },
+      { filename: "apps/control-plane/src/cloud-workspaces/routes.test.ts", status: "modified" },
+    ];
+    snapshot.pr.changedFiles = 2;
+    const gh = fakeGh(snapshot), endpoint = `repos/${REPOSITORY}`;
+    const run = { id: 17, run_number: 17, run_attempt: 1, path: ".github/workflows/zeros-dev-e2e.yml", name: "Zeros dev E2E",
+      head_sha: "c".repeat(40), head_branch: "main", event: "schedule", status: "completed", conclusion: "failure",
+      repository: { full_name: REPOSITORY }, head_repository: { full_name: REPOSITORY } };
+    const observed = { activated: true, latest: run, completedAt: "2026-10-14T00:00:00Z" }, marker = createHourlyRepairMarker(observed);
+    const respond = (route: string, value: unknown) => gh.responses.set(`api ${endpoint}/${route}`, json(value));
+    respond("actions/workflows/zeros-dev-e2e.yml/runs?branch=main&status=success&per_page=100", { total_count: 1, workflow_runs: [{ ...run, id: 16, run_number: 16, conclusion: "success" }] });
+    respond("actions/workflows/zeros-dev-e2e.yml/runs?branch=main&per_page=100", { total_count: 1, workflow_runs: [run] });
+    for (const id of [16, 17]) respond(`actions/runs/${id}/attempts/1/jobs?per_page=100`, { total_count: 1, jobs: [{
+      name: "lifecycle", status: "completed", conclusion: id === 16 ? "success" : "failure", run_attempt: 1, completed_at: observed.completedAt,
+      steps: ["Execute Alpha product lifecycle", "Save signed cleanup receipt"].map(name => ({ name, status: "completed", conclusion: "success" })),
+    }] });
+    respond("pulls/123", { number: 123, state: "open", commits: 2, changed_files: 2,
+      base: { ref: "main", repo: { full_name: REPOSITORY } }, head: { sha: HEAD, repo: { full_name: REPOSITORY } } });
+    respond("pulls/123/commits?per_page=100", [{ sha: first }, { sha: HEAD }]);
+    respond(`commits/${first}`, { files: [{ filename: marker.path, status: "added" }] });
+    respond(`contents/${marker.path}?ref=${first}`, { type: "file", encoding: "base64", size: 1000, content: Buffer.from(JSON.stringify(marker.value)).toString("base64") });
+    const missing = `api ${endpoint}/contents/${marker.path}?ref=${HEAD}`;
+    gh.responses.set(missing, { status: 1, stdout: JSON.stringify({ status, message: "synthetic-private-error" }) });
+    gh.responses.set(`${missing} --include`, { status: 1, stdout: `HTTP/2.0 ${status} Closed\r\nContent-Type: application/json\r\n\r\n{"message":"synthetic-private-error"}` });
+    respond("pulls/123/files?per_page=100", snapshot.files);
+    respond("pulls/123/reviews?per_page=100", [{ state: "APPROVED", commit_id: HEAD, submitted_at: observed.completedAt, user: { login: "owner", type: "User" } }]);
+    respond("collaborators/owner/permission", { permission: "admin" });
+    expect(await runAgentMerge(["123", "--dry-run"], gh)).toBe(status === 404 ? 0 : 1);
+    expect(gh.calls.some(args => args[1] === "merge")).toBe(false);
+    expect(JSON.stringify([...gh.stdout.mock.calls, ...gh.stderr.mock.calls])).not.toContain("synthetic-private-error");
+  });
+  it("refuses a cloud merge when the live hourly gate is stale, even with old green PR checks", async () => {
+    const snapshot = fixture(); snapshot.files = [{ filename: "apps/control-plane/src/cloud-workspaces/routes.ts", status: "modified" }];
+    const gh = fakeGh(snapshot);
+    const run = { id: 17, run_number: 17, run_attempt: 1, path: ".github/workflows/zeros-dev-e2e.yml", name: "Zeros dev E2E",
+      head_sha: HEAD, head_branch: "main", event: "schedule", status: "completed", conclusion: "success",
+      repository: { full_name: REPOSITORY }, head_repository: { full_name: REPOSITORY } };
+    for (const filter of ["&status=success", ""]) gh.responses.set(`api repos/${REPOSITORY}/actions/workflows/zeros-dev-e2e.yml/runs?branch=main${filter}&per_page=100`,
+      json({ total_count: 1, workflow_runs: [run] }));
+    gh.responses.set(`api repos/${REPOSITORY}/actions/runs/17/attempts/1/jobs?per_page=100`, json({ total_count: 1, jobs: [{
+      name: "lifecycle", run_attempt: 1, status: "completed", conclusion: "success", completed_at: "2020-01-01T00:00:00Z",
+      steps: ["Execute Alpha product lifecycle", "Save signed cleanup receipt"].map(name => ({ name, status: "completed", conclusion: "success" })),
+    }] }));
+    expect(await runAgentMerge(["123"], gh)).toBe(1);
+    expect(gh.calls.some(args => args[1] === "merge")).toBe(false);
+    expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("hourly_stale"));
+  });
   it("exports a pure decision that keeps its input unchanged", () => {
     const snapshot = fixture();
     const before = structuredClone(snapshot);

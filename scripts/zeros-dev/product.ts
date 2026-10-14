@@ -29,6 +29,14 @@ export class ProductApi {
   }
   private root(fixture:Fixture):string{return `/v1/organizations/${fixture.organizationId}/cloud-workspaces`;}
   private computerRoot(fixture:Fixture):string{return `/v1/organizations/${fixture.organizationId}/cloud-computer/v2`;}
+  async assertFixtureEmpty(signal?:AbortSignal):Promise<void>{
+    await this.session.whoami();const fixture=await this.session.fixture();
+    const rows=await this.request(`${this.root(fixture)}?limit=100`,z.object({workspaces:z.array(CloudWorkspaceDocumentSchema).max(100),nextCursor:z.string().nullable()}),{signal});
+    const pending=await this.request(`/v1/organizations/${fixture.organizationId}/cloud-workspace-management/pending-deletion`,pendingDeletion,{signal});
+    // Never treat an incomplete list, an unknown workspace or a provider's
+    // accepted deletion as a free fixture. Cleanup requires its signed receipt.
+    if(rows.nextCursor!==null||rows.workspaces.length||pending.truncated||pending.pendingDeletion.length)throw new ZerosDevError("cleanup_pending");
+  }
   private repositoryNameMatches(fixture:Fixture,repository:{owner:string;name:string}):boolean{
     // GitHub names are case-insensitive; Computer configs and workspace rows
     // use lowercase while GitHub discovery preserves display casing. Compare
