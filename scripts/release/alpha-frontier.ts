@@ -71,6 +71,15 @@ export class AlphaAdmissionRejectedError extends PromotionError {
   constructor(reason = "An Alpha destination is newer than or divergent from this candidate; forward-only admission refused") { super(reason); }
 }
 
+/** A publisher uploads the ledger before moving the rolling tag. Only a
+ * schema- and ancestry-checked mismatch may wait at initial admission; it is
+ * never an admission or a green pre-mutation skip on its own. */
+export class AlphaPublicationPendingError extends PromotionError {
+  constructor(tag: string, ledger: string) {
+    super(`Alpha rolling tag and release ledger disagree (tag=${tag}, ledger=${ledger}); reconcile publication before admission`);
+  }
+}
+
 function requireDestination(condition: unknown, reason: string): asserts condition {
   if (!condition) throw new AlphaAdmissionRejectedError(reason);
 }
@@ -149,7 +158,9 @@ export async function assertAlphaDestinations(candidate: { repository: string; s
   // Feed assets precede the tag update. The same admitted parent's parallel
   // runtime publisher can observe that intermediate write; both identities
   // must still be <= X and at least one must identify this admitted X.
-  requireDestination(tag === entry.sourceSha || env.GITHUB_JOB !== "ci" && (tag === candidate.sourceSha || entry.sourceSha === candidate.sourceSha),
+  const aligned = tag === entry.sourceSha || env.GITHUB_JOB !== "ci" && (tag === candidate.sourceSha || entry.sourceSha === candidate.sourceSha);
+  if (!aligned && env.GITHUB_JOB === "ci") throw new AlphaPublicationPendingError(tag, entry.sourceSha);
+  requireDestination(aligned,
     "Alpha rolling tag and release ledger disagree; reconcile publication before admission");
   return parsed.data;
 }

@@ -1,7 +1,7 @@
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { PromotionError, releaseSource, requireCheck } from "./contracts";
 import { CandidateSupersededError } from "./alpha-ci";
-import { AlphaAdmissionReceipt, AlphaAdmissionRejectedError, alphaForwardOnlyMode } from "./alpha-frontier";
+import { AlphaAdmissionReceipt, AlphaAdmissionRejectedError, AlphaPublicationPendingError, alphaForwardOnlyMode } from "./alpha-frontier";
 import { waitForRequiredCI } from "./ci";
 import { githubClient } from "./github";
 import { command } from "./io";
@@ -25,13 +25,32 @@ async function main() {
     await appendFile(process.env.GITHUB_OUTPUT, `ready=${value}\n`);
   };
   const required = await github.requiredWorkflows();
+  let publicationPending: { since: number; observations: number; error: AlphaPublicationPendingError } | undefined;
   try {
     if (mode === "--wait") await waitForRequiredCI(async () => {
-      await github.assertCurrent();
-      return github.requiredChecks();
+      if (publicationPending && Date.now() - publicationPending.since >= 120_000) throw publicationPending.error;
+      try {
+        await github.assertCurrent();
+        const evidence = await github.requiredChecks();
+        // Keep the completion check inside the poll: an overlapping publisher
+        // here must retry CI as well as every frontier, not reuse old green CI.
+        if (barrier && required.every(check => evidence.some(item => item.workflow === check.name && item.succeeded))) await github.assertCurrent();
+        if (publicationPending && Date.now() - publicationPending.since >= 120_000) throw publicationPending.error;
+        publicationPending = undefined;
+        return evidence;
+      } catch (error) {
+        if (!barrier || !(error instanceof AlphaPublicationPendingError)) throw error;
+        publicationPending ??= { since: Date.now(), observations: 0, error };
+        publicationPending.error = error;
+        // The initial barrier is read-only and outside the publication lock.
+        // Waiting grants no authority, including on a previously mutated run.
+        // Two minutes / twelve observations bound a persistent disagreement.
+        if (++publicationPending.observations >= 12 || Date.now() - publicationPending.since >= 120_000) throw error;
+        return [];
+      }
     }, {}, required);
     else await github.assertRequiredChecks();
-    await github.assertCurrent();
+    if (!barrier) await github.assertCurrent();
   } catch (error) {
     if (barrier && (error instanceof CandidateSupersededError || error instanceof AlphaAdmissionRejectedError) && await github.alphaBarrierUnmutated()) {
       await ready(false);
