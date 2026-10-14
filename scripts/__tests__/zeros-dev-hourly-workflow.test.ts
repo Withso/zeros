@@ -16,14 +16,14 @@ describe("hourly fixture workflow authority", () => {
     expect(JSON.stringify(workflow)).not.toContain("secrets.");
     expect(JSON.stringify(workflow)).not.toContain("pull_request.head");
   });
-  it("runs only main on Linux, serializes one fixture, and reserves a ten minute job", () => {
+  it("runs only main on Linux, serializes one fixture, and reserves fifteen minutes for one build and lifecycle", () => {
     const workflow = load(readFileSync(".github/workflows/zeros-dev-e2e.yml", "utf8")) as any;
     expect(Object.keys(workflow.on).sort()).toEqual(["schedule", "workflow_dispatch"]);
     expect(workflow.on.schedule).toEqual([{ cron: "23 * * * *" }]);
     expect(workflow.concurrency).toEqual({ group: "zeros-dev-alpha-fixture", "cancel-in-progress": false });
     const job = workflow.jobs.lifecycle;
     expect(Object.keys(workflow.jobs)).toEqual(["lifecycle"]);
-    expect(job["runs-on"]).toBe("ubuntu-24.04"); expect(job["timeout-minutes"]).toBe(10);
+    expect(job["runs-on"]).toBe("ubuntu-24.04"); expect(job["timeout-minutes"]).toBe(15);
     expect(job.if).toContain("github.ref == 'refs/heads/main'"); expect(job.if).toContain("github.repository == 'Withso/zeros'");
     expect(workflow.permissions).toEqual({ contents: "read", actions: "read" });
   });

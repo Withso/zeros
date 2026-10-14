@@ -84,6 +84,35 @@ describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
     await expect(f.api.waitComputer(f.handle.run,undefined,`r1-${"b".repeat(64)}`)).rejects.toThrow("zeros_dev_runtime_pin_unconfirmed");
   });
 
+  it("reads the qualified selection separately from an older saved pin without treating it as permission to use that pin", async () => {
+    const f = setup(), saved = `r1-${"a".repeat(64)}`, selected = `r1-${"b".repeat(64)}`;
+    const proof = { buildId: build.id, version: build.version, runtimeId: saved, baseImageId: "fixture-base",
+      selected: { runtimeId: selected, baseImageId: "fixture-base", sourceCommit: "c".repeat(40), qualificationMode: "smoke" } };
+    f.fetcher.mockResolvedValue(Response.json(proof));
+    await expect(f.api.readComputerRuntime(build)).resolves.toEqual(proof);
+    f.fetcher.mockResolvedValue(Response.json(proof));
+    await expect(f.api.verifyComputerRuntime(build)).rejects.toMatchObject({ code: "runtime_pin_unconfirmed" });
+    expect(f.fetcher.mock.calls.every(([, input]) => input?.method === "GET")).toBe(true);
+  });
+
+  it.each([
+    ["qualified", undefined], ["unavailable", "runtime_selection_unavailable"],
+    ["changed-runtime", "runtime_selection_changed"], ["changed-base", "runtime_selection_changed"],
+    ["different-pin", "runtime_pin_unconfirmed"], ["foreign-build", "identity_changed"],
+  ])("uses the intended qualified tuple to classify %s build completion", async (condition, code) => {
+    const f = setup(); await f.api.buildComputer(f.handle); const original = f.fetcher.getMockImplementation()!;
+    const target = { runtimeId: `r1-${"a".repeat(64)}`, baseImageId: "fixture-base" };
+    f.fetcher.mockImplementation(async (url, init) => String(url).endsWith(`/builds/${build.id}/runtime`) ? Response.json({
+      buildId: condition === "foreign-build" ? randomUUID() : build.id, version: build.version,
+      ...target, runtimeId: condition === "different-pin" ? `r1-${"b".repeat(64)}` : target.runtimeId,
+      selected: condition === "unavailable" ? null : { ...target, sourceCommit: "c".repeat(40), qualificationMode: "smoke",
+        runtimeId: condition === "changed-runtime" ? `r1-${"b".repeat(64)}` : target.runtimeId,
+        baseImageId: condition === "changed-base" ? "new-base" : target.baseImageId },
+    }) : original(url, init));
+    if (code) await expect(f.api.waitComputer(f.handle.run, undefined, target)).rejects.toMatchObject({ code });
+    else await expect(f.api.waitComputer(f.handle.run, undefined, target)).resolves.toMatchObject({ runtimePin: "confirmed" });
+  });
+
   it("keeps the 180 second resume deadline and carries the observed setup attempt in its closed error",async()=>{
     let elapsed=0;const f=setup(fixture,{now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
     await f.api.createWorkspace(f.handle);f.setWorkspace({...workspace(),status:"setting_up"});

@@ -8,16 +8,18 @@ import { ZerosDevError } from "./errors";
 import { beforeDeadline } from "./transport";
 
 export const HOURLY_WORK_MS = 350_000;
+export const HOURLY_COMPUTER_MS = 300_000;
 export const HOURLY_CLEANUP_MS = 140_000;
+export const HOURLY_TOTAL_MS = 850_000;
 export const HOURLY_PROMPT = "Reply exactly ZEROS_DEV_OK. Do not call any tools.";
 export const HOURLY_AGENTS = ["claude", "codex", "cursor"] as const;
 type Runtime = Pick<ZerosDevRuntime, "prompt" | "tail" | "terminal" | "dispose">;
 type CredentialPort = { install(handle: RunHandle, signal: AbortSignal): Promise<void>; cleanup(handle: RunHandle, signal: AbortSignal): Promise<void> };
 type Options = {
   handle: RunHandle;
-  api: Pick<ProductApi, "assertFixtureEmpty" | "ensureRepository" | "computerState" | "verifyComputerRuntime" | "createWorkspace" | "waitWorkspace" | "lifecycle" | "cleanup">;
+  api: Pick<ProductApi, "assertFixtureEmpty" | "ensureRepository" | "computerState" | "readComputerRuntime" | "verifyComputerRuntime" | "buildComputer" | "waitComputer" | "createWorkspace" | "waitWorkspace" | "lifecycle" | "cleanup">;
   credentials: CredentialPort; connect(run: Run, signal: AbortSignal): Promise<Runtime>; evidence: Evidence;
-  signal?: AbortSignal; workMs?: number; cleanupMs?: number; now?: () => number; monotonic?: () => number;
+  signal?: AbortSignal; budgetMs?: number; computerMs?: number; workMs?: number; cleanupMs?: number; now?: () => number; monotonic?: () => number;
 };
 
 export async function recoverHourlyRun(options: {
@@ -61,14 +63,45 @@ export async function runHourly(options: Options): Promise<void> {
     throw new ZerosDevError("operation_conflict");
   const now = options.now ?? Date.now, clock = options.monotonic ?? (() => performance.now());
   const workMs = Math.min(options.workMs ?? HOURLY_WORK_MS, HOURLY_WORK_MS);
+  const computerMs = Math.min(options.computerMs ?? HOURLY_COMPUTER_MS, HOURLY_COMPUTER_MS);
   const cleanupMs = Math.min(options.cleanupMs ?? HOURLY_CLEANUP_MS, HOURLY_CLEANUP_MS);
-  const work = AbortSignal.timeout(workMs), signal = options.signal ? AbortSignal.any([options.signal, work]) : work;
+  const budget = AbortSignal.timeout(Math.min(options.budgetMs ?? computerMs + workMs, computerMs + workMs));
+  const overall = options.signal ? AbortSignal.any([options.signal, budget]) : budget;
+  const preparation = AbortSignal.any([overall, AbortSignal.timeout(computerMs)]);
   hourly.startedAt = new Date(now()).toISOString(); await handle.save();
-  const step = <T>(phase: Parameters<Evidence["step"]>[0], task: () => Promise<T>, bound = signal) =>
+  const boundedStep = <T>(phase: Parameters<Evidence["step"]>[0], task: () => Promise<T>, bound: AbortSignal) =>
     evidence.step(phase, () => {
       if (bound.aborted) throw new ZerosDevError("deadline");
       return beforeDeadline(task(), bound);
     });
+  await boundedStep("prior_cleanup", () => api.assertFixtureEmpty(preparation), preparation);
+  await boundedStep("repository", () => api.ensureRepository(preparation), preparation);
+  const selected = await boundedStep("computer_selection", async () => {
+    const { active } = await api.computerState(preparation);
+    if (!active || active.state !== "succeeded" || active.templateState !== "ready") throw new ZerosDevError("computer_required");
+    const proof = await api.readComputerRuntime(active, preparation);
+    if (!proof.selected) throw new ZerosDevError("runtime_selection_unavailable");
+    if (!proof.runtimeId || !proof.baseImageId) throw new ZerosDevError("runtime_pin_unconfirmed");
+    const target = { runtimeId: proof.selected.runtimeId, baseImageId: proof.selected.baseImageId };
+    return { active, target, rebuild: proof.runtimeId !== target.runtimeId || proof.baseImageId !== target.baseImageId };
+  }, preparation);
+  const { target } = selected;
+  const active = selected.rebuild ? await boundedStep("computer_build", async () => {
+    await api.buildComputer(handle, preparation);
+    return api.waitComputer(handle.run, preparation, target);
+  }, preparation) : selected.active;
+  const assertPin = async (bound: AbortSignal) => {
+    const state = await api.computerState(bound);
+    if (state.active?.id !== active.id || state.active.version !== active.version || state.active.state !== "succeeded" || state.active.templateState !== "ready")
+      throw new ZerosDevError("runtime_pin_unconfirmed");
+    await api.verifyComputerRuntime(active, bound, target);
+  };
+  await boundedStep("computer_pin", () => assertPin(preparation), preparation);
+  // A refresh never consumes the lifecycle's phase allowance or cleanup's
+  // reserve, but all phases remain inside the workflow's original budget.
+  const signal = AbortSignal.any([overall, AbortSignal.timeout(workMs)]);
+  const step = <T>(phase: Parameters<Evidence["step"]>[0], task: () => Promise<T>, bound = signal) =>
+    boundedStep(phase, task, bound);
   const connected = async (task: (runtime: Runtime) => Promise<void>) => {
     const started = clock(), readyObservedAt = new Date(now()).toISOString();
     const runtime = await step("runtime_connect", () => connect(handle.run, signal));
@@ -82,16 +115,10 @@ export async function runHourly(options: Options): Promise<void> {
     catch (error) { failed ??= error; }
     if (failed) throw failed;
   };
-  await step("prior_cleanup", () => api.assertFixtureEmpty(signal));
-  await step("repository", () => api.ensureRepository(signal));
-  await step("computer_pin", async () => {
-    const { active } = await api.computerState(signal);
-    if (!active || active.state !== "succeeded" || active.templateState !== "ready") throw new ZerosDevError("computer_required");
-    await api.verifyComputerRuntime(active, signal);
-  });
   let failed: unknown;
   try {
     await step("credentials_install", () => credentials.install(handle, signal));
+    await step("computer_pin", () => assertPin(signal));
     await step("workspace_create", () => api.createWorkspace(handle, signal));
     await step("workspace_create_wait", () => api.waitWorkspace(handle, "running", signal));
     const marker = `.zeros-dev-${handle.run.runId}`;
@@ -127,6 +154,7 @@ export async function runHourly(options: Options): Promise<void> {
         throw new ZerosDevError("history_changed");
       });
     });
+    await step("computer_pin", () => assertPin(signal));
   } catch (error) { failed = error; }
   finally {
     // A work deadline or SIGTERM does not cancel its own cleanup. Split the

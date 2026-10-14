@@ -353,7 +353,7 @@ remain intact until its inventory is complete and exact cleanup is approved.
 ## Hourly E2E in Actions
 
 `zeros-dev-e2e.yml` runs on main, hourly at minute 23 or by dispatch, with one
-serialized Alpha fixture and a ten-minute job limit. It uses the normal product
+serialized Alpha fixture and a fifteen-minute job limit. It uses the normal product
 API and the desktop's RuntimeClient. Local Personal, organization-local and
 Beta/Production paths are not selected.
 
@@ -388,9 +388,22 @@ is never overwritten, including during cleanup.
 Before enabling `ZEROS_DEV_E2E_ENABLED=true`, configure the required status and
 owner-reviewed repair procedure in [CI](ci.md#hourly-zeros-dev-merge-requirement).
 The first actual successful main lifecycle activates the gate automatically;
-a skipped job cannot activate it. An active Computer must already pin the
-currently qualified runtime/base, confirmed by the build-runtime read. The
-canary does not build or change the durable Computer fixture.
+a skipped job cannot activate it. The fixture needs a ready active Computer
+and its approved draft. The canary reads that build's persisted pin and the
+builder's newest qualified runtime/base in the `computer_selection` phase.
+If the tuple moved, `computer_build` makes at most one normal, idempotent build
+from that draft and proves the resulting pin against the captured tuple. An
+unchanged tuple needs no build. It never rewrites a saved pin or builds onto
+an unqualified publication.
+
+`runtime_selection_unavailable` means no qualified selection was available;
+`runtime_selection_changed` means the captured selection moved or its base
+changed during this run. These are closed prerequisite/race outcomes, separate
+from lifecycle failures; neither can produce a green receipt. A newer publication
+still qualifying does not displace an older qualified selection. The canary
+checks the exact active build and tuple again before allocation and after the
+lifecycle, and never loops on rebuilds. A build timeout retains the signed build
+intent for normal product status/reconciliation; it does not assert cancellation.
 
 Each run restores its exact signed predecessor artifact before doing work.
 Skipped attempts can be crossed only when job metadata proves the product step
@@ -409,9 +422,13 @@ After that, the scenario creates one `zd-` workspace, proves its Git checkout
 and writes a harmless marker, sends one minimal prompt to each agent, then
 stops and resumes. It checks the marker and hashes of the three durable chat
 histories after reconnecting. It sends no second prompt on an uncertain turn.
-Work is capped at 350 seconds, individual prompts at 60 seconds. A separate
-140-second cleanup reserve protects credential revocation from a work timeout,
-SIGINT or SIGTERM; the whole budget starts before dependency installation.
+Computer preparation, including its optional build, is capped at 300 seconds.
+The lifecycle then gets up to 350 seconds, individual prompts up to 60 seconds.
+A separate 140-second cleanup reserve protects credential revocation from a
+work timeout, SIGINT or SIGTERM. All phases share an 850-second overall budget
+that starts before dependency installation; the Actions job allows 15 minutes
+for that budget, logout and receipt upload. Setup overhead reduces the remaining
+overall allowance and cannot extend a phase.
 An unfinished cleanup or any failed stage keeps the run red.
 
 The signed `zeros-dev-receipt-<workflow-run-id>-<attempt>` artifact contains

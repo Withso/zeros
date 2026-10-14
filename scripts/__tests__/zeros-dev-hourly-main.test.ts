@@ -24,7 +24,7 @@ beforeEach(() => {
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 const maskLine = (value: string) => `::add-mask::${value.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A")}\n`;
 async function fixture() {
-  const root = await mkdtemp(path.join(os.tmpdir(), "zd-actions-")); roots.push(root); await mkdir(path.join(root, ".git"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "zd-actions-")); roots.push(root); await mkdir(path.join(root, ".git"), { mode: 0o700 });
   const accountId = randomUUID(), credential = { ...createCloudReplicaDeviceCredential(accountId), deviceId: randomUUID() };
   const values = { ZEROS_DEV_PASSWORD: "synthetic-password-value", ZEROS_DEV_WORKOS_SUBJECT: "user_fixture", ZEROS_DEV_ACCOUNT_ID: accountId,
     ZEROS_DEV_EMAIL: "fixture@example.test", ZEROS_DEV_ORGANIZATION_ID: randomUUID(), ZEROS_DEV_REPOSITORY: "fixture/repository", ZEROS_DEV_REPOSITORY_ID: "123",
@@ -34,6 +34,14 @@ async function fixture() {
   return { root, env, values, credential };
 }
 describe("ephemeral Actions fixture credentials", () => {
+  it.each([0o002, 0o022, 0o077])("initializes a safe checkout under umask %i", async umask => {
+    const previous = process.umask(umask);
+    try {
+      const f = await fixture();
+      const store = await initializeActionsFixture(f.root, f.env);
+      expect((await store.read()).values).toEqual(f.values);
+    } finally { process.umask(previous); }
+  });
   it("masks decoded fixture and device secrets plus nested auth tokens directly on stdout", async () => {
     const f = await fixture(), tokens = { access_token: randomUUID(), refresh_token: randomUUID(), id_token: randomUUID() };
     const codex = JSON.stringify({ tokens });
@@ -106,6 +114,12 @@ async function actionsFixture() {
   const api = {
     assertFixtureEmpty: vi.fn(async () => {}), ensureRepository: vi.fn(async () => {}),
     computerState: vi.fn(async () => ({ active: computerBuild() })), verifyComputerRuntime: vi.fn(async () => "confirmed"),
+    readComputerRuntime: vi.fn(async () => ({ buildId: computerBuild().id, version: computerBuild().version,
+      runtimeId: `r1-${"a".repeat(64)}`, baseImageId: "fixture-base", selected: {
+        runtimeId: `r1-${"a".repeat(64)}`, baseImageId: "fixture-base", sourceCommit: "b".repeat(40), qualificationMode: "smoke" as const,
+      } })),
+    buildComputer: vi.fn(async () => { throw new ZerosDevError("computer_failed"); }),
+    waitComputer: vi.fn(async () => { throw new ZerosDevError("computer_failed"); }),
     createWorkspace: vi.fn(async (handle: RunHandle) => {
       handle.run.create = { key: randomUUID(), body: { name: `zd-${handle.run.runId}`, repository: { forge: "github.com", owner: "fixture", name: "repository", revision: "main", githubInstallationId: f.values.ZEROS_DEV_GITHUB_INSTALLATION_ID } } };
       await handle.save();
@@ -142,6 +156,35 @@ describe("Actions orchestration through signed files", () => {
     expect(artifact.payload.result).toMatchObject({ success: false, code, ...diagnostic });
     expect(artifact.payload.runs[0].evidence).toContainEqual(expect.objectContaining({ phase: "runtime_connect", code, ...diagnostic }));
     expect(JSON.stringify([artifact, ...f.output])).not.toContain("synthetic-private");
+  });
+
+  it("keeps a one-build intent in the public signed receipt before a failed build observation", async () => {
+    const f = await actionsFixture(), api = f.services.api;
+    const proof = await api.readComputerRuntime();
+    api.readComputerRuntime.mockResolvedValue({ ...proof, selected: { ...proof.selected, runtimeId: `r1-${"c".repeat(64)}` } });
+    api.buildComputer.mockImplementation(async (handle: RunHandle) => {
+      const build = computerBuild();
+      handle.run.computer = { operationId: randomUUID(), expectedRevision: 1 }; await handle.save();
+      expect((await f.checkpoint()).payload.runs.find((row: any) => row.runId === handle.run.runId).computer).toEqual(handle.run.computer);
+      handle.run.computer.result = { id: build.id, version: build.version }; await handle.save();
+      return build as never;
+    });
+    f.services.session.logout.mockRejectedValue(new ZerosDevError("service_unavailable"));
+    expect(await runActions(f.env, f.options as never)).toBe(1);
+    expect(api.buildComputer).toHaveBeenCalledOnce(); expect(api.waitComputer).toHaveBeenCalledOnce();
+    expect(f.services.credentials.install).not.toHaveBeenCalled(); expect(api.createWorkspace).not.toHaveBeenCalled();
+    expect(f.output).toContainEqual(expect.objectContaining({ phase: "computer_build", code: "computer_failed" }));
+    const artifact = await f.checkpoint();
+    expect(artifact.payload.result).toMatchObject({ success: false, code: "computer_failed" });
+    expect(artifact.payload.runs[0].computer.result).toMatchObject({ id: computerBuild().id });
+  });
+
+  it("uses the enlarged overall allowance after installation while retaining its original start", async () => {
+    const f = await actionsFixture();
+    f.env.ZEROS_DEV_E2E_START_MS = String(Date.now() - 600_000);
+    expect(await runActions(f.env, f.options as never)).toBe(1);
+    expect(f.output).toContainEqual(expect.objectContaining({ phase: "runtime_connect", code: "runtime_unavailable" }));
+    expect((await f.checkpoint()).payload.result.code).toBe("runtime_unavailable");
   });
 
   it("keeps mask commands and every secret out of public evidence and the signed receipt", async () => {

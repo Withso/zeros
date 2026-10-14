@@ -42,6 +42,9 @@
    not exist then; inspect the underlying SQL error before weakening a guard.
    Checkpoint/stop changes also run `recovery-migration.integration.test.ts`
    alongside the current-schema content, lease and reconciler suites.
+   For canaries with durable fixtures and moving defaults, test unchanged,
+   moved, unavailable and mid-run selection. Refresh at most once against the
+   captured qualified tuple, with separate build/lifecycle/cleanup budgets.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates

@@ -74,15 +74,18 @@ describe("one canonical locked zeros-dev credential file",()=>{
     expect(await expectPrivate(file)).toContain("BOAT_API_KEY=synthetic-provider-secret");
   });
 
-  it("resolves all linked checkouts to the common repository .env.agent",async()=>{
+  it.each([0o002,0o022,0o077])("resolves all linked checkouts to the common repository .env.agent under umask %i",async umask=>{
+    const previous=process.umask(umask);
+    try{
     const {root,file}=await fixture();
-    await mkdir(path.join(root,".git","worktrees","sibling"),{recursive:true});
+    await mkdir(path.join(root,".git","worktrees","sibling"),{recursive:true,mode:0o700});
     const checkout=path.join(root,"sibling");await mkdir(checkout);
     await writeFile(path.join(checkout,".git"),`gitdir: ${path.join(root,".git","worktrees","sibling")}\n`);
     await writeFile(path.join(root,".git","worktrees","sibling","commondir"),"../..\n");
     await writeFile(path.join(checkout,".env.agent"),"ZEROS_DEV_REFRESH_TOKEN=stale-copy\n",{mode:0o600});
     expect(await canonicalAgentFile(checkout)).toBe(file);
     expect(await canonicalAgentFile(root)).toBe(file);
+    }finally{process.umask(previous);}
   });
 
   it("serializes refresh and rereads the rotated value under the shared lock",async()=>{
