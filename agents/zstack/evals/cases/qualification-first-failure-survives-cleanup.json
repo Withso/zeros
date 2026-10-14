@@ -1,0 +1,9 @@
+{
+  "id": "qualification-first-failure-survives-cleanup",
+  "kind": "replay",
+  "area": "vm-image-bootstrap",
+  "fixedBy": "pr:482",
+  "symptom": "Runtime smoke failure was overwritten by cleanup_unconfirmed and then reconcile/timeout, hiding the first failed check.",
+  "rule": "Commit the first closed failure before cleanup, retry recording it after a storage outage, and preserve it through reconciliation without granting qualification.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/runtime-qualification.integration.test.ts"
+}

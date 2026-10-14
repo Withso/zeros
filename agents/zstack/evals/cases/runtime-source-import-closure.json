@@ -1,0 +1,9 @@
+{
+  "id": "runtime-source-import-closure",
+  "kind": "replay",
+  "area": "vm-image-bootstrap",
+  "fixedBy": "pr:482",
+  "symptom": "The source engine imported channel-policy files outside apps/desktop/src which were absent from the runtime archive; checkout imports and bundled CLI help did not expose the omission.",
+  "rule": "Stage every transitive source dependency and probe the complete source engine export before publication, independently of bundled CLI help.",
+  "check": "pnpm exec vitest run scripts/__tests__/cloud-runtime-bundle-closure.test.ts"
+}
