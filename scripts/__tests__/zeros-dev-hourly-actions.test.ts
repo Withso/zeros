@@ -20,6 +20,26 @@ function api(rows = [run(17, { status: "in_progress", conclusion: null }), run(1
   }) };
 }
 describe("hourly Actions predecessor and gate policy", () => {
+  it.each(["success", "failure"])("does not let a completed %s Gate 0 rehearsal replace the last hourly result", async conclusion => {
+    const f = { get: vi.fn(async (url: string) => url.includes("status=success")
+      ? { total_count: conclusion === "success" ? 2 : 1, workflow_runs: conclusion === "success" ? [run(17, { event: "workflow_dispatch" }), run(16)] : [run(16)] }
+      : url.includes("/jobs") ? { total_count: 1, jobs: [completedJob(url.includes("/runs/17/") ? { name: "gate0", conclusion } : {})] }
+      : { total_count: 2, workflow_runs: [run(17, { event: "workflow_dispatch", conclusion }), run(16)] }) };
+    const snapshot = await hourlySnapshot(f);
+    expect(snapshot).toMatchObject({ activated: true, latest: { id: 16 }, completedAt: "2026-10-14T00:08:00Z" });
+    expect(decideHourlyGate(snapshot, true, Date.parse("2026-10-14T00:38:00Z"))).toMatchObject({ allowed: true, code: "hourly_green" });
+  });
+  it("a green rehearsal cannot activate hourly admission or conceal a completed red hourly run", async () => {
+    const jobs = (url: string) => ({ total_count: 1, jobs: [completedJob(url.includes("/runs/17/") ? { name: "gate0" } : { conclusion: "failure" })] });
+    const f = { get: vi.fn(async (url: string) => url.includes("/jobs") ? jobs(url)
+      : url.includes("status=success") ? { total_count: 1, workflow_runs: [run(17, { event: "workflow_dispatch" })] }
+      : { total_count: 2, workflow_runs: [run(17, { event: "workflow_dispatch" }), run(16, { conclusion: "failure" })] }) };
+    expect(await hourlySnapshot(f)).toMatchObject({ activated: false, latest: { id: 16, conclusion: "failure" } });
+  });
+  it("preserves the signed rehearsal predecessor for the next hourly cleanup", async () => {
+    const f = api([run(17, { status: "in_progress", conclusion: null }), run(16, { event: "workflow_dispatch" })]);
+    expect(await planHourly(f, context)).toMatchObject({ previous: { workflowRunId: "16", attempt: 1 }, artifactId: "99", bootstrap: false });
+  });
   it("selects only the exact immediately preceding main artifact and never makes a network write", async () => {
     const f = api(); expect(await planHourly(f, context)).toMatchObject({ previous: { workflowRunId: "16", attempt: 1 }, artifactId: "99", bootstrap: false });
     expect(f.get.mock.calls.every(([url]) => url.startsWith("/repos/Withso/zeros/"))).toBe(true);

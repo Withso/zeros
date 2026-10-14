@@ -414,6 +414,17 @@ describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
     expect(reads).toBe(2);
   });
 
+  it("observes closed current-generation setup evidence even after readiness succeeds",async()=>{
+    const f=setup();await f.api.createWorkspace(f.handle);
+    const original=f.fetcher.getMockImplementation()!,observe=vi.fn();
+    f.fetcher.mockImplementation(async(url,init)=>new URL(String(url)).pathname===`/v1/cloud-workspaces/${workspace().id}`
+      ?Response.json({workspace:{...workspace(),status:"ready"},setupProgress:{generation:workspace().generation.number,
+        attempt:2,claimCount:2,state:"succeeded",errorCode:"private-provider-detail"}})
+      :original(url,init));
+    await f.api.waitWorkspace(f.handle,"running",undefined,observe);
+    expect(observe).toHaveBeenCalledExactlyOnceWith({attempt:2,claimCount:2,state:"succeeded",errorCode:"unknown"});
+  });
+
   it("fails a Computer with another repository before any build mutation",async()=>{
     const f=setup();f.fetcher.mockResolvedValue(Response.json({...state(),draft:{...state().draft,repositories:[{...repository,name:"foreign"}]}}));
     await expect(f.api.buildComputer(f.handle)).rejects.toThrow("zeros_dev_repository_required");

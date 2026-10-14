@@ -9,17 +9,21 @@ import { ERROR_CODES, ZerosDevError } from "./errors";
 import { SetupObservationSchema } from "./setup-observation";
 import { RuntimeObservationSchema } from "./runtime-observation";
 import { AdmissionObservationSchema } from "./admission-observation";
+import { TransportObservationSchema } from "./gate0-contract";
 
 export const ExecutionSchema = z.object({ workflowRunId: z.string().regex(/^[1-9][0-9]{0,19}$/), attempt: z.number().int().min(1).max(100),
   sourceSha: z.string().regex(/^[a-f0-9]{40}$/) }).strict();
 export type HourlyExecution = z.infer<typeof ExecutionSchema>;
 const resultSchema = z.object({ success: z.boolean(), code: z.enum(ERROR_CODES).nullable(), runId: z.string().uuid(),
-  setup: SetupObservationSchema.optional(), runtime: RuntimeObservationSchema.optional(), admission: AdmissionObservationSchema.optional() }).strict();
+  setup: SetupObservationSchema.optional(), runtime: RuntimeObservationSchema.optional(), admission: AdmissionObservationSchema.optional(),
+  transport: TransportObservationSchema.optional() }).strict();
 const payloadSchema = z.object({ schema: z.literal("zeros.dev-hourly/v1"), execution: ExecutionSchema, deviceId: z.string().uuid(),
   result: resultSchema,
   runs: z.array(RunSchema).max(3), completedAt: z.string().datetime() }).strict();
 const envelopeSchema = z.object({ payload: payloadSchema, signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict();
 const MAX_BYTES = 1024 * 1024;
+export const PublicHourlyTrustSchema = z.object({ deviceId: z.string().uuid(), publicKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
+export type PublicHourlyTrust = z.infer<typeof PublicHourlyTrustSchema>;
 const bad = () => new ZerosDevError("artifact_invalid");
 const key = (value: CloudReplicaDeviceCredential) => {
   const credential = parseCloudReplicaDeviceCredential(value);
@@ -41,11 +45,27 @@ async function readArtifact(file: string) {
 }
 
 function authenticate(envelope: z.infer<typeof envelopeSchema>, credential: CloudReplicaDeviceCredential, expected: HourlyExecution): void {
-  const { payload } = envelope;
-  if (JSON.stringify(payload.execution) !== JSON.stringify(ExecutionSchema.parse(expected)) || payload.deviceId !== credential.deviceId ||
-    !verify(null, Buffer.from(JSON.stringify(payload)), createPublicKey(key(credential)), Buffer.from(envelope.signature, "base64url")) ||
-    new Set(payload.runs.map(run => run.runId)).size !== payload.runs.length) throw bad();
-  if (payload.result.success && (!payload.runs.some(run => run.runId === payload.result.runId && run.hourly?.complete && run.deletionConfirmed) || payload.result.code !== null)) throw bad();
+  verifyPublicHourlyArtifact(envelope, { deviceId: credential.deviceId!, publicKey: credential.publicKey }, expected);
+}
+
+/** Read-only reports need the pinned public verifier, never a fixture password,
+ * private device key, provider credential or access to the product account. */
+export function verifyPublicHourlyArtifact(raw: unknown, trust: PublicHourlyTrust, expected: HourlyExecution) {
+  try {
+    const { deviceId, publicKey } = PublicHourlyTrustSchema.parse(trust), envelope = envelopeSchema.parse(raw), { payload } = envelope;
+    const publicBytes = Buffer.from(publicKey, "base64url");
+    if (publicBytes.length !== 32 || publicBytes.toString("base64url") !== publicKey || Buffer.byteLength(JSON.stringify(envelope)) > MAX_BYTES ||
+      JSON.stringify(payload.execution) !== JSON.stringify(ExecutionSchema.parse(expected)) || payload.deviceId !== deviceId ||
+      !verify(null, Buffer.from(JSON.stringify(payload)), createPublicKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: publicKey } }),
+        Buffer.from(envelope.signature, "base64url")) || new Set(payload.runs.map(run => run.runId)).size !== payload.runs.length ||
+      payload.runs.some(run => run.deviceId !== deviceId)) throw bad();
+    const primary = payload.runs.find(run => run.runId === payload.result.runId);
+    if (primary && (!primary.hourly || primary.hourly.workflowRunId !== expected.workflowRunId || primary.hourly.attempt !== expected.attempt ||
+      primary.hourly.sourceSha !== expected.sourceSha || primary.source.dirty || primary.source.revision !== expected.sourceSha)) throw bad();
+    if (payload.result.success !== (payload.result.code === null) ||
+      payload.result.success && (!primary?.hourly?.complete || !primary.deletionConfirmed)) throw bad();
+    return payload;
+  } catch { throw bad(); }
 }
 
 export async function importHourlyArtifact(file: string, store: RunStore, credential: CloudReplicaDeviceCredential, expected: HourlyExecution): Promise<void> {

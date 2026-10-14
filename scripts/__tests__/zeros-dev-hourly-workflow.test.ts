@@ -23,9 +23,21 @@ describe("hourly fixture workflow authority", () => {
     expect(workflow.concurrency).toEqual({ group: "zeros-dev-alpha-fixture", "cancel-in-progress": false });
     const job = workflow.jobs.lifecycle;
     expect(Object.keys(workflow.jobs)).toEqual(["lifecycle"]);
-    expect(job["runs-on"]).toBe("ubuntu-24.04"); expect(job["timeout-minutes"]).toBe(15);
+    expect(job["runs-on"]).toBe("ubuntu-24.04"); expect(job["timeout-minutes"]).toBe("${{ inputs.profile == 'gate0' && 135 || 15 }}");
     expect(job.if).toContain("github.ref == 'refs/heads/main'"); expect(job.if).toContain("github.repository == 'Withso/zeros'");
     expect(workflow.permissions).toEqual({ contents: "read", actions: "read" });
+  });
+  it("admits a separate owner-enabled manual Gate 0 profile under the same fixture lock", () => {
+    const workflow = load(readFileSync(".github/workflows/zeros-dev-e2e.yml", "utf8")) as any;
+    expect(workflow.on.workflow_dispatch.inputs.profile).toEqual({ description: "Hourly canary or Gate 0 rehearsal", type: "choice", required: true,
+      default: "hourly", options: ["hourly", "gate0"] });
+    const job = workflow.jobs.lifecycle;
+    expect(job.name).toBe("${{ inputs.profile == 'gate0' && 'gate0' || 'lifecycle' }}");
+    expect(job.env.ZEROS_DEV_PROFILE).toBe("${{ inputs.profile || 'hourly' }}");
+    expect(job.if).toContain("github.event_name == 'workflow_dispatch' && inputs.profile == 'gate0' && vars.ZEROS_DEV_GATE0_ENABLED == 'true'");
+    expect(job.if).toContain("vars.ZEROS_DEV_E2E_ENABLED == 'true'");
+    expect(job.steps.filter((step: any) => JSON.stringify(step.env ?? {}).includes("secrets.")).map((step: any) => step.name))
+      .toEqual(["Execute Alpha product lifecycle"]);
   });
   it("separates fixture secrets from agent secrets, preserves prior receipts and uploads only signed redacted output", () => {
     const workflow = load(readFileSync(".github/workflows/zeros-dev-e2e.yml", "utf8")) as any;

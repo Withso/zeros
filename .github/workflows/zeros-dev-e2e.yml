@@ -3,6 +3,15 @@ on:
   schedule:
     - cron: "23 * * * *"
   workflow_dispatch:
+    inputs:
+      profile:
+        description: Hourly canary or Gate 0 rehearsal
+        type: choice
+        required: true
+        default: hourly
+        options:
+          - hourly
+          - gate0
 permissions:
   contents: read
   actions: read
@@ -11,9 +20,15 @@ concurrency:
   cancel-in-progress: false
 jobs:
   lifecycle:
-    if: github.repository == 'Withso/zeros' && github.ref == 'refs/heads/main' && vars.ZEROS_DEV_E2E_ENABLED == 'true'
+    name: ${{ inputs.profile == 'gate0' && 'gate0' || 'lifecycle' }}
+    if: >-
+      github.repository == 'Withso/zeros' && github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.profile == 'gate0' && vars.ZEROS_DEV_GATE0_ENABLED == 'true') ||
+       ((github.event_name != 'workflow_dispatch' || inputs.profile == 'hourly') && vars.ZEROS_DEV_E2E_ENABLED == 'true'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: ${{ inputs.profile == 'gate0' && 135 || 15 }}
+    env:
+      ZEROS_DEV_PROFILE: ${{ inputs.profile || 'hourly' }}
     steps:
       - name: Start the overall budget
         run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "ZEROS_DEV_E2E_START_MS=" + Date.now() + "\n")'

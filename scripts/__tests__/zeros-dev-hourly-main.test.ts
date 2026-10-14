@@ -141,6 +141,30 @@ async function actionsFixture() {
 }
 
 describe("Actions orchestration through signed files", () => {
+  it("selects the manual rehearsal with its original enlarged budget and signed incomplete proof", async () => {
+    const f = await actionsFixture();
+    const env = { ...f.env, GITHUB_EVENT_NAME: "workflow_dispatch", ZEROS_DEV_PROFILE: "gate0",
+      ZEROS_DEV_E2E_START_MS: String(Date.now() - 1_000_000),
+      ZEROS_DEV_E2E_PLAN: JSON.stringify({ ...JSON.parse(f.env.ZEROS_DEV_E2E_PLAN), profile: "gate0" }) };
+    const rehearse = vi.fn(async (options: any) => {
+      expect(options.budgetMs).toBeGreaterThan(6_000_000); expect(options.budgetMs).toBeLessThan(7_000_000);
+      expect(options.handle.run.hourly.rehearsal).toMatchObject({ complete: false, models: [], cycles: [] });
+      await options.evidence.step("detached_start", async () => { throw new ZerosDevError("detached_task_not_active"); });
+    });
+    Object.assign(f.services.session, { prepareDetachedAuth: vi.fn(async () => 3_600_000) });
+    expect(await runActions(env, { ...f.options, rehearse })).toBe(1);
+    expect(rehearse).toHaveBeenCalledOnce(); expect(f.services.api.createWorkspace).not.toHaveBeenCalled();
+    expect((await f.checkpoint()).payload).toMatchObject({ result: { success: false, code: "detached_task_not_active" },
+      runs: [expect.objectContaining({ hourly: expect.objectContaining({ rehearsal: expect.objectContaining({ complete: false }) }) })] });
+    expect(f.output).toContainEqual(expect.objectContaining({ phase: "detached_start", outcome: "failed", code: "detached_task_not_active" }));
+  });
+  it.each(["scheduled", "mismatch"])("refuses a %s rehearsal before credentials or login", async kind => {
+    const f = await actionsFixture();
+    const env = { ...f.env, ZEROS_DEV_PROFILE: "gate0", GITHUB_EVENT_NAME: kind === "scheduled" ? "schedule" : "workflow_dispatch" };
+    expect(await runActions(env, f.options)).toBe(1); expect(f.services.session.login).not.toHaveBeenCalled();
+    await expect(readFile(path.join(f.root, ".env.agent"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(stdout).toHaveLength(0);
+  });
   it.each(["runtime", "setup", "admission"] as const)("keeps the first %s observation in the public result and signed artifact after logout fails", async kind => {
     const f = await actionsFixture();
     const runtime = { phase: "admission" as const, class: "admission_unavailable" as const, status: 500 };
