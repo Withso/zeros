@@ -1,0 +1,32 @@
+{
+  "schema": "zeros.ci-failure/v1",
+  "signature": "32eb871fecdc15d44a7514142202fbe9bfab3b2067d95d1ab85b99bf36e7d0d6",
+  "signature_version": 1,
+  "repository": "Withso/zeros",
+  "incident_kind": "postmerge_full_ci",
+  "base_branch": "main",
+  "branch": "ci-fix/32eb871fecdc15d44a7514142202fbe9bfab3b2067d95d1ab85b99bf36e7d0d6",
+  "first_failure": {
+    "sha": "8c726cca7880fbfdee083887e19e8d443d8c3398",
+    "run_id": "38527820708",
+    "attempt": 1
+  },
+  "source": {
+    "sha": "8c726cca7880fbfdee083887e19e8d443d8c3398",
+    "run_id": "38527820708",
+    "attempt": 1
+  },
+  "required_lanes": [
+    "macos"
+  ],
+  "required_ci_additions": [
+    "ci:macos"
+  ],
+  "controller_evidence": {
+    "run_id": "38529035491",
+    "attempt": 1,
+    "artifact_id": "11876499851",
+    "artifact_digest": "sha256:c07e19a92a3f108fb70983c1d55f440b43d19c446e07f108a79cd0d1bd787111",
+    "payload_sha256": "ec8d063816874f6a2f4e4928f814cb615ffb777956046312a8f673c9115aa5a6"
+  }
+}
