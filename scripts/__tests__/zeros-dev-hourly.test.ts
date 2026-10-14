@@ -9,6 +9,7 @@ import { ProductApi } from "../zeros-dev/product";
 import { AlphaTransport } from "../zeros-dev/transport";
 import type { CloudComputerV2BuildRuntime } from "@zeros/protocol/cloud-computer-v2";
 import { computerBuild } from "../../apps/desktop/src/renderer/features/settings/__tests__/cloud-computer-v2-fixtures";
+import type { AdmissionObservation } from "../zeros-dev/admission-observation";
 
 function fixture() {
   const calls: string[] = [], output: unknown[] = [];
@@ -68,6 +69,26 @@ function fixture() {
 }
 
 describe("hourly fixture lifecycle", () => {
+  it("records recovered admission failures and retry counts without retrying the lifecycle or hiding them in success", async () => {
+    const f = fixture();
+    const firstFailure = { status: 503 as const, code: "cloud_runtime_temporarily_unavailable" as const,
+      phase: "provider_endpoint" as const, retryAfterMs: 1000 };
+    const first: AdmissionObservation = { sequence: 1, firstFailure, retryCount: 0, retries: [] };
+    const admission: AdmissionObservation = { ...first, retryCount: 1, retries: [{ ...firstFailure, attempt: 2, delayMs: 1000 }] };
+    f.options.connect = vi.fn(async (_run?: unknown, _signal?: AbortSignal, observe?: (event: AdmissionObservation) => void) => {
+      observe?.(first); observe?.(admission); return { ...f.runtime, admission };
+    });
+    await runHourly(f.options as never);
+    expect(f.output.filter((row: any) => row.phase === "runtime_admission")).toEqual([
+      ...[first, admission, first, admission].map(observed => expect.objectContaining({ outcome: "pending", admission: observed, count: observed.retryCount })),
+    ]);
+    expect(f.output.filter((row: any) => row.phase === "runtime_connect")).toEqual([
+      expect.objectContaining({ outcome: "ok", admission }), expect.objectContaining({ outcome: "ok", admission }),
+    ]);
+    expect(f.handle.run.hourly?.complete).toBe(true); expect(f.api.createWorkspace).toHaveBeenCalledOnce();
+    expect(f.options.connect).toHaveBeenCalledTimes(2);
+  });
+
   it("names prior cleanup and refuses a still-unconfirmed signed workspace before the next allocation", async () => {
     const f = fixture();
     await f.api.createWorkspace(); f.api.createWorkspace.mockClear();

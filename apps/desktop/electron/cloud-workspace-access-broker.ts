@@ -7,6 +7,7 @@ import type { CloudNativeSshHandle } from "./cloud-workspace-ssh-runtime";
 
 import {
   CloudWorkspaceAccessClientError,
+  type CloudWorkspaceAdmissionOptions,
   type CloudWorkspaceEngineAdmission,
   type CloudWorkspacePreviewAccess,
   type CloudWorkspaceSshAccess,
@@ -22,6 +23,7 @@ export interface CloudWorkspaceAccessBrokerApi {
   issueEngineAdmission(
     accessToken: string,
     input: { organizationId: string; workspaceId: string; directProviderVersion?: 1; connectionChannel?: "control-plane-websocket" },
+    options?: CloudWorkspaceAdmissionOptions,
   ): Promise<CloudWorkspaceEngineAdmission | CloudActorConnectionGrant>;
   issueSsh(
     accessToken: string,
@@ -1233,13 +1235,16 @@ export class CloudWorkspaceAccessBroker {
    * proxy. Only the short-lived one-use engine admission crosses IPC. */
   async openRuntime(
     input: AccessTarget,
+    options: Omit<CloudWorkspaceAdmissionOptions, "assertCurrent"> = {},
   ): Promise<CloudWorkspaceRuntimeConnectionTarget> {
     const releaseCapacity = this.reserveCapacity();
     try {
       const token = await this.token();
       const admission = await this.api.issueEngineAdmission(token, {
         organizationId:input.organizationId,workspaceId:input.workspaceId,directProviderVersion:1,
-      });
+      }, { ...options, assertCurrent: () => {
+        if (!this.hasCurrentSession()) throw new CloudWorkspaceAccessClientError(401, "signed_out", "Cloud workspace access authority has ended");
+      } });
       if(admission.version===2){
         if(!this.hasCurrentSession()){await this.releaseActorAdmission(token,admission).catch(()=>undefined);throw new CloudWorkspaceAccessClientError(401,"signed_out","Cloud workspace access authority has ended");}
         let target:CloudWorkspaceRuntimeConnectionTarget;
@@ -1282,7 +1287,8 @@ export class CloudWorkspaceAccessBroker {
 
   /** Reconcile the exact reconnect boundary before minting. Concurrent and
    * retried requests share one published descriptor, even if IPC lost it. */
-  async refreshRuntime(input: CloudWorkspaceRuntimeIdentity): Promise<CloudWorkspaceRuntimeConnectionTarget> {
+  async refreshRuntime(input: CloudWorkspaceRuntimeIdentity,
+    options: Omit<CloudWorkspaceAdmissionOptions, "assertCurrent"> = {}): Promise<CloudWorkspaceRuntimeConnectionTarget> {
     this.pruneExpired();
     if (!this.hasCurrentSession())
       throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
@@ -1303,7 +1309,7 @@ export class CloudWorkspaceAccessBroker {
       throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
     }
     const source = runtimeIdentity(input);
-    const entry = { source, promise: this.mintRuntimeRefresh(source).then(target => {
+    const entry = { source, promise: this.mintRuntimeRefresh(source, options).then(target => {
       if (this.hasCurrentSession()) this.runtimeRefreshReceipts.set(source.runtimeId, { source, target });
       return target;
     }) };
@@ -1312,7 +1318,8 @@ export class CloudWorkspaceAccessBroker {
     finally { if (this.runtimeRefreshFlights.get(input.runtimeId) === entry) this.runtimeRefreshFlights.delete(input.runtimeId); }
   }
 
-  private async mintRuntimeRefresh(input: CloudWorkspaceRuntimeIdentity): Promise<CloudWorkspaceRuntimeConnectionTarget> {
+  private async mintRuntimeRefresh(input: CloudWorkspaceRuntimeIdentity,
+    options: Omit<CloudWorkspaceAdmissionOptions, "assertCurrent">): Promise<CloudWorkspaceRuntimeConnectionTarget> {
     this.pruneExpired();
     const actor=this.actorRuntimes.get(input.runtimeId);
     if(actor){
@@ -1323,7 +1330,11 @@ export class CloudWorkspaceAccessBroker {
       const token=await this.token();
       const preferControlPlane=target.channel==="direct-provider-websocket"||actor.preferControlPlane===true;
       const admission=await this.api.issueEngineAdmission(token,{organizationId:input.organizationId,workspaceId:input.workspaceId,
-        directProviderVersion:1,...(preferControlPlane?{connectionChannel:"control-plane-websocket" as const}:{})});
+        directProviderVersion:1,...(preferControlPlane?{connectionChannel:"control-plane-websocket" as const}:{})},
+      { ...options, assertCurrent: () => {
+        if (!this.hasCurrentSession() || actor.closing || this.actorRuntimes.get(input.runtimeId) !== actor || actor.target !== target)
+          throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+      } });
       if(admission.version!==2)throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","An actor-aware cloud runtime is required");
       if(!this.hasCurrentSession()||actor.closing||this.actorRuntimes.get(input.runtimeId)!==actor){
         await this.releaseActorAdmission(token,admission).catch(()=>undefined);
@@ -1365,7 +1376,11 @@ export class CloudWorkspaceAccessBroker {
     const admission = await this.api.issueEngineAdmission(token, {
       organizationId: input.organizationId,
       workspaceId: input.workspaceId,
-    });
+    }, { ...options, assertCurrent: () => {
+      if (!this.hasCurrentSession() || this.runtimeById.get(input.runtimeId) !== accessId || this.leases.get(accessId!) !== current ||
+        current.runtime?.sequence !== input.connectionSequence)
+        throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    } });
     const stillCurrent = this.runtimeById.get(input.runtimeId);
     if (
       stillCurrent !== accessId ||

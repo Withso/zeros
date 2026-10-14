@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { WebSocket } from "ws";
 import { z } from "zod";
-import { CloudWorkspaceAccessClient, CloudWorkspaceAccessClientError } from "../../apps/desktop/electron/cloud-workspace-access-client";
+import { CloudWorkspaceAccessClient, CloudWorkspaceAccessClientError,
+  type CloudWorkspaceAdmissionOptions } from "../../apps/desktop/electron/cloud-workspace-access-client";
 import { CloudWorkspaceAccessBroker } from "../../apps/desktop/electron/cloud-workspace-access-broker";
 import { CloudReplicaDeviceSigner } from "../../apps/desktop/src/engine/cloud-replica-device";
 import { RuntimeClient, type ConnectionRejection, type RuntimeClientEnvironment } from "../../apps/desktop/src/renderer/platform/bridge/runtime-client";
@@ -20,9 +21,11 @@ import { ALPHA_ORIGIN } from "./config";
 import { beforeDeadline } from "./transport";
 import { ZerosDevError } from "./errors";
 import type { RuntimeObservation } from "./runtime-observation";
+import { AdmissionObservationSchema, type AdmissionObservation } from "./admission-observation";
 
 type SessionPort = Pick<ZerosDevSession, "fixture" | "device" | "accessToken" | "accountSessionKey">;
-type Options = { signal?: AbortSignal; environment?: RuntimeClientEnvironment; fetch?: typeof fetch };
+type Options = { signal?: AbortSignal; environment?: RuntimeClientEnvironment; fetch?: typeof fetch;
+  onAdmissionEvent?: (event: AdmissionObservation) => void };
 const listSchema = z.object({ workspaces: z.array(z.object({ id: z.string().min(1), path: z.string().min(1).max(4096) })).max(1000) });
 const messagesSchema = z.object({ messages: z.array(z.object({ msgId: z.string().min(1).max(128), kind: z.string().max(64), payload: z.string().max(512 * 1024), createdAt: z.number().finite() })).max(200) });
 const promptSchema = z.object({ id: z.string().uuid(), agent: z.enum(["claude", "codex", "cursor"]), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/), text: z.string().min(1).max(64 * 1024), continueFrom: z.string().uuid().optional() }).strict();
@@ -30,7 +33,7 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const bounded = (signal: AbortSignal | undefined, ms: number) => signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
 
 function connectFailure(error: unknown, phase: RuntimeObservation["phase"], aborted: boolean,
-  rejection: ConnectionRejection | null | undefined, channel: string | undefined): ZerosDevError {
+  rejection: ConnectionRejection | null | undefined, channel: string | undefined, admission?: AdmissionObservation): ZerosDevError {
   const known = error instanceof ZerosDevError || error instanceof CloudWorkspaceAccessClientError || error instanceof CloudRuntimeAccessError;
   const code = known ? error.code : undefined, status = known ? error.status : undefined;
   let inner: RuntimeObservation["class"] = "unknown";
@@ -43,7 +46,7 @@ function connectFailure(error: unknown, phase: RuntimeObservation["phase"], abor
   else if (code === "runtime_changed" || code === "identity_changed" || code === "cloud_workspace_access_superseded") inner = "identity_changed";
   else if (code === "workspace_not_running") inner = "workspace_not_running";
   else if (status === 401 || status === 403 || ["auth_denied", "forbidden", "login_required", "signed_out", "device_proof_required"].includes(code ?? "")) inner = "authority_rejected";
-  else if (aborted || code === "deadline" || status === 408) inner = "request_timeout";
+  else if (aborted || code === "deadline" || code === "request_timeout" || status === 408) inner = "request_timeout";
   else if (phase === "admission" && (code === "control_plane_unavailable" || (status ?? 0) >= 500)) inner = "admission_unavailable";
   else if (phase === "admission" && (status ?? 0) >= 400) inner = "admission_refused";
   else if (code === "cloud_actor_runtime_unavailable" && channel === "control-plane-websocket") inner = "relay_unavailable";
@@ -58,8 +61,8 @@ function connectFailure(error: unknown, phase: RuntimeObservation["phase"], abor
   const runtime: RuntimeObservation = { phase, class: inner,
     ...(Number.isInteger(status) && Number(status) >= 100 && Number(status) <= 599 ? { status } : {}) };
   return error instanceof ZerosDevError
-    ? new ZerosDevError(error.code, error.status, error.retryAfterMs, error.setup, runtime)
-    : new ZerosDevError(aborted ? "deadline" : "runtime_unavailable", undefined, undefined, undefined, runtime);
+    ? new ZerosDevError(error.code, error.status, error.retryAfterMs, error.setup, runtime, error.admission ?? admission)
+    : new ZerosDevError(aborted || code === "request_timeout" ? "deadline" : "runtime_unavailable", undefined, undefined, undefined, runtime, admission);
 }
 
 function environment(): RuntimeClientEnvironment {
@@ -84,7 +87,7 @@ export class ZerosDevRuntime {
   private disposed = false;
   private constructor(readonly client: RuntimeClient, readonly scope: CloudRuntimeScope,
     private readonly broker: CloudWorkspaceAccessBroker, private readonly admissionId: string,
-    private readonly api: ProductApi, private readonly run: Run, readonly channel: string) {
+    private readonly api: ProductApi, private readonly run: Run, readonly channel: string, readonly admission?: AdmissionObservation) {
     this.events = new CloudEventReader(client, id => { void this.agents.refreshAttachments(id); });
     this.agents = new CloudAgentConnection(client, scope.engineWorkspaceId, (agent, model) => api.grant(run, agent as Agent, model), this.events);
     for (const type of ["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED"])
@@ -102,6 +105,25 @@ export class ZerosDevRuntime {
     let phase: RuntimeObservation["phase"] = "workspace_read", channel: string | undefined;
     let client: RuntimeClient | undefined, broker: CloudWorkspaceAccessBroker | undefined;
     let runtime: ZerosDevRuntime | undefined;
+    let firstAdmission: AdmissionObservation | undefined, sequence = 0;
+    const admissionOptions = (bound?: AbortSignal): CloudWorkspaceAdmissionOptions => {
+      const currentSequence = ++sequence;
+      let observation: AdmissionObservation | undefined;
+      const publish = () => {
+        const snapshot = AdmissionObservationSchema.parse(observation);
+        if (!firstAdmission || firstAdmission.sequence === currentSequence) firstAdmission = snapshot;
+        // The client isolates diagnostic callbacks. Validate/copy before the
+        // public writer sees anything, and never pass a raw server error.
+        options.onAdmissionEvent?.(AdmissionObservationSchema.parse(snapshot));
+      };
+      return { signal: bound, onAdmissionFailure: failure => {
+        if (observation) return;
+        observation = { sequence: currentSequence, firstFailure: failure, retryCount: 0, retries: [] }; publish();
+      }, onAdmissionRetry: retry => {
+        if (!observation) return;
+        observation.retries.push(retry); observation.retryCount = observation.retries.length; publish();
+      } };
+    };
     try {
       const row = await beforeDeadline(api.workspace(run, signal), signal);
       if (!["ready", "busy"].includes(row.status)) throw new ZerosDevError("workspace_not_running");
@@ -122,14 +144,15 @@ export class ZerosDevRuntime {
         onRuntimeRetired: () => client?.dispose(),
       });
       broker = admitted; phase = "admission";
-      const pending = admitted.openRuntime({ organizationId: fixture.organizationId, workspaceId: row.id });
+      const pending = admitted.openRuntime({ organizationId: fixture.organizationId, workspaceId: row.id }, admissionOptions(signal));
       // If the caller times out, dispose still owns and retires a late grant.
       void pending.then(target => { if (signal.aborted) return admitted.closeRuntime(target.runtimeId); }, () => {}).catch(() => {});
       const target = await beforeDeadline(pending, signal);
       if (target.generation !== row.generation.number || target.organizationId !== fixture.organizationId || target.workspaceId !== row.id)
         throw new ZerosDevError("runtime_changed");
       channel = target.channel; phase = "handshake";
-      client = new RuntimeClient(target, { environment: env, refreshCloudConnectionTarget: previous => admitted.refreshRuntime(previous) });
+      client = new RuntimeClient(target, { environment: env,
+        refreshCloudConnectionTarget: previous => admitted.refreshRuntime(previous, admissionOptions(runtime ? options.signal : signal)) });
       await beforeDeadline(client.connect(), signal); await client.waitUntilReady({ signal });
       phase = "workspace_read";
       const current = await beforeDeadline(api.workspace(run, signal), signal);
@@ -145,7 +168,7 @@ export class ZerosDevRuntime {
       if (!selected || !selected.path.startsWith("/") || selected.path === "/" || selected.path.includes("\0") || path.posix.normalize(selected.path) !== selected.path)
         throw new ZerosDevError("runtime_changed");
       runtime = new ZerosDevRuntime(client, { organizationId: fixture.organizationId, workspaceId: row.id,
-        engineWorkspaceId: selected.id, root: selected.path }, admitted, target.runtimeId, api, run, target.channel);
+        engineWorkspaceId: selected.id, root: selected.path }, admitted, target.runtimeId, api, run, target.channel, firstAdmission);
       if (options.signal) {
         const close = () => { void runtime!.dispose(); };
         options.signal.addEventListener("abort", close, { once: true });
@@ -154,8 +177,8 @@ export class ZerosDevRuntime {
       return runtime;
     } catch (error) {
       // Capture before disposal clears lastRejection, and before any retirement
-      // failure can replace the first cause. This adds no admission retry.
-      const failure = connectFailure(error, phase, signal.aborted, client?.lastRejection, channel);
+      // failure can replace the first cause. Only the shared client retries.
+      const failure = connectFailure(error, phase, signal.aborted, client?.lastRejection, channel, firstAdmission);
       client?.dispose();
       if (broker) await beforeDeadline(broker.dispose(), AbortSignal.timeout(3000)).catch(() => {});
       throw failure;

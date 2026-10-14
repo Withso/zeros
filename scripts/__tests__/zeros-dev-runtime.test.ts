@@ -9,9 +9,10 @@ import type { ProductApi } from "../zeros-dev/product";
 import type { RunHandle } from "../zeros-dev/receipts";
 import { AlphaTransport } from "../zeros-dev/transport";
 import { parseFixture } from "../zeros-dev/config";
+import type { AdmissionObservation } from "../zeros-dev/admission-observation";
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => { vi.useRealTimers(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 async function fixture(options: { rejection?: { reason: string; message: string }; listResult?: unknown; onList?: (count: number) => void } = {}) {
   const values = { ZEROS_DEV_WORKOS_SUBJECT: "user_fixture", ZEROS_DEV_ACCOUNT_ID: randomUUID(), ZEROS_DEV_EMAIL: "fixture@example.test",
@@ -91,13 +92,37 @@ async function fixture(options: { rejection?: { reason: string; message: string 
   const environment: RuntimeClientEnvironment = { controlPlaneOrigin: origin, allowHttpLoopback: true, createWebSocket: (url, protocols) => new WebSocket(url, protocols) as never,
     resolveEnginePort: async () => { throw new Error("no local engine"); }, resolveEngineToken: async () => { throw new Error("no local token"); },
     invalidateEnginePort() {}, invalidateEngineToken() {}, getAuthAccessToken: () => { throw new Error("no account token to VM"); }, logger: { warn() {}, error() {} } };
-  const connect = async (signal?: AbortSignal) => { const runtime = await ZerosDevRuntime.connect(session, api, handle.run, { environment, fetch: fetcher, signal }); cleanups.push(() => runtime.dispose()); return runtime; };
+  const connect = async (signal?: AbortSignal, onAdmissionEvent?: (event: AdmissionObservation) => void) => {
+    const runtime = await ZerosDevRuntime.connect(session, api, handle.run, { environment, fetch: fetcher, signal, onAdmissionEvent });
+    cleanups.push(() => runtime.dispose()); return runtime;
+  };
   return { connect, handle, api, fetcher, seen, headers, workspace, setGeneration: (value: number) => { generation = value; },
     setRoot: (value: string) => { engineRoot = value; }, setReceipt: (value: string) => { receiptState = value; },
     setExit: (value: number | null) => { exitCode = value; }, requirePermission: () => { permission = true; receiptState = "dispatching"; }, enqueued: () => enqueued, wrote: () => wrote };
 }
 
 describe("zeros-dev shared admission, agent and terminal loopback", () => {
+  it.each([false, true])("preserves the typed first failure and each signed retry when terminal failure is %s", async terminal => {
+    const f = await fixture(), events: AdmissionObservation[] = [];
+    const code = "cloud_runtime_temporarily_unavailable", firstFailure = { status: 503, code, phase: "provider_endpoint", retryAfterMs: 1000 };
+    f.fetcher.mockResolvedValueOnce(Response.json({ error: { code, phase: "provider_endpoint", retryable: true,
+      message: "synthetic-private-admission" } }, { status: 503, headers: { "Retry-After": "1" } }));
+    if (terminal) f.fetcher.mockResolvedValueOnce(Response.json({ error: { code: "internal", message: "synthetic-private-final" } }, { status: 500 }));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const connected = f.connect(undefined, event => events.push(event)).then(value => ({ value }), error => ({ error }));
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await connected;
+    const admission = { sequence: 1, firstFailure, retryCount: 1, retries: [{ ...firstFailure, attempt: 2, delayMs: 1000 }] };
+    expect(events).toEqual([{ sequence: 1, firstFailure, retryCount: 0, retries: [] }, admission]);
+    if (terminal) expect(result).toMatchObject({ error: { code: "runtime_unavailable", admission,
+      runtime: { phase: "admission", class: "admission_unavailable", status: 500 } } });
+    else expect(result).toMatchObject({ value: { admission } });
+    const posts = f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(new Set(posts.map(([, init]) => new Headers(init?.headers).get("x-zeros-device-nonce"))).size).toBe(2);
+    expect(JSON.stringify(events)).not.toContain("synthetic-private");
+  });
+
   it.each([
     [500, "internal", "admission_unavailable"],
     [503, "cloud_access_provider_unavailable", "admission_unavailable"],
