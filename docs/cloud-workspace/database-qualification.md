@@ -65,8 +65,24 @@ an idle egress budget or the direct connection success rate.
 
 ## Connections and authority
 
-`DATABASE_URL` owns the bounded request pool. `DATABASE_LISTEN_URL` optionally
-gives the durable event listener a separate max-one pool with runtime privileges.
+`DATABASE_URL` owns the bounded request pool. Hosted boot always creates a
+separate notification pool with a maximum of two connections and runtime
+privileges. `DATABASE_LISTEN_URL` selects its direct-primary connection target;
+otherwise it uses `DATABASE_URL`, while keeping its capacity separate.
+Security events, worker hints, engine checkpoint hints and Computer retention
+share one checked-out LISTEN session. Adding or stopping one consumer does not
+acquire another connection or interrupt the other consumers. The remaining
+pool slot is budgeted headroom, not a second permanent listener.
+
+The shared session discards failed connections, retries with 1–30 second
+backoff, and retires after ten minutes. Each queue re-reads its durable state
+after LISTEN succeeds, including reconnects; payloads remain hints and never
+carry authority. Security streams wake and stay unhealthy after a lost session
+until a caller explicitly starts them again. A late LISTEN acknowledgement or
+connection acquisition cannot revive a stopped consumer. Account/security
+listening remains available when cloud is paused; no cloud consumers start on
+paused channels, and Local engine behavior is unchanged.
+
 `DATABASE_MIGRATION_URL` belongs to the one-shot migrator, with a max-one pool;
 it must not be supplied to a hosted API using verify-only boot. Transaction
 helpers use `SET LOCAL ROLE zeros_app` and transaction-local authorization.
@@ -124,13 +140,17 @@ driver pool eviction alone does not establish safe listener rotation.
 [Role management](https://planetscale.com/docs/postgres/connecting/roles),
 [connection resilience](https://planetscale.com/docs/postgres/connection-resilience)
 
-Start isolated qualification with one API replica, six request connections and one
-dedicated listener. Rolling overlap would consume fourteen direct connections,
-before an explicit migrator and operator headroom. Compare the complete budget
-with the target's usable slots and measured load. The minimum is three request
-slots with shared LISTEN, or two with dedicated LISTEN, because a provider lock
-holder needs another connection to checkpoint. These minima are deadlock guards,
-not performance sizing recommendations.
+Start isolated qualification with one API replica and six request connections.
+Include the two-slot notification pool in the capacity budget even though its
+four consumers use one connection. Rolling overlap has a sixteen-connection
+ceiling before a migrator, separate worker pools and operator headroom. The
+request-pool default is still ten until the separate pool-bulkhead rollout;
+with that default, budget twenty-four connections for two overlapping replicas.
+Compare the complete budget with the target's usable slots and measured load.
+WorkOS needs at least two query slots because its session-lock holder needs a
+second connection to checkpoint. The current configuration retains its
+conservative three-slot minimum when `DATABASE_LISTEN_URL` is absent. These
+minima are deadlock guards, not performance sizing recommendations.
 
 ## Verification order
 

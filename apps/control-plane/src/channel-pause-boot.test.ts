@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const fixture = vi.hoisted(() => ({
   channel: "beta",
   pool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
+  listenerPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
+  createPool: vi.fn(),
+  securityBroker: vi.fn(),
   serve: vi.fn(),
   app: vi.fn(() => ({ fetch: vi.fn() })),
   securityStart: vi.fn(),
@@ -22,7 +25,7 @@ vi.mock("./config.js", async original => {
   }) };
 });
 vi.mock("./db.js", async original => ({
-  ...(await original<typeof import("./db.js")>()), createPool: () => fixture.pool,
+  ...(await original<typeof import("./db.js")>()), createPool: fixture.createPool,
 }));
 vi.mock("./migrate.js", async original => ({
   ...(await original<typeof import("./migrate.js")>()),
@@ -31,7 +34,7 @@ vi.mock("./migrate.js", async original => ({
 vi.mock("./email.js", () => ({ loadEmailConfig: () => ({ from: null, apiKey: null }), sendEmailStrict: vi.fn() }));
 vi.mock("./app.js", () => ({ createApp: fixture.app }));
 vi.mock("./security-events.js", () => ({
-  PostgresSecurityEventBroker: class { stop() {} },
+  PostgresSecurityEventBroker: class { constructor(pool: unknown) { fixture.securityBroker(pool); } stop() {} },
   SecurityEventPublisher: class {
     start() { fixture.securityStart(); return async () => {}; }
     notify() {}
@@ -55,6 +58,7 @@ beforeEach(() => {
   oldTerm = process.listeners("SIGTERM"); oldInt = process.listeners("SIGINT");
   fixture.pool.query.mockImplementation(() => { throw new Error("unexpected cloud polling"); });
   fixture.pool.connect.mockImplementation(() => { throw new Error("unexpected cloud listener"); });
+  fixture.createPool.mockImplementation((_url, options) => options.applicationName ? fixture.listenerPool : fixture.pool);
   fixture.serve.mockImplementation((_options, ready) => { ready({ port: 8080 }); return { on: vi.fn() }; });
   vi.spyOn(console, "log").mockImplementation(() => {});
 });
@@ -80,6 +84,12 @@ describe("paused-channel control-plane startup", () => {
     expect(fixture.boat).not.toHaveBeenCalled();
     expect(fixture.pool.query).not.toHaveBeenCalled();
     expect(fixture.pool.connect).not.toHaveBeenCalled();
+    expect(fixture.createPool).toHaveBeenCalledTimes(2);
+    expect(fixture.createPool).toHaveBeenLastCalledWith(expect.any(String), {
+      maxConnections: 2, applicationName: "zeros-notifications",
+    });
+    expect(fixture.securityBroker).toHaveBeenCalledExactlyOnceWith(fixture.listenerPool);
+    expect(fixture.cloudNotifications.mock.calls[0]![0]).toBe(fixture.listenerPool);
     expect(fixture.app).toHaveBeenCalledWith(expect.objectContaining({ cloudWorkspaces: null,
       cloudAgentCredentials: null, selectedCloudWorker: null, cloudRuntimePublication: expect.objectContaining({ enabled: false, s3: null }) }),
     fixture.pool, expect.anything(), expect.objectContaining({ runtimePublication: expect.objectContaining({ artifacts: null }) }));
