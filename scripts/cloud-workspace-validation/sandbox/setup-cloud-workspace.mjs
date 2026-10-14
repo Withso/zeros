@@ -102,6 +102,9 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+// Mirrors the CP's COMPUTER_NAMED_REF. The admitted request pins the exact
+// name/digest; either Computer image form still requires its saved tuple.
+const COMPUTER_NAMED_REF = /^boat-computer:([a-z0-9][a-z0-9-]{0,62})@sha256:([a-f0-9]{64})$/;
 const SETUP_TOKEN_PATTERN = /^zws_[A-Za-z0-9_-]{43}$/;
 const BRIDGE_TOKEN_PATTERN = /^zwb_[A-Za-z0-9_-]{43}$/;
 const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
@@ -576,7 +579,9 @@ export function parseCloudWorkspaceSetupMaterials(
   ) {
     throw new Error("cloud workspace setup materials are invalid");
   }
-  if (raw.image.ref.startsWith("boat-template:") !== (raw.computer !== undefined) ||
+  const namedComputer = raw.image.ref.startsWith("boat-computer:");
+  if ((namedComputer && !COMPUTER_NAMED_REF.test(raw.image.ref)) ||
+    (raw.image.ref.startsWith("boat-template:") || namedComputer) !== (raw.computer !== undefined) ||
     (raw.computer !== undefined && raw.version !== 2))
     throw new Error("cloud workspace setup materials are invalid");
   if (raw.computer !== undefined) parseCloudComputerSetup(raw.computer, raw.repository);
