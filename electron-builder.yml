@@ -70,6 +70,15 @@ extraResources:
   # via the auto-walked dependency tree + asarUnpack below.
   - from: apps/desktop/src/engine/pty/pty-host.cjs
     to: pty-host.cjs
+  # The Zeros Design skill, packaged like a Claude Code plugin. The engine finds
+  # it beside its binary (engine/design/design-skill.ts) and names its SKILL.md
+  # in Design conversation context. `**/*` skips dot-folders, so the plugin
+  # manifest is listed explicitly.
+  - from: apps/desktop/resources/zeros-design-skill
+    to: zeros-design-skill
+    filter:
+      - "**/*"
+      - ".claude-plugin/**/*"
   # Runtime-safe node-pty copy. On current macOS, the signed spawn-helper is
   # rejected with `posix_spawnp failed` when it lives below app.asar.unpacked,
   # even though the same signed bytes work under Contents/Resources. The host is

@@ -16,6 +16,7 @@ gates: `pnpm typecheck`, `pnpm lint`, `pnpm check:ui`,
 | Touched | Also run |
 |---|---|
 | Renderer UI, styling or tokens | `pnpm check:ui`; after a token or contrast change, `pnpm design:docs` |
+| Frames in `Zeros - Design/` | `design validate` and `design capture` from the frame context, then inspect the PNG. Add `--theme light` to capture Light; the default is the Base (Dark) theme. |
 | Composer, overlay, focus or popover | `pnpm test:ui-smoke`. Label the PR `ci:ui-smoke`. |
 | Performance-sensitive UI | exact-key and race tests, `pnpm build:ui` |
 | Electron IPC or preload | `pnpm check:preload` and the relevant Electron tests |
@@ -103,3 +104,9 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
 - Harness input files must be regular files you own, mode 0600 and small.
 - When a check fails, first rule out whether the environment changed under you
   (PATH tools, database encoding, a disk precondition) before blaming the code.
+- A workspace whose setup ran only `pnpm install` fails `pnpm typecheck` in
+  `apps/control-plane` with missing modules. `scripts/dev-environment/hook.sh setup`
+  installs all three dependency graphs, as `.conductor/settings.toml` does.
+  Playwright-backed Design suites also need `npx playwright install chromium`.
+  Before blaming your diff for a red local run, rerun the failing files in a
+  clean checkout of your base commit.

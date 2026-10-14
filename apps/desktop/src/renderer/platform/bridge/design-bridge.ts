@@ -106,6 +106,21 @@ export interface DesignTokenWire {
   line: number;
 }
 
+/** An imported style source declared in meta/canvas.json, as the theme editor
+ * shows it. The CSS itself reaches frames through rendering. */
+export interface DesignStyleSourceWire {
+  id: string;
+  title: string;
+  kind: string;
+  path: string;
+  status: "ready" | "warning" | "error";
+  messages: { level: "info" | "warning" | "error"; text: string }[];
+  themes: string[];
+  tokens: { name: string; value: string; themeValues: Record<string, string> }[];
+  bytes: number;
+  revision: string | null;
+}
+
 export interface DesignTokenMutationWire {
   changed: boolean;
   document: {
@@ -150,6 +165,9 @@ export interface DesignWorkspaceSnapshotWire {
   frames: DesignCanvasFrameWire[];
   tokens: DesignTokenWire[];
   tokenSourceVersion: string;
+  /** Absent on older engines, which have no imported style sources. */
+  styleSources?: DesignStyleSourceWire[];
+  styleSourceErrors?: string[];
   assets: DesignAssetWire[];
   lint: DesignLintReportWire;
 }
@@ -609,6 +627,19 @@ export async function bridgeDesignSetScreenshot(
   await workspaceOp(bridge, "design.screenshot.set", {
     workspaceId,
     ...screenshot,
+  });
+}
+
+/** This workspace's Design tab is showing (`present`), or was left. Showing
+ * starts the person's style builds; leaving starts their idle timer. */
+export async function bridgeDesignStyleBuildPresence(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  present: boolean,
+): Promise<void> {
+  await workspaceOp(bridge, "design.styleBuilds.presence", {
+    workspaceId,
+    present,
   });
 }
 

@@ -36,7 +36,7 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
 | Integrating or merging someone's patch (master) | `agents/zstack/playbooks/integrate-pr.md` |
 | Live Alpha DB, provider, Railway or WorkOS action | `agents/zstack/playbooks/alpha-operator.md` |
 | Pause or resume a multi-agent effort | `agents/zstack/playbooks/pause-resume.md` |
-| UI, styling or tokens | the `zeros-ui` skill |
+| UI, styling, tokens or mockups | `agents/zstack/playbooks/ui-design.md` and the `zeros-ui` skill |
 | Workspaces, engine, bridge, agents or Git | the `zeros-workspaces` skill (Local and cloud owners and placements) |
 
 Guard the context window. Read the feature area you are changing and the docs

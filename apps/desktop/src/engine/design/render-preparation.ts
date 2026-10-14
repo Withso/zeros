@@ -15,9 +15,15 @@ import {
   type DesignSourceEdit,
 } from "./source";
 import { stripNonDesignOidsForRender, healDesignOids } from "./node-identities";
+import type { CanvasDocument } from "./document-model";
+import { readCanvas } from "./document-storage";
+import { frameStyleSources } from "./style-sources";
+import { designTailwindVariables } from "./style-tailwind";
+import { inspectSafeRegularFile } from "./safe-files";
 import {
   MAX_ASSET_BYTES,
   DESIGN_ASSET_MIME_TYPES,
+  DESIGN_FONT_MIME_TYPES,
   readSafeDesignText,
   readSafeDesignBuffer,
   safeLocalReference,
@@ -47,12 +53,138 @@ function escapeAttribute(value: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
-async function inlineLocalStyles(
+// Shared stylesheets. A linked stylesheet is prepared once per file revision
+// and page folder (references rebased to that folder, local raster assets
+// inlined), then frames receive it as a placeholder that carries its content
+// hash. Frame identity hashes the placeholders, so snapshots never build or
+// hash a full document per frame; documents splice the cached CSS back in.
+// Frames still receive inline <style> text: the sandboxed runtime reads
+// cssRules for the inspector, which a linked cross-origin sheet would forbid.
+
+interface PreparedStylesheet {
+  /** CSS with `</style` escaped, ready to place inside a style element. */
+  css: string;
+  hash: string;
+  assetBytes: number;
+  variables: string[];
+}
+interface StylesheetCacheEntry {
+  /** Each file the result depends on, with its size and mtime before reading. */
+  dependencies: Array<{ file: string; signature: string }>;
+  prepared: PreparedStylesheet;
+}
+const MAX_PREPARED_STYLESHEETS = 64;
+const MAX_PREPARED_STYLESHEET_BYTES = 32 * 1024 * 1024;
+const preparedStylesheets = new Map<string, StylesheetCacheEntry>();
+let preparedStylesheetBytes = 0;
+const preparedStylesheetStats = { hits: 0, misses: 0 };
+
+async function fileSignature(directory: string, file: string): Promise<string> {
+  const metadata = await inspectSafeRegularFile(directory, file, MAX_ASSET_BYTES);
+  return metadata ? `${metadata.size}:${metadata.modifiedAt}` : "missing";
+}
+
+function evictPreparedStylesheet(key: string): void {
+  const entry = preparedStylesheets.get(key);
+  if (!entry) return;
+  preparedStylesheets.delete(key);
+  preparedStylesheetBytes -= entry.prepared.css.length;
+}
+
+/** Test hooks: cache effectiveness and isolation between cases. */
+export function designStylesheetCacheStatsForTests(): { hits: number; misses: number } {
+  return { ...preparedStylesheetStats };
+}
+export function resetDesignStylesheetCacheForTests(): void {
+  for (const key of [...preparedStylesheets.keys()]) evictPreparedStylesheet(key);
+  preparedStylesheetStats.hits = 0;
+  preparedStylesheetStats.misses = 0;
+}
+
+async function prepareStylesheet(
+  directory: string,
+  resolved: string,
+  cssFile: string,
+  entryFile: string,
+  sources?: Readonly<Record<string, string>>,
+  readAsset?: DesignRenderAssetReader,
+): Promise<PreparedStylesheet | null> {
+  // Immutable snapshot reads bring their own files; only live disk reads share.
+  const cacheable = !sources && !readAsset;
+  const key = `${resolved}\0${path.posix.dirname(entryFile)}`;
+  if (cacheable) {
+    const entry = preparedStylesheets.get(key);
+    if (entry) {
+      const current = await Promise.all(
+        entry.dependencies.map(({ file }) => fileSignature(directory, file)),
+      );
+      if (current.every((signature, index) => signature === entry.dependencies[index]!.signature)) {
+        preparedStylesheetStats.hits += 1;
+        preparedStylesheets.delete(key);
+        preparedStylesheets.set(key, entry);
+        return entry.prepared;
+      }
+      evictPreparedStylesheet(key);
+    }
+  }
+  preparedStylesheetStats.misses += 1;
+  // Signatures are taken before each read, so a change during preparation
+  // can only make the cached entry miss later, never serve stale content.
+  const dependencies: StylesheetCacheEntry["dependencies"] = [];
+  if (cacheable) dependencies.push({ file: resolved, signature: await fileSignature(directory, resolved) });
+  const css = sources ? (sources[cssFile] ?? null) : await readSafeDesignText(directory, resolved);
+  if (css === null) return null;
+  let rebased = css;
+  try { rebased = rebaseDesignCssReferences(css, cssFile, entryFile); }
+  catch { /* Lint reports malformed authored CSS; keep its repair preview. */ }
+  const reader: DesignRenderAssetReader = async (assetDirectory, asset) => {
+    if (cacheable) dependencies.push({ file: asset, signature: await fileSignature(directory, asset) });
+    return (readAsset ?? readSafeDesignBuffer)(assetDirectory, asset);
+  };
+  const budget = { inlineAssetBytes: 0 };
+  // Escape before asset inlining: postcss would otherwise rewrite a comment's
+  // `</style` itself, changing the established `<\/style` form.
+  const processed = await inlineCssLocalAssets(
+    directory,
+    rebased.replace(/<\/style/gi, "<\\/style"),
+    budget,
+    reader,
+    entryFile,
+  );
+  const prepared: PreparedStylesheet = {
+    css: processed,
+    hash: createHash("sha256").update(processed).digest("hex").slice(0, 24),
+    assetBytes: budget.inlineAssetBytes,
+    variables: designTailwindVariables(processed),
+  };
+  if (cacheable && prepared.css.length <= MAX_PREPARED_STYLESHEET_BYTES) {
+    preparedStylesheets.set(key, { dependencies, prepared });
+    preparedStylesheetBytes += prepared.css.length;
+    while (
+      preparedStylesheets.size > MAX_PREPARED_STYLESHEETS ||
+      preparedStylesheetBytes > MAX_PREPARED_STYLESHEET_BYTES
+    ) {
+      evictPreparedStylesheet(preparedStylesheets.keys().next().value!);
+    }
+  }
+  return prepared;
+}
+
+interface LinkedStylesheet {
+  /** Unique within the frame: `data-zeros-sheet` on its placeholder. */
+  token: string;
+  css: string;
+  variables?: readonly string[];
+}
+
+/** Replace each local stylesheet link with an empty, hash-tagged placeholder. */
+async function linkLocalStylesheets(
   workspacePath: string,
   source: string,
   sources?: Readonly<Record<string, string>>,
+  readAsset?: DesignRenderAssetReader,
   entryFile = "",
-): Promise<string> {
+): Promise<{ html: string; sheets: LinkedStylesheet[]; assetBytes: number }> {
   const directory = designDirectory(workspacePath);
   const document = parse(source, { sourceCodeLocationInfo: true });
   const links = elementRecords(document)
@@ -74,25 +206,29 @@ async function inlineLocalStyles(
     );
   }
   const edits: DesignSourceEdit[] = [];
+  const sheets: LinkedStylesheet[] = [];
+  let assetBytes = 0;
   let resultBytes = utf8Bytes(source);
-  for (const element of links) {
+  for (const [index, element] of links.entries()) {
     const location = element.sourceCodeLocation!;
     const href =
       element.attrs.find((attribute) => attribute.name === "href")?.value ?? "";
     const resolved = safeLocalReference(directory, href, entryFile);
     let replacement = "";
     if (resolved?.toLowerCase().endsWith(".css")) {
-      const css = sources
-        ? (sources[
-            path.relative(directory, resolved).split(path.sep).join("/")
-          ] ?? null)
-        : await readSafeDesignText(directory, resolved);
-      if (css !== null) {
-        const cssFile = path.relative(directory, resolved).split(path.sep).join("/");
-        let rebased = css;
-        try { rebased = rebaseDesignCssReferences(css, cssFile, entryFile); }
-        catch { /* Lint reports malformed authored CSS; keep its repair preview. */ }
-        replacement = `<style data-zeros-source="${escapeAttribute(cssFile)}">${rebased.replace(/<\/style/gi, "<\\/style")}</style>`;
+      const cssFile = path.relative(directory, resolved).split(path.sep).join("/");
+      const prepared = await prepareStylesheet(directory, resolved, cssFile, entryFile, sources, readAsset);
+      if (prepared) {
+        assetBytes += prepared.assetBytes;
+        if (assetBytes > MAX_INLINE_ASSET_BYTES_PER_FRAME) {
+          throw new DesignRenderBudgetError(
+            "Local assets exceeded the 12 MiB per-frame inline budget.",
+          );
+        }
+        const token = `${index}-${prepared.hash}`;
+        sheets.push({ token, css: prepared.css, variables: prepared.variables });
+        replacement = `<style data-zeros-source="${escapeAttribute(cssFile)}" data-zeros-sheet="${token}"></style>`;
+        resultBytes += utf8Bytes(prepared.css);
       }
     }
     resultBytes +=
@@ -109,12 +245,31 @@ async function inlineLocalStyles(
       text: replacement,
     });
   }
-  return applyDesignSourceEdits(source, edits);
+  return { html: applyDesignSourceEdits(source, edits), sheets, assetBytes };
+}
+
+/** Put each sheet's CSS inside its empty placeholder. Sanitizing edits the
+ * skeleton by source location, so placeholders survive byte for byte. */
+function spliceStylesheets(skeleton: string, sheets: readonly LinkedStylesheet[]): string {
+  let result = skeleton;
+  for (const sheet of sheets) {
+    const marker = result.indexOf(`data-zeros-sheet="${sheet.token}"`);
+    const close = marker < 0 ? -1 : result.indexOf("></style>", marker);
+    if (close < 0) continue;
+    result = `${result.slice(0, close + 1)}${sheet.css}${result.slice(close + 1)}`;
+  }
+  return result;
 }
 
 function designAssetMimeType(reference: string): string | null {
   const pathname = reference.trim().split(/[?#]/, 1)[0] ?? "";
   return DESIGN_ASSET_MIME_TYPES[path.extname(pathname).toLowerCase()] ?? null;
+}
+
+/** CSS may also embed fonts, for @font-face `src`; HTML attributes may not. */
+function designCssAssetMimeType(reference: string): string | null {
+  const pathname = reference.trim().split(/[?#]/, 1)[0] ?? "";
+  return designAssetMimeType(reference) ?? DESIGN_FONT_MIME_TYPES[path.extname(pathname).toLowerCase()] ?? null;
 }
 
 async function inlineCssUrlValue(
@@ -129,7 +284,7 @@ async function inlineCssUrlValue(
   let resultBytes = utf8Bytes(value);
   for (const match of matches.reverse()) {
     const reference = match.url;
-    const mimeType = designAssetMimeType(reference);
+    const mimeType = designCssAssetMimeType(reference);
     const resolved = mimeType ? safeLocalReference(directory, reference, sourceFile) : null;
     if (!resolved || !mimeType) continue;
     const data = await readAsset(directory, resolved);
@@ -196,11 +351,13 @@ async function inlineLocalAssets(
   source: string,
   readAsset: DesignRenderAssetReader = readSafeDesignBuffer,
   sourceFile = "",
+  /** Assets already inlined into this frame's shared stylesheets. */
+  initialAssetBytes = 0,
 ): Promise<string> {
   const directory = designDirectory(workspacePath);
   const document = parse(source, { sourceCodeLocationInfo: true });
   const edits: Array<{ start: number; end: number; text: string }> = [];
-  const budget = { inlineAssetBytes: 0 };
+  const budget = { inlineAssetBytes: initialAssetBytes };
   let resultBytes = utf8Bytes(source);
   const reserveEdit = (start: number, end: number, text: string) => {
     resultBytes += utf8Bytes(text) - utf8Bytes(source.slice(start, end));
@@ -298,6 +455,35 @@ async function inlineLocalAssets(
   return result;
 }
 
+/** Imported repository styles come first in head, so the frame's own CSS
+ * overrides them. An unreadable canvas leaves the frame on its own styles. */
+async function importedStylesheets(
+  workspacePath: string,
+  entryFile: string,
+  canvas: CanvasDocument | undefined,
+  html: string,
+  stylesheetVariables: readonly string[],
+  identityOnly: boolean,
+): Promise<{ markup: string; sheets: LinkedStylesheet[] }> {
+  const document = canvas ?? (await readCanvas(workspacePath).catch(() => null));
+  if (!document) return { markup: "", sheets: [] };
+  const sheets: LinkedStylesheet[] = [];
+  let markup = "";
+  const sources = await frameStyleSources(workspacePath, document, entryFile, { html, stylesheetVariables, build: !identityOnly });
+  for (const [index, source] of sources.entries()) {
+    const token = `s${index}-${source.revision}`;
+    sheets.push({ token, css: source.css.replace(/<\/style/gi, "<\\/style") });
+    markup += `<style data-zeros-style-source="${source.id}" data-zeros-sheet="${token}"></style>`;
+  }
+  return { markup, sheets };
+}
+
+export interface FrameRenderOptions {
+  /** Return only the generation; `sanitized` is then a skeleton whose
+   * stylesheet placeholders are empty. Snapshots need no document. */
+  identityOnly?: boolean;
+}
+
 export async function prepareFrameRenderSource(
   workspacePath: string,
   source: string,
@@ -305,6 +491,8 @@ export async function prepareFrameRenderSource(
   sources?: Readonly<Record<string, string>>,
   readAsset?: DesignRenderAssetReader,
   entryFile = "",
+  canvas?: CanvasDocument,
+  options: FrameRenderOptions = {},
 ): Promise<{ sanitized: string; sourceVersion: string }> {
   assertRenderByteLimit(
     source,
@@ -317,29 +505,54 @@ export async function prepareFrameRenderSource(
     MAX_SANITIZED_RENDER_BYTES,
     "Expanded components exceeded the 15 MiB per-frame render limit.",
   );
-  const withStyles = await inlineLocalStyles(
+  const linked = await linkLocalStylesheets(
     workspacePath,
     expanded.html,
     sources,
+    readAsset,
     entryFile,
   );
-  const inlined = await inlineLocalAssets(workspacePath, withStyles, readAsset, entryFile);
-  const sanitized = stripNonDesignOidsForRender(
-    sanitizeDesignFrameMarkup(inlined),
+  // Tailwind needs classes from the expanded frame and variables read by its
+  // linked sheets. The latter are extracted once per prepared stylesheet.
+  const imported = await importedStylesheets(workspacePath, entryFile, canvas, expanded.html,
+    linked.sheets.flatMap((sheet) => sheet.variables ?? []), options.identityOnly === true);
+  const withImported = imported.markup
+    ? insertDesignHeadMarkup(linked.html, imported.markup)
+    : linked.html;
+  const inlined = await inlineLocalAssets(
+    workspacePath,
+    withImported,
+    readAsset,
+    entryFile,
+    linked.assetBytes,
   );
+  const skeleton = stripNonDesignOidsForRender(sanitizeDesignFrameMarkup(inlined));
+  // Placeholders carry each stylesheet's content hash, so the generation
+  // still changes with any stylesheet or asset it depends on.
+  const sourceVersion = createHash("sha256")
+    .update(source)
+    .update("\0")
+    .update(skeleton)
+    .update("\0")
+    .update(`${viewport.width}x${viewport.height}`)
+    .digest("hex")
+    .slice(0, 24);
+  const sheets = [...imported.sheets, ...linked.sheets];
+  if (options.identityOnly) {
+    // Splicing fills empty placeholders, so the document's size is known
+    // without building it; identity and document fail the same frames.
+    const bytes = sheets.reduce((total, sheet) => total + utf8Bytes(sheet.css), utf8Bytes(skeleton));
+    if (bytes > MAX_SANITIZED_RENDER_BYTES) {
+      throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
+    }
+    return { sanitized: skeleton, sourceVersion };
+  }
+  const sanitized = spliceStylesheets(skeleton, sheets);
   assertRenderByteLimit(
     sanitized,
     MAX_SANITIZED_RENDER_BYTES,
     "Sanitized frame HTML exceeded the 15 MiB per-frame render limit.",
   );
-  const sourceVersion = createHash("sha256")
-    .update(source)
-    .update("\0")
-    .update(sanitized)
-    .update("\0")
-    .update(`${viewport.width}x${viewport.height}`)
-    .digest("hex")
-    .slice(0, 24);
   return { sanitized, sourceVersion };
 }
 

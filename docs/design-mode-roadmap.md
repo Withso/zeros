@@ -632,8 +632,8 @@ The existing engine CLI now implements:
 ```sh
 <engine-command> design list --url <verification-url>
 <engine-command> design validate --url <verification-url> --frame page-1/phone.html
-<engine-command> design capture --url <verification-url> --frame page-1/phone.html --output /tmp/phone.png
-<engine-command> design preview --url <verification-url> --frame page-1/phone.html
+<engine-command> design capture --url <verification-url> --frame page-1/phone.html --output /tmp/phone.png [--theme light]
+<engine-command> design preview --url <verification-url> --frame page-1/phone.html [--theme light]
 ```
 
 Prompt/frame context supplies the actual executable command and local URL. The
@@ -647,6 +647,15 @@ Fractional frame dimensions round up to whole CSS viewport pixels. Frames above
 while the complete PNG scales proportionally into 2048 × 2048, with at least one
 pixel per axis. Capture reports both PNG dimensions and the layout viewport and
 scale; the existing PNG byte and render-time limits still apply.
+Optional `--theme <name>` captures or previews a theme the canvas Themes
+control offers: one tokens.css declares or an imported style source maps. The
+service sets `data-zd-theme` on the frame's `<html>` element, replacing an
+authored value, exactly as the frame runtime's theme setter does on the canvas.
+The revision is unchanged because a theme is a view of the same source; the
+capture response names its theme in `X-Design-Theme`, and the CLI rejects a
+response for another theme. An unknown theme fails with the available names
+instead of silently capturing the base theme. `list` and `validate` refuse the
+flag.
 Capture and HTTP preview disable authored animations/transitions to show the
 canvas's default still state. Capture uses light/reduced-motion media emulation;
 the browser preview retains its browser's media preferences.
@@ -906,6 +915,198 @@ is unnecessary; the preview derives selection identities for ordinary HTML.
 Rendering retains its sandbox, sanitization, local-asset policy
 and byte/runtime limits. JavaScript/TSX execution, framework builds and new
 surface kinds are not implemented here.
+
+#### Imported style sources
+
+A Design directory can use stylesheets from elsewhere in its repository
+without copying them. `meta/canvas.json` declares them in a top-level `styles`
+list, which older engines preserve and ignore because canvas, page and frame
+records pass unknown fields through:
+
+```json
+"styles": [
+  { "id": "app", "title": "App tokens", "kind": "css", "path": "styles/app.css",
+    "themes": { "light": "[data-theme=\"light\"]" } }
+]
+```
+
+- `meta/design.toml` is not used: its strict v2/v3 schema would make every
+  older engine reject the directory.
+- `engine/design/style-sources.ts` owns the contract. A source path is
+  repository-relative, a regular `.css` file outside `.git` and `.zeros`, read
+  through the symlink-safe reader rooted at the workspace checkout, and at most
+  2 MiB; a directory declares at most 16 sources. Nothing in the repository
+  executes.
+- `kind: "css"` imports the file as plain CSS. Import skips `@import` and build-tool
+  directives (`@tailwind`, `@source`, `@plugin`, `@config`, `@apply`, …),
+  lifts Tailwind `@theme` custom properties into `:root`, drops comments, and
+  rewrites each `themes` selector to `[data-zd-theme="<name>"]` so the canvas
+  Themes control applies it.
+- `@font-face` rules are kept. Each `src` URL resolves against the source
+  file, must stay inside the repository (outside `.git` and `.zeros`) and name
+  a `.woff2`, `.woff`, `.ttf` or `.otf` file, and is embedded as a `data:` URL,
+  at most 4 MiB of fonts per source. Earlier URLs in a `src` list claim the
+  budget first. References that cannot be embedded (remote, missing, other
+  types, over budget) are kept and reported as a warning; the status names the
+  embedded size every frame carries. A package stylesheet such as
+  `node_modules/@fontsource-variable/geist/index.css` resolves through pnpm's
+  directory links because the reader follows parent links whose canonical
+  target stays inside the checkout. Zeros' own Design directory declares the
+  Geist and Geist Mono packages this way.
+- CSS image URLs (`.avif`, `.gif`, `.jpeg`, `.jpg`, `.png`, `.webp`) are also
+  embedded relative to the stylesheet that declares them, including Tailwind
+  imports and build output. They stay inside the repository, outside `.git`
+  and `.zeros`; build outputs may reference assets in `.zeros/design-styles/`.
+  These exclusions apply to the opened file's canonical path as well as the
+  authored URL. Each image is at most 10 MiB, with 12 MiB per source; the
+  frame's 15 MiB document limit still applies. Unavailable images are reported
+  as warnings, and existing `data:` URLs and fragment references are preserved.
+- A result is cached by the source file's size and modification time and by
+  the signature of every asset it tried to embed, including `missing`, so an
+  installed or edited asset refreshes its frames. The cache holds at most 64
+  results and 32 MiB.
+- Every frame receives every source in declaration order unless its frame
+  record lists `styles` (an ordered list of IDs, or `[]` for none). Imported
+  `<style data-zeros-style-source>` blocks are inserted at the start of `head`
+  by `prepareFrameRenderSource`, so the frame's own stylesheets override them.
+  The render generation hashes the result, so an edit to a source file gives
+  its frames new generations through the ordinary worktree event.
+- The workspace snapshot adds optional `styleSources` (status, messages,
+  themes and tokens, without CSS) and `styleSourceErrors`. The theme editor
+  lists Manual (`tokens.css`, editable) and each source with its status; an
+  imported source is read-only there. Older engines omit both fields.
+- `kind: "tailwind"` compiles the application's Tailwind v4 entry with the
+  engine's own bundled Tailwind (`tailwindcss` is a production dependency; the
+  stylesheets behind `@import "tailwindcss"` are generated into
+  `engine/design/generated/tailwind-stylesheets.ts` by
+  `scripts/codegen-design-tailwind.mjs`, which a test keeps current, because
+  the compiled sidecar has no `node_modules`). `engine/design/style-tailwind.ts`
+  resolves `@import` to CSS files inside the repository only: relative files,
+  then packages through the nearest `node_modules` (`exports` with the `style`
+  or `default` condition, `style`, a CSS `main`, or `index.css`), at most 32
+  imports and 4 MiB of CSS. `@plugin` and `@config` receive empty modules, so
+  no repository JavaScript runs and the rest still compiles; `@source` is
+  ignored. Assets in every imported file are embedded as for `css` sources.
+- One compile of the entry records every file it read (CSS, package manifests
+  and assets, with `missing` for each lookup that found nothing) and is reused
+  while all of their signatures hold. Tailwind's builds are cumulative, so each
+  frame gets its own compile from the recorded contents and a build of its
+  candidates: `class` tokens in the expanded frame, components included, and
+  the custom properties it reads with `var()` in HTML or linked CSS, so
+  Tailwind emits those theme variables. Linked-sheet references are extracted
+  once per prepared stylesheet revision, including supplied snapshot CSS.
+  A frame's sheet revision hashes the generation and its candidates,
+  so identity needs no compile; documents build on demand, cached by that
+  revision (256 builds, 32 MiB). A frame's Tailwind CSS is limited to 8 MiB.
+  Measured on macOS, compiling Zeros' own entry (`styles/zeros-tokens.css`,
+  with tw-animate and both Geist packages) takes 12–20 ms warm per frame.
+- `kind: "build"` imports the CSS file a command writes, as a `css` source,
+  for stylesheets only the project's own tool can produce. Its `path` may sit
+  in `.zeros/design-styles/`, the one `.zeros` location a source may name;
+  before a build writes there the engine adds `/.zeros/design-styles/` to
+  Git's local exclude file (`git rev-parse --git-path info/exclude`, shared by
+  every linked worktree) through `ensureLocalSettingsIgnored` and verifies it
+  with `git check-ignore`, so outputs never appear in `git status`.
+- The build comes from the source declaration (`command`, `watch`, `inputs`,
+  `timeoutSeconds`), so every worktree, cloud workspace and teammate builds it
+  without setup. A person's own `[[design.style_builds]]` entry for the same
+  output (user, repo-local or workspace-local layer; `settings/schema.ts`
+  refuses the legacy shared, team and managed layers for these entries)
+  replaces the declared command for them, and `design.repository_style_builds
+  = false` (any layer, so a managed policy can enforce it) turns declared
+  builds off while their own entries still run. Opening Design on a
+  repository therefore runs its declared style build, with the same trust as
+  running its dev scripts; the theme editor says whether a command came from
+  `meta/canvas.json` or the person's settings. The agent writes the
+  declaration when asked to sync styles (the `zeros-design` skill).
+- A build waits for its workspace's setup script (`SetupManager.whenSettled`)
+  so a new worktree builds after dependencies install, with the status
+  "Waiting for the workspace setup to finish before building".
+- Builds are live while a Design tab shows the checkout. The renderer reports
+  `design.styleBuilds.presence` when the tab activates and every 30 s while it
+  stays visible, and reports leaving when the tab hides, the window hides or
+  the view unmounts; a renderer silent for 90 s counts as gone. Leaving starts
+  a 5-minute idle timer (`DESIGN_STYLE_BUILD_IDLE_MS`); returning before it
+  fires finds every build still running. `engine/design/style-builds.ts` keeps
+  one session per checkout and one build per output: a `watch` command runs
+  until stopped (restarted after an exit at 1 s, 5 s and 30 s, then reported
+  as failed until Design reopens); a one-shot command runs when Design opens
+  and again 150 ms after a change under its `inputs` (chokidar, ignoring
+  `node_modules`, `.git` and the output), coalescing changes made during a run.
+  A failed one-shot command also retries when Design reopens; presence
+  heartbeats alone do not retry it.
+  Commands run through `runContainedInlineScript` with the setup script
+  environment, in the checkout, inside the engine's repository task boundary
+  and its start gate (`assertWorkspaceProcessStartAllowed`); one-shot runs keep
+  the 1–600 s timeout and 16 MiB output limit, while a watcher has no total
+  output cap and keeps its last stderr lines for the status. Measured on macOS
+  with the host boundary, a watch command is running 85–190 ms after presence.
+- A watcher on each output file announces a rebuilt output 50 ms after it
+  settles, as `DB_CHANGED { kinds: ["designStyles"] }` for the workspace; the
+  renderer revalidates only that workspace's Design snapshot (cloud wire
+  translation already scopes it to the cloud workspace key), never the Files
+  or Changes caches. Frames and identities read only the current output, so
+  rendering and status reads never start a build.
+- Presence is a restriction-gated remote write, `edit` for cloud actors, like
+  Run: developers and above keep builds live; prompters and viewers see the
+  last output. A running build counts as repository code authority (cloud
+  busy, idle and territory checks), and archive stops the builds its workspace
+  owns (by the archive's ownership predicate, sparing nested workspaces) and
+  includes their boundary stop proof. Failed proof retains the original
+  boundary and repository authority through repeated archive attempts,
+  settings removal/replacement and session eviction. It blocks replacement
+  commands; a later stop retries that same boundary before releasing it.
+  Follow-ups: hot-swapping a frame's
+  imported stylesheet without reloading it, warming on pointer intent, and
+  in-process Sass and Less.
+
+#### Fonts in Design CSS
+
+CSS in the Design directory (`tokens.css`, page stylesheets, frame `<style>`
+blocks and `style` attributes) inlines local `.woff2`, `.woff`, `.ttf` and
+`.otf` files from `url()` the way it inlines raster images, through the shared
+stylesheet cache and within the 12 MiB per-frame inline budget. HTML `src`,
+`srcset` and `poster` attributes stay limited to raster images, and the Assets
+panel and uploads list images only. Every frame CSP already allows `data:`
+fonts, and the canvas runtime, HTTP preview and native capture all wait for
+`document.fonts.ready`. Fonts are delivered inline for the same reason
+stylesheets are: a font loaded from `zeros-design:` by an opaque-origin frame
+would need a CORS-enabled protocol response.
+
+A frame's identity applies the same 15 MiB document limit as its document,
+from the skeleton and the byte length of each sheet it would splice, so a
+frame whose imported sources are too large fails in snapshots and lint as
+well as on render.
+
+#### Shared stylesheet preparation
+
+`render-preparation.ts` prepares each linked stylesheet once per file
+revision and page folder (references rebased to that folder, local raster
+assets inlined) and keeps it in engine memory, bounded to 64 entries and
+32 MiB. An entry is reused while the stylesheet and every asset it inlined
+keep the size and modification time recorded before each was read.
+
+A frame's render generation hashes a skeleton in which every linked or
+imported stylesheet is an empty `<style data-zeros-sheet="…">` placeholder
+carrying its content hash. Snapshots, render-identity reads and mutation
+preconditions use that skeleton (`identityOnly`) and never build a full
+document; documents splice the cached CSS into the placeholders. Measured on
+macOS, a snapshot of 100 frames sharing a 246 KB stylesheet fell from about
+20 s to 0.5 s warm, and 256 frames take about 1 s. Generations changed once
+for every frame when this format was introduced.
+
+Frames still receive inline `<style>` text. The sandboxed runtime reads
+`cssRules` for matched declarations, previews and motion, and an
+opaque-origin frame cannot read a `zeros-design:` stylesheet it linked. Linked
+delivery would need a reviewed CORS change to the Design protocol.
+
+Agent context names the packaged Zeros Design skill
+(`apps/desktop/resources/zeros-design-skill/`, shipped as
+`Contents/Resources/zeros-design-skill/`). `engine/design/design-skill.ts`
+finds it beside a compiled engine or in a source engine's own checkout, never
+in the served workspace. The cloud runtime bundle stages it as a source slice,
+so a cloud engine at `worker/dist-engine/cli.js` finds
+`worker/apps/desktop/resources/zeros-design-skill/`.
 
 ### Canonical Design foundation
 

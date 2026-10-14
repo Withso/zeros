@@ -38,6 +38,9 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { designAssetUploadSchema, prepareDesignAssetUpload, withDesignAssetUpload } from "./asset-upload";
 import { escapeAttribute } from "./source";
+import { readCanvas } from "./document-storage";
+import { setDesignStyleBuildPresence } from "./style-builds";
+import { designStyleBuildSettings } from "./style-sources";
 import {
   designDirectoryFromSettings,
   designDocumentMetadataPath,
@@ -212,6 +215,7 @@ export interface DesignWorkspaceRouteHost {
 }
 const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.capture",
+  "design.styleBuilds.presence",
   "design.context.create",
   "design.context.inspect",
   "design.verification.open",
@@ -280,6 +284,17 @@ export async function handleDesignWorkspaceRoute(
     case "design.capture": {
       const input = designWorkspaceCaptureSchema.parse(params);
       return host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) => captureWorkspaceDesign(root, input));
+    }
+    case "design.styleBuilds.presence": {
+      // A Design tab shows this workspace, or stopped showing it. Builds start
+      // without waiting for them to finish; leaving starts their idle timer.
+      const workspaceId = reqStr(params, "workspaceId");
+      const present = params.present === true;
+      return host.withDesignReadWorkspace(workspaceId, remote, async ({ root }) => {
+        const canvas = present ? await readCanvas(root).catch(() => null) : null;
+        await setDesignStyleBuildPresence(root, present, canvas ? designStyleBuildSettings(root, canvas) : []);
+        return { ok: true };
+      });
     }
     case "design.review.snapshot": {
       const input = designReviewRequestSchema.parse(params);

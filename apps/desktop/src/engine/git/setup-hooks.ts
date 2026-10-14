@@ -97,8 +97,9 @@ export async function runSetupHooks(opts: SetupHookOptions): Promise<void> {
   }
 }
 
-interface RunInlineScriptArgs {
-  kind: "setup" | "archive";
+export interface RunInlineScriptArgs {
+  /** `design-build` is a Design style source's approved build command. */
+  kind: "setup" | "archive" | "design-build";
   command: string;
   workspaceId: string;
   workspace?: ScriptWorkspaceIdentity | null;
@@ -136,6 +137,10 @@ export async function runContainedInlineScript(
   limits: {
     maxOutputBytes?: number;
     timeoutMs?: number;
+    /** Stops the script, then proves its boundary stopped, as a timeout does. */
+    signal?: AbortSignal;
+    /** Sees every chunk of output, for callers that report recent lines. */
+    onOutput?: (text: string, stream: "stdout" | "stderr") => void;
   } = {},
 ): Promise<{ stderr: string }> {
   if (!args.boundaryFactory) {
@@ -158,6 +163,7 @@ export async function runContainedInlineScript(
     limits.timeoutMs ??
     (args.kind === "archive" ? 30 * 1000 : 5 * 60 * 1000);
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let stopListener: (() => void) | null = null;
   let taskError: unknown;
   let taskFailed = false;
   try {
@@ -185,6 +191,7 @@ export async function runContainedInlineScript(
     };
     const account = (chunk: Buffer | string, isStderr: boolean) => {
       const text = String(chunk);
+      limits.onOutput?.(text, isStderr ? "stderr" : "stdout");
       outputBytes += Buffer.byteLength(text);
       if (isStderr && stderr.length < 8 * 1024) {
         stderr += text.slice(0, 8 * 1024 - stderr.length);
@@ -199,6 +206,9 @@ export async function runContainedInlineScript(
       () => abort(new Error(`repository script timed out after ${timeoutMs}ms`)),
       timeoutMs,
     );
+    stopListener = () => abort(new Error("repository script was stopped"));
+    if (limits.signal?.aborted) stopListener();
+    else limits.signal?.addEventListener("abort", stopListener, { once: true });
     const exit = await Promise.race([processHandle.wait(), aborted]);
     if (exit.code !== 0) {
       const error = new Error(
@@ -212,6 +222,7 @@ export async function runContainedInlineScript(
     taskFailed = true;
   } finally {
     if (timer) clearTimeout(timer);
+    if (stopListener) limits.signal?.removeEventListener("abort", stopListener);
   }
   try {
     await boundary.stopAndProve();
@@ -232,19 +243,13 @@ export async function runInlineScript(
 ): Promise<void> {
   const command = args.command.trim();
   if (!command) return;
-  const env = buildSetupEnv({
+  const env = await repositoryScriptEnv({
     ZEROS_WORKSPACE_ID: args.workspaceId,
     ZEROS_WORKTREE_PATH: args.worktreePath,
     ZEROS_REPO_ROOT: args.repoRoot,
     ZEROS_BASE_BRANCH: args.baseBranch,
     ...workspaceScriptIdentity(args.worktreePath, args.workspace),
   });
-  try {
-    const loginPath = sanitizeProbedPath(await getLoginShellPath());
-    if (loginPath) env.PATH = loginPath;
-  } catch {
-    /* keep the allowlisted PATH */
-  }
   // POSIX shell on macOS/Linux; cmd.exe on Windows (where `/bin/sh` is absent,
   // which would otherwise make setup fatally fail / archive silently no-op).
   const [shell, flag] =
@@ -341,6 +346,21 @@ const SETUP_ENV_ALLOWLIST = [
   // once instead of only wherever it was first noticed.
   ...TOOLCHAIN_ENV_NAMES,
 ];
+
+/** The scrubbed environment a repository command receives (see the allowlist
+ *  below), with the user's login-shell PATH so common tools resolve. */
+export async function repositoryScriptEnv(
+  extra: Record<string, string>,
+): Promise<Record<string, string>> {
+  const env = buildSetupEnv(extra);
+  try {
+    const loginPath = sanitizeProbedPath(await getLoginShellPath());
+    if (loginPath) env.PATH = loginPath;
+  } catch {
+    /* keep the allowlisted PATH */
+  }
+  return env;
+}
 
 function buildSetupEnv(extra: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};

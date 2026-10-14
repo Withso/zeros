@@ -174,6 +174,8 @@ it("binds both offline phases to engine10003 and the exact pinned Host marker wi
 describe("pnpm runtime closure", () => {
   it("stages the neutral provider closure without deleted ZSR qualification sources", async () => {
     expect(SOURCE_SLICES).not.toContain("scripts/zsr-qualification");
+    // Cloud agent context names this skill; the engine finds it under worker/.
+    expect(SOURCE_SLICES).toContain("apps/desktop/resources/zeros-design-skill");
     const probe = await readFile("scripts/cloud-workspace-validation/runtime-bundle/probe.cjs", "utf8");
     expect(probe).not.toContain("@anthropic-ai/sandbox-runtime");
     expect(probe).not.toContain("zsr-supervisor.mjs");

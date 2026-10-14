@@ -53,6 +53,9 @@ const ALLOWLIST = new Set([
   // `Zeros Design/tokens.css` seed whose palette cannot consume app-chrome
   // custom properties (the resulting files also render outside Zeros).
   "apps/desktop/src/engine/design/document-seeds.ts",
+  // Tailwind's own stylesheets, embedded verbatim (scripts/codegen-design-tailwind.mjs)
+  // so the Design engine can compile Tailwind style sources without node_modules.
+  "apps/desktop/src/engine/design/generated/tailwind-stylesheets.ts",
 ]);
 
 // Skip entire directories
@@ -690,6 +693,10 @@ const SOURCE_EXEMPT = [
   {
     why: "standalone design prototypes — deliberately free-form, self-styled, and explicitly NOT held to the design system",
     match: (rel) => rel.startsWith("styles/Artifacts/"),
+  },
+  {
+    why: "Design directory frames — plain HTML/CSS the Design canvas renders with its own tokens and style sources, compiling Tailwind classes itself",
+    match: (rel) => rel.startsWith("Zeros - Design/"),
   },
   {
     why: "build and smoke harnesses — Playwright selectors and fixture markup that never reach a bundle",

@@ -10,7 +10,7 @@ import {
   MAX_DESIGN_TEXT_BYTES,
   utf8Bytes,
 } from "./render-budget";
-import { prepareFrameRenderSource } from "./render-preparation";
+import { prepareFrameRenderSource, type FrameRenderOptions } from "./render-preparation";
 import { elementRecords } from "./source";
 // ──────────────────────────────────────────────────────────
 // Design document — authored HTML/CSS frames and canvas metadata
@@ -1010,6 +1010,7 @@ export async function prepareFrameRenderSourceForFile(
   workspacePath: string,
   file: string,
   source: string,
+  options: FrameRenderOptions = {},
 ): Promise<{
   document: DefaultTreeAdapterTypes.Document;
   meta: FrameMeta;
@@ -1029,7 +1030,7 @@ export async function prepareFrameRenderSourceForFile(
   const render = await prepareFrameRenderSource(workspacePath, source, {
     width,
     height,
-  }, undefined, undefined, file);
+  }, undefined, undefined, file, canvas, options);
   return {
     document,
     meta,
@@ -1052,6 +1053,7 @@ export async function readDesignFrameRenderIdentityFromSource(
     workspacePath,
     file,
     source,
+    { identityOnly: true },
   );
   return { file, sourceVersion: render.sourceVersion };
 }

@@ -396,6 +396,25 @@ export class SetupManager {
     const workspace = getWorkspaceById(id);
     if (workspace) updateWorkspace(id, { setupState: state });
     this.onChange(workspace ? id : null);
+    if (state !== "running") {
+      const waiters = this.settledWaiters.get(id);
+      this.settledWaiters.delete(id);
+      for (const resolve of waiters ?? []) resolve();
+    }
+  }
+
+  private readonly settledWaiters = new Map<string, Set<() => void>>();
+
+  /** Null when this workspace's setup is not running; otherwise resolves when
+   *  it passes, fails or stops. Work that needs installed dependencies (Design
+   *  style builds) waits on it instead of failing in a half-set-up worktree. */
+  whenSettled(workspaceId: string): Promise<void> | null {
+    if (this.info(workspaceId).state !== "running") return null;
+    return new Promise((resolve) => {
+      const waiters = this.settledWaiters.get(workspaceId) ?? new Set();
+      waiters.add(resolve);
+      this.settledWaiters.set(workspaceId, waiters);
+    });
   }
 
   /** (Re)start setup. Kills any in-flight setup PTY, resets the buffer under a

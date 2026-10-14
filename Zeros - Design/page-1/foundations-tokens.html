@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Foundations — Tokens</title>
+    <link rel="stylesheet" href="../tokens.css" />
+    <style>
+      body {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-10);
+        padding: var(--space-10) var(--space-12);
+        color: var(--fg2);
+      }
+      .sheet-header { display: flex; flex-direction: column; gap: var(--space-1-5); }
+      .sheet-title { color: var(--fg1); font-size: var(--dialog-title-size); font-weight: var(--weight-semibold); }
+      .sheet-note { color: var(--fg3); font-size: var(--text-xs); line-height: var(--text-xs--line-height); }
+      .section { display: flex; flex-direction: column; gap: var(--space-3); }
+      .section-title {
+        color: var(--fg1);
+        font-size: var(--text-xs);
+        font-weight: var(--weight-medium);
+        line-height: var(--text-xs--line-height);
+        padding-bottom: var(--space-2);
+        border-bottom: 1px solid var(--border1);
+      }
+      .columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-10); }
+      .grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-3); }
+      .grid-compact { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+      .swatch { display: flex; flex-direction: column; gap: var(--space-1-5); margin: 0; min-width: 0; }
+      .swatch-fill {
+        height: 44px;
+        border-radius: var(--radius-md);
+        background: var(--swatch);
+        border: 1px solid var(--border2);
+      }
+      .swatch-line { height: 0; border: 0; border-top: 2px solid var(--swatch); margin: 21px 0; border-radius: 0; }
+      .swatch figcaption { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .swatch code { color: var(--fg1); font-size: var(--text-2xxs); }
+      .swatch span { color: var(--muted-fg); font-size: var(--text-2xxs); line-height: 1.35; }
+      .tier { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: baseline; gap: var(--space-3); padding: var(--space-1-5) 0; }
+      .tier code, .type-row code, .scale code { color: var(--fg3); font-size: var(--text-2xxs); }
+      .tier p { font-size: var(--text-sm); line-height: var(--text-sm--line-height); }
+      .tier small { display: block; color: var(--muted-fg); font-size: var(--text-2xxs); }
+      .family { display: grid; grid-template-columns: 72px 1fr auto; align-items: center; gap: var(--space-3); padding: var(--space-1-5) 0; }
+      .family-name { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--family-primary); }
+      .family-dot { width: 8px; height: 8px; border-radius: 999px; background: var(--family-primary); }
+      .family-sample { color: var(--fg3); font-size: var(--text-2xxs); }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        height: 20px;
+        padding: 0 var(--space-1-5);
+        border-radius: var(--radius-sm);
+        background: var(--family-bg);
+        color: var(--family-fg);
+        font-size: var(--text-2xxs);
+        font-weight: var(--weight-medium);
+      }
+      .type-row { display: grid; grid-template-columns: 96px 64px minmax(0, 1fr); align-items: baseline; gap: var(--space-3); padding: var(--space-1) 0; }
+      .type-row .meta { color: var(--muted-fg); font-size: var(--text-2xxs); }
+      .type-row p { color: var(--fg1); }
+      .scale { display: flex; align-items: flex-end; gap: var(--space-6); }
+      .radius-box { display: flex; flex-direction: column; gap: var(--space-1-5); align-items: flex-start; }
+      .radius-box div { width: 72px; height: 48px; background: var(--bg2); border: 1px solid var(--border3); }
+      .space-row { display: grid; grid-template-columns: 96px 48px minmax(0, 1fr); align-items: center; gap: var(--space-3); padding: 3px 0; }
+      .space-row .meta { color: var(--muted-fg); font-size: var(--text-2xxs); }
+      .space-bar { height: 8px; border-radius: 2px; background: var(--blue-primary); }
+    </style>
+  </head>
+  <body>
+    <header class="sheet-header" data-oid="header">
+      <h1 class="sheet-title" data-oid="header-title">Zeros foundations</h1>
+      <p class="sheet-note" data-oid="header-note">Rendered from tokens.css, which pnpm design:docs generates from styles/tokens, in Geist from the app's Tailwind entry. Dark is the Base theme; Themes → light (or capture --theme light) shows Light.</p>
+    </header>
+
+    <section class="section" data-oid="surfaces">
+      <h2 class="section-title" data-oid="surfaces-title">Surfaces · hover is the selected state that stays · bg3 only floats</h2>
+      <div class="grid" data-oid="surfaces-grid">
+        <figure class="swatch" data-oid="surface-bg0">
+          <div class="swatch-fill" style="--swatch: var(--bg0)" data-oid="surface-bg0-fill"></div>
+          <figcaption data-oid="surface-bg0-caption">
+            <code data-oid="surface-bg0-name">--bg0</code>
+            <span data-oid="surface-bg0-role">INACTIVE chat window fill (below bg1)</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg1">
+          <div class="swatch-fill" style="--swatch: var(--bg1)" data-oid="surface-bg1-fill"></div>
+          <figcaption data-oid="surface-bg1-caption">
+            <code data-oid="surface-bg1-name">--bg1</code>
+            <span data-oid="surface-bg1-role">default canvas / app backdrop + active chat window</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg1-hover">
+          <div class="swatch-fill" style="--swatch: var(--bg1-hover)" data-oid="surface-bg1-hover-fill"></div>
+          <figcaption data-oid="surface-bg1-hover-caption">
+            <code data-oid="surface-bg1-hover-name">--bg1-hover</code>
+            <span data-oid="surface-bg1-hover-role">hover on bg1 (tool calls, tabs)</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg1-highlight">
+          <div class="swatch-fill" style="--swatch: var(--bg1-highlight)" data-oid="surface-bg1-highlight-fill"></div>
+          <figcaption data-oid="surface-bg1-highlight-caption">
+            <code data-oid="surface-bg1-highlight-name">--bg1-highlight</code>
+            <span data-oid="surface-bg1-highlight-role">highlighted content above bg1</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg1-bright">
+          <div class="swatch-fill" style="--swatch: var(--bg1-bright)" data-oid="surface-bg1-bright-fill"></div>
+          <figcaption data-oid="surface-bg1-bright-caption">
+            <code data-oid="surface-bg1-bright-name">--bg1-bright</code>
+            <span data-oid="surface-bg1-bright-role">filled section card on bg1</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg2">
+          <div class="swatch-fill" style="--swatch: var(--bg2)" data-oid="surface-bg2-fill"></div>
+          <figcaption data-oid="surface-bg2-caption">
+            <code data-oid="surface-bg2-name">--bg2</code>
+            <span data-oid="surface-bg2-role">composer surface</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg2-hover">
+          <div class="swatch-fill" style="--swatch: var(--bg2-hover)" data-oid="surface-bg2-hover-fill"></div>
+          <figcaption data-oid="surface-bg2-hover-caption">
+            <code data-oid="surface-bg2-hover-name">--bg2-hover</code>
+            <span data-oid="surface-bg2-hover-role">hover on bg2</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg2-highlight">
+          <div class="swatch-fill" style="--swatch: var(--bg2-highlight)" data-oid="surface-bg2-highlight-fill"></div>
+          <figcaption data-oid="surface-bg2-highlight-caption">
+            <code data-oid="surface-bg2-highlight-name">--bg2-highlight</code>
+            <span data-oid="surface-bg2-highlight-role">dropdown trigger hover/open</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg3">
+          <div class="swatch-fill" style="--swatch: var(--bg3)" data-oid="surface-bg3-fill"></div>
+          <figcaption data-oid="surface-bg3-caption">
+            <code data-oid="surface-bg3-name">--bg3</code>
+            <span data-oid="surface-bg3-role">floating popover surface</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg3-hover">
+          <div class="swatch-fill" style="--swatch: var(--bg3-hover)" data-oid="surface-bg3-hover-fill"></div>
+          <figcaption data-oid="surface-bg3-hover-caption">
+            <code data-oid="surface-bg3-hover-name">--bg3-hover</code>
+            <span data-oid="surface-bg3-hover-role">hover on bg3 (menu items)</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-sidebar-bg">
+          <div class="swatch-fill" style="--swatch: var(--sidebar-bg)" data-oid="surface-sidebar-bg-fill"></div>
+          <figcaption data-oid="surface-sidebar-bg-caption">
+            <code data-oid="surface-sidebar-bg-name">--sidebar-bg</code>
+            <span data-oid="surface-sidebar-bg-role">repository sidebar background</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-sidebar-bg-hover">
+          <div class="swatch-fill" style="--swatch: var(--sidebar-bg-hover)" data-oid="surface-sidebar-bg-hover-fill"></div>
+          <figcaption data-oid="surface-sidebar-bg-hover-caption">
+            <code data-oid="surface-sidebar-bg-hover-name">--sidebar-bg-hover</code>
+            <span data-oid="surface-sidebar-bg-hover-role">sidebar row hover and selected state</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-highlighted-bg">
+          <div class="swatch-fill" style="--swatch: var(--highlighted-bg)" data-oid="surface-highlighted-bg-fill"></div>
+          <figcaption data-oid="surface-highlighted-bg-caption">
+            <code data-oid="surface-highlighted-bg-name">--highlighted-bg</code>
+            <span data-oid="surface-highlighted-bg-role">user msg bg (text: fg1/fg2)</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg4">
+          <div class="swatch-fill" style="--swatch: var(--bg4)" data-oid="surface-bg4-fill"></div>
+          <figcaption data-oid="surface-bg4-caption">
+            <code data-oid="surface-bg4-name">--bg4</code>
+            <span data-oid="surface-bg4-role">rare</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="surface-bg5">
+          <div class="swatch-fill" style="--swatch: var(--bg5)" data-oid="surface-bg5-fill"></div>
+          <figcaption data-oid="surface-bg5-caption">
+            <code data-oid="surface-bg5-name">--bg5</code>
+            <span data-oid="surface-bg5-role">rare</span>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <div class="columns" data-oid="columns-1">
+      <section class="section" data-oid="text">
+        <h2 class="section-title" data-oid="text-title">Text and icon tiers · never opacity</h2>
+        <div data-oid="text-tiers">
+          <div class="tier" data-oid="tier-fg1">
+            <code data-oid="tier-fg1-name">--fg1</code>
+            <p style="color: var(--fg1)" data-oid="tier-fg1-sample">Review changes before merging<small data-oid="tier-fg1-role">selected/highlighted text + icons</small></p>
+          </div>
+          <div class="tier" data-oid="tier-fg2">
+            <code data-oid="tier-fg2-name">--fg2</code>
+            <p style="color: var(--fg2)" data-oid="tier-fg2-sample">Review changes before merging<small data-oid="tier-fg2-role">default text + icon across app</small></p>
+          </div>
+          <div class="tier" data-oid="tier-fg3">
+            <code data-oid="tier-fg3-name">--fg3</code>
+            <p style="color: var(--fg3)" data-oid="tier-fg3-sample">Review changes before merging<small data-oid="tier-fg3-role">middle tier (one step below fg2)</small></p>
+          </div>
+          <div class="tier" data-oid="tier-muted-fg">
+            <code data-oid="tier-muted-fg-name">--muted-fg</code>
+            <p style="color: var(--muted-fg)" data-oid="tier-muted-fg-sample">Review changes before merging<small data-oid="tier-muted-fg-role">supplemental metadata; 3:1 floor, fg3 on hover/selection</small></p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" data-oid="status">
+        <h2 class="section-title" data-oid="status-title">Status families · primary accent, -fg on -bg containers</h2>
+        <div data-oid="status-families">
+          <div class="family" style="--family-primary: var(--red-primary); --family-bg: var(--red-bg); --family-fg: var(--red-fg)" data-oid="family-red">
+            <span class="family-name" data-oid="family-red-name"><span class="family-dot" data-oid="family-red-dot"></span>red</span>
+            <span class="family-sample" data-oid="family-red-role">−N counts, error accents</span>
+            <span class="badge" data-oid="family-red-badge">Error</span>
+          </div>
+          <div class="family" style="--family-primary: var(--green-primary); --family-bg: var(--green-bg); --family-fg: var(--green-fg)" data-oid="family-green">
+            <span class="family-name" data-oid="family-green-name"><span class="family-dot" data-oid="family-green-dot"></span>green</span>
+            <span class="family-sample" data-oid="family-green-role">+N counts, success accents</span>
+            <span class="badge" data-oid="family-green-badge">Success</span>
+          </div>
+          <div class="family" style="--family-primary: var(--yellow-primary); --family-bg: var(--yellow-bg); --family-fg: var(--yellow-fg)" data-oid="family-yellow">
+            <span class="family-name" data-oid="family-yellow-name"><span class="family-dot" data-oid="family-yellow-dot"></span>yellow</span>
+            <span class="family-sample" data-oid="family-yellow-role">warning · modified · in-progress</span>
+            <span class="badge" data-oid="family-yellow-badge">Warning</span>
+          </div>
+          <div class="family" style="--family-primary: var(--blue-primary); --family-bg: var(--blue-bg); --family-fg: var(--blue-fg)" data-oid="family-blue">
+            <span class="family-name" data-oid="family-blue-name"><span class="family-dot" data-oid="family-blue-dot"></span>blue</span>
+            <span class="family-sample" data-oid="family-blue-role">info · links · accents</span>
+            <span class="badge" data-oid="family-blue-badge">Info</span>
+          </div>
+          <div class="family" style="--family-primary: var(--violet-primary); --family-bg: var(--violet-bg); --family-fg: var(--violet-fg)" data-oid="family-violet">
+            <span class="family-name" data-oid="family-violet-name"><span class="family-dot" data-oid="family-violet-dot"></span>violet</span>
+            <span class="family-sample" data-oid="family-violet-role">done · merged</span>
+            <span class="badge" data-oid="family-violet-badge">Merged</span>
+          </div>
+          <div class="family" style="--family-primary: var(--brown-primary); --family-bg: var(--brown-bg); --family-fg: var(--brown-fg)" data-oid="family-brown">
+            <span class="family-name" data-oid="family-brown-name"><span class="family-dot" data-oid="family-brown-dot"></span>brown</span>
+            <span class="family-sample" data-oid="family-brown-role">file paths · warm accents</span>
+            <span class="badge" data-oid="family-brown-badge">Path</span>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="columns" data-oid="columns-2">
+      <section class="section" data-oid="borders">
+        <h2 class="section-title" data-oid="borders-title">Borders and focus</h2>
+        <div class="grid grid-compact" data-oid="borders-grid">
+        <figure class="swatch" data-oid="border-border1">
+          <div class="swatch-fill swatch-line" style="--swatch: var(--border1)" data-oid="border-border1-fill"></div>
+          <figcaption data-oid="border-border1-caption">
+            <code data-oid="border-border1-name">--border1</code>
+            <span data-oid="border-border1-role">default for bg1 surfaces</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="border-border2">
+          <div class="swatch-fill swatch-line" style="--swatch: var(--border2)" data-oid="border-border2-fill"></div>
+          <figcaption data-oid="border-border2-caption">
+            <code data-oid="border-border2-name">--border2</code>
+            <span data-oid="border-border2-role">sidebar / composer focus / bg2</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="border-border3">
+          <div class="swatch-fill swatch-line" style="--swatch: var(--border3)" data-oid="border-border3-fill"></div>
+          <figcaption data-oid="border-border3-caption">
+            <code data-oid="border-border3-name">--border3</code>
+            <span data-oid="border-border3-role">secondary btn / dropdown / input</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="border-border4">
+          <div class="swatch-fill swatch-line" style="--swatch: var(--border4)" data-oid="border-border4-fill"></div>
+          <figcaption data-oid="border-border4-caption">
+            <code data-oid="border-border4-name">--border4</code>
+            <span data-oid="border-border4-role">highlighted state of border3</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="border-highlighted-bright">
+          <div class="swatch-fill swatch-line" style="--swatch: var(--highlighted-bright)" data-oid="border-highlighted-bright-fill"></div>
+          <figcaption data-oid="border-highlighted-bright-caption">
+            <code data-oid="border-highlighted-bright-name">--highlighted-bright</code>
+            <span data-oid="border-highlighted-bright-role">input focus border, brighter accents</span>
+          </figcaption>
+        </figure>
+        </div>
+      </section>
+
+      <section class="section" data-oid="inverted">
+        <h2 class="section-title" data-oid="inverted-title">Inverted pair and primary button</h2>
+        <div class="grid grid-compact" data-oid="inverted-grid">
+        <figure class="swatch" data-oid="inverted-inverted-bg">
+          <div class="swatch-fill" style="--swatch: var(--inverted-bg)" data-oid="inverted-inverted-bg-fill"></div>
+          <figcaption data-oid="inverted-inverted-bg-caption">
+            <code data-oid="inverted-inverted-bg-name">--inverted-bg</code>
+            <span data-oid="inverted-inverted-bg-role">near-white on dark</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="inverted-inverted-fg">
+          <div class="swatch-fill" style="--swatch: var(--inverted-fg)" data-oid="inverted-inverted-fg-fill"></div>
+          <figcaption data-oid="inverted-inverted-fg-caption">
+            <code data-oid="inverted-inverted-fg-name">--inverted-fg</code>
+            <span data-oid="inverted-inverted-fg-role">dark text/icon on the inverted fill</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="inverted-primary-button-bg">
+          <div class="swatch-fill" style="--swatch: var(--primary-button-bg)" data-oid="inverted-primary-button-bg-fill"></div>
+          <figcaption data-oid="inverted-primary-button-bg-caption">
+            <code data-oid="inverted-primary-button-bg-name">--primary-button-bg</code>
+            <span data-oid="inverted-primary-button-bg-role">filled focal CTA; one per view</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="inverted-primary-button-hover">
+          <div class="swatch-fill" style="--swatch: var(--primary-button-hover)" data-oid="inverted-primary-button-hover-fill"></div>
+          <figcaption data-oid="inverted-primary-button-hover-caption">
+            <code data-oid="inverted-primary-button-hover-name">--primary-button-hover</code>
+            <span data-oid="inverted-primary-button-hover-role">lifted neutral</span>
+          </figcaption>
+        </figure>
+        <figure class="swatch" data-oid="inverted-primary-button-fg">
+          <div class="swatch-fill" style="--swatch: var(--primary-button-fg)" data-oid="inverted-primary-button-fg-fill"></div>
+          <figcaption data-oid="inverted-primary-button-fg-caption">
+            <code data-oid="inverted-primary-button-fg-name">--primary-button-fg</code>
+            <span data-oid="inverted-primary-button-fg-role">text/icon on the primary button</span>
+          </figcaption>
+        </figure>
+        </div>
+      </section>
+    </div>
+
+    <div class="columns" data-oid="columns-3">
+      <section class="section" data-oid="type">
+        <h2 class="section-title" data-oid="type-title">Type scale · Geist and Geist Mono</h2>
+        <div data-oid="type-rows">
+          <div class="type-row" data-oid="type-text-sm">
+            <code data-oid="type-text-sm-name">--text-sm</code>
+            <span class="meta" data-oid="type-text-sm-metric">14 / 20</span>
+            <p style="font-size: var(--text-sm)" data-oid="type-text-sm-sample">Default reading size · chat and settings body</p>
+          </div>
+          <div class="type-row" data-oid="type-text-xs">
+            <code data-oid="type-text-xs-name">--text-xs</code>
+            <span class="meta" data-oid="type-text-xs-metric">13 / 18</span>
+            <p style="font-size: var(--text-xs)" data-oid="type-text-xs-sample">Buttons, rows, inputs and dense chrome</p>
+          </div>
+          <div class="type-row" data-oid="type-text-3xxs">
+            <code data-oid="type-text-3xxs-name">--text-3xxs</code>
+            <span class="meta" data-oid="type-text-3xxs-metric">12</span>
+            <p style="font-size: var(--text-3xxs)" data-oid="type-text-3xxs-sample">Category tags and compact metadata</p>
+          </div>
+          <div class="type-row" data-oid="type-text-2xxs">
+            <code data-oid="type-text-2xxs-name">--text-2xxs</code>
+            <span class="meta" data-oid="type-text-2xxs-metric">11</span>
+            <p style="font-size: var(--text-2xxs)" data-oid="type-text-2xxs-sample">Counts, shortcuts and badges</p>
+          </div>
+          <div class="type-row" data-oid="type-text-xxs">
+            <code data-oid="type-text-xxs-name">--text-xxs</code>
+            <span class="meta" data-oid="type-text-xxs-metric">10</span>
+            <p style="font-size: var(--text-xxs)" data-oid="type-text-xxs-sample">Smallest annotation</p>
+          </div>
+          <div class="type-row" data-oid="type-weights">
+            <code data-oid="type-weights-name">--weight-*</code>
+            <span class="meta" data-oid="type-weights-metric">450 · 500 · 600</span>
+            <p style="font-size: var(--text-xs)" data-oid="type-weights-sample"><span style="font-weight: var(--weight-medium)" data-oid="type-weight-medium">Medium</span> · <span style="font-weight: var(--weight-semibold)" data-oid="type-weight-semibold">Semibold</span> · <span style="font-weight: var(--weight-bold)" data-oid="type-weight-bold">Bold</span></p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" data-oid="shape">
+        <h2 class="section-title" data-oid="shape-title">Radius and spacing · --space-&lt;step&gt; is the Tailwind step</h2>
+        <div class="scale" data-oid="radius-scale">
+          <div class="radius-box" data-oid="radius-sm">
+            <div style="border-radius: var(--radius-sm)" data-oid="radius-sm-sample"></div>
+            <code data-oid="radius-sm-name">--radius-sm</code>
+            <span class="family-sample" data-oid="radius-sm-use">4 · buttons, inputs</span>
+          </div>
+          <div class="radius-box" data-oid="radius-md">
+            <div style="border-radius: var(--radius-md)" data-oid="radius-md-sample"></div>
+            <code data-oid="radius-md-name">--radius-md</code>
+            <span class="family-sample" data-oid="radius-md-use">6 · tabs, rows</span>
+          </div>
+          <div class="radius-box" data-oid="radius-lg">
+            <div style="border-radius: var(--radius-lg)" data-oid="radius-lg-sample"></div>
+            <code data-oid="radius-lg-name">--radius-lg</code>
+            <span class="family-sample" data-oid="radius-lg-use">8 · cards, dialogs</span>
+          </div>
+        </div>
+        <div data-oid="spacing-rows">
+          <div class="space-row" data-oid="space-0-5">
+            <code style="color: var(--fg3); font-size: var(--text-2xxs)" data-oid="space-0-5-name">--space-0-5</code>
+            <span class="meta" data-oid="space-0-5-px">2px</span>
+            <div class="space-bar" style="width: var(--space-0-5)" data-oid="space-0-5-bar"></div>
+          </div>
+          <div class="space-row" data-oid="space-1">
+            <code style="color: var(--fg3); font-size: var(--text-2xxs)" data-oid="space-1-name">--space-1</code>
+            <span class="meta" data-oid="space-1-px">4px</span>
+            <div class="space-bar" style="width: var(--space-1)" data-oid="space-1-bar"></div>
+          </div>
+          <div class="space-row" data-oid="space-1-5">
+            <code style="color: var(--fg3); font-size: var(--text-2xxs)" data-oid="space-1-5-name">--space-1-5</code>
+            <span class="meta" data-oid="space-1-5-px">6px</span>
+            <div class="space-bar" style="width: var(--space-1-5)" data-oid="space-1-5-bar"></div>
+          </div>
+          <div class="space-row" data-oid="space-2">
+            <code style="color: var(--fg3); font-size: var(--text-2xxs)" data-oid="space-2-name">--space-2</code>
+            <span class="meta" data-oid="space-2-px">8px</span>
+            <div class="space-bar" style="width: var(--space-2)" data-oid="space-2-bar"></div>
+          </div>
+          <div class="space-row" data-oid="space-2-5">
+            <code style="color: var(--fg3); font-size: var(--text-2xxs)" data-oid="space-2-5-name">--space-2-5</code>
+            <span class="meta" data-oid="space-2-5-px">10px</span>
+            <div class="space-bar" style="width: var(--space-2-5)" data-oid="space-2-5-bar"></div>
+          </div>
+          <div class="space-row" data-oid="space-3">
+            <code style="color: var(--fg3); font-size: var(--text-2xxs)" data-oid="space-3-name">--space-3</code>
+            <span class="meta" data-oid="space-3-px">12px</span>
+            <div class="space-bar" style="width: var(--space-3)" data-oid="space-3-bar"></div>
+          </div>
+          <div class="space-row" data-oid="space-4">
+            <code style="color: var(--fg3); font-size: var(--text-2xxs)" data-oid="space-4-name">--space-4</code>
+            <span class="meta" data-oid="space-4-px">16px</span>
+            <div class="space-bar" style="width: var(--space-4)" data-oid="space-4-bar"></div>
+          </div>
+          <div class="space-row" data-oid="space-6">
+            <code style="color: var(--fg3); font-size: var(--text-2xxs)" data-oid="space-6-name">--space-6</code>
+            <span class="meta" data-oid="space-6-px">24px</span>
+            <div class="space-bar" style="width: var(--space-6)" data-oid="space-6-bar"></div>
+          </div>
+          <div class="space-row" data-oid="space-8">
+            <code style="color: var(--fg3); font-size: var(--text-2xxs)" data-oid="space-8-name">--space-8</code>
+            <span class="meta" data-oid="space-8-px">32px</span>
+            <div class="space-bar" style="width: var(--space-8)" data-oid="space-8-bar"></div>
+          </div>
+          <div class="space-row" data-oid="space-12">
+            <code style="color: var(--fg3); font-size: var(--text-2xxs)" data-oid="space-12-name">--space-12</code>
+            <span class="meta" data-oid="space-12-px">48px</span>
+            <div class="space-bar" style="width: var(--space-12)" data-oid="space-12-bar"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>

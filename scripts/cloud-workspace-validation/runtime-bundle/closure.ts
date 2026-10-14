@@ -85,6 +85,8 @@ export const SOURCE_SLICES = [
   // Workspace packages (protocol/design-core/design-web) are copied in full by
   // the dependency walk, which also restores their own node_modules links.
   "apps/desktop/src",
+  // The Zeros Design skill that agent context names (engine/design/design-skill.ts).
+  "apps/desktop/resources/zeros-design-skill",
   "catalogs",
   `${SANDBOX}`,
   "scripts/cloud-workspace-validation/lib",

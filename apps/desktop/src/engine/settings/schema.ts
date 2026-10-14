@@ -25,6 +25,10 @@ import {
   DESIGN_DIRECTORY_ID_PATTERN,
   sanitizeDesignDirectoryName,
 } from "../design/directory-path";
+import {
+  designBuildInputPathError,
+  designBuildOutputPathError,
+} from "../design/style-source-path";
 
 export const RUN_MODES = ["concurrent", "nonconcurrent"] as const;
 export const PROVIDER_AUTH_METHODS = [
@@ -331,6 +335,56 @@ export type McpSettingsServer = z.infer<typeof mcpServerSchema>;
  *  `.zeros-canvas.json` marker); this key only selects WHICH one is active.
  *  The personal main-checkout file selects the directory for all linked local
  *  workspaces. Absent = "Zeros Design". */
+/** One Design style build a person approved: Zeros runs `command` in the
+ *  checkout to produce `output`, which a `build` style source imports. Read
+ *  only from the person's own layers (see sanitizeLayer). */
+const designStyleBuildSchema = z.object({
+  output: z
+    .string()
+    .refine(
+      (value) => designBuildOutputPathError(value) === null,
+      "Expected a repository-relative .css file outside .git and .zeros, or one in .zeros/design-styles/",
+    )
+    .describe(
+      "The CSS file the command writes, matching a build style source's path. " +
+        "Prefer .zeros/design-styles/<name>.css, which Zeros keeps out of Git.",
+    ),
+  command: z
+    .string()
+    .trim()
+    .min(1)
+    .max(4096)
+    .describe("Shell command Zeros runs in the checkout to build `output`."),
+  timeout_seconds: z
+    .number()
+    .int()
+    .min(1)
+    .max(600)
+    .optional()
+    .describe("Build deadline in seconds (1–600). Defaults to 120."),
+  watch: z
+    .boolean()
+    .optional()
+    .describe(
+      "The command keeps running and rebuilds by itself (for example sass --watch). " +
+        "Zeros runs it while the Design tab is open and stops it 5 minutes after you leave.",
+    ),
+  inputs: z
+    .array(
+      z
+        .string()
+        .refine(
+          (value) => designBuildInputPathError(value) === null,
+          "Expected a repository-relative file or folder outside .git and .zeros",
+        ),
+    )
+    .max(32)
+    .optional()
+    .describe(
+      "Files or folders whose changes re-run a one-shot command while the Design tab is open.",
+    ),
+});
+
 const designSchema = z
   .object({
     directory: z
@@ -349,6 +403,21 @@ const designSchema = z
       .regex(DESIGN_DIRECTORY_ID_PATTERN)
       .describe(
         "Stable ID from a Design folder's design.toml in this checkout.",
+      ),
+    repository_style_builds: z
+      .boolean()
+      .describe(
+        "Run the style builds a Design directory declares in meta/canvas.json " +
+          "while the Design tab is open (default true). Your own style_builds " +
+          "entries still run when this is false.",
+      ),
+    style_builds: z
+      .array(designStyleBuildSchema)
+      .max(16)
+      .describe(
+        "Build commands you approve for Design style sources. Zeros runs a " +
+          "build source's command only from your own settings, never from " +
+          "the repository's files.",
       ),
   })
   .partial();
@@ -936,6 +1005,12 @@ const TABLE_SHAPES: Record<string, Record<string, z.ZodType>> = {
 
 /** Per-leaf sanitize of one raw layer document. Layer-aware: user-only keys
  *  found in repo-scoped layers are dropped with a warning. */
+const PERSONAL_DESIGN_BUILD_LAYERS: ReadonlySet<SettingsLayerName> = new Set([
+  "user",
+  "repo-local",
+  "workspace-local",
+]);
+
 export function sanitizeLayer(
   raw: unknown,
   layer: SettingsLayerName,
@@ -1074,6 +1149,14 @@ export function sanitizeLayer(
         warnings,
         !repositoryScoped,
       );
+      // Running a build is the person's consent: a tracked legacy file or a
+      // team/managed policy layer cannot approve one for them.
+      if (table && hasOwn(table, "style_builds") && !PERSONAL_DESIGN_BUILD_LAYERS.has(layer)) {
+        delete table.style_builds;
+        warnings.push(
+          `design.style_builds: build commands are read only from your own settings — ignored in ${layer} settings`,
+        );
+      }
       if (table && Object.keys(table).length > 0) doc[key] = table;
       continue;
     }
