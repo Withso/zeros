@@ -3,6 +3,12 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.1.5
+
+- **Every PR appended to the same eval file and changelog,** so parallel PRs always conflicted. New eval
+  cases now live in `evals/cases/<id>.json` and lessons in `changes/<id>.md`. The legacy `cases.json` stays
+  readable (`zstack-eval`, `zstack-learn`, README).
+
 ## 0.1.4
 
 - **A large database fixture hit the 5 s test timeout.** The retention pagination test runs 53 journals and

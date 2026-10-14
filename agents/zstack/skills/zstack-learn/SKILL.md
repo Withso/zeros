@@ -25,8 +25,9 @@ Ask:
 3. **A pack rule.** One or two precise sentences in the skill or playbook where
    the next agent will actually read them.
 
-Record each lesson in `agents/zstack/CHANGELOG.md` as symptom → cause → rule
-→ where it is encoded.
+Record each lesson as a fragment, `agents/zstack/changes/<id>.md`, written as
+symptom → cause → rule → where it is encoded. Don't edit `CHANGELOG.md` directly;
+the integrator folds fragments into it when bumping the pack version.
 
 ## Boundaries
 

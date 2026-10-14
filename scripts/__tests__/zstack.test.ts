@@ -41,6 +41,21 @@ describe("zstack pack", () => {
     ]));
   });
 
+  it("reads one-case-per-file eval cases and flags a file whose id does not match its name", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, cpSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const temp = mkdtempSync(join(tmpdir(), "zstack-evals-"));
+    mkdirSync(join(temp, "agents/zstack/evals/cases"), { recursive: true });
+    cpSync(join(root, "agents/zstack/evals/cases.json"), join(temp, "agents/zstack/evals/cases.json"));
+    const entry = { id: "new-case", kind: "replay", area: "a", fixedBy: "pr:1", symptom: "s", rule: "r", check: "c" };
+    writeFileSync(join(temp, "agents/zstack/evals/cases/new-case.json"), JSON.stringify(entry));
+    writeFileSync(join(temp, "agents/zstack/evals/cases/wrong-name.json"), JSON.stringify({ ...entry, id: "other" }));
+    const cases = readEvalCases(temp).cases;
+    expect(cases.some((c: { id: string }) => c.id === "new-case")).toBe(true);
+    expect(validateEvalCases(readEvalCases(temp))).toEqual([expect.stringMatching(/file-name-mismatch:wrong-name\.json.*kebab-case/)]);
+  });
+
   it("accepts a pending fixedBy only when explicitly allowed", () => {
     const pending = { schema: "zeros.zstack-evals/v1", cases: [
       { id: "pending-case", kind: "replay", area: "a", fixedBy: "pending", symptom: "s", rule: "r", check: "c" },

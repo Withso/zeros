@@ -8,8 +8,10 @@ alwaysApply: false
 
 # zstack-eval
 
-`agents/zstack/evals/cases.json` lists real bugs that reached `main` or a live
-environment. Each case records:
+Real bugs that reached `main` or a live environment are recorded as eval cases.
+Add each **new case as its own file**, `agents/zstack/evals/cases/<id>.json`, so
+parallel PRs never touch the same file. `cases.json` holds the original cases and
+stays readable, but don't append to it. Each case records:
 
 | Field | Meaning |
 |---|---|
