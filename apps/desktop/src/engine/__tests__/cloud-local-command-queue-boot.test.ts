@@ -12,7 +12,7 @@ import { CloudAgentAdmissionError, CloudAgentExecutionError, type CloudAgentBoot
 import { CloudAgentBootSyncResponseSchema, CloudAgentBootRefreshResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
 import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
-import { restoreCloudLocalCommandCheckpointLedger } from "../cloud-local-command-queue-checkpoint";
+import { restoreCloudLocalCommandCheckpointLedger, recoverCloudLocalCommandCheckpointLedger } from "../cloud-local-command-queue-checkpoint";
 import { openSqlite } from "../db/sqlite";
 import ts from "typescript";
 import { ZerosEngine } from "../zeros-engine";
@@ -83,7 +83,7 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
 }
 
 describe("engine boot-mode orchestration", () => {
-  it.each(["new", "same"])("activates the fresh engine writer with a %s VM boot after a stop retains its FULL ledger", async vmBoot => {
+  it.each(["new", "same", "unsealed", "unsealed-lost-ack"])("activates the fresh engine writer with a %s VM boot after a stop retains its FULL ledger", async vmBoot => {
     const f = await fixture();
     await expect(f.boot.initialize()).resolves.toBe(true);
     const previous = f.boot.scope;
@@ -119,6 +119,36 @@ describe("engine boot-mode orchestration", () => {
     expect(f.request.mock.calls.map(([operation]) => operation)).toEqual(["bootstrap", "activate"]);
     expect(f.install).toHaveBeenCalledOnce();
     expect(f.startup).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "retry" }));
+    if (vmBoot.startsWith("unsealed")) {
+      await next.dispose();
+      const target = { ...successor, engineInstanceId: randomUUID(), bootId: randomUUID(), writerEpoch: randomUUID() };
+      const { writerEpoch: _writer, ...targetScope } = target;
+      const recoveryId = randomUUID(), manifest = JSON.parse(readFileSync(path.join(root, "manifest.json"), "utf8"));
+      const recovered = await recoverCloudLocalCommandCheckpointLedger({ root, file, scope: target,
+        expectedWriterEpoch: successor.writerEpoch, authorization: { ...targetScope, version: 1, mode: "boot-owner-v1", recoveryId,
+          code: "history_recovered_with_gap", coverage: "unknown", predecessor: successor, predecessorRetiredAt: new Date().toISOString(),
+          checkpoint: { writerEpoch: previous.writerEpoch, sha256: manifest.seal.sha256 }, mirroredSequence: 0 } });
+      cleanups.push(recovered.cleanup);
+      Object.assign(f.f.response, target); f.request.mockClear(); f.install.mockClear();
+      const original = f.request.getMockImplementation()!;
+      let activations = 0;
+      if (vmBoot === "unsealed-lost-ack") f.request.mockImplementation(async (operation, input) => {
+        const result = await original(operation, input);
+        if (operation === "activate" && ++activations === 1) throw new CloudAgentExecutionError("authority_transport", "validation");
+        return result;
+      });
+      const recoveredBoot = new CloudLocalAgentBootRuntime({ ...f.options,
+        scope: { ...f.options.scope, engineInstanceId: target.engineInstanceId }, runtimeBootId: target.bootId,
+        predecessor: recovered.predecessor });
+      cleanups.push(() => recoveredBoot.dispose());
+      await expect(recoveredBoot.initialize()).resolves.toBe(true);
+      expect(f.request.mock.calls.find(([op]) => op === "activate")?.[1]).toMatchObject({ historyRecoveryId: recoveryId, writerEpoch: target.writerEpoch });
+      const attempts = f.request.mock.calls.filter(([op]) => op === "activate");
+      expect(attempts).toHaveLength(vmBoot === "unsealed-lost-ack" ? 2 : 1);
+      for (const attempt of attempts) expect(attempt[1]).toEqual(attempts[0]![1]);
+      expect(f.request.mock.calls.filter(([op]) => op === "bootstrap")).toHaveLength(1);
+      expect(f.install).toHaveBeenCalledOnce();
+    }
   });
 
   it.each([100, 5_000])("shares actor confirmation across sockets and a background renewal delayed by %ims without sharing token admission", async delay => {

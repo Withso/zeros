@@ -11,12 +11,14 @@ import {
   CloudAgentBootRefreshRequestSchema, CloudAgentBootRefreshResponseSchema,
   CloudAgentActorConfirmRequestSchema, CloudAgentActorConfirmResponseSchema,
   CloudAgentWarmActorRequestSchema, CloudAgentWarmActorResponseSchema,
+  CloudAgentHistoryRecoveryRequestSchema, CloudAgentHistoryRecoveryResponseSchema,
   type CloudAgentBootCredentialRequest, type CloudAgentBootCredentialResponse,
   type CloudAgentBootSyncRequest, type CloudAgentBootSyncResponse,
   type CloudAgentBootActivateRequest, type CloudAgentBootActivateResponse,
   type CloudAgentBootRefreshRequest, type CloudAgentBootRefreshResponse,
   type CloudAgentActorConfirmRequest, type CloudAgentActorConfirmResponse,
   type CloudAgentWarmActorRequest, type CloudAgentWarmActorResponse,
+  type CloudAgentHistoryRecoveryRequest, type CloudAgentHistoryRecoveryResponse,
 } from "@zeros/protocol/cloud-agent-bootstrap";
 import { isDeepStrictEqual } from "node:util";
 import { cloudMcpDigest } from "./agents/cloud-mcp";
@@ -47,6 +49,7 @@ export class CloudComputerToolsUpdateRequiredError extends Error {
 }
 
 export type CloudAgentBootRequests = {
+  "recover-history": CloudAgentHistoryRecoveryRequest;
   bootstrap: CloudAgentBootCredentialRequest;
   sync: CloudAgentBootSyncRequest;
   activate: CloudAgentBootActivateRequest;
@@ -55,6 +58,7 @@ export type CloudAgentBootRequests = {
   "warm-context": CloudAgentWarmActorRequest;
 };
 export type CloudAgentBootResponses = {
+  "recover-history": CloudAgentHistoryRecoveryResponse;
   bootstrap: CloudAgentBootCredentialResponse;
   sync: CloudAgentBootSyncResponse;
   activate: CloudAgentBootActivateResponse;
@@ -64,6 +68,7 @@ export type CloudAgentBootResponses = {
 };
 export type CloudAgentBootOperation = keyof CloudAgentBootRequests;
 const bootContracts = {
+  "recover-history": { request: CloudAgentHistoryRecoveryRequestSchema, response: CloudAgentHistoryRecoveryResponseSchema, limit: 16 * 1024 },
   bootstrap: { request: CloudAgentBootCredentialRequestSchema, response: CloudAgentBootCredentialResponseSchema, limit: 256 * 1024 },
   sync: { request: CloudAgentBootSyncRequestSchema, response: CloudAgentBootSyncResponseSchema, limit: 256 * 1024 },
   activate: { request: CloudAgentBootActivateRequestSchema, response: CloudAgentBootActivateResponseSchema, limit: 8 * 1024 },

@@ -4,7 +4,7 @@ import { configureNativeGithubTransport } from "./git/github-native-client";
 import { requestCloudGithubWrite, type CloudGithubWriteRequest } from "./cloud-github-write-client";
 import { requestCloudGithubRead } from "./cloud-github-read-client";
 import type { CloudCommandEngineRequest } from "@zeros/protocol/cloud-commands";
-import { CloudAgentBootScopeSchema } from "@zeros/protocol/cloud-agent-bootstrap";
+import { CloudAgentBootScopeSchema, CloudAgentHistoryRecoveryResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudActorAdmissionResponseSchema, type CloudActorContext } from "@zeros/protocol/cloud-actors";
 import type { CloudEventEngineRequest } from "@zeros/protocol/cloud-events";
 import type { CloudActionEngineRequest } from "@zeros/protocol/cloud-actions";
@@ -617,6 +617,14 @@ export class CloudRuntimeRegistration {
       const result = await requestCloudAgentBoot(this.authority(document), operation, request,
         AbortSignal.any([signal, this.abortController.signal]), this.fetch);
       if (document !== this.document || !this.localCommandsNegotiated()) throw new CloudAgentExecutionError();
+      if (operation === "recover-history") {
+        const recovery = CloudAgentHistoryRecoveryResponseSchema.parse(result);
+        if (recovery.bootId !== this.agentRuntime.bootId || this.activatedLocalWriter)
+          throw new CloudAgentExecutionError("authority_response_invalid", "validation");
+        // A gap authorization is only custody for the exact future boot. It
+        // neither activates a writer nor admits controls/mirroring/execution.
+        return result;
+      }
       const rawIdentity = "provenance" in result ? result.provenance.scope : result;
       const identity = CloudAgentBootScopeSchema.parse(Object.fromEntries(Object.entries(rawIdentity)
         .filter(([key]) => key in CloudAgentBootScopeSchema.shape)));

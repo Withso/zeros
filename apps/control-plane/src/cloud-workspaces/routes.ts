@@ -361,6 +361,7 @@ type WorkspaceRow = CloudRuntimePinRow & {
   observed_state: string;
   provider_target: string | null;
   provider_last_observed_at: Date | string | null;
+  history_recovery: import("./workspace-ui-contracts.js").CloudWorkspaceHistoryRecovery | null;
   recovery: { state: string | null; checkpointId: string | null; checkpointAt: string | null; sourceGeneration: number; needsAcknowledgement: boolean;
     restored: import("./workspace-ui-contracts.js").CloudWorkspaceCheckpointRestore | null } | null;
 };
@@ -435,6 +436,13 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
            WHERE binding.id=cw.agent_boot_id AND binding.workspace_id=cw.id AND binding.org_id=cw.org_id
              AND binding.credentials_initialized
          ) END AS agent_credentials,
+         (SELECT jsonb_build_object('recoveryId',recovery.id,'code','history_recovered_with_gap','coverage',recovery.coverage,
+           'generation',recovery.generation,'engineInstanceId',recovery.engine_instance_id,'bootId',recovery.boot_id,
+           'writerEpoch',recovery.successor_writer_epoch,'completedAt',recovery.activated_at)
+          FROM cloud_agent_history_recoveries recovery WHERE recovery.workspace_id=cw.id AND recovery.org_id=cw.org_id
+            AND recovery.activated_at IS NOT NULL AND recovery.generation<=cw.current_generation
+          ORDER BY recovery.activated_at DESC,recovery.id LIMIT 1) AS history_recovery,
+
          (SELECT left(creator.display_name,240) FROM users creator
           WHERE creator.id=cw.created_by AND creator.deleted_at IS NULL) AS created_by_display_name,
          (SELECT creator_user_id FROM cloud_computer_admin_workspaces admin
@@ -624,6 +632,7 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
     createdByDisplayName: cloudWorkspaceDisplayLabel(row.created_by_display_name),
     ownerUserId: row.owner_user_id,
     ...agentCredentialsDocument(row),
+    ...(row.history_recovery ? { historyRecovery: row.history_recovery } : {}),
     ...(row.admin_creator_user_id ? { adminWorkspace: { creatorUserId: row.admin_creator_user_id } } : {}),
     actorRole: row.actor_role,
     sharingMode: row.sharing_mode,

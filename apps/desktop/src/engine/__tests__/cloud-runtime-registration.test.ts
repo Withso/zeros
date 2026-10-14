@@ -252,6 +252,37 @@ describe("cloud renewal timing", () => {
 });
 
 describe("cloud runtime registration", () => {
+  it.each(["current", "foreign-boot", "late"])("binds %s recovery authority without admitting controls or a local writer", async mode => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const target = { organizationId: runtime.execution.organizationId, workspaceId: runtime.execution.workspaceId,
+      generation: runtime.execution.generation, engineInstanceId: runtime.engine.instanceId,
+      bootId: mode === "foreign-boot" ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" : V4_ATTESTATION.bootId,
+      fundingOwnerUserId: ACCOUNT_USER_ID, fundingOwnerEpoch: 1 };
+    const result = { ...target, version: 1, mode: "boot-owner-v1", recoveryId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      code: "history_recovered_with_gap", coverage: "unknown", predecessorRetiredAt: new Date(NOW - 1_000).toISOString(),
+      predecessor: { ...target, engineInstanceId: "66666666-6666-4666-8666-666666666666", bootId: "77777777-7777-4777-8777-777777777777",
+        writerEpoch: "88888888-8888-4888-8888-888888888888" },
+      checkpoint: { writerEpoch: "99999999-9999-4999-8999-999999999999", sha256: "a".repeat(64) }, mirroredSequence: 0 };
+    let release!: (value: Response) => void;
+    const held = new Promise<Response>(resolve => { release = resolve; });
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json(registrationResponse(), { headers: { "x-zeros-cloud-local-commands": "1" } }))
+      .mockImplementationOnce(() => mode === "late" ? held : Promise.resolve(Response.json({ result })));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start();
+      const request = registration.agentBootRequest("recover-history", { version: 1, mode: "boot-owner-v1",
+        organizationId: target.organizationId, workspaceId: target.workspaceId, generation: target.generation,
+        engineInstanceId: target.engineInstanceId }, new AbortController().signal);
+      const settled = request.then(value => ({ value }), error => ({ error }));
+      if (mode === "late") { await registration.stop(); release(Response.json({ result })); }
+      if (mode === "current") expect(await settled).toEqual({ value: result });
+      else expect(await settled).toHaveProperty("error");
+      await expect(registration.credentialControlsRequest({ ...target, version: 1, mode: "boot-owner-v1", writerEpoch: result.predecessor.writerEpoch, acknowledgements: [] },
+        new AbortController().signal)).rejects.toThrow();
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally { release(Response.json({ result })); await registration.stop(); }
+  });
   it.each(["local", "legacy"])("passes the authenticated %s journal mode before the initial record restore", async agentJournalMode => {
     const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
     const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), {
