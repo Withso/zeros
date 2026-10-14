@@ -61,7 +61,9 @@ export async function connectGithub(session:ZerosDevSession,api:ProductApi,selec
   }
   const nonce=randomBytes(32).toString("base64url");
   const start=await desktop(async()=>client.start(await session.accessToken(),{nonce,variantKey:"github.com",scheme:"zeros-alpha",installFlow:false}));
-  if(start.flowKind!=="oauth"||start.expiresAtMs-now()>600_000)throw new ZerosDevError("bad_response");
+  // The control plane issues a ten-minute state from its own clock. Allow the
+  // desktop client's fifteen-minute bound so ordinary skew cannot refuse it.
+  if(start.flowKind!=="oauth"||start.expiresAtMs-now()>15*60_000)throw new ZerosDevError("bad_response");
   const url=authorizationUrl(start.authorizeUrl);
   assertNoCredentials(url,(await session.store.read()).values);
   show(url);

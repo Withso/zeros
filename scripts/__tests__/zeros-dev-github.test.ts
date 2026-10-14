@@ -129,6 +129,22 @@ describe("headless GitHub consent uses the fixture member's normal product conne
     expect((await f.store.read()).values.ZEROS_DEV_GITHUB_INSTALLATION_ID).toBeUndefined();
   });
 
+  it.each([800, 59_000])("accepts the control plane's ten-minute window when its clock is %i ms ahead",async ahead=>{
+    const f=await fixture(),original=f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async(input,init)=>String(input).endsWith("/oauth/start")?
+      Response.json({authorizeUrl,expiresAt:new Date(now+600_000+ahead).toISOString(),flowKind:"oauth"}):original(input,init));
+    await f.connect();
+    expect(f.output).toHaveLength(1);
+  });
+
+  it("refuses an authorization window longer than the desktop client's fifteen-minute bound",async()=>{
+    const f=await fixture(),original=f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async(input,init)=>String(input).endsWith("/oauth/start")?
+      Response.json({authorizeUrl,expiresAt:new Date(now+15*60_000+1).toISOString(),flowKind:"oauth"}):original(input,init));
+    await expect(f.connect()).rejects.toThrow("zeros_dev_bad_response");
+    expect(f.output).toEqual([]);
+  });
+
   it.each(["incomplete","duplicate","suspended","user","foreign-source","foreign-id","public","foreign-connect"])("does not pin a %s catalog/source/connection",async kind=>{
     const f=await fixture(),original=f.fetcher.getMockImplementation()!;
     f.fetcher.mockImplementation(async(input,init)=>{
