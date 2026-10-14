@@ -6,7 +6,7 @@ import type { Run, RunHandle, RunStore, Source } from "./receipts";
 import type { ZerosDevRuntime } from "./runtime";
 import { parseRepositorySelection, type AgentValues, type RepositorySelection } from "./config";
 import { Evidence, assertNoCredentials, redactContent, type EvidenceEvent } from "./evidence";
-import { ZerosDevError, closedError, setupEvidence } from "./errors";
+import { ZerosDevError, closedError, diagnosticEvidence } from "./errors";
 import type { controlPlaneHealth, controlPlaneLogs, databaseHealth } from "./health";
 
 const COMMANDS = {
@@ -225,7 +225,7 @@ export async function executeCommand(command: Command, services: Services, signa
     }, ["computer build", "workspace create", "scenario run smoke"].includes(name));
     return 0;
   } catch (error) {
-    result({ outcome: "failed", code: closedError(error), ...setupEvidence(error) }); return 1;
+    result({ outcome: "failed", code: closedError(error), ...diagnosticEvidence(error) }); return 1;
   }
 }
 

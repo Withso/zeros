@@ -14,7 +14,7 @@ import { ProductApi } from "./product";
 import { RunStore, type RunHandle, type Source } from "./receipts";
 import { ZerosDevRuntime } from "./runtime";
 import { Evidence } from "./evidence";
-import { closedError, ZerosDevError, type ErrorCode } from "./errors";
+import { closedError, diagnosticEvidence, ZerosDevError, type ErrorCode } from "./errors";
 import { controlPlaneHealth } from "./health";
 import { HourlyCredentials, actionsMaterials } from "./hourly-credentials";
 import { runHourly, recoverHourlyRun, HOURLY_CLEANUP_MS } from "./hourly";
@@ -113,6 +113,10 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
   const runId = randomUUID(), write = options.write ?? ((value: unknown) => { process.stdout.write(JSON.stringify(value) + "\n"); });
   const evidence = new Evidence(runId, write);
   let code: ErrorCode | null = null, historyVerified = false, loggedIn = false;
+  let diagnostic: ReturnType<typeof diagnosticEvidence> = {};
+  const fail = (error: unknown) => {
+    if (code === null) { code = closedError(error); diagnostic = diagnosticEvidence(error); }
+  };
   let store: RunStore | undefined, credential: CloudReplicaDeviceCredential | undefined, session: ActionsServices["session"] | undefined;
   let execution: z.infer<typeof ExecutionSchema> | undefined, artifact: string | undefined;
   try {
@@ -197,17 +201,17 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
       try { await handle.save(); } catch (error) { failed ??= error; }
       if (failed) throw failed;
     });
-  } catch (error) { code = closedError(error); }
+  } catch (error) { fail(error); }
   finally {
     if (loggedIn && session) {
       try { await beforeDeadline(session.logout(), AbortSignal.timeout(10_000)); }
-      catch (error) { code ??= closedError(error); }
+      catch (error) { fail(error); }
     }
     if (historyVerified && store && credential && execution && artifact) {
-      try { await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code }, { replace: true }); }
+      try { await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code, ...diagnostic }, { replace: true }); }
       catch { code ??= "artifact_invalid"; }
     }
-    write({ schema: "zeros.dev-hourly-result/v1", runId, success: code === null, code });
+    write({ schema: "zeros.dev-hourly-result/v1", runId, success: code === null, code, ...diagnostic });
   }
   return code === null ? 0 : 1;
 }

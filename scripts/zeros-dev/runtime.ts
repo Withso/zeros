@@ -2,10 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { WebSocket } from "ws";
 import { z } from "zod";
-import { CloudWorkspaceAccessClient } from "../../apps/desktop/electron/cloud-workspace-access-client";
+import { CloudWorkspaceAccessClient, CloudWorkspaceAccessClientError } from "../../apps/desktop/electron/cloud-workspace-access-client";
 import { CloudWorkspaceAccessBroker } from "../../apps/desktop/electron/cloud-workspace-access-broker";
 import { CloudReplicaDeviceSigner } from "../../apps/desktop/src/engine/cloud-replica-device";
-import { RuntimeClient, type RuntimeClientEnvironment } from "../../apps/desktop/src/renderer/platform/bridge/runtime-client";
+import { RuntimeClient, type ConnectionRejection, type RuntimeClientEnvironment } from "../../apps/desktop/src/renderer/platform/bridge/runtime-client";
+import { CloudRuntimeAccessError } from "../../apps/desktop/src/renderer/platform/bridge/cloud-runtime-access-error";
 import { CloudAgentConnection } from "../../apps/desktop/src/renderer/platform/bridge/cloud-agent-connection";
 import { CloudEventReader } from "../../apps/desktop/src/renderer/platform/bridge/cloud-event-reader";
 import { cloudOutgoing, record, type CloudRuntimeScope } from "../../apps/desktop/src/renderer/platform/bridge/cloud-runtime-wire";
@@ -18,6 +19,7 @@ import type { Run, RunHandle } from "./receipts";
 import { ALPHA_ORIGIN } from "./config";
 import { beforeDeadline } from "./transport";
 import { ZerosDevError } from "./errors";
+import type { RuntimeObservation } from "./runtime-observation";
 
 type SessionPort = Pick<ZerosDevSession, "fixture" | "device" | "accessToken" | "accountSessionKey">;
 type Options = { signal?: AbortSignal; environment?: RuntimeClientEnvironment; fetch?: typeof fetch };
@@ -26,6 +28,39 @@ const messagesSchema = z.object({ messages: z.array(z.object({ msgId: z.string()
 const promptSchema = z.object({ id: z.string().uuid(), agent: z.enum(["claude", "codex", "cursor"]), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/), text: z.string().min(1).max(64 * 1024), continueFrom: z.string().uuid().optional() }).strict();
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const bounded = (signal: AbortSignal | undefined, ms: number) => signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
+
+function connectFailure(error: unknown, phase: RuntimeObservation["phase"], aborted: boolean,
+  rejection: ConnectionRejection | null | undefined, channel: string | undefined): ZerosDevError {
+  const known = error instanceof ZerosDevError || error instanceof CloudWorkspaceAccessClientError || error instanceof CloudRuntimeAccessError;
+  const code = known ? error.code : undefined, status = known ? error.status : undefined;
+  let inner: RuntimeObservation["class"] = "unknown";
+  if (rejection) {
+    if (["auth-required", "auth-invalid", "auth-wrong-account", "desktop-unbound", "cloud-revoked"].includes(rejection.reason)) inner = "authority_rejected";
+    else if (rejection.reason === "cloud-superseded") inner = "identity_changed";
+    else if (rejection.reason === "cloud-transient") inner = channel === "control-plane-websocket" ? "relay_unavailable" : "unknown";
+    else inner = "handshake_rejected";
+  } else if (code === "bad_response") inner = "bad_response";
+  else if (code === "runtime_changed" || code === "identity_changed" || code === "cloud_workspace_access_superseded") inner = "identity_changed";
+  else if (code === "workspace_not_running") inner = "workspace_not_running";
+  else if (status === 401 || status === 403 || ["auth_denied", "forbidden", "login_required", "signed_out", "device_proof_required"].includes(code ?? "")) inner = "authority_rejected";
+  else if (aborted || code === "deadline" || status === 408) inner = "request_timeout";
+  else if (phase === "admission" && (code === "control_plane_unavailable" || (status ?? 0) >= 500)) inner = "admission_unavailable";
+  else if (phase === "admission" && (status ?? 0) >= 400) inner = "admission_refused";
+  else if (code === "cloud_actor_runtime_unavailable" && channel === "control-plane-websocket") inner = "relay_unavailable";
+  else if (error instanceof Error) {
+    // The shared client has not yet typed these request failures. Match only
+    // its exact literals; never forward even a substring of an error message.
+    if (["Request timeout: WORKSPACE_REQUEST", "Request timeout: WORKSPACE_REQUEST (reconnecting)"].includes(error.message) ||
+      ("code" in error && error.code === "REQUEST_ABORTED")) inner = "request_timeout";
+    else if (error.message === "Request timeout: engine disconnected" && channel === "control-plane-websocket") inner = "relay_unavailable";
+    else if ("code" in error && error.code === "ECONNREFUSED") inner = "connect_refused";
+  }
+  const runtime: RuntimeObservation = { phase, class: inner,
+    ...(Number.isInteger(status) && Number(status) >= 100 && Number(status) <= 599 ? { status } : {}) };
+  return error instanceof ZerosDevError
+    ? new ZerosDevError(error.code, error.status, error.retryAfterMs, error.setup, runtime)
+    : new ZerosDevError(aborted ? "deadline" : "runtime_unavailable", undefined, undefined, undefined, runtime);
+}
 
 function environment(): RuntimeClientEnvironment {
   return {
@@ -63,36 +98,43 @@ export class ZerosDevRuntime {
   }
 
   static async connect(session: SessionPort, api: ProductApi, run: Run, options: Options = {}): Promise<ZerosDevRuntime> {
-    const signal = bounded(options.signal, 30_000), row = await api.workspace(run, signal);
-    if (!["ready", "busy"].includes(row.status)) throw new ZerosDevError("workspace_not_running");
-    const fixture = await session.fixture(), credential = await session.device();
-    const env = options.environment ?? environment(); // Test port only; never an argv/env origin override.
-    const access = new CloudWorkspaceAccessClient({ baseUrl: env.controlPlaneOrigin, allowInsecureLoopback: env.allowHttpLoopback,
-      fetch: options.fetch ?? api.transport.fetchImpl,
-      signEngineAdmission: async (_token, target) => {
-        const current = await session.device();
-        if (current.deviceId !== credential.deviceId || current.publicKey !== credential.publicKey || current.keyVersion !== credential.keyVersion)
-          throw new ZerosDevError("identity_changed");
-        return new CloudReplicaDeviceSigner(current).proof("engine.connect", target);
-      },
-    });
-    let client: RuntimeClient | undefined;
-    const broker = new CloudWorkspaceAccessBroker({ api: access, getAccessToken: () => session.accessToken(),
-      getAccountSessionKey: () => session.accountSessionKey(), getDeviceId: async () => credential.deviceId!,
-      onRuntimeRetired: () => client?.dispose(),
-    });
+    const signal = bounded(options.signal, 30_000);
+    let phase: RuntimeObservation["phase"] = "workspace_read", channel: string | undefined;
+    let client: RuntimeClient | undefined, broker: CloudWorkspaceAccessBroker | undefined;
     let runtime: ZerosDevRuntime | undefined;
     try {
-      const pending = broker.openRuntime({ organizationId: fixture.organizationId, workspaceId: row.id });
+      const row = await beforeDeadline(api.workspace(run, signal), signal);
+      if (!["ready", "busy"].includes(row.status)) throw new ZerosDevError("workspace_not_running");
+      phase = "identity";
+      const fixture = await beforeDeadline(session.fixture(), signal), credential = await beforeDeadline(session.device(), signal);
+      const env = options.environment ?? environment(); // Test port only; never an argv/env origin override.
+      const access = new CloudWorkspaceAccessClient({ baseUrl: env.controlPlaneOrigin, allowInsecureLoopback: env.allowHttpLoopback,
+        fetch: options.fetch ?? api.transport.fetchImpl,
+        signEngineAdmission: async (_token, target) => {
+          const current = await session.device();
+          if (current.deviceId !== credential.deviceId || current.publicKey !== credential.publicKey || current.keyVersion !== credential.keyVersion)
+            throw new ZerosDevError("identity_changed");
+          return new CloudReplicaDeviceSigner(current).proof("engine.connect", target);
+        },
+      });
+      const admitted = new CloudWorkspaceAccessBroker({ api: access, getAccessToken: () => session.accessToken(),
+        getAccountSessionKey: () => session.accountSessionKey(), getDeviceId: async () => credential.deviceId!,
+        onRuntimeRetired: () => client?.dispose(),
+      });
+      broker = admitted; phase = "admission";
+      const pending = admitted.openRuntime({ organizationId: fixture.organizationId, workspaceId: row.id });
       // If the caller times out, dispose still owns and retires a late grant.
-      void pending.then(target => { if (signal.aborted) return broker.closeRuntime(target.runtimeId); }, () => {}).catch(() => {});
+      void pending.then(target => { if (signal.aborted) return admitted.closeRuntime(target.runtimeId); }, () => {}).catch(() => {});
       const target = await beforeDeadline(pending, signal);
       if (target.generation !== row.generation.number || target.organizationId !== fixture.organizationId || target.workspaceId !== row.id)
         throw new ZerosDevError("runtime_changed");
-      client = new RuntimeClient(target, { environment: env, refreshCloudConnectionTarget: previous => broker.refreshRuntime(previous) });
+      channel = target.channel; phase = "handshake";
+      client = new RuntimeClient(target, { environment: env, refreshCloudConnectionTarget: previous => admitted.refreshRuntime(previous) });
       await beforeDeadline(client.connect(), signal); await client.waitUntilReady({ signal });
-      const current = await api.workspace(run, signal);
+      phase = "workspace_read";
+      const current = await beforeDeadline(api.workspace(run, signal), signal);
       if (!["ready", "busy"].includes(current.status)) throw new ZerosDevError("workspace_not_running");
+      phase = "workspace_list";
       const response = await client.request({ type: "WORKSPACE_REQUEST", op: "workspace.list", params: {} }, { timeoutMs: 10_000, signal });
       const parsed = listSchema.safeParse(record(response).result);
       if (response.type !== "WORKSPACE_RESPONSE" || !parsed.success) throw new ZerosDevError("bad_response");
@@ -103,7 +145,7 @@ export class ZerosDevRuntime {
       if (!selected || !selected.path.startsWith("/") || selected.path === "/" || selected.path.includes("\0") || path.posix.normalize(selected.path) !== selected.path)
         throw new ZerosDevError("runtime_changed");
       runtime = new ZerosDevRuntime(client, { organizationId: fixture.organizationId, workspaceId: row.id,
-        engineWorkspaceId: selected.id, root: selected.path }, broker, target.runtimeId, api, run, target.channel);
+        engineWorkspaceId: selected.id, root: selected.path }, admitted, target.runtimeId, api, run, target.channel);
       if (options.signal) {
         const close = () => { void runtime!.dispose(); };
         options.signal.addEventListener("abort", close, { once: true });
@@ -111,9 +153,12 @@ export class ZerosDevRuntime {
       }
       return runtime;
     } catch (error) {
-      client?.dispose(); await beforeDeadline(broker.dispose(), AbortSignal.timeout(3000)).catch(() => {});
-      if (error instanceof ZerosDevError) throw error;
-      throw new ZerosDevError(signal.aborted ? "deadline" : "runtime_unavailable");
+      // Capture before disposal clears lastRejection, and before any retirement
+      // failure can replace the first cause. This adds no admission retry.
+      const failure = connectFailure(error, phase, signal.aborted, client?.lastRejection, channel);
+      client?.dispose();
+      if (broker) await beforeDeadline(broker.dispose(), AbortSignal.timeout(3000)).catch(() => {});
+      throw failure;
     }
   }
 

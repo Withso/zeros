@@ -122,6 +122,31 @@ describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
       setup:{attempt:2,claimCount:1,state:"running",errorCode:null}});
     expect(reads).toBe(2);
   });
+
+  it("reports the queued fifth setup attempt when the resume deadline expires during token acquisition", async () => {
+    let elapsed = 0;
+    const f = setup(fixture, { now: () => elapsed, sleep: async ms => { elapsed += ms; } });
+    await f.api.createWorkspace(f.handle);
+    const controller = new AbortController(), original = f.fetcher.getMockImplementation()!;
+    const progress = { generation: 1, attempt: 5, claimCount: 2, state: "queued", errorCode: "setup_provider_bootstrap_cleanup_unconfirmed" };
+    let tokenReads = 0, statusReads = 0;
+    f.session.accessToken = async () => {
+      if (++tokenReads === 2) {
+        elapsed = 180_300;
+        controller.abort(new DOMException("synthetic private native timeout", "TimeoutError"));
+      }
+      return "synthetic-account-access";
+    };
+    f.fetcher.mockImplementation(async (url, init) => {
+      if (!String(url).endsWith("?setupProgress=true")) return original(url, init);
+      statusReads++;
+      return Response.json({ workspace: { ...workspace(), status: "setting_up" }, setupProgress: progress });
+    });
+    await expect(f.api.waitWorkspace(f.handle, "running", controller.signal)).rejects.toMatchObject({
+      code: "deadline", setup: { attempt: 5, claimCount: 2, state: "queued", errorCode: "setup_provider_bootstrap_cleanup_unconfirmed" },
+    });
+    expect(elapsed).toBe(180_300); expect(statusReads).toBe(1);
+  });
   it.each(["stopped","ready","busy","failed"] as const)("deletes after an accepted wake settles as %s without claiming that wake succeeded",async status=>{
     let elapsed=0;const f=setup(fixture,{now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
     await f.api.createWorkspace(f.handle);await f.api.lifecycle(f.handle,"wake");

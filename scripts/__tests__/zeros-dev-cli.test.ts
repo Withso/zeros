@@ -96,6 +96,27 @@ function harness() {
 }
 
 describe("zeros-dev bounded orchestration and evidence", () => {
+  it("retains the first closed runtime cause in evidence, the signed run and the result when cleanup also fails", async () => {
+    const f = harness(), runtime = { phase: "admission" as const, class: "admission_unavailable" as const, status: 500 };
+    f.failDelete();
+    vi.mocked(f.services.connect).mockRejectedValue(new ZerosDevError("runtime_unavailable", undefined, undefined, undefined, runtime));
+    expect(await executeCommand(parseCommand(["scenario", "run", "smoke", "--run", f.runId, "--agent", "codex", "--model", "fixture-model"])!, f.services, AbortSignal.timeout(1000))).toBe(1);
+    expect(f.rows).toContainEqual(expect.objectContaining({ schema: "zeros.dev-evidence/v1", phase: "runtime_connect", code: "runtime_unavailable", runtime }));
+    expect(f.rows).toContainEqual(expect.objectContaining({ schema: "zeros.dev-result/v1", data: { outcome: "failed", code: "runtime_unavailable", runtime } }));
+    expect(f.handle.run.evidence).toContainEqual(expect.objectContaining({ phase: "runtime_connect", code: "runtime_unavailable", runtime }));
+    expect(JSON.stringify(f.rows)).not.toContain("synthetic-provider-secret");
+  });
+
+  it("does not emit an unreviewed runtime diagnostic field or class", async () => {
+    const f = harness();
+    vi.mocked(f.services.connect).mockRejectedValue(Object.assign(new ZerosDevError("runtime_unavailable"), {
+      runtime: { phase: "admission", class: "synthetic-private-class", message: "synthetic-private-message" },
+    }));
+    expect(await executeCommand(parseCommand(["terminal", "run", "--run", f.runId, "--script", "fixture.sh"])!, f.services, AbortSignal.timeout(1000))).toBe(1);
+    expect(JSON.stringify(f.rows)).not.toContain("synthetic-private");
+    expect(f.rows).toContainEqual(expect.objectContaining({ schema: "zeros.dev-result/v1", data: { outcome: "failed", code: "runtime_unavailable" } }));
+  });
+
   it("keeps the first resume failure when bounded scenario cleanup also fails",async()=>{
     const f=harness();let runningWaits=0;f.failDelete();
     const setup={attempt:2,claimCount:3,state:"running" as const,errorCode:"setup_engine_readiness_failed" as const};

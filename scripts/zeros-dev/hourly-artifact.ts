@@ -5,13 +5,17 @@ import { createPrivateKey, createPublicKey, randomUUID, sign, verify } from "nod
 import { z } from "zod";
 import { parseCloudReplicaDeviceCredential, type CloudReplicaDeviceCredential } from "../../apps/desktop/src/engine/cloud-replica-device";
 import { RunSchema, type RunStore } from "./receipts";
-import { ERROR_CODES, ZerosDevError, type ErrorCode } from "./errors";
+import { ERROR_CODES, ZerosDevError } from "./errors";
+import { SetupObservationSchema } from "./setup-observation";
+import { RuntimeObservationSchema } from "./runtime-observation";
 
 export const ExecutionSchema = z.object({ workflowRunId: z.string().regex(/^[1-9][0-9]{0,19}$/), attempt: z.number().int().min(1).max(100),
   sourceSha: z.string().regex(/^[a-f0-9]{40}$/) }).strict();
 export type HourlyExecution = z.infer<typeof ExecutionSchema>;
+const resultSchema = z.object({ success: z.boolean(), code: z.enum(ERROR_CODES).nullable(), runId: z.string().uuid(),
+  setup: SetupObservationSchema.optional(), runtime: RuntimeObservationSchema.optional() }).strict();
 const payloadSchema = z.object({ schema: z.literal("zeros.dev-hourly/v1"), execution: ExecutionSchema, deviceId: z.string().uuid(),
-  result: z.object({ success: z.boolean(), code: z.enum(ERROR_CODES).nullable(), runId: z.string().uuid() }).strict(),
+  result: resultSchema,
   runs: z.array(RunSchema).max(3), completedAt: z.string().datetime() }).strict();
 const envelopeSchema = z.object({ payload: payloadSchema, signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict();
 const MAX_BYTES = 1024 * 1024;
@@ -58,7 +62,7 @@ export async function importHourlyArtifact(file: string, store: RunStore, creden
 }
 
 export async function exportHourlyArtifact(file: string, store: RunStore, credential: CloudReplicaDeviceCredential,
-  execution: HourlyExecution, result: { success: boolean; code: ErrorCode | null; runId: string }, options: { replace?: boolean } = {}): Promise<void> {
+  execution: HourlyExecution, result: z.infer<typeof resultSchema>, options: { replace?: boolean } = {}): Promise<void> {
   let output, parent, temporary: string | undefined;
   try {
     const runs = [];

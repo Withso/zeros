@@ -270,8 +270,17 @@ Computer-log display uses `zeros.dev-content/v1`, redacts configured secrets,
 URLs, token shapes and terminal controls, and is separate from evidence.
 Provider error bodies/stacks and arbitrary extra diagnostic fields are never
 emitted. Keep interactive live artifacts private and outside committed source.
+Connection failures add a closed `runtime` observation to evidence, the command
+result and the signed hourly receipt. It names the failing phase (workspace
+read, identity, admission, handshake or workspace list), the failure class and
+the HTTP status when available. For example, an admission HTTP 500 reports
+`{phase:"admission",class:"admission_unavailable",status:500}`. Unknown causes
+stay `unknown`; this does not attribute a server error to a provider or the VM.
+The first observation survives cleanup/logout failure, and no harness retry is
+added. Native aborts at the HTTP boundary report `deadline`, retaining the last
+validated setup attempt and claim count during workspace waits.
 Use the updated CLI for subsequent receipt reads: older strict CLI versions
-cannot interpret the new wait phases or setup observation. Existing receipts
+cannot interpret the new wait phases or setup/runtime observations. Existing receipts
 without those optional observations remain readable.
 
 ## Read-only diagnostics and qualification
