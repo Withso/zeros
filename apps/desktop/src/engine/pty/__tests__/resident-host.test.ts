@@ -233,7 +233,9 @@ describe.runIf(process.platform === "linux")("resident cloud terminals", () => {
   const f=await setup(),client=await f.connect();
   const session=await client.create({sessionId:"busy-original-shell",cwd:f.root,cols:80,rows:24,env:{PATH:"/usr/bin:/bin",HOME:f.root}});
   await expect.poll(()=>client.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
-  await client.write(session.sessionId,{producerId:randomUUID(),sequence:1,data:"printf 'BUILTIN_%s\\n' READY; while :; do :; done\n"});
+  // Interactive bash ignores TERM by default. Keep this workload builtin-only,
+  // but let its shell exit before teardown proves the original group empty.
+  await client.write(session.sessionId,{producerId:randomUUID(),sequence:1,data:"trap 'exit 0' TERM; printf 'BUILTIN_%s\\n' READY; while :; do :; done\n"});
   await expect.poll(async()=>(await client.snapshot(session.sessionId)).data).toContain("BUILTIN_READY");
   const clock=vi.spyOn(Date,"now").mockReturnValue(Date.now()+11*60_000);
   try {expect(await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:true});}
