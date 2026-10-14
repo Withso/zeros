@@ -44,6 +44,66 @@ function setup(pinned=fixture,clock:{now?:()=>number;sleep?:(ms:number,signal?:A
 }
 
 describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
+  it.each(["missing", "different", "different-base", "unqualified", "foreign-build"])("refuses a succeeded Computer with a %s persisted runtime proof",async mode=>{
+    const f=setup();await f.api.buildComputer(f.handle);
+    const original=f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith(`/builds/${build.id}/runtime`)?Response.json({
+      buildId:mode==="foreign-build"?randomUUID():build.id,version:build.version,
+      runtimeId:mode==="missing"?null:`r1-${(mode==="different"?"b":"a").repeat(64)}`,baseImageId:mode==="missing"?null:mode==="different-base"?"other-base":"fixture-base",
+      selected:mode==="unqualified"?null:{runtimeId:`r1-${"a".repeat(64)}`,baseImageId:"fixture-base",sourceCommit:"c".repeat(40),qualificationMode:"smoke"},
+    }):original(url,init));
+    await expect(f.api.waitComputer(f.handle.run)).rejects.toThrow(mode==="foreign-build"?"zeros_dev_identity_changed":"zeros_dev_runtime_pin_unconfirmed");
+  });
+
+  it("confirms the saved runtime and base, and refuses a different explicitly intended runtime",async()=>{
+    const f=setup();await f.api.buildComputer(f.handle);const original=f.fetcher.getMockImplementation()!;
+    const runtimeId=`r1-${"a".repeat(64)}`;
+    f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith(`/builds/${build.id}/runtime`)?Response.json({
+      buildId:build.id,version:build.version,runtimeId,baseImageId:"fixture-base",
+      selected:{runtimeId,baseImageId:"fixture-base",sourceCommit:"c".repeat(40),qualificationMode:"full"},
+    }):original(url,init));
+    expect(await f.api.waitComputer(f.handle.run,undefined,runtimeId)).toMatchObject({runtimePin:"confirmed",state:"succeeded"});
+    await expect(f.api.waitComputer(f.handle.run,undefined,`r1-${"b".repeat(64)}`)).rejects.toThrow("zeros_dev_runtime_pin_unconfirmed");
+  });
+
+  it("keeps the 180 second resume deadline and carries the observed setup attempt in its closed error",async()=>{
+    let elapsed=0;const f=setup(fixture,{now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
+    await f.api.createWorkspace(f.handle);f.setWorkspace({...workspace(),status:"setting_up"});
+    const original=f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("?setupProgress=true")?Response.json({
+      workspace:{...workspace(),status:"setting_up"},setupProgress:{generation:1,attempt:2,claimCount:3,state:"running",errorCode:"setup_engine_readiness_failed"},
+    }):original(url,init));
+    await expect(f.api.waitWorkspace(f.handle,"running")).rejects.toMatchObject({code:"deadline",setup:{attempt:2,claimCount:3,state:"running",errorCode:"setup_engine_readiness_failed"}});
+    expect(elapsed).toBe(180_000);
+    expect(f.fetcher.mock.calls.filter(([url])=>String(url).includes("setupProgress"))).not.toHaveLength(0);
+  });
+  it.each(["unknown-error","stale-generation","missing","malformed"])("keeps %s setup diagnostics closed and does not extend the deadline",async mode=>{
+    let elapsed=0;const f=setup(fixture,{now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
+    await f.api.createWorkspace(f.handle);const original=f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("?setupProgress=true")?Response.json({
+      workspace:{...workspace(),status:"setting_up"},...(mode==="missing"?{}:{setupProgress:{generation:mode==="stale-generation"?2:1,
+        attempt:2,claimCount:3,state:mode==="malformed"?"synthetic-private-state":"running",errorCode:"synthetic-private-error"}}),
+    }):original(url,init));
+    const error=await f.api.waitWorkspace(f.handle,"running").catch(error=>error);
+    expect(error.code).toBe("deadline");expect(elapsed).toBe(180_000);
+    expect(error.setup).toEqual(mode==="unknown-error"?{attempt:2,claimCount:3,state:"running",errorCode:"unknown"}:undefined);
+    expect(JSON.stringify(error)).not.toContain("synthetic-private");
+  });
+
+  it("retains the last validated setup observation when the next read reaches the deadline",async()=>{
+    let elapsed=0;const f=setup(fixture,{now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
+    await f.api.createWorkspace(f.handle);const original=f.fetcher.getMockImplementation()!;let reads=0;
+    const controller=new AbortController();
+    f.fetcher.mockImplementation(async(url,init)=>{
+      if(!String(url).endsWith("?setupProgress=true"))return original(url,init);
+      if(reads++){controller.abort();return Response.json({});}
+      return Response.json({workspace:{...workspace(),status:"setting_up"},setupProgress:{generation:1,
+        attempt:2,claimCount:1,state:"running",errorCode:null}});
+    });
+    await expect(f.api.waitWorkspace(f.handle,"running",controller.signal)).rejects.toMatchObject({code:"deadline",
+      setup:{attempt:2,claimCount:1,state:"running",errorCode:null}});
+    expect(reads).toBe(2);
+  });
   it.each(["stopped","ready","busy","failed"] as const)("deletes after an accepted wake settles as %s without claiming that wake succeeded",async status=>{
     let elapsed=0;const f=setup(fixture,{now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
     await f.api.createWorkspace(f.handle);await f.api.lifecycle(f.handle,"wake");

@@ -22,6 +22,7 @@ import { computerTemplateBuilderIntent } from "./computer-template-boat.js";
 import { builderVmBaseSnapshot, prepareBuilderVmOperation } from "./cloud-builder-vm.js";
 import type { BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
 import { lockReadyRuntimeImage, type RuntimeImageChannel } from "./runtime-images.js";
+import { observeCloudRuntimeSelection } from "./runtime-selection.js";
 import { COMPUTER_TEMPLATE_RETENTION_CHANNEL } from "./computer-template-retention.js";
 import { updateRepositorySetupScript } from "./computer-repository-setup.js";
 import {
@@ -42,6 +43,7 @@ import {
   type CloudComputerV2BuildStage,
   type CloudComputerV2BuildState,
   type CloudComputerV2BuildSummary,
+  type CloudComputerV2BuildRuntime,
   type CloudComputerV2CancelResult,
   type CloudComputerV2DraftInput,
   type CloudComputerV2DraftResult,
@@ -1258,6 +1260,18 @@ export class DatabaseCloudComputerV2Service {
         return summary(await buildRow(tx, org, id));
       },
     );
+  }
+  async getBuildRuntime(organizationId: string, userId: string, buildId: string): Promise<CloudComputerV2BuildRuntime> {
+    const org = uuid(organizationId), user = uuid(userId), id = uuid(buildId);
+    return this.readTransaction(undefined, async tx => {
+      await authority(tx, org, user, false, false);
+      const build = await buildRow(tx, org, id);
+      const mode = this.config.runtime?.qualificationMode ?? "full";
+      const selected = await observeCloudRuntimeSelection(tx, mode);
+      return { buildId: build.id, version: integer(build.version), runtimeId: build.runtime_id, baseImageId: build.base_image_id,
+        selected: selected ? { runtimeId: selected.pin.runtimeId, baseImageId: selected.pin.baseImageId,
+          sourceCommit: selected.descriptor.sourceCommit, qualificationMode: mode } : null };
+    });
   }
   async cancel(
     organizationId: string,

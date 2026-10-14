@@ -30,6 +30,7 @@ const paths = [
   ["POST", "/discard", { expectedRevision: 0 }, "discard"],
   ["POST", "/builds", operation(), "build"],
   ["GET", `/builds/${buildId}`, undefined, "getBuild"],
+  ["GET", `/builds/${buildId}/runtime`, undefined, "getBuildRuntime"],
   ["GET", `/builds/${buildId}/log`, undefined, "logs"],
   ["POST", `/builds/${buildId}/cancel`, { expectedRevision: 0 }, "cancel"],
   ["POST", "/versions/1/activate", operation(), "activate"],
@@ -42,6 +43,7 @@ function configure(staffRole: StaffRole | null = "developer", parent = false) {
     discard: vi.fn().mockResolvedValue({ revision: 1 }),
     build: vi.fn().mockResolvedValue({ build: { id: buildId } }),
     getBuild: vi.fn().mockResolvedValue({ id: buildId }),
+    getBuildRuntime: vi.fn().mockResolvedValue({ buildId, version: 1, runtimeId: null, baseImageId: null, selected: null }),
     logs: vi.fn().mockResolvedValue({ entries: [] }),
     cancel: vi.fn().mockResolvedValue({ cancelled: true }),
     activate: vi.fn().mockResolvedValue({ activated: true }),
@@ -168,6 +170,7 @@ describe("Cloud Computer v2 organization route boundary", () => {
       ["GET", `/builds/${buildId}/log?after=-1`, undefined],
       ["GET", `/builds/${buildId}/log?limit=101`, undefined],
       ["GET", "/builds/not-an-id", undefined],
+      ["GET", "/builds/not-an-id/runtime", undefined],
     ];
     for (const [method, suffix, body] of invalid) {
       const response = await request(method, suffix, body);

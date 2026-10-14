@@ -2,7 +2,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
-import { selectCloudRuntime, loadPinnedCloudRuntime, runtimeCredentialQualificationJoin } from "./runtime-selection.js";
+import { selectCloudRuntime, observeCloudRuntimeSelection, loadPinnedCloudRuntime, runtimeCredentialQualificationJoin } from "./runtime-selection.js";
 import { runtimeBase, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
@@ -16,6 +16,20 @@ const url = process.env.TEST_DATABASE_URL;
     await withSystemTx(pool, tx => seedRuntimeBase(tx));
   });
   const select = (mode: "full" | "smoke" = "full") => withSystemTx(pool, tx => selectCloudRuntime(tx, mode));
+
+  it("observes the same qualified selection in a read-only snapshot without admission's revocation locks",async()=>{
+    const expected=await withSystemTx(pool,tx=>seedRuntimeBundle(tx));
+    await withSystemTx(pool,async tx=>{
+      expect(await observeCloudRuntimeSelection(tx,"full")).toMatchObject({pin:expected.pin});
+      await withSystemTx(pool,async revoker=>{
+        await revoker.query("SET LOCAL lock_timeout='100ms'");
+        await revoker.query("UPDATE cloud_runtime_qualifications SET revoked_at=now(),enabled=false,mcp_qualified=false WHERE credential_kind='codex-chatgpt'");
+      });
+      // This proof is an observation of this snapshot, never an admission lease.
+      expect(await observeCloudRuntimeSelection(tx,"full")).not.toBeNull();
+    },{consistentRead:true});
+    expect(await withSystemTx(pool,tx=>observeCloudRuntimeSelection(tx,"full"),{consistentRead:true})).toBeNull();
+  });
 
   it("chooses the newest confirmed release with every required kind and the deployed protocol", async () => {
     const older = await withSystemTx(pool, async tx => {

@@ -7,6 +7,7 @@ import { createCloudReplicaDeviceCredential } from "../../apps/desktop/src/engin
 import { RunStore } from "../zeros-dev/receipts";
 import { parseFixture } from "../zeros-dev/config";
 import { Evidence, redactContent } from "../zeros-dev/evidence";
+import { ZerosDevError } from "../zeros-dev/errors";
 
 const roots:string[]=[];
 const fixture=parseFixture({ZEROS_DEV_WORKOS_SUBJECT:"user_fixture",ZEROS_DEV_ACCOUNT_ID:"11111111-1111-4111-8111-111111111111",ZEROS_DEV_EMAIL:"fixture@example.test",
@@ -81,6 +82,21 @@ describe("zeros-dev exact signed resource receipts",()=>{
 });
 
 describe("closed zeros-dev evidence",()=>{
+  it("persists bounded setup observations and refuses raw error fields even on an internal exception",async()=>{
+    const f=await store(),id=randomUUID();
+    const setup={attempt:2,claimCount:3,state:"running" as const,errorCode:"setup_engine_readiness_failed" as const};
+    await f.store.withRun(id,source,async handle=>{
+      handle.run.evidence.push({phase:"workspace_resume_wait",outcome:"failed",code:"deadline",durationMs:180_000,setup});
+      await handle.save();
+    });
+    expect((await f.store.read(id)).evidence[0]?.setup).toEqual(setup);
+    const rows:unknown[]=[];const evidence=new Evidence(id,value=>rows.push(value));
+    const error=new ZerosDevError("deadline",undefined,undefined,{...setup,errorCode:"synthetic-private-error"} as never);
+    await expect(evidence.step("workspace_resume_wait",async()=>{throw error;})).rejects.toThrow("zeros_dev_deadline");
+    expect(JSON.stringify(rows)).not.toContain("synthetic-private-error");
+    expect(rows[0]).not.toHaveProperty("setup");
+    expect(()=>evidence.emit({phase:"workspace_resume_wait",outcome:"failed",durationMs:0,setup:{...setup,log:"private"}} as never)).toThrow("zeros_dev_invalid_request");
+  });
   it("never admits raw diagnostic, prompt, token or arbitrary keys into evidence",async()=>{
     const rows:unknown[]=[];let time=5;
     const evidence=new Evidence(randomUUID(),row=>{rows.push(row);},()=>time);

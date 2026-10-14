@@ -123,6 +123,27 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
     });
     return result.build;
   }
+  it("reads the saved Computer runtime against current qualified selection without changing a shipped summary",async()=>{
+    await withSystemTx(pool,async tx=>{
+      await tx.query(`INSERT INTO cloud_runtime_channel_releases(channel,release_order,runtime_id,github_release_run_id,github_release_run_attempt,confirmed_at)
+        VALUES('alpha',1,$1,1,1,now())`,[pins.runtimeId]);
+      for(const kind of ["claude-setup-token","codex-chatgpt","cursor-api-key"])await tx.query(`INSERT INTO cloud_runtime_qualifications
+        (runtime_id,base_compatibility_id,credential_kind,profile,enabled,evidence,qualified_at)
+        VALUES($1,$2,$3,'zeros-cloud-worker-v4',true,'{"mode":"full"}',now())`,[pins.runtimeId,templateRuntime.baseCompatibilityId,kind]);
+    });
+    const completed=await successful();
+    const before=await service.getBuild(fixture.organizationId,fixture.userId,completed.id);
+    const observed=await service.getBuildRuntime(fixture.organizationId,fixture.userId,completed.id);
+    expect(observed).toMatchObject({buildId:completed.id,version:completed.version,runtimeId:pins.runtimeId,baseImageId:pins.baseImageId,
+      selected:{runtimeId:pins.runtimeId,baseImageId:pins.baseImageId,qualificationMode:"full"}});
+    expect(await service.getBuild(fixture.organizationId,fixture.userId,completed.id)).toEqual(before);
+    expect(before).not.toHaveProperty("runtimeId");
+    await pool.query("UPDATE cloud_runtime_qualifications SET enabled=false,mcp_qualified=false,revoked_at=now() WHERE runtime_id=$1 AND credential_kind='codex-chatgpt'",[pins.runtimeId]);
+    expect(await service.getBuildRuntime(fixture.organizationId,fixture.userId,completed.id)).toMatchObject({runtimeId:pins.runtimeId,selected:null});
+    const outsider=await seedReadyCloudWorkspace(pool,{runtimeV4:false});
+    await expect(service.getBuildRuntime(fixture.organizationId,outsider.userId,completed.id)).rejects.toMatchObject({status:404});
+    await expect(service.getBuildRuntime(outsider.organizationId,outsider.userId,completed.id)).rejects.toMatchObject({status:404});
+  });
   async function admin() {
     const other = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await pool.query(

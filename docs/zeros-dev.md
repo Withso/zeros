@@ -148,6 +148,18 @@ GitHub App or writes a recipe. `computer build` builds the existing approved
 draft using its normal CAS revision and operation ID. A missing draft fails
 explicitly; repository pins alone do not approve a Computer configuration.
 
+Before reporting success, `computer build --wait` reads the saved build's runtime
+and base through its normal authorized product route and compares them with the
+builder's current qualified selection. Success includes `runtimePin: "confirmed"`.
+Use `--expect-runtime r1-<sha256>` to require a particular corrected runtime too.
+A missing, unqualified or different tuple returns `runtime_pin_unconfirmed`;
+another build ID or version returns `identity_changed`. This proof uses one
+read-only database snapshot and takes no admission locks. It is an observation,
+not a lease: subsequent publication or revocation can change selection. Old
+build pins are never rewritten; deliberately build again if the selection moved.
+The new route must be deployed before using this check. No database credential
+is needed for it, and ordinary strict build-summary responses keep their shape.
+
 For first setup, the fixture member opens the test organization's Settings →
 Cloud Computer, selects only the fixture repository under **Repositories**, and
 clicks **Save draft**. Use the approved install script (empty for a dependency-free
@@ -202,16 +214,26 @@ descriptor supplies the bytes and metadata; aliases, credentials and files
 replaced during the read are refused.
 
 Lifecycle waits are bounded at three minutes, Computer builds at fifteen,
-agent observation at five, and an invocation at thirty. Standalone workspace
+agent observation at five, and an invocation at thirty. A workspace wait uses
+the existing status request with `setupProgress=true`; default desktop reads
+keep their response shape. Deadline/failure evidence names `workspace_create_wait`,
+`workspace_resume_wait`, `workspace_stop_wait` or `workspace_delete_wait` and, when
+available, the last observed current-generation setup attempt, claim count,
+state and closed error code. Unknown codes become `unknown`; raw logs and
+provider fields are refused. An older CP or stale/malformed progress supplies
+no setup evidence. The product's longer retry loop does not extend this wait,
+and no new diagnostic request runs after its deadline. Standalone workspace
 commands retain their run for iteration. `scenario run smoke --agent <agent>
 --model <model>` creates a throwaway, verifies the repo through a terminal,
 waits for an agent response, stops/resumes, repeats, then stops and deletes.
 The resumed phase verifies its own small repository marker and continues the
 same recorded conversation through the new admission.
 `--build-computer` explicitly builds the configured draft first. The scenario
-always attempts its recorded workspace's cleanup in `finally`, including after
+always attempts its recorded workspace's cleanup, including after
 SIGINT or a work deadline, with a separate thirty-second cleanup budget.
 Cleanup that remains pending makes the scenario fail; its receipt is retained.
+If work and cleanup both fail, the result retains the first work failure and
+setup observation while a separate cleanup event records the cleanup failure.
 
 ## Identity, evidence and cleanup
 
@@ -248,6 +270,9 @@ Computer-log display uses `zeros.dev-content/v1`, redacts configured secrets,
 URLs, token shapes and terminal controls, and is separate from evidence.
 Provider error bodies/stacks and arbitrary extra diagnostic fields are never
 emitted. Keep all live artifacts private and outside committed source.
+Use the updated CLI for subsequent receipt reads: older strict CLI versions
+cannot interpret the new wait phases or setup observation. Existing receipts
+without those optional observations remain readable.
 
 ## Read-only diagnostics and qualification
 
