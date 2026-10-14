@@ -1,0 +1,9 @@
+{
+  "id": "zstack-replay-assertion-identity",
+  "kind": "replay",
+  "area": "engineering verification",
+  "fixedBy": "pr:504",
+  "symptom": "Parameterized assertions with the same full name shared a receipt identity, allowing a passed sibling to make a skipped assertion look like a caught regression.",
+  "rule": "zstack-eval binds each assertion to its file, name and repeated-name occurrence, independent of status; only that exact passing fixed assertion can authorize a parent failure.",
+  "check": "pnpm test:git scripts/__tests__/zstack-runner.test.ts scripts/__tests__/zstack-replay.test.ts"
+}
