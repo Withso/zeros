@@ -22,6 +22,7 @@ import { assertSingleProviderResource } from "./provider.js";
 import { requestManagedComputeStop } from "./compute-credit-stop.js";
 import { classifyCloudFailure, diagnosticCode, type CloudDiagnosticPhase } from "./cloud-diagnostics.js";
 import { retainCloudDiagnostic, diagnosticStorageFailed, recoverCloudDiagnostic, runCloudDiagnosticCleanup } from "./cloud-diagnostic-store.js";
+import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
 
 export type ManagedComputePolicy = {
   provider: string;
@@ -668,6 +669,33 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     );
     if (!lease) return true;
     assertProviderResourceIdentity(resource, input);
+    const stopGate = await withRetryableSystemTx(this.options.pool, async tx => {
+      await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [input.organizationId]);
+      await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE", [input.workspaceId, input.organizationId]);
+      const intent = (await tx.query<{ id: string; operation: "stop" | "archive" | "delete"; requested_by: string | null }>(
+        `SELECT id,operation,requested_by FROM cloud_workspace_lifecycle_intents
+         WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND operation IN ('stop','archive','delete')
+           AND state IN ('queued','observing','dispatching') ORDER BY created_at DESC,id LIMIT 1`,
+        [input.workspaceId, input.organizationId, input.generation],
+      )).rows[0];
+      return intent ? { ready: await prepareCloudWorkspaceStopSeal(tx, {
+        ...input, intentId: intent.id, operation: intent.operation, requestedBy: intent.requested_by,
+      }) } : null;
+    });
+    if (!stopGate) {
+      // A direct settlement caller has no lifecycle claim proving a drain.
+      // Admit a bounded stop first; its reconciler owns the provider dispatch.
+      const now = await this.now();
+      const remaining = Math.min(lease.provider_expires_at?.getTime() ?? now, lease.funded_until?.getTime() ?? now) - now;
+      await requestManagedComputeStop(this.options.pool, {
+        leaseId: lease.id, reason: "compute_delete_settlement", force: remaining < 45_000,
+        checkpointDeadlineMs: Math.max(30_000, Math.min(MAX_CHECKPOINT_DEADLINE_MS, remaining - STOP_MARGIN_MS)),
+      });
+      return false;
+    }
+    // The lifecycle caller normally proved its final checkpoint before claim.
+    // Settlement must not turn an overlapping user drain into a forced stop.
+    if (!stopGate.ready) return false;
     await requestManagedComputeStop(this.options.pool, {
       leaseId: lease.id,
       reason: "compute_delete_settlement",
@@ -972,10 +1000,16 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       return new Date(observed.stopped_observed_at!.getTime() + FINAL_METER_LAG_MS + 1000);
     phase("authority_check");
     const scope = await this.scope(identity);
+    if (scope.generation === identity.generation && scope.desired_state !== "running") {
+      // A user lifecycle request is a stop to observe, not a lost compute
+      // scope. Adoption preserves its drain; only the finite budget may force it.
+      const setupCode = diagnosticCode(scope.setup_failure_code);
+      await this.stopAtBudget(lease, setupCode === scope.setup_failure_code ? setupCode : "workspace_stop_requested");
+      return null;
+    }
     if (
       lease.state === "draining" ||
       !scope.live ||
-      scope.desired_state !== "running" ||
       scope.generation !== this.identity(lease).generation ||
       scope.user_id !== lease.user_id ||
       money(scope.billing_epoch) !== money(lease.billing_epoch)

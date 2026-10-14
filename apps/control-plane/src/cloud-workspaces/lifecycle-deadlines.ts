@@ -22,7 +22,7 @@ export async function readLifecycleDeadlines(pool: pg.Pool, provider: string | n
         WHERE i.state IN ('queued','observing','dispatching') AND (i.state<>'dispatching' OR i.lease_expires_at IS NOT NULL)
           AND (i.resume_after_intent_id IS NULL OR EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_intents prerequisite
             WHERE prerequisite.id=i.resume_after_intent_id AND prerequisite.state='succeeded'))
-          AND (request.id IS NULL OR request.state='succeeded')
+          AND (request.id IS NULL OR request.state='succeeded' OR (request.state='cancelled' AND request.error_code='stop_unsealed'))
           AND (i.operation<>'create' OR NOT EXISTS (SELECT 1 FROM workspace_fork_intents fork
             WHERE fork.target_cloud_workspace_id=i.workspace_id AND fork.org_id=i.org_id AND fork.operation='local_to_cloud' AND fork.state<>'succeeded'))
         UNION ALL SELECT 'paidAuthority',next_check_at FROM cloud_workspace_paid_authority_checks

@@ -52,6 +52,26 @@ nonrecoverable provider error, policy mismatch or exhausted balance starts a bou
 checkpoint and stop. Near the deadline it stops directly, retaining the last
 durable checkpoint. Budget enforcement never permanently deletes the VM.
 
+An exact-generation user stop or archive already in progress owns its final
+checkpoint. A lease tick adopts that intent instead of superseding it or
+cancelling its capture. An ordinary requested stop is not a lost compute scope.
+The existing provider and funding limits still bound the drain: at expiry, the
+worker escalates the same intent, records the checkpoint request as cancelled
+with `stop_unsealed`, and retires authority before provider dispatch. It never
+marks an incomplete checkpoint successful or extends the funded window.
+
+Final checkpoint completion also requires the active native command writer's
+seal. Every lifecycle stop, archive and delete checks that gate before provider
+dispatch; direct deletion settlement without an admitted stop first requests
+one. A native writer whose authority has already closed cannot be reactivated
+just to seal. That case, or an explicit seal-deadline fallback, records an
+idempotent `cloud_workspace.stop_unsealed` audit receipt with the exact
+workspace, generation, intent, checkpoint request and writer epoch. The receipt
+records an unsealed stop decision, not positive provider retirement proof.
+Credential retirement still requires the independently confirmed provider
+outcome. A completed seal does not manufacture a missing durable checkpoint,
+and an unsealed receipt does not authorize restore from an older checkpoint.
+
 Retryable provider failures on an active allocation retain its credit hold and
 retry with the existing 15-second to five-minute backoff while payer, generation,
 engine and paid authority remain current. The retry window ends 315 seconds
