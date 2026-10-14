@@ -1398,7 +1398,7 @@ export class DatabaseCloudComputerV2Service {
   }): Promise<CloudComputerV2Claim | null> {
     const workerFence = parse(positive, fence);
     return withSystemTx(this.pool, async (tx) => {
-      await tx.query("SELECT pg_advisory_xact_lock(62173)");
+      await tx.query("SELECT pg_advisory_xact_lock(62173) /*lock_purpose='computer-gc'*/");
       const running = (
         await tx.query<{ count: string }>(
           `SELECT count(*) FROM cloud_computer_v2_builds build LEFT JOIN cloud_computer_templates template ON template.build_id=build.id

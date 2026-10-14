@@ -125,7 +125,7 @@ export class DevConnectionStore {
       // through COMMIT. This also orders multi-generation revocations without
       // acquiring generation locks in conflicting orders. No provider I/O runs
       // under it; grant/restore readers do not need the writer lock.
-      if (outboxWriter) await tx.query("SELECT pg_advisory_xact_lock(730318513)");
+      if (outboxWriter) await tx.query("SELECT pg_advisory_xact_lock(730318513) /*lock_purpose='dev-connection-outbox'*/");
       const result = await fn(tx);
       if (lost) throw new Error("Dev connection database unavailable");
       await tx.query("COMMIT");
@@ -148,7 +148,7 @@ export class DevConnectionStore {
     if (expires <= Date.now() || expires > Date.now() + 7 * 86400000) invalid();
     return this.tx(async (tx) => {
       await tx.query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1,730318512))",
+        "SELECT pg_advisory_xact_lock(hashtextextended($1,730318512)) /*lock_purpose='dev-connection-generation'*/",
         [input.id],
       );
       if (
@@ -378,7 +378,7 @@ export class DevConnectionStore {
         .map(Number)
         .sort((a, b) => a - b);
     // Serialize both registry changes and all seed checks, including key rotation.
-    await tx.query("SELECT pg_advisory_xact_lock(730318511)");
+    await tx.query("SELECT pg_advisory_xact_lock(730318511) /*lock_purpose='dev-connection-bootstrap'*/");
     for (const version of versions)
       await tx.query(
         "INSERT INTO dev_connections.fingerprint_keys VALUES($1,$2) ON CONFLICT DO NOTHING",
@@ -860,7 +860,7 @@ export class DevConnectionStore {
     id = parse(uuid, id);
     await this.tx(async (tx) => {
       await tx.query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1,730318512))",
+        "SELECT pg_advisory_xact_lock(hashtextextended($1,730318512)) /*lock_purpose='dev-connection-generation'*/",
         [id],
       );
       await tx.query(

@@ -3,7 +3,7 @@ import { withSystemTx, type Tx } from "../db.js";
 import { cloudDiagnosticSchema, cloudStopReason, type CloudDiagnostic } from "./cloud-diagnostics.js";
 
 type Scope = { workspaceId: string; organizationId: string; generation: number; operationKind: "compute" | "setup" | "engine"; operationId: string; executionFence?: number; leaseOwner?: string };
-const retentionLock = () => "SELECT pg_advisory_xact_lock(837416,114)";
+const retentionLock = () => "SELECT pg_advisory_xact_lock(837416,114) /*lock_purpose='diagnostic-retention'*/";
 function installerDiagnosticKey(value: CloudDiagnostic): string | null {
   const installer = value.setup?.installer;
   // JSONB reorders object keys. Compare a stable tuple so identical failures

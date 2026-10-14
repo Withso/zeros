@@ -82,6 +82,7 @@ import type { MigrationStatus } from "./migrate.js";
 import type { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runtime-services.js";
 import { createCloudRuntimeServiceAuthorityRoutes, createCloudRuntimeServiceRoutes } from "./cloud-workspaces/runtime-service-routes.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming, type RequestCostObserverStatus, type RequestDatabaseCost } from "./request-timing.js";
+import { createDatabaseTimingReporter } from "./database-timing.js";
 import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
   engineLifecycleRequestsPerMinute,
@@ -155,6 +156,7 @@ export function createApp(
 ): ControlPlaneApp {
   const app: ControlPlaneApp = new Hono();
   const timing = requestTiming({ slowMs: config.slowRequestLogMs ?? DEFAULT_SLOW_REQUEST_LOG_MS,
+    timingObserver: createDatabaseTimingReporter().observe,
     ...(dependencies.requestCostObserver ? { costObserver: dependencies.requestCostObserver, databasePool: pool } : {}) });
   app.use("*", timing);
   if (dependencies.requestCostObserver) {

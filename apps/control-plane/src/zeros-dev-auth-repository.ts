@@ -70,7 +70,7 @@ export class DatabaseZerosDevAuthRepository implements ZerosDevAuthRepository {
       await boundedTransaction(tx);
       // This very low-volume anonymous endpoint has one database-wide budget.
       // A process restart or second API replica cannot evade its rate limit.
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('zeros-dev-auth-rate-v1', 0))");
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('zeros-dev-auth-rate-v1', 0)) /*lock_purpose='zeros-dev-auth-rate'*/");
       await assertPinnedIdentity(tx, pin);
       if (session) await assertIssuedSession(tx, pin, session);
       const result = await tx.query<{ total: string; source: string; repeated: boolean }>(

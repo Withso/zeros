@@ -215,7 +215,7 @@ export class RuntimeImageWorker {
   private async claim(): Promise<{ row: ImageRow; reconcile: boolean } | null> {
     const { mode } = this.options, scope = this.scope();
     return withSystemTx(this.options.pool, async tx => {
-      const lock = (await tx.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS locked",
+      const lock = (await tx.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS locked /*lock_purpose='runtime-image-retirement'*/",
         [`cloud-runtime-image-producer:${scope[0]}:${scope[1]}`])).rows[0];
       if (!lock?.locked) return null;
       const building = (await tx.query<ImageRow>(`SELECT * FROM cloud_runtime_images

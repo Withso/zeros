@@ -4,7 +4,7 @@ import type pg from 'pg';
 export async function quarantineRestoredConnections(pool:pg.Pool) {
   const tx=await pool.connect();
   try {
-    await tx.query("BEGIN; SELECT pg_advisory_xact_lock(730318513); SELECT set_config('dev_connections.authority','broker',true)");
+    await tx.query("BEGIN; SELECT pg_advisory_xact_lock(730318513); SELECT set_config('dev_connections.authority','broker',true) /*lock_purpose='dev-connection-outbox'*/");
     await tx.query('LOCK TABLE dev_connections.generations,dev_connections.connections,dev_connections.bindings,dev_connections.refresh_attempts IN ACCESS EXCLUSIVE MODE');
     await tx.query("INSERT INTO dev_connections.generation_revocations(id) SELECT id FROM dev_connections.generations ON CONFLICT DO NOTHING");
     await tx.query('UPDATE dev_connections.generations SET revoked_at=coalesce(revoked_at,clock_timestamp())');

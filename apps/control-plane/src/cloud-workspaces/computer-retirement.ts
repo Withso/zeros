@@ -98,7 +98,7 @@ export class ComputerImageRetirementWorker {
   async tick() {
     await withSystemTx(this.pool, async (tx) => {
       await tx.query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1,62172))",
+        "SELECT pg_advisory_xact_lock(hashtextextended($1,62172)) /*lock_purpose='computer-image-retirement'*/",
         [this.account],
       );
       for (const ref of this.protectedImageRefs) {
@@ -155,7 +155,7 @@ export class ComputerImageRetirementWorker {
     try {
       locked = (
         await lock.query<{ locked: boolean }>(
-          "SELECT pg_try_advisory_lock(hashtextextended($1,62173)) AS locked",
+          "SELECT pg_try_advisory_lock(hashtextextended($1,62173)) AS locked /*lock_purpose='computer-image-retirement'*/",
           [id],
         )
       ).rows[0]!.locked;
@@ -233,7 +233,7 @@ export class ComputerImageRetirementWorker {
         // This session lock serializes references/base promotion and deletion;
         // no database transaction remains open across a provider await.
         await lock.query(
-          "SELECT pg_advisory_lock(hashtextextended($1,62172))",
+          "SELECT pg_advisory_lock(hashtextextended($1,62172)) /*lock_purpose='computer-image-retirement'*/",
           [this.account],
         );
         try {
@@ -269,7 +269,7 @@ export class ComputerImageRetirementWorker {
           }
         } finally {
           await lock.query(
-            "SELECT pg_advisory_unlock(hashtextextended($1,62172))",
+            "SELECT pg_advisory_unlock(hashtextextended($1,62172)) /*lock_purpose='computer-image-retirement'*/",
             [this.account],
           );
         }
@@ -290,7 +290,7 @@ export class ComputerImageRetirementWorker {
     } finally {
       if (locked)
         await lock.query(
-          "SELECT pg_advisory_unlock(hashtextextended($1,62173))",
+          "SELECT pg_advisory_unlock(hashtextextended($1,62173)) /*lock_purpose='computer-image-retirement'*/",
           [id],
         );
       lock.release();

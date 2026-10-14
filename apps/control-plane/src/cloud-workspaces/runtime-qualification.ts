@@ -75,7 +75,7 @@ export class RuntimeQualificationWorker {
     if (!this.options.vms || !this.options.operations || !this.options.artifacts)
       throw new HttpError(503, "runtime_smoke_unavailable", "Runtime smoke qualification unavailable");
     return withSystemTx(this.options.pool, async tx => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [SCHEDULE_LOCK]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) /*lock_purpose='runtime-qualification'*/", [SCHEDULE_LOCK]);
       if (!await eligibleBundle(tx, runtimeId)) throw new HttpError(409, "runtime_smoke_ineligible", "Runtime is not eligible for smoke qualification");
       const previous = (await tx.query<Run>(`SELECT * FROM cloud_runtime_qualification_runs
         WHERE runtime_id=$1 AND state IN ('queued','running')`, [runtimeId])).rows[0];
@@ -111,7 +111,7 @@ export class RuntimeQualificationWorker {
 
   private async claim(): Promise<{ run: Run; reconcile: boolean } | null> {
     return withSystemTx(this.options.pool, async tx => {
-      const lock = (await tx.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS locked", [SCHEDULE_LOCK])).rows[0];
+      const lock = (await tx.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS locked /*lock_purpose='runtime-qualification'*/", [SCHEDULE_LOCK])).rows[0];
       if (!lock?.locked) return null;
       const running = (await tx.query<Run>(`SELECT * FROM cloud_runtime_qualification_runs WHERE state='running' FOR UPDATE`)).rows[0];
       if (running) {

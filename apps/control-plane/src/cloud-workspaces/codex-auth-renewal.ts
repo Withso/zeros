@@ -95,7 +95,7 @@ export async function rememberCodexRefreshSeed(
         ),
       ],
     );
-  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,461205))", [
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,461205)) /*lock_purpose='codex-auth-renewal'*/", [
     createHash("sha256").update(seed).digest("hex"),
   ]);
   // Read after acquiring the seed fence: a concurrently bootstrapping replica

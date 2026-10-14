@@ -8,6 +8,42 @@ workspace identity, forced RLS and forward migrations remain authoritative.
 Same-region restore evidence cannot establish regional/object-store recovery
 or sustained production capacity. See [qualification status](qualification-status.md).
 
+## Query and pool evidence
+
+Application and operator advisory-lock statements carry a static SQLCommenter
+`lock_purpose` tag. The tag identifies a code-owned purpose, never an owner,
+workspace, provider identifier or advisory-lock key. The source regression checks
+every current call site, including session unlocks; applied SQL migrations remain
+immutable. PlanetScale Insights can group these statements by the tag.
+
+HTTP requests record bounded pool-acquire, transaction and tagged advisory-query
+spans, including fast requests. WorkOS's separate session-lock connection records
+its acquires and tagged queries too. `[database] timing` emits one histogram per
+active minute, keyed by static route template, method, span kind and lock purpose.
+It retains at most 64 spans per request and 128 series per window, reporting
+dropped spans when those bounds are reached. There is no reporting query or
+idle polling loop. No SQL, argument, lock key, raw path, user identity or driver
+error enters the report. Local Personal and organization-local engines do not
+enter this CP instrumentation; cloud and account API authority is unchanged.
+
+The histogram buckets are disjoint; derive a p99 upper bound by accumulating
+counts through 99%, rather than averaging per-window percentiles. The final
+unbounded bucket has a `null` upper bound. An advisory-query span includes driver,
+network and statement execution time; it is not a measurement of only server
+lock wait. Transaction spans measure connection hold time and may include an
+awaited external operation. Their outcome is unknown at the existing timing
+hook, so a completed span does not assert a commit. Direct pool queries,
+background workers, row locks inside SQL functions and long-lived WebSocket
+callbacks are outside this HTTP helper-span coverage. Use Insights and worker
+measurements alongside it, and do not claim whole-database coverage from it.
+
+Before changing pool limits, record a quiet hour and an active workspace-hour
+with exact UTC bounds and the deployed revision. Report Railway CP egress
+separately from request-query counts and latency; outbound database traffic,
+TLS connection setup and relayed workspace data are distinct contributors.
+Keep channel scope exact. A local synthetic sample cannot qualify hosted p99,
+an idle egress budget or the direct connection success rate.
+
 ## Environment boundaries
 
 - Keep Alpha, Beta and Production on separate clusters with separate credentials,

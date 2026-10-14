@@ -89,7 +89,7 @@ export async function applyWorkOSIdentityEventInTransaction(
 
   // WorkOS may deliver multiple events for one User concurrently. Serialize
   // only this provider subject, not the whole lifecycle consumer.
-  await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 2))`, [
+  await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 2)) /*lock_purpose='workos-user-event'*/`, [
     `workos-event:${event.user.id}`,
   ]);
   const linked = await tx.query<{
@@ -277,7 +277,7 @@ export async function applyWorkOSIdentityEventInTransaction(
     return finishEvent(tx, event.eventId, "stale", account.user_id);
   }
 
-  await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 3))`, [
+  await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 3)) /*lock_purpose='workos-organization-event'*/`, [
     `workos-email:${event.user.email}`,
   ]);
   const collision = await tx.query<{ id: string }>(

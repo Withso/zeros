@@ -26,7 +26,7 @@ export function publishPendingSecurityEvents(pool:pg.Pool):Promise<number> {
 async function publishSecurityEvents(pool: pg.Pool): Promise<number> {
   await publishCloudWorkspaceDirectoryChanges(pool);
   return withSystemTx(pool, async (tx) => {
-    await tx.query("SELECT pg_advisory_xact_lock(1936024437, 1702258030)");
+    await tx.query("SELECT pg_advisory_xact_lock(1936024437, 1702258030) /*lock_purpose='security-event-publish'*/");
     await tx.query(`WITH expired AS (
       SELECT sequence FROM security_events WHERE expires_at <= now()
       ORDER BY expires_at, sequence LIMIT 1000 FOR UPDATE SKIP LOCKED
