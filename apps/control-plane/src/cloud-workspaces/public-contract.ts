@@ -7,6 +7,7 @@ const messages: Record<string, string> = {
   cloud_workspace_client_update_required: "Update Zeros to connect to cloud workspaces.",
   cloud_runtime_revoked: "This workspace runtime was revoked. Request an explicit runtime upgrade to continue.",
   cloud_runtime_unavailable: "The pinned cloud runtime is unavailable. Request an explicit runtime upgrade to continue.",
+  cloud_runtime_temporarily_unavailable: "The cloud runtime is temporarily unavailable",
   cloud_computer_capacity_reached: "Image capacity reached. Retire an unreferenced custom or Dev image, or try again when another build finishes.",
   not_found: "Cloud workspace not found",
   cloud_conversation_not_found: "Cloud conversation not found",

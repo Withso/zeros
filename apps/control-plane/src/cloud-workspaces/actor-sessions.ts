@@ -11,6 +11,7 @@ import type { CloudEngineRelayGrant } from "./engine-client-admission.js";
 import { requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 import {readCurrentCloudAgentBootBinding} from "./agent-boot-credentials.js";
 import {CloudAgentBootScopeSchema,type CloudAgentBootScope} from "./agent-boot-contract.js";
+import { CloudRuntimeAdmissionError, type CloudRuntimeAdmissionPhase } from "./runtime-admission-errors.js";
 
 export const CLOUD_ACTOR_ADMISSION_PATH = "/internal/v2/cloud-workspaces/engine/client-admission";
 export const CLOUD_ACTOR_ADMISSION_AUDIENCE = "zeros-cloud-workspace-engine-client-admission-v2";
@@ -128,8 +129,8 @@ export class DatabaseCloudWorkspaceActorSessionService {
   async revoke(input:CloudWorkspaceActorScope & {token:string}):Promise<void> {
     if(![input.workspaceId,input.organizationId,input.actorUserId].every(value=>uuid.test(value)) || !CLOUD_ACTOR_TOKEN_PATTERN.test(input.token))rejected();
     await withSystemTx(this.options.pool,async tx=>{
-      await tx.query(`UPDATE cloud_workspace_actor_sessions SET revoked_at=coalesce(revoked_at,now())
-        WHERE workspace_id=$1 AND org_id=$2 AND actor_user_id=$3 AND token_hash=$4`,
+      await tx.query(`UPDATE cloud_workspace_actor_sessions SET revoked_at=now()
+        WHERE workspace_id=$1 AND org_id=$2 AND actor_user_id=$3 AND token_hash=$4 AND revoked_at IS NULL`,
         [input.workspaceId,input.organizationId,input.actorUserId,hash(input.token)]);
     });
   }
@@ -184,6 +185,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
         engineInstanceId:engine.id,remotePort:this.options.enginePort,grantToken:token,expiresAt:row.admission_expires_at.toISOString(),bridgeUrl:this.options.bridgeUrl};
     });
     if(input.directProviderVersion!==1)return grant;
+    let phase:CloudRuntimeAdmissionPhase="grant";
     try {
       const admitted=await this.authorizeRelay(grant.grantToken);
       if(!admitted)rejected();
@@ -193,6 +195,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
       if(!before)return grant;
       let directProvider:{version:1;provider:"boat";url:string}|undefined;
       if(input.connectionChannel!=="control-plane-websocket") {
+        phase="provider_endpoint";
         if(!this.options.directProviderEndpoint)throw new HttpError(503,"cloud_actor_runtime_unavailable","Cloud runtime endpoint is unavailable");
         const endpoint=await this.options.directProviderEndpoint({workspaceId:grant.workspaceId,organizationId:grant.organizationId,generation:grant.generation,
           engineInstanceId:grant.engineInstanceId,resourceId:admitted.resourceId,remotePort:this.options.enginePort});
@@ -204,6 +207,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
       }
       // Provider I/O owns no DB locks. Reauthorize the exact original one-use
       // actor grant and boot/writer after that asynchronous boundary.
+      phase="grant";
       return await withSystemTx(this.options.pool,async tx=>{
         await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE",[grant.workspaceId,grant.organizationId]);
         await tx.query("SELECT id FROM cloud_workspace_engine_instances WHERE id=$1 FOR SHARE",[grant.engineInstanceId]);
@@ -214,7 +218,11 @@ export class DatabaseCloudWorkspaceActorSessionService {
         if(!await this.authorizeRelayInTx(tx,grant.grantToken,{}))rejected();
         return CloudActorConnectionGrantSchema.parse({...grant,bootScope,...(directProvider?{directProvider}:{})});
       });
-    }catch(error){await this.revoke({...input,token:grant.grantToken}).catch(()=>{});throw error;}
+    }catch(error){
+      try { await this.revoke({...input,token:grant.grantToken}); }
+      catch { throw new CloudRuntimeAdmissionError(phase,error,"unconfirmed"); }
+      throw new CloudRuntimeAdmissionError(phase,error,"confirmed");
+    }
   }
   private async directBootScope(tx:Tx,grant:z.infer<typeof actorGrantSchema>,authority:CloudEngineRelayGrant):Promise<CloudAgentBootScope|null> {
     const current=await readCurrentCloudAgentBootBinding(tx,{organizationId:grant.organizationId,workspaceId:grant.workspaceId});

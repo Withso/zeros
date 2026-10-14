@@ -55,6 +55,7 @@ import {
   CloudWorkspaceEngineClientAdmissionError,
   type DatabaseCloudWorkspaceEngineClientAdmissionService,
 } from "./engine-client-admission.js";
+import { cloudRuntimeAdmissionResponse } from "./runtime-admission-errors.js";
 import {
   forkErrorToHttp,
   type DatabaseCloudWorkspaceForkService,
@@ -2034,15 +2035,15 @@ export function createCloudWorkspaceRoutes(
   app.post(`${base}/:workspace/runtime/admission`, async (c) => {
     c.header("Cache-Control", "no-store");
     c.header("Pragma", "no-cache");
-    if (!engineClientAdmissionService) {
-      throw new HttpError(
-        503,
-        "cloud_workspace_runtime_not_configured",
-        "Cloud workspace runtime admission is not configured",
-      );
-    }
-    const body = parse(EngineClientAdmissionSchema, await c.req.json().catch(() => ({})));
     try {
+      if (!engineClientAdmissionService) {
+        throw new HttpError(
+          503,
+          "cloud_workspace_runtime_not_configured",
+          "Cloud workspace runtime admission is not configured",
+        );
+      }
+      const body = parse(EngineClientAdmissionSchema, await c.req.json().catch(() => ({})));
       const input={
           organizationId: uuidParam(c.req.param("organization")),
           workspaceId: uuidParam(c.req.param("workspace")),
@@ -2055,14 +2056,16 @@ export function createCloudWorkspaceRoutes(
         :await engineClientAdmissionService.issue(input);
       return c.json(admission,201);
     } catch (error) {
-      if (!(error instanceof CloudWorkspaceEngineClientAdmissionError)) {
-        throw error;
-      }
-      throw new HttpError(
+      const failure = error instanceof CloudWorkspaceEngineClientAdmissionError ? new HttpError(
         error.code === "engine_client_admission_invalid" ? 422 : 409,
         error.code,
         error.message,
-      );
+      ) : error;
+      const response = cloudRuntimeAdmissionResponse(failure);
+      if (response.retryAfterSeconds !== undefined) c.header("Retry-After", String(response.retryAfterSeconds));
+      if (response.diagnostic.code === "internal") console.error("[cloud-runtime] admission failed", response.diagnostic);
+      else console.warn("[cloud-runtime] admission failed", response.diagnostic);
+      return c.json({ error: response.error }, response.status);
     }
   });
 
