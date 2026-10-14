@@ -7161,11 +7161,21 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_INIT_AGENT": {
-          // Spawns the subprocess with empty env (if not already running)
-          // so the auth screen can read the agent's advertised auth methods.
-          // Providing a real env later (via AGENT_NEW_SESSION) will transparently
-          // respawn the subprocess when needed.
-          const initialize = await this.agents.initializeAgent(msg.agentId);
+          const actor = this.cloudWorker ? client.cloudActor : undefined;
+          if (this.cloudWorker && (!actor || client.authorized?.() !== true))
+            throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+          const bound = this.cloudWorker && msg.chatId ? this.conversationExecution.get(msg.chatId) : undefined;
+          const executionId = bound && this.sessionAgent.get(bound) === msg.agentId ? bound : undefined;
+          // Only an admitted execution may expose a cloud account catalog.
+          // A cold or unknown route gets generic metadata, never a new boot.
+          const initialize = executionId
+            ? await this.agents.initializeAgent(msg.agentId, executionId)
+            : await this.agents.initializeAgent(msg.agentId);
+          if (this.cloudWorker && (client.cloudActor !== actor || client.authorized?.() !== true))
+            throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+          if (this.cloudWorker && msg.chatId && (this.conversationExecution.get(msg.chatId) !== bound ||
+            (executionId && this.sessionAgent.get(executionId) !== msg.agentId)))
+            throw new Error("The conversation execution changed during the model catalog read.");
           client.send(
             createMessage({
               type: "AGENT_AGENT_INITIALIZED",

@@ -8,7 +8,7 @@
 //     default is now `composer-2.5`, and any pick is validated against the
 //     live `Cursor.models.list()` catalog (resolveValidModelId) before spawn.
 
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
 
@@ -113,13 +113,88 @@ beforeEach(() => {
   listSpy.mockReset().mockResolvedValue({ items: [] });
   // Default: no catalog discovered → adapter uses the static default and
   // trusts picks (the SDK still validates server-side).
-  modelsListSpy.mockReset().mockResolvedValue([]);
+  modelsListSpy.mockReset().mockRejectedValue(new Error("catalog unavailable"));
   storeGetSpy.mockReset().mockResolvedValue(null);
   usageSpy.mockReset().mockResolvedValue(EMPTY_AGENT_USAGE);
   runSeq = 0;
 });
+afterEach(() => { vi.restoreAllMocks(); });
 
 const TEXT: ContentBlock[] = [{ type: "text", text: "hi" } as ContentBlock];
+
+describe("Cursor account catalog freshness", () => {
+  it("expires a hung discovery flight and ignores its late answer after retry", async () => {
+    vi.useFakeTimers();
+    let late!: (models: unknown[]) => void;
+    modelsListSpy.mockImplementationOnce(() => new Promise(resolve => { late = resolve; }))
+      .mockResolvedValue([{ id: "composer-2.5" }]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test" } });
+      expect(createSpy).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await adapter.initialize();
+      expect(modelsListSpy).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await adapter.initialize();
+      await vi.waitFor(() => expect(modelsListSpy).toHaveBeenCalledTimes(2));
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.[0]?.value).toBe("composer-2.5"));
+      late([{ id: "stale-model" }]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect((await adapter.initialize())._meta?.models?.[0]?.value).toBe("composer-2.5");
+    } finally { await adapter.dispose(); vi.useRealTimers(); }
+  });
+  it("refreshes once after 15 minutes through a live session and retains the confirmed snapshot", async () => {
+    let now = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    modelsListSpy.mockResolvedValue([{ id: "composer-2.5" }]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "composer-2.5" } });
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.[0]?.value).toBe("composer-2.5"));
+      let release!: (models: unknown[]) => void;
+      modelsListSpy.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+      now = 15 * 60 * 1_000;
+      await Promise.all([adapter.initialize(), adapter.initialize()]);
+      await vi.waitFor(() => expect(modelsListSpy).toHaveBeenCalledTimes(2));
+      expect((await adapter.initialize())._meta?.models?.[0]?.value).toBe("composer-2.5");
+      release([{ id: "grok-4.6" }]);
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.[0]?.value).toBe("grok-4.6"));
+      expect(modelsListSpy).toHaveBeenCalledTimes(2);
+      expect(createSpy).toHaveBeenCalledTimes(1);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("replaces a populated list with an empty answer after expiry", async () => {
+    let now = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    modelsListSpy.mockResolvedValue([{ id: "composer-2.5" }]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test" } });
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.length).toBe(1));
+      now = 15 * 60 * 1_000;
+      modelsListSpy.mockResolvedValue([]);
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta).toMatchObject({ models: [], modelsAccountScoped: true }));
+      await adapter.initialize();
+      expect(modelsListSpy).toHaveBeenCalledTimes(2);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("drops a local account snapshot immediately when credentials change before another session starts", async () => {
+    let account = "a";
+    modelsListSpy.mockResolvedValue([{ id: "composer-2.5" }]);
+    const adapter = new CursorSdkAdapter({ ...makeCtx(), authenticationContext: () => account });
+    try {
+      await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_a" } });
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.length).toBe(1));
+      account = "b";
+      expect((await adapter.initialize())._meta?.models).toBeUndefined();
+      expect(modelsListSpy).toHaveBeenCalledTimes(1);
+      expect(createSpy).toHaveBeenCalledTimes(1);
+    } finally { await adapter.dispose(); }
+  });
+});
 
 describe("cursorModelStateFingerprint (pure)", () => {
   it("uses the process salt when pseudonymizing account credentials", async () => {
@@ -1754,6 +1829,7 @@ describe("CursorSdkAdapter — recovers when Cursor has retired the picked model
       attempt.mockRejectedValueOnce(new Error(REJECTION)).mockResolvedValue(fakeAgent);
       const adapter = new CursorSdkAdapter(makeCtx());
       try {
+        modelsListSpy.mockRejectedValueOnce(new Error("catalog unavailable")).mockResolvedValue([{ id: "composer-2.5" }]);
         const options = { cwd: "/tmp/proj", env: { ...ENV, ZEROS_REQUIRE_EXACT_MODEL: "1" } };
         await expect(stage === "newSession"
           ? adapter.newSession(options)
@@ -1761,6 +1837,7 @@ describe("CursorSdkAdapter — recovers when Cursor has retired the picked model
           .rejects.toBeDefined();
         expect(attempt).toHaveBeenCalledTimes(1);
         expect(sendSpy).not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(modelsListSpy).toHaveBeenCalledTimes(2));
       } finally { await adapter.dispose(); }
     },
   );
@@ -1793,7 +1870,9 @@ describe("CursorSdkAdapter — recovers when Cursor has retired the picked model
       const rejection = new Error("Cannot use this model: grok-4.6. Available models: composer-2.5.");
       if (failure === "throw") sendSpy.mockRejectedValueOnce(rejection);
       else sendSpy.mockResolvedValueOnce({ ...makeRun("error"), wait: async () => ({ status: "error", error: { code: "invalid_model", message: rejection.message } }) });
+      modelsListSpy.mockResolvedValue([{ id: "composer-2.5" }]);
       await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).rejects.toBeDefined();
+      await vi.waitFor(() => expect(modelsListSpy).toHaveBeenCalledTimes(2));
       expect(sendSpy).toHaveBeenCalledTimes(1);
       expect(sendSpy.mock.calls[0][1].model).toMatchObject({ id: "grok-4.6", params: expect.arrayContaining([{id: "effort", value: "xhigh"}]) });
     } finally { await adapter.dispose(); }

@@ -2,8 +2,8 @@
 // initialize forever" rule. Cursor (the @cursor/sdk) discovers its live model
 // catalog only after the agent boots, so its first initialize can be
 // model-less; the gateway must re-read the adapter on subsequent requests
-// until `_meta.models` lands, so the picker reflects the user's real account
-// instead of the bundled list.
+// until `_meta.models` lands. Refreshable account catalogs keep consulting the
+// adapter's cheap cache; the adapter owns the network TTL and single flight.
 
 import { describe, expect, it } from "vitest";
 
@@ -14,6 +14,11 @@ const init = (meta: Record<string, unknown> | null | undefined): InitializeRespo
   ({ _meta: meta } as unknown as InitializeResponse);
 
 describe("shouldRepollInitialize", () => {
+  it("consults a refreshable account catalog even after the first or empty answer", () => {
+    for (const models of [[], [{ value: "gpt-6-astra", label: "Astra" }]]) {
+      expect(shouldRepollInitialize(init({ modelsDynamic: true, modelsAccountScoped: true, models }))).toBe(true);
+    }
+  });
   it("does NOT re-poll a non-dynamic adapter (claude/codex use the catalog families)", () => {
     expect(shouldRepollInitialize(init({ modelEnvVar: "ANTHROPIC_MODEL" }))).toBe(false);
     expect(shouldRepollInitialize(init(null))).toBe(false);

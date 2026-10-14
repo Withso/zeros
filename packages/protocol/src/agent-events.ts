@@ -1287,6 +1287,10 @@ export interface AgentInitializeMetadata {
   models?: AdvertisedModel[];
   modelEnvVar?: string;
   modelsDynamic?: boolean;
+  /** The complete live account list, including an authoritative empty answer.
+   * Absent retains the legacy capability-overlay behavior. This is discovery
+   * metadata only; it never grants provider or cloud execution authority. */
+  modelsAccountScoped?: boolean;
   /** Compatibility for existing agent-owned metadata. Known product keys stay
    * explicitly typed above; new keys should become typed before consumers use
    * them for product behavior. */

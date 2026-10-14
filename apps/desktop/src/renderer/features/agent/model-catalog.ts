@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────────────────
-// Model catalog — CURATED display + live capability overlay
+// Model catalog — curated display, live capabilities and account eligibility
 // ──────────────────────────────────────────────────────────
 //
 // The composer model picker shows a CURATED list we control: the per-family
@@ -8,12 +8,11 @@
 // models appear, in what order, with what labels.
 //
 // Live agent discovery (Claude `query.supportedModels()`, Codex `model/list`,
-// Cursor's SDK model list, surfaced via `initialize._meta.models`) does NOT
-// drive the displayed list and does NOT NAME anything — it only OVERLAYS each
-// curated model's CAPABILITIES (effort ladder + fast support + selectability)
-// when we can match it, and powers `pnpm models:verify`. So the picker is
-// complete, stable, and controllable, while per-model effort/fast stay accurate
-// to what the live agent supports.
+// Cursor's SDK model list, surfaced via `initialize._meta.models`) overlays
+// capabilities without renaming curated rows. A complete account-scoped list
+// also controls eligibility: absent models stay visible but disabled, including
+// when the account returns an empty list. Older unscoped discovery keeps its
+// capability-only policy. Saved exact IDs are never replaced by this metadata.
 //
 // MODEL NAMES ARE CURATED, FOR EVERY AGENT. Each provider ships its own
 // marketing name for the same wire id (the Claude CLI calls `claude-opus-5[1m]`
@@ -24,7 +23,7 @@
 //
 // Resolution per agent family:
 //   1. CURATED_FAMILIES[family]                         (drives DISPLAY + NAMES)
-//      └─ overlaid with live _meta.models capabilities  (effort + fast, never names)
+//      └─ live capabilities and, when scoped, eligibility (never names)
 //   2. If a family has no curated entries → fall back to whatever the agent
 //      advertised live (so an unmapped/3rd-party agent still shows something —
 //      there is no curated name to protect for a model we never listed).
@@ -1043,6 +1042,10 @@ function extractMetaModels(
   const valid = meta.models
     .map(coerceModelOption)
     .filter((m): m is ModelOption => m !== null);
+  if (meta.modelsAccountScoped === true) {
+    // An incomplete/malformed snapshot cannot make account eligibility claims.
+    return valid.length === meta.models.length ? valid : null;
+  }
   return valid.length > 0 ? valid : null;
 }
 
@@ -1187,8 +1190,13 @@ export function modelsForAgent(
     liveBySlug.set(normalizeModelSlug(family, m.value), m);
   return curated.flatMap((c) => {
     const live = liveBySlug.get(normalizeModelSlug(family, c.value));
-    if (live?.selectable === false) return [];
     if (c.liveRequired && (!live || live.selectable !== true)) return [];
+    if (initialize?._meta?.modelsAccountScoped === true) {
+      // Keep saved identities and curated labels visible. A complete account
+      // list is authoritative about eligibility, including an empty list.
+      return [live ? overlayLiveCapabilities(c, live) : { ...c, selectable: false }];
+    }
+    if (live?.selectable === false) return [];
     if (!live) return [c];
     return [overlayLiveCapabilities(c, live)];
   });

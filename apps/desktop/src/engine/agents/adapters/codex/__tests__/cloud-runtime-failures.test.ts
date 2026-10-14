@@ -97,6 +97,7 @@ function installProcess(replies: Record<string, unknown> = {}, rejectMethod?: st
 }
 function installCloud(cwd="/srv/zeros/workspace", credentialKind: "codex-chatgpt" | "codex-api-key" = "codex-chatgpt") {
   const lease = {
+    signal: new AbortController().signal,
     credentialKind,
     admission: { provider: "codex", model: "gpt-5.6-sol" }, assertLive: vi.fn(), validate: vi.fn(async () => {}),
     codexAuth: vi.fn(() => credentialKind === "codex-chatgpt"
@@ -182,6 +183,90 @@ afterEach(async () => {
 });
 
 describe("Codex VM-only auth storage", () => {
+  it.each([
+    ["initialize", "initialize"], ["executor", "executor_start"],
+    ["account/login/start", "provider_login"], ["environment/add", "environment_add"],
+    ["environment/info", "environment_info"], ["environment/status", "environment_ready"],
+  ])("records a payload-free failure at the exact %s stage", async (method, step) => {
+    const native = installProcess({}, method);
+    installCloud();
+    if (method === "executor") harness.executor.mockRejectedValueOnce(new Error("private-executor-secret"));
+    const lines: string[] = [];
+    const runtime = await bootCodexAppServerRuntime({ cwd: "/srv/zeros/workspace", clientInfo: { name: "Zeros-test", version: "1" },
+      onStderr: line => lines.push(line) }).catch(() => null);
+    if (runtime) {
+      await runtime.request("thread/start", {}).catch(() => {});
+      await runtime.dispose();
+    }
+    const prefix = "[codex-app-server] cloud_stage ";
+    const trace = lines.filter(line => line.startsWith(prefix)).map(line => JSON.parse(line.slice(prefix.length)));
+    expect(trace).toContainEqual(expect.objectContaining({ step, status: "failed", elapsedMs: expect.any(Number) }));
+    expect(trace.find(event => event.step === step)?.status).toBe("started");
+    for (const event of trace) expect(Object.keys(event).sort()).toEqual(["attempt", "elapsedMs", "status", "step"]);
+    expect(new Set(trace.map(event => event.attempt)).size).toBe(1);
+    expect(JSON.stringify(trace)).not.toMatch(/private-|synthetic-|ws:\/\/|file:\/\/|accessToken|accountId|\/srv/);
+    expect(native.frames.filter(frame => frame.method === method)).toHaveLength(method === "executor" ? 0 : 1);
+  });
+
+  it("traces the existing environment-add timeout without widening or retrying it", async () => {
+    vi.useFakeTimers();
+    const native = installProcess({}, undefined, { holdMethod: "environment/add" });
+    installCloud();
+    const lines: string[] = [];
+    const result = bootCodexAppServerRuntime({ cwd: "/srv/zeros/workspace", clientInfo: { name: "Zeros-test", version: "1" },
+      onStderr: line => lines.push(line) }).catch(error => error);
+    await native.waitFor("environment/add");
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(await result).toMatchObject({ code: "cloud_provider_start_environment_setup_failed" });
+    expect(lines.some(line => line.includes('"step":"environment_add"') && line.includes('"status":"failed"'))).toBe(true);
+    expect(native.frames.filter(frame => frame.method === "environment/add")).toHaveLength(1);
+  });
+
+  it.each([false, true])("keeps stage observers inert and emits no cloud trace for Local (cloud=%s)", async cloud => {
+    installProcess();
+    if (cloud) installCloud();
+    const onStderr = vi.fn(() => { throw new Error("observer failure"); });
+    const runtime = await bootCodexAppServerRuntime({ cwd: "/srv/zeros/workspace", clientInfo: { name: "Zeros-test", version: "1" }, onStderr });
+    await runtime.dispose();
+    if (cloud) expect(onStderr).toHaveBeenCalled();
+    else expect(onStderr).not.toHaveBeenCalled();
+  });
+
+  it("discovers cloud models on the admitted execution without publishing them to another account", async () => {
+    installProcess({ ...startupReplies, "model/list": { data: [{ id: "gpt-5.6-sol" }] } });
+    installCloud();
+    const { adapter } = installAdapter();
+    const created = await adapter.newSession({ executionId: "catalog-execution", authenticationContext: "", cwd: "/srv/zeros/workspace" });
+    expect(created.initialize._meta).toMatchObject({ modelsAccountScoped: true, models: [{ value: "gpt-5.6-sol" }] });
+    expect((await adapter.initialize())._meta?.models).toBeUndefined();
+    expect((await adapter.initializeSession("catalog-execution"))._meta?.models).toEqual(created.initialize._meta?.models);
+    expect((await adapter.initializeSession("another-execution"))._meta?.models).toBeUndefined();
+  });
+  it.each([false, true])("waits for a cloud catalog refresh and rechecks disposal (dispose=%s)", async dispose => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const controls: { holdMethod?: string } = {};
+    const native = installProcess({ ...startupReplies, "model/list": { data: [{ id: "gpt-5.6-sol" }] } }, undefined, controls);
+    installCloud();
+    const { adapter } = installAdapter();
+    try {
+      await adapter.newSession({ executionId: "refresh-execution", cwd: "/srv/zeros/workspace" });
+      controls.holdMethod = "model/list";
+      now += 15 * 60 * 1_000;
+      let settled = false;
+      const refresh = adapter.initializeSession("refresh-execution").then(result => { settled = true; return result; });
+      const frame = await native.waitFor("model/list", 1);
+      await new Promise(resolve => setImmediate(resolve));
+      const returnedBeforeDiscovery = settled;
+      if (dispose) await adapter.disposeSession("refresh-execution");
+      native.send({ jsonrpc: "2.0", id: frame.id, result: { data: [] } });
+      const result = await refresh;
+      expect(returnedBeforeDiscovery).toBe(false);
+      if (dispose) expect(result._meta?.models).toBeUndefined();
+      else expect(result._meta).toMatchObject({ models: [], modelsAccountScoped: true });
+      expect(native.frames.filter(frame => frame.method === "model/list")).toHaveLength(2);
+    } finally { clock.mockRestore(); }
+  });
   it("keeps cloud credentials in the original physical file store even without a kernel boundary",async()=>{
     installProcess(startupReplies);installCloud();const runtime=await boot();
     expect(vi.mocked(spawnStdioAgent).mock.calls.at(-1)?.[0].args).toEqual(expect.arrayContaining([
