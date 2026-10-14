@@ -535,9 +535,12 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   Settings navigation or a cached connected hint alone cannot resolve it.
   Legacy raw authentication prose remains stored but does not appear as a second
   error or an assistant answer. Copied transcripts retain the explicit status.
-- Claude usage limits are one product notice below the provider turn's output,
-  including across steering and autonomous background replies. Keep each
-  budget's latest native state and prioritize any remaining limit warning over
+- Claude usage limits are one plain inbetween status message below the provider
+  turn's latest output, before the next prompt, including across steering and
+  autonomous background replies. Align it with transcript text: no tinted banner,
+  border, horizontal inset or action button. Keep actual blocked-turn failures
+  in their existing action notice. Keep each budget's latest native state and
+  prioritize any remaining limit warning over
   another budget's recovery. Typed notices and legacy native feedback IDs share
   this projection; ordinary model quotations keep their prose. Status changes
   use new immutable notice IDs, while the stable code selects the current state.
@@ -673,7 +676,7 @@ Edit/Write tools onto models that do not advertise them.
 For Claude, keep the [installed SDK event inventory](claude-event-coverage.md)
 and its exhaustive regression map current. Meaningful hook, permission, plugin,
 and runtime feedback uses bounded, replay-safe inbetween messages; usage limits
-use the one tail notice described above. Keep
+use the one plain tail message described above. Keep
 child notices under authoritative native ownership, omit private login output
 and routine diagnostic logs, and never turn advisory feedback into a tool or
 successful result. Thinking estimates indicate activity and steering consumption,

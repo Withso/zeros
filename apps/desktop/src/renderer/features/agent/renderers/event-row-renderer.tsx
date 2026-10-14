@@ -50,7 +50,7 @@ import {
 import { nativeAgentWait, toolRecord } from "./native-tool-presentation";
 import { pendingChecksMessage } from "./tool-pending-checks";
 import { toolPresentationReady } from "./tool-readiness";
-import { AgentNotice, AGENT_NOTICE_ACTION } from "../agent-notice";
+import { AgentNotice, AgentNoticeText, AGENT_NOTICE_ACTION } from "../agent-notice";
 import { getLang } from "./syntax";
 import type { Renderer, RendererContext } from "./types";
 
@@ -128,7 +128,9 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
     }
     if (message.kind === "error_notice" && message.code !== "api_retry") {
       if (message.code?.startsWith("claude-rate-limit:"))
-        return <AgentNotice message={message.message} data-provider-usage-notice="" />;
+        return <div role="status" className="text-fg2 py-1 text-sm" data-provider-usage-notice="">
+          <AgentNoticeText message={message.message} />
+        </div>;
       if (message.code === "claude-chrome-setup") return (
         <AgentNotice message={message.message} data-chrome-setup-notice="">
           {ctx.openBrowserSettings ? <Button type="button" variant="ghost" size="sm" className={cn(AGENT_NOTICE_ACTION, "mt-1")} onClick={ctx.openBrowserSettings}>

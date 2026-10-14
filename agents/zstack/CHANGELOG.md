@@ -20,6 +20,10 @@ Lessons already encoded:
   one tail notice across background replies and steering. Test the shared reducer,
   saved native message IDs and copied transcripts (`zstack-review`, Claude
   feedback and renderer regressions; case `claude-usage-status-through-history`).
+- **Deduplication does not choose a visual surface.** Informational usage status
+  is plain inbetween transcript text; authentication and blocked-turn failures
+  use action notices. Browser checks now verify the usage row has no banner
+  background, inset, border or action (`ui-smoke-claude-runtime-ui.mjs`).
 - **Agent lifecycle records need one presentation owner.** A native child can
   emit both an Agent group and task lifecycle records. Join by exact child identity
   before hiding a duplicate; preserve unmatched records and unrepresented failures

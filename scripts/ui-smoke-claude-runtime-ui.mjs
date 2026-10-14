@@ -59,7 +59,16 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
     const report = [...element.querySelectorAll("p")].find(p => p.textContent.includes("The conversation continued."));
     return !!report && !!(report.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING);
   });
-  check("Recovered Claude turns show Signed in, three real Agent groups and one usage banner after the output", usageAtTail);
+  check("Recovered Claude turns show Signed in, three real Agent groups and one usage message after the output", usageAtTail);
+  const inlineUsage = await recovery.locator("[data-provider-usage-notice]").evaluate(element => {
+    const style = getComputedStyle(element);
+    return !element.closest("[data-agent-notice]") &&
+      style.backgroundColor === "rgba(0, 0, 0, 0)" &&
+      style.borderTopWidth === "0px" && style.borderBottomWidth === "0px" &&
+      style.paddingLeft === "0px" && style.paddingRight === "0px" &&
+      element.querySelector("button") === null;
+  });
+  check("Usage feedback is a plain inbetween message with no banner surface or action", inlineUsage);
   await recovery.getByRole("button", { name: "Show settled recovery", exact: true }).click();
   await expect(recovery.locator("[data-provider-usage-notice]")).toHaveCount(1);
   await expect(recovery).not.toContainText("No conversation found");
