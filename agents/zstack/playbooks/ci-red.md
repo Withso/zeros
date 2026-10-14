@@ -21,5 +21,8 @@
 - **A flake twice** becomes a deterministic fix PR. Reproduce it under load,
   find the race (often teardown, not the asserted behavior) and fix the
   fixture without weakening the contract.
+- **Serializable capacity races:** a losing writer can either observe committed capacity or exhaust its
+  bounded serialization retries before that commit. Hold both commit schedules and assert their distinct
+  errors plus the final capacity bound. Don't rely on database victim selection or accept any error.
 - **Main red:** the CI incident bot opens a `fix(ci): restore …` PR. A green
   rerun at the same head resolves it; still land the deterministic fix.

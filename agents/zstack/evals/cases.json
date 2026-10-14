@@ -108,6 +108,15 @@
       "symptom": "Named Computers introduced boat-computer:<name>@sha256:<digest> image references. The VM setup helper accepted only boat-template:, so every workspace from a named Computer failed setup_settings_invalid.",
       "rule": "zstack-review \u203a Compatibility: when a producer adds a new identifier form, update every consumer's parser in the same change (search for the old prefix).",
       "check": "pnpm exec vitest run scripts/__tests__/cloud-workspace-setup-helper.test.ts"
+    },
+    {
+      "id": "warm-context-capacity-commit-order",
+      "kind": "replay",
+      "area": "access-authority",
+      "fixedBy": "pr:478",
+      "symptom": "The concurrent last-slot warm-context test expected only a capacity 429, but bounded SERIALIZABLE retries can exhaust before the winner commits and correctly return transient contention 503.",
+      "rule": "playbooks/ci-red.md: control both commit schedules, distinguish observed committed capacity from retry exhaustion, and keep the exact final capacity bound.",
+      "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/agent-boot-executions.integration.test.ts -t 'does not oversubscribe the last context slot'"
     }
   ]
 }
