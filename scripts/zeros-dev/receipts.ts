@@ -1,5 +1,5 @@
 import { constants, type Stats } from "node:fs";
-import { lstat, mkdir, open, rename, unlink, rmdir, readdir } from "node:fs/promises";
+import { lstat, mkdir, open, rename, unlink, readdir } from "node:fs/promises";
 import { createHash, createPrivateKey, createPublicKey, randomUUID, sign, verify } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
@@ -8,6 +8,7 @@ import { EvidenceEventSchema } from "./evidence";
 import { HourlySchema } from "./hourly-contract";
 import type { Fixture } from "./config";
 import { ZerosDevError } from "./errors";
+import { acquireRunLock } from "./run-lock";
 
 const uuid=z.string().uuid(),digest=z.string().regex(/^[a-f0-9]{64}$/),positive=z.number().int().positive().safe();
 export const SourceSchema=z.object({revision:z.string().regex(/^[a-f0-9]{40}$/).nullable(),dirty:z.boolean()}).strict();
@@ -83,13 +84,7 @@ export class RunStore {
     if(ids.length>500)throw bad();for(const id of ids)await this.read(id);return ids.sort();
   }
   async withRun<T>(id:string,source:Source|null,work:(handle:RunHandle)=>Promise<T>):Promise<T>{
-    const file=this.file(id);await this.prepare();const lock=`${file}.lock`,deadline=performance.now()+(this.options.lockTimeoutMs??5000);
-    let held:Stats;
-    for(;;){
-      try{await mkdir(lock,{mode:0o700});held=await lstat(lock);privateEntry(held,true);break;}
-      catch(error){if((error as NodeJS.ErrnoException).code!=="EEXIST")throw bad();privateEntry(await lstat(lock),true);
-        if(performance.now()>=deadline)throw new ZerosDevError("receipt_busy");await new Promise(resolve=>setTimeout(resolve,25));}
-    }
+    const file=this.file(id);await this.prepare();const lock=await acquireRunLock(`${file}.lock`,this.options.lockTimeoutMs??5000);
     try{
       let run:Run;
       let saved:string|undefined;
@@ -100,7 +95,7 @@ export class RunStore {
       }
       const handle:RunHandle={run,save:async()=>{
         const parsed=RunSchema.safeParse(handle.run);if(!parsed.success||parsed.data.runId!==id||parsed.data.fixtureSha256!==this.fixtureHash||parsed.data.deviceId!==this.credential.deviceId)throw bad();
-        if(!same(held,await lstat(lock)))throw bad();
+        await lock.check();
         let before:Stats|undefined;
         if(saved!==undefined){
           if(JSON.stringify(await this.read(id))!==saved)throw bad();
@@ -115,7 +110,7 @@ export class RunStore {
           output=await open(temporary,constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);
           privateEntry(await output.stat());
           await output.writeFile(bytes);await output.sync();await output.close();output=undefined;
-          if(!same(held,await lstat(lock)))throw bad();
+          await lock.check();
           if(before&&!same(before,await lstat(file)))throw bad();
           await rename(temporary,file);saved=JSON.stringify(parsed.data);
           const parent=await open(this.directory,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
@@ -123,6 +118,6 @@ export class RunStore {
         }finally{await output?.close();await unlink(temporary).catch(error=>{if(error.code!=="ENOENT")throw bad();});}
       }};
       return await work(handle);
-    }finally{if(same(held,await lstat(lock)))await rmdir(lock);}
+    }finally{await lock.release();}
   }
 }

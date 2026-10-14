@@ -245,6 +245,17 @@ receipt corruption; product authorization remains mandatory. Writes preserve
 the owned lock inode and refuse a changed saved receipt. Never copy only the
 receipt to a different account/device to recover it.
 
+Each run lock records its owner's PID, Linux boot ID, PID namespace and process
+start identity before a command begins. On Linux, the next invocation can
+recover a killed owner's lock only when that same host/namespace proves the
+process is gone or its PID has been reused. A live owner or reclaimer stays
+busy, regardless of age. Recovery retains the signed receipt and operation
+keys; retry with the same run UUID. Different or unverifiable host identities,
+non-Linux hosts, and old empty locks (including an interruption before owner
+publication) require manual confirmation of the absent holder. No age-based
+lock removal is allowed. This recovery applies only to run locks; the separate
+canonical credential-file lock retains its existing manual recovery procedure.
+
 `cleanup --run <run-uuid>` and `cleanup --all` preview the signed local allowlist;
 `--apply` invokes ordinary product deletion. The current name must still match
 the signed `zd-` name, in addition to the exact org, creator, workspace,
