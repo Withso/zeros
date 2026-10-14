@@ -302,7 +302,19 @@ valid nonempty ID. Symlinks, hard links, FIFOs and malformed IDs are rejected.
 
 Base sanitation preserves `.zeros-persist` and the bind roots, including the
 shared `files/repos` inode; it clears only empty-base private contents. Template
-sanitation may remove empty projection/staging directories, which boot recreates.
+sanitation preserves private directory identities and truncates ordinary files
+in place: a deleted entry can retain its ancestor bytes in an incremental save.
+Known generated markers get explicit empty files even when absent in the live
+tree. Boot treats only validated zero-byte epoch/boot-intent markers as missing
+and accepts only ordinary empty descendants in projection directories. Malformed
+nonempty data, aliases, hard links, special files and nested projection mounts
+remain invalid. The active runtime descriptor still requires fresh publication.
+
+The new protected helper and bootstrap must be qualified together in a new
+base; a control-plane release does not replace old pinned helper bytes. The
+[qualification sequence](../../../docs/cloud-workspace/computer-template-builds.md#qualifying-a-base-with-empty-state-sanitation)
+covers direct-base and runtime-image builds, exact stopped/named saved-tree
+proofs, cold clones, interrupted publication and supported-agent startup.
 
 ## Boat restore and early-boot dependencies
 
@@ -362,7 +374,7 @@ restore the old snapshot size. To detect it, compare a recent template's
 snapshot tree (`GET /snapshots/<id>/tree`) with its base and runtime contents.
 
 Boat also installs its own root SSH key on every machine during boot. Builder
-sanitation removes it before capture, the kit checks the saved snapshot tree
+sanitation empties it before capture, the kit checks the saved snapshot tree
 for credential files, and a cold boot from the snapshot accepts only the
 provider's reinstalled root key.
 

@@ -943,6 +943,45 @@ class Bootstrap:
         require(re.fullmatch(rb"[0-9a-f]{32}\n?", raw) is not None and raw.strip() != b"0" * 32, "base_compatibility")
         return sha(raw)
 
+    def require_empty_directory(self, directory):
+        """Sanitized snapshot entries may remain, but none may carry data.
+
+        Keep aliases, hard links, special files and nested mounts invalid.
+        This policy is for private/projection trees, never runtime admission.
+        """
+        mount_id = self.mounts.mount_id(directory)
+        count = 0
+
+        def identity(info):
+            return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink, info.st_size
+
+        def visit(parent, depth=0):
+            nonlocal count
+            require(depth <= 128, "base_compatibility")
+            names = sorted(os.listdir(parent))
+            for name in names:
+                count += 1
+                require(count <= 262_144, "base_compatibility")
+                before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                is_directory = stat.S_ISDIR(before.st_mode)
+                require(is_directory or stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size == 0,
+                        "base_compatibility")
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC |
+                             (os.O_DIRECTORY if is_directory else 0), dir_fd=parent)
+                try:
+                    require(identity(os.fstat(fd)) == identity(before) and self.mounts.mount_id(fd) == mount_id, "base_compatibility")
+                    if is_directory: visit(fd, depth + 1)
+                    require(identity(os.fstat(fd)) == identity(before) and
+                            identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity(before), "base_compatibility")
+                finally:
+                    os.close(fd)
+            require(sorted(os.listdir(parent)) == names, "base_compatibility")
+
+        try:
+            visit(directory)
+        except OSError as error:
+            raise Failure("base_compatibility") from error
+
     def clear_persistence_residue(self, target, root_fd):
         """Delete only uncovered capture residue; the backing tree is authority."""
         self.mounts.unmounted(target)  # Refuse nested mounts before any deletion.
@@ -1076,12 +1115,12 @@ class Bootstrap:
                                 for point in ("state", "managed-settings", "home"):
                                     with self.data_directory(source_fd, point, self.uid, self.gid, 0o755, True) as view:
                                         if point == "home":
-                                            require(set(os.listdir(view)) <= {"agent", "capture"}, "base_compatibility")
+                                            self.require_empty_directory(view)
                                             for actor in ("agent", "capture"):
                                                 with self.data_directory(view, actor, self.uid, self.gid, 0o755, True) as empty:
-                                                    require(not os.listdir(empty), "base_compatibility")
+                                                    self.require_empty_directory(empty)
                                         else:
-                                            require(not os.listdir(view), "base_compatibility")
+                                            self.require_empty_directory(view)
                             for parent, child, account, child_mode in (("home", "agent", "agent", 0o755),
                                     ("home", "capture", "capture", 0o700), ("state", "workspaces", "engine", 0o700)):
                                 if name == parent:
@@ -1520,6 +1559,7 @@ class Bootstrap:
             raw = self.read(FACADE + "/disk-epoch", 32, 0o600)
         except FileNotFoundError:
             return 0
+        if raw == b"": return 0
         require(re.fullmatch(rb"[0-9]{1,18}\n", raw) is not None, "pointer_publish")
         return int(raw)
 
@@ -1612,10 +1652,12 @@ class Bootstrap:
                 # Publish the epoch decision first. Re-running this boot after
                 # death at either subsequent write cannot advance it twice.
                 try:
-                    intent = strict_json(self.read(FACADE + "/sessions/boot.json", 256, 0o600), "pointer_publish")
-                    shape(intent, ("bootId", "epoch"), check="pointer_publish")
-                    text_match(intent["bootId"], UUID, "pointer_publish")
-                    integer(intent["epoch"], 1, 10**18 - 1, "pointer_publish")
+                    raw = self.read(FACADE + "/sessions/boot.json", 256, 0o600)
+                    intent = None if raw == b"" else strict_json(raw, "pointer_publish")
+                    if raw != b"":
+                        shape(intent, ("bootId", "epoch"), check="pointer_publish")
+                        text_match(intent["bootId"], UUID, "pointer_publish")
+                        integer(intent["epoch"], 1, 10**18 - 1, "pointer_publish")
                 except FileNotFoundError:
                     intent = None
                 if intent is None or intent["bootId"] != boot_id:

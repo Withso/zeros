@@ -5,8 +5,6 @@ sys.dont_write_bytecode = True
 import importlib.util
 import json
 import os
-from pathlib import Path
-import shutil
 
 
 def sanitize():
@@ -28,38 +26,23 @@ def sanitize():
 def sanitize_base(app):
     assert json.loads(app.read('/etc/zeros/cloud-worker.json', 4096, 0o444))['version'] == 4
     assert app.current() is None and app.current('previous') is None
-    assert set(os.listdir('/opt/zeros-infra')) <= {'.staging'} and not os.listdir('/opt/zeros-infra/.staging')
-    assert not os.listdir('/srv/zeros/runtime-installs')
+    assert set(os.listdir(app.path('/opt/zeros-infra'))) <= {'.staging'} and not os.listdir(app.path('/opt/zeros-infra/.staging'))
+    assert not os.listdir(app.path('/srv/zeros/runtime-installs'))
 
-    def remove(target):
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-        elif target.is_dir():
-            shutil.rmtree(target)
-
-    # Keep the backing root and bind sources themselves. In particular, repos
-    # is also mounted at /srv/zeros/repos; unlinking its source strands the bind.
-    for child in Path('/srv/zeros/files').iterdir():
-        if child.name not in ('repos', '.zeros-setup', 'state', 'home', 'managed-settings'):
-            remove(child)
-    for directory in ('/srv/zeros/files/repos', '/srv/zeros/files/.zeros-setup', '/srv/zeros/setup', '/srv/zeros/log', '/srv/zeros/state/workspaces',
-                      '/srv/zeros/home/agent', '/srv/zeros/home/capture', '/opt/zeros/sessions'):
-        for child in Path(directory).iterdir():
-            remove(child)
-    assert set(os.listdir('/srv/zeros/state')) <= {'workspaces'}
-    for name in ('state', 'managed-settings', 'home/agent', 'home/capture'):
-        assert not os.listdir('/srv/zeros/files/' + name)
-    private = ('.ssh', '.aws', '.azure', '.config/gh', '.config/gcloud', '.config/cursor', '.claude', '.codex', '.cursor',
-               '.git-credentials', '.netrc', '.npmrc', '.pypirc', '.bash_history', '.zsh_history')
-    for home in ('/root', '/home/user'):
-        for name in private:
-            remove(Path(home) / name)
-        for child in Path(home).glob('.env*'):
-            remove(child)
-    for child in Path('/tmp').glob('zeros-v2-test-base-*'):
-        remove(child)
-    remove(Path('/root/zeros-base-v4-builds'))
-    app.unlink('/run/zeros/active-runtime.json')
+    # app.base() verified this protected helper before sanitation. Use the
+    # same descriptor-bound overwrite policy as installed Computer builds.
+    spec = importlib.util.spec_from_file_location('computer_build', app.path('/opt/zeros-bootstrap/computer-build.py'))
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    state = helper.ComputerBuild(app.root, uid=app.uid, gid=app.gid)
+    state.empty_private_state()
+    # The base has no selected repositories. Keep bind-source identities while
+    # clearing their contents; Computer sanitation preserves its selected repos.
+    state.clear_directory('/srv/zeros/files/repos')
+    for child in app.path('/tmp').glob('zeros-v2-test-base-*'):
+        state.empty_path('/' + str(child.relative_to(app.root)))
+    state.empty_path('/root/zeros-base-v4-builds')
+    os.sync()
     # Provider-managed OS SSH identity and tools stay under Boat's lifecycle;
     # no workspace or account login grants survive the image capture.
     return {'schema': 'zeros.base-sanitation/v1', 'baseCompatibilityId': app.compat_id, 'clean': True}

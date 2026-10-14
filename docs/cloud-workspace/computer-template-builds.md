@@ -163,7 +163,7 @@ installation connection after minting and revokes every minted token in a
 helper only on SSH stdin, then Git through a private root-owned Unix socket and
 fixed askpass. They never enter a Git URL, argv, environment variable or file.
 Each clone fetches depth one at the selected ref, records its exact SHA, removes
-credential helpers and hooks, and ends at
+credential helpers, disables template hooks, and ends at
 `/srv/zeros/files/repos/<owner>/<name>`, owned by UID/GID 10001 under the frozen
 base's legacy setup contract. The root broker adopts mutable checkout ownership
 to 10003 after positive old-engine drain, before new runtime attestation. The repo root and
@@ -218,13 +218,42 @@ quarantine the shared image. Both source paths still require the complete
 baseline and post-install checks.
 
 Sanitation verifies integrity and repository SHAs again, normalizes Git config
-and repo ownership, stops the idle host and removes private homes, setup and
+and repo ownership, stops the idle host and empties private homes, setup and
 admission state, logs/journals, settings, sessions and machine-specific state.
-It preserves B4's home/state directory ownership and modes, runtime receipts,
-installed software and selected repo trees. Epoch contents and session payloads
+Ordinary private files are truncated in place after descriptor and pathname
+validation; directory identities, ownership and modes survive. No cleanup of
+these paths depends on unlinking an entry: an incremental saved disk can retain
+the ancestor's bytes after a live deletion. Symlinks, hard links and special
+files fail sanitation without following or truncating their targets.
+It preserves runtime receipts, installed software and selected repo trees.
+Epoch contents and session payloads
 are explicit generated-metadata exclusions; their parents and facade pointers
 remain protected. Provider-managed OS SSH identity stays under Boat's lifecycle,
 matching B4. No publication renames a pre-existing directory (contracts §22).
+
+The sanitizer materializes empty `disk-epoch`, `sessions/boot.json`,
+`sessions/reconciliation.json`, `active-runtime.json`, `random-seed` and
+`timesync/clock` files even if a known name is absent from the live tree.
+`computer-build` and the private home trees retain empty directories and files.
+Bootstrap recognizes only metadata-validated zero bytes as an absent epoch or
+boot intent; malformed nonempty content, including JSON `null`, remains invalid.
+Projection directories may retain only ordinary empty descendants. Links,
+special files, nested mounts and nonempty descendants still prevent boot.
+Empty cached files do not grant runtime, workspace or account admission.
+
+A live walk cannot discover arbitrary filenames deleted before sanitation.
+The exact saved-tree proof is therefore still required, independently of the
+helper's clean receipt; any inherited private bytes keep the Computer unready.
+Repository normalization remains separate from private-state sanitation.
+Visible ordinary `.git/hooks` files are emptied in place; aliases and special
+files fail sanitation. The normalized local Git config persists
+`core.hooksPath=/dev/null`, so ordinary Git in a restored clone cannot execute
+an inherited hook that was already absent from the live sanitation tree.
+The saved-tree private-state proof deliberately excludes repository content;
+this setting prevents hook execution, not recovery or erasure of unknown
+inherited repository bytes. An intentional workspace hook installation must
+explicitly replace this local setting. Local checkouts outside Computer builds
+are unaffected.
 
 For contracts §23, B10 binds `/srv/zeros/{files,state,home}` from
 `/home/user/.zeros-persist/*` on every boot/restore. C3 continues to address the
@@ -232,7 +261,71 @@ logical paths and never deletes or empties `/home/user/.zeros-persist`; it
 cleans its explicit private targets through those binds and retains repository
 data. B10 also owns the workspace-time `/srv/zeros/repos` bind outside a build
 and regeneration of the empty machine-id after restore. C3 keeps emptying
-machine-id during sanitation and does not change base boot files.
+machine-id during sanitation. `/etc/machine-id` and a regular
+`/var/lib/dbus/machine-id` retain their existing atomic empty-file replacement;
+the latter's provider-owned symlink is deliberately left intact. These are not
+claims that every OS identity or arbitrary private path is scrubbed.
+
+## Qualifying a base with empty-state sanitation
+
+Changing the protected bootstrap or Computer helper changes the generated
+`bc1-` compatibility ID. Deploying the control plane cannot update a helper
+already pinned in a base, runtime image or Computer. Qualify a newly built base
+and its runtime pairing before selecting it for new builds. Existing workspace
+pins, Local Personal and organization-local runtimes are unaffected.
+
+The operator qualification requires an approved Alpha budget and disposable
+resource names. Local tests do not qualify the provider's incremental capture,
+Ubuntu services or real mount lifecycle. Keep the old qualified pins available
+through the following gates:
+
+1. Run the retained Python security/recovery suite and the adjacent base,
+   Computer-helper, projection and fresh-base tests. Preserve the incremental
+   union, pre-truncation race, empty-marker crash-point, malformed-state and
+   projection rejection tests. Never loosen the saved-tree proof to pass.
+2. Use the base kit's existing `runtime-base-v4 live-check` flow with a fresh
+   state directory and unused name. Record source commit, protected-file hashes,
+   compatibility ID, builder/cold-clone evidence and snapshot size. Verify that
+   both `bootstrap.py` and `computer-build.py` are the newly qualified bytes.
+   Re-run the base's sanitize/verify sequence to check idempotence.
+3. Qualify a runtime against that exact new base, then produce a new runtime
+   image for the same pair. Build one Computer directly from the base and one
+   from that runtime image, using an approved synthetic repository and recipe.
+   Both paths must reach the same helper and compatibility ID; an old image is
+   not evidence for the new base.
+4. For each path, record a pre-sanitation saved generation containing synthetic
+   marker/private state, then the build's exact completed stop and named saved
+   tree. Every visible sanitized file must remain ordinary and zero bytes;
+   protected executables, repository content and directory modes must match.
+   Exercise nested private home files, projection leftovers, job records and
+   the six known markers above. Retained unknown private entries, aliases or
+   invalid metadata fail qualification. Inspect the synthetic repositories'
+   saved `.git/config` and hook inventory separately: normal origin, disabled
+   hooks, no credential helpers, and explicit empty replacements for visible
+   pre-sanitation hooks. The private-state proof does not certify these paths.
+   Do not read real credential contents.
+5. Cold-clone each qualified Computer through workspace creation. Check a fresh
+   boot ID, one epoch publication per boot, a freshly published active descriptor
+   and valid persistence bindings. Repeat boot and stop/resume; no parser may
+   admit an empty file as a credential or descriptor. Run create/send/stop/resume
+   with each supported agent and confirm that retained empty HOME/config files
+   do not block initial setup. Verify random-seed regeneration and timesync
+   service health on the Ubuntu clone. Synthetic tests separately cover death
+   after boot intent, epoch and boot-ID publication without double increments.
+   Exercise ordinary Git checkout and commit without the helper's `-c` flags,
+   with an approved synthetic inherited-hook sentinel: no hook may execute,
+   and repository contents/SHA, ownership and normal Git operations must work.
+   Explicitly installing a workspace hook must remain possible after replacing
+   the template's local `core.hooksPath` setting.
+6. Admit new allocations only after both source paths, exact saved proofs and
+   cold clones pass. A failed proof retains the save intent and artifact for
+   investigation. If rollout fails, stop selecting the new base/runtime images
+   for new claims and use previously qualified pins; never relabel a new
+   sanitized artifact with an older helper or rewrite an existing workspace pin.
+
+Record only closed results, counts, hashes and approved resource receipts in
+private qualification evidence. Disposable resource cleanup is an explicit
+operator step after the evidence is retained.
 
 ## Integration and remaining enablement
 
