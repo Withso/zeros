@@ -8,6 +8,7 @@ import {
   KNOWN_KEYS,
   SECRET_KEYS,
   checkFile,
+  checkZerosDevValues,
   formatResults,
   parseAgentEnv,
   redact,
@@ -85,6 +86,39 @@ function network(overrides: Record<string, Reply> = {}, railwayEnvironment = "al
 const byId = (results: Array<{ id: string }>) => Object.fromEntries(results.map((r) => [r.id, r]));
 
 describe("agent credential check", () => {
+  it("redacts every zeros-dev secret before fixtures can be added", () => {
+    const secrets = {
+      ZEROS_DEV_PASSWORD: 'synthetic-"password"-\\value',
+      ZEROS_DEV_ACCESS_TOKEN: "synthetic-access-token",
+      ZEROS_DEV_REFRESH_TOKEN: "synthetic-refresh-token",
+      ZEROS_DEV_DEVICE_PRIVATE_KEY_B64: "synthetic-device-private-key",
+      ZEROS_DEV_ALPHA_READONLY_DATABASE_URL: "postgres://fixture:synthetic@localhost/test",
+    };
+    for (const [key, value] of Object.entries(secrets)) {
+      expect(SECRET_KEYS).toContain(key);
+      expect(redact(`provider echoed ${value}`, secrets)).not.toContain(value);
+      expect(redact(JSON.stringify({ detail: value }), secrets)).not.toContain(
+        JSON.stringify(value).slice(1, -1),
+      );
+    }
+  });
+
+  it("does not leak short password values in rejected input diagnostics", () => {
+    expect(redact("fixture: abc", { ZEROS_DEV_PASSWORD: "abc" })).toBe("fixture: [redacted]");
+  });
+
+  it("redacts the decoded device key as well as its storage envelope", () => {
+    const privateKey="synthetic-private-device-seed";
+    const raw=JSON.stringify({version:1,privateKey});
+    const values={ZEROS_DEV_DEVICE_PRIVATE_KEY_B64:Buffer.from(raw).toString("base64")};
+    expect(redact(`${raw} ${privateKey}`,values)).not.toContain(privateKey);
+  });
+
+  it("recognizes the pinned zeros-dev identity and session metadata", () => {
+    for(const key of ["WORKOS_SUBJECT","ACCOUNT_ID","EMAIL","ORGANIZATION_ID","REPOSITORY","REPOSITORY_ID","GITHUB_INSTALLATION_ID","SESSION_ID","TOKEN_EXPIRES_AT"])
+      expect(KNOWN_KEYS).toContain(`ZEROS_DEV_${key}`);
+  });
+
   it("is wired as pnpm agent:check", () => {
     const pkg = JSON.parse(readFileSync("package.json", "utf8")) as { scripts: Record<string, string> };
     expect(pkg.scripts["agent:check"]).toBe("node scripts/agent-env-check.mjs");
@@ -142,6 +176,7 @@ describe("agent credential check", () => {
     expect(status).toEqual({
       cloudflare: "ok", r2: "ok", planetscale: "ok", boat: "ok", railway: "ok", workos: "ok",
       "github-app": "ok", "github-ci": "ok", openai: "skip", claude: "skip", cursor: "ok",
+      "zeros-dev": "skip",
     });
     const output = redact(formatResults(results, ".env.agent"), VALUES);
     for (const key of SECRET_KEYS) if (VALUES[key]) expect(output).not.toContain(VALUES[key]);
@@ -193,5 +228,16 @@ describe("agent credential check", () => {
     for (const key of SECRET_KEYS) expect(template.values.get(key)).toBe("");
     expect(() => execFileSync("git", ["check-ignore", "-q", ".env.agent.example"])).toThrow();
     expect(execFileSync("git", ["check-ignore", ".env.agent"]).toString().trim()).toBe(".env.agent");
+  });
+
+  it("checks zeros-dev fixture presence locally without authenticating or echoing a password",()=>{
+    const values={ZEROS_DEV_WORKOS_SUBJECT:"user_fixture",ZEROS_DEV_ACCOUNT_ID:"11111111-1111-4111-8111-111111111111",ZEROS_DEV_EMAIL:"fixture@example.test",
+      ZEROS_DEV_ORGANIZATION_ID:"22222222-2222-4222-8222-222222222222",ZEROS_DEV_REPOSITORY:"test-owner/test-repo",ZEROS_DEV_REPOSITORY_ID:"1234",
+      ZEROS_DEV_GITHUB_INSTALLATION_ID:"33333333-3333-4333-8333-333333333333",ZEROS_DEV_PASSWORD:"synthetic-private-password"};
+    expect(checkZerosDevValues({})).toMatchObject({status:"skip"});
+    expect(checkZerosDevValues(values)).toMatchObject({status:"ok",detail:expect.stringContaining("live login not checked")});
+    for(const changes of [{ZEROS_DEV_EMAIL:""},{ZEROS_DEV_ACCOUNT_ID:"bad"},{ZEROS_DEV_REPOSITORY:"../foreign"},{ZEROS_DEV_PASSWORD:""}])
+      expect(checkZerosDevValues({...values,...changes})).toMatchObject({status:"fail"});
+    expect(JSON.stringify(checkZerosDevValues({...values,ZEROS_DEV_EMAIL:"invalid"}))).not.toContain(values.ZEROS_DEV_PASSWORD);
   });
 });

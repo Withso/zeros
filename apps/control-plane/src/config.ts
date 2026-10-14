@@ -26,6 +26,7 @@ import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
 import { loadCloudRuntimeConfig, type CloudRuntimeConfig } from "./cloud-workspaces/runtime-config.js";
 import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
+import { loadZerosDevAuthConfig, type ZerosDevAuthConfig } from "./zeros-dev-auth-config.js";
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
 import { loadWorkerPollIntervals, type WorkerPollIntervals } from "./worker-polling-config.js";
@@ -324,6 +325,8 @@ export type Config = {
   auth: AuthBackendConfig;
   /** Null in legacy Auth0 mode. WorkOS secrets live only on Railway. */
   workos: WorkOSBackendConfig | null;
+  /** Fixed Alpha test identity; omitted/disabled everywhere else. No password. */
+  zerosDevAuth?: ZerosDevAuthConfig | null;
   /** Exact, environment-bound invitation landing page (without a query). */
   inviteLinkBase: string;
   port: number;
@@ -1654,6 +1657,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,
+    zerosDevAuth: loadZerosDevAuthConfig(env, deploymentChannel, auth),
     inviteLinkBase,
     port: e.PORT,
     ...(e.HOST ? { host: e.HOST } : {}),

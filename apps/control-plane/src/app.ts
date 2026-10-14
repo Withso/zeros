@@ -51,6 +51,9 @@ import {
 } from "./workos-desktop-revocation.js";
 import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
 import { createDevAuthConfigurationRoutes } from "./dev-auth-configuration.js";
+import { createZerosDevAuthRoutes, zerosDevAuthEnabled, ZEROS_DEV_AUTH_PATH, type ZerosDevAuthDependencies } from "./zeros-dev-auth.js";
+import { DatabaseZerosDevAuthRepository } from "./zeros-dev-auth-repository.js";
+import { ZerosDevWorkOSPasswordProvider } from "./zeros-dev-auth-workos.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import {
   createCloudWorkspaceInternalRoutes,
@@ -90,6 +93,7 @@ import { cloudAgentCredentialKeys } from "./cloud-workspaces/agent-credentials.j
 import { createRuntimePublicationRoutes, createRuntimeStaffRoutes, RUNTIME_STAFF_PATH, type RuntimePublicationDependencies } from "./cloud-workspaces/runtime-publication-routes.js";
 
 export type CreateAppDependencies = {
+  zerosDevAuth?: ZerosDevAuthDependencies;
   requestCostObserver?: (cost: RequestDatabaseCost) => void | Promise<void>;
   runtimePublication?: RuntimePublicationDependencies;
   releaseCanaries?: DatabaseReleaseCanaryService;
@@ -156,6 +160,9 @@ export function createApp(
   if (dependencies.requestCostObserver) {
     Object.defineProperty(app, "requestCostObserverStatus", { value: timing.costObserverStatus });
   }
+  // A disabled test-only endpoint stays absent, including during maintenance.
+  // Stale settings on another channel must not reveal an authentication path.
+  if (!zerosDevAuthEnabled(config)) app.all(ZEROS_DEV_AUTH_PATH, c => c.notFound());
   // Readiness stays public even during maintenance; /healthz remains liveness.
   app.route("/", createReleaseIdentityRoutes(config, pool, dependencies));
   if (config.databaseMaintenanceMode) {
@@ -306,6 +313,12 @@ export function createApp(
 
   // Dev discovery exposes only the anonymous public-client configuration.
   app.route("/", createDevAuthConfigurationRoutes(config));
+  if (!pendingMigration && zerosDevAuthEnabled(config) && config.auth.provider === "workos" && config.workos) {
+    app.route("/", createZerosDevAuthRoutes(config, dependencies.zerosDevAuth ?? {
+      repository: new DatabaseZerosDevAuthRepository(pool),
+      provider: new ZerosDevWorkOSPasswordProvider(config.auth, config.workos),
+    }));
+  }
 
   // Railway owns the complete WorkOS browser/desktop authentication boundary:
   // Hosted AuthKit authorization, authorization-code exchange, encrypted
