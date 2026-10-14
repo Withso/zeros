@@ -24,6 +24,7 @@ gates: `pnpm typecheck`, `pnpm lint`, `pnpm check:ui`,
 | Migrations, packaging, protocol or deploy paths | the matching `check:*` scripts in `package.json` |
 | Runtime dependencies or packaged assets | `pnpm check:licenses` |
 | Engine lifecycle | `pnpm smoke:engine`, on macOS only |
+| Control-plane concurrency, locks or transactions | Label the PR `ci:control-plane-db`. PR CI is path-selected, and without the label the full CP database lane runs only after merge, where a timing race turns `main` red. |
 
 CI's full root and control-plane suites are the authority. Locally, run the
 adjacent suites plus the gates above; don't wait on a full local run before

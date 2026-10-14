@@ -40,4 +40,12 @@ describe("zstack pack", () => {
       expect.stringMatching(/fixedBy must be/), expect.stringMatching(/area is required/), expect.stringMatching(/unknown fields extra/),
     ]));
   });
+
+  it("accepts a pending fixedBy only when explicitly allowed", () => {
+    const pending = { schema: "zeros.zstack-evals/v1", cases: [
+      { id: "pending-case", kind: "replay", area: "a", fixedBy: "pending", symptom: "s", rule: "r", check: "c" },
+    ] };
+    expect(validateEvalCases(pending)).toEqual([expect.stringMatching(/fixedBy must be a full commit SHA or pr:<number>$/)]);
+    expect(validateEvalCases(pending, { allowPending: true })).toEqual([]);
+  });
 });
