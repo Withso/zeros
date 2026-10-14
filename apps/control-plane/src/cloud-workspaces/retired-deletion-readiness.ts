@@ -20,12 +20,11 @@ export function stalledProviderDeletionPredicate(waitingStagesParameter: "$1" | 
         AND NOT coalesce(operation.deletion_stage,'') = ANY(${waitingStagesParameter}::text[])))`;
 }
 
-/** Release readiness only. Boat-accepted erasure of a retired generation or a
- * deleting/deleted workspace is provider work Zeros cannot advance. Health,
- * alerts, capacity and deletion verification keep reporting it. A current
- * generation on any other workspace, missing receipt, foreign binding, failed
- * intent or other stalled resource keeps readiness closed. The exported name
- * and release-identity label remain compatible with the original deferral. */
+/** Classifies the existing v1 retired-Boat deferral label. The CP release
+ * projection independently excludes cleanup alerts, without granting this
+ * label to a current live generation, missing receipt, foreign binding or
+ * failed intent. Health, capacity and deletion verification retain their
+ * full inventory; this read never completes or forgives deletion work. */
 export async function canDeferRetiredBoatDeletions(tx: Tx): Promise<boolean> {
   const result = await tx.query<{ eligible: boolean }>(`WITH stalled_deletions AS (
     SELECT intent.workspace_id,intent.generation,intent.org_id,operation.provider,operation.account_scope,

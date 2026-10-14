@@ -53,6 +53,9 @@ d("cloud workspace operational health", () => {
     });
     expect(JSON.stringify(degraded)).not.toContain(fixture.workspaceId);
     expect(JSON.stringify(degraded)).not.toContain(fixture.organizationId);
+    await expect(service.readForRelease()).resolves.toMatchObject({
+      health: degraded, controlPlaneReady: true, stalledDeletionsDeferred: false,
+    });
   });
 
   it("ignores setup-owned lease signals while setup execution is paused", async () => {
@@ -120,9 +123,12 @@ d("cloud workspace operational health", () => {
     });
     expect(JSON.stringify(degraded)).not.toContain(objectKey);
     expect(JSON.stringify(degraded)).not.toContain(fixture.organizationId);
+    await expect(service.readForRelease()).resolves.toMatchObject({
+      health: degraded, controlPlaneReady: true, stalledDeletionsDeferred: false,
+    });
   });
 
-  it("reports a repeatedly failing published-source cleanup", async () => {
+  it.each(["cleanup_pending", "target_cleanup_pending"] as const)("reports %s rotation cleanup while scoping release eligibility", async state => {
     const fixture = await seedReadyCloudWorkspace(pool);
     const blobId = "71717171-7171-4171-8171-717171717171";
     const sourceKey =
@@ -146,9 +152,9 @@ d("cloud workspace operational health", () => {
       `INSERT INTO workspace_blob_rotation_jobs (
          blob_id, org_id, target_key_version, source_object_key,
          target_object_key, state, attempt_count, error_code, reserved_bytes
-       ) VALUES ($1, $2, 2, $3, $4, 'cleanup_pending', 3,
+       ) VALUES ($1, $2, 2, $3, $4, $5, 3,
                  'object_store_delete_failed', 16)`,
-      [blobId, fixture.organizationId, sourceKey, targetKey],
+      [blobId, fixture.organizationId, sourceKey, targetKey, state],
     );
     const service = new DatabaseCloudWorkspaceHealthService(pool, {
       setupExecutionEnabled: false,
@@ -159,6 +165,77 @@ d("cloud workspace operational health", () => {
     await expect(service.read()).resolves.toMatchObject({
       operationalState: "degraded",
       reasons: ["object_rotation_failed"],
+    });
+    await expect(service.readForRelease()).resolves.toMatchObject({
+      controlPlaneReady: true,
+      health: { operationalState: "degraded", reasons: ["object_rotation_failed"] },
+    });
+    await pool.query("UPDATE workspace_blob_rotation_jobs SET state='failed',completed_at=now() WHERE blob_id=$1", [blobId]);
+    await expect(service.readForRelease()).resolves.toMatchObject({
+      controlPlaneReady: false,
+      health: { operationalState: "degraded", reasons: ["object_rotation_failed"] },
+    });
+  });
+
+  it("keeps a provider deletion wait visible without blocking a CP repair release", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    await pool.query(`INSERT INTO workspace_deletion_jobs
+      (workspace_id,org_id,requested_by,idempotency_key,state,created_at)
+      VALUES($1,$2,$3,'health-provider-wait','waiting_for_provider',now()-interval '25 hours')`,
+    [fixture.workspaceId, fixture.organizationId, fixture.userId]);
+    const service = new DatabaseCloudWorkspaceHealthService(pool, {
+      setupExecutionEnabled: true, durabilityEnabled: true, outboxDeliveryEnabled: false,
+    });
+    await expect(service.readForRelease()).resolves.toMatchObject({
+      controlPlaneReady: true, stalledDeletionsDeferred: false,
+      health: { operationalState: "degraded", reasons: ["deletion_provider_stalled"] },
+    });
+    expect((await pool.query("SELECT state FROM workspace_deletion_jobs WHERE workspace_id=$1", [fixture.workspaceId])).rows)
+      .toEqual([{ state: "waiting_for_provider" }]);
+  });
+
+  it("distinguishes deletion lifecycle stalls from stalled stop work in the same inventory", async () => {
+    const deleting = await seedReadyCloudWorkspace(pool);
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents
+      (workspace_id,generation,org_id,operation,idempotency_key,request_sha256,affects_workspace,state,created_at,updated_at,next_attempt_at)
+      VALUES($1,1,$2,'delete','health-delete-stall',decode(repeat('31',32),'hex'),true,'queued',
+        now()-interval '26 hours',now()-interval '16 minutes',now()-interval '16 minutes')`,
+    [deleting.workspaceId, deleting.organizationId]);
+    const service = new DatabaseCloudWorkspaceHealthService(pool, {
+      setupExecutionEnabled: true, durabilityEnabled: true, outboxDeliveryEnabled: false,
+    });
+    await expect(service.readForRelease()).resolves.toMatchObject({
+      controlPlaneReady: true, stalledDeletionsDeferred: false,
+      health: { operationalState: "degraded", reasons: ["lifecycle_stalled", "deletion_intent_stalled"] },
+    });
+    const stopping = await seedReadyCloudWorkspace(pool);
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents
+      (workspace_id,generation,org_id,operation,idempotency_key,request_sha256,affects_workspace,state,updated_at,next_attempt_at)
+      VALUES($1,1,$2,'stop','health-stop-stall',decode(repeat('32',32),'hex'),true,'queued',
+        now()-interval '16 minutes',now()-interval '16 minutes')`,
+    [stopping.workspaceId, stopping.organizationId]);
+    await expect(service.readForRelease()).resolves.toMatchObject({
+      controlPlaneReady: false,
+      health: { operationalState: "degraded", reasons: ["lifecycle_stalled", "deletion_intent_stalled"] },
+    });
+  });
+
+  it("retains a critical engine lease blocker alongside orphan cleanup", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    await pool.query(`INSERT INTO cloud_workspace_provider_orphans(provider,provider_resource_id,first_seen_at)
+      VALUES('boat','health-orphan-fixture',now()-interval '2 hours')`);
+    const service = new DatabaseCloudWorkspaceHealthService(pool, {
+      setupExecutionEnabled: true, durabilityEnabled: true, outboxDeliveryEnabled: false,
+    });
+    const cleanup = await service.readForRelease();
+    expect(cleanup).toMatchObject({ controlPlaneReady: true,
+      health: { operationalState: "degraded", reasons: ["provider_orphans_stalled"] } });
+    expect(await service.read()).toEqual(cleanup.health);
+    await pool.query(`UPDATE cloud_workspace_engine_instances SET last_heartbeat_at=now()-interval '2 minutes',
+      lease_expires_at=now()-interval '1 minute' WHERE id=$1`, [fixture.engineInstanceId]);
+    await expect(service.readForRelease()).resolves.toMatchObject({
+      controlPlaneReady: false,
+      health: { operationalState: "degraded", reasons: ["engine_lease_expired", "provider_orphans_stalled"] },
     });
   });
 });

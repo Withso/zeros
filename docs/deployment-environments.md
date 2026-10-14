@@ -1304,6 +1304,31 @@ The public boolean does not replace per-credential native launch qualification.
 
 ### Retired Boat deletions do not block release readiness
 
+Control-plane release eligibility is scoped to the CP artifact. Cleanup-only
+reasons (`deletion_jobs_failed`, `deletion_provider_stalled`,
+`deletion_intent_stalled`, `object_deletion_stalled`, `provider_orphans_stalled`)
+remain operational alerts and do not prevent a CP repair release. The two
+combined reasons require a finer read: `lifecycle_stalled` is cleanup only
+when every stalled intent is a delete; `object_rotation_failed` is cleanup only
+when there is no failed rotation and only source/target cleanup is pending.
+These classifications and the full health reasons come from one query in the
+same read-only, repeatable-read transaction.
+
+Stalled non-delete lifecycle work, failed rotations, setup/engine leases,
+access revocation, outbox delivery, blocked idle stops, durability and all
+compute/billing signals still close readiness. Unknown reasons and unreadable
+health fail closed. Workers, setup execution and durability must remain enabled;
+source/schema, migration, signing and selected worker/runtime/template proofs
+retain their own release and admission gates. Local and organization-local
+workspaces and disabled cloud channels do not use this projection.
+
+The v1 `cloud.state="healthy"` field describes CP **release eligibility**.
+For cleanup outside the legacy Boat label below, the identity does not add a
+new deferral kind or operational-state field: `/healthz` and in-service alerts
+continue to expose the full degraded health and reason codes. No health reason
+or resource identity is copied into the release receipt. Missing qualification
+remains false; cleanup eligibility cannot manufacture artifact approval.
+
 Once Boat accepts a deletion (a `bdop_*` receipt), erasing its stored data is
 Boat's background work. This release deferral covers both retired, non-current
 generations and generations of a workspace whose status is `deleting` or
@@ -1311,7 +1336,7 @@ generations and generations of a workspace whose status is `deleting` or
 otherwise unfinished does not close release readiness on any channel; no
 operator exception, allowlist or expiry is involved.
 
-In one read-only, repeatable-read system transaction, the API requires
+For the existing `deferredReadiness` label, the API requires
 `deletion_intent_stalled` to be the sole health reason and checks **every**
 stalled intent and provider journal. Each must have a Boat deletion receipt, an
 observing delete intent with `provider_deletion_pending` or
@@ -1321,8 +1346,8 @@ no-error intent allowance remains valid only for retired non-current
 generations. A missing or mismatched record, failed/queued intent, a current
 generation on a live workspace, unbound journal, other provider, or another
 health reason (including `deletion_jobs_failed` or `deletion_provider_stalled`)
-keeps publication blocked. Workers, setup execution and durability must remain
-enabled.
+refuses that legacy label. CP eligibility still follows the scoped projection
+above; this does not weaken the label's provider-receipt proof.
 
 While deferred, `/v1/release-identity` retains `cloud.ready=true` and the v1
 `cloud.state="healthy"` **release-readiness** posture, and explicitly adds

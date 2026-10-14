@@ -280,11 +280,15 @@ target-bound approval, and change nothing until rerun unchanged with
 | `health_query_failed` | The aggregate health query itself failed. | Check database connectivity, pool saturation and whether a migration is pending. |
 
 [Retired Boat deletions do not block release readiness](../deployment-environments.md#retired-boat-deletions-do-not-block-release-readiness)
-also covers accepted receipts for deleting/deleted workspaces while Boat
-finishes erasing them. That changes publication
-admission only: this health reason, operator alerts, reserved storage and
-deletion verification remain active. A sandbox lookup returning 404 is not a
-physical-deletion receipt.
+describes the separate CP release projection: deletion and orphan cleanup stay
+as alerts while a CP repair can ship. Lifecycle stalls qualify only when all
+stalled intents are deletes; rotation cleanup qualifies only without a failed
+rotation. Every other health reason remains a release blocker. The existing
+v1 retired-Boat label still requires its original accepted-receipt inventory.
+Operational health, alerts, reserved storage, cleanup workers and deletion
+verification remain active for every case. A ready release receipt does not
+claim these resources are healthy or deleted; a sandbox lookup returning 404
+is not a physical-deletion receipt.
 
 ## Recovery drills and measured limits
 

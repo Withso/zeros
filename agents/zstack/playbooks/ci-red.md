@@ -42,3 +42,10 @@
   observed completion, never with a sleep or a manual worker tick.
 - **Main red:** the CI incident bot opens a `fix(ci): restore …` PR. A green
   rerun at the same head resolves it; still land the deterministic fix.
+- **Cleanup blocking a repair release:** scope the readiness projection to the
+  artifact being released. Preserve operational alerts and exact artifact
+  qualification. Classify combined lifecycle/rotation signals in one consistent
+  read; test cleanup alone, cleanup plus each critical class, unknown reasons
+  and unchanged v1 receipt parsing before adjusting the gate. Release tests use
+  `--config scripts/release/vitest.config.ts`; confirm the matched file count,
+  since a mixed command can pass while a path outside its include list is ignored.
