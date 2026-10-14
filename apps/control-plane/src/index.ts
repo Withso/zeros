@@ -76,11 +76,11 @@ if (config.development && "generation" in config.development) {
 }
 const emailConfig = loadEmailConfig();
 
-// LISTEN is session-scoped and must bypass transaction poolers. The optional
-// dedicated connection uses runtime privileges, never migration credentials.
-const listenerPool = config.databaseListenUrl
-  ? createPool(config.databaseListenUrl, {maxConnections: 1, applicationName: "zeros-security-listener"})
-  : pool;
+// LISTEN is session-scoped and must bypass transaction poolers. All consumers
+// share one disposable session, in an isolated pool using runtime privileges.
+const listenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
+  maxConnections: 2, applicationName: "zeros-notifications",
+});
 const securityEventBroker = new PostgresSecurityEventBroker(listenerPool);
 const workosProvider =
   config.auth.provider === "workos" && config.workos
@@ -500,17 +500,10 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       workosEnabled: config.auth.provider === "workos",
     });
     // Served by the API process itself, independent of background workers:
-    // waiting engines are released by a dedicated LISTEN session.
+    // waiting engines share the dedicated notification session.
     const checkpointHints = new CloudEngineCheckpointHints(pool);
-    const checkpointHintListenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
-      maxConnections: 1, applicationName: "zeros-checkpoint-hint-listener",
-    });
-    const stopCheckpointHints = startCloudEngineCheckpointHintNotifications(checkpointHintListenerPool, checkpointHints);
+    stopCloudCheckpointHintNotifications = startCloudEngineCheckpointHintNotifications(listenerPool, checkpointHints);
     closeCloudCheckpointHints = () => checkpointHints.close();
-    stopCloudCheckpointHintNotifications = async () => {
-      try { await stopCheckpointHints(); }
-      finally { await checkpointHintListenerPool.end(); }
-    };
     cloudWorkspaceInternalSetupService = {
       ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos",undefined,
         {computer:computerV2,updateRepositorySetupScript:createRepositorySetupScriptWriter(pool)}, {
@@ -659,13 +652,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       cloud.provider === "boat" &&
       cloud.boat
     ) {
-      const retentionListenerPool = config.databaseListenUrl
-        ? createPool(config.databaseListenUrl, {
-            maxConnections: 1,
-            applicationName: "zeros-template-retention-listener",
-          })
-        : pool;
-      const stop = new CloudComputerTemplateRetentionWorker(pool, {
+      stopCloudComputerTemplateRetentionWorker = new CloudComputerTemplateRetentionWorker(pool, {
         accountScope: cloud.boat.accountScope,
         billingOrg: cloud.boat.billingOrg,
         journal: new DatabaseBuilderVmOperationStore(pool, cloud.boat.accountScope),
@@ -674,14 +661,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
           billingOrg: cloud.boat.billingOrg,
           timeoutMs: 45_000,
         }),
-      }).start(retentionListenerPool);
-      stopCloudComputerTemplateRetentionWorker = async () => {
-        try {
-          await stop();
-        } finally {
-          if (retentionListenerPool !== pool) await retentionListenerPool.end();
-        }
-      };
+      }).start(listenerPool);
     }
     console.log(
       `[control-plane] cloud workspace reconciliation enabled (${provider.name}/${cloud.target}); setup=${setupWorker ? "enabled" : "paused"}; durability=${blobService ? "enabled" : "disabled"}; outbox=${outboxWorker ? "enabled" : "queued"}`,
@@ -745,14 +725,7 @@ const server = serve({ fetch: app.fetch, port: config.port, ...(config.host ? { 
     if (workosSync) workerNotifications.workos = () => workosSync.notify();
     // Security/directory publication also runs with cloud disabled. One
     // dedicated disposable session serves the handlers that actually started.
-    const workerListenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
-      maxConnections: 1, applicationName: "zeros-cloud-worker-listener",
-    });
-    const stopNotifications = startCloudWorkerNotifications(workerListenerPool, workerNotifications);
-    stopCloudWorkerNotifications = async () => {
-      try { await stopNotifications(); }
-      finally { await workerListenerPool.end(); }
-    };
+    stopCloudWorkerNotifications = startCloudWorkerNotifications(listenerPool, workerNotifications);
   }
   console.log(`[control-plane] listening on :${info.port}`);
 });
@@ -811,7 +784,7 @@ function shutdown(signal: string): void {
   deadline.unref();
   server.close(() => {
     void backgroundStopped
-      .then(async () => { await pool.end(); if (listenerPool !== pool) await listenerPool.end(); })
+      .then(async () => { await pool.end(); await listenerPool.end(); })
       .finally(() => {
         clearTimeout(deadline);
         process.exit(0);

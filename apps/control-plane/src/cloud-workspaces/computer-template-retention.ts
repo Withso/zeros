@@ -1,6 +1,7 @@
 import type pg from "pg";
 import { z } from "zod";
 import { withSystemTx, type Tx } from "../db.js";
+import { postgresNotificationSubscription } from "../postgres-notifications.js";
 import { BOAT_RESOURCE_ID_PATTERN, type BoatApiClient } from "./boat-client.js";
 import type { BuilderVmOperation } from "./cloud-builder-vm-store.js";
 import { lockCloudComputerOrganization } from "./computer-identity.js";
@@ -488,44 +489,22 @@ export class CloudComputerTemplateRetentionWorker {
     };
     const timer = setInterval(() => run(), this.options.intervalMs ?? 60_000);
     timer.unref();
-    const listener = listenerPool
-      .connect()
-      .then(async (client) => {
-        const onNotification = (notice: pg.Notification) => {
-          if (
-            notice.channel === COMPUTER_TEMPLATE_RETENTION_CHANNEL &&
-            z.string().uuid().safeParse(notice.payload).success
-          )
-            run(notice.payload);
-        };
-        const onError = () =>
-          (this.options.logger ?? console).warn(
-            "[computer-template-retention] notifications unavailable; periodic sweep remains enabled",
-          );
-        client.on("notification", onNotification);
-        client.on("error", onError);
-        try {
-          await client.query(`LISTEN ${COMPUTER_TEMPLATE_RETENTION_CHANNEL}`);
-        } catch {
-          onError();
-        }
-        return async () => {
-          client.removeListener("notification", onNotification);
-          client.removeListener("error", onError);
-          await client
-            .query(`UNLISTEN ${COMPUTER_TEMPLATE_RETENTION_CHANNEL}`)
-            .catch(() => undefined);
-          client.release(true);
-        };
-      })
-      .catch(() => async () => undefined);
+    const listener = postgresNotificationSubscription(listenerPool, {
+      channels: [COMPUTER_TEMPLATE_RETENTION_CHANNEL],
+      onNotification: notice => {
+        if (z.string().uuid().safeParse(notice.payload).success) run(notice.payload);
+      },
+      onReady: () => run(),
+      onUnavailable: () => (this.options.logger ?? console).warn(
+        "[computer-template-retention] notifications unavailable; periodic sweep remains enabled",
+      ),
+    });
+    void listener.start().catch(() => {});
     run();
     return async () => {
       this.stopping = true;
       clearInterval(timer);
-      await (
-        await listener
-      )();
+      await listener.stop();
       await this.ticking;
     };
   }

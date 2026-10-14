@@ -11,6 +11,7 @@ import {
 } from "vitest";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { postgresNotificationSubscription } from "../postgres-notifications.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { forceDeletionRequestPurgeByStaff } from "../deletion-lifecycle.js";
 import { BoatApiClient } from "./boat-client.js";
@@ -720,7 +721,9 @@ d("Cloud Computer template retention", () => {
       expect((await state(template)).state).toBe("retired");
   });
 
-  it("scans past fifty uncertain deletions and retries them on later sweeps", async () => {
+  // This exercises 53 real journals and 153 provider attempts across three
+  // sweeps. It is a pagination/retry contract, not a five-second latency SLA.
+  it("scans past fifty uncertain deletions and retries them on later sweeps", { timeout: 30_000 }, async () => {
     const versions = await templates(53);
     const blocked = versions.slice(0, 50);
     for (const template of versions) journal = await realJournal(template);
@@ -760,6 +763,71 @@ d("Cloud Computer template retention", () => {
     for (const template of versions)
       expect((await state(template)).state).toBe("retired");
     expect(await tick()).toBe(0);
+  });
+
+  it("coalesces startup, hints and listener reconnect during an in-flight sweep", async () => {
+    const [oldest, active] = await templates(2);
+    for (const template of [oldest!, active!]) journal = await realJournal(template);
+    await pool.query("UPDATE cloud_computer_v2_heads SET active_build_id=$2 WHERE org_id=$1",
+      [fixture.organizationId, active!.id]);
+    worker = makeWorker();
+    const listener = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1, connectionTimeoutMillis: 1_000 });
+    const clients: pg.PoolClient[] = [];
+    listener.on("acquire", connection => clients.push(connection));
+    let entered!: () => void, release!: () => void, notified!: () => void, reconnected!: () => void;
+    const deleting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const notice = new Promise<void>(resolve => { notified = resolve; });
+    const readyAgain = new Promise<void>(resolve => { reconnected = resolve; });
+    let ready = 0, deletingNow = 0, maximumDeleting = 0;
+    deleteHook = async id => {
+      deletingNow++;
+      maximumDeleting = Math.max(maximumDeleting, deletingNow);
+      try {
+        if (id === oldest!.resource) { entered(); await gate; }
+        live.delete(id);
+        return Response.json({ ok: true, operation: {
+          id: `bdop_${"a".repeat(32)}`, kind: "sandbox", targetId: id,
+        } });
+      } finally { deletingNow--; }
+    };
+    const observation = postgresNotificationSubscription(listener, {
+      channels: [COMPUTER_TEMPLATE_RETENTION_CHANNEL],
+      onReady: () => { if (++ready === 2) reconnected(); },
+      onNotification: () => notified(),
+    });
+    const observing = observation.start();
+    const sweeps = vi.spyOn(worker, "tick");
+    const stop = worker.start(listener);
+    try {
+      await Promise.all([observing, deleting]);
+      expect(clients).toHaveLength(1);
+      // Make another template eligible after discovery, while the first
+      // provider operation is held. Hints and reconnect must replay this work
+      // without starting a second sweep alongside the one still in flight.
+      await pool.query("UPDATE cloud_computer_v2_heads SET active_build_id=NULL WHERE org_id=$1", [fixture.organizationId]);
+      await pool.query("SELECT pg_notify($1,$2)", [COMPUTER_TEMPLATE_RETENTION_CHANNEL, fixture.organizationId]);
+      await notice;
+      clients[0]!.emit("error", new Error("synthetic listener gap"));
+      await readyAgain;
+      expect(clients).toHaveLength(2);
+      expect(listener.waitingCount).toBe(0);
+      expect(requests.filter(request => request.method === "DELETE").map(request => request.id)).toEqual([oldest!.resource]);
+      // Observe the original sweep; calling tick here would itself queue the
+      // missing work and could hide a broken notification/reconnect replay.
+      const drained = sweeps.mock.results[0]!.value as Promise<number>;
+      release();
+      expect(await drained).toBe(2);
+      expect(maximumDeleting).toBe(1);
+      expect(requests.filter(request => request.method === "DELETE").map(request => request.id)).toEqual([oldest!.resource, active!.resource]);
+      for (const template of [oldest!, active!]) expect((await state(template)).state).toBe("retired");
+    } finally {
+      release();
+      await stop();
+      await observation.stop();
+      await listener.end();
+      sweeps.mockRestore();
+    }
   });
 
   it("preserves retired history for Rebuild and rejects Activate", async () => {

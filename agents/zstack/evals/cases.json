@@ -126,6 +126,15 @@
       "symptom": "The concurrent last-slot warm-context test expected only a capacity 429, but bounded SERIALIZABLE retries can exhaust before the winner commits and correctly return transient contention 503.",
       "rule": "playbooks/ci-red.md: control both commit schedules, distinguish observed committed capacity from retry exhaustion, and keep the exact final capacity bound.",
       "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/agent-boot-executions.integration.test.ts -t 'does not oversubscribe the last context slot'"
+    },
+    {
+      "id": "retention-pagination-test-budget",
+      "kind": "replay",
+      "area": "snapshots-retention",
+      "fixedBy": "pr:474",
+      "symptom": "A retention pagination fixture with 53 durable journals and 153 deletion attempts exceeded the default 5 s test timeout under modest database latency. The listener changed by the PR was never started by this test.",
+      "rule": "playbooks/ci-red.md: trace callback reachability, qualify large database fixtures with bounded transit delay, and adjust only the test budget; prove notification overlap with held work and observed completion.",
+      "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/computer-template-retention.integration.test.ts"
     }
   ]
 }

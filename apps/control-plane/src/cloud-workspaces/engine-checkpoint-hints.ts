@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
-import { DATABASE_CONNECTION_LIFETIME_SECONDS, withSystemTx } from "../db.js";
+import { withSystemTx } from "../db.js";
+import { postgresNotificationSubscription } from "../postgres-notifications.js";
 
 /** A stop, restart or archive queues a durable checkpoint request that the
  * engine otherwise sees only on its next heartbeat. An engine may hold one
@@ -115,71 +116,19 @@ export class CloudEngineCheckpointHints {
 
 const hint = (pending: boolean) => ({ version: 1 as const, audience: CLOUD_ENGINE_CHECKPOINT_HINT_AUDIENCE, pending });
 
-/** One dedicated, disposable LISTEN session, like the worker notifications.
- * Waiters keep their periodic recheck while this fast path is down. */
+/** Share the process's dedicated LISTEN session. Waiters retain their periodic
+ * recheck while this fast path is down, and re-read after every reconnect. */
 export function startCloudEngineCheckpointHintNotifications(
   pool: pg.Pool,
   hints: Pick<CloudEngineCheckpointHints, "notify" | "notifyAll">,
   logger: Pick<Console, "warn"> = console,
 ): () => Promise<void> {
-  let stopped = false;
-  let connecting: Promise<void> | undefined;
-  let disconnect: (() => void) | undefined;
-  let timer: NodeJS.Timeout | undefined;
-  let retryMs = 1_000;
-  const reconnect = () => {
-    if (stopped || timer) return;
-    timer = setTimeout(() => { timer = undefined; connect(); }, retryMs);
-    timer.unref();
-    retryMs = Math.min(30_000, retryMs * 2);
-  };
-  const connect = () => {
-    if (stopped || connecting || disconnect) return;
-    connecting = (async () => {
-      const client = await pool.connect();
-      if (stopped) { client.release(true); return; }
-      let disposed = false;
-      let retirement: NodeJS.Timeout | undefined;
-      const notify = (notice: pg.Notification) => {
-        if (!stopped && !disposed && notice.channel === CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL) hints.notify(notice.payload ?? "");
-      };
-      const dispose = () => {
-        if (disposed) return;
-        disposed = true;
-        clearTimeout(retirement);
-        client.removeListener("notification", notify);
-        disconnect = undefined;
-        // A checked-out LISTEN client never returns to a pool with session state.
-        client.release(true);
-        reconnect();
-      };
-      client.on("notification", notify);
-      client.on("error", dispose);
-      client.on("end", dispose);
-      disconnect = dispose;
-      try {
-        await client.query(`LISTEN ${CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL}`);
-        if (disposed || stopped) { dispose(); return; }
-        retryMs = 1_000;
-        retirement = setTimeout(dispose, DATABASE_CONNECTION_LIFETIME_SECONDS * 1_000);
-        retirement.unref();
-        hints.notifyAll();
-      } catch {
-        dispose();
-        throw new Error("checkpoint_hint_listener_unavailable");
-      }
-    })().catch(() => {
-      logger.warn("[cloud-workspace] checkpoint hint notifications unavailable; engines keep their heartbeat cadence");
-    }).finally(() => {
-      connecting = undefined;
-      if (!disconnect) reconnect();
-    });
-  };
-  connect();
-  return async () => {
-    stopped = true;
-    clearTimeout(timer);
-    disconnect?.();
-    await connecting;
-  };
+  const listener = postgresNotificationSubscription(pool, {
+    channels: [CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL],
+    onNotification: notice => hints.notify(notice.payload ?? ""),
+    onReady: () => hints.notifyAll(),
+    onUnavailable: () => logger.warn("[cloud-workspace] checkpoint hint notifications unavailable; engines keep their heartbeat cadence"),
+  });
+  void listener.start().catch(() => {});
+  return () => listener.stop();
 }

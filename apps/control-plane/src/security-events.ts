@@ -1,10 +1,11 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type pg from "pg";
+import { postgresNotificationSubscription, type PostgresNotificationSubscription } from "./postgres-notifications.js";
 
 import type { AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
-import { DATABASE_CONNECTION_LIFETIME_SECONDS, withSystemTx, type Tx } from "./db.js";
+import { withSystemTx, type Tx } from "./db.js";
 import {publishCloudWorkspaceDirectoryChanges} from "./cloud-workspaces/directory-events.js";
 import { CloudWorkerScheduler } from "./cloud-workspaces/worker-scheduler.js";
 import { readCloudWorkerNextDelay } from "./cloud-workspaces/worker-deadlines.js";
@@ -298,67 +299,22 @@ type Wake = () => void;
 /** One dedicated Postgres LISTEN connection per control-plane process. The
  * notification is only a wake-up; every subscriber replays durable rows. */
 export class PostgresSecurityEventBroker {
-  private client: pg.PoolClient | null = null;
-  private starting: Promise<void> | null = null;
-  private disconnect: (() => void) | null = null;
+  private readonly listener: PostgresNotificationSubscription;
   private readonly subscribers = new Set<Wake>();
   private stopped = false;
   private wakeRevision = 0;
 
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(pool: pg.Pool) {
+    this.listener = postgresNotificationSubscription(pool, {
+      channels: ["zeros_security_event"],
+      reconnect: false,
+      onNotification: () => this.wakeSubscribers(),
+      onDisconnect: () => this.wakeSubscribers(),
+    });
+  }
 
   async start(): Promise<void> {
-    if (this.stopped || this.client) return;
-    if (this.starting) return this.starting;
-    this.starting = (async () => {
-      const client = await this.pool.connect();
-      if (this.stopped) {
-        client.release(true);
-        return;
-      }
-      let disposed = false;
-      let retirement: ReturnType<typeof setTimeout> | undefined;
-      const notify = () => this.wakeSubscribers();
-      const disconnect = () => {
-        if (disposed) return;
-        disposed = true;
-        clearTimeout(retirement);
-        client.removeListener("notification", notify);
-        if (this.client === client) {
-          this.client = null;
-          this.disconnect = null;
-        }
-        // Destroy instead of returning a session with LISTEN state to the
-        // request pool. Retain the idempotent error handler until pg closes it.
-        client.release(true);
-        this.wakeSubscribers();
-      };
-      client.on("notification", notify);
-      client.on("error", disconnect);
-      client.on("end", disconnect);
-      try {
-        await client.query("LISTEN zeros_security_event");
-        if (this.stopped || disposed) {
-          disconnect();
-          return;
-        }
-        this.client = client;
-        this.disconnect = disconnect;
-        // Pool lifetime eviction waits for release. LISTEN holds its checkout,
-        // so it needs its own retirement; clients reconnect and replay rows.
-        retirement = setTimeout(
-          disconnect,
-          DATABASE_CONNECTION_LIFETIME_SECONDS * 1_000,
-        );
-        retirement.unref();
-      } catch (error) {
-        disconnect();
-        throw error;
-      }
-    })().finally(() => {
-      this.starting = null;
-    });
-    return this.starting;
+    if (!this.stopped) await this.listener.start();
   }
 
   subscribe(wake: Wake): () => void {
@@ -367,7 +323,7 @@ export class PostgresSecurityEventBroker {
   }
 
   healthy(): boolean {
-    return this.client !== null;
+    return this.listener.healthy();
   }
 
   revision(): number {
@@ -386,10 +342,10 @@ export class PostgresSecurityEventBroker {
   }
 
   async stop(): Promise<void> {
+    if (this.stopped) return;
     this.stopped = true;
-    await this.starting?.catch(() => {});
-    if (this.disconnect) this.disconnect();
-    else this.wakeSubscribers();
+    await this.listener.stop();
+    this.wakeSubscribers();
   }
 }
 
