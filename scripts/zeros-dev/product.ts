@@ -27,15 +27,22 @@ export class ProductApi {
   }
   private root(fixture:Fixture):string{return `/v1/organizations/${fixture.organizationId}/cloud-workspaces`;}
   private computerRoot(fixture:Fixture):string{return `/v1/organizations/${fixture.organizationId}/cloud-computer/v2`;}
+  private repositoryNameMatches(fixture:Fixture,repository:{owner:string;name:string}):boolean{
+    // GitHub names are case-insensitive; Computer configs and workspace rows
+    // use lowercase while GitHub discovery preserves display casing. Compare
+    // without rewriting fixture pins or any recorded request body.
+    const pinned=fixture.repository;
+    return repository.owner.toLowerCase()===pinned.owner.toLowerCase()&&repository.name.toLowerCase()===pinned.name.toLowerCase();
+  }
   private repositoryMatches(fixture:Fixture,repository:{id:string;owner:string;name:string;installationId:string}):boolean{
     const pinned=fixture.repository;
-    return repository.id===pinned.id&&repository.owner===pinned.owner&&repository.name===pinned.name&&repository.installationId===pinned.installationId;
+    return repository.id===pinned.id&&this.repositoryNameMatches(fixture,repository)&&repository.installationId===pinned.installationId;
   }
   async computerState(signal?:AbortSignal){const fixture=await this.session.fixture();return this.request(`${this.computerRoot(fixture)}?activeRepositories=true`,cloudComputerV2StateSchema,{signal});}
   async ensureRepository(signal?:AbortSignal):Promise<{revision:string}>{
     await this.session.whoami();const fixture=await this.session.fixture(),repo=fixture.repository;
     const result=await this.request(`${this.root(fixture)}/create-options?owner=${encodeURIComponent(repo.owner)}&repository=${encodeURIComponent(repo.name)}&cloudComputerV2=true`,OptionsSchema,{signal});
-    if(!result.configured||result.repository?.owner!==repo.owner||result.repository.name!==repo.name||
+    if(!result.configured||!result.repository||!this.repositoryNameMatches(fixture,result.repository)||
       !result.installations.some(row=>row.id===repo.installationId))throw new ZerosDevError("repository_required");
     return {revision:result.repository.defaultBranch};
   }
@@ -75,7 +82,7 @@ export class ProductApi {
   private assertWorkspace(row:CloudWorkspaceDocument,fixture:Fixture,run:Run,allowNextGeneration=false):void{
     const receipt=run.create?.result;
     if(row.placement!=="cloud"||row.organizationId!==fixture.organizationId||row.createdBy!==fixture.accountId||
-      row.ownerUserId!==fixture.accountId||row.repository.forge!=="github.com"||row.repository.owner!==fixture.repository.owner||row.repository.name!==fixture.repository.name||
+      row.ownerUserId!==fixture.accountId||row.repository.forge!=="github.com"||!this.repositoryNameMatches(fixture,row.repository)||
       receipt&&(row.id!==receipt.id||row.createdBy!==receipt.createdBy||row.createdAt!==receipt.createdAt))throw new ZerosDevError("identity_changed");
     if(receipt&&(row.generation.number<receipt.generation||!allowNextGeneration&&row.generation.number!==receipt.generation))throw new ZerosDevError("runtime_changed");
   }
