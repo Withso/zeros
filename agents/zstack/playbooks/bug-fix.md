@@ -26,6 +26,10 @@
    Inventory independent session-lock holders and hold them concurrently across
    provider barriers; their callbacks and an unrelated worker transaction must
    still progress. Count every lock pool in steady and rollout surge budgets.
+   For renewal telemetry, test real success, refusal, concurrency and retirement
+   paths. Use a separate monotonic clock, closed labels and bounded aggregates;
+   never let logging alter authority outcomes or add idle timers. State exactly
+   which boundary completed: a valid transport response is not final admission.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates
