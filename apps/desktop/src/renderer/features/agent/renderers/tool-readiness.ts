@@ -1,6 +1,7 @@
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { toolCompletionUnreported } from "./raw-output";
 import { toolRecord } from "./native-tool-presentation";
+import { agentReportText } from "./subagent";
 
 /** Claude persists task lifecycle records separately from the real Agent call.
  * Hide only records represented by an exact native child identity in this
@@ -22,8 +23,21 @@ export function withoutRedundantAgentTasks(messages: AgentMessage[]): AgentMessa
     if (input.taskType && input.taskType !== "local_agent") return true;
     const matches = typeof input.taskId === "string" ? agents.get(input.taskId) : undefined;
     if (!matches) return true;
-    if (message.status === "failed" || toolCompletionUnreported(message.rawOutput))
-      return !matches.some(agent => agent.status === "failed" || toolCompletionUnreported(agent.rawOutput));
+    const unreported = toolCompletionUnreported(message.rawOutput);
+    if (message.status === "failed" || unreported) {
+      const output = toolRecord(message.rawOutput);
+      const details = [output.error, output.summary].filter(
+        (value): value is string => typeof value === "string" && value.trim().length > 0,
+      );
+      // Status can precede the explanation. Hide a failed lifecycle row only
+      // when the matching Agent actually displays all of its failure details,
+      // including histories written before that Agent could be enriched.
+      return !matches.some(agent =>
+        (message.status !== "failed" || agent.status === "failed") &&
+        (!unreported || toolCompletionUnreported(agent.rawOutput)) &&
+        details.every(detail => agentReportText(agent).includes(detail.trim())),
+      );
+    }
     return false;
   });
   return visible.length === messages.length ? messages : visible;

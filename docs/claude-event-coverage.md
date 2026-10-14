@@ -249,6 +249,9 @@ Empty background acknowledgements retain activity and pending user/compaction
 ownership while cumulative usage advances exactly once. Explicit user UUIDs,
 including folded sends, still establish result ownership. Local commands that
 make no model calls remain valid completions.
+Nonempty autonomous results and results correlated to earlier turns also
+preserve a newer pending send's activity. The SDK adapter supplies that ownership
+decision before translation publishes activity; output and usage still advance.
 
 `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1` asks supporting runtimes to emit known
 startup errors before exit. Native reasons distinguish gateway sign-in from

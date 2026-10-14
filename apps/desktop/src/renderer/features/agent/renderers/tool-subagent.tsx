@@ -7,7 +7,7 @@ import { useTurnDisclosure } from "../turn-disclosures";
 import { MessageView } from "./message-view";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import type { Renderer } from "./types";
-import { matchSubagent } from "./subagent";
+import { agentReportText, matchSubagent } from "./subagent";
 import { EventStripe } from "./event-stripe";
 import { renderDetail } from "./event-row-renderer";
 import { renderMarkdown } from "../markdown";
@@ -15,7 +15,7 @@ import { displayNameForModelValue, effortLabel, familyForModelValue } from "../m
 import type { ChatEffort } from "../../../state/store";
 import { cn } from "@/renderer/shared/ui/cn";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
-import { asDisplayString, toolCompletionUnreported } from "./raw-output";
+import { toolCompletionUnreported } from "./raw-output";
 import { toolRecord } from "./native-tool-presentation";
 import { toolPresentationReady } from "./tool-readiness";
 import { ToolDetailSurface } from "./tool-detail-surface";
@@ -216,32 +216,6 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-export function agentReportText(tool: AgentToolMessage): string {
-  const output = toolRecord(tool.rawOutput);
-  // A native async acknowledgement is not the child's report. Retain it in
-  // history, but don't print internal launch instructions into the feed.
-  if (tool.status === "failed" && typeof output.message === "string")
-    return output.message;
-  if (output.status === "async_launched") return "";
-  const text = (tool.content ?? [])
-    .flatMap((block) =>
-      block.type === "content" && block.content.type === "text"
-        ? [block.content.text]
-        : [],
-    )
-    .join("");
-  // Compatibility with older Claude histories that only captured text.
-  if (/^Async agent launched successfully\./.test(text.trim())) return "";
-  if (text) return text;
-  if (typeof output.report === "string") return output.report;
-  if (["completed", "async_launched"].includes(String(output.status)))
-    return "";
-  if (typeof tool.rawOutput === "string") return tool.rawOutput;
-  return tool.status === "failed"
-    ? (asDisplayString(tool.rawOutput) ?? "")
-    : "";
 }
 
 /** Retired Claude model slugs still occur in saved transcripts. Format only

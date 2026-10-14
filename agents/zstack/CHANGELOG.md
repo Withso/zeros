@@ -9,6 +9,15 @@ The pack is introduced: the router, verify, review, eval and learn skills,
 five playbooks, and eleven seed eval cases from real Alpha incidents.
 
 Lessons already encoded:
+- **Result ownership must precede activity publication.** An unrelated Claude
+  result kept a user promise pending but briefly published idle to attached
+  clients. Classify ownership before translation; test every emitted activity
+  snapshot across Personal Local, organization-local and cloud paths
+  (`claude-sdk/__tests__/adapter.test.ts`).
+- **Tool outcomes are not recovery evidence.** A late result without its
+  invocation hid the failed-turn card and Retry. Require invocation evidence
+  before treating a tool as resumed model work, and replay through the shared
+  history reducer (`turn-failure-presentation.test.ts`).
 - **An omitted activity flag is not an explicit false.** Monitor watchers can
   arrive as ordinary shell tasks on older Claude streams. Join native tool and
   task IDs as a fallback, retain explicit membership flags, and keep process
@@ -34,6 +43,9 @@ Lessons already encoded:
   emit both an Agent group and task lifecycle records. Join by exact child identity
   before hiding a duplicate; preserve unmatched records and unrepresented failures
   (`docs/agent-tool-presentation.md`, case `claude-agent-lifecycle-duplicate`).
+  Failed status can precede its explanation: compare displayed detail, not just
+  terminal status, and retain saved-history regressions in
+  `agent-background-presentation.test.ts`.
 - **Provider fixtures can lie.** A synthetic Boat tree passed while the real
   one failed. The rule is to qualify against a real response
   (`zstack-review`, case `boat-saved-tree-real-shape`).

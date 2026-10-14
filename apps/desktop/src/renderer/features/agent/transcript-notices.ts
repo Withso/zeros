@@ -63,7 +63,11 @@ export function isProviderWorkEvent(event: AgentMessage): boolean {
       !(event.messageId ?? event.id)?.startsWith("claude-feedback-") && !isLegacyAuthenticationNotice(event) &&
       ((typeof event.text === "string" && event.text.trim().length > 0) || event.redacted === true);
   }
-  return event.kind === "tool" && !isLegacyEnvironmentConnection(event) && !isRoutineNativeSleep(event) && ![
+  // A late result can create a terminal tool row without its invocation.
+  // Its output is not evidence that the model resumed after the failure.
+  const invoked = event.kind === "tool" &&
+    (event.rawInput != null || event.status === "pending" || event.status === "in_progress");
+  return invoked && !isLegacyEnvironmentConnection(event) && !isRoutineNativeSleep(event) && ![
     "model_switch", "mode_switch", "background_task", "compaction", "budget_stop",
   ].includes(event.toolKind ?? "");
 }

@@ -2284,13 +2284,38 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           if (Array.isArray(cmds)) void this.refreshSkillsThenEmit(state, cmds);
         }
 
+        // Classify result ownership before translation can publish activity.
+        // Attached clients have no optimistic pending-turn marker to protect
+        // them from an unrelated result briefly parking the current send.
+        const result = m.type === "result" ? msg as Extract<SDKMessage, { type: "result" }> : null;
+        const correlatedMessageUuids = result ? new Set<string>() : null;
+        if (correlatedMessageUuids) {
+          if (typeof m.user_message_uuid === "string" && m.user_message_uuid.length > 0)
+            correlatedMessageUuids.add(m.user_message_uuid);
+          if (Array.isArray(m.user_message_uuids)) {
+            for (const uuid of m.user_message_uuids) {
+              if (typeof uuid === "string" && uuid.length > 0) correlatedMessageUuids.add(uuid);
+            }
+          }
+        }
+        const hasCorrelation = (correlatedMessageUuids?.size ?? 0) > 0;
+        const backgroundAcknowledgement = result !== null && isClaudeBackgroundAcknowledgement(result);
+        const unownedResult = result !== null && isUnownedClaudeResult(result);
+        // Explicit UUIDs win even when the user send was folded into an
+        // autonomous turn. Legacy uncorrelated results still settle normally.
+        const resultBelongsToTurn = state.turn !== null && correlatedMessageUuids !== null &&
+          !backgroundAcknowledgement && ((!hasCorrelation && !unownedResult) ||
+            [...correlatedMessageUuids].some(uuid => state.turnMessageUuids.has(uuid)));
+
         // Translate → emit. The SDK shapes match the raw stream-json the
         // translator already understands (system/assistant/user/result).
         const hadProcessWork = state.translator.hasProcessWork;
         let accepted = true;
         let translated = false;
         try {
-          accepted = state.translator.feed(msg);
+          accepted = state.translator.feed(msg, {
+            preserveTurnActivity: result !== null && state.turn !== null && !resultBelongsToTurn,
+          });
           translated = true;
         } catch (err) {
           console.warn(`[agents] claude-sdk translate failed: ${String(err)}`);
@@ -2376,33 +2401,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           }
         }
 
-        if (m.type === "result") {
+        if (result && correlatedMessageUuids) {
           // Refresh the real context-window reading for the
           // gauge on EVERY settled run — including turnless ones (the
           // compactContext "/compact", a steered follow-on) where there is
           // no prompt() awaiting to do it. Fire-and-forget: a control-
           // channel call (zero model tokens) that must never delay or fail
           // the turn.
-          const result = msg as Extract<SDKMessage, { type: "result" }>;
-          const backgroundAcknowledgement = isClaudeBackgroundAcknowledgement(result);
-          const unownedResult = isUnownedClaudeResult(result);
           if (!backgroundAcknowledgement && typeof m.startup_failure_reason !== "string") reportedStartupFailure = false;
           if (!backgroundAcknowledgement) void this.emitContextUsage(state);
-          const correlatedMessageUuids = new Set<string>();
-          if (
-            typeof m.user_message_uuid === "string" &&
-            m.user_message_uuid.length > 0
-          ) {
-            correlatedMessageUuids.add(m.user_message_uuid);
-          }
-          if (Array.isArray(m.user_message_uuids)) {
-            for (const uuid of m.user_message_uuids) {
-              if (typeof uuid === "string" && uuid.length > 0) {
-                correlatedMessageUuids.add(uuid);
-              }
-            }
-          }
-          const hasCorrelation = correlatedMessageUuids.size > 0;
           const turn = state.turn;
           if (!backgroundAcknowledgement) state.providerRunActive = false;
 
@@ -2430,16 +2437,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             );
           }
 
-          // UUIDs establish ownership even when a user message was folded into
-          // an autonomous turn. Without them, explicit autonomous origin or a
-          // batch acknowledgement cannot finish a waiting user send. Legacy
-          // uncorrelated results and session-scoped startup errors still settle.
-          const resultBelongsToTurn =
-            turn !== null && !backgroundAcknowledgement &&
-            ((!hasCorrelation && !unownedResult) ||
-              [...correlatedMessageUuids].some((uuid) =>
-                state.turnMessageUuids.has(uuid),
-              ));
           // Correlated autonomous results belong to their earlier user turn,
           // even while a newer prompt is queued on the same query.
           const owners = new Set([...correlatedMessageUuids].flatMap((id) => {
@@ -2469,7 +2466,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
               !state.cancelOperation) {
             this.boundFinishedSteering(state);
           }
-          if (!resultBelongsToTurn) {
+          if (!turn || !resultBelongsToTurn) {
             if (!turn && !state.cancelRequested && !state.disposed) {
               const error = state.translator.terminalFailure;
               if (error) {

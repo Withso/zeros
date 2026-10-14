@@ -394,6 +394,9 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   counts and copied transcript, while retaining its stored task state and the
   waiting indicator. Never match by description or tool name. Keep orphan tasks
   and failures whose explanation is not represented by the Agent group visible.
+  Matching failed statuses alone are insufficient: a later task notification
+  can supply the only explanation. Compare the Agent's displayed report before
+  hiding that detail, including when projecting older saved histories.
 - Codex activity-item completion only confirms delivery. `kind` owns the child
   lifetime; correlate different activity IDs by child thread. Legacy collab
   snapshots use child `agentsStates`, not the spawn/wait wrapper's success.
@@ -489,6 +492,10 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   through interim parent replies; child traffic does not restart the parent.
   The chat, workspace and transcript use the same activity projection. User
   Stop still cancels the outstanding send.
+  A result belonging to earlier/autonomous work cannot park a newer pending
+  user send. Resolve ownership before emitting activity so attached/reloaded
+  clients never observe a transient idle state; preserve the result's output
+  and usage accounting independently.
 - Keep the request's original elapsed-time anchor during background work. A
   later parent reply extends the footer beyond the first settled send; use its
   last changed text time, excluding child/tool bookkeeping and identical replay.
@@ -535,6 +542,8 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   Later genuine root work in the same turn supersedes an earlier retry error
   and its stopped footer label, including in copied transcripts. Child activity,
   routine transport/wait records and synthetic feedback cannot prove recovery.
+  A terminal tool result without an observed invocation also cannot prove
+  recovery; retain its outcome without clearing the failure or Retry action.
 - Authentication failures have one product Sign in notice. In history, show a
   compact **Sign-in required** status until a later turn in that conversation
   produces genuine root model work, then show **Signed in**. A new prompt,

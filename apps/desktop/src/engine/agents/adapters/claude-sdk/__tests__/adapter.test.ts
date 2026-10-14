@@ -31,6 +31,7 @@ import {
   type SessionNotification,
 } from "../../../types";
 import type { AvailableCommand, RequestPermissionRequest } from "@zeros/protocol/agent-events";
+import { applyUpdate } from "@zeros/protocol/agent-messages";
 
 vi.mock("../../../containment/cloud-runtime-root.mjs", async original => {
   const actual = await original<typeof import("../../../containment/cloud-runtime-root.mjs")>();
@@ -7270,6 +7271,72 @@ describe("ClaudeSdkAdapter.steer", () => {
 });
 
 describe("Claude result ownership across background batches", () => {
+  it.each(["Personal Local", "organization-local", "organization-cloud"])(
+    "keeps queued user activity running through unrelated results in %s",
+    async placement => {
+      const cloud = placement === "organization-cloud";
+      const boundary = cloud ? { status: { actor: "agent-code", backend: "cloud-worker" } } as never : undefined;
+      const execution = cloud ? {
+        mode: "actor-grant-v1", model: "claude-haiku-4-5", customization: null,
+        cwd: "/srv/zeros/workspace",
+        lifetime: { signal: new AbortController().signal, assertLive: vi.fn() },
+        coordinator: { nativeHome: await physicalClaudeHome() }, productServers: [],
+      } as unknown as cloudExecutions.CloudProviderExecution : undefined;
+      const original = cloudExecutions.cloudProviderExecution;
+      const authority = cloud ? vi.spyOn(cloudExecutions, "cloudProviderExecution")
+        .mockImplementation(value => value === boundary ? execution! : original(value)) : undefined;
+      const runtime = cloud ? admittedClaudeRuntimeFixture() : undefined;
+      const emitted: SessionNotification[] = [];
+      const live = makePushableQuery();
+      const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
+      const snapshots = () => emitted.map(note => note.update)
+        .filter(update => update.sessionUpdate === "background_tasks_update");
+      try {
+        const { session } = await adapter.newSession({
+          cwd: cloud ? "/srv/zeros/workspace" : path.join(TMP_DATA, placement),
+          executionBoundary: boundary,
+          ...(cloud ? { env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ANTHROPIC_API_KEY: "synthetic-provider-key" } } : {}),
+        });
+        const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("A")] });
+        await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1));
+        live.push(initMsg("activity"), { ...resultOk("activity"), uuid: "result-a", user_message_uuid: live.inputsSeen[0].uuid });
+        await first;
+        live.push(assistantText("Reviewing the background results"));
+        await vi.waitFor(() => expect(snapshots().at(-1)?.activity?.state).toBe("running"));
+        let settled = false;
+        const second = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("B")] })
+          .then(value => { settled = true; return value; }, () => null);
+        await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(2));
+        const startedAt = snapshots().at(-1)?.activity?.startedAt;
+        const beforeResults = snapshots().length;
+        const receipts = [
+          { origin: { kind: "task-notification" } },
+          { origin: { kind: "task-notification" }, queued_turn_count: 1 },
+          { user_message_uuid: live.inputsSeen[0].uuid },
+          { user_message_uuids: ["synthetic-wakeup"], queued_turn_count: 1 },
+        ];
+        for (const [index, receipt] of receipts.entries()) {
+          const report = `Background report ${index}`;
+          live.push({ ...resultOk("activity"), uuid: `background-result-${index}`, num_turns: 1, result: report, ...receipt });
+          // Observe the actual translated result instead of sleeping for the race.
+          await vi.waitFor(() => expect(emitted.reduce(applyUpdate, []).some(message => message.kind === "text" && message.text === report)).toBe(true));
+          expect(settled).toBe(false);
+          expect(snapshots().at(-1)).toMatchObject({ tasks: [], waiting: false, activity: { state: "running", startedAt } });
+          // A transient idle event is enough to mark completion on an attached
+          // client, which has no optimistic pendingLocalTurnId to mask it.
+          expect(snapshots().slice(beforeResults).every(snapshot => snapshot.activity?.state === "running")).toBe(true);
+        }
+        live.push({ ...resultOk("activity"), uuid: "result-b", user_message_uuid: live.inputsSeen[1].uuid });
+        await expect(second).resolves.toMatchObject({ stopReason: "end_turn" });
+        expect(snapshots().at(-1)).toMatchObject({ activity: { state: "idle", startedAt } });
+      } finally {
+        await adapter.dispose();
+        authority?.mockRestore();
+        runtime?.dispose();
+      }
+    },
+  );
+
   it.each([
     { result: "", num_turns: 0, origin: { kind: "task-notification" } },
     { result: "", num_turns: 0, queued_turn_count: 1, result_index: 1 },

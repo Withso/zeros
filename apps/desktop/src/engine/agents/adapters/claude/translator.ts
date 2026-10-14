@@ -884,8 +884,10 @@ export class ClaudeStreamTranslator {
     this.emitWorkflows();
   }
 
-  /** Feed a parsed JSON event from Claude's stdout. */
-  feed(rawEvent: unknown): boolean {
+  /** Feed a parsed JSON event from Claude's stdout. The adapter owns user
+   * result correlation; unrelated results still supply transcript and usage,
+   * but cannot park the activity of its pending send. */
+  feed(rawEvent: unknown, options?: { preserveTurnActivity?: boolean }): boolean {
     if (!isObj(rawEvent) || typeof rawEvent.type !== "string") {
       this.onUnknown?.(rawEvent);
       return false;
@@ -969,7 +971,7 @@ export class ClaudeStreamTranslator {
         this.onStreamEvent(event as unknown as ClaudeStreamEvent);
         break;
       case "result":
-        this.onResult(event as unknown as ClaudeResultEvent);
+        this.onResult(event as unknown as ClaudeResultEvent, options?.preserveTurnActivity);
         break;
       default:
         this.onUnknown?.(event);
@@ -2860,7 +2862,7 @@ export class ClaudeStreamTranslator {
   }
 
   // ── Result (final) ──────────────────────────────────────
-  private onResult(event: ClaudeResultEvent): void {
+  private onResult(event: ClaudeResultEvent, preserveTurnActivity = false): void {
     if (isClaudeBackgroundAcknowledgement(event)) {
       this.currentTurnUsage = this.queryUsage.record(event);
       return;
@@ -2872,7 +2874,7 @@ export class ClaudeStreamTranslator {
     if (event.subtype === "success" && event.is_error !== true && !hasNativeErrors &&
       (mappedTerminalReason === null || mappedTerminalReason === "end_turn")) this.transcript.final(event.result, event.uuid);
     this.hasSeenResult = true;
-    if (!this.activityStopped) {
+    if (!this.activityStopped && !preserveTurnActivity) {
       this.sessionActivityState = "idle";
       if (this.activityStartedAt !== null || this.lastEmittedBackgroundTasks) this.emitBackgroundTasks();
     }
