@@ -92,7 +92,9 @@ function exportsTarget(exports: unknown, subpath: string): string | null {
     const suffix = key.slice(star + 1);
     if (subpath.startsWith(prefix) && subpath.endsWith(suffix) && subpath.length >= prefix.length + suffix.length) {
       const target = conditionalTarget(value);
-      if (target) return target.replace("*", subpath.slice(prefix.length, subpath.length - suffix.length));
+      // Export patterns substitute every star; a callback keeps `$` sequences
+      // in the matched subpath literal rather than replacement-string syntax.
+      if (target) return target.replaceAll("*", () => subpath.slice(prefix.length, subpath.length - suffix.length));
     }
   }
   return null;

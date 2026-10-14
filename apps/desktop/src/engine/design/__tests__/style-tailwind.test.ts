@@ -71,6 +71,36 @@ describe("compiling a Tailwind entry", () => {
     expect(compiler.skippedImports).toEqual(["absent"]);
   });
 
+  it.each(["dark", "themes/dark", "$&", "$$"])("replaces every export-target wildcard with the literal subpath %s", async (subpath) => {
+    const target = `node_modules/patterned/styles/${subpath}/theme-${subpath}.css`;
+    const read = reader({
+      "node_modules/patterned/package.json": JSON.stringify({
+        exports: { "./themes/*.css": { style: "./styles/*/theme-*.css" } },
+      }),
+      [target]: ".patterned { order: 7; }",
+    });
+    const compiler = await compileDesignTailwind({
+      file: "styles/app.css",
+      content: `@import "patterned/themes/${subpath}.css";`,
+    }, read);
+    expect(compiler.imports).toEqual([target]);
+    expect(compiler.skippedImports).toEqual([]);
+    expect(compiler.build([])).toContain(".patterned");
+  });
+
+  it("rejects patterned export targets outside their package", async () => {
+    const outside = "node_modules/outside/dark/dark.css";
+    const read = reader({
+      "node_modules/patterned/package.json": JSON.stringify({ exports: { "./*": "../outside/*/*.css" } }),
+      [outside]: ".outside { order: 8; }",
+    });
+    const compiler = await compileDesignTailwind({ file: "styles/app.css", content: '@import "patterned/dark";' }, read);
+    expect(compiler.imports).toEqual([]);
+    expect(compiler.skippedImports).toEqual(["patterned/dark"]);
+    expect(read.reads).not.toContain(outside);
+    expect(compiler.build([])).not.toContain(".outside");
+  });
+
   it("starts every frame from a fresh compile, so one frame's classes never reach another", async () => {
     const entry = { file: "app.css", content: '@import "tailwindcss";' };
     const first = await compileDesignTailwind(entry, reader({}));
