@@ -835,13 +835,20 @@ d("account, organization, and operator deletion lifecycle", () => {
       providerLockTimeoutMs: 25,
       logger: { warn: () => undefined, error: () => undefined },
     }).tick(1);
-    await new Promise((resolve) => setTimeout(resolve, 75));
-    await blocker.query(
-      `SELECT pg_advisory_unlock(hashtextextended($1::text, 0))`,
-      [subjectLockKey],
-    );
-    blocker.release();
-    await expect(processing).resolves.toBe(1);
+    try {
+      // Pool/claim work can delay lock acquisition beyond any fixed sleep.
+      // Keep contention in place until the attempt has actually deferred.
+      await expect(processing).resolves.toBe(1);
+    } finally {
+      try {
+        await blocker.query(
+          `SELECT pg_advisory_unlock(hashtextextended($1::text, 0))`,
+          [subjectLockKey],
+        );
+      } finally {
+        blocker.release();
+      }
+    }
 
     await expect(
       pool.query(
