@@ -127,6 +127,23 @@ async function actionsFixture() {
 }
 
 describe("Actions orchestration through signed files", () => {
+  it.each(["runtime", "setup"] as const)("keeps the first %s observation in the public result and signed artifact after logout fails", async kind => {
+    const f = await actionsFixture();
+    const runtime = { phase: "admission" as const, class: "admission_unavailable" as const, status: 500 };
+    const setup = { attempt: 5, claimCount: 2, state: "queued" as const, errorCode: "setup_provider_bootstrap_cleanup_unconfirmed" as const };
+    const code = kind === "runtime" ? "runtime_unavailable" : "deadline";
+    const diagnostic = kind === "runtime" ? { runtime } : { setup };
+    f.services.connect.mockRejectedValue(new ZerosDevError(code, undefined, undefined, kind === "setup" ? setup : undefined, kind === "runtime" ? runtime : undefined));
+    f.services.session.logout.mockRejectedValue(new Error("synthetic-private-logout"));
+    expect(await runActions(f.env, f.options as never)).toBe(1);
+    expect(f.output).toContainEqual(expect.objectContaining({ phase: "runtime_connect", code, ...diagnostic }));
+    expect(f.output).toContainEqual(expect.objectContaining({ schema: "zeros.dev-hourly-result/v1", success: false, code, ...diagnostic }));
+    const artifact = await f.checkpoint();
+    expect(artifact.payload.result).toMatchObject({ success: false, code, ...diagnostic });
+    expect(artifact.payload.runs[0].evidence).toContainEqual(expect.objectContaining({ phase: "runtime_connect", code, ...diagnostic }));
+    expect(JSON.stringify([artifact, ...f.output])).not.toContain("synthetic-private");
+  });
+
   it("keeps mask commands and every secret out of public evidence and the signed receipt", async () => {
     const f = await actionsFixture(), tokens = { access_token: randomUUID(), refresh_token: randomUUID(), id_token: randomUUID() };
     const env = { ...f.env, AGENT_RUNTIME_CODEX_AUTH_JSON: JSON.stringify({ tokens }), AGENT_RUNTIME_CURSOR_API_KEY: randomUUID() };

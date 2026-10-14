@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { redact } from "../agent-env-check.mjs";
-import { ERROR_CODES, ZerosDevError, closedError, setupEvidence } from "./errors";
+import { ERROR_CODES, ZerosDevError, closedError, diagnosticEvidence } from "./errors";
 import { SetupObservationSchema } from "./setup-observation";
+import { RuntimeObservationSchema } from "./runtime-observation";
 import type { AgentValues } from "./config";
 
 export const EvidenceEventSchema=z.object({
@@ -11,7 +12,7 @@ export const EvidenceEventSchema=z.object({
     "prior_cleanup","computer_pin","credentials_install","credentials_cleanup","agent_claude","agent_codex","agent_cursor","chat_continuity","runtime_disconnect"]),
   outcome:z.enum(["ok","failed","pending","skipped"]),durationMs:z.number().nonnegative().finite(),
   code:z.enum(ERROR_CODES).optional(),count:z.number().int().nonnegative().safe().optional(),exitCode:z.number().int().min(-1).max(255).optional(),
-  setup:SetupObservationSchema.optional(),
+  setup:SetupObservationSchema.optional(),runtime:RuntimeObservationSchema.optional(),
 }).strict();
 export type EvidenceEvent=z.infer<typeof EvidenceEventSchema>;
 export class Evidence {
@@ -27,7 +28,7 @@ export class Evidence {
   async step<T>(phase:EvidenceEvent["phase"],work:()=>Promise<T>):Promise<T>{
     const start=this.now();
     try{const result=await work();this.emit({phase,outcome:"ok",durationMs:Math.max(0,this.now()-start)});return result;}
-    catch(error){this.emit({phase,outcome:"failed",durationMs:Math.max(0,this.now()-start),code:closedError(error),...setupEvidence(error)});throw error;}
+    catch(error){this.emit({phase,outcome:"failed",durationMs:Math.max(0,this.now()-start),code:closedError(error),...diagnosticEvidence(error)});throw error;}
   }
 }
 

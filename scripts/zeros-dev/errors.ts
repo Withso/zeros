@@ -1,4 +1,5 @@
 import { SetupObservationSchema, type SetupObservation } from "./setup-observation";
+import { RuntimeObservationSchema, type RuntimeObservation } from "./runtime-observation";
 
 /** Only these codes may leave the CLI. Provider errors, bodies and stack traces
  * are never evidence; neither are arbitrary error.code/name/message values. */
@@ -16,11 +17,19 @@ export const ERROR_CODES = [
 export type ErrorCode = typeof ERROR_CODES[number];
 export class ZerosDevError extends Error {
   readonly setup?: SetupObservation;
-  constructor(readonly code: ErrorCode, readonly status?: number, readonly retryAfterMs?: number, setup?: SetupObservation) {
+  readonly runtime?: RuntimeObservation;
+  constructor(readonly code: ErrorCode, readonly status?: number, readonly retryAfterMs?: number, setup?: SetupObservation, runtime?: RuntimeObservation) {
     super(`zeros_dev_${code}`);
     const parsed = SetupObservationSchema.safeParse(setup);
     if (parsed.success) this.setup = parsed.data;
+    const connection = RuntimeObservationSchema.safeParse(runtime);
+    if (connection.success) this.runtime = connection.data;
   }
+}
+export function diagnosticEvidence(error: unknown): { setup?: SetupObservation; runtime?: RuntimeObservation } {
+  if (!(error instanceof ZerosDevError)) return {};
+  const runtime = RuntimeObservationSchema.safeParse(error.runtime);
+  return { ...setupEvidence(error), ...(runtime.success ? { runtime: runtime.data } : {}) };
 }
 export function setupEvidence(error: unknown): { setup?: SetupObservation } {
   if (!(error instanceof ZerosDevError)) return {};

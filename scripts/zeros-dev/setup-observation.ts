@@ -4,7 +4,7 @@ import { z } from "zod";
 // server promises redaction. New codes remain unknown until reviewed here.
 const SetupErrorSchema = z.enum([
   "setup_image_contract_invalid", "setup_helper_failed", "setup_provider_failure",
-  "setup_provider_bootstrap_unavailable", "setup_admission_unavailable", "setup_engine_readiness_failed",
+  "setup_provider_bootstrap_unavailable", "setup_provider_bootstrap_cleanup_unconfirmed", "setup_admission_unavailable", "setup_engine_readiness_failed",
   "setup_checkpoint_restore_invalid", "setup_checkpoint_restore_unavailable", "setup_repository_revision_invalid",
   "setup_repository_history_limit", "setup_repository_unavailable", "setup_command_failed", "setup_request_invalid",
   "setup_settings_invalid", "setup_execution_aborted", "setup_readiness_invalid", "setup_helper_response_invalid",

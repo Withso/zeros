@@ -25,6 +25,29 @@ async function fixture() {
 }
 
 describe("cross-run signed Actions receipts", () => {
+  it.each(["legacy", "runtime", "setup"] as const)("round-trips a %s failure without changing its signed diagnostic", async kind => {
+    const f = await fixture();
+    const diagnostic = kind === "runtime" ? { runtime: { phase: "admission" as const, class: "admission_unavailable" as const, status: 500 } }
+      : kind === "setup" ? { setup: { attempt: 5, claimCount: 2, state: "queued" as const, errorCode: "setup_provider_bootstrap_cleanup_unconfirmed" as const } } : {};
+    await f.store.withRun(f.runId, null, async h => {
+      h.run.evidence.push({ phase: "runtime_connect", outcome: "failed", durationMs: 2300, code: "runtime_unavailable", ...diagnostic }); await h.save();
+    });
+    const result = { code: "runtime_unavailable" as const, success: false, runId: f.runId, ...diagnostic };
+    await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, result);
+    expect(JSON.parse(await readFile(f.file, "utf8")).payload.result).toEqual(result);
+    const next = new RunStore(path.join(f.root, "next"), f.fixture, f.credential);
+    await importHourlyArtifact(f.file, next, f.credential, f.execution);
+    expect((await next.read(f.runId)).evidence).toEqual((await f.store.read(f.runId)).evidence);
+  });
+
+  it("refuses unreviewed diagnostic fields in the public artifact", async () => {
+    const f = await fixture();
+    const runtime = { phase: "admission" as const, class: "admission_unavailable" as const, status: 500, message: "synthetic-private-body" };
+    await expect(exportHourlyArtifact(f.file, f.store, f.credential, f.execution,
+      { code: "runtime_unavailable", success: false, runId: f.runId, runtime })).rejects.toThrow("zeros_dev_artifact_invalid");
+    await expect(readFile(f.file)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("atomically checkpoints the same execution before mutation so a killed runner can recover its exact intent", async () => {
     const f = await fixture(), result = { code: "command_uncertain" as const, success: false, runId: f.runId };
     await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, result);
