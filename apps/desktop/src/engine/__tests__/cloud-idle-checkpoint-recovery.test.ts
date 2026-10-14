@@ -31,6 +31,7 @@ import { ResidentTerminalService } from "../pty/resident-service";
 import type { ResidentWorkloadFenceRequest } from "../pty/resident-protocol";
 import type { CloudCheckpointDirective } from "../cloud-runtime-registration";
 import type { CloudDurabilityAuthority } from "../cloud-durability-runtime";
+import { CloudCommandRuntimeError } from "../cloud-command-client";
 
 const directive: CloudCheckpointDirective = {
   id: "idle-checkpoint", reason: "before_stop", deadlineAtMs: Date.now() + 60_000, idleStop: true,
@@ -77,7 +78,8 @@ async function fixture(withResident = false) {
     cloudIdleReservation: null as (() => boolean) | null, cloudIdleCheckpoint: null,
     cloudWorkloadIdleFence: null as CloudWorkloadFence | null,
     cloudWorkloadCheckpointFence: null as CloudWorkloadFence | null,
-    cloudRuntimeRegistration: { idleStopRequest: vi.fn<() => Promise<CloudCheckpointDirective | null>>(async () => directive) },
+    cloudRuntimeRegistration: { idleStopRequest: vi.fn<() => Promise<CloudCheckpointDirective | null>>(async () => directive),
+      hasRuntimeHandoffAuthority: () => true },
     cloudCommands: { pauseClaims: vi.fn(), resumeClaims: vi.fn() },
     cloudHumanServices: { pause: vi.fn(async () => {}), resume: vi.fn() },
     cloudLanguageServices: { pause: vi.fn(async () => {}), resume: vi.fn() },
@@ -95,11 +97,100 @@ async function fixture(withResident = false) {
   Object.setPrototypeOf(state, ZerosEngine.prototype);
   return { registry, resident, operations, state: state as typeof state & {
     stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void>;
+    handleCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void>;
     resumeCloudCheckpointAdmission(): Promise<void>;
     sealCloudLocalWriter(): Promise<void>;
     fenceCloudResidentWorkloads(mode: "preserve" | "drain"): unknown;
   } };
 }
+
+describe("closed checkpoint progress before cleanup", () => {
+  it("dispatches a closed idle refusal before entering its early cancellation barrier", async () => {
+    const f = await fixture(), scope = { organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID() };
+    Object.assign(f.state, { cloudRuntimeConfig: { execution: scope, engine: { instanceId: scope.engineInstanceId },
+      registration: { endpoint: "https://control.test/internal/v1/cloud-workspaces/engine/register" } } });
+    const checkpointAuthority = { ...scope, heartbeatEndpoint: "https://control.test/internal/v1/cloud-workspaces/engine/heartbeat",
+      heartbeatToken: `zwh_${"h".repeat(43)}` };
+    const request: CloudCheckpointDirective = { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 60_000, idleStop: true };
+    const order: string[] = [], posted: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const report = JSON.parse(String(init?.body)); posted.push(report); order.push(String(report.state));
+      return new Response(null, { status: 202 });
+    });
+    let finishCancel!: () => void;
+    const barrier = new Promise<void>(resolve => { finishCancel = resolve; });
+    f.state.cloudRuntimeRegistration.idleStopRequest.mockImplementation(async () => {
+      order.push("cancel"); await barrier; return null;
+    });
+    const flight = f.state.handleCloudCheckpointRequest(request, checkpointAuthority); void flight.catch(() => {});
+    try {
+      expect(order).toEqual(["running", "failed", "cancel"]);
+      expect(posted.at(-1)).toMatchObject({ ...scope, requestId: request.id, state: "failed", reason: "pending_work" });
+      expect(f.state.cloudDurabilityRuntime.checkpoint).not.toHaveBeenCalled();
+    } finally {
+      finishCancel(); await expect(flight).rejects.toThrow("Cloud workspace is no longer idle"); f.state.running = false;
+    }
+  });
+
+  it.each([true, false])("finishes checkpoint work independently of held diagnostics (cloud=%s)", async cloud => {
+    const f = await fixture(), scope = { organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID() };
+    Object.assign(f.state, { cloudRuntimeConfig: { execution: scope, engine: { instanceId: scope.engineInstanceId },
+      registration: { endpoint: "https://control.test/internal/v1/cloud-workspaces/engine/register" } },
+    ...(cloud ? {} : { cloudWorker: null }) });
+    const checkpointAuthority = { ...scope, heartbeatEndpoint: "https://control.test/internal/v1/cloud-workspaces/engine/heartbeat",
+      heartbeatToken: `zwh_${"h".repeat(43)}` };
+    const request: CloudCheckpointDirective = { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 60_000 };
+    const requestFetch = vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise(() => {}));
+    try {
+      await expect(f.state.handleCloudCheckpointRequest(request, checkpointAuthority)).resolves.toBeUndefined();
+      expect(f.state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledWith(request, checkpointAuthority, undefined);
+      // Local Personal and organization-local use the same non-cloud boundary:
+      // even a stale cloud callback cannot create diagnostic network traffic.
+      expect(requestFetch).toHaveBeenCalledTimes(cloud ? 1 : 0);
+    } finally {
+      f.state.running = false;
+      const observed = f.state as unknown as { cloudCheckpointProgress?: { reporter: { dispose(): void } } };
+      observed.cloudCheckpointProgress?.reporter.dispose();
+    }
+  });
+
+  it.each(["setup_stop", "record_flush"] as const)("reports a blocked %s gate and preserves its first closed failure", async stage => {
+    const f = await fixture(), scope = { organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID() };
+    Object.assign(f.state, { cloudRuntimeConfig: { execution: scope, engine: { instanceId: scope.engineInstanceId },
+      registration: { endpoint: "https://control.test/internal/v1/cloud-workspaces/engine/register" } } });
+    const checkpointAuthority = { ...scope, heartbeatEndpoint: "https://control.test/internal/v1/cloud-workspaces/engine/heartbeat",
+      heartbeatToken: `zwh_${"h".repeat(43)}` };
+    const request: CloudCheckpointDirective = { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 60_000 };
+    const posted: Array<Record<string, unknown>> = [], order: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://control.test/internal/v1/cloud-workspaces/engine/checkpoint-progress");
+      const body = JSON.parse(String(init?.body)); posted.push(body); order.push(String(body.state));
+      return new Response(null, { status: 204 });
+    });
+    let failGate!: (error: Error) => void;
+    const gate = new Promise<void>((_resolve, reject) => { failGate = reject; });
+    if (stage === "setup_stop") f.state.setup.stopAllAndProve.mockReturnValueOnce(gate);
+    else f.state.cloudRecordRuntime.flush.mockReturnValueOnce(gate);
+    f.state.cloudRuntimeRegistration.idleStopRequest.mockImplementation(async () => {
+      order.push("cleanup"); throw new Error("private-cleanup-canary");
+    });
+    const flight = f.state.handleCloudCheckpointRequest(request, checkpointAuthority); void flight.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(posted).toContainEqual(expect.objectContaining({ ...scope, requestId: request.id,
+        stage, state: "running", reason: "none" })));
+      expect(f.state.cloudRuntimeRegistration.idleStopRequest).not.toHaveBeenCalled();
+      failGate(new CloudCommandRuntimeError("command_storage_unavailable"));
+      await expect(flight).rejects.toMatchObject({ code: "command_storage_unavailable" });
+      await vi.waitFor(() => expect(posted).toContainEqual(expect.objectContaining({ stage, state: "failed", reason: "storage" })));
+      expect(posted.filter(value => value.state === "failed")).toHaveLength(1);
+      expect(order.indexOf("failed")).toBeLessThan(order.indexOf("cleanup"));
+      expect(JSON.stringify(posted)).not.toContain("private-cleanup-canary");
+    } finally {
+      failGate(new CloudCommandRuntimeError("command_storage_unavailable")); await Promise.allSettled([flight]);
+      f.state.running = false;
+    }
+  });
+});
 
 async function originalTerminal(f: Awaited<ReturnType<typeof fixture>>) {
   const root = await mkdtemp(path.join(tmpdir(), "zeros-idle-preserved-"));

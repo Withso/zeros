@@ -56,6 +56,8 @@ import {
   type DatabaseCloudRuntimeAccessAdmissionService,
 } from "./runtime-access-admission.js";
 import { CloudEngineCheckpointHintRejected, type CloudEngineCheckpointHintInput } from "./engine-checkpoint-hints.js";
+import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, CloudCheckpointProgressSchema } from "./checkpoint-progress-contract.js";
+import { CloudEngineCheckpointProgressRejected, CloudEngineCheckpointProgressUnavailable, type CloudEngineCheckpointProgressInput } from "./checkpoint-progress.js";
 
 export const CLOUD_WORKSPACE_SETUP_ADMISSION_PATH =
   "/internal/v1/cloud-workspaces/setup/admission";
@@ -378,6 +380,8 @@ export interface CloudWorkspaceInternalSetupService {
   heartbeat(input: CloudWorkspaceEngineHeartbeatInput): Promise<unknown>;
   /** Optional timing hint; absent services answer 404 and engines keep their cadence. */
   waitForCheckpointHint?(input: CloudEngineCheckpointHintInput, signal: AbortSignal): Promise<unknown>;
+  /** Optional evidence; absent services preserve the old engine/CP pairing. */
+  reportCheckpointProgress?(input: CloudEngineCheckpointProgressInput): Promise<void>;
   admitEngineClient?: DatabaseCloudWorkspaceEngineClientAdmissionService["consume"];
   admitActorClient?: DatabaseCloudWorkspaceEngineClientAdmissionService["consumeActor"];
   admitRuntimeAccess?: DatabaseCloudRuntimeAccessAdmissionService["admit"];
@@ -605,6 +609,7 @@ export function createCloudWorkspaceInternalRoutes(
   ]) {
     routes.use(path, bodyLimit({ maxSize: INTERNAL_BODY_BYTES }));
   }
+  routes.use(CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, bodyLimit({ maxSize: 2_048 }));
 
   routes.post(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, async (c) => {
     const token = bearerToken(
@@ -744,6 +749,23 @@ export function createCloudWorkspaceInternalRoutes(
         return c.json(await service.waitForCheckpointHint!({ ...input, token }, c.req.raw.signal));
       } catch (error) {
         if (!(error instanceof CloudEngineCheckpointHintRejected)) throw error;
+        return c.json({ error: { code: error.code } }, 403);
+      }
+    });
+  }
+
+  if (service.reportCheckpointProgress) {
+    routes.post(CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, async c => {
+      const token = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);
+      if (!token) return c.json({ error: { code: "invalid_capability" } }, 401);
+      const input = await strictJson(c.req, CloudCheckpointProgressSchema);
+      if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
+      try {
+        await service.reportCheckpointProgress!({ ...input, token });
+        return c.json({ version: 1, accepted: true }, 202);
+      } catch (error) {
+        if (error instanceof CloudEngineCheckpointProgressUnavailable) return c.json({ error: { code: error.code } }, 503);
+        if (!(error instanceof CloudEngineCheckpointProgressRejected)) throw error;
         return c.json({ error: { code: error.code } }, 403);
       }
     });

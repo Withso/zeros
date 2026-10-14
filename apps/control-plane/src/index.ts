@@ -29,6 +29,7 @@ import { CloudComputerTemplateRetentionWorker } from "./cloud-workspaces/compute
 import { startCloudWorkerNotifications, type CloudWorkerNotificationHandlers } from "./cloud-workspaces/worker-notifications.js";
 import { workerPollingOptions } from "./worker-polling-config.js";
 import { CloudEngineCheckpointHints, startCloudEngineCheckpointHintNotifications } from "./cloud-workspaces/engine-checkpoint-hints.js";
+import { CloudEngineCheckpointProgress } from "./cloud-workspaces/checkpoint-progress.js";
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool, withSystemTx } from "./db.js";
@@ -529,6 +530,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     // Served by the API process itself, independent of background workers:
     // waiting engines share the dedicated notification session.
     const checkpointHints = new CloudEngineCheckpointHints(pool);
+    const checkpointProgress = new CloudEngineCheckpointProgress(pool, { workosEnabled: config.auth.provider === "workos" });
     stopCloudCheckpointHintNotifications = startCloudEngineCheckpointHintNotifications(listenerPool, checkpointHints);
     closeCloudCheckpointHints = () => checkpointHints.close();
     cloudWorkspaceInternalSetupService = {
@@ -543,6 +545,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       registerEngine: (input) => materials.registerEngine(input),
       heartbeat: (input) => materials.heartbeat(input),
       waitForCheckpointHint: (input, signal) => checkpointHints.wait(input, signal),
+      reportCheckpointProgress: input => checkpointProgress.report(input),
       admitEngineClient: (input) =>
         cloudWorkspaceEngineClientAdmissionService!.consume(input),
       admitActorClient: (input) => cloudWorkspaceEngineClientAdmissionService!.consumeActor(input),

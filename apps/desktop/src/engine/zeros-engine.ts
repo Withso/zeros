@@ -298,6 +298,7 @@ import {
   type CloudDurabilityAuthority,
 } from "./cloud-durability-runtime";
 import { CloudCheckpointScheduler } from "./cloud-checkpoint-scheduler";
+import { CloudCheckpointProgressReporter } from "./cloud-checkpoint-progress";
 import { CloudWorkspaceRecordRuntime } from "./cloud-record-runtime";
 import type {
   SessionNotification,
@@ -1163,6 +1164,8 @@ export class ZerosEngine {
   private cloudHandoffWatchersDirty = false;
   private cloudIdleReservation: (() => boolean) | null = null;
   private cloudIdleCheckpoint: { id: string; promise: Promise<void> } | null = null;
+  private cloudCheckpointProgress: { id: string; reporter: CloudCheckpointProgressReporter } | null = null;
+  private cloudCheckpointProgressUnsupported = false;
   private cloudIdleCaptureId: string | null = null;
   private readonly cloudUserPresence = new CloudUserPresence({ activity: () => {
     this.cloudLegacyResidentUserActivity = { at: performance.now() };
@@ -3317,6 +3320,7 @@ export class ZerosEngine {
    * Stop the engine gracefully.
    */
   async stop(): Promise<void> {
+    this.cloudCheckpointProgress?.reporter.dispose();
     const failures: unknown[] = [];
     if (this.cloudLegacyResidentRetryTimer) clearTimeout(this.cloudLegacyResidentRetryTimer);
     this.cloudLegacyResidentRetryTimer = null;
@@ -3482,6 +3486,7 @@ export class ZerosEngine {
   private handleCloudRuntimeAuthorityLoss(): void {
     if (this.cloudRuntimeAuthorityStopping) return;
     this.cloudRuntimeAuthorityStopping = true;
+    this.cloudCheckpointProgress?.reporter.dispose();
     this.cloudAgentTurnTimings?.retire();
     void this.cloudCheckpointScheduler?.close();
     this.cloudCommands?.close();
@@ -3800,15 +3805,38 @@ export class ZerosEngine {
     // Explicit final requests can also be redelivered after an ambiguous
     // response. Share their reconciliation just like an idle capture.
     if (this.cloudIdleCheckpoint?.id === directive.id) return this.cloudIdleCheckpoint.promise;
-    const promise = this.performCloudCheckpointRequest(directive, authority);
+    const progress = this.checkpointProgressReporter(directive, authority);
+    progress?.stage("checkpoint_received");
+    const promise = this.performCloudCheckpointRequest(directive, authority, progress);
     this.cloudIdleCheckpoint = { id: directive.id, promise };
-    void promise.catch(() => { if (this.cloudIdleCheckpoint?.id === directive.id) this.cloudIdleCheckpoint = null; });
+    void promise.catch(error => {
+      progress?.fail(error);
+      if (this.cloudIdleCheckpoint?.id === directive.id) this.cloudIdleCheckpoint = null;
+    });
     return promise;
+  }
+
+  private checkpointProgressReporter(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): CloudCheckpointProgressReporter | undefined {
+    const config = this.cloudRuntimeConfig, registration = this.cloudRuntimeRegistration;
+    if (!this.cloudWorker || !config || !registration || this.cloudCheckpointProgressUnsupported) return;
+    if (this.cloudCheckpointProgress?.id === directive.id) return this.cloudCheckpointProgress.reporter;
+    this.cloudCheckpointProgress?.reporter.dispose();
+    const reporter: CloudCheckpointProgressReporter = new CloudCheckpointProgressReporter({ authority, directive, registrationEndpoint: config.registration.endpoint,
+      current: () => this.running && !this.cloudRuntimeAuthorityStopping && this.cloudRuntimeConfig === config &&
+        this.cloudRuntimeRegistration === registration && this.cloudCheckpointProgress?.reporter === reporter &&
+        registration.hasRuntimeHandoffAuthority() && authority.organizationId === config.execution.organizationId &&
+        authority.workspaceId === config.execution.workspaceId && authority.generation === config.execution.generation &&
+        authority.engineInstanceId === config.engine.instanceId,
+      unsupported: () => { this.cloudCheckpointProgressUnsupported = true; },
+    });
+    this.cloudCheckpointProgress = { id: directive.id, reporter };
+    return reporter;
   }
 
   private async performCloudCheckpointRequest(
     directive: CloudCheckpointDirective,
     authority: CloudDurabilityAuthority,
+    progress?: CloudCheckpointProgressReporter,
   ): Promise<void> {
     this.cloudFinalCompletion = null;
     const unresolved = this.cloudUnresolvedFinalCheckpoint;
@@ -3833,8 +3861,10 @@ export class ZerosEngine {
     const idleReserved = directive.idleStop && this.cloudIdleReservation !== null;
     const stillIdle = directive.idleStop ? this.cloudIdleReservation : null;
     if (directive.idleStop && (!this.cloudIdleReservation?.() || await this.cloudIdleUserProcesses() || !this.cloudIdleReservation?.())) {
+      const error = new Error("Cloud workspace is no longer idle");
+      progress?.fail(error, "pending_work");
       await this.cloudRuntimeRegistration?.idleStopRequest({ kind: "cancel", requestId: directive.id }).catch(() => undefined);
-      throw new Error("Cloud workspace is no longer idle");
+      throw error;
     }
     if (
       this.cloudRuntimeHandoffFenced || !this.cloudDurabilityRuntime ||
@@ -3854,14 +3884,16 @@ export class ZerosEngine {
       "before_rebuild",
     ].includes(directive.reason);
     try {
+      progress?.stage("service_pause");
       if (this.cloudWorkloads && !this.cloudWorkloadCheckpointFence) {
         this.cloudWorkloadCheckpointFence = this.cloudWorkloads.fence({ preserveActive: directive.idleStop === true });
         this.cloudWorkloadCheckpointPreserved = directive.idleStop === true;
       }
       this.cloudResidentCheckpointFence ??= this.fenceCloudResidentWorkloads(directive.idleStop ? "preserve" : "drain");
       try { await Promise.all([this.cloudHumanServices?.pause(),this.cloudLanguageServices?.pause()]); }
-      catch (error) { this.handleCloudRuntimeAuthorityLoss(); throw error; }
+      catch (error) { progress?.fail(error); this.handleCloudRuntimeAuthorityLoss(); throw error; }
       await this.cloudCheckpointScheduler?.pause();
+      progress?.stage("process_starts");
       await this.waitForWorkspaceProcessStartSnapshot(
         "cloud-final-checkpoint",
         [...new Set([
@@ -3870,9 +3902,13 @@ export class ZerosEngine {
           ...[...this.workspaceProcessStarts.values()].flatMap(starts => [...starts]),
         ])],
       );
+      progress?.stage("setup_stop");
       await this.setup.stopAllAndProve();
+      progress?.stage("run_stop");
       await this.runs.stopAllAndProve();
+      progress?.stage("agent_retirement");
       await this.retireAllCodeAgentSessionsForTerritoryChange();
+      progress?.stage("workload_drain");
       if (this.cloudWorkloads && this.cloudWorkloadCheckpointFence) {
         if (directive.idleStop) {
           await this.joinCloudPreservedWorkloads(this.cloudWorkloadCheckpointFence, this.cloudResidentCheckpointFence);
@@ -3880,9 +3916,12 @@ export class ZerosEngine {
             throw new Error("Cloud workspace is no longer idle");
         } else await this.drainCloudWorkloads(this.cloudWorkloadCheckpointFence, this.cloudResidentCheckpointFence);
       }
+      progress?.stage("terminal_drain");
       if (!directive.idleStop) await this.terminals.clear();
+      progress?.stage("record_flush");
       await this.cloudRecordRuntime.flush(authority);
-      if (retainQuiescence && this.cloudLocalWriterLifecycle) await this.sealCloudLocalWriter();
+      if (retainQuiescence && this.cloudLocalWriterLifecycle) await this.sealCloudLocalWriter(progress);
+      progress?.stage("durability_capture");
       await this.cloudDurabilityRuntime.checkpoint(directive, authority, stillIdle ?? undefined);
       // A cancelled idle capture must leave terminal access intact. Clear the
       // shared registrations only after its final checkpoint was committed.
@@ -3895,11 +3934,14 @@ export class ZerosEngine {
         }
         await this.terminals.clear();
       }
+      progress?.stage("final_completion");
       if (retainQuiescence) this.captureCloudFinalCompletion(authority);
       if (!retainQuiescence) {
         await this.resumeCloudCheckpointAdmission();
       }
+      progress?.complete();
     } catch (error) {
+      progress?.fail(error);
       if (retainQuiescence) {
         // A lost checkpoint response can conceal a committed final snapshot.
         // Only acknowledged cancellation permits this engine to admit writes.
@@ -4418,7 +4460,7 @@ export class ZerosEngine {
     }
   }
 
-  private sealCloudLocalWriter(): Promise<void> {
+  private sealCloudLocalWriter(progress?: CloudCheckpointProgressReporter): Promise<void> {
     if (this.cloudLocalSealFlight) return this.cloudLocalSealFlight;
     const lifecycle = this.cloudLocalWriterLifecycle,boot = this.cloudAgentBoot,mirror = this.cloudLocalMirror,registration = this.cloudRuntimeRegistration;
     if (!lifecycle || !boot?.authorityActive || !mirror || !registration) return Promise.reject(new CloudCommandRuntimeError("engine_authority_rejected"));
@@ -4427,9 +4469,13 @@ export class ZerosEngine {
     const preserve = this.cloudRuntimeHandoffFenced === true || this.cloudIdleCaptureId != null;
     if (this.cloudWorkloads) this.cloudWorkloadSealFence ??= this.cloudWorkloads.fence({ preserveActive: preserve });
     this.cloudResidentSealFence ??= this.fenceCloudResidentWorkloads(preserve ? "preserve" : "drain");
+    progress?.stage("boot_quiesce");
     const flight = lifecycle.drainAndSeal({ mirror,
       retireNative: async () => {
-        await boot.quiesceForSeal(); await this.cloudLocalNativePump!.dispose(); await factory.disposeBoot();
+        await boot.quiesceForSeal();
+        progress?.stage("native_pump");
+        await this.cloudLocalNativePump!.dispose(); await factory.disposeBoot();
+        progress?.stage("workload_drain");
         if (this.cloudWorkloads && this.cloudWorkloadSealFence) {
           if (preserve) {
             await this.joinCloudPreservedWorkloads(this.cloudWorkloadSealFence, this.cloudResidentSealFence);
@@ -4438,16 +4484,25 @@ export class ZerosEngine {
         }
       },
       waitForWork: async () => {
+        progress?.stage("command_drain");
         const deadline = performance.now() + 25_000;
         while (!this.cloudCommands!.lifecycleDrained() || this.cloudActions!.hasActiveWork()) {
           if (performance.now() >= deadline) throw new CloudCommandRuntimeError("command_conflict");
           await new Promise<void>(resolve => setTimeout(resolve,25));
         }
-        await this.cloudEvents!.flush(); await registration.pauseRecordForRuntimeHandoff();
+        progress?.stage("event_flush");
+        await this.cloudEvents!.flush();
+        progress?.stage("record_handoff");
+        await registration.pauseRecordForRuntimeHandoff();
       },
       freezeNormal: sealZerosDbForRuntimeHandoff,
       request: (seal,signal) => registration.localCommandSealRequest(seal,signal),
-    }).then(async () => { await lifecycle.captureCheckpoint(cloudLocalCommandCheckpointRoot(zerosDataDir(), this.root)); })
+      onStage: stage => progress?.stage(stage),
+      onDeadline: () => progress?.fail(undefined, "deadline"),
+    }).then(async () => {
+      progress?.stage("checkpoint_capture");
+      await lifecycle.captureCheckpoint(cloudLocalCommandCheckpointRoot(zerosDataDir(), this.root));
+    })
       .finally(() => { if (this.cloudLocalSealFlight === flight) this.cloudLocalSealFlight = null; });
     this.cloudLocalSealFlight = flight; return flight;
   }
