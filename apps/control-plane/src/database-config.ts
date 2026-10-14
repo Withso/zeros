@@ -9,10 +9,12 @@ export function validateDatabaseConnections(input: {
   DATABASE_MIGRATION_URL?: string | undefined;
   DATABASE_POOL_MAX: number;
 }): void {
-  const minimum = input.DATABASE_LISTEN_URL ? 2 : 3;
+  // LISTEN and the Computer retirement session holder have dedicated pools.
+  // WorkOS caps query-pool holders so its callback still has a connection.
+  const minimum = 2;
   if (input.DATABASE_POOL_MAX < minimum) {
     throw new Error(
-      `Invalid environment: DATABASE_POOL_MAX must be at least ${minimum} to reserve lock, callback and listener capacity`,
+      `Invalid environment: DATABASE_POOL_MAX must be at least ${minimum} to reserve lock and callback capacity`,
     );
   }
   const invalid = (key: string, reason: string): never => { throw new Error(`Invalid environment: ${key} ${reason}`); };

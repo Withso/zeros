@@ -65,12 +65,52 @@ an idle egress budget or the direct connection success rate.
 
 ## Connections and authority
 
-`DATABASE_URL` owns the bounded request pool. Hosted boot always creates a
+`DATABASE_URL` owns separate bounded API and worker pools. API capacity defaults
+to six connections (`DATABASE_POOL_MAX`), with a one-second acquire deadline and
+five-second statement deadline. An expired acquire leaves the driver's queue
+and returns HTTP 503, `Retry-After: 1` and `Cache-Control: no-store`; SQL failures
+and unknown commit results are not automatically retried. Workers have two
+connections with the existing ten-second acquire and thirty-second statement
+deadlines. Operator pool callers keep their existing limits.
+
+These hosted defaults apply on the next release of every channel, including
+Beta and Production: API query capacity changes from ten to six, statement
+timeouts from thirty to five seconds, and acquire timeouts from ten to one
+second. An explicit `DATABASE_POOL_MAX` still controls API capacity, but does
+not restore the old timeouts. Review each channel's overrides before release.
+
+`CONTROL_PLANE_PROCESS_ROLE` selects `api`, `worker` or `combined` (the
+compatibility default). API replicas own HTTP/WebSocket requests, account
+security subscriptions and engine checkpoint waits. Worker replicas own
+WorkOS/account deletion, security publication, GitHub DB expiry and all enabled
+cloud queues, including retention, setup and runtime qualification. They expose
+only liveness and release readiness. The API's GitHub read-cache cleanup remains
+process-local. Nested provider operation stores, Computer services, blob
+services, setup admission and diagnostic writes use their owning worker pool;
+sharing the API-bound object would bypass isolation. API qualification enqueue
+uses API capacity, while qualification execution uses worker capacity.
+
+Separate worker ownership requires deploying at least one `worker` process and
+changing the serving processes to `api`. Merely scaling `combined` repeats its
+workers as before. Existing maintenance, migration, channel and cloud-worker
+enablement gates still apply. A worker owns no permanent leadership connection.
+WorkOS permits at most one session-lock holder in the two-slot worker query
+pool, leaving the other connection for callbacks and ordinary worker work.
+Historical Computer retirement has an independent max-one lock pool whenever
+Boat workers are enabled. Its provider waits and account session lock cannot
+consume query capacity; its callbacks use the worker query pool. A sweep whose
+initial account transaction lock is contended defers to the next sweep. This
+avoids pinning the remaining query connection behind another process's
+provider call. Both independent holders and short worker transactions must
+make progress together, not merely when the API pool is saturated.
+Shutdown stops consumers and drains their work before ending each distinct pool.
+
+Hosted boot always creates a
 separate notification pool with a maximum of two connections and runtime
 privileges. `DATABASE_LISTEN_URL` selects its direct-primary connection target;
 otherwise it uses `DATABASE_URL`, while keeping its capacity separate.
 Security events, worker hints, engine checkpoint hints and Computer retention
-share one checked-out LISTEN session. Adding or stopping one consumer does not
+share one checked-out LISTEN session per process. Adding or stopping one consumer does not
 acquire another connection or interrupt the other consumers. The remaining
 pool slot is budgeted headroom, not a second permanent listener.
 
@@ -149,17 +189,35 @@ driver pool eviction alone does not establish safe listener rotation.
 [Role management](https://planetscale.com/docs/postgres/connecting/roles),
 [connection resilience](https://planetscale.com/docs/postgres/connection-resilience)
 
-Start isolated qualification with one API replica and six request connections.
-Include the two-slot notification pool in the capacity budget even though its
-four consumers use one connection. Rolling overlap has a sixteen-connection
-ceiling before a migrator, separate worker pools and operator headroom. The
-request-pool default is still ten until the separate pool-bulkhead rollout;
-with that default, budget twenty-four connections for two overlapping replicas.
-Compare the complete budget with the target's usable slots and measured load.
-WorkOS needs at least two query slots because its session-lock holder needs a
-second connection to checkpoint. The current configuration retains its
-conservative three-slot minimum when `DATABASE_LISTEN_URL` is absent. These
-minima are deadlock guards, not performance sizing recommendations.
+Budget each live or overlapping process at its configured ceiling: `api` is
+`DATABASE_POOL_MAX + 2` (default 8), `worker` is 5, and `combined` is
+`DATABASE_POOL_MAX + 5` (default 11) with Boat retirement enabled. The worker
+ceiling comprises two query, one retirement-lock and two listener connections.
+Without Boat retirement, worker and combined ceilings are one lower.
+Include one connection for every active
+migrator, including compatibility boot migrations, plus operator headroom.
+The two listener slots are reserved even though one shared session normally
+uses only one. Separate processes each need their own listener; two query pools
+in one process share it.
+
+| Topology at default limits, verify-only service boot | Steady ceiling | With one API replacement | With replacement and one migrator |
+| --- | ---: | ---: | ---: |
+| One combined process | 11 | 22 (combined replacement) | 23 |
+| One API plus one worker process | 13 | 21 | 22 |
+
+On a 25-slot target, the combined rollout leaves two slots after the one
+migrator; the split rollout leaves three. Replacing only the worker in the
+split topology reserves 19 including the migrator. Do not overlap API and
+worker replacements: two API and two worker processes plus a migrator reserve
+27 slots, exceeding the target before any recovery headroom.
+Additional replicas, larger `DATABASE_POOL_MAX`, concurrent boot migrations or
+operator sessions require recalculating this budget against the actual target
+limit before rollout. This is a deployment budget, not a fleet-wide allocator;
+the application does not discover replica counts or change provider settings.
+Bring up the dedicated worker and confirm queue drainage before disabling the
+old process's workers. Keep API and worker rollouts sequential within the budget.
+The two-slot query minimum applies with or without `DATABASE_LISTEN_URL`, since
+LISTEN is always isolated. It is a deadlock guard, not a sizing recommendation.
 
 ## Verification order
 

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const fixture = vi.hoisted(() => ({
   channel: "beta",
   pool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
+  workerPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
   listenerPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
   createPool: vi.fn(),
   securityBroker: vi.fn(),
@@ -58,7 +59,8 @@ beforeEach(() => {
   oldTerm = process.listeners("SIGTERM"); oldInt = process.listeners("SIGINT");
   fixture.pool.query.mockImplementation(() => { throw new Error("unexpected cloud polling"); });
   fixture.pool.connect.mockImplementation(() => { throw new Error("unexpected cloud listener"); });
-  fixture.createPool.mockImplementation((_url, options) => options.applicationName ? fixture.listenerPool : fixture.pool);
+  fixture.createPool.mockImplementation((_url, options) => options.workload === "worker" ? fixture.workerPool :
+    options.workload === "listener" ? fixture.listenerPool : fixture.pool);
   fixture.serve.mockImplementation((_options, ready) => { ready({ port: 8080 }); return { on: vi.fn() }; });
   vi.spyOn(console, "log").mockImplementation(() => {});
 });
@@ -84,9 +86,9 @@ describe("paused-channel control-plane startup", () => {
     expect(fixture.boat).not.toHaveBeenCalled();
     expect(fixture.pool.query).not.toHaveBeenCalled();
     expect(fixture.pool.connect).not.toHaveBeenCalled();
-    expect(fixture.createPool).toHaveBeenCalledTimes(2);
+    expect(fixture.createPool).toHaveBeenCalledTimes(3);
     expect(fixture.createPool).toHaveBeenLastCalledWith(expect.any(String), {
-      maxConnections: 2, applicationName: "zeros-notifications", keepAlive: true,
+      workload: "listener", maxConnections: 2, applicationName: "zeros-notifications", keepAlive: true,
     });
     expect(fixture.securityBroker).toHaveBeenCalledExactlyOnceWith(fixture.listenerPool);
     expect(fixture.cloudNotifications.mock.calls[0]![0]).toBe(fixture.listenerPool);

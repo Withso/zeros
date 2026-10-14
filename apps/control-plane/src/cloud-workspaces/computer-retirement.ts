@@ -93,14 +93,18 @@ export class ComputerImageRetirementWorker {
     private readonly account: string,
     private readonly driver: ComputerRetirementDriver,
     private readonly protectedImageRefs: readonly string[] = [],
+    private readonly lockPool: pg.Pool = pool,
   ) {}
   get accountScope(): string { return this.account; }
   async tick() {
-    await withSystemTx(this.pool, async (tx) => {
-      await tx.query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1,62172)) /*lock_purpose='computer-image-retirement'*/",
+    const prepared = await withSystemTx(this.pool, async (tx) => {
+      // Another process can hold this account lock across provider I/O.
+      // Defer instead of pinning the remaining worker query connection.
+      const result = await tx.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1,62172)) AS acquired /*lock_purpose='computer-image-retirement'*/",
         [this.account],
       );
+      if (!result.rows[0]?.acquired) return false;
       for (const ref of this.protectedImageRefs) {
         const name = /^boat:([a-z0-9-]+)@sha256:[a-f0-9]{64}$/.exec(ref)?.[1];
         if (!name) throw new Error("Invalid protected Computer base");
@@ -110,7 +114,9 @@ export class ComputerImageRetirementWorker {
           [this.account, name, ref],
         );
       }
+      return true;
     });
+    if (!prepared) return;
     const ids = await withSystemTx(this.pool, (tx) =>
       tx.query<{ id: string }>(
         `WITH candidates AS (
@@ -150,7 +156,9 @@ export class ComputerImageRetirementWorker {
     );
   }
   private async retire(id: string) {
-    const lock = await this.pool.connect();
+    // Hosted workers isolate this session holder from query capacity: WorkOS
+    // can hold a query-pool session too, and both holders need DB callbacks.
+    const lock = await this.lockPool.connect();
     let locked = false;
     try {
       locked = (
@@ -441,7 +449,7 @@ export class CloudComputerRetirementWorker {
 export function createCloudComputerRetirementWorker(
   pool: pg.Pool,
   config: CloudWorkspaceBackendConfig,
-  options: { intervalMs?: number } = {},
+  options: { intervalMs?: number; lockPool?: pg.Pool } = {},
 ) {
   return new CloudComputerRetirementWorker(
     pool,
@@ -452,6 +460,7 @@ export function createCloudComputerRetirementWorker(
           config.boat.accountScope,
           createComputerRetirementDriver(config),
           [cloudWorkspaceProvisioningProfile(config, "boat").imageRef],
+          options.lockPool,
         )
       : undefined,
     options,

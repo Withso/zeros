@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({
   migrationState: "current",
+  processRole: "combined",
   pool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
+  workerPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
+  listenerPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
+  createPool: vi.fn(),
   serve: vi.fn(),
   workos: { notify: vi.fn(), stop: vi.fn(async () => {}) },
   startWorkos: vi.fn(),
@@ -20,12 +24,13 @@ vi.mock("./config.js", async original => {
       DATABASE_MIGRATIONS_ON_BOOT: "false",
       AUTH0_DOMAIN: "identity.example.test", AUTH_AUDIENCE: "https://api.example.test",
       CLOUD_WORKSPACES_ENABLED: "false",
+      CONTROL_PLANE_PROCESS_ROLE: fixture.processRole,
     }),
     auth: { provider: "workos" }, workos: {}, workerPollIntervalsMs: { workos: 2_000 },
   }) };
 });
 vi.mock("./db.js", async original => ({
-  ...(await original<typeof import("./db.js")>()), createPool: () => fixture.pool,
+  ...(await original<typeof import("./db.js")>()), createPool: fixture.createPool,
 }));
 vi.mock("./migrate.js", async original => ({
   ...(await original<typeof import("./migrate.js")>()),
@@ -52,10 +57,14 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   vi.useFakeTimers();
+  fixture.processRole = "combined";
+  fixture.migrationState = "current";
   oldTerm = process.listeners("SIGTERM"); oldInt = process.listeners("SIGINT");
   fixture.pool.query.mockImplementation(() => { throw new Error("unexpected database query"); });
   fixture.pool.connect.mockImplementation(() => { throw new Error("unexpected database acquisition"); });
   fixture.startWorkos.mockReturnValue(fixture.workos);
+  fixture.createPool.mockImplementation((_url, options) => options.workload === "worker" ? fixture.workerPool :
+    options.workload === "listener" ? fixture.listenerPool : fixture.pool);
   fixture.serve.mockImplementation((_options, ready) => { ready({ port: 8080 }); return { on: vi.fn() }; });
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -68,12 +77,30 @@ afterEach(() => {
 });
 
 describe("account maintenance without cloud workspaces", () => {
+  it("starts no account or security publication workers on API replicas", async () => {
+    fixture.processRole = "api";
+    await import("./index.js");
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fixture.startWorkos).not.toHaveBeenCalled();
+    expect(fixture.security).not.toHaveBeenCalled();
+    expect(fixture.notifications).not.toHaveBeenCalled();
+    expect(fixture.createPool.mock.calls.map(call => call[1].workload).sort()).toEqual(["api", "listener"]);
+  });
+
+  it("gives a worker process its own two slots and retains account work without cloud", async () => {
+    fixture.processRole = "worker";
+    await import("./index.js");
+    expect(fixture.startWorkos).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ pool: fixture.workerPool }));
+    expect(fixture.createPool.mock.calls.map(call => call[1].workload).sort()).toEqual(["listener", "worker"]);
+    expect(fixture.notifications.mock.calls[0]![0]).toBe(fixture.listenerPool);
+  });
+
   it("registers account and security wakes and preserves the account override", async () => {
     fixture.migrationState = "current";
     await import("./index.js");
     await vi.advanceTimersByTimeAsync(120_000);
     expect(fixture.startWorkos).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      intervalMs: 2_000, deletionLifecycleEnabled: true,
+      intervalMs: 2_000, deletionLifecycleEnabled: true, pool: fixture.workerPool,
     }));
     expect(fixture.notifications).toHaveBeenCalledOnce();
     const handlers = fixture.notifications.mock.calls[0]![1] as Record<string, () => void>;

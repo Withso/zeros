@@ -20,6 +20,12 @@
    For periodic disconnects, inspect client retirement timers before blaming
    server idle limits. Test real server closure, reconnect acknowledgement,
    durable replay and bounded backoff; distinguish planned rotation in logs.
+   For pool isolation, test the boot composition and nested DB-bound services,
+   not only pool sizes. Hold capacity on real Postgres, prove expired promise
+   and callback acquires leave no queued work, and drain every owned pool.
+   Inventory independent session-lock holders and hold them concurrently across
+   provider barriers; their callbacks and an unrelated worker transaction must
+   still progress. Count every lock pool in steady and rollout surge budgets.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates
