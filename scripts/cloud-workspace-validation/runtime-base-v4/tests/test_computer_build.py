@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -99,6 +100,7 @@ class Bootstrap(source.Bootstrap):
         self.write("/etc/apparmor.d/zeros-cloud-engine", "fixture profile", 0o444)
         self.write("/opt/zeros-infra/" + RUNTIME + "/fixture", "verified runtime", 0o444)
         self.mkdir("/opt/zeros")
+        self.mkdir("/opt/zeros/sessions").chmod(0o700)
         (self.root / "opt/zeros/current").symlink_to("../zeros-infra/" + RUNTIME)
         self.mkdir("/usr/local/lib")
         stock = {"optionalSystemd": bootstrap.Bootstrap(self.root, uid=os.getuid(), gid=os.getgid()).qualify_optional_systemd({"uid": 4242, "gid": 4242})}
@@ -397,6 +399,66 @@ ENDFONT
         for path in self.root.rglob("*"):
             if path.is_file() and not path.is_symlink(): self.assertNotIn(b"synthetic-clone-credential", path.read_bytes())
 
+    def test_sanitize_overwrites_visible_repository_hooks_without_unlink(self):
+        document, _, _ = self.repository()
+        repositories = self.app.clone_repos(document)['repositories']
+        hook = self.write('/srv/zeros/files/repos/fixture/repo/.git/hooks/post-checkout',
+                          '#!/bin/sh\nprintf inherited > inherited-hook-ran\n', 0o755)
+        inode, inherited = hook.stat().st_ino, hook.read_bytes()
+        request = self.sanitation_request()
+        request['manifest']['repositoryManifest'] = repositories
+        request['manifestSha256'] = build.sha(build.packed(request['manifest']))
+        self.app.sanitize(request)
+        saved = hook.read_bytes() if hook.exists() else inherited
+        self.assertEqual(saved, b'', 'incremental capture retained an executable hook')
+        self.assertEqual(hook.stat().st_ino, inode)
+
+    def test_restored_git_does_not_execute_an_inherited_hook_absent_at_sanitation(self):
+        document, commit, _ = self.repository()
+        repositories = self.app.clone_repos(document)['repositories']
+        repo = self.root / 'srv/zeros/files/repos/fixture/repo'
+        hook = self.write('/srv/zeros/files/repos/fixture/repo/.git/hooks/post-checkout',
+                          '#!/bin/sh\nprintf inherited > inherited-hook-ran\n', 0o755)
+        inherited = hook.read_bytes()
+        hook.unlink()  # Removed before the live sanitizer can discover it.
+        request = self.sanitation_request()
+        request['manifest']['repositoryManifest'] = repositories
+        request['manifestSha256'] = build.sha(build.packed(request['manifest']))
+        self.app.sanitize(request)
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_bytes(inherited)  # The provider restores the ancestor entry.
+        hook.chmod(0o755)
+        result = subprocess.run(['git', 'checkout', '--quiet', '--detach', commit], cwd=repo,
+                                env={**build.ENVIRONMENT, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'},
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        self.assertEqual(result.returncode, 0, 'ordinary restored Git checkout failed')
+        self.assertFalse((repo / 'inherited-hook-ran').exists(), 'ordinary Git executed an inherited hook')
+        self.assertEqual((repo / 'file').read_text(), 'repository data')
+        # A workspace can deliberately install fresh hooks after replacing
+        # the template setting. No global or Local-workspace policy is changed.
+        hook.write_bytes(b'#!/bin/sh\nprintf approved > intentional-hook-ran\n')
+        environment = {**build.ENVIRONMENT, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'}
+        for arguments in (['config', '--local', 'core.hooksPath', '.git/hooks'], ['checkout', '--quiet', '--detach', commit]):
+            result = subprocess.run(['git', *arguments], cwd=repo, env=environment,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+            self.assertEqual(result.returncode, 0, 'explicit workspace hook installation failed')
+        self.assertEqual((repo / 'intentional-hook-ran').read_text(), 'approved')
+
+    def test_hook_alias_fails_sanitation_without_truncating_repository_content(self):
+        document, _, _ = self.repository()
+        repositories = self.app.clone_repos(document)['repositories']
+        repo = self.root / 'srv/zeros/files/repos/fixture/repo'
+        hooks = repo / '.git/hooks'
+        hooks.mkdir(exist_ok=True)
+        (hooks / 'post-checkout').symlink_to('../../file')
+        request = self.sanitation_request()
+        request['manifest']['repositoryManifest'] = repositories
+        request['manifestSha256'] = build.sha(build.packed(request['manifest']))
+        with self.assertRaises(build.Failure):
+            self.app.sanitize(request)
+        self.assertEqual((repo / 'file').read_text(), 'repository data')
+
+
     def test_empty_repository_list_does_not_create_repo_projection(self):
         result = self.app.clone_repos({"schema": "zeros.computer-repositories-input/v1", **JOB, "repositories": []})
         self.assertEqual(result["repositories"], [])
@@ -443,7 +505,8 @@ ENDFONT
             self.app.host = FakeHost()
             self.app.sanitize({"schema": "zeros.computer-sanitation-input/v1", **JOB, "manifest": manifest, "manifestSha256": build.sha(build.packed(manifest))})
             accessible()
-            self.assertFalse(private.exists())
+            self.assertTrue(private.is_dir())
+            self.assertTrue(all(path.is_dir() or path.is_file() and path.stat().st_size == 0 for path in private.rglob("*")))
         finally:
             os.umask(original_umask)
 
@@ -477,7 +540,139 @@ ENDFONT
         try: os.waitpid(-1, 0)
         except ChildProcessError: pass
 
-    def test_sanitize_preserves_repositories_runtime_and_manifest_but_removes_private_state(self):
+    def sanitation_request(self):
+        manifest = {"schema": "zeros.computer-template/v1", "buildId": JOB["buildId"], "configId": JOB["buildId"], "baseImageId": "fixture-base",
+                    "runtimeId": RUNTIME, "baseCompatibilityId": self.compatibility, "repositoryManifest": [], "protectedContractDigest": self.baseline()}
+        self.app.host = FakeHost()
+        return {"schema": "zeros.computer-sanitation-input/v1", **JOB, "manifest": manifest, "manifestSha256": build.sha(build.packed(manifest))}
+
+    def test_sanitize_overwrites_inherited_private_entries_without_deleting_paths(self):
+        private = ("/root/.ssh/id", "/root/.cache/nested/private", "/root/.local/state/private", "/home/user/.env.fixture",
+                   "/home/user/.codex/auth.json", "/srv/zeros/setup/admission", "/srv/zeros/state/workspaces/session",
+                   "/srv/zeros/home/agent/.claude/session", "/srv/zeros/home/capture/session", "/srv/zeros/log/private",
+                   "/srv/zeros/files/state/private", "/srv/zeros/managed-settings/extra/private",
+                   "/srv/zeros/managed-settings/settings.managed.toml", "/opt/zeros/sessions/boot.json",
+                   "/opt/zeros/sessions/reconciliation.json", "/var/log/journal/private", "/run/log/journal/private",
+                   "/run/zeros/active-runtime.json", "/run/zeros/computer-build/" + JOB["buildId"] + "/install.json",
+                   "/var/lib/systemd/random-seed", "/var/lib/systemd/timesync/clock", "/opt/zeros/disk-epoch")
+        for path in private:
+            self.write(path, "4\n" if path.endswith("disk-epoch") else "synthetic private state", 0o600)
+        request = self.sanitation_request()
+        before = {path: (self.app.path(path).read_bytes(), self.app.path(path).stat().st_ino) for path in private}
+        parents = {self.app.path(path).parent: self.app.path(path).parent.stat().st_ino for path in private}
+        result = self.app.sanitize(request)
+        # An incremental capture can retain an ancestor entry when the live
+        # path was deleted. Only an explicit empty replacement clears its bytes.
+        saved = {path: value[0] for path, value in before.items()}
+        saved.update({path: self.app.path(path).read_bytes() for path in private if self.app.path(path).exists()})
+        self.assertTrue(result["clean"])
+        self.assertEqual([path for path, data in saved.items() if data], [], "incremental capture retained private bytes")
+        for path, (_, inode) in before.items():
+            self.assertEqual(self.app.path(path).stat().st_ino, inode)
+        for path, inode in parents.items():
+            self.assertEqual(path.stat().st_ino, inode)
+        self.verify(request["manifest"]["protectedContractDigest"])
+
+    def test_sanitize_materializes_known_markers_missing_from_live_tree(self):
+        self.mkdir("/opt/zeros/sessions").chmod(0o700)
+        markers = ("/opt/zeros/disk-epoch", "/opt/zeros/sessions/boot.json", "/opt/zeros/sessions/reconciliation.json",
+                   "/run/zeros/active-runtime.json", "/var/lib/systemd/random-seed", "/var/lib/systemd/timesync/clock")
+        for path in markers:
+            self.write(path, "ancestor snapshot bytes", 0o600).unlink()
+        self.app.sanitize(self.sanitation_request())
+        for path in markers:
+            with self.subTest(path=path):
+                target = self.app.path(path)
+                self.assertTrue(target.exists() and stat.S_ISREG(target.lstat().st_mode), "known inherited marker was not superseded")
+                self.assertEqual(target.read_bytes(), b"")
+                self.assertEqual(target.stat().st_nlink, 1)
+        self.assertTrue(self.app.path("/run/zeros/computer-build").is_dir())
+
+    def test_sanitize_refuses_private_aliases_and_special_files(self):
+        victim = self.write("/outside/private", "unrelated bytes")
+        for kind in ("symlink", "directory-alias", "hardlink", "fifo"):
+            with self.subTest(kind=kind):
+                target = self.app.path("/root/.netrc")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if kind == "symlink": target.symlink_to(victim)
+                elif kind == "directory-alias": target.symlink_to(victim.parent, target_is_directory=True)
+                elif kind == "hardlink": os.link(victim, target)
+                else: os.mkfifo(target)
+                try:
+                    with self.assertRaises(build.Failure):
+                        self.app.sanitize(self.sanitation_request())
+                    self.assertEqual(victim.read_text(), "unrelated bytes")
+                finally:
+                    target.unlink(missing_ok=True)
+
+    def test_sanitize_checks_opened_file_before_truncating_a_raced_hardlink(self):
+        victim = self.write("/outside/private", "unrelated bytes")
+        target = self.write("/root/.netrc", "synthetic private state", 0o600)
+        request = self.sanitation_request()
+        real_open = os.open
+        raced = False
+
+        def opened(path, flags, *args, **kwargs):
+            nonlocal raced
+            if str(path).endswith(".netrc") and flags & (os.O_WRONLY | os.O_RDWR):
+                self.assertFalse(flags & os.O_TRUNC, "metadata must be checked before truncation")
+                if not raced:
+                    raced = True
+                    target.unlink()
+                    os.link(victim, target)
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch.object(build.os, "open", side_effect=opened):
+            with self.assertRaises(build.Failure):
+                self.app.sanitize(request)
+        self.assertTrue(raced)
+        self.assertEqual(victim.read_text(), "unrelated bytes")
+
+    def test_sanitize_rejects_invalid_marker_metadata_before_clearing_its_bytes(self):
+        target = self.write("/opt/zeros/sessions/boot.json", "synthetic boot intent", 0o644)
+        with self.assertRaises(build.Failure): self.app.sanitize(self.sanitation_request())
+        self.assertEqual(target.read_bytes(), b"synthetic boot intent")
+
+    def test_journal_preparation_keeps_archived_files_visible_for_overwrite(self):
+        target = self.write("/var/log/journal/fixture/archived.journal", "synthetic journal bytes", 0o600)
+        request = self.sanitation_request()
+        self.app.host = build.SystemHost()
+        commands = []
+
+        def command(arguments, **_kwargs):
+            commands.append(arguments)
+            if any(arg.startswith("--vacuum") for arg in arguments): target.unlink()
+            return 0, b""
+
+        with patch.object(build, "bounded_command", side_effect=command):
+            self.app.sanitize(request)
+        self.assertTrue(target.is_file(), "vacuum hid an inherited journal entry before zeroization")
+        self.assertEqual(target.read_bytes(), b"")
+        self.assertIn(["/usr/bin/journalctl", "--sync"], commands)
+
+    def test_sanitize_refuses_a_detached_parent_before_truncating(self):
+        target = self.write("/root/.ssh/id", "synthetic private state", 0o600)
+        outside = self.write("/outside/id", "unrelated bytes")
+        request = self.sanitation_request()
+        real_open = os.open
+        detached = target.parent.with_name("detached-fixture")
+        raced = False
+
+        def opened(path, flags, *args, **kwargs):
+            nonlocal raced
+            if str(path) == "id" and flags & (os.O_WRONLY | os.O_RDWR) and not raced:
+                raced = True
+                target.parent.rename(detached)
+                target.parent.symlink_to(outside.parent, target_is_directory=True)
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch.object(build.os, "open", side_effect=opened):
+            with self.assertRaises(build.Failure): self.app.sanitize(request)
+        self.assertTrue(raced)
+        self.assertEqual(outside.read_bytes(), b"unrelated bytes")
+        self.assertEqual((detached / "id").read_bytes(), b"synthetic private state")
+
+    def test_sanitize_preserves_repositories_runtime_and_manifest_but_empties_private_state(self):
         document, commit, _ = self.repository()
         repositories = self.app.clone_repos(document)["repositories"]
         # §23's physical root must survive; sanitation owns explicit private
@@ -505,10 +700,8 @@ ENDFONT
         self.assertEqual((self.root / "srv/zeros/files/repos/fixture/repo/file").read_text(), "repository data")
         self.assertEqual((self.root / "opt/zeros-infra" / RUNTIME / "fixture").read_text(), "verified runtime")
         self.assertEqual((self.root / "etc/machine-id").read_bytes(), b"")
-        self.assertFalse((self.root / "root/.ssh").exists())
-        self.assertFalse((self.root / "srv/zeros/setup/admission").exists())
-        self.assertFalse((self.root / "opt/zeros/sessions/session").exists())
-        self.assertFalse((self.root / "srv/zeros/files/state").exists())
+        for path in ("root/.ssh/id", "srv/zeros/setup/admission", "opt/zeros/sessions/session", "srv/zeros/files/state/private"):
+            self.assertEqual((self.root / path).read_bytes(), b"")
         for path, mode in skeleton.items():
             target = self.root / path.lstrip("/")
             self.assertTrue(target.is_dir())
@@ -516,9 +709,8 @@ ENDFONT
             self.assertEqual(target.stat().st_uid, os.getuid())
         self.assertEqual(managed.read_bytes(), b"")
         self.assertEqual(managed.stat().st_mode & 0o7777, 0o640)
-        self.assertEqual(list((self.root / "srv/zeros/state/workspaces").iterdir()), [])
-        self.assertEqual(list((self.root / "srv/zeros/home/agent").iterdir()), [])
-        self.assertEqual(list((self.root / "srv/zeros/home/capture").iterdir()), [])
+        for path in ("srv/zeros/state/workspaces/session", "srv/zeros/home/agent/.bash_history", "srv/zeros/home/capture/session"):
+            self.assertEqual((self.root / path).read_bytes(), b"")
         self.assertEqual(json.loads((self.root / "srv/zeros/computer-template.json").read_bytes()), manifest)
         # The digest must remain meaningful on the archived template. Epoch
         # contents and private session payloads are explicit metadata exclusions.
@@ -527,7 +719,7 @@ ENDFONT
 
 class FakeHost:
     def stop_host(self): pass
-    def clear_journal(self): pass
+    def sync_journal(self): pass
 
 
 class Install(unittest.TestCase):

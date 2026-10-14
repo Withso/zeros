@@ -125,7 +125,38 @@ describe("Computer saved-artifact proof", () => {
     }
   });
 
-  it.each([".zeros-persist", ".zeros-persist/home", ".zeros-persist/state", ".zeros-persist/home/agent"])(
+  it.each([
+    "__system__/srv/zeros/files/home/agent/private.json",
+    "__system__/srv/zeros/files/state/private.json",
+    "__system__/srv/zeros/files/.zeros-setup/private.json",
+    ".zeros-persist/files/home/agent/private.json",
+    ".zeros-persist/files/state/private.json",
+    ".zeros-persist/files/managed-settings/private.json",
+    ".zeros-persist/files/.zeros-setup/private.json",
+    ".zeros-persist/files/repos-old/private.json",
+    "__system__/srv/zeros/managed-settings/previous/private.json",
+  ])("refuses inherited content that sanitation clears outside the selected repositories: %s", path => {
+    for (const entry of [{ path, kind: "file", size: 64 }, { path, kind: "file" }, { path, kind: "symlink" }]) {
+      expect(() => verifyComputerTemplateSavedTree(tree([entry]), snapshot))
+        .toThrow(expect.objectContaining({ code: "provider_template_capture_invalid" }));
+    }
+  });
+
+  it.each([
+    "__system__/srv/zeros/managed-settings/settings.managed.toml",
+    "__system__/etc/machine-id",
+    "__system__/var/lib/systemd/random-seed",
+    "__system__/var/lib/systemd/timesync/clock",
+    "__system__/opt/zeros/disk-epoch",
+    "__system__/run/zeros/active-runtime.json",
+  ])("refuses private descendants when a sanitized file is captured as a directory: %s", path => {
+    expect(() => verifyComputerTemplateSavedTree(tree([
+      { path, kind: "dir" }, { path: `${path}/private.json`, kind: "file", size: 64 },
+    ]), snapshot)).toThrow(expect.objectContaining({ code: "provider_template_capture_invalid" }));
+  });
+
+  it.each([".zeros-persist", ".zeros-persist/home", ".zeros-persist/state", ".zeros-persist/home/agent",
+    ".zeros-persist/files", "__system__/srv/zeros/files", "__system__/srv/zeros/managed-settings"])(
     "refuses an aliased native private root or ancestor %s", path => {
       for (const kind of ["symlink", "hardlink", "socket", "unknown"]) {
         expect(() => verifyComputerTemplateSavedTree(tree([{ path, kind }]), snapshot))
@@ -146,6 +177,20 @@ describe("Computer saved-artifact proof", () => {
     ];
     expect(verifyComputerTemplateSavedTree(tree(entries), snapshot).entryCount).toBe(entries.length + 1);
     expect(() => verifyComputerTemplateSavedTree(tree([...entries, entries[1]]), snapshot)).toThrow();
+  });
+
+  it("accepts explicit empty replacements throughout sanitized trees and preserves both repository representations", () => {
+    const entries = [
+      { path: "__system__/srv/zeros/files/home/agent", kind: "dir" },
+      { path: "__system__/srv/zeros/files/home/agent/private.json", kind: "file", size: 0 },
+      { path: ".zeros-persist/files/state/private.json", kind: "file", size: 0 },
+      { path: "__system__/srv/zeros/managed-settings/previous/private.json", kind: "file", size: 0 },
+      { path: "__system__/opt/zeros/disk-epoch", kind: "file", size: 0 },
+      { path: "__system__/opt/zeros/sessions/boot.json", kind: "file", size: 0 },
+      { path: "__system__/srv/zeros/files/repos/example/package.json", kind: "file", size: 256 },
+      { path: ".zeros-persist/files/repos/example/package.json", kind: "file", size: 256 },
+    ];
+    expect(verifyComputerTemplateSavedTree(tree(entries), snapshot).entryCount).toBe(entries.length + 1);
   });
 });
 

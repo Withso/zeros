@@ -3,6 +3,7 @@ import sys
 sys.dont_write_bytecode = True
 
 import base64
+import contextlib
 import grp
 import hashlib
 import importlib.util
@@ -16,7 +17,7 @@ import stat
 import subprocess
 
 # Boat installs its own root key on every machine during boot. Builder
-# sanitation removes it before capture and the kit checks the saved tree, so a
+# sanitation empties it before capture and the kit checks the saved tree, so a
 # cold boot from the snapshot may show only the provider's reinstalled key.
 COLD_BOOT = '{{BOOT}}' == 'cold'
 PRIVATE_FILES = ('.ssh/authorized_keys', '.git-credentials', '.netrc', '.npmrc', '.pypirc', '.bash_history', '.zsh_history',
@@ -32,14 +33,62 @@ def verify_protected_ancestry(app):
 
 
 def private_state_clean(root='/', cold_boot=COLD_BOOT):
+    def empty_file(relative):
+        def identity(info):
+            return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink, info.st_size
+
+        try:
+            with contextlib.ExitStack() as stack:
+                parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                stack.callback(os.close, parent)
+                watches = []
+                parts = relative.split('/')
+                for index, part in enumerate(parts):
+                    try:
+                        before = os.stat(part, dir_fd=parent, follow_symlinks=False)
+                    except FileNotFoundError:
+                        break
+                    directory = index < len(parts) - 1
+                    if not (stat.S_ISDIR(before.st_mode) if directory else
+                            stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size == 0):
+                        return False
+                    child = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC |
+                                    (os.O_DIRECTORY if directory else 0), dir_fd=parent)
+                    stack.callback(os.close, child)
+                    watches.append((parent, part, child, identity(before)))
+                    parent = child
+                return all(identity(os.fstat(fd)) == before and
+                           identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == before
+                           for parent, name, fd, before in watches)
+        except OSError:
+            return False
+
     for home in ('root', 'home/user'):
         for name in PRIVATE_FILES:
             if cold_boot and home == 'root' and name == '.ssh/authorized_keys':
                 continue
-            target = Path(root) / home / name
-            if os.path.lexists(target) and not (target.is_file() and target.stat().st_size == 0):
+            if not empty_file(home + '/' + name):
                 return False
     return True
+
+
+def verify_empty_base_state(bootstrap, app):
+    require = bootstrap.require
+    require(not os.path.lexists(app.path('/opt/zeros/previous')), 'cache_conflict')
+    try:
+        require(app.read(bootstrap.ACTIVE, 16384, 0o600) == b'', 'cache_conflict')
+    except FileNotFoundError:
+        pass
+    require(set(os.listdir(app.path('/opt/zeros-infra'))) <= {'.staging'} and
+            not os.listdir(app.path('/opt/zeros-infra/.staging')) and
+            not os.listdir(app.path('/srv/zeros/runtime-installs')), 'cache_conflict')
+    require({'repos', '.zeros-setup', 'state', 'home', 'managed-settings'} <= set(os.listdir(app.path('/srv/zeros/files'))), 'base_compatibility')
+    require({'agent', 'capture'} <= set(os.listdir(app.path('/srv/zeros/files/home'))), 'base_compatibility')
+    for name in ('/srv/zeros/files', '/srv/zeros/repos', '/srv/zeros/setup', '/srv/zeros/log', '/srv/zeros/home',
+                 '/srv/zeros/state', '/srv/zeros/managed-settings'):
+        fd = os.open(app.path(name), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try: app.require_empty_directory(fd)
+        finally: os.close(fd)
 
 
 def verify_stock_prerequisites(app):
@@ -108,16 +157,7 @@ def verify_host(bootstrap, app):
             (scope / 'host/pids.max').read_text().strip() != 'max', 'cgroup_controllers')
     status = app.status()
     require(status['hostState'] == 'waiting_for_runtime' and status['currentRuntimeId'] is None, 'host_start')
-    require(not os.path.lexists('/opt/zeros/previous') and not os.path.lexists(bootstrap.ACTIVE), 'cache_conflict')
-    require(set(os.listdir('/opt/zeros-infra')) <= {'.staging'} and not os.listdir('/opt/zeros-infra/.staging') and
-            not os.listdir('/srv/zeros/runtime-installs'), 'cache_conflict')
-    require(set(os.listdir('/srv/zeros/files')) == {'repos', '.zeros-setup', 'state', 'home', 'managed-settings'}, 'base_compatibility')
-    require(set(os.listdir('/srv/zeros/files/home')) == {'agent', 'capture'}, 'base_compatibility')
-    for name in ('state', 'managed-settings', 'home/agent', 'home/capture'):
-        require(not os.listdir('/srv/zeros/files/' + name), 'base_compatibility')
-    for name in ('/srv/zeros/files/repos', '/srv/zeros/files/.zeros-setup', '/srv/zeros/repos', '/srv/zeros/setup', '/srv/zeros/log', '/srv/zeros/home/agent', '/srv/zeros/home/capture'):
-        require(not os.listdir(name), 'base_compatibility')
-    require(set(os.listdir('/srv/zeros/state')) <= {'workspaces'} and not os.listdir('/srv/zeros/state/workspaces'), 'base_compatibility')
+    verify_empty_base_state(bootstrap, app)
     require(private_state_clean(), 'base_compatibility')
     verify_stock_prerequisites(app)
     compatibility_raw = app.read('/opt/zeros-bootstrap/compatibility.json', 65536, 0o444)
