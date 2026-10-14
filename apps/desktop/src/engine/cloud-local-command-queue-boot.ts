@@ -322,8 +322,12 @@ export class CloudLocalAgentBootRuntime {
       const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...reference } = scope;
       const response = CloudAgentCredentialControlExchangeResponseSchema.parse(await this.options.registration.credentialControlsRequest(
         { ...reference, version: 1, mode: "boot-owner-v1", acknowledgements: ack ? [ack] : [] }, this.controller.signal));
-      if (!this.active || response.controls.some(control => Object.entries(scope).some(([key, value]) => control[key as keyof typeof control] !== value)))
+      if (!this.authorityActive || response.controls.some(control => Object.entries(scope).some(([key, value]) => control[key as keyof typeof control] !== value)))
         throw new CloudCredentialControlError("credential_control_authority_rejected");
+      // A local checkpoint fence closes admission without retiring the writer
+      // needed for its final seal. Discard a valid late reply and retain its
+      // immutable ACK; only an active exchange may confirm/apply controls.
+      if (!this.active) return;
       if (ack) this.fencesValue!.confirmAcknowledgement(ack);
       // Each call synchronously installs its FULL start fence before awaiting
       // refresh or native retirement. No later control is hidden behind I/O.

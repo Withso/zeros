@@ -18,6 +18,9 @@
    Repeat complete handoffs and an interrupted, unsealed handoff on that same
    FULL store. Retain closed checkpoint failure sites through setup and cleanup;
    repeating a claim cannot repair missing lineage or authorize an older writer.
+   For stop/seal races, hold background replies across the admission fence and
+   local cancellation. Assert authority and heartbeats survive through a real
+   seal, while explicit revocation and wrong identities remain terminal.
    For packaged imports, reproduce against staged
    sources; a checkout import or bundled CLI can hide a missing source file.
    For periodic disconnects, inspect client retirement timers before blaming
