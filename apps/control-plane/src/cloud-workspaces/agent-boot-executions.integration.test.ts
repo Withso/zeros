@@ -276,26 +276,66 @@ suite("genuine private boot credential execution",()=>{
     expect(aborted).toBe(true);
     expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts")).rows[0]).toEqual({ count: 0 });
   });
-  it("keeps one context and the original request deadline across concurrent serializable publications", async () => {
+  it.each(["committed", "still pending"] as const)("keeps one context and the original request deadline when the concurrent publisher is %s", async commitState => {
     const bound = await boot(), sender = await actor();
     const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
       provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
-    let publications = 0, release!: () => void;
-    const together = new Promise<void>(resolve => { release = resolve; });
-    const began: number[] = [];
-    const reader = interceptQueries(pool, async sql => {
-      if (sql.startsWith("BEGIN")) began.push(Date.now());
-      if (!sql.startsWith("INSERT INTO cloud_agent_boot_contexts") || ++publications > 2) return;
-      if (publications === 2) release();
-      await together;
+    let loserReady!: () => void, winnerAtCommit!: () => void, winnerFinished!: () => void, allowCommit!: () => void;
+    const bothReadContext = new Promise<void>(resolve => { loserReady = resolve; });
+    const atCommit = new Promise<void>(resolve => { winnerAtCommit = resolve; });
+    const committed = new Promise<void>(resolve => { winnerFinished = resolve; });
+    const commitAllowed = new Promise<void>(resolve => { allowCommit = resolve; });
+    const began = { winner: [] as number[], loser: [] as number[] };
+    let loserPublications = 0;
+    const winnerPool = interceptQueries(pool, async sql => {
+      if (sql.startsWith("BEGIN")) began.winner.push(Date.now());
+      if (sql.startsWith("INSERT INTO cloud_agent_boot_contexts")) await bothReadContext;
+      if (sql === "COMMIT") {
+        winnerAtCommit();
+        if (commitState === "still pending") await commitAllowed;
+      }
     });
-    const reads = new DatabaseCloudAgentExecutionService(reader, keys, false);
-    const values = await Promise.all([reads.boot(engine(), "warm-context", input), reads.boot(engine(), "warm-context", input)]);
-    const contexts = values.map(value => CloudAgentWarmActorResponseSchema.parse(value));
-    expect(publications).toBeGreaterThan(2);
-    expect(contexts[0]!.contextId).toBe(contexts[1]!.contextId);
-    for (const context of contexts) expect(context.actor.confirmedUntilMs).toBeLessThanOrEqual(Math.max(...began.slice(0, 2)) + 10_000);
-    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts")).rows[0]).toEqual({ count: 1 });
+    const loserPool = interceptQueries(pool, async (sql, client) => {
+      if (sql.startsWith("BEGIN")) began.loser.push(Date.now());
+      if (!sql.startsWith("INSERT INTO cloud_agent_boot_contexts")) return;
+      loserPublications++;
+      loserReady();
+      if (commitState === "committed") {
+        // The stale read retries only after a real winner commit, then reuses
+        // that exact context rather than creating a second identity.
+        await committed;
+      }
+      else {
+        // Reproduce all three aborts while the winner is held before COMMIT;
+        // do not rely on which real transaction PostgreSQL chooses to abort.
+        await atCommit;
+        await client.query("DO $abort$ BEGIN RAISE EXCEPTION USING ERRCODE='40001', MESSAGE='held publication serialization fixture'; END $abort$");
+      }
+    });
+    const winner = new DatabaseCloudAgentExecutionService(winnerPool, keys, false).boot(engine(), "warm-context", input)
+      .finally(() => { winnerAtCommit(); winnerFinished(); });
+    const loser = new DatabaseCloudAgentExecutionService(loserPool, keys, false).boot(engine(), "warm-context", input)
+      .finally(() => { loserReady(); allowCommit(); });
+    const results = await Promise.allSettled([winner, loser]);
+    expect(results[0]!.status).toBe("fulfilled");
+    if (results[0]!.status !== "fulfilled") throw new Error("Expected committed context fixture");
+    const first = CloudAgentWarmActorResponseSchema.parse(results[0]!.value);
+    if (commitState === "committed") {
+      expect(results[1]).toMatchObject({ status: "fulfilled", value: { contextId: first.contextId, contextRevision: first.contextRevision } });
+    } else {
+      expect(results[1]).toMatchObject({ status: "rejected", reason: { status: 503, code: "cloud_agent_credential_busy" } });
+    }
+    for (const [index, result] of results.entries()) {
+      if (result.status !== "fulfilled") continue;
+      const context = CloudAgentWarmActorResponseSchema.parse(result.value);
+      expect(context.actor.confirmedUntilMs).toBeLessThanOrEqual((index === 0 ? began.winner[0]! : began.loser[0]!) + 10_000);
+    }
+    expect(began.winner).toHaveLength(1);
+    expect(began.loser).toHaveLength(commitState === "committed" ? 2 : 3);
+    expect(loserPublications).toBe(commitState === "committed" ? 2 : 3);
+    const stored = (await pool.query("SELECT context_id,expires_at FROM cloud_agent_boot_contexts")).rows;
+    expect(stored).toEqual([{ context_id: first.contextId, expires_at: expect.any(Date) }]);
+    expect(stored[0].expires_at.getTime()).toBeLessThanOrEqual((commitState === "committed" ? began.loser[0]! : began.winner[0]!) + 10_000);
   });
   it("warms the sender's bounded native context with real context storage and no lease",async()=>{
     const bound=await boot(),sender=await actor(),input={...request(),bootId:bound.bootId,writerEpoch:bound.writerEpoch,actorSessionId:sender.actorSessionId,

@@ -3,6 +3,8 @@ import path from "node:path";
 import type Sqlite from "better-sqlite3";
 import { z } from "zod";
 import { CloudAgentBootScopeSchema, type CloudAgentBootScope } from "@zeros/protocol/cloud-agent-bootstrap";
+import { verifiedCloudLocalCommandRecoveryHistory, verifiedCloudLocalCommandSealedHistoryOrigins,
+  type CloudLocalCommandPredecessor } from "./cloud-local-command-queue-checkpoint";
 import { canonicalCloudLocalCommandHistoryJson as canonical, canonicalCloudLocalCommandWriterSealDescriptor,
   cloudLocalCommandHistoryHeadMatchesManifest, CloudCompactControlEventSchema, CloudLocalCommandHistoryHeadSchema,
   CloudLocalCommandHistoryManifestSchema, CloudLocalCommandHistoryRecordSchema, CloudLocalCommandWriterSealSchema,
@@ -40,16 +42,16 @@ export class CloudLocalCommandHistoryRebuildError extends Error {
   readonly code = "cloud_history_rebuild_refused";
   constructor() { super("cloud_history_rebuild_refused"); this.name = "CloudLocalCommandHistoryRebuildError"; }
 }
-export interface CloudLocalCommandHistoryRebuildInput {
+export type CloudLocalCommandHistoryRebuildInput = {
   db: Sqlite.Database;
   /** W4 verifies authenticated custody, the exact sealed file pair and ACK
    * before supplying this read-only candidate. This helper never opens it. */
   ledger: Sqlite.Database;
   repositoryRoot: string;
   scope: CloudAgentBootScope;
-  sourceSeal: CloudLocalCommandWriterSeal;
   conversationId: string;
-}
+} & ({ sourceSeal: CloudLocalCommandWriterSeal; sourceRecovery?: never } |
+  { sourceSeal?: never; sourceRecovery: CloudLocalCommandPredecessor });
 export interface CloudLocalCommandHistoryRebuildResult {
   readonly conversationId: string;
   readonly historyHead: CloudLocalCommandHistoryHead;
@@ -94,9 +96,12 @@ function storedSeal(ledger: Sqlite.Database, writerEpoch: string): CloudLocalCom
       hash(canonicalCloudLocalCommandWriterSealDescriptor(seal)) !== seal.sha256 || !cloudLocalCommandWriterSealAckMatchesSeal(ack,seal)) refuse();
   return seal;
 }
-function source(ledger: Sqlite.Database, conversationId: string, head: CloudLocalCommandHistoryHead, seal: CloudLocalCommandWriterSeal): CloudAgentBootScope {
+type HistoryOrigin = Pick<CloudLocalCommandWriterSeal, "scope" | "recordSequence" | "eventSequence">;
+type HistorySource = HistoryOrigin & { origins?: readonly HistoryOrigin[] };
+function source(ledger: Sqlite.Database, conversationId: string, head: CloudLocalCommandHistoryHead, seal: HistorySource): CloudAgentBootScope {
   if (head.source.kind !== "command") {
-    const origin = head.originWriterEpoch === seal.scope.writerEpoch ? seal : storedSeal(ledger,head.originWriterEpoch);
+    const origin = head.originWriterEpoch === seal.scope.writerEpoch ? seal :
+      seal.origins?.find(value => value.scope.writerEpoch === head.originWriterEpoch) ?? storedSeal(ledger,head.originWriterEpoch);
     if (origin.scope.organizationId !== seal.scope.organizationId || origin.scope.workspaceId !== seal.scope.workspaceId ||
         origin.scope.generation > seal.scope.generation || origin.scope.fundingOwnerEpoch > seal.scope.fundingOwnerEpoch ||
         head.history.recordSequence !== null && head.history.recordSequence > origin.recordSequence ||
@@ -132,21 +137,38 @@ function insert(db: Sqlite.Database, table: "chats" | "chat_messages" | "turns",
   db.prepare(`INSERT INTO ${table}(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`).run(...Object.values(row));
 }
 
-/** Pure synchronous projection from independently verified sealed custody.
+/** Pure synchronous projection from independently verified custody.
  * Reads latest FULL authority/CAS; writes only NORMAL transcript and local
  * restore fences. Native sessions, claims, permissions and queue state are
  * never reconstructed. Caller installs these fences before any exposure. */
 export function rebuildCloudLocalCommandHistory(input: CloudLocalCommandHistoryRebuildInput): CloudLocalCommandHistoryRebuildResult {
   try {
-    const scope = CloudAgentBootScopeSchema.parse(input.scope), seal = CloudLocalCommandWriterSealSchema.parse(input.sourceSeal);
+    const scope = CloudAgentBootScopeSchema.parse(input.scope);
     const conversationId = identity.parse(input.conversationId), root = input.repositoryRoot;
-    if (!path.isAbsolute(root) || path.resolve(root) !== root || canonical(scope) !== canonical(seal.scope) ||
-        hash(canonicalCloudLocalCommandWriterSealDescriptor(seal)) !== seal.sha256 || input.db === input.ledger) refuse();
+    if (!path.isAbsolute(root) || path.resolve(root) !== root || input.db === input.ledger ||
+        (input.sourceSeal !== undefined) === (input.sourceRecovery !== undefined)) refuse();
     return input.ledger.transaction(() => {
       const metadata = (key: string) => (input.ledger.prepare("SELECT value FROM local_command_metadata WHERE key=?").get(key) as { value: string } | undefined)?.value;
-      if (metadata("writer") !== canonical(scope) || metadata("sealedWriter") !== scope.writerEpoch ||
-          metadata("journalHead") !== String(seal.sequence) || metadata("mirrorHead") !== String(seal.sequence)) refuse();
-      if (canonical(storedSeal(input.ledger,scope.writerEpoch)) !== canonical(seal)) refuse();
+      let seal: HistorySource;
+      if (input.sourceRecovery) {
+        const recovered = verifiedCloudLocalCommandRecoveryHistory(input.sourceRecovery, input.ledger);
+        if (!recovered) refuse();
+        // This is the retained unsealed writer, not a synthetic complete seal.
+        // Every bound and fence is rechecked against the private custody proof.
+        seal = recovered;
+      } else {
+        const parsed = CloudLocalCommandWriterSealSchema.parse(input.sourceSeal);
+        if (hash(canonicalCloudLocalCommandWriterSealDescriptor(parsed)) !== parsed.sha256 ||
+            metadata("sealedWriter") !== scope.writerEpoch || metadata("journalHead") !== String(parsed.sequence) ||
+            metadata("mirrorHead") !== String(parsed.sequence) || canonical(storedSeal(input.ledger,scope.writerEpoch)) !== canonical(parsed)) refuse();
+        seal = { ...parsed, origins: verifiedCloudLocalCommandSealedHistoryOrigins(input.ledger, parsed) };
+      }
+      // Sealed restoration requires the exact original writer namespace.
+      // Recovery's private receipt already verifies the full surviving file
+      // and CP-authorized prepared namespaces; its history source stays A even
+      // when a crash left the queue on never-activated B.
+      if (canonical(scope) !== canonical(seal.scope) ||
+          !input.sourceRecovery && metadata("writer") !== canonical(scope)) refuse();
       const stored = input.ledger.prepare("SELECT restore_revision,document FROM local_command_history_heads WHERE conversation_id=?")
         .get(conversationId) as { restore_revision: number; document: string } | undefined;
       if (!stored || stored.document.length > 64 * 1024) refuse();

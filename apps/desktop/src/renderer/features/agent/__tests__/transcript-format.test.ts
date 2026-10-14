@@ -21,6 +21,43 @@ import type {
 
 let seq = 0;
 
+describe("provider status in copied transcripts", () => {
+  it("keeps an explicit auth status for legacy failures and resolves it after confirmed work", () => {
+    const prompt = text("user", "Inspect the workspace");
+    const auth = text("agent", "Failed to authenticate: OAuth session expired and could not be refreshed");
+    const output = formatTranscript([prompt, auth], "full").text;
+    expect(output).toContain("Sign-in required");
+    expect(output).not.toContain("## Assistant");
+    expect(formatTranscript([prompt, auth], "concise").text).not.toContain("Failed to authenticate");
+    const recovered = formatTranscript([prompt, auth, text("user", "Continue"), text("agent", "Confirmed report")], "full").text;
+    expect(recovered).toContain("Signed in");
+    expect(recovered).not.toContain("Failed to authenticate");
+  });
+
+  it("places one usage status after every segment of a steered provider turn", () => {
+    const prompt = text("user", "Inspect the workspace");
+    const usage = text("agent", "Claude is nearing its usage limit.", { messageId: "claude-feedback-first", phase: "commentary" });
+    const steer = text("user", "Check the renderer too", { steeredTurnId: prompt.id });
+    const answer = text("agent", "Report after steering", { phase: "final_answer" });
+    const output = formatTranscript([prompt, usage, steer, answer, { ...usage, id: "second-usage", messageId: "claude-feedback-second" }], "full").text;
+    expect(output.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
+    expect(output.indexOf("Report after steering")).toBeLessThan(output.indexOf("Claude is nearing"));
+  });
+
+  it("copies one usage status at the tail and omits errors superseded by real work", () => {
+    const prompt = text("user", "Inspect the workspace");
+    const failure: AgentMessage = { id: "retry-error", kind: "error_notice", createdAt: 2, severity: "error", recoverable: false,
+      message: "No conversation found with session ID missing", turnFailure: { turnId: prompt.id, kind: "session-expired" } };
+    const usage = text("agent", "Claude is nearing its usage limit.", { messageId: "claude-feedback-first", phase: "commentary" });
+    const answer = text("agent", "Confirmed report", { phase: "final_answer" });
+    const output = formatTranscript([prompt, failure, { ...failure, id: "retry-error-again" }, usage, tool(), answer,
+      { ...usage, id: "second-usage", messageId: "claude-feedback-second" }], "full").text;
+    expect(output).not.toContain("No conversation found");
+    expect(output.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
+    expect(output.indexOf("Confirmed report")).toBeLessThan(output.indexOf("Claude is nearing"));
+  });
+});
+
 /** Verbatim shape of the launch receipt an agent SDK returns for an async
  *  sub-agent — the thing a transcript must never carry. */
 const LAUNCH_RECEIPT = [

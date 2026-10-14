@@ -1,6 +1,7 @@
 import { CloudAgentCredentialCards } from "./cloud-agent-credential-cards";
 import { cloudAdmissionForTurn } from "./cloud-admission-failure";
 import { TurnFailureCard } from "./turn-failure-card";
+import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
 import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-send-failure-toast";
 // ──────────────────────────────────────────────────────────
 // AgentChat — messages + tool cards + permission modal + composer
@@ -255,6 +256,7 @@ import {
   authenticationTurnState,
   authenticationTurnOutput,
   authenticationFailureMessage,
+  latestAuthenticationRecoveryTurn,
 } from "./auth-prompt-recovery";
 import { useAgentSessions } from "./sessions-hooks";
 import { useStickyBottom, nextTextMessageTarget } from "./use-sticky-bottom";
@@ -2917,6 +2919,7 @@ export function AgentChat({
       ),
     [visibleMessages],
   );
+  const authenticationRecoveredAt = useMemo(() => latestAuthenticationRecoveryTurn(turns), [turns]);
   // Only a committed render becomes the baseline. Mutating this ref inside
   // useMemo lets an abandoned concurrent render influence the next pass.
   useLayoutEffect(() => {
@@ -3312,7 +3315,7 @@ export function AgentChat({
   // the adapter at session creation. Claude, Codex and Cursor support it; an unavailable
   // harness disables its arrow with a tooltip while a turn is in flight.
   const steeringSupported =
-    session.initialize?.agentCapabilities?.steering === true;
+    session.initialize?.agentCapabilities?.steering;
   const steeringAgentName =
     session.agentName ??
     chatThread?.agentName ??
@@ -3638,6 +3641,7 @@ export function AgentChat({
   const runSend = async (
     override?: string,
     extras?: {
+      followUpBehavior?: FollowUpBehavior;
       /** Inline summary imports from prior chats. Serialized
        *  into <from_previous_chat> text blocks and prepended to the
        *  prompt so the agent reads them as opening context. Used by
@@ -3812,7 +3816,7 @@ export function AgentChat({
           if (!capabilitiesBridge) throw new Error("The frame context connection is unavailable.");
           return prepareDesignFrameAttachments(capabilitiesBridge, submittedDesignFrame);
         } : undefined });
-      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent);
+      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent, extras?.followUpBehavior ?? getFollowUpBehavior());
       const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
       if (unchanged) {
         clearComposer(); designFrameContext.pin(undefined);
@@ -4051,6 +4055,9 @@ export function AgentChat({
       bubbleAttachments.length > 0 ? bubbleAttachments : undefined,
       messageSegments && messageSegments.length > 0 ? messageSegments : undefined,
       onAccepted,
+      undefined,
+      undefined,
+      extras?.followUpBehavior ?? getFollowUpBehavior(),
     );
     const submittedDraftUnchanged = override === undefined && snapshot &&
       isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
@@ -4345,8 +4352,10 @@ export function AgentChat({
     modEnter: () => {
       if (editingQueuedRef.current) return false;
       const selected = queueSelectedRef.current;
-      if (selected == null) return false;
-      void sendNowQueued(selected);
+      if (selected != null) void sendNowQueued(selected);
+      else void handleSend(undefined, {
+        followUpBehavior: getFollowUpBehavior() === "queue" ? "steer" : "queue",
+      });
       return true;
     },
     escape: () => {
@@ -4841,9 +4850,11 @@ export function AgentChat({
                 failureKind: session.failure?.kind,
                 isTail: isVisualTail,
                 inFlight: turnInFlight,
+                recovered: authenticationRecoveredAt > i,
+                readOnly: transcriptReadOnly,
               });
               const authRequired = !transcriptReadOnly && authState === "sign-in";
-              const authStopped = authState === "stopped";
+              const authStopped = authState === "stopped" || authState === "signed-in";
               const visibleEvents = cloudAdmission ? [] : authState
                 ? authenticationTurnOutput(turn.events)
                 : turn.events;
@@ -4953,6 +4964,7 @@ export function AgentChat({
                     {(!authRequired || visibleEvents.length > 0) && (
                       <TurnEventList
                         events={visibleEvents}
+                        usageEvents={ownsProviderFooter ? turn.providerEvents : null}
                         failureTurnId={!cloudAdmission && !authRequired && chatId ? turn.recordedTurnId ?? undefined : undefined}
                         isActive={isActiveProviderSegment}
                         isStreaming={turnInFlight && !authStopped}
@@ -4978,7 +4990,7 @@ export function AgentChat({
                           // Do not mount turn metadata reads or reset/fork
                           // controls until the transcript has validated.
                           !provisionalTranscript &&
-                          !authRequired &&
+                          !authState &&
                           turn.userPrompt &&
                           chatId &&
                           ownsProviderFooter ? (
@@ -5006,11 +5018,7 @@ export function AgentChat({
                                   ? () => retryTurn(turn.userPrompt!, turn.providerEvents, true)
                                   : undefined
                               }
-                              events={
-                                authStopped
-                                  ? visibleEvents
-                                  : turn.providerEvents
-                              }
+                              events={turn.providerEvents}
                               startedAt={turn.recordedStartedAt}
                               live={isVisualTail && turnInFlight}
                               fallbackStopReason={
@@ -5019,12 +5027,9 @@ export function AgentChat({
                                   : null
                               }
                               fallbackStatusLabel={
-                                authStopped
-                                  ? "AGENT STOPPED"
-                                  : isVisualTail &&
-                                      session.status !== "streaming"
-                                    ? turnFooterFailureLabel(session.failure)
-                                    : null
+                                isVisualTail && session.status !== "streaming"
+                                  ? turnFooterFailureLabel(session.failure)
+                                  : null
                               }
                               // "An auto-rebuild is re-running THIS turn" — which
                               // only happens while this renderer's own send owns
@@ -5058,8 +5063,10 @@ export function AgentChat({
                         }
                       />
                     )}
-                    {authRequired && (
+                    {(authRequired || authStopped) && (
                       <AuthenticationNotice
+                        historical={authStopped}
+                        resolved={authState === "signed-in"}
                         message={authenticationFailureMessage(turn.events, isVisualTail ? session.failure : null)}
                         name={
                           session.agentName ??

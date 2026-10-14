@@ -246,7 +246,10 @@ official HTTPS `SHASUMS256.txt` entry; only verified bytes are written to disk.
 
 The payload preserves the production pnpm graph, installed Linux x64 optional
 SDK packages, peers and workspace packages, plus `tsx` and TypeScript. Its
-source slices and single append-only helper inventory live in `closure.ts`.
+source slices, individual source dependencies and single append-only helper
+inventory live in `closure.ts`. The unbundled engine also imports the public
+channel-policy module under `apps/desktop/shared` and its control-plane JSON;
+both files are required even when the bundled CLI's `--help` succeeds.
 Copies preserve package topology with internal relative links; regenerated
 `.bin` shims invoke the bundled Node. pnpm metadata, browser `.links`, install
 validation markers, native build intermediates, non-target embedded PTY/SSH helpers,
@@ -287,7 +290,8 @@ does not attempt a nested user namespace (#410). Disposable v4 marker,
 active-runtime and facade fixtures let source imports exercise B2's resolver.
 Their synthetic base/receipt/session identities are never archived and do not
 qualify a real base installation.
-It loads SQLite, PTY, Cursor, engine externals and source qualification modules;
+It loads SQLite, PTY, Cursor, engine externals, the complete source `ZerosEngine`
+export and source qualification modules;
 runs Claude/Codex versions, LSP/compiler shims, engine help, Host module syntax
 and ripgrep checks; and resolves the pinned browser assets. The pinned Cursor
 platform executables are checked with `--version`/`--help`, including missing

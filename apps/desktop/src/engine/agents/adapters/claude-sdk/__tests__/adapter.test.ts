@@ -31,6 +31,7 @@ import {
   type SessionNotification,
 } from "../../../types";
 import type { AvailableCommand, RequestPermissionRequest } from "@zeros/protocol/agent-events";
+import { applyUpdate } from "@zeros/protocol/agent-messages";
 
 vi.mock("../../../containment/cloud-runtime-root.mjs", async original => {
   const actual = await original<typeof import("../../../containment/cloud-runtime-root.mjs")>();
@@ -1330,9 +1331,14 @@ describe("Claude verification and cloud credential failures", () => {
   });
 
   for (const background of [false, true]) {
-    it.each(cases)(`preserves %s when the iterator closes without a result, background=${background}`, async (code, kind, message) => {
+    it.each([
+      ...cases,
+      ["authentication_failed", "auth-required", "Failed to authenticate: OAuth session expired and could not be refreshed"],
+      ["rate_limit", "rate-limited", "Claude has reached its usage limit."],
+    ] as const)(`preserves %s when the iterator closes without a result, background=${background}`, async (code, kind, message) => {
       const live = makePushableQuery();
       const emitted: SessionNotification[] = [];
+      const expectedMessage = code === "rate_limit" ? `Claude rate limit: ${message}` : message;
       const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
       try {
         const { session } = await adapter.newSession({ cwd: "/tmp" });
@@ -1348,9 +1354,9 @@ describe("Claude verification and cloud credential failures", () => {
         if (background) {
           await flushMicrotasks();
           expect(emitted.map((entry) => entry.update).filter((update) => update.sessionUpdate === "error_notice")).toMatchObject([
-            { code: "claude-background-failed", failureKind: kind, message },
+            { code: "claude-background-failed", failureKind: kind, message: expectedMessage },
           ]);
-        } else expect(await turn).toMatchObject({ failure: { kind, message } });
+        } else expect(await turn).toMatchObject({ failure: { kind, message: expectedMessage } });
       } finally { await adapter.dispose(); }
     });
 
@@ -1958,6 +1964,55 @@ const streamText = (t: string): Msg => ({
 });
 
 describe("ClaudeSdkAdapter", () => {
+  it("preserves an existing conversation through failed authentication and the next explicit send", async () => {
+    const emitted: SessionNotification[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("saved-conversation"), assistantText("Initial report"), resultOk("saved-conversation")],
+      [initMsg("unconfirmed-auth-attempt"), { ...assistantText("OAuth session expired"), error: "authentication_failed" },
+        { type: "result", subtype: "error_during_execution", is_error: true, errors: ["OAuth session expired"] }],
+      [initMsg("saved-conversation"), assistantText("Continuing the same conversation"), resultOk("saved-conversation")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const prompt = () => adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Continue")] });
+      await prompt();
+      await expect(prompt()).rejects.toMatchObject({ failure: { kind: "auth-required" } });
+      await prompt();
+      expect(captured.map(options => options.resume)).toEqual([undefined, "saved-conversation", "saved-conversation"]);
+      expect(emitted.filter(note => note.update.sessionUpdate === "provider_binding_update")).toHaveLength(1);
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["Personal Local", "organization-local", "organization-cloud"])(
+    "does not resume an init-only conversation after failed authentication (%s)",
+    async (owner) => {
+      const emitted: SessionNotification[] = [];
+      const cloud = owner === "organization-cloud";
+      const boundary = cloud ? { status: { actor: "agent-code", backend: "cloud-worker" } } as never : undefined;
+      const execution = cloud ? { mode: "actor-grant-v1", model: "claude-haiku-4-5", cwd: "/srv/zeros/workspace", customization: null,
+        lifetime: { signal: new AbortController().signal, assertLive: vi.fn() }, coordinator: { nativeHome: await physicalClaudeHome() }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution : null;
+      const original = cloudExecutions.cloudProviderExecution;
+      const authority = cloud ? vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value)) : null;
+      const runtime = cloud ? admittedClaudeRuntimeFixture() : null;
+      const { queryFn, captured } = makeScriptedQuery([
+        [initMsg("unconfirmed-conversation"), { ...assistantText("Failed to authenticate: OAuth session expired and could not be refreshed"), error: "authentication_failed" },
+          { type: "result", subtype: "error_during_execution", is_error: true, errors: ["Failed to authenticate: OAuth session expired and could not be refreshed"] }],
+        [initMsg("confirmed-conversation"), assistantText("Continuing your request."), resultOk("confirmed-conversation")],
+      ]);
+      const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+      try {
+        const { session } = await adapter.newSession({ cwd: cloud ? "/srv/zeros/workspace" : `/tmp/${owner}`, executionBoundary: boundary,
+          env: { ANTHROPIC_MODEL: "claude-haiku-4-5" } });
+        await expect(adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hello")] as never })).rejects.toMatchObject({ failure: { kind: "auth-required" } });
+        expect(emitted.filter(n => n.update.sessionUpdate === "provider_binding_update")).toEqual([]);
+        await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Continue")] as never });
+        expect(captured[1]?.resume).toBeUndefined();
+        expect(emitted.filter(n => n.update.sessionUpdate === "provider_binding_update")).toHaveLength(1);
+      } finally { await adapter.dispose(); runtime?.dispose(); authority?.mockRestore(); }
+    },
+  );
+
   it("publishes Claude's native binding without replacing the Zeros execution route", async () => {
     const emitted: SessionNotification[] = [];
     const { queryFn } = makeScriptedQuery([
@@ -2175,6 +2230,97 @@ describe("ClaudeSdkAdapter", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(["Personal Local", "organization-local", "organization-cloud"])(
+    "keeps a Monitor alive without counting it as work in %s",
+    async (placement) => {
+      const cloud = placement === "organization-cloud";
+      const boundary = cloud ? { status: { actor: "agent-code", backend: "cloud-worker" } } as never : undefined;
+      const execution = cloud ? {
+        mode: "actor-grant-v1", model: "claude-haiku-4-5", customization: null,
+        cwd: "/srv/zeros/workspace",
+        lifetime: { signal: new AbortController().signal, assertLive: vi.fn() },
+        coordinator: { nativeHome: await physicalClaudeHome() }, productServers: [],
+      } as unknown as cloudExecutions.CloudProviderExecution : undefined;
+      const original = cloudExecutions.cloudProviderExecution;
+      const authority = cloud ? vi.spyOn(cloudExecutions, "cloudProviderExecution")
+        .mockImplementation((value) => value === boundary ? execution! : original(value)) : undefined;
+      const runtime = cloud ? admittedClaudeRuntimeFixture() : undefined;
+      const emitted: SessionNotification[] = [];
+      const interrupt = vi.fn(async () => {});
+      const live = makePushableQuery({ interrupt });
+      const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn, idleTimeoutMs: 1_000 });
+      vi.useFakeTimers();
+      try {
+        const { session } = await adapter.newSession({
+          cwd: cloud ? "/srv/zeros/workspace" : path.join(TMP_DATA, placement),
+          executionBoundary: boundary,
+          ...(cloud ? { env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ANTHROPIC_API_KEY: "synthetic-provider-key" } } : {}),
+        });
+        const snapshot = () => emitted.map((note) => note.update)
+          .filter((update) => update.sessionUpdate === "background_tasks_update").at(-1)!;
+        const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Run checks")] });
+        await flushMicrotasks();
+        live.push(initMsg("monitor-session"), {
+          type: "assistant", message: { content: [{ type: "tool_use", id: "monitor-call", name: "Monitor",
+            input: { command: "watch-checks", description: "Wait for checks", timeout_ms: 300_000 } }] },
+        }, {
+          type: "system", subtype: "background_tasks_changed",
+          tasks: ["checks", "baseline", "watch"].map((task_id) => ({ task_id, task_type: "local_bash" })),
+        }, {
+          type: "system", subtype: "task_started", task_id: "watch", tool_use_id: "monitor-call",
+          task_type: "local_bash", is_backgrounded: true,
+        }, {
+          type: "user", tool_use_result: { taskId: "watch", timeoutMs: 300_000 },
+          message: { content: [{ type: "tool_result", tool_use_id: "monitor-call", content: "Monitor started" }] },
+        }, resultOk("monitor-session"));
+        await first;
+        expect(snapshot()).toMatchObject({ tasks: [{ taskId: "checks" }, { taskId: "baseline" }], waiting: true });
+        live.push({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "baseline" }, { task_id: "watch" }] });
+        await flushMicrotasks();
+        expect(snapshot()).toMatchObject({ tasks: [{ taskId: "baseline" }], waiting: true });
+        live.push({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "watch" }] });
+        await flushMicrotasks();
+        expect(snapshot()).toMatchObject({ tasks: [], waiting: false });
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(live.control.closes).toBe(0);
+        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(true);
+
+        const next = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Status")] });
+        await flushMicrotasks();
+        live.push(initMsg("monitor-session"), assistantText("The checks have finished."), resultOk("monitor-session"));
+        await next;
+        expect(snapshot()).toMatchObject({ tasks: [], waiting: false });
+        expect(live.captured).toHaveLength(1);
+
+        // Completion releases ownership, but a new watcher remains cancellable
+        // even though no waiting indicator is shown for it.
+        live.push({ type: "system", subtype: "task_notification", task_id: "watch", status: "completed" });
+        await flushMicrotasks();
+        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(false);
+        live.push({
+          type: "assistant", message: { content: [{ type: "tool_use", id: "second-monitor", name: "Monitor",
+            input: { command: "watch-checks", description: "Wait for checks", timeout_ms: 300_000 } }] },
+        }, {
+          type: "system", subtype: "task_started", task_id: "second-watch", tool_use_id: "second-monitor",
+          task_type: "local_bash", is_backgrounded: true,
+        }, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "second-watch" }] });
+        await flushMicrotasks();
+        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(true);
+        expect(snapshot()).toMatchObject({ tasks: [], waiting: false });
+        await adapter.cancel({ sessionId: session.sessionId });
+        expect(adapter.backgroundWorkActive(session.sessionId)).toBe(false);
+        expect(interrupt).toHaveBeenCalledOnce();
+        expect(live.control.closes).toBe(1);
+        if (runtime) expect(runtime.desktop).not.toHaveBeenCalled();
+      } finally {
+        await adapter.dispose();
+        vi.useRealTimers();
+        runtime?.dispose();
+        authority?.mockRestore();
+      }
+    },
+  );
 
   it.each([false, true])("retains the newest resumed task run across idle teardown and an older completion (ambient=%s)", async (ambient) => {
     vi.useFakeTimers();
@@ -7125,6 +7271,72 @@ describe("ClaudeSdkAdapter.steer", () => {
 });
 
 describe("Claude result ownership across background batches", () => {
+  it.each(["Personal Local", "organization-local", "organization-cloud"])(
+    "keeps queued user activity running through unrelated results in %s",
+    async placement => {
+      const cloud = placement === "organization-cloud";
+      const boundary = cloud ? { status: { actor: "agent-code", backend: "cloud-worker" } } as never : undefined;
+      const execution = cloud ? {
+        mode: "actor-grant-v1", model: "claude-haiku-4-5", customization: null,
+        cwd: "/srv/zeros/workspace",
+        lifetime: { signal: new AbortController().signal, assertLive: vi.fn() },
+        coordinator: { nativeHome: await physicalClaudeHome() }, productServers: [],
+      } as unknown as cloudExecutions.CloudProviderExecution : undefined;
+      const original = cloudExecutions.cloudProviderExecution;
+      const authority = cloud ? vi.spyOn(cloudExecutions, "cloudProviderExecution")
+        .mockImplementation(value => value === boundary ? execution! : original(value)) : undefined;
+      const runtime = cloud ? admittedClaudeRuntimeFixture() : undefined;
+      const emitted: SessionNotification[] = [];
+      const live = makePushableQuery();
+      const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
+      const snapshots = () => emitted.map(note => note.update)
+        .filter(update => update.sessionUpdate === "background_tasks_update");
+      try {
+        const { session } = await adapter.newSession({
+          cwd: cloud ? "/srv/zeros/workspace" : path.join(TMP_DATA, placement),
+          executionBoundary: boundary,
+          ...(cloud ? { env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ANTHROPIC_API_KEY: "synthetic-provider-key" } } : {}),
+        });
+        const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("A")] });
+        await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1));
+        live.push(initMsg("activity"), { ...resultOk("activity"), uuid: "result-a", user_message_uuid: live.inputsSeen[0].uuid });
+        await first;
+        live.push(assistantText("Reviewing the background results"));
+        await vi.waitFor(() => expect(snapshots().at(-1)?.activity?.state).toBe("running"));
+        let settled = false;
+        const second = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("B")] })
+          .then(value => { settled = true; return value; }, () => null);
+        await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(2));
+        const startedAt = snapshots().at(-1)?.activity?.startedAt;
+        const beforeResults = snapshots().length;
+        const receipts = [
+          { origin: { kind: "task-notification" } },
+          { origin: { kind: "task-notification" }, queued_turn_count: 1 },
+          { user_message_uuid: live.inputsSeen[0].uuid },
+          { user_message_uuids: ["synthetic-wakeup"], queued_turn_count: 1 },
+        ];
+        for (const [index, receipt] of receipts.entries()) {
+          const report = `Background report ${index}`;
+          live.push({ ...resultOk("activity"), uuid: `background-result-${index}`, num_turns: 1, result: report, ...receipt });
+          // Observe the actual translated result instead of sleeping for the race.
+          await vi.waitFor(() => expect(emitted.reduce(applyUpdate, []).some(message => message.kind === "text" && message.text === report)).toBe(true));
+          expect(settled).toBe(false);
+          expect(snapshots().at(-1)).toMatchObject({ tasks: [], waiting: false, activity: { state: "running", startedAt } });
+          // A transient idle event is enough to mark completion on an attached
+          // client, which has no optimistic pendingLocalTurnId to mask it.
+          expect(snapshots().slice(beforeResults).every(snapshot => snapshot.activity?.state === "running")).toBe(true);
+        }
+        live.push({ ...resultOk("activity"), uuid: "result-b", user_message_uuid: live.inputsSeen[1].uuid });
+        await expect(second).resolves.toMatchObject({ stopReason: "end_turn" });
+        expect(snapshots().at(-1)).toMatchObject({ activity: { state: "idle", startedAt } });
+      } finally {
+        await adapter.dispose();
+        authority?.mockRestore();
+        runtime?.dispose();
+      }
+    },
+  );
+
   it.each([
     { result: "", num_turns: 0, origin: { kind: "task-notification" } },
     { result: "", num_turns: 0, queued_turn_count: 1, result_index: 1 },

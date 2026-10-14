@@ -1,6 +1,7 @@
 import { createHash, createHmac, hkdfSync, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
+import { authorizeCloudAgentHistoryRecovery, checkCloudAgentHistoryActivation, completeCloudAgentHistoryActivation } from "./agent-history-recovery.js";
 import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import {
@@ -381,7 +382,7 @@ export async function readCurrentCloudAgentBootBinding(tx: Tx, supplied: unknown
 // The authenticated engine selects no account. The CP reserves a genuine
 // writer and freezes the actual funding owner before any positive delivery.
 import { CloudAgentBootCredentialRequestSchema, CloudAgentBootCredentialResponseSchema, CloudAgentBootIdentitySchema,
-  CloudAgentBootSyncRequestSchema, CloudAgentBootActivateRequestSchema, CloudAgentBootActivateResponseSchema,
+  CloudAgentBootSyncRequestSchema, CloudAgentBootActivateRequestSchema, CloudAgentBootActivateResponseSchema, CloudAgentHistoryRecoveryRequestSchema,
   CloudAgentBootRefreshRequestSchema, CloudAgentActorConfirmRequestSchema, CloudAgentWarmActorRequestSchema,
   CloudAgentBootRefreshResponseSchema, CloudAgentBootProviderReadySchema, type CloudAgentBootCredentialResponse } from "./agent-boot-contract.js";
 import { assertCurrentCloudEngineAuthority, assertCloudEngineAuthorityDeadline, readCurrentCloudEngineAuthority } from "./engine-authority.js";
@@ -403,7 +404,7 @@ import { serializeCloudAgentCredentialSourceMutation, recordCloudAgentBootCreden
 import { DatabaseCodexAuthRenewal, type CodexCredentialVersion } from "./codex-auth-renewal.js";
 
 type BootEngineScope={organizationId:string;workspaceId:string;generation:number;engineInstanceId:string;heartbeatToken:string};
-export type CloudAgentBootOperation="bootstrap"|"sync"|"activate"|"refresh"|"actor-confirm"|"warm-context";
+export type CloudAgentBootOperation="bootstrap"|"sync"|"activate"|"refresh"|"actor-confirm"|"warm-context"|"recover-history";
 type BootRow={id:string;workspace_id:string;org_id:string;generation:number;engine_instance_id:string;boot_id:string;writer_epoch:string;
   funding_owner_user_id:string;funding_owner_epoch:string;cache_revision:string;desired_cache_revision:string;
   credentials_initialized:boolean;initial_adoptions:unknown;retired_at:Date|null};
@@ -415,7 +416,7 @@ function bootMetadataJson(value:unknown):string {
   return JSON.stringify(normalize(value));
 }
 const bootProviders=["claude","codex","cursor"] as const;
-const bootSchemas={bootstrap:CloudAgentBootCredentialRequestSchema,sync:CloudAgentBootSyncRequestSchema,activate:CloudAgentBootActivateRequestSchema,
+const bootSchemas={"recover-history":CloudAgentHistoryRecoveryRequestSchema,bootstrap:CloudAgentBootCredentialRequestSchema,sync:CloudAgentBootSyncRequestSchema,activate:CloudAgentBootActivateRequestSchema,
   refresh:CloudAgentBootRefreshRequestSchema,"actor-confirm":CloudAgentActorConfirmRequestSchema,"warm-context":CloudAgentWarmActorRequestSchema};
 const unavailable=(provider:typeof bootProviders[number],code:"cloud_agent_credential_required"|"cloud_agent_credential_revoked"|"cloud_agent_credential_expired"|"cloud_runtime_upgrade_required"|"cloud_agent_model_not_authorized")=>({provider,status:"unavailable" as const,code});
 function bootScope(row:BootRow):CloudAgentBootScope { return CloudAgentBootScopeSchema.parse({organizationId:row.org_id,workspaceId:row.workspace_id,
@@ -569,6 +570,8 @@ export class DatabaseCloudAgentBootService {
     if(!request.success)throw new HttpError(422,"invalid_agent_execution","invalid_agent_execution");
     for(const field of ["organizationId","workspaceId","generation","engineInstanceId"] as const)
       if(engine[field]!==request.data[field])rejected();
+    if(operation==="recover-history")return authorizeCloudAgentHistoryRecovery(this.pool,engine,this.workosEnabled,
+      CloudAgentHistoryRecoveryRequestSchema.parse(request.data).preparedCustody);
     if(operation==="refresh")return this.refresh(engine,CloudAgentBootRefreshRequestSchema.parse(request.data));
     if(operation==="actor-confirm"||operation==="warm-context")return this.withReadBinding(engine,operation,request.data,async(tx,row,identity,deadline)=>{
       const scope=bootScope(row);
@@ -588,8 +591,10 @@ export class DatabaseCloudAgentBootService {
         throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");
       // reserve is inert. Only this separate ready-epoch call activates and
       // commits the exact private pointer atomically with W4's writer fence.
+      const recoveryId=await checkCloudAgentHistoryActivation(tx,scope,activation.historyRecoveryId,activation.historyRecoveryCustodySha256);
       await activateLocalCloudCommandWriter(tx,{...engine,workosEnabled:this.workosEnabled},{bootId:scope.bootId,writerEpoch:scope.writerEpoch});
       await tx.query("UPDATE cloud_workspaces SET agent_command_mode='boot-owner-v1',agent_boot_id=$3 WHERE id=$1 AND org_id=$2",[scope.workspaceId,scope.organizationId,row.id]);
+      if(recoveryId)await completeCloudAgentHistoryActivation(tx,scope,recoveryId,activation.historyRecoveryCustodySha256!);
       return CloudAgentBootActivateResponseSchema.parse({...identity,cacheRevision:response.cacheRevision,activated:true});
     });
   }

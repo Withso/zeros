@@ -14,6 +14,12 @@ function render(overrides: Partial<QueuedMessagesCardProps> = {}) {
   return renderToStaticMarkup(createElement(QueuedMessagesCard, { ...props, ...overrides }));
 }
 describe("cloud readiness in the existing queued card", () => {
+  it("distinguishes missing resume metadata from a confirmed unsupported provider", () => {
+    expect(render({ streaming: true, steeringSupported: undefined })).toContain("Checking steering support");
+    expect(render({ streaming: true, steeringSupported: undefined })).not.toContain("support mid-turn steering");
+    expect(render({ streaming: true, steeringSupported: false })).toContain("support mid-turn steering");
+    expect(render({ streaming: true, steeringSupported: true })).toMatch(/aria-label="Send now"(?![^>]*disabled)/);
+  });
   it("shows queued messages with editable/removable controls and no failure presentation while waiting", () => {
     const html = render({ waiting: true });
     expect(html).toContain("Waiting for agent"); expect(html).toContain("Inspect the checkout");

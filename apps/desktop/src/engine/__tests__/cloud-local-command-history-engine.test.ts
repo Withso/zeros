@@ -11,6 +11,8 @@ import { openSqlite } from "../db/sqlite";
 import { closeZerosDb, setZerosDbPathForTesting } from "../db";
 import { headRev } from "../db/sync";
 import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
+import { CloudCommandRuntimeError } from "../cloud-command-client";
+import { CloudLocalAgentBootRuntime } from "../cloud-local-command-queue-boot";
 import { CloudActorAuthorityRegistry } from "../agents/cloud-actor-authority";
 import { WorkspaceService } from "../workspace/service";
 import { closeState, setStateRootForTesting } from "../git";
@@ -24,6 +26,7 @@ const head: CloudLocalCommandHistoryHead = { originWriterEpoch: scope.writerEpoc
   source: { kind: "mutation", mutationId: randomUUID(), operation: "prune" }, deleted: false,
   history: { restoreRevision: 9, recordSequence: 10, eventSequence: 11, incompleteReason: "capture_unavailable" } };
 const methods = ZerosEngine.prototype as unknown as {
+  initializeCloudAgentBoot(this: unknown): Promise<void>;
   restoreCloudLocalHistory(this: unknown): Promise<void>;
   cloudHistoryRestoreMetadata(this: unknown, conversations: readonly string[]): Record<string, unknown> | undefined;
   cloudHistoryReadResult(this: unknown, op: string, params: Record<string, unknown>, result: unknown): unknown;
@@ -38,6 +41,58 @@ afterEach(async () => { vi.restoreAllMocks(); for (const queue of mutationQueues
   if (directory) await rm(directory, { recursive: true, force: true }); directory = undefined; });
 
 describe("current local-writer history exposure", () => {
+  it.each(["current", "replaced", "custody-replaced"])("uses only exact CP gap custody for a %s registration, before exposing restored heads", async mode => {
+    directory = await mkdtemp(path.join(os.tmpdir(), "zeros-history-gap-engine-"));
+    setZerosDbPathForTesting(path.join(directory, "normal.sqlite"));
+    const file = path.join(directory, "source.sqlite"), ledger = openSqlite(file);
+    ledger.exec("CREATE TABLE local_command_history_heads(conversation_id TEXT); INSERT INTO local_command_history_heads VALUES('chat')"); ledger.close();
+    const predecessor = Object.freeze({ scope }), cleanup = vi.fn(async () => {});
+    const source = { manifest: { seal: { scope } }, ledgerFile: file, normalFile: "unused", cleanup, predecessor };
+    vi.spyOn(checkpoint, "restoreCloudLocalCommandCheckpointLedger").mockRejectedValue(new CloudCommandRuntimeError("checkpoint_expected_writer_mismatch"));
+    const recover = vi.spyOn(checkpoint, "recoverCloudLocalCommandCheckpointLedger").mockResolvedValue(source as unknown as Awaited<ReturnType<typeof checkpoint.recoverCloudLocalCommandCheckpointLedger>>);
+    const project = vi.spyOn(rebuild, "rebuildCloudLocalCommandHistory").mockImplementation(input => ({ conversationId: input.conversationId, historyHead: head, restored: false }));
+    const target = { ...scope, engineInstanceId: randomUUID(), bootId: randomUUID() }, authorization = { recoveryId: randomUUID() };
+    const registration = { agentSourceWriterEpoch: scope.writerEpoch, runtimeBootId: target.bootId,
+      agentBootAuthorityRemainingMs: () => 30_000,
+      localCommandsNegotiated: () => true, agentBootRequest: vi.fn(async () => {
+        if (mode === "replaced") state.cloudRuntimeRegistration = { ...registration };
+        return authorization;
+      }) };
+    const state = { root: directory, cloudLocalHistoryRestored: false, cloudLocalHistoryRestoreHeads: new Map(),
+      cloudLocalCommandPredecessor: null, cloudRecordRuntime: { usesLocalAgentJournal: true }, cloudWorker: {},
+      cloudRuntimeConfig: { execution: target, engine: { instanceId: target.engineInstanceId } }, cloudRuntimeRegistration: registration };
+    const preparedCustody = [{ writerEpoch: randomUUID(), recoveryId: randomUUID() }];
+    vi.spyOn(checkpoint, "cloudLocalCommandHistoryRecoveryCustody").mockImplementation(async () => {
+      if (mode === "custody-replaced") state.cloudRuntimeRegistration = { ...registration };
+      return preparedCustody;
+    });
+    if (mode !== "current") {
+      await expect(methods.restoreCloudLocalHistory.call(state)).rejects.toThrow("engine_authority_rejected");
+      expect(recover).not.toHaveBeenCalled(); expect(project).not.toHaveBeenCalled(); expect(state.cloudLocalHistoryRestored).toBe(false);
+      if (mode === "custody-replaced") expect(registration.agentBootRequest).not.toHaveBeenCalled();
+    } else {
+      await methods.restoreCloudLocalHistory.call(state);
+      expect(registration.agentBootRequest).toHaveBeenCalledWith("recover-history", expect.objectContaining({
+        organizationId: target.organizationId, workspaceId: target.workspaceId, engineInstanceId: target.engineInstanceId, generation: target.generation,
+        preparedCustody }), expect.any(AbortSignal));
+      expect(recover).toHaveBeenCalledWith(expect.objectContaining({ expectedWriterEpoch: scope.writerEpoch, authorization,
+        scope: expect.objectContaining({ engineInstanceId: target.engineInstanceId, bootId: target.bootId }) }));
+      expect(project).toHaveBeenCalledWith(expect.objectContaining({ sourceRecovery: predecessor, scope }));
+      expect(project.mock.calls[0]![0]).not.toHaveProperty("sourceSeal");
+      expect(state.cloudLocalHistoryRestoreHeads.get("chat")).toBe(head); expect(state.cloudLocalCommandPredecessor).toBe(predecessor);
+      expect(cleanup).toHaveBeenCalledOnce();
+    }
+  });
+  it.each(["checkpoint_part_hash", "checkpoint_seal_document", "checkpoint_inventory_timeout", "checkpoint_workspace_mismatch"])(
+    "does not recover or retry an integrity/operational refusal (%s)", async code => {
+      const failure = new CloudCommandRuntimeError(code);
+      vi.spyOn(checkpoint, "restoreCloudLocalCommandCheckpointLedger").mockRejectedValue(failure);
+      const recover = vi.spyOn(checkpoint, "recoverCloudLocalCommandCheckpointLedger"), agentBootRequest = vi.fn();
+      const state = { root: "/synthetic", cloudRecordRuntime: { usesLocalAgentJournal: true }, cloudWorker: {},
+        cloudRuntimeConfig: { execution: scope }, cloudRuntimeRegistration: { agentSourceWriterEpoch: scope.writerEpoch, agentBootRequest } };
+      await expect(methods.restoreCloudLocalHistory.call(state)).rejects.toBe(failure);
+      expect(agentBootRequest).not.toHaveBeenCalled(); expect(recover).not.toHaveBeenCalled();
+    });
   it("requires authenticated source selection before any checkpoint install or NORMAL rebuild", async () => {
     const restore = vi.spyOn(checkpoint, "restoreCloudLocalCommandCheckpointLedger"), project = vi.spyOn(rebuild, "rebuildCloudLocalCommandHistory");
     const state = { cloudRecordRuntime: { usesLocalAgentJournal: true }, cloudWorker: {},
@@ -50,20 +105,35 @@ describe("current local-writer history exposure", () => {
     setZerosDbPathForTesting(path.join(directory, "normal.sqlite"));
     const file = path.join(directory, "source.sqlite"), ledger = openSqlite(file);
     ledger.exec("CREATE TABLE local_command_history_heads(conversation_id TEXT); INSERT INTO local_command_history_heads VALUES('chat'),('sibling')"); ledger.close();
-    const cleanup = vi.fn(async () => {}), source = { manifest: { seal: { scope } }, ledgerFile: file, normalFile: "unused", cleanup };
+    const predecessor = Object.freeze({ scope }), cleanup = vi.fn(async () => {});
+    const source = { manifest: { seal: { scope } }, ledgerFile: file, normalFile: "unused", cleanup, predecessor };
     const restore = vi.spyOn(checkpoint, "restoreCloudLocalCommandCheckpointLedger").mockResolvedValue(source as unknown as Awaited<ReturnType<typeof checkpoint.restoreCloudLocalCommandCheckpointLedger>>);
     const project = vi.spyOn(rebuild, "rebuildCloudLocalCommandHistory").mockImplementation(input => ({ conversationId: input.conversationId, historyHead: head, restored: false }));
     const state = { root: directory, cloudLocalHistoryRestored: false, cloudLocalHistoryRestoreHeads: new Map(),
-      cloudRecordRuntime: { usesLocalAgentJournal: true }, cloudWorker: {}, cloudRuntimeConfig: { execution: scope },
-      cloudRuntimeRegistration: { agentSourceWriterEpoch: scope.writerEpoch } };
+      cloudLocalCommandPredecessor: null as checkpoint.CloudLocalCommandPredecessor | null, cloudAgentLegacyFactory: {},
+      cloudRecordRuntime: { usesLocalAgentJournal: true }, cloudWorker: {},
+      cloudRuntimeConfig: { execution: scope, engine: { instanceId: scope.engineInstanceId } },
+      cloudRuntimeRegistration: { agentSourceWriterEpoch: scope.writerEpoch, localCommandsNegotiated: () => true },
+      restoreCloudLocalHistory() { return methods.restoreCloudLocalHistory.call(this); } };
+    const boot = vi.spyOn(CloudLocalAgentBootRuntime.prototype, "initialize").mockImplementation(function (this: CloudLocalAgentBootRuntime) {
+      expect((this as unknown as { options: { predecessor: unknown } }).options.predecessor).toBe(predecessor);
+      return Promise.resolve(true);
+    });
     project.mockImplementationOnce(input => ({ conversationId: input.conversationId, historyHead: head, restored: false }))
       .mockImplementationOnce(() => { throw new Error("invalid lineage"); });
-    await expect(methods.restoreCloudLocalHistory.call(state)).rejects.toThrow("invalid lineage");
+    await expect(methods.initializeCloudAgentBoot.call(state)).rejects.toThrow("invalid lineage");
     expect(state.cloudLocalHistoryRestoreHeads.size).toBe(0); expect(state.cloudLocalHistoryRestored).toBe(false);
-    await methods.restoreCloudLocalHistory.call(state);
+    expect(state.cloudLocalCommandPredecessor).toBeNull(); expect(boot).not.toHaveBeenCalled();
+    await methods.initializeCloudAgentBoot.call(state);
     expect(restore).toHaveBeenCalledWith(expect.objectContaining({ expectedWriterEpoch: scope.writerEpoch }));
     expect(state.cloudLocalHistoryRestoreHeads).toEqual(new Map([["chat", head], ["sibling", head]]));
     expect(state.cloudLocalHistoryRestored).toBe(true); expect(cleanup).toHaveBeenCalledTimes(2);
+    expect(state.cloudLocalCommandPredecessor).toBe(predecessor); expect(boot).toHaveBeenCalledOnce();
+  });
+  it.each(["Personal Local", "organization-local"])("never restores or changes cloud custody on %s boot", async () => {
+    const restoreCloudLocalHistory = vi.fn(), initialize = vi.spyOn(CloudLocalAgentBootRuntime.prototype, "initialize");
+    await methods.initializeCloudAgentBoot.call({ cloudWorker: undefined, restoreCloudLocalHistory });
+    expect(restoreCloudLocalHistory).not.toHaveBeenCalled(); expect(initialize).not.toHaveBeenCalled();
   });
   it("publishes current FULL heads with exact boot scope and separate confirmed mirror cursor", () => {
     const latest = { ...head, history: { ...head.history, restoreRevision: 10 } };

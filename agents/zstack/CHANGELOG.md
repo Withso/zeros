@@ -5,32 +5,37 @@ where it is encoded.
 
 ## 0.1.6
 
-- **Style-build teardown could disappear before archive retry.** Settled
-  command promises and cache eviction were mistaken for process-stop proof.
-  Keep unresolved boundary authority until the original proof succeeds, and
-  test archive retries, settings replacement, idle stop and eviction
-  (`design/__tests__/style-build-lifecycle.test.ts`). The same suite proves
-  that failed one-shot builds retry on reopen, not on presence heartbeats.
-  The real-process presence-expiry test arms its short lease after startup,
-  so scheduler coverage does not assume a shell starts within 50 ms.
-- **Imported styles lost images and linked-CSS theme variables.** Render
-  preparation skipped source-relative raster assets and scanned only HTML for
-  Tailwind candidates. Test asset dependencies and canonical path restrictions,
-  linked and snapshot CSS, and actual Local/cloud preview rendering
-  (`style-sources.test.ts`, `style-sources-render.test.ts`,
-  `verification-browser.test.ts`).
+Folds the lessons from #482 and #484, pins merged eval cases to their merge commits, and adds the
+lessons from the first fixture lifecycle run.
+
+- **Qualification hid its first failure.** Pending cleanup replaced the closed smoke diagnostic, and
+  reconciliation then replaced that with a timeout. Persist the first failure before cleanup and keep it
+  through retries, including a transient diagnostic-write outage (`playbooks/bug-fix.md`, case
+  `qualification-first-failure-survives-cleanup`).
+- **Checkout imports hid a missing runtime dependency.** The engine's channel-policy imports lay outside
+  the staged source slices. Probe the staged import and the complete source engine in the archive,
+  separately from bundled CLI help (`playbooks/bug-fix.md`, case `runtime-source-import-closure`).
+- **A hidden or stable catalog still woke every two seconds.** The fetch guard suppressed requests but left
+  the interval running. Use one visible next-due timeout and count callbacks as well as requests in
+  fake-clock tests. Release the network flight before the slower cache restore, and recheck workspace
+  eligibility after it (`docs/ui-interaction-performance.md`, case `cloud-catalog-next-due-timer`).
+- **The owner was asked to rebuild before the runtime qualified.** A build pins the newest qualified
+  runtime, which was still the broken one. Confirm qualification first, then compare the build's persisted
+  `runtime_id` (`playbooks/alpha-operator.md`).
+- **The integrate steps asked for the PR number before the PR existed.** Open the PR first, then pin
+  pending cases and force-push with lease. Check all four PR sections before arming (`integrate-pr.md`).
+- **A scripted lifecycle run chained cleanup after a failed resume.** It would have deleted the evidence.
+  Stop at the first failed stage and capture database rows and control-plane logs first; a lifecycle run
+  counts only once stop and resume pass (`zstack-verify`).
+- **A plan recorded estimated times.** Every recorded time comes from a clock read (`zstack-verify`).
+- **A subagent sat idle for 50 minutes** while its feed was quiet. Masters check session status when a feed
+  goes quiet and send the next step (`zstack`).
 
 ## 0.1.5
 
-- **UI work had no procedure, and mockups drifted from the product.** 20 of 25 standalone mockups in
-  `styles/Artifacts/` hand-copied token values that later changed, so designs no longer matched the app.
-  Zeros mockups now live in `Zeros - Design/`, whose `tokens.css` `pnpm design:docs` generates and
-  `check:ui` keeps fresh. UI work follows design → verify → approve → implement → look
-  (`playbooks/ui-design.md`, `zeros-ui`).
-- **A new workspace failed required gates for environment reasons.** Its setup ran only `pnpm install`,
-  so `pnpm typecheck` lacked the control-plane dependencies and Playwright suites lacked Chromium. Install
-  all three dependency graphs, and rerun failures in a clean base checkout before blaming the diff
-  (`zstack-verify`).
+- **Every PR appended to the same eval file and changelog,** so parallel PRs always conflicted. New eval
+  cases now live in `evals/cases/<id>.json` and lessons in `changes/<id>.md`. The legacy `cases.json` stays
+  readable (`zstack-eval`, `zstack-learn`, README).
 
 ## 0.1.4
 
@@ -68,6 +73,43 @@ The pack is introduced: the router, verify, review, eval and learn skills,
 five playbooks, and eleven seed eval cases from real Alpha incidents.
 
 Lessons already encoded:
+- **Result ownership must precede activity publication.** An unrelated Claude
+  result kept a user promise pending but briefly published idle to attached
+  clients. Classify ownership before translation; test every emitted activity
+  snapshot across Personal Local, organization-local and cloud paths
+  (`claude-sdk/__tests__/adapter.test.ts`).
+- **Tool outcomes are not recovery evidence.** A late result without its
+  invocation hid the failed-turn card and Retry. Require invocation evidence
+  before treating a tool as resumed model work, and replay through the shared
+  history reducer (`turn-failure-presentation.test.ts`).
+- **An omitted activity flag is not an explicit false.** Monitor watchers can
+  arrive as ordinary shell tasks on older Claude streams. Join native tool and
+  task IDs as a fallback, retain explicit membership flags, and keep process
+  ownership separate from the visible 2 → 1 → 0 task count. Native, adapter and
+  browser regressions cover late joins, cancellation and an idle parent with
+  only a watcher remaining (case `claude-monitor-visible-activity`).
+- **Claude init does not confirm a resumable conversation.** Failed sign-in
+  published an ID before Claude saved the conversation, so the next send resumed
+  a missing session. Confirm root model work or success before persisting a new
+  binding, retain existing confirmed bindings, and resolve historical sign-in
+  UI only from real conversation progress (case `claude-provisional-auth-session`).
+- **Feedback must survive its consumer.** Usage dedupe reset at intermediate
+  results, while reusing an immutable notice ID dropped later status changes.
+  Keep per-turn budget state, issue new receipts for changed states and project
+  one tail notice across background replies and steering. Test the shared reducer,
+  saved native message IDs and copied transcripts (`zstack-review`, Claude
+  feedback and renderer regressions; case `claude-usage-status-through-history`).
+- **Deduplication does not choose a visual surface.** Informational usage status
+  is plain inbetween transcript text; authentication and blocked-turn failures
+  use action notices. Browser checks now verify the usage row has no banner
+  background, inset, border or action (`ui-smoke-claude-runtime-ui.mjs`).
+- **Agent lifecycle records need one presentation owner.** A native child can
+  emit both an Agent group and task lifecycle records. Join by exact child identity
+  before hiding a duplicate; preserve unmatched records and unrepresented failures
+  (`docs/agent-tool-presentation.md`, case `claude-agent-lifecycle-duplicate`).
+  Failed status can precede its explanation: compare displayed detail, not just
+  terminal status, and retain saved-history regressions in
+  `agent-background-presentation.test.ts`.
 - **Provider fixtures can lie.** A synthetic Boat tree passed while the real
   one failed. The rule is to qualify against a real response
   (`zstack-review`, case `boat-saved-tree-real-shape`).

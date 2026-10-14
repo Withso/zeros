@@ -9,11 +9,12 @@ import type { ProductApi } from "../zeros-dev/product";
 import type { RunHandle } from "../zeros-dev/receipts";
 import { AlphaTransport } from "../zeros-dev/transport";
 import { parseFixture } from "../zeros-dev/config";
+import type { AdmissionObservation } from "../zeros-dev/admission-observation";
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => { vi.useRealTimers(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function fixture() {
+async function fixture(options: { rejection?: { reason: string; message: string }; listResult?: unknown; onList?: (count: number) => void } = {}) {
   const values = { ZEROS_DEV_WORKOS_SUBJECT: "user_fixture", ZEROS_DEV_ACCOUNT_ID: randomUUID(), ZEROS_DEV_EMAIL: "fixture@example.test",
     ZEROS_DEV_ORGANIZATION_ID: randomUUID(), ZEROS_DEV_REPOSITORY: "test-owner/test-repo", ZEROS_DEV_REPOSITORY_ID: "1234", ZEROS_DEV_GITHUB_INSTALLATION_ID: randomUUID() };
   const configured = parseFixture(values), workspaceId = randomUUID(), streamId = randomUUID();
@@ -24,12 +25,16 @@ async function fixture() {
   const origin = `http://127.0.0.1:${address.port}`, seen: Record<string, any>[] = [], headers: Record<string, unknown>[] = [];
   const workspace = { id: workspaceId, generation: { number: 1 }, status: "ready" };
   let generation = 1, engineRoot = "/home/user/test-repo", receiptState = "succeeded", exitCode: number | null = 0, permission = false, enqueued: any;
-  let conversationId = "", commandId = "", wrote = false;
+  let conversationId = "", commandId = "", wrote = false, listRequests = 0;
   server.on("connection", (socket, request) => {
     headers.push(request.headers);
     socket.on("message", bytes => {
       const message = JSON.parse(bytes.toString()); seen.push(message);
       const send = (body: object) => socket.send(JSON.stringify({ id: randomUUID(), timestamp: Date.now(), source: "engine", ...body }));
+      if (options.rejection) {
+        if (message.type === "CONNECTED") send({ type: "CONNECTION_REJECTED", ...options.rejection });
+        return;
+      }
       if (message.type === "PTY_CREATE") {
         send({ type: "PTY_CREATED", requestId: message.id, sessionId: message.sessionId, cwd: engineRoot, pid: 123, cols: 120, rows: 30 }); return;
       }
@@ -41,7 +46,10 @@ async function fixture() {
       const params = message.params ?? {}, request = params.request;
       const queue = () => ({ version: 1, conversationId, revision: 0, paused: false, pending: [], receipts: [] });
       let result: unknown;
-      if (message.op === "workspace.list") result = { workspaces: [{ id: "local-main", path: engineRoot }] };
+      if (message.op === "workspace.list") {
+        listRequests++; options.onList?.(listRequests);
+        result = listRequests > 1 && options.listResult !== undefined ? options.listResult : { workspaces: [{ id: "local-main", path: engineRoot }] };
+      }
       else if (message.op === "cloudCommands.createConversation" || message.op === "cloudCommands.conversation") {
         conversationId = params.conversationId;
         result = { conversationId, modeRevision: 0, permissionModeVersion: 1, nativeCommandsVersion: 1 };
@@ -84,13 +92,89 @@ async function fixture() {
   const environment: RuntimeClientEnvironment = { controlPlaneOrigin: origin, allowHttpLoopback: true, createWebSocket: (url, protocols) => new WebSocket(url, protocols) as never,
     resolveEnginePort: async () => { throw new Error("no local engine"); }, resolveEngineToken: async () => { throw new Error("no local token"); },
     invalidateEnginePort() {}, invalidateEngineToken() {}, getAuthAccessToken: () => { throw new Error("no account token to VM"); }, logger: { warn() {}, error() {} } };
-  const connect = async () => { const runtime = await ZerosDevRuntime.connect(session, api, handle.run, { environment, fetch: fetcher }); cleanups.push(() => runtime.dispose()); return runtime; };
+  const connect = async (signal?: AbortSignal, onAdmissionEvent?: (event: AdmissionObservation) => void) => {
+    const runtime = await ZerosDevRuntime.connect(session, api, handle.run, { environment, fetch: fetcher, signal, onAdmissionEvent });
+    cleanups.push(() => runtime.dispose()); return runtime;
+  };
   return { connect, handle, api, fetcher, seen, headers, workspace, setGeneration: (value: number) => { generation = value; },
     setRoot: (value: string) => { engineRoot = value; }, setReceipt: (value: string) => { receiptState = value; },
     setExit: (value: number | null) => { exitCode = value; }, requirePermission: () => { permission = true; receiptState = "dispatching"; }, enqueued: () => enqueued, wrote: () => wrote };
 }
 
 describe("zeros-dev shared admission, agent and terminal loopback", () => {
+  it.each([false, true])("preserves the typed first failure and each signed retry when terminal failure is %s", async terminal => {
+    const f = await fixture(), events: AdmissionObservation[] = [];
+    const code = "cloud_runtime_temporarily_unavailable", firstFailure = { status: 503, code, phase: "provider_endpoint", retryAfterMs: 1000 };
+    f.fetcher.mockResolvedValueOnce(Response.json({ error: { code, phase: "provider_endpoint", retryable: true,
+      message: "synthetic-private-admission" } }, { status: 503, headers: { "Retry-After": "1" } }));
+    if (terminal) f.fetcher.mockResolvedValueOnce(Response.json({ error: { code: "internal", message: "synthetic-private-final" } }, { status: 500 }));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const connected = f.connect(undefined, event => events.push(event)).then(value => ({ value }), error => ({ error }));
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await connected;
+    const admission = { sequence: 1, firstFailure, retryCount: 1, retries: [{ ...firstFailure, attempt: 2, delayMs: 1000 }] };
+    expect(events).toEqual([{ sequence: 1, firstFailure, retryCount: 0, retries: [] }, admission]);
+    if (terminal) expect(result).toMatchObject({ error: { code: "runtime_unavailable", admission,
+      runtime: { phase: "admission", class: "admission_unavailable", status: 500 } } });
+    else expect(result).toMatchObject({ value: { admission } });
+    const posts = f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(new Set(posts.map(([, init]) => new Headers(init?.headers).get("x-zeros-device-nonce"))).size).toBe(2);
+    expect(JSON.stringify(events)).not.toContain("synthetic-private");
+  });
+
+  it.each([
+    [500, "internal", "admission_unavailable"],
+    [503, "cloud_access_provider_unavailable", "admission_unavailable"],
+    [403, "forbidden", "authority_rejected"],
+    [409, "engine_client_admission_ineligible", "admission_refused"],
+  ] as const)("retains admission %i as a closed cause without retrying or echoing the body", async (status, code, inner) => {
+    const f = await fixture();
+    f.fetcher.mockResolvedValueOnce(Response.json({ error: { code, message: "synthetic-private-admission" } }, { status }));
+    const error = await f.connect().catch(error => error);
+    expect(error).toMatchObject({ code: "runtime_unavailable", runtime: { phase: "admission", class: inner, status } });
+    expect(f.fetcher).toHaveBeenCalledOnce(); expect(f.seen).toHaveLength(0);
+    expect(JSON.stringify(error)).not.toContain("synthetic-private");
+  });
+
+  it("classifies an invalid admission response without opening a socket", async () => {
+    const f = await fixture(); f.fetcher.mockResolvedValueOnce(Response.json({ private: "synthetic-private-response" }, { status: 201 }));
+    await expect(f.connect()).rejects.toMatchObject({ code: "runtime_unavailable", runtime: { phase: "admission", class: "bad_response", status: 201 } });
+    expect(f.fetcher).toHaveBeenCalledOnce(); expect(f.seen).toHaveLength(0);
+  });
+
+  it.each([["auth-wrong-account", "authority_rejected"], ["protocol-too-old", "handshake_rejected"]] as const)(
+    "captures %s before disposal clears the shared client's rejection", async (reason, inner) => {
+      const f = await fixture({ rejection: { reason, message: "synthetic-private-rejection" } });
+      const error = await f.connect().catch(error => error);
+      expect(error).toMatchObject({ code: "runtime_unavailable", runtime: { phase: "handshake", class: inner } });
+      expect(JSON.stringify(error)).not.toContain("synthetic-private");
+      expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+      expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
+    });
+
+  it("distinguishes malformed workspace.list from admission and keeps the first error through failed retirement", async () => {
+    const f = await fixture({ listResult: { private: "synthetic-private-result" } });
+    const fetcher = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation((url, init) => init?.method === "DELETE" ? Promise.reject(new Error("synthetic-private-cleanup")) : fetcher(url, init));
+    await expect(f.connect()).rejects.toMatchObject({ code: "bad_response", runtime: { phase: "workspace_list", class: "bad_response" } });
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("names the expired workspace.list phase without sleeping or retrying", async () => {
+    const controller = new AbortController();
+    const f = await fixture({ onList: count => { if (count === 2) controller.abort(new DOMException("synthetic-private-timeout", "TimeoutError")); } });
+    await expect(f.connect(controller.signal)).rejects.toMatchObject({ code: "deadline", runtime: { phase: "workspace_list", class: "request_timeout" } });
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("keeps unknown pre-admission failures explicitly unknown and value-free", async () => {
+    const f = await fixture(); vi.mocked(f.api.workspace).mockRejectedValueOnce(new Error("synthetic-private-workspace"));
+    const error = await f.connect().catch(error => error);
+    expect(error).toMatchObject({ code: "runtime_unavailable", runtime: { phase: "workspace_read", class: "unknown" } });
+    expect(JSON.stringify(error)).not.toContain("synthetic-private"); expect(f.fetcher).not.toHaveBeenCalled();
+  });
+
   it.each(["claude", "codex", "cursor"] as const)("waits for %s's native receipt, then reads the same transcript", async agent => {
     const f = await fixture(), runtime = await f.connect(), id = randomUUID();
     const receipt = await runtime.prompt(f.handle, { id, agent, model: "fixture-model", text: "Reply with fixture output." });

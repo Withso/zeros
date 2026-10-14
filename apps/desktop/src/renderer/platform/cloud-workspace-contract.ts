@@ -2,7 +2,7 @@ import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
 import { CloudNativeCapabilitiesSchema } from "@zeros/protocol/cloud-agent-execution";
 import { CloudAgentInitialAdoptionsSchema } from "@zeros/protocol/cloud-agent-bootstrap";
-import { CloudWorkspaceCheckpointRestoreSchema } from "@zeros/protocol/cloud-runtime-lifecycle";
+import { CloudWorkspaceCheckpointRestoreSchema, CloudWorkspaceHistoryRecoverySchema } from "@zeros/protocol/cloud-runtime-lifecycle";
 
 // Pure response schemas shared by desktop and the Alpha Linux harness.
 export const CloudWorkspaceActorRoleSchema = z.enum(["viewer", "prompter", "developer", "manager", "owner"]);
@@ -33,6 +33,7 @@ export const CloudWorkspaceDocumentSchema = z.object({
   createdByDisplayName: z.string().min(1).max(120).nullable().optional(),
   ownerUserId: z.string().uuid().optional(),
   agentCredentials: CloudWorkspaceAgentCredentialsSchema.optional(),
+  historyRecovery: CloudWorkspaceHistoryRecoverySchema.optional(),
   adminWorkspace: CloudComputerAdminWorkspaceSchema.optional(),
   actorRole: CloudWorkspaceActorRoleSchema.nullable().optional(),
   sharingMode: z.enum(["private", "organization"]).optional(),

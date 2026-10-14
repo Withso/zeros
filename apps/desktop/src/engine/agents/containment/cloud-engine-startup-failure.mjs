@@ -9,7 +9,7 @@ export const CLOUD_ENGINE_STARTUP_PHASES = Object.freeze(["startup", "registrati
 export const CLOUD_ENGINE_STARTUP_NAMES = Object.freeze([
   "Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError", "ZodError", "SqliteError",
   "CloudCommandRuntimeError", "CloudRuntimeRequestError", "CloudAgentExecutionError", "CloudAgentAdmissionError",
-  "CloudRuntimeUpgradeRequiredError", "unknown",
+  "CloudRuntimeUpgradeRequiredError", "CloudCredentialControlError", "unknown",
 ]);
 // This helper is also shipped as standalone setup code. Mirror the protocol's
 // closed admission/validation categories here; parity tests cover both copies.
@@ -22,6 +22,16 @@ const bootFailureCategories = [
   "credential_refresh_invalid", "credential_refresh_timeout", "credential_refresh_unchanged", "credential_refresh_rejected", "lock_busy", "execution_limit",
   "customization_changed", "access_denied", "environment_revoked", "environment_runtime_required", "environment_unavailable", "lease_expired",
 ];
+const checkpointFailureCodes = [
+  "checkpoint_directory_metadata", "checkpoint_file_open_flags", "checkpoint_file_metadata", "checkpoint_part_path",
+  "checkpoint_inventory_timeout", "checkpoint_seal_missing", "checkpoint_seal_document", "checkpoint_seal_ack",
+  "checkpoint_writer_scope", "checkpoint_writer_unsealed", "checkpoint_journal_head", "checkpoint_mirror_head",
+  "checkpoint_inventory_hash", "checkpoint_stream_head", "checkpoint_pending_work", "checkpoint_normal_head",
+  "checkpoint_capture_read", "checkpoint_capture_identity", "checkpoint_manifest_size", "checkpoint_manifest_missing",
+  "checkpoint_manifest_identity", "checkpoint_manifest_invalid", "checkpoint_workspace_mismatch", "checkpoint_expected_writer_mismatch",
+  "checkpoint_part_missing", "checkpoint_part_size", "checkpoint_part_hash", "checkpoint_part_identity",
+  "checkpoint_assembled_size", "checkpoint_assembled_hash", "checkpoint_restore_read", "checkpoint_restore_hash", "checkpoint_restore_identity",
+];
 export const CLOUD_ENGINE_STARTUP_CODES = Object.freeze([
   "ENOENT", "ENOTDIR", "EISDIR", "EACCES", "EPERM", "EIO", "EROFS", "ENOSPC", "EDQUOT", "EMFILE", "ENFILE",
   "EEXIST", "ELOOP", "EBUSY", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET",
@@ -30,6 +40,9 @@ export const CLOUD_ENGINE_STARTUP_CODES = Object.freeze([
   "cloud_commands_unavailable", "cloud_actor_authority_rejected", "cloud_runtime_upgrade_required", "unknown",
   "cloud_workspace_client_update_required", "cloud_workspace_v2_required", "cloud_agent_model_not_authorized",
   "cloud_agent_credential_required", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required",
+  "credential_control_authority_rejected", "credential_control_conflict", "credential_control_limit",
+  "credential_control_storage_unavailable", "credential_control_invalid",
+  ...checkpointFailureCodes,
   ...["admission", "validation"].flatMap(stage => bootFailureCategories.map(category => `cloud_${stage}_${category}`)),
 ]);
 export const CLOUD_ENGINE_STARTUP_ERRNOS = Object.freeze([-1, -2, -5, -13, -16, -17, -20, -21, -23, -24, -28, -30, -40, -104, -110, -111, -122]);

@@ -191,6 +191,12 @@ export async function completeWorkspaceCheckpointRequest(
   const idle = await tx.query("SELECT 1 FROM workspace_checkpoint_requests WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4 AND idle_engine_instance_id IS NOT NULL",
     [input.requestId, input.workspaceId, input.organizationId, input.generation]);
   if (idle.rowCount && await cloudWorkspaceHasActiveWork(tx, input)) throw new Error("Workspace became active before idle checkpoint completed");
+  if (["before_stop", "before_archive", "before_delete", "before_rebuild"].includes(input.reason) &&
+      (await tx.query(`SELECT 1 FROM cloud_workspace_local_command_writers
+        WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND state='active' AND sealed_sequence IS NULL`,
+      [input.workspaceId, input.organizationId, input.generation])).rowCount) {
+    throw new Error("Final checkpoint requires the current native writer seal");
+  }
   const result = await tx.query(
     `UPDATE workspace_checkpoint_requests
      SET state = 'succeeded', checkpoint_id = $6, completed_at = clock_timestamp(),

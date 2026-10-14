@@ -60,6 +60,23 @@ function fixture() {
 }
 
 describe("private negotiated boot client", () => {
+  it("validates an exact history-gap authorization without treating it as writer activation", async () => {
+    const f = fixture(), { writerEpoch: _writer, ...target } = f.scope;
+    const result = { ...target, version: 1, mode: "boot-owner-v1", recoveryId: randomUUID(),
+      code: "history_recovered_with_gap", coverage: "unknown", predecessorRetiredAt: new Date().toISOString(),
+      predecessor: { ...f.scope, engineInstanceId: randomUUID(), bootId: randomUUID(), writerEpoch: randomUUID() },
+      checkpoint: { writerEpoch: randomUUID(), sha256: "a".repeat(64) }, mirroredSequence: 0 };
+    const requestFetch = vi.fn().mockResolvedValue(Response.json({ result }));
+    await expect(requestCloudAgentBoot(f.authority, "recover-history", f.bootstrap, f.signal, requestFetch)).resolves.toEqual(result);
+    expect(String(requestFetch.mock.calls[0]![0])).toBe("https://control.example.test/internal/v2/cloud-workspaces/engine/agent-boot/recover-history");
+    expect(JSON.parse(requestFetch.mock.calls[0]![1].body)).toEqual(f.bootstrap);
+    for (const changed of [{ ...result, workspaceId: randomUUID() }, { ...result, engineInstanceId: randomUUID() },
+      { ...result, coverage: "empty" }, { ...result, activated: true }, { ...result, writerEpoch: f.scope.writerEpoch }]) {
+      requestFetch.mockResolvedValueOnce(Response.json({ result: changed }));
+      await expect(requestCloudAgentBoot(f.authority, "recover-history", f.bootstrap, f.signal, requestFetch))
+        .rejects.toMatchObject({ code: "cloud_validation_authority_response_invalid" });
+    }
+  });
   it("activates only the exact ready boot/writer through the separate private endpoint", async () => {
     const f = fixture(), { providers: _providers, initialAdoptions: _baseline, desiredCacheRevision: _desired, ...identity } = f.credentials;
     const result = { ...identity, activated: true }, requestFetch = vi.fn().mockResolvedValue(Response.json({ result }));

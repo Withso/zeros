@@ -162,7 +162,9 @@ import { CloudLocalCommandEventStore } from "./cloud-local-command-queue-events"
 import { CloudLocalCommandActionStore } from "./cloud-local-command-queue-actions";
 import { CloudLocalCommandWriterLifecycle } from "./cloud-local-command-queue-lifecycle";
 import type { CloudLocalCommandQueue, CloudLocalCommandHistoryMutation } from "./cloud-local-command-queue";
-import { cloudLocalCommandCheckpointRoot, restoreCloudLocalCommandCheckpointLedger } from "./cloud-local-command-queue-checkpoint";
+import { cloudLocalCommandCheckpointRoot, restoreCloudLocalCommandCheckpointLedger, recoverCloudLocalCommandCheckpointLedger,
+  cloudLocalCommandHistoryRecoveryCustody,
+  type CloudLocalCommandPredecessor } from "./cloud-local-command-queue-checkpoint";
 import { rebuildCloudLocalCommandHistory } from "./cloud-local-command-queue-history-rebuild";
 import { openSqlite } from "./db/sqlite";
 import { CloudLocalCommandMirrorDriver } from "./cloud-local-command-mirror";
@@ -1127,6 +1129,7 @@ export class ZerosEngine {
   } | null = null;
   private cloudLocalSealFlight: Promise<void> | null = null;
   private cloudLocalHistoryRestored = false;
+  private cloudLocalCommandPredecessor: CloudLocalCommandPredecessor | null = null;
   private cloudLocalHistoryRestoreHeads = new Map<string, CloudLocalCommandHistoryHead>();
   private cloudLocalMirror: CloudLocalCommandMirrorDriver | null = null;
   private cloudLocalMirrorTimer: ReturnType<typeof setTimeout> | null = null;
@@ -4177,6 +4180,7 @@ export class ZerosEngine {
     this.cloudStartupPhase = "boot_owner";
     this.cloudAgentBoot ??= new CloudLocalAgentBootRuntime({
       file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
+      predecessor: this.cloudLocalCommandPredecessor,
       runtimeBootId: registration.runtimeBootId, registration, legacy,
       observeStartup: observation => {
         this.cloudStartupPhase = observation.phase;
@@ -4284,28 +4288,58 @@ export class ZerosEngine {
       return;
     }
     const config = this.cloudRuntimeConfig;
-    const expectedWriterEpoch = this.cloudRuntimeRegistration?.agentSourceWriterEpoch;
+    const registration = this.cloudRuntimeRegistration, expectedWriterEpoch = registration?.agentSourceWriterEpoch;
     if (!config || !this.cloudWorker || !expectedWriterEpoch) throw new CloudCommandRuntimeError("engine_authority_rejected");
-    const verified = await restoreCloudLocalCommandCheckpointLedger({
+    const input = {
       root: cloudLocalCommandCheckpointRoot(zerosDataDir(), this.root),
       file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
       scope: { organizationId: config.execution.organizationId, workspaceId: config.execution.workspaceId },
       expectedWriterEpoch,
-    });
-    const ledger = openSqlite(verified.ledgerFile, { readonly: true, fileMustExist: true });
+    };
+    let verified: Awaited<ReturnType<typeof restoreCloudLocalCommandCheckpointLedger>>, recovering = false;
+    const recoveryCurrent = () => {
+      if (!registration || registration !== this.cloudRuntimeRegistration || !registration.localCommandsNegotiated() ||
+          registration.agentSourceWriterEpoch !== expectedWriterEpoch || this.cloudRuntimeAuthorityStopping)
+        throw new CloudCommandRuntimeError("engine_authority_rejected");
+    };
+    try { verified = await restoreCloudLocalCommandCheckpointLedger(input); }
+    catch (error) {
+      // Integrity failures never select an older artifact. Only explicit
+      // incomplete predecessor custody can ask CP for an authenticated gap.
+      if (!(error instanceof CloudCommandRuntimeError) || !["checkpoint_expected_writer_mismatch", "checkpoint_writer_unsealed"].includes(error.code)) throw error;
+      recoveryCurrent();
+      const preparedCustody = await cloudLocalCommandHistoryRecoveryCustody(input.file, expectedWriterEpoch);
+      recoveryCurrent();
+      const remaining = registration!.agentBootAuthorityRemainingMs();
+      if (remaining <= 0) throw new CloudCommandRuntimeError("engine_authority_rejected");
+      const authorization = await registration!.agentBootRequest("recover-history", {
+        version: 1, mode: "boot-owner-v1", ...input.scope, generation: config.execution.generation,
+        engineInstanceId: config.engine.instanceId, ...(preparedCustody.length ? { preparedCustody } : {}),
+      }, AbortSignal.timeout(Math.min(10_000, remaining)));
+      recoveryCurrent();
+      verified = await recoverCloudLocalCommandCheckpointLedger({ ...input, authorization,
+        scope: { ...input.scope, generation: config.execution.generation, engineInstanceId: config.engine.instanceId,
+          bootId: registration!.runtimeBootId } });
+      recovering = true;
+    }
+    let ledger: ReturnType<typeof openSqlite> | undefined;
     try {
+      ledger = openSqlite(verified.ledgerFile, { readonly: true, fileMustExist: true });
+      if (recovering) recoveryCurrent();
       const rows = ledger.prepare("SELECT conversation_id FROM local_command_history_heads ORDER BY conversation_id").all() as { conversation_id: string }[];
       const db = openZerosDb(), sourceSeal = verified.manifest.seal;
       const restoredHeads = new Map<string, CloudLocalCommandHistoryHead>();
       for (const row of rows) {
+        const custody = recovering ? { scope: verified.predecessor!.scope, sourceRecovery: verified.predecessor! } : { scope: sourceSeal.scope, sourceSeal };
         const restored = rebuildCloudLocalCommandHistory({ db, ledger, repositoryRoot: fs.realpathSync(this.root),
-          scope: sourceSeal.scope, sourceSeal, conversationId: row.conversation_id });
+          ...custody, conversationId: row.conversation_id });
         restoredHeads.set(restored.conversationId, restored.historyHead);
       }
       // No partial lineage is publishable if any conversation fails custody.
       this.cloudLocalHistoryRestoreHeads = restoredHeads;
+      this.cloudLocalCommandPredecessor = verified.predecessor;
       this.cloudLocalHistoryRestored = true;
-    } finally { ledger.close(); await verified.cleanup(); }
+    } finally { ledger?.close(); await verified.cleanup(); }
   }
 
   private cloudHistoryRestoreMetadata(conversations: readonly string[]): CloudAgentHistoryRestoreMetadata | undefined {

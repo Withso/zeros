@@ -25,6 +25,7 @@ import { isIP } from "node:net";
 import type pg from "pg";
 
 import type { Config } from "./config.js";
+import { DatabaseAcquireTimeoutError } from "./db.js";
 import type { CloudWorkspaceReleaseHealthReader } from "./cloud-workspaces/health.js";
 import { createReleaseIdentityRoutes } from "./release-identity.js";
 import { ClientCompatibility, createClientCompatibilityMiddleware } from "./client-compatibility.js";
@@ -178,10 +179,26 @@ export function createApp(
         try {
           await pool.query("SELECT 1");
           return c.json({ ok: true, maintenance: true });
-        } catch { return c.json({ ok: false, maintenance: true }, 503); }
+        } catch (error) {
+          if (error instanceof DatabaseAcquireTimeoutError) c.header("Retry-After", "1");
+          return c.json({ ok: false, maintenance: true }, 503);
+        }
       }
       c.header("Retry-After", "30");
       return c.json({ error: "maintenance", message: "Service is temporarily unavailable" }, 503);
+    });
+    return app;
+  }
+  if (config.processRole === "worker") {
+    // Worker replicas publish health/readiness but never serve user or engine
+    // requests. Their two query slots remain available to the queues they own.
+    app.get("/healthz", async c => {
+      c.header("Cache-Control", "no-store");
+      try { await pool.query("SELECT 1"); return c.json({ ok: true }); }
+      catch (error) {
+        if (error instanceof DatabaseAcquireTimeoutError) c.header("Retry-After", "1");
+        return c.json({ ok: false }, 503);
+      }
     });
     return app;
   }
@@ -310,7 +327,9 @@ export function createApp(
           },
         });
       }
-    } catch {
+    } catch (error) {
+      c.header("Cache-Control", "no-store");
+      if (error instanceof DatabaseAcquireTimeoutError) c.header("Retry-After", "1");
       return c.json({ ok: false }, 503);
     }
   });
@@ -682,6 +701,11 @@ export function createApp(
   }));
 
   app.onError((err, c) => {
+    if (err instanceof DatabaseAcquireTimeoutError) {
+      c.header("Cache-Control", "no-store");
+      c.header("Retry-After", "1");
+      return c.json({ error: { code: "service_busy", message: "Service is temporarily busy" } }, 503);
+    }
     // Preserve deliberate framework responses such as bodyLimit's 413. Turning
     // them into a generic 500 both hides the real client error and defeats the
     // middleware contract.

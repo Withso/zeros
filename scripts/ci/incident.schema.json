@@ -328,6 +328,31 @@
         "payload_sha256": { "$ref": "#/$defs/signature" }
       }
     },
+    "hourly_marker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "signature", "signature_version", "repository", "incident_kind", "base_branch", "source", "required_lanes"],
+      "properties": {
+        "schema": { "const": "zeros.ci-failure/v1" },
+        "signature": { "$ref": "#/$defs/signature" },
+        "signature_version": { "const": 1 },
+        "repository": { "const": "Withso/zeros" },
+        "incident_kind": { "const": "hourly_zeros_dev" },
+        "base_branch": { "const": "main" },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha", "run_id", "attempt", "workflow_path"],
+          "properties": {
+            "sha": { "$ref": "#/$defs/sha" },
+            "run_id": { "$ref": "#/$defs/id" },
+            "attempt": { "$ref": "#/$defs/attempt" },
+            "workflow_path": { "const": ".github/workflows/zeros-dev-e2e.yml" }
+          }
+        },
+        "required_lanes": { "type": "array", "const": ["cloud-runtime"], "items": { "type": "string", "const": "cloud-runtime" } }
+      }
+    },
     "marker": {
       "type": "object",
       "additionalProperties": false,

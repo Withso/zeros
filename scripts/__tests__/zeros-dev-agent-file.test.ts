@@ -1,4 +1,4 @@
-import { mkdtemp, open, mkdir, writeFile, readFile, chmod, link, symlink, rm, stat } from "node:fs/promises";
+import { mkdtemp, open, mkdir, writeFile, readFile, chmod, link, symlink, rm, rmdir, stat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +13,18 @@ async function expectPrivate(file: string): Promise<string> {
   } finally { await handle.close(); }
 }
 
+const race = vi.hoisted(() => ({ afterContention: undefined as undefined | ((file: string) => Promise<void>) }));
+vi.mock("node:fs/promises", async load => {
+  const actual = await load<typeof import("node:fs/promises")>();
+  return { ...actual, mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
+    try { return await actual.mkdir(...args); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") await race.afterContention?.(String(args[0]));
+      throw error;
+    }
+  } };
+});
+
 const roots: string[]=[];
 async function fixture(mode=0o600) {
   const root=await mkdtemp(path.join(os.tmpdir(),"zeros-dev-env-test-")); roots.push(root);
@@ -20,9 +32,34 @@ async function fixture(mode=0o600) {
   await writeFile(file,"# preserve unrelated settings\nBOAT_API_KEY=synthetic-provider-secret\nZEROS_DEV_PASSWORD='synthetic-password'\nZEROS_DEV_REFRESH_TOKEN=synthetic-refresh-0\n",{mode});
   return {root,file,store:new AgentFileStore(file,{lockTimeoutMs:80})};
 }
-afterEach(async()=>{await Promise.all(roots.splice(0).map(root=>rm(root,{recursive:true,force:true})));});
+afterEach(async()=>{race.afterContention=undefined;vi.restoreAllMocks();await Promise.all(roots.splice(0).map(root=>rm(root,{recursive:true,force:true})));});
 
 describe("one canonical locked zeros-dev credential file",()=>{
+  it("retries immediately when the holder removes its lock between EEXIST and lstat",async()=>{
+    const {file}=await fixture(),lock=`${file}.zeros-dev-lock`;
+    await mkdir(lock,{mode:0o700});
+    const removed=vi.fn(async candidate=>{expect(candidate).toBe(lock);race.afterContention=undefined;await rmdir(lock);});
+    race.afterContention=removed;
+    const sleep=vi.spyOn(globalThis,"setTimeout"),work=vi.fn(async current=>{
+      expect((await stat(lock)).mode&0o777).toBe(0o700);
+      await current.update({ZEROS_DEV_REFRESH_TOKEN:"synthetic-after-release"});
+    });
+    await new AgentFileStore(file,{lockTimeoutMs:1000}).locked(work);
+    expect(removed).toHaveBeenCalledOnce();expect(work).toHaveBeenCalledOnce();expect(sleep).not.toHaveBeenCalled();
+    expect((await new AgentFileStore(file).read()).values.ZEROS_DEV_REFRESH_TOKEN).toBe("synthetic-after-release");
+    await expect(stat(lock)).rejects.toMatchObject({code:"ENOENT"});
+  });
+
+  it("keeps the busy deadline when the contended lock disappears at expiry",async()=>{
+    const {file}=await fixture(),lock=`${file}.zeros-dev-lock`;
+    await mkdir(lock,{mode:0o700});
+    race.afterContention=async candidate=>{expect(candidate).toBe(lock);race.afterContention=undefined;await rmdir(lock);};
+    const work=vi.fn(),sleep=vi.spyOn(globalThis,"setTimeout");
+    await expect(new AgentFileStore(file,{lockTimeoutMs:0}).locked(work)).rejects.toThrow("zeros_dev_credentials_busy");
+    expect(work).not.toHaveBeenCalled();expect(sleep).not.toHaveBeenCalled();
+    await expect(stat(lock)).rejects.toMatchObject({code:"ENOENT"});
+  });
+
   it("pins only the three repository fields atomically without widening session writes",async()=>{
     const {file,store}=await fixture();
     const pins={ZEROS_DEV_REPOSITORY:"fixture-owner/fixture-repo",ZEROS_DEV_REPOSITORY_ID:"1234",ZEROS_DEV_GITHUB_INSTALLATION_ID:"44444444-4444-4444-8444-444444444444"};
@@ -37,15 +74,18 @@ describe("one canonical locked zeros-dev credential file",()=>{
     expect(await expectPrivate(file)).toContain("BOAT_API_KEY=synthetic-provider-secret");
   });
 
-  it("resolves all linked checkouts to the common repository .env.agent",async()=>{
+  it.each([0o002,0o022,0o077])("resolves all linked checkouts to the common repository .env.agent under umask %i",async umask=>{
+    const previous=process.umask(umask);
+    try{
     const {root,file}=await fixture();
-    await mkdir(path.join(root,".git","worktrees","sibling"),{recursive:true});
+    await mkdir(path.join(root,".git","worktrees","sibling"),{recursive:true,mode:0o700});
     const checkout=path.join(root,"sibling");await mkdir(checkout);
     await writeFile(path.join(checkout,".git"),`gitdir: ${path.join(root,".git","worktrees","sibling")}\n`);
     await writeFile(path.join(root,".git","worktrees","sibling","commondir"),"../..\n");
     await writeFile(path.join(checkout,".env.agent"),"ZEROS_DEV_REFRESH_TOKEN=stale-copy\n",{mode:0o600});
     expect(await canonicalAgentFile(checkout)).toBe(file);
     expect(await canonicalAgentFile(root)).toBe(file);
+    }finally{process.umask(previous);}
   });
 
   it("serializes refresh and rereads the rotated value under the shared lock",async()=>{

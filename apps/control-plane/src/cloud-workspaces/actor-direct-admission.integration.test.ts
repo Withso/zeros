@@ -1,7 +1,7 @@
 import {createHash,generateKeyPairSync,randomBytes,randomUUID,sign} from "node:crypto";
 import pg from "pg";
 import {Hono} from "hono";
-import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from "vitest";
+import {afterAll,afterEach,beforeAll,beforeEach,describe,expect,it,vi} from "vitest";
 import {ensureUser} from "../auth.js";
 import {resetMigratedTestDatabase} from "../test-database.js";
 import {seedReadyCloudWorkspace} from "./test-fixtures.js";
@@ -12,6 +12,9 @@ import {CloudAgentBootCredentialResponseSchema} from "./agent-boot-contract.js";
 import {createCloudWorkspaceRoutes} from "./routes.js";
 import {DatabaseCloudWorkspaceEngineClientAdmissionService} from "./engine-client-admission.js";
 import {HttpError} from "../authz.js";
+import {BoatApiClient} from "./boat-client.js";
+import {CloudProviderError} from "./provider.js";
+import {publicCloudError} from "./public-contract.js";
 
 const suite=process.env.TEST_DATABASE_URL?describe:describe.skip;
 type EndpointScope={organizationId:string;workspaceId:string;generation:number;engineInstanceId:string;resourceId:string;remotePort:number};
@@ -21,7 +24,24 @@ suite("negotiated verified Boat actor admission",()=>{
  const input=()=>{const fields={deviceId,keyVersion:1,timestampMs:Date.now(),nonce:randomBytes(24).toString("base64url")};return {organizationId:fixture.organizationId,workspaceId:fixture.workspaceId,actorUserId:user.id,authenticatedUser:user,
   proof:{...fields,signature:sign(null,cloudWorkspaceDeviceProofMessage({...fields,accountUserId:user.id,action:"engine.connect",payload:{organizationId:fixture.organizationId,workspaceId:fixture.workspaceId}}),pair.privateKey).toString("base64url")}};};
  const issuer=(resolve:(scope:EndpointScope)=>Promise<{url:string}>)=>{const options={pool,enginePort:39393,bridgeUrl:"wss://api.example.test/v1/cloud-workspaces/bridge",workosEnabled:false,directProviderEndpoint:resolve};return new DatabaseCloudWorkspaceActorSessionService(options);};
+ const admissionRoute=(resolve:(scope:EndpointScope)=>Promise<{url:string}>)=>{
+  const admission=new DatabaseCloudWorkspaceEngineClientAdmissionService({pool,enginePort:39393,relayEnabled:true,
+   endpoint:"https://api.example.test/internal/v1/cloud-workspaces/engine/client-admission",directProviderEndpoint:resolve});
+  const app=new Hono();app.use("*",async(c,next)=>{c.set("user",user);await next();});
+  app.route("/",createCloudWorkspaceRoutes(pool,null,{engineClientAdmissionService:admission}));
+  app.onError((error,c)=>error instanceof HttpError
+   ?c.json({error:publicCloudError(error.code)},error.status)
+   :c.json({error:{code:"internal",message:"Internal error"}},500));
+  const request=(value=input())=>app.request(`/v1/organizations/${fixture.organizationId}/cloud-workspaces/${fixture.workspaceId}/runtime/admission`,{
+   method:"POST",headers:{"content-type":"application/json","x-zeros-device-id":value.proof.deviceId,
+    "x-zeros-device-key-version":String(value.proof.keyVersion),"x-zeros-device-timestamp":String(value.proof.timestampMs),
+    "x-zeros-device-nonce":value.proof.nonce,"x-zeros-device-signature":value.proof.signature},
+   body:JSON.stringify({actorProtocolVersion:2,directProviderVersion:1}),
+  });
+  return {admission,request};
+ };
  beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:8});});afterAll(async()=>{await pool.end();});
+ afterEach(()=>{vi.restoreAllMocks();});
  beforeEach(async()=>{
   await resetMigratedTestDatabase(pool);fixture=await seedReadyCloudWorkspace(pool);
   await pool.query("UPDATE cloud_workspace_engine_instances SET cloud_local_commands_version=1 WHERE id=$1",[fixture.engineInstanceId]);
@@ -40,6 +60,86 @@ suite("negotiated verified Boat actor admission",()=>{
   expect(resolve).toHaveBeenCalledWith(expect.objectContaining({organizationId:fixture.organizationId,workspaceId:fixture.workspaceId,generation:1,engineInstanceId:fixture.engineInstanceId,resourceId:expect.any(String),remotePort:39393}));
   expect(resolve.mock.calls[0]![0]).not.toHaveProperty("heartbeatToken");
   const admitted=await service.consume({...engine(),token:grant.grantToken});expect(admitted).toMatchObject({admitted:true,accountUserId:fixture.userId});
+  await expect(service.consume({...engine(),token:grant.grantToken})).rejects.toMatchObject({status:401});
+ });
+ it("returns a closed retryable 503 for a provider 5xx only after retiring its unpublished grant",async()=>{
+  const sentinel="synthetic-private-provider-detail";
+  const client=new BoatApiClient({apiKey:"synthetic-admission-api-key",timeoutMs:1000,fetch:vi.fn(async()=>
+   new Response(JSON.stringify({ok:false,message:sentinel}),{status:502,headers:{"retry-after":"1.2"}}))});
+  const resolve=vi.fn(async()=>{await client.request("/sandboxes/bx_23456789/host",{method:"POST",body:{port:39393,public:true}});return {url:"https://verified-sandbox-39393.on.boat.dev/"};});
+  const log=vi.spyOn(console,"warn").mockImplementation(()=>{}),revoke=vi.spyOn(DatabaseCloudWorkspaceActorSessionService.prototype,"revoke");
+  const {admission,request}=admissionRoute(resolve),response=await request();
+  expect(response.status).toBe(503);expect(response.headers.get("retry-after")).toBe("2");
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(await response.json()).toEqual({error:{code:"cloud_runtime_temporarily_unavailable",message:"The cloud runtime is temporarily unavailable",phase:"provider_endpoint",retryable:true}});
+  expect(log).toHaveBeenCalledExactlyOnceWith("[cloud-runtime] admission failed",{code:"cloud_runtime_temporarily_unavailable",status:503,phase:"provider_endpoint",retryable:true,grantCleanup:"confirmed"});
+  expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);
+  expect(resolve).toHaveBeenCalledTimes(1);expect(revoke).toHaveBeenCalledTimes(1);
+  const rows=(await pool.query("SELECT revoked_at,consumed_at FROM cloud_workspace_actor_sessions WHERE workspace_id=$1",[fixture.workspaceId])).rows;
+  expect(rows).toEqual([{revoked_at:expect.any(Date),consumed_at:null}]);
+  const token=revoke.mock.calls[0]![0].token;
+  expect(await admission.authorizeRelay(token)).toBeNull();
+  await expect(admission.consumeActor({...engine(),token})).rejects.toMatchObject({status:401});
+ });
+ it.each(["internal","lookalike","integrity"] as const)("keeps a %s endpoint failure nonretryable and retires its grant",async kind=>{
+  const sentinel="synthetic-private-endpoint-detail";
+  const error=kind==="internal"?new Error(sentinel):kind==="lookalike"
+   ?Object.assign(new Error(sentinel),{code:"provider_request_failed",retryable:true,httpStatus:503})
+   :new CloudProviderError("provider_access_response_invalid",sentinel,false);
+  const log=vi.spyOn(console,"error").mockImplementation(()=>{}),revoke=vi.spyOn(DatabaseCloudWorkspaceActorSessionService.prototype,"revoke");
+  const {request}=admissionRoute(async()=>{throw error;}),response=await request();
+  expect(response.status).toBe(500);expect(response.headers.get("retry-after")).toBeNull();
+  expect(await response.json()).toEqual({error:{code:"internal",message:"Internal error",phase:"provider_endpoint",retryable:false}});
+  expect(log).toHaveBeenCalledExactlyOnceWith("[cloud-runtime] admission failed",{code:"internal",status:500,phase:"provider_endpoint",retryable:false,grantCleanup:"confirmed"});
+  expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);expect(revoke).toHaveBeenCalledTimes(1);
+  expect((await pool.query("SELECT revoked_at,consumed_at FROM cloud_workspace_actor_sessions WHERE workspace_id=$1",[fixture.workspaceId])).rows)
+   .toEqual([{revoked_at:expect.any(Date),consumed_at:null}]);
+ });
+ it("allows a fresh device-proof retry without leaking or consuming the failed admission",async()=>{
+  vi.spyOn(console,"warn").mockImplementation(()=>{});
+  const resolve=vi.fn(async()=>({url:"https://verified-sandbox-39393.on.boat.dev/"}))
+   .mockRejectedValueOnce(new CloudProviderError("provider_request_failed","synthetic provider failure",true,{httpStatus:503}));
+  const {admission,request}=admissionRoute(resolve);
+  expect((await request()).status).toBe(503);
+  const response=await request();expect(response.status).toBe(201);
+  const grant=await response.json();
+  await expect(admission.consumeActor({...engine(),token:grant.grantToken})).resolves.toMatchObject({admitted:true});
+  await expect(admission.consumeActor({...engine(),token:grant.grantToken})).rejects.toMatchObject({status:401});
+  expect((await pool.query(`SELECT revoked_at IS NOT NULL AS revoked,consumed_at IS NOT NULL AS consumed
+   FROM cloud_workspace_actor_sessions WHERE workspace_id=$1 ORDER BY revoked DESC`,[fixture.workspaceId])).rows)
+   .toEqual([{revoked:true,consumed:false},{revoked:false,consumed:true}]);
+ });
+ it("keeps the first phase but never offers a retry when grant retirement is unconfirmed",async()=>{
+  const revoke=vi.spyOn(DatabaseCloudWorkspaceActorSessionService.prototype,"revoke").mockRejectedValueOnce(new Error("synthetic-private-cleanup-detail"));
+  const log=vi.spyOn(console,"error").mockImplementation(()=>{});
+  const {request}=admissionRoute(async()=>{throw new CloudProviderError("provider_request_failed","synthetic-private-provider-detail",true,{httpStatus:503});});
+  const response=await request();
+  expect(response.status).toBe(500);expect(response.headers.get("retry-after")).toBeNull();
+  expect(await response.json()).toEqual({error:{code:"internal",message:"Internal error",phase:"provider_endpoint",retryable:false}});
+  expect(log).toHaveBeenCalledExactlyOnceWith("[cloud-runtime] admission failed",{code:"internal",status:500,phase:"provider_endpoint",retryable:false,grantCleanup:"unconfirmed"});
+  expect(revoke).toHaveBeenCalledTimes(1);
+ });
+ it("never repeats the terminal write when failed-grant cleanup races with revocation",async()=>{
+  const service=issuer(async()=>{throw new Error("synthetic-endpoint-failure");}),revoke=vi.spyOn(service,"revoke");
+  await expect(service.issue({...input(),directProviderVersion:1})).rejects.toThrow();
+  expect(revoke).toHaveBeenCalledTimes(1);
+  const scope=revoke.mock.calls[0]![0];
+  const before=(await pool.query("SELECT xmin::text,revoked_at,consumed_at FROM cloud_workspace_actor_sessions WHERE workspace_id=$1",[fixture.workspaceId])).rows;
+  expect(before).toEqual([{xmin:expect.any(String),revoked_at:expect.any(Date),consumed_at:null}]);
+  await Promise.all([service.revoke(scope),service.revoke(scope)]);
+  expect((await pool.query("SELECT xmin::text,revoked_at,consumed_at FROM cloud_workspace_actor_sessions WHERE workspace_id=$1",[fixture.workspaceId])).rows).toEqual(before);
+ });
+ it("attributes a post-endpoint authority refusal to grant revalidation without retrying it",async()=>{
+  const log=vi.spyOn(console,"warn").mockImplementation(()=>{});
+  const {request}=admissionRoute(async()=>{
+   await pool.query("UPDATE devices SET trust_state='revoked',revoked_at=now() WHERE id=$1",[deviceId]);
+   return {url:"https://verified-sandbox-39393.on.boat.dev/"};
+  });
+  const response=await request();
+  expect(response.status).toBe(401);expect(response.headers.get("retry-after")).toBeNull();
+  expect(await response.json()).toMatchObject({error:{code:"cloud_actor_admission_rejected",phase:"grant",retryable:false}});
+  expect(log).toHaveBeenCalledExactlyOnceWith("[cloud-runtime] admission failed",{code:"admission_refused",status:401,phase:"grant",retryable:false,grantCleanup:"confirmed"});
+  expect((await pool.query("SELECT count(*)::int AS count FROM cloud_workspace_actor_sessions WHERE revoked_at IS NULL")).rows[0]!.count).toBe(0);
  });
  it("keeps old strict grants unchanged and makes CP fallback a fresh exact-boot admission without provider lookup",async()=>{
   const resolve=vi.fn(async()=>({url:"https://verified-sandbox-39393.on.boat.dev/"})),service=issuer(resolve);

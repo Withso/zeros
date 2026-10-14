@@ -1,0 +1,9 @@
+{
+  "id": "control-plane-custody-import-boundary",
+  "kind": "replay",
+  "area": "cloud-engine-custody",
+  "fixedBy": "pr:491",
+  "symptom": "A runtime checkpoint verifier imported by shared credential-control schemas expanded the control-plane graph beyond its declared inputs.",
+  "rule": "Keep checkpoint custody verification at engine boot and inject it into shared fences with a type-only dependency; missing or rejecting verification must refuse the handoff without changing the retained ledger.",
+  "check": "pnpm test:git scripts/__tests__/control-plane-scope.test.ts apps/desktop/src/engine/__tests__/cloud-local-command-queue-resume.test.ts apps/desktop/src/engine/__tests__/cloud-local-command-queue-boot.test.ts"
+}

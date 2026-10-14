@@ -92,6 +92,13 @@ export const SOURCE_SLICES = [
   "scripts/cloud-workspace-validation/lib",
   "third_party",
 ];
+// The unbundled engine smoke imports the same public channel policy as the
+// bundled CLI. These are source dependencies outside apps/desktop/src, not a
+// reason to copy the control plane's entire source tree into the runtime.
+export const SOURCE_FILES = [
+  "apps/desktop/shared/cloud-workspace-channel.ts",
+  "apps/control-plane/src/cloud-workspace-channels.json",
+];
 const CLOUD_HOST_MODULES = [
   "host-process-supervisor.mjs",
   "cloud-host-workload-entry.mjs",
@@ -427,7 +434,7 @@ export async function stageSources(
   for (const relative of CLOUD_HOST_MODULES)
     check((await lstat(path.join(source, relative))).isFile(), "host_assets");
   const worker = path.join(runtime, "worker");
-  for (const relative of SOURCE_SLICES) {
+  for (const relative of [...SOURCE_SLICES, ...SOURCE_FILES]) {
     await copyPayload(
       path.join(source, relative),
       path.join(worker, relative),

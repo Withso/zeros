@@ -1,5 +1,6 @@
-import { toolPresentationReady } from "./renderers/tool-readiness";
+import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 import { isTurnFailureNotice } from "./turn-failure";
+import { isProviderWorkEvent, isUsageNotice } from "./transcript-notices";
 // Split working narration/tools from provider-declared partial/final answers.
 // Live events retain their source order and become inspectable immediately.
 
@@ -98,11 +99,12 @@ export function partitionTurn(
   events: AgentMessage[],
   options?: PartitionOptions,
 ): TurnPartition {
-  events = events.filter(isVisibleTranscriptEvent);
+  events = withoutRedundantAgentTasks(events).filter(isVisibleTranscriptEvent);
   const finalOutputIndexes = new Set<number>();
   const failureTurnId = options?.failureTurnId;
   let liveFailureIndex = -1;
   events.forEach((event, index) => {
+    if (isProviderWorkEvent(event)) liveFailureIndex = -1;
     if (options?.live && failureTurnId && isTurnFailureNotice(event, failureTurnId)) {
       liveFailureIndex = index;
     }
@@ -117,7 +119,7 @@ export function partitionTurn(
   // Legacy providers have no phase. Keep their settled trailing-answer
   // convention, while explicit answers survive further work and bookkeeping.
   for (let i = events.length - 1; !options?.live && i >= 0; i--) {
-    if (isBackgroundTask(events[i])) continue;
+    if (isBackgroundTask(events[i]) || isUsageNotice(events[i])) continue;
     if (isFinalOutputEvent(events[i])) {
       finalOutputIndexes.add(i);
     } else {
@@ -127,6 +129,8 @@ export function partitionTurn(
   const working: AgentMessage[] = [];
   const finalOutput: AgentMessage[] = [];
   events.forEach((event, index) => {
+    // Usage is a product status rendered once below the turn's output.
+    if (isUsageNotice(event)) return;
     // Keep the native event as an answer boundary above: dropping a failure
     // before partitioning would turn unfinished phase-less prose into output.
     // Before settlement, show the latest terminal notice outside activity.

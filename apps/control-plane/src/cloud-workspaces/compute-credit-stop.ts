@@ -7,6 +7,7 @@ import { findInitiatingCloudStopTx, tryRetainCloudDiagnosticTx } from "./cloud-d
 import { enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import { cancelCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
+import { recordCloudWorkspaceStopUnsealed } from "./stop-seal.js";
 
 /** Budget expiry preserves the VM's recoverable snapshot. Give the engine a
  * final-checkpoint window while it is still funded; if that fails, retain the
@@ -96,24 +97,34 @@ export async function requestManagedComputeStop(
       workspace.status === "stopped"
     )
       return;
-    // The durable lease owns idempotency. A public caller's key cannot reserve
-    // a system operation's name, and superseding a stop cannot disable it.
-    const pending = lease.stop_intent_id
-      ? (
-          await tx.query<{ state: string; checkpoint_state: string | null }>(
-            `SELECT intent.state,request.state AS checkpoint_state
-      FROM cloud_workspace_lifecycle_intents intent LEFT JOIN workspace_checkpoint_requests request ON request.lifecycle_intent_id=intent.id
-      WHERE intent.id=$1 AND intent.workspace_id=$2 AND intent.org_id=$3`,
-            [lease.stop_intent_id, scope.workspace_id, scope.org_id],
-          )
-        ).rows[0]
-      : null;
+    // Adopt the user's exact-generation stop as well as our own. A second
+    // intent could cancel its in-flight capture and bypass the final seal.
+    const pending = (await tx.query<{
+      id: string; state: string; operation: "stop" | "archive"; requested_by: string | null;
+      checkpoint_id: string | null; checkpoint_state: string | null; checkpoint_live: boolean | null; checkpoint_error: string | null;
+    }>(`SELECT intent.id,intent.state,intent.operation,intent.requested_by,request.id AS checkpoint_id,
+        request.state AS checkpoint_state,request.error_code AS checkpoint_error,request.deadline_at>clock_timestamp() AS checkpoint_live
+      FROM cloud_workspace_lifecycle_intents intent
+      LEFT JOIN workspace_checkpoint_requests request ON request.lifecycle_intent_id=intent.id
+      WHERE intent.workspace_id=$2 AND intent.org_id=$3 AND intent.generation=$4
+        AND intent.operation IN ('stop','archive')
+        AND (intent.id=$1 OR intent.affects_workspace)
+        AND (intent.state IN ('queued','observing','dispatching') OR
+          (intent.id=$1 AND intent.state='failed' AND request.state='expired'))
+      ORDER BY (intent.id=$1) DESC NULLS LAST,intent.created_at DESC,intent.id LIMIT 1`,
+    [lease.stop_intent_id, scope.workspace_id, scope.org_id, scope.generation])).rows[0];
+    if (pending) await tx.query(
+      "UPDATE managed_compute_allocation_leases SET stop_intent_id=$2,updated_at=now() WHERE id=$1",
+      [input.leaseId, pending.id],
+    );
     if (
       pending &&
       ["queued", "observing", "dispatching"].includes(pending.state) &&
-      (!input.force ||
+      (pending.state === "dispatching" ||
         pending.checkpoint_state === null ||
-        pending.checkpoint_state === "succeeded")
+        pending.checkpoint_state === "succeeded" ||
+        pending.checkpoint_error === "stop_unsealed" ||
+        (!input.force && pending.checkpoint_live === true))
     )
       return;
     // An existing stop covers normal drain observations. Only a new stop or a
@@ -124,15 +135,41 @@ export async function requestManagedComputeStop(
       workspaceStopping:workspace.desired_state !== "running" || ["stopping","stopped","failed","archiving","archived"].includes(workspace.status),
     });
     const code = initiating ? diagnosticCode(initiating.code) : input.reason;
+    const ordinaryStop = !initiating && (pending?.requested_by != null || input.reason === "workspace_stop_requested");
     const stopReason = initiating ? initiating.stopReason : input.stopReason;
-    const incidentId = initiating?.id ?? input.incidentId ?? await tryRetainCloudDiagnosticTx(tx, {
+    const incidentId = initiating?.id ?? input.incidentId ?? (ordinaryStop ? null : await tryRetainCloudDiagnosticTx(tx, {
       workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
       operationKind: "compute", operationId: input.leaseId, ...(input.expectedLeaseOwner ? { leaseOwner: input.expectedLeaseOwner } : {}),
     }, { phase: "authority_check", code: diagnosticCode(code), errorClass: "unknown", retryable: false,
       ...(stopReason ? { stopReason } : {}),
-      decision: input.force ? "direct_stop" : "checkpoint", claim: "current" });
+      decision: input.force ? "direct_stop" : "checkpoint", claim: "current" }));
     const reason = cloudStopReason(code, stopReason);
-    await tx.query("UPDATE managed_compute_allocation_leases SET last_error_code=$2 WHERE id=$1",[input.leaseId,code]);
+    if (!ordinaryStop) await tx.query("UPDATE managed_compute_allocation_leases SET last_error_code=$2 WHERE id=$1",[input.leaseId,code]);
+    if (pending) {
+      // The finite funding/provider limit can shorten the seal window, but it
+      // cannot replace the operation or turn an incomplete capture into success.
+      await tx.query(`UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=now(),error_code='stop_unsealed',
+        deadline_at=least(deadline_at,greatest(clock_timestamp(),created_at+interval '1 millisecond'))
+        WHERE id=$1 AND state IN ('queued','delivered','failed','expired')`, [pending.checkpoint_id]);
+      await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='queued',completed_at=NULL,next_attempt_at=now(),
+        lease_owner=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1`, [pending.id]);
+      await recordCloudWorkspaceStopUnsealed(tx, {
+        workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
+        intentId: pending.id, reason: "seal_deadline", checkpointRequestId: pending.checkpoint_id,
+      });
+      if (affectsWorkspace) {
+        await retireCloudWorkspaceRuntimeAccess(tx, {
+          workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
+          reason: pending.operation === "stop" ? "workspace_stop_requested" : "workspace_archive_requested",
+        });
+        await tx.query(`UPDATE cloud_workspaces SET desired_state=$4::cloud_workspace_desired_state,status=$5::cloud_workspace_status,authority_epoch=authority_epoch+1,
+          version=version+1,updated_at=now(),last_error_code=$2,last_error_message=$3 WHERE id=$1`,
+        [scope.workspace_id, ordinaryStop ? null : code,
+          ordinaryStop ? null : `${reason.message}${incidentId ? ` (incident ${incidentId})` : ''}`,
+          pending.operation === "stop" ? "stopped" : "archived", pending.operation === "stop" ? "stopping" : "archiving"]);
+      }
+      return;
+    }
     const key = `system:compute-stop:${randomUUID()}`;
     if (affectsWorkspace) {
       await tx.query(
@@ -186,6 +223,10 @@ export async function requestManagedComputeStop(
         })
       : null;
     if (affectsWorkspace && !checkpoint) {
+      await recordCloudWorkspaceStopUnsealed(tx, {
+        workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
+        intentId, reason: input.force ? "seal_deadline" : "authority_closed", checkpointRequestId: null,
+      });
       await retireCloudWorkspaceRuntimeAccess(tx, {
         workspaceId: scope.workspace_id,
         organizationId: scope.org_id,
@@ -194,7 +235,7 @@ export async function requestManagedComputeStop(
       await tx.query(
         `UPDATE cloud_workspaces SET desired_state='stopped',status='stopping',authority_epoch=authority_epoch+1,
         version=version+1,updated_at=now(),last_error_code=$2,last_error_message=$3 WHERE id=$1`,
-        [scope.workspace_id, code, `${reason.message}${incidentId ? ` (incident ${incidentId})` : ''}`],
+        [scope.workspace_id, ordinaryStop ? null : code, ordinaryStop ? null : `${reason.message}${incidentId ? ` (incident ${incidentId})` : ''}`],
       );
     }
     await tx.query(

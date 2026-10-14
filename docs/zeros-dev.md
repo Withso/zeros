@@ -148,6 +148,18 @@ GitHub App or writes a recipe. `computer build` builds the existing approved
 draft using its normal CAS revision and operation ID. A missing draft fails
 explicitly; repository pins alone do not approve a Computer configuration.
 
+Before reporting success, `computer build --wait` reads the saved build's runtime
+and base through its normal authorized product route and compares them with the
+builder's current qualified selection. Success includes `runtimePin: "confirmed"`.
+Use `--expect-runtime r1-<sha256>` to require a particular corrected runtime too.
+A missing, unqualified or different tuple returns `runtime_pin_unconfirmed`;
+another build ID or version returns `identity_changed`. This proof uses one
+read-only database snapshot and takes no admission locks. It is an observation,
+not a lease: subsequent publication or revocation can change selection. Old
+build pins are never rewritten; deliberately build again if the selection moved.
+The new route must be deployed before using this check. No database credential
+is needed for it, and ordinary strict build-summary responses keep their shape.
+
 For first setup, the fixture member opens the test organization's Settings →
 Cloud Computer, selects only the fixture repository under **Repositories**, and
 clicks **Save draft**. Use the approved install script (empty for a dependency-free
@@ -202,16 +214,26 @@ descriptor supplies the bytes and metadata; aliases, credentials and files
 replaced during the read are refused.
 
 Lifecycle waits are bounded at three minutes, Computer builds at fifteen,
-agent observation at five, and an invocation at thirty. Standalone workspace
+agent observation at five, and an invocation at thirty. A workspace wait uses
+the existing status request with `setupProgress=true`; default desktop reads
+keep their response shape. Deadline/failure evidence names `workspace_create_wait`,
+`workspace_resume_wait`, `workspace_stop_wait` or `workspace_delete_wait` and, when
+available, the last observed current-generation setup attempt, claim count,
+state and closed error code. Unknown codes become `unknown`; raw logs and
+provider fields are refused. An older CP or stale/malformed progress supplies
+no setup evidence. The product's longer retry loop does not extend this wait,
+and no new diagnostic request runs after its deadline. Standalone workspace
 commands retain their run for iteration. `scenario run smoke --agent <agent>
 --model <model>` creates a throwaway, verifies the repo through a terminal,
 waits for an agent response, stops/resumes, repeats, then stops and deletes.
 The resumed phase verifies its own small repository marker and continues the
 same recorded conversation through the new admission.
 `--build-computer` explicitly builds the configured draft first. The scenario
-always attempts its recorded workspace's cleanup in `finally`, including after
+always attempts its recorded workspace's cleanup, including after
 SIGINT or a work deadline, with a separate thirty-second cleanup budget.
 Cleanup that remains pending makes the scenario fail; its receipt is retained.
+If work and cleanup both fail, the result retains the first work failure and
+setup observation while a separate cleanup event records the cleanup failure.
 
 ## Identity, evidence and cleanup
 
@@ -223,9 +245,28 @@ receipt corruption; product authorization remains mandatory. Writes preserve
 the owned lock inode and refuse a changed saved receipt. Never copy only the
 receipt to a different account/device to recover it.
 
+Each run lock records its owner's PID, Linux boot ID, PID namespace and process
+start identity before a command begins. On Linux, the next invocation can
+recover a killed owner's lock only when that same host/namespace proves the
+process is gone or its PID has been reused. A live owner or reclaimer stays
+busy, regardless of age. Recovery retains the signed receipt and operation
+keys; retry with the same run UUID. Different or unverifiable host identities,
+non-Linux hosts, and old empty locks (including an interruption before owner
+publication) require manual confirmation of the absent holder. No age-based
+lock removal is allowed. This recovery applies only to run locks; the separate
+canonical credential-file lock retains its existing manual recovery procedure.
+
 `cleanup --run <run-uuid>` and `cleanup --all` preview the signed local allowlist;
-`--apply` invokes ordinary product deletion. Names are only labels. Every write
-rechecks org, creator, workspace, repository, generation and account binding.
+`--apply` invokes ordinary product deletion. The current name must still match
+the signed `zd-` name, in addition to the exact org, creator, workspace,
+repository, generation and account binding; a name alone never authorizes cleanup.
+If an accepted wake or stop remains unconfirmed but the workspace is now
+`stopped`, `ready`, `busy` or `failed`, apply first saves that closed observed
+outcome in the signed receipt. It does not claim the original intent succeeded.
+Deletion then proceeds with its own saved key, reused after a lost response.
+If setup is still transient, cleanup returns `cleanup_pending` immediately;
+rerun the same command after the product reaches a settled state. Planning
+neither changes the receipt's lifecycle history nor issues a deletion.
 An unknown create response must first be reconciled with `workspace create
 --run <same-uuid>`. A deleted row or HTTP 404 alone is not completion: cleanup
 requires the provider-deleted observation and a complete pending-deletion view
@@ -239,7 +280,35 @@ revision/dirty state from the deployed Alpha source. Explicit chat/terminal/
 Computer-log display uses `zeros.dev-content/v1`, redacts configured secrets,
 URLs, token shapes and terminal controls, and is separate from evidence.
 Provider error bodies/stacks and arbitrary extra diagnostic fields are never
-emitted. Keep all live artifacts private and outside committed source.
+emitted. Keep interactive live artifacts private and outside committed source.
+Connection failures add a closed `runtime` observation to evidence, the command
+result and the signed hourly receipt. It names the failing phase (workspace
+read, identity, admission, handshake or workspace list), the failure class and
+the HTTP status when available. For example, an admission HTTP 500 reports
+`{phase:"admission",class:"admission_unavailable",status:500}`. Unknown causes
+stay `unknown`; this does not attribute a server error to a provider or the VM.
+The first observation survives cleanup/logout failure. The shared desktop
+access client retries only HTTP 503 with the exact
+`cloud_runtime_temporarily_unavailable` code, `provider_endpoint` phase,
+`retryable:true` and an integer `Retry-After` of 1–300 seconds. It makes at most
+three requests with fresh device proofs, inside the original 15-second admission
+deadline and caller budget. A delay that cannot fit ends the attempt; it is
+never clamped or used to extend the deadline. Session, runtime and Stop fences
+remain in force. Unknown faults, `service_busy`, auth/integrity refusals and
+unconfirmed cleanup are terminal for this policy.
+
+`runtime_admission` pending events retain the first typed failure and every
+executed retry, with a separate `retryCount`. `sequence` distinguishes admission
+calls within one connection, including refreshes. The successful connection
+event or failed result retains the first admission observation too. A recovered
+connection can pass while its first failure and retry costs stay visible in
+the signed receipt. Connection timings include proofs, waits and all retries;
+the CLI adds no second retry loop. Native aborts at the HTTP boundary report
+`deadline`, retaining the last
+validated setup attempt and claim count during workspace waits.
+Use the updated CLI for subsequent receipt reads: older strict CLI versions
+cannot interpret the new wait phases or setup/runtime/admission observations. Existing receipts
+without those optional observations remain readable.
 
 ## Read-only diagnostics and qualification
 
@@ -296,3 +365,115 @@ Rollback disables `ZEROS_DEV_AUTH_ENABLED` on Alpha and revokes the dedicated
 test sessions/devices through existing account APIs; retain audit/history and
 cleanup receipts. The old hosted Dev implementation and its billable resources
 remain intact until its inventory is complete and exact cleanup is approved.
+
+## Hourly E2E in Actions
+
+`zeros-dev-e2e.yml` runs on main, hourly at minute 23 or by dispatch, with one
+serialized Alpha fixture and a fifteen-minute job limit. It uses the normal product
+API and the desktop's RuntimeClient. Local Personal, organization-local and
+Beta/Production paths are not selected.
+
+The owner prepares the fixture through the ordinary setup above, then stores
+`ZEROS_DEV_FIXTURE_B64` as an Actions secret. It is base64-encoded JSON with
+exactly these canonical keys: `ZEROS_DEV_PASSWORD`, `ZEROS_DEV_WORKOS_SUBJECT`,
+`ZEROS_DEV_ACCOUNT_ID`, `ZEROS_DEV_EMAIL`, `ZEROS_DEV_ORGANIZATION_ID`,
+`ZEROS_DEV_REPOSITORY`, `ZEROS_DEV_REPOSITORY_ID`,
+`ZEROS_DEV_GITHUB_INSTALLATION_ID`, and `ZEROS_DEV_DEVICE_PRIVATE_KEY_B64`.
+Use the already-enrolled device for this fixture; keep its key stable across
+hourly receipts. Transfer the envelope through the approved secret-store path,
+without printing it or placing it in arguments, source or artifacts. Access and
+refresh tokens and infrastructure credentials are excluded. Each ephemeral
+runner creates its own canonical mode-0600 `.env.agent` and retires its session.
+
+This repository's Actions logs and hourly receipt artifacts are public.
+Initialization registers stdout-only `::add-mask::` commands for the decoded
+fixture values, device private-key envelope and fields, and native auth tokens
+before validating or writing the fixture. Both raw and JSON-escaped values are
+masked. Mask commands never enter the evidence writer or signed receipt.
+
+The execution step also receives the existing dedicated-test
+`AGENT_RUNTIME_ANTHROPIC_API_KEY`, `AGENT_RUNTIME_CLAUDE_CODE_OAUTH_TOKEN`,
+`AGENT_RUNTIME_OPENAI_API_KEY`, `AGENT_RUNTIME_CODEX_AUTH_JSON` and
+`AGENT_RUNTIME_CURSOR_API_KEY`. These stay in memory, never in `.env.agent`.
+API keys take precedence over native credentials to avoid rotating shared
+test accounts unnecessarily. The normal product credential and org-connection
+routes install fresh IDs for the run, select only the existing canary smoke
+models, and disconnect/revoke exactly those IDs afterward. A foreign selection
+is never overwritten, including during cleanup.
+
+Before enabling `ZEROS_DEV_E2E_ENABLED=true`, configure the required status and
+owner-reviewed repair procedure in [CI](ci.md#hourly-zeros-dev-merge-requirement).
+The first actual successful main lifecycle activates the gate automatically;
+a skipped job cannot activate it. The fixture needs a ready active Computer
+and its approved draft. The canary reads that build's persisted pin and the
+builder's newest qualified runtime/base in the `computer_selection` phase.
+If the tuple moved, `computer_build` makes at most one normal, idempotent build
+from that draft and proves the resulting pin against the captured tuple. An
+unchanged tuple needs no build. It never rewrites a saved pin or builds onto
+an unqualified publication.
+
+`runtime_selection_unavailable` means no qualified selection was available;
+`runtime_selection_changed` means the captured selection moved or its base
+changed during this run. These are closed prerequisite/race outcomes, separate
+from lifecycle failures; neither can produce a green receipt. A newer publication
+still qualifying does not displace an older qualified selection. The canary
+checks the exact active build and tuple again before allocation and after the
+lifecycle, and never loops on rebuilds. A build timeout retains the signed build
+intent for normal product status/reconciliation; it does not assert cancellation.
+
+Each run restores its exact signed predecessor artifact before doing work.
+Skipped attempts can be crossed only when job metadata proves the product step
+never ran. An old rerun is refused if a newer run may have touched the fixture.
+Missing, expired, foreign or corrupt executed-run artifacts stop allocation.
+The runner first cleans its signed leftovers through product deletion. A failed
+wake that settled as stopped is recorded and deleted; transient setup or
+unconfirmed provider deletion reports `prior_cleanup`/`cleanup_pending`, and
+no new workspace is allocated. Unknown creates/publications stay unknown;
+there is no prefix scan or direct provider fallback. Do not delete artifacts
+or change the fixture device to bypass this check. The owner must reconcile the
+exact recorded operation through the normal product path when automatic
+recovery cannot prove its outcome.
+
+After that, the scenario creates one `zd-` workspace, proves its Git checkout
+and writes a harmless marker, sends one minimal prompt to each agent, then
+stops and resumes. It checks the marker and hashes of the three durable chat
+histories after reconnecting. It sends no second prompt on an uncertain turn.
+Computer preparation, including its optional build, is capped at 300 seconds.
+The lifecycle then gets up to 350 seconds, individual prompts up to 60 seconds.
+A separate 140-second cleanup reserve protects credential revocation from a
+work timeout, SIGINT or SIGTERM. All phases share an 850-second overall budget
+that starts before dependency installation; the Actions job allows 15 minutes
+for that budget, logout and receipt upload. Setup overhead reduces the remaining
+overall allowance and cannot extend a phase.
+An unfinished cleanup or any failed stage keeps the run red.
+
+The signed `zeros-dev-receipt-<workflow-run-id>-<attempt>` artifact contains
+closed phases, timings, setup attempt/claim/error observations and exact cleanup
+intents. Every saved intent is checkpointed before its product mutation with
+atomic replacement, so interruption leaves the last valid signed record.
+Only `receipt.json` is uploaded, with 90-day retention. Agent output, prompts,
+terminal output, tokens and credential values are excluded. The first failure
+survives later disconnect or cleanup failures, which have separate events.
+UTC `activeWindows` and monotonic durations cover completed, verified connected
+work only; they are not a measurement of total VM billable time.
+
+Agents can dispatch and inspect the canary with the normal release automation
+identity; neither operation needs provider keys in the checkout:
+
+```sh
+pnpm agent:gh workflow run zeros-dev-e2e.yml --ref main
+pnpm agent:gh run list --workflow zeros-dev-e2e.yml --branch main --limit 5
+pnpm agent:gh run view <workflow-run-id> --json status,conclusion,jobs,url
+pnpm agent:gh run download <workflow-run-id> --name zeros-dev-receipt-<workflow-run-id>-<attempt> --dir <private-scratch>
+```
+
+Downloaded hourly receipts contain the public metadata listed above, including
+resource IDs and idempotency keys. Disabling the schedule after activation does
+not reset the gate: skipped or stale completed runs remain a refusal for cloud
+changes. A newer run in progress leaves the latest completed result in force,
+including its two-hour freshness limit.
+To roll back enforcement, the owner removes the required status and reverts its
+CI/wrapper gate, then disables the canary. Preserve signed cleanup receipts and
+complete product cleanup before rotating the fixture device or retiring its
+dedicated credentials. No successful live run or 24-hour soak is implied by
+the synthetic workflow tests.

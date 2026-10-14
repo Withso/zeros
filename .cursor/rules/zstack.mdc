@@ -22,6 +22,9 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
   - The master owns Git, integration and the final review of every diff.
   - Subagents return frozen patches with a SHA and evidence, not commits.
   - Never start agents or sessions the user did not authorize.
+  - When a subagent's progress feed is quiet for longer than its usual
+    cadence, check its session status through the host and send its next
+    step. An idle agent is lost capacity.
 - Write the mode, models and the user's instruction into your first progress
   note.
 

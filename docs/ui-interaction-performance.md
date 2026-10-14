@@ -149,6 +149,24 @@ Archived workspaces and pending provider storage deletion use the normal catalog
 cadence; neither keeps all workspaces on fast setup polling. Actual startup and
 interactive lifecycle transitions still receive fast refreshes.
 
+The account catalog owns one next-due timeout: 30 seconds for stable rows and
+2 seconds during those transitions, measured from the read's monotonic start.
+Catalog events update the due time; focus and visibility events coalesce with
+that same read. Hidden, signed-out, disabled and pending-network states have no
+passive timer. A slow transcript-cache read does not delay the catalog fallback;
+after it resolves, recheck workspace eligibility before restoring chat metadata.
+Switching A → B → A retires each request identity, so an old response cannot
+clear the current flight, restore another owner's chats or schedule its timer.
+
+Runtime availability uses one observer per account/catalog/workspace/generation
+key, shared by the composer and workspace details. Stable visible surfaces use
+a 30-second fallback; open details retain the existing 5-second VM-startup and
+2-second runtime-transition cadence. Hidden or inactive surfaces do not start
+reads, poll, or focus. In-flight reads suppress passive timers, and foreground
+events coalesce with an existing cache refresh without postponing its deadline.
+Keep the confirmed exact-key snapshot through refresh failures and honor data
+warmed on intent. Passive observation never wakes or upgrades a workspace.
+
 Deletion cleanup follows semantic path ownership, not raw equality: include
 normalized descendant cwd keys, but protect a separately registered nested
 repository (the most-specific known owner wins).

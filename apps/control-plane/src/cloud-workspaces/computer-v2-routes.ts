@@ -25,6 +25,7 @@ type Service = Pick<
   | "discard"
   | "build"
   | "getBuild"
+  | "getBuildRuntime"
   | "logs"
   | "cancel"
   | "activate"
@@ -181,6 +182,9 @@ export function createCloudComputerV2Routes(
       )
       .then((value) => c.json(value)),
   );
+  app.get(root + "/builds/:buildId/runtime", (c) => service.getBuildRuntime(
+    id(c.req.param("organization")), c.get("user").id, id(c.req.param("buildId")),
+  ).then(value => c.json(value)));
   app.get(root + "/builds/:buildId/log", (c) => {
     const query = parse(logQuery, c.req.query());
     return service

@@ -24,6 +24,13 @@ function session() {
 }
 
 describe("Claude stable subagent ownership and metadata", () => {
+  it("records the exact native child identity before a background launch acknowledgement arrives", () => {
+    const { tool, start, row } = session();
+    tool("launch", { description: "Inspect source" });
+    start("native-child", "launch", { is_backgrounded: true });
+    expect(row("launch").rawOutput).toMatchObject({ agentId: "native-child" });
+  });
+
   it("routes assistant and user messages by agent_id when resume changes the native tool parent", () => {
     const { t, tool, start, row, text, background } = session();
     tool("launch", { description: "Audit source", effort: "medium" });

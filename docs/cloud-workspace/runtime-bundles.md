@@ -227,6 +227,30 @@ and `cgroup_retired`. The installer reports a nested setup failure as stage
 installer diagnostic cannot forward a setup check such as `generation_pin`.
 Diagnostics cannot include free text, paths, URLs, stderr or exception fields.
 
+Setup failures also preserve the closed engine startup class and substage,
+including credential-control rejection at `boot_durability`. Each failed owned
+claim records `cloud_workspace.setup_claim_failed` in the append-only audit log,
+keyed by setup run and execution fence. The receipt commits before retirement;
+current-claim timings can then reset on retry without losing earlier evidence.
+Admission cleanup or a later heartbeat cannot replace the first error. A
+reclaimed crash lease records `setup_lease_lost` at the worker's `runtime` phase
+unless an earlier exact-claim receipt exists; it cannot infer an engine stage
+that was never received. Slow-request logs alone cannot prove a boot call was
+skipped. Known credential-control integrity/storage failures are terminal;
+existing classified transient retries retain their original deadlines.
+
+For a resume correction, qualify the new immutable runtime on its exact base,
+then use the product Computer build and verify the persisted `build.runtime_id`
+before creating the test workspace. A restart keeps the generation's runtime
+pin; deploying the CP alone cannot repair an older pinned engine. Qualification
+must cover create, terminal, stop and resume with both fresh and retained
+credential controls, plus 20 consecutive usable wakes with zero setup retries.
+Retain the per-claim diagnostic and timing receipts for any failed attempt.
+Source rollback can stop new selection and revert CP diagnostics without
+altering data. Keep a migrated SQLite ledger on a writer-aware qualified runtime;
+do not downgrade it in place to an older writer-unaware engine or clear its
+fences. Existing generation pins and product recovery checks stay authoritative.
+
 ## Registry, pins and authority
 
 The runtime authority has five registry tables: base compatibility contracts, approved Boat base
@@ -547,8 +571,18 @@ identity under the immutable registry contract; rerunning today's smoke worker
 cannot upgrade existing evidence. Keep full-mode deployments closed until that
 evidence exists.
 
-Failures retain only a closed diagnostic and insert no qualifications. A
-crashed run is reconciled after its deadline: recover the sandbox identity from
+The first closed failure is committed before cleanup and retained through
+pending deletion, worker restart and reconciliation. If that write fails,
+cleanup still proceeds and the worker retries recording the original failure
+when it records pending cleanup or finishes. Cleanup status is tracked by the
+run state, cleanup lease, provider journal and confirmation timestamp; it must
+not replace an earlier self-test or install failure. A successful smoke with
+unconfirmed cleanup records `cleanup/cleanup_unconfirmed` and grants no
+qualification. `reconcile/timeout` is a fallback only when no earlier failure
+was stored; cleanup may shorten the run deadline, so this code alone does not
+prove the smoke exceeded its original deadline.
+
+A crashed run is reconciled after its deadline: recover the sandbox identity from
 the provider journal, delete it, verify the deletion receipt and a subsequent
 404, then mark the run failed. A receipt may be `completed`, or `blocked` at
 `waiting_for_uploads`, `kept_for_newer_snapshots` or `waiting_for_restore` with
@@ -569,6 +603,13 @@ Closure prevents any future dispatch or resource binding. Every builder intent
 tracks attempts from the start. Deleting a bound sandbox remains possible after
 the qualification run becomes terminal; cleanup evidence is recorded only
 after confirmed absence.
+
+Publication alone does not make a runtime selectable. Diagnose its exact
+runtime/base compatibility pair and retained failure before retrying. A missing
+packaged source dependency requires a new immutable runtime publication; a
+retry cannot repair the old archive. After the corrected descendant qualifies,
+verify the new Computer build's persisted `runtime_id` before using it for
+workspace setup. Existing Computers and workspace generations keep their pins.
 
 The shared `CloudBuilderVms` module also supports authorized template and runtime-image sources
 and graceful stop-to-archived for Cloud Computer builds. Its system-only

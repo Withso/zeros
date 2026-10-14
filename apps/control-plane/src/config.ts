@@ -57,7 +57,8 @@ const EnvSchema = z.object({
   DATABASE_MIGRATION_ROLE: z.string().min(1).optional(),
   DATABASE_MIGRATIONS_ON_BOOT: z.enum(["true", "false"]).default("true"),
   DATABASE_MAINTENANCE_MODE: z.enum(["true", "false"]).default("false"),
-  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(6),
+  CONTROL_PLANE_PROCESS_ROLE: z.enum(["api", "worker", "combined"]).default("combined"),
   SLOW_REQUEST_LOG_MS: z.coerce.number().int().min(50).max(60_000).default(DEFAULT_SLOW_REQUEST_LOG_MS),
   DESKTOP_RELEASE_LEDGER_URL: z.string().optional(),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
@@ -315,6 +316,8 @@ export type Config = {
   databaseMigrationRole?: string;
   databaseMigrationsOnBoot?: boolean;
   databasePoolMax?: number;
+  /** Combined preserves existing deployments; dedicated workers scale independently. */
+  processRole?: "api" | "worker" | "combined";
   workerPollIntervalsMs?: WorkerPollIntervals;
   /** Requests at least this slow are logged once by route template. */
   slowRequestLogMs?: number;
@@ -1651,6 +1654,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     ...(migrationRole ? {databaseMigrationRole: migrationRole} : {}),
     databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
     databasePoolMax: e.DATABASE_POOL_MAX,
+    processRole: e.CONTROL_PLANE_PROCESS_ROLE,
     workerPollIntervalsMs: loadWorkerPollIntervals(env, cloudWorkspaces !== null),
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
     operationsAlertEmail: loadOperationsAlertEmail(env, diagnostics),

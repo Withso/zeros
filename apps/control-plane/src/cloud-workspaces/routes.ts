@@ -55,6 +55,7 @@ import {
   CloudWorkspaceEngineClientAdmissionError,
   type DatabaseCloudWorkspaceEngineClientAdmissionService,
 } from "./engine-client-admission.js";
+import { cloudRuntimeAdmissionResponse } from "./runtime-admission-errors.js";
 import {
   forkErrorToHttp,
   type DatabaseCloudWorkspaceForkService,
@@ -341,7 +342,7 @@ type WorkspaceRow = CloudRuntimePinRow & {
   last_error_code: string | null;
   last_error_message: string | null;
   diagnostic_incident: { id: string; reason: string; stopReason?: unknown } | null;
-  setup_failure: { code: string | null; hasLog: boolean } | null;
+  setup_run: { state: string; attempt: number; claimCount: number; code: string | null; hasLog: boolean } | null;
   last_observed_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -361,6 +362,7 @@ type WorkspaceRow = CloudRuntimePinRow & {
   observed_state: string;
   provider_target: string | null;
   provider_last_observed_at: Date | string | null;
+  history_recovery: import("./workspace-ui-contracts.js").CloudWorkspaceHistoryRecovery | null;
   recovery: { state: string | null; checkpointId: string | null; checkpointAt: string | null; sourceGeneration: number; needsAcknowledgement: boolean;
     restored: import("./workspace-ui-contracts.js").CloudWorkspaceCheckpointRestore | null } | null;
 };
@@ -435,6 +437,13 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
            WHERE binding.id=cw.agent_boot_id AND binding.workspace_id=cw.id AND binding.org_id=cw.org_id
              AND binding.credentials_initialized
          ) END AS agent_credentials,
+         (SELECT jsonb_build_object('recoveryId',recovery.id,'code','history_recovered_with_gap','coverage',recovery.coverage,
+           'generation',recovery.generation,'engineInstanceId',recovery.engine_instance_id,'bootId',recovery.boot_id,
+           'writerEpoch',recovery.successor_writer_epoch,'completedAt',recovery.activated_at)
+          FROM cloud_agent_history_recoveries recovery WHERE recovery.workspace_id=cw.id AND recovery.org_id=cw.org_id
+            AND recovery.activated_at IS NOT NULL AND recovery.generation<=cw.current_generation
+          ORDER BY recovery.activated_at DESC,recovery.id LIMIT 1) AS history_recovery,
+
          (SELECT left(creator.display_name,240) FROM users creator
           WHERE creator.id=cw.created_by AND creator.deleted_at IS NULL) AS created_by_display_name,
          (SELECT creator_user_id FROM cloud_computer_admin_workspaces admin
@@ -480,10 +489,10 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
          cw.repository_forge, cw.repository_owner, cw.repository_name,
          cw.repository_revision, cw.status, cw.desired_state,
          cw.current_generation, cw.version, cw.last_error_code,
-         (SELECT CASE WHEN setup.state='failed' THEN jsonb_build_object(
-           'code',setup.error_code,'hasLog',btrim(setup.log_excerpt)<>'') ELSE NULL END
+         (SELECT jsonb_build_object('state',setup.state,'attempt',setup.attempt,'claimCount',setup.claim_count,
+           'code',setup.error_code,'hasLog',btrim(setup.log_excerpt)<>'')
           FROM cloud_workspace_setup_runs setup WHERE setup.workspace_id=cw.id AND setup.org_id=cw.org_id
-            AND setup.generation=cw.current_generation ORDER BY setup.attempt DESC LIMIT 1) AS setup_failure,
+            AND setup.generation=cw.current_generation ORDER BY setup.attempt DESC LIMIT 1) AS setup_run,
          (SELECT jsonb_build_object('id',incident.id,'reason',incident.reason,'stopReason',incident.terminal_cause->>'stopReason')
           FROM cloud_workspace_diagnostic_incidents incident WHERE incident.workspace_id=cw.id AND incident.org_id=cw.org_id
             AND incident.generation=cw.current_generation AND incident.recovered_at IS NULL
@@ -624,6 +633,7 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
     createdByDisplayName: cloudWorkspaceDisplayLabel(row.created_by_display_name),
     ownerUserId: row.owner_user_id,
     ...agentCredentialsDocument(row),
+    ...(row.history_recovery ? { historyRecovery: row.history_recovery } : {}),
     ...(row.admin_creator_user_id ? { adminWorkspace: { creatorUserId: row.admin_creator_user_id } } : {}),
     actorRole: row.actor_role,
     sharingMode: row.sharing_mode,
@@ -653,7 +663,7 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
       lastObservedAt: iso(row.provider_last_observed_at),
     },
     version: Number(row.version),
-    setupFailure: row.setup_failure ? { code: diagnosticCode(row.setup_failure.code), hasLog: row.setup_failure.hasLog } : null,
+    setupFailure: row.setup_run?.state === "failed" ? { code: diagnosticCode(row.setup_run.code), hasLog: row.setup_run.hasLog } : null,
     error:
       supported&&!row.supported_generation ? publicCloudError(CLOUD_WORKSPACE_V2_REQUIRED) : row.diagnostic_incident ? publicCloudIncident(row.diagnostic_incident) : row.last_error_code === null
         ? null
@@ -663,6 +673,13 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
     updatedAt: iso(row.updated_at),
     deletedAt: iso(row.deleted_at),
   };
+}
+
+function setupProgress(row: WorkspaceRow) {
+  const setup = row.setup_run;
+  if (!setup) return null;
+  return { generation: row.current_generation, attempt: setup.attempt, claimCount: setup.claimCount,
+    state: setup.state, errorCode: setup.code === null ? null : diagnosticCode(setup.code) };
 }
 
 function intentDocument(row: IntentRow) {
@@ -1981,7 +1998,8 @@ export function createCloudWorkspaceRoutes(
       if(!scope)throw new HttpError(404,"not_found","Cloud workspace not found");
       const row=await loadWorkspace(tx,scope.org_id,workspaceId,userId);
       const live=(await tx.query<{role:string|null}>("SELECT cloud_workspace_actor_role($1,$2) AS role",[workspaceId,userId])).rows[0]!;
-      return {workspace:workspaceDocument(row,config),access:{role:live.role??"owner",computeEligible:live.role!==null},path:`/workspace/${workspaceId}`};
+      return {workspace:workspaceDocument(row,config),access:{role:live.role??"owner",computeEligible:live.role!==null},path:`/workspace/${workspaceId}`,
+        ...(c.req.query("setupProgress")==="true"?{setupProgress:setupProgress(row)}:{})};
     });
     return c.json(result);
   });
@@ -1994,7 +2012,8 @@ export function createCloudWorkspaceRoutes(
     const row = await withSystemTx(pool, (tx) =>
       loadWorkspace(tx, orgId, workspaceId, user.id),
     );
-    return c.json({ workspace: workspaceDocument(row,config) });
+    return c.json({ workspace: workspaceDocument(row,config),
+      ...(c.req.query("setupProgress")==="true"?{setupProgress:setupProgress(row)}:{}) });
   });
 
   app.get(`${base}/:workspace/detected-ports`, async (c) => {
@@ -2025,15 +2044,15 @@ export function createCloudWorkspaceRoutes(
   app.post(`${base}/:workspace/runtime/admission`, async (c) => {
     c.header("Cache-Control", "no-store");
     c.header("Pragma", "no-cache");
-    if (!engineClientAdmissionService) {
-      throw new HttpError(
-        503,
-        "cloud_workspace_runtime_not_configured",
-        "Cloud workspace runtime admission is not configured",
-      );
-    }
-    const body = parse(EngineClientAdmissionSchema, await c.req.json().catch(() => ({})));
     try {
+      if (!engineClientAdmissionService) {
+        throw new HttpError(
+          503,
+          "cloud_workspace_runtime_not_configured",
+          "Cloud workspace runtime admission is not configured",
+        );
+      }
+      const body = parse(EngineClientAdmissionSchema, await c.req.json().catch(() => ({})));
       const input={
           organizationId: uuidParam(c.req.param("organization")),
           workspaceId: uuidParam(c.req.param("workspace")),
@@ -2046,14 +2065,16 @@ export function createCloudWorkspaceRoutes(
         :await engineClientAdmissionService.issue(input);
       return c.json(admission,201);
     } catch (error) {
-      if (!(error instanceof CloudWorkspaceEngineClientAdmissionError)) {
-        throw error;
-      }
-      throw new HttpError(
+      const failure = error instanceof CloudWorkspaceEngineClientAdmissionError ? new HttpError(
         error.code === "engine_client_admission_invalid" ? 422 : 409,
         error.code,
         error.message,
-      );
+      ) : error;
+      const response = cloudRuntimeAdmissionResponse(failure);
+      if (response.retryAfterSeconds !== undefined) c.header("Retry-After", String(response.retryAfterSeconds));
+      if (response.diagnostic.code === "internal") console.error("[cloud-runtime] admission failed", response.diagnostic);
+      else console.warn("[cloud-runtime] admission failed", response.diagnostic);
+      return c.json({ error: response.error }, response.status);
     }
   });
 

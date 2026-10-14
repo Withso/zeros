@@ -41,11 +41,14 @@ import {
 import type { ContentBlock, ToolCallContent } from "@zeros/protocol/agent-events";
 
 import { partitionTurn } from "./turn-partition";
-import { groupMessagesIntoTurns } from "./turn-grouping";
+import { groupMessagesIntoTurns, isProviderTurnTail } from "./turn-grouping";
 import { readableTextFromArray } from "./renderers/raw-output";
 import { fallbackProse } from "./model-fallback";
-import { toolPresentationReady } from "./renderers/tool-readiness";
+import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 import { pendingChecksMessage } from "./renderers/tool-pending-checks";
+import { isUsageNotice, turnUsageNotice } from "./transcript-notices";
+import { isTurnFailureNotice, turnFailureForCard } from "./turn-failure";
+import { authenticationTurn, authenticationTurnOutput, authenticationTurnState, latestAuthenticationRecoveryTurn } from "./auth-prompt-recovery";
 
 export type TranscriptMode = "full" | "concise";
 
@@ -110,6 +113,7 @@ interface VisibleMessages {
  *  parent tool call isn't in this window) stays top-level rather than
  *  vanishing — the same guard agent-chat.tsx applies via `presentToolIds`. */
 function selectVisible(messages: AgentMessage[]): VisibleMessages {
+  messages = withoutRedundantAgentTasks(messages);
   messages = messages.filter((m) => !(m.kind === "text" && m.retracted)).map((m) => fallbackProse(m) ?? m)
     .filter((m) => m.kind !== "tool" || toolPresentationReady(m));
   const toolIds = new Set<string>();
@@ -638,10 +642,11 @@ export function formatTranscript(
 ): FormattedTranscript {
   const { top, children } = selectVisible(messages);
   const head = header(mode, meta);
+  const turns = groupMessagesIntoTurns(top);
 
   if (mode === "concise") {
     const sections: string[] = [];
-    for (const turn of groupMessagesIntoTurns(top)) {
+    for (const turn of turns) {
       const parts: string[] = [];
       const prompt = turn.userPrompt;
       if (prompt) parts.push(safeSection(() => renderUser(prompt), "prompt"));
@@ -650,7 +655,9 @@ export function formatTranscript(
       // renders through renderText so a role:"system" row keeps its own
       // heading — partitionTurn admits system text as output, and hard-coding
       // "## Assistant" would attribute app-generated text to the model.
-      const answer = partitionTurn(turn.events)
+      const events = authenticationTurn(turn.events) || prompt?.authRecovery
+        ? authenticationTurnOutput(turn.events) : turn.events;
+      const answer = partitionTurn(events)
         .finalOutput.filter(
           (m): m is AgentTextMessage =>
             m.kind === "text" &&
@@ -668,7 +675,32 @@ export function formatTranscript(
   }
 
   const ctx: Ctx = { children, root: meta?.folder?.trim() || undefined };
-  const sections = top
+  // Match the product's one tail status. Native retry receipts stay stored,
+  // but copying a recovered turn must not resurrect its obsolete error UI or
+  // attribute provider usage feedback to the assistant.
+  const recoveredAt = latestAuthenticationRecoveryTurn(turns);
+  const projected = turns.flatMap((turn, index) => {
+    const turnId = turn.recordedTurnId;
+    const ownsTail = isProviderTurnTail(turns, index);
+    const auth = authenticationTurnState({ userPrompt: turn.userPrompt, events: turn.events,
+      isTail: index === turns.length - 1, inFlight: false, recovered: recoveredAt > index });
+    const authStatus: AgentTextMessage | null = auth ? {
+      id: `authentication-status-${turnId ?? index}`, kind: "text", role: "system",
+      createdAt: turn.recordedStartedAt, text: auth === "signed-in" ? "Signed in" : "Sign-in required",
+    } : null;
+    const usage = ownsTail ? turnUsageNotice(turn.providerEvents) : null;
+    const failure = ownsTail && turnId && !auth ? turnFailureForCard({ events: turn.providerEvents, turnId }) : null;
+    const terminal = failure && turnId ? turn.providerEvents.slice().reverse().find(event => isTurnFailureNotice(event, turnId)) : undefined;
+    const events = auth ? authenticationTurnOutput(turn.events) : turn.events;
+    return [
+      ...(turn.userPrompt ? [turn.userPrompt] : []),
+      ...events.filter(event => !isUsageNotice(event) && !(turnId && isTurnFailureNotice(event, turnId))),
+      ...(usage ? [usage] : []),
+      ...(authStatus ? [authStatus] : []),
+      ...(failure && terminal?.kind === "error_notice" ? [{ ...terminal, message: failure.message }] : []),
+    ];
+  });
+  const sections = projected
     .map((m) => safeRender(m, ctx))
     .filter((s) => s.length > 0);
   const { text, truncated, used } = assemble(head, sections);

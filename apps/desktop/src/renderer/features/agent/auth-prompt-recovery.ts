@@ -1,6 +1,7 @@
 import type { AgentMessage, AgentTextMessage } from "./use-agent-session";
 import type { SessionsActions } from "./sessions-context";
 import { claudeOrganizationStartupCode, claudeOrganizationStartupMessage } from "@zeros/protocol/claude-startup-notice";
+import { isAuthenticationFailureText, isLegacyAuthenticationNotice, isProviderWorkEvent } from "./transcript-notices";
 
 type PromptArgs = Parameters<SessionsActions["sendPrompt"]>;
 export class AuthPromptRecovery {
@@ -52,13 +53,7 @@ export function lastUserPrompt(
 // Compatibility for already-persisted provider failures. Ordinary assistant
 // discussion of OAuth/keys is not an authentication gate.
 export function isAuthenticationNotice(message: AgentMessage): boolean {
-  return (
-    message.kind === "text" &&
-    message.role !== "user" &&
-    /^(?:Failed to authenticate\b|Authentication (?:required|failed)\b|OAuth session expired\b|Invalid API key\b|Unauthorized\b|Not (?:logged|signed) in\b)/i.test(
-      message.text.trim(),
-    )
-  );
+  return isLegacyAuthenticationNotice(message);
 }
 export function authenticationTurn(
   events: readonly AgentMessage[],
@@ -84,8 +79,9 @@ export function authenticationTurnOutput(
   return events.filter(
     (event) =>
       !isAuthenticationNotice(event) &&
-      !(event.kind === "error_notice" && !event.parentToolId && event.code === "org_config_refused" &&
-        !event.recoverable && event.turnFailure?.kind === "auth-required") &&
+      !(event.kind === "error_notice" && !event.parentToolId &&
+        !event.recoverable && (event.turnFailure?.kind === "auth-required" ||
+          (!event.turnFailure && isAuthenticationFailureText(event.message)))) &&
       !(
         event.kind === "tool" &&
         event.toolKind === "model_switch" &&
@@ -110,21 +106,32 @@ export function authenticationFailureMessage(
   return code === "org_config_refused" ? claudeOrganizationStartupMessage(code) : undefined;
 }
 
-/** Auth is a product notice only while it owns the visual tail. Once the user
- * sends again, the earlier turn is settled history with the normal footer. */
+/** A later prompt alone does not prove sign-in. Historical auth notices become
+ * resolved only after this conversation receives real parent model work. */
 export function authenticationTurnState(input: {
   userPrompt: AgentTextMessage | null | undefined;
   events: readonly AgentMessage[];
   failureKind?: string;
   isTail: boolean;
   inFlight: boolean;
-}): "sign-in" | "stopped" | null {
+  recovered?: boolean;
+  readOnly?: boolean;
+}): "sign-in" | "stopped" | "signed-in" | null {
   if (!input.userPrompt) return null;
   const kind = (input.isTail ? input.failureKind : undefined) ?? latestTurnFailureKind(input.events);
   const blocked = kind ? kind === "auth-required" : !!input.userPrompt.authRecovery || authenticationTurn(input.events);
   if (!blocked) return null;
-  if (!input.isTail) return "stopped";
+  if (!input.isTail || input.readOnly) return input.recovered ? "signed-in" : "stopped";
   return input.inFlight ? null : "sign-in";
+}
+
+export function latestAuthenticationRecoveryTurn(
+  turns: readonly { events: readonly AgentMessage[] }[],
+): number {
+  for (let index = turns.length - 1; index >= 0; index--) {
+    if (turns[index].events.some(isProviderWorkEvent)) return index;
+  }
+  return -1;
 }
 
 /** These messages remain in Zeros history but may never have reached the

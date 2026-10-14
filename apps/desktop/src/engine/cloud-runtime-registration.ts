@@ -4,7 +4,7 @@ import { configureNativeGithubTransport } from "./git/github-native-client";
 import { requestCloudGithubWrite, type CloudGithubWriteRequest } from "./cloud-github-write-client";
 import { requestCloudGithubRead } from "./cloud-github-read-client";
 import type { CloudCommandEngineRequest } from "@zeros/protocol/cloud-commands";
-import { CloudAgentBootScopeSchema } from "@zeros/protocol/cloud-agent-bootstrap";
+import { CloudAgentBootScopeSchema, CloudAgentHistoryRecoveryResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudActorAdmissionResponseSchema, type CloudActorContext } from "@zeros/protocol/cloud-actors";
 import type { CloudEventEngineRequest } from "@zeros/protocol/cloud-events";
 import type { CloudActionEngineRequest } from "@zeros/protocol/cloud-actions";
@@ -187,6 +187,72 @@ class CloudRuntimeRequestError extends Error {
 export class CloudClientAuthorityTransientError extends Error {
   readonly code = "cloud_client_authority_transient";
   constructor() { super("Cloud client authority is temporarily unavailable"); this.name = "CloudClientAuthorityTransientError"; }
+}
+
+type RenewalOperation = "engine-heartbeat" | "client-renew" | "actor-confirm" | "warm-context";
+type RenewalOutcome = "completed" | "refused" | "failed";
+const RENEWAL_BUCKETS_MS = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000, 10_000, 30_000, null] as const;
+type RenewalSeries = { operation: RenewalOperation; outcome: RenewalOutcome; count: number;
+  sumMs: number; maxMs: number; buckets: number[] };
+
+/** Registration-boundary observations, not authority. Four code-owned labels
+ * and three outcomes bound storage to twelve series. Flush on existing work
+ * after an active minute, or once on retirement; never start a reporting timer.
+ * This module is in the standalone CP test import closure: keep the helper
+ * dependency-free and never retain a request, response, identity or error. */
+class CloudRuntimeRenewalTimings {
+  private readonly series = new Map<string, RenewalSeries>();
+  private started: number | null = null;
+  private inFlight = 0;
+  private invalidSpans = 0;
+  private closed = false;
+
+  private time(): number | null {
+    try { const value = performance.now(); return Number.isFinite(value) && value >= 0 ? value : null; }
+    catch { return null; }
+  }
+
+  begin(operation: RenewalOperation): (outcome: RenewalOutcome) => void {
+    if (this.closed) return () => {};
+    const started = this.time();
+    this.started ??= started;
+    this.inFlight++;
+    let ended = false;
+    return outcome => {
+      if (ended || this.closed) return;
+      ended = true; this.inFlight--;
+      const now = this.time(), duration = started === null || now === null ? null : now - started;
+      if (duration === null || !Number.isFinite(duration) || duration < 0) this.invalidSpans++;
+      else {
+        const key = `${operation}:${outcome}`;
+        let series = this.series.get(key);
+        if (!series) {
+          series = { operation, outcome, count: 0, sumMs: 0, maxMs: 0, buckets: RENEWAL_BUCKETS_MS.map(() => 0) };
+          this.series.set(key, series);
+        }
+        series.count++; series.sumMs += duration; series.maxMs = Math.max(series.maxMs, duration);
+        const bucket = RENEWAL_BUCKETS_MS.findIndex(bound => bound === null || duration <= bound);
+        series.buckets[bucket] = series.buckets[bucket]! + 1;
+      }
+      this.started ??= now;
+      if (this.started !== null && now !== null && now - this.started >= 60_000) this.flush(now);
+    };
+  }
+
+  private flush(now: number | null): void {
+    if (!this.series.size && !this.invalidSpans && !this.inFlight) return;
+    const report = { version: 1, scope: "cloud-runtime-renewal", windowMs: now === null || this.started === null || now < this.started
+      ? null : now - this.started, bucketUpperBoundsMs: RENEWAL_BUCKETS_MS, series: [...this.series.values()],
+    invalidSpans: this.invalidSpans, inFlight: this.inFlight };
+    this.series.clear(); this.invalidSpans = 0; this.started = now;
+    try { console.info(`[cloud-runtime] renewal-timing ${JSON.stringify(report)}`); }
+    catch { /* Observation must not alter a renewal or authority retirement. */ }
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true; this.flush(this.time());
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -382,6 +448,7 @@ async function boundedResponseJson(response: Response): Promise<unknown> {
 }
 
 export class CloudRuntimeRegistration {
+  private readonly renewalTimings = new CloudRuntimeRenewalTimings();
   private readonly fetch: FetchLike;
   private readonly now: () => number;
   private readonly onAuthorityLost: () => void;
@@ -544,21 +611,34 @@ export class CloudRuntimeRegistration {
     const document = this.document;
     if (!document || !this.localCommandsNegotiated())
       throw new CloudCommandRuntimeError("cloud_workspace_client_update_required");
-    const result = await requestCloudAgentBoot(this.authority(document), operation, request,
-      AbortSignal.any([signal, this.abortController.signal]), this.fetch);
-    if (document !== this.document || !this.localCommandsNegotiated()) throw new CloudAgentExecutionError();
-    const rawIdentity = "provenance" in result ? result.provenance.scope : result;
-    const identity = CloudAgentBootScopeSchema.parse(Object.fromEntries(Object.entries(rawIdentity)
-      .filter(([key]) => key in CloudAgentBootScopeSchema.shape)));
-    const bootId = identity.bootId;
-    if (bootId !== this.agentRuntime.bootId) throw new CloudAgentExecutionError("authority_response_invalid");
-    if (this.activatedLocalWriter && (identity.bootId !== this.activatedLocalWriter.bootId || identity.writerEpoch !== this.activatedLocalWriter.writerEpoch))
-      throw new CloudAgentExecutionError("authority_response_invalid");
-    if (operation === "activate") {
-      this.activatedLocalWriter = Object.freeze({ bootId, writerEpoch: identity.writerEpoch });
-      this.agentJournalMode = "local";
-    }
-    return result;
+    const finish = operation === "actor-confirm" || operation === "warm-context" ? this.renewalTimings.begin(operation) : undefined;
+    let outcome: RenewalOutcome = "failed";
+    try {
+      const result = await requestCloudAgentBoot(this.authority(document), operation, request,
+        AbortSignal.any([signal, this.abortController.signal]), this.fetch);
+      if (document !== this.document || !this.localCommandsNegotiated()) throw new CloudAgentExecutionError();
+      if (operation === "recover-history") {
+        const recovery = CloudAgentHistoryRecoveryResponseSchema.parse(result);
+        if (recovery.bootId !== this.agentRuntime.bootId || this.activatedLocalWriter)
+          throw new CloudAgentExecutionError("authority_response_invalid", "validation");
+        // A gap authorization is only custody for the exact future boot. It
+        // neither activates a writer nor admits controls/mirroring/execution.
+        return result;
+      }
+      const rawIdentity = "provenance" in result ? result.provenance.scope : result;
+      const identity = CloudAgentBootScopeSchema.parse(Object.fromEntries(Object.entries(rawIdentity)
+        .filter(([key]) => key in CloudAgentBootScopeSchema.shape)));
+      const bootId = identity.bootId;
+      if (bootId !== this.agentRuntime.bootId) throw new CloudAgentExecutionError("authority_response_invalid");
+      if (this.activatedLocalWriter && (identity.bootId !== this.activatedLocalWriter.bootId || identity.writerEpoch !== this.activatedLocalWriter.writerEpoch))
+        throw new CloudAgentExecutionError("authority_response_invalid");
+      if (operation === "activate") {
+        this.activatedLocalWriter = Object.freeze({ bootId, writerEpoch: identity.writerEpoch });
+        this.agentJournalMode = "local";
+      }
+      outcome = "completed";
+      return result;
+    } finally { finish?.(outcome); }
   }
 
   private localWriterCurrent(bootId: string, writerEpoch: string, allowRecordPause = false): boolean {
@@ -702,6 +782,7 @@ export class CloudRuntimeRegistration {
     this.timer = null;
     this.abortController.abort();
     this.document = null;
+    this.renewalTimings.close();
     await this.durableRecordSyncInFlight?.catch(() => undefined);
   }
 
@@ -757,6 +838,8 @@ export class CloudRuntimeRegistration {
       "/internal/v2/cloud-workspaces/engine/client-admission",
       document.heartbeat.endpoint,
     ).toString();
+    const finish = renew ? this.renewalTimings.begin("client-renew") : undefined;
+    let outcome: RenewalOutcome = "refused";
     try {
       const raw = await this.post(endpoint, document.heartbeat.token, {
         workspaceId: this.config.execution.workspaceId,
@@ -776,14 +859,16 @@ export class CloudRuntimeRegistration {
       const parsed = CloudActorAdmissionResponseSchema.safeParse(raw);
       if (!parsed.success) return null;
       const admitted = parsed.data;
+      outcome = "completed";
       return {accountUserId:admitted.accountUserId,authorityEpoch:admitted.authorityEpoch,
         actor:{sessionId:admitted.actorSessionId,deviceId:admitted.deviceId,role:admitted.role,fingerprint:admitted.fingerprint}};
     } catch (error) {
+      outcome = "failed";
       if (renew && this.document === document && this.hasControlAuthority(document) && error instanceof CloudRuntimeRequestError &&
           (!error.terminal || error.status === 408 || error.status === 429))
         throw new CloudClientAuthorityTransientError();
       return null;
-    }
+    } finally { finish?.(outcome); }
   }
 
   async verifyServiceAccess(
@@ -930,6 +1015,7 @@ export class CloudRuntimeRegistration {
     if (!document || this.stopped || this.authorityLost) return;
     this.heartbeatInFlight = true;
     this.heartbeatAgain = false;
+    const finish = this.renewalTimings.begin("engine-heartbeat");
     try {
       const credentialRefresh = this.readCredentialRefresh();
       const observedPorts = await this.observedPorts();
@@ -994,7 +1080,9 @@ export class CloudRuntimeRegistration {
       if (checkpointRequest && !this.recordHandoffPaused) {
         this.dispatchCheckpointRequest(checkpointRequest, document);
       }
+      finish("completed");
     } catch (error) {
+      finish("failed");
       const terminal =
         error instanceof CloudRuntimeRequestError && error.terminal;
       if (terminal || this.now() >= document.leaseExpiresAtMs - 1_000) {
@@ -1276,6 +1364,7 @@ export class CloudRuntimeRegistration {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.document = null;
+    this.renewalTimings.close();
     this.onAuthorityLost();
   }
 

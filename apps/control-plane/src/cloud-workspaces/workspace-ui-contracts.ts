@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+// Mirrored in @zeros/protocol/cloud-runtime-lifecycle; never admission authority.
+export const CloudWorkspaceHistoryRecoverySchema = z.object({
+  recoveryId: z.string().uuid(), code: z.literal("history_recovered_with_gap"), coverage: z.literal("unknown"),
+  generation: z.number().int().positive().safe(), engineInstanceId: z.string().uuid(), bootId: z.string().uuid(),
+  writerEpoch: z.string().uuid(), completedAt: z.string().datetime({ offset: true }),
+}).strict();
+export type CloudWorkspaceHistoryRecovery = z.infer<typeof CloudWorkspaceHistoryRecoverySchema>;
+
 // Mirrored in @zeros/protocol/cloud-runtime-lifecycle; checked by UI parity.
 export const CloudWorkspaceCheckpointRestoreSchema = z.object({
   checkpointId: z.string().uuid(),

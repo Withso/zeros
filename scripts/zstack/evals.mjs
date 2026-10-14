@@ -8,11 +8,13 @@
 //                                               also accept fixedBy "pending" (unopened PR)
 //   node scripts/zstack/evals.mjs --list       one line per case
 // ============================================================
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ZSTACK_EVALS_FILE = "agents/zstack/evals/cases.json";
+/** One case per file, so parallel PRs never edit the same file. */
+export const ZSTACK_EVAL_CASES_DIR = "agents/zstack/evals/cases";
 const KINDS = new Set(["replay", "seeded", "scenario"]);
 const ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const FIXED_BY = /^(?:[0-9a-f]{40}|pr:[1-9][0-9]*)$/;
@@ -42,7 +44,16 @@ export function validateEvalCases(value, { allowPending = false } = {}) {
 }
 
 export function readEvalCases(root) {
-  return JSON.parse(readFileSync(join(root, ZSTACK_EVALS_FILE), "utf8"));
+  const legacy = JSON.parse(readFileSync(join(root, ZSTACK_EVALS_FILE), "utf8"));
+  const dir = join(root, ZSTACK_EVAL_CASES_DIR);
+  const files = existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".json")).sort() : [];
+  const cases = [...legacy.cases];
+  for (const name of files) {
+    const entry = JSON.parse(readFileSync(join(dir, name), "utf8"));
+    // The file name is the case id, which keeps one-case-per-file honest.
+    cases.push(entry?.id === name.slice(0, -5) ? entry : { ...entry, id: `file-name-mismatch:${name}` });
+  }
+  return { ...legacy, cases };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

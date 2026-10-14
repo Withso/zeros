@@ -4,6 +4,17 @@ import { describe, expect, it } from "vitest";
 import { AuthenticationNotice } from "../authentication-notice";
 
 describe("chat authentication notice", () => {
+  it("renders confirmed recovery as a compact Signed in status without sign-in advice", () => {
+    const html = renderToStaticMarkup(createElement(AuthenticationNotice, {
+      name: "Claude Code", resolved: true, onSignIn: () => {},
+    }));
+    expect(html).toContain("Signed in");
+    expect(html).toContain('role="status"');
+    expect(html).not.toContain("send a new message");
+    expect(html).not.toContain("data-agent-notice");
+    expect(html).not.toContain("<button");
+  });
+
   it("keeps the organization refusal explanation with the existing Sign in action", () => {
     const message = "Your organization's Claude settings were refused for this sign-in. Sign in again or ask your administrator.";
     const html = renderToStaticMarkup(createElement(AuthenticationNotice, { name: "Claude Code", message, onSignIn: () => {} }));

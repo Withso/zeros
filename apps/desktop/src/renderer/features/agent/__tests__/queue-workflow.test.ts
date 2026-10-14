@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SendQueue } from "../send-queue";
 import { CloudSendPreparation } from "../cloud-send-preparation";
 import * as lifecycle from "../session-reload-lifecycle";
-import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
+import { hasBackgroundAgentWork } from "../background-task-state";
 
 // Exercise the actual provider callbacks with an in-memory bridge/store. This
 // keeps Stop/Send now races deterministic without mounting unrelated app UI.
@@ -33,6 +34,7 @@ const names = new Set([
   "releaseQueue",
   "editQueued",
   "removeQueued",
+  "sendPrompt",
 ]);
 const callbacks: string[] = [];
 function collect(node: ts.Node): void {
@@ -82,6 +84,7 @@ function setup(agentId = "claude", status = "streaming") {
         executionId: "execution",
         status,
         cwd: "/repo",
+        initialize: { protocolVersion: 1, agentCapabilities: { steering: true } },
         messages,
       },
     },
@@ -98,7 +101,23 @@ function setup(agentId = "claude", status = "streaming") {
   const flush = new Map<string, string>();
   const context: any = {
     ...lifecycle,
+    hasBackgroundAgentWork,
     isCloudWorkspace,
+    parseCloudWorkspaceKey,
+    cloudComputerV2: false,
+    cloudCatalogGeneration: () => "account",
+    hasCloudWorkspaceAccountAccess: () => true,
+    useWorkspaceStore: { getState: () => ({ chats: [] }) },
+    getAgentsSnapshot: () => [],
+    pendingAuthenticationPrompts: () => [],
+    prepareForSend: vi.fn(() => null),
+    persistAuthPrompt: vi.fn(),
+    drainOrDropQueue: vi.fn(),
+    retryCloudQueuedPrompt: vi.fn(),
+    refreshModelCatalog: vi.fn(),
+    cloudFlushRef: { current: new Map() },
+    beginCloudSendWaitRef: { current: vi.fn() },
+    capUserAppend: (list: unknown[], message: unknown) => [...list, message],
     crypto: {
       randomUUID: (() => {
         let id = 0;
@@ -180,6 +199,112 @@ function setup(agentId = "claude", status = "streaming") {
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe.each(["claude", "codex", "cursor"])("%s follow-up submission", agentId => {
+  it("keeps Queue as the default while a turn is working", async () => {
+    const h = setup(agentId);
+    await h.actions.sendPrompt("chat", "new follow-up");
+    expect(h.requests).toEqual([]);
+    expect(h.queue.get("chat")?.map(entry => entry.args[1])).toEqual(["B", "C", "D", "new follow-up"]);
+  });
+
+  it("dispatches Steer immediately without waiting for the current turn to finish", async () => {
+    const h = setup(agentId);
+    await h.actions.sendPrompt("chat", "new instruction", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "steer");
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0].message).toMatchObject({ type: "AGENT_STEER", prompt: [{ type: "text", text: "new instruction" }] });
+    h.requests[0].resolve({ type: "AGENT_STEERED", outcome: "delivered", turnId: "A" });
+    await vi.waitFor(() => expect(h.queue.get("chat")?.map(entry => entry.bubbleId)).toEqual(["B", "C", "D"]));
+    expect(h.store.sessions.chat.messages.at(-1)).toMatchObject({ text: "new instruction", queued: false });
+  });
+
+  it("prepares cloud attachment payloads before immediate steering", async () => {
+    const h = setup(agentId);
+    h.context.cloudComputerV2 = true;
+    h.store.sessions.chat.cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const prepare = vi.fn(async () => ({ text: "Inspect attached context", attachments: [{ type: "text", text: "Saved attachment content" }] }));
+    await h.actions.sendPrompt("chat", "Inspect attached context", undefined, undefined, undefined, undefined, undefined, undefined,
+      { prepare }, undefined, "steer");
+    await vi.waitFor(() => expect(h.requests).toHaveLength(1));
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(h.requests[0].message).toMatchObject({ type: "AGENT_STEER", prompt: [
+      { type: "text", text: "Inspect attached context" }, { type: "text", text: "Saved attachment content" },
+    ] });
+    h.requests[0].resolve({ type: "AGENT_STEERED", outcome: "delivered", turnId: "A" });
+    await vi.waitFor(() => expect(h.queue.get("chat")).toHaveLength(3));
+  });
+});
+
+describe("cloud steering preparation ownership", () => {
+  it.each(["stop", "execution", "workspace", "account"])("does not deliver an attachment prepared after %s changes", async changed => {
+    const h = setup("claude");
+    h.context.cloudComputerV2 = true;
+    h.store.sessions.chat.cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    let release!: (payload: { text: string }) => void;
+    const prepare = vi.fn(() => new Promise(resolve => { release = resolve; }));
+    await h.actions.sendPrompt("chat", "pending attachment", undefined, undefined, undefined, undefined, undefined, undefined,
+      { prepare }, undefined, "steer");
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+    if (changed === "stop") {
+      h.context.cancelGenerationsRef.current.set("chat", 1);
+      h.queue.pause("chat");
+    } else if (changed === "execution") h.store.sessions.chat.executionId = "replacement";
+    else if (changed === "workspace") h.store.sessions.chat.cwd = "/other";
+    else h.context.cloudCatalogGeneration = () => "another-account";
+    release({ text: "prepared attachment" });
+    await vi.waitFor(() => expect(h.queue.isSending("chat")).toBe(false));
+    expect(h.requests).toEqual([]);
+    expect(h.queue.get("chat")?.at(-1)?.args[1]).toBe("pending attachment");
+    expect(h.store.sessions.chat.messages.at(-1).queuedDelivery).toBeUndefined();
+  });
+});
+
+describe.each(["/repo", "/organization/repo", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"])(
+  "background queue ownership in %s",
+  cwd => {
+    it("accepts a new follow-up into the queue while only background work remains", () => {
+      expect(lifecycle.shouldQueuePrompt({ status: "ready", hasLocalSend: false,
+        hasQueuedSends: false, queueHeld: false, flushing: false, hasBackgroundWork: true })).toBe(true);
+    });
+
+    it("keeps follow-ups queued after the foreground reply while Claude still has background tasks", async () => {
+      const h = setup("claude", "ready");
+      h.store.sessions.chat.cwd = cwd;
+      h.store.sessions.chat.backgroundTasks = [{ taskId: "child", status: "running", description: "Verify changes", startedAt: 1 }];
+      h.store.sessions.chat.waitingForBackgroundTasks = true;
+      h.actions.drainNextQueued("chat");
+      await Promise.resolve();
+      expect(h.sent).toEqual([]);
+      expect(h.queue.get("chat")?.map(entry => entry.bubbleId)).toEqual(["B", "C", "D"]);
+
+      h.store.sessions.chat.backgroundTasks = [];
+      h.store.sessions.chat.waitingForBackgroundTasks = false;
+      h.actions.drainNextQueued("chat");
+      await Promise.resolve();
+      expect(h.sent).toEqual([["chat", "B"]]);
+    });
+
+    it("holds the queue while the parent is reporting after its last background task exits", async () => {
+      const h = setup("claude", "ready");
+      h.store.sessions.chat.cwd = cwd;
+      h.store.sessions.chat.backgroundTasks = [];
+      h.store.sessions.chat.backgroundActivity = { state: "running", startedAt: 1 };
+      h.actions.releaseQueue("chat");
+      await Promise.resolve();
+      expect(h.sent).toEqual([]);
+    });
+
+    it("sends an explicit steer immediately while the parent is waiting on background tasks", async () => {
+      const h = setup("claude", "ready");
+      h.store.sessions.chat.cwd = cwd;
+      h.store.sessions.chat.backgroundTasks = [{ taskId: "child", status: "running" }];
+      h.store.sessions.chat.waitingForBackgroundTasks = true;
+      await h.actions.sendPrompt("chat", "redirect the task", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "steer");
+      expect(h.sent).toEqual([["chat", "redirect the task", undefined, undefined, undefined, undefined, undefined]]);
+      expect(h.queue.get("chat")?.map(entry => entry.bubbleId)).toEqual(["B", "C", "D"]);
+    });
+  },
+);
 
 describe("cloud Stop acknowledgement", () => {
   it("sends a correlated owned request and a late acknowledgement does not clear a newer turn", async () => {

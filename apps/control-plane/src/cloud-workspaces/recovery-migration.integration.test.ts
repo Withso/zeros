@@ -48,10 +48,19 @@ suite("recovery migration with populated FORCE RLS tables", () => {
     const appended = await content.append({ ...scope, expectedRevision: 0, idempotencyKey: randomUUID(), gitBaseCommit: "a".repeat(40), gitHeadRef: null,
       mutations: [{ path: "file.txt", operation: "upsert", entryType: "file", mode: 33188, blobId: file.id, contentSha256: file.plaintextSha256, sizeBytes: 7 }] });
     const directive = (await new DatabaseCloudIdleStop(pool, false).request(scope, randomUUID()))!;
-    await content.commitCheckpoint({ ...scope, requestId: directive.id, idempotencyKey: directive.id,
+    const checkpoint = await content.commitCheckpoint({ ...scope, idempotencyKey: directive.id,
       contentRevision: appended.revision, reason: "before_stop", manifestBlobId: manifest.id, artifactBlobId: null,
       inclusionPolicy: {}, fileCount: 1, totalBytes: 7, integritySha256: manifest.plaintextSha256 });
-    return (await pool.query("SELECT lifecycle_intent_id FROM workspace_checkpoint_requests WHERE id=$1", [directive.id])).rows[0].lifecycle_intent_id;
+    // Seed the receipt written by a pre-0113 worker. Today's completion path
+    // requires the native-writer table from 0139, which must not exist in this
+    // migration fixture. Keep the durable content and its real blob references.
+    const completed = await pool.query<{ lifecycle_intent_id: string }>(`UPDATE workspace_checkpoint_requests
+      SET state='succeeded', checkpoint_id=$2, completed_at=clock_timestamp(), error_code=NULL
+      WHERE id=$1 AND workspace_id=$3 AND org_id=$4 AND generation=1 AND reason='before_stop'
+        AND state IN ('queued','delivered') AND deadline_at>now()
+      RETURNING lifecycle_intent_id`, [directive.id, checkpoint.checkpointId, fixture.workspaceId, fixture.organizationId]);
+    expect(completed.rowCount).toBe(1);
+    return completed.rows[0]!.lifecycle_intent_id;
   }
 
   async function migrateAsNonBypassOwner(systemContext = false): Promise<void> {
@@ -86,6 +95,23 @@ suite("recovery migration with populated FORCE RLS tables", () => {
       client.release();
     }
   }
+
+  it("seeds the committed legacy checkpoint without requiring the later native-writer schema", async () => {
+    expect((await pool.query("SELECT to_regclass('public.cloud_workspace_local_command_writers') AS native_writers")).rows[0])
+      .toEqual({ native_writers: null });
+    const drainId = await finalCheckpoint();
+    expect((await pool.query(`SELECT request.state, request.completed_at, checkpoint.state AS checkpoint_state,
+      checkpoint.reason, checkpoint.file_count,
+      (SELECT count(*)::int FROM workspace_checkpoint_entries entry WHERE entry.checkpoint_id=checkpoint.id) AS entry_count
+      FROM workspace_checkpoint_requests request JOIN workspace_checkpoints checkpoint ON checkpoint.id=request.checkpoint_id
+      WHERE request.lifecycle_intent_id=$1`, [drainId])).rows)
+      .toEqual([{ state: "succeeded", completed_at: expect.any(Date), checkpoint_state: "durable",
+        reason: "before_stop", file_count: 1, entry_count: 1 }]);
+    expect((await pool.query(`SELECT to_regclass('public.cloud_workspace_local_command_writers') AS native_writers,
+      to_jsonb(engine) ? 'final_checkpoint_at' AS has_final_fence
+      FROM cloud_workspace_engine_instances engine WHERE id=$1`, [fixture.engineInstanceId])).rows[0])
+      .toEqual({ native_writers: null, has_final_fence: false });
+  });
 
   it.each([false, true])("repairs final fences and old recovery rollbacks (caller supplies system context: %s)", async systemContext => {
     const drainId = await finalCheckpoint();

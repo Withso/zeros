@@ -1083,6 +1083,16 @@ update (or the older cached ledger after the tag update); both sources must
 still be at or before the candidate, and one must identify that candidate.
 Other disagreements block. Missing feeds or
 unreadable/malformed identities are unknown, not a zero/genesis destination.
+The initial automatic Alpha barrier runs outside the publication lock, so it
+can read an older publisher's ledger upload before that publisher moves the
+tag. Only a mismatch whose identities and ancestry already passed validation
+is pending: retry every 10 seconds, for at most 12 observations and a two-minute
+pending deadline. Each retry reads all frontiers again; if the mismatch was
+observed after green CI, it also reads CI again before issuing admission. A
+persistent mismatch fails red, without `ready=true` or an admission receipt.
+Malformed, unavailable, newer or divergent identities retain their existing
+closed behavior; downstream, manual, Beta and Production checks gain no retry
+or authority from this exception.
 The publication entry job repeats authentication, CI/admission and fresh
 frontier checks **inside** the encompassing lock before any provider writes.
 It compares the authenticated parent's immutable `run_number` with every
@@ -1099,6 +1109,39 @@ can issue admission or a green pre-mutation skip; nested entry conflicts fail
 visibly.
 The strict migrator still rejects unknown or newer schema rows; neither stage
 rolls schema back or authorizes a controlled migration.
+
+**Recovering an overlapping Alpha publication.**
+
+Read the prior publisher's job outcomes first. Ledger upload and rolling-tag
+movement are separate writes; neither side alone proves a completed release.
+Read `GET /repos/Withso/zeros/git/ref/tags/alpha` (peeling annotated tags to a
+commit) and the public
+`https://github.com/Withso/zeros/releases/download/alpha/alpha-release-ledger.json`.
+Require the tag to equal the last entry's `sourceSha`, a valid monotonic Alpha
+ledger, and successful prior feed publication. The proposed source must contain
+every destination source, with its exact-source required CI green. The normal
+barrier and in-lock entry revalidate API, Pages, worker and schema identities;
+`/healthz` alone is insufficient.
+
+If the previous publisher finished and those reads now agree, no tag or ledger
+repair is needed. Check that the candidate has no active attempt, then fully
+rerun its release:
+
+```sh
+pnpm agent:gh run rerun <release-run-id> --repo Withso/zeros
+```
+
+Never use `--failed` for a release. Rebuild both producers in the same attempt
+to preserve signed-build and artifact provenance. Verify the successful barrier,
+fresh signed desktop and Linux runtime producers, hosted promotion, both
+publishers, and matching final tag/ledger. Check the published runtime's exact
+base qualification separately before rebuilding a Computer.
+
+If disagreement persists after the publisher has stopped, retain the tag,
+ledger, feed, producer and job evidence for owner-led forward recovery. There
+is no tag/ledger rewrite operator: `release-ledger-cli.ts --build` and
+`--verify` construct or verify ledgers, and do not reconcile partial publication.
+Do not move tags or discard ledger history merely to unblock admission.
 
 Stage 2 admission and both stages' later checkpoints read the deployed identity from a valid
 HTTP 503 readiness response so a newer candidate can repair an unready Alpha
@@ -1261,6 +1304,31 @@ The public boolean does not replace per-credential native launch qualification.
 
 ### Retired Boat deletions do not block release readiness
 
+Control-plane release eligibility is scoped to the CP artifact. Cleanup-only
+reasons (`deletion_jobs_failed`, `deletion_provider_stalled`,
+`deletion_intent_stalled`, `object_deletion_stalled`, `provider_orphans_stalled`)
+remain operational alerts and do not prevent a CP repair release. The two
+combined reasons require a finer read: `lifecycle_stalled` is cleanup only
+when every stalled intent is a delete; `object_rotation_failed` is cleanup only
+when there is no failed rotation and only source/target cleanup is pending.
+These classifications and the full health reasons come from one query in the
+same read-only, repeatable-read transaction.
+
+Stalled non-delete lifecycle work, failed rotations, setup/engine leases,
+access revocation, outbox delivery, blocked idle stops, durability and all
+compute/billing signals still close readiness. Unknown reasons and unreadable
+health fail closed. Workers, setup execution and durability must remain enabled;
+source/schema, migration, signing and selected worker/runtime/template proofs
+retain their own release and admission gates. Local and organization-local
+workspaces and disabled cloud channels do not use this projection.
+
+The v1 `cloud.state="healthy"` field describes CP **release eligibility**.
+For cleanup outside the legacy Boat label below, the identity does not add a
+new deferral kind or operational-state field: `/healthz` and in-service alerts
+continue to expose the full degraded health and reason codes. No health reason
+or resource identity is copied into the release receipt. Missing qualification
+remains false; cleanup eligibility cannot manufacture artifact approval.
+
 Once Boat accepts a deletion (a `bdop_*` receipt), erasing its stored data is
 Boat's background work. This release deferral covers both retired, non-current
 generations and generations of a workspace whose status is `deleting` or
@@ -1268,7 +1336,7 @@ generations and generations of a workspace whose status is `deleting` or
 otherwise unfinished does not close release readiness on any channel; no
 operator exception, allowlist or expiry is involved.
 
-In one read-only, repeatable-read system transaction, the API requires
+For the existing `deferredReadiness` label, the API requires
 `deletion_intent_stalled` to be the sole health reason and checks **every**
 stalled intent and provider journal. Each must have a Boat deletion receipt, an
 observing delete intent with `provider_deletion_pending` or
@@ -1278,8 +1346,8 @@ no-error intent allowance remains valid only for retired non-current
 generations. A missing or mismatched record, failed/queued intent, a current
 generation on a live workspace, unbound journal, other provider, or another
 health reason (including `deletion_jobs_failed` or `deletion_provider_stalled`)
-keeps publication blocked. Workers, setup execution and durability must remain
-enabled.
+refuses that legacy label. CP eligibility still follows the scoped projection
+above; this does not weaken the label's provider-receipt proof.
 
 While deferred, `/v1/release-identity` retains `cloud.ready=true` and the v1
 `cloud.state="healthy"` **release-readiness** posture, and explicitly adds

@@ -111,7 +111,7 @@ describe("cloud worker notifications", () => {
 
   it("retires long-held connections and suppresses late acquisition after stop", async () => {
     const { first, second, stop } = fixture();
-    await vi.advanceTimersByTimeAsync(600_000 + 1_000);
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60_000 + 1_000);
     expect(first.release).toHaveBeenCalledExactlyOnceWith(true);
     expect(second.query).toHaveBeenCalledOnce();
     await stop();

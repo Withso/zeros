@@ -7,9 +7,14 @@ import { CloudLocalAgentBootRuntime } from "../cloud-local-command-queue-boot";
 import { testCloudBootFixture } from "../agents/__tests__/helpers/test-cloud-boot";
 import { isCloudBootAgentExecutionFactory, isCloudBootAgentSelection, type CloudBootAgentExecutionFactory } from "../agents/cloud-provider-execution";
 import type { CloudLocalCommandQueue } from "../cloud-local-command-queue";
-import type { CloudRuntimeRegistration } from "../cloud-runtime-registration";
+import { CloudRuntimeRegistration, type CloudCheckpointDirective } from "../cloud-runtime-registration";
+import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { CloudAgentAdmissionError, CloudAgentExecutionError, type CloudAgentBootResponses } from "../cloud-agent-execution-client";
 import { CloudAgentBootSyncResponseSchema, CloudAgentBootRefreshResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
+import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
+import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
+import { restoreCloudLocalCommandCheckpointLedger, recoverCloudLocalCommandCheckpointLedger } from "../cloud-local-command-queue-checkpoint";
+import { openSqlite } from "../db/sqlite";
 import ts from "typescript";
 import { ZerosEngine } from "../zeros-engine";
 import { CloudTransport } from "../transport/cloud";
@@ -79,6 +84,74 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
 }
 
 describe("engine boot-mode orchestration", () => {
+  it.each(["new", "same", "unsealed", "unsealed-lost-ack"])("activates the fresh engine writer with a %s VM boot after a stop retains its FULL ledger", async vmBoot => {
+    const f = await fixture();
+    await expect(f.boot.initialize()).resolves.toBe(true);
+    const previous = f.boot.scope;
+    const file = f.options.file, normal = openSqlite(path.join(path.dirname(file), "normal.sqlite"));
+    normal.pragma("journal_mode = WAL"); normal.pragma("synchronous = NORMAL");
+    normal.exec("CREATE TABLE sync_meta(id INTEGER PRIMARY KEY,next_rev INTEGER NOT NULL); INSERT INTO sync_meta VALUES(0,2)");
+    cleanups.push(() => { normal.close(); });
+    const events = new CloudLocalCommandEventStore({ file, queue: f.boot.queue, engineLive: () => true });
+    cleanups.push(() => events.close());
+    const lifecycle = new CloudLocalCommandWriterLifecycle({ file, queue: f.boot.queue, normalDb: () => normal,
+      assertQuiescent: () => {}, heads: (source = normal) => ({ recordSequence: (source.prepare("SELECT next_rev-1 AS rev FROM sync_meta WHERE id=0").get() as { rev: number }).rev,
+        eventSequence: events.head }) });
+    cleanups.push(() => lifecycle.close());
+    await f.boot.quiesceForSeal();
+    await lifecycle.drainAndSeal({ mirror: { flush: async () => {} }, retireNative: async () => {}, waitForWork: async () => {},
+      freezeNormal: () => normal.close(), request: async seal => { const { scope: _scope, ...body } = seal; return { ...body, writerEpoch: previous.writerEpoch }; } });
+    const root = path.join(path.dirname(file), "checkpoint");
+    await lifecycle.captureCheckpoint(root);
+    events.close(); lifecycle.close();
+    await f.boot.dispose();
+    const restored = await restoreCloudLocalCommandCheckpointLedger({ root, file, scope: previous, expectedWriterEpoch: previous.writerEpoch });
+    cleanups.push(restored.cleanup);
+    const successor = { ...previous, engineInstanceId: randomUUID(), bootId: vmBoot === "same" ? previous.bootId : randomUUID(), writerEpoch: randomUUID() };
+    Object.assign(f.f.response, successor);
+    f.request.mockClear(); f.startup.mockClear(); f.install.mockClear();
+    const next = new CloudLocalAgentBootRuntime({ ...f.options,
+      scope: { ...f.options.scope, engineInstanceId: successor.engineInstanceId }, runtimeBootId: successor.bootId,
+      predecessor: restored.predecessor });
+    cleanups.push(() => next.dispose());
+    await expect(next.initialize()).resolves.toBe(true);
+    expect(next.scope).toEqual(successor);
+    expect(next.queue.durability()).toEqual({ journalMode: "wal", synchronous: "full" });
+    expect(f.request.mock.calls.map(([operation]) => operation)).toEqual(["bootstrap", "activate"]);
+    expect(f.install).toHaveBeenCalledOnce();
+    expect(f.startup).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "retry" }));
+    if (vmBoot.startsWith("unsealed")) {
+      await next.dispose();
+      const target = { ...successor, engineInstanceId: randomUUID(), bootId: randomUUID(), writerEpoch: randomUUID() };
+      const { writerEpoch: _writer, ...targetScope } = target;
+      const recoveryId = randomUUID(), manifest = JSON.parse(readFileSync(path.join(root, "manifest.json"), "utf8"));
+      const recovered = await recoverCloudLocalCommandCheckpointLedger({ root, file, scope: target,
+        expectedWriterEpoch: successor.writerEpoch, authorization: { ...targetScope, version: 1, mode: "boot-owner-v1", recoveryId,
+          code: "history_recovered_with_gap", coverage: "unknown", predecessor: successor, predecessorRetiredAt: new Date().toISOString(),
+          checkpoint: { writerEpoch: previous.writerEpoch, sha256: manifest.seal.sha256 }, mirroredSequence: 0 } });
+      cleanups.push(recovered.cleanup);
+      Object.assign(f.f.response, target); f.request.mockClear(); f.install.mockClear();
+      const original = f.request.getMockImplementation()!;
+      let activations = 0;
+      if (vmBoot === "unsealed-lost-ack") f.request.mockImplementation(async (operation, input) => {
+        const result = await original(operation, input);
+        if (operation === "activate" && ++activations === 1) throw new CloudAgentExecutionError("authority_transport", "validation");
+        return result;
+      });
+      const recoveredBoot = new CloudLocalAgentBootRuntime({ ...f.options,
+        scope: { ...f.options.scope, engineInstanceId: target.engineInstanceId }, runtimeBootId: target.bootId,
+        predecessor: recovered.predecessor });
+      cleanups.push(() => recoveredBoot.dispose());
+      await expect(recoveredBoot.initialize()).resolves.toBe(true);
+      expect(f.request.mock.calls.find(([op]) => op === "activate")?.[1]).toMatchObject({ historyRecoveryId: recoveryId, writerEpoch: target.writerEpoch });
+      const attempts = f.request.mock.calls.filter(([op]) => op === "activate");
+      expect(attempts).toHaveLength(vmBoot === "unsealed-lost-ack" ? 2 : 1);
+      for (const attempt of attempts) expect(attempt[1]).toEqual(attempts[0]![1]);
+      expect(f.request.mock.calls.filter(([op]) => op === "bootstrap")).toHaveLength(1);
+      expect(f.install).toHaveBeenCalledOnce();
+    }
+  });
+
   it.each([100, 5_000])("shares actor confirmation across sockets and a background renewal delayed by %ims without sharing token admission", async delay => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
     const f = await fixture(); await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
@@ -570,6 +643,137 @@ describe("engine boot-mode orchestration", () => {
     await f.boot.pollCredentialControls();
     expect(f.controls.mock.calls.at(-1)![0]).toMatchObject({ acknowledgements: [ack] });
     expect(f.boot.fences.pendingAcknowledgement()).toBeNull();
+  });
+  it.each(["checkpoint", "seal"] as const)("keeps engine authority when a successful control reply crosses the local %s fence", async fence => {
+    vi.useFakeTimers();
+    const f = await fixture(); let startsAllowed = true;
+    Object.assign(f.options, { startsAllowed: () => startsAllowed });
+    await f.boot.initialize();
+    const fences = f.boot.fences, control = { ...f.f.scope, version: 1 as const, mutationId: randomUUID(), controlRequestId: randomUUID(), fenceEpoch: 1,
+      selectors: [{ provider: "cursor" as const, credentialId: f.f.selection.credentialRun.credentialId }],
+      operation: "pause-starts" as const, desiredCacheRevision: null };
+    const ack = await fences.handle(control);
+    let reply!: (value: Awaited<ReturnType<typeof f.controls>>) => void;
+    f.controls.mockImplementationOnce(() => new Promise(resolve => { reply = resolve; }));
+    const exchange = f.boot.pollCredentialControls(); void exchange.catch(() => {});
+    startsAllowed = false;
+    const sealing = fence === "seal" ? f.boot.quiesceForSeal() : Promise.resolve();
+    reply({ version: 1, mode: "boot-owner-v1", controls: [] });
+    await expect(exchange).resolves.toBeUndefined(); await sealing;
+    expect(f.options.supervisor.onRetirementFailure).not.toHaveBeenCalled();
+    expect(f.boot.active).toBe(false); expect(f.boot.authorityActive).toBe(true);
+    expect(fences.pendingAcknowledgement()).toEqual(ack);
+    const count = f.controls.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(2_000); expect(f.controls).toHaveBeenCalledTimes(count);
+    if (fence === "checkpoint") {
+      startsAllowed = true; await f.boot.pollCredentialControls();
+      expect(fences.pendingAcknowledgement()).toBeNull(); expect(f.boot.active).toBe(true);
+    }
+  });
+  it.each(["engine_authority_rejected", "credential_control_authority_rejected", "foreign-control", "lost-registration"] as const)(
+    "keeps %s terminal when a control reply crosses a local checkpoint fence", async failure => {
+      vi.useFakeTimers(); const f = await fixture(); let startsAllowed = true;
+      Object.assign(f.options, { startsAllowed: () => startsAllowed });
+      await f.boot.initialize();
+      let reply!: (value: Awaited<ReturnType<typeof f.controls>>) => void, refuse!: (error: unknown) => void;
+      f.controls.mockImplementationOnce(() => new Promise((resolve, reject) => { reply = resolve; refuse = reject; }));
+      const exchange = f.boot.pollCredentialControls(); void exchange.catch(() => {});
+      startsAllowed = false;
+      if (failure.endsWith("_rejected")) refuse(Object.assign(new Error("closed synthetic rejection"), { code: failure }));
+      else {
+        if (failure === "lost-registration") f.unnegotiate();
+        reply({ version: 1, mode: "boot-owner-v1", controls: failure === "foreign-control" ? [{ ...f.f.scope, generation: f.f.scope.generation + 1,
+          version: 1, mutationId: randomUUID(), controlRequestId: randomUUID(), fenceEpoch: 1, operation: "pause-starts", desiredCacheRevision: null,
+          selectors: [{ provider: "cursor", credentialId: f.f.selection.credentialRun.credentialId }] }] : [] });
+      }
+      await expect(exchange).rejects.toMatchObject({ code: expect.stringMatching(/^(engine_authority_rejected|credential_control_authority_rejected)$/) });
+      expect(f.options.supervisor.onRetirementFailure).toHaveBeenCalledOnce(); expect(f.boot.authorityActive).toBe(false);
+    });
+  it.each(["late-reply", "cancel-fetch"] as const)("continues heartbeats from checkpoint delivery through a real acknowledged seal across %s", async boundary => {
+    vi.useFakeTimers(); const f = await fixture(), scope = f.f.scope;
+    const origin = "https://control.test", heartbeatEndpoint = origin + "/internal/v1/cloud-workspaces/engine/heartbeat";
+    const normal = openSqlite(path.join(path.dirname(f.options.file), "normal.sqlite"));
+    normal.pragma("journal_mode = WAL"); normal.pragma("synchronous = NORMAL");
+    normal.exec("CREATE TABLE source_head(value INTEGER); INSERT INTO source_head VALUES(1)");
+    cleanups.push(() => { normal.close(); });
+    let startsAllowed = true, holdControls = false, finishControl: ((response: Response) => void) | undefined;
+    let releaseStage!: () => void; const stage = new Promise<void>(resolve => { releaseStage = resolve; });
+    let lifecycle!: CloudLocalCommandWriterLifecycle;
+    const directive: CloudCheckpointDirective = { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 300_000 };
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname.endsWith("/register")) return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-registration-v1",
+        engineInstanceId: scope.engineInstanceId, durableRecordConnected: true, leaseExpiresAtMs: Date.now() + 90_000,
+        heartbeat: { endpoint: heartbeatEndpoint, token: `zwh_${"h".repeat(43)}`, intervalMs: 30_000 } },
+        { headers: { "x-zeros-cloud-local-commands": "1" } });
+      if (pathname.endsWith("/heartbeat")) return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1",
+        accepted: true, engineInstanceId: scope.engineInstanceId, leaseExpiresAtMs: Date.now() + 90_000, checkpointRequest: directive });
+      if (pathname.endsWith("/agent-credential-controls")) {
+        if (!holdControls) return Response.json({ result: { version: 1, mode: "boot-owner-v1", controls: [] } });
+        return new Promise<Response>((resolve, reject) => {
+          finishControl = resolve;
+          if (boundary === "cancel-fetch") init!.signal!.addEventListener("abort",
+            () => reject(new DOMException("synthetic local cancellation", "AbortError")), { once: true });
+        });
+      }
+      const body = JSON.parse(String(init!.body));
+      if (pathname.endsWith("/commands/seal")) {
+        const { scope: _scope, ...seal } = body.seal;
+        return Response.json({ result: { ...seal, writerEpoch: scope.writerEpoch } });
+      }
+      return Response.json({ result: await f.request(pathname.slice(pathname.lastIndexOf("/") + 1), body) });
+    });
+    const checkpoint = vi.fn(async () => {
+      startsAllowed = false;
+      if (boundary === "cancel-fetch") await f.boot.quiesceForSeal();
+      // Hold a real pre-seal gate across another heartbeat. Dispatch must not
+      // await it, and the local admission fence cannot retire the registration.
+      await stage;
+      await lifecycle.drainAndSeal({ mirror: { flush: async () => {} }, retireNative: () => f.boot.quiesceForSeal(),
+        waitForWork: async () => {}, freezeNormal: () => normal.close(),
+        request: (seal, signal) => registration.localCommandSealRequest(seal, signal) });
+    });
+    const lost = vi.fn();
+    const registration = new CloudRuntimeRegistration({ version: 1, audience: "zeros-cloud-engine-runtime-v1",
+      execution: { organizationId: scope.organizationId, workspaceId: scope.workspaceId, generation: scope.generation,
+        setupRunId: randomUUID(), executionFence: 1 },
+      engine: { instanceId: scope.engineInstanceId, protocolVersion: PROTOCOL_VERSION, readinessProbeToken: `zwr_${"r".repeat(43)}` },
+      registration: { endpoint: origin + "/internal/v1/cloud-workspaces/engine/register", token: `zws_${"s".repeat(43)}`,
+        expiresAtMs: Date.now() + 3_600_000 } }, {
+      fetch: fetcher, now: Date.now, negotiateLocalCommands: true, onAuthorityLost: lost,
+      agentRuntime: { profile: "zeros-cloud-worker-v4", runtimeId: `r1-${"a".repeat(64)}`, manifestSha256: "a".repeat(64),
+        baseCompatibilityId: `bc1-${"b".repeat(64)}`, installerReceiptSha256: "c".repeat(64), bootId: scope.bootId, supervisorSessionId: randomUUID() },
+      onDurableRecordSync: async () => {}, onCheckpointRequested: checkpoint,
+    });
+    cleanups.push(() => registration.stop());
+    Object.assign(f.options, { registration, startsAllowed: () => startsAllowed });
+    f.options.supervisor.onRetirementFailure.mockImplementation(() => { f.retire(); void registration.stop(); });
+    await registration.start(); await f.boot.initialize();
+    const queue = f.boot.queue, events = new CloudLocalCommandEventStore({ file: f.options.file, queue, engineLive: () => f.boot.authorityActive });
+    cleanups.push(() => events.close());
+    lifecycle = new CloudLocalCommandWriterLifecycle({ file: f.options.file, queue, normalDb: () => normal,
+      assertQuiescent: () => { if (f.boot.active || !f.boot.authorityActive) throw new Error("writer is not quiescent"); },
+      heads: (source = normal) => ({ recordSequence: (source.prepare("SELECT value FROM source_head").get() as { value: number }).value, eventSequence: events.head }) });
+    cleanups.push(() => lifecycle.close());
+    let exchange: Promise<void> | undefined;
+    try {
+      await vi.advanceTimersByTimeAsync(29_990); holdControls = true;
+      exchange = f.boot.pollCredentialControls(); void exchange.catch(() => {});
+      expect(finishControl).toBeTypeOf("function");
+      await vi.advanceTimersByTimeAsync(10); expect(checkpoint).toHaveBeenCalledOnce();
+      if (boundary === "late-reply") finishControl!(Response.json({ result: { version: 1, mode: "boot-owner-v1", controls: [] } }));
+      await Promise.allSettled([exchange]);
+      expect(f.options.supervisor.onRetirementFailure).not.toHaveBeenCalled();
+      expect(f.boot.authorityActive).toBe(true); expect(f.boot.active).toBe(false);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fetcher.mock.calls.filter(([url]) => String(url) === heartbeatEndpoint)).toHaveLength(2);
+      releaseStage(); await checkpoint.mock.results[0]!.value;
+      expect(lifecycle.readAcknowledgedSeal()).toMatchObject({ scope });
+      expect(lost).not.toHaveBeenCalled(); expect(registration.readiness()).not.toBeNull();
+    } finally {
+      finishControl?.(Response.json({ result: { version: 1, mode: "boot-owner-v1", controls: [] } }));
+      releaseStage(); await Promise.allSettled([...(exchange ? [exchange] : []), ...checkpoint.mock.results.map(result => result.value)]);
+    }
   });
   it("validates the whole returned control scope before retiring a durable ACK", async () => {
     const f = await fixture(); await f.boot.initialize();

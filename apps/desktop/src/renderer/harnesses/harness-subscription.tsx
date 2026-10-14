@@ -27,10 +27,9 @@ import { BLANK, useSessionsStore } from "../features/agent/sessions-store";
 import {
   lastUserPrompt,
   authenticationTurnState,
-  authenticationTurnOutput,
+  latestAuthenticationRecoveryTurn,
 } from "../features/agent/auth-prompt-recovery";
 import { groupMessagesIntoTurns } from "../features/agent/turn-grouping";
-import { TurnFooter } from "../features/agent/turn-footer";
 import { loadAgents, refreshAgents } from "../features/agent/agents-cache";
 import { registerAgentPreferencesFlush } from "../platform/agent-preferences";
 import { BridgeProvider } from "../platform/bridge/use-bridge";
@@ -39,6 +38,7 @@ import type {
   BridgeMessage,
   BridgeRegistryAgent,
 } from "../platform/bridge/messages";
+import { createMessage } from "../platform/bridge/messages";
 import type { AgentTextMessage } from "../features/agent/use-agent-session";
 import { Button } from "../shared/ui";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
@@ -51,6 +51,7 @@ const queueFixture = ids.find((id) => id === params.get("queue"));
 const queueTurns = new Map<string, (reason: string) => void>();
 const queueSteers = new Map<string, (outcome: string) => void>();
 const queuePrompts: string[] = [];
+const queueBridgeListeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const usageFixture = ids.find((id) => id === params.get("usage"));
 let holdUsage = params.has("holdUsage");
 const pendingUsage = new Set<() => void>();
@@ -289,6 +290,12 @@ Object.defineProperty(RuntimeClient.prototype, "status", {
   get: () => "connected",
 });
 RuntimeClient.prototype.connect = () => Promise.resolve();
+if (queueFixture) RuntimeClient.prototype.on = function (type, handler) {
+  const handlers = queueBridgeListeners.get(type) ?? new Set();
+  queueBridgeListeners.set(type, handlers);
+  handlers.add(handler);
+  return () => { handlers.delete(handler); };
+};
 RuntimeClient.prototype.send = (message) => {
   if (queueFixture && message.type === "AGENT_CANCEL" && message.sessionId) queueTurns.get(message.sessionId)?.("cancelled");
   if (message.type === "PTY_WRITE") {
@@ -337,6 +344,9 @@ RuntimeClient.prototype.request = async function <
   }
   if (request.type === "AGENT_LIST_AGENTS")
     return { type: "AGENT_AGENTS_LIST", agents: registry() } as unknown as T;
+  if (request.type === "AGENT_INIT_AGENT")
+    return { type: "AGENT_AGENT_INITIALIZED", agentId: request.agentId,
+      initialize: { protocolVersion: 1, agentCapabilities: { steering: true } } } as unknown as T;
   if (request.type === "AGENT_VALIDATE_KEY")
     return { type: "AGENT_KEY_VALIDATED", ok: true } as unknown as T;
   if (request.type === "RESOLVE_AGENT_BINARY")
@@ -458,6 +468,13 @@ RuntimeClient.prototype.request = async function <
           message: "Sign in required",
         },
       } as unknown as T;
+    // A successful fixture send produces actual root output, as a provider
+    // would. Connection hints and completion metadata alone do not resolve
+    // the historical authentication notice.
+    useSessionsStore.getState().applyBridgeUpdate({ sessionId: request.sessionId, update: {
+      sessionUpdate: "agent_message_chunk", messageId: `reply-${request.agentId}-${counts.prompts}`,
+      phase: "final_answer", content: { type: "text", text: "Continued the original request." },
+    } });
     return {
       type: "AGENT_PROMPT_COMPLETE",
       sessionId: request.sessionId,
@@ -502,11 +519,14 @@ function Harness() {
     useState<BrowserSubscriptionProvider>(usageFixture ?? "claude");
   const [settings, setSettings] = useState(Boolean(usageFixture));
   const [active, setActive] = useState(true);
+  const [readOnly, setReadOnly] = useState(false);
   const [draft, setDraft] = useState("Original message");
   const actions = useAgentSessions();
   const chatId = `chat-${provider}`;
   const session = useChatSession(chatId);
   const prompt = lastUserPrompt(session.messages);
+  const turns = groupMessagesIntoTurns(session.messages);
+  const recoveredAt = latestAuthenticationRecoveryTurn(turns);
   useEffect(() => subscribeProviderSettingsTab(() => setSettings(true)), []);
   useEffect(() => { if (usageFixture) requestProviderSettings(usageFixture); }, []);
   useEffect(() => {
@@ -559,6 +579,9 @@ function Harness() {
         <Button onClick={() => setActive((v) => !v)}>
           Toggle retained surface
         </Button>
+        <Button onClick={() => setReadOnly(value => !value)}>
+          Toggle read-only transcript
+        </Button>
         <Button onClick={() => setSettings(false)}>Return to chat</Button>
         <Button onClick={() => requestProviderSettings(provider)}>
           Settings
@@ -591,13 +614,15 @@ function Harness() {
       </section>
       {!settings && active && (
         <section data-chat>
-          {groupMessagesIntoTurns(session.messages).map(
+          {turns.map(
             (turn, index, turns) => {
               const state = authenticationTurnState({
                 userPrompt: turn.userPrompt,
                 events: turn.events,
                 failureKind: session.failure?.kind,
                 isTail: index === turns.length - 1,
+                recovered: recoveredAt > index,
+                readOnly,
                 inFlight:
                   session.status === "streaming" || !!turn.userPrompt?.queued,
               });
@@ -608,20 +633,12 @@ function Harness() {
                       {turn.userPrompt.text}
                     </p>
                   )}
-                  {state === "sign-in" && (
+                  {state && (
                     <AuthenticationNotice
                       name={names[provider]}
+                      historical={state !== "sign-in"}
+                      resolved={state === "signed-in"}
                       onSignIn={() => requestProviderSettings(provider)}
-                    />
-                  )}
-                  {state === "stopped" && turn.userPrompt && (
-                    <TurnFooter
-                      chatId={chatId}
-                      turnId={turn.userPrompt.id}
-                      startedAt={turn.userPrompt.createdAt}
-                      events={authenticationTurnOutput(turn.events)}
-                      live={false}
-                      fallbackStatusLabel="AGENT STOPPED"
                     />
                   )}
                 </React.Fragment>
@@ -630,11 +647,12 @@ function Harness() {
           )}
           <input
             aria-label="Message"
+            disabled={readOnly}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
           />
           <Button
-            disabled={!draft.trim()}
+            disabled={readOnly || !draft.trim()}
             onClick={() => {
               const first = !prompt;
               void actions.sendPrompt(
@@ -663,6 +681,14 @@ createRoot(document.getElementById("root")!).render(
       <AgentSessionsProvider>
         {queueFixture ? <QueueFixture provider={queueFixture} prompts={queuePrompts}
           finish={(sessionId) => queueTurns.get(sessionId)?.("end_turn")}
+          background={(sessionId, active) => {
+            const notification = createMessage({ type: "AGENT_SESSION_UPDATE", source: "engine", agentId: queueFixture,
+              notification: { sessionId, update: { sessionUpdate: "background_tasks_update", waiting: active,
+                activity: { state: "idle", startedAt: 1 }, tasks: active
+                  ? [{ taskId: "background-check", taskType: "local_bash", name: "Background verification", startedAt: 1, updatedAt: 1 }]
+                  : [] } } });
+            for (const listener of queueBridgeListeners.get("AGENT_SESSION_UPDATE") ?? []) listener(notification);
+          }}
           acknowledge={(sessionId, outcome) => queueSteers.get(sessionId)?.(outcome)} /> : <Harness />}
       </AgentSessionsProvider>
     </BridgeProvider>

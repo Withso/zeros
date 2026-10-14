@@ -440,6 +440,22 @@ function helperFailure(
     ) {
       const mapped = HELPER_FAILURES[parsed.code];
       if (mapped) {
+        const diagnostic = parseSetupDiagnostic(parsed.diagnostic);
+        const credentialFenceRejected = parsed.code === "engine_readiness_failed" &&
+          diagnostic?.engineStartup?.name === "CloudCredentialControlError" &&
+          ["credential_control_authority_rejected", "credential_control_conflict", "credential_control_limit",
+            "credential_control_storage_unavailable", "credential_control_invalid"].includes(diagnostic.engineStartup.code);
+        const checkpointCode = parsed.code === "engine_readiness_failed" && diagnostic?.engineStartup?.phase === "history_restore" &&
+          diagnostic.engineStartup.name === "CloudCommandRuntimeError" && diagnostic.engineStartup.code.startsWith("checkpoint_")
+          ? diagnostic.engineStartup.code : null;
+        // Re-running the same pin cannot produce a missing predecessor seal
+        // or authorize an older artifact. Preserve custody and stop this claim
+        // once; only an explicit authenticated recovery may bridge that gap.
+        const checkpointFailure = checkpointCode === null ? null : checkpointCode === "checkpoint_inventory_timeout"
+          ? { code: "setup_checkpoint_restore_unavailable", retryable: true }
+          : { code: ["checkpoint_expected_writer_mismatch", "checkpoint_manifest_missing", "checkpoint_part_missing",
+            "checkpoint_seal_missing", "checkpoint_writer_unsealed"].includes(checkpointCode)
+            ? "setup_checkpoint_incomplete" : "setup_checkpoint_restore_invalid", retryable: false };
         // Boat can expose its command channel while snapshot restoration is
         // still replacing runtime files. A failed proof never admits the VM:
         // let the setup worker's bounded claim budget rerun the entire helper
@@ -449,10 +465,10 @@ function helperFailure(
           execution.provider.name === "boat" &&
           parsed.code === "image_contract_invalid";
         return Object.assign(setupError(
-          mapped.code,
+          checkpointFailure?.code ?? mapped.code,
           "Cloud workspace setup helper did not complete",
-          parsed.code === "computer_environment_revoked" || (execution.runtime && ["setup_command_failed", "setup_hook_retry_required"].includes(parsed.code)) ? false : mapped.retryable || restoringBoatImage,
-        ), parsed.version === 2 || parsed.version === 3 ? { diagnostic: parseSetupDiagnostic(parsed.diagnostic)! } : {},
+          credentialFenceRejected || parsed.code === "computer_environment_revoked" || (execution.runtime && ["setup_command_failed", "setup_hook_retry_required"].includes(parsed.code)) ? false : checkpointFailure?.retryable ?? (mapped.retryable || restoringBoatImage),
+        ), parsed.version === 2 || parsed.version === 3 ? { diagnostic: diagnostic! } : {},
         parsed.version === 3 ? { hookLog: parseCloudWorkspaceSetupHookLog(parsed.hookLog)! } : {});
       }
     }
@@ -526,6 +542,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
     const code = diagnosticCode((error as {code?:unknown}|null)?.code);
     typed.code = code === "compute_reconciliation_failed" ? "setup_provider_failure" : code;
     if (error instanceof CloudWorkspaceSetupError) typed.retryable = error.retryable;
+    if (error instanceof CloudWorkspaceSetupError) error.failureDiagnostic = { ...typed, ...(setup ? { setup } : {}) };
     const source = sourceError && typeof sourceError === "object" ? sourceError as { code?: unknown } : {};
     const transientProvider = typed.retryable && !setup && (
       (sourceError instanceof CloudProviderError && sourceError.code.startsWith("provider_") && sourceError.code !== "provider_resource_lost") ||
@@ -705,8 +722,10 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
         true,
       );
       await this.retain(execution,revokeFailure,"setup_admission",error);
-      revokeFailure.timings = mergeSetupTimings(result?.timings ?? failure?.timings, transportTimings, clock?.snapshot());
-      throw revokeFailure;
+      const primary = failure ?? revokeFailure;
+      if (failure && revokeFailure.failureDiagnostic) primary.cleanupDiagnostic = revokeFailure.failureDiagnostic;
+      primary.timings = mergeSetupTimings(result?.timings ?? failure?.timings, transportTimings, clock?.snapshot());
+      throw primary;
     }
     if (failure) {
       failure.timings = mergeSetupTimings(failure.timings, transportTimings, clock?.snapshot());

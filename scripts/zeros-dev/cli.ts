@@ -63,7 +63,7 @@ async function services(checkout: string, write: (value: unknown) => void): Prom
       } catch { throw new ZerosDevError("invalid_request"); }
       finally { await handle?.close(); }
     },
-    connect: (run, signal) => ZerosDevRuntime.connect(session, api, run, { signal }),
+    connect: (run, signal, onAdmissionEvent) => ZerosDevRuntime.connect(session, api, run, { signal, onAdmissionEvent }),
     healthCp: () => controlPlaneHealth(transport),
     healthDb: async run => databaseHealth((await store.read()).values, await session.fixture(), run),
     healthLogs: async run => controlPlaneLogs((await store.read()).values, run),

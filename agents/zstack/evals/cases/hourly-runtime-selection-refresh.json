@@ -1,0 +1,9 @@
+{
+  "id": "hourly-runtime-selection-refresh",
+  "kind": "replay",
+  "area": "release-dev-environment",
+  "fixedBy": "pr:497",
+  "symptom": "The hourly cloud canary required a durable Computer pin to equal a moving runtime selection and would block cloud PRs after each newly qualified release.",
+  "rule": "Capture the qualified runtime/base once; rebuild an older fixture at most once within a separate phase budget. Unavailable or changed selection is a closed outcome, never a rebuild loop or a successful lifecycle. See the bug-fix playbook.",
+  "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-hourly.test.ts scripts/__tests__/zeros-dev-product.test.ts scripts/__tests__/zeros-dev-hourly-main.test.ts scripts/__tests__/zeros-dev-hourly-workflow.test.ts"
+}

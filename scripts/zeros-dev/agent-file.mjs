@@ -115,7 +115,14 @@ export class AgentFileStore {
       try {await mkdir(lock,{mode:0o700});held=await lstat(lock);safeDirectory(held,0o700);break;}
       catch(error) {
         if(error.code!=="EEXIST")throw error.message?.startsWith("zeros_dev_credentials_")?error:failure("unsafe");
-        safeDirectory(await lstat(lock),0o700);
+        try {safeDirectory(await lstat(lock),0o700);}
+        catch(observed) {
+          if(observed.code!=="ENOENT")throw observed.message?.startsWith("zeros_dev_credentials_")?observed:failure("unsafe");
+          // The holder may release between mkdir(EEXIST) and this lookup.
+          // Retry acquisition now, without extending the contention deadline.
+          if(performance.now()>=deadline)throw failure("busy");
+          continue;
+        }
         if(performance.now()>=deadline)throw failure("busy");
         await new Promise(resolve=>setTimeout(resolve,25));
       }

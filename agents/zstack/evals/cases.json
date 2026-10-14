@@ -2,6 +2,42 @@
   "schema": "zeros.zstack-evals/v1",
   "cases": [
     {
+      "id": "claude-monitor-visible-activity",
+      "kind": "replay",
+      "area": "vm-engine-agents",
+      "fixedBy": "pr:480",
+      "symptom": "Two background jobs plus a passive Monitor appeared as three running tasks; streams without ambient activity metadata reproduced the extra count.",
+      "rule": "docs/agent-tool-presentation.md: infer ambient Monitor activity only from native tool/task identity when its explicit flag is absent; retain ownership, notifications and cancellation separately from visible activity.",
+      "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/claude/__tests__/monitor-activity.test.ts apps/desktop/src/engine/agents/adapters/claude-sdk/__tests__/adapter.test.ts apps/desktop/src/renderer/features/agent/__tests__/agent-activity.test.ts"
+    },
+    {
+      "id": "claude-provisional-auth-session",
+      "kind": "replay",
+      "area": "vm-engine-agents",
+      "fixedBy": "c7ebbceeed6dc0ce6f0d4efad61e64b126074560",
+      "symptom": "Failed initial authentication saved Claude's provisional init ID; the next prompt resumed a nonexistent conversation and retained duplicate error text after recovery.",
+      "rule": "Confirm root model work or a successful root result before persisting a new provider binding. Preserve confirmed bindings and derive resolved authentication UI only from subsequent root conversation work.",
+      "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/claude-sdk/__tests__/adapter.test.ts apps/desktop/src/engine/agents/adapters/claude/__tests__/action-errors.test.ts apps/desktop/src/renderer/features/agent/__tests__/auth-prompt-recovery.test.ts apps/desktop/src/renderer/features/agent/__tests__/authentication-notice.test.ts"
+    },
+    {
+      "id": "claude-usage-status-through-history",
+      "kind": "replay",
+      "area": "vm-engine-agents",
+      "fixedBy": "c7ebbceeed6dc0ce6f0d4efad61e64b126074560",
+      "symptom": "Claude usage warnings repeated across background results and appeared inside and after output. Reusing immutable notice IDs also dropped changed statuses, and legacy history used a different message identity.",
+      "rule": "zstack-review: exercise provider updates through the shared history reducer. Keep budget state through a provider turn, emit new receipts for changed status, and project one current notice at the final visual segment in UI and export.",
+      "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/claude/__tests__/sdk-event-feedback.test.ts apps/desktop/src/renderer/features/agent/__tests__/transcript-notices.test.ts apps/desktop/src/renderer/features/agent/__tests__/transcript-format.test.ts apps/desktop/src/renderer/features/agent/__tests__/turn-event-list-streaming.test.ts"
+    },
+    {
+      "id": "claude-agent-lifecycle-duplicate",
+      "kind": "replay",
+      "area": "vm-engine-agents",
+      "fixedBy": "c7ebbceeed6dc0ce6f0d4efad61e64b126074560",
+      "symptom": "A real Claude Agent group and a separate background task row represented the same native child, duplicating its activity in the transcript.",
+      "rule": "docs/agent-tool-presentation.md: hide a background lifecycle row only when an exact native child identity joins it to a visible Agent group. Retain orphan tasks, non-agent tasks, and otherwise unrepresented failures.",
+      "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/claude/__tests__/subagent-ownership.test.ts apps/desktop/src/renderer/features/agent/__tests__/agent-background-presentation.test.ts apps/desktop/src/renderer/features/agent/__tests__/turn-grouping.test.ts"
+    },
+    {
       "id": "boat-saved-tree-real-shape",
       "kind": "replay",
       "area": "snapshots-retention",
@@ -113,7 +149,7 @@
       "id": "empty-renderer-log-poll",
       "kind": "replay",
       "area": "desktop-cloud-ui-state",
-      "fixedBy": "pr:477",
+      "fixedBy": "fdf5de08fccdaa2c5397dedc40c4ad55b755ff96",
       "symptom": "Renderer logging left a one-second interval running with an empty queue or stalled IPC, despite making no log_submit requests.",
       "rule": "playbooks/bug-fix.md: exercise the real producer and consumer with a fake clock; assert no scheduled work after the queue drains, and cover pending flights and failure backoff.",
       "check": "pnpm test:git apps/desktop/src/renderer/platform/observability/logging/__tests__/renderer-log-scheduling.test.ts"
@@ -122,7 +158,7 @@
       "id": "warm-context-capacity-commit-order",
       "kind": "replay",
       "area": "access-authority",
-      "fixedBy": "pr:478",
+      "fixedBy": "32d791e6b63b7bb45707c7a98f6146d439d9c33a",
       "symptom": "The concurrent last-slot warm-context test expected only a capacity 429, but bounded SERIALIZABLE retries can exhaust before the winner commits and correctly return transient contention 503.",
       "rule": "playbooks/ci-red.md: control both commit schedules, distinguish observed committed capacity from retry exhaustion, and keep the exact final capacity bound.",
       "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/agent-boot-executions.integration.test.ts -t 'does not oversubscribe the last context slot'"
@@ -131,7 +167,7 @@
       "id": "retention-pagination-test-budget",
       "kind": "replay",
       "area": "snapshots-retention",
-      "fixedBy": "pr:474",
+      "fixedBy": "b8ab0b239a8c9615d50d83a153c853854c91b305",
       "symptom": "A retention pagination fixture with 53 durable journals and 153 deletion attempts exceeded the default 5 s test timeout under modest database latency. The listener changed by the PR was never started by this test.",
       "rule": "playbooks/ci-red.md: trace callback reachability, qualify large database fixtures with bounded transit delay, and adjust only the test budget; prove notification overlap with held work and observed completion.",
       "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/computer-template-retention.integration.test.ts"

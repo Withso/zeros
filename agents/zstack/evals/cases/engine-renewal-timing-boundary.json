@@ -1,0 +1,9 @@
+{
+  "id": "engine-renewal-timing-boundary",
+  "kind": "replay",
+  "area": "cloud-engine-authority",
+  "fixedBy": "pr:496",
+  "symptom": "CP request spans omitted the VM's end-to-end heartbeat and client/actor/context renewal duration, so CP latency could not explain the complete renewal path.",
+  "rule": "playbooks/bug-fix.md: observe real renewal boundaries with a separate monotonic clock and bounded closed-label reports, without adding polling, retaining identities or changing authority results.",
+  "check": "pnpm test:git apps/desktop/src/engine/__tests__/cloud-runtime-registration.test.ts apps/desktop/src/engine/__tests__/cloud-agent-boot-client.test.ts scripts/__tests__/control-plane-scope.test.ts"
+}

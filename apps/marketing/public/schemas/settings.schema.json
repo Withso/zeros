@@ -267,6 +267,13 @@
         "show_hidden_workspaces": {
           "type": "boolean"
         },
+        "follow_up_behavior": {
+          "type": "string",
+          "enum": [
+            "queue",
+            "steer"
+          ]
+        },
         "internal": {
           "type": "object",
           "propertyNames": {

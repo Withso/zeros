@@ -14,6 +14,15 @@ const document = {
 };
 
 describe("cloud workspace sharing projection", () => {
+  it("retains only a closed additive history-gap receipt, never fabricated empty coverage", () => {
+    const historyRecovery = { recoveryId: "88888888-8888-4888-8888-888888888888", code: "history_recovered_with_gap", coverage: "unknown",
+      generation: 1, engineInstanceId: "66666666-6666-4666-8666-666666666666", bootId: "44444444-4444-4444-8444-444444444444",
+      writerEpoch: "55555555-5555-4555-8555-555555555555", completedAt: "2026-10-14T00:00:00Z" };
+    expect(CloudWorkspaceDocumentSchema.parse({ ...document, historyRecovery }).historyRecovery).toEqual(historyRecovery);
+    expect(CloudWorkspaceDocumentSchema.parse(document)).not.toHaveProperty("historyRecovery");
+    for (const change of [{ coverage: "empty" }, { code: "history_restored" }, { recoveryId: "foreign" }, { generation: 0 }, { predecessor: {} }])
+      expect(CloudWorkspaceDocumentSchema.safeParse({ ...document, historyRecovery: { ...historyRecovery, ...change } }).success).toBe(false);
+  });
   it("retains the additive failed-setup projection without requiring it from older servers", () => {
     const setupFailure = { code: "setup_image_contract_invalid", hasLog: false };
     expect(CloudWorkspaceDocumentSchema.parse({ ...document, setupFailure })).toMatchObject({ setupFailure });

@@ -218,13 +218,24 @@ export class RuntimeQualificationWorker {
     } catch (error) {
       result = error instanceof QualificationFailure ? error.diagnostic : failure(stage, error instanceof BuilderVmError ? error.check : "operation_failed");
     }
+    if (result && !result.ok) {
+      // Commit the first closed failure before potentially slow provider
+      // cleanup. Another replica may own the later reconciliation attempt.
+      await withSystemTx(this.options.pool, tx => tx.query(`UPDATE cloud_runtime_qualification_runs
+        SET diagnostic=COALESCE(diagnostic,$2::jsonb) WHERE id=$1 AND state='running'`,
+      [run.id, JSON.stringify(result)])).catch(() => {
+        // Diagnostic storage must not prevent deletion. finish() still has
+        // this result if the database recovers during cleanup.
+        console.warn("[cloud-runtime] qualification_diagnostic_persist_failed");
+      });
+    }
     // Cleanup precedes approval. An unknown create is replayed with the exact
     // journalled key/body solely to recover its identity and delete it.
     const cleaned = await this.cleanup(run);
     if (!cleaned) {
       await withSystemTx(this.options.pool, async tx => {
-        await tx.query(`UPDATE cloud_runtime_qualification_runs SET diagnostic=$2,deadline_at=LEAST(deadline_at,clock_timestamp()),cleanup_lease_until=NULL
-          WHERE id=$1 AND state='running'`, [run.id, JSON.stringify(failure("cleanup", "cleanup_unconfirmed"))]);
+        await tx.query(`UPDATE cloud_runtime_qualification_runs SET diagnostic=COALESCE(diagnostic,$2::jsonb),deadline_at=LEAST(deadline_at,clock_timestamp()),cleanup_lease_until=NULL
+          WHERE id=$1 AND state='running'`, [run.id, JSON.stringify(result && !result.ok ? result : failure("cleanup", "cleanup_unconfirmed"))]);
       });
       return;
     }
@@ -264,7 +275,7 @@ export class RuntimeQualificationWorker {
       const base = (await tx.query(`SELECT 1 FROM cloud_runtime_base_images base JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
         WHERE base.base_image_id=$1 AND base.base_compatibility_id=$2 AND base.revoked_at IS NULL AND contract.revoked_at IS NULL FOR SHARE OF base,contract`,
       [run.base_image_id, run.base_compatibility_id])).rowCount;
-      const active = (await tx.query<{ state: Run["state"]; timely: boolean }>(`SELECT state,deadline_at>clock_timestamp() AS timely FROM cloud_runtime_qualification_runs
+      const active = (await tx.query<{ state: Run["state"]; timely: boolean; diagnostic: ClosedDiagnostic | null }>(`SELECT state,diagnostic,deadline_at>clock_timestamp() AS timely FROM cloud_runtime_qualification_runs
         WHERE id=$1 FOR UPDATE`, [run.id])).rows[0];
       if (!active) return;
       if (active.state !== "running") {
@@ -272,6 +283,7 @@ export class RuntimeQualificationWorker {
           WHERE id=$1 AND state IN ('failed','succeeded')`, [run.id]);
         return;
       }
+      if (active.diagnostic?.ok === false) result = active.diagnostic;
       if (result.ok && (!bundle || !base)) result = failure("admit", "runtime_ineligible");
       if (result.ok && !active.timely) result = failure("admit", "timeout");
       if (result.ok) {

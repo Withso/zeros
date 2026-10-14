@@ -28,6 +28,8 @@ import type {
   CloudWorkspaceProvider,
 } from "./provider.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
+import { activateLocalCloudCommandWriter, reserveLocalCloudCommandWriter } from "./commands.js";
+import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
 import {
   DatabaseCloudWorkspaceSetupRecoveryService,
   issueWorkspaceSetupRecoveryGrant,
@@ -125,10 +127,46 @@ d("cloud workspace content durability", () => {
     };
   }
 
-
-
-
-
+  it("does not complete a final checkpoint before the exact native writer has sealed", async () => {
+    const authority = engineAuthority();
+    const bootId = (await pool.query("SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0].runtime_boot_id;
+    const writerEpoch = await withSystemTx(pool, async tx => {
+      const epoch = await reserveLocalCloudCommandWriter(tx, authority, bootId, fixture.userId, 1);
+      await activateLocalCloudCommandWriter(tx, authority, { bootId, writerEpoch: epoch });
+      return epoch;
+    });
+    const manifest = await blobs.put({ ...authority, bytes: Buffer.from("{}") });
+    const revision = await content.append({ ...authority, expectedRevision: 0, idempotencyKey: randomUUID(),
+      gitBaseCommit: null, gitHeadRef: null, mutations: [] });
+    const intentId = randomUUID();
+    const request = await withSystemTx(pool, async tx => {
+      await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256)
+        VALUES($1,$2,1,$3,$4,'stop',$5,$6)`, [intentId, fixture.workspaceId, fixture.organizationId, fixture.userId, randomUUID(), Buffer.alloc(32)]);
+      return enqueueWorkspaceCheckpointRequest(tx, { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
+        generation: 1, requestedBy: fixture.userId, lifecycleIntentId: intentId, reason: "before_stop", idempotencyKey: randomUUID() });
+    });
+    const commit = () => content.commitCheckpoint({ ...authority, requestId: request.id, idempotencyKey: `native-final.${request.id}`,
+      contentRevision: revision.revision, reason: "before_stop", manifestBlobId: manifest.id, artifactBlobId: null,
+      inclusionPolicy: {}, fileCount: 0, totalBytes: 0, integritySha256: manifest.plaintextSha256 });
+    await expect(commit()).rejects.toMatchObject({ code: "checkpoint_request_rejected" });
+    expect((await pool.query("SELECT state,checkpoint_id FROM workspace_checkpoint_requests WHERE id=$1", [request.id])).rows[0])
+      .toEqual({ state: "queued", checkpoint_id: null });
+    expect((await pool.query("SELECT count(*)::int count FROM workspace_checkpoints WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].count).toBe(0);
+    // A valid relational seal fixture: its immutable shape is independently
+    // enforced by the seal API/storage suites. Completion must now progress.
+    const seal = { version: 1, scope: { organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, generation: 1,
+      engineInstanceId: fixture.engineInstanceId, bootId, writerEpoch, fundingOwnerUserId: fixture.userId, fundingOwnerEpoch: 1 },
+      sealId: randomUUID(), sequence: 0, recordSequence: 0, eventSequence: 0, inventorySha256: "a".repeat(64), sha256: "b".repeat(64) };
+    const { scope: _scope, ...descriptor } = seal;
+    await pool.query(`UPDATE cloud_workspace_local_command_writers SET sealed_sequence=0,seal_record_sequence=0,seal_event_sequence=0,
+      seal=$2::jsonb,seal_ack=$3::jsonb WHERE writer_epoch=$1`, [writerEpoch, JSON.stringify(seal), JSON.stringify({ ...descriptor, writerEpoch })]);
+    await expect(commit()).resolves.toMatchObject({ replayed: false });
+    await expect(withSystemTx(pool, async tx => {
+      await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE", [fixture.workspaceId, fixture.organizationId]);
+      return prepareCloudWorkspaceStopSeal(tx, { ...authority, intentId, operation: "stop" });
+    })).resolves.toBe(true);
+    expect((await pool.query("SELECT count(*)::int count FROM audit_log WHERE action='cloud_workspace.stop_unsealed'")).rows[0].count).toBe(0);
+  });
   it("authenticates upload ingress by the live indexed engine capability and rechecks publication after revocation", async () => {
     await expect(blobs.authorizeUpload(`zwh_${"x".repeat(43)}`)).rejects.toMatchObject({ code: "engine_authority_rejected" });
     await expect(blobs.authorizeUpload(fixture.heartbeatToken)).resolves.toBeUndefined();

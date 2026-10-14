@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ClaudeStreamTranslator } from "../translator";
 import type { SessionNotification } from "../../../types";
+import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
 
 function setup() {
   const events: SessionNotification["update"][] = [];
@@ -33,6 +34,33 @@ const tool = (id: string, parent?: string) => ({
 });
 
 describe("Claude SDK lifecycle and feedback events", () => {
+  it("retains usage recovery when immutable notice events pass through the shared history reducer", () => {
+    let messages: AgentMessage[] = [];
+    const t = new ClaudeStreamTranslator({ sessionId: "usage", emit: note => { messages = applyUpdate(messages, note); } });
+    const usage = (status: string) => ({ type: "rate_limit_event", rate_limit_info: { status, rateLimitType: "five_hour" } });
+    t.feed(usage("allowed_warning"));
+    t.feed({ type: "result", subtype: "success" });
+    t.feed(usage("allowed"));
+    expect(messages.at(-1)).toMatchObject({ kind: "error_notice", message: "Claude usage is available again." });
+    t.feed(usage("allowed_warning"));
+    expect(messages.at(-1)).toMatchObject({ kind: "error_notice", message: "Claude is nearing its usage limit." });
+  });
+
+  it("keeps usage feedback in one notice across parent results and background continuations", () => {
+    const { t, events, text } = setup();
+    const warning = { type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour" } };
+    t.feed({ ...warning, uuid: "usage-first" });
+    t.feed({ type: "result", subtype: "success", is_error: false, result: "First report" });
+    t.feed({ ...warning, uuid: "usage-continuation" });
+    const notices = events.filter(e => e.sessionUpdate === "error_notice").filter(e => e.code === "claude-rate-limit:five_hour");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ severity: "warning", recoverable: true, message: "Claude is nearing its usage limit." });
+    expect(text().some(e => e.content.type === "text" && e.content.text.includes("usage limit"))).toBe(false);
+    t.feed({ ...warning, uuid: "usage-restored", rate_limit_info: { status: "allowed", rateLimitType: "five_hour" } });
+    expect(events.at(-1)).toMatchObject({ sessionUpdate: "error_notice", code: notices[0].code, message: "Claude usage is available again." });
+    expect(t.terminalFailure).toBeNull();
+  });
+
   it.each([
     system("informational", {
       level: "warning",
@@ -373,7 +401,8 @@ describe("Claude SDK lifecycle and feedback events", () => {
   });
 
   it("shows actionable rate-limit transitions once without classifying the whole turn as failed", () => {
-    const { t, text } = setup();
+    const { t, events } = setup();
+    const notices = () => events.filter(e => e.sessionUpdate === "error_notice");
     const frame = {
       type: "rate_limit_event",
       uuid: "limit-1",
@@ -384,24 +413,26 @@ describe("Claude SDK lifecycle and feedback events", () => {
     };
     t.feed(frame);
     t.feed({ ...frame, uuid: "limit-2" });
-    expect(text()).toHaveLength(1);
+    expect(notices()).toHaveLength(1);
     t.feed({
       ...frame,
       uuid: "limit-3",
       rate_limit_info: { ...frame.rate_limit_info, status: "rejected" },
     });
-    expect(text()).toHaveLength(2);
+    expect(notices()).toHaveLength(2);
+    expect(notices()[1].noticeId).not.toBe(notices()[0].noticeId);
+    expect(notices()[1].code).toBe(notices()[0].code);
     expect(t.sawResult).toBe(false);
   });
 
   it("does not advise stopping when subscription usage is exhausted but extra usage remains available", () => {
-    const { t, text } = setup();
+    const { t, events } = setup();
     t.feed({
       type: "rate_limit_event",
       rate_limit_info: { status: "rejected", overageStatus: "allowed" },
     });
-    expect(text()[0].content).toMatchObject({
-      text: "Claude has reached its included usage limit. Extra usage is available.",
+    expect(events.find(e => e.sessionUpdate === "error_notice")).toMatchObject({
+      message: "Claude has reached its included usage limit. Extra usage is available.",
     });
     expect(t.sawResult).toBe(false);
   });

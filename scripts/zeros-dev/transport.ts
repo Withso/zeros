@@ -32,7 +32,7 @@ export class AlphaTransport {
     if(url.origin!==ALPHA_ORIGIN)throw new ZerosDevError("invalid_request");
     const timeout=AbortSignal.timeout(input.timeoutMs??20_000);
     const signal=input.signal?AbortSignal.any([input.signal,timeout]):timeout;
-    signal.throwIfAborted();
+    if(signal.aborted)throw new ZerosDevError("deadline");
     let response:Response;
     try{
       response=await beforeDeadline(this.fetchImpl(url.href,{

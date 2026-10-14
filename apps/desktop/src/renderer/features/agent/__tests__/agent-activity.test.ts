@@ -54,6 +54,20 @@ describe("shared transcript and tab activity", () => {
       agentActivity({ ...waiting, status: "streaming" }, "new-prompt"),
     ).toBe("running");
   });
+  it("rests when the parent is idle and only ambient tasks remain before Result", () => {
+    const idle = { ...waiting, status: "streaming" as const, backgroundTasks: [], waitingForBackgroundTasks: false };
+    expect(agentActivity(idle)).toBeNull();
+    expect(chatWorkingActivity(idle)).toBeNull();
+    expect(workingActivity(idle)).toBeNull();
+    expect(agentActivity(idle, "new-prompt")).toBe("running");
+    expect(agentActivity({ ...idle, backgroundActivity: { state: "running", startedAt: 100 } })).toBe("running");
+    expect(agentActivity({ ...idle, workflows: [{
+      taskId: "workflow", name: "Review", status: "running", phases: [], startedAt: 100, updatedAt: 200,
+    }] })).toBe("running");
+    for (const agentId of ["codex", "cursor"]) {
+      expect(agentActivity({ ...idle, agentId })).toBe("running");
+    }
+  });
   it("does not invent Claude-style background continuation for Codex or Cursor", () => {
     for (const agentId of ["codex", "cursor"]) {
       expect(agentActivity({ ...waiting, agentId })).toBe("running");

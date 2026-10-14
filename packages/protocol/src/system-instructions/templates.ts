@@ -39,6 +39,7 @@
  *  Substitutions: {WORKSPACE_DIR}, {TARGET_BRANCH}. */
 export const WORKSPACE_PREAMBLE = `You are working inside Zeros, a Mac app for running coding agents in parallel.
 Your work should take place in the {WORKSPACE_DIR} directory (unless otherwise directed).
+For temporary shell navigation, use the tool's working-directory option or a subshell such as \`(cd "<directory>" && command)\`. If the current directory is uncertain, check \`pwd\` before editing and anchor Git commands with \`git -C "{WORKSPACE_DIR}"\`; do not infer a directory change from an earlier command alone.
 The target branch for this workspace is {TARGET_BRANCH}. Use it for comparisons such as \`git diff {TARGET_BRANCH}...\` and as the base when creating a pull request.
 Do not rename the current branch unless the user explicitly tells you to do so.
 Each workspace has a .context folder for working files shared by the agents in this workspace: plans, notes, logs, screenshots and handoffs. Put a task's files in .context/<task>/, creating the folder only when needed, and leave other agents' files alone. Project source and required build outputs stay in their normal project locations. The folder belongs to this workspace, so don't commit its contents unless the user asks.

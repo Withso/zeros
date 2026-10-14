@@ -1,0 +1,9 @@
+{
+  "id": "serializable-context-publication-schedules",
+  "kind": "replay",
+  "area": "control-plane-read-projection",
+  "fixedBy": "pr:502",
+  "symptom": "The concurrent warm-context test required both callers to succeed, although one could exhaust all three serialization retries before the winner committed and correctly return cloud_agent_credential_busy.",
+  "rule": "The CI-red playbook requires separate committed and still-pending COMMIT schedules, exact success or refusal, one stored context identity and each caller's original deadline. An INSERT barrier alone does not determine the retry outcome; never widen production retries to satisfy the fixture.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/agent-boot-executions.integration.test.ts"
+}

@@ -13,11 +13,23 @@ vi.mock("pg", () => ({
   },
 }));
 
-import { createPool, withSystemTx, withUserTx } from "./db.js";
+import { createPool, createMigrationPool, withSystemTx, withUserTx } from "./db.js";
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("database connection resilience", () => {
+  it("reserves separate bounded pools without giving workers the interactive deadline", async () => {
+    createPool("postgres://operator@database.test/zeros", { workload: "api" });
+    expect(pools.options.at(-1)).toMatchObject({ max: 6, connectionTimeoutMillis: 1_000, statement_timeout: 5_000 });
+    createPool("postgres://operator@database.test/zeros", { workload: "worker" });
+    expect(pools.options.at(-1)).toMatchObject({ max: 2, connectionTimeoutMillis: 10_000, statement_timeout: 30_000 });
+    createPool("postgres://operator@database.test/zeros", { workload: "retirement-lock" });
+    expect(pools.options.at(-1)).toMatchObject({ max: 1, connectionTimeoutMillis: 10_000, statement_timeout: 30_000 });
+    createPool("postgres://operator@database.test/zeros", { workload: "listener" });
+    expect(pools.options.at(-1)).toMatchObject({ max: 2 });
+    createMigrationPool("postgres://operator@database.test/zeros");
+    expect(pools.options.at(-1)).toMatchObject({ max: 1, statement_timeout: 30_000 });
+  });
   it("never enters a callback when batched role setup fails", async () => {
     const denied = Object.assign(new Error("role denied"), { code: "42501" });
     const client = { query: vi.fn(async (sql: string) => {
@@ -75,6 +87,14 @@ describe("database connection resilience", () => {
     expect(options.maxLifetimeSeconds).toBeGreaterThan(0);
     expect(options.maxLifetimeSeconds).toBeLessThan(86_400);
     expect(options.idle_in_transaction_session_timeout).toBeGreaterThan(0);
+  });
+
+  it("opts only the dedicated listener into TCP keepalive without adding SQL polling", () => {
+    createPool("postgres://operator@database.test/zeros", { keepAlive: true });
+    const listener = pools.options.at(-1)!;
+    expect(listener).toMatchObject({ keepAlive: true, keepAliveInitialDelayMillis: 30_000 });
+    createPool("postgres://operator@database.test/zeros");
+    expect(pools.options.at(-1)!.keepAlive).not.toBe(true);
   });
 
   it.each(["user", "system"])(

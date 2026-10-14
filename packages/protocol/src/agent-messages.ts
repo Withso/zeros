@@ -39,7 +39,8 @@ export interface AgentTextMessage {
   /** A prompt stopped by provider authentication. Its original expanded text
    * survives Settings navigation and reload as context for the next user send;
    * attachment bytes remain in the context graph. Historical markers retain
-   * the stopped footer. Optional for compatibility with older transcripts. */
+   * sign-in status until later model work confirms recovery. Optional for
+   * compatibility with older transcripts. */
   authRecovery?: { text: string };
   /** Original expanded request for explicit retry. Attachment bodies remain
    * in the context graph, referenced by attachments/segments below. */

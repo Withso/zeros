@@ -20,7 +20,8 @@ function contentBlock(value: unknown): boolean {
   }
 }
 
-/** Diagnostics only: a stream envelope is not evidence of generated content.
+/** Parent progress and resume-binding evidence: a stream envelope alone is
+ * not evidence of generated content.
  * Tool names/argument fragments count even before the tool row is presentable.
  * Child traffic and synthetic error prose cannot establish parent latency. */
 export function hasClaudeModelContent(value: unknown): boolean {
