@@ -36,8 +36,8 @@ import {
 //     we await its `result` before accepting the next prompt.
 //   - "First message: No conversation found" — the FIRST turn never passes
 //     `resume`; we only resume once the SDK has minted + reported a
-//     session id (captured from the `system/init` message, persisted to
-//     the session dir so it survives an engine restart).
+//     session id AND confirmed conversation work. Init alone can precede an
+//     auth failure without creating a resumable conversation on disk.
 //
 // The bundled `@anthropic-ai/claude-agent-sdk` ships its own pinned
 // `claude-code` CLI, so depending on the SDK IS the binary pin (the
@@ -2190,6 +2190,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     let continuationFailure = false;
     let streamError: string | null = null;
     let rejectedPrompt = false;
+    // Init names a prospective conversation before Claude authenticates. Do
+    // not persist or advertise it as resumable until actual model content or
+    // a successful root result confirms that the conversation was used.
+    let initializedSessionId: string | null = null;
     // The SDK can yield a structured startup error and then throw it again
     // when the process exits. The rejected send already owns that diagnostic.
     let reportedStartupFailure = false;
@@ -2241,30 +2245,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           if (typeof m.model === "string" && this.stopUnexpectedExactModel(state, m.model)) break;
           if (Array.isArray(m.capabilities)) state.queryCapabilities = new Set(m.capabilities.filter((v): v is string => typeof v === "string"));
           this.queryPlugins.set(q, claudeSessionPluginGroup(m.plugins));
-          if (
-            typeof m.session_id === "string" &&
-            state.claudeSessionId !== m.session_id
-          ) {
-            state.claudeSessionId = m.session_id;
-            void this.persistClaudeSessionId(
-              state.zerosSessionId,
-              m.session_id,
-            );
-            this.ctx.emit.onSessionUpdate(this.agentId, {
-              executionId: state.zerosSessionId,
-              sessionId: state.zerosSessionId,
-              update: {
-                sessionUpdate: "provider_binding_update",
-                providerBinding: providerBindingForResume(
-                  "claude",
-                  m.session_id,
-                  state.legacySessionId
-                    ? { legacySessionId: state.legacySessionId }
-                    : {},
-                ),
-              },
-            });
-          }
+          if (typeof m.session_id === "string" && m.session_id)
+            initializedSessionId = m.session_id;
           // The init message carries the skill-NAME subset separately from the
           // merged command list (`init.skills: string[]`). Capture it so the
           // emitted commands can be tagged skill vs command — without it the
@@ -2322,6 +2304,24 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         // idle activity. Stream replay controls were still consumed so their
         // following deltas retain the correct native message owner.
         if (!accepted) continue;
+
+        if (initializedSessionId && state.claudeSessionId !== initializedSessionId &&
+            !state.cancelRequested && !state.disposed &&
+            (hasClaudeModelContent(msg) ||
+              (m.type === "result" && !m.parent_tool_use_id && !m.agent_id &&
+                !isClaudeBackgroundAcknowledgement(msg as Extract<SDKMessage, { type: "result" }>) &&
+                !state.translator.terminalError && state.translator.stopReason === "end_turn"))) {
+          state.claudeSessionId = initializedSessionId;
+          void this.persistClaudeSessionId(state.zerosSessionId, initializedSessionId);
+          this.ctx.emit.onSessionUpdate(this.agentId, {
+            executionId: state.zerosSessionId, sessionId: state.zerosSessionId,
+            update: {
+              sessionUpdate: "provider_binding_update",
+              providerBinding: providerBindingForResume("claude", initializedSessionId,
+                state.legacySessionId ? { legacySessionId: state.legacySessionId } : {}),
+            },
+          });
+        }
 
         if (m.type === "system" && m.subtype === "session_state_changed" && m.state && !state.cancelRequested) {
           state.providerRunActive = m.state !== "idle";

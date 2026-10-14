@@ -27,7 +27,7 @@ the table and native fixtures whenever the pinned SDK changes.
 | `result/error_max_turns` | handled | Existing terminal reason and turn settlement; preserve provider explanation and usage. |
 | `result/error_max_budget_usd` | handled | Legacy/native budget termination remains readable even though Zeros no longer configures a spend cap. |
 | `result/error_max_structured_output_retries` | handled | Structured-output exhaustion settles the turn with its native failure and usage. |
-| `system/init` | handled | Adapter: native binding, commands/skills/plugins, capabilities and permission mode. Translator: current model and usage conversation identity. Ordinary init does not reset process-owned background work. |
+| `system/init` | handled | Adapter: provisional native ID, commands/skills/plugins, capabilities and permission mode. Persist/publish the resume binding only after accepted root model content or successful root result, because init can precede failed authentication without a saved conversation. Translator: current model and usage conversation identity. Ordinary init does not reset process-owned background work. |
 | `stream_event` | handled | Translator/transcript state: native message/block deltas, tool arguments, Thinking and final-answer boundaries; root client UUIDs acknowledge consumed steering. |
 | `system/compact_boundary` | handled | Existing compaction row settles only on confirmation; retain native trigger/pre-token metadata. Native UUID replay does not duplicate the row. History-preservation metadata is not a request to delete Zeros history. |
 | `system/status` | handled | Compaction start/success/failure, requesting/compacting liveness and confirmed live permission-mode changes. A status clears neither user work nor the result requirement. Stop/replay guards precede state changes. |
@@ -55,13 +55,13 @@ the table and native fixtures whenever the pinned SDK changes.
 | `system/files_persisted` | handled | Failure produces a generic session-file persistence explanation. Successful cloud file IDs, private filenames and diagnostics are not displayed or treated as local artifacts. |
 | `tool_use_summary` | intentionally ignored | Optional summary duplicates the existing native tool feed. It cannot settle or replace those tools. |
 | `system/memory_recall` | intentionally ignored | Internal personal/team/organization memory hydration, including private contents, is not transcript narration. No memory-inspection feature is implied. |
-| `rate_limit_event` | handled | Deduplicated limit/extra-usage/recovery advisory. Preserve included-usage versus extra-usage availability; never fail or authenticate a turn from this status alone. |
+| `rate_limit_event` | handled | Typed `claude-rate-limit:<budget>` limit/extra-usage/recovery notice, deduplicated across results and background replies. The renderer selects one current status at the provider turn's tail. Preserve included-usage versus extra-usage availability; never fail or authenticate a turn from this status alone. |
 | `system/elicitation_complete` | handled | Plain external-request completion feedback keyed by server/request identity. Does not answer an approval or settle a pending question automatically. |
 | `system/permission_denied` | handled | Preserve native explanation beside the exact owning tool/child feed. Unknown or ambiguous native tool ownership stays deferred. Native tool results still own tool success/failure. |
 | `prompt_suggestion` | unsupported | Optional predicted follow-up suggestions are not enabled and have no product surface; never auto-submit them. |
 | `system/mirror_error` | handled | Generic synchronization explanation without exposing private mirror paths/keys. Does not falsely mark an ordinary file tool failed. |
 | `system/informational` | handled | Plain bounded content as an inbetween message, tool-scoped where identified. `prevent_continuation` explains runtime behavior but is not itself a terminal result. |
-| `conversation_reset` | handled | Existing idempotent accounting reset at `/clear`. **Limitation:** the SDK's fresh-transcript/title remount is unsupported; this handler does not erase saved chat history or invent a new chat. Native session binding still follows init. |
+| `conversation_reset` | handled | Existing idempotent accounting reset at `/clear`. **Limitation:** the SDK's fresh-transcript/title remount is unsupported; this handler does not erase saved chat history or invent a new chat. Native session binding follows init plus confirmed root work/success. |
 
 ## 0.3.296 field dispositions
 
@@ -172,9 +172,15 @@ order are documented in [the harness capability boundary](agent-harness-capabili
 
 ## Feedback and lifecycle invariants
 
-New feedback uses existing `agent_message_chunk` commentary and parent-binding
-updates. Stable local message IDs permit keyed replacement; native UUIDs suppress
-replay across results/query replacement. Text is capped at 8,000 characters,
+Feedback uses existing `agent_message_chunk` commentary and parent-binding
+updates, with typed `error_notice` events for usage status. Stable native message
+IDs permit commentary replacement; native UUIDs suppress replay across
+results/query replacement. Usage notices are immutable: changed states receive
+new IDs, and their stable budget code selects the current display. Repeated
+identical states remain deduplicated across intermediate results until the next
+user turn. Older commentary is recognized by its persisted `messageId`, not the
+renderer row ID, and shares the one tail notice without a storage migration.
+Text is capped at 8,000 characters,
 active keyed notices at 256, deferred tool notices at 64 and replay IDs at 4,000.
 Unknown ownership cannot borrow a sibling row. Stop/disposal clears deferred
 feedback and prevents late publication. Ordinary turn results retain separately

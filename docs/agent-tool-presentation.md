@@ -389,6 +389,11 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   `async_launched` instructions, correlate task IDs with native tool IDs, and
   retain resolved model information. Task completion/failure owns the loader;
   late launch acknowledgements cannot overwrite that terminal result.
+- A Claude background Agent lifecycle row is redundant when its native task ID
+  matches the real Agent group's child ID. Hide that extra row from the feed,
+  counts and copied transcript, while retaining its stored task state and the
+  waiting indicator. Never match by description or tool name. Keep orphan tasks
+  and failures whose explanation is not represented by the Agent group visible.
 - Codex activity-item completion only confirms delivery. `kind` owns the child
   lifetime; correlate different activity IDs by child thread. Legacy collab
   snapshots use child `agentsStates`, not the spawn/wait wrapper's success.
@@ -493,6 +498,10 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   joins and workflow narration. Resume can reuse the native session ID; it
   still creates a new process. Retain durable transcript identities and settle
   unfinished rows on retirement without claiming success.
+  Init can precede a failed sign-in without saving a native conversation. Keep
+  a new ID provisional until accepted root model content or a successful root
+  result confirms it; only then persist and publish the resume binding. A failed
+  authentication attempt does not discard an already confirmed conversation.
 - Keep native task ownership separate from visible activity. Ambient watchers
   (including legacy `skip_transcript` tasks) retain their process while alive,
   but do not activate the waiting count, workflow display or busy indicators.
@@ -512,11 +521,26 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
 
 - Settled root turn failures appear once in the failure card outside the
   collapsible activity feed, for Claude, Codex and Cursor. Keep native and
-  persisted notices intact for recovery and export; do not repeat them when
+  persisted notices intact for recovery; do not repeat them when
   activity is expanded. The provider turn owns this presentation across steer
   segments. Before settlement, show the latest terminal notice outside activity
   until the footer takes over. Feeds without a turn footer remain inspectable,
   as do recoverable warnings, child errors and individual failed tool results.
+  Later genuine root work in the same turn supersedes an earlier retry error
+  and its stopped footer label, including in copied transcripts. Child activity,
+  routine transport/wait records and synthetic feedback cannot prove recovery.
+- Authentication failures have one product Sign in notice. In history, show a
+  compact **Sign-in required** status until a later turn in that conversation
+  produces genuine root model work, then show **Signed in**. A new prompt,
+  Settings navigation or a cached connected hint alone cannot resolve it.
+  Legacy raw authentication prose remains stored but does not appear as a second
+  error or an assistant answer. Copied transcripts retain the explicit status.
+- Claude usage limits are one product notice below the provider turn's output,
+  including across steering and autonomous background replies. Keep each
+  budget's latest native state and prioritize any remaining limit warning over
+  another budget's recovery. Typed notices and legacy native feedback IDs share
+  this projection; ordinary model quotations keep their prose. Status changes
+  use new immutable notice IDs, while the stable code selects the current state.
 - Claude's native `verification_required` and `cloud_credential_error` remain
   distinct from a Claude sign-in failure, model unavailability and transport
   failure. Preserve the provider's explanation, credential/provider name and
@@ -526,8 +550,8 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   **Retry in new chat**, or invalidate Claude's sign-in health for these errors.
   Keep classification through persistence and autonomous/background results;
   classification alone does not establish a result's turn ownership.
-- These two parent synthetic SDK error messages belong in the failure card,
-  not the assistant answer. They are not evidence of model work: Retry resends
+- Parent synthetic SDK error messages belong in the product failure or Sign in
+  notice, not the assistant answer. They are not evidence of model work: Retry resends
   the original prompt and attachments before work, or continues with that same
   request after actual output/tools. Child-only and replaced/recovered errors
   must not poison a later parent result. Normal provider tool choices are unchanged.
@@ -648,7 +672,8 @@ Edit/Write tools onto models that do not advertise them.
 
 For Claude, keep the [installed SDK event inventory](claude-event-coverage.md)
 and its exhaustive regression map current. Meaningful hook, permission, plugin,
-limit and runtime feedback uses bounded, replay-safe inbetween messages. Keep
+and runtime feedback uses bounded, replay-safe inbetween messages; usage limits
+use the one tail notice described above. Keep
 child notices under authoritative native ownership, omit private login output
 and routine diagnostic logs, and never turn advisory feedback into a tool or
 successful result. Thinking estimates indicate activity and steering consumption,

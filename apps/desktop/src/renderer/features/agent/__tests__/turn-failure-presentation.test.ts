@@ -35,6 +35,23 @@ const displayed = (
   );
 
 describe("turn failure presentation", () => {
+  it("retires earlier retry failures when the same turn resumes real work", () => {
+    const retryFailure = { ...terminal, turnFailure: { turnId, kind: "session-expired" } };
+    const answer: AgentMessage = { id: "recovered-answer", kind: "text", role: "agent", phase: "final_answer", text: "Continued successfully.", createdAt: 4 };
+    const events = [retryFailure, { ...retryFailure, id: "second-attempt" }, { ...tool, createdAt: 3 }, answer];
+    expect(displayed(events, turnId, true).some(event => event.kind === "error_notice")).toBe(false);
+    // Persisted turn metadata can still describe the failed attempt while a
+    // background reply continues the same user turn.
+    expect(turnFailureForCard({ events, turnId, status: "failed" })).toBeNull();
+    expect(turnFailureForCard({ events: JSON.parse(JSON.stringify(events)), turnId })).toBeNull();
+  });
+
+  it("does not mistake child activity or provider telemetry for successful recovery", () => {
+    const feedback: AgentMessage = { id: "claude-feedback-usage", kind: "text", role: "agent", phase: "commentary", text: "Claude is nearing its usage limit.", createdAt: 3 };
+    const child = { ...tool, id: "child-work", parentToolId: "agent" };
+    expect(turnFailureForCard({ events: [terminal, feedback, child], turnId, status: "failed" })).toMatchObject({ message: terminal.message });
+  });
+
   it.each(["claude", "codex", "cursor"])(
     "renders a persisted %s failure only in the footer, retaining failed tools",
     (provider) => {

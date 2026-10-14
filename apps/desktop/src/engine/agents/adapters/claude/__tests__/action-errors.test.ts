@@ -10,6 +10,18 @@ const assistant = (id: string, text: string, error?: string) => ({
 const stream = (event: object, parent_tool_use_id?: string) => ({ type: "stream_event", event, parent_tool_use_id });
 
 describe("Claude user-action error identities", () => {
+  it.each(["authentication_failed", "rate_limit", "model_not_found", "unknown"])(
+    "keeps synthetic %s failures out of assistant output while retaining the terminal cause",
+    (code) => {
+      let messages: AgentMessage[] = [];
+      const translator = new ClaudeStreamTranslator({ sessionId: "s", emit: (n) => { messages = applyUpdate(messages, n); } });
+      translator.feed(assistant("native-failure", "Provider could not complete this request.", code));
+      expect(messages).toEqual([]);
+      translator.feed({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["Provider could not complete this request."] });
+      expect(translator.terminalFailure).toEqual({ code, message: "Provider could not complete this request." });
+    },
+  );
+
   it.each([
     ["org_config_required_unavailable", "protocol-error", "Claude couldn't load your organization's required settings. Check your connection, then retry."],
     ["org_config_refused", "auth-required", "Your organization's Claude settings were refused for this sign-in. Sign in again or ask your administrator."],

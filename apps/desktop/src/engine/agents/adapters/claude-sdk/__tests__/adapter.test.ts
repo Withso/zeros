@@ -1330,9 +1330,14 @@ describe("Claude verification and cloud credential failures", () => {
   });
 
   for (const background of [false, true]) {
-    it.each(cases)(`preserves %s when the iterator closes without a result, background=${background}`, async (code, kind, message) => {
+    it.each([
+      ...cases,
+      ["authentication_failed", "auth-required", "Failed to authenticate: OAuth session expired and could not be refreshed"],
+      ["rate_limit", "rate-limited", "Claude has reached its usage limit."],
+    ] as const)(`preserves %s when the iterator closes without a result, background=${background}`, async (code, kind, message) => {
       const live = makePushableQuery();
       const emitted: SessionNotification[] = [];
+      const expectedMessage = code === "rate_limit" ? `Claude rate limit: ${message}` : message;
       const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
       try {
         const { session } = await adapter.newSession({ cwd: "/tmp" });
@@ -1348,9 +1353,9 @@ describe("Claude verification and cloud credential failures", () => {
         if (background) {
           await flushMicrotasks();
           expect(emitted.map((entry) => entry.update).filter((update) => update.sessionUpdate === "error_notice")).toMatchObject([
-            { code: "claude-background-failed", failureKind: kind, message },
+            { code: "claude-background-failed", failureKind: kind, message: expectedMessage },
           ]);
-        } else expect(await turn).toMatchObject({ failure: { kind, message } });
+        } else expect(await turn).toMatchObject({ failure: { kind, message: expectedMessage } });
       } finally { await adapter.dispose(); }
     });
 
@@ -1958,6 +1963,55 @@ const streamText = (t: string): Msg => ({
 });
 
 describe("ClaudeSdkAdapter", () => {
+  it("preserves an existing conversation through failed authentication and the next explicit send", async () => {
+    const emitted: SessionNotification[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("saved-conversation"), assistantText("Initial report"), resultOk("saved-conversation")],
+      [initMsg("unconfirmed-auth-attempt"), { ...assistantText("OAuth session expired"), error: "authentication_failed" },
+        { type: "result", subtype: "error_during_execution", is_error: true, errors: ["OAuth session expired"] }],
+      [initMsg("saved-conversation"), assistantText("Continuing the same conversation"), resultOk("saved-conversation")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const prompt = () => adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Continue")] });
+      await prompt();
+      await expect(prompt()).rejects.toMatchObject({ failure: { kind: "auth-required" } });
+      await prompt();
+      expect(captured.map(options => options.resume)).toEqual([undefined, "saved-conversation", "saved-conversation"]);
+      expect(emitted.filter(note => note.update.sessionUpdate === "provider_binding_update")).toHaveLength(1);
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["Personal Local", "organization-local", "organization-cloud"])(
+    "does not resume an init-only conversation after failed authentication (%s)",
+    async (owner) => {
+      const emitted: SessionNotification[] = [];
+      const cloud = owner === "organization-cloud";
+      const boundary = cloud ? { status: { actor: "agent-code", backend: "cloud-worker" } } as never : undefined;
+      const execution = cloud ? { mode: "actor-grant-v1", model: "claude-haiku-4-5", cwd: "/srv/zeros/workspace", customization: null,
+        lifetime: { signal: new AbortController().signal, assertLive: vi.fn() }, coordinator: { nativeHome: await physicalClaudeHome() }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution : null;
+      const original = cloudExecutions.cloudProviderExecution;
+      const authority = cloud ? vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value)) : null;
+      const runtime = cloud ? admittedClaudeRuntimeFixture() : null;
+      const { queryFn, captured } = makeScriptedQuery([
+        [initMsg("unconfirmed-conversation"), { ...assistantText("Failed to authenticate: OAuth session expired and could not be refreshed"), error: "authentication_failed" },
+          { type: "result", subtype: "error_during_execution", is_error: true, errors: ["Failed to authenticate: OAuth session expired and could not be refreshed"] }],
+        [initMsg("confirmed-conversation"), assistantText("Continuing your request."), resultOk("confirmed-conversation")],
+      ]);
+      const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+      try {
+        const { session } = await adapter.newSession({ cwd: cloud ? "/srv/zeros/workspace" : `/tmp/${owner}`, executionBoundary: boundary,
+          env: { ANTHROPIC_MODEL: "claude-haiku-4-5" } });
+        await expect(adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hello")] as never })).rejects.toMatchObject({ failure: { kind: "auth-required" } });
+        expect(emitted.filter(n => n.update.sessionUpdate === "provider_binding_update")).toEqual([]);
+        await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Continue")] as never });
+        expect(captured[1]?.resume).toBeUndefined();
+        expect(emitted.filter(n => n.update.sessionUpdate === "provider_binding_update")).toHaveLength(1);
+      } finally { await adapter.dispose(); runtime?.dispose(); authority?.mockRestore(); }
+    },
+  );
+
   it("publishes Claude's native binding without replacing the Zeros execution route", async () => {
     const emitted: SessionNotification[] = [];
     const { queryFn } = makeScriptedQuery([

@@ -9,6 +9,17 @@ The pack is introduced: the router, verify, review, eval and learn skills,
 five playbooks, and eleven seed eval cases from real Alpha incidents.
 
 Lessons already encoded:
+- **Claude init does not confirm a resumable conversation.** Failed sign-in
+  published an ID before Claude saved the conversation, so the next send resumed
+  a missing session. Confirm root model work or success before persisting a new
+  binding, retain existing confirmed bindings, and resolve historical sign-in
+  UI only from real conversation progress (adapter and authentication regressions).
+- **Feedback must survive its consumer.** Usage dedupe reset at intermediate
+  results, while reusing an immutable notice ID dropped later status changes.
+  Keep per-turn budget state, issue new receipts for changed states and project
+  one tail notice across background replies and steering. Test the shared reducer,
+  saved native message IDs and copied transcripts (`zstack-review`, Claude
+  feedback and renderer regressions).
 - **Provider fixtures can lie.** A synthetic Boat tree passed while the real
   one failed. The rule is to qualify against a real response
   (`zstack-review`, case `boat-saved-tree-real-shape`).

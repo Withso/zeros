@@ -255,6 +255,7 @@ import {
   authenticationTurnState,
   authenticationTurnOutput,
   authenticationFailureMessage,
+  latestAuthenticationRecoveryTurn,
 } from "./auth-prompt-recovery";
 import { useAgentSessions } from "./sessions-hooks";
 import { useStickyBottom, nextTextMessageTarget } from "./use-sticky-bottom";
@@ -2917,6 +2918,7 @@ export function AgentChat({
       ),
     [visibleMessages],
   );
+  const authenticationRecoveredAt = useMemo(() => latestAuthenticationRecoveryTurn(turns), [turns]);
   // Only a committed render becomes the baseline. Mutating this ref inside
   // useMemo lets an abandoned concurrent render influence the next pass.
   useLayoutEffect(() => {
@@ -4841,9 +4843,11 @@ export function AgentChat({
                 failureKind: session.failure?.kind,
                 isTail: isVisualTail,
                 inFlight: turnInFlight,
+                recovered: authenticationRecoveredAt > i,
+                readOnly: transcriptReadOnly,
               });
               const authRequired = !transcriptReadOnly && authState === "sign-in";
-              const authStopped = authState === "stopped";
+              const authStopped = authState === "stopped" || authState === "signed-in";
               const visibleEvents = cloudAdmission ? [] : authState
                 ? authenticationTurnOutput(turn.events)
                 : turn.events;
@@ -4953,6 +4957,7 @@ export function AgentChat({
                     {(!authRequired || visibleEvents.length > 0) && (
                       <TurnEventList
                         events={visibleEvents}
+                        usageEvents={ownsProviderFooter ? turn.providerEvents : null}
                         failureTurnId={!cloudAdmission && !authRequired && chatId ? turn.recordedTurnId ?? undefined : undefined}
                         isActive={isActiveProviderSegment}
                         isStreaming={turnInFlight && !authStopped}
@@ -4978,7 +4983,7 @@ export function AgentChat({
                           // Do not mount turn metadata reads or reset/fork
                           // controls until the transcript has validated.
                           !provisionalTranscript &&
-                          !authRequired &&
+                          !authState &&
                           turn.userPrompt &&
                           chatId &&
                           ownsProviderFooter ? (
@@ -5006,11 +5011,7 @@ export function AgentChat({
                                   ? () => retryTurn(turn.userPrompt!, turn.providerEvents, true)
                                   : undefined
                               }
-                              events={
-                                authStopped
-                                  ? visibleEvents
-                                  : turn.providerEvents
-                              }
+                              events={turn.providerEvents}
                               startedAt={turn.recordedStartedAt}
                               live={isVisualTail && turnInFlight}
                               fallbackStopReason={
@@ -5019,12 +5020,9 @@ export function AgentChat({
                                   : null
                               }
                               fallbackStatusLabel={
-                                authStopped
-                                  ? "AGENT STOPPED"
-                                  : isVisualTail &&
-                                      session.status !== "streaming"
-                                    ? turnFooterFailureLabel(session.failure)
-                                    : null
+                                isVisualTail && session.status !== "streaming"
+                                  ? turnFooterFailureLabel(session.failure)
+                                  : null
                               }
                               // "An auto-rebuild is re-running THIS turn" — which
                               // only happens while this renderer's own send owns
@@ -5058,8 +5056,10 @@ export function AgentChat({
                         }
                       />
                     )}
-                    {authRequired && (
+                    {(authRequired || authStopped) && (
                       <AuthenticationNotice
+                        historical={authStopped}
+                        resolved={authState === "signed-in"}
                         message={authenticationFailureMessage(turn.events, isVisualTail ? session.failure : null)}
                         name={
                           session.agentName ??

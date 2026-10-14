@@ -51,6 +51,9 @@ failing input, or a reproduction. Drop anything you can't substantiate.
   code under test has actually observed it.
 - Provider-shaped fixtures match the real wire shape. Qualify against a real
   response at least once.
+- Replay provider updates through the shared history reducer as well as the
+  producer. An emitted replacement can look correct while an immutable consumer
+  silently ignores it.
 
 ## Output
 

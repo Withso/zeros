@@ -43,6 +43,7 @@ export function ClaudeRuntimeUiFixture({ ctx, connected }: { ctx: RendererContex
   const [retries, setRetries] = useState(0);
   const [signIns, setSignIns] = useState(0);
   const [connectionOpen, setConnectionOpen] = useState(false);
+  const [recoveryLive, setRecoveryLive] = useState(true);
   const nestedCtx = { ...ctx, subagentChildren: new Map<string, AgentMessage[]>([
     ["explore", [plan]], ["plan", [childRead]],
   ]) };
@@ -61,8 +62,38 @@ export function ClaudeRuntimeUiFixture({ ctx, connected }: { ctx: RendererContex
     { id: "background-run-2", label: "Run 2 · resumed", ordinal: 2, status: "in_progress" as const, waiting: true },
     { id: "background-run-late", label: "Late run 1 event", ordinal: 2, status: "in_progress" as const, waiting: true },
   ];
+  const recoveryAgents = ["Inspect workspace files", "Review Design guidance", "Check UI behavior"].map((description, index) =>
+    tool(`recovery-agent-${index}`, {
+      status: "in_progress", rawInput: { description, subagent_type: "Explore" },
+      rawOutput: { agentId: `recovery-child-${index}`, resolvedModel: "claude-sonnet-5-5", subagentType: "Explore" },
+    }));
+  const usage: AgentMessage = { id: "usage-before", messageId: "claude-feedback-usage-before", kind: "text", role: "agent",
+    phase: "commentary", text: "Claude is nearing its usage limit.", createdAt: 2 };
+  const recoveredEvents: AgentMessage[] = [
+    { id: "retry-error", kind: "error_notice", severity: "error", recoverable: false, createdAt: 1,
+      message: "Claude session expired mid-turn: No conversation found with session ID: missing-fixture",
+      turnFailure: { turnId: "recovery-prompt", kind: "session-expired" } },
+    usage,
+    ...recoveryAgents,
+    ...recoveryAgents.map((agent, index) => tool(`recovery-background-${index}`, {
+      title: "Background Task", toolKind: "background_task", status: "in_progress",
+      rawInput: { taskId: `recovery-child-${index}`, taskType: "local_agent", subagentType: "Explore" },
+    })),
+    { id: "recovered-report", kind: "text", role: "agent", phase: "final_answer", text: "The conversation continued. The three agents are checking the workspace.", createdAt: 4 },
+    { ...usage, id: "usage-after", messageId: "claude-feedback-usage-after", createdAt: 5 },
+  ];
+  const recoveredFailure = turnFailureForCard({ events: recoveredEvents, turnId: "recovery-prompt", status: "failed" });
   return (
     <div className="flex flex-col gap-6">
+      <section id="claude-transcript-recovery" className="flex flex-col gap-3" aria-label="Transcript recovery">
+        <h2 className="text-fg1 text-sm font-medium">Transcript recovery</h2>
+        <AuthenticationNotice name="Claude Code" resolved onSignIn={() => {}} />
+        <TurnEventList events={recoveredEvents} failureTurnId="recovery-prompt" isActive isStreaming={recoveryLive} showActivity={false} ctx={ctx}
+          footer={recoveredFailure ? <TurnFailureCard failure={recoveredFailure} /> : null} />
+        <Button variant="secondary" className="w-fit" onClick={() => setRecoveryLive(value => !value)}>
+          {recoveryLive ? "Show settled recovery" : "Show live recovery"}
+        </Button>
+      </section>
       <section className="flex flex-col gap-3" aria-label="Background task runs">
         <h2 className="text-fg1 text-sm font-medium">Background task runs</h2>
         <div className="grid gap-4 md:grid-cols-2">

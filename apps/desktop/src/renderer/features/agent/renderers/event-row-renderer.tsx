@@ -127,6 +127,8 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
       );
     }
     if (message.kind === "error_notice" && message.code !== "api_retry") {
+      if (message.code?.startsWith("claude-rate-limit:"))
+        return <AgentNotice message={message.message} data-provider-usage-notice="" />;
       if (message.code === "claude-chrome-setup") return (
         <AgentNotice message={message.message} data-chrome-setup-notice="">
           {ctx.openBrowserSettings ? <Button type="button" variant="ghost" size="sm" className={cn(AGENT_NOTICE_ACTION, "mt-1")} onClick={ctx.openBrowserSettings}>

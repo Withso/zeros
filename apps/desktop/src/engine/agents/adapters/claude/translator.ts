@@ -1,6 +1,5 @@
 import { ClaudeQueryUsage } from "./usage-accounting";
 import { isClaudeBackgroundAcknowledgement, type ClaudeResultOwnership } from "./result-ownership";
-import { claudeActionCategory } from "../shared/provider-error";
 import { boundedStructuredOutput, canonicalResourceLinks, canonicalToolContent, mergeToolContent, type CanonicalToolContent } from "../shared/tool-content";
 // ──────────────────────────────────────────────────────────
 // Claude stream-json → SessionNotification translator
@@ -515,6 +514,12 @@ export class ClaudeStreamTranslator {
   private readonly detachedToolKeys = new Set<string>();
   private readonly lifecycleFrames = new Set<string>();
   private readonly feedback = new ClaudeEventFeedback({
+    emitNotice: (noticeId, message, code) => {
+      this.emit({ sessionId: this.sessionId, update: {
+        sessionUpdate: "error_notice", noticeId, message, code,
+        severity: "warning", recoverable: true,
+      } });
+    },
     emit: (messageId, text, nativeParent, groupId) => {
       const parentToolId = groupId ?? (nativeParent ? this.toolCallIds.get(nativeParent) : undefined);
       if (nativeParent && !parentToolId) {
@@ -562,6 +567,7 @@ export class ClaudeStreamTranslator {
   private readonly agentTasks = new Map<
     string,
     {
+      agentId: string;
       toolCallId: string;
       nativeParent: string;
       pendingToolCallIds: Set<string>;
@@ -1081,12 +1087,11 @@ export class ClaudeStreamTranslator {
       : null;
   }
 
-  /** An explicit setup failure remains actionable if the transport ends before
-   * result. Success, replacement and retraction already clear this candidate. */
+  /** A native failure remains actionable if the transport ends before result.
+   * Success, replacement and retraction already clear this candidate. Synthetic
+   * errors are absent from assistant output, so the terminal notice owns them. */
   get pendingUserActionFailure(): { message: string; code: string } | null {
-    return this.assistantFailure && claudeActionCategory(this.assistantFailure.code)
-      ? this.assistantFailure
-      : null;
+    return this.assistantFailure;
   }
 
   /** Per-turn token/cost usage for LLM analytics. */
@@ -2141,6 +2146,7 @@ export class ClaudeStreamTranslator {
     if (!toolCallId || (!existing && !/^(Agent|Task)$/i.test(tool?.name ?? ""))) return;
     const agent = {
       ...existing,
+      agentId: taskId,
       toolCallId,
       nativeParent: existing?.nativeParent ?? this.agentMessageParents.get(taskId) ?? nativeToolUseId!,
       pendingToolCallIds: existing?.pendingToolCallIds ?? new Set<string>(),
@@ -2163,15 +2169,16 @@ export class ClaudeStreamTranslator {
         sessionUpdate: "message_parent_update", messageIds: [toolCallId], parentToolId,
       } });
     }
-    if (publish && (agent.model !== existing?.model || agent.subagentType !== existing?.subagentType || agent.effort !== existing?.effort))
+    if (publish && (agent.agentId !== existing?.agentId || agent.model !== existing?.model || agent.subagentType !== existing?.subagentType || agent.effort !== existing?.effort))
       this.emit({ sessionId: this.sessionId, update: {
         sessionUpdate: "tool_call_update", toolCallId,
         rawOutput: { status: agent.status, ...this.agentMetadata(agent), ...(agent.error ? { message: agent.error } : {}) },
       } });
   }
 
-  private agentMetadata(agent: { model?: string; subagentType?: string; effort?: string }) {
+  private agentMetadata(agent: { agentId?: string; model?: string; subagentType?: string; effort?: string }) {
     return {
+      ...(agent.agentId ? { agentId: agent.agentId } : {}),
       ...(agent.model ? { resolvedModel: agent.model } : {}),
       ...(agent.subagentType ? { subagentType: agent.subagentType } : {}),
       ...(agent.effort ? { effort: agent.effort } : {}),
@@ -2718,7 +2725,7 @@ export class ClaudeStreamTranslator {
     if (
       !claudeParentId &&
       blocks.every((block) => block.type === "text") &&
-      event.error && claudeActionCategory(event.error)
+      event.error
     ) {
       this.transcript.rememberSuppressed(event.message?.id, "", event.uuid);
       return;
