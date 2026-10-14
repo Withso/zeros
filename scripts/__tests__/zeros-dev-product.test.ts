@@ -18,11 +18,11 @@ const workspace=()=>({id:"44444444-4444-4444-8444-444444444444",organizationId:f
   repository:{forge:"github.com",owner:repository.owner,name:repository.name,revision:"a".repeat(40)},
   generation:{number:1,architecture:"linux/amd64",resources:{cpuMillicores:2000,memoryMiB:4096,storageMiB:16384},observedState:"running",lastObservedAt:null},
   version:1,error:null,createdAt:"2026-10-12T00:00:00.000Z",updatedAt:"2026-10-12T00:00:00.000Z",deletedAt:null as string|null});
-function setup(){
+function setup(pinned=fixture){
   let current=workspace();const snapshots:Run[]=[];
   const handle:RunHandle={run:{version:1,runId:randomUUID(),fixtureSha256:"a".repeat(64),deviceId:randomUUID(),createdAt:new Date().toISOString(),
     source:{revision:"b".repeat(40),dirty:true},lifecycle:[],prompts:[],evidence:[],deletionConfirmed:false},save:async()=>{snapshots.push(structuredClone(handle.run));}};
-  const session={fixture:async()=>fixture,whoami:vi.fn(async()=>fixture),accessToken:async()=>"synthetic-account-access"};
+  const session={fixture:async()=>pinned,whoami:vi.fn(async()=>pinned),accessToken:async()=>"synthetic-account-access"};
   const fetcher=vi.fn<typeof fetch>(async(url,init)=>{
     const p=new URL(String(url)).pathname;
     if(p.endsWith("/cloud-computer/v2"))return Response.json(state());
@@ -70,8 +70,52 @@ describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
     expect(JSON.stringify(f.handle.run)).not.toContain("synthetic-recipe");
   });
 
-  it("replays an unknown create with byte-identical body and key even after the active Computer changes",async()=>{
-    const f=setup(), original=f.fetcher.getMockImplementation()!;let first=true;
+  it.each(["ensureRepository","buildComputer","createWorkspace","workspace"] as const)("accepts product-normalized GitHub casing in %s without changing fixture pins",async method=>{
+    const pinned={...fixture,repository:{...fixture.repository,owner:"Test-Owner",name:"Test-Repo"}};
+    const f=setup(pinned);
+    if(method==="workspace")f.handle.run.create={key:randomUUID(),body:{name:"zd-fixture",cloudComputerBuild:{id:build.id,version:build.version},
+      repository:{forge:"github.com",owner:pinned.repository.owner,name:pinned.repository.name,revision:"main",githubInstallationId:pinned.repository.installationId}},
+      result:{id:workspace().id,createdBy:fixture.accountId,createdAt:workspace().createdAt,generation:1}};
+    const operation=method==="ensureRepository"?f.api.ensureRepository():method==="workspace"?f.api.workspace(f.handle.run):f.api[method](f.handle);
+    await expect(operation).resolves.toBeDefined();
+    expect(await f.session.fixture()).toEqual(pinned);
+    if(method==="createWorkspace")expect(f.handle.run.create?.body.repository).toMatchObject({owner:"Test-Owner",name:"Test-Repo"});
+  });
+
+  it("builds an approved first draft before requiring an active Computer repository grant",async()=>{
+    const f=setup(),original=f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async(url,init)=>{
+      const pathname=new URL(String(url)).pathname;
+      if(pathname.endsWith("/cloud-computer/v2"))return Response.json({...state(),state:"not_built",active:null,activeRepositories:[],latestBuild:null});
+      if(pathname.endsWith("/create-options"))return Response.json({configured:true,installations:[]});
+      return original(url,init);
+    });
+    await expect(f.api.ensureRepository()).rejects.toThrow("zeros_dev_repository_required");
+    await expect(f.api.createWorkspace(f.handle)).rejects.toThrow(/zeros_dev_(?:computer_required|repository_required)/);
+    expect(f.fetcher.mock.calls.every(([,init])=>init?.method==="GET")).toBe(true);
+    expect(f.handle.run.create).toBeUndefined();
+    await expect(f.api.buildComputer(f.handle)).resolves.toEqual(build);
+    expect(f.fetcher.mock.calls.filter(([,init])=>init?.method!=="GET")).toHaveLength(1);
+  });
+
+  it("does not create a missing Computer draft from repository pins",async()=>{
+    const f=setup();f.fetcher.mockResolvedValue(Response.json(computerState()));
+    await expect(f.api.buildComputer(f.handle)).rejects.toThrow("zeros_dev_repository_required");
+    expect(f.fetcher.mock.calls.every(([,init])=>init?.method==="GET")).toBe(true);
+    expect(f.handle.run.computer).toBeUndefined();
+  });
+
+  it.each(["id","installationId","owner","name"] as const)("keeps Computer %s identity exact apart from GitHub name casing",async field=>{
+    const f=setup(),foreign={...repository,[field]:field==="id"?"5678":field==="installationId"?randomUUID():"foreign"};
+    f.fetcher.mockResolvedValue(Response.json({...state(),draft:{...state().draft,repositories:[foreign]}}));
+    await expect(f.api.buildComputer(f.handle)).rejects.toThrow("zeros_dev_repository_required");
+    expect(f.fetcher.mock.calls.every(([,init])=>init?.method==="GET")).toBe(true);
+    expect(f.handle.run.computer).toBeUndefined();
+  });
+
+  it.each(["canonical","display"])("replays an unknown create with %s casing and a byte-identical body and key even after the active Computer changes",async casing=>{
+    const pinned=casing==="canonical"?fixture:{...fixture,repository:{...fixture.repository,owner:"Test-Owner",name:"Test-Repo"}};
+    const f=setup(pinned), original=f.fetcher.getMockImplementation()!;let first=true;
     f.fetcher.mockImplementation(async(url,init)=>{
       if(String(url).endsWith("/cloud-workspaces")&&init?.method==="POST"&&first){first=false;expect(f.snapshots.at(-1)?.create?.body).toEqual(JSON.parse(String(init.body)));throw new Error("synthetic lost acknowledgment");}
       if(!first&&new URL(String(url)).pathname.endsWith("/cloud-computer/v2"))return Response.json({...state(),active:{...build,id:randomUUID(),version:5}});

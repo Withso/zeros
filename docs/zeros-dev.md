@@ -141,17 +141,30 @@ command to start another normal handoff; it cannot resume an abandoned nonce.
 The normal product fixture needs the GitHub App installed and selected for the
 repository before connect. It also needs one Computer draft repository matching that exact fixture, an
 approved recipe, entitlement/quota and the chosen agent's supported account
-connection. `org ensure` and `repo ensure` validate/adopt these prerequisites.
-They do not create an org, change membership/funding, install a GitHub App or
-write a recipe. `computer build` builds the existing draft using its normal CAS
-revision and operation ID. A missing prerequisite fails explicitly.
+connection. `org ensure` confirms membership. `repo ensure` checks the repository
+grant from the **ready active Computer**, so it runs after the first successful
+build. Neither command creates an org, changes membership/funding, installs a
+GitHub App or writes a recipe. `computer build` builds the existing approved
+draft using its normal CAS revision and operation ID. A missing draft fails
+explicitly; repository pins alone do not approve a Computer configuration.
+
+For first setup, the fixture member opens the test organization's Settings →
+Cloud Computer, selects only the fixture repository under **Repositories**, and
+clicks **Save draft**. Use the approved install script (empty for a dependency-free
+fixture) and leave **Environment** empty. Saving establishes fresh GitHub source
+authorization for that exact repository; the proof created by `github connect`
+expires after two minutes, while the connection itself persists. Then run the
+commands below. A successful build activates automatically. The harness accepts
+GitHub name casing differences in returned Computer/workspace rows, while still
+requiring the exact repository ID, installation UUID, owner and workspace scope.
 
 ```sh
 pnpm exec tsx scripts/zeros-dev/cli.ts login
 pnpm exec tsx scripts/zeros-dev/cli.ts github connect --repository OWNER/NAME --repository-id NUMERIC_ID
 pnpm exec tsx scripts/zeros-dev/cli.ts org ensure
-pnpm exec tsx scripts/zeros-dev/cli.ts repo ensure
+# Save the approved Computer draft through the product once, as described above.
 pnpm exec tsx scripts/zeros-dev/cli.ts computer build --wait
+pnpm exec tsx scripts/zeros-dev/cli.ts repo ensure
 pnpm exec tsx scripts/zeros-dev/cli.ts workspace create --wait
 ```
 
