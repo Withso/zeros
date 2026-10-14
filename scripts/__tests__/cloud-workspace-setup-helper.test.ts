@@ -18,6 +18,10 @@ import {
   CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
   MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
 } from "../../apps/control-plane/src/cloud-workspaces/engine-protocol-version";
+import {
+  COMPUTER_NAMED_REF,
+  computerTemplateSnapshotName,
+} from "../../apps/control-plane/src/cloud-workspaces/computer-template-name";
 
 import {
   CLOUD_WORKSPACE_SETUP_AUDIENCE,
@@ -52,6 +56,9 @@ const ORGANIZATION_ID = "00000000-0000-4000-8000-000000000002";
 const SETUP_RUN_ID = "00000000-0000-4000-8000-000000000003";
 const ENGINE_INSTANCE_ID = "00000000-0000-4000-8000-000000000004";
 const execFileAsync = promisify(execFile);
+const NAMED_COMPUTER_REF = `boat-computer:${computerTemplateSnapshotName({
+  organizationSlug: "fixture", channel: "alpha", version: 1,
+})}@sha256:${"d".repeat(64)}`;
 
 describe("bounded setup process cancellation", () => {
   it("terminates an in-flight Git process group when the history guard aborts", async () => {
@@ -219,21 +226,43 @@ describe("cloud setup credential transport", () => {
       }
     } finally { vi.restoreAllMocks(); vi.unstubAllGlobals(); }
   });
-  it("requires the saved Cloud Computer tuple for a template image and refuses it on other images", () => {
-    const request = requestDocument();
-    request.expected.imageRef = "boat-template:bx_3456789a";
-    request.expected.repositoryRevision = "a".repeat(40);
-    const raw = { ...materialDocument(), version: 2, image: { ref: request.expected.imageRef,
-      sourceCommit: request.expected.imageSourceCommit, resources: { architecture: "linux/amd64", cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 } },
-      repository: { ...materialDocument().repository, revision: request.expected.repositoryRevision } };
-    const computer = { template: { schema: "zeros.computer-template/v1", buildId: WORKSPACE_ID, configId: ORGANIZATION_ID,
-      baseImageId: "zeros-v2-test-base", runtimeId: `r1-${"a".repeat(64)}`, baseCompatibilityId: `bc1-${"b".repeat(64)}`,
-      repositoryManifest: [{ id: "123", owner: "withso", name: "zeros", sha: "b".repeat(40) }], protectedContractDigest: "c".repeat(64) },
-      primaryRepositoryId: "123", requestedRevision: "feature/accepted" };
+  it.each(["boat-template:bx_3456789a", NAMED_COMPUTER_REF])("requires the saved Cloud Computer tuple for %s and refuses it on other images", imageRef => {
+    const { request, raw, computer } = computerMaterialDocument(imageRef);
     expect(() => parseCloudWorkspaceSetupMaterials(raw, request, NOW)).toThrow();
     expect(parseCloudWorkspaceSetupMaterials({ ...raw, computer }, request, NOW).computer).toEqual(computer);
     expect(() => parseCloudWorkspaceSetupMaterials({ ...materialDocument(), computer }, requestDocument(), NOW)).toThrow();
     expect(() => parseCloudWorkspaceSetupMaterials({ ...raw, computer: { ...computer, primaryRepositoryId: "999" } }, request, NOW)).toThrow();
+    expect(() => parseCloudWorkspaceSetupMaterials({ ...raw, computer }, { ...request,
+      expected: { ...request.expected, imageRef: `${imageRef}-different` } }, NOW)).toThrow();
+    expect(() => parseCloudWorkspaceSetupMaterials({ ...raw, computer, image: { ...raw.image, sourceCommit: "f".repeat(40) } }, request, NOW)).toThrow();
+  });
+  it("redeems a CP-generated named snapshot reference through the real material parser", async () => {
+    const { request, raw, computer } = computerMaterialDocument(NAMED_COMPUTER_REF);
+    expect(COMPUTER_NAMED_REF.test(raw.image.ref)).toBe(true);
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ ...raw, computer }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const material = await redeemMaterials(request);
+      expect(material.image.ref).toBe(NAMED_COMPUTER_REF);
+      expect(material.computer).toEqual(computer);
+      expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body)).expected).toEqual(request.expected);
+    } finally { vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+  });
+  it.each([
+    "boat-computer:fixture-alpha-computer-v1",
+    `boat-computer:fixture-alpha-computer-v1@sha256:${"d".repeat(63)}`,
+    `boat-computer:fixture-alpha-computer-v1@sha256:${"d".repeat(65)}`,
+    `boat-computer:fixture-alpha-computer-v1@sha256:${"D".repeat(64)}`,
+    `boat-computer:Fixture-alpha-computer-v1@sha256:${"d".repeat(64)}`,
+    `boat-computer:${"a".repeat(64)}@sha256:${"d".repeat(64)}`,
+    `boat-computer:../fixture-alpha-computer-v1@sha256:${"d".repeat(64)}`,
+    `${NAMED_COMPUTER_REF}/extra`,
+  ])("refuses a malformed named Computer reference even without Computer metadata: %s", imageRef => {
+    const { request, raw, computer } = computerMaterialDocument(imageRef);
+    expect(COMPUTER_NAMED_REF.test(imageRef)).toBe(false);
+    expect(() => parseCloudWorkspaceSetupMaterials(raw, request, NOW)).toThrow();
+    expect(() => parseCloudWorkspaceSetupMaterials({ ...raw, computer }, request, NOW)).toThrow();
   });
   it("reads a bounded request from SSH stdin without an environment or argv secret", async () => {
     const encoded = Buffer.from("test-request").toString("base64url");
@@ -291,6 +320,20 @@ describe("cloud setup credential transport", () => {
 
 function encode(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function computerMaterialDocument(imageRef: string) {
+  const request = requestDocument();
+  request.expected.imageRef = imageRef;
+  request.expected.repositoryRevision = "a".repeat(40);
+  const raw = { ...materialDocument(), version: 2, image: { ref: imageRef,
+    sourceCommit: request.expected.imageSourceCommit, resources: { architecture: "linux/amd64", cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 } },
+    repository: { ...materialDocument().repository, revision: request.expected.repositoryRevision } };
+  const computer = { template: { schema: "zeros.computer-template/v1", buildId: WORKSPACE_ID, configId: ORGANIZATION_ID,
+    baseImageId: "zeros-v2-test-base", runtimeId: `r1-${"a".repeat(64)}`, baseCompatibilityId: `bc1-${"b".repeat(64)}`,
+    repositoryManifest: [{ id: "123", owner: "withso", name: "zeros", sha: "b".repeat(40) }], protectedContractDigest: "c".repeat(64) },
+    primaryRepositoryId: "123", requestedRevision: "feature/accepted" };
+  return { request, raw, computer };
 }
 
 function requestDocument() {

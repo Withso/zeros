@@ -17,18 +17,22 @@ afterEach(async()=>{await Promise.all(roots.splice(0).map(root=>rm(root,{recursi
 async function store(){const root=await mkdtemp(path.join(tmpdir(),"zeros-dev-run-"));roots.push(root);return {root,store:new RunStore(path.join(root,"runs"),fixture,device,{lockTimeoutMs:20})};}
 
 describe("zeros-dev exact signed resource receipts",()=>{
-  it("persists a bounded creation intent before allocation and keeps it across interruption",async()=>{
+  it.each(["current","legacy"])("persists a %s creation intent before allocation and keeps its bytes across interruption",async mode=>{
     const f=await store(),id=randomUUID();
     await f.store.withRun(id,source,async handle=>{
-      handle.run.create={key:randomUUID(),body:{name:`zd-${id.slice(0,8)}`,cloudComputerBuild:{id:randomUUID(),version:4},repository:{forge:"github.com",owner:fixture.repository.owner,name:fixture.repository.name,revision:"b".repeat(40),githubInstallationId:fixture.repository.installationId}}};
+      handle.run.create={key:randomUUID(),body:{name:`zd-${id.slice(0,8)}`,...(mode==="legacy"?{cloudComputerBuild:{id:randomUUID(),version:4}}:{}),repository:{forge:"github.com",owner:fixture.repository.owner,name:fixture.repository.name,revision:"b".repeat(40),githubInstallationId:fixture.repository.installationId}}};
       await handle.save();
       throw new Error("synthetic interrupted request");
     }).catch(()=>{});
     const run=await f.store.read(id);
     expect(run.create?.body.repository.revision).toBe("b".repeat(40));
+    expect(Object.hasOwn(run.create!.body,"cloudComputerBuild")).toBe(mode==="legacy");
     expect(run.source).toEqual(source);
     expect((await stat(path.join(f.root,"runs",`${id}.json`))).mode&0o777).toBe(0o600);
-    expect(await readFile(path.join(f.root,"runs",`${id}.json`),"utf8")).not.toContain(device.privateKey);
+    const saved=await readFile(path.join(f.root,"runs",`${id}.json`),"utf8");
+    expect(saved).not.toContain(device.privateKey);
+    await f.store.withRun(id,null,handle=>handle.save());
+    expect(await readFile(path.join(f.root,"runs",`${id}.json`),"utf8")).toBe(saved);
   });
 
   it("refuses a corrupted workspace, generation, fixture, signature or device instead of selecting cleanup by name",async()=>{

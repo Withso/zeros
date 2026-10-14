@@ -11,7 +11,9 @@ import { ZerosDevError } from "./errors";
 const uuid=z.string().uuid(),digest=z.string().regex(/^[a-f0-9]{64}$/),positive=z.number().int().positive().safe();
 export const SourceSchema=z.object({revision:z.string().regex(/^[a-f0-9]{40}$/).nullable(),dirty:z.boolean()}).strict();
 export type Source=z.infer<typeof SourceSchema>;
-export const CreateBodySchema=z.object({name:z.string().regex(/^zd-[a-z0-9-]{1,100}$/),cloudComputerBuild:z.object({id:uuid,version:positive}).strict(),
+// Keep the retired field readable for exact legacy receipt/replay verification;
+// new ordinary workspace creates omit it. Never migrate a recorded request.
+export const CreateBodySchema=z.object({name:z.string().regex(/^zd-[a-z0-9-]{1,100}$/),cloudComputerBuild:z.object({id:uuid,version:positive}).strict().optional(),
   repository:z.object({forge:z.literal("github.com"),owner:z.string().min(1).max(39),name:z.string().min(1).max(100),revision:z.string().min(1).max(512),githubInstallationId:uuid}).strict()}).strict();
 export const RunSchema=z.object({
   version:z.literal(1),runId:uuid,fixtureSha256:digest,deviceId:uuid,createdAt:z.string().datetime(),source:SourceSchema,

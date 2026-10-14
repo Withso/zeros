@@ -94,7 +94,9 @@ export class ProductApi {
       const [state,repository]=await Promise.all([this.computerState(signal),this.ensureRepository(signal)]);
       if(!state.active||state.active.state!=="succeeded"||state.active.templateState!=="ready")throw new ZerosDevError("computer_required");
       if(state.activeRepositories.length!==1||!this.repositoryMatches(fixture,state.activeRepositories[0]!))throw new ZerosDevError("repository_required");
-      handle.run.create={key:randomUUID(),body:CreateBodySchema.parse({name:`zd-${handle.run.runId}`,cloudComputerBuild:{id:state.active.id,version:state.active.version},
+      // Ordinary creates use the CP's active Computer grant. cloudComputerBuild
+      // is the retired workspace-as-builder request, not a template selector.
+      handle.run.create={key:randomUUID(),body:CreateBodySchema.parse({name:`zd-${handle.run.runId}`,
         repository:{forge:"github.com",owner:fixture.repository.owner,name:fixture.repository.name,revision:repository.revision,githubInstallationId:fixture.repository.installationId}})};
       await handle.save();
     }

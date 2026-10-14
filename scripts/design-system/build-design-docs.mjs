@@ -15,6 +15,8 @@
 //   .claude/skills/zeros-workspaces/SKILL.md  ┐
 //   .agents/skills/zeros-workspaces/SKILL.md  ├ ← the workspace brief in RULES.md
 //   .cursor/rules/zeros-workspaces.mdc        ┘   (between the workspace-brief markers)
+//   .claude|.agents/skills/zstack*/SKILL.md, .cursor/rules/zstack*.mdc
+//                                  ← agents/zstack/skills/*/SKILL.md (scripts/zstack/render.mjs)
 //
 //   pnpm design:docs           write them
 //   pnpm check:ui              fails if any is stale (checkGeneratedDocs)
@@ -24,6 +26,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildTokens, MARKETING_TOKENS_FILE, renderTokenCss } from "./build-tokens.mjs";
+import { renderZstackFiles, ZSTACK_SKILLS_DIR } from "../zstack/render.mjs";
 import {
   evaluateContract,
   evaluateLadders,
@@ -290,6 +293,7 @@ export function generatedFiles(root) {
     "docs/design-tokens.md": renderTokenReference(root),
     ...renderAgentFiles(root),
     ...renderWorkspaceAgentFiles(root),
+    ...renderZstackFiles(root),
   };
 }
 
@@ -302,7 +306,7 @@ export function checkGeneratedDocs(root) {
       violations.push({
         file: rel,
         line: 1,
-        message: `Generated design-system file is stale — run \`pnpm design:docs\` (source: ${rel === "docs/design-tokens.md" ? `styles/tokens/ + ${CONTRACT_FILE}` : rel.includes("zeros-workspaces") ? RULES_FILE : GUIDE_FILE}).`,
+        message: `Generated design-system file is stale — run \`pnpm design:docs\` (source: ${rel === "docs/design-tokens.md" ? `styles/tokens/ + ${CONTRACT_FILE}` : rel.includes("zstack") ? ZSTACK_SKILLS_DIR : rel.includes("zeros-workspaces") ? RULES_FILE : GUIDE_FILE}).`,
       });
     }
   }

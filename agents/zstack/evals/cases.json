@@ -1,0 +1,113 @@
+{
+  "schema": "zeros.zstack-evals/v1",
+  "cases": [
+    {
+      "id": "boat-saved-tree-real-shape",
+      "kind": "replay",
+      "area": "snapshots-retention",
+      "fixedBy": "cfaa5e46824ad1804aa3422de756cd4d6638a46d",
+      "symptom": "The named-Computer proof rejected Boat's real saved tree: folders are kind \"dir\", not \"directory\", and two stock systemd names contain literal backslashes.",
+      "rule": "zstack-review \u203a Tests: qualify provider-shaped fixtures against a real response at least once.",
+      "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/computer-template-snapshot-boat.test.ts"
+    },
+    {
+      "id": "saved-tree-full-sanitizer-scope",
+      "kind": "replay",
+      "area": "snapshots-retention",
+      "fixedBy": "36678681a112790aa27d290e08c3590b67e728f1",
+      "symptom": "The saved-tree proof admitted residue beside the selected repositories, extra managed-settings entries and descendants of sanitized file paths.",
+      "rule": "The saved artifact proof must cover everything sanitation clears, not only the direct private roots.",
+      "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/computer-template-snapshot-boat.test.ts"
+    },
+    {
+      "id": "sanitize-by-emptying-not-deleting",
+      "kind": "replay",
+      "area": "vm-image-bootstrap",
+      "fixedBy": "1f140c503e675af54e9a2fbd3b75d86e968ed355",
+      "symptom": "Files the Computer build deleted (boot marker, disk epoch) reappeared in the saved artifact because Boat's incremental save kept the older payload.",
+      "rule": "Sanitize persistent provider disks by truncating in place, never by unlinking, and verify the saved artifact rather than the live cleanup.",
+      "check": "python3 -m unittest discover -s scripts/cloud-workspace-validation/runtime-base-v4/tests -p 'test_computer_build.py'"
+    },
+    {
+      "id": "fixed-sleep-lock-contention",
+      "kind": "replay",
+      "area": "control-plane-data",
+      "fixedBy": "01eba12f4aa54730955de605287251780c12ccb0",
+      "symptom": "A deletion test released a contended lock after a fixed 75 ms sleep. On a slow runner the worker never saw contention, so main went red.",
+      "rule": "zstack-review \u203a Tests: hold the contended condition until the code under test observes it; no fixed sleeps.",
+      "check": "pnpm --dir apps/control-plane exec vitest run src/deletion-lifecycle.integration.test.ts"
+    },
+    {
+      "id": "read-path-took-owner-lock",
+      "kind": "replay",
+      "area": "access-authority",
+      "fixedBy": "4a7f3db6c913ebadcd52fbca270f7fa956b27471",
+      "symptom": "actor-confirm and warm-context ran under the exclusive per-owner funding lock, and warm-context synchronized credentials. The lock family used about 80% of Alpha DB time and caused reconnect loops.",
+      "rule": "zstack-review \u203a Concurrency: read paths take no mutation lock; deadlines anchor at the start of the observation.",
+      "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/agent-boot-executions.integration.test.ts"
+    },
+    {
+      "id": "password-grant-desktop-client",
+      "kind": "replay",
+      "area": "zeros-dev-e2e",
+      "fixedBy": "bc9880d8d30ea57f206a34b8685dcab64966417d",
+      "symptom": "The Alpha fixture login was denied: WorkOS rejects a secret-backed password grant for the desktop client (invalid_client) and accepts it for the web client.",
+      "rule": "Qualify authentication flows against the real provider configuration before relying on them.",
+      "check": "pnpm --dir apps/control-plane exec vitest run src/zeros-dev-auth-workos.test.ts"
+    },
+    {
+      "id": "stat-then-read-in-tests",
+      "kind": "replay",
+      "area": "zeros-dev-e2e",
+      "fixedBy": "bc9880d8d30ea57f206a34b8685dcab64966417d",
+      "symptom": "CodeQL raised two high alerts because tests checked a credential file's mode with stat and then read it by path.",
+      "rule": "zstack-review \u203a Security: open once and validate the descriptor, in tests too.",
+      "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-github.test.ts scripts/__tests__/zeros-dev-agent-file.test.ts"
+    },
+    {
+      "id": "authorization-window-clock-skew",
+      "kind": "replay",
+      "area": "zeros-dev-e2e",
+      "fixedBy": "e591d8c964713a6b038127b8cb757ebc28ec78e9",
+      "symptom": "GitHub connect refused Alpha's ten-minute OAuth state because the harness required at most exactly 600,000 ms remaining and Alpha's clock runs about 0.5 s ahead.",
+      "rule": "zstack-verify \u203a Gotchas: tolerate clock skew and compare against the documented bound.",
+      "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-github.test.ts"
+    },
+    {
+      "id": "repository-name-casing",
+      "kind": "replay",
+      "area": "zeros-dev-e2e",
+      "fixedBy": "adb9cdc1f852ba6f35ee639a35f48e5b07111612",
+      "symptom": "The control plane stores repository names in lowercase, while the harness compared GitHub's display casing exactly and reported a configured repository as missing.",
+      "rule": "Compare GitHub owner and name case-insensitively and numeric IDs exactly.",
+      "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-product.test.ts"
+    },
+    {
+      "id": "retired-create-request-field",
+      "kind": "replay",
+      "area": "zeros-dev-e2e",
+      "fixedBy": "a62dc5dafb73085e078718dfc7c5283ce376920b",
+      "symptom": "workspace create sent the retired cloudComputerBuild field, and the control plane refused it with 409 before admission.",
+      "rule": "zstack-review \u203a Compatibility: check the current route contract; don't send retired fields.",
+      "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-product.test.ts"
+    },
+    {
+      "id": "interactive-shell-ignores-term",
+      "kind": "replay",
+      "area": "vm-engine-agents",
+      "fixedBy": "0a2400cf6135e96144addfb6e8d96b265f539788",
+      "symptom": "A resident-host test flaked in teardown because interactive bash ignores SIGTERM, so stopping could not prove the process group empty under load.",
+      "rule": "playbooks/ci-red.md: a repeated flake gets a deterministic fix; check teardown before the asserted behavior.",
+      "check": "pnpm exec vitest run apps/desktop/src/engine/pty/__tests__/resident-host.test.ts"
+    },
+    {
+      "id": "new-image-ref-form-unhandled-by-vm-helper",
+      "kind": "replay",
+      "area": "vm-image-bootstrap",
+      "fixedBy": "1f586e4b4d70d3d8d57813774e78d5005101560b",
+      "symptom": "Named Computers introduced boat-computer:<name>@sha256:<digest> image references. The VM setup helper accepted only boat-template:, so every workspace from a named Computer failed setup_settings_invalid.",
+      "rule": "zstack-review \u203a Compatibility: when a producer adds a new identifier form, update every consumer's parser in the same change (search for the old prefix).",
+      "check": "pnpm exec vitest run scripts/__tests__/cloud-workspace-setup-helper.test.ts"
+    }
+  ]
+}
