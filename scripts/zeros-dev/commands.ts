@@ -4,13 +4,13 @@ import type { ZerosDevSession } from "./session";
 import type { ProductApi, Agent } from "./product";
 import type { Run, RunHandle, RunStore, Source } from "./receipts";
 import type { ZerosDevRuntime } from "./runtime";
-import type { AgentValues } from "./config";
+import { parseRepositorySelection, type AgentValues, type RepositorySelection } from "./config";
 import { Evidence, assertNoCredentials, redactContent, type EvidenceEvent } from "./evidence";
 import { ZerosDevError, closedError } from "./errors";
 import type { controlPlaneHealth, controlPlaneLogs, databaseHealth } from "./health";
 
 const COMMANDS = {
-  login: [], whoami: [], logout: [], "org ensure": [], "repo ensure": [],
+  login: [], whoami: [], logout: [], "org ensure": [], "repo ensure": [], "github connect": ["repository", "repository-id"],
   "computer build": ["run", "wait"], "computer status": ["run"], "computer logs": ["run", "after"],
   "workspace create": ["run", "wait"], "workspace resume": ["run", "wait"], "workspace stop": ["run", "wait"], "workspace delete": ["run", "wait"], "workspace status": ["run"],
   "agent send": ["run", "agent", "model", "prompt-file", "prompt", "continue", "wait"], "chat tail": ["run", "prompt"],
@@ -24,6 +24,7 @@ const uuid = z.string().uuid();
 
 export const HELP = `Alpha-only Linux zeros-dev (credentials: canonical .env.agent)
   login | whoami | logout
+  github connect --repository OWNER/NAME --repository-id NUMERIC_ID
   org ensure | repo ensure
   computer build [--run UUID] [--wait]
   computer status|logs --run UUID [--after N]
@@ -37,12 +38,13 @@ export const HELP = `Alpha-only Linux zeros-dev (credentials: canonical .env.age
   scenario run smoke --agent AGENT --model MODEL [--run UUID] [--build-computer] [--prompt-file FILE]
   cleanup --run UUID|--all [--apply]
 Lifecycle/build/prompt commands wait with finite deadlines. Cleanup defaults to a plan.
-No channel, origin, password, token, provider-ID or SQL argument is supported.`;
+No channel, origin, password, token, sandbox-ID or SQL argument is supported.`;
 
 export function parseCommand(args: string[]): Command | null {
   if (args.length === 0 || args.length === 1 && ["help", "--help", "-h"].includes(args[0]!)) return null;
   const flag = args.findIndex(value => value.startsWith("--"));
-  const name = args.slice(0, flag < 0 ? args.length : flag).join(" ");
+  const requested = args.slice(0, flag < 0 ? args.length : flag).join(" ");
+  const name = requested === "health" ? "health cp" : requested;
   if (!Object.hasOwn(COMMANDS, name)) throw new ZerosDevError("invalid_request");
   const options: Record<string, string | true> = {};
   for (let i = flag < 0 ? args.length : flag; i < args.length; i++) {
@@ -59,8 +61,9 @@ export function parseCommand(args: string[]): Command | null {
   if (options["expect-source"] && !/^[a-f0-9]{40}$/.test(String(options["expect-source"])) ||
     options["expect-runtime"] && !/^r1-[a-f0-9]{64}$/.test(String(options["expect-runtime"]))) throw new ZerosDevError("invalid_request");
   if (name === "cleanup" && (!!options.run === !!options.all)) throw new ZerosDevError("invalid_request");
-  if (!["login", "whoami", "logout", "org ensure", "repo ensure", "health cp", "workspace create", "computer build", "scenario run smoke", "cleanup"].includes(name) && !options.run)
+  if (!["login", "whoami", "logout", "org ensure", "repo ensure", "github connect", "health cp", "workspace create", "computer build", "scenario run smoke", "cleanup"].includes(name) && !options.run)
     throw new ZerosDevError("invalid_request");
+  if (name === "github connect") parseRepositorySelection(String(options.repository ?? ""), String(options["repository-id"] ?? ""));
   if (["agent send", "scenario run smoke"].includes(name) && (!z.enum(["claude", "codex", "cursor"]).safeParse(options.agent).success ||
     typeof options.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/.test(options.model))) throw new ZerosDevError("invalid_request");
   if (name === "agent send" && !options["prompt-file"] || name === "chat tail" && !options.prompt || name === "terminal run" && !options.script ||
@@ -69,7 +72,7 @@ export function parseCommand(args: string[]): Command | null {
 }
 
 export interface Services {
-  session: Pick<ZerosDevSession, "login" | "logout" | "whoami" | "fixture">;
+  session: Pick<ZerosDevSession, "login" | "logout" | "whoami" | "identity" | "fixture">;
   api: ProductApi;
   runs(): Promise<RunStore>;
   source(): Promise<Source>;
@@ -79,6 +82,7 @@ export interface Services {
   healthCp(): ReturnType<typeof controlPlaneHealth>;
   healthDb(run: Run): ReturnType<typeof databaseHealth>;
   healthLogs(run: Run): ReturnType<typeof controlPlaneLogs>;
+  githubConnect(repository: RepositorySelection, signal: AbortSignal, show: (url: string) => void): Promise<void>;
   write(value: unknown): void;
 }
 
@@ -113,7 +117,13 @@ export async function executeCommand(command: Command, services: Services, signa
     else if (name === "logout") { await evidence.step("identity", () => services.session.logout()); result({ authenticated: false }); }
     else if (name === "whoami" || name === "org ensure") { await evidence.step("identity", () => services.session.whoami()); result({ fixture: "confirmed" }); }
     else if (name === "repo ensure") { await evidence.step("repository", () => services.api.ensureRepository(signal)); result({ fixture: "confirmed" }); }
-    else if (name === "health cp") result(await sourceCheck());
+    else if (name === "github connect") {
+      const repository = parseRepositorySelection(String(options.repository), String(options["repository-id"]));
+      await evidence.step("repository", () => services.githubConnect(repository, signal,
+        authorizeUrl => services.write({ schema: "zeros.dev-github-authorization/v1", authorizeUrl })));
+      result({ connected: true, fixture: "confirmed" });
+    }
+    else if (name === "health cp") { await services.session.identity(); result(await sourceCheck()); }
     else if (name === "cleanup") {
       const runs = await services.runs(), ids = options.all ? await runs.list() : [runId];
       let planned = 0, confirmed = 0;

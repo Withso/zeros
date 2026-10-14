@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
+import { createRemoteJWKSet, decodeJwt, errors, jwtVerify } from "jose";
 import type { AuthBackendConfig, WorkOSBackendConfig } from "./config.js";
 import { authTokenVerifyOptions, validateAuthTokenClaims, type AuthTokenClaims } from "./auth-token-contract.js";
 import { ZerosDevAuthError, type ZerosDevAuthConfig } from "./zeros-dev-auth-config.js";
@@ -8,10 +8,13 @@ const IDENTIFIER = /^[A-Za-z0-9_-]{1,512}$/;
 export type ZerosDevIssuedGrant = {
   accessToken: string; refreshToken: string; sessionId: string;
   subject: string; email: string; emailVerified: boolean; authenticationMethod: string;
+  challengePresent?: boolean;
 };
 export interface ZerosDevPasswordProvider {
   issue(identity: ZerosDevAuthConfig, password: string, signal: AbortSignal): Promise<ZerosDevIssuedGrant>;
+  refresh(refreshToken: string, signal: AbortSignal): Promise<ZerosDevIssuedGrant>;
   verify(token: string): Promise<AuthTokenClaims>;
+  verifySessionProof(token: string): Promise<AuthTokenClaims>;
   revoke(sessionId: string, signal: AbortSignal): Promise<void>;
 }
 
@@ -49,7 +52,7 @@ export async function boundedJson(message: Request | Response, max: number, sign
   }
 }
 
-/** Uses WorkOS's existing Desktop Application, never a locally issued token.
+/** Uses WorkOS's configured confidential web client, never a locally issued token.
  * The transport seam is injectable for fake-WorkOS tests, not environment URLs. */
 export class ZerosDevWorkOSPasswordProvider implements ZerosDevPasswordProvider {
   private readonly keys: ReturnType<typeof createRemoteJWKSet>;
@@ -63,11 +66,18 @@ export class ZerosDevWorkOSPasswordProvider implements ZerosDevPasswordProvider 
   }
 
   async issue(identity: ZerosDevAuthConfig, password: string, signal: AbortSignal): Promise<ZerosDevIssuedGrant> {
+    return this.authenticate({ grant_type: "password", email: identity.email, password }, signal);
+  }
+
+  async refresh(refreshToken: string, signal: AbortSignal): Promise<ZerosDevIssuedGrant> {
+    return this.authenticate({ grant_type: "refresh_token", refresh_token: refreshToken }, signal);
+  }
+
+  private async authenticate(grant: Record<string, string>, signal: AbortSignal): Promise<ZerosDevIssuedGrant> {
     const response = await this.fetchImpl(`${ORIGIN}/user_management/authenticate`, {
       method: "POST", redirect: "error", credentials: "omit", signal,
       headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({ client_id: this.auth.desktopClientId, client_secret: this.backend.apiKey,
-        grant_type: "password", email: identity.email, password }),
+      body: JSON.stringify({ client_id: this.auth.webClientId, client_secret: this.backend.apiKey, ...grant }),
     });
     if (!response.ok) {
       void response.body?.cancel().catch(() => {});
@@ -89,12 +99,14 @@ export class ZerosDevWorkOSPasswordProvider implements ZerosDevPasswordProvider 
     catch { throw new ZerosDevAuthError("unavailable"); }
     if (typeof sessionId !== "string" || !IDENTIFIER.test(sessionId)) throw new ZerosDevAuthError("unavailable");
     const user = body?.user as Record<string, unknown> | undefined;
+    const challengePresent = ["pending_authentication_token", "authentication_challenge", "code", "error"].some(key => key in (body ?? {}));
     return { accessToken: token as string,
       refreshToken: typeof body?.refresh_token === "string" && body.refresh_token.length <= 64 * 1024 ? body.refresh_token : "",
       sessionId, subject: typeof user?.id === "string" ? user.id : "",
       email: typeof user?.email === "string" ? user.email.trim().toLowerCase() : "",
       emailVerified: user?.email_verified === true,
-      authenticationMethod: !["pending_authentication_token", "authentication_challenge", "code", "error"].some(key => key in (body ?? {})) &&
+      challengePresent,
+      authenticationMethod: !challengePresent &&
         typeof body?.authentication_method === "string" ? body.authentication_method : "" };
   }
 
@@ -102,6 +114,19 @@ export class ZerosDevWorkOSPasswordProvider implements ZerosDevPasswordProvider 
     if (this.verifyImpl) return this.verifyImpl(token);
     const { payload } = await jwtVerify(token, this.keys, authTokenVerifyOptions(this.auth));
     return validateAuthTokenClaims(payload, this.auth);
+  }
+
+  /** Expired tokens are proof of possession only, never API bearers. JOSE's
+   * exp error carries claims only after signature, issuer, audience, required
+   * claims and nbf checks. The lifecycle route additionally requires the exact
+   * pinned web client and a recorded zeros-dev issuance; refresh still needs
+   * WorkOS's refresh token. Ordinary verify() keeps enforcing expiry. */
+  async verifySessionProof(token: string): Promise<AuthTokenClaims> {
+    try { return await this.verify(token); }
+    catch (error) {
+      if (!(error instanceof errors.JWTExpired) || error.claim !== "exp") throw error;
+      return validateAuthTokenClaims(error.payload, this.auth);
+    }
   }
 
   async revoke(sessionId: string, signal: AbortSignal): Promise<void> {

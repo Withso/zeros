@@ -32,7 +32,7 @@ function fixture(overrides: { config?: Config; timeoutMs?: number } = {}) {
   const grant = { accessToken: "synthetic-access", refreshToken: "synthetic-refresh", sessionId: "session_fixture",
     subject: identity.subject, email: identity.email, emailVerified: true, authenticationMethod: "Password" };
   const claims = { providerSubject: identity.subject, sessionId: grant.sessionId, email: identity.email,
-    emailVerified: true as const, clientKind: "desktop" as const, clientId: auth.desktopClientId,
+    emailVerified: true as const, clientKind: "web" as const, clientId: auth.webClientId,
     tokenId: "token_fixture", displayName: null, avatarUrl: null, authTime: 100, issuedAt: 100, expiresAt: 200 };
   const repository = {
     begin: vi.fn(async () => { events.push("reserved"); }),
@@ -42,6 +42,8 @@ function fixture(overrides: { config?: Config; timeoutMs?: number } = {}) {
   } satisfies ZerosDevAuthRepository;
   const provider = {
     issue: vi.fn(async () => { events.push("workos"); return grant; }),
+    refresh: vi.fn(async () => grant),
+    verifySessionProof: vi.fn(async () => claims),
     verify: vi.fn(async () => claims),
     revoke: vi.fn(async () => { events.push("provider_revocation"); }),
   } satisfies ZerosDevPasswordProvider;
@@ -50,7 +52,129 @@ function fixture(overrides: { config?: Config; timeoutMs?: number } = {}) {
   return { app, repository, provider, grant, claims, events };
 }
 
+function webLifecycle(overrides: { config?: Config; timeoutMs?: number } = {}) {
+  const f = fixture(overrides);
+  const claims = { ...f.claims, clientKind: "web" as const, clientId: auth.webClientId };
+  f.provider.verify.mockResolvedValue(claims as never);
+  const refresh = vi.fn(async () => { f.events.push("refresh"); return f.grant; });
+  const verifySessionProof = vi.fn(async () => claims);
+  Object.assign(f.provider, { refresh, verifySessionProof });
+  const send = (kind: "refresh" | "revoke", extra: Record<string, unknown> = {}, headers = {}) => {
+    const { password: _password, ...input } = request();
+    return f.app.request(`/auth/zeros-dev/${kind}`, { method: "POST", headers: {
+      "content-type": "application/json", authorization: "Bearer synthetic-session-proof", ...headers },
+      body: JSON.stringify({ ...input, ...(kind === "refresh" ? { refreshToken: "synthetic-refresh" } : {}), ...extra }) });
+  };
+  return { ...f, refresh, verifySessionProof, send, webClaims: claims };
+}
+
+describe("zeros-dev web session lifecycle stays inside its fixed Alpha admission", () => {
+  it("refreshes the same audited session with a server-side secret and commits before returning", async () => {
+    const f = webLifecycle();
+    const response = await f.send("refresh");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ session: { clientKind: "web", sessionId: f.grant.sessionId } });
+    expect(f.verifySessionProof).toHaveBeenCalledWith("synthetic-session-proof");
+    expect(f.repository.begin).toHaveBeenCalledWith(identity, expect.anything(), expect.any(String), { sessionId: f.grant.sessionId, operation: "refresh" });
+    expect(f.refresh).toHaveBeenCalledWith("synthetic-refresh", expect.any(AbortSignal));
+    expect(f.repository.commit).toHaveBeenCalledWith(identity, expect.anything(), f.webClaims, "refresh");
+    expect(f.events).toEqual(["reserved", "refresh", "audit_commit"]);
+    expect(f.provider.issue).not.toHaveBeenCalled();
+  });
+
+  it("refuses a session without its zeros-dev issuance receipt before forwarding a refresh", async () => {
+    const f = webLifecycle();
+    f.repository.begin.mockRejectedValue(new ZerosDevAuthError("denied"));
+    expect((await f.send("refresh")).status).toBe(401);
+    expect(f.refresh).not.toHaveBeenCalled();
+    expect(f.provider.revoke).not.toHaveBeenCalled();
+  });
+
+  it.each(["desktop", "foreign", "subject"])("refuses a %s session proof before database/provider work", async kind => {
+    const f = webLifecycle();
+    f.verifySessionProof.mockResolvedValue({ ...f.webClaims,
+      ...(kind === "desktop" ? { clientKind: "desktop", clientId: auth.desktopClientId } : kind === "foreign" ? { clientId: "client_foreign" } : { providerSubject: "user_foreign" }) } as never);
+    expect((await f.send("refresh")).status).toBe(401);
+    expect(f.refresh).not.toHaveBeenCalled();
+    expect(f.repository.begin).not.toHaveBeenCalled();
+  });
+
+  it("withholds a refresh and retires the known session if its success audit fails", async () => {
+    const f = webLifecycle();
+    f.repository.commit.mockRejectedValue(new Error("synthetic audit failure"));
+    expect((await f.send("refresh")).status).toBe(503);
+    expect(f.repository.revoke).toHaveBeenCalledWith(identity, f.grant.sessionId);
+    expect(f.provider.revoke).toHaveBeenCalledWith(f.grant.sessionId, expect.any(AbortSignal));
+  });
+
+  it("retires the known session after an unknown refresh outcome without repeating the grant", async () => {
+    const f = webLifecycle();
+    f.refresh.mockRejectedValue(new ZerosDevAuthError("unavailable"));
+    expect((await f.send("refresh")).status).toBe(503);
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.repository.revoke).toHaveBeenCalledWith(identity, f.grant.sessionId);
+    expect(f.repository.finish).toHaveBeenCalledWith(identity, expect.anything(), { outcome: "unknown_issuance", cleanup: "retired" });
+  });
+
+  it("accepts omitted refresh ceremony metadata but cannot continue a challenge", async () => {
+    const f = webLifecycle();
+    f.grant.authenticationMethod = "";
+    expect((await f.send("refresh")).status).toBe(200);
+    Object.assign(f.grant, { challengePresent: true });
+    expect((await f.send("refresh")).status).toBe(401);
+    expect(f.repository.commit).toHaveBeenCalledOnce();
+    expect(f.provider.revoke).toHaveBeenCalledOnce();
+  });
+
+  it("shares the source budget between login, refresh and revoke even with spoofed forwarded headers", async () => {
+    const f = webLifecycle();
+    for (let i = 0; i < 4; i++) expect((await post(f.app, request(), { "x-real-ip": "192.0.2.10" })).status).toBe(200);
+    expect((await f.send("refresh", {}, { "x-real-ip": "192.0.2.10" })).status).toBe(200);
+    expect((await f.send("revoke", {}, { "x-real-ip": "192.0.2.10", "x-forwarded-for": "192.0.2.11" })).status).toBe(429);
+    expect(f.provider.revoke).not.toHaveBeenCalled();
+  });
+
+  it("retires both known and returned sessions if refresh unexpectedly switches the SID", async () => {
+    const f = webLifecycle();
+    f.refresh.mockResolvedValue({ ...f.grant, sessionId: "session_foreign" });
+    f.provider.verify.mockResolvedValue({ ...f.webClaims, sessionId: "session_foreign" } as never);
+    expect((await f.send("refresh")).status).toBe(401);
+    expect(f.repository.commit).not.toHaveBeenCalled();
+    expect(f.repository.revoke).toHaveBeenCalledWith(identity, f.grant.sessionId);
+    expect(f.repository.revoke).toHaveBeenCalledWith(identity, "session_foreign");
+  });
+
+  it("revokes only the proved issued session, with a durable tombstone before success", async () => {
+    const f = webLifecycle();
+    const result = await f.send("revoke");
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual({ revoked: 1 });
+    expect(f.repository.begin).toHaveBeenCalledWith(identity, expect.anything(), expect.any(String), { sessionId: f.grant.sessionId, operation: "revoke" });
+    expect(f.repository.revoke).toHaveBeenCalledWith(identity, f.grant.sessionId, expect.objectContaining({ requestId: expect.any(String) }));
+    expect(f.provider.revoke).toHaveBeenCalledWith(f.grant.sessionId, expect.any(AbortSignal));
+    expect(f.provider.issue).not.toHaveBeenCalled();
+    expect(f.refresh).not.toHaveBeenCalled();
+  });
+
+  it.each(["beta", "production"])("leaves all lifecycle paths unregistered on %s despite stale enablement", async channel => {
+    const cfg = loadConfig({ ...env, RAILWAY_ENVIRONMENT_NAME: channel }); cfg.zerosDevAuth = identity;
+    const f = webLifecycle({ config: cfg });
+    expect((await f.send("refresh")).status).toBe(404);
+    expect((await f.send("revoke")).status).toBe(404);
+    expect(f.verifySessionProof).not.toHaveBeenCalled();
+  });
+});
+
 describe("zeros-dev fixed Alpha identity", () => {
+  it("returns the verified web client kind instead of relabeling a password grant as desktop", async () => {
+    const f = fixture();
+    f.provider.verify.mockResolvedValue({ ...f.claims, clientKind: "web", clientId: auth.webClientId } as never);
+    const response = await post(f.app);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ session: { clientKind: "web", providerSubject: identity.subject } });
+    expect(f.repository.commit).toHaveBeenCalledWith(identity, expect.anything(), expect.objectContaining({ clientKind: "web" }));
+  });
+
   it("requires explicit enablement and ignores stale keys outside Alpha", async () => {
     for (const channel of ["development", "beta", "production", "preview", ""]) {
       const cfg = loadConfig({ ...env, RAILWAY_ENVIRONMENT_NAME: channel });
@@ -70,10 +194,12 @@ describe("zeros-dev fixed Alpha identity", () => {
       // Even a stale manually supplied option cannot override the authoritative channel.
       cfg.zerosDevAuth = identity;
       const app = createApp(cfg, {} as never, {} as never);
-      expect((await app.request("/auth/zeros-dev/session", { method: "POST", body: "{}" })).status).toBe(404);
+      for (const path of ["session", "refresh", "revoke"])
+        expect((await app.request(`/auth/zeros-dev/${path}`, { method: "POST", body: "{}" })).status).toBe(404);
       cfg.databaseMaintenanceMode = true;
       const maintenanceApp = createApp(cfg, {} as never, {} as never);
-      expect((await maintenanceApp.request("/auth/zeros-dev/session", { method: "POST", body: "{}" })).status).toBe(404);
+      for (const path of ["session", "refresh", "revoke"])
+        expect((await maintenanceApp.request(`/auth/zeros-dev/${path}`, { method: "POST", body: "{}" })).status).toBe(404);
     }
   });
 
@@ -84,14 +210,14 @@ describe("zeros-dev fixed Alpha identity", () => {
     }
   });
 
-  it("returns only the existing desktop session after the fixed identity and audit commit", async () => {
+  it("returns only the existing web session after the fixed identity and audit commit", async () => {
     const { app, provider, repository, events } = fixture();
     const input = request();
     const response = await post(app, input);
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toMatchObject({ accountId: identity.accountId, organizationId: identity.organizationId,
-      session: { accessToken: "synthetic-access", refreshToken: "synthetic-refresh", clientKind: "desktop",
+      session: { accessToken: "synthetic-access", refreshToken: "synthetic-refresh", clientKind: "web",
         providerSubject: identity.subject, authenticationMethod: "Password" } });
     expect(events).toEqual(["reserved", "workos", "audit_commit"]);
     expect(provider.issue).toHaveBeenCalledWith(identity, input.password, expect.any(AbortSignal));

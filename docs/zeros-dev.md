@@ -8,7 +8,8 @@ and `electron:alpha` retain their current launch paths.
 
 ## Alpha authentication boundary
 
-The control plane registers `POST /auth/zeros-dev/session` only when its
+The control plane registers `POST /auth/zeros-dev/session`, `/refresh` and
+`/revoke` (all under `/auth/zeros-dev`) only when its
 authoritative deployment channel is Alpha, the checked-in cloud channel policy
 allows Alpha, and `ZEROS_DEV_AUTH_ENABLED=true`. Other channels return 404,
 including with stale settings and during database maintenance. VM engines do
@@ -19,18 +20,35 @@ The operator pins `ZEROS_DEV_AUTH_SUBJECT`, `ZEROS_DEV_AUTH_ACCOUNT_ID`,
 `ZEROS_DEV_AUTH_EMAIL` and `ZEROS_DEV_AUTH_ORGANIZATION_ID` in the Alpha CP.
 The account and verified WorkOS identity must already exist, have no staff
 role, and belong to the active nonpersonal test organization. The route never
-creates accounts, roles, memberships, credentials or entitlements. Requests
-contain only a password, a UUID request ID, and Linux device intent. WorkOS must
-issue the existing signed desktop contract; MFA, SSO-only, verification and
-authentication-policy challenges cannot be continued or bypassed here.
+creates accounts, roles, memberships, credentials or entitlements. Login requests
+contain only a password, a UUID request ID, and Linux device intent. WorkOS uses
+the configured confidential `AUTH_WEB_CLIENT_ID`, with its secret kept on the
+control plane. The public desktop client cannot issue this password grant.
+The signed token and recorded session keep their real `web` client kind; the
+ordinary bearer contract already accepts that client on the device, GitHub,
+Computer and runtime routes. Desktop PKCE, refresh and revoke checks remain
+unchanged. MFA, SSO-only, verification and authentication-policy challenges
+cannot be continued or bypassed here.
 
-Requests have a 4 KiB limit and a five-second response deadline. WorkOS bodies
+Login and revoke requests have a 4 KiB limit; refresh allows 70 KiB for a
+refresh token of at most 64 KiB. All have a five-second response deadline. WorkOS bodies
 are bounded at 128 KiB. The endpoint allows five attempts per source and twenty
 globally per minute, with a process backstop and serialized database budgets.
 Railway's trusted edge supplies `X-Real-IP`; other forwarded headers cannot
 select a bucket. Missing or invalid peers share one bucket. Keep the API behind
 that edge: the header alone is not peer authentication. The global cap also
 applies when multiple edges or API replicas are involved.
+
+Refresh and logout require a signed token for the pinned web account and the
+exact session's committed zeros-dev issuance audit. An ordinary web session,
+including another session for the same test user, cannot use these routes.
+Only lifecycle proof may be expired: signature, issuer, audience, required
+claims and `nbf` still validate, and expired tokens remain invalid on product
+APIs. Refresh also requires the WorkOS refresh token and must return the same
+SID; its audit commits before the rotated token is returned. An unknown or
+withheld refresh retires the known session through the tombstone/outbox path.
+Logout retires that one session; it has no global-signout option. Neither route
+accepts a caller-selected subject, client, organization or session ID.
 
 The attempt audit commits before the grant request; the exact session and its
 success audit commit before tokens are returned. Reusing a recorded request ID
@@ -86,13 +104,42 @@ Use `pnpm exec tsx scripts/zeros-dev/cli.ts --help` for the complete command
 surface. Commands have one live target: `https://api-alpha.zeros.build`.
 There is no channel, origin, SQL, provider sandbox ID or credential argument.
 The CLI never loads credentials from ambient environment variables. Set the
-owner-prepared subject, account UUID, verified email, org UUID, repository
-`owner/name`, GitHub numeric repository ID, Zeros installation UUID and password
-in `.env.agent`. `pnpm agent:check` reports structural fixture validity without
-logging in, refreshing or enrolling a device.
+owner-prepared subject, account UUID, verified email, org UUID and password in
+`.env.agent` first. `login`, `whoami`, `org ensure`, `health` (an alias for
+`health cp`) and `github connect` work before repository pins exist.
+`pnpm agent:check` reports a valid identity awaiting GitHub as a warning, without
+logging in, refreshing or enrolling a device. Repository, Computer, workspace
+and receipt-scoped health commands still require the complete fixture.
 
-The normal product fixture must already have its GitHub connection and App
-installation, one Computer draft repository matching that exact fixture, an
+Run `github connect --repository OWNER/NAME --repository-id NUMERIC_ID` with the
+owner-approved private fixture repository. These arguments are nonsecret
+selection metadata; no installation UUID or credential is accepted on argv.
+The command prints a `zeros.dev-github-authorization/v1` record containing only
+the validated GitHub authorization URL, followed by closed completion metadata.
+Send that URL to the owner while the command remains running. The owner signs
+into their own GitHub account and authorizes the Alpha GitHub App. On the
+**GitHub connected** page, they can close the tab without selecting **Open
+Zeros**. They never sign into the fixture account or enter its password.
+
+The CLI reuses the desktop OAuth client and polls the normal owner-bound
+handoff every 25 seconds, allowing the 90-second completion grace after the
+ten-minute authorization window. It then uses the fixture session's normal
+catalog, source and connect routes. It requires one active organization
+installation, a complete catalog, and the exact private repository name and
+numeric ID. The **Zeros installation UUID** comes from that member's catalog
+and must agree with the source and connect responses; a GitHub provider
+installation number or another member's row is never substituted.
+
+After rechecking the account, it atomically pins `ZEROS_DEV_REPOSITORY`,
+`ZEROS_DEV_REPOSITORY_ID` and `ZEROS_DEV_GITHUB_INSTALLATION_ID` under the same
+canonical lock used for token rotation. Matching pins may be confirmed again;
+conflicting pins or an account/session change fail closed. The nonce and GitHub
+tokens stay in process memory and are not written to `.env.agent`, receipts or
+logs. If approval expires or the process exits before confirmation, rerun the
+command to start another normal handoff; it cannot resume an abandoned nonce.
+
+The normal product fixture needs the GitHub App installed and selected for the
+repository before connect. It also needs one Computer draft repository matching that exact fixture, an
 approved recipe, entitlement/quota and the chosen agent's supported account
 connection. `org ensure` and `repo ensure` validate/adopt these prerequisites.
 They do not create an org, change membership/funding, install a GitHub App or
@@ -101,6 +148,7 @@ revision and operation ID. A missing prerequisite fails explicitly.
 
 ```sh
 pnpm exec tsx scripts/zeros-dev/cli.ts login
+pnpm exec tsx scripts/zeros-dev/cli.ts github connect --repository OWNER/NAME --repository-id NUMERIC_ID
 pnpm exec tsx scripts/zeros-dev/cli.ts org ensure
 pnpm exec tsx scripts/zeros-dev/cli.ts repo ensure
 pnpm exec tsx scripts/zeros-dev/cli.ts computer build --wait
@@ -217,11 +265,11 @@ credential or infrastructure token is injected into a VM or template.
 
 The required live qualification is a normal owner-prepared WorkOS password
 grant, each selected agent's completed prompt, terminal exit, stop/resume with
-state intact, and verified product deletion. If WorkOS cannot issue the existing
-desktop contract, stop qualification; there is no alternative issuer, MFA/SSO
+state intact, and verified product deletion. If WorkOS cannot issue the pinned
+web bearer contract, stop qualification; there is no alternative issuer, MFA/SSO
 bypass or role seed. Every recoverable received grant stays under cleanup until
 canonical persistence succeeds, including envelope, identity, verification and
-save failures. Cleanup attempts normal current-session revocation; an attempt
+save failures. Cleanup attempts the fixture's current-session revocation; an attempt
 does not confirm provider retirement. A malformed response with no recoverable
 grant reports `auth_unknown_issuance`. If a save confirmation fails, the harness
 clears only that same session through its owned file lock when its inode checks

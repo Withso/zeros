@@ -13,6 +13,7 @@ import { ZerosDevRuntime } from "./runtime";
 import { controlPlaneHealth, controlPlaneLogs, databaseHealth } from "./health";
 import { HELP, parseCommand, executeCommand, type Services } from "./commands";
 import { ZerosDevError, closedError } from "./errors";
+import { connectGithub } from "./github";
 
 async function source(checkout: string): Promise<Source> {
   const exec = promisify(execFile);
@@ -38,7 +39,8 @@ async function services(checkout: string, write: (value: unknown) => void): Prom
       const info = await lstat(parent);
       if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || info.mode & 0o022 || await realpath(parent) !== parent)
         throw new ZerosDevError("receipt_invalid");
-      runs = new RunStore(path.join(parent, "zeros-dev"), await session.whoami(), await session.device()); return runs;
+      await session.whoami();
+      runs = new RunStore(path.join(parent, "zeros-dev"), await session.fixture(), await session.device()); return runs;
     },
     content: async (input, limit) => {
       const target = path.resolve(checkout, input);
@@ -65,6 +67,7 @@ async function services(checkout: string, write: (value: unknown) => void): Prom
     healthCp: () => controlPlaneHealth(transport),
     healthDb: async run => databaseHealth((await store.read()).values, await session.fixture(), run),
     healthLogs: async run => controlPlaneLogs((await store.read()).values, run),
+    githubConnect: (repository, signal, show) => connectGithub(session, api, repository, show, signal),
   };
 }
 

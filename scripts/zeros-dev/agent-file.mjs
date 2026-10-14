@@ -16,6 +16,7 @@ const WRITABLE = new Set([
   "ZEROS_DEV_ACCESS_TOKEN", "ZEROS_DEV_REFRESH_TOKEN", "ZEROS_DEV_SESSION_ID", "ZEROS_DEV_TOKEN_EXPIRES_AT",
   "ZEROS_DEV_DEVICE_PRIVATE_KEY_B64",
 ]);
+const REPOSITORY_KEYS = new Set(["ZEROS_DEV_REPOSITORY", "ZEROS_DEV_REPOSITORY_ID", "ZEROS_DEV_GITHUB_INSTALLATION_ID"]);
 const failure = code => new Error(`zeros_dev_credentials_${code}`);
 const same = (a,b) => a.dev === b.dev && a.ino === b.ino;
 
@@ -121,11 +122,9 @@ export class AgentFileStore {
     }
     try {
       let current=await this.read();
-      const store={
-        get values(){return current.values;},
-        update:async changes=>{
+      const update=async (changes,allowed)=>{
           if(!changes || typeof changes!=="object" || Array.isArray(changes) || Object.entries(changes).some(([key,value])=>
-            !WRITABLE.has(key) || typeof value!=="string" || value.length>128*1024 || /[\r\n\0]/.test(value) || value.trim()!==value))throw failure("invalid");
+            !allowed.has(key) || typeof value!=="string" || value.length>128*1024 || /[\r\n\0]/.test(value) || value.trim()!==value))throw failure("invalid");
           const before=await this.read();
           if(!same(current.info,before.info) || current.text!==before.text || !same(held,await lstat(lock)))throw failure("changed");
           const pending=new Map(Object.entries(changes));
@@ -155,6 +154,17 @@ export class AgentFileStore {
             try{safeDirectory(await directory.stat());await directory.sync();}finally{await directory.close();}
             current=await this.read();
           } finally {await output?.close();await unlink(temporary).catch(error=>{if(error.code!=="ENOENT")throw failure("unsafe");});}
+      };
+      const store={
+        get values(){return current.values;},
+        update:changes=>update(changes,WRITABLE),
+        pinRepository:async changes=>{
+          if(!changes || typeof changes!=="object" || Array.isArray(changes) || Object.keys(changes).length!==3 ||
+            Object.entries(changes).some(([key,value])=>!REPOSITORY_KEYS.has(key)||typeof value!=="string"||!value))throw failure("invalid");
+          // This is a once-only fixture bind, never a general configuration
+          // writer. A retry may confirm the same pins but cannot replace them.
+          if(Object.entries(changes).some(([key,value])=>current.values[key]&&current.values[key]!==value))throw failure("changed");
+          await update(changes,REPOSITORY_KEYS);
         },
       };
       return await work(store);

@@ -240,4 +240,13 @@ describe("agent credential check", () => {
       expect(checkZerosDevValues({...values,...changes})).toMatchObject({status:"fail"});
     expect(JSON.stringify(checkZerosDevValues({...values,ZEROS_DEV_EMAIL:"invalid"}))).not.toContain(values.ZEROS_DEV_PASSWORD);
   });
+
+  it("distinguishes a valid login identity awaiting GitHub from invalid credentials",()=>{
+    const identity={ZEROS_DEV_WORKOS_SUBJECT:"user_fixture",ZEROS_DEV_ACCOUNT_ID:"11111111-1111-4111-8111-111111111111",ZEROS_DEV_EMAIL:"fixture@example.test",
+      ZEROS_DEV_ORGANIZATION_ID:"22222222-2222-4222-8222-222222222222",ZEROS_DEV_PASSWORD:"synthetic-private-password"};
+    for(const partial of [{},{ZEROS_DEV_REPOSITORY:""},{ZEROS_DEV_REPOSITORY:"test-owner/test-repo",ZEROS_DEV_REPOSITORY_ID:"1234"}])
+      expect(checkZerosDevValues({...identity,...partial})).toMatchObject({status:"warn",detail:expect.stringContaining("GitHub fixture pending")});
+    for(const invalid of [{ZEROS_DEV_ACCOUNT_ID:"bad"},{ZEROS_DEV_REPOSITORY:"../foreign"},{ZEROS_DEV_GITHUB_INSTALLATION_ID:"1234"}])
+      expect(checkZerosDevValues({...identity,...invalid})).toMatchObject({status:"fail"});
+  });
 });

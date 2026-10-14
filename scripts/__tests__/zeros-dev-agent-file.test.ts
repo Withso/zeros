@@ -1,8 +1,17 @@
-import { mkdtemp, mkdir, writeFile, readFile, chmod, link, symlink, rm, stat } from "node:fs/promises";
+import { mkdtemp, open, mkdir, writeFile, readFile, chmod, link, symlink, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentFileStore, canonicalAgentFile } from "../zeros-dev/agent-file.mjs";
+
+/** Check the mode and read the bytes through one descriptor, not a path check-then-read. */
+async function expectPrivate(file: string): Promise<string> {
+  const handle = await open(file, "r");
+  try {
+    expect((await handle.stat()).mode & 0o777).toBe(0o600);
+    return await handle.readFile("utf8");
+  } finally { await handle.close(); }
+}
 
 const roots: string[]=[];
 async function fixture(mode=0o600) {
@@ -14,6 +23,20 @@ async function fixture(mode=0o600) {
 afterEach(async()=>{await Promise.all(roots.splice(0).map(root=>rm(root,{recursive:true,force:true})));});
 
 describe("one canonical locked zeros-dev credential file",()=>{
+  it("pins only the three repository fields atomically without widening session writes",async()=>{
+    const {file,store}=await fixture();
+    const pins={ZEROS_DEV_REPOSITORY:"fixture-owner/fixture-repo",ZEROS_DEV_REPOSITORY_ID:"1234",ZEROS_DEV_GITHUB_INSTALLATION_ID:"44444444-4444-4444-8444-444444444444"};
+    await expect(store.locked(current=>current.update(pins))).rejects.toThrow("zeros_dev_credentials_invalid");
+    await store.locked(current=>current.pinRepository(pins));
+    await store.locked(current=>current.pinRepository(pins));
+    expect((await store.read()).values).toMatchObject(pins);
+    await expectPrivate(file);
+    await expect(store.locked(current=>current.pinRepository({...pins,ZEROS_DEV_REPOSITORY_ID:"9876"}))).rejects.toThrow("zeros_dev_credentials_changed");
+    await expect(store.locked(current=>current.pinRepository({...pins,ZEROS_DEV_ACCOUNT_ID:"11111111-1111-4111-8111-111111111111"}))).rejects.toThrow("zeros_dev_credentials_invalid");
+    await expect(store.locked(current=>current.pinRepository({ZEROS_DEV_REPOSITORY:pins.ZEROS_DEV_REPOSITORY}))).rejects.toThrow("zeros_dev_credentials_invalid");
+    expect(await expectPrivate(file)).toContain("BOAT_API_KEY=synthetic-provider-secret");
+  });
+
   it("resolves all linked checkouts to the common repository .env.agent",async()=>{
     const {root,file}=await fixture();
     await mkdir(path.join(root,".git","worktrees","sibling"),{recursive:true});
