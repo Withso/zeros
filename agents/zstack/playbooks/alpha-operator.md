@@ -25,6 +25,15 @@ WorkOS. Never use Beta or Production credentials or data.
     username, which carries a routing suffix;
   - delete the role afterwards and retry until a GET returns 404.
 
+## Pins and rebuilds
+
+- Before asking anyone, the owner included, to rebuild a Computer, confirm
+  that the runtime it should pin is published and qualified: every required
+  kind enabled and cleanup confirmed. A build pins the newest qualified
+  runtime, which can be older than the one just published.
+- After the build, compare its persisted `runtime_id` with that runtime
+  before any workspace setup.
+
 ## Collisions and cleanup
 
 - Don't change Railway variables in a way that redeploys a service while a

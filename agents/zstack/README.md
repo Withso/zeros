@@ -16,7 +16,8 @@ branch.
 |---|---|
 | `skills/<name>/SKILL.md` | Canonical skills. They are generated into `.claude/skills/`, `.agents/skills/` and `.cursor/rules/`. |
 | `playbooks/*.md` | Task procedures that the skills load by path. They are not generated. |
-| `evals/cases.json` | Eval cases. Each one is an escaped bug with the check that should have caught it. |
+| `evals/cases/<id>.json` | Eval cases, one per file. Each one is an escaped bug with the check that should have caught it. `evals/cases.json` holds the original cases. |
+| `changes/<id>.md` | Lessons waiting to be folded into `CHANGELOG.md` at the next version. |
 | `CHANGELOG.md` | One entry per pack change, recording the lesson that caused it. |
 
 ## Skills
