@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtemp, open, readFile, rm, symlink, chmod } from "node:fs/promises";
+import { mkdtemp, open, rm, symlink, chmod } from "node:fs/promises";
 import { constants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -146,13 +146,19 @@ describe("bounded zstack execution and receipts", () => {
     const receipt = await executeVerification(plan(), { cwd: process.cwd(), metadata, fingerprint: async () => digest,
       run: async () => ({ status: "passed", code: "ok", exitCode: 0, durationMs: 1, outputBytes: 0, outputSha256: "d".repeat(64), tests: null }) });
     await writeReceipt(file, receipt);
-    const input = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try { expect((await input.stat()).mode & 0o777).toBe(0o600); expect(JSON.parse(await input.readFile("utf8"))).toEqual(receipt); }
+    const input = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await input.stat();
+      expect(info.isFile()).toBe(true); expect(info.uid).toBe(process.getuid?.());
+      expect(info.nlink).toBe(1); expect(info.mode & 0o7777).toBe(0o600);
+      const contents = await input.readFile("utf8");
+      expect(JSON.parse(contents)).toEqual(receipt);
+      expect(contents).not.toContain("synthetic private output");
+    }
     finally { await input.close(); }
     await expect(writeReceipt(file, receipt)).rejects.toThrow("zstack_receipt_unsafe");
     const alias = path.join(root, "alias.json"); await symlink(file, alias);
     await expect(writeReceipt(alias, receipt)).rejects.toThrow("zstack_receipt_unsafe");
-    expect(await readFile(file, "utf8")).not.toContain("synthetic private output");
   });
   it("refuses an output directory other processes can replace entries in", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zstack-receipt-writable-")); roots.push(root);

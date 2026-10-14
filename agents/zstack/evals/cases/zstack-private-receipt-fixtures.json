@@ -1,0 +1,9 @@
+{
+  "id": "zstack-private-receipt-fixtures",
+  "kind": "scenario",
+  "area": "engineering verification",
+  "fixedBy": "pr:504",
+  "symptom": "Mocked CLI receipt writers concealed unsafe fixed paths in the shared temporary directory, and a receipt assertion reopened a pathname after checking its descriptor.",
+  "rule": "CLI filesystem fixtures use owned mode-0700 mkdtemp directories, exercise the real exclusive mode-0600 writer, and validate and read each receipt through the same no-follow descriptor.",
+  "check": "pnpm test:git scripts/__tests__/zstack-runner.test.ts scripts/__tests__/zstack-verify.test.ts scripts/__tests__/zstack-eval-replay.test.ts; CodeQL must report zero new filesystem alerts"
+}
