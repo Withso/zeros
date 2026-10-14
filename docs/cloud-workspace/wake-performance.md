@@ -148,6 +148,26 @@ deadlines; a quiet fallback does not extend an engine lease, funded deadline or
 the current stop policy. Provider drift and orphan inventory are maintenance
 work. Local Personal and organization-local Host execution are unchanged.
 
+Runtime-image retirement and object rotation/garbage collection use a separate
+maintenance cadence: one startup pass, then a jittered 150–300-second sweep.
+Runtime registry and Computer-builder completion hints wake image maintenance
+sooner through the existing shared listener. A lost hint still has the bounded
+sweep fallback. These sweeps do not replace the 30–60-second queue fallback.
+Image passes inspect at most 18 ready candidates, keep the two newest usable
+images and attempt at most 16 eligible named-snapshot removals. A cursor advances
+past unconfirmed removals so one failing name cannot starve the following page;
+account, channel, wallet and recorded-builder fences still govern every action.
+Presence checks reuse the kept-image inventory instead of querying it again.
+
+A full image page or object batch continues after 100 ms, with at most four
+passes in an automatic burst. The burst limit also applies when failed garbage
+collection keeps returning an attempted item. Object reference-count repair
+still precedes every collection pass; object retention, restore windows, holds,
+lease checks and explicit workspace deletion keep their existing authority.
+Shutdown drains the active pass and drops pending continuations. Sweep discovery
+may wait up to five minutes, including discovery of expired maintenance leases;
+interactive lifecycle claims and funded/engine deadlines are unchanged.
+
 Account maintenance uses one shared deadline read for WorkOS commands, security
 mail and account/organization deletion. Migration 0144 adds empty commit-bound
 wakes, including future retries, organization provisioning and completion of
@@ -167,7 +187,8 @@ deployed measurement with the worker replica count recorded.
 For rollback, `WORKER_POLL_INTERVALS_MS` accepts a JSON map of explicit fallback
 intervals, for example `{"outbox":5000,"setup":1000}`. Keys are `outbox`, `access`,
 `invitations`, `security`, `setup` (including recovery), `forks`, `checkpoints`,
-`lifecycle`, `operations`, `retirement`, `templates`, `runtimeStaging` and
+`lifecycle`, `operations`, `retirement`, `templates`, `runtimeStaging`,
+`runtimeImages`, `objects` and
 `workos` (the shared account-queue fallback).
 An override disables jitter for that worker; deadlines and notifications still
 wake sooner. Remove a key to restore its default. Explicit legacy

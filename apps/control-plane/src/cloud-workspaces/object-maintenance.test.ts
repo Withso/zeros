@@ -76,6 +76,7 @@ describe("CloudWorkspaceObjectMaintenanceWorker", () => {
       intervalMs: 100,
     });
     const stop = worker.start();
+    await Promise.resolve();
     const stopping = stop();
 
     expect(maintenance.scheduleKeyRotation).toHaveBeenCalledTimes(1);

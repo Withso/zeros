@@ -12,7 +12,12 @@ describe("per-worker polling rollback", () => {
   it("preserves explicit legacy settings and lets per-worker overrides take precedence", () => {
     expect(loadWorkerPollIntervals({ CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS: "7000", CLOUD_WORKSPACE_SETUP_INTERVAL_MS: "2000",
       WORKER_POLL_INTERVALS_MS: '{"outbox":1000}' }))
-      .toEqual({ access: 7_000, outbox: 1_000, forks: 7_000, checkpoints: 7_000, lifecycle: 7_000, operations: 7_000, setup: 2_000 });
+      .toEqual({ access: 7_000, outbox: 1_000, forks: 7_000, checkpoints: 7_000, lifecycle: 7_000, operations: 7_000,
+        objects: 60_000, setup: 2_000 });
+  });
+  it("allows independent object and runtime-image sweep rollback", () => {
+    expect(loadWorkerPollIntervals({ WORKER_POLL_INTERVALS_MS: '{"objects":60000,"runtimeImages":60000}' }))
+      .toEqual({ objects: 60_000, runtimeImages: 60_000 });
   });
   it("ignores legacy cloud timing settings when cloud is disabled and keeps security overrides available", () => {
     expect(loadConfig({ ...env, CLOUD_WORKSPACES_ENABLED: "false", CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS: "unused-invalid",
@@ -20,8 +25,8 @@ describe("per-worker polling rollback", () => {
       .toEqual({ security: 1_000 });
   });
   it.each(['{"outbox":0}', '{"outbox":300001}', '{"other":1000}', '{"outbox":1.5}', 'secret-sentinel',
-    '{"setup":60001}', '{"access":60001}', '{"forks":249}', '{"checkpoints":499}', '{"operations":999}'])
-    ("rejects invalid overrides without reflecting the value", value => {
+    '{"setup":60001}', '{"access":60001}', '{"forks":249}', '{"checkpoints":499}', '{"operations":999}'])(
+    "rejects invalid overrides without reflecting the value", value => {
       expect(() => loadConfig({ ...env, WORKER_POLL_INTERVALS_MS: value })).toThrow("Invalid worker polling intervals");
       try { loadConfig({ ...env, WORKER_POLL_INTERVALS_MS: value }); } catch (error) {
         expect(String(error)).not.toContain(value);

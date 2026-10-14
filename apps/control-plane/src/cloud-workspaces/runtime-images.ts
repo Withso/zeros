@@ -3,6 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { Config } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { workerPollingOptions } from "../worker-polling-config.js";
 import { BOAT_RESOURCE_ID_PATTERN, BoatApiClient } from "./boat-client.js";
 import { boatRuntimeDisplayName } from "./boat-display-name.js";
 import {
@@ -16,6 +17,7 @@ import { RuntimeDescriptorSchema, RuntimeInstallInputSchema, type RuntimeDescrip
 import type { RuntimeArtifactStore } from "./runtime-artifact-store.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { loadPinnedCloudRuntime, selectCloudRuntime } from "./runtime-selection.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 
 export type RuntimeImageChannel = "alpha" | "beta" | "production";
 export function runtimeImageChannel(channel: string): RuntimeImageChannel | null {
@@ -159,6 +161,11 @@ export class BoatRuntimeImageSnapshots implements RuntimeImageSnapshots {
  * worker still reconciles and retires what it already started. */
 export class RuntimeImageWorker {
   private pending: Promise<void> | null = null;
+  private readonly scheduler: CloudWorkerScheduler;
+  private readonly maintenanceBatchSize: number;
+  private retirementCursor: string | null = null;
+  private moreWork = false;
+  private sweepPasses = 0;
   private readonly checked = new Map<string, number>();
   private readonly now: () => number;
   private readonly wait: (ms: number) => Promise<void>;
@@ -166,10 +173,19 @@ export class RuntimeImageWorker {
     pool: pg.Pool; enabled: boolean; channel: RuntimeImageChannel; mode: CloudRuntimeQualificationMode;
     accountScope: string; billingOrg: string; vms: CloudBuilderVms; operations: BuilderVmOperationStore;
     artifacts: RuntimeArtifactStore; snapshots: RuntimeImageSnapshots;
-    intervalMs?: number; now?: () => number; wait?: (ms: number) => Promise<void>;
+    intervalMs?: number; maintenanceBatchSize?: number; now?: () => number; wait?: (ms: number) => Promise<void>;
   }) {
     this.now = options.now ?? Date.now;
     this.wait = options.wait ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+    this.maintenanceBatchSize = options.maintenanceBatchSize ?? 16;
+    if (!Number.isSafeInteger(this.maintenanceBatchSize) || this.maintenanceBatchSize < 1 || this.maintenanceBatchSize > 100)
+      throw new Error("runtime image maintenance configuration is invalid");
+    this.scheduler = new CloudWorkerScheduler(options.intervalMs ?? 300_000, async periodic => {
+      this.sweepPasses = periodic ? 1 : this.sweepPasses + 1;
+      await this.tick();
+    }, () => console.warn("[cloud-runtime] image_tick_failed"),
+    async () => this.moreWork && this.sweepPasses < 4 ? 100 : null,
+    { jitter: options.intervalMs === undefined });
   }
 
   tick(): Promise<void> {
@@ -177,14 +193,13 @@ export class RuntimeImageWorker {
     return this.pending;
   }
   start(): () => Promise<void> {
-    const tick = () => { void this.tick().catch(() => console.warn("[cloud-runtime] image_tick_failed")); };
-    const timer = setInterval(tick, this.options.intervalMs ?? 60_000);
-    timer.unref();
-    tick();
-    return async () => { clearInterval(timer); await this.pending?.catch(() => {}); };
+    this.scheduler.start();
+    return async () => { await this.scheduler.stop(); await this.pending?.catch(() => {}); };
   }
+  notify(): void { this.scheduler.notify(); }
 
   private async work() {
+    this.moreWork = false;
     await this.retire();
     const claimed = await this.claim();
     if (!claimed) return;
@@ -485,30 +500,39 @@ export class RuntimeImageWorker {
    * unknown create, so their state never shortens this wait. */
   private async retire() {
     const { pool } = this.options, scope = this.scope();
+    const readyLimit = KEEP_READY + this.maintenanceBatchSize;
     const ready = (await withSystemTx(pool, async tx => tx.query<ImageRow>(`SELECT * FROM cloud_runtime_images
       WHERE channel=$1 AND account_scope=$2 AND lower(billing_org)=lower($3) AND state='ready'
-      ORDER BY ready_at DESC,image_id`, scope))).rows;
+      ORDER BY ready_at DESC,image_id LIMIT $4`, [...scope, readyLimit]))).rows;
+    this.moreWork ||= ready.length === readyLimit;
     // Only usable images count toward the newest kept.
     let kept = 0;
+    const keptImages: ImageRow[] = [];
     for (const image of ready) {
       await withSystemTx(pool, async tx => {
         const usable = await this.pinned(tx, image);
-        if (usable && kept < KEEP_READY) { kept++; return; }
+        if (usable && kept < KEEP_READY) { kept++; keptImages.push(image); return; }
         // The row lock waits for any consumer claim holding its share lock.
         if (!(await tx.query(`SELECT 1 FROM cloud_runtime_images WHERE image_id=$1 AND state='ready' FOR UPDATE`, [image.image_id])).rowCount) return;
         await tx.query(`UPDATE cloud_runtime_images SET state='retiring',retire_requested_at=clock_timestamp(),diagnostic=$2
           WHERE image_id=$1 AND state='ready'`, [image.image_id, JSON.stringify(failure("retire", usable ? "superseded" : "runtime_revoked"))]);
       });
     }
-    await this.checkPresence();
+    await this.checkPresence(keptImages);
     // Evaluated after the withdrawal committed, so every claim that chose the
     // image is visible here.
     const retiring = (await withSystemTx(pool, async tx => tx.query<{ image_id: string; snapshot_name: string }>(`SELECT image.image_id,image.snapshot_name
       FROM cloud_runtime_images image WHERE image.channel=$1 AND image.account_scope=$2 AND lower(image.billing_org)=lower($3)
+        AND ($4::uuid IS NULL OR image.image_id>$4)
         AND image.state='retiring' AND NOT EXISTS (
         SELECT 1 FROM cloud_computer_templates template WHERE template.builder_source_image_id=image.image_id
           AND template.stopped_at IS NULL AND template.cleanup_confirmed_at IS NULL)
-      ORDER BY image.retire_requested_at,image.image_id`, scope))).rows;
+      ORDER BY image.image_id LIMIT $5`, [...scope, this.retirementCursor, this.maintenanceBatchSize]))).rows;
+    // Advance past unconfirmed removals too, so one provider failure cannot
+    // monopolize the next bounded page. A later sweep wraps and retries it.
+    this.moreWork ||= retiring.length === this.maintenanceBatchSize ||
+      (this.retirementCursor !== null && retiring.length === 0);
+    this.retirementCursor = retiring.length === this.maintenanceBatchSize ? retiring.at(-1)!.image_id : null;
     for (const image of retiring) {
       try {
         if (await this.options.snapshots.remove(image.snapshot_name) !== "gone") continue;
@@ -522,10 +546,8 @@ export class RuntimeImageWorker {
 
   /** Boat may prune an unpaid name above the free allowance. A missing ready
    * name is withdrawn so later builds fall back to the base. */
-  private async checkPresence() {
-    const ready = (await withSystemTx(this.options.pool, async tx => tx.query<{ image_id: string; snapshot_name: string }>(
-      `SELECT image_id,snapshot_name FROM cloud_runtime_images WHERE channel=$1 AND account_scope=$2 AND lower(billing_org)=lower($3)
-        AND state='ready'`, this.scope()))).rows;
+  private async checkPresence(ready: ImageRow[]) {
+    for (const id of this.checked.keys()) if (!ready.some(image => image.image_id === id)) this.checked.delete(id);
     for (const image of ready) {
       if (this.now() - (this.checked.get(image.image_id) ?? 0) < PRESENCE_INTERVAL_MS) continue;
       try {
@@ -547,5 +569,6 @@ export function createRuntimeImageWorker(config: Config, pool: pg.Pool, artifact
     resolveDisplayName: intent => boatRuntimeDisplayName(channel, intent.source.kind === "image" ? "check" : "build") });
   return new RuntimeImageWorker({ pool, enabled: cloud.runtime?.imagesEnabled === true, channel,
     mode: cloud.runtime?.qualificationMode ?? "full", accountScope: cloud.boat.accountScope, billingOrg: cloud.boat.billingOrg,
-    vms, operations, artifacts, snapshots: new BoatRuntimeImageSnapshots(client) });
+    vms, operations, artifacts, snapshots: new BoatRuntimeImageSnapshots(client),
+    ...workerPollingOptions(config.workerPollIntervalsMs, "runtimeImages") });
 }

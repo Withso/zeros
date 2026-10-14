@@ -356,7 +356,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     objectMaintenanceWorker = new CloudWorkspaceObjectMaintenanceWorker(
       blobService,
       {
-        intervalMs: Math.max(60_000, cloud.reconcileIntervalMs),
+        ...workerPollingOptions(config.workerPollIntervalsMs, "objects"),
         leaseMs: Math.max(60_000, cloud.operationTimeoutSeconds * 2_000),
       },
     );
@@ -644,8 +644,12 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       ...(forkWorker ? { forks: () => forkWorker.notify() } : {}),
       ...(operationsWorker ? { operations: () => operationsWorker.notify() } : {}),
       retirement: () => retirementWorker.notify(),
-      ...(computerTemplateWorker ? { templates: () => computerTemplateWorker.notify() } : {}),
-      ...(runtimeStagingWorker ? { runtimeStaging: () => runtimeStagingWorker.notify() } : {}),
+      ...(computerTemplateWorker || runtimeImageWorker ? { templates: () => {
+        computerTemplateWorker?.notify(); runtimeImageWorker?.notify();
+      } } : {}),
+      ...(runtimeStagingWorker || runtimeImageWorker ? { runtimeStaging: () => {
+        runtimeStagingWorker?.notify(); runtimeImageWorker?.notify();
+      } } : {}),
     } satisfies CloudWorkerNotificationHandlers);
     if (runtimeQualificationWorker) stopCloudRuntimeQualificationWorker = runtimeQualificationWorker.start();
     if (runtimeImageWorker) stopCloudRuntimeImageWorker = runtimeImageWorker.start();
