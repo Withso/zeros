@@ -34,7 +34,9 @@ branch.
 1. Edit only the canonical files here.
 2. Run `pnpm design:docs` to regenerate the provider copies.
 3. `pnpm check:ui` fails when a copy is stale; CI already runs it.
-4. Add a `CHANGELOG.md` entry.
+4. Put each lesson in `changes/<id>.md` and each new eval case in
+   `evals/cases/<id>.json`, one file each, so parallel PRs never conflict. The
+   integrator folds fragments into `CHANGELOG.md`.
 5. Validate evals with `node scripts/zstack/evals.mjs --validate`.
 
 Changes to safety rules in `AGENTS.md` or `RULES.md`, to CI definitions, or to

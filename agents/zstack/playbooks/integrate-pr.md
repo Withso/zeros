@@ -12,8 +12,8 @@ session itself.
    already reviewed, review the interdiff (`git range-diff`).
 4. **Commit** with the workspace's own identity. The message gives the why and
    then the what, and ends with the agent's `Co-Authored-By` trailer.
-5. **Replace any `"fixedBy": "pending"`** in `agents/zstack/evals/cases.json` with the PR's `pr:<n>`,
-   amend, and push before CI runs.
+5. **Replace any `"fixedBy": "pending"`** in `agents/zstack/evals/cases/*.json` (or the legacy
+   `cases.json`) with the PR's `pr:<n>`, amend, and push before CI runs.
 6. **Open the PR** with Why, What changes, Tests and Rollout sections, ending
    with the repository's PR footer. Add lane labels the paths need, for example
    `ci:ui-smoke`.
