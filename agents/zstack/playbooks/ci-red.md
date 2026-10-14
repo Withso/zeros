@@ -18,6 +18,11 @@
   jobs get new IDs and break signed-build provenance. Use a full rerun or a new
   push. A release that started while another deploy was in flight can fail its
   forward-only barrier; the next successful release supersedes it.
+- **Alpha tag/ledger disagreement:** the previous publisher uploads the ledger
+  before moving the tag. Read both identities and the prior job outcome before
+  proposing a repair. Initial admission may wait only for an already validated
+  ancestor mismatch, with a bound and fresh CI/frontiers on retry. Never admit
+  unequal identities or manually rewrite publication history to pass a gate.
 - **A flake twice** becomes a deterministic fix PR. Reproduce it under load,
   find the race (often teardown, not the asserted behavior) and fix the
   fixture without weakening the contract.

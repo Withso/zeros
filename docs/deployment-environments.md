@@ -1083,6 +1083,16 @@ update (or the older cached ledger after the tag update); both sources must
 still be at or before the candidate, and one must identify that candidate.
 Other disagreements block. Missing feeds or
 unreadable/malformed identities are unknown, not a zero/genesis destination.
+The initial automatic Alpha barrier runs outside the publication lock, so it
+can read an older publisher's ledger upload before that publisher moves the
+tag. Only a mismatch whose identities and ancestry already passed validation
+is pending: retry every 10 seconds, for at most 12 observations and a two-minute
+pending deadline. Each retry reads all frontiers again; if the mismatch was
+observed after green CI, it also reads CI again before issuing admission. A
+persistent mismatch fails red, without `ready=true` or an admission receipt.
+Malformed, unavailable, newer or divergent identities retain their existing
+closed behavior; downstream, manual, Beta and Production checks gain no retry
+or authority from this exception.
 The publication entry job repeats authentication, CI/admission and fresh
 frontier checks **inside** the encompassing lock before any provider writes.
 It compares the authenticated parent's immutable `run_number` with every
@@ -1099,6 +1109,39 @@ can issue admission or a green pre-mutation skip; nested entry conflicts fail
 visibly.
 The strict migrator still rejects unknown or newer schema rows; neither stage
 rolls schema back or authorizes a controlled migration.
+
+**Recovering an overlapping Alpha publication.**
+
+Read the prior publisher's job outcomes first. Ledger upload and rolling-tag
+movement are separate writes; neither side alone proves a completed release.
+Read `GET /repos/Withso/zeros/git/ref/tags/alpha` (peeling annotated tags to a
+commit) and the public
+`https://github.com/Withso/zeros/releases/download/alpha/alpha-release-ledger.json`.
+Require the tag to equal the last entry's `sourceSha`, a valid monotonic Alpha
+ledger, and successful prior feed publication. The proposed source must contain
+every destination source, with its exact-source required CI green. The normal
+barrier and in-lock entry revalidate API, Pages, worker and schema identities;
+`/healthz` alone is insufficient.
+
+If the previous publisher finished and those reads now agree, no tag or ledger
+repair is needed. Check that the candidate has no active attempt, then fully
+rerun its release:
+
+```sh
+pnpm agent:gh run rerun <release-run-id> --repo Withso/zeros
+```
+
+Never use `--failed` for a release. Rebuild both producers in the same attempt
+to preserve signed-build and artifact provenance. Verify the successful barrier,
+fresh signed desktop and Linux runtime producers, hosted promotion, both
+publishers, and matching final tag/ledger. Check the published runtime's exact
+base qualification separately before rebuilding a Computer.
+
+If disagreement persists after the publisher has stopped, retain the tag,
+ledger, feed, producer and job evidence for owner-led forward recovery. There
+is no tag/ledger rewrite operator: `release-ledger-cli.ts --build` and
+`--verify` construct or verify ledgers, and do not reconcile partial publication.
+Do not move tags or discard ledger history merely to unblock admission.
 
 Stage 2 admission and both stages' later checkpoints read the deployed identity from a valid
 HTTP 503 readiness response so a newer candidate can repair an unready Alpha
