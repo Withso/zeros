@@ -20,7 +20,7 @@ const workspace=()=>({id:"44444444-4444-4444-8444-444444444444",organizationId:f
   repository:{forge:"github.com",owner:repository.owner,name:repository.name,revision:"a".repeat(40)},
   generation:{number:1,architecture:"linux/amd64",resources:{cpuMillicores:2000,memoryMiB:4096,storageMiB:16384},observedState:"running",lastObservedAt:null},
   version:1,error:null,createdAt:"2026-10-12T00:00:00.000Z",updatedAt:"2026-10-12T00:00:00.000Z",deletedAt:null as string|null});
-function setup(pinned=fixture){
+function setup(pinned=fixture,clock:{now?:()=>number;sleep?:(ms:number,signal?:AbortSignal)=>Promise<void>}={}){
   let current=workspace();const snapshots:Run[]=[];
   const handle:RunHandle={run:{version:1,runId:randomUUID(),fixtureSha256:"a".repeat(64),deviceId:randomUUID(),createdAt:new Date().toISOString(),
     source:{revision:"b".repeat(40),dirty:true},lifecycle:[],prompts:[],evidence:[],deletionConfirmed:false},save:async()=>{snapshots.push(structuredClone(handle.run));}};
@@ -32,16 +32,83 @@ function setup(pinned=fixture){
     if(p.endsWith("/builds")&&init?.method==="POST")return Response.json({revision:13,build,replayed:false});
     if(p.endsWith(`/builds/${build.id}`))return Response.json(build);
     if(p.endsWith("/pending-deletion"))return Response.json({truncated:false,pendingDeletion:[]});
+    if(p.endsWith("/cloud-workspaces")&&init?.method==="POST")current={...current,name:JSON.parse(String(init.body)).name};
     if(p.endsWith("/stop")){current={...current,status:"stopped",generation:{...current.generation,observedState:"stopped"}};}
     if(p.endsWith("/wake")){current={...current,status:"ready",generation:{...current.generation,observedState:"running"}};}
     if(init?.method==="DELETE"){current={...current,status:"deleted",deletedAt:new Date().toISOString(),generation:{...current.generation,observedState:"deleted"}};}
     return Response.json({workspace:current});
   });
-  const api=new ProductApi(session,new AlphaTransport(fetcher),{sleep:async()=>{},now:()=>0});
-  return {api,handle,fetcher,session,snapshots,setWorkspace:(row:ReturnType<typeof workspace>)=>{current=row;}};
+  const api=new ProductApi(session,new AlphaTransport(fetcher),{sleep:async()=>{},now:()=>0,...clock});
+  return {api,handle,fetcher,session,snapshots,setWorkspace:(row:ReturnType<typeof workspace>)=>{current={...row,
+    name:row.name===workspace().name?(handle.run.create?.body.name??row.name):row.name};}};
 }
 
 describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
+  it.each(["stopped","ready","busy","failed"] as const)("deletes after an accepted wake settles as %s without claiming that wake succeeded",async status=>{
+    let elapsed=0;const f=setup(fixture,{now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
+    await f.api.createWorkspace(f.handle);await f.api.lifecycle(f.handle,"wake");
+    f.setWorkspace({...workspace(),status,generation:{...workspace().generation,observedState:status==="stopped"?"stopped":"running"}});
+    const wake=f.handle.run.lifecycle.at(-1)!;
+    expect(await f.api.cleanup(f.handle,true)).toEqual({planned:1,confirmed:1});
+    expect(elapsed).toBe(0);
+    expect(wake).toMatchObject({operation:"wake",confirmed:false,settled:{status,generation:1}});
+    expect(f.handle.run.lifecycle.at(-1)).toMatchObject({operation:"delete",confirmed:true});
+    expect(f.fetcher.mock.calls.filter(([,init])=>init?.method==="DELETE")).toHaveLength(1);
+    expect(f.handle.run.deletionConfirmed).toBe(true);
+  });
+
+  it("plans a failed wake cleanup without writing or changing the signed lifecycle history",async()=>{
+    const f=setup();await f.api.createWorkspace(f.handle);await f.api.lifecycle(f.handle,"wake");
+    f.setWorkspace({...workspace(),status:"stopped"});const history=structuredClone(f.handle.run.lifecycle),before=f.fetcher.mock.calls.length;
+    expect(await f.api.cleanup(f.handle,false)).toEqual({planned:1,confirmed:0});
+    expect(f.handle.run.lifecycle).toEqual(history);
+    expect(f.fetcher.mock.calls.slice(before).every(([,init])=>init?.method==="GET")).toBe(true);
+  });
+
+  it("persists the stop outcome and delete key before sending, then reuses the key after a lost acknowledgement",async()=>{
+    const f=setup();await f.api.createWorkspace(f.handle);await f.api.lifecycle(f.handle,"stop");
+    f.setWorkspace({...workspace(),status:"failed"});const original=f.fetcher.getMockImplementation()!;let first=true;
+    f.fetcher.mockImplementation(async(url,init)=>{
+      if(init?.method==="DELETE"){
+        expect(f.snapshots.at(-1)?.lifecycle).toMatchObject([{operation:"stop",confirmed:false,settled:{status:"failed",generation:1}},{operation:"delete",confirmed:false}]);
+        const response=await original(url,init);
+        if(first){first=false;throw new Error("synthetic lost delete acknowledgement");}
+        return response;
+      }
+      return original(url,init);
+    });
+    await expect(f.api.cleanup(f.handle,true)).rejects.toThrow("zeros_dev_service_unavailable");
+    expect(await f.api.cleanup(f.handle,true)).toEqual({planned:1,confirmed:1});
+    const deletes=f.fetcher.mock.calls.filter(([,init])=>init?.method==="DELETE");
+    expect(deletes).toHaveLength(2);expect(deletes[0]?.[1]?.headers).toEqual(deletes[1]?.[1]?.headers);
+    expect(f.handle.run.lifecycle).toHaveLength(2);
+  });
+
+  it("reports transient setup as cleanup_pending immediately, without waiting for the failed wake or inventing settlement",async()=>{
+    let elapsed=0;const f=setup(fixture,{now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
+    await f.api.createWorkspace(f.handle);await f.api.lifecycle(f.handle,"wake");f.setWorkspace({...workspace(),status:"setting_up"});
+    const history=structuredClone(f.handle.run.lifecycle),before=f.fetcher.mock.calls.length;
+    await expect(f.api.cleanup(f.handle,true)).rejects.toThrow("zeros_dev_cleanup_pending");
+    expect(elapsed).toBe(0);expect(f.handle.run.lifecycle).toEqual(history);
+    expect(f.fetcher.mock.calls.slice(before).every(([,init])=>init?.method==="GET")).toBe(true);
+  });
+
+  it.each(["zd-someone-else","personal-work"])("refuses changed cleanup name %s even for the exact signed workspace",async name=>{
+    const f=setup();await f.api.createWorkspace(f.handle);f.setWorkspace({...workspace(),name});const before=f.fetcher.mock.calls.length;
+    await expect(f.api.cleanup(f.handle,true)).rejects.toThrow("zeros_dev_identity_changed");
+    expect(f.fetcher.mock.calls.slice(before).every(([,init])=>init?.method==="GET")).toBe(true);
+  });
+
+  it("rechecks the unchanged signed name at the final deletion read",async()=>{
+    const f=setup();await f.api.createWorkspace(f.handle);const original=f.fetcher.getMockImplementation()!;let reads=0;
+    f.fetcher.mockImplementation(async(url,init)=>{
+      if(new URL(String(url)).pathname===`/v1/cloud-workspaces/${workspace().id}`&&++reads===2)
+        return Response.json({workspace:{...workspace(),name:"renamed-work"}});
+      return original(url,init);
+    });
+    await expect(f.api.cleanup(f.handle,true)).rejects.toThrow("zeros_dev_identity_changed");
+    expect(f.fetcher.mock.calls.filter(([,init])=>init?.method==="DELETE")).toHaveLength(0);
+  });
   it.each(["ensureRepository","buildComputer","createWorkspace"] as const)("keeps %s closed when only the identity is configured",async method=>{
     const f=setup();
     f.session.whoami=async()=>({subject:fixture.subject,accountId:fixture.accountId,email:fixture.email,organizationId:fixture.organizationId}) as typeof fixture;

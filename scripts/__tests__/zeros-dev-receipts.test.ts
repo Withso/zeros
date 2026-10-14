@@ -17,6 +17,18 @@ afterEach(async()=>{await Promise.all(roots.splice(0).map(root=>rm(root,{recursi
 async function store(){const root=await mkdtemp(path.join(tmpdir(),"zeros-dev-run-"));roots.push(root);return {root,store:new RunStore(path.join(root,"runs"),fixture,device,{lockTimeoutMs:20})};}
 
 describe("zeros-dev exact signed resource receipts",()=>{
+  it("retains a closed settled wake outcome through signed replay without claiming expected completion",async()=>{
+    const f=await store(),id=randomUUID(),key=randomUUID();
+    await f.store.withRun(id,source,async handle=>{
+      handle.run.lifecycle.push({operation:"wake",key,generation:1,confirmed:false,settled:{status:"stopped",generation:1}});
+      await handle.save();
+    });
+    expect((await f.store.read(id)).lifecycle).toEqual([{operation:"wake",key,generation:1,confirmed:false,settled:{status:"stopped",generation:1}}]);
+    await f.store.withRun(id,null,handle=>handle.save());
+    await expect(f.store.withRun(id,null,async handle=>{
+      handle.run.lifecycle[0]!.settled={status:"setting_up",generation:1} as never;await handle.save();
+    })).rejects.toThrow("zeros_dev_receipt_invalid");
+  });
   it.each(["current","legacy"])("persists a %s creation intent before allocation and keeps its bytes across interruption",async mode=>{
     const f=await store(),id=randomUUID();
     await f.store.withRun(id,source,async handle=>{
