@@ -31,6 +31,7 @@ import type { DesignOperation, DesignTransaction } from "@zeros/design-core";
 
 import type {
   DesignCanvasFrameWire,
+  DesignStyleSourceWire,
   DesignTokenWire,
 } from "../../platform/git";
 import {
@@ -64,13 +65,24 @@ import {
 } from "./design-theme-css";
 import { DesignColorPicker, DesignColorSwatch } from "./design-color-picker";
 import { scrubDesignNumericValue } from "./design-style-values";
+import {
+  DesignThemeSourceRail,
+  DesignThemeSourceStatus,
+  designStyleSourceTokens,
+} from "./design-theme-sources";
 import "./design-theme-editor.css";
+
+const NO_STYLE_SOURCES: readonly DesignStyleSourceWire[] = [];
+const NO_STYLE_SOURCE_ERRORS: readonly string[] = [];
 
 interface DesignThemeEditorProps {
   workspaceId: string | null;
   frame: DesignCanvasFrameWire | null;
   tokens: readonly DesignTokenWire[];
   tokenSourceVersion: string | null;
+  /** Imported style sources; absent on older engines. */
+  styleSources?: readonly DesignStyleSourceWire[];
+  styleSourceErrors?: readonly string[];
   activeTheme: string | null;
   /** An inactive (retained, hidden) Design surface keeps its window mounted,
    * with drafts and position, but hidden and inert over the other tab. */
@@ -381,6 +393,8 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   frame,
   tokens,
   tokenSourceVersion,
+  styleSources = NO_STYLE_SOURCES,
+  styleSourceErrors = NO_STYLE_SOURCE_ERRORS,
   activeTheme,
   active,
   open,
@@ -422,13 +436,43 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   const [newThemeOpen, setNewThemeOpen] = useState(false);
   const [newTheme, setNewTheme] = useState("");
   const [action, setAction] = useState<string | null>(null);
+  // null shows the manual tokens; a removed source falls back to them.
+  const [sourceId, setSourceId] = useState<string | null>(null);
+  const selectedSource = useMemo(
+    () =>
+      sourceId === null
+        ? null
+        : (styleSources.find((source) => source.id === sourceId) ?? null),
+    [sourceId, styleSources],
+  );
+  const readOnly = selectedSource !== null;
+  const sourceTokens = useMemo(
+    () => (selectedSource ? designStyleSourceTokens(selectedSource) : null),
+    [selectedSource],
+  );
+  const visibleTokens = sourceTokens ?? tokens;
+  const showSources = styleSources.length > 0 || styleSourceErrors.length > 0;
 
   const themes = useMemo(
     () =>
       [
-        ...new Set(tokens.flatMap((token) => Object.keys(token.themeValues))),
+        ...new Set([
+          ...(selectedSource?.themes ?? []),
+          ...visibleTokens.flatMap((token) => Object.keys(token.themeValues)),
+        ]),
       ].sort((left, right) => left.localeCompare(right)),
-    [tokens],
+    [selectedSource, visibleTokens],
+  );
+  // The canvas can preview any theme a source defines, whichever is shown.
+  const previewThemes = useMemo(
+    () =>
+      [
+        ...new Set([
+          ...tokens.flatMap((token) => Object.keys(token.themeValues)),
+          ...styleSources.flatMap((source) => source.themes),
+        ]),
+      ].sort((left, right) => left.localeCompare(right)),
+    [styleSources, tokens],
   );
   const parsedImport = useMemo(() => {
     try {
@@ -439,7 +483,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   }, [cssDraft]);
   const tokenTypeCounts = useMemo(() => {
     const counts = new Map<DesignTokenValueType, number>();
-    for (const token of tokens) {
+    for (const token of visibleTokens) {
       const type = inferDesignTokenType(
         token.name,
         token.value || token.initialValue,
@@ -448,11 +492,11 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
       counts.set(type, (counts.get(type) ?? 0) + 1);
     }
     return counts;
-  }, [tokens]);
+  }, [visibleTokens]);
   const groupedTokens = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
     const groups = new Map<string, DesignTokenWire[]>();
-    for (const token of tokens) {
+    for (const token of visibleTokens) {
       const type = inferDesignTokenType(
         token.name,
         token.value || token.initialValue,
@@ -475,7 +519,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
     return [...groups.entries()].sort(([left], [right]) =>
       left.localeCompare(right),
     );
-  }, [query, tokens, typeFilter]);
+  }, [query, typeFilter, visibleTokens]);
 
   const applyOperations = async (
     key: string,
@@ -777,32 +821,52 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
           </div>
 
           <div className="zd-theme-body">
-            <div
-              data-design-theme-type-filter=""
-              role="group"
-              aria-label="Filter variables by type"
-              className="zd-theme-rail"
-            >
-              {(["all", ...THEME_TOKEN_TYPES] as const).map((type) => {
-                const count =
-                  type === "all"
-                    ? tokens.length
-                    : (tokenTypeCounts.get(type) ?? 0);
-                if (type !== "all" && count === 0) return null;
-                return (
-                  <button
-                    key={type}
-                    type="button"
-                    aria-label={THEME_TYPE_LABELS[type]}
-                    aria-pressed={typeFilter === type}
-                    className="zd-theme-filter"
-                    onClick={() => setTypeFilter(type)}
-                  >
-                    <span>{THEME_TYPE_LABELS[type]}</span>
-                    <span className="zd-theme-filter-count">{count}</span>
-                  </button>
-                );
-              })}
+            <div data-design-theme-type-filter="" className="zd-theme-rail">
+              {showSources ? (
+                <>
+                  <DesignThemeSourceRail
+                    sources={styleSources}
+                    errors={styleSourceErrors}
+                    manualCount={tokens.length}
+                    selectedId={selectedSource?.id ?? null}
+                    onSelect={(id) => {
+                      setSourceId(id);
+                      if (id !== null) {
+                        setPasteOpen(false);
+                        setNewVariableOpen(false);
+                        setNewThemeOpen(false);
+                      }
+                    }}
+                  />
+                  <div className="zd-theme-rail-label">Types</div>
+                </>
+              ) : null}
+              <div
+                role="group"
+                aria-label="Filter variables by type"
+                className="zd-theme-types"
+              >
+                {(["all", ...THEME_TOKEN_TYPES] as const).map((type) => {
+                  const count =
+                    type === "all"
+                      ? visibleTokens.length
+                      : (tokenTypeCounts.get(type) ?? 0);
+                  if (type !== "all" && count === 0) return null;
+                  return (
+                    <button
+                      key={type}
+                      type="button"
+                      aria-label={THEME_TYPE_LABELS[type]}
+                      aria-pressed={typeFilter === type}
+                      className="zd-theme-filter"
+                      onClick={() => setTypeFilter(type)}
+                    >
+                      <span>{THEME_TYPE_LABELS[type]}</span>
+                      <span className="zd-theme-filter-count">{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <div className="zd-theme-main">
@@ -834,46 +898,54 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__base__">Base</SelectItem>
-                    {themes.map((theme) => (
+                    {previewThemes.map((theme) => (
                       <SelectItem key={theme} value={theme}>
                         {theme}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <Tooltip className="zd-theme-tooltip" label="Paste CSS">
-                  <Button
-                    ref={pasteTriggerRef}
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="zd-icon-button"
-                    data-size="row"
-                    aria-label="Paste CSS"
-                    aria-expanded={pasteOpen}
-                    onClick={togglePaste}
-                  >
-                    <ClipboardPaste />
-                  </Button>
-                </Tooltip>
-                <Tooltip className="zd-theme-tooltip" label="New variable">
-                  <Button
-                    ref={newVariableTriggerRef}
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="zd-icon-button"
-                    data-size="row"
-                    aria-label="New variable"
-                    aria-expanded={newVariableOpen}
-                    onClick={toggleNewVariable}
-                  >
-                    <Plus />
-                  </Button>
-                </Tooltip>
+                {readOnly ? null : (
+                  <>
+                    <Tooltip className="zd-theme-tooltip" label="Paste CSS">
+                      <Button
+                        ref={pasteTriggerRef}
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="zd-icon-button"
+                        data-size="row"
+                        aria-label="Paste CSS"
+                        aria-expanded={pasteOpen}
+                        onClick={togglePaste}
+                      >
+                        <ClipboardPaste />
+                      </Button>
+                    </Tooltip>
+                    <Tooltip className="zd-theme-tooltip" label="New variable">
+                      <Button
+                        ref={newVariableTriggerRef}
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="zd-icon-button"
+                        data-size="row"
+                        aria-label="New variable"
+                        aria-expanded={newVariableOpen}
+                        onClick={toggleNewVariable}
+                      >
+                        <Plus />
+                      </Button>
+                    </Tooltip>
+                  </>
+                )}
               </div>
 
-              {pasteOpen ? (
+              {selectedSource ? (
+                <DesignThemeSourceStatus source={selectedSource} />
+              ) : null}
+
+              {pasteOpen && !readOnly ? (
                 <div
                   className="zd-theme-paste"
                   onKeyDown={(event) => {
@@ -976,7 +1048,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                       </div>
                     ))}
                     <div role="columnheader" className="zd-theme-add-mode">
-                      {newThemeOpen ? (
+                      {readOnly ? null : newThemeOpen ? (
                         <div className="zd-field">
                           <Input
                             autoFocus
@@ -1035,7 +1107,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                     </div>
                   </div>
 
-                  {newVariableOpen ? (
+                  {newVariableOpen && !readOnly ? (
                     <div
                       role="row"
                       className="zd-theme-new-variable"
@@ -1155,7 +1227,11 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                               )}
                               <Tooltip
                                 className="zd-theme-tooltip"
-                                label={`${token.name} · ${token.usageCount} ${token.usageCount === 1 ? "use" : "uses"}`}
+                                label={
+                                  readOnly
+                                    ? `${token.name} · ${selectedSource!.path}`
+                                    : `${token.name} · ${token.usageCount} ${token.usageCount === 1 ? "use" : "uses"}`
+                                }
                               >
                                 <span
                                   tabIndex={0}
@@ -1171,52 +1247,68 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                                 role="cell"
                                 className="zd-theme-value-cell"
                               >
-                                <ThemeValueField
-                                  token={token}
-                                  theme={theme}
-                                  value={
-                                    theme === null
+                                {readOnly ? (
+                                  <span
+                                    className="zd-theme-readonly-value"
+                                    data-design-theme-inherited={
+                                      theme !== null &&
+                                      token.themeValues[theme] === undefined
+                                        ? "true"
+                                        : undefined
+                                    }
+                                  >
+                                    {theme === null
                                       ? value
-                                      : (token.themeValues[theme] ?? "")
-                                  }
-                                  inheritedValue={
-                                    theme === null ? undefined : value
-                                  }
-                                  disabled={!canEdit}
-                                  onCommit={async (next) => {
-                                    await updateDesignTokenCached(
-                                      workspaceId!,
-                                      {
-                                        frame: frame!.file,
-                                        name: token.name,
-                                        theme,
-                                        value: next,
-                                        sourceVersion: tokenSourceVersion!,
-                                      },
-                                    );
-                                  }}
-                                  onReset={
-                                    theme !== null &&
-                                    token.themeValues[theme] !== undefined &&
-                                    foundation.data
-                                      ? () =>
-                                          applyOperations(
-                                            `reset:${theme}:${token.name}`,
-                                            `Reset ${token.name} in ${theme} to Base`,
-                                            [
-                                              {
-                                                operationId: `theme-reset-${crypto.randomUUID()}`,
-                                                type: "token.set",
-                                                file: "tokens.css",
-                                                name: token.name,
-                                                theme,
-                                                value: null,
-                                              },
-                                            ],
-                                          )
-                                      : undefined
-                                  }
-                                />
+                                      : (token.themeValues[theme] ?? value)}
+                                  </span>
+                                ) : (
+                                  <ThemeValueField
+                                    token={token}
+                                    theme={theme}
+                                    value={
+                                      theme === null
+                                        ? value
+                                        : (token.themeValues[theme] ?? "")
+                                    }
+                                    inheritedValue={
+                                      theme === null ? undefined : value
+                                    }
+                                    disabled={!canEdit}
+                                    onCommit={async (next) => {
+                                      await updateDesignTokenCached(
+                                        workspaceId!,
+                                        {
+                                          frame: frame!.file,
+                                          name: token.name,
+                                          theme,
+                                          value: next,
+                                          sourceVersion: tokenSourceVersion!,
+                                        },
+                                      );
+                                    }}
+                                    onReset={
+                                      theme !== null &&
+                                      token.themeValues[theme] !== undefined &&
+                                      foundation.data
+                                        ? () =>
+                                            applyOperations(
+                                              `reset:${theme}:${token.name}`,
+                                              `Reset ${token.name} in ${theme} to Base`,
+                                              [
+                                                {
+                                                  operationId: `theme-reset-${crypto.randomUUID()}`,
+                                                  type: "token.set",
+                                                  file: "tokens.css",
+                                                  name: token.name,
+                                                  theme,
+                                                  value: null,
+                                                },
+                                              ],
+                                            )
+                                        : undefined
+                                    }
+                                  />
+                                )}
                               </div>
                             ))}
                             <div role="cell" />
@@ -1230,7 +1322,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                   <div className="zd-theme-empty">
                     <Palette aria-hidden="true" className="size-3.5" />
                     <span>No variables</span>
-                    {tokens.length === 0 ? (
+                    {!readOnly && tokens.length === 0 ? (
                       <div className="zd-theme-empty-actions">
                         <Button
                           type="button"

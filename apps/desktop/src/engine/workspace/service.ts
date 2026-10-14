@@ -596,6 +596,9 @@ const WRITE_OPS = new Set<string>([
   "workspace.stopSetup",
   "workspace.startRun",
   "workspace.stopRun",
+  // Starts and idles the person's own Design style builds, the same
+  // repository-task controls as Run.
+  "design.styleBuilds.presence",
   // These mutate only the engine-owned MCP vault/authorization flight. OAuth
   // tokens never leave the engine; begin/complete carries only the short-lived
   // authorization URL/code over the authenticated cloud bridge.

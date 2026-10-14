@@ -532,3 +532,61 @@ describe("sanitizeLayer", () => {
     expect(r.warnings).toEqual([]);
   });
 });
+
+describe("Design style builds", () => {
+  const builds = [{ output: "dist/design.css", command: "pnpm build:design-css", timeout_seconds: 90 }];
+
+  it("reads build commands only from a person's own settings", () => {
+    for (const layer of ["user", "repo-local", "workspace-local"] as const) {
+      expect(sanitizeLayer({ design: { style_builds: builds } }, layer).doc).toEqual({ design: { style_builds: builds } });
+    }
+    // A tracked legacy file or a policy layer must not approve a command for the person.
+    for (const layer of ["repo", "team", "managed"] as const) {
+      const result = sanitizeLayer({ design: { style_builds: builds, directory: "Product - Design" } }, layer);
+      expect((result.doc.design as Record<string, unknown> | undefined)?.style_builds).toBeUndefined();
+      expect(result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("design.style_builds")]));
+    }
+  });
+
+  it.each([
+    [{ output: "../outside.css", command: "x" }],
+    [{ output: "dist/design.scss", command: "x" }],
+    [{ output: ".git/design.css", command: "x" }],
+    [{ output: "dist/design.css", command: "   " }],
+    [{ output: "dist/design.css", command: "x", timeout_seconds: 601 }],
+  ])("rejects an unusable build %j", (build) => {
+    const result = sanitizeLayer({ design: { style_builds: [build] } }, "repo-local");
+    expect(result.doc).toEqual({});
+    expect(result.warnings).toEqual([expect.stringContaining("design.style_builds")]);
+  });
+});
+
+describe("repository style builds", () => {
+  it("reads the opt-out from any layer, so a managed policy can turn them off", () => {
+    for (const layer of ["user", "repo-local", "workspace-local", "managed"] as const) {
+      expect(sanitizeLayer({ design: { repository_style_builds: false } }, layer).doc).toEqual({ design: { repository_style_builds: false } });
+    }
+  });
+});
+
+describe("live Design style builds", () => {
+  it("accepts a watch command or input globs, with output in the private build folder", () => {
+    const builds = [
+      { output: ".zeros/design-styles/app.css", command: "sass --watch src/app.scss:.zeros/design-styles/app.css", watch: true },
+      { output: "dist/tokens.css", command: "node scripts/tokens.mjs", inputs: ["src/tokens", "tokens.config.json"] },
+    ];
+    expect(sanitizeLayer({ design: { style_builds: builds } }, "repo-local").doc).toEqual({ design: { style_builds: builds } });
+  });
+
+  it.each([
+    [{ output: ".zeros/settings.css", command: "x" }],
+    [{ output: ".zeros/design-styles/../app.css", command: "x" }],
+    [{ output: "dist/app.css", command: "x", inputs: ["../outside/**"] }],
+    [{ output: "dist/app.css", command: "x", inputs: ["/abs"] }],
+    [{ output: "dist/app.css", command: "x", inputs: ["src/**/*.css"] }],
+  ])("rejects %j", (build) => {
+    const result = sanitizeLayer({ design: { style_builds: [build] } }, "repo-local");
+    expect(result.doc).toEqual({});
+    expect(result.warnings).toEqual([expect.stringContaining("design.style_builds")]);
+  });
+});

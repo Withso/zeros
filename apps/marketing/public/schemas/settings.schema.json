@@ -175,6 +175,52 @@
           "type": "string",
           "pattern": "^design_[a-zA-Z0-9_-]{1,64}$",
           "description": "Stable ID from a Design folder's design.toml in this checkout."
+        },
+        "repository_style_builds": {
+          "type": "boolean",
+          "description": "Run the style builds a Design directory declares in meta/canvas.json while the Design tab is open (default true). Your own style_builds entries still run when this is false."
+        },
+        "style_builds": {
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "output": {
+                "type": "string",
+                "description": "The CSS file the command writes, matching a build style source's path. Prefer .zeros/design-styles/<name>.css, which Zeros keeps out of Git."
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Shell command Zeros runs in the checkout to build `output`."
+              },
+              "timeout_seconds": {
+                "description": "Build deadline in seconds (1–600). Defaults to 120.",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 600
+              },
+              "watch": {
+                "description": "The command keeps running and rebuilds by itself (for example sass --watch). Zeros runs it while the Design tab is open and stops it 5 minutes after you leave.",
+                "type": "boolean"
+              },
+              "inputs": {
+                "description": "Files or folders whose changes re-run a one-shot command while the Design tab is open.",
+                "maxItems": 32,
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "output",
+              "command"
+            ]
+          },
+          "description": "Build commands you approve for Design style sources. Zeros runs a build source's command only from your own settings, never from the repository's files."
         }
       }
     },

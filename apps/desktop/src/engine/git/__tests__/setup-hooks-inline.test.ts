@@ -50,3 +50,45 @@ describe("contained inline repository scripts", () => {
     );
   });
 });
+
+describe("stopping a contained repository script", () => {
+  it("stops the child and proves the boundary stopped when its signal aborts", async () => {
+    let stopped = 0;
+    let proved = 0;
+    const processHandle = {
+      stdout: new PassThrough(),
+      wait: () => new Promise<never>(() => {}),
+      stopAndProve: async () => {
+        stopped += 1;
+      },
+    } as unknown as BoundaryProcess;
+    const boundary = {
+      spawn: async () => processHandle,
+      stopAndProve: async () => {
+        proved += 1;
+      },
+    } as unknown as PreparedBoundary;
+    const controller = new AbortController();
+    const running = runContainedInlineScript(
+      {
+        kind: "design-build",
+        command: "ignored",
+        workspaceId: "",
+        worktreePath: "/tmp",
+        repoRoot: "/tmp",
+        baseBranch: "",
+        boundaryFactory: async () => boundary,
+      },
+      "/bin/sh",
+      "-c",
+      "ignored",
+      {},
+      { timeoutMs: 60_000, signal: controller.signal },
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    controller.abort();
+    await expect(running).rejects.toThrow(/repository script was stopped/);
+    expect(stopped).toBe(1);
+    expect(proved).toBe(1);
+  });
+});

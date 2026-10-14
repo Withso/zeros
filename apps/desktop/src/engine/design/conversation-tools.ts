@@ -20,6 +20,7 @@ import { withDesignWorkspaceMutation } from "./document-write-lock";
 import { assertLegacyDesignDraftWritable, readDirectoryDesignManifest } from "./metadata";
 import { initializeDesignDocumentUnlocked } from "./document-transactions";
 import { withDesignDirectoryNameLease } from "./directory-registry";
+import { designSkillFile } from "./design-skill";
 import { openDesignVerification } from "./verification-service";
 import { readDesignPageContext } from "./page-selection";
 import { DesignTargetError } from "./target-error";
@@ -84,11 +85,14 @@ export async function designPromptContext(
   let target: DesignCodeToolTarget | null = null;
   try {
     target = await resolveTarget();
-    const context = await nativeDesignContext(target, mode, assertCurrent);
+    const skill = target ? designSkillFile() : null;
+    const context = `${await nativeDesignContext(target, mode, assertCurrent)}${skill
+      ? `\nRead the Zeros Design skill before Design work: '${skill}'. It covers supported HTML and CSS, meta/canvas.json, tokens, themes and style sources, components, assets, verification and limits.`
+      : ""}`;
     if (!nativeVerification || !target || !readDirectoryDesignManifest(target.workspacePath, target.directory)) return context;
     const verification = await openDesignVerification(target);
     assertCurrent();
-    return `${context}\nNative frame verification is available through ordinary shell commands: ${verification.command} <list|validate|capture|preview> --url '${verification.url}' --frame '<page.folder>/<name>.html'. Omit --frame for list. Capture requires --output '<png-output-path>'; use --revision to require a previously validated source revision. ${verification.captureAvailable ? "Capture uses the native PNG renderer; inspect its saved PNG with your normal image tool." : "PNG capture is unavailable on this host; validation and the HTTP preview remain available."} Preview returns an HTTP URL using the canvas's sanitized HTML/CSS and assets. Use the browser actually available through your provider's native browser tooling; do not assume an iab backend exists or navigate to file://. A successful lint or capture is not proof of visual inspection or application behavior. Verification URLs expire after 30 minutes; request fresh frame context if expired.`;
+    return `${context}\nNative frame verification is available through ordinary shell commands: ${verification.command} <list|validate|capture|preview> --url '${verification.url}' --frame '<page.folder>/<name>.html'. Omit --frame for list. Capture requires --output '<png-output-path>'; use --revision to require a previously validated source revision. Capture and preview show the base theme; add --theme <name> for another theme the canvas Themes menu offers. ${verification.captureAvailable ? "Capture uses the native PNG renderer; inspect its saved PNG with your normal image tool." : "PNG capture is unavailable on this host; validation and the HTTP preview remain available."} Preview returns an HTTP URL using the canvas's sanitized HTML/CSS and assets. Use the browser actually available through your provider's native browser tooling; do not assume an iab backend exists or navigate to file://. A successful lint or capture is not proof of visual inspection or application behavior. Verification URLs expire after 30 minutes; request fresh frame context if expired.`;
   } catch (error) {
     assertCurrent();
     if (target?.assertInspectionCurrent) target.assertInspectionCurrent();

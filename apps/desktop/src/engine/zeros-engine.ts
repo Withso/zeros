@@ -12,6 +12,7 @@ import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
 import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
+import { configureDesignStyleBuilds, hasRunningDesignStyleBuilds, stopDesignStyleBuilds } from "./design/style-builds";
 import type { DesignCaptureService } from "./design/capture-service";
 // ──────────────────────────────────────────────────────────
 // ZerosEngine — The heart of Zeros V2
@@ -148,7 +149,7 @@ import {
   type CreatedWorkspace,
 } from "./git";
 import { RunManager } from "./run/run-manager";
-import { getWorkspaceById, listWorkspaces } from "./git/state";
+import { getWorkspaceById, getWorkspaceByPath, listWorkspaces } from "./git/state";
 import { CloudCommandRuntime, type CloudCommandSettlementObservation } from "./cloud-command-runtime";
 import { CloudAgentTurnTimings } from "./cloud-local-command-queue-timings";
 import { CloudGoalRecorder } from "./cloud-goal-recorder";
@@ -1386,6 +1387,34 @@ export class ZerosEngine {
       },
     });
 
+    // The person's Design style builds run like setup scripts while a Design
+    // tab is open. Their outputs are usually ignored by Git, so a finished
+    // build announces itself.
+    configureDesignStyleBuilds({
+      boundaryFactory: repoTaskBoundaryFactory,
+      // Archive, deletion and Design authority transitions block new
+      // repository code, exactly as they block Setup and Run starts.
+      assertStartAllowed: (workspacePath) =>
+        this.assertWorkspaceProcessStartAllowed(getWorkspaceByPath(workspacePath)?.id ?? null),
+      // A new worktree builds once its setup has installed what the build needs.
+      whenReady: (workspacePath) => {
+        const workspaceId = getWorkspaceByPath(workspacePath)?.id;
+        return workspaceId ? this.setup.whenSettled(workspaceId) : null;
+      },
+      // Only Design re-reads; Files and Changes ignore a rebuilt output.
+      changed: (workspacePath) => {
+        const workspaceId = getWorkspaceByPath(workspacePath)?.id;
+        this.broadcast(
+          createMessage({
+            type: "DB_CHANGED",
+            source: "engine",
+            kinds: ["designStyles"],
+            ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
+          }),
+        );
+      },
+    });
+
     // Initialize components
     this.cache = new EngineCache(this.root);
     this.workspace = new WorkspaceService(this.root, {
@@ -1785,6 +1814,10 @@ export class ZerosEngine {
         }
         this.setup.stop(workspaceId);
         this.runs.stopAllForWorkspace(workspaceId);
+        // Approved Design style builds are repository tasks in this checkout too.
+        // Observed now so a rejection before the proof below is never unhandled.
+        const designBuildsStopped = stopDesignStyleBuilds(belongsToWorkspace);
+        designBuildsStopped.catch(() => undefined);
         const terminalIds = new Set(
           this.terminals.sessionIds().filter((sessionId) => {
             const terminal = this.terminals.get(sessionId);
@@ -1838,6 +1871,7 @@ export class ZerosEngine {
           await Promise.all([
             this.setup.proveWorkspaceBoundaryStopped(workspaceId),
             this.runs.proveWorkspaceBoundariesStopped(workspaceId),
+            designBuildsStopped,
           ]);
         } catch (error) {
           throw new GitError({
@@ -3376,6 +3410,7 @@ export class ZerosEngine {
     await settle(() => this.cloudLocalActions?.close());
     await settle(() => this.cloudLocalWriterLifecycle?.close());
     await settle(() => stopDesignVerification());
+    configureDesignStyleBuilds(null);
     const captureService = this.designCaptureService;
     this.designCaptureService = undefined;
     if (captureService) {
@@ -3503,7 +3538,7 @@ export class ZerosEngine {
       this.pendingPermissionRequests.size > 0 || this.pendingQuestionRequests.size > 0 ||
       this.cloudWorkspaceMutations.size > 0 || this.globalDesignAuthorityStarts.size > 0 ||
       [...this.workspaceProcessStarts.values()].some(starts => starts.size > 0) ||
-      this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() ||
+      this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() || hasRunningDesignStyleBuilds() ||
       this.cloudCommands?.handoffDrained() !== true || this.cloudActions?.hasActiveWork() === true ||
       this.cloudGoals.active() || this.activeAgentExecutionCount() > 0 || this.pty.list().length > 0 ||
       this.cloud?.handoffBusy() === true || [...this.residentGithubBrokers.values()].some(broker => broker.busy());
@@ -3746,7 +3781,7 @@ export class ZerosEngine {
       this.pendingPermissionRequests.size > 0 || this.pendingQuestionRequests.size > 0 ||
       this.cloudWorkspaceMutations.size > this.cloudWorkspaceIdleMaintenance.size || this.globalDesignAuthorityStarts.size > 0 ||
       [...this.workspaceProcessStarts.values()].some(starts => starts.size > 0) ||
-      this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() ||
+      this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() || hasRunningDesignStyleBuilds() ||
       this.cloudCommands?.hasActiveWork() === true || this.cloudGoals.active() || this.activeAgentExecutionCount() > 0 ||
       this.pty.hasRecentInput() || this.residentTerminals?.hasRecentInput() === true || this.residentTerminals?.busy() === true ||
       humanServices || (includePresence && this.cloudUserPresence.active());
@@ -5776,7 +5811,8 @@ export class ZerosEngine {
         const repositoryTasksActive =
           Boolean(this.cloudWorker) &&
           (this.setup.hasRepositoryCodeAuthority() ||
-            this.runs.hasRepositoryCodeAuthority());
+            this.runs.hasRepositoryCodeAuthority() ||
+            hasRunningDesignStyleBuilds());
         const pooledUtilityAuthorityActive =
           Boolean(this.cloudWorker) &&
           this.agents.hasPooledUtilityCodeAuthority();

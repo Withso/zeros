@@ -113,6 +113,7 @@ import {
 } from "./frame-lifecycle";
 import { getDesignRuntimeAudit } from "./runtime-audits";
 import { readSafeRegularFile } from "./safe-files";
+import { readDesignStyleSources } from "./style-sources";
 
 export { listDesignAssets,type DesignAssetSummary } from "./assets";
 export { designDirectoryNameFor } from "./directory-registry";
@@ -488,7 +489,7 @@ async function mutateDesignFrameSource(
     const current = await prepareFrameRenderSource(workspacePath, before, {
       width: geometry?.w ?? meta.width,
       height: geometry?.h ?? meta.height,
-    }, undefined, undefined, file);
+    }, undefined, undefined, file, canvas, { identityOnly: true });
     if (current.sourceVersion !== input.sourceVersion) {
       throw new Error(
         `Design frame changed before the mutation: ${file}. Re-read it and retry.`,
@@ -980,6 +981,7 @@ async function readDesignFrameFromSummary(
 async function readDesignCanvasFrameFromSummary(
   workspacePath: string,
   summary: DesignFrameSummary,
+  canvas: CanvasDocument,
 ): Promise<DesignCanvasFrame> {
   const source = await readBoundedDesignFrameSource(
     workspacePath,
@@ -988,7 +990,7 @@ async function readDesignCanvasFrameFromSummary(
   const render = await prepareFrameRenderSource(workspacePath, source, {
     width: summary.width,
     height: summary.height,
-  }, undefined, undefined, summary.file);
+  }, undefined, undefined, summary.file, canvas, { identityOnly: true });
   return { ...summary, sourceVersion: render.sourceVersion };
 }
 
@@ -1051,9 +1053,9 @@ export async function readDesignWorkspaceSnapshot(
       context.layout?.canvasVersion === 2,
     );
     const renderBudgetViolations: DesignLintViolation[] = [];
-    const [renderedFrames, tokensDocument, assets] = await Promise.all([
+    const [renderedFrames, tokensDocument, assets, styleSources] = await Promise.all([
       mapDesignFramesBounded(summaries, (summary) =>
-        readDesignCanvasFrameFromSummary(workspacePath, summary).catch(
+        readDesignCanvasFrameFromSummary(workspacePath, summary, context.canvas).catch(
           (error: unknown) => {
             if (!(error instanceof DesignRenderBudgetError)) throw error;
             renderBudgetViolations.push(
@@ -1065,6 +1067,7 @@ export async function readDesignWorkspaceSnapshot(
       ),
       readDesignTokensDocument(workspacePath, context),
       listDesignAssets(workspacePath),
+      readDesignStyleSources(workspacePath, context.canvas),
     ]);
     const frames = renderedFrames.filter(
       (frame): frame is DesignCanvasFrame => frame !== null,
@@ -1077,6 +1080,9 @@ export async function readDesignWorkspaceSnapshot(
       frames: frames.map((frame) => ({ ...frame, pageId: pages.find((page) => page.frameFiles.includes(frame.file))!.id })),
       tokens: tokensDocument.tokens,
       tokenSourceVersion: tokensDocument.sourceVersion,
+      // The CSS itself reaches frames through rendering, not the snapshot.
+      styleSources: styleSources.sources.map(({ css: _css, ...status }) => status),
+      styleSourceErrors: styleSources.errors,
       assets,
       lint: {
         ...lint,
@@ -1531,6 +1537,33 @@ function sortDesignLintViolations(
       left.column - right.column ||
       left.ruleId.localeCompare(right.ruleId),
   );
+}
+
+/** Themes the canvas Themes control offers: those tokens.css declares and
+ * those imported style sources map. Unlike the tokens document, this reads no
+ * frames. */
+export async function readDesignThemeNames(
+  workspacePath: string,
+): Promise<string[]> {
+  const directory = designDirectory(workspacePath);
+  const tokenSource =
+    (await readSafeDesignText(directory, path.join(directory, DESIGN_TOKENS_FILE))) ?? "";
+  const themes = new Set<string>();
+  try {
+    postcss.parse(tokenSource).walkRules((rule) => {
+      const theme = designTokenThemeName(rule.selector);
+      if (theme) themes.add(theme);
+    });
+  } catch {
+    // Unparseable tokens declare no themes, as in the theme editor.
+  }
+  const canvas = await readCanvas(workspacePath).catch(() => null);
+  if (canvas) {
+    for (const source of (await readDesignStyleSources(workspacePath, canvas)).sources) {
+      for (const theme of source.themes) themes.add(theme);
+    }
+  }
+  return [...themes].sort();
 }
 
 export async function readDesignTokensDocument(

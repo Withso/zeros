@@ -179,6 +179,24 @@ function snapshot(
 }
 
 describe("design workspace cache", () => {
+  it("carries imported style sources and keeps unchanged ones by reference", () => {
+    const source = {
+      id: "app", title: "App", kind: "css", path: "styles/app.css", status: "ready" as const,
+      messages: [], themes: ["light"], bytes: 24, revision: "a".repeat(24),
+      tokens: [{ name: "--brand", value: "1px", themeValues: { light: "2px" } }],
+    };
+    const previous = { ...snapshot([]), styleSources: [source], styleSourceErrors: [] };
+    expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);
+    const failed = { ...previous, styleSources: [{ ...source, status: "error" as const, revision: null, messages: [{ level: "error" as const, text: "missing" }] }] };
+    const published = stabilizeDesignWorkspaceSnapshot(previous, failed);
+    expect(published).not.toBe(previous);
+    expect(published.styleSources).toEqual(failed.styleSources);
+    // An older engine sends no sources at all; that is a stable empty list.
+    const legacy = snapshot([]);
+    expect(stabilizeDesignWorkspaceSnapshot(legacy, structuredClone(legacy))).toBe(legacy);
+    expect(stabilizeDesignWorkspaceSnapshot(previous, legacy).styleSources).toEqual([]);
+  });
+
   it("retains identical catalogs but publishes changed registered IDs even without rendered frames", () => {
     const previous = { ...snapshot([]), pages: [{ id: "a", title: "A", folder: "a", frameFiles: ["a/missing.html"], frameIds: ["before"] }] };
     expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);

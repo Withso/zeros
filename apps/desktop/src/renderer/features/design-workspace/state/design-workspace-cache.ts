@@ -513,6 +513,23 @@ function invalidateSettledDesignCache<T>(cache: KeyedAsyncCache<T>): void {
   }
 }
 
+/** A style build wrote new CSS for these workspaces (all, when unnamed).
+ * Only their Design snapshots revalidate; a local mutation in flight defers
+ * its workspace's refresh until it settles, as Git refreshes do. */
+export function invalidateDesignWorkspacesForStyleBuild(
+  workspaceIds: readonly string[] | undefined,
+): void {
+  if (!workspaceIds?.length) {
+    invalidateSettledDesignCache(designWorkspaceSnapshotCache);
+    return;
+  }
+  for (const workspaceId of workspaceIds) {
+    const localMutation = pendingLocalMutationByWorkspace.get(workspaceId);
+    if (localMutation) localMutation.deferredRefresh = true;
+    else designWorkspaceSnapshotCache.invalidate(workspaceId);
+  }
+}
+
 // A respawned engine re-composes every generation and authored revision, so
 // settled identities held across a connection boundary are suspect. Mounted
 // exact-key consumers revalidate them while retaining their confirmed data.
@@ -733,6 +750,35 @@ function sameToken(
   );
 }
 
+type DesignStyleSourceSnapshot = NonNullable<
+  DesignWorkspaceSnapshotWire["styleSources"]
+>[number];
+const NO_STYLE_SOURCES: DesignStyleSourceSnapshot[] = [];
+const NO_STYLE_SOURCE_ERRORS: string[] = [];
+
+/** The revision hashes the imported CSS, so equal revisions carry equal tokens. */
+function sameStyleSource(
+  left: DesignStyleSourceSnapshot,
+  right: DesignStyleSourceSnapshot,
+): boolean {
+  return (
+    left.id === right.id &&
+    left.title === right.title &&
+    left.kind === right.kind &&
+    left.path === right.path &&
+    left.status === right.status &&
+    left.revision === right.revision &&
+    left.bytes === right.bytes &&
+    left.themes.join("\u0000") === right.themes.join("\u0000") &&
+    left.messages.length === right.messages.length &&
+    left.messages.every(
+      (message, index) =>
+        message.level === right.messages[index]!.level &&
+        message.text === right.messages[index]!.text,
+    )
+  );
+}
+
 function sameAsset(
   left: DesignWorkspaceSnapshotWire["assets"][number],
   right: DesignWorkspaceSnapshotWire["assets"][number],
@@ -896,6 +942,16 @@ export function stabilizeDesignWorkspaceSnapshot(
     left.frameIds?.length === right.frameIds?.length && (left.frameIds?.every((id, index) => id === right.frameIds?.[index]) ?? true)) : next.pages;
   const frames = stableArray(previous.frames, next.frames, sameFrame);
   const tokens = stableArray(previous.tokens, next.tokens, sameToken);
+  const styleSources = stableArray(
+    previous.styleSources ?? NO_STYLE_SOURCES,
+    next.styleSources ?? NO_STYLE_SOURCES,
+    sameStyleSource,
+  );
+  const styleSourceErrors = stableArray(
+    previous.styleSourceErrors ?? NO_STYLE_SOURCE_ERRORS,
+    next.styleSourceErrors ?? NO_STYLE_SOURCE_ERRORS,
+    (left, right) => left === right,
+  );
   const assets = stableArray(previous.assets, next.assets, sameAsset);
   const violations = stableArray(
     previous.lint.violations,
@@ -918,6 +974,8 @@ export function stabilizeDesignWorkspaceSnapshot(
     next.protocolCapability === previous.protocolCapability &&
     tokens === previous.tokens &&
     next.tokenSourceVersion === previous.tokenSourceVersion &&
+    styleSources === (previous.styleSources ?? NO_STYLE_SOURCES) &&
+    styleSourceErrors === (previous.styleSourceErrors ?? NO_STYLE_SOURCE_ERRORS) &&
     assets === previous.assets &&
     lint === previous.lint
     ? previous
@@ -929,6 +987,8 @@ export function stabilizeDesignWorkspaceSnapshot(
         frames,
         tokens,
         tokenSourceVersion: next.tokenSourceVersion,
+        styleSources,
+        styleSourceErrors,
         assets,
         lint,
       };

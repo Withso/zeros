@@ -33,6 +33,7 @@ import {
   useDesignWorkspaceUiStore,
 } from "./state/design-workspace-ui";
 import { useDesignPageSnapshot } from "./state/design-page-projection";
+import { useDesignStyleBuildPresence } from "./state/use-design-style-build-presence";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
 import { useDesignLifecycleFeedback } from "./state/use-design-lifecycle-feedback";
 
@@ -106,6 +107,8 @@ export function DesignWorkspaceColumn({
     folder,
     surfaceActive,
   );
+  // Keeps the person's style builds live while this Design tab is showing.
+  useDesignStyleBuildPresence(workspaceId, surfaceActive);
   useDesignLifecycleFeedback(
     workspaceId,
     surfaceActive,

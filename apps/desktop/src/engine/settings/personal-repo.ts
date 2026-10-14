@@ -238,12 +238,13 @@ export function assertRegularSettingsPath(
  * higher-priority negation is an error, never a best-effort privacy promise. */
 export function ensureLocalSettingsIgnored(
   repoRoot: string,
-  relative: PersonalSettingsPath | ".zeros/skills/" = LOCAL_FILE,
+  // Folder rules end in "/": private skills and Design style build outputs.
+  relative: PersonalSettingsPath | ".zeros/skills/" | ".zeros/design-styles/" = LOCAL_FILE,
 ): void {
   const root = personalWorkspaceRoot(repoRoot);
   assertRegularSettingsPath(
     root,
-    relative === ".zeros/skills/" ? LOCAL_FILE : relative,
+    relative.endsWith("/") ? LOCAL_FILE : (relative as PersonalSettingsPath),
   );
   if (!existsSync(path.join(root, ".git"))) return;
   if (

@@ -16,7 +16,10 @@ import {
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
 } from "@zeros/protocol/design-runtime";
 import { designFrameGeometryError } from "@zeros/design-core";
-import type { DesignFoundationOpenWire } from "../platform/git";
+import type {
+  DesignFoundationOpenWire,
+  DesignWorkspaceSnapshotWire,
+} from "../platform/git";
 import { createDesignPagesHarness } from "./harness-design-pages";
 
 const HOME_SOURCE_VERSION = "aaaaaaaaaaaaaaaaaaaaaaaa";
@@ -26,6 +29,44 @@ const HARNESS_LAYER_COUNT = new URLSearchParams(window.location.search).has(
 )
   ? 10_000
   : 48;
+
+// `?styleSources=1` adds imported style sources; the default harness keeps
+// the snapshot shape every existing smoke check was written against.
+const styleSourcesHarness = new URLSearchParams(window.location.search).has(
+  "styleSources",
+);
+const HARNESS_STYLE_SOURCES: DesignWorkspaceSnapshotWire["styleSources"] = [
+  {
+    id: "app",
+    title: "App tokens",
+    kind: "css",
+    path: "src/styles/tokens.css",
+    status: "warning",
+    messages: [
+      { level: "info", text: "Skipped 2 build-tool directives (@tailwind, @source, @plugin, @apply, …); only plain CSS is imported." },
+      { level: "warning", text: 'Theme "dark": no rule uses the selector .dark.' },
+    ],
+    themes: ["dark", "light"],
+    tokens: [
+      { name: "--surface", value: "white", themeValues: { light: "whitesmoke" } },
+      { name: "--radius-card", value: "8px", themeValues: {} },
+    ],
+    bytes: 120,
+    revision: "style-source-revision-1",
+  },
+  {
+    id: "brand",
+    title: "Brand kit",
+    kind: "css",
+    path: "packages/brand/brand.css",
+    status: "error",
+    messages: [{ level: "error", text: "packages/brand/brand.css is missing, outside the repository, a symlink, or larger than 2 MiB." }],
+    themes: [],
+    tokens: [],
+    bytes: 0,
+    revision: null,
+  },
+];
 
 function withDesignRuntime(source: string, sourceVersion: string): string {
   const runtime =
@@ -282,6 +323,9 @@ async function main() {
       })),
     ],
     tokenSourceVersion: "tokens-source-version-1",
+    ...(styleSourcesHarness
+      ? { styleSources: HARNESS_STYLE_SOURCES, styleSourceErrors: [] }
+      : {}),
     assets: [],
     lint: {
       workspacePath,

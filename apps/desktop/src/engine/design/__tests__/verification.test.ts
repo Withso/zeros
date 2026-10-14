@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -106,6 +106,44 @@ describe("native Design verification", () => {
     expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([390, 844]);
     expect(JSON.parse(lines[0]!)).toMatchObject({ path: output, width: 390, height: 844, motion: "reduced", reference: { revision: expect.any(String) } });
     expect(render).toHaveBeenCalledOnce();
+  });
+
+  it("captures and previews a named theme the way the canvas Themes control applies it", async () => {
+    await writeFile(path.join(root, directory, "tokens.css"), 'body{margin:0;background:seagreen} [data-zd-theme="light"]{--gap:4px}');
+    const output = path.join(root, ".context", "phone-light.png");
+    const lines: string[] = [];
+    expect(await runDesignVerificationCli(["capture", "--url", url, "--frame", frame, "--output", output, "--theme", "light"], (line) => lines.push(line))).toBe(0);
+    expect(render.mock.calls[0]![0].html).toMatch(/<html[^>]* data-zd-theme="light"/);
+    expect(JSON.parse(lines[0]!)).toMatchObject({ theme: "light" });
+    const preview: string[] = [];
+    expect(await runDesignVerificationCli(["preview", "--url", url, "--frame", frame, "--theme", "light"], (line) => preview.push(line))).toBe(0);
+    expect(JSON.parse(preview[0]!).url).toContain("&theme=light");
+    expect(await (await fetch(`${url}/${frame}/document?theme=light`)).text()).toMatch(/<html[^>]* data-zd-theme="light"/);
+    expect((await fetch(`${url}/${frame}/document?theme=Not%20A%20Theme`)).status).toBe(400);
+    await expect(runDesignVerificationCli(["capture", "--url", url, "--frame", frame, "--output", output, "--theme", "Bad Theme"]))
+      .rejects.toThrow(/--theme/);
+    await expect(runDesignVerificationCli(["validate", "--url", url, "--frame", frame, "--theme", "light"]))
+      .rejects.toThrow(/capture and preview/);
+    await expect(runDesignVerificationCli(["capture", "--url", url, "--frame", frame, "--output", output, "--theme"]))
+      .rejects.toThrow(/--theme/);
+    // A theme nothing declares would silently capture the default instead.
+    await expect(runDesignVerificationCli(["preview", "--url", url, "--frame", frame, "--theme", "sepia"]))
+      .rejects.toThrow('Unknown theme "sepia". Choose one of: light.');
+    expect(render).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts a theme that only an imported style source maps", async () => {
+    await mkdir(path.join(root, "styles"), { recursive: true });
+    await writeFile(path.join(root, "styles/app.css"), ":root{--gap:2px} .sepia{--gap:3px}");
+    const canvasFile = path.join(root, directory, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+    canvas.styles = [{ id: "app", title: "App", kind: "css", path: "styles/app.css", themes: { sepia: ".sepia" } }];
+    await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
+    const output = path.join(root, ".context", "phone-sepia.png");
+    expect(await runDesignVerificationCli(["capture", "--url", url, "--frame", frame, "--output", output, "--theme", "sepia"], () => {})).toBe(0);
+    const html = render.mock.calls[0]![0].html;
+    expect(html).toMatch(/<html[^>]* data-zd-theme="sepia"/);
+    expect(html).toContain('[data-zd-theme="sepia"]{--gap:3px}');
   });
 
   it.each([

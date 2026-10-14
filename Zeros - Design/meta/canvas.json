@@ -1,0 +1,52 @@
+{
+  "version": 2,
+  "id": "main",
+  "title": "Design",
+  "pages": [
+    {
+      "id": "page_357dca0b83fb47599c247947b460d954",
+      "title": "Page 1",
+      "frames": [
+        "foundations_tokens"
+      ],
+      "folder": "page-1"
+    }
+  ],
+  "frames": {
+    "foundations_tokens": {
+      "kind": "html",
+      "source": "page-1/foundations-tokens.html",
+      "title": "Foundations — Tokens",
+      "x": 0,
+      "y": 0,
+      "width": 1440,
+      "height": 1400
+    }
+  },
+  "foundation": {
+    "schemaVersion": 1,
+    "parameters": [],
+    "variants": [],
+    "components": []
+  },
+  "styles": [
+    {
+      "id": "app",
+      "title": "App styles (Tailwind)",
+      "kind": "tailwind",
+      "path": "styles/zeros-tokens.css",
+      "themes": {
+        "light": "[data-theme=\"light\"]"
+      }
+    },
+    {
+      "id": "app-semantic",
+      "title": "App semantic tokens",
+      "kind": "css",
+      "path": "styles/semantic-tokens.css",
+      "themes": {
+        "light": "[data-theme=\"light\"]"
+      }
+    }
+  ]
+}

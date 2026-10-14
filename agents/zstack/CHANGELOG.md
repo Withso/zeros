@@ -3,6 +3,35 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.1.6
+
+- **Style-build teardown could disappear before archive retry.** Settled
+  command promises and cache eviction were mistaken for process-stop proof.
+  Keep unresolved boundary authority until the original proof succeeds, and
+  test archive retries, settings replacement, idle stop and eviction
+  (`design/__tests__/style-build-lifecycle.test.ts`). The same suite proves
+  that failed one-shot builds retry on reopen, not on presence heartbeats.
+  The real-process presence-expiry test arms its short lease after startup,
+  so scheduler coverage does not assume a shell starts within 50 ms.
+- **Imported styles lost images and linked-CSS theme variables.** Render
+  preparation skipped source-relative raster assets and scanned only HTML for
+  Tailwind candidates. Test asset dependencies and canonical path restrictions,
+  linked and snapshot CSS, and actual Local/cloud preview rendering
+  (`style-sources.test.ts`, `style-sources-render.test.ts`,
+  `verification-browser.test.ts`).
+
+## 0.1.5
+
+- **UI work had no procedure, and mockups drifted from the product.** 20 of 25 standalone mockups in
+  `styles/Artifacts/` hand-copied token values that later changed, so designs no longer matched the app.
+  Zeros mockups now live in `Zeros - Design/`, whose `tokens.css` `pnpm design:docs` generates and
+  `check:ui` keeps fresh. UI work follows design → verify → approve → implement → look
+  (`playbooks/ui-design.md`, `zeros-ui`).
+- **A new workspace failed required gates for environment reasons.** Its setup ran only `pnpm install`,
+  so `pnpm typecheck` lacked the control-plane dependencies and Playwright suites lacked Chromium. Install
+  all three dependency graphs, and rerun failures in a clean base checkout before blaming the diff
+  (`zstack-verify`).
+
 ## 0.1.4
 
 - **A large database fixture hit the 5 s test timeout.** The retention pagination test runs 53 journals and

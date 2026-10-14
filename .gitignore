@@ -171,4 +171,11 @@ snapshots/diff/
 
 # Zeros Design metadata (managed by Zeros)
 /.zeros/
+!/Zeros\ -\ Design/
+!/Zeros\ -\ Design/canvas.json
+!/Zeros\ -\ Design/design.toml
+!/Zeros\ -\ Design/meta/
+!/Zeros\ -\ Design/meta/canvas.json
+!/Zeros\ -\ Design/meta/design.toml
+!/Zeros\ -\ Design/rules.md
 # End Zeros Design metadata

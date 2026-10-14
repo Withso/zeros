@@ -111,6 +111,110 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Theme sources: the manual tokens plus imported style sources, above Types. */
+.zd-theme-sources,
+.zd-theme-types {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.zd-theme-rail-label {
+  padding: 4px 8px 0;
+  color: var(--muted-fg);
+  font-size: 11px;
+  font-weight: var(--weight-medium);
+}
+
+.zd-theme-source-name {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.zd-theme-source-errors {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 4px 8px;
+  color: var(--yellow-primary);
+  font-size: 12px;
+}
+
+.zd-theme-source-status {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border1);
+}
+
+.zd-theme-source-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg1);
+  font-size: 13px;
+}
+
+.zd-theme-source-title {
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.zd-theme-source-path {
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zd-theme-source-summary {
+  margin-left: auto;
+  color: var(--muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.zd-theme-source-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  color: var(--muted-fg);
+  font-size: 12px;
+  list-style: none;
+}
+
+.zd-theme-source-messages [data-level="warning"] {
+  color: var(--yellow-primary);
+}
+
+.zd-theme-source-messages [data-level="error"] {
+  color: var(--red-primary);
+}
+
+.zd-theme-readonly-value {
+  display: block;
+  overflow: hidden;
+  padding-inline: 8px;
+  color: var(--fg2);
+  font-size: 13px;
+  line-height: 28px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zd-theme-readonly-value[data-design-theme-inherited="true"] {
+  color: var(--muted-fg);
+}
+
 .zd-theme-main {
   display: flex;
   min-width: 0;

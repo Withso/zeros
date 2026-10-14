@@ -15,6 +15,16 @@ import { declarations, extractBlock, extractBlockRange, hslToRgb, toHex, TOKENS_
 
 export const TOKEN_RESOLVER_FILE = "styles/tokens/zeros.resolver.json";
 export const MARKETING_TOKENS_FILE = "apps/marketing/src/index.css";
+// The repository's registered Design directory; rename this with the directory.
+export const DESIGN_TOKENS_FILE = "Zeros - Design/tokens.css";
+// The Design tab applies a named theme as `data-zd-theme` on each frame root.
+const DESIGN_LIGHT_THEME = '[data-zd-theme="light"]';
+const DESIGN_SCALE = /^(?:font-(?:sans|mono)|text-[a-z0-9-]+|radius-[a-z0-9]+)$/;
+// Numeric ramp steps stay private to the app palette, as check:ui requires of
+// components; frames use the family anchors.
+const PRIVATE_RAMP = "--(?:red|green|yellow|blue|violet|brown)-\\d{2,3}";
+const isPrivateRamp = new RegExp(`^${PRIVATE_RAMP}$`);
+const usesPrivateRamp = new RegExp(`var\\(${PRIVATE_RAMP}\\)`);
 const EXTENSION = "org.zeros";
 const ALIAS = /^\{([a-z0-9-]+(?:\.[a-z0-9-]+)*)\}$/;
 const SECTION = /^[a-z0-9-]+$/;
@@ -397,7 +407,46 @@ export function renderMarketingTokenCss(root = process.cwd(), css) {
   return result;
 }
 
-const TOKEN_OUTPUTS = [[TOKENS_FILE, renderTokenCss], [MARKETING_TOKENS_FILE, renderMarketingTokenCss]];
+/** The repository's Design directory renders the product palette: Dark is the
+ * canvas Base theme and Light is its `light` theme. Frames have no Tailwind
+ * build, so the font, type and radius scales that `@theme inline` keeps
+ * compile-time-only are mirrored as runtime custom properties. */
+export function renderDesignTokenCss(root = process.cwd(), css) {
+  const source = css ?? readFileSync(join(root, DESIGN_TOKENS_FILE), "utf8");
+  const { base, lightOverrides, themes } = readTokenSources(root);
+  const scales = [...declarations(extractBlock(readFileSync(join(root, TOKENS_FILE), "utf8"), "@theme inline"))]
+    .filter(([name]) => DESIGN_SCALE.test(name));
+  const exported = (tokens) => [...tokens.values()].filter((entry) => !isPrivateRamp.test(entry.cssName));
+  const line = (entry, theme) => {
+    const value = tokenCss(entry, theme, false);
+    if (usesPrivateRamp.test(value)) fail(`Design export ${entry.cssName} depends on a private ramp step: ${value}`, entry.file);
+    return `  ${entry.cssName}: ${value}; ${description(entry, theme)}`;
+  };
+  const regions = new Map([
+    ["design-dark", { selector: ":root", declarations: exported(base).map((entry) => line(entry, themes.dark)) }],
+    ["design-scales", { selector: ":root", declarations: scales.map(([name, value]) => `  --${name}: ${value};`) }],
+    ["design-light", { selector: DESIGN_LIGHT_THEME, declarations: exported(lightOverrides).map((entry) => line(entry, themes.light)) }],
+  ]);
+  const ranges = new Map([":root", DESIGN_LIGHT_THEME].map((selector) => [selector, blockRange(source, selector, DESIGN_TOKENS_FILE)]));
+  const result = replaceTokenRegions(source, regions, ranges, DESIGN_TOKENS_FILE);
+  // Design-only tokens may extend the palette; a shadowed product token would
+  // silently fork it, including a Light value the theme editor appends.
+  const generated = new Set([...exported(base).map((entry) => entry.cssName.slice(2)), ...scales.map(([name]) => name)]);
+  for (const [start, end] of ranges.values()) {
+    for (const name of declarations(source.slice(start, end).replace(GENERATION_REGION, "")).keys()) {
+      if (generated.has(name)) {
+        fail(`Unmarked declaration shadows generated --${name}; change product tokens in styles/tokens/ instead`, DESIGN_TOKENS_FILE);
+      }
+    }
+  }
+  return result;
+}
+
+const TOKEN_OUTPUTS = [
+  [TOKENS_FILE, renderTokenCss],
+  [MARKETING_TOKENS_FILE, renderMarketingTokenCss],
+  [DESIGN_TOKENS_FILE, renderDesignTokenCss],
+];
 
 export function buildTokens(root = process.cwd()) {
   // Prepare every output first so an invalid template cannot partially publish.

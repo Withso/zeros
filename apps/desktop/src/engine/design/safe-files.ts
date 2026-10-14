@@ -53,6 +53,7 @@ async function openVerifiedRegularFile(
   root: string,
   target: string,
   maxBytes: number,
+  allowCanonicalPath?: (relativePath: string) => boolean,
 ): Promise<{ handle: FileHandle; metadata: SafeRegularFileMetadata } | null> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) return null;
   const canonicalRoot = await realpath(root).catch(() => null);
@@ -75,6 +76,7 @@ async function openVerifiedRegularFile(
     if (
       !canonicalTarget ||
       !within(canonicalRoot, canonicalTarget) ||
+      (allowCanonicalPath && !allowCanonicalPath(path.relative(canonicalRoot, canonicalTarget).split(path.sep).join("/"))) ||
       !info.isFile() ||
       info.size > maxBytes
     ) {
@@ -95,8 +97,9 @@ export async function inspectSafeRegularFile(
   root: string,
   target: string,
   maxBytes: number,
+  allowCanonicalPath?: (relativePath: string) => boolean,
 ): Promise<SafeRegularFileMetadata | null> {
-  const opened = await openVerifiedRegularFile(root, target, maxBytes);
+  const opened = await openVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath);
   if (!opened) return null;
   try {
     return opened.metadata;
@@ -109,8 +112,10 @@ export async function readSafeRegularFile(
   root: string,
   target: string,
   maxBytes: number,
+  /** Optional policy checked against the opened descriptor's canonical path. */
+  allowCanonicalPath?: (relativePath: string) => boolean,
 ): Promise<SafeRegularFile | null> {
-  const opened = await openVerifiedRegularFile(root, target, maxBytes);
+  const opened = await openVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath);
   if (!opened) return null;
   try {
     // fstat already established the descriptor's bounded size. Read one byte

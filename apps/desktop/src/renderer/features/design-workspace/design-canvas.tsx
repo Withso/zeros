@@ -750,13 +750,15 @@ export function DesignCanvas({
   ]);
 
   const showColdBusy = useDelayedColdBusy(loading && !snapshot);
+  // Imported style sources can define themes that tokens.css does not.
   const availableThemes = useMemo(
     () =>
-      new Set(
-        snapshot?.tokens.flatMap((token) => Object.keys(token.themeValues)) ??
-          [],
-      ),
-    [snapshot?.tokens],
+      new Set([
+        ...(snapshot?.tokens.flatMap((token) => Object.keys(token.themeValues)) ??
+          []),
+        ...(snapshot?.styleSources?.flatMap((source) => source.themes) ?? []),
+      ]),
+    [snapshot?.styleSources, snapshot?.tokens],
   );
 
   useEffect(() => {
@@ -7553,6 +7555,8 @@ export function DesignCanvas({
           frame={selectedFrame}
           tokens={snapshot?.tokens ?? []}
           tokenSourceVersion={snapshot?.tokenSourceVersion ?? null}
+          styleSources={snapshot?.styleSources}
+          styleSourceErrors={snapshot?.styleSourceErrors}
           activeTheme={view.activeTheme}
           active={active}
           open={themeEditorOpen}

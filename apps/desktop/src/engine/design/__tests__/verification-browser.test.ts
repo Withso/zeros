@@ -1,6 +1,6 @@
 import { chromium, type Browser } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -61,9 +61,17 @@ it.each(["local", "cloud"])("opens a %s static sandboxed frame offscreen, then r
     const frame = (await createDesignFrame(root, { title: "Phone", geometry: { x: 0, y: 0, w: 390, h: 844, z: 0 } })).file;
     const directory = designDirectoryNameFor(root);
     const file = path.join(root, directory, frame);
-    const source = '<html><head><link rel="stylesheet" href="tokens.css"></head><body><main data-oid="screen">Phone</main><script>document.body.textContent="script ran"</script></body></html>';
+    const source = '<html><head><link rel="stylesheet" href="../tokens.css"></head><body><main data-oid="screen">Phone</main><script>document.body.textContent="script ran"</script></body></html>';
     await writeFile(file, source);
-    await writeFile(path.join(root, directory, "tokens.css"), "body{margin:0}main{width:100%;height:100vh;background:seagreen;opacity:1;animation:fade 1s infinite alternate}@keyframes fade{from{opacity:0}to{opacity:0.5}}");
+    await writeFile(path.join(root, directory, "tokens.css"), "body{margin:0}main{width:100%;height:100vh;color:var(--color-brand);opacity:1;animation:fade 1s infinite alternate}@keyframes fade{from{opacity:0}to{opacity:0.5}}");
+    await mkdir(path.join(root, "styles"));
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    await writeFile(path.join(root, "styles/dot.png"), Buffer.from(png, "base64"));
+    await writeFile(path.join(root, "styles/app.css"), '@import "tailwindcss"; @theme { --color-brand: rebeccapurple; } main { background-image: url(./dot.png); }');
+    const canvasFile = path.join(root, directory, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+    canvas.styles = [{ id: "app", kind: "tailwind", path: "styles/app.css" }];
+    await writeFile(canvasFile, JSON.stringify(canvas));
     const reference = await createDesignContextReference(root, "workspace", frame);
     const access = service.register({ workspaceId: "workspace", workspacePath: root, directory, directoryId: reference.directoryId });
     const destination = new URL(`${access.url}/${frame}/?frameId=${reference.frameId}`);
@@ -93,11 +101,22 @@ it.each(["local", "cloud"])("opens a %s static sandboxed frame offscreen, then r
     await page.addInitScript(() => Object.defineProperty(document, "hidden", { get: () => true, configurable: true }));
     await page.goto(destination.toString());
     await page.waitForFunction(() => (window as unknown as { __ZEROS_FRAME_PREVIEW__: { ready: boolean } }).__ZEROS_FRAME_PREVIEW__?.ready, undefined, { timeout: 2000 });
-    const rendered = await page.locator("iframe").evaluate((element: HTMLIFrameElement) => {
+    const rendered = await page.locator("iframe").evaluate(async (element: HTMLIFrameElement) => {
       const doc = element.contentDocument!;
-      return { width: element.clientWidth, height: element.clientHeight, text: doc.body.textContent, opacity: doc.defaultView!.getComputedStyle(doc.querySelector("main")!).opacity, animations: doc.getAnimations().length };
+      const style = doc.defaultView!.getComputedStyle(doc.querySelector("main")!);
+      const referenceColor = doc.createElement("span");
+      referenceColor.style.color = "rebeccapurple";
+      doc.body.append(referenceColor);
+      const colorMatches = style.color === doc.defaultView!.getComputedStyle(referenceColor).color;
+      referenceColor.remove();
+      const image = doc.createElement("img");
+      image.src = style.backgroundImage.slice(5, -2);
+      await image.decode();
+      return { width: element.clientWidth, height: element.clientHeight, text: doc.body.textContent, opacity: style.opacity, animations: doc.getAnimations().length,
+        colorMatches, backgroundImage: style.backgroundImage, imageWidth: image.naturalWidth };
     });
-    expect(rendered).toEqual({ width: 390, height: 844, text: "Phone", opacity: "1", animations: 0 });
+    expect(rendered).toEqual({ width: 390, height: 844, text: "Phone", opacity: "1", animations: 0,
+      colorMatches: true, backgroundImage: `url("data:image/png;base64,${png}")`, imageWidth: 1 });
     expect(await readFile(file, "utf8")).toBe(source);
     await page.evaluate(() => Object.defineProperty(document, "hidden", { get: () => false }));
     await writeFile(file, source.replace("Phone</main>", "Updated phone</main>"));

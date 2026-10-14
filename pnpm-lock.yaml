@@ -270,6 +270,9 @@ importers:
       tailwind-merge:
         specifier: ^3.0.0
         version: 3.5.0
+      tailwindcss:
+        specifier: ^4.0.0
+        version: 4.2.1
       tinyglobby:
         specifier: ^0.2.17
         version: 0.2.17
@@ -367,9 +370,6 @@ importers:
       prettier-plugin-tailwindcss:
         specifier: ^0.8.0
         version: 0.8.0(prettier@3.8.3)
-      tailwindcss:
-        specifier: ^4.0.0
-        version: 4.2.1
       tsup:
         specifier: ^8.0.0
         version: 8.5.1(@swc/core@1.15.33)(jiti@2.6.1)(postcss@8.5.25)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
