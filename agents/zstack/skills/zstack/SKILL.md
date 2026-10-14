@@ -1,0 +1,80 @@
+---
+name: zstack
+description: "Start here for every Zeros engineering task (bug, feature, refactor, CI red, review, PR integration, Alpha operator, release): record the orchestration mode the user chose, pick the playbook, run the zstack loop (plan → red → implement → verify → eval → review → fix → deliver → learn) and leave a receipt."
+globs: "**"
+---
+
+# zstack: the Zeros engineering loop
+
+Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
+`RULES.md` are authoritative. This skill turns them into a repeatable loop.
+
+## 1. Record the mode before working
+
+- **Single session** is the default unless the user asks for subagents. You
+  run the whole loop yourself, including a fresh-context review pass over your
+  own diff.
+- **Master plus subagents** only when the user asks for it. The user names
+  which model is the master and which models are subagents, and the pairing
+  can change from task to task.
+  - The master owns Git, integration and the final review of every diff.
+  - Subagents return frozen patches with a SHA and evidence, not commits.
+  - Never start agents or sessions the user did not authorize.
+- Write the mode, models and the user's instruction into your first progress
+  note.
+
+## 2. Classify the task and load only what it needs
+
+| Task | Load |
+|---|---|
+| Bug or regression | `agents/zstack/playbooks/bug-fix.md` |
+| CI red, flaky test or release failure | `agents/zstack/playbooks/ci-red.md` |
+| Integrating or merging someone's patch (master) | `agents/zstack/playbooks/integrate-pr.md` |
+| Live Alpha DB, provider, Railway or WorkOS action | `agents/zstack/playbooks/alpha-operator.md` |
+| Pause or resume a multi-agent effort | `agents/zstack/playbooks/pause-resume.md` |
+| UI, styling or tokens | the `zeros-ui` skill |
+| Workspaces, engine, bridge, agents or Git | the `zeros-workspaces` skill (Local and cloud owners and placements) |
+
+Guard the context window. Read the feature area you are changing and the docs
+`AGENTS.md` points to for it, not the whole repository.
+
+## 3. The loop
+
+1. **Plan.** State the observable outcome and acceptance criteria, which
+   subsystem owns the change, and how Local and cloud are affected.
+2. **Red.** A bug needs a failing regression test before the fix. A feature
+   needs a concrete usage example. A finding becomes work only once it has a
+   failing test or a recorded repro.
+3. **Implement** the smallest change that satisfies the outcome. Preserve
+   persisted keys, wire fields and runtime behavior unless a migration is part
+   of the task.
+4. **Verify** with `zstack-verify`: adjacent suites plus the required static
+   gates, and live Alpha checks when the change needs them.
+5. **Eval** with `zstack-eval` when the pack or a covered area changed.
+6. **Review** with `zstack-review`. Review the full diff yourself; no other
+   reviewer replaces that.
+7. **Fix** what the review found, in bounded rounds, then re-verify the files
+   you touched.
+8. **Deliver** a PR with Why, What changes, Tests and Rollout sections, merged
+   only through `pnpm agent:merge` (`integrate-pr.md`).
+9. **Learn** with `zstack-learn`. Write any lesson back into the pack in the
+   same branch.
+
+## 4. Receipt
+
+End each loop with a compact receipt:
+- revision and zstack version (from `agents/zstack/CHANGELOG.md`);
+- mode and models;
+- the commands run and their results, with counts;
+- evidence paths;
+- anything not verified, with the reason (for example, macOS-only).
+
+## 5. Non-negotiables (from `AGENTS.md`)
+
+- Never print, log, commit or echo a credential, including in arguments and
+  test output. `.env.agent` holds Alpha and test credentials only.
+- Merge only through `pnpm agent:merge`. PRs that change CI-definition paths
+  need the owner's merge.
+- Never claim a platform-only check passed on a platform where it did not run.
+- Local Personal, organization-local and cloud placements must all keep
+  working, including A → B → A owner switching.
