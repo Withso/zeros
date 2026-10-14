@@ -19,6 +19,10 @@ These instructions apply to the entire repository. Read and follow
 - For a bug, add a failing regression test first, implement the fix, and retain
   the test.
 - Run adjacent Vitest suites after each meaningful edit, not only at handoff.
+- Start every task with the `zstack` skill (canonical pack in `agents/zstack/`):
+  record the orchestration mode the user chose, follow its loop and playbooks,
+  and write lessons back into the pack. Regenerate provider copies with
+  `pnpm design:docs`.
 - A Zeros `meta/design.toml` registers a Design directory; legacy root
   `design.toml` remains readable. Local Code and Design use the same normal
   provider Read/Write/Edit/patch/shell tools and permissions.
