@@ -302,6 +302,22 @@ describe("cloud workspace catalog ownership", () => {
     await manageCloudWorkspace(target, "wake");
     expect(api.lifecycle.mock.calls[1][2]).toBe(api.lifecycle.mock.calls[0][2]);
   });
+  it("does not clear a newer explicit wake flight when an older ready receipt arrives", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    let finishFirst!: (value: CloudWorkspaceDocument) => void, finishSecond!: (value: CloudWorkspaceDocument) => void;
+    const secondReceipt = new Promise<CloudWorkspaceDocument>(resolve => { finishSecond = resolve; });
+    api.lifecycle.mockReturnValueOnce(new Promise<CloudWorkspaceDocument>(resolve => { finishFirst = resolve; }))
+      .mockReturnValue(secondReceipt);
+    const first = manageCloudWorkspace(target, "wake", false, undefined, crypto.randomUUID());
+    acceptCloudWorkspaceDocument(doc(2, "ready"));
+    const id = crypto.randomUUID();
+    const second = manageCloudWorkspace(target, "wake", false, undefined, id);
+    finishFirst(doc(1, "ready")); await first;
+    const joined = manageCloudWorkspace(target, "wake", false, undefined, id);
+    const calls = api.lifecycle.mock.calls.length;
+    finishSecond(doc(3, "ready")); await Promise.all([second, joined]);
+    expect(calls).toBe(2);
+  });
   it("retains an interaction reason with an uncertain wake intent when a send retries it", async () => {
     acceptCloudWorkspaceDocument(doc(1, "stopped"));
     api.lifecycle.mockRejectedValueOnce(new Error("Transport response lost")).mockResolvedValueOnce(doc(2, "waking"));

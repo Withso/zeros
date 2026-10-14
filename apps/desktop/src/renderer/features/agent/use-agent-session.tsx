@@ -275,6 +275,7 @@ export interface AgentSessionControls {
     /** Called once the session provider owns this pending submission. */
     onAccepted?: () => void,
     cloudQueue?: import("./sessions-context").CloudQueuedPrompt,
+    wakeIntent?: import("../../state/cloud-workspace-wake").CloudWorkspaceWakeIntent,
   ): Promise<void>;
   /** Cancel the in-flight prompt (if any). */
   cancel(): Promise<void>;

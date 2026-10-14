@@ -3,6 +3,7 @@ const mocks = vi.hoisted(() => ({ enabled: true, epoch: 1, doc: { status: "ready
 vi.mock("../../../features/team/cloud-workspace-account-access", () => ({ hasCloudWorkspaceAccountAccess: () => mocks.enabled }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({
   cloudCatalogGeneration: () => mocks.epoch, cloudWorkspaceDocument: () => mocks.doc, cloudWorkspaceStopVersion: () => 0,
+  cloudWorkspaceOwnerGeneration: () => 1,
   refreshCloudWorkspace: mocks.refresh, acceptCloudEngineWorkspace: vi.fn(),
   manageCloudWorkspace: mocks.wake,
   canReadCloudWorkspace: (doc: { status: string }) => !["deleted", "deleting"].includes(doc.status),
@@ -31,6 +32,20 @@ beforeEach(() => {
 });
 afterEach(() => { mocks.listeners.clear(); });
 describe("cloud runtime admission fencing", () => {
+  it("submits one wake per send intent while revalidating every settled preparation's live root", async () => {
+    const wakeIntent = { id: crypto.randomUUID() };
+    const peer = await openCloudRuntime(target, { wake: true, wakeIntent });
+    try {
+      for (let attempt = 0; attempt < 7; attempt++)
+        expect(await peer.prepareForRun!(new AbortController().signal, undefined, wakeIntent)).toBe(true);
+      expect(mocks.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", false, undefined, wakeIntent.id);
+      expect(mocks.list).toHaveBeenCalledTimes(8);
+      mocks.list.mockResolvedValue([{ id: "local-main", path: "/workspace/foreign" }]);
+      await expect(peer.prepareForRun!(new AbortController().signal, undefined, wakeIntent)).rejects.toThrow(/root changed/);
+      expect(mocks.wake).toHaveBeenCalledOnce();
+    } finally { peer.release(); }
+  });
+
   it("waits for readiness before requesting its root or installing startup couriers", async () => {
     const readiness = deferred<void>(); mocks.ready.mockReturnValue(readiness.promise);
     const opening = openCloudRuntime(target);

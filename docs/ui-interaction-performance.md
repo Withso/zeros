@@ -73,6 +73,27 @@ hydrates successfully, including when hydration fails or the old native close
 acknowledgement arrives late. Account replacement and owner deletion still
 prune that snapshot; another workspace and the Local connection stay independent.
 
+Cloud transport and compute lifecycle are separate facts. A ready or busy VM
+does not become Starting when its socket disconnects. Short gaps keep the
+existing quiet grace; longer gaps show Connecting or Reconnecting, and real
+rejections and prolonged failures still use the existing error escalation.
+Only lifecycle documents or an explicit Restart can report a compute transition.
+
+An explicit cloud navigation, interaction or queued-send attempt owns one
+ephemeral wake intent. Carry it through readiness retries, admission replacement,
+and any preparation before enqueueing; allocate it only when the work begins.
+The first ready/busy preparation still crosses the wake/capture barrier. Later
+preparations reuse the confirmed wake while rechecking current account, owner,
+access, Stop, lifecycle, live admission and physical root. The receipt is never
+send authority: native commands retain their checkpoint and execution fences.
+An uncertain response retries the same idempotency ID and initiating reason;
+a definitive refusal needs a new explicit attempt. Stop, account replacement,
+owner deletion and the original fifteen-minute safety cap retire old work.
+Explicit Retry renews the intent; reconnect, catalog, history, hover and selection
+restore never do. This identity stays in renderer memory, outside persisted
+messages and provider commands. Local Personal and organization-local behavior
+is unchanged.
+
 Cloud catalog polling is not a transcript mutation. Retain the cloud history
 revision and unchanged snapshot references, deduplicate concurrent history warms,
 and notify chat/message consumers only when that exact workspace's confirmed

@@ -112,7 +112,8 @@ export function useSendToActiveChat(
       recordWorkspaceActivity(workspacePath);
       void (async () => {
         let chat = targetChat(true);
-        const preparation = sessions.prepareForSend(chat.id);
+        const wakeIntent = cloudComputerV2 && isCloudWorkspace(chat.folder) ? { id: crypto.randomUUID() } : undefined;
+        const preparation = sessions.prepareForSend(chat.id, ...(wakeIntent ? [wakeIntent] : []));
         if (preparation) await preparation;
         chat = targetChat();
         if (sessions.getSession(chat.id)?.transcriptState !== "resident") {
@@ -164,7 +165,7 @@ export function useSendToActiveChat(
             "This chat's agent changed. Try the PR action again.",
           );
         }
-        await sessions.sendPrompt(
+        const sendArgs: Parameters<typeof sessions.sendPrompt> = [
           chat.id,
           text,
           displayText,
@@ -172,7 +173,9 @@ export function useSendToActiveChat(
           bubbleAttachments,
           segments,
           autoAction,
-        );
+        ];
+        if (wakeIntent) sendArgs[9] = wakeIntent;
+        await sessions.sendPrompt(...sendArgs);
       })()
         .catch(reportError)
         .finally(() => onSettled?.());

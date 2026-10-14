@@ -71,7 +71,7 @@ import { cloudHistoryRestoreHead, onCloudHistoryRestoreHead, type CloudHistoryRe
 import { cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, type CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
 import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, cloudWorkspaceStopVersion, canBackgroundSyncCloudWorkspace, canReadCloudWorkspace, isCloudWorkspaceLifecyclePending, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
-import { CloudWorkspaceWakeEndedError } from "../../state/cloud-workspace-wake";
+import { CloudWorkspaceWakeEndedError, type CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake";
 import { CloudSendPreparation } from "./cloud-send-preparation";
 import { CloudSendWait, CloudSendWaitError, type CloudSendWaitBudget } from "./cloud-send-wait";
 import { ControlPlaneError } from "../team/control-plane";
@@ -1338,6 +1338,8 @@ export function AgentSessionsProvider({
       waitStartedAt?: number;
       waitBudget?: CloudSendWaitBudget;
       waitStopVersion?: number;
+      /** One user attempt, retained through readiness retries, never admission. */
+      wakeIntent?: CloudWorkspaceWakeIntent;
       retryAdmission?: boolean;
       /** Toast identity survives explicit renewal of a refused delivery ID. */
       queueEntryId?: string;
@@ -1369,7 +1371,7 @@ export function AgentSessionsProvider({
     folder: string | null | undefined) => {
     if (!entry.cloud || account !== cloudCatalogGeneration() || getStore().sessions[chatId]?.cwd !== folder ||
         !sendQueueRef.current.get(chatId)?.includes(entry)) return;
-    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; }
+    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; }
     resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
   }, [getStore, resumeQueue]);
   const markQueuedDelivery = useCallback(
@@ -1417,7 +1419,7 @@ export function AgentSessionsProvider({
     if (cloudComputerV2) return registerAttachmentSourceOwner(() =>
       [...sendQueueRef.current.values()].flatMap(entries => entries.flatMap(entry => entry.cloudQueue?.draft.attachments ?? [])));
   }, [cloudComputerV2]);
-  const prepareForSend = useCallback<SessionsActions["prepareForSend"]>((chatId) => {
+  const prepareForSend = useCallback<SessionsActions["prepareForSend"]>((chatId, wakeIntent) => {
     if (!cloudComputerV2) return null;
     const current = () => {
       // Never fall back to the active folder: a hidden chat can own an
@@ -1439,7 +1441,7 @@ export function AgentSessionsProvider({
     if (!(bridge instanceof WorkspaceRuntimeClient)) return Promise.reject(new Error("Cloud workspace connection is unavailable"));
     const target = parseCloudWorkspaceKey(owner.folder)!;
     return cloudSendPreparationRef.current.prepare(chatId, owner,
-      signal => bridge.openWorkspace(target, { signal }), current, subscribeCloudWorkspaces);
+      signal => bridge.openWorkspace(target, { signal, wakeIntent }), current, subscribeCloudWorkspaces);
   }, [bridge, cloudComputerV2, getStore]);
 
   /** Dispose only the exact route returned by a create/load that completed
@@ -2331,6 +2333,7 @@ export function AgentSessionsProvider({
       autoAction,
       onAccepted,
       cloudQueue,
+      wakeIntent,
     ) => {
       const original = getStore().sessions[chatId];
       const chat = useWorkspaceStore.getState().chats.find(candidate => candidate.id === chatId);
@@ -2355,8 +2358,8 @@ export function AgentSessionsProvider({
           ...(segments?.length ? { segments } : {}), ...(autoAction ? { autoAction } : {}),
         };
         const q = sendQueueRef.current.get(chatId) ?? [];
-        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) { entry.waitStartedAt = undefined; entry.waitBudget = undefined; entry.waitStopVersion = undefined; }
-        q.push({ cloud: true, bubbleId, queueEntryId: bubbleId, cloudQueue, args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction] });
+        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) { entry.waitStartedAt = undefined; entry.waitBudget = undefined; entry.waitStopVersion = undefined; entry.wakeIntent = undefined; }
+        q.push({ cloud: true, bubbleId, queueEntryId: bubbleId, cloudQueue, wakeIntent, args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction] });
         sendQueueRef.current.set(chatId, q);
         getStore().patchSession(chatId, { messages: capUserAppend(slot.messages, queuedMsg, slot.historyExpanded) });
         resumeQueue(chatId);
@@ -2365,7 +2368,7 @@ export function AgentSessionsProvider({
         return;
       }
       if (!bridge) return;
-      const preparation = cloudSend && flushBubbleRef.current.has(chatId) ? null : prepareForSend(chatId);
+      const preparation = cloudSend && flushBubbleRef.current.has(chatId) ? null : prepareForSend(chatId, wakeIntent);
       if (preparation) await preparation;
       // Atomic lock — fix #8. Two synchronous Enter presses both
       // observed `status !== "streaming"` before either could flip
@@ -4123,7 +4126,9 @@ export function AgentSessionsProvider({
       safetyTimeoutMs: 15 * 60_000 - (performance.now() - startedAt),
       attempt: async signal => {
         readiness();
-        await prepareForSend(chatId);
+        const preparing = sendQueueRef.current.get(chatId)?.[0];
+        if (!preparing?.cloud) return false;
+        await prepareForSend(chatId, preparing.wakeIntent ??= { id: crypto.randomUUID() });
         if (signal.aborted || !current()) return false;
         if (getStore().sessions[chatId]?.transcriptState !== "resident") await hydrateCloudSendRef.current?.(chatId);
         if (signal.aborted || !current()) return false;
@@ -4160,9 +4165,11 @@ export function AgentSessionsProvider({
             message.id === head.bubbleId && message.kind === "text" ? { ...message, attachments: payload.bubbleAttachments, segments: payload.segments } : message) });
         }
         if (hasPromptAttachmentReferences({ bubbleAttachments: head.args[4] }) && !(await refreshQueuedAttachments(chatId, head))) return false;
-        // Admission/session/file work may outlive the first wake. Serialize the
-        // final boundary while the row is still removable, then claim it once.
-        await prepareForSend(chatId);
+        // Admission/session/file work may outlive the first preparation. Check
+        // the live peer/root again without creating another lifecycle intent.
+        // A different queue head owns a new wake; the native checkpoint fence
+        // still guards command submission even after this preparation returns.
+        await prepareForSend(chatId, head.wakeIntent ??= { id: crypto.randomUUID() });
         return !signal.aborted && current() && sendQueueRef.current.get(chatId)?.[0] === head;
       },
       terminal: error => {
@@ -4194,7 +4201,7 @@ export function AgentSessionsProvider({
           cloudAdmissionFailure: { ...admission, code: String(cloudAdmissionFailureCode(error)), turnId: head.bubbleId, agentId, model },
         } : {}) });
         if (head) notifyAgentSendFailure({ folder, chatId, attemptId: head.queueEntryId ??= head.bubbleId, agentId, model, error,
-          reason: error instanceof CloudWorkspaceWakeEndedError ? "workspace_stopped" : error instanceof CloudSendWaitError ? error.reason : undefined,
+          reason: error instanceof CloudWorkspaceWakeEndedError || error instanceof CloudSendWaitError ? error.reason : undefined,
           onRetry: () => retryCloudQueuedPrompt(chatId, head, account, folder) });
       },
     });
@@ -4963,7 +4970,7 @@ export function AgentSessionsProvider({
       const slot = getStore().sessions[chatId];
       if (entry.cloud && slot?.cloudSendWait) {
         if (slot.cloudSendWait.state === "failed") {
-          for (const queued of q ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; }
+          for (const queued of q ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; }
           resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
         }
         return true;

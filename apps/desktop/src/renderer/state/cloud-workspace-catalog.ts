@@ -44,6 +44,15 @@ const detailReads = new Map<string, Promise<CloudWorkspaceDocument>>();
 // newly allocated token if that owner later becomes readable again.
 const detailOwnerGenerations = new Map<string, number>();
 let nextDetailOwnerGeneration = 0;
+/** Removal retires the owner even if the same workspace becomes visible again.
+ * Catalog-only owners need a token before their first detail read or wake. */
+export function cloudWorkspaceOwnerGeneration(target: CloudWorkspaceTarget): number | undefined {
+  if (!canReadCloudWorkspace(cloudWorkspaceDocument(target))) return undefined;
+  const key = cloudWorkspaceKey(target);
+  const owner = detailOwnerGenerations.get(key) ?? ++nextDetailOwnerGeneration;
+  detailOwnerGenerations.set(key, owner);
+  return owner;
+}
 const listeners = new Set<() => void>();
 // Renderer-owned Stop intent wins over input captured before that request.
 // Engine idle stops do not enter this map and still consume recent input.
@@ -235,6 +244,9 @@ export function acceptCloudWorkspaceDocument(
       Date.parse(prior.updatedAt) > Date.parse(doc.updatedAt))
   )
     return;
+  if (!canReadCloudWorkspace(doc)) detailOwnerGenerations.delete(cloudWorkspaceKey({
+    organizationId: doc.organizationId, workspaceId: doc.id,
+  }));
   if (prior && JSON.stringify(prior) === JSON.stringify(doc)) {
     if (detailReadGeneration === undefined) detailCatalogGenerations.delete(prior);
     return;
@@ -291,7 +303,7 @@ export async function refreshCloudWorkspaceCatalog(): Promise<void> {
           documents = [...documents.filter((item) => item.id !== row.id), row];
       }
       const documentsChanged = JSON.stringify(before) !== JSON.stringify(documents);
-      const currentOwners = new Set(documents.map(row => cloudWorkspaceKey({
+      const currentOwners = new Set(documents.filter(canReadCloudWorkspace).map(row => cloudWorkspaceKey({
         organizationId: row.organizationId, workspaceId: row.id,
       })));
       for (const key of new Set([...detailOwnerGenerations.keys(), ...cloudWorkspaceDetails.keys()])) {
@@ -476,6 +488,7 @@ export async function manageCloudWorkspace(
   operation: "wake" | "stop" | "archive" | "delete",
   wait = false,
   reason?: "interaction",
+  wakeIntentId?: string,
 ): Promise<CloudWorkspaceDocument> {
   const refusal = operation === "wake" ? cloudWorkspaceExecutionRefusal(cloudWorkspaceDocument(target)) : null;
   if (refusal) throw new ControlPlaneError(409, refusal.code, refusal.message);
@@ -486,10 +499,10 @@ export async function manageCloudWorkspace(
   if (owner !== undefined) detailOwnerGenerations.set(workspaceKey, owner);
   const generation = cloudWorkspaceDocument(target)?.generation.number;
   const previous = lifecycleIntents.get(key);
-  const intent: LifecycleIntent = previous && (operation !== "wake" || previous.owner === owner &&
+  const intent: LifecycleIntent = previous && (!wakeIntentId || previous.id === wakeIntentId) && (operation !== "wake" || previous.owner === owner &&
       (previous.generation === generation || generation !== undefined && previous.generation !== undefined &&
         (generation >= previous.generation || isCloudWorkspaceLifecyclePending(cloudWorkspaceDocument(target)))))
-    ? previous : { id: crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version, reason: operation === "wake" ? reason : undefined };
+    ? previous : { id: wakeIntentId ?? crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version, reason: operation === "wake" ? reason : undefined };
   if (intent.task) {
     const doc = await intent.task;
     return wait ? waitForCloudWorkspaceLifecycle(target, operation, doc) : doc;
@@ -541,7 +554,7 @@ export async function manageCloudWorkspace(
                 : "stopped",
           ];
     if (wait) doc = await waitForCloudWorkspaceLifecycle(target, operation, doc);
-    if (terminal.includes(doc.status)) lifecycleIntents.delete(key);
+    if (terminal.includes(doc.status) && lifecycleIntents.get(key) === intent) lifecycleIntents.delete(key);
     return doc;
   })().catch(error => {
     // A definitive rejection cannot become a successful replay. Retain the

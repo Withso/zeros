@@ -8,6 +8,7 @@ import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { CloudHistoryRestoreTracker, type CloudHistoryRestoreTicket } from "../../state/cloud-transcript-cache";
 import { CloudHistoryRestoreMetadataSchema, type CloudHistoryRestoreMetadata, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
 import { installCloudHistoryRestoreMetadata, captureCloudHistoryRestoreRead, assertCloudHistoryRestoreResult } from "../cloud-transcript-cache";
+import type { CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake";
 import {
   cloudWorkspaceKey,
   isCloudRepositorySlug,
@@ -46,7 +47,7 @@ export interface CloudPeer {
   events?: Pick<RuntimeClient, "on">;
   /** Serialize explicit work with idle capture and revalidate the admission.
    * False means the drain retired this connection and a fresh one is needed. */
-  prepareForRun?: (signal: AbortSignal, reason?: "interaction") => Promise<boolean>;
+  prepareForRun?: (signal: AbortSignal, reason?: "interaction", wakeIntent?: CloudWorkspaceWakeIntent) => Promise<boolean>;
 }
 export interface CloudResourceUsageConnection extends CloudWorkspaceTarget {
   generation: number;
@@ -55,7 +56,7 @@ export interface CloudResourceUsageConnection extends CloudWorkspaceTarget {
   admissionId: string;
 }
 export interface WorkspaceRuntimeOptions {
-  open: (target: CloudWorkspaceTarget, options?: { signal: AbortSignal; wake?: boolean; reason?: "interaction" }) => Promise<CloudPeer>;
+  open: (target: CloudWorkspaceTarget, options?: { signal: AbortSignal; wake?: boolean; reason?: "interaction"; wakeIntent?: CloudWorkspaceWakeIntent }) => Promise<CloudPeer>;
   /** Account/catalog epoch and generation; never a credential or admission. */
   identity?: (target: CloudWorkspaceTarget) => string;
   /** Explicit wake ownership follows replacements and in-progress rollbacks.
@@ -360,7 +361,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
 
   /** Explicit navigation and message preparation share one wake/admission.
    * Each caller owns cancellation; a navigation away cannot cancel a send. */
-  async openWorkspace(target: CloudWorkspaceTarget, options?: { signal?: AbortSignal; reason?: "interaction" }): Promise<void> {
+  async openWorkspace(target: CloudWorkspaceTarget, options?: { signal?: AbortSignal; reason?: "interaction"; wakeIntent?: CloudWorkspaceWakeIntent }): Promise<void> {
     const controller = new AbortController();
     const cancel = () => controller.abort(options?.signal?.reason);
     options?.signal?.addEventListener("abort", cancel, { once: true });
@@ -368,11 +369,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     // Bound the whole intent, including native admission and retargeting N+1;
     // compute progress never starts a fresh short deadline at each stage.
     const safety = setTimeout(() => controller.abort(new Error("The cloud workspace is still starting after fifteen minutes. Try again when it is ready.")), 15 * 60_000);
-    try { await this.openWorkspaceIntent(target, { signal: controller.signal, reason: options?.reason }); }
+    try { await this.openWorkspaceIntent(target, { signal: controller.signal, reason: options?.reason,
+      wakeIntent: options?.wakeIntent ?? { id: crypto.randomUUID() } }); }
     finally { clearTimeout(safety); options?.signal?.removeEventListener("abort", cancel); }
   }
 
-  private async openWorkspaceIntent(target: CloudWorkspaceTarget, options: { signal: AbortSignal; reason?: "interaction" }): Promise<void> {
+  private async openWorkspaceIntent(target: CloudWorkspaceTarget, options: { signal: AbortSignal; reason?: "interaction"; wakeIntent: CloudWorkspaceWakeIntent }): Promise<void> {
     const cancelled = () => options.signal.reason instanceof Error && options.signal.reason.name !== "AbortError"
       ? options.signal.reason : new Error("Cloud workspace open cancelled");
     const key = cloudWorkspaceKey(target);
@@ -389,7 +391,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const open = () => {
       if (options.signal.aborted) return Promise.reject(cancelled());
       if (!current()) return Promise.reject(new Error("Cloud account changed while connecting"));
-      const promise = this.peer(target, true, options?.reason, owner);
+      const promise = this.peer(target, true, options.reason, owner, options.wakeIntent);
       const flight = this.opening.get(key);
       if (flight) flight.consumers++;
       return new Promise<PeerEntry>((resolve, reject) => {
@@ -877,7 +879,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     );
   }
 
-  private peer(target: CloudWorkspaceTarget, wake = false, reason?: "interaction", intentOwner?: WakeOwner): Promise<PeerEntry> {
+  private peer(target: CloudWorkspaceTarget, wake = false, reason?: "interaction", intentOwner?: WakeOwner, wakeIntent?: CloudWorkspaceWakeIntent): Promise<PeerEntry> {
     if (this.routing.canAccess && !this.routing.canAccess(target))
       return Promise.reject(
         new Error(
@@ -925,7 +927,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     let opening: Promise<CloudPeer>;
     try {
       opening = reusable
-        ? reusable.prepareForRun!(controller.signal, reason).then(ready => {
+        ? reusable.prepareForRun!(controller.signal, reason, wakeIntent).then(ready => {
             if (controller.signal.aborted) throw new Error("Cloud workspace open cancelled");
             if (ready && !reusable.retired && reusable.client.status === "connected") return reusable;
             this.retirePeer(reusable);
@@ -933,7 +935,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
             // a newer Stop must win instead of triggering another wake.
             return this.routing.open(target, { signal: controller.signal });
           })
-        : this.routing.open(target, { signal: controller.signal, ...(wake ? { wake: true, ...(reason ? { reason } : {}) } : {}) });
+        : this.routing.open(target, { signal: controller.signal, ...(wake ? { wake: true, wakeIntent, ...(reason ? { reason } : {}) } : {}) });
     }
     catch (error) { this.ongoingOpens--; return Promise.reject(error); }
     const flight = opening

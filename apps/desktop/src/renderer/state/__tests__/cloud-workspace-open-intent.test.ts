@@ -19,7 +19,7 @@ vi.mock("../store", async original => {
 vi.mock("../../shared/ui/primitives/elements", () => ({ toast: { error: harness.error } }));
 vi.mock("../workbench-availability", async original => ({ ...await original<typeof import("../workbench-availability")>(), recordWorkbenchConnectionFailure: harness.failure }));
 import { CloudWorkspaceLifecycle } from "../cloud-workspace-lifecycle";
-import { requestCloudWorkspaceOpen } from "../cloud-workspace-open-intent";
+import { requestCloudWorkspaceOpen, subscribeCloudWorkspaceOpens } from "../cloud-workspace-open-intent";
 import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudCatalogGeneration, cloudWorkspaceDocument, manageCloudWorkspace } from "../cloud-workspace-catalog";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { setActiveBridge } from "../../platform/bridge/active-bridge";
@@ -49,6 +49,21 @@ beforeEach(() => {
 afterEach(() => { cleanup?.(); cleanup = undefined; client.dispose(); setActiveBridge(null); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("explicit cloud navigation intent", () => {
+  it("publishes one wake identity to all consumers of an explicit navigation", () => {
+    const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
+    const seen = vi.fn(), second = vi.fn();
+    const off = subscribeCloudWorkspaceOpens(seen), offSecond = subscribeCloudWorkspaceOpens(second);
+    renderToStaticMarkup(createElement(CloudWorkspaceLifecycle)); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!();
+    try {
+      requestCloudWorkspaceOpen(folder);
+      const intent = seen.mock.calls[0]?.[1];
+      expect(intent?.id).toEqual(expect.any(String));
+      expect(second.mock.calls[0]?.[1]).toBe(intent);
+      expect(open.mock.calls[0][1]?.wakeIntent).toBe(intent);
+      requestCloudWorkspaceOpen("/local");
+      expect(seen).toHaveBeenCalledOnce();
+    } finally { off(); offSecond(); }
+  });
   it.each(["navigation", "interaction"].flatMap(intent => [false, true].map(rollback => ({ intent, rollback }))))("silently follows generation changes during a pending $intent wake (rollback=$rollback)", async ({ intent, rollback }) => {
     client.dispose(); let finish!: () => void;
     const ready = new Promise<void>(resolve => { finish = resolve; });
@@ -193,7 +208,7 @@ describe("explicit cloud navigation intent", () => {
     visibility();
     expect(open).not.toHaveBeenCalled();
     requestCloudWorkspaceOpen(folder); requestCloudWorkspaceOpen(folder);
-    expect(open).toHaveBeenCalledExactlyOnceWith(target, { signal: expect.any(AbortSignal) });
+    expect(open).toHaveBeenCalledExactlyOnceWith(target, { signal: expect.any(AbortSignal), wakeIntent: { id: expect.any(String) } });
     await Promise.resolve();
   });
 

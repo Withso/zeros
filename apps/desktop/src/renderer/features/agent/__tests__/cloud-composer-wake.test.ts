@@ -10,6 +10,7 @@ import * as lifecycle from "../session-reload-lifecycle";
 import * as retention from "../transcript-retention";
 import { SendQueue } from "../send-queue";
 import { CloudSendWait, CloudSendWaitError } from "../cloud-send-wait";
+import { CloudSendPreparation } from "../cloud-send-preparation";
 import { cloudQueuedPrompt } from "../cloud-queued-prompt";
 import { isRecoverable } from "../../../platform/bridge/failure";
 import { CloudWorkspaceWakeEndedError } from "../../../state/cloud-workspace-wake";
@@ -57,7 +58,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
   const store = { sessions: { chat: slot } as Record<string, typeof slot>, patchSession: (id: string, patch: object) => Object.assign(store.sessions[id], patch),
     setSession: (id: string, value: typeof slot) => { store.sessions[id] = value; }, setPendingLocalTurn: vi.fn(), hydrateChatPolicies: vi.fn(async () => {}) };
   const wait = new CloudSendWait(); waits.push(wait);
-  const prepare = vi.fn(() => wake.promise), delivered = vi.fn(), toasts = { error: vi.fn(), warning: vi.fn(), info: vi.fn() };
+  const prepare = vi.fn<(chatId: string, wakeIntent?: { id: string }) => Promise<void>>(() => wake.promise), delivered = vi.fn(), toasts = { error: vi.fn(), warning: vi.fn(), info: vi.fn() };
   const failureNotice = vi.fn();
   let cancellation = 0, sequence = 0;
   const sending = new Set<string>();
@@ -106,7 +107,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
   const dispatch = vi.fn(), localSend = vi.fn(async () => {}), cloudError = vi.fn();
   const composer: any = { ...lifecycle, chatId: "chat", readOnly: false, runtimeUpgradeRequired: false, cloudComputerV2: cloud, chatThread: workspace.chats[0], workspaceProvisioning: false,
     session: { transcriptState: resident ? "resident" : "loading", status: "reconnecting", agentId: "codex", startSession: vi.fn(async () => {}),
-      sendPrompt: cloud ? (...args: unknown[]) => provider.actions.sendPrompt("chat", ...args.slice(0, 5), undefined, args[5], args[6]) : localSend },
+      sendPrompt: cloud ? (...args: unknown[]) => provider.actions.sendPrompt("chat", ...args.slice(0, 5), undefined, args[5], args[6], args[7]) : localSend },
     agentSessions: { getSendGeneration: () => cancellation }, cloudWorkspaceDocument: () => doc, parseCloudWorkspaceKey, isCloudWorkspace,
     cloudQueuedPrompt, redactLogSecrets: (s: string) => s, setCloudSendError: cloudError,
     notifyAgentSendFailure: failureNotice, crypto: provider.crypto,
@@ -128,6 +129,80 @@ function harness(cloud = true, status = "stopped", resident = true) {
 }
 
 describe("cloud composer readiness queue", () => {
+  it.each(["cloud", "personal-local", "organization-local"])("forwards the intent through the actual %s preparation callback", async placement => {
+    const h = harness(placement === "cloud", "ready");
+    class BridgeFixture { openWorkspace = vi.fn(async () => {}); }
+    const bridge = new BridgeFixture(), wakeIntent = { id: "prepared-action" };
+    const context = { ...h.provider, bridge, cloudComputerV2: true, WorkspaceRuntimeClient: BridgeFixture,
+      canReadCloudWorkspace: () => true, cloudSendPreparationRef: { current: new CloudSendPreparation() } };
+    vm.runInNewContext(callbacks(providerAst, ["prepareForSend"]), context);
+    for (let attempt = 0; attempt < 3; attempt++) await context.actions.prepareForSend("chat", wakeIntent);
+    if (placement === "cloud") {
+      expect(bridge.openWorkspace).toHaveBeenCalledTimes(3);
+      for (const call of bridge.openWorkspace.mock.calls) expect(call).toEqual([
+        parseCloudWorkspaceKey(h.store.sessions.chat.cwd), { signal: expect.anything(), wakeIntent },
+      ]);
+    } else expect(bridge.openWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("retains an upstream preparation's wake intent when accepting the queued message", async () => {
+    const h = harness(true, "ready"), wakeIntent = { id: "upstream-action" };
+    await h.provider.actions.sendPrompt("chat", "Action", undefined, undefined, undefined, undefined, undefined, undefined, undefined, wakeIntent);
+    expect(h.queue.get("chat")![0].wakeIntent).toBe(wakeIntent);
+    expect(h.prepare).toHaveBeenCalledExactlyOnceWith("chat", wakeIntent);
+  });
+
+  it("keeps an unrecognized slash command's preliminary wake when it becomes a prompt", async () => {
+    const h = harness(true, "ready"); h.type("/unknown");
+    h.composer.agentSessions.prepareForSend = h.prepare;
+    h.composer.openTerminalCommand = () => false;
+    h.prepare.mockResolvedValue(undefined);
+    await h.send();
+    const intent = h.prepare.mock.calls[0][1];
+    expect(intent?.id).toEqual(expect.any(String));
+    h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledOnce();
+    for (const call of h.prepare.mock.calls) expect(call[1]).toBe(intent);
+  });
+
+  it("retains one wake intent across seven settled readiness attempts and final preparation", async () => {
+    const h = harness(true, "ready");
+    h.prepare.mockResolvedValue(undefined);
+    h.provider.ensureSessionRef.current.mockResolvedValue(undefined);
+    await h.send(); await vi.advanceTimersByTimeAsync(12_000);
+    expect(h.prepare).toHaveBeenCalledTimes(7);
+    const intent = h.prepare.mock.calls[0][1];
+    expect(intent?.id).toEqual(expect.any(String));
+    for (const call of h.prepare.mock.calls) expect(call[1]).toBe(intent);
+    Object.assign(h.store.sessions.chat, { status: "ready", sessionId: "admitted" });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(h.delivered).toHaveBeenCalledOnce();
+    expect(h.prepare).toHaveBeenCalledTimes(9);
+    for (const call of h.prepare.mock.calls) expect(call[1]).toBe(intent);
+  });
+
+  it("allocates a wake intent only when a queued row reaches preparation and renews it on explicit retry", async () => {
+    const h = harness(true, "ready");
+    h.store.sessions.chat.status = "streaming";
+    await h.send();
+    expect(h.prepare).not.toHaveBeenCalled();
+    expect(h.queue.get("chat")![0].wakeIntent).toBeUndefined();
+    h.prepare.mockRejectedValueOnce(new CloudWorkspaceWakeEndedError("Cloud workspace was stopped"));
+    h.finish(); await vi.advanceTimersByTimeAsync(0);
+    const first = h.prepare.mock.calls[0]?.[1];
+    expect(first?.id).toEqual(expect.any(String));
+    const row = h.queue.get("chat")![0];
+    expect(h.queue.isPaused("chat")).toBe(true);
+    h.prepare.mockResolvedValue(undefined);
+    Object.assign(h.store.sessions.chat, { status: "ready", sessionId: "admitted" });
+    h.provider.actions.retryCloudQueuedPrompt("chat", row, 1, h.store.sessions.chat.cwd);
+    await vi.advanceTimersByTimeAsync(0);
+    const retry = h.prepare.mock.calls[1]?.[1];
+    expect(retry?.id).toEqual(expect.any(String));
+    expect(retry).not.toBe(first);
+    expect(h.delivered).toHaveBeenCalledOnce();
+  });
+
   it("does not dispatch cached presentation after wake until authoritative history settles", async () => {
     const h = harness(true, "stopped", false), history = deferred();
     h.store.sessions.chat.messages = [{ id: "cached", kind: "text", role: "agent", text: "Visible cached history" }];

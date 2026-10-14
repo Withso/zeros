@@ -232,6 +232,8 @@ export function describeWorkspaceRuntimeStatus(input: WorkspaceAvailability, now
   if (status?.tone === "error") return "Needs attention";
   if (["stopped", "sleeping"].includes(input.state ?? "")) return "Sleeping";
   if (input.state === "stopping") return "Stopping";
+  if (input.cloud && status?.connectionPhase)
+    return status.connectionPhase === "reconnecting" ? "Reconnecting…" : "Connecting…";
   if (status?.tone === "pending") return "Starting";
   if (input.state === "archived") return "Archived";
   return "Running";
