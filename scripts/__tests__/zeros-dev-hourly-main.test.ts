@@ -7,8 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCloudReplicaDeviceCredential } from "../../apps/desktop/src/engine/cloud-replica-device";
 import { initializeActionsFixture, runActions } from "../zeros-dev/hourly-main";
 import { ZerosDevError } from "../zeros-dev/errors";
-import { RunStore, type RunHandle } from "../zeros-dev/receipts";
+import { RunStore, type Run, type RunHandle } from "../zeros-dev/receipts";
 import { exportHourlyArtifact } from "../zeros-dev/hourly-artifact";
+import { exportCleanupHandoff } from "../zeros-dev/cleanup-handoff";
+import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
 import { ProductApi } from "../zeros-dev/product";
 import { AlphaTransport } from "../zeros-dev/transport";
 import { parseFixture } from "../zeros-dev/config";
@@ -112,7 +114,7 @@ async function actionsFixture() {
     await handle.save();
   }) };
   const api = {
-    assertFixtureEmpty: vi.fn(async () => {}), ensureRepository: vi.fn(async () => {}),
+    assertFixtureEmpty: vi.fn(async (_signal?: AbortSignal, _predecessors: readonly Run[] = []) => {}), ensureRepository: vi.fn(async () => {}),
     computerState: vi.fn(async () => ({ active: computerBuild() })), verifyComputerRuntime: vi.fn(async () => "confirmed"),
     readComputerRuntime: vi.fn(async () => ({ buildId: computerBuild().id, version: computerBuild().version,
       runtimeId: `r1-${"a".repeat(64)}`, baseImageId: "fixture-base", selected: {
@@ -128,7 +130,7 @@ async function actionsFixture() {
       await handle.save();
     }),
     waitWorkspace: vi.fn(async () => {}), lifecycle: vi.fn(async () => {}),
-    cleanup: vi.fn(async (handle: RunHandle, _apply: boolean, signal: AbortSignal) => {
+    cleanup: vi.fn(async (handle: RunHandle, _apply: boolean, signal: AbortSignal, _options?: { allowStoragePending?: boolean }) => {
       expect(signal.aborted).toBe(false); handle.run.deletionConfirmed = true; await handle.save(); return { planned: 1, confirmed: 1 };
     }),
   };
@@ -141,6 +143,61 @@ async function actionsFixture() {
 }
 
 describe("Actions orchestration through signed files", () => {
+  it("checks and carries an explicit local cleanup handoff before allocation without taking over its credentials", async () => {
+    const f = await actionsFixture(), pins = parseFixture(f.values), localId = randomUUID();
+    const local = new RunStore(path.join(f.env.RUNNER_TEMP, "local-runs"), pins, f.credential);
+    await local.withRun(localId, { revision: "b".repeat(40), dirty: true }, async handle => {
+      handle.run.create = { key: randomUUID(), body: { name: `zd-${localId}`, repository: { forge: "github.com", owner: "fixture", name: "repository",
+        revision: "main", githubInstallationId: pins.repository.installationId } },
+      result: { id: randomUUID(), createdBy: pins.accountId, createdAt: new Date().toISOString(), generation: 1 } };
+      retireFixtureCompute(handle).organizationId = pins.organizationId;
+      handle.run.evidence.push({ phase: "terminal_run", outcome: "ok", durationMs: 7 }); await handle.save();
+    });
+    const file = path.join(f.env.RUNNER_TEMP, "handoff.b64");
+    const exported = await exportCleanupHandoff({ file, runIds: [localId], store: local, credential: f.credential,
+      api: { readRetirement: async run => run.retirement! }, signal: new AbortController().signal });
+    const env = { ...f.env, ZEROS_DEV_CLEANUP_HANDOFF_B64: await readFile(file, "utf8") };
+    const cleanup = f.services.api.cleanup.getMockImplementation()!, reference = { sha256: exported.sha256, runIds: [localId] };
+    let recovered = false;
+    f.services.api.cleanup.mockImplementation(async (handle, apply, signal, options) => {
+      if (handle.run.runId !== localId) return cleanup(handle, apply, signal, options);
+      expect(options).toEqual({ allowStoragePending: true });
+      const checkpoint = await f.checkpoint();
+      expect(checkpoint.payload.handoff).toEqual(reference);
+      expect(checkpoint.payload.runs.find((run: Run) => run.runId === localId)).toMatchObject({ cleanupOnly: { handoffSha256: exported.sha256 }, evidence: [] });
+      handle.run.retirement!.observedAt = new Date().toISOString();
+      await handle.save(); recovered = true;
+      return { planned: 0, confirmed: 0, storagePending: 1 };
+    });
+    f.services.api.assertFixtureEmpty.mockImplementation(async (_signal, predecessors) => {
+      expect(recovered).toBe(true); expect(predecessors).toHaveLength(1);
+      expect(predecessors![0]).toMatchObject({ runId: localId, cleanupOnly: { handoffSha256: exported.sha256 }, deletionConfirmed: false });
+    });
+    const create = f.services.api.createWorkspace.getMockImplementation()!;
+    f.services.api.createWorkspace.mockImplementation(async handle => { expect(recovered).toBe(true); await create(handle); });
+    expect(await runActions(env, f.options as never)).toBe(1); // Deliberate first runtime failure remains visible.
+    expect(f.services.api.assertFixtureEmpty).toHaveBeenCalledTimes(2);
+    expect(f.services.credentials.cleanup).toHaveBeenCalledOnce();
+    expect(f.services.credentials.cleanup.mock.calls[0]![0].run.runId).not.toBe(localId);
+    const artifact = await f.checkpoint();
+    expect(artifact.payload.handoff).toEqual(reference);
+    expect(artifact.payload.result).toMatchObject({ success: false, code: "runtime_unavailable" });
+    expect(artifact.payload.cleanup).toMatchObject({ pendingWorkspaces: 1, reservedStorageMiB: 16_384 });
+    expect(artifact.payload.runs.find((run: Run) => run.runId === localId)).toMatchObject({ deletionConfirmed: false,
+      retirement: { status: "compute_retired_storage_pending" }, cleanupOnly: { handoffSha256: exported.sha256 } });
+    expect(f.output).toContainEqual(expect.objectContaining({ runId: localId, phase: "storage_pending", outcome: "pending" }));
+    expect(f.output).toContainEqual(expect.objectContaining({ schema: "zeros.dev-hourly-result/v1", code: "runtime_unavailable",
+      cleanup: expect.objectContaining({ pendingWorkspaces: 1 }) }));
+  });
+
+  it("refuses an unverified handoff before login or any product operation", async () => {
+    const f = await actionsFixture();
+    expect(await runActions({ ...f.env, ZEROS_DEV_CLEANUP_HANDOFF_B64: Buffer.from("{}").toString("base64") }, f.options as never)).toBe(1);
+    expect(f.services.session.login).not.toHaveBeenCalled(); expect(f.services.api.cleanup).not.toHaveBeenCalled();
+    expect(f.services.api.createWorkspace).not.toHaveBeenCalled();
+    expect((await f.checkpoint()).payload.result).toMatchObject({ success: false, code: "artifact_invalid" });
+  });
+
   it("selects the manual rehearsal with its original enlarged budget and signed incomplete proof", async () => {
     const f = await actionsFixture();
     const env = { ...f.env, GITHUB_EVENT_NAME: "workflow_dispatch", ZEROS_DEV_PROFILE: "gate0",

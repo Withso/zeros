@@ -14,6 +14,7 @@ import { controlPlaneHealth, controlPlaneLogs, databaseHealth } from "./health";
 import { HELP, parseCommand, executeCommand, type Services } from "./commands";
 import { ZerosDevError, closedError } from "./errors";
 import { connectGithub } from "./github";
+import { exportCleanupHandoff } from "./cleanup-handoff";
 
 async function source(checkout: string): Promise<Source> {
   const exec = promisify(execFile);
@@ -30,18 +31,21 @@ async function services(checkout: string, write: (value: unknown) => void): Prom
   await store.read();
   const session = new ZerosDevSession(store, transport), api = new ProductApi(session, transport);
   let runs: RunStore | undefined;
+  const loadRuns = async () => {
+    if (runs) return runs;
+    const parent = path.join(path.dirname(file), ".context");
+    await mkdir(parent, { mode: 0o700 }).catch(error => { if (error.code !== "EEXIST") throw error; });
+    const info = await lstat(parent);
+    if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || info.mode & 0o022 || await realpath(parent) !== parent)
+      throw new ZerosDevError("receipt_invalid");
+    await session.whoami();
+    runs = new RunStore(path.join(parent, "zeros-dev"), await session.fixture(), await session.device()); return runs;
+  };
   return {
     session, api, write, source: () => source(checkout), values: async () => (await store.read()).values,
-    runs: async () => {
-      if (runs) return runs;
-      const parent = path.join(path.dirname(file), ".context");
-      await mkdir(parent, { mode: 0o700 }).catch(error => { if (error.code !== "EEXIST") throw error; });
-      const info = await lstat(parent);
-      if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || info.mode & 0o022 || await realpath(parent) !== parent)
-        throw new ZerosDevError("receipt_invalid");
-      await session.whoami();
-      runs = new RunStore(path.join(parent, "zeros-dev"), await session.fixture(), await session.device()); return runs;
-    },
+    runs: loadRuns,
+    handoff: async (runIds, output, signal) => exportCleanupHandoff({ file: path.resolve(checkout, output), runIds,
+      store: await loadRuns(), credential: await session.device(), api, signal }),
     content: async (input, limit) => {
       const target = path.resolve(checkout, input);
       let handle;

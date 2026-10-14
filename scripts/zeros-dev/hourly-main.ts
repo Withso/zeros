@@ -22,6 +22,8 @@ import { ExecutionSchema, importHourlyArtifact, exportHourlyArtifact } from "./h
 import { actionsProfile, hourlyContext } from "./hourly-actions.mjs";
 import { runGate0, productGate0Probe } from "./gate0";
 import { GATE0_TOTAL_MS } from "./gate0-contract";
+import { importCleanupHandoff } from "./cleanup-handoff";
+import type { CleanupHandoffReference, CleanupSummary } from "./cleanup-contract";
 
 const PIN_KEYS = ["ZEROS_DEV_PASSWORD", "ZEROS_DEV_WORKOS_SUBJECT", "ZEROS_DEV_ACCOUNT_ID", "ZEROS_DEV_EMAIL", "ZEROS_DEV_ORGANIZATION_ID",
   "ZEROS_DEV_REPOSITORY", "ZEROS_DEV_REPOSITORY_ID", "ZEROS_DEV_GITHUB_INSTALLATION_ID", "ZEROS_DEV_DEVICE_PRIVATE_KEY_B64"] as const;
@@ -124,6 +126,7 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
   };
   let store: RunStore | undefined, credential: CloudReplicaDeviceCredential | undefined, session: ActionsServices["session"] | undefined;
   let execution: z.infer<typeof ExecutionSchema> | undefined, artifact: string | undefined;
+  let handoff: CleanupHandoffReference | undefined, cleanup: CleanupSummary | undefined;
   try {
     execution = ExecutionSchema.parse(hourlyContext(env));
     const profile = actionsProfile(env);
@@ -144,19 +147,23 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
     const output = path.join(temporary, "zeros-dev-output"); await ownedDirectory(output); artifact = path.join(output, "receipt.json");
     const context = path.join(root, ".context"); await ownedDirectory(context);
     store = new RunStore(path.join(context, "zeros-dev"), fixture, credential);
-    if (plan.previous) await importHourlyArtifact(path.join(temporary, "zeros-dev-previous", "receipt.json"), store, credential, plan.previous);
+    if (plan.previous) ({ handoff } = await importHourlyArtifact(path.join(temporary, "zeros-dev-previous", "receipt.json"), store, credential, plan.previous));
     const runs = store, device = credential, identity = execution, outputFile = artifact;
     const uncertain = { runId, success: false, code: "command_uncertain" as const };
     // An initial checkpoint precedes authentication or any product write. All
     // subsequent intent saves atomically replace only this signed execution.
-    await exportHourlyArtifact(outputFile, runs, device, identity, uncertain);
+    await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { handoff });
     historyVerified = true;
+    if (env.ZEROS_DEV_CLEANUP_HANDOFF_B64) {
+      handoff = await importCleanupHandoff(env.ZEROS_DEV_CLEANUP_HANDOFF_B64, runs, device, handoff);
+      await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff });
+    }
     let checkpoints = Promise.resolve();
     const withRun = <T>(id: string, source: Source | null, work: (handle: RunHandle) => Promise<T>) => runs.withRun(id, source, async handle => {
       const save = handle.save;
       handle.save = async () => {
         await save();
-        const checkpoint = checkpoints.then(() => exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true }));
+        const checkpoint = checkpoints.then(async () => { await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff }); });
         checkpoints = checkpoint.catch(() => {}); await checkpoint;
       };
       return work(handle);
@@ -196,6 +203,7 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
       }); } catch (error) { recoveryFailure ??= error; }
     }
     if (recoveryFailure) throw recoveryFailure;
+    const predecessors = await Promise.all((await store.list()).map(id => store!.read(id)));
     if (bound().aborted) throw new ZerosDevError("deadline");
     await withRun(runId, { revision: execution.sourceSha, dirty: false }, async handle => {
       handle.run.hourly = { version: 1, ...execution!, credentials: [], histories: [], activeWindows: [], complete: false,
@@ -203,7 +211,7 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
       let failed: unknown;
       try {
         const inputs = { handle, api, credentials, evidence, budgetMs: Math.max(1, Math.ceil(remaining() - HOURLY_CLEANUP_MS)),
-          signal: options.signal, connect: services.connect };
+          signal: options.signal, connect: services.connect, predecessors };
         if (profile === "gate0") {
           if (!session!.prepareDetachedAuth) throw new ZerosDevError("invalid_request");
           await (options.rehearse ?? runGate0)({ ...inputs, connect: services.connect as Parameters<typeof runGate0>[0]["connect"],
@@ -221,10 +229,10 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
       catch (error) { fail(error); }
     }
     if (historyVerified && store && credential && execution && artifact) {
-      try { await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code, ...diagnostic }, { replace: true }); }
+      try { cleanup = await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code, ...diagnostic }, { replace: true, handoff }); }
       catch { code ??= "artifact_invalid"; }
     }
-    write({ schema: "zeros.dev-hourly-result/v1", runId, success: code === null, code, ...diagnostic });
+    write({ schema: "zeros.dev-hourly-result/v1", runId, success: code === null, code, ...diagnostic, ...(cleanup ? { cleanup } : {}) });
   }
   return code === null ? 0 : 1;
 }

@@ -274,6 +274,76 @@ with no remaining binding for that workspace. No direct Boat delete fallback,
 foreign workspace scan or prefix-based cleanup exists. Durable test org/repo
 and Computer fixtures are excluded.
 
+### Compute retirement while storage is pending
+
+Hourly and Gate 0 runs explicitly use a separate cleanup outcome,
+`compute_retired_storage_pending`. Their authenticated product read is
+`POST /v1/organizations/:org/cloud-workspaces/:workspace/deletion-retirement`,
+with only the recorded generation and original accepted delete key. The
+control plane must confirm the exact owner, creator, creation time, name,
+workspace, delete intent and every persisted generation; admission, access
+and compute settlement must be fenced. Fresh authenticated provider receipts
+must prove sandbox absence and storage-only retention. The read never changes
+lifecycle, provider deletion, capacity accounting or record-purge gates.
+
+The signed run retains that complete observation and keeps
+`deletionConfirmed=false`. Each `storage_pending` event and the public v2
+artifact's `cleanup` summary retain the pending count, generations, reserved
+storage and original deletion time. This is compute retirement, not physical
+erasure or measured disk usage. Ordinary CLI cleanup still waits for physical
+deletion. A positive physical completion receipt can retire carried work after
+content purge; a missing row or 404 cannot.
+
+Before allocation, the runner rereads every carried retirement and compares it
+with the complete organization workspace and pending-deletion inventories. It
+does this again after Computer preparation. Proof must remain within 60 seconds
+of observation through the inventory reads. A deleting inventory row can retain
+its old CPU/memory allocation; only the fresh retirement response proves zero
+compute, while inventory must still match every generation and its disk
+reservation. Live, foreign, failed, unknown, renamed, changed-generation,
+truncated or unaccounted work blocks allocation. The fixture's normal product
+entitlement, funding and provider-capacity checks still apply.
+
+Admission reserves one new slot within a maximum of eight pending workspaces
+and `8 × 70,225 MiB` of reserved storage. Original accepted deletion age is
+bounded at eight hours, allowing the provider's six-hour upload fence plus two
+hours of reconciliation. New observations or provider estimates never reset
+that clock. `cleanup_backlog_exceeded` blocks another allocation; old debt is
+never evicted to make room. The signed artifact carries at most nine run
+records, including a failed current attempt, within its existing 1 MiB bound.
+Readers retain v1's physical-deletion success rule; new writers emit
+`zeros.dev-hourly/v2` so the two outcomes cannot be confused.
+
+### Handing released local evidence to Actions
+
+Actions never discovers local runs by name. Once the investigator releases
+the evidence and normal product deletion has been accepted, the owner can
+export up to four explicit local run UUIDs using the **same fixture and
+enrolled device key** used by Actions:
+
+```sh
+pnpm exec tsx scripts/zeros-dev/cli.ts cleanup handoff --runs <uuid>,<uuid> --output /absolute/private/fixture-cleanup.b64
+gh variable set ZEROS_DEV_CLEANUP_HANDOFF_B64 --repo Withso/zeros < /absolute/private/fixture-cleanup.b64
+```
+
+The export authenticates the original local receipts and performs only the
+retirement reads above. It writes one exclusive mode-0600 file in an owned
+directory and prints only its digest and count. The signed manifest contains
+exact cleanup bindings and original receipt digests, with no password, device
+private key, provider credential, transcript or prompt. Do not hand off an
+active or evidence-held run. Missing retirement proof refuses the export.
+
+The optional Actions variable is a cleanup-only handoff, separate from the
+fixture secret. Imports cannot build, allocate, wake, stop, issue agent grants,
+connect a runtime, clean local credentials or supply a successful hourly
+result. Actions refreshes proof before admitting another workspace. It carries
+the consumed manifest digest and run UUIDs even after physical deletion, so an
+unchanged variable cannot resurrect work. A different manifest or a collision
+with existing intent is refused. Export the intended bootstrap set together;
+the owner may remove the variable after its consumption is checkpointed.
+The local and Actions invocations still share fixture funding, Computer state
+and provider capacity, so keep live fixture work serialized by the operator.
+
 Output is JSONL. `zeros.dev-evidence/v1` contains closed phases, outcomes,
 durations and error codes. `zeros.dev-context/v1` distinguishes the local source
 revision/dirty state from the deployed Alpha source. Explicit chat/terminal/
@@ -426,9 +496,10 @@ Skipped attempts can be crossed only when job metadata proves the product step
 never ran. An old rerun is refused if a newer run may have touched the fixture.
 Missing, expired, foreign or corrupt executed-run artifacts stop allocation.
 The runner first cleans its signed leftovers through product deletion. A failed
-wake that settled as stopped is recorded and deleted; transient setup or
-unconfirmed provider deletion reports `prior_cleanup`/`cleanup_pending`, and
-no new workspace is allocated. Unknown creates/publications stay unknown;
+wake that settled as stopped is recorded and deleted. Exact compute-retired,
+storage-pending predecessors follow the bounded contract above; transient
+setup or missing retirement proof reports `prior_cleanup`/`cleanup_pending`,
+and no new workspace is allocated. Unknown creates/publications stay unknown;
 there is no prefix scan or direct provider fallback. Do not delete artifacts
 or change the fixture device to bypass this check. The owner must reconcile the
 exact recorded operation through the normal product path when automatic
@@ -445,7 +516,9 @@ work timeout, SIGINT or SIGTERM. All phases share an 850-second overall budget
 that starts before dependency installation; the Actions job allows 15 minutes
 for that budget, logout and receipt upload. Setup overhead reduces the remaining
 overall allowance and cannot extend a phase.
-An unfinished cleanup or any failed stage keeps the run red.
+Cleanup passes only with physical deletion or the authenticated compute-retired,
+storage-pending outcome above. Unconfirmed cleanup or any failed stage keeps
+the run red; retained storage remains visible after a successful lifecycle.
 
 The signed `zeros-dev-receipt-<workflow-run-id>-<attempt>` artifact contains
 closed phases, timings, setup attempt/claim/error observations and exact cleanup

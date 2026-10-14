@@ -10,6 +10,7 @@ import { AlphaTransport } from "../zeros-dev/transport";
 import type { CloudComputerV2BuildRuntime } from "@zeros/protocol/cloud-computer-v2";
 import { computerBuild } from "../../apps/desktop/src/renderer/features/settings/__tests__/cloud-computer-v2-fixtures";
 import type { AdmissionObservation } from "../zeros-dev/admission-observation";
+import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
 
 function fixture() {
   const calls: string[] = [], output: unknown[] = [];
@@ -44,7 +45,8 @@ function fixture() {
       await handle.save(); return computer.active;
     }),
     waitComputer: vi.fn((...args: Parameters<ProductApi["waitComputer"]>) => { calls.push("build_wait"); return product.waitComputer(...args); }),
-    createWorkspace: vi.fn(async () => { calls.push("create"); handle.run.create = { key: randomUUID(), body: {} as never,
+    createWorkspace: vi.fn(async () => { calls.push("create"); handle.run.create = { key: randomUUID(), body: {
+      name: `zd-${handle.run.runId}`, repository: { forge: "github.com", owner: "fixture", name: "fixture", revision: "main", githubInstallationId: randomUUID() } },
       result: { id: randomUUID(), createdBy: randomUUID(), createdAt: new Date().toISOString(), generation: 1 } }; }),
     waitWorkspace: vi.fn(async (_h: unknown, target: string) => { calls.push(target); }),
     lifecycle: vi.fn(async (_h: unknown, op: string) => { calls.push(op); }),
@@ -69,6 +71,33 @@ function fixture() {
 }
 
 describe("hourly fixture lifecycle", () => {
+  it("finishes the lifecycle with exact retired compute while retaining unconfirmed physical deletion", async () => {
+    const f = fixture();
+    f.api.cleanup.mockImplementation(async () => {
+      retireFixtureCompute(f.handle, new Date().toISOString());
+      return { planned: 1, confirmed: 0 };
+    });
+    await expect(runHourly(f.options as never)).resolves.toBeUndefined();
+    expect(f.handle.run.hourly?.complete).toBe(true);
+    expect(f.handle.run.deletionConfirmed).toBe(false);
+    expect(f.handle.run.lifecycle.at(-1)).toMatchObject({ operation: "delete", confirmed: false });
+    expect(f.credentials.cleanup).toHaveBeenCalledOnce();
+    expect(f.output).toContainEqual(expect.objectContaining({ phase: "cleanup", outcome: "ok" }));
+  });
+
+  it("recovers an exact storage-pending predecessor without calling physical deletion confirmed", async () => {
+    const f = fixture();
+    await f.api.createWorkspace(); f.api.createWorkspace.mockClear();
+    f.api.cleanup.mockImplementation(async () => {
+      retireFixtureCompute(f.handle, new Date().toISOString());
+      return { planned: 1, confirmed: 0 };
+    });
+    await expect(recoverHourlyRun({ ...f.options, signal: new AbortController().signal } as never)).resolves.toBeUndefined();
+    expect(f.handle.run.deletionConfirmed).toBe(false);
+    expect(f.credentials.cleanup).toHaveBeenCalledOnce();
+    expect(f.api.createWorkspace).not.toHaveBeenCalled();
+  });
+
   it("records recovered admission failures and retry counts without retrying the lifecycle or hiding them in success", async () => {
     const f = fixture();
     const firstFailure = { status: 503 as const, code: "cloud_runtime_temporarily_unavailable" as const,
@@ -116,7 +145,7 @@ describe("hourly fixture lifecycle", () => {
 
   it("sends exactly one minimal prompt per agent and proves chat/files after stop and resume", async () => {
     const f = fixture(); await runHourly(f.options as never);
-    expect(f.calls).toEqual(["empty", "repo", "pin", "credentials", "pin", "create", "running", "connect1", "claude", "codex", "cursor", "disconnect", "stop", "stopped", "wake", "running", "connect2", "disconnect", "pin", "cleanup", "revoke"]);
+    expect(f.calls).toEqual(["empty", "repo", "pin", "credentials", "pin", "empty", "create", "running", "connect1", "claude", "codex", "cursor", "disconnect", "stop", "stopped", "wake", "running", "connect2", "disconnect", "pin", "cleanup", "revoke"]);
     expect(f.api.buildComputer).not.toHaveBeenCalled();
     expect(f.runtime.prompt).toHaveBeenCalledTimes(3); expect(f.runtime.tail).toHaveBeenCalledTimes(6);
     expect(f.runtime.terminal).toHaveBeenCalledTimes(2);
@@ -135,6 +164,14 @@ describe("hourly fixture lifecycle", () => {
     expect(f.api.createWorkspace).toHaveBeenCalledOnce(); expect(f.runtime.prompt).toHaveBeenCalledTimes(3);
     expect(f.handle.run.hourly?.complete).toBe(true);
     expect(f.output).toContainEqual(expect.objectContaining({ phase: "computer_build", outcome: "ok" }));
+  });
+
+  it("rechecks the fixture after Computer preparation and refuses a new foreign workspace before create", async () => {
+    const f = fixture();
+    f.api.assertFixtureEmpty.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new ZerosDevError("cleanup_pending"));
+    await expect(runHourly(f.options as never)).rejects.toMatchObject({ code: "cleanup_pending" });
+    expect(f.api.assertFixtureEmpty).toHaveBeenCalledTimes(2); expect(f.api.createWorkspace).not.toHaveBeenCalled();
+    expect(f.credentials.cleanup).toHaveBeenCalledOnce(); expect(f.handle.run.hourly?.complete).toBe(false);
   });
 
   it("rebuilds for a changed qualified base even when the runtime ID is unchanged", async () => {

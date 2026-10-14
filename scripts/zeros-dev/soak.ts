@@ -7,6 +7,7 @@ import { ZerosDevError, type ErrorCode } from "./errors";
 import type { EvidenceEvent } from "./evidence";
 import { beforeDeadline } from "./transport";
 import type { Gate0 } from "./gate0-contract";
+import type { CleanupSummary } from "./cleanup-contract";
 
 const HOUR = 3_600_000, DAY = 24 * HOUR;
 const runSchema = z.object({ id: z.number().int().positive().safe(), run_number: z.number().int().positive().safe(),
@@ -24,6 +25,7 @@ type Attempt = {
   artifactSha256?: string; firstFailure?: { phase: EvidenceEvent["phase"] | "orchestration"; code: ErrorCode };
   phases?: EvidenceEvent[]; admission?: ReturnType<typeof summarizeSoakEvidence>["admission"];
   rehearsal?: Gate0;
+  cleanup?: CleanupSummary;
 };
 export type SoakOptions = { api: Api; read(run: SoakWorkflowRun, artifact: Record<string, unknown>): Promise<unknown>;
   trust: PublicHourlyTrust; end: string; now?: () => number; signal?: AbortSignal };
@@ -97,6 +99,7 @@ export async function collectSoak(options: SoakOptions) {
           Date.parse(payload.completedAt) > Date.parse(job.completed_at) + 60_000 ||
           primary && (entry.profile === "gate0") !== Boolean(primary.hourly?.rehearsal)) throw new ZerosDevError("artifact_invalid");
         entry.artifactSha256 = artifact.digest.slice("sha256:".length);
+        if (payload.schema === "zeros.dev-hourly/v2") entry.cleanup = payload.cleanup;
         const passed = payload.result.success && run.conclusion === "success" &&
           (entry.profile === "hourly" ? productCompleted(job) : job.conclusion === "success");
         entry.status = passed ? "passed" : "failed"; entry.code = passed ? null : payload.result.code ?? "internal";
