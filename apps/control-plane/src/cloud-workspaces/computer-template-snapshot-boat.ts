@@ -35,7 +35,7 @@ const privateHome = [".ssh", ".aws", ".azure", ".docker", ".kube", ".cache", ".l
   ".git-credentials", ".netrc", ".npmrc", ".pypirc", ".bash_history", ".zsh_history", ".python_history", ".gitconfig"];
 const emptyRoots = ["__system__/srv/zeros/state", "__system__/srv/zeros/home", "__system__/srv/zeros/setup",
   "__system__/srv/zeros/log", "__system__/opt/zeros/sessions", "__system__/var/log", "__system__/run/log/journal",
-  "__system__/run/zeros/computer-build",
+  "__system__/run/zeros/computer-build", "__system__/srv/zeros/managed-settings",
   // bootstrap.py binds these native /home/user roots onto /srv/zeros. Prove
   // both saved representations; an empty logical mount does not prove its
   // backing tree is sanitized. Keep .zeros-persist/files/repos as source data.
@@ -43,6 +43,9 @@ const emptyRoots = ["__system__/srv/zeros/state", "__system__/srv/zeros/home", "
 const emptyFiles = ["__system__/srv/zeros/managed-settings/settings.managed.toml", "__system__/etc/machine-id",
   "__system__/var/lib/systemd/random-seed", "__system__/var/lib/systemd/timesync/clock", "__system__/opt/zeros/disk-epoch",
   "__system__/run/zeros/active-runtime.json"];
+// Sanitation retains only repos beneath files. Prove both the logical mount
+// and native backing tree, including old private projections beside repos.
+const filesRoots = ["__system__/srv/zeros/files", ".zeros-persist/files"];
 const below = (path: string, root: string) => path === root || path.startsWith(`${root}/`);
 
 /** Only metadata is read. The closed receipt contains no paths or file bytes.
@@ -65,7 +68,8 @@ export function verifyComputerTemplateSavedTree(value: unknown, snapshot: Comput
       templateCaptureInvalid();
     entries.set(entry.path, entry);
   }
-  const protectedPaths = [...emptyRoots, ...emptyFiles, ...["", "__system__/root/"].flatMap(home => privateHome.map(root => home + root))];
+  const protectedPaths = [...emptyRoots, ...emptyFiles, ...filesRoots,
+    ...["", "__system__/root/"].flatMap(home => privateHome.map(root => home + root))];
   for (const entry of entries.values()) {
     // An aliased parent can conceal private contents even when the listing
     // contains no child entries underneath that parent.
@@ -80,7 +84,8 @@ export function verifyComputerTemplateSavedTree(value: unknown, snapshot: Comput
       const relative = entry.path.startsWith(home) ? entry.path.slice(home.length) : null;
       return relative !== null && (privateHome.some(root => below(relative, root)) || /^\.env[^/]*(?:\/|$)/.test(relative));
     });
-    if (privatePath || emptyRoots.some(root => below(entry.path, root)) || emptyFiles.includes(entry.path)) {
+    const sanitizedFiles = filesRoots.some(root => below(entry.path, root) && !below(entry.path, `${root}/repos`));
+    if (privatePath || sanitizedFiles || emptyRoots.some(root => below(entry.path, root)) || emptyFiles.some(root => below(entry.path, root))) {
       if (entry.kind !== "dir" && !(entry.kind === "file" && entry.size === 0)) templateCaptureInvalid();
     }
   }

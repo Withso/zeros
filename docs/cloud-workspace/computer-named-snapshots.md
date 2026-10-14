@@ -6,7 +6,9 @@ source sandbox, snapshot ID, size and complete saved-tree proof before marking
 the template ready. The tree must be available and untruncated, contain the
 Computer manifest, and have empty private roots matching Computer sanitation,
 including native `.zeros-persist/home` and `.zeros-persist/state` backing roots.
-Repository content under `.zeros-persist/files/repos` remains allowed.
+The logical `/srv/zeros/files` tree and native `.zeros-persist/files` tree must
+also be empty outside their exact `repos` subtrees. Every managed-settings entry
+is checked, including obsolete siblings of `settings.managed.toml`.
 Unsafe paths, aliases, credential-bearing files or a changed snapshot identity
 refuse publication. The proof hashes metadata; it does not download private
 file contents. Existing runtime, protected-contract and manifest checks still
@@ -21,6 +23,12 @@ still refuse proof, including aliases of private roots with no listed children.
 Keep qualification evidence private and record only aggregate metadata and the
 proof receipt, never file paths or contents. Synthetic fixtures cover the wire
 shape but do not replace this live qualification.
+
+An incremental capture can retain an older payload after a live unlink. Empty
+replacement files and directories remain valid proof inputs, but nonempty
+descendants of any sanitized path are refused, including when a path expected
+to hold an empty file is captured as a directory. Verify the saved artifact
+after sanitation; a successful live cleanup receipt alone is insufficient.
 
 The name is `<org-slug>-<channel>-computer-v<N>`. Channel is `development`,
 `alpha`, `beta` or `production`. Slugs are normalized to lowercase ASCII and
