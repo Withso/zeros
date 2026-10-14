@@ -102,6 +102,20 @@ async function fixture(options: { rejection?: { reason: string; message: string 
 }
 
 describe("zeros-dev shared admission, agent and terminal loopback", () => {
+  it("can detach only device transport and retain actor authority until explicit cleanup", async () => {
+    const f = await fixture(), runtime = await f.connect();
+    runtime.detachTransport();
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(0);
+    await expect(runtime.tail(randomUUID())).rejects.toMatchObject({ code: "receipt_missing" });
+    await runtime.dispose();
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
+  });
+  it.each(["claude", "codex", "cursor"] as const)("uses %s's normal Auto mode only when the rehearsal explicitly requests it", async agent => {
+    const f = await fixture(), runtime = await f.connect();
+    const pending = await runtime.startPrompt(f.handle, { agent, model: "fixture-model", text: "Fixture edit.", permissionMode: "auto" });
+    expect((await pending.completion).state).toBe("succeeded");
+    expect(f.enqueued().payload.permissionMode).toBe(agent === "codex" ? "auto-edit" : "auto");
+  });
   it.each([false, true])("preserves the typed first failure and each signed retry when terminal failure is %s", async terminal => {
     const f = await fixture(), events: AdmissionObservation[] = [];
     const code = "cloud_runtime_temporarily_unavailable", firstFailure = { status: 503, code, phase: "provider_endpoint", retryAfterMs: 1000 };
@@ -112,8 +126,9 @@ describe("zeros-dev shared admission, agent and terminal loopback", () => {
     const connected = f.connect(undefined, event => events.push(event)).then(value => ({ value }), error => ({ error }));
     await vi.advanceTimersByTimeAsync(1000);
     const result = await connected;
-    const admission = { sequence: 1, firstFailure, retryCount: 1, retries: [{ ...firstFailure, attempt: 2, delayMs: 1000 }] };
-    expect(events).toEqual([{ sequence: 1, firstFailure, retryCount: 0, retries: [] }, admission]);
+    const connectionId = "value" in result ? result.value.transport().connectionId : result.error.transport.connectionId;
+    const admission = { connectionId, sequence: 1, firstFailure, retryCount: 1, retries: [{ ...firstFailure, attempt: 2, delayMs: 1000 }] };
+    expect(events).toEqual([{ connectionId, sequence: 1, firstFailure, retryCount: 0, retries: [] }, admission]);
     if (terminal) expect(result).toMatchObject({ error: { code: "runtime_unavailable", admission,
       runtime: { phase: "admission", class: "admission_unavailable", status: 500 } } });
     else expect(result).toMatchObject({ value: { admission } });

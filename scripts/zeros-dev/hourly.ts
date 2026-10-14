@@ -14,9 +14,9 @@ export const HOURLY_CLEANUP_MS = 140_000;
 export const HOURLY_TOTAL_MS = 850_000;
 export const HOURLY_PROMPT = "Reply exactly ZEROS_DEV_OK. Do not call any tools.";
 export const HOURLY_AGENTS = ["claude", "codex", "cursor"] as const;
-type Runtime = Pick<ZerosDevRuntime, "prompt" | "tail" | "terminal" | "dispose" | "admission">;
+type Runtime = Pick<ZerosDevRuntime, "prompt" | "tail" | "terminal" | "dispose" | "admission" | "transport">;
 type CredentialPort = { install(handle: RunHandle, signal: AbortSignal): Promise<void>; cleanup(handle: RunHandle, signal: AbortSignal): Promise<void> };
-type Options = {
+export type HourlyOptions = {
   handle: RunHandle;
   api: Pick<ProductApi, "assertFixtureEmpty" | "ensureRepository" | "computerState" | "readComputerRuntime" | "verifyComputerRuntime" | "buildComputer" | "waitComputer" | "createWorkspace" | "waitWorkspace" | "lifecycle" | "cleanup">;
   credentials: CredentialPort; connect(run: Run, signal: AbortSignal, onAdmissionEvent?: (event: AdmissionObservation) => void): Promise<Runtime>; evidence: Evidence;
@@ -55,10 +55,42 @@ export function historyDigest(rows: Awaited<ReturnType<Runtime["tail"]>>): strin
   return createHash("sha256").update(JSON.stringify(rows)).digest("hex");
 }
 
+/** The hourly and longer manual rehearsal choose once and share the same
+ * one-build intent and persisted qualified-runtime proof. */
+export async function prepareHourlyComputer(options: Pick<HourlyOptions, "handle" | "api" | "evidence">, preparation: AbortSignal) {
+  const { handle, api, evidence } = options;
+  const step = <T>(phase: Parameters<Evidence["step"]>[0], task: () => Promise<T>) => evidence.step(phase, () => {
+    if (preparation.aborted) throw new ZerosDevError("deadline");
+    return beforeDeadline(task(), preparation);
+  });
+  const selected = await step("computer_selection", async () => {
+    const { active } = await api.computerState(preparation);
+    if (!active || active.state !== "succeeded" || active.templateState !== "ready") throw new ZerosDevError("computer_required");
+    const proof = await api.readComputerRuntime(active, preparation);
+    if (!proof.selected) throw new ZerosDevError("runtime_selection_unavailable");
+    if (!proof.runtimeId || !proof.baseImageId) throw new ZerosDevError("runtime_pin_unconfirmed");
+    const target = { runtimeId: proof.selected.runtimeId, baseImageId: proof.selected.baseImageId };
+    return { active, target, rebuild: proof.runtimeId !== target.runtimeId || proof.baseImageId !== target.baseImageId };
+  });
+  const { target } = selected;
+  const active = selected.rebuild ? await step("computer_build", async () => {
+    await api.buildComputer(handle, preparation);
+    return api.waitComputer(handle.run, preparation, target);
+  }) : selected.active;
+  const assertPin = async (bound: AbortSignal) => {
+    const state = await api.computerState(bound);
+    if (state.active?.id !== active.id || state.active.version !== active.version || state.active.state !== "succeeded" || state.active.templateState !== "ready")
+      throw new ZerosDevError("runtime_pin_unconfirmed");
+    await api.verifyComputerRuntime(active, bound, target);
+  };
+  await step("computer_pin", () => assertPin(preparation));
+  return { active, target, assertPin };
+}
+
 /** Actions calls this with a fresh signed run after reconciling its predecessor.
  * All access/commands are the same product API and desktop RuntimeClient used
  * by the interactive harness. It never edits VM state through provider APIs. */
-export async function runHourly(options: Options): Promise<void> {
+export async function runHourly(options: HourlyOptions): Promise<void> {
   const { handle, api, credentials, connect, evidence } = options, hourly = handle.run.hourly;
   if (!hourly || hourly.startedAt || handle.run.create || handle.run.prompts.length || handle.run.lifecycle.length)
     throw new ZerosDevError("operation_conflict");
@@ -78,27 +110,7 @@ export async function runHourly(options: Options): Promise<void> {
     }, admission);
   await boundedStep("prior_cleanup", () => api.assertFixtureEmpty(preparation), preparation);
   await boundedStep("repository", () => api.ensureRepository(preparation), preparation);
-  const selected = await boundedStep("computer_selection", async () => {
-    const { active } = await api.computerState(preparation);
-    if (!active || active.state !== "succeeded" || active.templateState !== "ready") throw new ZerosDevError("computer_required");
-    const proof = await api.readComputerRuntime(active, preparation);
-    if (!proof.selected) throw new ZerosDevError("runtime_selection_unavailable");
-    if (!proof.runtimeId || !proof.baseImageId) throw new ZerosDevError("runtime_pin_unconfirmed");
-    const target = { runtimeId: proof.selected.runtimeId, baseImageId: proof.selected.baseImageId };
-    return { active, target, rebuild: proof.runtimeId !== target.runtimeId || proof.baseImageId !== target.baseImageId };
-  }, preparation);
-  const { target } = selected;
-  const active = selected.rebuild ? await boundedStep("computer_build", async () => {
-    await api.buildComputer(handle, preparation);
-    return api.waitComputer(handle.run, preparation, target);
-  }, preparation) : selected.active;
-  const assertPin = async (bound: AbortSignal) => {
-    const state = await api.computerState(bound);
-    if (state.active?.id !== active.id || state.active.version !== active.version || state.active.state !== "succeeded" || state.active.templateState !== "ready")
-      throw new ZerosDevError("runtime_pin_unconfirmed");
-    await api.verifyComputerRuntime(active, bound, target);
-  };
-  await boundedStep("computer_pin", () => assertPin(preparation), preparation);
+  const { assertPin } = await prepareHourlyComputer(options, preparation);
   // A refresh never consumes the lifecycle's phase allowance or cleanup's
   // reserve, but all phases remain inside the workflow's original budget.
   const signal = AbortSignal.any([overall, AbortSignal.timeout(workMs)]);
@@ -118,6 +130,7 @@ export async function runHourly(options: Options): Promise<void> {
     } catch (error) { failed = error; }
     try { await step("runtime_disconnect", () => runtime.dispose(), AbortSignal.timeout(3000)); }
     catch (error) { failed ??= error; }
+    if (runtime.transport) evidence.emit({ phase: "runtime_transport", outcome: "ok", durationMs: 0, transport: runtime.transport() });
     if (failed) throw failed;
   };
   let failed: unknown;

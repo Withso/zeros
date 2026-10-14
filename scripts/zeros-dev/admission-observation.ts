@@ -6,6 +6,10 @@ const failure = z.object({ status: z.literal(503), code: z.literal("cloud_runtim
 /** One shared-client admission call. Sequence distinguishes later refreshes;
  * these are executed retries, not scheduled sleeps or lifecycle attempts. */
 export const AdmissionObservationSchema = z.object({
+  // Optional for signed receipts from the original harness. New observations
+  // can be deduplicated across connect and refresh snapshots without confusing
+  // two separate connections whose local sequence both begins at one.
+  connectionId: z.string().uuid().optional(),
   sequence: z.number().int().positive().safe(), firstFailure: failure,
   retryCount: z.number().int().min(0).max(2),
   retries: z.array(failure.extend({ attempt: z.union([z.literal(2), z.literal(3)]), delayMs: delay }).strict()).max(2),

@@ -170,7 +170,8 @@ export class ProductApi {
     // Accepted is not completed. Keep the key until observation confirms it.
     await handle.save();return next;
   }
-  async waitWorkspace(handle:RunHandle,target:"running"|"stopped"|"deleted",signal?:AbortSignal):Promise<CloudWorkspaceDocument>{
+  async waitWorkspace(handle:RunHandle,target:"running"|"stopped"|"deleted",signal?:AbortSignal,
+    observeSetup?:(value:SetupObservation|undefined)=>void):Promise<CloudWorkspaceDocument>{
     let setup:SetupObservation|undefined;
     try{return await this.observe(async bound=>{
       const pending=handle.run.lifecycle.at(-1);
@@ -180,6 +181,7 @@ export class ProductApi {
       const row=observation.workspace;
       this.assertWorkspace(row,fixture,handle.run,pending?.operation==="wake"&&!pending.confirmed);
       setup=readSetupProgress(observation.setupProgress,row.generation.number);
+      observeSetup?.(setup);
       if(row.status==="failed"&&target!=="deleted")throw new ZerosDevError("workspace_failed");
       if(target==="running"?!["ready","busy"].includes(row.status):row.status!==target)return null;
       if(target==="deleted"){

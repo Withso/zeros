@@ -1,6 +1,7 @@
 import { SetupObservationSchema, type SetupObservation } from "./setup-observation";
 import { RuntimeObservationSchema, type RuntimeObservation } from "./runtime-observation";
 import { AdmissionObservationSchema, type AdmissionObservation } from "./admission-observation";
+import { TransportObservationSchema, type TransportObservation } from "./gate0-contract";
 
 /** Only these codes may leave the CLI. Provider errors, bodies and stack traces
  * are never evidence; neither are arbitrary error.code/name/message values. */
@@ -15,14 +16,17 @@ export const ERROR_CODES = [
   "runtime_unavailable", "runtime_changed", "runtime_pin_unconfirmed", "runtime_selection_unavailable", "runtime_selection_changed",
   "terminal_failed", "cleanup_pending", "database_unavailable",
   "database_readonly_required", "input_contains_credentials", "cancelled", "internal", "history_changed", "actions_required", "artifact_invalid",
+  "model_eligibility_unconfirmed", "workload_incomplete", "detached_auth_window", "detached_task_not_active", "detached_proof_incomplete", "transport_interrupted",
+  "setup_retried", "setup_observation_unavailable",
 ] as const;
 export type ErrorCode = typeof ERROR_CODES[number];
 export class ZerosDevError extends Error {
   readonly setup?: SetupObservation;
   readonly runtime?: RuntimeObservation;
   readonly admission?: AdmissionObservation;
+  readonly transport?: TransportObservation;
   constructor(readonly code: ErrorCode, readonly status?: number, readonly retryAfterMs?: number, setup?: SetupObservation,
-    runtime?: RuntimeObservation, admission?: AdmissionObservation) {
+    runtime?: RuntimeObservation, admission?: AdmissionObservation, transport?: TransportObservation) {
     super(`zeros_dev_${code}`);
     const parsed = SetupObservationSchema.safeParse(setup);
     if (parsed.success) this.setup = parsed.data;
@@ -30,14 +34,17 @@ export class ZerosDevError extends Error {
     if (connection.success) this.runtime = connection.data;
     const retry = AdmissionObservationSchema.safeParse(admission);
     if (retry.success) this.admission = retry.data;
+    const observed = TransportObservationSchema.safeParse(transport);
+    if (observed.success) this.transport = observed.data;
   }
 }
-export function diagnosticEvidence(error: unknown): { setup?: SetupObservation; runtime?: RuntimeObservation; admission?: AdmissionObservation } {
+export function diagnosticEvidence(error: unknown): { setup?: SetupObservation; runtime?: RuntimeObservation; admission?: AdmissionObservation; transport?: TransportObservation } {
   if (!(error instanceof ZerosDevError)) return {};
   const runtime = RuntimeObservationSchema.safeParse(error.runtime);
   const admission = AdmissionObservationSchema.safeParse(error.admission);
+  const transport = TransportObservationSchema.safeParse(error.transport);
   return { ...setupEvidence(error), ...(runtime.success ? { runtime: runtime.data } : {}),
-    ...(admission.success ? { admission: admission.data } : {}) };
+    ...(admission.success ? { admission: admission.data } : {}), ...(transport.success ? { transport: transport.data } : {}) };
 }
 export function setupEvidence(error: unknown): { setup?: SetupObservation } {
   if (!(error instanceof ZerosDevError)) return {};

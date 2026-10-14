@@ -5,7 +5,7 @@ import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCloudReplicaDeviceCredential } from "../../apps/desktop/src/engine/cloud-replica-device";
 import { RunStore } from "../zeros-dev/receipts";
-import { exportHourlyArtifact, importHourlyArtifact } from "../zeros-dev/hourly-artifact";
+import { exportHourlyArtifact, importHourlyArtifact, verifyPublicHourlyArtifact } from "../zeros-dev/hourly-artifact";
 import type { Fixture } from "../zeros-dev/config";
 
 const roots: string[] = [];
@@ -25,6 +25,17 @@ async function fixture() {
 }
 
 describe("cross-run signed Actions receipts", () => {
+  it("verifies public receipts with a pinned public key and exact producer, without private credentials", async () => {
+    const f = await fixture(); await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, { code: "cleanup_pending", success: false, runId: f.runId });
+    const raw = JSON.parse(await readFile(f.file, "utf8"));
+    const trust = { deviceId: f.credential.deviceId, publicKey: f.credential.publicKey };
+    expect(verifyPublicHourlyArtifact(raw, trust, f.execution).result).toMatchObject({ success: false, code: "cleanup_pending" });
+    for (const untrusted of [{ ...trust, publicKey: createCloudReplicaDeviceCredential(f.fixture.accountId).publicKey }, { ...trust, deviceId: randomUUID() }])
+      expect(() => verifyPublicHourlyArtifact(raw, untrusted, f.execution)).toThrow("zeros_dev_artifact_invalid");
+    expect(() => verifyPublicHourlyArtifact(raw, trust, { ...f.execution, attempt: 2 })).toThrow("zeros_dev_artifact_invalid");
+    raw.payload.result.code = "internal";
+    expect(() => verifyPublicHourlyArtifact(raw, trust, f.execution)).toThrow("zeros_dev_artifact_invalid");
+  });
   it.each(["legacy", "runtime", "setup"] as const)("round-trips a %s failure without changing its signed diagnostic", async kind => {
     const f = await fixture();
     const diagnostic = kind === "runtime" ? { runtime: { phase: "admission" as const, class: "admission_unavailable" as const, status: 500 } }

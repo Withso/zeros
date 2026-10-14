@@ -168,13 +168,14 @@ export class ZerosDevSession {
       await this.enroll(current,received.data.session.accessToken,fixture);
     });
   }
-  async accessToken():Promise<string>{
+  async accessToken(minimumValidityMs=30_000):Promise<string>{
+    if(!Number.isSafeInteger(minimumValidityMs)||minimumValidityMs<30_000||minimumValidityMs>3_600_000)throw new ZerosDevError("invalid_request");
     return this.store.locked(async(current:LockedFile)=>{
       const fixture=this.bound(current.values), values=current.values;
       const sessionId=values.ZEROS_DEV_SESSION_ID;
       if(!sessionId||!values.ZEROS_DEV_REFRESH_TOKEN||!values.ZEROS_DEV_ACCESS_TOKEN)throw new ZerosDevError("login_required");
       this.bindSession(sessionId);
-      if(values.ZEROS_DEV_ACCESS_TOKEN&&Number(values.ZEROS_DEV_TOKEN_EXPIRES_AT)>this.now()+30_000){
+      if(values.ZEROS_DEV_ACCESS_TOKEN&&Number(values.ZEROS_DEV_TOKEN_EXPIRES_AT)>this.now()+minimumValidityMs){
         await this.verify(values.ZEROS_DEV_ACCESS_TOKEN,fixture,sessionId);return values.ZEROS_DEV_ACCESS_TOKEN;
       }
       await this.authConfig();
@@ -200,6 +201,21 @@ export class ZerosDevSession {
       const claims=await this.verify(session.accessToken,fixture,sessionId);
       if(session.expiresAt!==claims.expiresAt*1000)throw new ZerosDevError("auth_contract");
       await this.saveSession(current,session);return session.accessToken;
+    });
+  }
+  /** A device-disconnected rehearsal cannot secretly refresh its session.
+   * Refresh once beforehand through the existing Alpha contract, authenticate
+   * that token at the CP, then expose only the verified remaining duration. */
+  async prepareDetachedAuth(requiredMs:number):Promise<number>{
+    const token=await this.accessToken(requiredMs);
+    return this.store.locked(async(current:LockedFile)=>{
+      const fixture=this.bound(current.values),sessionId=current.values.ZEROS_DEV_SESSION_ID;
+      if(!sessionId||current.values.ZEROS_DEV_ACCESS_TOKEN!==token)throw new ZerosDevError("identity_changed");
+      const claims=await this.verify(token,fixture,sessionId);
+      await this.checkAccount(token,fixture);
+      const remaining=claims.expiresAt*1000-this.now();
+      if(remaining<=requiredMs)throw new ZerosDevError("detached_auth_window");
+      return remaining;
     });
   }
   async whoami():Promise<FixtureIdentity>{const token=await this.accessToken(),identity=await this.identity();await this.checkAccount(token,identity);return identity;}

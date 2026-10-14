@@ -477,3 +477,119 @@ CI/wrapper gate, then disables the canary. Preserve signed cleanup receipts and
 complete product cleanup before rotating the fixture device or retiring its
 dedicated credentials. No successful live run or 24-hour soak is implied by
 the synthetic workflow tests.
+
+## Gate 0 rehearsal in Actions
+
+The owner enables `ZEROS_DEV_GATE0_ENABLED=true` and dispatches the same trusted
+main workflow with `profile=gate0`:
+
+```sh
+pnpm agent:gh workflow run zeros-dev-e2e.yml --ref main -f profile=gate0
+```
+
+Run it after the corrected runtime qualifies and the held incident workspace
+has been released by its investigator. The rehearsal uses the same fixture
+concurrency group, signed predecessor recovery, normal product routes and
+Actions-only provider credentials as the hourly canary. It creates one new
+allowlisted workspace, installs only the approved test account credentials and
+retains every intent before execution. An uncertain predecessor blocks it.
+
+The separate `gate0` job name keeps rehearsals out of hourly activation and
+admission. The hourly profile retains its fifteen-minute job limit; the manual
+profile allows 135 minutes, with an 8,000-second overall allowance starting
+before installation. Computer preparation remains bounded at 300 seconds with
+at most one build. Individual connect, create, stop and resume deadlines stay
+unchanged, and cleanup retains its separate 140-second reserve.
+
+The signed `hourly.rehearsal` proof covers these phases:
+
+- `model_eligibility` compares installed native providers and the selected
+  smoke models with the exact activated boot's funding-owner availability.
+  Missing, stale or unavailable eligibility fails closed. This is the product
+  input used by cloud model selection; native menu rendering and its reason/
+  action presentation remain part of the owner's desktop check.
+- `workload` spans at least sixty monotonic minutes. Thirteen sparse turns
+  rotate Claude, Codex and Cursor using the canary's minimal models and normal
+  Auto permissions. Each turn creates one small fixture file, verifies its
+  contents through the terminal and hashes its durable history. Permission
+  requests remain terminal; the harness never fabricates an approval.
+- Three stop/resume cycles record stop, ready and usable timings, plus file
+  and history continuity. Create and every wake require a successful setup
+  observation with exactly one claim. `setup_retried` and
+  `setup_observation_unavailable` retain the observed setup and keep the
+  rehearsal red. Any unplanned transport loss during work is terminal.
+- `detached_auth` refreshes through the existing session contract and records
+  only verified remaining validity. A short grant gives `detached_auth_window`.
+  A normal Codex turn runs a bounded 31-minute Python task. `detached_start`
+  proves its exact durable dispatch and a live heartbeat before disconnect.
+  `detached_wait` closes all device transport for at least thirty minutes,
+  without CP polling, session refresh, actor retirement or a hidden client.
+  The VM continues its ordinary authority checks against a healthy CP.
+- `detached_history` reconnects to the same boot/funding/execution identity
+  and requires the original terminal receipt, contiguous event replay,
+  retained transcript prefix and a complete monotonic VM heartbeat journal.
+  It never sends the task twice. Transcript data, prompts, file contents,
+  runtime destinations and credential values stay out of public artifacts;
+  receipts contain counts, durations and hashes.
+
+Actual socket attempts and authenticated ready events supply separate direct
+and relay counters. Closed authority reasons, losses and admission retries are
+recorded without using throttled logs as a denominator. Missing observation
+support remains unavailable. The first failed phase survives later disconnect,
+cleanup or logout failures. The same signed receipt carries pending cleanup
+to the next run.
+
+Schedule this longer rehearsal before starting the clean 24-hour soak. It
+occupies the single fixture for roughly 95–120 minutes and can delay an hourly
+run beyond the unchanged two-hour freshness limit. It supplies no freshness
+exemption. The owner still verifies native cached-chat presentation, menu
+actions, the actual laptop-close experience and Beta Local behavior. A Linux
+rehearsal does not measure a CP outage or arbitrary expired-session continuity.
+UTC active windows and verified duration are available for the backend egress
+correlation; they cover completed workload observations, not billable VM time.
+
+Rollback disables `ZEROS_DEV_GATE0_ENABLED`. Keep this version of the receipt
+reader and the signed predecessor until product cleanup completes; older strict
+readers cannot interpret rehearsal fields. Local Personal, organization-local,
+owner switching and Beta/Production behavior retain their existing paths.
+
+## Collect a 24-hour evidence pack
+
+The collector reads Actions only. Give it the fixture device's **public**
+Ed25519 key and device UUID through the approved fixture inventory, plus an
+Actions-read token in `GITHUB_TOKEN` or `GH_TOKEN`. It never reads `.env.agent`,
+selects product credentials, dispatches work or contacts the CP/VM.
+
+```sh
+pnpm exec tsx scripts/zeros-dev/soak-cli.ts \
+  --end <completed-UTC-hour> \
+  --device-id <fixture-device-uuid> \
+  --public-key <Ed25519-base64url-public-key> \
+  --output <absolute-new-file-in-owned-directory>
+```
+
+`--end` must be an elapsed UTC hour boundary; the report covers its previous
+24 hours. The output must be new, in an owned directory without symlink aliases
+or group/world write permission. It is created exclusively at mode 0600 and
+written through its verified descriptor. A write failure can leave a private
+partial file; use a new output path on retry. Existing outputs are never
+overwritten or deleted.
+
+`zeros.dev-soak/v1` verifies trusted-main producers, exact attempt/job/artifact
+identity, artifact SHA256 and the pinned device signature. The collection has
+a three-minute budget, four listing pages and 200 attempts. Each UTC hour needs
+completed hourly evidence; missing, unfinished, expired or unverifiable evidence
+stays incomplete. Work finishing after the selected window cannot backfill it.
+Every earlier attempt is retained, so a green rerun does not erase a red run.
+Manual rehearsals have their own proof and cannot fill an hourly slot.
+
+The pack includes phase distributions, the first failed stage/code, setup and
+connection diagnostics, UTC active windows, direct/relay counts and distinct
+admission retry counts. Repeated cumulative observations are deduplicated by
+run, connection and call. Missing legacy counters have unavailable coverage and
+null rates. `status=passed` confirms the signed hourly window and its available
+harness measurements; the raw rates remain in the pack for SLO assessment.
+Idle database transactions, CPU, actor-confirm latency, CP egress and native
+UI/Beta checks stay explicitly unverified for the backend and owner evidence
+to complete. Exit status is zero only for a passed window; a closed JSON summary
+names incomplete collection without leaking API bodies or token values.

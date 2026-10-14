@@ -16,6 +16,13 @@ export function hourlyContext(env) {
     !identifier(env.GITHUB_RUN_ID) || !/^[1-9][0-9]{0,1}$/.test(env.GITHUB_RUN_ATTEMPT ?? "") || !sha(env.GITHUB_SHA)) throw failure("actions_required");
   return { workflowRunId: env.GITHUB_RUN_ID, attempt: Number(env.GITHUB_RUN_ATTEMPT), sourceSha: env.GITHUB_SHA };
 }
+export function actionsProfile(env) {
+  hourlyContext(env);
+  const profile = env.ZEROS_DEV_PROFILE ?? "hourly";
+  if (!["hourly", "gate0"].includes(profile) || profile === "gate0" && env.GITHUB_EVENT_NAME !== "workflow_dispatch")
+    throw failure("actions_required");
+  return profile;
+}
 export function trustedHourlyRun(run) {
   return run?.path === HOURLY_PATH && run.name === HOURLY_NAME && run.head_branch === "main" &&
     run.repository?.full_name === "Withso/zeros" && run.head_repository?.full_name === "Withso/zeros" &&
@@ -29,10 +36,11 @@ function collection(value, key) {
   return value[key];
 }
 
-async function lifecycleJob(api, run) {
+export async function lifecycleJob(api, run) {
   const response = await api.get(`${REPO}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
   const jobs = collection(response, "jobs");
-  if (response.total_count !== jobs.length || jobs.length !== 1 || jobs[0].name !== "lifecycle" ||
+  if (response.total_count !== jobs.length || jobs.length !== 1 || !["lifecycle", "gate0"].includes(jobs[0].name) ||
+    jobs[0].name === "gate0" && run.event !== "workflow_dispatch" ||
     jobs[0].run_attempt !== run.run_attempt || jobs[0].status !== "completed" || !Array.isArray(jobs[0].steps)) throw failure("artifact_invalid");
   return jobs[0];
 }
@@ -41,8 +49,8 @@ function productNeverStarted(job) {
   const steps = job.steps.filter(step => step.name === "Execute Alpha product lifecycle");
   return steps.length === 1 && steps[0].status === "completed" && steps[0].conclusion === "skipped";
 }
-function productCompleted(job) {
-  return job.conclusion === "success" && ["Execute Alpha product lifecycle", "Save signed cleanup receipt"].every(name => {
+export function productCompleted(job) {
+  return job.name === "lifecycle" && job.conclusion === "success" && ["Execute Alpha product lifecycle", "Save signed cleanup receipt"].every(name => {
     const steps = job.steps.filter(step => step.name === name);
     return steps.length === 1 && steps[0].status === "completed" && steps[0].conclusion === "success";
   });
@@ -87,6 +95,12 @@ export async function hourlySnapshot(api) {
   runs.sort((a, b) => b.run_number - a.run_number);
   if (!runs.length && rows.total_count) throw failure("artifact_invalid");
   const previousAttempts = new Map();
+  const jobs = new Map();
+  const jobFor = async run => {
+    const key = `${run.id}/${run.run_attempt}`;
+    if (!jobs.has(key)) jobs.set(key, await lifecycleJob(api, run));
+    return jobs.get(key);
+  };
   const previousAttempt = async (run, attempt) => {
     const key = `${run.id}/${attempt}`;
     if (!previousAttempts.has(key)) {
@@ -101,12 +115,18 @@ export async function hourlySnapshot(api) {
   // it, including when GitHub hides the prior attempt behind an active rerun.
   let latest = null;
   for (const run of runs) {
-    if (run.status === "completed") { latest = run; break; }
-    if (!["queued", "waiting", "requested", "pending", "in_progress"].includes(run.status)) throw failure("artifact_invalid");
-    if (run.run_attempt > 1) { latest = await previousAttempt(run, run.run_attempt - 1); break; }
+    let completed = run;
+    if (run.status !== "completed") {
+      if (!["queued", "waiting", "requested", "pending", "in_progress"].includes(run.status)) throw failure("artifact_invalid");
+      if (run.run_attempt <= 1) continue;
+      completed = await previousAttempt(run, run.run_attempt - 1);
+    }
+    // The manual rehearsal shares cleanup ownership, never the hourly merge
+    // requirement. Its longer/red run must neither activate nor replace it.
+    if ((await jobFor(completed)).name === "lifecycle") { latest = completed; break; }
   }
   let activated = false;
-  for (const run of successes) if (productCompleted(await lifecycleJob(api, run))) { activated = true; break; }
+  for (const run of successes) if (productCompleted(await jobFor(run))) { activated = true; break; }
   if (!activated) {
     // GitHub's success filter shows the latest attempt only. A rerun of the
     // first green must not erase activation when that new attempt goes red.
@@ -115,7 +135,7 @@ export async function hourlySnapshot(api) {
       for (let attempt = run.run_attempt - 1; attempt >= 1; attempt--) {
         if (++inspected > 100) throw failure("artifact_invalid");
         const previous = await previousAttempt(run, attempt);
-        if (previous.conclusion === "success" && productCompleted(await lifecycleJob(api, previous))) { activated = true; break history; }
+        if (previous.conclusion === "success" && productCompleted(await jobFor(previous))) { activated = true; break history; }
       }
     }
   }
@@ -124,7 +144,7 @@ export async function hourlySnapshot(api) {
     return { activated: false, latest, completedAt: null };
   }
   if (!latest) throw failure("artifact_invalid");
-  const job = await lifecycleJob(api, latest);
+  const job = await jobFor(latest);
   if (!Number.isFinite(Date.parse(job.completed_at))) throw failure("artifact_invalid");
   return { activated: true, latest, completedAt: job.completed_at, executed: productCompleted(job) };
 }
@@ -147,7 +167,7 @@ export function decideHourlyGate(snapshot, cloudRequired, now = Date.now()) {
 export async function planMain(env = process.env) {
   try {
     const execution = hourlyContext(env), api = createGitHubApi({ token: env.GITHUB_TOKEN });
-    const plan = await planHourly(api, execution);
+    const plan = { ...await planHourly(api, execution), profile: actionsProfile(env) };
     if (!env.GITHUB_OUTPUT) throw failure("actions_required");
     appendFileSync(env.GITHUB_OUTPUT, `plan=${JSON.stringify(plan)}\nprevious_run=${plan.previous?.workflowRunId ?? ""}\nartifact_id=${plan.artifactId ?? ""}\n`);
     return 0;

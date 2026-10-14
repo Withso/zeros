@@ -46,6 +46,24 @@ async function fixture(initial:Record<string,string>=values) {
 }
 
 describe("Alpha zeros-dev session keeps the verified web contract",()=>{
+  it("refreshes before device sleep and reports only verified residual validity", async () => {
+    const f = await fixture(); await f.session.login();
+    const original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => String(url).endsWith("/auth/zeros-dev/refresh")
+      ? Response.json({ accountId: account, organizationId: org, session: { ...grant, expiresAt: now + 3_600_000 } }) : original(url, init));
+    f.verify.mockResolvedValue({ ...claims, expiresAt: now / 1000 + 3600 });
+    expect(await f.session.prepareDetachedAuth(35 * 60_000)).toBe(3_600_000);
+    expect(f.fetcher.mock.calls.filter(([url]) => String(url).endsWith("/auth/zeros-dev/refresh"))).toHaveLength(1);
+    expect(String(f.fetcher.mock.calls.at(-1)?.[0])).toMatch(/\/v1\/me$/);
+  });
+  it("refuses a normal grant whose real TTL cannot cover the disconnected task", async () => {
+    const f = await fixture(); await f.session.login();
+    const original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => String(url).endsWith("/auth/zeros-dev/refresh")
+      ? Response.json({ accountId: account, organizationId: org, session: grant }) : original(url, init));
+    await expect(f.session.prepareDetachedAuth(35 * 60_000)).rejects.toMatchObject({ code: "detached_auth_window" });
+    expect(f.fetcher.mock.calls.filter(([url]) => String(url).endsWith("/auth/zeros-dev/refresh"))).toHaveLength(1);
+  });
   it("accepts the pinned web grant without weakening or impersonating the desktop contract",async()=>{
     const f=await fixture(),original=f.fetcher.getMockImplementation()!;
     f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("/auth/zeros-dev/session")?

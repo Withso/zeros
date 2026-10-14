@@ -1,0 +1,9 @@
+{
+  "id": "gate0-detached-native-proof",
+  "kind": "scenario",
+  "area": "release-dev-environment",
+  "fixedBy": "pr:512",
+  "symptom": "A long-task rehearsal can claim continuity after mere admission, a short timer, a different native execution, truncated replay or a ready state reached after multiple setup claims.",
+  "rule": "zstack-verify evidence must bind the real accepted command, boot and funding identity, first-claim setup, remaining auth validity, measured disconnected duration and complete durable replay. Disconnect only the device; retain the first failure and never resubmit an uncertain task.",
+  "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-gate0.test.ts scripts/__tests__/zeros-dev-gate0-runtime.test.ts scripts/__tests__/zeros-dev-runtime.test.ts scripts/__tests__/zeros-dev-session.test.ts"
+}
