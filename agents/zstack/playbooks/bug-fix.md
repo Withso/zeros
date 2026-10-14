@@ -45,6 +45,10 @@
    For canaries with durable fixtures and moving defaults, test unchanged,
    moved, unavailable and mid-run selection. Refresh at most once against the
    captured qualified tuple, with separate build/lifecycle/cleanup budgets.
+   For public admission failures, inject the fault after grant creation. Keep
+   a closed phase through confirmed cleanup; only typed transient provider
+   errors offer retries. Test unknown defects, failed cleanup and repeated
+   grant retirement through the HTTP boundary, without raw exception logging.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates

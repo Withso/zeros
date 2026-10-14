@@ -857,6 +857,28 @@ is no caller URL, query bearer or reused grant. Electron freezes the descriptor;
 the renderer requires both authenticated actor confirmation and matching
 `ENGINE_READY.cloudLocalCommands` before sending queued work.
 
+Admission failures carry a closed `error.phase`: `grant`, `provider_endpoint`,
+`provider_host_key`, or `engine_reach`. The current public admission route only
+performs the first two; it does not claim to have reached the engine or checked
+an SSH host key. Logs retain that phase and closed outcome fields, never raw
+provider messages, addresses or grant material.
+
+A typed transient endpoint failure returns HTTP 503 with
+`error.code: "cloud_runtime_temporarily_unavailable"`, `error.retryable: true`
+and an integer `Retry-After` of 1–300 seconds (default 1, rounded up). Unknown
+faults stay HTTP 500 / `internal`; identity, integrity and permission refusals
+are not retry signals. Existing pool-capacity failures keep `service_busy`.
+A caller retries only the exact transient admission contract, with a fresh
+device proof, a bounded attempt count and its original connection deadline.
+This response does not imply that a client retry policy is installed.
+
+The failed, unpublished actor grant is revoked before publishing the transient
+response. Concurrent or repeated revocation never rewrites its terminal receipt;
+successful admission still consumes its grant only once. If revocation cannot
+be confirmed, return nonretryable HTTP 500 with the original failed phase and
+log `grantCleanup: "unconfirmed"`. The undisclosed grant retains its existing
+two-minute admission expiry; uncertain cleanup never triggers a replacement.
+
 A transport-only failure may request a fresh admission with
 `connectionChannel: "control-plane-websocket"`. CP fallback must retain every
 boot/owner field and authority epoch while rotating the admission token and
