@@ -44,6 +44,11 @@ export const SECRET_KEYS = Object.freeze([
   "CLAUDE_CODE_OAUTH_TOKEN",
   "CURSOR_API_KEY",
   "OPENAI_API_KEY",
+  "ZEROS_DEV_PASSWORD",
+  "ZEROS_DEV_ACCESS_TOKEN",
+  "ZEROS_DEV_REFRESH_TOKEN",
+  "ZEROS_DEV_DEVICE_PRIVATE_KEY_B64",
+  "ZEROS_DEV_ALPHA_READONLY_DATABASE_URL",
 ]);
 
 /** Every key the template documents. Only these are read from the process
@@ -61,6 +66,15 @@ export const KNOWN_KEYS = Object.freeze([
   "ZEROS_GITHUB_ALPHA_APP_SLUG",
   "ZEROS_CLOUD_REQUIRED_AGENTS",
   "ZEROS_CLOUD_AGENT_SELECTIONS",
+  "ZEROS_DEV_WORKOS_SUBJECT",
+  "ZEROS_DEV_ACCOUNT_ID",
+  "ZEROS_DEV_EMAIL",
+  "ZEROS_DEV_ORGANIZATION_ID",
+  "ZEROS_DEV_REPOSITORY",
+  "ZEROS_DEV_REPOSITORY_ID",
+  "ZEROS_DEV_GITHUB_INSTALLATION_ID",
+  "ZEROS_DEV_SESSION_ID",
+  "ZEROS_DEV_TOKEN_EXPIRES_AT",
 ]);
 
 /** Parse a dotenv file. Lines that are neither comments nor `KEY=value` are
@@ -154,7 +168,8 @@ export function signS3Get({
     "aws4_request",
   );
   const signature = createHmac("sha256", key).update(stringToSign).digest("hex");
-  const { host: _signedHost, ...sent } = signed;
+  const sent = { ...signed };
+  delete sent.host;
   return {
     ...sent,
     authorization: `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${scope}, SignedHeaders=${names.join(";")}, Signature=${signature}`,
@@ -174,7 +189,7 @@ async function request(deps, url, init = {}) {
     const response = await deps.fetch(url, {
       ...init,
       redirect: "error",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: globalThis.AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     const text = await response.text();
     let body = null;
@@ -203,12 +218,29 @@ const ok = (detail) => ({ status: "ok", detail });
 const warn = (detail) => ({ status: "warn", detail });
 const fail = (detail) => ({ status: "fail", detail });
 
+/** Structural only. The read-only credential checker never consumes a
+ * password grant, rotates a refresh token or enrolls a device. */
+export function checkZerosDevValues(values) {
+  if (!Object.entries(values).some(([key,value]) => key.startsWith("ZEROS_DEV_") && value)) return {status:"skip",detail:"not set"};
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const email=values.ZEROS_DEV_EMAIL??"",repo=(values.ZEROS_DEV_REPOSITORY??"").split("/");
+  const valid=/^user_[A-Za-z0-9_-]{1,240}$/.test(values.ZEROS_DEV_WORKOS_SUBJECT??"") &&
+    ["ZEROS_DEV_ACCOUNT_ID","ZEROS_DEV_ORGANIZATION_ID","ZEROS_DEV_GITHUB_INSTALLATION_ID"].every(key=>uuid.test(values[key]??"")) &&
+    email===email.trim().toLowerCase() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length<=254 &&
+    repo.length===2 && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(repo[0]) && /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(repo[1]) && !repo[1].endsWith(".git") &&
+    /^[1-9][0-9]{0,39}$/.test(values.ZEROS_DEV_REPOSITORY_ID??"") &&
+    (Boolean(values.ZEROS_DEV_PASSWORD) && values.ZEROS_DEV_PASSWORD.length<=1024 ||
+      Boolean(values.ZEROS_DEV_REFRESH_TOKEN) && /^[A-Za-z0-9_-]{1,512}$/.test(values.ZEROS_DEV_SESSION_ID??""));
+  return valid ? ok("fixed Alpha fixture structurally valid; live login not checked") : fail("zeros-dev fixture incomplete or invalid; values withheld");
+}
+
 const siblings = (name) =>
   name.endsWith("-alpha")
     ? ["beta", "production"].map((channel) => name.replace(/-alpha$/, `-${channel}`))
     : [];
 
 export const PROVIDER_CHECKS = Object.freeze([
+  { id: "zeros-dev", label: "zeros-dev (Alpha fixture)", keys: [], run: checkZerosDevValues },
   {
     id: "cloudflare",
     label: "Cloudflare",
@@ -457,9 +489,23 @@ export async function runProviderChecks(values, deps) {
 /** Replace every secret value that appears in `text`. */
 export function redact(text, values) {
   let output = text;
+  const variants = new Set();
   for (const key of SECRET_KEYS) {
     const value = values[key];
-    if (typeof value === "string" && value.length >= 8) output = output.split(value).join("[redacted]");
+    if (typeof value !== "string" || !value) continue;
+    // Invalid/short credentials and JSON-escaped passwords are secrets too.
+    variants.add(value);
+    variants.add(JSON.stringify(value).slice(1, -1));
+  }
+  // The storage envelope contains the device's actual private seed. Provider
+  // diagnostics may echo either representation; neither may escape redaction.
+  try {
+    const decoded = Buffer.from(values.ZEROS_DEV_DEVICE_PRIVATE_KEY_B64 ?? "", "base64").toString("utf8");
+    const key = JSON.parse(decoded)?.privateKey;
+    if (typeof key === "string" && key) { variants.add(decoded); variants.add(key); variants.add(JSON.stringify(key).slice(1, -1)); }
+  } catch { /* Malformed envelopes are still redacted verbatim above. */ }
+  for (const value of [...variants].sort((a, b) => b.length - a.length)) {
+    output = output.split(value).join("[redacted]");
   }
   return output;
 }
@@ -505,5 +551,10 @@ async function main() {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  await main();
+  void main().catch(() => {
+    // This module is also imported by the Linux harness's CommonJS launcher.
+    // Do not reflect a filesystem/provider exception (or secret value).
+    console.error("Agent credential check failed; details withheld");
+    process.exitCode = 1;
+  });
 }
