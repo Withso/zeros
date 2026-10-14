@@ -17,6 +17,19 @@ import type { CloudAgentBootScope } from "@zeros/protocol/cloud-agent-bootstrap"
 const PART_BYTES = 16 * 1024 * 1024;
 const MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 256 * 1024;
+/** Closed failure sites, mirrored by the standalone setup producer and CP
+ * parser. No path, SQL, artifact content or provider output is diagnostic. */
+export const CLOUD_LOCAL_COMMAND_CHECKPOINT_CODES = [
+  "checkpoint_directory_metadata", "checkpoint_file_open_flags", "checkpoint_file_metadata", "checkpoint_part_path",
+  "checkpoint_inventory_timeout", "checkpoint_seal_missing", "checkpoint_seal_document", "checkpoint_seal_ack",
+  "checkpoint_writer_scope", "checkpoint_writer_unsealed", "checkpoint_journal_head", "checkpoint_mirror_head",
+  "checkpoint_inventory_hash", "checkpoint_stream_head", "checkpoint_pending_work", "checkpoint_normal_head",
+  "checkpoint_capture_read", "checkpoint_capture_identity", "checkpoint_manifest_size", "checkpoint_manifest_missing",
+  "checkpoint_manifest_identity", "checkpoint_manifest_invalid", "checkpoint_workspace_mismatch", "checkpoint_expected_writer_mismatch",
+  "checkpoint_part_missing", "checkpoint_part_size", "checkpoint_part_hash", "checkpoint_part_identity",
+  "checkpoint_assembled_size", "checkpoint_assembled_hash", "checkpoint_restore_read", "checkpoint_restore_hash", "checkpoint_restore_identity",
+] as const;
+type CheckpointCode = typeof CLOUD_LOCAL_COMMAND_CHECKPOINT_CODES[number];
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const partSchema = z.object({ path: z.string().regex(/^(ledger|normal)\/[0-9]{6}\.part$/),
   bytes: z.number().int().positive().max(PART_BYTES), sha256: digest }).strict();
@@ -61,7 +74,10 @@ export function verifiedCloudLocalCommandPredecessor(
 }
 
 function hash(value: string | Buffer): string { return createHash("sha256").update(value).digest("hex"); }
-function invalid(): never { throw new CloudCommandRuntimeError("command_storage_unavailable"); }
+function invalid(code: CheckpointCode): never { throw new CloudCommandRuntimeError(code); }
+function json(value: string, code: CheckpointCode): unknown {
+  try { return JSON.parse(value); } catch { return invalid(code); }
+}
 function stable(before: Stats, after: Stats): boolean {
   return before.dev === after.dev && before.ino === after.ino && before.size === after.size &&
     before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs && after.nlink === 1;
@@ -69,16 +85,16 @@ function stable(before: Stats, after: Stats): boolean {
 async function directory(file: string): Promise<void> {
   const stat = await fs.lstat(file);
   if (!stat.isDirectory() || stat.isSymbolicLink() || await fs.realpath(file) !== path.resolve(file) ||
-      (process.getuid && stat.uid !== process.getuid())) invalid();
+      (process.getuid && stat.uid !== process.getuid())) invalid("checkpoint_directory_metadata");
 }
 async function readHandle(file: string, maxBytes: number): Promise<{ handle: FileHandle; before: Stats }> {
-  if (!constants.O_NOFOLLOW || !constants.O_NONBLOCK) invalid();
+  if (!constants.O_NOFOLLOW || !constants.O_NONBLOCK) invalid("checkpoint_file_open_flags");
   await directory(path.dirname(file));
   const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await handle.stat();
     if (!before.isFile() || before.nlink !== 1 || before.size < 1 || before.size > maxBytes ||
-        (process.getuid && before.uid !== process.getuid()) || !stable(before, await fs.lstat(file))) invalid();
+        (process.getuid && before.uid !== process.getuid()) || !stable(before, await fs.lstat(file))) invalid("checkpoint_file_metadata");
     return { handle, before };
   } catch (error) { await handle.close(); throw error; }
 }
@@ -120,7 +136,7 @@ async function publishCheckpoint(root: string, staging: string, manifest: CloudL
     await syncDirectory(root); await syncDirectory(backup);
     for (const kind of ["ledger", "normal"]) {
       for (const name of (await fs.readdir(path.join(root, kind))).sort()) {
-        if (!/^[0-9]{6}\.part$/.test(name)) invalid();
+        if (!/^[0-9]{6}\.part$/.test(name)) invalid("checkpoint_part_path");
         assertFrozen();
         const relative = `${kind}/${name}`;
         await moveRegular(path.join(root, relative), path.join(backup, relative), PART_BYTES);
@@ -176,7 +192,7 @@ export function cloudLocalCommandSealInventory(db: Sqlite.Database, seal: Pick<C
       const rows = db.prepare(`SELECT * FROM ${table} ORDER BY ${order} LIMIT 64 OFFSET ?`).all(offset);
       if (!rows.length) break;
       for (const row of rows) {
-        if (performance.now() > deadline) invalid();
+        if (performance.now() > deadline) invalid("checkpoint_inventory_timeout");
         digest.update(canonicalCloudLocalCommandHistoryJson(row));
       }
     }
@@ -189,15 +205,19 @@ function verifyLedger(db: Sqlite.Database, seal: CloudLocalCommandWriterSeal): v
     { value: string } | undefined)?.value;
   const stored = db.prepare("SELECT document,ack FROM local_command_writer_seals WHERE writer_epoch=?").get(seal.scope.writerEpoch) as
     { document: string; ack: string | null } | undefined;
-  if (!stored?.ack || !isDeepStrictEqual(JSON.parse(stored.document), seal) ||
-      !cloudLocalCommandWriterSealAckMatchesSeal(CloudLocalCommandWriterSealAckSchema.parse(JSON.parse(stored.ack)), seal) ||
-      !isDeepStrictEqual(JSON.parse(metadata("writer") ?? "null"), seal.scope) || metadata("sealedWriter") !== seal.scope.writerEpoch ||
-      Number(metadata("journalHead") ?? "0") !== seal.sequence || Number(metadata("mirrorHead") ?? "0") !== seal.sequence ||
-      cloudLocalCommandSealInventory(db, { scope: seal.scope, sequence: seal.sequence,
-        recordSequence: seal.recordSequence, eventSequence: seal.eventSequence }) !== seal.inventorySha256) invalid();
+  if (!stored?.ack) invalid("checkpoint_seal_missing");
+  if (!isDeepStrictEqual(json(stored.document, "checkpoint_seal_document"), seal)) invalid("checkpoint_seal_document");
+  const ack = CloudLocalCommandWriterSealAckSchema.safeParse(json(stored.ack, "checkpoint_seal_ack"));
+  if (!ack.success || !cloudLocalCommandWriterSealAckMatchesSeal(ack.data, seal)) invalid("checkpoint_seal_ack");
+  if (!isDeepStrictEqual(json(metadata("writer") ?? "null", "checkpoint_writer_scope"), seal.scope)) invalid("checkpoint_writer_scope");
+  if (metadata("sealedWriter") !== seal.scope.writerEpoch) invalid("checkpoint_writer_unsealed");
+  if (Number(metadata("journalHead") ?? "0") !== seal.sequence) invalid("checkpoint_journal_head");
+  if (Number(metadata("mirrorHead") ?? "0") !== seal.sequence) invalid("checkpoint_mirror_head");
+  if (cloudLocalCommandSealInventory(db, { scope: seal.scope, sequence: seal.sequence,
+    recordSequence: seal.recordSequence, eventSequence: seal.eventSequence }) !== seal.inventorySha256) invalid("checkpoint_inventory_hash");
   const stream = db.prepare("SELECT head FROM local_command_streams WHERE stream_id=? AND writer_epoch=?").get(
     seal.scope.engineInstanceId, seal.scope.writerEpoch) as { head: number } | undefined;
-  if (!stream || stream.head !== seal.eventSequence) invalid();
+  if (!stream || stream.head !== seal.eventSequence) invalid("checkpoint_stream_head");
   const pending = (table: string, predicate: string, ...parameters: string[]) =>
     !!db.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(table) &&
     !!db.prepare(`SELECT 1 FROM ${table} WHERE ${predicate} LIMIT 1`).get(...parameters);
@@ -206,7 +226,7 @@ function verifyLedger(db: Sqlite.Database, seal: CloudLocalCommandWriterSeal): v
       pending("local_command_actions", "writer_epoch=? AND state='dispatching'", seal.scope.writerEpoch) ||
       pending("local_command_control_owners", "settled=0 AND command_id IN (SELECT id FROM local_commands WHERE writer_epoch=?)", seal.scope.writerEpoch) ||
       pending("local_command_journal", "writer_epoch=?", seal.scope.writerEpoch) ||
-      pending("local_command_mirror_batches", "writer_epoch=?", seal.scope.writerEpoch) || pending("local_command_outbox_jobs", "1=1")) invalid();
+      pending("local_command_mirror_batches", "writer_epoch=?", seal.scope.writerEpoch) || pending("local_command_outbox_jobs", "1=1")) invalid("checkpoint_pending_work");
 }
 function verifyPair(ledgerFile: string, normalFile: string, seal: CloudLocalCommandWriterSeal): void {
   const ledger = openSqlite(ledgerFile, { readonly: true, fileMustExist: true });
@@ -216,7 +236,7 @@ function verifyPair(ledgerFile: string, normalFile: string, seal: CloudLocalComm
     try {
       normal.pragma("busy_timeout = 25");
       const head = normal.prepare("SELECT next_rev-1 AS rev FROM sync_meta WHERE id=0").get() as { rev: number } | undefined;
-      if (head?.rev !== seal.recordSequence) invalid();
+      if (head?.rev !== seal.recordSequence) invalid("checkpoint_normal_head");
     } finally { normal.close(); }
   } finally { ledger.close(); }
 }
@@ -249,14 +269,14 @@ export async function captureCloudLocalCommandCheckpoint(input: { root: string; 
           let consumed = 0;
           while (consumed < bytes.length) {
             const result = await handle.read(bytes, consumed, bytes.length - consumed, offset + consumed);
-            if (!result.bytesRead) invalid(); consumed += result.bytesRead;
+            if (!result.bytesRead) invalid("checkpoint_capture_read"); consumed += result.bytesRead;
           }
           input.assertFrozen(); fileDigest.update(bytes);
           const relative = `${kind}/${String(parts.length).padStart(6, "0")}.part`;
           await writeDurable(path.join(staging, relative), bytes);
           parts.push({ path: relative, bytes: bytes.length, sha256: hash(bytes) });
         }
-        if (!stable(before, await handle.stat()) || !stable(before, await fs.lstat(source))) invalid();
+        if (!stable(before, await handle.stat()) || !stable(before, await fs.lstat(source))) invalid("checkpoint_capture_identity");
         files.push({ kind, bytes: before.size, sha256: fileDigest.digest("hex"), parts });
         await syncDirectory(target);
       } finally { await handle.close(); }
@@ -264,7 +284,7 @@ export async function captureCloudLocalCommandCheckpoint(input: { root: string; 
     input.assertFrozen(); verifyPair(input.ledgerFile, input.normalFile, input.seal);
     const manifest = CloudLocalCommandCheckpointManifestSchema.parse({ version: 1, seal: input.seal, files });
     const bytes = Buffer.from(canonicalCloudLocalCommandHistoryJson(manifest));
-    if (bytes.length > MAX_MANIFEST_BYTES) invalid();
+    if (bytes.length > MAX_MANIFEST_BYTES) invalid("checkpoint_manifest_size");
     await writeDurable(path.join(staging, "manifest.json"), bytes); await syncDirectory(staging);
     input.assertFrozen();
     await publishCheckpoint(root, staging, manifest, input.assertFrozen);
@@ -278,20 +298,28 @@ export async function captureCloudLocalCommandCheckpoint(input: { root: string; 
 export async function verifyCloudLocalCommandCheckpoint(input: { root: string; scope: { organizationId: string; workspaceId: string };
   expectedWriterEpoch?: string }):
   Promise<{ manifest: CloudLocalCommandCheckpointManifest; ledgerFile: string; normalFile: string; cleanup(): Promise<void> }> {
-  const root = path.resolve(input.root); await directory(root);
-  const { handle, before } = await readHandle(path.join(root, "manifest.json"), MAX_MANIFEST_BYTES);
+  const root = path.resolve(input.root);
+  let opened: Awaited<ReturnType<typeof readHandle>>;
+  try { await directory(root); opened = await readHandle(path.join(root, "manifest.json"), MAX_MANIFEST_BYTES); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") invalid("checkpoint_manifest_missing");
+    throw error;
+  }
+  const { handle, before } = opened;
   let manifest: CloudLocalCommandCheckpointManifest;
   try {
     const bytes = await handle.readFile();
-    if (bytes.length !== before.size || !stable(before, await handle.stat())) invalid();
-    manifest = CloudLocalCommandCheckpointManifestSchema.parse(JSON.parse(bytes.toString("utf8")));
+    if (bytes.length !== before.size || !stable(before, await handle.stat())) invalid("checkpoint_manifest_identity");
+    const parsed = CloudLocalCommandCheckpointManifestSchema.safeParse(json(bytes.toString("utf8"), "checkpoint_manifest_invalid"));
+    if (!parsed.success) invalid("checkpoint_manifest_invalid");
+    manifest = parsed.data;
   } finally { await handle.close(); }
-  if (manifest.seal.scope.organizationId !== input.scope.organizationId || manifest.seal.scope.workspaceId !== input.scope.workspaceId) invalid();
+  if (manifest.seal.scope.organizationId !== input.scope.organizationId || manifest.seal.scope.workspaceId !== input.scope.workspaceId) invalid("checkpoint_workspace_mismatch");
   // The authenticated enrollment selects the current predecessor. Blob
   // custody alone cannot distinguish an old, valid checkpoint on an empty VM.
   // Check before allocating a candidate or installing either database file.
   if (input.expectedWriterEpoch !== undefined && (!z.string().uuid().safeParse(input.expectedWriterEpoch).success ||
-      manifest.seal.scope.writerEpoch !== input.expectedWriterEpoch)) invalid();
+      manifest.seal.scope.writerEpoch !== input.expectedWriterEpoch)) invalid("checkpoint_expected_writer_mismatch");
   const restored = path.join(root, `.verified-${randomUUID()}`); await fs.mkdir(restored, { mode: 0o700 });
   try {
     for (const file of manifest.files) {
@@ -300,15 +328,24 @@ export async function verifyCloudLocalCommandCheckpoint(input: { root: string; s
       try {
         const fileDigest = createHash("sha256"); let total = 0;
         for (const part of file.parts) {
-          const source = path.join(root, part.path), { handle, before } = await readHandle(source, PART_BYTES);
+          const source = path.join(root, part.path);
+          let opened: Awaited<ReturnType<typeof readHandle>>;
+          try { opened = await readHandle(source, PART_BYTES); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") invalid("checkpoint_part_missing");
+            throw error;
+          }
+          const { handle, before } = opened;
           try {
             const bytes = await handle.readFile();
-            if (bytes.length !== part.bytes || bytes.length !== before.size || hash(bytes) !== part.sha256 ||
-                !stable(before, await handle.stat()) || !stable(before, await fs.lstat(source))) invalid();
+            if (bytes.length !== part.bytes || bytes.length !== before.size) invalid("checkpoint_part_size");
+            if (hash(bytes) !== part.sha256) invalid("checkpoint_part_hash");
+            if (!stable(before, await handle.stat()) || !stable(before, await fs.lstat(source))) invalid("checkpoint_part_identity");
             fileDigest.update(bytes); total += bytes.length; await destination.writeFile(bytes);
           } finally { await handle.close(); }
         }
-        if (total !== file.bytes || fileDigest.digest("hex") !== file.sha256) invalid();
+        if (total !== file.bytes) invalid("checkpoint_assembled_size");
+        if (fileDigest.digest("hex") !== file.sha256) invalid("checkpoint_assembled_hash");
         await destination.sync();
       } finally { await destination.close(); }
     }
@@ -343,11 +380,12 @@ export async function restoreCloudLocalCommandCheckpointLedger(input: { root: st
           const bytes = Buffer.alloc(Math.min(PART_BYTES, before.size - offset)); let consumed = 0;
           while (consumed < bytes.length) {
             const result = await handle.read(bytes, consumed, bytes.length - consumed, offset + consumed);
-            if (!result.bytesRead) invalid(); consumed += result.bytesRead;
+            if (!result.bytesRead) invalid("checkpoint_restore_read"); consumed += result.bytesRead;
           }
           digest.update(bytes); await destination.writeFile(bytes);
         }
-        if (digest.digest("hex") !== verified.manifest.files[0].sha256 || !stable(before, await handle.stat())) invalid();
+        if (digest.digest("hex") !== verified.manifest.files[0].sha256) invalid("checkpoint_restore_hash");
+        if (!stable(before, await handle.stat())) invalid("checkpoint_restore_identity");
         await destination.sync();
       } finally { await handle.close(); await destination.close(); }
       // No companion/native writer is opened at this stage. Old sidecars

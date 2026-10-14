@@ -676,6 +676,29 @@ describe("CloudWorkspaceLinuxSetupExecutor", () => {
       expect(JSON.stringify(error)).not.toContain("private-cleanup-canary");
     });
 
+  it.each([
+    ["checkpoint_expected_writer_mismatch", "setup_checkpoint_incomplete", false],
+    ["checkpoint_manifest_missing", "setup_checkpoint_incomplete", false],
+    ["checkpoint_part_missing", "setup_checkpoint_incomplete", false],
+    ["checkpoint_seal_missing", "setup_checkpoint_incomplete", false],
+    ["checkpoint_part_hash", "setup_checkpoint_restore_invalid", false],
+    ["checkpoint_writer_scope", "setup_checkpoint_restore_invalid", false],
+    ["checkpoint_inventory_timeout", "setup_checkpoint_restore_unavailable", true],
+  ] as const)("maps %s to a closed %s outcome before failed cleanup", async (code, expected, retryable) => {
+    const f = v4();
+    const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+      phase: "history_restore", name: "CloudCommandRuntimeError", code, errno: null } };
+    vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 1, outputTruncated: false,
+      output: JSON.stringify({ version: 2, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error",
+        code: "engine_readiness_failed", diagnostic }) + "\n" + JSON.stringify({ ...f.installerDiagnostic,
+        stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] }) });
+    vi.mocked(f.broker.revoke).mockRejectedValue(new Error("private-cleanup-canary"));
+    const error = await f.executor.execute(f.input, new AbortController().signal).catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: expected, retryable, diagnostic: expect.objectContaining(diagnostic),
+      cleanupDiagnostic: expect.objectContaining({ code: "setup_admission_revoke_failed" }) });
+    expect(JSON.stringify(error)).not.toContain("canary");
+  });
+
   it.each(["credential_control_authority_rejected", "credential_control_conflict", "credential_control_invalid",
     "credential_control_limit", "credential_control_storage_unavailable"])(
     "does not retry a proven engine credential-fence %s failure", async code => {

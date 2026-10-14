@@ -1,0 +1,9 @@
+{
+  "id": "cloud-resume-checkpoint-failure-site",
+  "kind": "replay",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pr:499",
+  "symptom": "An interrupted stop left an unsealed predecessor. Resume hid the expected-writer mismatch as command_storage_unavailable and repeated five setup claims.",
+  "rule": "The bug-fix playbook requires repeated real-store handoffs plus an interrupted handoff. Preserve closed checkpoint failure sites through cleanup and stop retrying incomplete or invalid custody; never infer authorization to use an older checkpoint.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-local-command-queue-checkpoint.test.ts apps/desktop/src/engine/__tests__/cloud-local-command-queue-resume.test.ts apps/desktop/src/engine/__tests__/cloud-engine-startup-failure.test.ts && pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/linux-setup-executor.test.ts src/cloud-workspaces/setup-worker.integration.test.ts"
+}

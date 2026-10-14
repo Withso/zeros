@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -90,6 +90,54 @@ async function fixture(legacy = false) {
 }
 
 describe("credential-control custody across verified writer replacement", () => {
+  it.each([false, true])("preserves eight sealed handoffs and identifies an unsealed successor (interrupted=%s)", async interrupted => {
+    const f = await fixture();
+    let scope: CloudAgentBootScope = f.scope;
+    let predecessor = f.predecessor;
+    for (let cycle = 1; cycle <= 8; cycle++) {
+      const next = successor(scope), current = controls(f.file, next, predecessor);
+      const request = { ...f.request, ...next, mutationId: randomUUID(), controlRequestId: randomUUID() };
+      const ack = await current.handle(request);
+      current.confirmAcknowledgement(ack);
+      current.close();
+      await seal(f.file, next, f.root);
+      const restored = await restoreCloudLocalCommandCheckpointLedger({
+        root: f.root, file: f.file, scope: next, expectedWriterEpoch: next.writerEpoch,
+      });
+      cleanup.push(restored.cleanup);
+      expect(restored.predecessor?.scope).toEqual(next);
+      const retained = inventory(f.file);
+      expect(retained.fences).toEqual(expect.arrayContaining(f.before.fences));
+      expect(retained.operations).toEqual(expect.arrayContaining(f.before.operations));
+      expect(retained.floors).toEqual(f.before.floors);
+      scope = next; predecessor = restored.predecessor;
+    }
+    const db = openSqlite(f.file, { readonly: true });
+    try {
+      expect(db.prepare("SELECT count(*) AS n FROM local_command_writer_seals WHERE ack IS NOT NULL").get()).toEqual({ n: 9 });
+      expect(db.prepare("SELECT count(*) AS n FROM local_credential_control_scopes WHERE retired=1").get()).toEqual({ n: 8 });
+    } finally { db.close(); }
+    if (interrupted) {
+      const unsealed = successor(scope), current = controls(f.file, unsealed, predecessor);
+      const ack = await current.handle({ ...f.request, ...unsealed, mutationId: randomUUID(), controlRequestId: randomUUID() });
+      current.confirmAcknowledgement(ack); current.close();
+      const actors = new CloudActorAuthorityRegistry({ scope: unsealed, engineLive: () => true });
+      const queue = new CloudLocalCommandQueue({ file: f.file, scope: unsealed, actors,
+        engineLive: () => true, ready: () => true, history: () => ({ recordSequence: 7, eventSequence: 0 }) });
+      // A provider stop retired this writer before drain/seal/capture. Its FULL
+      // ledger must remain available for an explicitly authorized recovery.
+      queue.close(); actors.dispose();
+      const before = readFileSync(f.file), manifest = readFileSync(path.join(f.root, "manifest.json"));
+      const retained = inventory(f.file);
+      await expect(restoreCloudLocalCommandCheckpointLedger({
+        root: f.root, file: f.file, scope: unsealed, expectedWriterEpoch: unsealed.writerEpoch,
+      })).rejects.toMatchObject({ code: "checkpoint_expected_writer_mismatch" });
+      expect(readFileSync(f.file)).toEqual(before);
+      expect(readFileSync(path.join(f.root, "manifest.json"))).toEqual(manifest);
+      expect(inventory(f.file)).toEqual(retained);
+    }
+  });
+
   it.each(["missing", "rejected"] as const)("refuses real predecessor custody when the injected verifier is %s", async mode => {
     const f = await fixture();
     const verifyPredecessor = mode === "missing" ? null : vi.fn<typeof verifiedCloudLocalCommandPredecessor>((receipt, file, db) => {

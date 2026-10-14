@@ -22,6 +22,16 @@ const bootFailureCategories = [
   "credential_refresh_invalid", "credential_refresh_timeout", "credential_refresh_unchanged", "credential_refresh_rejected", "lock_busy", "execution_limit",
   "customization_changed", "access_denied", "environment_revoked", "environment_runtime_required", "environment_unavailable", "lease_expired",
 ] as const;
+const checkpointFailureCodes = [
+  "checkpoint_directory_metadata", "checkpoint_file_open_flags", "checkpoint_file_metadata", "checkpoint_part_path",
+  "checkpoint_inventory_timeout", "checkpoint_seal_missing", "checkpoint_seal_document", "checkpoint_seal_ack",
+  "checkpoint_writer_scope", "checkpoint_writer_unsealed", "checkpoint_journal_head", "checkpoint_mirror_head",
+  "checkpoint_inventory_hash", "checkpoint_stream_head", "checkpoint_pending_work", "checkpoint_normal_head",
+  "checkpoint_capture_read", "checkpoint_capture_identity", "checkpoint_manifest_size", "checkpoint_manifest_missing",
+  "checkpoint_manifest_identity", "checkpoint_manifest_invalid", "checkpoint_workspace_mismatch", "checkpoint_expected_writer_mismatch",
+  "checkpoint_part_missing", "checkpoint_part_size", "checkpoint_part_hash", "checkpoint_part_identity",
+  "checkpoint_assembled_size", "checkpoint_assembled_hash", "checkpoint_restore_read", "checkpoint_restore_hash", "checkpoint_restore_identity",
+] as const;
 const engineStartup = z.object({
   phase: z.enum(["startup", "registration", "history_restore", "boot_owner",
     "boot_bootstrap", "boot_credentials", "boot_durability", "boot_activate", "boot_install"]),
@@ -37,6 +47,7 @@ const engineStartup = z.object({
     "cloud_agent_credential_required", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required",
     "credential_control_authority_rejected", "credential_control_conflict", "credential_control_limit",
     "credential_control_storage_unavailable", "credential_control_invalid",
+    ...checkpointFailureCodes,
     ...(["admission", "validation"] as const).flatMap(stage => bootFailureCategories.map(category => `cloud_${stage}_${category}` as const))]),
   errno: z.number().int().refine(value => [-1, -2, -5, -13, -16, -17, -20, -21, -23, -24, -28, -30, -40, -104, -110, -111, -122].includes(value)).nullable(),
 }).strict();
@@ -66,7 +77,7 @@ const codes = new Set([
   "provider_response_invalid", "provider_billing_scope_mismatch", "provider_billing_scope_unknown", "provider_bootstrap_unavailable",
   "provider_access_response_invalid", "provider_command_failed", "provider_command_timeout", "provider_command_unavailable",
   "engine_lease_expired", "engine_unavailable", "setup_image_contract_invalid", "setup_helper_failed", "setup_provider_failure",
-  "setup_provider_bootstrap_unavailable", "setup_admission_unavailable", "setup_engine_readiness_failed", "setup_checkpoint_restore_invalid",
+  "setup_provider_bootstrap_unavailable", "setup_admission_unavailable", "setup_engine_readiness_failed", "setup_checkpoint_restore_invalid", "setup_checkpoint_incomplete",
   "setup_checkpoint_restore_unavailable", "setup_repository_revision_invalid", "setup_repository_history_limit", "setup_repository_unavailable", "setup_command_failed",
   "setup_request_invalid", "setup_settings_invalid", "setup_execution_aborted", "setup_readiness_invalid", "setup_helper_response_invalid",
   "setup_helper_response_truncated", "setup_helper_secret_echo", "setup_admission_invalid", "setup_admission_revoke_failed",
