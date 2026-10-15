@@ -75,6 +75,41 @@ describe("retained transcript during transient revalidation", () => {
     expect(h.native.mock.calls.some(([command]) => command === "cloud_transcript_cache_prune")).toBe(false);
   });
 
+  it.each(failures)("preserves $message after a bounded wait when native disk I/O hangs", async error => {
+    vi.useFakeTimers();
+    const gate = deferred<void>();
+    const native = h.native.getMockImplementation()!;
+    h.native.mockImplementation(async (...args) => { await gate.promise; return native(...args); });
+    const painted = vi.fn(), rejected = vi.fn();
+    const result = readCloudTranscriptWithCachedPaint(chatId, async () => { throw error; }, painted).catch(rejected);
+    try {
+      await vi.advanceTimersByTimeAsync(249);
+      expect(rejected).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(rejected).toHaveBeenCalledExactlyOnceWith(error);
+      expect(painted).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      gate.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(painted).not.toHaveBeenCalled();
+      expect(disk.read(owner)?.messages).toEqual(window.messages);
+    } finally {
+      gate.resolve();
+      await result;
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the grace deadline when the disk paint completes promptly", async () => {
+    vi.useFakeTimers();
+    try {
+      const painted = vi.fn();
+      await expect(readCloudTranscriptWithCachedPaint(chatId, async () => { throw failures[0]; }, painted)).rejects.toBe(failures[0]);
+      expect(painted).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messages: window.messages }));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("reopens from the same bounded disk snapshot after repeated projection misses", async () => {
     for (let reopen = 0; reopen < 2; reopen++) {
       setCloudTranscriptCacheOwner(owner.accountId);
