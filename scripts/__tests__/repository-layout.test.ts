@@ -812,6 +812,7 @@ describe("repository layout contracts", () => {
       "README.md",
       "account-pro-operations.md",
       "agent-authentication-and-language-tools.md",
+      "agent-connection-health.md",
       "architecture.md",
       "checkpoint-native-format.md",
       "checkpoint-recovery.md",
