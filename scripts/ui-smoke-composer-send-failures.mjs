@@ -124,6 +124,11 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await expect(toasts).toHaveCount(0);
   check("Ambiguous dispatch shows one review toast and preserves the transcript without restoring a possibly delivered draft", true);
 
+  await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
+  await expect(editor).toBeVisible();
+  const { checkInstantCheckpointNavigation } = await import("./ui-smoke-instant-checkpoint.mjs");
+  await checkInstantCheckpointNavigation({ page, check });
+
   // Production queued refusals retain their editable FIFO prompt outside the
   // transcript. That absence must not hide the chat's active failure banner.
   await page.goto(`${harnessBase}/harness-composer-send-failures.html`);

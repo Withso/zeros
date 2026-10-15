@@ -64,7 +64,7 @@
 //
 // Because off-screen turns are sized by a 240px estimate, a long jump
 // can land slightly off once real layout replaces the estimates. The
-// click handler runs settle passes after the smooth scroll finishes
+// click handler jumps immediately, then settles replaced estimates
 // (scrollend, with a timeout fallback) and nudges the viewport onto
 // the re-measured target; a user wheel/pointer input cancels the
 // pending pass so we never fight the user for the scroll position.
@@ -514,7 +514,7 @@ export const CheckpointRail = memo(function CheckpointRail({
       // clamps the scroll short. Growth only — an oversized leftover
       // spacer from an earlier click shrinks via the maintenance pass
       // instead, because shrinking here could clamp scrollTop and
-      // visibly jump the viewport before the animation starts.
+      // visibly shift the viewport before the requested jump.
       const ensureReachable = (target: number) => {
         const needed = checkpointBottomSpacer(
           target,
@@ -531,35 +531,21 @@ export const CheckpointRail = memo(function CheckpointRail({
       if (target === null) return;
       beginChatScrollNavigation(scrollEl, { target });
 
-      // Pin BEFORE the animation: the clicked checkpoint is the
-      // selected one from this instant, whatever the spy would derive
-      // from the frames flying past. Otherwise clicking the third can
-      // light up the fourth once both fit in the viewport.
+      // Pin before the jump: the clicked checkpoint stays selected even
+      // when another checkpoint also fits in the destination viewport.
       pinnedIdRef.current = id;
       navigatingRef.current = true;
       const idx = checkpointsRef.current.findIndex((c) => c.id === id);
       if (idx !== -1) setActiveIndex(idx);
 
       ensureReachable(target);
-      // Long-jump hop: a target many screens
-      // away must NOT smooth-scroll through the whole transcript — the
-      // ride is long and the flying frames are meaningless. Instead the
-      // viewport teleports (instant; a programmatic scrollTop set fires
-      // no wheel/pointer input, so the pin holds and nothing flashes)
-      // to exactly one screen short of the target on the approach side,
-      // and the smooth scroll animates only that final screen. The user
-      // perceives the same glide-and-settle motion at ANY distance,
-      // with a constant, snappy duration.
-      const distance = target - scrollEl.scrollTop;
-      const hop = scrollEl.clientHeight;
-      if (Math.abs(distance) > hop * 2.5) {
-        scrollEl.scrollTop = distance > 0 ? target - hop : target + hop;
-      }
-      scrollEl.scrollTo({ top: target, behavior: "smooth" });
+      // Navigator selection is a direct jump at any distance. Intermediate
+      // history must not pass through the viewport on the way to the target.
+      scrollEl.scrollTo({ top: target, behavior: "auto" });
 
-      // Settle passes — re-measure once the smooth scroll finishes and
-      // nudge onto the true offset (estimates above the target may have
-      // been replaced by real layout mid-flight). Two passes converge in
+      // Re-measure after layout catches up with the destination and correct
+      // its offset without animation. Estimates above the target may have
+      // been replaced by real layout. Two passes converge in
       // practice; a wheel/pointer input from the user cancels the chain.
       let passes = 0;
       const arm = () => {
@@ -578,10 +564,10 @@ export const CheckpointRail = memo(function CheckpointRail({
           const t = targetTopFor(id);
           if (t === null || Math.abs(scrollEl.scrollTop - t) <= 6) {
             navigatingRef.current = false;
-            // One post-flight spy pass: the maintenance rules this
+            // One final spy pass: the maintenance rules this
             // navigation suspended (stale-spacer collection above all)
             // must get a look at the final resting position — nothing
-            // else re-triggers recompute when the animation ends
+            // else re-triggers recompute when the jump lands
             // exactly on target.
             recompute();
             return;
@@ -592,9 +578,7 @@ export const CheckpointRail = memo(function CheckpointRail({
           ensureReachable(t);
           scrollEl.scrollTo({
             top: t,
-            // First correction stays smooth (it can be a visible hop);
-            // the last one snaps the residual few px invisibly.
-            behavior: passes >= 2 ? "auto" : "smooth",
+            behavior: "auto",
           });
           if (passes < 2) arm();
           else {
@@ -615,8 +599,7 @@ export const CheckpointRail = memo(function CheckpointRail({
           passive: true,
         });
         scrollEl.addEventListener("pointerdown", onUserInput, { once: true });
-        // Fallback for environments without scrollend; generous enough
-        // for the longest smooth animation.
+        // Bound the settle pass in environments without scrollend.
         const timer = window.setTimeout(finish, 700);
         cancelSettleRef.current = onUserInput;
       };
