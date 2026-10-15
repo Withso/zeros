@@ -10,6 +10,7 @@ import { SetupObservationSchema } from "./setup-observation";
 import { RuntimeObservationSchema } from "./runtime-observation";
 import { AdmissionObservationSchema } from "./admission-observation";
 import { TransportObservationSchema } from "./gate0-contract";
+import { NativeProofObservationSchema } from "./native-proof-observation";
 import { CleanupHandoffReferenceSchema, CleanupSummarySchema, MAX_CARRIED_RUNS, type CleanupHandoffReference, type CleanupSummary } from "./cleanup-contract";
 import { cleanupOutcome, requireCleanupCapacity, requireComputeCleanup, summarizeCleanup } from "./cleanup-state";
 import { InfrastructureCoverageSchema, OWNER_SECTION7_COVERAGE } from "./infrastructure-contract";
@@ -24,7 +25,9 @@ export const PrestartRecoverySchema = z.object({ version: z.literal(1), workflow
 export type PrestartRecovery = z.infer<typeof PrestartRecoverySchema>;
 const resultSchema = z.object({ success: z.boolean(), code: z.enum(ERROR_CODES).nullable(), runId: z.string().uuid(),
   setup: SetupObservationSchema.optional(), runtime: RuntimeObservationSchema.optional(), admission: AdmissionObservationSchema.optional(),
-  transport: TransportObservationSchema.optional() }).strict();
+  transport: TransportObservationSchema.optional(), nativeProof: NativeProofObservationSchema.optional() }).strict()
+  .refine(result => !result.nativeProof || !result.success && result.code === "detached_proof_incomplete",
+    "Native diagnostic requires a failed native proof result");
 const legacyPayloadSchema = z.object({ schema: z.literal("zeros.dev-hourly/v1"), execution: ExecutionSchema, deviceId: z.string().uuid(),
   result: resultSchema,
   runs: z.array(RunSchema).max(3), completedAt: z.string().datetime() }).strict();

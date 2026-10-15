@@ -252,6 +252,28 @@ describe("infrastructure-only product lifecycle", () => {
     expect(f.api.cleanup).toHaveBeenCalledOnce();
   });
 
+  it("checkpoints the first native predicate before helper and product cleanup fail", async () => {
+    const f = fixture(), native = f.native.getMockImplementation()!;
+    const failure = new ZerosDevError("detached_proof_incomplete", undefined, undefined, undefined, undefined, undefined, undefined,
+      { predicate: "pty_create_unavailable" });
+    const recorded = () => expect(f.snapshots.at(-1).evidence).toContainEqual(expect.objectContaining({
+      phase: "detached_native_proof", outcome: "failed", code: "detached_proof_incomplete", nativeProof: { predicate: "pty_create_unavailable" },
+    }));
+    f.native.mockImplementation((...args) => {
+      const helper = native(...args); helper.finish.mockRejectedValue(failure);
+      helper.cleanup.mockImplementation(async () => { recorded(); throw new ZerosDevError("command_uncertain"); });
+      return helper;
+    });
+    f.api.cleanup.mockImplementation(async () => { recorded(); throw new ZerosDevError("cleanup_pending"); });
+    await expect(runInfrastructure(f.options as never)).rejects.toBe(failure);
+    recorded();
+    expect(f.output.filter(row => row.outcome === "failed").map(row => [row.phase, row.code])).toEqual([
+      ["detached_native_proof", "detached_proof_incomplete"], ["native_cleanup", "command_uncertain"], ["cleanup", "cleanup_pending"],
+    ]);
+    expect(f.calls.filter(value => value === "native-allocation")).toHaveLength(1);
+    expect(f.handle.run.hourly!.infrastructure!.complete).toBe(false);
+  });
+
   it("checks that selection stayed fixed after native work instead of passing an obsolete target", async () => {
     const f = fixture();
     f.api.verifyComputerRuntime.mockImplementation(async () => {

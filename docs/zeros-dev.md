@@ -622,6 +622,19 @@ the fallback; compute retirement may pass with storage pending and
 Computer pin is rechecked. Phases, UTC endpoints, measured active/detached
 durations and actual transport/retry counters remain in the signed artifact.
 
+Failed `detached_start` and `detached_native_proof` events may carry
+`nativeProof: { predicate }`, from the strict allowlist in
+`scripts/zeros-dev/native-proof-observation.ts`. It distinguishes unavailable
+PTY admission, wrong reattach/cwd, exit, replay metadata, row identity/sequence,
+heartbeat/duration and file checks without raw output or provider text. The
+first predicate is saved before cleanup and retained in the signed/public
+result through later cleanup or logout failures. Proof requirements, original
+deadlines and no-restart behavior are unchanged. `pty_create_unavailable` means
+the bridge returned no usable reply; it does not identify the reason. An
+unchanged boot/writer does not exclude a checkpoint admission fence. Correlate
+the predicate with lifecycle/checkpoint evidence. Legacy signed receipts remain
+readable without defaults or rewrites; absent diagnostics remain unavailable.
+
 The distinct `zeros.dev-infrastructure/v1` artifact and
 `zeros.dev-infrastructure-result/v1` result require these coverage values:
 `agents`, `accountModels`, `agentHistory` and `detachedAgent` are all
