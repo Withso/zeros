@@ -22,6 +22,21 @@ function api(overrides = {}) {
   return { get, marker };
 }
 describe("D7 cloud merge gate", () => {
+  it("keeps the exact skipped schedule expression not-live through the concrete snapshot reader", async () => {
+    const skipped = { ...snapshot.latest, conclusion: "skipped" };
+    const f = { get: vi.fn(async (url: string) => url.includes("/jobs")
+      ? { total_count: 1, jobs: [{ name: "inputs.profile == 'gate0' && 'gate0' || 'lifecycle'", status: "completed", conclusion: "skipped", run_attempt: 1, steps: [] }] }
+      : url.includes("status=success") ? { total_count: 0, workflow_runs: [] }
+      : { total_count: 1, workflow_runs: [skipped] }) };
+    expect(await evaluateHourly(f, { cloudRequired: true, number: 123, head })).toEqual({ allowed: true, alert: false, code: "hourly_not_live", activated: false });
+    expect(f.get.mock.calls.some(([url]) => url.includes("/pulls/"))).toBe(false);
+  });
+  it("cannot use an owner repair marker when the trusted snapshot reader throws", async () => {
+    const f = { get: vi.fn(async (_url: string) => { throw new Error("zeros_dev_artifact_invalid"); }) };
+    expect(await evaluateHourly(f, { cloudRequired: true, number: 123, head })).toMatchObject({ allowed: false, code: "hourly_unavailable" });
+    expect(f.get).toHaveBeenCalledTimes(1);
+    expect(f.get.mock.calls[0]?.[0]).toContain("/actions/workflows/zeros-dev-e2e.yml/runs?");
+  });
   it("uses a closed incident marker without widening the Preflight bot's writer contract", () => {
     const marker = createHourlyRepairMarker(snapshot).value;
     const ajv = new Ajv({ strict: false });
