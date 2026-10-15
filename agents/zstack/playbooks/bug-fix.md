@@ -78,6 +78,12 @@
    Inventory independent session-lock holders and hold them concurrently across
    provider barriers; their callbacks and an unrelated worker transaction must
    still progress. Count every lock pool in steady and rollout surge budgets.
+   For finite compute leases, distinguish unavailable DB proof from revoked
+   authority. Terminate the real connection before and after COMMIT, exhaust
+   pool capacity and transaction retries, then re-observe the same allocation,
+   reservation, generation and claim. Preserve existing prepaid runway only;
+   never replay provider I/O or ambiguous funding. Keep monotonic DB-time bounds,
+   closed throw sites, deadline stops and permanent-corruption controls covered.
    For renewal telemetry, test real success, refusal, concurrency and retirement
    paths. Use a separate monotonic clock, closed labels and bounded aggregates;
    never let logging alter authority outcomes or add idle timers. State exactly

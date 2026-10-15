@@ -874,3 +874,36 @@ matrix on an adopted qualified v4 pin before release claims.
 - Provider-validation scripts stay outside shipping application graphs.
 - Add a separate execution-coordinator app only if it becomes independently
   built, deployed, scaled, and operated.
+
+### Temporary control-plane unavailability and finite compute
+
+A running managed allocation retains its already funded provider deadline when
+known transient database failures interrupt reconciliation. Connection loss,
+acquisition exhaustion, PostgreSQL transaction rollback exhaustion and bounded
+lock/statement timeouts classify as `control_plane_unavailable`. This is not
+permission to renew compute, accept new work or retry an ambiguous transaction.
+Only confirmed rollback outcomes (`40001`/`40P01`) receive the existing DB-only
+transaction retry; connection loss may have followed a committed write.
+
+Each new reconciliation observes the same allocation, reservation, generation
+and worker claim before writing. Existing cumulative meter/reservation keys
+make a committed result observable without double charging or replaying a
+provider create, start or renewal. An unavailable authority re-read is unknown;
+a positive revocation or permanent ledger failure still closes authority.
+
+Retry delay remains bounded by the earlier of `funded_until` and
+`provider_expires_at`, reserving the existing five-minute checkpoint window and
+15-second stop margin. A missing DB clock uses the claim's observed server time
+plus monotonic elapsed time, conservatively including the claim round trip.
+A total DB outage cannot commit a new schedule or checkpoint request; the
+provider's original finite deadline remains the final limit, and no funds or
+provider TTL are extended. Once the checkpoint margin is reached, an exact
+claim/generation stop reports control-plane unavailability rather than an
+unspecified safety failure. The stored reason enum stays compatible; the closed
+stop class and compute throw site are additive diagnostic JSON, without raw
+exception text, queries, paths or customer content.
+
+This applies to CP-managed cloud allocations only. Local Personal and
+organization-local engines do not call these services; their offline lifecycle
+and owner switching remain unchanged. It does not change authority tokens,
+WorkOS sessions, idle policy, provider pricing or the native process model.

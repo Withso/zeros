@@ -113,7 +113,8 @@ export async function retainCloudDiagnosticTx(tx: Tx, scope: Scope, value: Cloud
         stop_initiated_at=CASE WHEN cloud_workspace_diagnostic_incidents.recovered_at IS NULL
           THEN coalesce(cloud_workspace_diagnostic_incidents.stop_initiated_at,EXCLUDED.stop_initiated_at) ELSE EXCLUDED.stop_initiated_at END,
         events=$9,execution_fence=$6,recovered_at=NULL,recovered_generation=NULL RETURNING id`,
-    [scope.workspaceId,scope.organizationId,scope.generation,scope.operationKind,scope.operationId,scope.executionFence??null,cloudStopReason(diagnostic.code).code,JSON.stringify(diagnostic),JSON.stringify(events),
+    [scope.workspaceId,scope.organizationId,scope.generation,scope.operationKind,scope.operationId,scope.executionFence??null,
+      diagnostic.code === "control_plane_unavailable" ? "safety_failure" : cloudStopReason(diagnostic.code).code,JSON.stringify(diagnostic),JSON.stringify(events),
       diagnostic.decision === "checkpoint" || diagnostic.decision === "direct_stop"])).rows[0]!;
     await enforceCaps(tx);
     return row.id;
@@ -154,7 +155,7 @@ export async function tryRetainCloudDiagnosticTx(tx: Tx, scope: Scope, value: Cl
  * diagnostic lock cannot prevent finite-lease enforcement. */
 export async function findInitiatingCloudStopTx(tx: Tx, scope: {
   workspaceId: string; organizationId: string; generation: number; leaseId: string; workspaceStopping: boolean;
-}): Promise<{ id: string; code: string; stopReason?: "provider_outage" } | null> {
+}): Promise<{ id: string; code: string; stopReason?: "provider_outage" | "control_plane_unavailable" } | null> {
   return tryCloudDiagnosticTx(tx, async () => {
     const row = (await tx.query<{id:string;code:string;stop_reason:string|null}>(`
     SELECT incident.id,incident.terminal_cause->>'code' AS code,incident.terminal_cause->>'stopReason' AS stop_reason
@@ -167,7 +168,8 @@ export async function findInitiatingCloudStopTx(tx: Tx, scope: {
       AND ($5 OR (incident.operation_kind='compute' AND incident.operation_id=$4))
     ORDER BY incident.stop_initiated_at,incident.id LIMIT 1`,
   [scope.workspaceId,scope.organizationId,scope.generation,scope.leaseId,scope.workspaceStopping])).rows[0];
-    return row ? { id: row.id, code: row.code, ...(row.stop_reason === "provider_outage" ? { stopReason: "provider_outage" as const } : {}) } : null;
+    return row ? { id: row.id, code: row.code,
+      ...(row.stop_reason === "provider_outage" || row.stop_reason === "control_plane_unavailable" ? { stopReason: row.stop_reason } : {}) } : null;
   });
 }
 
