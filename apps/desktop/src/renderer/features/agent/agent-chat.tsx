@@ -17,6 +17,7 @@ import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-s
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import { transcriptParentId } from "./transcript-parent";
 import { useCloudTranscriptLatency, useCloudTranscriptLoading } from "./use-cloud-transcript-latency";
+import { useTranscriptHistoryStatus } from "./use-transcript-history-status";
 import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { hasTranscriptPresentation } from "./transcript-retention";
 import { startCloudSubmitSpan } from "../../state/cloud-workspace-latency";
@@ -1954,22 +1955,16 @@ export function AgentChat({
     session.messages.length === 0 &&
     !session.error &&
     !!chatThread?.folder;
-  const [showTranscriptLoading, setShowTranscriptLoading] = useState(false);
-  useEffect(() => {
-    if (!surfaceActive || session.transcriptState === "resident" || transcriptPaintReady) {
-      setShowTranscriptLoading(false);
-      return;
-    }
-    // Genuine cold DB load. Delay the indicator so normal local reads do not
-    // flash; this is not masking a waterfall—the retained deck already warms
-    // likely destinations and the composer stays intact while the exact read
-    // completes.
-    const timer = window.setTimeout(() => setShowTranscriptLoading(true), 180);
-    return () => window.clearTimeout(timer);
-  }, [chatId, surfaceActive, session.transcriptState, transcriptPaintReady]);
-  const transcriptCatchupVisible = surfaceActive && transcriptCatchingUp;
-  const transcriptLoadingVisible = showTranscriptLoading && surfaceActive && !transcriptCatchingUp && !transcriptPaintReady && session.transcriptState !== "resident";
-  useCloudTranscriptLoading(chatThread?.folder ?? session.cwd, chatId, transcriptLoadingVisible || transcriptCatchupVisible && !transcriptPaintReady);
+  const transcriptHistoryStatus = useTranscriptHistoryStatus({
+    identity: JSON.stringify([chatThread?.folder ?? session.cwd, chatId]),
+    active: surfaceActive,
+    hasMessages: session.messages.length > 0,
+    hasTranscript: session.hasTranscript,
+    resident: session.transcriptState === "resident",
+    incomplete: transcriptCatchingUp,
+  });
+  const transcriptLoadingVisible = transcriptHistoryStatus === "loading";
+  useCloudTranscriptLoading(chatThread?.folder ?? session.cwd, chatId, transcriptLoadingVisible);
   const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
     useChatTranscriptSummaries(
       chatThread?.folder,
@@ -4691,13 +4686,6 @@ export function AgentChat({
         </header>
       )}
 
-      {transcriptCatchupVisible && (
-        <div className="text-muted-fg mx-auto flex w-full max-w-[856px] shrink-0 items-center gap-2 px-7 py-2 text-xs">
-          <ZerosSpinner size={14} label="Catching up conversation" className="shrink-0" />
-          <span aria-hidden="true">Catching up conversation…</span>
-        </div>
-      )}
-
       {/* Agent errors surface only through the toast surface (with agent name).
           Reset session lives in the settings/menu surface so an inline error
           banner does not interrupt transcript flow. The useEffect higher up fires
@@ -4790,6 +4778,14 @@ export function AgentChat({
                   className="shrink-0"
                 />
                 <span aria-hidden="true">Loading conversation…</span>
+              </div>
+            )}
+            {transcriptHistoryStatus === "unavailable" && (
+              <div role="status" aria-label="Chat history unavailable" className="text-fg3 flex items-center gap-2 py-2 text-xs">
+                <span>Chat history isn’t available yet.</span>
+                <Button variant="ghost" size="sm" onClick={() => { void session.hydrateChat().catch(() => {}); }}>
+                  Retry
+                </Button>
               </div>
             )}
             {/* Empty transcript → state what this workspace IS (created /

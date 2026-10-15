@@ -14,8 +14,11 @@ export async function checkCloudTranscriptPaint({ page, check, screenshotDir }) 
     await page.evaluate(async phase => {
       const { useSessionsStore } = await import("/apps/desktop/src/renderer/features/agent/sessions-store.ts");
       window.composerSendFailureFixture.publish({ status: phase });
-      useSessionsStore.getState().patchSession("composer-chat-0", { messages: [], hasTranscript: true,
-        transcriptState: "loading", transcriptPresentation: null });
+      const store = useSessionsStore.getState();
+      // Seed the known-history flag explicitly. patchSession derives it from
+      // message mutations, so an empty array on a new slot cannot set it.
+      store.setSession("composer-chat-0", { ...store.sessions["composer-chat-0"],
+        messages: [], hasTranscript: true, transcriptState: "loading", transcriptPresentation: null });
       useSessionsStore.getState().setScrollPosition("composer-chat-0", phase === "setting_up"
         ? { top: 0, anchorId: "cached-100", anchorOffset: 0, atBottom: false }
         : { top: 0, atBottom: true });
@@ -93,5 +96,7 @@ export async function checkCloudTranscriptPaint({ page, check, screenshotDir }) 
   await expect(loading).toBeVisible();
   expect(await page.evaluate(() => window.composerSendFailureFixture.sends)).toBe(0);
   check("Cloud cache misses/invalidation stay truthful and cached rows never cross either Local placement", true);
-  await page.clock.pauseAt(new Date());
+  // Earlier deterministic scenarios may have advanced the browser clock past
+  // wall time. Pause at its next second, never rewind it to the host clock.
+  await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1_000);
 }
