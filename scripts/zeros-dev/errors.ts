@@ -2,6 +2,7 @@ import { SetupObservationSchema, type SetupObservation } from "./setup-observati
 import { RuntimeObservationSchema, type RuntimeObservation } from "./runtime-observation";
 import { AdmissionObservationSchema, type AdmissionObservation } from "./admission-observation";
 import { TransportObservationSchema, type TransportObservation } from "./gate0-contract";
+import { NativeProofObservationSchema, type NativeProofObservation } from "./native-proof-observation";
 
 /** Only these codes may leave the CLI. Provider errors, bodies and stack traces
  * are never evidence; neither are arbitrary error.code/name/message values. */
@@ -25,8 +26,9 @@ export class ZerosDevError extends Error {
   readonly runtime?: RuntimeObservation;
   readonly admission?: AdmissionObservation;
   readonly transport?: TransportObservation;
+  readonly nativeProof?: NativeProofObservation;
   constructor(readonly code: ErrorCode, readonly status?: number, readonly retryAfterMs?: number, setup?: SetupObservation,
-    runtime?: RuntimeObservation, admission?: AdmissionObservation, transport?: TransportObservation) {
+    runtime?: RuntimeObservation, admission?: AdmissionObservation, transport?: TransportObservation, nativeProof?: NativeProofObservation) {
     super(`zeros_dev_${code}`);
     const parsed = SetupObservationSchema.safeParse(setup);
     if (parsed.success) this.setup = parsed.data;
@@ -36,15 +38,19 @@ export class ZerosDevError extends Error {
     if (retry.success) this.admission = retry.data;
     const observed = TransportObservationSchema.safeParse(transport);
     if (observed.success) this.transport = observed.data;
+    const native = NativeProofObservationSchema.safeParse(nativeProof);
+    if (code === "detached_proof_incomplete" && native.success) this.nativeProof = native.data;
   }
 }
-export function diagnosticEvidence(error: unknown): { setup?: SetupObservation; runtime?: RuntimeObservation; admission?: AdmissionObservation; transport?: TransportObservation } {
+export function diagnosticEvidence(error: unknown): { setup?: SetupObservation; runtime?: RuntimeObservation; admission?: AdmissionObservation; transport?: TransportObservation; nativeProof?: NativeProofObservation } {
   if (!(error instanceof ZerosDevError)) return {};
   const runtime = RuntimeObservationSchema.safeParse(error.runtime);
   const admission = AdmissionObservationSchema.safeParse(error.admission);
   const transport = TransportObservationSchema.safeParse(error.transport);
+  const native = NativeProofObservationSchema.safeParse(error.nativeProof);
   return { ...setupEvidence(error), ...(runtime.success ? { runtime: runtime.data } : {}),
-    ...(admission.success ? { admission: admission.data } : {}), ...(transport.success ? { transport: transport.data } : {}) };
+    ...(admission.success ? { admission: admission.data } : {}), ...(transport.success ? { transport: transport.data } : {}),
+    ...(error.code === "detached_proof_incomplete" && native.success ? { nativeProof: native.data } : {}) };
 }
 export function setupEvidence(error: unknown): { setup?: SetupObservation } {
   if (!(error instanceof ZerosDevError)) return {};

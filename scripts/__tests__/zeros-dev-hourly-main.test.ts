@@ -150,6 +150,26 @@ async function actionsFixture() {
 }
 
 describe("Actions orchestration through signed files", () => {
+  it("keeps the first native predicate in the public result and artifact when logout also fails", async () => {
+    const f = await actionsFixture();
+    const env = { ...f.env, ZEROS_DEV_PROFILE: "infrastructure",
+      ZEROS_DEV_E2E_PLAN: JSON.stringify({ ...JSON.parse(f.env.ZEROS_DEV_E2E_PLAN), profile: "infrastructure", prestartRecovery: PRESTART_RECOVERY }) };
+    const nativeProof = { predicate: "pty_create_unavailable" as const };
+    const failure = new ZerosDevError("detached_proof_incomplete", undefined, undefined, undefined, undefined, undefined, undefined, nativeProof);
+    Object.assign(f.services.session, { prepareLaunchAuth: vi.fn() });
+    f.services.session.logout.mockRejectedValue(new Error("synthetic-private-logout"));
+    const infrastructure = async (options: any) => {
+      await options.evidence.step("detached_native_proof", async () => { throw failure; });
+    };
+    expect(await runActions(env, { ...f.options, infrastructure } as never)).toBe(1);
+    const artifact = await f.checkpoint();
+    expect(artifact.payload.result).toMatchObject({ success: false, code: "detached_proof_incomplete", nativeProof });
+    expect(artifact.payload.runs[0].evidence).toContainEqual(expect.objectContaining({ phase: "detached_native_proof", nativeProof }));
+    expect(f.output).toContainEqual(expect.objectContaining({ schema: "zeros.dev-infrastructure-result/v1",
+      success: false, code: "detached_proof_incomplete", nativeProof }));
+    expect(f.services.session.logout).toHaveBeenCalledOnce();
+    expect(JSON.stringify([artifact, ...f.output])).not.toContain("synthetic-private");
+  });
   it("checkpoints infrastructure separately before any native work and never installs agent material", async () => {
     const f = await actionsFixture();
     const launchAuth = { observedAt: "2026-10-15T00:00:00.000Z", expiresAt: "2026-10-15T00:05:00.000Z", remainingMs: 300_000 };
