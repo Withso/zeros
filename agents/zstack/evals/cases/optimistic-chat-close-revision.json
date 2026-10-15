@@ -1,0 +1,9 @@
+{
+  "id": "optimistic-chat-close-revision",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pending",
+  "symptom": "A delayed pre-close chat snapshot reopened an optimistically archived tab because closing did not advance its metadata timestamp or a late title/settings/touch callback lowered it again.",
+  "rule": "agents/zstack/changes/optimistic-chat-close-revision.md: replay held snapshots through the real reducer and reconciliation for close/reopen, including clock skew and Local/cloud owners.",
+  "check": "pnpm test:git apps/desktop/src/renderer/state/__tests__/chat-close-reconciliation.test.ts apps/desktop/src/renderer/state/__tests__/chat-reconciliation.test.ts apps/desktop/src/renderer/state/__tests__/chat-selection-invariant.test.ts"
+}
