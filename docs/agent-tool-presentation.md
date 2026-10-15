@@ -223,10 +223,29 @@ metadata. Passive initialization never starts a provider process.
 After a turn, including a model refusal, the renderer performs a detached
 metadata read keyed by account generation, workspace, chat, execution and bridge.
 A cloud read joins bounded discovery and rechecks lifetime after waiting. Cursor
-native startup stays independent of catalog completion. Late responses cannot
+ID-only startup stays independent of catalog completion. Grok registry selections
+join that same bounded discovery before create/resume: the account's complete
+default variant supplies required parameters, and explicit empty schemas never
+inherit guessed effort/Fast fields. Recheck the original Local account or cloud
+lifetime after the wait. A missing registry schema marks the live model unavailable
+and refuses the attempt with an action to
+choose another model; it neither guesses parameters nor swaps the requested
+Grok model. Late responses cannot
 replace a newer session or metadata snapshot. This read neither authorizes a
 send nor changes a saved model; cloud exact-model refusal remains terminal for
-that attempt. The existing Local Cursor fallback policy is unchanged.
+that attempt. The legacy Local ID-only fallback policy is unchanged. Execution
+rejection makes that account's model unselectable during refresh, even if the
+registry still lists it. Unavailable menu rows retain their saved identity,
+explain the reason, and offer a view of eligible choices without changing the
+selection or favorite.
+
+Agent error toasts report a new failure observed by the active exact chat. Mount,
+reveal, unchanged replay and owner changes do not notify historical state. Keep
+the failure in the transcript/authentication notice; distinct new failures still
+notify, even with the same short label. Typed ownership cancellation stays quiet
+and never authorizes a resend. A cloud authentication failure invalidates only
+that workspace's cloud metadata; Local connection probes stay Local. Do not copy
+provider failure prose into console logs from a render effect.
 
 Cloud Codex emits payload-free `cloud_stage` diagnostics for `initialize`,
 `executor_start`, `provider_login`, `environment_add`, `environment_info` and

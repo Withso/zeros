@@ -245,9 +245,9 @@ import {
   loadAgents,
   refreshAgents,
 } from "./agents-cache";
-import { useWorkspaceAgents } from "./workspace-agent-registry";
+import { invalidateCloudAgentRegistry, useWorkspaceAgents } from "./workspace-agent-registry";
 import { isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
-import { cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings, requestUserSettingsSection } from "../settings/settings-navigation";
 import { isSubscriptionProvider } from "../settings/subscription-connection";
@@ -3177,26 +3177,27 @@ export function AgentChat({
     (session.status === "failed" || session.status === "auth-required") &&
     !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait?.state === "waiting");
 
-  // 01u (2026-05-20): error feedback moved to the toast surface.
-  // 01w (2026-05-20): toast now leads with the agent name so the
-  // user sees "Claude Code: …" instead of "Error: …". Also fires the
-  // session.failure.message as the description for context (e.g.
-  // "CLI exited with code 143 signal=null"). Inline error banners are gone;
-  // reset is a settings/menu affordance.
-  const lastErrorLabelRef = useRef<string | null>(null);
+  // Toasts describe a new failure observed by this active chat, never a
+  // historical snapshot on mount/reveal. Seed from the current state and
+  // advance while hidden too; the transcript/auth notice retains old errors.
+  const lastErrorObservationRef = useRef({ chatId, folder: chatThread?.folder,
+    account: cloudCatalogGeneration(), agentId: session.agentId, failure: session.failure,
+    error: session.error, status: session.status });
   useEffect(() => {
-    if (!interactive) {
-      lastErrorLabelRef.current = null;
-      return;
-    }
+    const previous = lastErrorObservationRef.current;
+    const current = { chatId, folder: chatThread?.folder, account: cloudCatalogGeneration(),
+      agentId: session.agentId, failure: session.failure, error: session.error, status: session.status };
+    lastErrorObservationRef.current = current;
+    if (!interactive || !isErrorState || previous.chatId !== current.chatId || previous.folder !== current.folder ||
+        previous.account !== current.account || previous.agentId !== current.agentId) return;
+    const sameFailure = previous.failure === current.failure || !!previous.failure && !!current.failure &&
+      (["kind", "message", "stage", "agentId", "advice"] as const).every(key => previous.failure![key] === current.failure![key]) &&
+      previous.failure.exit?.code === current.failure.exit?.code && previous.failure.exit?.signal === current.failure.exit?.signal &&
+      previous.failure.exit?.stderrTail === current.failure.exit?.stderrTail;
+    if (sameFailure && previous.error === current.error && previous.status === current.status) return;
     if (cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) return;
-    if (!isErrorState) {
-      lastErrorLabelRef.current = null;
-      return;
-    }
+    if (session.failure?.kind === "lifecycle-superseded" || session.failure?.kind === "transport-closed") return;
     const label = labelForFailure(session.failure, session.status);
-    if (lastErrorLabelRef.current === label) return;
-    lastErrorLabelRef.current = label;
     const agentLabel = session.agentName ?? session.agentId ?? "Agent";
     const detail = session.failure?.message ?? session.error ?? undefined;
     // Defense in depth — even if a future code path forgets to route a
@@ -3207,12 +3208,8 @@ export function AgentChat({
     if (isTransportShaped(detail)) {
       return;
     }
-    // The technical detail is for logs, never for the toast (UI-indication
-    // consolidation, 2026-07-10): the user can't act on "cursor-sdk
-    // newSession failed: …exited unexpectedly…" — they only need to know
-    // WHICH agent errored. Full detail stays greppable here + in the engine
-    // log for support/diagnosis.
-    if (detail) console.warn(`[agent] ${agentLabel} failure: ${detail}`);
+    // Technical provider text stays in the failure/transcript boundary. Do not
+    // copy arbitrary messages into console output on navigation or revalidation.
     // Authentication uses the product notice. Other prompt failures have a
     // turn footer; initialization failures and actionable advice use a toast.
     const isAuth =
@@ -3237,12 +3234,14 @@ export function AgentChat({
     // protocol, transport, or Design-protection failure is not authentication
     // evidence and must not fan out utility probes across every provider.
     if (isAuth) {
-      invalidateAgentsCache();
-      void refreshAgents((force) => agentSessions.listAgents(force)).catch(
-        () => {
-          /* surfaced by the cache via toast */
-        },
-      );
+      if (current.folder && isCloudWorkspace(current.folder)) {
+        invalidateCloudAgentRegistry(current.folder);
+      } else {
+        invalidateAgentsCache();
+        void refreshAgents((force) => agentSessions.listAgents(force)).catch(() => {
+          /* Retain the last confirmed Local registry until it can refresh. */
+        });
+      }
     }
   }, [
     isErrorState,

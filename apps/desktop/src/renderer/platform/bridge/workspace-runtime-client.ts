@@ -301,7 +301,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       await Promise.resolve();
     }
     if (epoch !== this.accountEpoch || this.closed)
-      throw new Error("Cloud account changed while loading conversations");
+      throw Object.assign(new Error("Cloud account changed while loading conversations"), { code: "WORKSPACE_READ_SUPERSEDED" });
     if (!local?.result && !hasCloud() && !cloudOnly)
       throw local?.error ?? new Error("No confirmed workspace snapshot is available");
     const result = local?.result ?? {};

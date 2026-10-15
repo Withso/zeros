@@ -1,0 +1,9 @@
+{
+  "id": "agent-error-notification-ownership",
+  "kind": "replay",
+  "area": "desktop-cloud-ui-state",
+  "fixedBy": "pending",
+  "symptom": "Historical failures retoast on chat mount/reveal, distinct same-label failures disappear, and account cancellation or cloud authentication can surface through the wrong Local boundary.",
+  "rule": "Observe new exact-chat failure transitions, preserve historical errors without replaying notifications, classify account-retired reads as superseded, and refresh only the owning placement. See docs/agent-tool-presentation.md and the agent-error-notification-ownership change fragment.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/agent/__tests__/agent-error-notifications.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-composer-wake.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/workspace-runtime-client.test.ts"
+}

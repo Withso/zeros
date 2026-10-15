@@ -11,7 +11,7 @@ import { cloudNativeProviderEnvironment } from "../../../containment/cloud-nativ
 import { CloudExecutionBoundary, isCloudPreparedBoundary } from "../../../containment/cloud-execution-boundary";
 import * as workerConfiguration from "../../../containment/cloud-worker-config";
 import { portableCloudWorkloads } from "../../../containment/__tests__/helpers/portable-cloud-custody";
-import { cloudProviderExecution, cloudBootTurnReservation, type CloudBootNativeAuthority } from "../../../cloud-provider-execution";
+import { cloudProviderExecution, cloudBootTurnReservation, cloudExecutionLifetime, type CloudBootNativeAuthority, type CloudProviderExecution } from "../../../cloud-provider-execution";
 import { testCloudBootFixture } from "../../../__tests__/helpers/test-cloud-boot";
 
 const native = vi.hoisted(() => ({ prepareBoot: vi.fn(), runtime: vi.fn(), create: vi.fn(), resume: vi.fn(), send: vi.fn(), models: vi.fn() }));
@@ -40,7 +40,10 @@ beforeEach(() => {
   native.runtime.mockReset().mockImplementation(() => ({ module: { Agent: { create: native.create, resume: native.resume, list: vi.fn(async () => ({ items: [] })) },
     Cursor: { models: { list: native.models } }, platform: { prewarm: vi.fn(async () => ({})) } }, dispose: async () => {} }));
 });
-async function setup(operation: "new" | "load" = "new") {
+async function setup(operation: "new" | "load" = "new", selection: {
+  model?: string;
+  beforeSession?: (execution: CloudProviderExecution) => void;
+} = {}) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "zeros-cursor-boot-"))); cleanups.push(() => rm(root, { recursive: true, force: true }));
   // Genuine Host scopes and physical HOME; deployment/cgroup admission is an
   // explicit portable fixture, not a native kernel qualification.
@@ -57,7 +60,7 @@ async function setup(operation: "new" | "load" = "new") {
     boundary = new CloudExecutionBoundary({ projectRoot: root, configuration, workloads });
   } finally { guard.mockRestore(); }
   cleanups.push(async () => { await workloads.drain(workloads.fence()); });
-  const f = await testCloudBootFixture(root); cleanups.push(f.close);
+  const f = await testCloudBootFixture(root, "cursor", selection.model); cleanups.push(f.close);
   native.prepareBoot.mockImplementation(async (authority: CloudBootNativeAuthority, domain: PreparedBoundary) => {
     authority.lifetime.assertLive();
     const nativeHome = await createCloudNativeHome({ dataRoot: root, conversationId: f.input.conversationId,
@@ -75,6 +78,7 @@ async function setup(operation: "new" | "load" = "new") {
     emit: { onSessionUpdate() {}, onPermissionRequest() {}, onQuestionRequest() {}, onAgentStderr() {}, onAgentExit() {} } };
   const adapter = new CursorSdkAdapter(ctx); cleanups.push(() => adapter.dispose());
   const options = { executionId: f.selection.executionId, cwd: root, env: result.env, executionBoundary: result.boundary };
+  selection.beforeSession?.(execution);
   if (operation === "new") await adapter.newSession(options); else await adapter.loadSession({ ...options, sessionId: "native-existing" });
   const writes = vi.fn();
   native.send.mockImplementation(async (_message, opts: CursorSdkSendOptions) => {
@@ -85,6 +89,22 @@ async function setup(operation: "new" | "load" = "new") {
 }
 const blocks = [{ type: "text" as const, text: "Synthetic" }];
 describe("Cursor original boot reservation across native preparation", () => {
+  it.each(["new", "load"] as const)("does not %s from a late registry reply after its original cloud authority retires", async operation => {
+    let release!: (models: unknown[]) => void;
+    let started!: () => void;
+    const discovering = new Promise<void>(resolve => { started = resolve; });
+    native.models.mockImplementationOnce(() => new Promise(resolve => { release = resolve; started(); }));
+    let execution!: CloudProviderExecution;
+    const pending = setup(operation, { model: "grok-4.7", beforeSession: value => { execution = value; } });
+    void pending.catch(() => {});
+    await discovering;
+    await cloudExecutionLifetime(execution).close();
+    release([{ id: "grok-4.7", parameters: [] }]);
+    await expect(pending).rejects.toHaveProperty("code", "cloud_validation_lifecycle_superseded");
+    expect(native.create).not.toHaveBeenCalled();
+    expect(native.resume).not.toHaveBeenCalled();
+    expect(native.send).not.toHaveBeenCalled();
+  });
   it.each([false, true])("joins a rejected model refresh without replay and rechecks disposal (dispose=%s)", async dispose => {
     const f = await setup();
     await f.adapter.initializeSession(f.sessionId);
