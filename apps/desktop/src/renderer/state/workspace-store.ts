@@ -860,6 +860,12 @@ function retainBrowserTabsForConversations(
 // ──────────────────────────────────────────────────────────
 // Reducer (moved verbatim from store.tsx)
 // ──────────────────────────────────────────────────────────
+function nextChatUpdatedAt(chat: ChatThread, now = Date.now()): number {
+  // Every local metadata writer must retain an optimistic edit's ordering,
+  // including late title/session callbacks while the device clock is behind.
+  return Math.max(now, Number.isFinite(chat.updatedAt) ? chat.updatedAt + 1 : 0);
+}
+
 function reducer(state: WorkspaceState, action: Action): WorkspaceState {
   switch (action.type) {
     case "SET_BROWSER_PICKER_SELECTION":
@@ -1511,6 +1517,10 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       // archive paths that don't run that handler.
       const target = state.chats.find((c) => c.id === action.id);
       if (!target || target.archived) return state;
+      // Closing is a local metadata edit. Advance past the observed row even
+      // when the device clock lags the engine, so an in-flight pre-close
+      // snapshot cannot win a timestamp tie and reopen the optimistic tab.
+      const updatedAt = nextChatUpdatedAt(target);
       const wasActive = state.activeChatId === action.id;
       // When the ACTIVE chat is archived, hand the selection to the most-
       // recently-touched live sibling in the SAME workspace instead of
@@ -1533,7 +1543,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       return {
         ...state,
         chats: state.chats.map((c) =>
-          c.id === action.id ? { ...c, archived: true, pinned: false } : c,
+          c.id === action.id ? { ...c, archived: true, pinned: false, updatedAt } : c,
         ),
         activeChatId: wasActive ? replacementId : state.activeChatId,
         newAgentFolder:
@@ -1564,7 +1574,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
                 ...c,
                 archived: false,
                 createdAt: reopenedAt,
-                updatedAt: reopenedAt,
+                updatedAt: nextChatUpdatedAt(target, reopenedAt),
               }
             : c,
         ),
@@ -1575,7 +1585,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         ...state,
         chats: state.chats.map((c) =>
           c.id === action.id
-            ? { ...c, title: action.title, updatedAt: Date.now() }
+            ? { ...c, title: action.title, updatedAt: nextChatUpdatedAt(c) }
             : c,
         ),
       };
@@ -1584,7 +1594,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         ...state,
         chats: state.chats.map((c) =>
           c.id === action.id && c.title === action.expectedTitle
-            ? { ...c, title: action.title, updatedAt: Date.now() }
+            ? { ...c, title: action.title, updatedAt: nextChatUpdatedAt(c) }
             : c,
         ),
       };
@@ -1654,7 +1664,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
                   providerMetadata,
                 }
               : {}),
-            updatedAt: Date.now(),
+            updatedAt: nextChatUpdatedAt(c),
           };
         }),
       };
@@ -1662,7 +1672,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       return {
         ...state,
         chats: state.chats.map((c) =>
-          c.id === action.id ? { ...c, updatedAt: Date.now() } : c,
+          c.id === action.id ? { ...c, updatedAt: nextChatUpdatedAt(c) } : c,
         ),
       };
     case "TOGGLE_PIN_CHAT":
