@@ -1,0 +1,9 @@
+{
+  "id": "infrastructure-connect-phase-lifetime",
+  "kind": "scenario",
+  "area": "release-dev-environment",
+  "fixedBy": "pr:522",
+  "symptom": "A completed connect-phase timeout remained attached to an admitted runtime and killed valid later file or native-task work.",
+  "rule": "The connect-lifetime lesson requires deterministic actual-client coverage of both pending cancellation and successful admission followed by old phase expiry; preserve the overall lifetime and retire late results.",
+  "check": "pnpm test:git scripts/__tests__/zeros-dev-runtime.test.ts scripts/__tests__/zeros-dev-infrastructure.test.ts"
+}

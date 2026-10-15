@@ -12,10 +12,16 @@ import { AdmissionObservationSchema } from "./admission-observation";
 import { TransportObservationSchema } from "./gate0-contract";
 import { CleanupHandoffReferenceSchema, CleanupSummarySchema, MAX_CARRIED_RUNS, type CleanupHandoffReference, type CleanupSummary } from "./cleanup-contract";
 import { cleanupOutcome, requireCleanupCapacity, requireComputeCleanup, summarizeCleanup } from "./cleanup-state";
+import { InfrastructureCoverageSchema, OWNER_SECTION7_COVERAGE } from "./infrastructure-contract";
+import { PRESTART_RECOVERY } from "./prestart-recovery.mjs";
 
 export const ExecutionSchema = z.object({ workflowRunId: z.string().regex(/^[1-9][0-9]{0,19}$/), attempt: z.number().int().min(1).max(100),
   sourceSha: z.string().regex(/^[a-f0-9]{40}$/) }).strict();
 export type HourlyExecution = z.infer<typeof ExecutionSchema>;
+export const PrestartRecoverySchema = z.object({ version: z.literal(1), workflowRunId: z.literal(PRESTART_RECOVERY.workflowRunId),
+  attempt: z.literal(1), sourceSha: z.literal(PRESTART_RECOVERY.sourceSha), jobId: z.literal(PRESTART_RECOVERY.jobId),
+  cause: z.literal(PRESTART_RECOVERY.cause) }).strict();
+export type PrestartRecovery = z.infer<typeof PrestartRecoverySchema>;
 const resultSchema = z.object({ success: z.boolean(), code: z.enum(ERROR_CODES).nullable(), runId: z.string().uuid(),
   setup: SetupObservationSchema.optional(), runtime: RuntimeObservationSchema.optional(), admission: AdmissionObservationSchema.optional(),
   transport: TransportObservationSchema.optional() }).strict();
@@ -23,8 +29,11 @@ const legacyPayloadSchema = z.object({ schema: z.literal("zeros.dev-hourly/v1"),
   result: resultSchema,
   runs: z.array(RunSchema).max(3), completedAt: z.string().datetime() }).strict();
 const currentPayloadSchema = legacyPayloadSchema.extend({ schema: z.literal("zeros.dev-hourly/v2"),
-  runs: z.array(RunSchema).max(MAX_CARRIED_RUNS), cleanup: CleanupSummarySchema, handoff: CleanupHandoffReferenceSchema.optional() }).strict();
-const payloadSchema = z.discriminatedUnion("schema", [legacyPayloadSchema, currentPayloadSchema]);
+  runs: z.array(RunSchema).max(MAX_CARRIED_RUNS), cleanup: CleanupSummarySchema, handoff: CleanupHandoffReferenceSchema.optional(),
+  prestartRecovery: PrestartRecoverySchema.optional() }).strict();
+const infrastructurePayloadSchema = currentPayloadSchema.extend({ schema: z.literal("zeros.dev-infrastructure/v1"),
+  coverage: InfrastructureCoverageSchema }).strict();
+const payloadSchema = z.discriminatedUnion("schema", [legacyPayloadSchema, currentPayloadSchema, infrastructurePayloadSchema]);
 const envelopeSchema = z.object({ payload: payloadSchema, signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict();
 const MAX_BYTES = 1024 * 1024;
 export const PublicHourlyTrustSchema = z.object({ deviceId: z.string().uuid(), publicKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
@@ -69,6 +78,9 @@ export function verifyPublicHourlyArtifact(raw: unknown, trust: PublicHourlyTrus
       primary.hourly.sourceSha !== expected.sourceSha || primary.source.dirty || primary.source.revision !== expected.sourceSha)) throw bad();
     if (payload.result.success !== (payload.result.code === null) || primary?.cleanupOnly ||
       new Set(payload.runs.map(run => run.fixtureSha256)).size > 1) throw bad();
+    const infrastructure = payload.schema === "zeros.dev-infrastructure/v1";
+    if (primary && infrastructure !== Boolean(primary.hourly?.infrastructure) || infrastructure && primary &&
+      (primary.prompts.length > 0 || primary.hourly?.complete || primary.hourly?.rehearsal)) throw bad();
     if (payload.schema === "zeros.dev-hourly/v1") {
       if (payload.runs.some(run => run.retirement || run.cleanupOnly) ||
         payload.result.success && (!primary?.hourly?.complete || !primary.deletionConfirmed)) throw bad();
@@ -77,7 +89,9 @@ export function verifyPublicHourlyArtifact(raw: unknown, trust: PublicHourlyTrus
         payload.runs.some(run => run.cleanupOnly && (run.hourly || run.cleanupOnly.handoffSha256 !== payload.handoff?.sha256 ||
           !payload.handoff.runIds.includes(run.runId)))) throw bad();
       if (payload.result.success) {
-        if (!primary?.hourly?.complete || payload.runs.some(run => run.hourly?.credentials.some(row => !row.revoked || !row.disconnected))) throw bad();
+        const completed = infrastructure ? primary?.hourly?.infrastructure?.complete : primary?.hourly?.complete;
+        if (!primary || !completed || infrastructure && !primary.create?.result ||
+          payload.runs.some(run => run.hourly?.credentials.some(row => !row.revoked || !row.disconnected))) throw bad();
         requireComputeCleanup(primary); requireCleanupCapacity(payload.runs);
       }
     }
@@ -85,7 +99,7 @@ export function verifyPublicHourlyArtifact(raw: unknown, trust: PublicHourlyTrus
   } catch { throw bad(); }
 }
 
-export async function importHourlyArtifact(file: string, store: RunStore, credential: CloudReplicaDeviceCredential, expected: HourlyExecution): Promise<{ handoff?: CleanupHandoffReference }> {
+export async function importHourlyArtifact(file: string, store: RunStore, credential: CloudReplicaDeviceCredential, expected: HourlyExecution): Promise<{ handoff?: CleanupHandoffReference; prestartRecovery?: PrestartRecovery }> {
   const { envelope } = await readArtifact(file), { payload } = envelope;
   authenticate(envelope, credential, expected);
   for (const run of payload.runs) {
@@ -97,11 +111,14 @@ export async function importHourlyArtifact(file: string, store: RunStore, creden
       handle.run = run; await handle.save();
     });
   }
-  return payload.schema === "zeros.dev-hourly/v2" && payload.handoff ? { handoff: payload.handoff } : {};
+  return payload.schema === "zeros.dev-hourly/v1" ? {} : {
+    ...(payload.handoff ? { handoff: payload.handoff } : {}), ...(payload.prestartRecovery ? { prestartRecovery: payload.prestartRecovery } : {}),
+  };
 }
 
 export async function exportHourlyArtifact(file: string, store: RunStore, credential: CloudReplicaDeviceCredential,
-  execution: HourlyExecution, result: z.infer<typeof resultSchema>, options: { replace?: boolean; handoff?: CleanupHandoffReference } = {}): Promise<CleanupSummary> {
+  execution: HourlyExecution, result: z.infer<typeof resultSchema>, options: { replace?: boolean; handoff?: CleanupHandoffReference;
+    profile?: "hourly" | "gate0" | "infrastructure"; prestartRecovery?: PrestartRecovery } = {}): Promise<CleanupSummary> {
   let output, parent, temporary: string | undefined;
   try {
     const runs = [];
@@ -113,9 +130,13 @@ export async function exportHourlyArtifact(file: string, store: RunStore, creden
       // Completed predecessors no longer need to be copied every hour.
       if (id === result.runId || run.create && cleanupOutcome(run) !== "physically_deleted" || run.hourly?.credentials.some(row => !row.revoked || !row.disconnected)) runs.push(run);
     }
-    const payload = currentPayloadSchema.parse({ schema: "zeros.dev-hourly/v2", execution, result, runs,
+    const infrastructure = options.profile === "infrastructure";
+    const payload = (infrastructure ? infrastructurePayloadSchema : currentPayloadSchema).parse({
+      schema: infrastructure ? "zeros.dev-infrastructure/v1" : "zeros.dev-hourly/v2", execution, result, runs,
+      ...(infrastructure ? { coverage: OWNER_SECTION7_COVERAGE } : {}),
       deviceId: credential.deviceId, completedAt: new Date().toISOString(),
-      cleanup: summarizeCleanup(runs, runs.find(run => run.runId === result.runId)), ...(options.handoff ? { handoff: options.handoff } : {}) });
+      cleanup: summarizeCleanup(runs, runs.find(run => run.runId === result.runId)), ...(options.handoff ? { handoff: options.handoff } : {}),
+      ...(options.prestartRecovery ? { prestartRecovery: options.prestartRecovery } : {}) });
     const envelope = { payload, signature: sign(null, Buffer.from(JSON.stringify(payload)), key(credential)).toString("base64url") };
     authenticate(envelope, credential, execution);
     const bytes = JSON.stringify(envelope) + "\n";
@@ -127,7 +148,9 @@ export async function exportHourlyArtifact(file: string, store: RunStore, creden
     const previous = options.replace ? await readArtifact(file) : undefined;
     if (previous) {
       authenticate(previous.envelope, credential, execution);
-      if (previous.envelope.payload.result.runId !== result.runId || (previous.info.mode & 0o7777) !== 0o600) throw bad();
+      if (previous.envelope.payload.result.runId !== result.runId || previous.envelope.payload.schema !== payload.schema ||
+        JSON.stringify(previous.envelope.payload.prestartRecovery) !== JSON.stringify(payload.prestartRecovery) ||
+        (previous.info.mode & 0o7777) !== 0o600) throw bad();
       temporary = path.join(directory, `.receipt-${randomUUID()}`);
     }
     output = await open(temporary ?? file, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);

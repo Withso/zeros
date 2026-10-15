@@ -15,6 +15,7 @@ import { ProductApi } from "../zeros-dev/product";
 import { AlphaTransport } from "../zeros-dev/transport";
 import { parseFixture } from "../zeros-dev/config";
 import { computerBuild } from "../../apps/desktop/src/renderer/features/settings/__tests__/cloud-computer-v2-fixtures";
+import { PRESTART_RECOVERY } from "../zeros-dev/prestart-recovery.mjs";
 
 const roots: string[] = [];
 const stdout: string[] = [];
@@ -53,6 +54,12 @@ describe("ephemeral Actions fixture credentials", () => {
     // Boolean assertions keep test credentials out of failure diagnostics too.
     expect(required.every(value => stdout.includes(maskLine(value)))).toBe(true);
     expect(stdout.every(line => line.startsWith("::add-mask::") && line.endsWith("\n") && line.split("\n").length === 2)).toBe(true);
+  });
+  it("masks the cleanup handoff secret before fixture validation without emitting it as evidence", async () => {
+    const f = await fixture(), handoff = Buffer.from(`synthetic-cleanup-${randomUUID()}`).toString("base64");
+    await initializeActionsFixture(f.root, { ...f.env, ZEROS_DEV_CLEANUP_HANDOFF_B64: handoff });
+    expect(stdout.includes(maskLine(handoff))).toBe(true);
+    expect(stdout.filter(line => !line.startsWith("::add-mask::")).some(line => line.includes(handoff))).toBe(false);
   });
   it("masks even rejected decoded tokens before fixture validation and escapes workflow commands", async () => {
     const f = await fixture(), token = `synthetic-${randomUUID()}%\r\n::error::not-a-command`;
@@ -120,7 +127,7 @@ async function actionsFixture() {
       runtimeId: `r1-${"a".repeat(64)}`, baseImageId: "fixture-base", selected: {
         runtimeId: `r1-${"a".repeat(64)}`, baseImageId: "fixture-base", sourceCommit: "b".repeat(40), qualificationMode: "smoke" as const,
       } })),
-    buildComputer: vi.fn(async () => { throw new ZerosDevError("computer_failed"); }),
+    buildComputer: vi.fn(async (_handle: RunHandle) => { throw new ZerosDevError("computer_failed"); }),
     waitComputer: vi.fn(async () => { throw new ZerosDevError("computer_failed"); }),
     createWorkspace: vi.fn(async (handle: RunHandle) => {
       handle.run.create = { key: randomUUID(), body: { name: `zd-${handle.run.runId}`, repository: { forge: "github.com", owner: "fixture", name: "repository", revision: "main", githubInstallationId: f.values.ZEROS_DEV_GITHUB_INSTALLATION_ID } } };
@@ -143,6 +150,28 @@ async function actionsFixture() {
 }
 
 describe("Actions orchestration through signed files", () => {
+  it("checkpoints infrastructure separately before any native work and never installs agent material", async () => {
+    const f = await actionsFixture();
+    const env = { ...f.env, ZEROS_DEV_PROFILE: "infrastructure",
+      ZEROS_DEV_E2E_PLAN: JSON.stringify({ ...JSON.parse(f.env.ZEROS_DEV_E2E_PLAN), profile: "infrastructure", prestartRecovery: PRESTART_RECOVERY }) };
+    const infrastructure = vi.fn(async (options: any) => {
+      const artifact = await f.checkpoint();
+      expect(artifact.payload.schema).toBe("zeros.dev-infrastructure/v1");
+      expect(artifact.payload.prestartRecovery).toEqual(PRESTART_RECOVERY);
+      expect(options.handle.run.hourly.infrastructure).toMatchObject({ complete: false,
+        coverage: { agents: "not_covered_owner_section7" }, cycles: [], terminalChecks: 0 });
+      expect(options.handle.run.hourly.complete).toBe(false);
+      await options.evidence.step("detached_start", async () => { throw new ZerosDevError("detached_task_not_active"); });
+    });
+    Object.assign(f.services.session, { prepareDetachedAuth: vi.fn(async () => 3_600_000) });
+    expect(await runActions(env, { ...f.options, infrastructure } as never)).toBe(1);
+    expect(infrastructure).toHaveBeenCalledOnce();
+    expect(f.services.credentials.install).not.toHaveBeenCalled(); expect(f.services.connect).not.toHaveBeenCalled();
+    expect((await f.checkpoint()).payload).toMatchObject({ schema: "zeros.dev-infrastructure/v1",
+      result: { success: false, code: "detached_task_not_active" }, coverage: { detachedAgent: "not_covered_owner_section7" } });
+    expect(f.output).toContainEqual(expect.objectContaining({ schema: "zeros.dev-infrastructure-result/v1", success: false,
+      code: "detached_task_not_active", coverage: expect.objectContaining({ agents: "not_covered_owner_section7" }) }));
+  });
   it("checks and carries an explicit local cleanup handoff before allocation without taking over its credentials", async () => {
     const f = await actionsFixture(), pins = parseFixture(f.values), localId = randomUUID();
     const local = new RunStore(path.join(f.env.RUNNER_TEMP, "local-runs"), pins, f.credential);
@@ -209,7 +238,7 @@ describe("Actions orchestration through signed files", () => {
       await options.evidence.step("detached_start", async () => { throw new ZerosDevError("detached_task_not_active"); });
     });
     Object.assign(f.services.session, { prepareDetachedAuth: vi.fn(async () => 3_600_000) });
-    expect(await runActions(env, { ...f.options, rehearse })).toBe(1);
+    expect(await runActions(env, { ...f.options, rehearse } as never)).toBe(1);
     expect(rehearse).toHaveBeenCalledOnce(); expect(f.services.api.createWorkspace).not.toHaveBeenCalled();
     expect((await f.checkpoint()).payload).toMatchObject({ result: { success: false, code: "detached_task_not_active" },
       runs: [expect.objectContaining({ hourly: expect.objectContaining({ rehearsal: expect.objectContaining({ complete: false }) }) })] });
@@ -218,7 +247,7 @@ describe("Actions orchestration through signed files", () => {
   it.each(["scheduled", "mismatch"])("refuses a %s rehearsal before credentials or login", async kind => {
     const f = await actionsFixture();
     const env = { ...f.env, ZEROS_DEV_PROFILE: "gate0", GITHUB_EVENT_NAME: kind === "scheduled" ? "schedule" : "workflow_dispatch" };
-    expect(await runActions(env, f.options)).toBe(1); expect(f.services.session.login).not.toHaveBeenCalled();
+    expect(await runActions(env, f.options as never)).toBe(1); expect(f.services.session.login).not.toHaveBeenCalled();
     await expect(readFile(path.join(f.root, ".env.agent"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(stdout).toHaveLength(0);
   });

@@ -8,6 +8,7 @@ import { RunStore } from "../zeros-dev/receipts";
 import { exportHourlyArtifact, importHourlyArtifact, verifyPublicHourlyArtifact } from "../zeros-dev/hourly-artifact";
 import type { Fixture } from "../zeros-dev/config";
 import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
+import { PRESTART_RECOVERY } from "../zeros-dev/prestart-recovery.mjs";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -26,6 +27,32 @@ async function fixture() {
 }
 
 describe("cross-run signed Actions receipts", () => {
+  it("signs and preserves the exact reviewed prestart incident without pretending it produced an artifact", async () => {
+    const f = await fixture(), result = { code: "command_uncertain" as const, success: false, runId: f.runId };
+    await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, result, { prestartRecovery: PRESTART_RECOVERY });
+    const raw = JSON.parse(await readFile(f.file, "utf8"));
+    expect(raw.payload.prestartRecovery).toEqual(PRESTART_RECOVERY); expect(raw.payload.result.success).toBe(false);
+    const next = new RunStore(path.join(f.root, "next"), f.fixture, f.credential);
+    expect(await importHourlyArtifact(f.file, next, f.credential, f.execution)).toEqual({ prestartRecovery: PRESTART_RECOVERY });
+    await expect(exportHourlyArtifact(f.file, f.store, f.credential, f.execution, result, { replace: true })).rejects.toThrow("zeros_dev_artifact_invalid");
+    await expect(exportHourlyArtifact(path.join(f.root, "other.json"), f.store, f.credential, f.execution, result,
+      { prestartRecovery: { ...PRESTART_RECOVERY, attempt: 2 } } as never)).rejects.toThrow("zeros_dev_artifact_invalid");
+    raw.payload.prestartRecovery.jobId = "17";
+    expect(() => verifyPublicHourlyArtifact(raw, { deviceId: f.credential.deviceId, publicKey: f.credential.publicKey }, f.execution)).toThrow("zeros_dev_artifact_invalid");
+  });
+  it("uses a separate infrastructure signature domain even for its initial uncertain checkpoint", async () => {
+    const f = await fixture();
+    await exportHourlyArtifact(f.file, f.store, f.credential, f.execution,
+      { code: "command_uncertain", success: false, runId: randomUUID() }, { profile: "infrastructure" });
+    const raw = JSON.parse(await readFile(f.file, "utf8"));
+    expect(raw.payload.schema).toBe("zeros.dev-infrastructure/v1");
+    expect(raw.payload.coverage).toEqual({ agents: "not_covered_owner_section7", accountModels: "not_covered_owner_section7",
+      agentHistory: "not_covered_owner_section7", detachedAgent: "not_covered_owner_section7" });
+    const trust = { deviceId: f.credential.deviceId, publicKey: f.credential.publicKey };
+    expect(verifyPublicHourlyArtifact(raw, trust, f.execution).schema).toBe("zeros.dev-infrastructure/v1");
+    raw.payload.schema = "zeros.dev-hourly/v2";
+    expect(() => verifyPublicHourlyArtifact(raw, trust, f.execution)).toThrow("zeros_dev_artifact_invalid");
+  });
   it.each(["physical", "storage-pending"])("reads a correctly signed legacy %s receipt with its original erasure requirement", async condition => {
     const f = await fixture();
     await f.store.withRun(f.runId, null, async h => {

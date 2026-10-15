@@ -29,10 +29,25 @@ function fixture() {
     rows.set(id, credential); return Response.json({ credential, replayed: false });
   });
   const api = new ProductApi({ fixture: async () => ({ organizationId: org, accountId: account }) as never, accessToken: async () => "synthetic-bearer", whoami: async () => ({}) as never }, new AlphaTransport(fetcher as typeof fetch));
-  return { handle, rows, connections, writes, fetcher, credentials: new HourlyCredentials(api, materials), uncertain: () => { uncertain = true; } };
+  return { api, handle, rows, connections, writes, fetcher, credentials: new HourlyCredentials(api, materials), uncertain: () => { uncertain = true; } };
 }
 
 describe("Actions-only product credentials", () => {
+  it("refuses new agent work without release-check material before any product read or write", async () => {
+    const f = fixture(), credentials = new HourlyCredentials(f.api);
+    await expect(credentials.install(f.handle, AbortSignal.timeout(1000))).rejects.toThrow("zeros_dev_release_checks_unavailable");
+    expect(f.fetcher).not.toHaveBeenCalled();
+    expect(f.handle.save).not.toHaveBeenCalled();
+  });
+
+  it("can retire only its signed predecessor credentials without needing new credential material", async () => {
+    const f = fixture(); await f.credentials.install(f.handle, AbortSignal.timeout(1000));
+    f.writes.length = 0;
+    await new HourlyCredentials(f.api).cleanup(f.handle, AbortSignal.timeout(1000));
+    expect(f.rows.size).toBe(0);
+    expect(f.writes.every(row => row.method === "DELETE" || row.body?.credentialId === null)).toBe(true);
+  });
+
   it("publishes exactly three fresh account credentials with bounded models, then clears and revokes them", async () => {
     const f = fixture(); await f.credentials.install(f.handle, AbortSignal.timeout(1000));
     expect(f.rows.size).toBe(3); expect(f.handle.run.hourly?.credentials).toHaveLength(3);

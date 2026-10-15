@@ -16,18 +16,23 @@ import { ZerosDevRuntime } from "./runtime";
 import { Evidence } from "./evidence";
 import { closedError, diagnosticEvidence, ZerosDevError, type ErrorCode } from "./errors";
 import { controlPlaneHealth } from "./health";
-import { HourlyCredentials, actionsMaterials } from "./hourly-credentials";
+import { HourlyCredentials } from "./hourly-credentials";
 import { runHourly, recoverHourlyRun, HOURLY_CLEANUP_MS, HOURLY_TOTAL_MS } from "./hourly";
-import { ExecutionSchema, importHourlyArtifact, exportHourlyArtifact } from "./hourly-artifact";
+import { ExecutionSchema, PrestartRecoverySchema, type PrestartRecovery, importHourlyArtifact, exportHourlyArtifact } from "./hourly-artifact";
 import { actionsProfile, hourlyContext } from "./hourly-actions.mjs";
 import { runGate0, productGate0Probe } from "./gate0";
 import { GATE0_TOTAL_MS } from "./gate0-contract";
 import { importCleanupHandoff } from "./cleanup-handoff";
 import type { CleanupHandoffReference, CleanupSummary } from "./cleanup-contract";
+import { runInfrastructure } from "./infrastructure";
+import { InfrastructureNative } from "./infrastructure-native";
+import { initialInfrastructure, INFRASTRUCTURE_TOTAL_MS, OWNER_SECTION7_COVERAGE } from "./infrastructure-contract";
 
 const PIN_KEYS = ["ZEROS_DEV_PASSWORD", "ZEROS_DEV_WORKOS_SUBJECT", "ZEROS_DEV_ACCOUNT_ID", "ZEROS_DEV_EMAIL", "ZEROS_DEV_ORGANIZATION_ID",
   "ZEROS_DEV_REPOSITORY", "ZEROS_DEV_REPOSITORY_ID", "ZEROS_DEV_GITHUB_INSTALLATION_ID", "ZEROS_DEV_DEVICE_PRIVATE_KEY_B64"] as const;
-const planSchema = z.object({ execution: ExecutionSchema, profile: z.enum(["hourly", "gate0"]).default("hourly"),
+const profileSchema = z.enum(["hourly", "gate0", "infrastructure"]);
+const planSchema = z.object({ execution: ExecutionSchema, profile: profileSchema.default("hourly"),
+  prestartRecovery: PrestartRecoverySchema.optional(),
   bootstrap: z.boolean(), previous: ExecutionSchema.nullable(), artifactId: z.string().regex(/^[1-9][0-9]{0,19}$/).nullable() }).strict();
 
 function maskActionsSecrets(env: Readonly<Record<string, string | undefined>>): void {
@@ -99,7 +104,8 @@ async function ownedDirectory(directory: string): Promise<void> {
     throw new ZerosDevError("artifact_invalid");
 }
 
-type ActionsServices = Pick<Parameters<typeof runHourly>[0], "api" | "credentials" | "connect"> & {
+type ActionsServices = Pick<Parameters<typeof runHourly>[0], "api" | "credentials"> & {
+  connect: (...args: Parameters<Parameters<typeof runHourly>[0]["connect"]>) => Promise<ZerosDevRuntime>;
   session: Pick<ZerosDevSession, "login" | "whoami" | "logout"> & Partial<Pick<ZerosDevSession, "prepareDetachedAuth">>;
   health(): ReturnType<typeof controlPlaneHealth>;
 };
@@ -108,10 +114,13 @@ type ActionsOptions = {
   write?: (value: unknown) => void;
   factory?: (file: AgentFileStore, env: NodeJS.ProcessEnv) => ActionsServices;
   rehearse?: typeof runGate0;
+  infrastructure?: typeof runInfrastructure;
 };
-function productServices(file: AgentFileStore, env: NodeJS.ProcessEnv): ActionsServices {
+function productServices(file: AgentFileStore): ActionsServices {
   const transport = new AlphaTransport(), session = new ZerosDevSession(file, transport), api = new ProductApi(session, transport);
-  return { session, api, credentials: new HourlyCredentials(api, actionsMaterials(env)),
+  // Owner option B supplies no provider keys. Keep exact legacy credential
+  // cleanup available; full agent installation awaits the release-check bridge.
+  return { session, api, credentials: new HourlyCredentials(api),
     health: () => controlPlaneHealth(transport),
     connect: (run, signal, onAdmissionEvent) => ZerosDevRuntime.connect(session, api, run, { signal, onAdmissionEvent }) };
 }
@@ -126,17 +135,19 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
   };
   let store: RunStore | undefined, credential: CloudReplicaDeviceCredential | undefined, session: ActionsServices["session"] | undefined;
   let execution: z.infer<typeof ExecutionSchema> | undefined, artifact: string | undefined;
-  let handoff: CleanupHandoffReference | undefined, cleanup: CleanupSummary | undefined;
+  let profile: z.infer<typeof profileSchema> | undefined;
+  let handoff: CleanupHandoffReference | undefined, cleanup: CleanupSummary | undefined, prestartRecovery: PrestartRecovery | undefined;
   try {
     execution = ExecutionSchema.parse(hourlyContext(env));
-    const profile = actionsProfile(env);
+    profile = profileSchema.parse(actionsProfile(env));
     const plan = planSchema.parse(JSON.parse(env.ZEROS_DEV_E2E_PLAN ?? ""));
+    prestartRecovery = plan.prestartRecovery;
     if (plan.profile !== profile || JSON.stringify(plan.execution) !== JSON.stringify(execution) || plan.bootstrap !== (plan.previous === null) || plan.bootstrap !== (plan.artifactId === null))
       throw new ZerosDevError("artifact_invalid");
     const started = Number(env.ZEROS_DEV_E2E_START_MS), wall = Date.now(), anchor = performance.now();
     // The workflow starts this budget before dependency installation. Anchor
     // its remainder once so a wall-clock adjustment cannot extend the run.
-    const totalMs = profile === "gate0" ? GATE0_TOTAL_MS : HOURLY_TOTAL_MS;
+    const totalMs = profile === "gate0" ? GATE0_TOTAL_MS : profile === "infrastructure" ? INFRASTRUCTURE_TOTAL_MS : HOURLY_TOTAL_MS;
     const remaining = () => totalMs - Math.max(0, wall - started) - (performance.now() - anchor);
     if (!Number.isSafeInteger(started) || started > Date.now() + 1000 || remaining() < HOURLY_CLEANUP_MS + 60_000) throw new ZerosDevError("deadline");
     if (!env.GITHUB_WORKSPACE || !env.RUNNER_TEMP) throw new ZerosDevError("actions_required");
@@ -147,23 +158,26 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
     const output = path.join(temporary, "zeros-dev-output"); await ownedDirectory(output); artifact = path.join(output, "receipt.json");
     const context = path.join(root, ".context"); await ownedDirectory(context);
     store = new RunStore(path.join(context, "zeros-dev"), fixture, credential);
-    if (plan.previous) ({ handoff } = await importHourlyArtifact(path.join(temporary, "zeros-dev-previous", "receipt.json"), store, credential, plan.previous));
+    if (plan.previous) {
+      const previous = await importHourlyArtifact(path.join(temporary, "zeros-dev-previous", "receipt.json"), store, credential, plan.previous);
+      handoff = previous.handoff; prestartRecovery ??= previous.prestartRecovery;
+    }
     const runs = store, device = credential, identity = execution, outputFile = artifact;
     const uncertain = { runId, success: false, code: "command_uncertain" as const };
     // An initial checkpoint precedes authentication or any product write. All
     // subsequent intent saves atomically replace only this signed execution.
-    await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { handoff });
+    await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { handoff, profile, prestartRecovery });
     historyVerified = true;
     if (env.ZEROS_DEV_CLEANUP_HANDOFF_B64) {
       handoff = await importCleanupHandoff(env.ZEROS_DEV_CLEANUP_HANDOFF_B64, runs, device, handoff);
-      await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff });
+      await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff, profile, prestartRecovery });
     }
     let checkpoints = Promise.resolve();
     const withRun = <T>(id: string, source: Source | null, work: (handle: RunHandle) => Promise<T>) => runs.withRun(id, source, async handle => {
       const save = handle.save;
       handle.save = async () => {
         await save();
-        const checkpoint = checkpoints.then(async () => { await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff }); });
+        const checkpoint = checkpoints.then(async () => { await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff, profile, prestartRecovery }); });
         checkpoints = checkpoint.catch(() => {}); await checkpoint;
       };
       return work(handle);
@@ -207,18 +221,27 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
     if (bound().aborted) throw new ZerosDevError("deadline");
     await withRun(runId, { revision: execution.sourceSha, dirty: false }, async handle => {
       handle.run.hourly = { version: 1, ...execution!, credentials: [], histories: [], activeWindows: [], complete: false,
-        ...(profile === "gate0" ? { rehearsal: { version: 1, complete: false, models: [], cycles: [], transports: [] } } : {}) }; await handle.save();
+        ...(profile === "gate0" ? { rehearsal: { version: 1, complete: false, models: [], cycles: [], transports: [] } } : {}),
+        ...(profile === "infrastructure" ? { infrastructure: initialInfrastructure() } : {}) }; await handle.save();
       let failed: unknown;
       try {
         const inputs = { handle, api, credentials, evidence, budgetMs: Math.max(1, Math.ceil(remaining() - HOURLY_CLEANUP_MS)),
           signal: options.signal, connect: services.connect, predecessors };
-        if (profile === "gate0") {
+        if (profile === "infrastructure") {
           if (!session!.prepareDetachedAuth) throw new ZerosDevError("invalid_request");
-          await (options.rehearse ?? runGate0)({ ...inputs, connect: services.connect as Parameters<typeof runGate0>[0]["connect"],
+          await (options.infrastructure ?? runInfrastructure)({ ...inputs,
+            connect: services.connect,
+            prepareDetachedAuth: ms => session!.prepareDetachedAuth!(ms),
+            native: (runtime, handle, settings) => new InfrastructureNative(runtime, handle, settings) });
+        } else if (profile === "gate0") {
+          if (!session!.prepareDetachedAuth) throw new ZerosDevError("invalid_request");
+          await (options.rehearse ?? runGate0)({ ...inputs, connect: services.connect,
             probe: productGate0Probe(api as ProductApi), prepareDetachedAuth: ms => session!.prepareDetachedAuth!(ms) });
         } else await runHourly(inputs);
       } catch (error) { failed = error; }
-      handle.run.evidence = [...handle.run.evidence, ...evidence.events].slice(-256);
+      // This is a fresh run; the runner may already have checkpointed this
+      // same event prefix before cleanup. Never double-count those phases.
+      handle.run.evidence = evidence.events.slice(-256);
       try { await handle.save(); } catch (error) { failed ??= error; }
       if (failed) throw failed;
     });
@@ -229,10 +252,12 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
       catch (error) { fail(error); }
     }
     if (historyVerified && store && credential && execution && artifact) {
-      try { cleanup = await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code, ...diagnostic }, { replace: true, handoff }); }
+      try { cleanup = await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code, ...diagnostic }, { replace: true, handoff, profile, prestartRecovery }); }
       catch { code ??= "artifact_invalid"; }
     }
-    write({ schema: "zeros.dev-hourly-result/v1", runId, success: code === null, code, ...diagnostic, ...(cleanup ? { cleanup } : {}) });
+    write({ schema: profile === "infrastructure" ? "zeros.dev-infrastructure-result/v1" : "zeros.dev-hourly-result/v1",
+      ...(profile === "infrastructure" ? { coverage: OWNER_SECTION7_COVERAGE } : {}),
+      runId, success: code === null, code, ...diagnostic, ...(cleanup ? { cleanup } : {}) });
   }
   return code === null ? 0 : 1;
 }

@@ -33,7 +33,13 @@ export const RunSchema=z.object({
   retirement:DeletionRetirementSchema.optional(),
   cleanupOnly:z.object({handoffSha256:digest,sourceRunSha256:digest}).strict().optional(),
   hourly:HourlySchema.optional(),
-}).strict();
+}).strict().superRefine((run,context)=>{
+  const infrastructure=run.hourly?.infrastructure,intent=infrastructure?.intent;
+  if(!infrastructure)return;
+  if(run.prompts.length||intent&&(intent.runId!==run.runId||intent.fixtureSha256!==run.fixtureSha256||
+    !run.create?.result||intent.scope.workspaceId!==run.create.result.id||intent.scope.generation!==run.create.result.generation))
+    context.addIssue({code:"custom",message:"Infrastructure run binding is inconsistent"});
+});
 export type Run=z.infer<typeof RunSchema>;
 export type RunHandle={run:Run;save():Promise<void>};
 const envelope=z.object({run:RunSchema,signature:z.string().regex(/^[A-Za-z0-9_-]{86}$/)}).strict();
