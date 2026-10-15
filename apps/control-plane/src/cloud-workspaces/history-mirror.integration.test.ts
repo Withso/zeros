@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { withSystemTx, withUserTx, type Tx } from "../db.js";
@@ -6,6 +6,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import { CloudNativeResultSchema } from "./commands.js";
 import { applyMirroredCloudAgentHistory } from "./history.js";
+import { applyCompactCloudAgentEvent } from "./event-streams.js";
 import { canonicalCloudHistoryJson, HISTORY_PART_BYTES, HISTORY_WORKSPACE_BYTES, type CloudLocalHistoryManifest, type CloudLocalHistoryRecord } from "./history-local-contract.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -239,6 +240,94 @@ suite("atomic canonical cloud history projection", () => {
     const snapshot = manifest([value]); await stage("record", value); await stage("manifest", snapshot);
     await expect(publish(snapshot)).rejects.toMatchObject({ code: "cloud_history_conflict" });
     expect((await heads()).rowCount).toBe(0);
+  });
+  it.each(["covered", "unacknowledged", "changed-frame", "wrong-command", "wrong-stream"] as const)(
+    "reprojects inherited canonical controls with exact original coverage (%s)", async kind => {
+    const origin = boot(), originWriter = writerEpoch, commandId = randomUUID();
+    const actor = { scope: origin, actor: { userId: workspace.userId, deviceId: randomUUID(), deviceKeyVersion: 1,
+      fingerprint: "a".repeat(64), role: "owner" }, actorSessionId: randomUUID(), authorityEpoch: 1,
+      confirmedUntilMs: 1, fundingConsentVersion: 1, fundingGrant: { kind: "owner" } };
+    const event = { version: 1, executionId: "execution", eventSequence: 9, commandId, turnId: "turn",
+      frame: { id: "permission", type: "AGENT_PERMISSION_REQUEST", source: "engine", timestamp: 1, agentId: "cursor",
+        cloudStream: { streamId: origin.engineInstanceId, sequence: 9 }, permissionId: "permission", request: { sessionId: "execution",
+          toolCall: { toolCallId: "tool", title: "Read", rawInput: {} },
+          options: [{ optionId: "once", name: "Allow", kind: "allow_once" }] } } };
+    await mirror(async tx => {
+      await tx.query(`INSERT INTO cloud_workspace_local_command_controls(workspace_id,org_id,writer_epoch,conversation_id,revision,paused)
+        VALUES($1,$2,$3,'chat',1,false)`, [workspace.workspaceId, workspace.organizationId, writerEpoch]);
+      await tx.query(`INSERT INTO cloud_workspace_local_commands(workspace_id,org_id,id,conversation_id,writer_epoch,projection_epoch,
+        user_message_id,agent_id,position,state,payload,generation,execution_id,actor_provenance,mirror_sequence,created_at,updated_at)
+        VALUES($1,$2,$3,'chat',$4,$4,'turn','cursor',1,'dispatching','{}',1,'execution',$5,99,now(),now())`,
+      [workspace.workspaceId, workspace.organizationId, commandId, writerEpoch, JSON.stringify(actor)]);
+      await applyCompactCloudAgentEvent(tx, { ...parent(100), conversationId: "chat", commandId }, event);
+    });
+    const control = record({ entityKind: "control", entityId: "permission", document: event });
+    const snapshot = manifest([control]); snapshot.source = { kind: "command", commandId,
+      intent: { userMessageId: "turn", agentId: "cursor" }, executionId: "execution", nativeResultSha256: null };
+    const originalHead = head(snapshot);
+    await stage("record", control); await stage("manifest", snapshot);
+    await expect(publish(snapshot, 99)).rejects.toMatchObject({ code: "cloud_history_conflict" });
+    await publish(snapshot, 101);
+    // These are relational history/projection fixtures. No native activation,
+    // replay, actor admission or production checkpoint custody is synthesized.
+    const nextEngine = randomUUID(), grant = randomUUID(), nextWriter = randomUUID(), nextBoot = randomUUID(), binding = randomUUID();
+    await mirror(async tx => {
+      await tx.query("UPDATE cloud_workspace_local_command_writers SET state='retired',retired_at=now(),mirrored_sequence=$2 WHERE writer_epoch=$1",
+        [originWriter, kind === "unacknowledged" ? 99 : 101]);
+      await tx.query(`INSERT INTO cloud_workspace_endpoint_grants
+        (id,workspace_id,generation,org_id,account_user_id,purpose,audience,token_hash,account_revision,authorization_revision,
+         expires_at,consumed_at,setup_run_id,setup_execution_fence)
+        SELECT $2,workspace_id,generation,org_id,account_user_id,'setup','fixture',$3,1,1,
+          now()+interval '10 minutes',now(),setup_run_id,setup_execution_fence
+        FROM cloud_workspace_engine_instances WHERE id=$1`, [origin.engineInstanceId, grant, randomBytes(32)]);
+      const columns = (await tx.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='cloud_workspace_engine_instances' AND column_name<>'enrollment_order'
+        ORDER BY ordinal_position`)).rows.map(row => `"${row.column_name.replaceAll('"', '""')}"`).join(",");
+      await tx.query(`INSERT INTO cloud_workspace_engine_instances (${columns}) SELECT ${columns}
+        FROM jsonb_populate_record(NULL::cloud_workspace_engine_instances,
+          (SELECT to_jsonb(engine) || $2::jsonb FROM cloud_workspace_engine_instances engine WHERE id=$1))`,
+      [origin.engineInstanceId, JSON.stringify({ id: nextEngine, registration_grant_id: grant,
+        runtime_boot_id: nextBoot, runtime_supervisor_session_id: randomUUID(),
+        bridge_token_hash: `\\x${randomBytes(32).toString("hex")}`, heartbeat_token_hash: `\\x${randomBytes(32).toString("hex")}` })]);
+      await tx.query(`INSERT INTO cloud_workspace_local_command_writers(workspace_id,org_id,generation,engine_instance_id,
+        boot_id,writer_epoch,funding_owner_user_id,funding_owner_epoch)
+        VALUES($1,$2,1,$3,$4,$5,$6,1)`,
+      [workspace.workspaceId, workspace.organizationId, nextEngine, nextBoot, nextWriter, workspace.userId]);
+      await tx.query(`INSERT INTO cloud_agent_boot_bindings(id,workspace_id,org_id,generation,engine_instance_id,
+        boot_id,writer_epoch,funding_owner_user_id,funding_owner_epoch,credentials_initialized)
+        VALUES($1,$2,$3,1,$4,$5,$6,$7,1,true)`,
+      [binding, workspace.workspaceId, workspace.organizationId, nextEngine, nextBoot, nextWriter, workspace.userId]);
+      await tx.query("UPDATE cloud_workspace_local_command_writers SET state='active',activated_at=now() WHERE writer_epoch=$1", [nextWriter]);
+      await tx.query("UPDATE cloud_workspaces SET agent_boot_id=$2 WHERE id=$1", [workspace.workspaceId, binding]);
+      await tx.query(`INSERT INTO cloud_workspace_local_command_controls(workspace_id,org_id,writer_epoch,conversation_id,revision,paused)
+        VALUES($1,$2,$3,'chat',1,false)`, [workspace.workspaceId, workspace.organizationId, nextWriter]);
+      await tx.query("UPDATE cloud_workspace_local_commands SET projection_epoch=$3,mirror_sequence=1 WHERE workspace_id=$1 AND id=$2",
+        [workspace.workspaceId, commandId, nextWriter]);
+    });
+    writerEpoch = nextWriter; bootId = nextBoot;
+    let projectedHead = originalHead;
+    if (kind === "changed-frame" || kind === "wrong-command" || kind === "wrong-stream") {
+      const altered = structuredClone(event);
+      if (kind === "changed-frame") altered.frame.timestamp = 2;
+      if (kind === "wrong-command") altered.commandId = randomUUID();
+      if (kind === "wrong-stream") altered.frame.cloudStream.streamId = randomUUID();
+      const alteredControl = { ...control, document: altered };
+      const alteredSnapshot = { ...snapshot, restoreRevision: 2,
+        records: [{ ...snapshot.records[0]!, sha256: digest(alteredControl) }] };
+      await stage("record", alteredControl); await stage("manifest", alteredSnapshot);
+      projectedHead = { ...originalHead, history: { ...originalHead.history,
+        restoreRevision: 2, manifestSha256: digest(alteredSnapshot) } };
+    }
+    await mirror(async tx => {
+      expect(await applyCompactCloudAgentEvent(tx, { ...parent(1), conversationId: "chat", commandId }, event)).toEqual({ replayed: true });
+      const publication = applyMirroredCloudAgentHistory(tx, parent(2), { conversationId: "chat", historyHead: projectedHead });
+      if (kind === "covered") await expect(publication).resolves.toMatchObject({ historyLimit: false });
+      else await expect(publication).rejects.toMatchObject({ code: "cloud_history_conflict" });
+    });
+    const retained = (await pool.query("SELECT projection_epoch,outbox_sequence,local_sequence FROM cloud_workspace_local_agent_controls WHERE workspace_id=$1",
+      [workspace.workspaceId])).rows;
+    expect(retained).toEqual([{ projection_epoch: originWriter, outbox_sequence: "100", local_sequence: "9" }]);
+    expect((await heads()).rows).toHaveLength(kind === "covered" ? 2 : 1);
   });
   it("keeps raw canonical bytes and parts hidden from user RLS", async () => {
     await stage("record", record());

@@ -83,6 +83,13 @@ local replay prefix requires a current snapshot, never resending the prompt.
 The VM record head and sparse live-event cursor are separate from CP's mirror
 sequence and compact row count.
 
+An inherited compact control retains its original writer, native stream and
+event identity. The CP validates its stored outbox position against that retired
+writer's committed mirror cursor. A successor starts its own outbox at zero, so
+its publication ordinal cannot bound an older writer's position. Controls from
+the current writer remain bounded by the current mirror transaction; reprojecting
+history neither moves an original control row nor creates a live event.
+
 Capture reads a stable NORMAL source head, applies the original run's redactor,
 and produces immutable canonical records, a manifest and 128 KiB parts. The
 FULL queue publishes their CAS bytes, terminal, current restore head and outbox
