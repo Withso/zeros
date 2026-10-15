@@ -60,6 +60,7 @@
     "dev:archive": "node scripts/dev-environment/hosted-entry.mjs archive",
     "dev:adopt": "node scripts/dev-environment/hosted-entry.mjs adopt",
     "dev:reconcile": "node scripts/dev-environment/hosted-entry.mjs reconcile",
+    "zeros-dev": "tsx scripts/zeros-dev/cli.ts",
     "dev:gc": "node --import tsx scripts/dev-environment/gc-cli.mjs",
     "dev:gc:cron": "node scripts/dev-environment/gc-cron.mjs",
     "dev:doctor": "node scripts/dev-environment/hosted-entry.mjs doctor",

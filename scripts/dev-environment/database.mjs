@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
+import { loadControlPlaneDependency, DevEnvironmentError, devEnvironmentDiagnostic } from "./dependency-preflight.mjs";
 import { databaseUrl } from "./postgres.mjs";
 
 export function validateDatabaseRequest(request) {
@@ -17,8 +17,7 @@ export function validateDatabaseRequest(request) {
 
 async function execute(request) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-  const require = createRequire(path.join(root, "apps/control-plane/package.json"));
-  const { Pool } = require("pg");
+  const { Pool } = loadControlPlaneDependency("pg", root);
   const { runMigrations, planMigrations, verifyMigrations } = await import(pathToFileURL(path.join(root, "apps/control-plane/dist/migrate.js")));
   const migration = new Pool({ connectionString: request.migrationUrl, options: "-c role=none", max: 1 });
   const runtime = new Pool({ connectionString: request.runtimeUrl, options: "-c role=none", max: 1 });
@@ -55,7 +54,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result));
   } catch (error) {
     // SQL and driver errors may embed user data and credentials.
-    const { migrationFailureDiagnostic } = await import(pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../apps/control-plane/dist/migrate.js")));
-    console.error(migrationFailureDiagnostic(error)); process.exitCode = 1;
+    if (error instanceof DevEnvironmentError) console.error(JSON.stringify(devEnvironmentDiagnostic(error)));
+    else {
+      try {
+        const { migrationFailureDiagnostic } = await import(pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../apps/control-plane/dist/migrate.js")));
+        console.error(migrationFailureDiagnostic(error));
+      } catch { console.error(JSON.stringify(devEnvironmentDiagnostic(error))); }
+    }
+    process.exitCode = 1;
   }
 }

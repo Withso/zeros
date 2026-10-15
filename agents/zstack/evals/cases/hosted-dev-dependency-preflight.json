@@ -1,0 +1,9 @@
+{
+  "id": "hosted-dev-dependency-preflight",
+  "kind": "replay",
+  "area": "release-dev-environment",
+  "fixedBy": "pr:517",
+  "symptom": "The owner's read-only Dev inventory failed because root pnpm install did not install the independent control-plane SDK graph; GC's catch-all hid MODULE_NOT_FOUND behind an unhelpful cleanup warning.",
+  "rule": "Resolve dependencies at the package that owns the adapter before provider or database work. Report a fixed missing-versus-unavailable code and the exact install command, never loader stacks or provider text. Replay the existing concrete adapter so an absent newly added helper cannot substitute for a failing assertion.",
+  "check": "pnpm test:git scripts/__tests__/dev-environment-preflight.test.ts --testNamePattern 'concrete loader'"
+}

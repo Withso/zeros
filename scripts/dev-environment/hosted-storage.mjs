@@ -1,16 +1,15 @@
-import { createRequire } from "node:module";
+import { loadControlPlaneDependency } from "./dependency-preflight.mjs";
 import { sha256 } from "./state.mjs";
 
 export function devObjectStorage(config, dependencies) {
-  const require = createRequire(new URL("../../apps/control-plane/package.json", import.meta.url));
-  const sdk = dependencies?.sdk ?? require("@aws-sdk/client-s3");
+  const sdk = dependencies?.sdk ?? loadControlPlaneDependency("@aws-sdk/client-s3");
   const client = dependencies?.client ?? new sdk.S3Client({ region: "auto", endpoint: config.endpoint,
     credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey }, maxAttempts: 2 });
   // Archives can be tens of MiB on a developer's uplink. Keep metadata calls
   // short while giving bounded artifact transfers their own deadline.
   const transferTimeout = 180_000;
   const send = (command, { timeout = 20_000, signal } = {}) => client.send(command, {
-    abortSignal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
+    abortSignal: signal ? globalThis.AbortSignal.any([signal, globalThis.AbortSignal.timeout(timeout)]) : globalThis.AbortSignal.timeout(timeout),
   });
   const prefix = state => {
     if (!/^[a-f0-9]{24}$/.test(state.owner ?? "") || !/^[a-f0-9-]{36}$/.test(state.generation ?? "")) throw new Error("Invalid Dev storage owner");

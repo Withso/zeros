@@ -2,8 +2,9 @@
 
 The harness runs against Alpha's existing account, Computer, cloud workspace,
 agent and terminal APIs. It creates no hosted development deployment. Run it
-from Linux with `pnpm exec tsx scripts/zeros-dev/cli.ts`. The package alias and
-retirement of the old hosted Dev tooling are a separate change. `electron:local`
+from Linux with `pnpm zeros-dev`; the direct entrypoint is
+`pnpm exec tsx scripts/zeros-dev/cli.ts`. Retirement of the old hosted Dev tooling
+is a separate change. `electron:local`
 and `electron:alpha` retain their current launch paths.
 
 ## Alpha authentication boundary
@@ -100,7 +101,7 @@ do not prove those fixtures or a live WorkOS password-grant configuration.
 
 ## Commands and fixture preparation
 
-Use `pnpm exec tsx scripts/zeros-dev/cli.ts --help` for the complete command
+Use `pnpm zeros-dev --help` for the complete command
 surface. Commands have one live target: `https://api-alpha.zeros.build`.
 There is no channel, origin, SQL, provider sandbox ID or credential argument.
 The CLI never loads credentials from ambient environment variables. Set the
