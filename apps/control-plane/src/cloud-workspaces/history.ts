@@ -192,11 +192,19 @@ async function validatedManifestRecords(tx: Tx, scope: MirrorScope, conversation
     if (record.entityKind === "control") controls.push(CloudCompactControlEventSchema.parse(record.document));
   }
   if (!controls.length) return;
+  // A retained control keeps its original writer's outbox position. A new
+  // projection restarts its own cursor; it cannot compare those two clocks.
+  // Current-batch rows are bounded by this transaction's supplied ordinal,
+  // while retired rows need their own already-committed mirror coverage.
   const saved = (await tx.query<{ command_id: string; execution_id: string; user_message_id: string; agent_id: string;
-    local_stream_id: string; local_sequence: string; frame: unknown }>(`SELECT command_id,execution_id,user_message_id,agent_id,
-      local_stream_id,local_sequence,frame FROM cloud_workspace_local_agent_controls WHERE workspace_id=$1 AND org_id=$2
-      AND conversation_id=$3 AND local_sequence=ANY($4::bigint[]) AND outbox_sequence<=$5 LIMIT $6`,
-  [scope.workspaceId, scope.organizationId, conversationId, controls.map(event => event.eventSequence), scope.outboxSequence, controls.length + 1])).rows;
+    local_stream_id: string; local_sequence: string; frame: unknown }>(`SELECT c.command_id,c.execution_id,c.user_message_id,c.agent_id,
+      c.local_stream_id,c.local_sequence,c.frame FROM cloud_workspace_local_agent_controls c
+      JOIN cloud_workspace_local_command_writers w ON w.workspace_id=c.workspace_id AND w.org_id=c.org_id AND w.writer_epoch=c.projection_epoch
+      WHERE c.workspace_id=$1 AND c.org_id=$2 AND c.conversation_id=$3 AND c.local_sequence=ANY($4::bigint[])
+        AND ((c.projection_epoch=$6 AND c.outbox_sequence<=$5)
+          OR (c.projection_epoch<>$6 AND w.state='retired' AND c.outbox_sequence<=w.mirrored_sequence)) LIMIT $7`,
+  [scope.workspaceId, scope.organizationId, conversationId, controls.map(event => event.eventSequence), scope.outboxSequence,
+    scope.writerEpoch, controls.length + 1])).rows;
   for (const event of controls) {
     const matching = saved.filter(row => Number(row.local_sequence) === event.eventSequence && row.execution_id === event.executionId &&
       row.agent_id === event.frame.agentId && (event.commandId === undefined || row.command_id === event.commandId) &&

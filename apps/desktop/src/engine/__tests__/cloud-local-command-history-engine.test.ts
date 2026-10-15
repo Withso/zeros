@@ -79,6 +79,7 @@ describe("current local-writer history exposure", () => {
         scope: expect.objectContaining({ engineInstanceId: target.engineInstanceId, bootId: target.bootId }) }));
       expect(project).toHaveBeenCalledWith(expect.objectContaining({ sourceRecovery: predecessor, scope }));
       expect(project.mock.calls[0]![0]).not.toHaveProperty("sourceSeal");
+      expect(project.mock.calls[0]![0]).not.toHaveProperty("sealedCheckpoint");
       expect(state.cloudLocalHistoryRestoreHeads.get("chat")).toBe(head); expect(state.cloudLocalCommandPredecessor).toBe(predecessor);
       expect(cleanup).toHaveBeenCalledOnce();
     }
@@ -100,7 +101,7 @@ describe("current local-writer history exposure", () => {
     await expect(methods.restoreCloudLocalHistory.call(state)).rejects.toThrow("engine_authority_rejected");
     expect(restore).not.toHaveBeenCalled(); expect(project).not.toHaveBeenCalled();
   });
-  it("retains every exact restored fence before boot exposure and does not publish a partial rebuild", async () => {
+  it.each(["same-generation", "replacement"] as const)("retains every exact sealed pair before %s boot exposure and does not publish a partial rebuild", async kind => {
     directory = await mkdtemp(path.join(os.tmpdir(), "zeros-history-exposure-"));
     setZerosDbPathForTesting(path.join(directory, "normal.sqlite"));
     const file = path.join(directory, "source.sqlite"), ledger = openSqlite(file);
@@ -112,7 +113,7 @@ describe("current local-writer history exposure", () => {
     const state = { root: directory, cloudLocalHistoryRestored: false, cloudLocalHistoryRestoreHeads: new Map(),
       cloudLocalCommandPredecessor: null as checkpoint.CloudLocalCommandPredecessor | null, cloudAgentLegacyFactory: {},
       cloudRecordRuntime: { usesLocalAgentJournal: true }, cloudWorker: {},
-      cloudRuntimeConfig: { execution: scope, engine: { instanceId: scope.engineInstanceId } },
+      cloudRuntimeConfig: { execution: { ...scope, generation: scope.generation + (kind === "replacement" ? 1 : 0) }, engine: { instanceId: scope.engineInstanceId } },
       cloudRuntimeRegistration: { agentSourceWriterEpoch: scope.writerEpoch, localCommandsNegotiated: () => true },
       restoreCloudLocalHistory() { return methods.restoreCloudLocalHistory.call(this); } };
     const boot = vi.spyOn(CloudLocalAgentBootRuntime.prototype, "initialize").mockImplementation(function (this: CloudLocalAgentBootRuntime) {
@@ -126,6 +127,8 @@ describe("current local-writer history exposure", () => {
     expect(state.cloudLocalCommandPredecessor).toBeNull(); expect(boot).not.toHaveBeenCalled();
     await methods.initializeCloudAgentBoot.call(state);
     expect(restore).toHaveBeenCalledWith(expect.objectContaining({ expectedWriterEpoch: scope.writerEpoch }));
+    expect(project).toHaveBeenCalledWith(expect.objectContaining({ scope, sourceSeal: source.manifest.seal, sealedCheckpoint: source }));
+    expect(project.mock.calls.every(([input]) => input.sourceRecovery === undefined)).toBe(true);
     expect(state.cloudLocalHistoryRestoreHeads).toEqual(new Map([["chat", head], ["sibling", head]]));
     expect(state.cloudLocalHistoryRestored).toBe(true); expect(cleanup).toHaveBeenCalledTimes(2);
     expect(state.cloudLocalCommandPredecessor).toBe(predecessor); expect(boot).toHaveBeenCalledOnce();

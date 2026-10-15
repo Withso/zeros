@@ -180,6 +180,17 @@ export class CloudLocalCommandQueue {
             // they are never published as the new writer's runnable state.
             this.setMetadata("mirrorHead", "0");
             this.setMetadata("journalHead", "0");
+            // A CP projection belongs to its current writer. Local custody is
+            // not evidence that the successor has published these receipts.
+            // Inherited runnable rows were quarantined above; only their exact
+            // audit and current heads are republished, never native dispatch.
+            this.db.prepare("UPDATE local_commands SET mirror_dirty=1").run();
+            this.db.prepare("UPDATE local_command_controls SET mirror_dirty=1").run();
+            this.setMetadata("historyProjectionWriter",this.db.prepare("SELECT 1 FROM local_command_history_heads LIMIT 1").get() ? this.scope.writerEpoch : "");
+            this.setMetadata("historyProjectionCursor","");
+            // A genuine sealed predecessor already ACKed its immutable CAS.
+            // Recovery without that seal must resend the retained parts too.
+            this.setMetadata("historyProjectionParts",this.metadata("sealedWriter") === writer.writerEpoch ? "0" : "1");
           }
         }
         this.setMetadata("writer", canonical(this.scope));
@@ -601,9 +612,9 @@ export class CloudLocalCommandQueue {
     if (row) this.db.prepare("UPDATE local_commands SET mirror_dirty=0 WHERE id=?").run(row.id);
   }
   private materializeDirty(): void {
-    const rows = this.db.prepare("SELECT * FROM local_commands WHERE mirror_dirty=1 ORDER BY conversation_id,position").all() as CommandRow[];
+    const rows = this.db.prepare("SELECT * FROM local_commands WHERE mirror_dirty=1 ORDER BY conversation_id,position LIMIT ?").all(MAX_BATCH_ENTRIES) as CommandRow[];
     for (const row of rows) { if (!this.journalCapacity(false)) return; this.journal(row.conversation_id,row,true); }
-    const controls = this.db.prepare("SELECT * FROM local_command_controls WHERE mirror_dirty=1 ORDER BY conversation_id").all() as ControlRow[];
+    const controls = this.db.prepare("SELECT * FROM local_command_controls WHERE mirror_dirty=1 ORDER BY conversation_id LIMIT ?").all(MAX_BATCH_ENTRIES) as ControlRow[];
     for (const control of controls) { if (!this.journalCapacity(false)) return; this.journal(control.conversation_id,undefined,true); }
   }
   currentHistoryHead(conversationId: string): CloudLocalCommandHistoryHead | null {
@@ -854,10 +865,60 @@ export class CloudLocalCommandQueue {
     if (bytes > CLOUD_LOCAL_COMMAND_HISTORY_BUNDLE_MAX_BYTES) throw new CloudCommandRuntimeError("command_storage_unavailable");
   }
 
+  /** Rebuild the current projection a conversation at a time. The FULL cursor
+   * commits with its jobs, so a restart/lost ACK never changes an assigned
+   * flight or promotes an older head over a newer edit/delete fence. */
+  private stageInheritedHistory(): void {
+    if (this.metadata("historyProjectionWriter") !== this.scope.writerEpoch) return;
+    const cursor = this.metadata("historyProjectionCursor"), parts = this.metadata("historyProjectionParts");
+    if (cursor === null || cursor !== "" && !identity.safeParse(cursor).success || parts !== "0" && parts !== "1")
+      throw new CloudCommandRuntimeError("command_storage_unavailable");
+    // Every command prerequisite must be assigned before any inherited head
+    // or retained event job can be accepted in the new CP projection.
+    if (this.db.prepare("SELECT 1 FROM local_commands WHERE mirror_dirty=1 LIMIT 1").get()) return;
+    const row = this.db.prepare("SELECT conversation_id,document FROM local_command_history_heads WHERE conversation_id>? ORDER BY conversation_id LIMIT 1")
+      .get(cursor) as { conversation_id: string; document: string } | undefined;
+    if (!row) { this.setMetadata("historyProjectionWriter",""); return; }
+    const head = CloudLocalCommandHistoryHeadSchema.parse(JSON.parse(row.document));
+    this.verifyHistoryHead(row.conversation_id,head);
+    const jobs: Array<Pick<SharedChange,"historyHead" | "historyPart">> = [];
+    const manifestSha256 = "manifestSha256" in head.history ? head.history.manifestSha256 : null;
+    if (parts === "1" && manifestSha256) {
+      const manifest = CloudLocalCommandHistoryManifestSchema.parse(JSON.parse(this.document(manifestSha256)!.document));
+      for (const sha256 of new Set([...manifest.records.map(record => record.sha256),manifestSha256])) {
+        const saved = this.document(sha256)!, bytes = Buffer.from(saved.document), count = Math.ceil(saved.bytes / (128 * 1024));
+        for (let index = 0; index < count; index++) jobs.push({ historyPart: { version: 1, kind: saved.kind, sha256,
+          index, count, bytes: saved.bytes, data: bytes.subarray(index * 128 * 1024,(index + 1) * 128 * 1024).toString("base64") } });
+      }
+    }
+    jobs.push({ historyHead: head });
+    const bytes = jobs.reduce((sum,job) => sum + Buffer.byteLength(this.historyJobDocument(job)),0);
+    const reserveJobs = this.limits.pending * 4, reserveBytes = this.limits.pending * MAX_CHANGE_BYTES * 2;
+    const pending = this.db.prepare("SELECT count(*) AS n,coalesce(sum(bytes),0) AS bytes FROM local_command_outbox_jobs").get() as { n: number; bytes: number };
+    if (jobs.length + reserveJobs > this.limits.historyJobs || bytes + reserveBytes > this.limits.historyBytes) {
+      // A restored bundle can exceed deliberately reduced bulk limits. Waiting
+      // cannot make it fit: publish one compact fence from reserved control
+      // space, then advance. Native audit and immutable CAS remain untouched.
+      // Waiting for older jobs bounds this escape to one compact head at once.
+      if (pending.n) return;
+      const limited = parts === "1" && manifestSha256 ? CloudLocalCommandHistoryHeadSchema.parse({ ...head,
+        history: { restoreRevision: this.nextRestoreRevision(row.conversation_id), recordSequence: head.history.recordSequence,
+          eventSequence: head.history.eventSequence, incompleteReason: "history_limit" } }) : head;
+      this.saveHistoryHead(row.conversation_id,limited);
+      this.historyJob(row.conversation_id,{ historyHead: limited });
+      this.setMetadata("historyProjectionCursor",row.conversation_id);
+      return;
+    }
+    if (pending.n + jobs.length + reserveJobs > this.limits.historyJobs || pending.bytes + bytes + reserveBytes > this.limits.historyBytes) return;
+    for (const job of jobs) this.historyJob(row.conversation_id,job,manifestSha256);
+    this.setMetadata("historyProjectionCursor",row.conversation_id);
+  }
+
   /** Assign at most one next flight's bytes. Parts stay unsequenced until then,
    * so a different conversation's control cannot sit behind a 16 MiB prefix.
    * Assigned retries are immutable and retain their original sequence. */
   private materializeHistoryJobs(): void {
+    if (this.db.prepare("SELECT 1 FROM local_commands WHERE mirror_dirty=1 LIMIT 1").get()) return;
     const after = Number(this.metadata("mirrorHead") ?? "0");
     const pending = this.db.prepare("SELECT bytes FROM local_command_journal WHERE writer_epoch=? AND sequence>? ORDER BY sequence LIMIT ?")
       .all(this.scope.writerEpoch,after,MAX_BATCH_ENTRIES) as { bytes: number }[];
@@ -974,6 +1035,7 @@ export class CloudLocalCommandQueue {
       const previous = this.db.prepare("SELECT document FROM local_command_mirror_batches WHERE writer_epoch=?").get(this.scope.writerEpoch) as { document: string } | undefined;
       if (previous) return JSON.parse(previous.document);
       this.materializeDirty();
+      this.stageInheritedHistory();
       this.materializeHistoryJobs();
       const after = Number(this.metadata("mirrorHead") ?? "0");
       const rows = this.db.prepare("SELECT sequence,document,bytes FROM local_command_journal WHERE writer_epoch=? AND sequence>? ORDER BY sequence LIMIT ?")
@@ -1030,7 +1092,8 @@ export class CloudLocalCommandQueue {
   }
   mirrorDrained(): boolean {
     if (this.closed) return false;
-    return !this.db.prepare("SELECT 1 FROM local_command_journal WHERE writer_epoch=? LIMIT 1").get(this.scope.writerEpoch) &&
+    return this.metadata("historyProjectionWriter") !== this.scope.writerEpoch &&
+      !this.db.prepare("SELECT 1 FROM local_command_journal WHERE writer_epoch=? LIMIT 1").get(this.scope.writerEpoch) &&
       !this.db.prepare("SELECT 1 FROM local_commands WHERE mirror_dirty=1 LIMIT 1").get() &&
       !this.db.prepare("SELECT 1 FROM local_command_controls WHERE mirror_dirty=1 LIMIT 1").get() &&
       !this.db.prepare("SELECT 1 FROM local_command_outbox_jobs LIMIT 1").get();

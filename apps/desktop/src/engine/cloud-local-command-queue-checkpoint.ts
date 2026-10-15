@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, lstatSync } from "node:fs";
+import { constants, closeSync, fstatSync, lstatSync, openSync, realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import type { Stats } from "node:fs";
@@ -55,8 +55,11 @@ export type CloudLocalCommandCheckpointManifest = z.infer<typeof CloudLocalComma
  * Only restoration with authenticated source lineage can mint this receipt;
  * copying its public fields cannot manufacture one. */
 export type CloudLocalCommandPredecessor = Readonly<{ scope: Readonly<CloudAgentBootScope> }>;
+type VerifiedTranscriptPair = { ledgerFile: string; ledger: Stats; normalFile: string; normal: Stats };
+const verifiedTranscriptPairs = new WeakMap<object, VerifiedTranscriptPair>();
 const restoredPredecessors = new WeakMap<CloudLocalCommandPredecessor, {
   file: string; dev: number; ino: number; seal: CloudLocalCommandWriterSeal;
+  transcript: VerifiedTranscriptPair;
 }>();
 type HistoryOrigin = Readonly<{ scope: Readonly<CloudAgentBootScope>; recordSequence: number; eventSequence: number }>;
 type RecoveryHistory = HistoryOrigin & { readonly origins: readonly HistoryOrigin[] };
@@ -93,6 +96,41 @@ export function verifiedCloudLocalCommandPredecessor(
     verifyLedger(db, proof.seal);
     return receipt.scope;
   } catch { return null; }
+}
+
+/** The exact sealed NORMAL snapshot is local transcript custody, not a new
+ * complete mirror head. Only authenticated sealed restoration can mint this
+ * capability. An unsealed recovery's ancestor must never supply newer rows. */
+export function readVerifiedCloudLocalCommandSealedTranscript<T>(receipt: CloudLocalCommandPredecessor | null | undefined,
+  ledger: Sqlite.Database, seal: CloudLocalCommandWriterSeal, read: (normal: Sqlite.Database) => T): T {
+  const proof = receipt && restoredPredecessors.get(receipt);
+  if (!proof || !isDeepStrictEqual(seal, proof.seal)) invalid("checkpoint_writer_scope");
+  const source = proof.transcript;
+  const current = () => {
+    const main = (ledger.prepare("PRAGMA database_list").all() as { name: string; file: string }[]).find(row => row.name === "main");
+    if (main?.file !== source.ledgerFile) invalid("checkpoint_writer_scope");
+    unchangedTranscriptFile(source.ledgerFile, source.ledger); unchangedTranscriptFile(source.normalFile, source.normal);
+  };
+  current();
+  // Pin the descriptor before SQLite opens its read view. The selected file
+  // cannot be redirected by replacing its pathname between the checks.
+  if (!constants.O_NOFOLLOW || !constants.O_NONBLOCK) invalid("checkpoint_file_open_flags");
+  const descriptor = openSync(source.normalFile,constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let normal: Sqlite.Database | undefined;
+  try {
+    const pinned = () => { if (!stable(source.normal,fstatSync(descriptor))) invalid("checkpoint_restore_identity"); };
+    pinned(); current();
+    normal = openSqlite(`${process.platform === "linux" ? "/proc/self/fd" : "/dev/fd"}/${descriptor}`, { readonly: true, fileMustExist: true });
+    normal.pragma("busy_timeout = 25"); normal.pragma("query_only = ON");
+    const snapshot = normal;
+    const result = snapshot.transaction(() => {
+      pinned(); current();
+      const head = snapshot.prepare("SELECT next_rev-1 AS rev FROM sync_meta WHERE id=0").get() as { rev: number } | undefined;
+      if (head?.rev !== seal.recordSequence) invalid("checkpoint_normal_head");
+      return read(snapshot);
+    })();
+    pinned(); current(); return result;
+  } finally { normal?.close(); closeSync(descriptor); }
 }
 
 function sameRecoveryTarget(authorization: CloudAgentHistoryRecoveryResponse,
@@ -171,6 +209,13 @@ function json(value: string, code: CheckpointCode): unknown {
 function stable(before: Stats, after: Stats): boolean {
   return before.dev === after.dev && before.ino === after.ino && before.size === after.size &&
     before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs && after.nlink === 1;
+}
+function unchangedTranscriptFile(file: string, before: Stats): void {
+  const current = lstatSync(file);
+  if (!current.isFile() || realpathSync(file) !== file || !stable(before, current)) invalid("checkpoint_restore_identity");
+  // A mutable WAL cannot extend an immutable verified main-file snapshot.
+  try { if (lstatSync(`${file}-wal`).size !== 0) invalid("checkpoint_normal_head"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 }
 async function directory(file: string): Promise<void> {
   const stat = await fs.lstat(file);
@@ -321,7 +366,8 @@ function verifyLedger(db: Sqlite.Database, seal: CloudLocalCommandWriterSeal): v
   const pending = (table: string, predicate: string, ...parameters: string[]) =>
     !!db.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(table) &&
     !!db.prepare(`SELECT 1 FROM ${table} WHERE ${predicate} LIMIT 1`).get(...parameters);
-  if (pending("local_commands", "writer_epoch=? AND state IN ('queued','dispatching')", seal.scope.writerEpoch) ||
+  if (metadata("historyProjectionWriter") === seal.scope.writerEpoch ||
+      pending("local_commands", "writer_epoch=? AND state IN ('queued','dispatching')", seal.scope.writerEpoch) ||
       pending("local_commands", "mirror_dirty=1") || pending("local_command_controls", "mirror_dirty=1") ||
       pending("local_command_actions", "writer_epoch=? AND state='dispatching'", seal.scope.writerEpoch) ||
       pending("local_command_control_owners", "settled=0 AND command_id IN (SELECT id FROM local_commands WHERE writer_epoch=?)", seal.scope.writerEpoch) ||
@@ -422,6 +468,7 @@ export async function verifyCloudLocalCommandCheckpoint(input: { root: string; s
       manifest.seal.scope.writerEpoch !== input.expectedWriterEpoch)) invalid("checkpoint_expected_writer_mismatch");
   const restored = path.join(root, `.verified-${randomUUID()}`); await fs.mkdir(restored, { mode: 0o700 });
   try {
+    const assembled = new Map<"ledger" | "normal", Stats>();
     for (const file of manifest.files) {
       const destination = await fs.open(path.join(restored, `${file.kind}.sqlite`),
         constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -447,11 +494,21 @@ export async function verifyCloudLocalCommandCheckpoint(input: { root: string; s
         if (total !== file.bytes) invalid("checkpoint_assembled_size");
         if (fileDigest.digest("hex") !== file.sha256) invalid("checkpoint_assembled_hash");
         await destination.sync();
+        // Bind the exact descriptor that received the verified bytes. A later
+        // install await must never bless a replacement or changed candidate.
+        const identity = await destination.stat();
+        if (!identity.isFile() || identity.nlink !== 1 || identity.size !== file.bytes) invalid("checkpoint_assembled_size");
+        assembled.set(file.kind,identity);
       } finally { await destination.close(); }
     }
     const ledgerFile = path.join(restored, "ledger.sqlite"), normalFile = path.join(restored, "normal.sqlite");
+    const transcript = { ledgerFile, ledger: assembled.get("ledger")!, normalFile, normal: assembled.get("normal")! };
+    unchangedTranscriptFile(ledgerFile,transcript.ledger); unchangedTranscriptFile(normalFile,transcript.normal);
     verifyPair(ledgerFile, normalFile, manifest.seal);
-    return { manifest, ledgerFile, normalFile, cleanup: () => fs.rm(restored, { recursive: true, force: true }) };
+    unchangedTranscriptFile(ledgerFile,transcript.ledger); unchangedTranscriptFile(normalFile,transcript.normal);
+    const verified = { manifest, ledgerFile, normalFile, cleanup: () => fs.rm(restored, { recursive: true, force: true }) };
+    verifiedTranscriptPairs.set(verified,transcript);
+    return verified;
   } catch (error) { await fs.rm(restored, { recursive: true, force: true }); throw error; }
 }
 
@@ -497,9 +554,12 @@ export async function restoreCloudLocalCommandCheckpointLedger(input: { root: st
     if (input.expectedWriterEpoch !== undefined) {
       const scope = Object.freeze({ ...verified.manifest.seal.scope });
       const published = await fs.lstat(file);
+      const transcript = verifiedTranscriptPairs.get(verified);
+      if (!transcript) invalid("checkpoint_restore_identity");
+      unchangedTranscriptFile(transcript.ledgerFile,transcript.ledger); unchangedTranscriptFile(transcript.normalFile,transcript.normal);
       predecessor = Object.freeze({ scope });
       restoredPredecessors.set(predecessor, { file, dev: published.dev, ino: published.ino,
-        seal: Object.freeze({ ...verified.manifest.seal, scope }) });
+        seal: Object.freeze({ ...verified.manifest.seal, scope }), transcript });
     }
     return { ...verified, predecessor };
   } catch (error) { await verified.cleanup(); throw error; }

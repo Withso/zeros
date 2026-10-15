@@ -4374,7 +4374,7 @@ export class ZerosEngine {
       for (const row of rows) {
         const custody = recovering ? { scope: verified.predecessor!.scope, sourceRecovery: verified.predecessor! } : { scope: sourceSeal.scope, sourceSeal };
         const restored = rebuildCloudLocalCommandHistory({ db, ledger, repositoryRoot: fs.realpathSync(this.root),
-          ...custody, conversationId: row.conversation_id });
+          ...custody, ...(!recovering ? { sealedCheckpoint: verified } : {}), conversationId: row.conversation_id });
         restoredHeads.set(restored.conversationId, restored.historyHead);
       }
       // No partial lineage is publishable if any conversation fails custody.
