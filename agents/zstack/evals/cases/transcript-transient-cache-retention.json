@@ -2,7 +2,7 @@
   "id": "transcript-transient-cache-retention",
   "kind": "replay",
   "area": "renderer",
-  "fixedBy": "pending",
+  "fixedBy": "pr:525",
   "symptom": "Transient cloud history failures erased or suppressed a confirmed disk transcript on reopen.",
   "rule": "Retain the exact-owner presentation through transient revalidation; only authoritative absence or access retirement can clear it (zstack-review).",
   "check": "pnpm test:git apps/desktop/src/renderer/platform/__tests__/cloud-transcript-revalidation.test.ts"

@@ -2,7 +2,7 @@
   "id": "navigation-cold-local-identity",
   "kind": "replay",
   "area": "renderer",
-  "fixedBy": "pending",
+  "fixedBy": "pr:525",
   "symptom": "Reopening with a cold or partial Local metadata cache lost the saved chat before its authoritative list arrived.",
   "rule": "Restore durable selection synchronously by semantic owner, then validate against the exact backend; cold metadata is not deletion (zstack-review).",
   "check": "pnpm test:git apps/desktop/src/renderer/state/__tests__/navigation-reopen.test.ts"
