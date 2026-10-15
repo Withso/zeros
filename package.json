@@ -169,6 +169,7 @@
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-tooltip": "^1.2.8",
     "@replit/codemirror-indentation-markers": "^6.5.3",
+    "@tanstack/react-virtual": "3.14.20",
     "@tiptap/core": "3.31.2",
     "@tiptap/extension-document": "3.31.2",
     "@tiptap/extension-mention": "3.31.2",
