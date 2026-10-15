@@ -158,6 +158,7 @@ const EditFileRow = memo(function EditFileRow({
     Icon: FileEdit,
     label: writeLineCount != null ? `Write ${writeLineCount} lines` : "Edit",
     target: path,
+    filePath: source?.path ?? readPath(tool.rawInput) ?? undefined,
     targetFile: true,
     targetKind: "file",
     expandable: true,

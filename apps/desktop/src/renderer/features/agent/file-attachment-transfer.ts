@@ -60,7 +60,8 @@ function publish(key: string, state: FileAttachmentProgress): void {
   if (
     previous?.phase === state.phase &&
     previous.percent === state.percent &&
-    previous.error === state.error
+    previous.error === state.error &&
+    (state.diskPath === undefined || previous.diskPath === state.diskPath)
   )
     return;
   states.delete(key);
@@ -70,6 +71,16 @@ function publish(key: string, state: FileAttachmentProgress): void {
     if (old.phase !== "saving" && !listeners.has(oldKey)) states.delete(oldKey);
   }
   for (const listener of listeners.get(key) ?? []) listener();
+}
+
+/** Legacy inline drafts use the older writer, but their pills need the same
+ * confirmed-path publication as streamed imports. */
+export function publishSavedAttachment(cwd: string, attachment: ComposerAttachment, result: AttachmentWriteResult): void {
+  attachment.diskPath = result.relativePath;
+  attachment.absolutePath = result.absolutePath;
+  attachment.contextAttachmentId ??= attachment.id;
+  attachment.owner = attachmentOwner(cwd);
+  publish(keyFor(cwd, attachment.contextAttachmentId), { phase: "ready", percent: 100, diskPath: result.relativePath });
 }
 
 async function withUploadSlot<T>(task: () => Promise<T>): Promise<T> {

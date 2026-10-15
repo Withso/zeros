@@ -617,6 +617,7 @@ describe("normalizeWorkbenchTabs", () => {
         changesView: "tree",
         viewerMode: "diff",
         changesPresentation: "single",
+        changesRequestedFile: "src/a.ts",
       },
       {
         id: "review-valid",
@@ -636,6 +637,7 @@ describe("normalizeWorkbenchTabs", () => {
     expect(out.find((tab) => tab.id === "changes-valid")).toMatchObject({
       changesView: "tree",
       changesPresentation: "single",
+      changesRequestedFile: undefined,
       viewerMode: undefined,
     });
     expect(out.find((tab) => tab.id === "review-valid")?.reviewSubtab).toBe(
@@ -644,6 +646,15 @@ describe("normalizeWorkbenchTabs", () => {
     expect(out.find((tab) => tab.id === "file-invalid")?.viewerMode).toBe(
       undefined,
     );
+  });
+
+  it("restores literal file paths without trimming them into another filename", () => {
+    const tabs = normalizeWorkbenchTabs([
+      { id: "literal-file", type: "files", title: "notes.ts", filePath: " notes.ts " },
+      { id: "literal-change", type: "changes", title: "Changes", filePath: " notes.ts " },
+    ]);
+    expect(tabs.find((tab) => tab.id === "literal-file")?.filePath).toBe(" notes.ts ");
+    expect(tabs.find((tab) => tab.id === "literal-change")?.filePath).toBe(" notes.ts ");
   });
 });
 

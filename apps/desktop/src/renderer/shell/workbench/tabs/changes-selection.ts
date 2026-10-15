@@ -9,7 +9,9 @@ export function reconcileChangesSelection(
   previousPaths: readonly string[],
   nextPaths: readonly string[],
   selectedPath: string | null,
+  requestedPath?: string,
 ): string | null {
+  if (selectedPath && requestedPath === selectedPath) return selectedPath;
   if (nextPaths.length === 0) return null;
   if (!selectedPath) return nextPaths[0];
 

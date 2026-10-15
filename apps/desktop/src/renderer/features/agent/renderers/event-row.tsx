@@ -22,6 +22,9 @@ import { ToolIdentityIcon } from "./tool-identity-icon";
 import { nativeToolSurface, toolRecord } from "./native-tool-presentation";
 import { pendingChecksMessage } from "./tool-pending-checks";
 import { useTurnDisclosure } from "../turn-disclosures";
+import { ListRow } from "@/renderer/shared/ui/primitives";
+import { ImageHoverCard, imagePreviewMimeType } from "../image-hover-card";
+import { filePillPath, openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill-navigation";
 
 interface EventRowProps {
   message: AgentMessage;
@@ -35,8 +38,7 @@ interface EventRowProps {
   /** Optional trailing content rendered after the target — overrides
    *  `meta.trailing`. Used by EditCard for the green/red +N −M counts. */
   trailingNode?: React.ReactNode;
-  /** Optional exact diff shown on hover/focus. Only EditCard supplies this;
-   *  generic/Read tool rows deliberately remain ordinary expandable rows. */
+  /** Exact recorded diff shown on the file pill, independently of disclosure. */
   hoverPreview?: React.ReactNode;
   /** Seed an unseen disclosure (the exit-plan card starts open so the plan
    * is readable without a click). Later prop changes do not override the
@@ -116,15 +118,47 @@ export const EventRow = memo(function EventRow({
   const rowTint = sTone ? TONE_ROW_TINT[sTone] : "";
 
   const accessibleTarget = meta.targetFile ? meta.target?.replace(/\/+$/, "").split("/").pop() : meta.target;
-  const row = (
-    <button
-      type="button"
+  const fileRow = !!(meta.target && meta.targetFile);
+  const active = ctx.attachmentImagesActive !== false;
+  const destination = isTool && message.toolKind === "edit" ? "changes" : "file";
+  const path = meta.filePath;
+  const canOpen = active && !!path && !!filePillPath(ctx.attachmentCwd, path);
+  const warmFile = () => {
+    if (canOpen && path) warmFilePill(ctx.attachmentCwd, path, destination);
+  };
+  let filePill: React.ReactNode = fileRow ? (
+    <FileTag
+      name={path ?? meta.target!}
+      kind={meta.targetKind}
+      data-file-path={path}
+      title={hoverPreview || (path && destination === "file" && imagePreviewMimeType(path)) ? undefined : path ?? meta.target}
+      aria-label={`Open ${accessibleTarget}${destination === "changes" ? " in Changes" : ""}`}
+      aria-disabled={!canOpen || undefined}
+      onPointerEnter={warmFile}
+      onFocus={warmFile}
+      onClick={() => { if (canOpen && path) openFilePill(ctx.attachmentCwd, path, destination); }}
+      className={sTone === "fail" ? "border-red-primary/25 bg-red-bg text-red-primary hover:bg-red-bg [&_*]:text-red-primary!" : undefined}
+    />
+  ) : null;
+  if (filePill && hoverPreview) {
+    filePill = <DiffHoverCard trigger={filePill as React.ReactElement} enabled={!open && active}>{hoverPreview}</DiffHoverCard>;
+  } else if (filePill && path && destination === "file" && imagePreviewMimeType(path)) {
+    filePill = <ImageHoverCard name={path} path={path} cwd={ctx.attachmentCwd} enabled={active && !open}>{filePill as React.ReactElement}</ImageHoverCard>;
+  }
+  const trailing = <>
+    {trailingNode ?? (meta.trailing ? <span className="text-fg2 shrink-0 text-xs tabular-nums">{meta.trailing}</span> : null)}
+    {transportTruncated && <span className="bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium" title="The provider truncated this tool payload">Truncated</span>}
+  </>;
+  const disclosure = (
+    <ListRow
       // Width hugs the content (`w-fit`) and never exceeds the lane
       // (`max-w-full`): the hover tint then wraps exactly the row's content
       // instead of painting the empty space out to the right edge.
       className={cn(
-        "group/event-row -ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
+        "-ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
+        !fileRow && "group/event-row",
         expandable ? "hover:bg-bg2-hover/40 cursor-pointer" : "cursor-default",
+        fileRow && "m-0 min-w-0 shrink-0 gap-2 rounded-sm p-0",
         rowTint,
       )}
       onClick={() => {
@@ -197,45 +231,18 @@ export const EventRow = memo(function EventRow({
         {sTone === "fail" ? "Error" : meta.label}
       </span>
 
-      {/* Target — a file/image TAG (FileTypeIcon + bg1/border3 pill) for file
-          tools (Read/Edit/List), else a plain command/query/thought pill. The
-          tag carries the same glyph as the Files tab so a Read of `foo.tsx`
-          and an Edit of it match. min-w-0 + truncate ellipsize a long name. */}
-      {meta.target && (meta.targetFile || !open) &&
-        (meta.targetFile ? (
-          <FileTag name={meta.target} kind={meta.targetKind} className={sTone === "fail" ? "border-red-primary/25 bg-red-bg text-red-primary hover:bg-red-bg [&_*]:text-red-primary!" : undefined} />
-        ) : (
+      {!fileRow && meta.target && !open && (
           <span data-tool-preview="" className={cn("max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs font-medium", sTone === "fail" ? "bg-red-bg text-red-primary" : "bg-bg1-hover text-fg3")}>
             {meta.target}
           </span>
-        ))}
-      {/* Trailing — a custom node (EditCard's green/red +N −M) wins; else the
-          string meta.trailing (Grep match count, etc.). Read's line count
-          lives in the LABEL now, so reads carry no trailing. */}
-      {trailingNode ??
-        (meta.trailing ? (
-          <span className="text-fg2 shrink-0 text-xs tabular-nums">
-            {meta.trailing}
-          </span>
-        ) : null)}
-      {transportTruncated && (
-        <span
-          className="bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium"
-          title="The provider truncated this tool payload"
-        >
-          Truncated
-        </span>
       )}
-    </button>
+      {!fileRow && trailing}
+    </ListRow>
   );
 
   return (
     <div className="flex flex-col">
-      {hoverPreview ? (
-        <DiffHoverCard trigger={row} enabled={!open && ctx.attachmentImagesActive !== false}>{hoverPreview}</DiffHoverCard>
-      ) : (
-        row
-      )}
+      {fileRow ? <div className={cn("group/event-row -ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1", rowTint)}>{disclosure}{filePill}{trailing}</div> : disclosure}
       {expandable && open && (
         <div id={detailId} className={cn("min-w-0 pr-2", isThinking ? "py-1" : "pt-1.5 pb-2")}>
           {isThinking ? (

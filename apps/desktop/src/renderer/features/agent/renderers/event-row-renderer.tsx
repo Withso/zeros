@@ -199,7 +199,7 @@ function CommandReadRows({ tool, reads, ctx }: {
           key={read.key}
           message={tool}
           ctx={ctx}
-          meta={{ Icon: FileText, label, target: read.path, targetFile: true, targetKind: "file", expandable: true }}
+          meta={{ Icon: FileText, label, target: read.path, filePath: read.path, targetFile: true, targetKind: "file", expandable: true }}
           open={expanded === read.key}
           onOpenChange={(open) => setExpanded(open ? read.key : null)}
           detail={detail}
