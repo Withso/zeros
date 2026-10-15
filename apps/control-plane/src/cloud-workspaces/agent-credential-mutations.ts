@@ -482,6 +482,10 @@ async function progressRemoval(tx: Tx, row: Mutation): Promise<void> {
   if (isPublication(row)) {
     if (row.state === "preparing" && row.expires_at.getTime() <= Date.now()) {
       await setState(tx,row,"cancelling","expire"); await nextControls(tx,row,"release");
+      // The decision is durable in this transaction. Positive retirement can
+      // already satisfy every release; evaluate the new row, never the stale
+      // preparing snapshot, before reporting that closure is still pending.
+      return progressRemoval(tx,await mutation(tx,row.owner_user_id,row.id));
     } else if (row.state === "publishing") {
       const publications = (await controlsFor(tx,row.id)).filter(control=>control.operation==="publish-desired");
       if (publications.length && publications.every(control=>completedControl(control,"ready"))) await setState(tx,row,"published");
@@ -602,15 +606,19 @@ export async function exchangeCloudAgentCredentialControls(tx: Tx,
 /** Settings preflight is a separate committed transaction: a pending refusal
  * must not roll back the outbox/start fence. It never stores provider bytes. */
 export async function prepareCloudAgentCredentialPublication(tx:Tx,userId:string,operationId:string,
-  value:CloudAgentCredentialPublicationTarget):Promise<"legacy"|"pending"|"fenced"|"committed"> {
+  value:CloudAgentCredentialPublicationTarget):Promise<"legacy"|"pending"|"fenced"|"committed"|"expired"> {
   const target=checked(publicationTarget,value); if(!uuid.safeParse(operationId).success) denied();
   await lockOwner(tx,userId);
   const previous=(await tx.query<Mutation>("SELECT * FROM cloud_agent_credential_mutations WHERE id=$1 FOR UPDATE",[operationId])).rows[0];
   if(previous) {
     if(previous.owner_user_id!==userId) denied();
     if(!hash(previous.target).equals(hash(target))) conflict();
-    if(previous.state==="publishing"||previous.state==="published") return "committed";
-    if(previous.decision!==null) conflict();
+    await progressRemoval(tx,previous);
+    const current=await mutation(tx,userId,operationId);
+    if(current.state==="publishing"||current.state==="published") return "committed";
+    if(current.state==="expired"||current.state==="cancelled") return "expired";
+    if(current.state==="cancelling") return "pending";
+    if(current.decision!==null) conflict();
     const pauses=(await controlsFor(tx,operationId)).filter(control=>control.operation==="pause-starts");
     return pauses.every(fencedControl) ? "fenced" : "pending";
   }
@@ -660,6 +668,47 @@ export async function prepareCloudAgentCredentialPublication(tx:Tx,userId:string
     controlsCreated++;
   }
   return controlsCreated?"pending":"fenced";
+}
+
+/** The released selection API has no client operation ID. Only a new
+ * authenticated selection may open a successor, after all elapsed attempts
+ * for this connection have positively released their original start fences.
+ * The old row, deadline and receipts remain immutable; pending/lost-ACK
+ * retries select the same durable attempt under the owner serialization lock.
+ */
+export async function prepareCloudAgentConnectionPublication(tx:Tx,userId:string,initialOperationId:string,
+  value:Extract<CloudAgentCredentialPublicationTarget,{kind:"publish-connection"}>) {
+  const target=checked(publicationTarget,value);
+  if(target.kind!=="publish-connection")denied();
+  await lockOwner(tx,userId);await organization(tx,userId,target.organizationId);
+  const previous=(await tx.query<Mutation>(`SELECT * FROM cloud_agent_credential_mutations
+    WHERE owner_user_id=$1 AND request_sha256=$2 AND target->>'kind'='publish-connection'
+    ORDER BY fence_epoch DESC LIMIT 1 FOR UPDATE`,[userId,hash(target)])).rows[0];
+  // A lost acknowledgement of an already committed selection is a replay,
+  // even while a later, different selection is waiting for its release ACK.
+  // The source-write transaction still verifies the current request/revision.
+  if(previous?.state==="publishing"||previous?.state==="published")
+    return {operationId:previous.id,state:await prepareCloudAgentCredentialPublication(tx,userId,previous.id,target)};
+  const elapsed=(await tx.query<Mutation>(`SELECT * FROM cloud_agent_credential_mutations
+    WHERE owner_user_id=$1 AND target->>'kind'='publish-connection'
+      AND target->>'organizationId'=$2 AND target->>'provider'=$3
+      AND state IN ('preparing','cancelling') AND expires_at<=clock_timestamp()
+    ORDER BY fence_epoch LIMIT 17 FOR UPDATE`,[userId,target.organizationId,target.provider])).rows;
+  let pending=elapsed.length>16;
+  for(const row of elapsed.slice(0,16)) {
+    await progressRemoval(tx,row);
+    const current=await mutation(tx,userId,row.id);
+    if(current.state!=="expired"&&current.state!=="cancelled")pending=true;
+  }
+  if(pending)return {operationId:initialOperationId,state:"pending" as const};
+  const current=previous?await mutation(tx,userId,previous.id):null;
+  const operationId=current
+    ? current.state==="expired"||current.state==="cancelled" ? randomUUID() : current.id
+    : initialOperationId;
+  const state=await prepareCloudAgentCredentialPublication(tx,userId,operationId,target);
+  // Expiry during this preflight closes that attempt. A subsequent request,
+  // not an unbounded internal retry, may create its successor.
+  return {operationId,state:state==="expired"?"pending" as const:state};
 }
 
 /** Called in the SAME source-write transaction. All old bytes disappear before

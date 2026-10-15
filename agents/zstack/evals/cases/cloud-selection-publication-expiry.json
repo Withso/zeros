@@ -1,0 +1,9 @@
+{
+  "id": "cloud-selection-publication-expiry",
+  "kind": "replay",
+  "area": "cloud-agent-credentials",
+  "fixedBy": "pending",
+  "symptom": "An explicit cloud account selection remains stuck behind an expired private publication even after positive retirement, or revives the expired operation instead of creating a separately fenced successor.",
+  "rule": "The bug-fix playbook requires a durable re-read after expiry, positive closure, bounded overlapping progress and unchanged explicit-operation and committed-replay identities.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/agent-credential-removal.integration.test.ts"
+}
