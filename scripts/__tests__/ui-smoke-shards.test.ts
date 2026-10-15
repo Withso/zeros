@@ -98,6 +98,7 @@ const originalOrder = [
   "activity-disclosure",
   "sticky-bottom",
   "scroll-area-cleanup",
+  "scroll-area-drag",
   "subscription",
 ];
 
