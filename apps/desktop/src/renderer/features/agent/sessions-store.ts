@@ -1358,8 +1358,16 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const pendingId = state.pendingLocalTurns[chatId];
       const optimistic = slot.messages.filter(message => !windowed.some(saved => saved.id === message.id) &&
         (message.kind === "text" && message.queued || message.id === pendingId));
-      const restored = windowed.length ? mergeWindowedTail(slot.messages, windowed) : [];
-      const messages = capMessages([...restored, ...optimistic.filter(message => !restored.some(saved => saved.id === message.id))]);
+      const head = state.cloudHistoryRestoreHeads[chatId];
+      const awaitingHistory = windowed.length === 0 && (head
+        ? !head.head?.deleted && !cloudHistoryFenceHasTranscript(head)
+        : slot.transcriptState !== "resident" && slot.hasTranscript);
+      // Session controls may be available before restored history. An empty
+      // snapshot without a complete head cannot clear the last confirmed rows;
+      // authoritative edit/delete heads have already fenced those rows above.
+      const restored = windowed.length || !head || awaitingHistory ? mergeWindowedTail(slot.messages, windowed) : [];
+      const additional = optimistic.filter(message => !restored.some(saved => saved.id === message.id));
+      const messages = capMessages(additional.length ? [...restored, ...additional] : restored);
       const permissions = snapshot.permissions.reduce<PendingPermission[]>((queue, item) => queuePermission(queue, item), []);
       const terminal = snapshot.latestTurn;
       const newerPending = pendingId && pendingId !== terminal?.turnId && pendingId !== snapshot.activeTurn?.turnId;
@@ -1368,8 +1376,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         : null;
       installed = true;
       return { pendingLocalTurns: !snapshot.activeTurn && terminal?.turnId === pendingId ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId) : state.pendingLocalTurns,
-        sessions: { ...state.sessions, [chatId]: { ...slot, ...metadata, messages, hasTranscript: hasDurableMessages(messages), transcriptState: "resident",
-        transcriptPresentation: null,
+        sessions: { ...state.sessions, [chatId]: { ...slot, ...metadata, messages, hasTranscript: awaitingHistory || hasDurableMessages(messages),
+        transcriptState: awaitingHistory ? "loading" : "resident",
+        transcriptPresentation: awaitingHistory ? slot.transcriptPresentation : null,
         transcriptDirty: false, pendingPermissions: permissions, pendingPermission: permissions[0] ?? null, pendingQuestions: snapshot.questions,
         status: snapshot.activeTurn || newerPending ? "streaming" : failure ? "failed" : "ready", failure, error: failure?.message ?? null,
         activeTurnStartedAt: newerPending ? slot.activeTurnStartedAt : snapshot.activeTurn?.startedAt ?? null,

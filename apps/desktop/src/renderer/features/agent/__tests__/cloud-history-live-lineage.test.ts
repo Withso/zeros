@@ -7,6 +7,7 @@ import { CloudAgentConnection } from "../../../platform/bridge/cloud-agent-conne
 import { cloudScopedId, cloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import { CloudAgentBootConversationSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { BLANK, useSessionsStore } from "../sessions-store";
+import { NativeTranscriptSnapshots } from "../transcript-retention";
 import type { AgentMessage } from "../use-agent-session";
 import type { RuntimeClient } from "../../../platform/bridge/ws-client";
 import type { WireRecord } from "../../../platform/bridge/cloud-runtime-wire";
@@ -75,7 +76,7 @@ async function fixture(withGlobalHeads = false) {
   useSessionsStore.getState().setSession(chatId, { ...BLANK, cwd: cloudWorkspaceKey(target), agentId: "codex",
     executionId: routedExecution, sessionId: routedExecution, messages: [live], transcriptState: "resident", status: "streaming", hasTranscript: true });
   const context: Record<string, unknown> = { WorkspaceRuntimeClient, HYDRATE_WINDOW: 200,
-    getStore: useSessionsStore.getState, bridge, persistedMessageRefsRef: { current: new Map() }, pendingHydratesRef: { current: new Set() } };
+    getStore: useSessionsStore.getState, bridge, persistedMessageRefsRef: { current: new Map() }, pendingHydratesRef: { current: new Set() }, nativeTranscriptSnapshotsRef: { current: new NativeTranscriptSnapshots() } };
   vm.runInNewContext(source, context);
   const stop = onCloudHistoryRestoreHead(context.install as Parameters<typeof onCloudHistoryRestoreHead>[0], true);
   return { bridge, agents, routedExecution, request,
