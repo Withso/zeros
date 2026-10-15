@@ -2,7 +2,7 @@
   "id": "cloud-selected-account-health",
   "kind": "replay",
   "area": "desktop-cloud-ui-state",
-  "fixedBy": "pending",
+  "fixedBy": "pr:530",
   "symptom": "An expired selected account appears Connected, reconnect conflicts lose the completed import, and late owner or hidden-dialog replies can select or publish stale state.",
   "rule": "Read exact optional selected-source health, keep missing observations unavailable, reconnect through the fresh native ceremony, retain imports across conflicts and require an explicit current-revision retry. Fence all continuations by the initiating owner and dialog. See docs/cloud-workspace/organization-setup.md and the cloud-selected-account-health change fragment.",
   "check": "pnpm test:git apps/desktop/src/renderer/features/settings/__tests__/cloud-provider-connection.test.ts apps/desktop/src/renderer/features/settings/__tests__/cloud-provider-connections.test.ts"
