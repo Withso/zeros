@@ -225,6 +225,11 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await expect(toasts).toHaveCount(0);
   check("Local and organization-local sends remain available; A to B to A keeps the cloud draft and toast acknowledgement", true);
 
+  await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
+  await expect(editor).toBeVisible();
+  const { checkRunningTurnPresentation } = await import("./ui-smoke-running-turn.mjs");
+  await checkRunningTurnPresentation({ page, check, screenshotDir });
+
   // A fresh renderer acknowledgement lets the deliberate toast action exercise
   // the shared production restart against synthetic lifecycle responses.
   await page.goto(`${harnessBase}/harness-composer-send-failures.html?blocked=1`);

@@ -3,6 +3,12 @@ import { agentFamily } from "./model-catalog";
 
 export type AgentActivity = "running" | "waiting" | null;
 
+function foregroundTurnRunning(slot: AgentSessionState | undefined): boolean {
+  return !!slot && (slot.status === "streaming" ||
+    (slot.status === "warming" || slot.status === "reconnecting") &&
+    slot.lastStopReason !== "cancelled" && slot.activeTurnStartedAt !== null);
+}
+
 /** Codex and Cursor retain their foreground-only chat-tab indicator. Their
  * native background process tracking still participates in workspace safety.
  * A send this renderer has in flight is foreground work for every agent, so a
@@ -15,7 +21,7 @@ export function chatAgentActivity(
   if (pendingLocalTurnId) return "running";
   return agentFamily(slot?.agentId ?? null) === "claude"
     ? agentActivity(slot, pendingLocalTurnId)
-    : slot?.status === "streaming"
+    : foregroundTurnRunning(slot)
       ? "running"
       : null;
 }

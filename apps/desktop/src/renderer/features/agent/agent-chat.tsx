@@ -79,7 +79,7 @@ import {
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
 import { cloudQueuedPrompt } from "./cloud-queued-prompt";
-import { agentActivity } from "./agent-activity";
+import { agentActivity, chatAgentActivity } from "./agent-activity";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
 import { PermissionCard } from "./permission-card";
@@ -584,7 +584,7 @@ export function AgentChat({
     !readOnly &&
     (agentFamily(session.agentId) === "claude"
       ? activity === "running"
-      : session.status === "streaming");
+      : chatAgentActivity(session) === "running");
   // QuestionCard's submit hook routes through session.sendPrompt (see the
   // RendererContext contract).
   const respondToQuestion = useCallback(

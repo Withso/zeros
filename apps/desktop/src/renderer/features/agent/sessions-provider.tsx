@@ -791,17 +791,19 @@ export function AgentSessionsProvider({
       startTransition(() => {
         const s = useSessionsStore.getState();
         for (const n of updates) {
-          const terminalTurn =
-            n.update.sessionUpdate === "turn_state"
-              ? n.update.state !== "running"
-              : false;
+          const before = useSessionsStore.getState();
+          const terminalTurn = n.update.sessionUpdate === "turn_state" && n.update.state !== "running" ? n.update : null;
           const chatId =
             (n as { chatId?: string }).chatId ??
-            s.executionToChatId[n.sessionId];
+            before.executionToChatId[n.sessionId];
           const exactSession =
-            !!chatId && s.sessions[chatId]?.sessionId === n.sessionId;
+            !!chatId && (before.sessions[chatId]?.executionId ?? before.sessions[chatId]?.sessionId) === (n.executionId ?? n.sessionId);
           s.applyBridgeUpdate(n);
-          if (terminalTurn && exactSession && chatId) {
+          const after = useSessionsStore.getState();
+          // The reducer may reject an older turn on this same route. Its
+          // completion cannot clear the current review or release its queue.
+          if (terminalTurn && exactSession && chatId && before.sessions[chatId] !== after.sessions[chatId] &&
+              after.sessions[chatId]?.foregroundTurnId === terminalTurn.turnId) {
             s.clearStrandedPlanReview(chatId);
             // Release, not just drain: for a turn this renderer did not issue
             // there is no sendPrompt finally to resolve a queue parked behind
@@ -811,18 +813,13 @@ export function AgentSessionsProvider({
             // Adopted turns (renderer reloaded mid-prompt) have no sendPrompt
             // finally. Emit finish from the engine's durable turn_state push;
             // idempotent with the local-send path when both observe the same id.
-            const turnUpdate = n.update as {
-              sessionUpdate: "turn_state";
-              state: "running" | "completed" | "failed" | "cancelled";
-              startedAt: number;
-              stopReason?: string | null;
-            };
+            const turnUpdate = terminalTurn;
             // Prefer sendPrompt's finally when this renderer still owns the
             // in-flight RPC — it has usage/effectiveModel/retry metadata.
             // Adopted turns have no local send lock, so finish from turn_state.
             const promptId = peekAgentPromptId(chatId);
             if (promptId && !sendingChatsRef.current.has(chatId)) {
-              const slot = s.sessions[chatId];
+              const slot = after.sessions[chatId];
               trackAgentPromptFinished({
                 promptId,
                 chatId,
@@ -2760,6 +2757,19 @@ export function AgentSessionsProvider({
         getStore().sessions[chatId]?.agentId === cloudSendOwner.agentId &&
         getStore().sessions[chatId]?.sessionId === cloudSendOwner.sessionId
       );
+      let promptOwner: { cwd: string | null; agentId: string | null } | null = null;
+      let requestExecutionId: string | null = null;
+      const ownsPromptConversation = () => {
+        const slot = getStore().sessions[chatId];
+        return ownsCloudSend() && (!promptOwner || !!slot && slot.cwd === promptOwner.cwd && slot.agentId === promptOwner.agentId);
+      };
+      const ownsPromptIdentity = () => {
+        const slot = getStore().sessions[chatId];
+        return ownsPromptConversation() && (!sentUserMessageId || !!slot &&
+          (!slot.foregroundTurnId || slot.foregroundTurnId === sentUserMessageId));
+      };
+      const ownsPromptTurn = () => ownsPromptIdentity() && (!requestExecutionId ||
+        (getStore().sessions[chatId]?.executionId ?? getStore().sessions[chatId]?.sessionId) === requestExecutionId);
       let promptInterruptedAfterOutput:
         | (Pick<AgentFailure, "kind" | "stage"> &
             Partial<Pick<AgentFailure, "message">>)
@@ -2923,6 +2933,7 @@ export function AgentSessionsProvider({
           flushedCloud.retryAdmission = false; flushedCloud.bubbleId = userMessage.id;
         }
         sentUserMessageId = userMessage.id;
+        promptOwner = { cwd: current.cwd, agentId: current.agentId };
         authPromptsRef.current.remember(
           chatId,
           current.agentId!,
@@ -3001,6 +3012,7 @@ export function AgentSessionsProvider({
           error: null,
           failure: null,
           lastStopReason: null,
+          foregroundTurnId: userMessage.id,
           activeTurnStartedAt: userMessage.createdAt,
           // On a queued-send flush, PROMOTE the placeholder. A follow-up's
           // array slot is mid-previous-turn and must move to the end; an active
@@ -3033,7 +3045,7 @@ export function AgentSessionsProvider({
         const submittedModel = isCloudWorkspace(current.cwd) ? useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.model ?? null : null;
         if (isCloudWorkspace(current.cwd)) cloudSendOwner = { cwd: current.cwd, agentId: current.agentId, sessionId: current.sessionId };
         const settleCloudAdmission = (error: unknown) => {
-          if (isCloudWorkspace(current.cwd) && (!ownsCloudSend() || stoppedByUser())) return true;
+          if (isCloudWorkspace(current.cwd) && (!ownsPromptTurn() || stoppedByUser())) return true;
           const admission = flushedCloud && classifyCloudAdmissionFailure({ folder: current.cwd, error,
             agentId: current.agentId, model: submittedModel });
           // These closed causes prove provider execution did not begin. Keep
@@ -3080,7 +3092,7 @@ export function AgentSessionsProvider({
         };
         const settleCloudPromptFailure = (failure: AgentFailure) => {
           if (!isCloudWorkspace(current.cwd)) return false;
-          if (!ownsCloudSend()) return true;
+          if (!ownsPromptTurn()) return true;
           // Once a cloud command is accepted, observation loss is never
           // permission to rebuild its provider and dispatch that prompt again.
           cloudTerminalFailure = failure;
@@ -3157,6 +3169,7 @@ export function AgentSessionsProvider({
           promptToSend: ContentBlock[],
         ): Promise<AgentPromptCompleteMessage | AgentPromptFailedMessage> =>
           new Promise((resolve, reject) => {
+            requestExecutionId = sessionId;
             const pendingIds = new Set(pendingAuth.map((message) => message.id));
             const replay = getStore().sessions[chatId]?.needsConversationReplay
               ? synthesizeReplayPrompt(current.messages.filter((message) =>
@@ -3190,7 +3203,7 @@ export function AgentSessionsProvider({
             ) => {
               if (settled) return;
               if (value.type === "AGENT_PROMPT_COMPLETE" &&
-                  getStore().sessions[chatId]?.sessionId === sessionId) {
+                  ownsPromptTurn() && getStore().sessions[chatId]?.sessionId === sessionId) {
                 getStore().patchSession(chatId, { needsConversationReplay: false });
               }
               cleanup();
@@ -3226,6 +3239,9 @@ export function AgentSessionsProvider({
             const selectionRevision = getStore().sessions[chatId]?.modelSelectionRevision ?? 0;
             getStore().patchSession(chatId, { modelSelectionRevisionAtRequest: selectionRevision });
             const send = () => {
+              // Mode application can await while another client starts work.
+              // The original send must not dispatch over that successor.
+              if (!ownsPromptTurn() || stoppedByUser()) return Promise.reject(new DOMException("Prompt turn superseded", "AbortError"));
               const request = {
                 type: "AGENT_PROMPT" as const,
                 agentId: current.agentId!,
@@ -3249,7 +3265,7 @@ export function AgentSessionsProvider({
                 : requestLocalPrompt(bridge, request, {
                     chatId,
                     signal: controller.signal,
-                    isCurrent: () => !stoppedByUser() &&
+                    isCurrent: () => ownsPromptTurn() && !stoppedByUser() &&
                       getStore().sessions[chatId]?.sessionId === sessionId,
                     onRecovery: () => {
                       recoveredLocalExecution = sessionId;
@@ -3326,6 +3342,7 @@ export function AgentSessionsProvider({
               bridge,
               current.cwd ?? null,
             );
+            if (!ownsPromptIdentity()) return "superseded";
             const loaded = await bridge.request<
               AgentSessionLoadedMessage | AgentErrorMessage
             >(
@@ -3341,6 +3358,7 @@ export function AgentSessionsProvider({
               },
               60_000,
             );
+            if (!ownsPromptIdentity()) return "superseded";
             if (loaded.type !== "AGENT_SESSION_LOADED") {
               const failure = failureFromAgentError(loaded, "loadSession");
               return bindFailureWasSuperseded(failure) ? "superseded" : null;
@@ -3360,6 +3378,7 @@ export function AgentSessionsProvider({
             // no longer receive prompts, cancellation, or lifecycle events.
             getStore().patchSession(chatId, {
               ...recovered,
+              foregroundTurnId: userMessage.id,
               ...loadedBackgroundTaskState(prebindBackgroundTasksRef.current.take(chatId, recovered.executionId) ?? loaded.response.backgroundTasks),
               needsConversationReplay: loaded.response.resumedFresh === true,
               ...(prebindGoal !== undefined ? { goal: prebindGoal } : {}),
@@ -3391,6 +3410,7 @@ export function AgentSessionsProvider({
         }): Promise<
           AgentPromptCompleteMessage | AgentPromptFailedMessage | null
         > => {
+          if (!ownsPromptIdentity()) return null;
           // A recovery is a RE-SEND of the user's prompt. After a Stop there is
           // nothing to recover: retrying would restart the very turn the user
           // just ended (the "I stopped it and it kept going" report).
@@ -3418,6 +3438,7 @@ export function AgentSessionsProvider({
                 failure: null,
               });
               const resumed = await tryResumeSameSession();
+              if (!ownsPromptIdentity()) return null;
               if (stoppedByUser()) {
                 settleStoppedSend();
                 return null;
@@ -3430,6 +3451,7 @@ export function AgentSessionsProvider({
                 if (replacementFlight) {
                   await replacementFlight.catch(() => {});
                 }
+                if (!ownsPromptIdentity()) return null;
                 if (stoppedByUser()) {
                   settleStoppedSend();
                   return null;
@@ -3517,6 +3539,7 @@ export function AgentSessionsProvider({
           } catch {
             /* surfaces via store below */
           }
+          if (!ownsPromptIdentity()) return null;
           if (stoppedByUser()) {
             settleStoppedSend();
             return null;
@@ -3556,6 +3579,7 @@ export function AgentSessionsProvider({
             error: null,
             failure: null,
             lastStopReason: null,
+            foregroundTurnId: userMessage.id,
             messages: messagesAfterRebuild,
             needsConversationReplay: rebuilt.needsConversationReplay || !!(opts?.replayHistory && hasPriorContext),
           });
@@ -3630,6 +3654,7 @@ export function AgentSessionsProvider({
               prompt,
             );
           } catch (firstErr) {
+            if (!ownsPromptTurn()) return;
             // A Stop is the most common reason this rejects: killing the
             // provider tears the stream down, which classifies as the
             // RECOVERABLE transport-closed — and this path then rebuilt the
@@ -3702,6 +3727,7 @@ export function AgentSessionsProvider({
             if (!resp) return;
           }
 
+          if (!ownsPromptTurn()) return;
           if (resp.type === "AGENT_PROMPT_FAILED") {
             // If the user just clicked Cancel, this PROMPT_FAILED is the
             // expected exit of the SIGTERM'd subprocess — not a real
@@ -3744,7 +3770,7 @@ export function AgentSessionsProvider({
               const retried = await rebuildAndRetry({
                 replayHistory: promptFailureShouldResumeProvider(failure),
               });
-              if (!retried) return;
+              if (!retried || !ownsPromptTurn()) return;
               if (retried.type === "AGENT_PROMPT_FAILED") {
                 if (settleCloudAdmission(retried.error)) return;
                 // The retry itself failed — surface the second failure
@@ -3779,7 +3805,7 @@ export function AgentSessionsProvider({
             // the engine's persisted tail before publishing final completion;
             // native empty/tool-only turns are valid and require no text test.
             const windowed = reconcileHistoryMessages(await persistWindowMessages(chatId, HYDRATE_WINDOW));
-            if (!ownsCloudSend() || stoppedByUser()) return;
+            if (!ownsPromptTurn() || stoppedByUser()) return;
             const fresh = getStore().sessions[chatId];
             if (windowed.length) getStore().patchSession(chatId, { messages: mergeWindowedTail(fresh.messages, windowed) });
           }
@@ -3913,6 +3939,7 @@ export function AgentSessionsProvider({
             costKind: tu?.costKind,
           });
         } catch (err) {
+          if (!ownsPromptTurn()) return;
           // Same cancel-suppression as the AGENT_PROMPT_FAILED branch
           // above: the await chain may reject (timeout, transport-closed)
           // because the subprocess died from our SIGTERM, not from a
@@ -3937,7 +3964,7 @@ export function AgentSessionsProvider({
       } finally {
         cancelLatency?.();
         const terminalSlot = getStore().sessions[chatId];
-        const ownsTerminalSlot = ownsCloudSend();
+        let ownsTerminalSlot = ownsPromptTurn();
         // Includes model refusals. Refresh only metadata; queued sends and the
         // saved model stay under their existing admission and user-intent gates.
         if (ownsTerminalSlot && !stoppedByUser()) refreshModelCatalog(chatId);
@@ -3985,17 +4012,18 @@ export function AgentSessionsProvider({
           }
         }
         const lifecycleCancelled = stoppedByUser();
-        // This turn is no longer in flight, however it ended (sent, aborted by a
-        // stop, bailed before dispatch). Unconditional and first: leaving it set
-        // would strand the tail shimmer on a settled turn — the inverse of the
-        // bug this fact exists to fix.
-        if (ownsTerminalSlot) getStore().setPendingLocalTurn(chatId, null);
+        // Release only this send's presentation owner. A newer native turn can
+        // already be running (or settled) while this RPC is still retiring.
+        const pendingOwner = sentUserMessageId ?? flushBubbleId;
+        if (pendingOwner && getStore().pendingLocalTurns[chatId] === pendingOwner)
+          getStore().setPendingLocalTurn(chatId, null);
         if (promptDiagnostics) {
           const terminal = getStore().sessions[chatId];
           const stopReason =
             promptResult?.stopReason ?? (ownsTerminalSlot ? terminal?.lastStopReason : undefined) ?? undefined;
           const cancelled = stopReason === "cancelled" || (!!cloudSendOwner && lifecycleCancelled);
           const healthy =
+            ownsTerminalSlot &&
             !promptInterruptedAfterOutput &&
             (!cloudSendOwner || promptResult !== null) &&
             terminal?.status === "ready" &&
@@ -4026,28 +4054,36 @@ export function AgentSessionsProvider({
               (healthy ? null : cloudTerminalFailure ?? (ownsTerminalSlot ? terminal?.failure : null)),
           });
         }
-        if (!ownsTerminalSlot) sendingChatsRef.current.delete(chatId);
-        if (ownsTerminalSlot) {
-          if (getStore().sessions[chatId]?.status === "ready")
-            authPromptsRef.current.delete(chatId);
-          if (recoveredLocalExecution && bridge &&
+        if (ownsTerminalSlot && getStore().sessions[chatId]?.status === "ready")
+          authPromptsRef.current.delete(chatId);
+        if (ownsTerminalSlot && recoveredLocalExecution && bridge &&
             getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
             getStore().sessions[chatId]?.status !== "streaming") {
-            // Fill any stream gap from the engine's saved transcript before a
-            // queued successor can make history reads ineligible again, including
-            // another disconnect between terminal delivery and this finalizer.
-            const ownsRecovery = () => !stoppedByUser() &&
-              getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
-              getStore().sessions[chatId]?.status !== "streaming";
-            const applied = await backfillLocalPromptTranscript(bridge, {
-              isCurrent: ownsRecovery,
-              reconcile: async () => {
-                await reconcileChatMessagesRef.current(chatId);
-                return getStore().sessions[chatId]?.transcriptDirty === false;
-              },
-            });
-            if (!applied && ownsRecovery()) pauseQueue(chatId);
-          }
+          // Fill a recovered stream gap before releasing the RPC lock, and
+          // recheck ownership if a native successor arrives during the read.
+          const ownsRecovery = () => ownsPromptTurn() && !stoppedByUser() &&
+            getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
+            getStore().sessions[chatId]?.status !== "streaming";
+          const applied = await backfillLocalPromptTranscript(bridge, {
+            isCurrent: ownsRecovery,
+            reconcile: async () => {
+              await reconcileChatMessagesRef.current(chatId);
+              return getStore().sessions[chatId]?.transcriptDirty === false;
+            },
+          });
+          if (!applied && ownsRecovery()) pauseQueue(chatId);
+          ownsTerminalSlot = ownsPromptTurn();
+        }
+        if (!ownsTerminalSlot) {
+          sendingChatsRef.current.delete(chatId);
+          // B may have finished while A still held the RPC lock. Its terminal
+          // event could not drain C then; retry only the normal healthy drain,
+          // never A's plan/failure/drop cleanup on B's state.
+          const settled = getStore().sessions[chatId];
+          if (ownsPromptConversation() && (settled?.executionId ?? settled?.sessionId) === requestExecutionId &&
+              settled?.status === "ready") drainNextQueued(chatId);
+        }
+        if (ownsTerminalSlot) {
           sendingChatsRef.current.delete(chatId);
           // Drop a STRANDED plan-review card. A plan gate BLOCKS its turn, so in
           // the happy path Approve / a typed follow-up cleared pendingPermission
