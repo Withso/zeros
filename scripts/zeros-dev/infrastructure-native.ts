@@ -192,7 +192,7 @@ export class InfrastructureNative {
   async begin(signal: AbortSignal): Promise<InfrastructureNativeTask> {
     if (this.began) throw new ZerosDevError("operation_conflict");
     this.began = true;
-    if (this.handle.run.cleanupOnly || this.handle.run.deletionConfirmed) throw new ZerosDevError("forbidden");
+    if (this.handle.run.cleanupOnly || this.handle.run.cleanupRecovery || this.handle.run.deletionConfirmed) throw new ZerosDevError("forbidden");
     const scope = this.scope(), startedAtMs = Date.now(), runId = this.handle.run.runId, nonce = randomUUID();
     const intent = InfrastructureNativeIntentSchema.parse({ version: 1, kind: "native-terminal-task", runId,
       fixtureSha256: this.handle.run.fixtureSha256, sessionId: `zd-infra-${runId}`, nonce, scope, scopeSha256: sha(JSON.stringify(scope)),

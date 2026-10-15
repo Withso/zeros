@@ -118,6 +118,10 @@
    exact intent custody, keep its key and preserve worker progress and leases.
    Cover operator skips after physical completion; linkage reconciliation must
    not turn into an implicit retry of a failed record purge.
+   If an operator must replace a failed DELETE, retain the original attempt
+   and append exact signed cleanup-only custody. Exercise exporter, Actions
+   restore, fresh successor proof and consumed replay together; recovery must
+   neither redispatch DELETE nor relabel the failed source as successful.
    For account selection, observe the exact selected revision and material;
    vault presence and refresh metadata are not authority. Re-read durable state
    after expiry, require positive release or retirement, and commit bounded

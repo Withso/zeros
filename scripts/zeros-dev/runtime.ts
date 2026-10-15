@@ -106,7 +106,7 @@ export class ZerosDevRuntime {
   }
 
   static async connect(session: SessionPort, api: ProductApi, run: Run, options: Options = {}): Promise<ZerosDevRuntime> {
-    if (run.cleanupOnly) throw new ZerosDevError("forbidden");
+    if (run.cleanupOnly || run.cleanupRecovery) throw new ZerosDevError("forbidden");
     const signal = bounded(options.signal, 30_000);
     let phase: RuntimeObservation["phase"] = "workspace_read", channel: string | undefined;
     let client: RuntimeClient | undefined, broker: CloudWorkspaceAccessBroker | undefined;

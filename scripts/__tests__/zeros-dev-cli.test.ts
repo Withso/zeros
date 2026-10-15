@@ -10,6 +10,21 @@ import { runCli } from "../zeros-dev/cli";
 import { ZerosDevError } from "../zeros-dev/errors";
 
 describe("documented zeros-dev Linux command", () => {
+  it("requires the exact failed workflow identity and one approval for cleanup recovery", () => {
+    const options = { artifact: "/private/failed.json", run: randomUUID(), approval: randomUUID(),
+      "workflow-run": "17", "workflow-attempt": "1", "expect-source": "a".repeat(40), output: "/private/recovery.b64" };
+    const argv = Object.entries(options).flatMap(([key, value]) => [`--${key}`, value]);
+    expect(parseCommand(["cleanup", "recovery", ...argv])).toEqual({ name: "cleanup recovery", options });
+    for (const key of Object.keys(options))
+      expect(() => parseCommand(["cleanup", "recovery", ...Object.entries(options).filter(([name]) => name !== key).flatMap(([name, value]) => [`--${name}`, value])]))
+        .toThrow("zeros_dev_invalid_request");
+    for (const change of [{ approval: "name-pattern" }, { "workflow-attempt": "0" }, { "workflow-attempt": "101" },
+      { "workflow-run": "0" }, { "workflow-run": "17.0" }, { "expect-source": "main" }])
+      expect(() => parseCommand(["cleanup", "recovery", ...Object.entries({ ...options, ...change }).flatMap(([key, value]) => [`--${key}`, value])]))
+        .toThrow("zeros_dev_invalid_request");
+    expect(() => parseCommand(["cleanup", "recovery", ...argv, "--apply"])).toThrow("zeros_dev_invalid_request");
+  });
+
   it("accepts only explicit local receipt IDs for the cleanup-only Actions handoff", () => {
     const runs = [randomUUID(), randomUUID()].join(",");
     expect(parseCommand(["cleanup", "handoff", "--runs", runs, "--output", "/private/fixture-handoff.b64"]))
@@ -105,6 +120,20 @@ function harness() {
 }
 
 describe("zeros-dev bounded orchestration and evidence", () => {
+  it("routes cleanup recovery only to the closed read-only exporter without loading mutable local runs", async () => {
+    const f = harness(), approvalId = randomUUID(), output = { state: "ready" as const, sha256: "b".repeat(64), runCount: 1 };
+    const recovery = vi.fn(async () => output), runs = vi.fn(async () => { throw new Error("recovery must not open local runs"); });
+    Object.assign(f.services, { recovery, runs });
+    const args = ["cleanup", "recovery", "--artifact", "failed.json", "--run", f.runId, "--approval", approvalId,
+      "--workflow-run", "17", "--workflow-attempt", "1", "--expect-source", "a".repeat(40), "--output", "recovery.b64"];
+    const signal = new AbortController().signal;
+    expect(await runCli(args, { initialize: async () => f.services, write: f.services.write, signal })).toBe(0);
+    expect(recovery).toHaveBeenCalledExactlyOnceWith({ artifact: "failed.json", runId: f.runId, approvalId,
+      execution: { workflowRunId: "17", attempt: 1, sourceSha: "a".repeat(40) }, file: "recovery.b64" }, signal);
+    expect(runs).not.toHaveBeenCalled(); expect(f.api.lifecycle).not.toHaveBeenCalled(); expect(f.services.connect).not.toHaveBeenCalled();
+    expect(f.rows).toEqual([{ schema: "zeros.dev-result/v1", runId: f.runId, command: "cleanup recovery", data: output }]);
+  });
+
   it("retains the first closed runtime cause in evidence, the signed run and the result when cleanup also fails", async () => {
     const f = harness(), runtime = { phase: "admission" as const, class: "admission_unavailable" as const, status: 500 };
     f.failDelete();

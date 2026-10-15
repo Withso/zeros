@@ -354,6 +354,63 @@ recovery instead of silently skipping its predecessor.
 The local and Actions invocations still share fixture funding, Computer state
 and provider capacity, so keep live fixture work serialized by the operator.
 
+### Recovering a failed Actions DELETE
+
+A failed DELETE cannot be repaired by retrying a different key inside the
+canary or marking the old lifecycle intent successful. The operator first
+reviews an exact stopped-only product deletion plan and issues its approved
+request through `cloud-workspace-deletion:manage`. Retain that approval UUID
+and reuse the same `operator-delete:<approval>:<workspace>` key after a lost
+response. If the request was accepted before the CP successor-linkage fix was
+deployed, replay that same approved request against fixed CP to reconcile its
+linkage. Request acceptance, a stopped workspace, a 404 or provider absence
+alone is insufficient to restart Actions.
+
+Once the exact successor has positive product retirement proof, use the
+existing fixture account and enrolled device to export one cleanup-only append:
+
+```sh
+pnpm exec tsx scripts/zeros-dev/cli.ts cleanup recovery \
+  --artifact /absolute/private/failed-receipt.json --run <failed-run-uuid> \
+  --workflow-run <original-workflow-id> --workflow-attempt <original-attempt> \
+  --expect-source <original-source-sha> --approval <approved-operator-uuid> \
+  --output /absolute/private/fixture-recovery.b64
+gh secret set ZEROS_DEV_CLEANUP_HANDOFF_B64 --repo Withso/zeros < /absolute/private/fixture-recovery.b64
+```
+
+The input must be the original device-signed failed Actions artifact, mode
+0600, with the selected primary run's unresolved DELETE. The command verifies
+its exact workflow execution, fixture/device/repository, workspace/generation
+and fresh successor retirement. It neither enrolls a device nor edits local
+run receipts or issues a lifecycle request. Its exclusive mode-0600 output is
+the separately signed `zeros.dev-cleanup-recovery/v1` envelope. Success prints
+only `state: "ready"`, its SHA256 and `runCount: 1`; raw base64 and credential
+material are never printed. Normal fixture authentication and refresh still
+apply to the retirement read.
+
+The append binds the original artifact bytes and run digest, failed DELETE
+key, exact source execution and approved operator key. It contains custody,
+not a cached retirement observation. It also binds the already-consumed local
+handoff, so replacing the secret does not lose those earlier cleanup receipts.
+The first Actions import requires that exact restored source artifact. Missing
+or changed source bytes refuse before login. Actions checkpoints the append
+before product work, then reads fresh retirement for the approved key during
+`prior_cleanup` and again during complete fixture inventory/capacity checks.
+It never falls back to issuing DELETE. Build, wake, stop, runtime connection,
+agent grants and native tasks remain forbidden for a recovered run.
+
+The old failed lifecycle intent and original failure evidence remain intact.
+Storage-only retirement still means `deletionConfirmed=false`; physical purge
+and every provider, generation, funding and backlog fence remain in force.
+The signed Actions artifact carries the optional `cleanupRecovery` reference,
+including after physical completion, so the unchanged secret cannot resurrect
+the workspace. One chain consumes one exact recovery envelope; substitution
+or a second recovery is refused. Preserve the original failed artifact and
+soak window; recovery does not turn either into a pass. An interruption before
+the append checkpoint remains closed and requires operator reconciliation.
+Update collectors to this receipt reader before emitting recovery-bearing
+artifacts; older signed receipts keep their original serialized interpretation.
+
 Output is JSONL. `zeros.dev-evidence/v1` contains closed phases, outcomes,
 durations and error codes. `zeros.dev-context/v1` distinguishes the local source
 revision/dirty state from the deployed Alpha source. Explicit chat/terminal/
