@@ -1444,3 +1444,108 @@ describe("cloud runtime registration", () => {
     await registration.stop();
   });
 });
+
+describe("final checkpoint delivery after record handoff", () => {
+  it("delivers the next final request after cancellation without reopening record writes", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+    const first = { id: "55555555-5555-4555-8555-555555555555", reason: "before_stop" as const,
+      deadlineAtMs: NOW + 5 * 60_000 };
+    const next = { ...first, id: "66666666-6666-4666-8666-666666666666", reason: "before_delete" as const };
+    let current = first as typeof first | typeof next;
+    const sync = completedDurableRecordSync(), lost = vi.fn(), cancelled: string[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      const route = new URL(String(url)).pathname;
+      if (route.endsWith("/register")) return Response.json(registrationResponse());
+      if (route.endsWith("/idle-stop")) {
+        cancelled.push(JSON.parse(String(init!.body)).request.requestId);
+        return Response.json({ cancelled: true });
+      }
+      if (!route.endsWith("/heartbeat")) throw new Error("Unexpected synthetic route");
+      return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: Date.now() + 90_000, checkpointRequest: current });
+    });
+    let release!: () => void;
+    const pendingCapture = new Promise<void>(resolve => { release = resolve; });
+    const onCheckpointRequested = vi.fn(async (request: { id: string }) => {
+      if (request.id !== first.id) return;
+      await registration.pauseRecordForRuntimeHandoff();
+      await pendingCapture;
+      await registration.idleStopRequest({ kind: "cancel", requestId: request.id });
+      throw new Error("Synthetic capture superseded after handoff");
+    });
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION,
+      fetch: fetcher, now: Date.now, onAuthorityLost: lost, onDurableRecordSync: sync, onCheckpointRequested });
+    try {
+      await registration.start();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(onCheckpointRequested).toHaveBeenCalledOnce();
+      const recordWrites = sync.mock.calls.length;
+      current = next;
+      await vi.advanceTimersByTimeAsync(30_000);
+      // A new authoritative directive cannot overlap the still-running capture.
+      expect(onCheckpointRequested).toHaveBeenCalledOnce();
+      release(); await vi.advanceTimersByTimeAsync(0);
+      expect(cancelled).toEqual([first.id]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(onCheckpointRequested).toHaveBeenCalledTimes(2);
+      expect(onCheckpointRequested).toHaveBeenLastCalledWith(next, expect.objectContaining({
+        engineInstanceId: runtime.engine.instanceId, generation: runtime.execution.generation,
+      }));
+      expect(sync).toHaveBeenCalledTimes(recordWrites);
+      expect(fetcher.mock.calls.filter(([url]) => String(url) === heartbeatEndpoint)).toHaveLength(3);
+      expect(registration.hasRuntimeHandoffAuthority()).toBe(true);
+      await expect(registration.commandRequest({ kind: "claim", conversationId: "chat", executionId: "execution" }))
+        .rejects.toMatchObject({ code: "command_durability_unavailable" });
+      expect(lost).not.toHaveBeenCalled();
+    } finally {
+      release(); await Promise.allSettled(onCheckpointRequested.mock.results.map(result => result.value));
+      await registration.stop();
+    }
+  });
+});
+
+describe("failed record handoff retry", () => {
+  it("retries a failed final flush explicitly while keeping ordinary record writes parked", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+    const sync = completedDurableRecordSync();
+    const fetcher = vi.fn<typeof fetch>(async url => new URL(String(url)).pathname.endsWith("/register")
+      ? Response.json(registrationResponse()) : Response.json({ version: 1,
+        audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: Date.now() + 90_000 }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION,
+      fetch: fetcher, now: Date.now, onAuthorityLost: vi.fn(), onDurableRecordSync: sync });
+    try {
+      await registration.start(); sync.mockRejectedValueOnce(new Error("Synthetic handoff flush failure"));
+      await expect(registration.pauseRecordForRuntimeHandoff()).rejects.toThrow("Synthetic");
+      await expect(registration.pauseRecordForRuntimeHandoff()).rejects.toThrow("record flush failed");
+      expect(sync).toHaveBeenCalledTimes(2);
+      await registration.pauseRecordForRuntimeHandoff({ retryFailedFlush: true });
+      expect(sync).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(sync).toHaveBeenCalledTimes(3);
+      await expect(registration.commandRequest({ kind: "claim", conversationId: "chat", executionId: "execution" }))
+        .rejects.toMatchObject({ code: "command_durability_unavailable" });
+    } finally { await registration.stop(); }
+  });
+});
+
+
+it.each(["manual", "before_fork"] as const)("keeps %s outside final-only control during record handoff", async reason => {
+  vi.useFakeTimers(); vi.setSystemTime(NOW);
+  const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+  const onCheckpointRequested = vi.fn(async () => {}), sync = completedDurableRecordSync();
+  const fetcher = vi.fn<typeof fetch>(async url => new URL(String(url)).pathname.endsWith("/register")
+    ? Response.json(registrationResponse()) : Response.json({ version: 1,
+      audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+      engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: Date.now() + 90_000,
+      checkpointRequest: { id: "55555555-5555-4555-8555-555555555555", reason, deadlineAtMs: NOW + 300_000 } }));
+  const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION,
+    fetch: fetcher, now: Date.now, onAuthorityLost: vi.fn(), onDurableRecordSync: sync, onCheckpointRequested });
+  try {
+    await registration.start(); await registration.pauseRecordForRuntimeHandoff();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(onCheckpointRequested).not.toHaveBeenCalled(); expect(sync).toHaveBeenCalledTimes(2);
+  } finally { await registration.stop(); }
+});

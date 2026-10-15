@@ -58,6 +58,11 @@
    For stop/seal races, hold background replies across the admission fence and
    local cancellation. Assert authority and heartbeats survive through a real
    seal, while explicit revocation and wrong identities remain terminal.
+   For cancelled final checkpoints, keep authenticated final control separate
+   from record-write admission. Retry against the original frozen writer without
+   reopening NORMAL or claims; exercise heartbeat delivery, failed handoff flush,
+   lost seal ACK, cancellation ACK, replacement final capture and original drain
+   tickets together. A generic cancellation label does not identify the failed gate.
    For packaged imports, reproduce against staged
    sources; a checkout import or bundled CLI can hide a missing source file.
    For periodic disconnects, inspect client retirement timers before blaming
