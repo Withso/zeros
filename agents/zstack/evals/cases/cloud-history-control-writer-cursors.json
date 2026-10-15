@@ -2,7 +2,7 @@
   "id": "cloud-history-control-writer-cursors",
   "kind": "replay",
   "area": "cloud-engine-resume",
-  "fixedBy": "pending",
+  "fixedBy": "pr:528",
   "symptom": "A successor writer rejected an inherited canonical conversation manifest because an authenticated compact control retained an outbox position higher than the successor's reset publication cursor.",
   "rule": "The bug-fix playbook requires predecessor-to-successor cursor regressions. Bound each compact control in its own writer, preserve native stream/event/command/frame identity, and refuse uncovered or changed controls without recreating live events.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/history-mirror.integration.test.ts -t 'reprojects inherited canonical controls'"
