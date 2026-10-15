@@ -320,6 +320,10 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   Missing results and images have no invented text count; an error message is
   not successfully read source. Keep failures and unresolved completion
   distinguishable from success.
+- File pills keep their exact path independently of the basename. Read pills
+  open a File tab; Edit/Write pills select that file in Changes. The operation
+  label and disclosure remain separate controls. Image Read pills preview on
+  hover/focus; code and video Reads keep their path tooltip.
 - Native batches consisting entirely of reads can show individual file rows.
   These rows share one execution and one expandable combined result; explain
   that ownership in the detail card. When per-file boundaries are absent, label
@@ -617,6 +621,8 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
 - The expanded card, including any path or failure notice, is capped at 320px.
   Embedded diffs do not add another vertical scroller or a larger height cap.
 - Hover previews retain their collision-aware 450px width and 350px outer cap.
+  Only the file pill triggers the preview. Clicking it dismisses pending hover
+  intent as well as an already-open card, so it cannot cover the next target.
   Disable hover previews while the corresponding edit is expanded or inactive,
   without remounting its disclosure button or losing keyboard focus.
 - Render the recorded patch and native hunk line numbers. Never replace a

@@ -66,6 +66,8 @@ import {
 } from "../../../state/pending-workspaces";
 import { HARD_TEXT_CAP_BYTES, MAX_IMAGE_BYTES } from "../agent-attachments";
 import type { ComposerAttachment } from "../composer-attachments";
+import { getFileAttachmentProgress } from "../file-attachment-transfer";
+import * as pendingWorkspaces from "../../../state/pending-workspaces";
 
 function att(over: Partial<ComposerAttachment> = {}): ComposerAttachment {
   return {
@@ -446,6 +448,15 @@ describe("isBuildSkewFailure", () => {
 });
 
 describe("executeGraphSync", () => {
+  it.each(["/personal/repo", "/organization/repo", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"])("publishes a legacy draft's saved path for file-pill navigation in %s", async (cwd) => {
+    vi.spyOn(pendingWorkspaces, "isWorkspaceProvisioning").mockReturnValue(false);
+    const attachment = att({ id: "legacy-preview" });
+    const relativePath = ".context/attachments/legacy-preview/notes.txt";
+    writeContextAttachment.mockResolvedValue({ relativePath, absolutePath: `/repo/${relativePath}`, bytes: 5, mimeType: "text/plain" });
+    executeGraphSync(cwd, { stage: [attachment], nextIds: new Set([attachment.id]) });
+    await vi.waitFor(() => expect(getFileAttachmentProgress(cwd, attachment.id)).toMatchObject({ phase: "ready", diskPath: relativePath }));
+    expect(attachment.diskPath).toBe(relativePath);
+  });
   beforeEach(() => {
     writeContextAttachment.mockReset().mockResolvedValue({});
     toastError.mockReset();

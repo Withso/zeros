@@ -5,6 +5,7 @@ import { RunSchema } from "../zeros-dev/receipts";
 import { collectSoak } from "../zeros-dev/soak";
 import { summarizeCleanup } from "../zeros-dev/cleanup-state";
 import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
+import { infrastructureProof } from "./zeros-dev-infrastructure-fixture";
 
 function fixture() {
   const end = "2026-10-15T00:00:00.000Z", start = Date.parse(end) - 24 * 3_600_000;
@@ -58,6 +59,66 @@ function fixture() {
 }
 
 describe("read-only signed 24-hour soak report", () => {
+  const infrastructureFixture = () => {
+    const f = fixture();
+    for (const run of f.runs) {
+      const payload = f.payloads.get(`${run.id}/1`), local = payload.runs[0];
+      local.hourly.complete = false;
+      const completedAt = new Date(Date.parse(run.created_at) + 32 * 60_000).toISOString();
+      local.hourly.activeWindows[0].workCompletedAt = completedAt;
+      local.hourly.activeWindows[0].durationMs = 32 * 60_000 - 80_000;
+      local.create = { key: randomUUID(), body: { name: `zd-${local.runId}`, repository: { forge: "github.com", owner: "fixture", name: "fixture",
+        revision: "main", githubInstallationId: randomUUID() } },
+      result: { id: randomUUID(), createdBy: f.credential.accountUserId, createdAt: run.created_at, generation: 1 } };
+      local.hourly.infrastructure = infrastructureProof(run.created_at, { runId: local.runId, fixtureSha256: local.fixtureSha256,
+        workspaceId: local.create.result.id, generation: local.create.result.generation });
+      payload.schema = "zeros.dev-infrastructure/v1";
+      payload.runs = [RunSchema.parse(local)]; payload.cleanup = summarizeCleanup(payload.runs, payload.runs[0]); payload.completedAt = completedAt;
+      payload.coverage = local.hourly.infrastructure.coverage;
+      Object.assign(f.jobs.get(`${run.id}/1`), { name: "infrastructure", completed_at: completedAt });
+    }
+    return f;
+  };
+  it("reports a signed infrastructure soak under its own scope, never as a complete agent/hourly soak", async () => {
+    const f = infrastructureFixture();
+    const report = await collectSoak({ ...f.options, profile: "infrastructure" } as never);
+    expect(report.schema).toBe("zeros.dev-infrastructure-soak/v1"); expect(report.status).toBe("passed");
+    expect(report).toMatchObject({ coverage: { agents: "not_covered_owner_section7", detachedAgent: "not_covered_owner_section7" } });
+    expect(report.attempts.every(row => row.profile === "infrastructure" && row.status === "passed")).toBe(true);
+    expect(report.slots.every(row => row.status === "passed")).toBe(true);
+    expect(report.metrics.active).toMatchObject({ coverage: "complete", durationMs: 24 * (32 * 60_000 - 80_000) });
+    const hourly = await collectSoak(f.options);
+    expect(hourly.schema).toBe("zeros.dev-soak/v1"); expect(hourly.status).toBe("incomplete");
+    expect(hourly.slots.every(row => row.status === "missing")).toBe(true);
+    expect(hourly.metrics.active.durationMs).toBe(0);
+  });
+  it("does not backfill infrastructure coverage with a full hourly run", async () => {
+    const f = fixture(), report = await collectSoak({ ...f.options, profile: "infrastructure" } as never);
+    expect(report.status).toBe("incomplete"); expect(report.slots.every(row => row.status === "missing")).toBe(true);
+  });
+  it("requires the actual infrastructure execution and receipt steps even with a green job", async () => {
+    const f = infrastructureFixture(), job = f.jobs.get(`${f.runs[0].id}/1`);
+    job.steps[0].conclusion = "skipped";
+    const report = await collectSoak({ ...f.options, profile: "infrastructure" });
+    expect(report.status).toBe("failed"); expect(report.attempts[0].status).toBe("failed");
+  });
+  it("keeps an infrastructure failure and its first stage when a retry succeeds", async () => {
+    const f = infrastructureFixture(), run = f.runs[3], original = structuredClone(f.payloads.get(`${run.id}/1`));
+    const failed = f.payloads.get(`${run.id}/1`);
+    failed.result = { ...failed.result, success: false, code: "detached_proof_incomplete" };
+    failed.runs[0].hourly.infrastructure.complete = false;
+    failed.runs[0].evidence.push({ phase: "detached_history", outcome: "failed", code: "detached_proof_incomplete", durationMs: 1000 });
+    failed.runs = failed.runs.map((row: unknown) => RunSchema.parse(row));
+    f.jobs.get(`${run.id}/1`).conclusion = "failure";
+    f.attempts.get(`${run.id}/1`).conclusion = "failure";
+    run.run_attempt = 2; f.install(run, "infrastructure");
+    original.execution.attempt = 2; original.runs[0].hourly.attempt = 2;
+    f.payloads.set(`${run.id}/2`, original); f.jobs.get(`${run.id}/2`).completed_at = original.completedAt;
+    const report = await collectSoak({ ...f.options, profile: "infrastructure" } as never);
+    expect(report.status).toBe("failed");
+    expect(report.attempts.filter(row => row.workflowRunId === String(run.id)).map(row => row.status)).toEqual(["failed", "passed"]);
+    expect(report.attempts.find(row => row.workflowRunId === String(run.id))!.firstFailure).toMatchObject({ phase: "detached_history", code: "detached_proof_incomplete" });
+  });
   it("reports compute retirement separately from erasure and retains both red and green attempts", async () => {
     const f = fixture(), run = f.runs[3]; f.install({ ...run }, "lifecycle", true);
     run.run_attempt = 2; f.install(run);
@@ -104,7 +165,7 @@ describe("read-only signed 24-hour soak report", () => {
     const report = await collectSoak(f.options);
     expect(report.status).toBe("incomplete");
     expect(report.slots.filter((row: any) => row.status === "missing")).toHaveLength(2);
-    expect(report.attempts.find((row: any) => row.workflowRunId === String(run.id)).profile).toBe("gate0");
+    expect(report.attempts.find((row: any) => row.workflowRunId === String(run.id))?.profile).toBe("gate0");
   });
   it.each(["signature", "producer", "digest", "expired"])("refuses %s artifact evidence without raw diagnostic output", async kind => {
     const f = fixture(), run = f.runs[2];
@@ -125,7 +186,7 @@ describe("read-only signed 24-hour soak report", () => {
       { phase: "runtime_admission", outcome: "pending", durationMs: 1000, admission }, { phase: "runtime_connect", outcome: "ok", durationMs: 1200, admission });
     const report = await collectSoak(f.options);
     expect(report.metrics.admission).toMatchObject({ coverage: "complete", failedCalls: 1, retries: 1 });
-    expect(report.attempts[0].admission.failures).toHaveLength(1);
+    expect(report.attempts[0].admission?.failures).toHaveLength(1);
     expect(report.metrics.transport.directAttempts).toBe(48);
   });
   it("marks legacy missing counters unknown and never invents a zero error or 100% rate", async () => {

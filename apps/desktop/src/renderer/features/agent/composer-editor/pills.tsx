@@ -32,13 +32,17 @@ import {
   HoverCardContent,
   HoverCardTrigger,
   Tooltip,
+  Button,
 } from "@/renderer/shared/ui/primitives";
 import {
   AttachmentTextPreview,
   attachmentTextPreviewKey,
   warmAttachmentTextPreview,
 } from "./attachment-text-preview";
-import { useAttachmentImageSource } from "../attachment-image-source";
+import { ImageHoverCard, imagePreviewMimeType } from "../image-hover-card";
+import { filePillPath, openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill-navigation";
+import { attachmentOwner, sameAttachmentOwner } from "../attachment-owner";
+import { useAttachmentPillFile } from "../attachment-pill-file";
 import {
   getFileAttachmentProgress,
   subscribeFileAttachmentProgress,
@@ -57,7 +61,8 @@ function PillRemoveButton({
 }) {
   return (
     <Tooltip label="Remove">
-      <button
+      <Button
+        variant="ghost"
         type="button"
         // Removing a pill must preserve the editor's current selection.
         onMouseDown={(event) => event.preventDefault()}
@@ -73,7 +78,7 @@ function PillRemoveButton({
           {children}
         </span>
         <X size={11} className="col-start-1 row-start-1" />
-      </button>
+      </Button>
     </Tooltip>
   );
 }
@@ -87,8 +92,8 @@ export function MentionPill(props: NodeViewProps) {
     path: string;
     kind: "file" | "folder" | "selection";
   };
-  return (
-    <Tooltip label={attrs.path || attrs.label}>
+  const canOpen = attrs.kind !== "folder" && ctx.attachmentImagesActive && !!filePillPath(ctx.cwd, attrs.path);
+  const shell = (
       <NodeViewWrapper
         as="span"
         data-mention-pill=""
@@ -112,10 +117,19 @@ export function MentionPill(props: NodeViewProps) {
             size={13}
           />
         </PillRemoveButton>
-        <span className="max-w-[18rem] truncate">{attrs.label}</span>
+        <Button variant="ghost" aria-label={`Open ${attrs.label}`} disabled={!canOpen}
+          onMouseDown={(event) => event.preventDefault()}
+          onPointerEnter={() => { if (canOpen) warmFilePill(ctx.cwd, attrs.path); }}
+          onFocus={() => { if (canOpen) warmFilePill(ctx.cwd, attrs.path); }}
+          onClick={() => { if (canOpen) openFilePill(ctx.cwd, attrs.path); }}
+          className="m-0 min-w-0 border-0 bg-transparent p-0 text-inherit disabled:opacity-100">
+          <span className="max-w-[18rem] truncate">{attrs.label}</span>
+        </Button>
       </NodeViewWrapper>
-    </Tooltip>
   );
+  return attrs.kind !== "folder" && imagePreviewMimeType(attrs.path) ? (
+    <ImageHoverCard name={attrs.path} path={attrs.path} cwd={ctx.cwd} enabled={ctx.attachmentImagesActive}>{shell}</ImageHoverCard>
+  ) : <Tooltip label={attrs.path || attrs.label}>{shell}</Tooltip>;
 }
 
 // ── AttachmentPill — inline image / text-file attachment ───
@@ -130,7 +144,8 @@ export function AttachmentPill(props: NodeViewProps) {
   };
   const ctx = useComposerEditorContext();
   const att = ctx.getAttachment(attrs.attachmentId);
-  const isImage = attrs.kind === "image";
+  const imageMime = imagePreviewMimeType(attrs.name, att?.mimeType ?? attrs.mimeType);
+  const isImage = imageMime !== null;
   const progressId = att?.contextAttachmentId ?? attrs.attachmentId;
   const progress = useSyncExternalStore(
     useCallback(
@@ -147,16 +162,17 @@ export function AttachmentPill(props: NodeViewProps) {
     ),
     () => undefined,
   );
-  const diskImageSource = useAttachmentImageSource({
+  const ownedAttachment = !att?.owner || (!!ctx.cwd && sameAttachmentOwner(att.owner, attachmentOwner(ctx.cwd)));
+  const storedPath = progress?.diskPath ?? (ownedAttachment ? att?.diskPath : undefined);
+  const restoredFile = useAttachmentPillFile({
     cwd: ctx.cwd,
-    diskPath: att?.diskPath ?? progress?.diskPath,
+    diskPath: storedPath,
     attachmentId: att?.contextAttachmentId,
-    enabled: ctx.attachmentImagesActive && isImage,
+    enabled: ctx.attachmentImagesActive && !!att && !att.sourceFile && !att.data && !progress,
   });
-  const dataUri =
-    att && isImage && att.data
-      ? `data:${att.mimeType};base64,${att.data}`
-      : diskImageSource;
+  const diskPath = restoredFile.path;
+  const canOpen = ctx.attachmentImagesActive && !restoredFile.resolving && !att?.unavailable &&
+    progress?.phase !== "saving" && !!diskPath && !!filePillPath(ctx.cwd, diskPath);
   const invalid =
     (att ? !att.validation.ok : false) || progress?.phase === "error";
   const tooltip =
@@ -171,7 +187,7 @@ export function AttachmentPill(props: NodeViewProps) {
   // show the selected file on hover instead of its own filename. Read the
   // staged Blob or its saved record, never the source chat's newer transcript.
   //
-  // An INVALID attachment keeps its tooltip regardless of the preview.
+  // An INVALID text attachment keeps its tooltip regardless of the preview.
   // `tooltip` is the only live surface in the app for validation.reason, and
   // an invalid attachment is excluded at send — so swapping it for a panel
   // would make the largest attachment the app can stage the one case that is
@@ -179,6 +195,7 @@ export function AttachmentPill(props: NodeViewProps) {
   const preview =
     att?.preview && att.kind === "text" && !invalid ? att.preview : null;
   const warmPreview = () => {
+    if (canOpen && diskPath) warmFilePill(ctx.cwd, diskPath);
     if (preview && att && ctx.attachmentImagesActive) {
       void warmAttachmentTextPreview(ctx.cwd, att).catch(() => {});
     }
@@ -213,28 +230,34 @@ export function AttachmentPill(props: NodeViewProps) {
           size={13}
         />
       </PillRemoveButton>
-      <button
+      <Button
+        variant="ghost"
         type="button"
         // mousedown preventDefault so clicking a pill doesn't blur/move the
-        // ProseMirror selection; images open the lightbox.
+        // ProseMirror selection; the saved file opens in the workbench.
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => {
-          if (isImage && dataUri) ctx.onPreviewImage?.(dataUri);
+          if (canOpen && diskPath) openFilePill(ctx.cwd, diskPath);
         }}
-        disabled={!isImage}
-        aria-label={isImage ? "Preview image" : attrs.name}
-        className="m-0 inline-flex min-w-0 items-center gap-1 border-0 bg-transparent p-0 font-[inherit] text-inherit disabled:cursor-default"
+        disabled={!canOpen}
+        aria-label={`Open ${attrs.name}`}
+        data-file-path={diskPath}
+        className="m-0 inline-flex min-w-0 items-center gap-1 border-0 bg-transparent p-0 font-[inherit] text-inherit disabled:cursor-default disabled:opacity-100"
       >
         {/* Transfer status belongs in the tooltip: adding/removing inline
             text resizes this pill and rewraps every later file in a drop. */}
         <span className="max-w-[16rem] truncate">{attrs.name}</span>
-      </button>
+      </Button>
     </NodeViewWrapper>
   );
 
-  // A transcript chip earns the panel; everything else keeps the plain
-  // filename tooltip. This is the one case where hover has something strictly
-  // better to say than the name already on screen.
+  if (isImage) {
+    return <ImageHoverCard name={attrs.name} mimeType={imageMime} cwd={ctx.cwd} path={diskPath}
+      sourceFile={att?.sourceFile} legacyUri={att?.data ? `data:${imageMime};base64,${att.data}` : undefined}
+      enabled={ctx.attachmentImagesActive} status={tooltip}>{shell}</ImageHoverCard>;
+  }
+
+  // Synthesized transcript files retain their frozen text preview.
   if (preview && att) {
     return (
       <HoverCard

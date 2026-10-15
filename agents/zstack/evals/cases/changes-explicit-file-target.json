@@ -1,0 +1,9 @@
+{
+  "id": "changes-explicit-file-target",
+  "kind": "replay",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:521",
+  "symptom": "Changes replaced an explicitly requested missing or clean file with an unrelated changed file during list reconciliation.",
+  "rule": "Keep explicit file navigation separate from automatic neighbor selection, and retain the requested target until a new user selection; see changes-selection.test.ts and the attachment-pill-navigation pack fragment.",
+  "check": "pnpm test:git apps/desktop/src/renderer/shell/workbench/tabs/__tests__/changes-selection.test.ts"
+}

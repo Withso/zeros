@@ -94,6 +94,26 @@ function fakePeer(target: CloudWorkspaceTarget) {
 }
 afterEach(() => vi.restoreAllMocks());
 
+describe("file reference ownership", () => {
+  it("uses only admitted native roots and never wakes another owner to resolve a hover", async () => {
+    const peer = fakePeer(a), open = vi.fn(async () => peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    try {
+      expect(client.fileReferencePath(cloudWorkspaceKey(a), "/workspace/repo/a.png")).toBeNull();
+      expect(client.fileReferencePath(cloudWorkspaceKey(a), "art/a.png")).toBe("art/a.png");
+      expect(open).not.toHaveBeenCalled();
+      await client.warmWorkspace(a);
+      expect(client.fileReferencePath(cloudWorkspaceKey(a), "/workspace/repo/a.png")).toBe("a.png");
+      expect(client.fileReferencePath(cloudWorkspaceKey(b), "/workspace/repo/a.png")).toBeNull();
+      expect(client.fileReferencePath(cloudWorkspaceKey(a), "/other/a.png")).toBeNull();
+      expect(client.fileReferencePath("/local/repo", "/local/repo/a.png")).toBe("a.png");
+      expect(open).toHaveBeenCalledTimes(1);
+      client.clearCloudConnections();
+      expect(client.fileReferencePath(cloudWorkspaceKey(a), "/workspace/repo/a.png")).toBeNull();
+    } finally { client.dispose(); }
+  });
+});
+
 describe("cached activated cloud binding", () => {
   const binding = { version: 1 as const, mode: "boot-owner-v1" as const, fundingScope: "workspace-roles-v1" as const,
     ...a, generation: 7, engineInstanceId: "44444444-4444-4444-8444-444444444444", authorityEpoch: 2,

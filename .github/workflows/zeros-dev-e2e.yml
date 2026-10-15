@@ -5,13 +5,14 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: Hourly canary or Gate 0 rehearsal
+        description: Hourly agents, full Gate 0, or infrastructure only
         type: choice
         required: true
-        default: hourly
+        default: infrastructure
         options:
           - hourly
           - gate0
+          - infrastructure
 permissions:
   contents: read
   actions: read
@@ -20,15 +21,16 @@ concurrency:
   cancel-in-progress: false
 jobs:
   lifecycle:
-    name: ${{ inputs.profile == 'gate0' && 'gate0' || 'lifecycle' }}
+    name: ${{ (inputs.profile == 'infrastructure' || (github.event_name == 'schedule' && vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED == 'true')) && 'infrastructure' || (inputs.profile == 'gate0' && 'gate0' || 'lifecycle') }}
     if: >-
       github.repository == 'Withso/zeros' && github.ref == 'refs/heads/main' &&
-      ((github.event_name == 'workflow_dispatch' && inputs.profile == 'gate0' && vars.ZEROS_DEV_GATE0_ENABLED == 'true') ||
-       ((github.event_name != 'workflow_dispatch' || inputs.profile == 'hourly') && vars.ZEROS_DEV_E2E_ENABLED == 'true'))
+      ((github.event_name == 'workflow_dispatch' && (inputs.profile == 'gate0' || inputs.profile == 'infrastructure') && vars.ZEROS_DEV_GATE0_ENABLED == 'true') ||
+       (github.event_name == 'schedule' && vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED == 'true') ||
+       ((github.event_name == 'workflow_dispatch' && inputs.profile == 'hourly' || github.event_name == 'schedule' && vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED != 'true') && vars.ZEROS_DEV_E2E_ENABLED == 'true'))
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.profile == 'gate0' && 135 || 15 }}
+    timeout-minutes: ${{ inputs.profile == 'gate0' && 135 || ((inputs.profile == 'infrastructure' || (github.event_name == 'schedule' && vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED == 'true')) && 65 || 15) }}
     env:
-      ZEROS_DEV_PROFILE: ${{ inputs.profile || 'hourly' }}
+      ZEROS_DEV_PROFILE: ${{ github.event_name == 'schedule' && vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED == 'true' && 'infrastructure' || inputs.profile || 'hourly' }}
     steps:
       - name: Start the overall budget
         run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "ZEROS_DEV_E2E_START_MS=" + Date.now() + "\n")'
@@ -60,12 +62,7 @@ jobs:
         env:
           ZEROS_DEV_E2E_PLAN: ${{ steps.plan.outputs.plan }}
           ZEROS_DEV_FIXTURE_B64: ${{ secrets.ZEROS_DEV_FIXTURE_B64 }}
-          ZEROS_DEV_CLEANUP_HANDOFF_B64: ${{ vars.ZEROS_DEV_CLEANUP_HANDOFF_B64 }}
-          AGENT_RUNTIME_ANTHROPIC_API_KEY: ${{ secrets.AGENT_RUNTIME_ANTHROPIC_API_KEY }}
-          AGENT_RUNTIME_CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.AGENT_RUNTIME_CLAUDE_CODE_OAUTH_TOKEN }}
-          AGENT_RUNTIME_OPENAI_API_KEY: ${{ secrets.AGENT_RUNTIME_OPENAI_API_KEY }}
-          AGENT_RUNTIME_CODEX_AUTH_JSON: ${{ secrets.AGENT_RUNTIME_CODEX_AUTH_JSON }}
-          AGENT_RUNTIME_CURSOR_API_KEY: ${{ secrets.AGENT_RUNTIME_CURSOR_API_KEY }}
+          ZEROS_DEV_CLEANUP_HANDOFF_B64: ${{ secrets.ZEROS_DEV_CLEANUP_HANDOFF_B64 }}
         run: pnpm exec tsx scripts/zeros-dev/hourly-main.ts
       - name: Save signed cleanup receipt
         if: always()

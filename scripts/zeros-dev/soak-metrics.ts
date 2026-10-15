@@ -32,6 +32,7 @@ export function summarizeSoakEvidence(samples: SoakEvidence[], incomplete = fals
       (phases[row.phase] ??= []).push(row.durationMs); transport(row.transport); admission(row.admission);
     }
     for (const row of run.hourly?.rehearsal?.transports ?? []) transport(row);
+    for (const row of run.hourly?.infrastructure?.transports ?? []) transport(row);
     transport(result.transport); admission(result.admission);
     if (!observedTransport) transportComplete = false;
     for (const window of run.hourly?.activeWindows ?? []) {

@@ -35,7 +35,7 @@ export async function runComposerEditorSmoke({ page, check }) {
       const icon = button.querySelector("[data-composer-pill-icon]");
       const pill = button.closest("[data-attachment-pill]");
       const label = pill.querySelector(
-        "button[aria-label='Preview image'] span",
+        "button[data-file-path] span",
       );
       return {
         cross: cross ? Number(getComputedStyle(cross).opacity) : null,
@@ -119,14 +119,26 @@ export async function runComposerEditorSmoke({ page, check }) {
     JSON.stringify(afterArrow),
   );
 
-  // Clicking the image label still opens its original preview; removing an
-  // attachment leaves focus and staged bytes intact for undo and serialization.
-  await firstPill.getByRole("button", { name: "Preview image" }).click();
-  const preview = page.getByRole("dialog", { name: "Image preview" });
-  await preview.waitFor();
-  check("image label still opens its preview", await preview.isVisible());
+  // Hover owns image preview; click owns exact file navigation. Removing an
+  // attachment still leaves focus and staged bytes intact for undo.
+  const imageButton = firstPill.getByRole("button", { name: /^Open / });
+  await expect(imageButton).toBeEnabled();
+  await imageButton.hover();
+  const preview = page.locator("[data-image-hover-preview]");
+  await expect(preview.locator("img")).toBeVisible();
+  await expect.poll(() => preview.locator("img").evaluate((img) => img.naturalWidth)).toBeGreaterThan(0);
+  await preview.hover();
+  check("image hover preview remains open across pointer travel", await preview.isVisible());
   await page.keyboard.press("Escape");
   await preview.waitFor({ state: "hidden" });
+  await imageButton.click();
+  const opened = await page.evaluate(() => {
+    const scope = window.__composerWorkbench()["/composer-editor-harness"];
+    return scope?.tabs.find((tab) => tab.id === scope.activeId);
+  });
+  const expectedPath = await imageButton.getAttribute("data-file-path");
+  check("image click opens the exact saved file in a workbench tab", opened?.type === "files" && opened?.filePath === expectedPath);
+  await expect(page.getByRole("dialog", { name: "Image preview" })).toHaveCount(0);
   const beforeRemove = await page.evaluate(() => {
     const ed = window.__composerHarness.editor;
     ed.commands.focus();
@@ -430,4 +442,104 @@ export async function runComposerEditorSmoke({ page, check }) {
       text: undone.displayText,
     }),
   );
+  await runFilePillNavigationSmoke({ page, check, base });
+}
+
+async function runFilePillNavigationSmoke({ page, check, base }) {
+  const cloud = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+  for (const cwd of ["/composer-editor-harness", "/organization/repo", cloud]) {
+    base.search = `?workspace=${encodeURIComponent(cwd)}`;
+    await page.goto(base.href, { waitUntil: "networkidle" });
+    await page.evaluate(async () => {
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="240" height="120" fill="teal"/><script>window.__svgExecuted = true</script></svg>';
+      const gif = Uint8Array.from(atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"), (c) => c.charCodeAt(0));
+      await window.__composerHarness.insertFiles([
+        new File([svg], "Logo ü.SVG", { type: "text/plain" }),
+        new File([gif], "loop.gif", { type: "image/gif" }),
+        new File(["export const a = 1"], "notes.ts", { type: "text/plain" }),
+        new File(["movie"], "clip.mp4", { type: "video/mp4" }),
+        new File(["other source"], "notes.ts", { type: "text/plain" }),
+      ]);
+    });
+    const pills = page.locator("[data-attachment-pill]");
+    await expect(pills).toHaveCount(5);
+    for (const pill of await pills.all()) await expect(pill.getByRole("button", { name: /^Open / })).toBeEnabled();
+    const preview = page.locator("[data-image-hover-preview]");
+    const openedFile = () => page.evaluate((cwd) => {
+      const scope = window.__composerWorkbench()[cwd];
+      return { active: scope?.tabs.find((tab) => tab.id === scope.activeId), count: scope?.tabs.filter((tab) => tab.type === "files" && tab.filePath).length };
+    }, cwd);
+    for (const index of [0, 1]) {
+      const button = pills.nth(index).getByRole("button", { name: /^Open / });
+      await button.hover();
+      await expect(preview.locator("img")).toBeVisible();
+      await expect.poll(() => preview.locator("img").evaluate((img) => img.naturalWidth)).toBeGreaterThan(0);
+      await page.keyboard.press("Escape");
+      await preview.waitFor({ state: "hidden" });
+    }
+    check(`SVG and GIF hover previews render for ${cwd}`, true);
+    check("SVG preview remains an inert image", await page.evaluate(() => !window.__svgExecuted));
+    for (const index of [2, 3]) {
+      await pills.nth(index).hover();
+      await page.waitForTimeout(400);
+      await expect(preview).toHaveCount(0);
+    }
+    check("Code and video pills keep filename tooltips", true);
+    const first = pills.first().getByRole("button", { name: /^Open / });
+    await first.focus();
+    await page.keyboard.press("Enter");
+    expect((await openedFile()).active?.filePath).toBe(await first.getAttribute("data-file-path"));
+    const before = (await openedFile()).count;
+    await first.click();
+    expect((await openedFile()).count).toBe(before);
+    for (const index of [2, 3, 4]) {
+      const button = pills.nth(index).getByRole("button", { name: /^Open / });
+      await button.click();
+      expect((await openedFile()).active?.filePath).toBe(await button.getAttribute("data-file-path"));
+    }
+    expect((await openedFile()).count).toBe(before + 3);
+    check("Keyboard and file clicks open exact tabs, deduplicate reopens, and preserve same-name files", true);
+    await first.hover();
+    await expect(preview.locator("img")).toBeVisible();
+    await page.evaluate(() => window.__setComposerActive(false));
+    await expect(preview).toHaveCount(0);
+    await expect(first).toBeDisabled();
+    await page.evaluate(() => window.__setComposerActive(true));
+    await expect(preview).toHaveCount(0);
+    check("Hidden composers dismiss image previews and disable file actions", true);
+
+    const restoredPaths = await page.evaluate(async () => {
+      const attachments = window.__composerHarness.serialize().attachments;
+      const restored = [attachments[1], attachments[2]].map((attachment, index) => ({
+        ...attachment,
+        id: `att-edit-legacy-${index}`,
+        sourceFile: undefined,
+        data: "",
+        text: undefined,
+        diskPath: attachment.diskPath.replace(".context/attachments/", ".context/shared/attachments/"),
+      }));
+      // A restored draft has no in-memory transfer progress from its old import.
+      const { resetFileAttachmentTransfersForTests } = await import("/apps/desktop/src/renderer/features/agent/file-attachment-transfer.ts");
+      resetFileAttachmentTransfersForTests();
+      window.__composerHarness.setContent({
+        attachments: restored,
+        json: { type: "doc", content: [{ type: "paragraph", content: restored.map((attachment) => ({
+          type: "attachment",
+          attrs: { attachmentId: attachment.id, name: attachment.name, mimeType: attachment.mimeType, kind: attachment.kind },
+        })) }] },
+      });
+      return [attachments[1].diskPath, attachments[2].diskPath];
+    });
+    await expect(pills).toHaveCount(2);
+    for (const [index, path] of restoredPaths.entries()) {
+      const button = pills.nth(index).getByRole("button", { name: /^Open / });
+      await expect(button).toHaveAttribute("data-file-path", path);
+      await button.click();
+      expect((await openedFile()).active?.filePath).toBe(path);
+    }
+    await pills.first().hover();
+    await expect(preview.locator("img")).toBeVisible();
+    await expect.poll(() => preview.locator("img").evaluate((img) => img.naturalWidth)).toBeGreaterThan(0);
+    check("Restored image and text pills resolve moved attachment records before opening", true);
+  }
 }

@@ -1,0 +1,9 @@
+{
+  "id": "infrastructure-native-replay-proof",
+  "kind": "scenario",
+  "area": "release-verification",
+  "fixedBy": "pr:522",
+  "symptom": "A detached native task needs an explicit proof when the fixture has no agent credentials. Duplicate output arriving during the final file read initially escaped validation, and a plain text mock did not exercise the product's terminal replay format.",
+  "rule": "The bug-fix playbook requires the real terminal grid, replay/live races, persisted intent before allocation and final output revalidation. Native terminal proof remains distinct from agent transcript coverage.",
+  "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-infrastructure-native.test.ts"
+}

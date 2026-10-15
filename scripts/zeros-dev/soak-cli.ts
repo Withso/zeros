@@ -10,22 +10,26 @@ import { PublicHourlyTrustSchema } from "./hourly-artifact";
 import { REPO } from "./hourly-actions.mjs";
 import { ZerosDevError, closedError } from "./errors";
 
-const HELP = "Usage: pnpm exec tsx scripts/zeros-dev/soak-cli.ts --end <UTC-hour> --device-id <uuid> --public-key <Ed25519-base64url> --output <new-file>\nReads Actions only using GITHUB_TOKEN or GH_TOKEN. The verifier is public; no .env.agent or provider keys are read.\n";
+const HELP = "Usage: pnpm exec tsx scripts/zeros-dev/soak-cli.ts --end <UTC-hour> --device-id <uuid> --public-key <Ed25519-base64url> --output <new-file> [--profile hourly|infrastructure]\nReads Actions only using GITHUB_TOKEN or GH_TOKEN. The verifier is public; no .env.agent or provider keys are read. Infrastructure reports exclude the owner's §7 agent/UI test.\n";
 type Options = { env?: NodeJS.ProcessEnv; fetch?: typeof fetch; write?: (value: unknown) => void; now?: () => number };
 
 export async function soakMain(argv: string[], options: Options = {}): Promise<number> {
   const write = options.write ?? ((value: unknown) => { process.stdout.write(JSON.stringify(value) + "\n"); });
   let file: Awaited<ReturnType<typeof open>> | undefined, parent: Awaited<ReturnType<typeof open>> | undefined;
   let stage: "input" | "file" | "collection" = "input";
+  let profile: "hourly" | "infrastructure" = "hourly";
   try {
     // A valid base64url key can begin with '-'. Bind only this exact value
     // shape to its known flag before the strict option parser sees it.
     const args = [...argv], index = args.indexOf("--public-key");
     if (index >= 0 && /^[A-Za-z0-9_-]{43}$/.test(args[index + 1] ?? "")) args.splice(index, 2, `--public-key=${args[index + 1]}`);
     const { values } = parseArgs({ args, strict: true, allowPositionals: false,
-      options: { end: { type: "string" }, "device-id": { type: "string" }, "public-key": { type: "string" }, output: { type: "string" }, help: { type: "boolean" } } });
+      options: { end: { type: "string" }, "device-id": { type: "string" }, "public-key": { type: "string" }, output: { type: "string" },
+        profile: { type: "string" }, help: { type: "boolean" } } });
     if (values.help) { process.stdout.write(HELP); return 0; }
     if (!values.end || !values.output || !path.isAbsolute(values.output)) throw new ZerosDevError("invalid_request");
+    if (values.profile !== undefined && values.profile !== "hourly" && values.profile !== "infrastructure") throw new ZerosDevError("invalid_request");
+    profile = values.profile ?? "hourly";
     const trust = PublicHourlyTrustSchema.parse({ deviceId: values["device-id"], publicKey: values["public-key"] });
     const destination = path.resolve(values.output);
     const directory = path.dirname(destination), same = (a: { ino: number; dev: number }, b: { ino: number; dev: number }) => a.ino === b.ino && a.dev === b.dev;
@@ -41,7 +45,7 @@ export async function soakMain(argv: string[], options: Options = {}): Promise<n
     const env = options.env ?? process.env, token = env.GITHUB_TOKEN ?? env.GH_TOKEN, fetchImpl = options.fetch ?? fetch;
     const api = createGitHubApi({ token, fetchImpl });
     stage = "collection";
-    const report = await collectSoak({ api, trust, end: values.end, now: options.now,
+    const report = await collectSoak({ api, trust, end: values.end, profile, now: options.now,
       read: async (_run, artifact) => {
         try { return jsonFromZip(await downloadArtifact({ prefix: REPO, token, fetch: fetchImpl }, artifact, 1024 * 1024), "receipt.json", 1024 * 1024); }
         catch { throw new ZerosDevError("artifact_invalid"); }
@@ -55,12 +59,13 @@ export async function soakMain(argv: string[], options: Options = {}): Promise<n
       after.nlink !== 1 || after.uid !== info.uid || after.mode !== info.mode || await realpath(directory) !== directory)
       throw new ZerosDevError("artifact_invalid");
     await parent.sync();
-    write({ schema: "zeros.dev-soak-result/v1", status: report.status, collection: report.collection,
+    write({ schema: profile === "infrastructure" ? "zeros.dev-infrastructure-soak-result/v1" : "zeros.dev-soak-result/v1", status: report.status, collection: report.collection,
+      ...(report.coverage ? { coverage: report.coverage } : {}),
       attempts: report.attempts.length, completeHours: report.slots.filter(row => row.status === "passed").length });
     return report.status === "passed" ? 0 : 1;
   } catch (error) {
     const code = error instanceof ZerosDevError ? error.code : stage === "input" ? "invalid_request" : stage === "file" ? "artifact_invalid" : closedError(error);
-    write({ schema: "zeros.dev-soak-result/v1", status: "incomplete", code }); return 1;
+    write({ schema: profile === "infrastructure" ? "zeros.dev-infrastructure-soak-result/v1" : "zeros.dev-soak-result/v1", status: "incomplete", code }); return 1;
   } finally {
     await file?.close().catch(() => {}); await parent?.close().catch(() => {});
     // A failed write can leave a private partial file. Never unlink an output

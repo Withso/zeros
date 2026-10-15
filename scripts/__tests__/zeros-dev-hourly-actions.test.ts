@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { planHourly, hourlyContext, hourlySnapshot, decideHourlyGate, lifecycleJob } from "../zeros-dev/hourly-actions.mjs";
+import { planHourly, hourlyContext, actionsProfile, hourlySnapshot, decideHourlyGate, lifecycleJob } from "../zeros-dev/hourly-actions.mjs";
 
 const run = (id: number, overrides = {}) => ({ id, run_number: id, run_attempt: 1, path: ".github/workflows/zeros-dev-e2e.yml", name: "Zeros dev E2E",
   head_sha: "a".repeat(40), head_branch: "main", event: "schedule", status: "completed", conclusion: "success",
@@ -8,13 +8,14 @@ const run = (id: number, overrides = {}) => ({ id, run_number: id, run_attempt: 
 const context = { workflowRunId: "17", attempt: 1, sourceSha: "a".repeat(40) };
 // Exact API name from the skipped scheduled run 38666579898.
 const skippedExpression = "inputs.profile == 'gate0' && 'gate0' || 'lifecycle'";
+const infrastructureExpression = "(inputs.profile == 'infrastructure' || (github.event_name == 'schedule' && vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED == 'true')) && 'infrastructure' || (inputs.profile == 'gate0' && 'gate0' || 'lifecycle')";
 const completedJob = (overrides = {}) => ({ name: "lifecycle", status: "completed", conclusion: "success", run_attempt: 1,
   completed_at: "2026-10-14T00:08:00Z", steps: [
     { name: "Execute Alpha product lifecycle", status: "completed", conclusion: "success" },
     { name: "Save signed cleanup receipt", status: "completed", conclusion: "success" },
   ], ...overrides });
 function api(rows = [run(17, { status: "in_progress", conclusion: null }), run(16)]) {
-  return { get: vi.fn(async (url: string) => {
+  return { get: vi.fn(async (url: string): Promise<unknown> => {
     if (url.endsWith("/actions/runs/17")) return rows[0];
     if (url.includes("/artifacts")) return { total_count: 1, artifacts: [{ id: 99, name: "zeros-dev-receipt-16-1", expired: false, size_in_bytes: 100,
       digest: `sha256:${"c".repeat(64)}`, workflow_run: { id: 16, head_sha: "a".repeat(40) } }] };
@@ -22,6 +23,34 @@ function api(rows = [run(17, { status: "in_progress", conclusion: null }), run(1
   }) };
 }
 describe("hourly Actions predecessor and gate policy", () => {
+  it.each(["schedule", "workflow_dispatch"])("accepts the explicit infrastructure profile for %s without calling it hourly", event => {
+    expect(actionsProfile({ GITHUB_ACTIONS: "true", GITHUB_REPOSITORY: "Withso/zeros", GITHUB_REF: "refs/heads/main",
+      GITHUB_WORKFLOW_REF: "Withso/zeros/.github/workflows/zeros-dev-e2e.yml@refs/heads/main", GITHUB_EVENT_NAME: event,
+      GITHUB_RUN_ID: "17", GITHUB_RUN_ATTEMPT: "1", GITHUB_SHA: "a".repeat(40), ZEROS_DEV_PROFILE: "infrastructure" })).toBe("infrastructure");
+  });
+  it.each(["success", "failure"])("never activates or replaces hourly with a completed %s infrastructure run", async conclusion => {
+    const f = { get: vi.fn(async (url: string) => url.includes("status=success")
+      ? { total_count: conclusion === "success" ? 2 : 1, workflow_runs: conclusion === "success" ? [run(17), run(16)] : [run(16)] }
+      : url.includes("/jobs") ? { total_count: 1, jobs: [completedJob(url.includes("/runs/17/") ? { name: "infrastructure", conclusion } : {})] }
+      : { total_count: 2, workflow_runs: [run(17, { conclusion }), run(16)] }) };
+    const snapshot = await hourlySnapshot(f);
+    expect(snapshot).toMatchObject({ activated: true, latest: { id: 16 } });
+    expect(decideHourlyGate(snapshot, true, Date.parse("2026-10-14T00:38:00Z"))).toMatchObject({ allowed: true, code: "hourly_green" });
+    f.get.mockImplementation(async (url: string) => url.includes("/jobs")
+      ? { total_count: 1, jobs: [completedJob({ name: "infrastructure" })] }
+      : { total_count: 1, workflow_runs: [run(17)] });
+    expect(await hourlySnapshot(f)).toMatchObject({ activated: false, latest: null });
+  });
+  it("keeps an unevaluated infrastructure profile expression skipped and cannot infer a green profile", async () => {
+    const current = run(17, { status: "in_progress", conclusion: null }), skipped = run(16, { conclusion: "skipped" });
+    const f = api([current, skipped]), original = f.get.getMockImplementation()!;
+    f.get.mockImplementation(async url => url.includes("/artifacts") ? { total_count: 0, artifacts: [] }
+      : url.includes("/jobs") ? { total_count: 1, jobs: [completedJob({ name: infrastructureExpression, conclusion: "skipped", steps: [] })] } : original(url));
+    expect(await planHourly(f, context)).toMatchObject({ bootstrap: true, previous: null });
+    expect(await lifecycleJob(f, skipped)).toMatchObject({ name: "unselected", conclusion: "skipped" });
+    const malformed = { get: vi.fn(async () => ({ total_count: 1, jobs: [completedJob({ name: infrastructureExpression })] })) };
+    await expect(lifecycleJob(malformed, run(16))).rejects.toThrow("zeros_dev_artifact_invalid");
+  });
   it.each(["success", "failure"])("does not let a completed %s Gate 0 rehearsal replace the last hourly result", async conclusion => {
     const f = { get: vi.fn(async (url: string) => url.includes("status=success")
       ? { total_count: conclusion === "success" ? 2 : 1, workflow_runs: conclusion === "success" ? [run(17, { event: "workflow_dispatch" }), run(16)] : [run(16)] }
@@ -49,6 +78,30 @@ describe("hourly Actions predecessor and gate policy", () => {
   it("fails closed on a missing predecessor receipt", async () => {
     const f = api(); const get = f.get.getMockImplementation()!;
     f.get.mockImplementation(async url => url.includes("/artifacts") ? { total_count: 0, artifacts: [] } : get(url));
+    await expect(planHourly(f, context)).rejects.toThrow("zeros_dev_artifact_invalid");
+  });
+  it("retains the exact owner-reviewed prestart incident when crossing its missing receipt", async () => {
+    const current = run(17, { status: "in_progress", conclusion: null }), previous = run(38682977049, {
+      run_number: 16, event: "workflow_dispatch", conclusion: "failure", head_sha: "bb8455571cb27026060ad728f245e700151fdf38" });
+    const f = api([current, previous]), original = f.get.getMockImplementation()!;
+    f.get.mockImplementation(async url => url.includes("/artifacts") ? { total_count: 0, artifacts: [] }
+      : url.includes("/jobs") ? { total_count: 1, jobs: [completedJob({ id: 116251429975, name: "gate0", conclusion: "failure",
+        steps: ["Execute Alpha product lifecycle", "Save signed cleanup receipt"].map(name => ({ name, status: "completed", conclusion: "failure" })) })] }
+      : original(url));
+    expect(await planHourly(f, context)).toMatchObject({ bootstrap: true, previous: null, prestartRecovery: {
+      version: 1, workflowRunId: "38682977049", attempt: 1, sourceSha: previous.head_sha, jobId: "116251429975", cause: "module_transform_before_evaluation",
+    } });
+  });
+  it.each(["run", "attempt", "source", "event", "job", "executed", "upload"])("refuses a prestart recovery with changed %s", async change => {
+    const current = run(17, { status: "in_progress", conclusion: null }), previous = run(change === "run" ? 38682977050 : 38682977049, {
+      run_number: 16, event: change === "event" ? "schedule" : "workflow_dispatch", conclusion: "failure",
+      head_sha: change === "source" ? "f".repeat(40) : "bb8455571cb27026060ad728f245e700151fdf38", run_attempt: change === "attempt" ? 2 : 1 });
+    const f = api([current, previous]), original = f.get.getMockImplementation()!;
+    f.get.mockImplementation(async url => url.includes("/artifacts") ? { total_count: 0, artifacts: [] }
+      : url.includes("/jobs") ? { total_count: 1, jobs: [completedJob({ id: change === "job" ? 116251429976 : 116251429975,
+        name: "gate0", conclusion: "failure", run_attempt: previous.run_attempt,
+        steps: [{ name: "Execute Alpha product lifecycle", status: "completed", conclusion: change === "executed" ? "success" : "failure" },
+          { name: "Save signed cleanup receipt", status: "completed", conclusion: change === "upload" ? "success" : "failure" }] })] } : original(url));
     await expect(planHourly(f, context)).rejects.toThrow("zeros_dev_artifact_invalid");
   });
   it.each(["lifecycle", skippedExpression])("can start after a disabled schedule with job name %s only when the product never ran", async name => {

@@ -7,6 +7,7 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
+import type { AgentToolMessage } from "../features/agent/use-agent-session";
 
 async function main() {
   const React = await import("react");
@@ -18,7 +19,7 @@ async function main() {
   const { CodeEditor } = await import("../shell/workbench/tabs/code-editor");
   const { MarkdownPreview } =
     await import("../shell/workbench/tabs/file-viewer");
-  const { primeWorkspaceFileDiff } =
+  const { primeWorkspaceFileDiff, primeWorkspaceFileRead } =
     await import("../shell/workspace-file-data-cache");
   const { WorkspaceFileTree } =
     await import("../shell/workbench/tabs/workspace-file-tree");
@@ -35,6 +36,12 @@ async function main() {
   const { getPrefs } = await import("../shared/theme/store");
   const { shikiLangForPath } =
     await import("../shell/workbench/tabs/code-editor/shiki-lang");
+  const { useWorkspaceStore } = await import("../state/store");
+  (window as unknown as { __diffWorkbench: () => unknown }).__diffWorkbench = () => useWorkspaceStore.getState().workbenchByScope["/workspace-smoke"];
+  primeWorkspaceFileRead({ cwd: "/workspace-smoke", path: "art/logo.svg" }, {
+    kind: "image", path: "art/logo.svg", bytes: 110,
+    dataUrl: `data:image/svg+xml;base64,${btoa('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="teal"/></svg>')}`,
+  });
 
   const oldLine = `const value = "${"old-city ".repeat(90)}";`;
   const newLine = `const value = "${"new-city ".repeat(90)}";`;
@@ -128,7 +135,7 @@ async function main() {
     );
   }
 
-  const ctx = { editBaselines: new Map() } as never;
+  const ctx = { editBaselines: new Map(), attachmentCwd: "/workspace-smoke" } as never;
   const separatorHunks = [8, 20].map((start) => ({
     oldStart: start,
     oldLines: 3,
@@ -235,7 +242,7 @@ async function main() {
     rawInput: { file_path: "src/shared.ts" },
     createdAt: 0,
     updatedAt: 0,
-  } as never;
+  } satisfies AgentToolMessage;
 
   // Files Search is a real sidebar mode: it fills the same resizable shell as
   // the tree, starts with only its input, and keeps its column open after a
@@ -344,7 +351,7 @@ async function main() {
               40px global bar + 44px pane tabs create the same boundary. */}
           <div
             data-testid="placement-edit-host"
-            className="absolute top-[55px] left-[360px]"
+            className="absolute top-[50px] left-[360px]"
           >
             <EditCard message={placementEdit} ctx={ctx} />
           </div>
@@ -360,6 +367,9 @@ async function main() {
               ctx={ctx}
               detail={<pre>const value = &apos;new&apos;;</pre>}
             />
+          </div>
+          <div data-testid="image-read-host">
+            <EventRow message={{ ...read, id: "image-read", toolCallId: "image-read", rawInput: { file_path: "art/logo.svg" } }} ctx={ctx} detail={<div>Image read</div>} />
           </div>
           <div data-testid="footer-host" className="flex">
             <TurnFilePill

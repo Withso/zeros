@@ -9,6 +9,7 @@ import { CloudHistoryRestoreTracker, type CloudHistoryRestoreTicket } from "../.
 import { CloudHistoryRestoreMetadataSchema, type CloudHistoryRestoreMetadata, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
 import { installCloudHistoryRestoreMetadata, captureCloudHistoryRestoreRead, assertCloudHistoryRestoreResult } from "../cloud-transcript-cache";
 import type { CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake";
+import { relativeWorkspaceFilePath } from "../workspace-file-path";
 import {
   cloudWorkspaceKey,
   isCloudRepositorySlug,
@@ -347,6 +348,19 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       this.speculative.set(key, setTimeout(() => this.discardSpeculative(key), 15_000));
     } else if (!options?.intent) this.claimPeer(key);
     await this.peer(target);
+  }
+
+  /** Resolve a tool's literal path through an already-admitted owner. Hover
+   * never opens a connection or wakes a VM to discover its filesystem root. */
+  fileReferencePath(cwd: string, path: string): string | null {
+    try {
+      const target = parseCloudWorkspaceKey(cwd);
+      if (!target) return relativeWorkspaceFilePath(cwd, path);
+      const peer = this.peers.get(cloudWorkspaceKey(target));
+      const root = peer && !peer.retired && peer.identity === this.identity(target) &&
+        this.routing.canAccess?.(target) !== false ? peer.scope.root : undefined;
+      return relativeWorkspaceFilePath(cwd, path, root);
+    } catch { return null; }
   }
 
   /** Presence is receive-only lifecycle evidence on an existing admission.

@@ -79,13 +79,13 @@ export async function runAttachmentLayoutSmoke({ page, check }) {
     JSON.stringify(await pills.allTextContents()),
   );
   await pills.first().hover();
-  await expect(page.getByRole("tooltip")).toContainText("Saving attachment");
-  await expect(page.getByRole("tooltip")).not.toContainText("0%");
+  await expect(page.locator("[data-image-hover-preview]")).toContainText("Saving attachment");
+  await expect(page.locator("[data-image-hover-preview]")).not.toContainText("0%");
   await page.keyboard.press("Escape");
   await page.mouse.move(850, 500);
   await expect(page.getByRole("tooltip")).toHaveCount(0);
   check(
-    "pending status stays in the tooltip without displaying a zero percentage",
+    "pending status stays in the image card without displaying a zero percentage",
     true,
   );
 
@@ -165,7 +165,7 @@ export async function runAttachmentLayoutSmoke({ page, check }) {
       new File(["{}\n"], "more.jsonl", { type: "application/jsonl" }),
     );
     const pill = document.querySelector("[data-attachment-pill]");
-    const label = pill.querySelector("button[aria-label='Preview image'] span");
+    const label = pill.querySelector("button[data-file-path] span");
     for (const [target, type] of [
       [pill, "dragenter"],
       [label, "dragenter"],

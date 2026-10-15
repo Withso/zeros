@@ -54,7 +54,7 @@ export const SECRET_KEYS = Object.freeze([
 // Actions-only input is redacted but never admitted as a canonical .env.agent
 // key or a provider-check input. Agent keys stay in the workflow's memory.
 export const ACTIONS_SECRET_KEYS = Object.freeze([
-  "ZEROS_DEV_FIXTURE_B64", "AGENT_RUNTIME_ANTHROPIC_API_KEY", "AGENT_RUNTIME_CLAUDE_CODE_OAUTH_TOKEN",
+  "ZEROS_DEV_FIXTURE_B64", "ZEROS_DEV_CLEANUP_HANDOFF_B64", "AGENT_RUNTIME_ANTHROPIC_API_KEY", "AGENT_RUNTIME_CLAUDE_CODE_OAUTH_TOKEN",
   "AGENT_RUNTIME_OPENAI_API_KEY", "AGENT_RUNTIME_CODEX_AUTH_JSON", "AGENT_RUNTIME_CURSOR_API_KEY",
 ]);
 

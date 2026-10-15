@@ -4,7 +4,7 @@ import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 
-import { useLayoutEffect } from "react";
+import { useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   useComposerEditor,
@@ -14,9 +14,39 @@ import {
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
+import { useWorkspaceStore } from "../state/store";
+import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
+import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
 
 const query = new URLSearchParams(location.search);
 const cwd = query.get("workspace") ?? "/composer-editor-harness";
+const cloudTarget = parseCloudWorkspaceKey(cwd);
+if (cloudTarget) {
+  acceptCloudWorkspaceDocument({
+    id: cloudTarget.workspaceId,
+    organizationId: cloudTarget.organizationId,
+    teamId: cloudTarget.organizationId,
+    createdBy: cloudTarget.organizationId,
+    actorRole: "developer",
+    name: "Composer fixture",
+    placement: "cloud",
+    status: "ready",
+    version: 1,
+    error: null,
+    createdAt: "2026-10-15T00:00:00Z",
+    updatedAt: "2026-10-15T00:00:00Z",
+    deletedAt: null,
+    capabilities: { canWrite: true, canEdit: true, canManage: false, canStart: true, startUnavailableReason: null },
+    repository: { forge: "github.com", owner: "example", name: "composer", revision: "refs/heads/main" },
+    generation: {
+      number: 1,
+      architecture: "x86_64",
+      resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
+      observedState: "running",
+      lastObservedAt: null,
+    },
+  });
+}
 const records = new Map<
   string,
   { relativePath: string; bytes: Uint8Array; mimeType: string }
@@ -136,6 +166,8 @@ setActiveBridge({
 declare global {
   interface Window {
     __composerHarness?: ComposerEditorApi;
+    __composerWorkbench: () => ReturnType<typeof useWorkspaceStore.getState>["workbenchByScope"];
+    __setComposerActive: (active: boolean) => void;
     __composerAttachmentTransport: {
       pending: () => string[];
       releaseNext: (filename: string, error?: string) => void;
@@ -182,12 +214,14 @@ const initialContent: ComposerInitialContent | undefined = new URLSearchParams(
   : undefined;
 
 function Harness() {
+  const [active, setActive] = useState(true);
   const composer = useComposerEditor({
     agentId: null,
     agentName: null,
     agentSupportsImage: true,
     modelId: null,
     cwd,
+    attachmentImagesActive: active,
     originUrl: null,
     availableCommands: [],
     placeholder: "Message",
@@ -196,6 +230,8 @@ function Harness() {
   });
   useLayoutEffect(() => {
     window.__composerHarness = composer;
+    window.__composerWorkbench = () => useWorkspaceStore.getState().workbenchByScope;
+    window.__setComposerActive = setActive;
     return () => {
       delete window.__composerHarness;
     };

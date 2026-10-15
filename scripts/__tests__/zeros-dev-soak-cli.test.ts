@@ -20,6 +20,15 @@ async function fixture() {
     now: () => Date.parse("2026-10-14T01:00:00Z"), write: (value: unknown) => { output.push(value); } } };
 }
 describe("soak collector CLI read and output boundary", () => {
+  it("labels an explicitly requested infrastructure report with its owner §7 exclusions", async () => {
+    const f = await fixture();
+    expect(await soakMain([...f.argv, "--profile", "infrastructure"], f.options)).toBe(1);
+    expect(f.fetcher).toHaveBeenCalledOnce();
+    const file = await open(f.file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try { expect(JSON.parse(await file.readFile("utf8"))).toMatchObject({ schema: "zeros.dev-infrastructure-soak/v1",
+      coverage: { agents: "not_covered_owner_section7" }, status: "incomplete" }); } finally { await file.close(); }
+    expect(f.output).toContainEqual(expect.objectContaining({ schema: "zeros.dev-infrastructure-soak-result/v1", status: "incomplete" }));
+  });
   it("writes one private report and closed summary with no credential value or fixture access", async () => {
     const f = await fixture(); expect(await soakMain(f.argv, f.options)).toBe(1);
     const input = await open(f.file, constants.O_RDONLY | constants.O_NOFOLLOW);

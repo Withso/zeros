@@ -11,6 +11,8 @@
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { FileTypeIcon } from "../composer-editor/file-type-icon";
+import { Pill } from "@/renderer/shared/ui/primitives";
+import { forwardRef, type ComponentPropsWithoutRef } from "react";
 
 function baseName(p: string): string {
   const cleaned = p.replace(/\/+$/, "");
@@ -18,19 +20,21 @@ function baseName(p: string): string {
   return i === -1 ? cleaned : cleaned.slice(i + 1);
 }
 
-export function FileTag({
+export const FileTag = forwardRef<HTMLButtonElement, {
+  name: string;
+  kind?: "file" | "folder";
+} & ComponentPropsWithoutRef<typeof Pill>>(function FileTag({
   /** Full path or filename — drives both the glyph (by extension) and the
    *  displayed basename. */
   name,
   kind = "file",
   className,
-}: {
-  name: string;
-  kind?: "file" | "folder";
-  className?: string;
-}) {
+  ...props
+}, ref) {
   return (
-    <span
+    <Pill
+      ref={ref}
+      {...props}
       className={cn(
         // Unified pill recipe: 20px tall, 4px radius —
         // shared with the turn-footer file pills and the composer pills.
@@ -40,6 +44,6 @@ export function FileTag({
     >
       <FileTypeIcon name={name} kind={kind} size={13} className="shrink-0" />
       <span className="min-w-0 truncate">{baseName(name)}</span>
-    </span>
+    </Pill>
   );
-}
+});

@@ -110,6 +110,9 @@ export interface WorkbenchTab {
   changesView?: ChangesViewMode;
   /** Changes body presentation; omitted on older tabs means all file diffs. */
   changesPresentation?: "all" | "single";
+  /** Explicit tool navigation keeps an absent/clean file selected instead of
+   * silently opening an unrelated change. Not restored by normalization. */
+  changesRequestedFile?: string;
   /** Explicit Files-tab viewer choice. Changes is a diff-only surface. */
   viewerMode?: ViewerMode;
   /** File tab only: whether this tab's workspace tree is visible beside its
@@ -637,6 +640,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         type === "changes" && candidate.changesPresentation === "single"
           ? "single"
           : undefined,
+      changesRequestedFile: undefined,
       id,
       type,
       title: typeof candidate.title === "string" ? candidate.title : "",
@@ -651,8 +655,8 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
   };
   const firstReview = tabs.find((t) => t.type === "review");
   const changesFilePath =
-    typeof firstChanges?.filePath === "string"
-      ? firstChanges.filePath.trim().slice(0, 8192) || undefined
+    typeof firstChanges?.filePath === "string" && firstChanges.filePath.trim()
+      ? firstChanges.filePath.slice(0, 8192)
       : undefined;
   const homeChanges: WorkbenchTab = firstChanges
     ? {
@@ -719,8 +723,8 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
       }
       if (tab.type === "files") {
         const filePath =
-          typeof tab.filePath === "string"
-            ? tab.filePath.trim().slice(0, 8192) || undefined
+          typeof tab.filePath === "string" && tab.filePath.trim()
+            ? tab.filePath.slice(0, 8192)
             : undefined;
         return {
           ...tab,
