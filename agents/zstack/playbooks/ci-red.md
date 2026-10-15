@@ -31,6 +31,11 @@
   jobs get new IDs and break signed-build provenance. Use a full rerun or a new
   push. A release that started while another deploy was in flight can fail its
   forward-only barrier; the next successful release supersedes it.
+- **Alpha release edit 5xx:** retry only the identical metadata edit for the
+  exact repository release object, within the publication lock and original
+  job lifetime. Keep the bound, cancellation and closed diagnostics; never
+  broaden this to creation, assets or tag writes. Execute the actual workflow
+  step against asserted synthetic executables to verify upload/tag ordering.
 - **Alpha tag/ledger disagreement:** the previous publisher uploads the ledger
   before moving the tag. Read both identities and the prior job outcome before
   proposing a repair. Initial admission may wait only for an already validated

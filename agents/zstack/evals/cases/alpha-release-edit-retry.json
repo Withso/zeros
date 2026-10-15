@@ -1,0 +1,9 @@
+{
+  "id": "alpha-release-edit-retry",
+  "kind": "replay",
+  "area": "release-dev-environment",
+  "fixedBy": "pr:516",
+  "symptom": "An intermittent HTTP 500 on the existing Alpha release metadata edit aborted feed publication before signed assets could upload.",
+  "rule": "Retry only identical release-object edits on exact repository HTTP 5xx with a small bound, cancellation and unchanged provenance, upload and tag ordering. See playbooks/ci-red.md.",
+  "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/alpha-release-edit-workflow.test.ts scripts/release/alpha-release-edit.test.ts"
+}
