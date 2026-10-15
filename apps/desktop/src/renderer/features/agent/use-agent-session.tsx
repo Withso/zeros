@@ -187,6 +187,10 @@ export interface AgentSessionState {
    *  whenever the session is warming/ready/streaming. */
   failure: import("../../platform/bridge/failure").AgentFailure | null;
   lastStopReason: StopReason | null;
+  /** Latest foreground turn for this exact execution. Retained after it settles
+   * so a delayed older receipt cannot settle or clear the successor's state.
+   * This is live renderer identity, never a persisted history authority. */
+  foregroundTurnId: string | null;
   /** Engine-owned active-turn start. Restored by loadSession after a renderer
    * reload so an empty live tail does not restart its elapsed clock at 0s. */
   activeTurnStartedAt: number | null;

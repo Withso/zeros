@@ -276,6 +276,7 @@ export const BLANK: AgentSessionState = {
   error: null,
   failure: null,
   lastStopReason: null,
+  foregroundTurnId: null,
   activeTurnStartedAt: null,
   availableModes: [],
   currentModeId: null,
@@ -628,6 +629,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         normalized = { ...normalized, executionId, sessionId: executionId };
       }
       const previous = state.sessions[chatId];
+      if (previous && ((previous.executionId ?? previous.sessionId) !== executionId ||
+          previous.cwd !== normalized.cwd || previous.agentId !== normalized.agentId) &&
+          normalized.foregroundTurnId === previous.foregroundTurnId && normalized.foregroundTurnId !== null)
+        normalized = { ...normalized, foregroundTurnId: null };
       if (normalized.transcriptState === "cold" || previous && normalized.messages !== previous.messages &&
           normalized.transcriptPresentation === previous.transcriptPresentation) {
         normalized = { ...normalized, transcriptPresentation: null };
@@ -679,6 +684,12 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       ) {
         updated = { ...updated, executionId, sessionId: executionId };
       }
+      // A settled turn retains its identity; a different execution or owner
+      // cannot inherit it. Explicit lifecycle/snapshot identity wins.
+      if (patch.foregroundTurnId === undefined && updated.foregroundTurnId !== null &&
+          ((existing.executionId ?? existing.sessionId) !== executionId ||
+            existing.cwd !== updated.cwd || existing.agentId !== updated.agentId))
+        updated = { ...updated, foregroundTurnId: null };
       if (
         (existing.executionId ?? existing.sessionId) !== executionId &&
         Object.keys(updated.safetyReviewRetries).length > 0
@@ -998,7 +1009,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         !slot ||
         (slot.executionId ?? slot.sessionId) !==
           (notification.executionId ?? notification.sessionId) ||
-        (pendingTurn && upd.turnId && pendingTurn !== upd.turnId)
+        (pendingTurn && upd.turnId && pendingTurn !== upd.turnId) ||
+        // Adopted turns have no local prompt RPC. An old completion on the
+        // same route cannot settle their successor, even after it finishes.
+        (upd.state !== "running" && !pendingTurn && slot.foregroundTurnId && slot.foregroundTurnId !== upd.turnId)
       )
         return;
       if (upd.state === "running") {
@@ -1013,12 +1027,13 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           error: null,
           failure: null,
           lastStopReason: null,
+          foregroundTurnId: upd.turnId ?? slot.foregroundTurnId,
           // A local send starts this clock before session admission. Cursor's
           // provider create can acknowledge seconds later; lifecycle updates
           // may refine the start earlier, but must never move it forward and
           // visibly reset the timer.
           activeTurnStartedAt:
-            slot.activeTurnStartedAt == null
+            (slot.foregroundTurnId && slot.foregroundTurnId !== upd.turnId && !pendingTurn) || slot.activeTurnStartedAt == null
               ? engineStartedAt
               : engineStartedAt == null
                 ? slot.activeTurnStartedAt
@@ -1036,6 +1051,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
               status: settledTurnStatus(slot),
               lastStopReason:
                 upd.state === "cancelled" ? "cancelled" : (upd.stopReason ?? null),
+              foregroundTurnId: upd.turnId ?? slot.foregroundTurnId,
               activeTurnStartedAt: null,
             },
           },
@@ -1381,6 +1397,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         transcriptPresentation: awaitingHistory ? slot.transcriptPresentation : null,
         transcriptDirty: false, pendingPermissions: permissions, pendingPermission: permissions[0] ?? null, pendingQuestions: snapshot.questions,
         status: snapshot.activeTurn || newerPending ? "streaming" : failure ? "failed" : "ready", failure, error: failure?.message ?? null,
+        foregroundTurnId: newerPending ? pendingId : snapshot.activeTurn?.turnId ?? terminal?.turnId ?? slot.foregroundTurnId,
         activeTurnStartedAt: newerPending ? slot.activeTurnStartedAt : snapshot.activeTurn?.startedAt ?? null,
         lastStopReason: newerPending ? slot.lastStopReason : snapshot.activeTurn ? null : terminal?.stopReason ?? (terminal?.status === "cancelled" ? "cancelled" : null),
       } } };
@@ -1685,6 +1702,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           session: null,
           boundary: null,
           boundaryPorts: null,
+          foregroundTurnId: null,
           activeTurnStartedAt: null,
           pendingPermission: null,
           pendingPermissions: [],
@@ -1818,6 +1836,8 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           // next create/load response repopulates both fields.
           boundary: null,
           boundaryPorts: null,
+          foregroundTurnId: null,
+          activeTurnStartedAt: null,
         };
       }
       if (!changed) return state;
