@@ -2,7 +2,7 @@
   "id": "transcript-incremental-refresh",
   "kind": "replay",
   "area": "renderer",
-  "fixedBy": "pending",
+  "fixedBy": "pr:531",
   "symptom": "A changed history window replaced unchanged message objects and completed turns in an open chat.",
   "rule": "Preserve equal same-ID row references only after exact-owner and restore-head checks while retaining authoritative order and truncation (zstack-review).",
   "check": "pnpm test:git apps/desktop/src/renderer/features/agent/__tests__/transcript-incremental-refresh.test.ts"
