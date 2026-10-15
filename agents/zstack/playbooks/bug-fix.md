@@ -15,6 +15,13 @@
    and replay/live boundary. Persist allocation intent before starting work,
    refuse uncertain restarts, and recheck output after the file read settles.
    Bounded native output proves only the native task, never an agent transcript.
+   For hidden observation, start the real consumer hidden, then hold reads and
+   invalidations across hide/reveal and A → B → A. Count sibling observers too.
+   Assert timers are cancelled, async tails cannot start hidden reads, and a
+   superseded response cannot replace confirmed content before catch-up lands.
+   Skip intermediate producer states too: a hidden reset can replace a log with
+   equal or greater length. Append only when the full snapshot extends the
+   confirmed prefix; otherwise replace the rendered buffer.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
    For worker failures, retain the first closed diagnostic before cleanup and

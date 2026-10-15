@@ -167,6 +167,18 @@ events coalesce with an existing cache refresh without postponing its deadline.
 Keep the confirmed exact-key snapshot through refresh failures and honor data
 warmed on intent. Passive observation never wakes or upgrades a workspace.
 
+Setup observation also requires a visible window: the output view, off-tab
+status dot and chat provenance stop passive reads while hidden. A retained
+Setup view cancels its 900 ms running poll and 2 s first-snapshot retry, keeps
+its confirmed exact-workspace output, and catches up on reveal. In-flight
+invalidation queues cannot start hidden or retired reads, and a superseded
+response cannot replace that confirmed output. Reveal during an old flight
+coalesces one fresh read. Log reconciliation appends only an exact extension of
+the confirmed prefix; a hidden rerun may replace it with an equal or longer log
+without the observer seeing the intermediate empty snapshot. The visible
+fallbacks and engine-owned setup process continue to have their existing
+behavior; hiding the window never stops setup.
+
 Deletion cleanup follows semantic path ownership, not raw equality: include
 normalized descendant cwd keys, but protect a separately registered nested
 repository (the most-specific known owner wins).
