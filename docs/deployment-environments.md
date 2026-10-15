@@ -941,6 +941,16 @@ The runtime publisher revalidates its producer before the existing exact-source
 CI and OIDC publication, which still checks descriptor, manifest and archive
 identity and the original parent's `workflow_ref`.
 
+The existing Alpha release's metadata edit retries at most three identical
+`gh release edit` attempts, with 1 s and 2 s backoffs, only when gh reports a
+single HTTP 5xx error for this repository's exact release object. Logs retain
+the status and attempt without response text. Cancellation, other errors and
+retry exhaustion stop publication before assets upload or tag advancement.
+Release creation, upload and tag writes keep their existing behavior. These
+retries stay inside the original publication lock and job lifetime; they do
+not relax signed producing-attempt checks. After a terminal release failure,
+use a full workflow rerun or a new push, not a failed-jobs-only rerun.
+
 With an 8-minute gate, 11-minute signing build and 6-minute hosted deployment,
 the example critical path stays `max(8+6, 11) = 14` minutes before final
 publication when the small version job finishes during the gate and signing
