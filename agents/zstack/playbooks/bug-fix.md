@@ -8,10 +8,27 @@
    For a scheduler, drive the real producer and consumer with a fake clock:
    assert no scheduled work after the queue drains, not just no requests.
    Cover records arriving during a pending flight and an open failure circuit.
+   For display clocks, test multiple real consumers: one visible timer, zero
+   hidden timers, immediate wall-time catch-up on reveal, and final-unsubscribe
+   cleanup. A snapshot read must not consume another consumer's next tick.
    For detached terminal proofs, exercise the real serialized terminal grid
    and replay/live boundary. Persist allocation intent before starting work,
    refuse uncertain restarts, and recheck output after the file read settles.
    Bounded native output proves only the native task, never an agent transcript.
+   For hidden observation, start the real consumer hidden, then hold reads and
+   invalidations across hide/reveal and A → B → A. Count sibling observers too.
+   Assert timers are cancelled, async tails cannot start hidden reads, and a
+   superseded response cannot replace confirmed content before catch-up lands.
+   Skip intermediate producer states too: a hidden reset can replace a log with
+   equal or greater length. Append only when the full snapshot extends the
+   confirmed prefix; otherwise replace the rendered buffer.
+   When hiding a display clock, advance wall time with the next read held and
+   require reset/countdown labels to catch up on reveal from retained data.
+   Keep account/owner clearing active when gating passive observation. Hold each
+   awaited boundary across hide and account resets, including late clear ACKs;
+   serial requests and a final owner-ID comparison alone do not fence A → B → A.
+   Let a held read observe hidden state before the visibility event runs; retiring
+   that read must still leave one catch-up for a quick reveal.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
    For worker failures, retain the first closed diagnostic before cleanup and

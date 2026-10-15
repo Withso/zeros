@@ -167,6 +167,40 @@ events coalesce with an existing cache refresh without postponing its deadline.
 Keep the confirmed exact-key snapshot through refresh failures and honor data
 warmed on intent. Passive observation never wakes or upgrades a workspace.
 
+Setup observation also requires a visible window: the output view, off-tab
+status dot and chat provenance stop passive reads while hidden. A retained
+Setup view cancels its 900 ms running poll and 2 s first-snapshot retry, keeps
+its confirmed exact-workspace output, and catches up on reveal. In-flight
+invalidation queues cannot start hidden or retired reads, and a superseded
+response cannot replace that confirmed output. Reveal during an old flight
+coalesces one fresh read. Log reconciliation appends only an exact extension of
+the confirmed prefix; a hidden rerun may replace it with an equal or longer log
+without the observer seeing the intermediate empty snapshot. The visible
+fallbacks and engine-owned setup process continue to have their existing
+behavior; hiding the window never stops setup.
+
+Provider Information also requires both an active surface and a visible
+document. Its 30-minute usage fallback and one-minute reset-label clock are
+removed while hidden; focus cannot initiate a hidden usage read. Reveal
+refreshes the exact provider/method/account/auth-revision/identity cache and
+updates elapsed reset labels immediately, retaining confirmed usage through
+the shared request. Explicit Refresh, the 25-second native request timeout and
+five-minute automatic-failure backoff keep their existing behavior. This is
+the native account information surface; organization provider connections
+retain their separate cloud contract.
+
+The organization settings courier uses one visible-only 15-minute fallback
+and a 30-second focus freshness guard. Reveal catches up once when stale or
+invalidated; explicit settings and membership invalidations coalesce into one
+trailing read. Hidden windows and pending observations have no passive timer;
+every asynchronous tail rechecks visibility, the observation epoch and the
+account-store generation.
+Owner changes, account resets and sign-out still clear the Local engine context
+immediately while hidden. A late A → B → A response or clear acknowledgement
+cannot revive the old context; ordinary same-owner refresh failures retain the
+confirmed settings. Personal remains device-local and this courier never
+addresses a cloud VM. Local ownership migration retains its existing path.
+
 Deletion cleanup follows semantic path ownership, not raw equality: include
 normalized descendant cwd keys, but protect a separately registered nested
 repository (the most-specific known owner wins).
@@ -380,6 +414,13 @@ Finished transcript, editor, xterm, iframe, and virtualized-diff trees can be mo
 - Do not retain cheap or unbounded surfaces merely for consistency.
 
 Current deck helpers live in `apps/desktop/src/renderer/shell/retained-view-keys.ts` and `apps/desktop/src/renderer/shell/use-retained-view-keys.ts`.
+
+Background-task elapsed labels share `state/use-visible-clock.ts`: one timer
+per renderer with visible consumers, none when the document is hidden or all
+consumers are inactive. Reveal samples wall time immediately; elapsed state
+still comes from each chat's own `startedAt`. Snapshot reads do not advance or
+consume a pending publication. This display clock never controls task,
+authentication, or request deadlines, which retain their own authority.
 
 ### 5. Preserve identities through hot renders
 

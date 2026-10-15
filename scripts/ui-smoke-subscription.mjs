@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runProviderUsageObservationSmoke } from "./ui-smoke-provider-usage-observation.mjs";
 
 export async function runSubscriptionSmoke({ page, check }) {
   const base = new URL(page.url()).origin;
@@ -448,6 +449,7 @@ export async function runUsageSmoke({ page, check }) {
   await page.clock.fastForward(31 * 60_000);
   expect((await counts()).usageReads).toBe(hiddenReads);
   check("Usage refreshes every 30 minutes while visible and pauses while hidden", true);
+  await runProviderUsageObservationSmoke({ page, check });
 }
 
 export async function runQueueSmoke({ page, check }) {

@@ -55,6 +55,8 @@ const queueBridgeListeners = new Map<string, Set<(message: BridgeMessage) => voi
 const usageFixture = ids.find((id) => id === params.get("usage"));
 let holdUsage = params.has("holdUsage");
 const pendingUsage = new Set<() => void>();
+const pendingUsageAccounts = new Map<() => void, string | undefined>();
+const usageObservation = params.has("observeUsage");
 const names = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" };
 const accounts = {
   claude: "anthropic-api-key",
@@ -87,7 +89,13 @@ if (usageFixture || queueFixture) {
     rememberConnectionMethod(provider, "account");
     statuses.set(provider, {
       provider, state: "connected", revision: 1, method: "account", email: "user@example.test", plan: "Pro", activeAccountId: id,
-      accounts: [{ id, email: "user@example.test", plan: "Pro", state: "connected" }],
+      accounts: [
+        { id, email: "user@example.test", plan: "Pro", state: "connected" },
+        ...(usageObservation ? [{
+          id: `00000000-0000-4000-8000-${String(index + 101).padStart(12, "0")}`,
+          email: "second@example.test", plan: "Pro", state: "connected" as const,
+        }] : []),
+      ],
     });
   }
 }
@@ -184,7 +192,15 @@ window.__ZEROS_NATIVE__ = {
     if (args?.action === "usage") {
       counts.usageReads++;
       showCounts();
-      if (holdUsage) await new Promise<void>((resolve) => pendingUsage.add(resolve));
+      if (holdUsage) await new Promise<void>((resolve) => {
+        const release = () => {
+          pendingUsage.delete(release);
+          pendingUsageAccounts.delete(release);
+          resolve();
+        };
+        pendingUsage.add(release);
+        pendingUsageAccounts.set(release, args.accountId as string | undefined);
+      });
       return {
         provider,
         method: args.method,
@@ -285,6 +301,28 @@ window.__ZEROS_NATIVE__ = {
     };
   },
 };
+if (usageFixture && usageObservation) {
+  const accountId = (slot: "a" | "b") => {
+    const id = statuses.get(usageFixture)?.accounts?.[slot === "a" ? 0 : 1]?.id;
+    if (!id) throw new Error("Missing fixture account");
+    return id;
+  };
+  Object.assign(window, {
+    __providerUsageObservation: {
+      reads: () => counts.usageReads,
+      hold: () => { holdUsage = true; },
+      release: (slot: "a" | "b") => {
+        for (const release of pendingUsage)
+          if (pendingUsageAccounts.get(release) === accountId(slot)) release();
+      },
+      pending: (slot: "a" | "b") =>
+        [...pendingUsageAccounts.values()].filter((id) => id === accountId(slot)).length,
+      select: (slot: "a" | "b") => window.__ZEROS_NATIVE__!.invoke("provider_subscription", {
+        provider: usageFixture, action: "select-account", accountId: accountId(slot),
+      }),
+    },
+  });
+}
 registerAgentPreferencesFlush(async () => {});
 Object.defineProperty(RuntimeClient.prototype, "status", {
   get: () => "connected",
