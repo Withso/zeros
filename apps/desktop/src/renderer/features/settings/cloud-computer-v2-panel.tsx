@@ -571,7 +571,7 @@ function CloudComputerV2Form({
                 .map((row) => `${row.name} (${row.set ? "set" : "not set"})`)
                 .join(", ") || "None"}
             </p>
-            <pre className="text-fg2 max-h-40 overflow-auto font-mono text-xs whitespace-pre-wrap">
+            <pre className="text-fg2 max-h-40 select-text overflow-auto font-mono text-xs whitespace-pre-wrap">
               {snapshot.draft.installScript || "No install script"}
             </pre>
             <div className="flex gap-2">

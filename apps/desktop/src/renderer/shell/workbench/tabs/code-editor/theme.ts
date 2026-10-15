@@ -42,7 +42,8 @@ const chrome = (dark: boolean, baseFg: string | null): Extension =>
         lineHeight: "1.6",
         overflow: "auto",
       },
-      ".cm-content": { padding: "12px 0", caretColor: "var(--fg1)" },
+      // Read-only editors use contenteditable=false but remain copyable.
+      ".cm-content": { padding: "12px 0", caretColor: "var(--fg1)", userSelect: "text" },
       "&.cm-focused": { outline: "none" },
       ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--fg1)" },
       ".cm-gutters": {

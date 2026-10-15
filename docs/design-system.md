@@ -174,6 +174,18 @@ its own scale in `styles/global/runtime-content.css`.
 `font-medium` 450, `font-semibold` 500, `font-bold` 600. Hand-written CSS uses
 `var(--weight-medium)` etc., never a bare number.
 
+**Text selection:** desktop chrome is non-selectable by default, including
+sidebar labels, tabs, settings copy, and portalled dialogs/menus. Native inputs,
+textareas and editable content keep selection. Readable user/provider content
+opts in with `select-text` at its owning surface: messages, thinking, tool
+details, pending questions, queued prompts, source, diffs and logs. Keep actions
+and line-number gutters non-selectable inside those surfaces. A read-only code
+view is still readable content; do not rely only on `contenteditable=true`.
+Native link/image drags are disabled unless explicitly `draggable=true`;
+application tab drag-and-drop and selected-text dragging remain available.
+`scripts/ui-smoke-text-selection.mjs` verifies real pointer selection, Select
+All, editing, portals and vendor surfaces across owners, placements and themes.
+
 ## 5. Status color
 
 | Family | Meaning |

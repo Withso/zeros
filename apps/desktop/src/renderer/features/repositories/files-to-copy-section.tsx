@@ -525,7 +525,7 @@ export function FilesToCopySection({
       {/* Read-only patterns for the committed-file case. The list above is the
           answer either way; these are the lines that produced it. */}
       {readOnly && preview?.sourceText !== undefined && (
-        <pre className="bg-bg1-highlight text-fg2 text-2xxs m-0 max-h-64 overflow-auto rounded-md px-3 py-2 font-mono leading-relaxed">
+        <pre className="bg-bg1-highlight text-fg2 text-2xxs m-0 max-h-64 select-text overflow-auto rounded-md px-3 py-2 font-mono leading-relaxed">
           {preview.sourceText}
         </pre>
       )}

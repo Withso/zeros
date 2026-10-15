@@ -45,7 +45,7 @@ const MessageContent = React.forwardRef<HTMLDivElement, MessageContentProps>(
     <div
       ref={ref}
       className={cn(
-        "flex flex-col gap-2 overflow-hidden text-sm leading-relaxed",
+        "flex select-text flex-col gap-2 overflow-hidden text-sm leading-relaxed",
         // User bubbles use a calm raised surface instead of the inverted
         // primary-action colors, which would be too bright in dark mode.
         variant === "default" &&

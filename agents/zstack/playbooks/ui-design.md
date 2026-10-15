@@ -36,5 +36,9 @@ them.
 7. **Look at the result** in the running app or a ui-smoke harness, in both
    themes; a green check is not visual review. Put screenshot paths in the
    receipt.
+   Selection changes need real pointer drags and Select All: programmatic
+   Range selections bypass CSS. Cover portalled chrome, composed link buttons,
+   chat/question/queue content, read-only editors, shadow-DOM diffs and explicit
+   drag-and-drop, including Local and cloud owner switches.
 8. **Deliver and learn** (`integrate-pr.md`, `zstack-learn`). State the Local
    and cloud impact. When a mockup, token or check drifted, encode the lesson.

@@ -130,6 +130,8 @@
    the scale, so rendered markdown drifts heavier than the chrome beside it
    the next time the weights move. */
 [data-Zeros-root] .zeros-agent-md {
+  -webkit-user-select: text;
+  user-select: text;
   white-space: normal;
   font-size: 14px;
   /* Emergency break for unbroken tokens (long URLs, hashes, JSON runs) so

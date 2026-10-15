@@ -358,7 +358,7 @@ export function renderDetail(
       .filter((paragraph) => paragraph.trim());
     if (paragraphs.length === 0) return null;
     return (
-      <div className="text-fg2 flex flex-col gap-2 px-3 text-sm leading-normal">
+      <div className="text-fg2 flex select-text flex-col gap-2 px-3 text-sm leading-normal">
         {paragraphs.map((paragraph, index) => (
           <p key={index} className="m-0 wrap-anywhere whitespace-pre-wrap">
             {paragraph}
