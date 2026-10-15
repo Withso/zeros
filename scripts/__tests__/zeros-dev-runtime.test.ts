@@ -30,6 +30,8 @@ async function fixture(options: { rejection?: { reason: string; message: string 
   const origin = `http://127.0.0.1:${address.port}`, seen: Record<string, any>[] = [], headers: Record<string, unknown>[] = [];
   const workspace = { id: workspaceId, generation: { number: 1 }, status: "ready" };
   let generation = 1, engineRoot = "/home/user/test-repo", receiptState = "succeeded", exitCode: number | null = 0, permission = false, enqueued: any;
+  let bearer = "fixture-access-token";
+  const accessToken = vi.fn(async () => bearer);
   let conversationId = "", commandId = "", wrote = false, listRequests = 0;
   server.on("connection", (socket, request) => {
     headers.push(request.headers);
@@ -80,7 +82,7 @@ async function fixture(options: { rejection?: { reason: string; message: string 
     if (init?.method === "DELETE") return new Response(null, { status: 204 });
     expect(JSON.parse(String(init?.body))).toEqual({ actorProtocolVersion: 2, directProviderVersion: 1 });
     const header = new Headers(init?.headers);
-    expect(header.get("authorization")).toBe("Bearer fixture-access-token");
+    expect(header.get("authorization")).toBe(`Bearer ${bearer}`);
     const proof = { accountUserId: configured.accountId, deviceId: credential.deviceId, keyVersion: credential.keyVersion,
       action: "engine.connect", timestampMs: Number(header.get("x-zeros-device-timestamp")), nonce: header.get("x-zeros-device-nonce")!,
       payload: { organizationId: configured.organizationId, workspaceId } };
@@ -91,7 +93,7 @@ async function fixture(options: { rejection?: { reason: string; message: string 
       expiresAt: new Date(Date.now() + 60_000).toISOString(), bridgeUrl: `${origin.replace("http:", "ws:")}/v1/cloud-workspaces/bridge` }, { status: 201 });
   });
   const api = { workspace: vi.fn(async () => workspace), grant: vi.fn(async () => randomUUID()), transport: new AlphaTransport(fetcher) } as unknown as ProductApi;
-  const session = { fixture: async () => configured, device: async () => credential, accessToken: async () => "fixture-access-token", accountSessionKey: () => "fixture-session" };
+  const session = { fixture: async () => configured, device: async () => credential, accessToken, accountSessionKey: () => "fixture-session" };
   const handle: RunHandle = { run: { version: 1, runId: randomUUID(), fixtureSha256: "a".repeat(64), deviceId: credential.deviceId,
     createdAt: new Date().toISOString(), source: { revision: null, dirty: true }, lifecycle: [], prompts: [], evidence: [], deletionConfirmed: false }, save: vi.fn(async () => {}) };
   const environment: RuntimeClientEnvironment = { controlPlaneOrigin: origin, allowHttpLoopback: true, createWebSocket: (url, protocols) => new WebSocket(url, protocols) as never,
@@ -101,12 +103,23 @@ async function fixture(options: { rejection?: { reason: string; message: string 
     const runtime = await ZerosDevRuntime.connect(session, api, handle.run, { environment, fetch: fetcher, signal, onAdmissionEvent });
     cleanups.push(() => runtime.dispose()); return runtime;
   };
-  return { connect, handle, api, fetcher, seen, headers, workspace, setGeneration: (value: number) => { generation = value; },
+  return { connect, handle, api, fetcher, seen, headers, workspace, accessToken, setAccessToken: (value: string) => { bearer = value; }, setGeneration: (value: number) => { generation = value; },
     setRoot: (value: string) => { engineRoot = value; }, setReceipt: (value: string) => { receiptState = value; },
     setExit: (value: number | null) => { exitCode = value; }, requirePermission: () => { permission = true; receiptState = "dispatching"; }, enqueued: () => enqueued, wrote: () => wrote };
 }
 
 describe("zeros-dev shared admission, agent and terminal loopback", () => {
+  it("obtains fresh authenticated admission when reconnecting a detached native transport", async () => {
+    const f = await fixture(), first = await f.connect(); first.detachTransport();
+    f.accessToken.mockClear(); f.setAccessToken("fixture-fresh-after-detach");
+    const reconnected = await f.connect();
+    expect(reconnected).not.toBe(first); expect(f.accessToken).toHaveBeenCalledOnce();
+    const posts = f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(new Headers(posts[1]![1]?.headers).get("authorization")).toBe("Bearer fixture-fresh-after-detach");
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(0);
+  });
+
   it("can detach only device transport and retain actor authority until explicit cleanup", async () => {
     const f = await fixture(), runtime = await f.connect();
     runtime.detachTransport();
@@ -302,7 +315,7 @@ it("keeps the admitted runtime alive when its completed connect-phase deadline e
         });
         return runtime;
       },
-      prepareDetachedAuth: async () => { throw new Error("must not reach native work"); },
+      prepareLaunchAuth: async () => { throw new Error("must not reach native work"); },
       native: () => { throw new Error("must not reach native work"); },
     } as never).then(() => null, error => error);
     expect(result).toMatchObject({ code: "command_uncertain" });

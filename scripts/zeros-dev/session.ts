@@ -207,15 +207,21 @@ export class ZerosDevSession {
    * Refresh once beforehand through the existing Alpha contract, authenticate
    * that token at the CP, then expose only the verified remaining duration. */
   async prepareDetachedAuth(requiredMs:number):Promise<number>{
+    // Agent rehearsals still require auth covering their entire detached task.
+    return (await this.prepareLaunchAuth(requiredMs)).remainingMs;
+  }
+  /** Native PTYs need verified auth at launch and fresh auth on reconnect.
+   * This observation never extends an agent grant or the verified expiry. */
+  async prepareLaunchAuth(requiredMs:number):Promise<{observedAt:string;expiresAt:string;remainingMs:number}>{
     const token=await this.accessToken(requiredMs);
     return this.store.locked(async(current:LockedFile)=>{
       const fixture=this.bound(current.values),sessionId=current.values.ZEROS_DEV_SESSION_ID;
       if(!sessionId||current.values.ZEROS_DEV_ACCESS_TOKEN!==token)throw new ZerosDevError("identity_changed");
       const claims=await this.verify(token,fixture,sessionId);
       await this.checkAccount(token,fixture);
-      const remaining=claims.expiresAt*1000-this.now();
+      const observedAt=this.now(),expiresAt=claims.expiresAt*1000,remaining=expiresAt-observedAt;
       if(remaining<=requiredMs)throw new ZerosDevError("detached_auth_window");
-      return remaining;
+      return {observedAt:new Date(observedAt).toISOString(),expiresAt:new Date(expiresAt).toISOString(),remainingMs:remaining};
     });
   }
   async whoami():Promise<FixtureIdentity>{const token=await this.accessToken(),identity=await this.identity();await this.checkAccount(token,identity);return identity;}

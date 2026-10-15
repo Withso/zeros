@@ -22,9 +22,10 @@ const config={version:1,environment:"alpha",env:{AUTH_PROVIDER:"workos",AUTH_DES
   AUTH_ISSUER:"https://api.workos.com/user_management/client_web_fixture",AUTH_JWKS_URL:"https://api.workos.com/sso/jwks/client_web_fixture",
   AUTH_AUDIENCE:"https://api-alpha.zeros.build",VITE_APP_BASE_URL:"https://app-alpha.zeros.build",VITE_CONTROL_PLANE_URL:"https://api-alpha.zeros.build"}};
 const directories:string[]=[];
+type LockedFile = { readonly values: Record<string, string>; update(changes: Record<string, string>): Promise<void> };
 afterEach(async()=>{await Promise.all(directories.splice(0).map(root=>rm(root,{recursive:true,force:true})));});
 
-async function fixture(initial:Record<string,string>=values) {
+async function fixture(initial:Record<string,string>=values, options: { now?: () => number } = {}) {
   const root=await mkdtemp(path.join(tmpdir(),"zeros-dev-session-"));directories.push(root);
   const file=path.join(root,".env.agent");
   await writeFile(file,Object.entries({...initial,BOAT_API_KEY:"synthetic-infra-never-send"}).map(([k,v])=>`${k}=${v}`).join("\n")+"\n",{mode:0o600});
@@ -39,13 +40,65 @@ async function fixture(initial:Record<string,string>=values) {
     if(pathname==="/auth/zeros-dev/revoke")return Response.json({ok:true});
     throw new Error("unexpected synthetic request");
   });
-  const verify=vi.fn(async()=>({...claims}));
+  const verify=vi.fn(async(_token:string)=>({...claims}));
   const transport=new AlphaTransport(fetcher);
-  const session=new ZerosDevSession(store,transport,{now:()=>now,verifyToken:verify});
+  const session=new ZerosDevSession(store,transport,{now:options.now??(()=>now),verifyToken:verify});
   return {store,file,fetcher,session,verify,transport};
 }
 
 describe("Alpha zeros-dev session keeps the verified web contract",()=>{
+  it("refreshes a 300-second native launch token and records its verified expiry after the CP check", async () => {
+    let at = now;
+    const f = await fixture(values, { now: () => at }); await f.session.login();
+    at += 200_000;
+    const expiresAt = at + 300_000, original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/auth/zeros-dev/refresh")) return Response.json({ accountId: account, organizationId: org,
+        session: { ...grant, accessToken: "synthetic-refreshed", expiresAt } });
+      if (String(url).endsWith("/v1/me")) at += 250;
+      return original(url, init);
+    });
+    f.verify.mockResolvedValue({ ...claims, expiresAt: expiresAt / 1000 });
+    expect(await f.session.prepareLaunchAuth(120_000)).toEqual({ observedAt: new Date(at).toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(), remainingMs: 299_750 });
+    expect(f.fetcher.mock.calls.filter(([url]) => String(url).endsWith("/auth/zeros-dev/refresh"))).toHaveLength(1);
+    expect(String(f.fetcher.mock.calls.at(-1)?.[0])).toMatch(/\/v1\/me$/);
+  });
+
+  it("refuses a refreshed native launch token below the short floor", async () => {
+    let at = now;
+    const f = await fixture(values, { now: () => at }); await f.session.login(); at += 200_000;
+    const expiresAt = at + 119_000, original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => String(url).endsWith("/auth/zeros-dev/refresh")
+      ? Response.json({ accountId: account, organizationId: org, session: { ...grant, expiresAt } }) : original(url, init));
+    f.verify.mockResolvedValue({ ...claims, expiresAt: expiresAt / 1000 });
+    await expect(f.session.prepareLaunchAuth(120_000)).rejects.toMatchObject({ code: "detached_auth_window" });
+    expect(String(f.fetcher.mock.calls.at(-1)?.[0])).toMatch(/\/v1\/me$/);
+  });
+
+  it("uses normal fresh auth after native detachment, using expired access only as refresh proof", async () => {
+    let at = now;
+    const f = await fixture(values, { now: () => at }); await f.session.login();
+    await f.session.prepareLaunchAuth(120_000);
+    at += 31 * 60_000;
+    const expiresAt = at + 300_000, original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/auth/zeros-dev/refresh")) {
+        expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${grant.accessToken}`);
+        expect(JSON.parse(String(init?.body)).refreshToken).toBe(grant.refreshToken);
+        return Response.json({ accountId: account, organizationId: org,
+          session: { ...grant, accessToken: "synthetic-reconnected", expiresAt } });
+      }
+      return original(url, init);
+    });
+    f.verify.mockImplementation(async token => {
+      expect(token).toBe("synthetic-reconnected");
+      return { ...claims, expiresAt: expiresAt / 1000 };
+    });
+    expect(await f.session.accessToken()).toBe("synthetic-reconnected");
+    expect(f.fetcher.mock.calls.filter(([url]) => String(url).endsWith("/auth/zeros-dev/refresh"))).toHaveLength(1);
+  });
+
   it("refreshes before device sleep and reports only verified residual validity", async () => {
     const f = await fixture(); await f.session.login();
     const original = f.fetcher.getMockImplementation()!;
@@ -154,7 +207,7 @@ describe("Alpha zeros-dev session keeps the verified web contract",()=>{
       Response.json({accountId:kind==="envelope"?device:"invalid",organizationId:org,session:grant}):originalFetch(url,init));
     else{
       const locked=f.store.locked.bind(f.store);
-      f.store.locked=work=>locked(current=>work({
+      f.store.locked=work=>locked((current: LockedFile)=>work({
         get values(){return current.values;},
         update:async(changes:Record<string,string>)=>{
           if(changes.ZEROS_DEV_ACCESS_TOKEN){
@@ -181,7 +234,7 @@ describe("Alpha zeros-dev session keeps the verified web contract",()=>{
 
   it("sends refresh only to Alpha and preserves rotation if local verification is unavailable",async()=>{
     const f=await fixture();await f.session.login();
-    await f.store.locked(current=>current.update({ZEROS_DEV_TOKEN_EXPIRES_AT:String(now-1)}));
+    await f.store.locked((current: LockedFile)=>current.update({ZEROS_DEV_TOKEN_EXPIRES_AT:String(now-1)}));
     const original=f.fetcher.getMockImplementation()!;
     f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("/auth/zeros-dev/refresh")?
       Response.json({accountId:account,organizationId:org,session:{...grant,refreshToken:"synthetic-rotated"}}):original(url,init));
@@ -199,7 +252,7 @@ describe("Alpha zeros-dev session keeps the verified web contract",()=>{
 
   it("clears a terminal refresh, never silently falling back to a password grant",async()=>{
     const f=await fixture();await f.session.login();
-    await f.store.locked(current=>current.update({ZEROS_DEV_TOKEN_EXPIRES_AT:"1"}));
+    await f.store.locked((current: LockedFile)=>current.update({ZEROS_DEV_TOKEN_EXPIRES_AT:"1"}));
     const original=f.fetcher.getMockImplementation()!;
     f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("/auth/zeros-dev/refresh")?
       Response.json({error:{code:"zeros_dev_auth_denied"}},{status:401}):original(url,init));
@@ -219,7 +272,7 @@ describe("Alpha zeros-dev session keeps the verified web contract",()=>{
 
   it("keeps an already-rotated token if a subsequent verification becomes unavailable",async()=>{
     const f=await fixture();await f.session.login();
-    await f.store.locked(current=>current.update({ZEROS_DEV_TOKEN_EXPIRES_AT:"1"}));
+    await f.store.locked((current: LockedFile)=>current.update({ZEROS_DEV_TOKEN_EXPIRES_AT:"1"}));
     const original=f.fetcher.getMockImplementation()!;
     f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("/auth/zeros-dev/refresh")?
       Response.json({accountId:account,organizationId:org,session:{...grant,refreshToken:"synthetic-rotated-verified"}}):original(url,init));
@@ -232,7 +285,7 @@ describe("Alpha zeros-dev session keeps the verified web contract",()=>{
 
   it("allows concurrent invocations to refresh once and consume the serialized result",async()=>{
     const f=await fixture();await f.session.login();
-    await f.store.locked(current=>current.update({ZEROS_DEV_TOKEN_EXPIRES_AT:"1"}));
+    await f.store.locked((current: LockedFile)=>current.update({ZEROS_DEV_TOKEN_EXPIRES_AT:"1"}));
     const original=f.fetcher.getMockImplementation()!;
     const refresh=vi.fn(async()=>Response.json({accountId:account,organizationId:org,session:{...grant,refreshToken:"synthetic-rotated-once"}}));
     f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("/auth/zeros-dev/refresh")?refresh():original(url,init));
@@ -244,7 +297,7 @@ describe("Alpha zeros-dev session keeps the verified web contract",()=>{
 
   it("retires an expired web session through its scoped route without refreshing or using desktop revocation",async()=>{
     const f=await fixture();await f.session.login();
-    await f.store.locked(current=>current.update({ZEROS_DEV_TOKEN_EXPIRES_AT:"1"}));
+    await f.store.locked((current: LockedFile)=>current.update({ZEROS_DEV_TOKEN_EXPIRES_AT:"1"}));
     const before=f.fetcher.mock.calls.length;
     await f.session.logout();
     const calls=f.fetcher.mock.calls.slice(before);

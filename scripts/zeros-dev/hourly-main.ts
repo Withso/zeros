@@ -106,7 +106,7 @@ async function ownedDirectory(directory: string): Promise<void> {
 
 type ActionsServices = Pick<Parameters<typeof runHourly>[0], "api" | "credentials"> & {
   connect: (...args: Parameters<Parameters<typeof runHourly>[0]["connect"]>) => Promise<ZerosDevRuntime>;
-  session: Pick<ZerosDevSession, "login" | "whoami" | "logout"> & Partial<Pick<ZerosDevSession, "prepareDetachedAuth">>;
+  session: Pick<ZerosDevSession, "login" | "whoami" | "logout"> & Partial<Pick<ZerosDevSession, "prepareDetachedAuth" | "prepareLaunchAuth">>;
   health(): ReturnType<typeof controlPlaneHealth>;
 };
 type ActionsOptions = {
@@ -228,10 +228,10 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
         const inputs = { handle, api, credentials, evidence, budgetMs: Math.max(1, Math.ceil(remaining() - HOURLY_CLEANUP_MS)),
           signal: options.signal, connect: services.connect, predecessors };
         if (profile === "infrastructure") {
-          if (!session!.prepareDetachedAuth) throw new ZerosDevError("invalid_request");
+          if (!session!.prepareLaunchAuth) throw new ZerosDevError("invalid_request");
           await (options.infrastructure ?? runInfrastructure)({ ...inputs,
             connect: services.connect,
-            prepareDetachedAuth: ms => session!.prepareDetachedAuth!(ms),
+            prepareLaunchAuth: ms => session!.prepareLaunchAuth!(ms),
             native: (runtime, handle, settings) => new InfrastructureNative(runtime, handle, settings) });
         } else if (profile === "gate0") {
           if (!session!.prepareDetachedAuth) throw new ZerosDevError("invalid_request");

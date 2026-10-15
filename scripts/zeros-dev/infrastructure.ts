@@ -4,7 +4,8 @@ import type { ZerosDevRuntime } from "./runtime";
 import type { InfrastructureNative, InfrastructureNativeIntent, InfrastructureNativeTask } from "./infrastructure-native";
 import type { AdmissionObservation } from "./admission-observation";
 import type { SetupObservation } from "./setup-observation";
-import { InfrastructureSchema, INFRASTRUCTURE_TOTAL_MS, INFRASTRUCTURE_DETACHED_MS } from "./infrastructure-contract";
+import { InfrastructureSchema, INFRASTRUCTURE_TOTAL_MS, INFRASTRUCTURE_DETACHED_MS, INFRASTRUCTURE_LAUNCH_AUTH_MS,
+  INFRASTRUCTURE_DISCONNECT_MS, LaunchAuthObservationSchema, type LaunchAuthObservation } from "./infrastructure-contract";
 import { HOURLY_COMPUTER_MS, HOURLY_CLEANUP_MS, prepareHourlyComputer, recordStoragePending, type HourlyOptions } from "./hourly";
 import { ZerosDevError } from "./errors";
 import { requireComputeCleanup } from "./cleanup-state";
@@ -15,7 +16,7 @@ type Runtime = Pick<ZerosDevRuntime, "client" | "scope" | "terminal" | "dispose"
 type Native = Pick<InfrastructureNative, "begin" | "finish" | "cleanup">;
 export type InfrastructureOptions = Omit<HourlyOptions, "credentials" | "connect" | "workMs" | "computerMs"> & {
   connect(run: Run, signal: AbortSignal, onAdmissionEvent?: (event: AdmissionObservation) => void): Promise<Runtime>;
-  prepareDetachedAuth(requiredMs: number): Promise<number>;
+  prepareLaunchAuth(requiredMs: number): Promise<LaunchAuthObservation>;
   native(runtime: Runtime, handle: RunHandle, options: { persistIntent(intent: InfrastructureNativeIntent): Promise<void> }): Native;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 };
@@ -153,15 +154,21 @@ export async function runInfrastructure(options: InfrastructureOptions): Promise
       runtime = await connect(); await files(runtime, index);
       proof.cycles.push({ index, stopMs, resumeMs, usableMs: clock() - wakeAt, stoppedAt, readyAt, setup }); await checkpoint();
     }
-    const authAt = clock(), authRemainingMs = await step("detached_auth", 30_000,
-      () => options.prepareDetachedAuth(INFRASTRUCTURE_DETACHED_MS + 5 * 60_000));
+    const authAt = clock(), launchAuth = await step("detached_auth", 30_000, async () => {
+      const observed = LaunchAuthObservationSchema.safeParse(await options.prepareLaunchAuth(INFRASTRUCTURE_LAUNCH_AUTH_MS));
+      if (!observed.success || Date.parse(observed.data.expiresAt) - now() <= INFRASTRUCTURE_LAUNCH_AUTH_MS)
+        throw new ZerosDevError("detached_auth_window");
+      return observed.data;
+    });
     taskRuntime = runtime; taskHelper = native(runtime);
     task = await step("detached_start", 90_000, signal => taskHelper!.begin(signal));
     proof.task = task; observedWork(runtime); await checkpoint();
-    const remaining = authRemainingMs - (clock() - authAt);
     let detachedAt = 0, detachedStartedAt = "";
-    await step("detached_disconnect", 3000, async () => {
-      if (remaining <= INFRASTRUCTURE_DETACHED_MS + 180_000) throw new ZerosDevError("detached_auth_window");
+    await step("detached_disconnect", INFRASTRUCTURE_DISCONNECT_MS, async () => {
+      // Bound launch only. The resident PTY keeps its normal engine/workload
+      // lifetime; reconnect must authenticate afresh after the offline wait.
+      if (Math.min(launchAuth.remainingMs - (clock() - authAt), Date.parse(launchAuth.expiresAt) - now()) <= INFRASTRUCTURE_DISCONNECT_MS)
+        throw new ZerosDevError("detached_auth_window");
       assertContinuous(runtime);
       runtime.detachTransport(); detached.add(runtime);
       detachedAt = clock(); detachedStartedAt = new Date(now()).toISOString();
@@ -171,7 +178,7 @@ export async function runInfrastructure(options: InfrastructureOptions): Promise
     // runtime/CP read, hidden transport or native helper remains scheduled.
     await step("detached_wait", INFRASTRUCTURE_DETACHED_MS + 10_000, async signal => {
       await pause(INFRASTRUCTURE_DETACHED_MS, signal);
-      if (clock() - detachedAt < INFRASTRUCTURE_DETACHED_MS || clock() - detachedAt >= remaining)
+      if (clock() - detachedAt < INFRASTRUCTURE_DETACHED_MS)
         throw new ZerosDevError("detached_proof_incomplete");
     });
     const durationMs = clock() - detachedAt, completedAt = new Date(now()).toISOString();
@@ -179,7 +186,7 @@ export async function runInfrastructure(options: InfrastructureOptions): Promise
     const detachedProof = await step("detached_native_proof", 180_000, async signal => {
       const nativeProof = await taskHelper!.finish(task!, signal);
       assertContinuous(runtime);
-      const candidate = { startedAt: detachedStartedAt, completedAt, durationMs, authRemainingMs: remaining, proof: nativeProof };
+      const candidate = { startedAt: detachedStartedAt, completedAt, durationMs, launchAuth, proof: nativeProof };
       if (!InfrastructureSchema.safeParse({ ...proof, detached: candidate }).success) throw new ZerosDevError("detached_proof_incomplete");
       return candidate;
     });

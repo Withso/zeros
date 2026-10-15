@@ -58,7 +58,7 @@ function fixture() {
     calls.push("finish"); return { durationMs: 31 * 60_000, heartbeatCount: 32, maxHeartbeatGapMs: 60_000,
       commandSha256: "a".repeat(64), scopeSha256: "b".repeat(64), historySha256: "c".repeat(64), historyRows: 8, replayEvents: 17, cursorSha256: "d".repeat(64) };
   }) };
-  const prepareDetachedAuth = vi.fn(async () => { calls.push("auth"); return 60 * 60_000; });
+  const prepareDetachedAuth = vi.fn(async (_requiredMs: number) => { calls.push("auth"); return 60 * 60_000; });
   const sleep = vi.fn(async (ms: number) => {
     if (ms === GATE0_DETACHED_MS) {
       expect(calls.at(-1)).toBe("detach");
@@ -73,6 +73,19 @@ function fixture() {
 }
 
 describe("Gate 0 manual rehearsal through product ports", () => {
+  it("still refuses a 300-second token for the detached agent task before starting it", async () => {
+    const f = fixture();
+    f.prepareDetachedAuth.mockImplementation(async requiredMs => {
+      if (requiredMs >= 300_000) throw new ZerosDevError("detached_auth_window");
+      return 300_000;
+    });
+    await expect(runGate0(f.options as never)).rejects.toMatchObject({ code: "detached_auth_window" });
+    expect(f.prepareDetachedAuth).toHaveBeenCalledExactlyOnceWith(35 * 60_000);
+    expect(f.probe.begin).not.toHaveBeenCalled();
+    expect(f.calls).not.toContain("detach"); expect(f.handle.run.hourly!.complete).toBe(false);
+    expect(f.output.find(row => row.outcome === "failed")).toMatchObject({ phase: "detached_auth", code: "detached_auth_window" });
+  });
+
   it("can complete compute cleanup while the signed exact storage deletion stays pending", async () => {
     const f = fixture();
     f.api.cleanup.mockImplementation(async () => {
