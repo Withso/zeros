@@ -152,6 +152,8 @@ async function actionsFixture() {
 describe("Actions orchestration through signed files", () => {
   it("checkpoints infrastructure separately before any native work and never installs agent material", async () => {
     const f = await actionsFixture();
+    const launchAuth = { observedAt: "2026-10-15T00:00:00.000Z", expiresAt: "2026-10-15T00:05:00.000Z", remainingMs: 300_000 };
+    const prepareLaunchAuth = vi.fn(async () => launchAuth);
     const env = { ...f.env, ZEROS_DEV_PROFILE: "infrastructure",
       ZEROS_DEV_E2E_PLAN: JSON.stringify({ ...JSON.parse(f.env.ZEROS_DEV_E2E_PLAN), profile: "infrastructure", prestartRecovery: PRESTART_RECOVERY }) };
     const infrastructure = vi.fn(async (options: any) => {
@@ -161,11 +163,13 @@ describe("Actions orchestration through signed files", () => {
       expect(options.handle.run.hourly.infrastructure).toMatchObject({ complete: false,
         coverage: { agents: "not_covered_owner_section7" }, cycles: [], terminalChecks: 0 });
       expect(options.handle.run.hourly.complete).toBe(false);
+      expect(await options.prepareLaunchAuth(120_000)).toEqual(launchAuth);
       await options.evidence.step("detached_start", async () => { throw new ZerosDevError("detached_task_not_active"); });
     });
-    Object.assign(f.services.session, { prepareDetachedAuth: vi.fn(async () => 3_600_000) });
+    Object.assign(f.services.session, { prepareLaunchAuth, prepareDetachedAuth: vi.fn(async () => 3_600_000) });
     expect(await runActions(env, { ...f.options, infrastructure } as never)).toBe(1);
     expect(infrastructure).toHaveBeenCalledOnce();
+    expect(prepareLaunchAuth).toHaveBeenCalledExactlyOnceWith(120_000);
     expect(f.services.credentials.install).not.toHaveBeenCalled(); expect(f.services.connect).not.toHaveBeenCalled();
     expect((await f.checkpoint()).payload).toMatchObject({ schema: "zeros.dev-infrastructure/v1",
       result: { success: false, code: "detached_task_not_active" }, coverage: { detachedAgent: "not_covered_owner_section7" } });

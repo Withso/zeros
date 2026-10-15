@@ -8,6 +8,8 @@ import { InfrastructureNativeIntentSchema, InfrastructureNativeTaskSchema, Infra
 // agent/UI test. It cannot supply full Gate 0 or hourly agent coverage.
 export const INFRASTRUCTURE_TOTAL_MS = 3_800_000;
 export const INFRASTRUCTURE_DETACHED_MS = 31 * 60_000;
+export const INFRASTRUCTURE_LAUNCH_AUTH_MS = 120_000; // 90s begin + 3s disconnect + margin.
+export const INFRASTRUCTURE_DISCONNECT_MS = 3_000;
 export const OWNER_SECTION7_COVERAGE = {
   agents: "not_covered_owner_section7", accountModels: "not_covered_owner_section7",
   agentHistory: "not_covered_owner_section7", detachedAgent: "not_covered_owner_section7",
@@ -19,6 +21,20 @@ export const InfrastructureCoverageSchema = z.object({
 const count = z.number().int().nonnegative().safe();
 const duration = z.number().nonnegative().finite();
 
+// Verified at the CP before native startup. This is a launch-time observation,
+// not continuing agent authority or a claim that auth spans the offline task.
+export const LaunchAuthObservationSchema = z.object({
+  observedAt: z.string().datetime(), expiresAt: z.string().datetime(), remainingMs: count,
+}).strict().refine(value => value.remainingMs > INFRASTRUCTURE_LAUNCH_AUTH_MS &&
+  Date.parse(value.expiresAt) - Date.parse(value.observedAt) === value.remainingMs);
+export type LaunchAuthObservation = z.infer<typeof LaunchAuthObservationSchema>;
+const detachedSchema = z.union([
+  // Keep the original field/order and requirement for signed cleanup receipts.
+  // No defaults or transforms: signature verification uses the parsed bytes.
+  WindowSchema.extend({ authRemainingMs: duration, proof: InfrastructureNativeProofSchema }).strict(),
+  WindowSchema.extend({ launchAuth: LaunchAuthObservationSchema, proof: InfrastructureNativeProofSchema }).strict(),
+]);
+
 export const InfrastructureSchema = z.object({
   version: z.literal(1), complete: z.boolean(), coverage: InfrastructureCoverageSchema,
   runtimePin: z.object({ buildId: z.string().uuid(), version: z.number().int().positive().safe(),
@@ -29,7 +45,7 @@ export const InfrastructureSchema = z.object({
   terminalChecks: count, fileChecks: count,
   cycles: z.array(z.object({ index: z.number().int().min(1).max(3), stopMs: duration, resumeMs: duration, usableMs: duration,
     stoppedAt: z.string().datetime(), readyAt: z.string().datetime(), setup: SetupObservationSchema }).strict()).max(3),
-  detached: WindowSchema.extend({ authRemainingMs: duration, proof: InfrastructureNativeProofSchema }).strict().optional(),
+  detached: detachedSchema.optional(),
   transports: z.array(TransportObservationSchema).max(12),
 }).strict().superRefine((value, context) => {
   const task = value.task, intent = value.intent, detached = value.detached;
@@ -40,12 +56,15 @@ export const InfrastructureSchema = z.object({
     Date.parse(detached.startedAt) < task.startedAtMs || Date.parse(detached.completedAt) > task.deadlineAtMs ||
     Date.parse(detached.completedAt) < Date.parse(detached.startedAt) || detached.durationMs > task.deadlineAtMs - task.startedAtMs))
     context.addIssue({ code: "custom", message: "Infrastructure task binding is inconsistent" });
+  if (task && detached && "launchAuth" in detached && (Date.parse(detached.launchAuth.observedAt) > task.startedAtMs ||
+    Date.parse(detached.launchAuth.expiresAt) <= Date.parse(detached.startedAt) + INFRASTRUCTURE_DISCONNECT_MS))
+    context.addIssue({ code: "custom", message: "Infrastructure launch observation is inconsistent" });
   if (!value.complete) return;
   if (!intent || !task || !value.runtimePin || !value.initialSetup || value.initialSetup.state !== "succeeded" ||
     value.initialSetup.claimCount !== 1 || value.initialSetup.errorCode !== null || value.terminalChecks < 4 || value.fileChecks < 4 ||
     value.cycles.length !== 3 || value.cycles.some((row, index) => row.index !== index + 1 || row.setup.state !== "succeeded" ||
       row.setup.claimCount !== 1 || row.setup.errorCode !== null) || !detached || detached.durationMs <= GATE0_DETACHED_MS ||
-    detached.authRemainingMs <= detached.durationMs || detached.proof.taskDurationMs <= GATE0_DETACHED_MS ||
+    ("authRemainingMs" in detached && detached.authRemainingMs <= detached.durationMs) || detached.proof.taskDurationMs <= GATE0_DETACHED_MS ||
     detached.proof.maxHeartbeatGapMs > 90_000 || !value.transports.length ||
     value.transports.some(row => row.coverage !== "complete" || row.lostConnections > 0 || row.unexplainedAuthorityCloses > 0))
     context.addIssue({ code: "custom", message: "Infrastructure proof is incomplete" });

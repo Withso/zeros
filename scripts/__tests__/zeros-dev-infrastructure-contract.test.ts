@@ -7,6 +7,45 @@ import { RunSchema } from "../zeros-dev/receipts";
 import { randomUUID } from "node:crypto";
 
 describe("explicit infrastructure coverage", () => {
+  it("accepts verified launch expiry as an observation shorter than native detachment", () => {
+    const proof = infrastructureProof(), detached = proof.detached!;
+    const { authRemainingMs: _legacy, ...window } = detached as typeof detached & { authRemainingMs: number };
+    Object.assign(proof, { detached: { ...window, launchAuth: {
+      observedAt: new Date(proof.task!.startedAtMs - 1_000).toISOString(),
+      expiresAt: new Date(proof.task!.startedAtMs + 299_000).toISOString(), remainingMs: 300_000,
+    } } });
+    expect(InfrastructureSchema.safeParse(proof).success).toBe(true);
+    expect(Gate0Schema.safeParse(proof).success).toBe(false);
+  });
+
+  it("keeps the legacy signed proof serialization unchanged without adding launch defaults", () => {
+    const { version, complete, coverage, runtimePin, initialSetup, intent, task, terminalChecks, fileChecks, cycles, detached, transports } = infrastructureProof();
+    const legacy = { version, complete, coverage, runtimePin, initialSetup, intent, task, terminalChecks, fileChecks, cycles, detached, transports };
+    const serialized = JSON.stringify(legacy);
+    expect(JSON.stringify(InfrastructureSchema.parse(JSON.parse(serialized)))).toBe(serialized);
+  });
+
+  it.each(["floor", "inconsistent", "after-start", "expired-at-detach", "mixed"])("refuses an invalid %s launch observation", kind => {
+    const proof = infrastructureProof(), task = proof.task!, detached = proof.detached!;
+    const { authRemainingMs: _legacy, ...window } = detached as typeof detached & { authRemainingMs: number };
+    const launchAuth = { observedAt: new Date(task.startedAtMs - 1_000).toISOString(),
+      expiresAt: new Date(task.startedAtMs + 299_000).toISOString(), remainingMs: 300_000 };
+    if (kind === "floor") { launchAuth.remainingMs = 119_000; launchAuth.expiresAt = new Date(task.startedAtMs + 118_000).toISOString(); }
+    if (kind === "inconsistent") launchAuth.remainingMs++;
+    if (kind === "after-start") { launchAuth.observedAt = new Date(task.startedAtMs + 1_000).toISOString(); launchAuth.remainingMs = 298_000; }
+    if (kind === "expired-at-detach") {
+      launchAuth.observedAt = new Date(task.startedAtMs - 301_000).toISOString();
+      launchAuth.expiresAt = new Date(task.startedAtMs - 1_000).toISOString();
+    }
+    Object.assign(proof, { detached: { ...window, launchAuth, ...(kind === "mixed" ? { authRemainingMs: 3_600_000 } : {}) } });
+    expect(InfrastructureSchema.safeParse(proof).success).toBe(false);
+  });
+
+  it("preserves the old auth-duration requirement for legacy signed proofs", () => {
+    const proof = infrastructureProof(); Object.assign(proof.detached!, { authRemainingMs: 300_000 });
+    expect(InfrastructureSchema.safeParse(proof).success).toBe(false);
+  });
+
   it("retains owner §7 exclusions even when every native requirement passed", () => {
     const proof = infrastructureProof();
     expect(InfrastructureSchema.safeParse(proof).success).toBe(true);

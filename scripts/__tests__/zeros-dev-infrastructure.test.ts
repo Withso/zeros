@@ -86,7 +86,11 @@ function fixture() {
     };
     helpers.push(helper); return helper;
   });
-  const prepareDetachedAuth = vi.fn(async () => { calls.push("auth"); return 60 * 60_000; });
+  const prepareDetachedAuth = vi.fn(async (_requiredMs: number) => { calls.push("auth"); return 60 * 60_000; });
+  const prepareLaunchAuth = vi.fn(async (requiredMs: number) => {
+    const remainingMs = await prepareDetachedAuth(requiredMs), observedAt = origin + elapsed;
+    return { observedAt: new Date(observedAt).toISOString(), expiresAt: new Date(observedAt + remainingMs).toISOString(), remainingMs };
+  });
   const sleep = vi.fn(async (ms: number) => {
     expect(ms).toBe(INFRASTRUCTURE_DETACHED_MS); expect(calls.at(-1)).toBe("detach");
     const before = [...calls]; elapsed += ms;
@@ -95,13 +99,54 @@ function fixture() {
     expect(calls).toEqual(before);
     expect(runtimes[3].dispose).not.toHaveBeenCalled();
   });
-  const options = { handle, api, connect, prepareDetachedAuth, native, sleep,
+  const options = { handle, api, connect, prepareDetachedAuth, prepareLaunchAuth, native, sleep,
     now: () => origin + elapsed, monotonic: () => elapsed, evidence: new Evidence(handle.run.runId, row => output.push(row), () => elapsed) };
-  return { options, handle, api, connect, prepareDetachedAuth, sleep, native, helpers, runtimes, snapshots, calls, output, scripts,
+  return { options, handle, api, connect, prepareDetachedAuth, prepareLaunchAuth, sleep, native, helpers, runtimes, snapshots, calls, output, scripts,
     advance: (ms: number) => { elapsed += ms; } };
 }
 
 describe("infrastructure-only product lifecycle", () => {
+  it("finishes 31 minutes of native detachment with a 300-second launch token and no detached auth work", async () => {
+    const f = fixture();
+    f.prepareDetachedAuth.mockImplementation(async requiredMs => {
+      f.calls.push("auth");
+      if (requiredMs >= 300_000) throw new ZerosDevError("detached_auth_window");
+      return 300_000;
+    });
+    await expect(runInfrastructure(f.options as never)).resolves.toBeUndefined();
+    expect(f.prepareLaunchAuth).toHaveBeenCalledExactlyOnceWith(120_000);
+    const detached = f.handle.run.hourly!.infrastructure!.detached!;
+    expect(detached).toMatchObject({ durationMs: 31 * 60_000, launchAuth: { remainingMs: 300_000 } });
+    expect(detached).not.toHaveProperty("authRemainingMs");
+    if (!("launchAuth" in detached)) throw new Error("missing launch observation");
+    expect(Date.parse(detached.launchAuth.expiresAt)).toBeLessThan(Date.parse(detached.completedAt));
+    expect(f.calls.filter(value => value === "auth")).toHaveLength(1);
+    expect(f.calls.slice(f.calls.indexOf("detach") + 1, f.calls.indexOf("finish"))).toEqual(["connect"]);
+    expect(f.handle.run.hourly).toMatchObject({ complete: false, credentials: [], histories: [], infrastructure: { complete: true } });
+  });
+
+  it("refuses launch validity below the fixed floor before native allocation", async () => {
+    const f = fixture(); f.prepareDetachedAuth.mockResolvedValue(119_999);
+    await expect(runInfrastructure(f.options as never)).rejects.toMatchObject({ code: "detached_auth_window" });
+    expect(f.native).not.toHaveBeenCalled();
+    expect(f.output.find(row => row.outcome === "failed")).toMatchObject({ phase: "detached_auth", code: "detached_auth_window" });
+    expect(f.api.cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("rechecks short launch validity after startup and checkpointing consume the floor", async () => {
+    const f = fixture(), save = f.handle.save;
+    f.prepareDetachedAuth.mockResolvedValue(120_001);
+    f.handle.save = vi.fn(async () => {
+      if (f.handle.run.hourly!.infrastructure!.task && !f.calls.includes("detach")) f.advance(117_002);
+      await save();
+    });
+    await expect(runInfrastructure(f.options as never)).rejects.toMatchObject({ code: "detached_auth_window" });
+    expect(f.helpers[0].begin).toHaveBeenCalledOnce();
+    expect(f.calls).not.toContain("detach"); expect(f.sleep).not.toHaveBeenCalled();
+    expect(f.output.find(row => row.outcome === "failed")).toMatchObject({ phase: "detached_disconnect", code: "detached_auth_window" });
+    expect(f.api.cleanup).toHaveBeenCalledOnce();
+  });
+
   it("proves create, three first-claim wakes and native detachment without an agent claim", async () => {
     const f = fixture(); await runInfrastructure(f.options as never);
     expect(f.api.createWorkspace).toHaveBeenCalledOnce();
