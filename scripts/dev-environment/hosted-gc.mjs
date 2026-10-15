@@ -1,6 +1,20 @@
 import { hostedGcEligibility, withHostedLease } from "./hosted-state.mjs";
 import { archiveHosted } from "./hosted-lifecycle.mjs";
 import { assertHostedCleanupTargets } from "./hosted-protection.mjs";
+import { createHmac } from "node:crypto";
+
+const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+function targetSha256(state, profile) {
+  if (!/^[a-f0-9]{64}$/.test(profile.registry?.encryptionKey ?? "")) throw new Error("Invalid authenticated cleanup profile");
+  // Resources can carry credentials: expose only a domain-separated keyed
+  // digest, and recheck it under the existing owner/generation lease.
+  return createHmac("sha256", Buffer.from(profile.registry.encryptionKey, "hex")).update("zeros-dev:gc-targets:v1\0")
+    .update(JSON.stringify(canonical({ owner: state.owner, generation: state.generation, resources: state.resources,
+      pendingBuilderDeletions: state.pendingBuilderDeletions ?? [], pendingWorkerDeletions: state.pendingWorkerDeletions ?? [],
+      retiredImages: state.retiredImages ?? [], connectionRegistration: state.connectionRegistration ?? null,
+      connectionRevocation: state.connectionRevocation ?? null }))).digest("hex");
+}
 
 /** Defense in depth around the existing exact-resource adapter guards. */
 export const assertHostedGcTargets = assertHostedCleanupTargets;
@@ -15,7 +29,7 @@ export async function planHostedGc(store, profile, { owner, generation, now = Da
     try { assertHostedGcTargets(state, profile); }
     catch { eligibility = { eligible: false, reason: "protected-or-container-mismatch" }; }
     plan.entries.push({ owner: state.owner, generation: state.generation, identity: state.identity, status: state.status,
-      historical: Boolean(historical), ...eligibility });
+      historical: Boolean(historical), targetSha256: targetSha256(state, profile), ...eligibility });
   }
   if (inventory) {
     let resources;
@@ -39,7 +53,7 @@ export async function applyHostedGc(store, profile, plan, servicesFor, { signal,
     signal?.throwIfAborted();
     if (results.length >= maxOwners || now() >= deadline) break;
     try {
-      const ownerSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(Math.min(ownerBudgetMs, Math.max(1, deadline - now())))]);
+      const ownerSignal = globalThis.AbortSignal.any([...(signal ? [signal] : []), globalThis.AbortSignal.timeout(Math.min(ownerBudgetMs, Math.max(1, deadline - now())))]);
       const result = await mutation(entry, () => withHostedLease(store, { owner: entry.owner, identity: entry.identity }, async ownerLease => {
         let lease = ownerLease;
         if (ownerLease.state.generation !== entry.generation) {
@@ -52,6 +66,7 @@ export async function applyHostedGc(store, profile, plan, servicesFor, { signal,
           } };
         }
         if (!hostedGcEligibility(lease.state, profile, now()).eligible) throw new Error("GC eligibility changed");
+        if (entry.targetSha256 !== undefined && entry.targetSha256 !== targetSha256(lease.state, profile)) throw new Error("GC targets changed");
         assertHostedGcTargets(lease.state, profile);
         lease.state.gcLastAttemptAt = new Date(now()).toISOString(); await lease.save();
         const services = await servicesFor(lease.state);

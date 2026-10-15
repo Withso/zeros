@@ -38,7 +38,7 @@ explicit command refuses before preparing provider or account authority.
 | `pnpm dev:archive` | Immediately start owned resource cleanup and confirm the remote environment is gone |
 | `pnpm dev:archive --owner OWNER --generation UUID` | Clean an explicitly selected authenticated generation, including from another checkout |
 | `pnpm dev:gc --all --json` | Read-only cross-owner cleanup plan, including quarantined unknowns |
-| `pnpm dev:gc --apply --owner OWNER --generation UUID` | Apply eligible cleanup under the same owner lease and resource guards |
+| `pnpm dev:gc --apply --owner OWNER --generation UUID --expect-plan SHA256` | On the owner's Mac, echo and apply the reviewed eligible cleanup plan under the same owner lease and resource guards |
 | `pnpm electron:alpha` | Explicit desktop-against-Alpha workflow, separate from workspace Dev |
 
 Conductor's Setup command is `sh scripts/dev-environment/hook.sh setup`.
@@ -653,8 +653,36 @@ history. `dev:gc` reads complete paginated registry/provider inventories and is
 read-only unless `--apply` is supplied. `--all`, `--owner`, `--generation` and
 `--json` select its scope/output. GC never adopts a Dev-looking resource name;
 unknown keys, unreadable receipts and unowned provider resources are quarantined.
+Quarantine is permanent unless a resource gains its own authenticated receipt;
+age, a matching name or an otherwise unknown resource never authorizes deletion.
 An unavailable provider is reported without preventing authenticated independent
 cleanup. Each apply rereads the exact generation under the owner lease.
+
+During retirement, `--apply` is restricted to the owner's Mac. First run the
+read-only command with the exact intended scope and review its full output.
+Pass that output's `planSha256` as `--expect-plan SHA256` with the same scope.
+The CLI echoes a fresh read-only plan before any mutation. A changed eligible
+set, target digest or quarantine stops with `gc_plan_changed`; review the new
+plan instead of reusing approval. Only observation time and listing order are
+excluded from the comparison. The signed resource set is checked again under
+the owner lease, so same-generation replacement cannot inherit the old plan's
+approval. Ineligible active owners are not selected for cleanup.
+
+The R2 and PostgreSQL adapters resolve dependencies through the independent
+`apps/control-plane/package.json`. A root install does not install that graph.
+`control_plane_dependencies_missing` reports the required command without
+printing the loader error, paths, provider response or credentials:
+
+```sh
+pnpm --dir apps/control-plane install --frozen-lockfile
+pnpm dev:gc --all --json
+```
+
+`control_plane_dependencies_unavailable` distinguishes an installed module
+that cannot initialize. Profile, inventory and cleanup failures use the fixed
+`gc_profile_invalid`, `gc_inventory_unavailable` and `gc_cleanup_unconfirmed`
+codes. Preserve receipts after an unconfirmed result; a failed command is not
+proof that a provider mutation did not happen.
 
 GC eligibility requires signed archive intent or an explicitly enrolled maximum
 lifetime. Legacy receipts, inactivity and maintenance heartbeats do not establish
@@ -684,7 +712,7 @@ supplement the existing exact owner/generation/account/actor checks. They do not
 give a connection hook authority over a shared service. The lifecycle exposes
 `lifecycleHooks` (`beforeDeploy` and `archive`) for separate integrations.
 
-### Hosted scheduled job (implementation supplied; not deployed)
+### Hosted scheduled job (read-only during retirement)
 
 `scripts/dev-environment/hosted-gc.mjs` is the same plan/apply library used by the
 CLI and `scripts/dev-environment/gc-cron.mjs`. Install a separate protected Railway
@@ -693,6 +721,10 @@ minutes it starts one pass and exits, with no restart loop. Railway cron skips a
 new scheduled run if the previous process is still running; registry CAS leases
 also fence overlapping manual/scheduled attempts. See
 [Railway cron jobs](https://docs.railway.com/cron-jobs).
+
+Do not enable scheduled apply during retirement. `ZEROS_DEV_GC_APPLY=1` is
+refused on Linux; only the owner runs reviewed cleanup on the Mac. An existing
+read-only schedule remains an inventory operation.
 
 Build the job from a reviewed operational-code artifact, independent of any
 disposable workspace. Include `scripts/dev-environment/`, the referenced

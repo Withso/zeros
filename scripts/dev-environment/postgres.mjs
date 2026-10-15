@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
+import { loadControlPlaneDependency } from "./dependency-preflight.mjs";
 import { run } from "./processes.mjs";
 import { privateDirectory, saveWorkspace, systemEnvironment, writePrivateFile } from "./state.mjs";
 import { portFree } from "../dev-ports.mjs";
@@ -66,6 +66,7 @@ export function validateDatabaseUrl(value, workspace, port, role = "runtime") {
 }
 
 export async function startPostgres(workspace, profile, ports, repositoryRoot) {
+  const { Client } = loadControlPlaneDependency("pg", repositoryRoot);
   const bin = postgresBinaries(profile);
   const env = systemEnvironment();
   const version = await run(path.join(bin, "postgres"), ["--version"], { env, label: "PostgreSQL version check" });
@@ -103,8 +104,6 @@ export async function startPostgres(workspace, profile, ports, repositoryRoot) {
     await run(path.join(bin, "pg_ctl"), ["-D", data, "-w", "-t", "20", "-m", "fast", "stop"], { env, label: "PostgreSQL shutdown", timeout: 25_000 });
   };
   try {
-    const require = createRequire(path.join(repositoryRoot, "apps/control-plane/package.json"));
-    const { Client } = require("pg");
     const admin = new Client({ host: "127.0.0.1", port: ports.database, user: ROLES.admin,
       password: workspace.state.database.adminPassword, database: "postgres", connectionTimeoutMillis: 5000 });
     await admin.connect();

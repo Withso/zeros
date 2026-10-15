@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHmac, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
+import { loadControlPlaneDependency } from "./dependency-preflight.mjs";
 import { sha256, workspaceIdentity, derivedWorkspaceIdentity, legacyWorkspaceIdentities } from "./state.mjs";
 
 const OWNER = /^[a-f0-9]{24}$/;
@@ -148,8 +148,7 @@ export function hostedGcEligibility(state, profile, now = Date.now()) {
 /** The registry lives outside both checkout copies. Conditional writes prevent
  * the Mac and cloud archive hook from owning one generation concurrently. */
 export function r2Registry(config, dependencies) {
-  const require = createRequire(new URL("../../apps/control-plane/package.json", import.meta.url));
-  const sdk = dependencies?.sdk ?? require("@aws-sdk/client-s3");
+  const sdk = dependencies?.sdk ?? loadControlPlaneDependency("@aws-sdk/client-s3");
   if (!/^https:\/\/[a-f0-9]{32}\.r2\.cloudflarestorage\.com$/.test(config?.endpoint ?? "") ||
       !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(config.bucket ?? "") || !config.bucket.includes("dev") ||
       !KEY.test(config.encryptionKey ?? "") || !config.accessKeyId || !config.secretAccessKey) {

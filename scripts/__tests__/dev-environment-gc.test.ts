@@ -68,6 +68,34 @@ it("plans without mutations and quarantines unknown inventory", async () => {
   expect(result.quarantine[0].reason).toBe("no-authenticated-receipt");
   expect(write).not.toHaveBeenCalled();
 });
+it("never reads or leases an ineligible active owner or quarantined resource during apply", async () => {
+  const { planHostedGc, applyHostedGc } = await import("../dev-environment/hosted-gc.mjs");
+  const active = state.newHostedGeneration(identity); active.status = "ready";
+  const store = { list: async () => ({ records: [{ state: active }], quarantine: [] }), read: vi.fn(), write: vi.fn() };
+  const services = vi.fn();
+  const inventory = ["main", "unowned-old-dev-image", "protected-worker"].map(id => ({ provider: "boat", id }));
+  const plan = await planHostedGc(store, profile, { inventory: async () => inventory });
+  expect(plan.entries).toMatchObject([{ eligible: false, reason: "unenrolled-or-active" }]);
+  expect(plan.quarantine).toEqual(inventory.map(row => ({ ...row, reason: "no-authenticated-receipt" })));
+  expect(await applyHostedGc(store, profile, plan, services)).toEqual({ complete: true, deferred: 0, results: [] });
+  expect(store.read).not.toHaveBeenCalled(); expect(store.write).not.toHaveBeenCalled(); expect(services).not.toHaveBeenCalled();
+  expect(active.status).toBe("ready"); expect(active.lease).toBeUndefined();
+});
+it("refuses changed authenticated deletion targets after the plan even in the same generation", async () => {
+  const { planHostedGc, applyHostedGc } = await import("../dev-environment/hosted-gc.mjs");
+  const record = state.newHostedGeneration(identity); state.recordArchiveIntent(record, profile);
+  record.resources.railway = { id: "owned-environment-one", name: "disposable-test" };
+  let current = record, revision = 0;
+  const store = { list: async () => ({ records: [{ state: structuredClone(current) }], quarantine: [] }),
+    read: async () => ({ state: structuredClone(current), etag: String(revision) }),
+    write: async (_owner: string, value: any) => { current = structuredClone(value); return String(++revision); } };
+  const plan = await planHostedGc(store, profile);
+  current.resources.railway.id = "owned-environment-two";
+  const services = vi.fn();
+  const result = await applyHostedGc(store, profile, plan, services);
+  expect(result.results).toMatchObject([{ outcome: "unconfirmed" }]);
+  expect(services).not.toHaveBeenCalled(); expect(current.status).toBe("provisioning");
+});
 it("keeps authenticated cleanup eligible when an independent inventory provider is unavailable", async () => {
   const { planHostedGc } = await import("../dev-environment/hosted-gc.mjs");
   const record = state.newHostedGeneration(identity); state.recordArchiveIntent(record, profile);
