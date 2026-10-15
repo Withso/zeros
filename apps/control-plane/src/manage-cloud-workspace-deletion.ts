@@ -14,6 +14,7 @@ import { HttpError, requireOrganizationRole } from "./authz.js";
 import { authorizeCloudWorkspaceCleanup } from "./cloud-workspaces/actors.js";
 import { loadGenerationCloudProviderConnection } from "./cloud-workspaces/provider-connections.js";
 import { requestCloudWorkspaceDeletion } from "./cloud-workspaces/routes.js";
+import { reconcileWorkspaceDeletionJob } from "./cloud-workspaces/workspace-deletion-job.js";
 import { parseDatabaseTarget } from "./database-target.js";
 import { createMigrationPool, type Tx } from "./db.js";
 
@@ -308,7 +309,16 @@ export async function manageCloudWorkspaceDeletion(
 
     for (let index = 0; index < workspaces.length; index++) {
       const workspace = workspaces[index]!;
-      if (isDeleted(workspace)) continue;
+      if (isDeleted(workspace)) {
+        // A recovery accepted by the old producer may finish before this
+        // deployment. Reconcile only its exact retained operator intent;
+        // skipped targets never create an intent or retry failed record purge.
+        if (replaying && workspace.intentId) await reconcileWorkspaceDeletionJob(tx, {
+          workspaceId: workspace.workspaceId, organizationId: request.organizationId,
+          requestedBy: request.actorUserId, lifecycleIntentId: workspace.intentId,
+        });
+        continue;
+      }
       const result = await requestCloudWorkspaceDeletion(tx, {
         organizationId: request.organizationId, workspaceId: workspace.workspaceId, actorUserId: request.actorUserId,
         idempotencyKey: idempotencyKey(request.approvalId, workspace.workspaceId),
