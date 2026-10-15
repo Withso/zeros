@@ -2,7 +2,7 @@
   "id": "unavailable-model-recovery-menu",
   "kind": "replay",
   "area": "desktop-cloud-ui-state",
-  "fixedBy": "pending",
+  "fixedBy": "pr:529",
   "symptom": "An unavailable saved model still exposes configuration controls and has neither an eligibility explanation nor a direct route to available choices.",
   "rule": "Keep saved model identities visible without enabling them; show a reason and an action that filters to eligible alternatives without changing selection or favorites. See docs/agent-tool-presentation.md and the cursor-registry-model-parameters change fragment.",
   "check": "pnpm test:ui-smoke --shard=2/3"
