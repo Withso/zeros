@@ -392,7 +392,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
         <div className="flex items-start gap-2">
           {/* Scope/header chip (e.g. COMPONENT SOURCE) intentionally not
             rendered. */}
-          <div className="text-fg1 min-w-0 flex-1 text-sm font-medium">
+          <div className="text-fg1 min-w-0 flex-1 select-text text-sm font-medium">
             {q.prompt}
           </div>
           {showCountdown ? (
@@ -724,7 +724,7 @@ function OneClickApprovalCard({
             )}
           </span>
           <div className="min-w-0 flex-1">
-            <div className="text-fg1 text-sm font-medium">
+            <div className="text-fg1 select-text text-sm font-medium">
               {question.approvalPrompt ?? question.prompt}
             </div>
             {question.header ? (

@@ -148,7 +148,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                     )}
                   >
                     <Tooltip label={m.text}>
-                      <span className="text-fg1 min-w-0 flex-1 truncate text-sm">
+                      <span className="text-fg1 min-w-0 flex-1 select-text truncate text-sm">
                         {m.text}
                       </span>
                     </Tooltip>

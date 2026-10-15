@@ -372,7 +372,7 @@ export const PermissionCard = memo(function PermissionCard({
             <span
               key={`${index}:${item}`}
               data-permission-context-item=""
-              className="border-border3 bg-bg1 text-fg2 max-w-full truncate rounded-md border px-2 py-1 text-xs"
+              className="border-border3 bg-bg1 text-fg2 max-w-full select-text truncate rounded-md border px-2 py-1 text-xs"
             >
               {item}
             </span>
@@ -384,12 +384,12 @@ export const PermissionCard = memo(function PermissionCard({
         <Inline gap={2} align="center" className="min-w-0">
           <Icon className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
           {label && (
-            <span className="text-fg1 max-w-[45%] shrink-0 truncate text-sm">
+            <span className="text-fg1 max-w-[45%] shrink-0 select-text truncate text-sm">
               {label}
             </span>
           )}
           {detail && (
-            <span className="text-fg2 min-w-0 flex-1 truncate font-mono text-xs">
+            <span className="text-fg2 min-w-0 flex-1 select-text truncate font-mono text-xs">
               {detail}
             </span>
           )}

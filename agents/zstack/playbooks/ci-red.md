@@ -27,6 +27,11 @@
   Do not widen the CI input list merely to hide an unintended dependency.
 - **PR CI:** rerunning only the failed jobs is fine for a flake or infra
   failure. Record that it was a rerun.
+- **Trusted-base gate drift:** when workloads pass but the hourly gate reports
+  `hourly_unavailable`, compare the policy checkout SHA with the current main
+  workflow's job profiles. If main already contains the compatible reader,
+  update the PR branch to include it and run fresh CI; a failed-job rerun keeps
+  the old trusted base and cannot pick up that fix.
 - **Release workflows:** never rerun only the failed jobs. Carried producer
   jobs get new IDs and break signed-build provenance. Use a full rerun or a new
   push. A release that started while another deploy was in flight can fail its

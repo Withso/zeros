@@ -55,6 +55,7 @@ const coreInline = {
 // its shared pages and inherited viewport changes. A shard gives each unit a
 // separate context seeded at this viewport and, where needed, a valid origin.
 export const scenarioRegistry = [
+  fresh("text-selection", "text-selection", "runTextSelectionSmoke", 1440, 1100),
   fresh(
     "git-review-actions",
     "git-review-actions",

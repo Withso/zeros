@@ -30,7 +30,7 @@ const CodeBlock = React.forwardRef<HTMLDivElement, CodeBlockProps>(
           ) : null}
         </div>
       )}
-      <div className="overflow-x-auto px-3 py-2 [&_pre]:m-0 [&_pre]:bg-transparent">
+      <div className="select-text overflow-x-auto px-3 py-2 [&_pre]:m-0 [&_pre]:bg-transparent">
         {children}
       </div>
     </div>

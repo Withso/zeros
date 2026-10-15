@@ -1004,7 +1004,7 @@ export function MarkdownPreview({ html }: { html: string }) {
   return (
     <div
       className={cn(
-        "text-fg1 max-w-3xl min-w-0 text-sm leading-relaxed wrap-anywhere",
+        "text-fg1 max-w-3xl min-w-0 select-text text-sm leading-relaxed wrap-anywhere",
         "[&_h1]:mt-6 [&_h1]:mb-3 [&_h1]:text-xl [&_h1]:font-semibold first:[&_h1]:mt-0",
         "[&_h2]:mt-6 [&_h2]:mb-2 [&_h2]:text-lg [&_h2]:font-semibold",
         "[&_h3]:mt-4 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-semibold",

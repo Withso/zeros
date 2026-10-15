@@ -1,0 +1,9 @@
+{
+  "id": "desktop-content-selection",
+  "kind": "scenario",
+  "area": "renderer-shared-ui",
+  "fixedBy": "pr:520",
+  "symptom": "Dragging or Select All selected application chrome throughout the desktop; composed link buttons also inherited selection from readable output.",
+  "rule": "ui-design.md: verify real pointer selection and Select All, preserve content/editing and explicit drags, and cover portals, read-only/vendor surfaces and Local/cloud switches.",
+  "check": "pnpm test:ui-smoke --shard=1/3"
+}

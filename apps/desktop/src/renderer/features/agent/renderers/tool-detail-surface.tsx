@@ -19,7 +19,7 @@ export function ToolDetailSurface({
       role="region"
       tabIndex={0}
       className={cn(
-        "border-border2 bg-bg2 text-fg1 focus-visible:ring-highlighted-bright max-h-[320px] min-w-0 overflow-auto overscroll-contain rounded-md border text-sm focus-visible:ring-1 focus-visible:outline-none",
+        "border-border2 bg-bg2 text-fg1 focus-visible:ring-highlighted-bright max-h-[320px] min-w-0 select-text overflow-auto overscroll-contain rounded-md border text-sm focus-visible:ring-1 focus-visible:outline-none",
         failed &&
           // Shiki uses inline token colors; failure styling must override them.
           "border-red-primary/25 bg-red-bg text-red-primary [&_*]:text-red-primary!",
