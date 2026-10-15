@@ -426,7 +426,8 @@ function ActiveCloudWorkspaceLifecycle() {
   }, [cloudComputerV2]);
   useEffect(() => {
     if (!cloudComputerV2) return;
-    let available = !isElectron(), closed = false, nativeVersion = 0, nativeQueried = false;
+    let available: boolean | undefined = isElectron() ? undefined : true;
+    let closed = false, nativeVersion = 0, nativeQueried = false;
     const current = () => {
       const state = useWorkspaceStore.getState(), key = selectActiveFolder(state);
       const target = parseCloudWorkspaceKey(key);
@@ -439,6 +440,13 @@ function ActiveCloudWorkspaceLifecycle() {
     };
     const controller = new CloudWorkspaceInteraction({
       current, visible: () => document.visibilityState === "visible", focused: () => document.hasFocus(), available: () => available,
+      // A ready admission can still be in flight when idle capture commits.
+      // Keep the gesture until that flight settles; joining its retiring
+      // admission would consume the gesture without ever waking the VM.
+      opening: key => {
+        const bridge = getActiveBridge();
+        return bridge instanceof WorkspaceRuntimeClient && bridge.statusForWorkspace(key) === "connecting";
+      },
       presence: (key, present) => {
         const target = parseCloudWorkspaceKey(key), bridge = getActiveBridge();
         return !!target && bridge instanceof WorkspaceRuntimeClient && bridge.sendWorkspacePresence(target, present);
@@ -450,6 +458,15 @@ function ActiveCloudWorkspaceLifecycle() {
         if (!signal.aborted && current()?.key === key) clearWorkbenchConnectionFailure(key);
       },
       failed: recordCloudOpenFailure,
+    });
+    const offOpen = subscribeCloudWorkspaceOpens(target => {
+      const selected = current();
+      // Selection is published before this event. A different sidebar row's
+      // pointerdown deliberately did not arm the previous workspace; now arm
+      // the destination, including keyboard and programmatic explicit opens.
+      // Restored tabs, hover, catalog reads and reconnects never emit this.
+      if (useWorkspaceStore.getState().activePage === "workspace" && selected?.key === cloudWorkspaceKey(target) &&
+          selected.document.capabilities.canWrite) controller.interact();
     });
     const input = (event: Event) => {
       if (!event.isTrusted) return;
@@ -494,7 +511,7 @@ function ActiveCloudWorkspaceLifecycle() {
     window.addEventListener("focus", refresh); window.addEventListener("blur", refresh);
     const timer = window.setInterval(refresh, 15_000);
     return () => {
-      closed = true; controller.close(); offSelection(); offCatalog(); offBridge(); offStatus(); void offNative.then(off => off());
+      closed = true; controller.close(); offOpen(); offSelection(); offCatalog(); offBridge(); offStatus(); void offNative.then(off => off());
       window.clearInterval(timer);
       for (const event of events) window.removeEventListener(event, input, true);
       document.removeEventListener("visibilitychange", refresh);

@@ -177,12 +177,12 @@ export async function openCloudRuntime(
         await wakeCloudWorkspace(target, current, signal, reason, wakeIntent);
         if (signal.aborted) throw new Error("Cloud workspace open cancelled");
         // A committed capture retires this runtime while preparation waits.
-        // A replacement generation does too. Wake already revalidated the
+        // A replacement generation does too. Preparation revalidated the
         // account/access/Stop intent; the caller now needs fresh admission.
         if (released) return false;
         assertCurrent();
-        // Revalidate the still-live connection and root without disrupting an
-        // active turn. Reads do not prove the capture fence has cleared;
+        // Revalidate the still-live connection and root without a lifecycle
+        // wake on ready compute. Reads do not clear the capture fence;
         // CloudAgentConnection waits on explicit checkpointing rejections.
         const rows = await bridgeWorkspaceList(client, {});
         if (signal.aborted) throw new Error("Cloud workspace open cancelled");

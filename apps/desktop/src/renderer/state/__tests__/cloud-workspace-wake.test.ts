@@ -24,6 +24,7 @@ vi.mock("../../platform/cloud-workspaces", async original => ({
   listCloudWorkspaceDocuments: api.list,
 }));
 import { wakeCloudWorkspace } from "../cloud-workspace-wake";
+import { CloudWorkspaceInteraction } from "../cloud-workspace-interaction";
 import {
   acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudWorkspaceDocument,
   refreshCloudWorkspaceCatalog, manageCloudWorkspace,
@@ -51,33 +52,88 @@ beforeEach(() => {
 afterEach(() => { clearCloudWorkspaceCatalog(); vi.useRealTimers(); });
 
 describe("explicit cloud wake readiness", () => {
-  it("keeps an uncertain request's ID and reason after catalog progress settles the operation slot", async () => {
+  it.each(["ready", "busy"])("prepares an already-%s workspace without creating wake intents", async status => {
+    acceptCloudWorkspaceDocument(doc(1, status));
+    api.wake.mockResolvedValue(doc(2, status));
+    for (let navigation = 0; navigation < 3; navigation++) {
+      await expect(wakeCloudWorkspace(target, cloudWorkspaceDocument(target)!, undefined, undefined,
+        { id: crypto.randomUUID() })).resolves.toMatchObject({ status });
+    }
+    expect(api.wake).not.toHaveBeenCalled();
+    expect(api.read).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("carries fresh input across committed idle capture and wakes only after the observed stop", async () => {
     acceptCloudWorkspaceDocument(doc(1, "ready"));
+    api.wake.mockResolvedValue(doc(4, "waking"));
+    const key = `cloud://${target.organizationId}/${target.workspaceId}`, presence = vi.fn(() => true);
+    let pending: Promise<CloudWorkspaceDocument> | undefined;
+    const interaction = new CloudWorkspaceInteraction({
+      current: () => ({ key, document: cloudWorkspaceDocument(target)! }),
+      visible: () => true, focused: () => true, available: () => true, presence,
+      wake: async (_key, signal) => {
+        pending = wakeCloudWorkspace(target, cloudWorkspaceDocument(target)!, signal, "interaction", { id: crypto.randomUUID() });
+        await pending;
+      },
+    });
+    try {
+      interaction.interact();
+      await wakeCloudWorkspace(target, doc(1, "ready"), undefined, undefined, { id: crypto.randomUUID() });
+      expect(presence).toHaveBeenCalledExactlyOnceWith(key, true);
+      expect(api.wake).not.toHaveBeenCalled();
+      acceptCloudWorkspaceDocument(doc(2, "stopping")); interaction.refresh();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending).toBeDefined();
+      expect(api.wake).not.toHaveBeenCalled();
+      acceptCloudWorkspaceDocument(doc(3, "stopped"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", expect.any(String), "interaction");
+      acceptCloudWorkspaceDocument(doc(5, "ready")); await pending;
+      interaction.reconnect(); interaction.refresh();
+      expect(api.wake).toHaveBeenCalledOnce();
+      expect(api.read).not.toHaveBeenCalled();
+    } finally { interaction.close(); }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not turn a settled ready preparation into a wake after another device stops it", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    const intent = { id: crypto.randomUUID() };
+    await wakeCloudWorkspace(target, doc(1, "ready"), undefined, undefined, intent);
+    acceptCloudWorkspaceDocument(doc(2, "stopped"));
+    await expect(wakeCloudWorkspace(target, doc(2, "stopped"), undefined, undefined, intent))
+      .rejects.toMatchObject({ name: "CloudWorkspaceWakeEndedError" });
+    expect(api.wake).not.toHaveBeenCalled();
+  });
+
+  it("keeps an uncertain request's ID and reason after catalog progress settles the operation slot", async () => {
+    acceptCloudWorkspaceDocument(doc(1));
     api.wake.mockRejectedValueOnce(new Error("Response lost")).mockResolvedValueOnce(doc(3, "ready"));
     const intent = { id: crypto.randomUUID() };
-    await expect(wakeCloudWorkspace(target, doc(1, "ready"), undefined, "interaction", intent)).rejects.toThrow("Response lost");
-    acceptCloudWorkspaceDocument(doc(2, "ready"));
-    await wakeCloudWorkspace(target, doc(2, "ready"), undefined, undefined, intent);
+    await expect(wakeCloudWorkspace(target, doc(1), undefined, "interaction", intent)).rejects.toThrow("Response lost");
+    acceptCloudWorkspaceDocument(doc(2));
+    await wakeCloudWorkspace(target, doc(2), undefined, undefined, intent);
     expect(api.wake.mock.calls).toEqual([
       [target, "wake", intent.id, "interaction"], [target, "wake", intent.id, "interaction"],
     ]);
   });
 
-  it("retains a definitive refusal until a fresh explicit intent crosses the ready barrier", async () => {
-    acceptCloudWorkspaceDocument(doc(1, "ready"));
+  it("retains a definitive refusal until a fresh explicit intent requests a stopped start", async () => {
+    acceptCloudWorkspaceDocument(doc(1));
     api.wake.mockRejectedValueOnce(new ControlPlaneError(409, "quota_exceeded", "No capacity")).mockResolvedValue(doc(2, "ready"));
     const intent = { id: crypto.randomUUID() }, retry = { id: crypto.randomUUID() };
-    await expect(wakeCloudWorkspace(target, doc(1, "ready"), undefined, undefined, intent)).rejects.toThrow("No capacity");
-    await expect(wakeCloudWorkspace(target, doc(1, "ready"), undefined, undefined, intent)).rejects.toThrow("No capacity");
+    await expect(wakeCloudWorkspace(target, doc(1), undefined, undefined, intent)).rejects.toThrow("No capacity");
+    await expect(wakeCloudWorkspace(target, doc(1), undefined, undefined, intent)).rejects.toThrow("No capacity");
     expect(api.wake).toHaveBeenCalledOnce();
-    await wakeCloudWorkspace(target, doc(1, "ready"), undefined, undefined, retry);
+    await wakeCloudWorkspace(target, doc(1), undefined, undefined, retry);
     expect(api.wake).toHaveBeenLastCalledWith(target, "wake", retry.id);
   });
   it("does not bypass a definitive refusal by joining another actor's setup", async () => {
-    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    acceptCloudWorkspaceDocument(doc(1));
     api.wake.mockRejectedValueOnce(new ControlPlaneError(403, "run_access_denied", "Run denied"));
     const intent = { id: crypto.randomUUID() };
-    await expect(wakeCloudWorkspace(target, doc(1, "ready"), undefined, undefined, intent)).rejects.toThrow("Run denied");
+    await expect(wakeCloudWorkspace(target, doc(1), undefined, undefined, intent)).rejects.toThrow("Run denied");
     acceptCloudWorkspaceDocument(doc(2, "setting_up"));
     const outcome = wakeCloudWorkspace(target, doc(2, "setting_up"), undefined, undefined, intent)
       .then(() => "opened", error => (error as Error).message);
@@ -95,7 +151,7 @@ describe("explicit cloud wake readiness", () => {
     acceptCloudWorkspaceDocument(doc(3, "deleted"));
     acceptCloudWorkspaceDocument(doc(4, "ready"));
     await expect(wakeCloudWorkspace(target, doc(4, "ready"), undefined, undefined, intent)).rejects.toThrow(/owner|changed/i);
-    expect(api.wake).toHaveBeenCalledOnce();
+    expect(api.wake).not.toHaveBeenCalled();
   });
 
   it("retires a confirmed intent on catalog omission even if the same key is later re-added", async () => {
@@ -106,7 +162,7 @@ describe("explicit cloud wake readiness", () => {
     api.list.mockResolvedValue([]); await refreshCloudWorkspaceCatalog();
     acceptCloudWorkspaceDocument(doc(3, "ready"));
     await expect(wakeCloudWorkspace(target, doc(3, "ready"), undefined, undefined, intent)).rejects.toThrow(/owner|changed/i);
-    expect(api.wake).toHaveBeenCalledOnce();
+    expect(api.wake).not.toHaveBeenCalled();
   });
 
   it("resumes a cancelled waiter through the same replacement drain without another wake", async () => {
@@ -144,17 +200,17 @@ describe("explicit cloud wake readiness", () => {
     await expect(wakeCloudWorkspace(target, doc(2, "ready"), undefined, undefined, intent)).rejects.toMatchObject({
       name: "CloudWorkspaceWakeEndedError", reason: "queued_timeout", message: expect.stringContaining("fifteen minutes"),
     });
-    expect(api.wake).toHaveBeenCalledOnce();
+    expect(api.wake).not.toHaveBeenCalled();
   });
 
   it("isolates cancellation while two preparations share one pending intent", async () => {
-    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    acceptCloudWorkspaceDocument(doc(1));
     let finish!: (value: CloudWorkspaceDocument) => void;
     api.wake.mockReturnValue(new Promise(resolve => { finish = resolve; }));
     const intent = { id: crypto.randomUUID() }, controller = new AbortController();
-    const first = wakeCloudWorkspace(target, doc(1, "ready"), controller.signal, undefined, intent);
+    const first = wakeCloudWorkspace(target, doc(1), controller.signal, undefined, intent);
     const cancelled = expect(first).rejects.toThrow(/cancel/i);
-    const second = wakeCloudWorkspace(target, doc(1, "ready"), undefined, undefined, intent);
+    const second = wakeCloudWorkspace(target, doc(1), undefined, undefined, intent);
     controller.abort(); await cancelled;
     finish(doc(2, "ready")); await second;
     expect(api.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", intent.id);
@@ -162,19 +218,19 @@ describe("explicit cloud wake readiness", () => {
   });
 
   it.each([408, 425, 429, 503])("retries a transient %s response with the same ID and reason", async status => {
-    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    acceptCloudWorkspaceDocument(doc(1));
     api.wake.mockRejectedValueOnce(new ControlPlaneError(status, "temporarily_unavailable", "Try later"))
       .mockResolvedValueOnce(doc(2, "ready"));
     const intent = { id: crypto.randomUUID() };
-    await expect(wakeCloudWorkspace(target, doc(1, "ready"), undefined, "interaction", intent)).rejects.toThrow("Try later");
-    await wakeCloudWorkspace(target, doc(1, "ready"), undefined, undefined, intent);
+    await expect(wakeCloudWorkspace(target, doc(1), undefined, "interaction", intent)).rejects.toThrow("Try later");
+    await wakeCloudWorkspace(target, doc(1), undefined, undefined, intent);
     expect(api.wake.mock.calls).toEqual([
       [target, "wake", intent.id, "interaction"], [target, "wake", intent.id, "interaction"],
     ]);
   });
 
   it("submits one wake for seven settled readiness attempts belonging to one send intent", async () => {
-    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    acceptCloudWorkspaceDocument(doc(1));
     api.wake.mockResolvedValue(doc(2, "ready"));
     const intent = { id: crypto.randomUUID() };
     for (let attempt = 0; attempt < 7; attempt++) {
@@ -186,10 +242,10 @@ describe("explicit cloud wake readiness", () => {
   });
 
   it("does not reuse a settled intent after a later explicit Stop", async () => {
-    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    acceptCloudWorkspaceDocument(doc(1));
     api.wake.mockResolvedValue(doc(2, "ready"));
     const intent = { id: crypto.randomUUID() };
-    await wakeCloudWorkspace(target, doc(1, "ready"), undefined, undefined, intent);
+    await wakeCloudWorkspace(target, doc(1), undefined, undefined, intent);
     api.wake.mockResolvedValue(doc(3, "stopped"));
     await manageCloudWorkspace(target, "stop");
     api.wake.mockResolvedValue(doc(4, "ready"));
@@ -206,7 +262,7 @@ describe("explicit cloud wake readiness", () => {
     clearCloudWorkspaceCatalog(); acceptCloudWorkspaceDocument(doc(3, "ready"));
     api.wake.mockResolvedValue(doc(4, "ready"));
     await expect(wakeCloudWorkspace(target, doc(3, "ready"), undefined, undefined, intent)).rejects.toThrow(/account|owner/i);
-    expect(api.wake).toHaveBeenCalledOnce();
+    expect(api.wake).not.toHaveBeenCalled();
   });
 
   it("wakes for a nonstaff member without enabling the retired preference", async () => {
@@ -362,12 +418,12 @@ describe("explicit cloud wake readiness", () => {
     expect(api.read).toHaveBeenCalledTimes(2);
   });
   it("ends an older wake as soon as Stop is requested, before its HTTP response", async () => {
-    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    acceptCloudWorkspaceDocument(doc(1));
     let finishWake!: (value: CloudWorkspaceDocument) => void, finishStop!: (value: CloudWorkspaceDocument) => void;
     api.wake.mockImplementation((_target, operation) => new Promise(resolve => {
       if (operation === "stop") finishStop = resolve; else finishWake = resolve;
     }));
-    const pending = wakeCloudWorkspace(target, doc(1, "ready"));
+    const pending = wakeCloudWorkspace(target, doc(1));
     const ended = expect(pending).rejects.toMatchObject({ name: "CloudWorkspaceWakeEndedError", message: expect.stringContaining("stopped") });
     const stopping = manageCloudWorkspace(target, "stop");
     finishWake(doc(2, "ready")); await ended;

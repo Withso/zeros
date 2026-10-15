@@ -3,7 +3,8 @@ import { CloudWorkspaceInteraction } from "../cloud-workspace-interaction";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 
 function harness() {
-  let now = 0, visible = true, focused = true, available = true;
+  let now = 0, visible = true, focused = true;
+  let available: boolean | undefined = true;
   let current: { key: string; document: CloudWorkspaceDocument; stopVersion?: number } | null = { key: "cloud://fixture", document: {
     status: "ready", generation: { number: 1 }, capabilities: { canWrite: true }, deletedAt: null, error: null,
   } as CloudWorkspaceDocument };
@@ -14,10 +15,24 @@ function harness() {
     tick: (ms: number) => { now += ms; controller.refresh(); },
     visibility: (value: boolean) => { visible = value; controller.refresh(); },
     focus: (value: boolean) => { focused = value; controller.refresh(); },
+    availability: (value: boolean | undefined) => { available = value; controller.refresh(); },
     lock: () => { available = false; controller.refresh(); } };
 }
 
 describe("selected cloud workspace interaction", () => {
+  it("retains fresh intent during native presence discovery without granting a wake before the result", () => {
+    const h = harness(); h.availability(undefined); h.current!.document.status = "stopped";
+    h.controller.interact();
+    expect(h.wake).not.toHaveBeenCalled(); expect(h.presence).not.toHaveBeenCalled();
+    h.availability(true); expect(h.wake).toHaveBeenCalledOnce();
+  });
+  it.each(["unavailable", "expired"])("does not revive pending native intent after it became %s", reason => {
+    const h = harness(); h.availability(undefined); h.current!.document.status = "stopped";
+    h.controller.interact();
+    if (reason === "unavailable") h.availability(false);
+    else h.tick(120_000);
+    h.availability(true); expect(h.wake).not.toHaveBeenCalled();
+  });
   it("sends immediate presence after input and once per minute for fifteen minutes", () => {
     const h = harness(); h.controller.refresh(); expect(h.presence).not.toHaveBeenCalled();
     h.controller.interact(); expect(h.presence).toHaveBeenLastCalledWith("cloud://fixture", true);

@@ -151,13 +151,11 @@ export async function wakeCloudWorkspace(
     // An open arriving during final capture waits for stop to finish. After a
     // wake has begun, a later Stop wins; never loop by waking it a second time.
     let mayWake = !state?.confirmed && ["stopped", "stopping"].includes(current.status);
-    // Ready is not proof that final capture is absent. The existing wake
-    // transaction cancels an uncommitted idle checkpoint, or serializes a
-    // committed drain before fresh runtime admission is allowed.
-    if (["ready", "busy"].includes(current.status)) {
-      await wait(requestWake());
-      current = assertCurrent();
-    }
+    // A ready catalog hint is not a reason to mutate compute. Fresh admission
+    // and the engine's checkpoint fence still govern usability. Trusted input
+    // cancels an uncommitted idle capture through presence; if final capture
+    // already committed, its bounded interaction intent waits for the actual
+    // stop before waking. A transport retry cannot create that intent.
     while (!["ready", "busy"].includes(current.status)) {
       if (current.status === "stopped" && mayWake) {
         mayWake = false;

@@ -82,10 +82,16 @@ Only lifecycle documents or an explicit Restart can report a compute transition.
 An explicit cloud navigation, interaction or queued-send attempt owns one
 ephemeral wake intent. Carry it through readiness retries, admission replacement,
 and any preparation before enqueueing; allocate it only when the work begins.
-The first ready/busy preparation still crosses the wake/capture barrier. Later
-preparations reuse the confirmed wake while rechecking current account, owner,
-access, Stop, lifecycle, live admission and physical root. The receipt is never
-send authority: native commands retain their checkpoint and execution fences.
+A ready/busy preparation does not write a wake intent. It rechecks current
+account, owner, access, Stop, lifecycle, live admission and physical root.
+Explicit navigation arms the selected destination after its atomic selection,
+including a different sidebar row or programmatic open. If idle capture commits
+before admission, that existing two-minute interaction window waits for the
+in-flight admission to settle, then follows the normal stopped-workspace wake
+path. A later local Stop, owner/access change, hide, blur or expiry clears it.
+Actual wakes retain their confirmed receipt across repeated preparations. The
+receipt is never send authority: native commands retain their checkpoint and
+execution fences.
 An uncertain response retries the same idempotency ID and initiating reason;
 a definitive refusal needs a new explicit attempt. Stop, account replacement,
 owner deletion and the original fifteen-minute safety cap retire old work.

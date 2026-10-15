@@ -60,6 +60,10 @@
    For periodic disconnects, inspect client retirement timers before blaming
    server idle limits. Test real server closure, reconnect acknowledgement,
    durable replay and bounded backoff; distinguish planned rotation in logs.
+   For redundant lifecycle writes, test explicit destination navigation with
+   admission held across idle drain. Selected-row input alone misses a
+   different-row or programmatic open, and joining a retiring flight can
+   consume its wake intent. Keep passive reconnect and later Stop inert.
    For pool isolation, test the boot composition and nested DB-bound services,
    not only pool sizes. Hold capacity on real Postgres, prove expired promise
    and callback acquires leave no queued work, and drain every owned pool.

@@ -1,0 +1,9 @@
+{
+  "id": "ready-open-without-lifecycle-write",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pending",
+  "symptom": "Explicit ready opens issued no-op wakes, while removing the write alone lost a new destination's intent when idle capture retired its pending admission.",
+  "rule": "Separate transport from lifecycle and drive explicit destination intent through a held admission and committed drain, including Stop and owner/access cancellation (bug-fix).",
+  "check": "pnpm test:git apps/desktop/src/renderer/state/__tests__/cloud-workspace-wake.test.ts apps/desktop/src/renderer/state/__tests__/cloud-workspace-open-intent.test.ts apps/desktop/src/renderer/state/__tests__/cloud-workspace-interaction.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/open-cloud-runtime.test.ts"
+}
