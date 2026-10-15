@@ -2,7 +2,7 @@
   "id": "fixture-operator-cleanup-recovery",
   "kind": "replay",
   "area": "release-dev-environment",
-  "fixedBy": "pending",
+  "fixedBy": "pr:545",
   "symptom": "A failed fixture DELETE left Actions bound to its failed key even after an approved operator successor retired compute. Rewriting the old attempt or accepting provider absence would lose cleanup custody and falsify the failed soak.",
   "rule": "Keep the original failure immutable. Append only a bounded device-signed cleanup-only reference bound to the exact source artifact/run, fixture and approved operator key. Re-read exact retirement and complete inventory before allocation; never replay DELETE from recovery or substitute missing proof. Preserve consumed local handoffs and recovery identity after physical deletion.",
   "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-cleanup-recovery-contract.test.ts scripts/__tests__/zeros-dev-cleanup-recovery.test.ts scripts/__tests__/zeros-dev-cleanup-recovery-actions.test.ts scripts/__tests__/zeros-dev-hourly-artifact.test.ts scripts/__tests__/zeros-dev-cli.test.ts"
