@@ -97,6 +97,7 @@ const originalOrder = [
   "pr-actions",
   "activity-disclosure",
   "sticky-bottom",
+  "scroll-area-cleanup",
   "subscription",
 ];
 
