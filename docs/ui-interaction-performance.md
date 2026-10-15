@@ -179,6 +179,16 @@ without the observer seeing the intermediate empty snapshot. The visible
 fallbacks and engine-owned setup process continue to have their existing
 behavior; hiding the window never stops setup.
 
+Provider Information also requires both an active surface and a visible
+document. Its 30-minute usage fallback and one-minute reset-label clock are
+removed while hidden; focus cannot initiate a hidden usage read. Reveal
+refreshes the exact provider/method/account/auth-revision/identity cache and
+updates elapsed reset labels immediately, retaining confirmed usage through
+the shared request. Explicit Refresh, the 25-second native request timeout and
+five-minute automatic-failure backoff keep their existing behavior. This is
+the native account information surface; organization provider connections
+retain their separate cloud contract.
+
 Deletion cleanup follows semantic path ownership, not raw equality: include
 normalized descendant cwd keys, but protect a separately registered nested
 repository (the most-specific known owner wins).

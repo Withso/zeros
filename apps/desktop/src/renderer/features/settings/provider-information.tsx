@@ -16,6 +16,10 @@ import {
 } from "../../platform/provider-auth-state";
 import { useCachedRead } from "../../state/use-cached-read";
 import {
+  documentIsVisible,
+  useDocumentActive,
+} from "../../state/use-document-active";
+import {
   PROVIDER_USAGE_MAX_AGE_MS,
   providerUsageCache,
   providerUsageKey,
@@ -46,9 +50,10 @@ export function ProviderInformation({
   status: ProviderSubscriptionStatus | undefined;
   surfaceActive: boolean;
 }) {
+  const visible = useDocumentActive(surfaceActive);
   const native = useNativeRuntime().ready;
   const revision = useSyncExternalStore(
-    surfaceActive ? subscribeProviderAuth : noSubscription,
+    visible ? subscribeProviderAuth : noSubscription,
     providerAuthRevision,
     providerAuthRevision,
   );
@@ -62,7 +67,7 @@ export function ProviderInformation({
           JSON.stringify([status?.email, status?.organization]),
         )
       : null;
-  const active = surfaceActive && native && key !== null;
+  const active = visible && native && key !== null;
   const read = useCachedRead(providerUsageCache, key, readProviderUsage, {
     enabled: active,
     maxAgeMs: PROVIDER_USAGE_MAX_AGE_MS,
@@ -70,7 +75,9 @@ export function ProviderInformation({
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!active || !key) return;
+    let retired = false;
     const revalidate = (force = false) => {
+      if (retired || !documentIsVisible()) return;
       void providerUsageCache
         .load(key, () => readProviderUsage(key), {
           maxAgeMs: PROVIDER_USAGE_MAX_AGE_MS,
@@ -79,8 +86,12 @@ export function ProviderInformation({
         .catch(() => {});
     };
     // Opening this tab explicitly refreshes the retained snapshot. Concurrent
-    // mounts share the same request; hidden surfaces neither poll nor focus-read.
+    // mounts share the same request; hidden surfaces/windows neither poll nor
+    // focus-read, including a focus event delivered before effect cleanup.
     revalidate(true);
+    // Reveal can retain an old snapshot while refreshing; its reset labels
+    // must reflect elapsed hidden time without waiting for the next clock tick.
+    setNow(Date.now());
     const clock = setInterval(() => setNow(Date.now()), 60_000);
     const timer = setInterval(
       () => revalidate(true),
@@ -89,6 +100,7 @@ export function ProviderInformation({
     const onFocus = () => revalidate();
     window.addEventListener("focus", onFocus);
     return () => {
+      retired = true;
       clearInterval(timer);
       clearInterval(clock);
       window.removeEventListener("focus", onFocus);

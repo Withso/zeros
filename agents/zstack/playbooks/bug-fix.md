@@ -22,6 +22,8 @@
    Skip intermediate producer states too: a hidden reset can replace a log with
    equal or greater length. Append only when the full snapshot extends the
    confirmed prefix; otherwise replace the rendered buffer.
+   When hiding a display clock, advance wall time with the next read held and
+   require reset/countdown labels to catch up on reveal from retained data.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
    For worker failures, retain the first closed diagnostic before cleanup and
