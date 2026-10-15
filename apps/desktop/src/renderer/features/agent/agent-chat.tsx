@@ -17,6 +17,7 @@ import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-s
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import { transcriptParentId } from "./transcript-parent";
 import { useCloudTranscriptLatency, useCloudTranscriptLoading } from "./use-cloud-transcript-latency";
+import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { hasTranscriptPresentation } from "./transcript-retention";
 import { startCloudSubmitSpan } from "../../state/cloud-workspace-latency";
 import React, {
@@ -1285,6 +1286,13 @@ export function AgentChat({
   const transcriptPaintReady = useSessionsStore((s) =>
     !!chatId && hasTranscriptPresentation(s.sessions[chatId]),
   );
+  const transcriptCatchingUp = useSessionsStore((s) => {
+    const head = chatId ? s.cloudHistoryRestoreHeads[chatId] : undefined;
+    // Native rows can be resident while the current FULL head is incomplete.
+    // Residency describes paintable rows, not confirmed history coverage.
+    return !!chatId && !!s.sessions[chatId] &&
+      !!head && !head.head?.deleted && !cloudHistoryFenceHasTranscript(head);
+  });
   useCloudTranscriptLatency(chatThread?.folder ?? session.cwd, chatId, surfaceActive,
     transcriptPaintReady, hasSessionMessages);
   // Which turn (if any) this renderer has an unsettled prompt for. The tail's
@@ -1942,6 +1950,7 @@ export function AgentChat({
   // locally stateful and the dialog still opens from the exact-key cache.
   const transcriptRowLive =
     session.transcriptState === "resident" &&
+    !transcriptCatchingUp &&
     session.messages.length === 0 &&
     !session.error &&
     !!chatThread?.folder;
@@ -1958,8 +1967,9 @@ export function AgentChat({
     const timer = window.setTimeout(() => setShowTranscriptLoading(true), 180);
     return () => window.clearTimeout(timer);
   }, [chatId, surfaceActive, session.transcriptState, transcriptPaintReady]);
-  const transcriptLoadingVisible = showTranscriptLoading && surfaceActive && !transcriptPaintReady && session.transcriptState !== "resident";
-  useCloudTranscriptLoading(chatThread?.folder ?? session.cwd, chatId, transcriptLoadingVisible);
+  const transcriptCatchupVisible = surfaceActive && transcriptCatchingUp;
+  const transcriptLoadingVisible = showTranscriptLoading && surfaceActive && !transcriptCatchingUp && !transcriptPaintReady && session.transcriptState !== "resident";
+  useCloudTranscriptLoading(chatThread?.folder ?? session.cwd, chatId, transcriptLoadingVisible || transcriptCatchupVisible && !transcriptPaintReady);
   const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
     useChatTranscriptSummaries(
       chatThread?.folder,
@@ -4681,6 +4691,13 @@ export function AgentChat({
         </header>
       )}
 
+      {transcriptCatchupVisible && (
+        <div className="text-muted-fg mx-auto flex w-full max-w-[856px] shrink-0 items-center gap-2 px-7 py-2 text-xs">
+          <ZerosSpinner size={14} label="Catching up conversation" className="shrink-0" />
+          <span aria-hidden="true">Catching up conversation…</span>
+        </div>
+      )}
+
       {/* Agent errors surface only through the toast surface (with agent name).
           Reset session lives in the settings/menu surface so an inline error
           banner does not interrupt transcript flow. The useEffect higher up fires
@@ -4786,11 +4803,13 @@ export function AgentChat({
               session shows its own failure UI and provenance would read as
               reassurance the user shouldn't take. */}
             {readOnly &&
+              !transcriptCatchingUp &&
               session.transcriptState === "resident" &&
               session.messages.length === 0 && (
                 <p className="text-fg2 text-sm">No chat history.</p>
               )}
             {!readOnly &&
+              !transcriptCatchingUp &&
               session.transcriptState === "resident" &&
               session.messages.length === 0 &&
               !session.error && (

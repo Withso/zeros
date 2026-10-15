@@ -66,6 +66,7 @@ import { useBridge } from "../../platform/bridge/use-bridge";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { refreshAgentModelCatalog } from "./refresh-agent-model-catalog";
 import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
+import { NativeTranscriptSnapshots } from "./transcript-retention";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudReplyOwnership } from "../../platform/bridge/cloud-runtime-wire";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
@@ -560,6 +561,7 @@ export function AgentSessionsProvider({
   const persistedMessageRefsRef = useRef(
     new Map<string, Map<string, AgentMessage>>(),
   );
+  const nativeTranscriptSnapshotsRef = useRef(new NativeTranscriptSnapshots());
   // Exact chat ids owned by the committed 12-view renderer deck. This is
   // intentionally published by a passive effect in ChatDeck, never by
   // an abandoned concurrent render.
@@ -571,7 +573,10 @@ export function AgentSessionsProvider({
       ["delete", "prune", "repair"].includes(fence.head.source.operation);
     store.applyCloudHistoryRestoreHead(chatId, fence, !replacement && cloudHasNativeTranscript(bridge, chatId, before.executionId), origin !== "disk");
     const after = getStore().sessions[chatId];
-    if (after?.messages !== before.messages) persistedMessageRefsRef.current.delete(chatId);
+    if (after?.messages !== before.messages) {
+      persistedMessageRefsRef.current.delete(chatId);
+      nativeTranscriptSnapshotsRef.current.delete(chatId);
+    }
     if (after?.transcriptState === "loading") pendingHydratesRef.current.add(chatId);
     else if (fence.head?.deleted) pendingHydratesRef.current.delete(chatId);
   }, [bridge, getStore]);
@@ -1515,6 +1520,7 @@ export function AgentSessionsProvider({
         invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
         invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
         persistedMessageRefsRef.current.delete(chatId);
+        nativeTranscriptSnapshotsRef.current.delete(chatId);
         store.detachSession(chatId);
         continue;
       }
@@ -1539,6 +1545,7 @@ export function AgentSessionsProvider({
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
       persistedMessageRefsRef.current.delete(chatId);
+      nativeTranscriptSnapshotsRef.current.delete(chatId);
 
       if (
         slot.transcriptState === "cold" &&
@@ -2051,6 +2058,7 @@ export function AgentSessionsProvider({
           cwd: resolvedCwd,
           status: "warming",
           transcriptState: existing?.transcriptState ?? BLANK.transcriptState,
+          transcriptPresentation: existing?.transcriptPresentation ?? null,
           transcriptDirty: existing?.transcriptDirty ?? false,
           hasTranscript: existing?.hasTranscript ?? false,
           messages: existing?.messages ?? [],
@@ -5282,6 +5290,7 @@ export function AgentSessionsProvider({
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
       persistedMessageRefsRef.current.delete(chatId);
+      nativeTranscriptSnapshotsRef.current.delete(chatId);
       sendQueueRef.current.delete(chatId);
       queueHeldRef.current.delete(chatId);
       flushBubbleRef.current.delete(chatId);
@@ -5354,8 +5363,31 @@ export function AgentSessionsProvider({
           if (page.isCurrent?.() === false) { retryAfterRestore = true; return; }
           const fresh = getStore().sessions[chatId];
           const head = cloud ? cloudHistoryRestoreHead(chatId) : undefined;
-          const native = page.source === "native" && cloudHasNativeTranscript(bridge, chatId, fresh?.executionId);
-          if (head && !native && !cloudHistoryFenceHasTranscript(head)) return;
+          const native = page.source === "native" && page.messages.length > 0 && cloudHasNativeTranscript(bridge, chatId, fresh?.executionId);
+          if (head && !native && !cloudHistoryFenceHasTranscript(head)) {
+            const sameNativeAuthority = page.source === "native" && !!page.restoreHead &&
+              cloudHistoryFencesMatch(page.restoreHead, head) && !!fresh &&
+              cloudHasNativeTranscript(bridge, chatId, fresh.executionId);
+            // Check freshness before an incomplete read can strip rows. A
+            // turn may start and settle, or replace its execution, during the
+            // await. That older read cannot revoke newer native state under
+            // the same authority. A new head or first native read still fences
+            // unconfirmed CP/cache rows below.
+            if (sameNativeAuthority && !canApplyTranscriptRead(slot, fresh) &&
+                (nativeTranscriptSnapshotsRef.current.matches(chatId, slot, head) ||
+                 nativeTranscriptSnapshotsRef.current.matches(chatId, fresh, head))) {
+              retryAfterChange = fresh.transcriptState === "resident" && fresh.status !== "streaming";
+              return;
+            }
+            // An empty incomplete page cannot revoke a positive native read
+            // under the same authority. Equal heads alone are insufficient:
+            // first-native confirmation must still fence CP/cache rows.
+            const retainNative = sameNativeAuthority && canApplyTranscriptRead(slot, fresh) &&
+              nativeTranscriptSnapshotsRef.current.matches(chatId, fresh, head);
+            getStore().applyCloudHistoryRestoreHead(chatId, head, retainNative);
+            if (!head.head?.deleted) pendingHydratesRef.current.add(chatId);
+            return;
+          }
           if (head && (!page.restoreHead || !cloudHistoryFencesMatch(page.restoreHead, head))) {
             retryAfterRestore = true;
             getStore().applyCloudHistoryRestoreHead(chatId, head);
@@ -5385,6 +5417,7 @@ export function AgentSessionsProvider({
             if (fresh.transcriptDirty || restoring) {
               getStore().patchSession(chatId, { transcriptDirty: false, transcriptState: "resident", transcriptPresentation: presentation });
             }
+            if (native && head) nativeTranscriptSnapshotsRef.current.confirm(chatId, getStore().sessions[chatId], head, page.isCurrent);
             return;
           }
           let refs = persistedMessageRefsRef.current.get(chatId);
@@ -5400,6 +5433,7 @@ export function AgentSessionsProvider({
             transcriptPresentation: presentation,
             transcriptDirty: false,
           });
+          if (native && head) nativeTranscriptSnapshotsRef.current.confirm(chatId, getStore().sessions[chatId], head, page.isCurrent);
         } catch (err) {
           console.warn("[Zeros agent-history] message reconcile failed:", err);
         }
@@ -5498,7 +5532,7 @@ export function AgentSessionsProvider({
           const head = parseCloudScopedId(chatId) ? cloudHistoryRestoreHead(chatId) : undefined;
           const currentSlot = getStore().sessions[chatId];
           if (head && !cloudHistoryFenceHasTranscript(head) &&
-              !(page.source === "native" && cloudHasNativeTranscript(bridge, chatId, currentSlot?.executionId))) {
+              !(page.source === "native" && page.messages.length > 0 && cloudHasNativeTranscript(bridge, chatId, currentSlot?.executionId))) {
             getStore().applyCloudHistoryRestoreHead(chatId, head);
             if (head.head?.deleted) pendingHydratesRef.current.delete(chatId);
             else pendingHydratesRef.current.add(chatId);
@@ -5511,6 +5545,15 @@ export function AgentSessionsProvider({
             // prove continuity to a successor the page did not verify.
             getStore().applyCloudHistoryRestoreHead(chatId, head);
             retryAfterRestore = true;
+            return;
+          }
+          // A legacy projection can briefly contain no rows after resume. It
+          // has no restore head proving that an already painted transcript was
+          // cleared. Keep that exact-chat presentation while native history or
+          // a confirmed projection catches up.
+          if (page.source === "control-plane" && !page.restoreHead && page.messages.length === 0 &&
+              currentSlot?.transcriptPresentation && currentSlot.messages.length > 0) {
+            pendingHydratesRef.current.add(chatId);
             return;
           }
           pendingHydratesRef.current.delete(chatId);
@@ -5558,6 +5601,9 @@ export function AgentSessionsProvider({
               (message) => message.kind !== "text" || !message.queued,
             ),
           });
+          if (page.source === "native" && head && deduped.length > 0) {
+            nativeTranscriptSnapshotsRef.current.confirm(chatId, getStore().sessions[chatId], head, page.isCurrent);
+          }
           // A live chunk/DB nudge may have landed after the window read began.
           // Re-window once more rather than trying to merge raw deltas into a
           // partial transcript. The in-flight reconcile map dedupes nudges.
@@ -5783,6 +5829,7 @@ export function AgentSessionsProvider({
         cwd: resolvedCwd,
         status: "warming",
         transcriptState: existing?.transcriptState ?? BLANK.transcriptState,
+        transcriptPresentation: existing?.transcriptPresentation ?? null,
         transcriptDirty: existing?.transcriptDirty ?? false,
         hasTranscript: existing?.hasTranscript ?? false,
         messages: existing?.messages ?? [],
@@ -6287,6 +6334,7 @@ export function AgentSessionsProvider({
     capabilityRefreshInFlightRef.current.clear();
     loadFlightAdoptOnlyRef.current.clear();
     persistedMessageRefsRef.current.clear();
+    nativeTranscriptSnapshotsRef.current.clear();
     authPromptsRef.current.clear();
     // Note: we deliberately do NOT clear the disk transcript here.
     // disposeAll is called on engine respawn (in-place project swap),
@@ -6311,6 +6359,7 @@ export function AgentSessionsProvider({
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
       persistedMessageRefsRef.current.delete(chatId);
+      nativeTranscriptSnapshotsRef.current.delete(chatId);
       // Release the dedupe owner immediately. Its promise still settles behind
       // identity checks, while a fast History reopen may start a fresh bind.
       ensureInFlightRef.current.delete(chatId);
@@ -6469,6 +6518,7 @@ export function AgentSessionsProvider({
           // Eviction must release the second, less-visible owner of historical
           // message objects too. The next disk hydrate seeds its exact refs.
           persistedMessageRefsRef.current.delete(chatId);
+          nativeTranscriptSnapshotsRef.current.delete(chatId);
           continue;
         }
         let chatMap = persistedMessageRefsRef.current.get(chatId);
@@ -6498,6 +6548,7 @@ export function AgentSessionsProvider({
       for (const chatId of persistedMessageRefsRef.current.keys()) {
         if (!(chatId in nextSessions)) {
           persistedMessageRefsRef.current.delete(chatId);
+          nativeTranscriptSnapshotsRef.current.delete(chatId);
         }
       }
 
