@@ -1404,12 +1404,21 @@ export function AgentSessionsProvider({
     ) => {
       const slot = getStore().sessions[chatId];
       if (!slot) return;
+      const message = slot.messages.find((m): m is AgentTextMessage => m.id === messageId && m.kind === "text" && !!m.queued);
+      if (!message) return;
+      // A lost receipt retries its original turn and visible position, even
+      // after another execution starts. Only a new attempt owns the live tail.
+      const receipt = sendQueueRef.current.get(chatId)?.find(entry => entry.bubbleId === messageId)?.steerRequest;
+      const turnId = queuedDelivery === "sending" && !receipt && slot.status === "streaming"
+        ? activeProviderTurnId(slot.messages, messageId) : undefined;
+      const pending = { ...message, queuedDelivery, ...(turnId ? { steeredTurnId: turnId } : {}) };
       getStore().patchSession(chatId, {
-        messages: slot.messages.map((m) =>
-          m.id === messageId && m.kind === "text" && m.queued
-            ? { ...m, queuedDelivery }
-            : m,
-        ),
+        // Show Send now at the current tail before awaiting consumption. Its
+        // provider-turn owner keeps the working timer continuous. Later ACKs
+        // replace this row in place instead of moving it past streamed output.
+        messages: turnId && message.steeredTurnId !== turnId
+          ? promoteToEnd(slot.messages, messageId, pending, slot.historyExpanded)
+          : slot.messages.map(m => m === message ? pending : m),
       });
     },
     [getStore],
@@ -4127,6 +4136,15 @@ export function AgentSessionsProvider({
     const slot = getStore().sessions[chatId], target = parseCloudWorkspaceKey(slot?.cwd);
     const first = sendQueueRef.current.get(chatId)?.[0];
     if (!slot || !target || !first?.cloud) return;
+    const opening = slot.messages.find((m): m is AgentTextMessage => m.id === first.bubbleId && m.kind === "text" && !!m.queued);
+    if (opening && opening.queuedPresentation !== "active-turn" && slot.status !== "streaming" &&
+        !hasBackgroundAgentWork(slot) && !sendingChatsRef.current.has(chatId)) {
+      getStore().patchSession(chatId, {
+        messages: slot.messages.map(m => m === opening ? { ...opening, queuedPresentation: "active-turn" } : m),
+        activeTurnStartedAt: opening.createdAt,
+      });
+      getStore().setPendingLocalTurn(chatId, opening.id);
+    }
     const startedAt = first.waitStartedAt ??= performance.now();
     const stopVersion = first.waitStopVersion ??= cloudWorkspaceStopVersion(target);
     const folder = slot.cwd, account = cloudCatalogGeneration();
@@ -4147,9 +4165,17 @@ export function AgentSessionsProvider({
       if (doc && !doc.capabilities.canWrite) throw new CloudSendWaitError("You do not have permission to run agents in this workspace.", "workspace_unavailable");
       // Replacement and rollback progress belong to this undispatched row.
       generation = doc?.generation.number ?? generation;
-      return doc?.status === "ready" || doc?.status === "busy";
+      const ready = doc?.status === "ready" || doc?.status === "busy";
+      const fresh = getStore().sessions[chatId];
+      // An admitted follow-up still crosses the same admission/checkpoint
+      // guards, but it is not a first-session readiness wait.
+      const waiting = !ready || !fresh?.sessionId;
+      if (waiting && fresh?.cloudSendWait?.state !== "waiting")
+        getStore().patchSession(chatId, { cloudSendWait: { state: "waiting" } });
+      else if (!waiting && fresh?.cloudSendWait)
+        getStore().patchSession(chatId, { cloudSendWait: undefined });
+      return ready;
     };
-    if (slot.cloudSendWait?.state !== "waiting") getStore().patchSession(chatId, { cloudSendWait: { state: "waiting" } });
     cloudSendWaitRef.current.start(chatId, {
       current,
       readiness,
@@ -4223,6 +4249,13 @@ export function AgentSessionsProvider({
         const model = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.model ?? null;
         const admission = classifyCloudAdmissionFailure({ folder, error, agentId, model });
         const head = sendQueueRef.current.get(chatId)?.[0];
+        if (head && getStore().pendingLocalTurns[chatId] === head.bubbleId) {
+          getStore().setPendingLocalTurn(chatId, null);
+          const failed = getStore().sessions[chatId];
+          if (failed) getStore().patchSession(chatId, { activeTurnStartedAt: null,
+            messages: failed.messages.map(m => m.kind === "text" && m.id === head.bubbleId
+              ? { ...m, queuedPresentation: undefined } : m) });
+        }
         if (admission && admission.kind !== "waiting" && agentId && head) {
           if (admission.kind === "runtime-upgrade-required") reportCloudAgentRuntimeUpgrade(folder!, agentId);
           else invalidateCloudAgentRegistry(folder!);
@@ -4251,8 +4284,11 @@ export function AgentSessionsProvider({
       // bridge is needed to make the in-flight send read it.
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
       cloudSendPreparationRef.current.cancel(chatId);
+      // Ready follow-ups prepare silently, without cloudSendWait presentation.
+      // Their readiness flight is still cancelled by Stop.
+      cloudSendWaitRef.current.cancel(chatId);
       if (getStore().sessions[chatId]?.cloudSendWait) {
-        cloudSendWaitRef.current.cancel(chatId); getStore().patchSession(chatId, { cloudSendWait: undefined });
+        getStore().patchSession(chatId, { cloudSendWait: undefined });
       }
       getStore().setPendingLocalTurn(chatId, null);
       // Stop pauses follow-ups, including messages whose steering receipt is
@@ -5241,27 +5277,20 @@ export function AgentSessionsProvider({
         .get(chatId)
         ?.filter((e) => e !== entry);
       if (remaining) sendQueueRef.current.set(chatId, remaining);
-      // Delivered into the running turn. Promote the placeholder to a live
-      // user bubble at the transcript END. It remains a distinct visual
-      // segment, but shares the running provider turn's footer/reset owner.
+      // The optimistic bubble is already visible. Confirm it in place so an
+      // ACK cannot move it past output received during native consumption.
       const fresh = getStore().sessions[chatId];
       const ph = fresh?.messages.find((m) => m.id === messageId);
       if (fresh && ph && ph.kind === "text") {
         getStore().patchSession(chatId, {
-          messages: promoteToEnd(
-            fresh.messages,
-            messageId,
-            {
+          messages: fresh.messages.map(message => message === ph ? {
               ...ph,
               queued: false,
               queuedDelivery: undefined,
               queuedPresentation: undefined,
               queuedEditable: undefined,
-              createdAt: Date.now(),
               ...(steeredTurnId ? { steeredTurnId } : {}),
-            },
-            fresh.historyExpanded,
-          ),
+            } : message),
         });
       }
       return true;

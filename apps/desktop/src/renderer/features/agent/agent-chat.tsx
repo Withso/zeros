@@ -487,10 +487,9 @@ export function AgentChat({
         string,
         import("./use-agent-session").AgentMessage[]
       >();
-      // Follow-ups render in the QueuedMessagesCard, not as transcript
-      // bubbles. The first send waiting only for session admission is the one
-      // exception: it is already the active turn, so it stays in the timeline
-      // with the live timer while the provider session becomes ready.
+      // Deliberately parked follow-ups render in the queue card. An accepted
+      // opening prompt and a send awaiting native consumption are already
+      // visible bubbles; delivery bookkeeping must not hide the user's send.
       const queuedMessages: AgentTextMessage[] = [];
       // Tool calls present in THIS window. A child is only shadowed when its
       // parent SubagentCard is here to render it — the hydrate window (or a
@@ -508,7 +507,8 @@ export function AgentChat({
         if (
           m.kind === "text" &&
           m.queued &&
-          m.queuedPresentation !== "active-turn"
+          m.queuedPresentation !== "active-turn" &&
+          m.queuedDelivery !== "sending"
         ) {
           queuedMessages.push(m);
           shadowed.add(m.id);
