@@ -1,0 +1,9 @@
+{
+  "id": "transcript-cache-paint-deadline",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pending",
+  "symptom": "A hung native disk read withheld a transient history failure indefinitely.",
+  "rule": "Bound provisional cache paint, preserve the original failure, and fence late callbacks after the request settles (zstack-review).",
+  "check": "pnpm test:git apps/desktop/src/renderer/platform/__tests__/cloud-transcript-revalidation.test.ts"
+}

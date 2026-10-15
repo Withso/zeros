@@ -187,10 +187,18 @@ export async function readCloudTranscriptWithCachedPaint<T>(
       onCached?.({ recordEpoch: null, revision: 0, cursor: null, messages: [] });
     } else {
       // The network can reject before local disk I/O finishes. Give that
-      // already-started exact-owner read its paint before hydration releases
-      // its request identity. It remains provisional and the error still
-      // propagates, so it cannot authorize a send or confirm an empty history.
-      await cachedPaint;
+      // already-started exact-owner read a short chance to paint before
+      // hydration releases its request identity. A hung native read must not
+      // hold the original error indefinitely; finally fences any late paint.
+      if (cachedPaint) {
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            cachedPaint.catch(() => {}),
+            new Promise<void>(resolve => { deadline = setTimeout(resolve, 250); }),
+          ]);
+        } finally { if (deadline !== undefined) clearTimeout(deadline); }
+      }
     }
     throw error;
   }
