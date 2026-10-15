@@ -422,6 +422,7 @@ export class CloudComputerRetirementWorker {
             organizationId: candidate.org_id,
             requestedBy: workspace.owner_user_id,
             lifecycleIntentId: intentId,
+            mode: "accepted",
           });
           await tx.query(
             "UPDATE cloud_workspaces SET status='deleting',desired_state='deleted',version=version+1,authority_epoch=authority_epoch+1,updated_at=now() WHERE id=$1",

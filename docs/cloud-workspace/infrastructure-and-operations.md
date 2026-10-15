@@ -303,6 +303,26 @@ rows, missing bindings, unsupported identities or incomplete proof refuse the
 whole observation with `409/cloud_workspace_retirement_unconfirmed`.
 Missing or foreign authority returns 404. The response is never cached.
 
+After a failed delete, an explicitly accepted fresh DELETE binds the existing
+workspace deletion job to its own intent. Replaying an older key returns that
+intent's retained result and cannot rebind or reset the successor's job. The
+selected intent must still be accepted, match the job and current generation,
+and pass every retirement check. Earlier failed intents remain unchanged audit
+history; they do not independently veto positive proof for a later accepted
+delete. This does not transfer a signed harness receipt to the new request.
+
+If a successor was already accepted before this linkage correction deployed,
+deployment alone does not update the job. Replay its same idempotency key after
+deployment. The compatibility path adopts only a current-generation accepted
+successor whose bound predecessor had already failed before that request began,
+with no third DELETE in that generation. It preserves worker progress and leases.
+Ambiguous history remains unconfirmed; timestamps alone never choose among
+competing requests. Keep the original failed request and every signed failure.
+The guarded operator can reconcile this linkage on replay even if the target
+has since become deleted. That branch changes only the existing job binding;
+it creates no intent or job and never restarts a failed record purge. Record
+purge retry still requires the separate explicit operator mode below.
+
 `compute_retired_storage_pending` requires desired deleted, retired engine and
 runtime access, settled compute leases and reservations, and no pending setup or
 generation transition. Every pending Boat allocation must have its exact

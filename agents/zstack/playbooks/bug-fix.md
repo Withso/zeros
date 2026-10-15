@@ -103,6 +103,15 @@
    proof and a post-I/O authority recheck; preserve storage debt and the D1 gate.
    Test the actual record purge so a signed carry can later retire from positive
    retained proof, never from a missing row or a provider 404 alone.
+   For a failed delete followed by a fresh accepted retry, bind cleanup to the
+   successor without rewriting the failed intent. Replay the older key after
+   the successor and after its job fails; neither replay may rebind or reset
+   that job. Recheck current intent failure and replacement across provider I/O.
+   Also replay a successor accepted by the old producer before deployment:
+   deployment alone cannot repair request-time linkage. Require unambiguous
+   exact intent custody, keep its key and preserve worker progress and leases.
+   Cover operator skips after physical completion; linkage reconciliation must
+   not turn into an implicit retry of a failed record purge.
    For account selection, observe the exact selected revision and material;
    vault presence and refresh metadata are not authority. Re-read durable state
    after expiry, require positive release or retirement, and commit bounded

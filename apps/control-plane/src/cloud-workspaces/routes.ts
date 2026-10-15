@@ -1626,6 +1626,7 @@ async function requestCloudWorkspaceLifecycleIntent(
       organizationId: orgId,
       requestedBy: actorUserId,
       lifecycleIntentId: intentId,
+      mode: "accepted",
     });
   }
 
@@ -1738,6 +1739,7 @@ export async function requestCloudWorkspaceDeletion(
     assertIdempotencyMatch(existing, workspaceId, digest, actorUserId);
     await ensureWorkspaceDeletionJob(tx, {
       workspaceId, organizationId: orgId, requestedBy: actorUserId, lifecycleIntentId: existing.id,
+      mode: "replayed",
     });
     return { workspace, intent: existing, replayed: true };
   }

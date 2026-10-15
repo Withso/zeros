@@ -56,7 +56,7 @@ export class DatabaseCloudWorkspaceDeletionRetirement {
           AND NOT EXISTS(SELECT 1 FROM cloud_workspace_client_access_grants g WHERE g.workspace_id=w.id AND g.org_id=w.org_id AND g.state<>'revoked') AS access_retired,
         NOT EXISTS(SELECT 1 FROM cloud_workspace_setup_runs r WHERE r.workspace_id=w.id AND r.org_id=w.org_id AND r.state IN ('queued','running'))
           AND NOT EXISTS(SELECT 1 FROM cloud_workspace_lifecycle_intents i WHERE i.workspace_id=w.id AND i.org_id=w.org_id
-            AND (i.operation<>'delete' AND i.state IN ('queued','dispatching','observing') OR i.operation='delete' AND i.state='failed'))
+            AND i.operation<>'delete' AND i.state IN ('queued','dispatching','observing'))
           AND NOT EXISTS(SELECT 1 FROM cloud_workspace_generation_transitions t WHERE t.workspace_id=w.id AND t.org_id=w.org_id AND t.state NOT IN ('succeeded','rolled_back','cancelled'))
           AND NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_transitions t WHERE t.workspace_id=w.id AND t.org_id=w.org_id AND t.phase NOT IN ('healthy','rolled_back','cancelled')) AS generations_fenced,
         NOT EXISTS(SELECT 1 FROM cloud_workspace_provider_operations o WHERE o.workspace_id=w.id AND o.org_id=w.org_id
@@ -69,6 +69,8 @@ export class DatabaseCloudWorkspaceDeletionRetirement {
       [input.workspaceId, input.organizationId, input.deleteIdempotencyKey])).rows[0];
       if (!workspace) throw new HttpError(404, "not_found", "Cloud workspace not found");
       await authorizeCloudWorkspaceCleanup(tx, input);
+      // The job binds the selected accepted delete. Its failure still refuses;
+      // an immutable earlier failure cannot veto fresh proof for every generation.
       if (workspace.current_generation !== input.generation || workspace.intent_generation !== input.generation ||
           workspace.desired_state !== "deleted" || !["deleting", "deleted"].includes(workspace.status) ||
           !workspace.intent_id || !workspace.requested_at || workspace.requested_by !== input.actorUserId || !workspace.affects_workspace ||
