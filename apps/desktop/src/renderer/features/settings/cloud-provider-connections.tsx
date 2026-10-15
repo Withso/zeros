@@ -57,6 +57,8 @@ function connectionErrorMessage(error: unknown): string {
     ? error.code : error instanceof Error ? error.message : null;
   if (code === "cloud_agent_credential_busy")
     return "Your cloud connection is being updated. Try again in a moment.";
+  if (code === "agent_credential_conflict" || code === "agent_connection_conflict")
+    return "Your saved accounts changed. Review the refreshed list, then connect again.";
   return error instanceof Error ? error.message : "Cloud connection failed";
 }
 
@@ -137,6 +139,9 @@ function CloudProviderConnection({
   const [connectionBusy, setBusy] = useState(false);
   const inFlight = useRef(false),
     mounted = useRef(true);
+  const active = useRef(surfaceActive);
+  active.current = surfaceActive;
+  const operationEpoch = useRef(0);
   const signIn = useRef<AbortController | null>(null);
   const [authStatus, setAuthStatus] = useState<CloudProviderAuthStatus | null>(
     null,
@@ -161,12 +166,14 @@ function CloudProviderConnection({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      operationEpoch.current += 1;
       createIntent.current = null;
       signIn.current?.abort();
     };
   }, []);
   useEffect(() => {
     if (!surfaceActive) {
+      operationEpoch.current += 1;
       setOpen(false);
       setToken("");
       createIntent.current = null;
@@ -175,35 +182,43 @@ function CloudProviderConnection({
     }
   }, [surfaceActive]);
   const refresh = async () => {
+    if (!mounted.current || !active.current || !removal.current()) return;
     cloudOrganizationConnectionsCache.invalidate(key);
     invalidateCloudOrganizationAgentRegistry(organizationId);
-    if (mounted.current) await snapshot.refresh();
+    await snapshot.refresh();
   };
   const removal = useCloudCredentialRemoval({ userId, organizationId, active: surfaceActive, onRemoved: refresh });
   const busy = connectionBusy || removal.pending || !surfaceActive;
-  const run = async (action: () => Promise<void>) => {
+  const run = async (action: (current: () => boolean) => Promise<void>) => {
     if (inFlight.current || removal.isPending() || !surfaceActive || !removal.current()) return;
+    const epoch = operationEpoch.current;
+    // Capture this render's owner guard. A later owner A-B-A or hidden dialog
+    // cannot turn an old import into a new selection or publish its feedback.
+    const current = () => mounted.current && active.current && removal.current() && operationEpoch.current === epoch;
     inFlight.current = true;
     setBusy(true);
     try {
-      await action();
-      await refresh();
+      await action(current);
+      if (current()) await refresh();
     } catch (error) {
       if (
-        mounted.current &&
+        current() &&
         !(error instanceof DOMException && error.name === "AbortError")
       )
         toast.error(connectionErrorMessage(error));
-      await refresh().catch(() => {});
+      if (current()) await refresh().catch(() => {});
     } finally {
       inFlight.current = false;
       if (mounted.current) setBusy(false);
     }
   };
   const connect = () =>
-    run(async () => {
+    run(async current => {
       if (!snapshot.data) return;
-      let chosen = selected;
+      // Only the explicit Connect click adopts refreshed source revisions.
+      // Keep a successful import in the dialog across a selection conflict.
+      let chosen = selected ? snapshot.data.credentials.find(row => row.id === selected.id && !row.revoked) : null;
+      if (selected && !chosen) throw new Error("This saved account is unavailable. Refresh accounts and choose again.");
       if (!chosen) {
         const name =
           displayName.trim() ||
@@ -217,7 +232,7 @@ function CloudProviderConnection({
           chosen = await connectCloudProviderSignIn(
             { organizationId, provider: agent.id, displayName: name },
             abort.signal,
-            setAuthStatus,
+            status => { if (current() && !abort.signal.aborted) setAuthStatus(status); },
           );
           abort.signal.throwIfAborted();
         } else {
@@ -243,12 +258,12 @@ function CloudProviderConnection({
             })
           ).credential;
         }
-        if (mounted.current) {
-          setSelected(chosen);
-          setToken("");
-        }
+        if (!current()) return;
+        setSelected(chosen);
+        setToken("");
         createIntent.current = null;
       }
+      if (!current()) return;
       await selectCloudOrganizationCredential(organizationId, agent.id, {
         expectedRevision: connection?.revision ?? 0,
         credentialId: chosen.id,
@@ -257,7 +272,7 @@ function CloudProviderConnection({
         allModels: true,
         consent: "zeros-managed",
       });
-      if (mounted.current) {
+      if (current()) {
         setOpen(false);
         toast.success(`${agent.name} connected`);
       }
@@ -270,10 +285,11 @@ function CloudProviderConnection({
     if (busy || inFlight.current) return;
     await removal.start(cloudOrganizationCredentialRemovalTarget(organizationId, credential));
   };
-  const configure = (credential: CloudProviderCredential | null) => {
-    setSelected(credential);
+  const configure = (credential: CloudProviderCredential | null, reconnect = false) => {
+    operationEpoch.current += 1;
+    setSelected(reconnect ? null : credential);
     setToken("");
-    setDisplayName("");
+    setDisplayName(reconnect ? credential?.displayName ?? "" : "");
     setAuthStatus(null);
     createIntent.current = null;
     setMethod(
@@ -317,8 +333,19 @@ function CloudProviderConnection({
         </div>
       )}
       {matching.map((credential) => {
-        const active =
-          connection?.connected && connection.credentialId === credential.id;
+        const isSelected = connection?.credentialId === credential.id;
+        const health = isSelected ? connection?.health : undefined;
+        const ready = isSelected && connection?.connected && health?.status === "ready" &&
+          health.credentialRevision === credential.revision && !credential.revoked;
+        const reconnect = isSelected && (credential.revoked || health?.status === "expired" ||
+          health?.status === "expiring" || health?.status === "credential_unavailable");
+        // Health is the selected source's last observation, never a model or
+        // refresh grant. N-1 servers leave it absent; do not invent readiness.
+        const status = !isSelected ? "Saved" : !health ? "Selected · Status unavailable"
+          : health.status === "ready" ? ready ? "Connected" : "Account changed"
+          : ({ not_selected: "Status unavailable", consent_required: "Permission required",
+              credential_unavailable: "Account unavailable", credential_changed: "Account changed",
+              expiring: "Connection expires soon", expired: "Connection expired" })[health.status];
         return (
           <div
             key={credential.id}
@@ -330,7 +357,7 @@ function CloudProviderConnection({
                 {credential.displayName}
               </div>
               <div className="text-fg2 text-xs">
-                {active ? "Connected" : "Saved"} ·{" "}
+                {status} ·{" "}
                 {credential.connectionMethod === "account" ||
                 !credential.kind.endsWith("api-key")
                   ? "Account"
@@ -341,11 +368,11 @@ function CloudProviderConnection({
               <Button
                 variant="ghost"
                 disabled={busy}
-                onClick={() => configure(credential)}
+                onClick={() => configure(credential, reconnect)}
               >
-                {active ? "Configure" : "Use account"}
+                {reconnect ? "Reconnect" : isSelected ? "Configure" : "Use account"}
               </Button>
-              {active ? (
+              {isSelected ? (
                 <Button
                   variant="ghost"
                   disabled={busy}
@@ -378,6 +405,7 @@ function CloudProviderConnection({
         onOpenChange={(value) => {
           setOpen(value);
           if (!value) {
+            operationEpoch.current += 1;
             setToken("");
             createIntent.current = null;
             signIn.current?.abort();
@@ -386,12 +414,14 @@ function CloudProviderConnection({
         }}
         method={method}
         onMethodChange={(value) => {
+          operationEpoch.current += 1;
           setMethod(value);
           setSelected(null);
           setToken("");
           createIntent.current = null;
         }}
-        connected={connection?.connected ?? false}
+        connected={!!selected && connection?.credentialId === selected.id && connection.connected &&
+          connection.health?.status === "ready" && connection.health.credentialRevision === selected.revision}
         busy={busy}
         methodOptions={[
           {

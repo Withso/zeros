@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CloudAgentConnectionHealthSchema } from "@zeros/protocol";
 import { cloudAccountRequest } from "../../platform/cloud-workspaces";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { clearReleaseCanaryDesignations } from "./release-canary-designation";
@@ -42,6 +43,7 @@ const organizationConnections = z.object({
         models: z.array(z.string()).max(32),
         allModels: z.boolean().optional(),
         connected: z.boolean(),
+        health: CloudAgentConnectionHealthSchema.optional(),
       }),
     )
     .max(3),

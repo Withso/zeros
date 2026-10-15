@@ -98,6 +98,11 @@
    proof and a post-I/O authority recheck; preserve storage debt and the D1 gate.
    Test the actual record purge so a signed carry can later retire from positive
    retained proof, never from a missing row or a provider 404 alone.
+   For account selection, observe the exact selected revision and material;
+   vault presence and refresh metadata are not authority. Re-read durable state
+   after expiry, require positive release or retirement, and commit bounded
+   closure progress. Preserve explicit IDs and committed lost-ACK replay; only
+   a later explicit request may start a separately fenced successor.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates

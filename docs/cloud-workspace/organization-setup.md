@@ -58,6 +58,22 @@ Credential material remains encrypted by the credential service.
 An account edit, membership authority change, or revocation requires renewed
 consent. Cursor account expiry is enforced by the backend.
 
+Each selected connection may include a strict versioned `health` observation
+for its exact selected credential revision and material version. Settings shows
+Connected only when that source is ready; expired, expiring, changed, unavailable
+and consent-required sources keep their own status and recovery action. An older
+server without this field shows Status unavailable, never inferred readiness or
+expiry. This metadata grants neither model access nor automatic refresh, and a
+fresh unselected account cannot make the previous selection healthy.
+
+Reconnect starts the existing fresh native sign-in or replacement-key ceremony.
+A completed import remains saved if selecting it conflicts. The dialog refreshes
+metadata, explains the conflict, and adopts current revisions only on the next
+explicit Connect click; it never retries the mutation or repeats the import by
+itself. Owner changes, hidden dialogs and canceled ceremonies retire pending
+continuations and feedback. Local Personal and organization-local provider
+credentials keep their existing device paths.
+
 Electron owns the `cloud_provider_auth` ceremony. Codex uses a dedicated private
 profile and the pinned native runtime, then imports its native cache directly
 into the authenticated credential service. It does not read a Local login's
