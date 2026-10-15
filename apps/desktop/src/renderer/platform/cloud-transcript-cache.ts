@@ -163,21 +163,34 @@ export async function readCloudTranscriptWithCachedPaint<T>(
       painted = window; observe("hit", source, window.restoreHead); onCached?.(window);
     } else observe("miss", source, cloudHistoryRestoreHead(chatId));
   };
+  let cachedPaint: Promise<void> | undefined;
   if (onCached) {
     const remembered = peekCloudTranscriptWindow(chatId);
-    if (remembered) queueMicrotask(() => paint(remembered, "memory"));
-    else void readCachedCloudTranscriptWindow(chatId).then(window => paint(window, "disk"));
+    cachedPaint = remembered
+      ? Promise.resolve().then(() => paint(remembered, "memory"))
+      : readCachedCloudTranscriptWindow(chatId).then(window => paint(window, "disk"));
   }
   try { return await authoritative(); }
   catch (error) {
     const status = (error as { status?: unknown } | null)?.status;
-    if (status === 401 || status === 403 || status === 404) {
+    // A newly created conversation may not have reached the passive projection
+    // yet. Its typed 404 is not a delete receipt; explicit heads/tombstones and
+    // account/workspace access still retire the exact cache independently.
+    const projectionPending = status === 404 &&
+      (error as { code?: unknown } | null)?.code === "cloud_conversation_not_found";
+    if (status === 401 || status === 403 || status === 404 && !projectionPending) {
       if (onCached) observe("denied", "control-plane");
       // Denial/tombstone is authoritative absence, not an offline fallback.
       const target = parseCloudScopedId(chatId);
       if (status === 403 && target) forgetCloudTranscriptWorkspace({ organizationId: target.organizationId, workspaceId: target.workspaceId });
       else forgetCloudTranscriptChat(chatId);
       onCached?.({ recordEpoch: null, revision: 0, cursor: null, messages: [] });
+    } else {
+      // The network can reject before local disk I/O finishes. Give that
+      // already-started exact-owner read its paint before hydration releases
+      // its request identity. It remains provisional and the error still
+      // propagates, so it cannot authorize a send or confirm an empty history.
+      await cachedPaint;
     }
     throw error;
   }
