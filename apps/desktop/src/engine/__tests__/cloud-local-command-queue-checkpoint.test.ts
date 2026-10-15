@@ -9,7 +9,7 @@ import { CloudActorAuthorityRegistry } from "../agents/cloud-actor-authority";
 import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
 import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
 import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
-import { verifyCloudLocalCommandCheckpoint, restoreCloudLocalCommandCheckpointLedger } from "../cloud-local-command-queue-checkpoint";
+import { captureCloudLocalCommandCheckpoint, verifyCloudLocalCommandCheckpoint, restoreCloudLocalCommandCheckpointLedger } from "../cloud-local-command-queue-checkpoint";
 import { openSqlite } from "../db/sqlite";
 
 vi.mock("node:fs/promises", async original => {
@@ -149,6 +149,16 @@ describe("sealed FULL/NORMAL checkpoint custody", () => {
     await expect(f.lifecycle.captureCheckpoint(f.root)).rejects.toThrow("command_conflict");
     f.lifecycle.begin(); f.lifecycle.createSeal();
     await expect(f.lifecycle.captureCheckpoint(f.root)).rejects.toThrow("command_conflict");
+  });
+  it("refuses a sealed artifact that still has unpublished inherited projection work", async () => {
+    const f = await fixture(), ledger = openSqlite(path.join(f.directory,"queue.sqlite"));
+    try {
+      ledger.prepare("INSERT INTO local_command_metadata(key,value) VALUES('historyProjectionWriter',?)").run(f.scope.writerEpoch);
+      ledger.pragma("wal_checkpoint(TRUNCATE)");
+    } finally { ledger.close(); }
+    await expect(captureCloudLocalCommandCheckpoint({ root: f.root, ledgerFile: path.join(f.directory,"queue.sqlite"),
+      normalFile: path.join(f.directory,"normal.sqlite"), seal: f.lifecycle.seal!, assertFrozen: () => {} }))
+      .rejects.toMatchObject({ code: "checkpoint_pending_work" });
   });
   it.each(["missing", "mutated", "mixed"])("refuses a %s checkpoint part before boot exposure", async problem => {
     const f = await fixture(), manifest = await f.lifecycle.captureCheckpoint(f.root);

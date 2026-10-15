@@ -54,10 +54,137 @@ function fixture(terminal = false) {
   }
   const batch = queue.peekMirrorBatch()!, db = openSqlite(file);
   cleanup.push(() => db.close());
-  return { queue, db, scope, batch, options, ack: { version: 1 as const, writerEpoch: scope.writerEpoch, batchId: batch.batchId, through: batch.through } };
+  return { queue, db, scope, batch, options, actorSessionId, ack: { version: 1 as const, writerEpoch: scope.writerEpoch, batchId: batch.batchId, through: batch.through } };
+}
+function drain(queue: CloudLocalCommandQueue) {
+  const changes = [];
+  for (let flight = 0; flight < 2048; flight++) {
+    const batch = queue.peekMirrorBatch();
+    if (!batch) { expect(queue.mirrorDrained()).toBe(true); return changes; }
+    expect(batch.changes.length).toBeLessThanOrEqual(32);
+    expect(Buffer.byteLength(JSON.stringify(batch))).toBeLessThanOrEqual(1024 * 1024);
+    changes.push(...batch.changes);
+    queue.acknowledgeMirror({ version: 1, writerEpoch: queue.scope.writerEpoch, batchId: batch.batchId, through: batch.through });
+  }
+  throw new Error("Synthetic mirror failed to drain");
+}
+function successor(f: ReturnType<typeof fixture>, limits?: ConstructorParameters<typeof CloudLocalCommandQueue>[0]["limits"]) {
+  const scope = { ...f.scope, writerEpoch: randomUUID(), engineInstanceId: randomUUID(), bootId: randomUUID() };
+  const actors = new CloudActorAuthorityRegistry({ scope, engineLive: () => true }); cleanup.push(() => actors.dispose());
+  const options = { ...f.options, scope, actors, limits }, queue = new CloudLocalCommandQueue(options);
+  cleanup.push(() => queue.close()); return { queue, options, scope };
 }
 
 describe("FULL queue ACK joins the exact persisted mirror flight", () => {
+  it("republishes inherited current history after a writer handoff without redispatching its request", () => {
+    const f = fixture(true), head = f.queue.currentHistoryHead("chat")!;
+    expect(head.history).toHaveProperty("manifestSha256");
+    for (let batch = f.queue.peekMirrorBatch(); batch; batch = f.queue.peekMirrorBatch())
+      f.queue.acknowledgeMirror({ version: 1, writerEpoch: f.scope.writerEpoch, batchId: batch.batchId, through: batch.through });
+    expect(f.queue.mirrorDrained()).toBe(true);
+    const audit = f.db.prepare("SELECT id,state,actor,history,result FROM local_commands").all();
+    f.queue.close();
+    const scope = { ...f.scope, writerEpoch: randomUUID(), engineInstanceId: randomUUID(), bootId: randomUUID() };
+    const actors = new CloudActorAuthorityRegistry({ scope, engineLive: () => true });
+    cleanup.push(() => actors.dispose());
+    const next = new CloudLocalCommandQueue({ ...f.options, scope, actors });
+    cleanup.push(() => next.close());
+    expect(next.currentHistoryHead("chat")).toEqual(head);
+    expect(f.db.prepare("SELECT id,state,actor,history,result FROM local_commands").all()).toEqual(audit);
+    expect(next.handle({ kind: "claim", conversationId: "chat", claimId: randomUUID(), executionId: randomUUID() },
+      { writerEpoch: scope.writerEpoch })).toBeNull();
+    const changes = [];
+    for (let batch = next.peekMirrorBatch(); batch; batch = next.peekMirrorBatch()) {
+      changes.push(...batch.changes);
+      next.acknowledgeMirror({ version: 1, writerEpoch: scope.writerEpoch, batchId: batch.batchId, through: batch.through });
+    }
+    expect(changes.filter(change => change.historyHead).at(-1)?.historyHead).toEqual(head);
+    expect(changes.some(change => change.entry && ["queued", "dispatching"].includes(change.entry.state))).toBe(false);
+  });
+  it.each(["edit", "prune", "delete"] as const)("republishes the latest %s fence instead of an older complete head", operation => {
+    const f = fixture(true);
+    const head = f.queue.publishHistoryMutation({ conversationId: "chat", mutationId: randomUUID(), operation, deleted: operation === "delete",
+      recordSequence: 1, eventSequence: 1 });
+    drain(f.queue); f.queue.close();
+    const next = successor(f), changes = drain(next.queue);
+    expect(changes.filter(change => change.historyHead).at(-1)?.historyHead).toEqual(head);
+    expect(changes.some(change => change.historyPart || change.event)).toBe(false);
+    expect(next.queue.currentHistoryHead("chat")).toEqual(head);
+    expect(next.queue.handle({ kind: "claim", conversationId: "chat", claimId: randomUUID(), executionId: randomUUID() },
+      { writerEpoch: next.scope.writerEpoch })).toBeNull();
+  });
+  it("keeps an inherited flight exact across lost ACK and same-writer restart, then stays drained", () => {
+    const f = fixture(true); drain(f.queue); f.queue.close();
+    const next = successor(f), batch = next.queue.peekMirrorBatch()!;
+    expect(batch).not.toBeNull(); expect(next.queue.peekMirrorBatch()).toEqual(batch);
+    const audit = f.db.prepare("SELECT id,state,actor,history,result FROM local_commands").all();
+    next.queue.close();
+    const reopened = new CloudLocalCommandQueue(next.options); cleanup.push(() => reopened.close());
+    expect(reopened.peekMirrorBatch()).toEqual(batch);
+    drain(reopened); reopened.close();
+    const drained = new CloudLocalCommandQueue(next.options); cleanup.push(() => drained.close());
+    expect(drained.peekMirrorBatch()).toBeNull(); expect(drained.mirrorDrained()).toBe(true);
+    expect(f.db.prepare("SELECT id,state,actor,history,result FROM local_commands").all()).toEqual(audit);
+  });
+  it("advances an intrinsically oversized inherited bundle with a durable incomplete head and no redispatch", () => {
+    const f = fixture(true), previous = f.queue.currentHistoryHead("chat")!;
+    f.queue.publishHistoryMutation({ conversationId: "sibling", mutationId: randomUUID(), operation: "edit", deleted: false,
+      recordSequence: 1, eventSequence: 1 });
+    drain(f.queue);
+    const audit = f.db.prepare("SELECT id,state,actor,history,result FROM local_commands").all();
+    const documents = f.db.prepare("SELECT sha256,document FROM local_command_history_documents ORDER BY sha256").all();
+    f.queue.close();
+    // The compact head fits, but two parts plus head do not fit alongside the
+    // reserved control jobs. This was a permanent command_limit on every peek.
+    const next = successor(f,{ pending: 1, historyJobs: 5 });
+    const first = next.queue.peekMirrorBatch()!;
+    expect(first).not.toBeNull(); expect(next.queue.peekMirrorBatch()).toEqual(first);
+    next.queue.close();
+    const reopened = new CloudLocalCommandQueue(next.options); cleanup.push(() => reopened.close());
+    expect(reopened.peekMirrorBatch()).toEqual(first);
+    const changes = drain(reopened), head = reopened.currentHistoryHead("chat")!;
+    expect(head).toMatchObject({ source: previous.source, history: { incompleteReason: "history_limit" } });
+    expect(head.history.restoreRevision).toBeGreaterThan(previous.history.restoreRevision);
+    expect(changes.some(change => change.conversationId === "sibling" && change.historyHead)).toBe(true);
+    expect(changes.filter(change => change.conversationId === "chat" && change.historyHead).at(-1)?.historyHead).toEqual(head);
+    expect(changes.some(change => change.historyPart || change.event)).toBe(false);
+    expect(f.db.prepare("SELECT id,state,actor,history,result FROM local_commands").all()).toEqual(audit);
+    expect(f.db.prepare("SELECT sha256,document FROM local_command_history_documents ORDER BY sha256").all()).toEqual(documents);
+    expect(reopened.handle({ kind: "claim", conversationId: "chat", claimId: randomUUID(), executionId: randomUUID() },
+      { writerEpoch: next.scope.writerEpoch })).toBeNull();
+    expect(reopened.mirrorDrained()).toBe(true);
+  });
+  it("publishes every inherited command prerequisite before heads across a multi-flight backlog", () => {
+    const f = fixture(true), latest = new Map([["chat",f.queue.currentHistoryHead("chat")!]]);
+    for (let index = 0; index < 65; index++) {
+      const conversationId = `chat-${String(index).padStart(3,"0")}`;
+      f.queue.handle({ kind: "mutate", admissionError: null, mutation: { conversationId, operationId: randomUUID(), expectedRevision: 0,
+        action: { kind: "enqueue", commandId: randomUUID(), payload: { agentId: "claude", userMessageId: "turn", model: "fixture-model",
+          modeRevision: 0, prompt: [{ type: "text", text: "Synthetic inherited request" }] } } } },
+      { actorSessionId: f.actorSessionId, writerEpoch: f.scope.writerEpoch });
+      const claim = CloudBootCommandClaimSchema.parse(f.queue.handle({ kind: "claim", conversationId, claimId: randomUUID(), executionId: randomUUID() },
+        { writerEpoch: f.scope.writerEpoch }));
+      f.queue.handle({ kind: "settle", result: { commandId: claim.commandId, claimId: claim.claimId, state: "succeeded",
+        resultCode: null, result: { version: 1 } } }, { writerEpoch: f.scope.writerEpoch });
+      latest.set(conversationId,f.queue.currentHistoryHead(conversationId)!);
+    }
+    // Unacknowledged parts and heads survive this handoff too. They cannot
+    // outrun command prerequisites merely because their jobs already exist.
+    f.queue.close();
+    const next = successor(f), changes = drain(next.queue), commands = new Set(), heads = new Map();
+    for (const change of changes) {
+      if (change.entry) {
+        expect(["queued","dispatching"]).not.toContain(change.entry.state);
+        commands.add(change.entry.commandId);
+      }
+      if (change.historyHead) {
+        if (change.historyHead.source.kind === "command") expect(commands.has(change.historyHead.source.commandId)).toBe(true);
+        heads.set(change.conversationId,change.historyHead);
+      }
+    }
+    expect(heads).toEqual(latest); expect(commands.size).toBe(66);
+    expect(changes.some(change => change.event)).toBe(false);
+  });
   it.each(["boot", "range", "actor", "document", "stored-after", "stored-through"])("never prunes a corrupt %s flight", kind => {
     const f = fixture(), changed = structuredClone(f.batch), ack = { ...f.ack };
     const originalHead = f.db.prepare("SELECT value FROM local_command_metadata WHERE key='mirrorHead'").get();

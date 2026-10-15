@@ -75,7 +75,7 @@ function relative(root: string, folder: unknown): string {
 function compound(kind: "m" | "t" | "c", conversationId: string, entityId: string): string {
   return `${kind}:${digest(`${conversationId}\0${entityId}`)}`;
 }
-function chatDocument(row: Row, root: string): JsonObject {
+export function cloudLocalCommandHistoryChatDocument(row: Row, root: string): JsonObject {
   const strings = ["agent_id", "agent_name", "model", "last_mode_id", "pre_plan_mode_id", "session_id", "source_chat_id", "kind"];
   const result: JsonObject = { id: row.id, folder: relative(root, row.folder), composerMode: row.composer_mode ?? "code",
     composerModeRevision: row.composer_mode_revision ?? 0, effort: row.effort ?? "", permissionMode: row.permission_mode ?? "",
@@ -171,7 +171,7 @@ export function captureCloudLocalCommandHistory(input: CloudLocalCommandHistoryC
         if (previousChat) previousChat.sourceRevision = sourceRevision; else tombstones.push({ entityKind: "chat", entityId: conversationId, sourceRevision });
       } else {
         if (tombstone) throw new CaptureRefusal("capture_conflict");
-        add("chat", conversationId, revision(chat.rev, capturedHead), chatDocument(chat, input.repositoryRoot));
+        add("chat", conversationId, revision(chat.rev, capturedHead), cloudLocalCommandHistoryChatDocument(chat, input.repositoryRoot));
         const count = input.db.prepare("SELECT count(*) AS n,coalesce(sum(length(CAST(payload AS BLOB))),0) AS bytes FROM chat_messages WHERE chat_id=?")
           .get(conversationId) as { n: number; bytes: number };
         if (count.n > MAX_RECORDS - 1 || count.bytes > CLOUD_LOCAL_COMMAND_HISTORY_BUNDLE_MAX_BYTES) throw new CaptureRefusal("history_limit");

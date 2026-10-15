@@ -94,22 +94,51 @@ Capture reads a stable NORMAL source head, applies the original run's redactor,
 and produces immutable canonical records, a manifest and 128 KiB parts. The
 FULL queue publishes their CAS bytes, terminal, current restore head and outbox
 atomically; the mirror verifies all bytes/references before complete visibility.
-The limit is 16 MiB for the entire conversation, not each message. Capture or
-capacity failure preserves the known native outcome with an explicit incomplete
-head, without truncation or substituting an older complete transcript.
+The current canonical capture transport has a 16 MiB / 16,384-record bundle
+bound. This is a capture defect to replace with segmented history, not a
+supported chat-size limit. Capture or capacity failure preserves the known
+native outcome and local rows with an explicit incomplete head, without
+truncation or substituting an older complete transcript.
 The original native receipt/history audit stays immutable; a remote quota failure
 publishes a separate incomplete current head. Stable mirror batches retry the
 same body after lost ACK. Exact ACK and quota feedback commit before local
 pruning, so a crash cannot drop the restore fence or repeat native work.
 
 Clean-drain checkpoint recovery verifies the original FULL/NORMAL file pair,
-writer seal and authenticated ACK before rebuilding transcript data. The rebuild
-reads only each conversation's latest FULL head and verified immutable canonical
-bytes; it preserves original provenance and clears native session bindings.
-A newer incomplete or deleted head removes stale NORMAL messages and turns.
-Missing seal, lineage or bytes refuses restore, without selecting an older
-complete snapshot. Replacement is transactional and idempotent; it never
-recreates a native session, command claim or permission resolver.
+writer seal and authenticated ACK before rebuilding transcript data. Complete
+latest FULL heads use their verified canonical bytes. If the latest head is
+incomplete, an authenticated private receipt can instead restore supported
+transcript rows from the exact NORMAL file paired with that seal. A metadata
+edit must not erase an existing transcript; an actual prune or chat tombstone
+still takes effect. The reader pins the verified file, checks exact root and
+revision bounds, and copies one supported row at a time using indexed cursors.
+There is no total row or byte cap on this sealed local preservation; retained
+memory is proportional to the largest row, not the conversation. Oversized chats
+remain present with completeness unknown and cannot prevent sibling restoration
+or workspace resume merely because capture reached `history_limit`. Invalid
+custody or a bad row rolls back the entire destination transaction, including
+all previously copied rows and the final source-descriptor checks.
+
+This local preservation keeps the latest FULL head unchanged and incomplete.
+It does not publish unredacted NORMAL bytes, select an older complete manifest,
+or restore native/provider/session bindings. An unsealed recovery cannot borrow
+its ancestor's NORMAL snapshot; it retains the existing latest-FULL recovery
+rules. Both same-generation wake and generation replacement use this boundary.
+Missing seal, lineage or bytes refuses restore. Replacement is transactional
+and idempotent; it never recreates a native session, command claim or permission
+resolver.
+
+A new writer also republishes inherited terminal receipts and exact latest heads
+into its own CP projection. Command prerequisites are ordered before heads;
+immutable artifacts already acknowledged by a sealed predecessor need no new
+upload. An unsealed handoff restages retained artifact parts. A persistent,
+bounded conversation cursor and stable mirror flights survive lost ACKs and
+restarts. A bundle that intrinsically cannot fit reduced bulk staging limits
+publishes a bounded `history_limit` fence and advances its cursor; it does not
+loop on `command_limit` or rewrite native audit/CAS. Temporary backlog pressure
+still waits for ACKs. Pending publication prevents a final seal. Inherited requests remain
+quarantined or terminal, and historical controls keep their original stream and
+sequence rather than becoming new live events.
 
 Checkpoint refusal retains a closed failure site in `engineStartup.code`,
 including `checkpoint_expected_writer_mismatch`, `checkpoint_seal_missing` and

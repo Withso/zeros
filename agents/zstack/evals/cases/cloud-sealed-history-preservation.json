@@ -1,0 +1,9 @@
+{
+  "id": "cloud-sealed-history-preservation",
+  "kind": "replay",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pending",
+  "symptom": "A metadata mutation left the newest FULL history head incomplete. A sealed stop/resume rebuilt from that head and erased the earlier local transcript despite a valid paired NORMAL checkpoint.",
+  "rule": "The bug-fix loop verifies real sealed stores and the exact authenticated FULL/NORMAL pair. An incomplete latest fence is not evidence of an empty transcript; preserve exact sealed rows without borrowing older or unsealed custody, retain real prune/delete effects, and restore oversized chats and siblings without a total local-history cap. Stream rows inside the destination transaction through the final source custody check.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-local-command-history-sealed.test.ts apps/desktop/src/engine/__tests__/cloud-local-command-history-engine.test.ts"
+}

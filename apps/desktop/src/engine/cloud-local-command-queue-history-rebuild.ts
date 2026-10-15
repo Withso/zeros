@@ -3,8 +3,9 @@ import path from "node:path";
 import type Sqlite from "better-sqlite3";
 import { z } from "zod";
 import { CloudAgentBootScopeSchema, type CloudAgentBootScope } from "@zeros/protocol/cloud-agent-bootstrap";
-import { verifiedCloudLocalCommandRecoveryHistory, verifiedCloudLocalCommandSealedHistoryOrigins,
+import { verifiedCloudLocalCommandRecoveryHistory, verifiedCloudLocalCommandSealedHistoryOrigins, readVerifiedCloudLocalCommandSealedTranscript,
   type CloudLocalCommandPredecessor } from "./cloud-local-command-queue-checkpoint";
+import { cloudLocalCommandHistoryChatDocument } from "./cloud-local-command-queue-history";
 import { canonicalCloudLocalCommandHistoryJson as canonical, canonicalCloudLocalCommandWriterSealDescriptor,
   cloudLocalCommandHistoryHeadMatchesManifest, CloudCompactControlEventSchema, CloudLocalCommandHistoryHeadSchema,
   CloudLocalCommandHistoryManifestSchema, CloudLocalCommandHistoryRecordSchema, CloudLocalCommandWriterSealSchema,
@@ -50,6 +51,10 @@ export type CloudLocalCommandHistoryRebuildInput = {
   repositoryRoot: string;
   scope: CloudAgentBootScope;
   conversationId: string;
+  /** Only the exact authenticated sealed pair, never an unsealed recovery's
+   * ancestor or the mutable destination NORMAL database. Its incomplete FULL
+   * fence remains incomplete; these rows are not new CP publication proof. */
+  sealedCheckpoint?: { predecessor: CloudLocalCommandPredecessor | null };
 } & ({ sourceSeal: CloudLocalCommandWriterSeal; sourceRecovery?: never } |
   { sourceSeal?: never; sourceRecovery: CloudLocalCommandPredecessor });
 export interface CloudLocalCommandHistoryRebuildResult {
@@ -137,6 +142,86 @@ function insert(db: Sqlite.Database, table: "chats" | "chat_messages" | "turns",
   db.prepare(`INSERT INTO ${table}(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`).run(...Object.values(row));
 }
 
+function restoredChat(value: z.infer<typeof chatDocument>["chat"], root: string, rev: number): Row {
+  return { id: value.id, folder: folder(root,value.folder), agent_id: value.agentId, agent_name: value.agentName, model: value.model,
+    effort: value.effort, permission_mode: value.permissionMode, title: value.title, created_at: value.createdAt, updated_at: value.updatedAt,
+    session_id: null, provider_binding: null, provider_metadata: null, fast: Number(value.fast), pinned: Number(value.pinned), archived: Number(value.archived),
+    source_chat_id: value.sourceChatId, kind: value.kind, last_mode_id: value.lastModeId, pre_plan_mode_id: value.prePlanModeId,
+    composer_mode: value.composerMode, composer_mode_revision: value.composerModeRevision, rev };
+}
+/** Copy one supported row at a time, using the existing composite primary key.
+ * The bound is the largest row, never the size or age of a conversation. Gap
+ * deletes preserve exact prune semantics, and conditional upserts make a second
+ * restore a no-op. The caller keeps the destination transaction open through
+ * the final descriptor/custody checks, including every copied page. */
+function copySealedRows(source: Sqlite.Database, target: Sqlite.Database, table: "chat_messages" | "turns", columns: string[],
+  conversationId: string, normalize: (row: Row) => Row): void {
+  const key = table === "turns" ? "turn_id" : "msg_id";
+  const select = `SELECT ${columns.join(",")} FROM ${table} WHERE chat_id=?`;
+  const first = source.prepare(`${select} ORDER BY ${key} LIMIT 1`);
+  const next = source.prepare(`${select} AND ${key}>? ORDER BY ${key} LIMIT 1`);
+  const before = target.prepare(`DELETE FROM ${table} WHERE chat_id=? AND ${key}<?`);
+  const between = target.prepare(`DELETE FROM ${table} WHERE chat_id=? AND ${key}>? AND ${key}<?`);
+  let previous: string | null = null, upsert: Sqlite.Statement | undefined;
+  let raw = first.get(conversationId) as Row | undefined;
+  while (raw) {
+    const id = identity.parse(raw[key]), row = normalize(raw);
+    if (row.chat_id !== conversationId || row[key] !== id) refuse();
+    if (!upsert) {
+      const names = Object.keys(row), updates = names.filter(name => name !== "chat_id" && name !== key);
+      upsert = target.prepare(`INSERT INTO ${table}(${names.join(",")}) VALUES(${names.map(() => "?").join(",")})
+        ON CONFLICT(chat_id,${key}) DO UPDATE SET ${updates.map(name => `${name}=excluded.${name}`).join(",")}
+        WHERE ${updates.map(name => `${table}.${name} IS NOT excluded.${name}`).join(" OR ")}`);
+    }
+    if (previous === null) before.run(conversationId,id); else between.run(conversationId,previous,id);
+    upsert.run(...Object.values(row));
+    previous = id; raw = next.get(conversationId,id) as Row | undefined;
+  }
+  if (previous === null) target.prepare(`DELETE FROM ${table} WHERE chat_id=?`).run(conversationId);
+  else target.prepare(`DELETE FROM ${table} WHERE chat_id=? AND ${key}>?`).run(conversationId,previous);
+}
+function sealedTranscript(db: Sqlite.Database, target: Sqlite.Database, root: string, conversationId: string, recordSequence: number,
+  deleted: boolean): Row | null {
+  const revision = (value: unknown): number => {
+    const parsed = sequence.parse(value); if (parsed > recordSequence) refuse(); return parsed;
+  };
+  if (deleted) {
+    const tombstone = db.prepare("SELECT rev FROM sync_tombstones WHERE kind='chat' AND id=?").get(conversationId) as { rev: number } | undefined;
+    // deleteChat retains orphaned transcript storage. Its exact tombstone is
+    // authoritative; those rows cannot resurrect a deleted conversation.
+    if (db.prepare("SELECT 1 FROM chats WHERE id=?").get(conversationId) || !tombstone) refuse(); revision(tombstone.rev);
+    return null;
+  }
+  // Native/provider bindings are deliberately not read or parsed. The new
+  // engine obtains their authority separately; only supported transcript and
+  // chat metadata enter this exact sealed local projection. FULL remains
+  // incomplete; these unredacted local rows never enter the CP outbox.
+  const rawChat = rows(db,"chats",["id","folder","agent_id","agent_name","model","effort","permission_mode","title","created_at","updated_at",
+    "fast","pinned","archived","source_chat_id","kind","last_mode_id","pre_plan_mode_id","composer_mode","composer_mode_revision","rev"],conversationId)[0];
+  if (!rawChat || db.prepare("SELECT 1 FROM sync_tombstones WHERE kind='chat' AND id=?").get(conversationId)) refuse();
+  const value = chatDocument.parse(cloudLocalCommandHistoryChatDocument(rawChat,root)).chat;
+  if (value.id !== conversationId) refuse();
+  const chat = restoredChat(value,root,revision(rawChat.rev));
+  if (canonical(rows(target,"chats",Object.keys(chat),conversationId)) !== canonical([chat])) {
+    target.prepare("DELETE FROM chats WHERE id=?").run(conversationId); insert(target,"chats",chat);
+  }
+  copySealedRows(db,target,"chat_messages",["chat_id","msg_id","ord","kind","payload","created_at","rev"],conversationId,row => {
+    const value = messageDocument.parse({ version: 1, chatId: row.chat_id, msgId: row.msg_id, ord: row.ord,
+      kind: row.kind ?? "", payload: row.payload, createdAt: row.created_at });
+    return { chat_id: conversationId, msg_id: value.msgId, ord: value.ord, kind: value.kind, payload: value.payload,
+      created_at: value.createdAt, content: content(value.payload), rev: revision(row.rev) };
+  });
+  copySealedRows(db,target,"turns",["chat_id","turn_id","folder","agent_id","ord","summary","started_at","ended_at","stop_reason","status",
+    "pre_snapshot","post_snapshot","files","usage","rev"],conversationId,row => {
+    const { rev, ...saved } = row;
+    if (row.folder !== null && !inRoot(root,row.folder)) refuse();
+    const value = turnDocument.parse({ version: 1, row: { ...saved, workspace_id: null,
+      folder: row.folder === null ? null : path.relative(root,String(row.folder)).split(path.sep).join("/") || "." } }).row;
+    return { ...value, folder: value.folder === null ? null : folder(root,value.folder), rev: revision(rev) };
+  });
+  return chat;
+}
+
 /** Pure synchronous projection from independently verified custody.
  * Reads latest FULL authority/CAS; writes only NORMAL transcript and local
  * restore fences. Native sessions, claims, permissions and queue state are
@@ -146,7 +231,7 @@ export function rebuildCloudLocalCommandHistory(input: CloudLocalCommandHistoryR
     const scope = CloudAgentBootScopeSchema.parse(input.scope);
     const conversationId = identity.parse(input.conversationId), root = input.repositoryRoot;
     if (!path.isAbsolute(root) || path.resolve(root) !== root || input.db === input.ledger ||
-        (input.sourceSeal !== undefined) === (input.sourceRecovery !== undefined)) refuse();
+        (input.sourceSeal !== undefined) === (input.sourceRecovery !== undefined) || input.sourceRecovery && input.sealedCheckpoint) refuse();
     return input.ledger.transaction(() => {
       const metadata = (key: string) => (input.ledger.prepare("SELECT value FROM local_command_metadata WHERE key=?").get(key) as { value: string } | undefined)?.value;
       let seal: HistorySource;
@@ -178,6 +263,7 @@ export function rebuildCloudLocalCommandHistory(input: CloudLocalCommandHistoryR
           (head.history.eventSequence !== null && head.history.eventSequence > seal.eventSequence)) refuse();
       const origin = source(input.ledger,conversationId,head,seal);
       let chat: Row | null = null; const messages: Row[] = [], turns: Row[] = [];
+      const preserveSealed = !("manifestSha256" in head.history) && input.sealedCheckpoint !== undefined;
       if ("manifestSha256" in head.history) {
         const artifact = document(input.ledger,head.history.manifestSha256,"manifest"), manifest = CloudLocalCommandHistoryManifestSchema.parse(artifact.parsed);
         if (manifest.conversationId !== conversationId || !cloudLocalCommandHistoryHeadMatchesManifest(head,manifest,head.history.manifestSha256) ||
@@ -194,11 +280,7 @@ export function rebuildCloudLocalCommandHistory(input: CloudLocalCommandHistoryR
           if (record.entityKind === "chat") {
             const value = chatDocument.parse(record.document).chat;
             if (chat || record.entityId !== conversationId || value.id !== conversationId) refuse();
-            chat = { id: conversationId, folder: folder(root,value.folder), agent_id: value.agentId, agent_name: value.agentName, model: value.model,
-              effort: value.effort, permission_mode: value.permissionMode, title: value.title, created_at: value.createdAt, updated_at: value.updatedAt,
-              session_id: null, provider_binding: null, provider_metadata: null, fast: Number(value.fast), pinned: Number(value.pinned), archived: Number(value.archived),
-              source_chat_id: value.sourceChatId, kind: value.kind, last_mode_id: value.lastModeId, pre_plan_mode_id: value.prePlanModeId,
-              composer_mode: value.composerMode, composer_mode_revision: value.composerModeRevision, rev: record.sourceRevision };
+            chat = restoredChat(value,root,record.sourceRevision);
           } else if (record.entityKind === "message") {
             const value = messageDocument.parse(record.document);
             if (value.chatId !== conversationId || record.entityId !== compound("m",conversationId,value.msgId) || seenMessages.has(value.msgId)) refuse();
@@ -238,8 +320,14 @@ export function rebuildCloudLocalCommandHistory(input: CloudLocalCommandHistoryR
         }
         const existing = input.db.prepare("SELECT folder FROM chats WHERE id=?").get(conversationId) as { folder: string | null } | undefined;
         if (existing && !inRoot(root,existing.folder)) refuse();
+        if (preserveSealed) {
+          // Final source-identity checks finish before this target transaction
+          // commits; a late refusal rolls back the chat and every streamed row.
+          chat = readVerifiedCloudLocalCommandSealedTranscript(input.sealedCheckpoint!.predecessor,input.ledger,input.sourceSeal!,
+            normal => sealedTranscript(normal,input.db,root,conversationId,seal.recordSequence,head.deleted));
+        }
         if (chat) {
-          const equal = canonical(rows(input.db,"chats",Object.keys(chat),conversationId)) === canonical([chat]) &&
+          const equal = preserveSealed || canonical(rows(input.db,"chats",Object.keys(chat),conversationId)) === canonical([chat]) &&
             canonical(rows(input.db,"chat_messages",Object.keys(messages[0] ?? { chat_id: null, msg_id: null }),conversationId)) === canonical(messages) &&
             canonical(rows(input.db,"turns",Object.keys(turns[0] ?? { chat_id: null, turn_id: null }),conversationId)) === canonical(turns);
           if (!equal) {

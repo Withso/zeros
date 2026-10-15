@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Sqlite from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import { CloudActorProvenanceSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { canonicalCloudLocalCommandHistoryJson as canonical, canonicalCloudLocalCommandWriterSealDescriptor,
   type CloudLocalCommandHistoryHead, type CloudLocalCommandHistoryManifest, type CloudLocalCommandHistoryRecord,
   type CloudLocalCommandWriterSeal } from "@zeros/protocol/cloud-local-mirror";
@@ -52,9 +53,16 @@ function fixture(payload = '{"title":"Read source","status":"completed","rawOutp
   const insertDocument = full.prepare("INSERT OR REPLACE INTO local_command_history_documents(sha256,kind,document,bytes) VALUES(?,?,?,?)");
   for (const item of capture.documents) insertDocument.run(item.sha256,item.kind,item.canonicalDocument,Buffer.byteLength(item.canonicalDocument));
   full.prepare("INSERT INTO local_command_controls(conversation_id) VALUES('chat')").run();
+  // This retained receipt is also republished after writer replacement. Keep
+  // the complete production provenance and wire-valid times, not just the
+  // scope fields the isolated rebuild reader happened to consume originally.
+  const provenance = CloudActorProvenanceSchema.parse({ scope, actorSessionId: randomUUID(), authorityEpoch: 1,
+    confirmedUntilMs: 1_009_000, fundingConsentVersion: 1, fundingGrant: { kind: "owner" },
+    actor: { userId: scope.fundingOwnerUserId, deviceId: randomUUID(), deviceKeyVersion: 1, fingerprint: "a".repeat(64), role: "owner" } });
   full.prepare(`INSERT INTO local_commands(id,conversation_id,position,state,payload,actor,user_message_id,agent_id,writer_epoch,generation,
-    execution_id,result,created_at,updated_at) VALUES(?, 'chat',1,'succeeded',NULL,?,'turn','cursor',?,?,'old-execution',?,'1','2')`)
-    .run(commandId,canonical({ scope }),scope.writerEpoch,scope.generation,canonical(result));
+    execution_id,result,created_at,updated_at,history,mirror_history_head) VALUES(?, 'chat',1,'succeeded',NULL,?,'turn','cursor',?,?,'old-execution',?,?,?,?,?)`)
+    .run(commandId,canonical(provenance),scope.writerEpoch,scope.generation,canonical(result),new Date(1).toISOString(),new Date(2).toISOString(),
+      canonical(capture.historyHead.history),canonical(capture.historyHead));
   const setHead = (head: CloudLocalCommandHistoryHead) => full.prepare(`INSERT INTO local_command_history_heads(conversation_id,restore_revision,document)
     VALUES('chat',?,?) ON CONFLICT(conversation_id) DO UPDATE SET restore_revision=excluded.restore_revision,document=excluded.document`)
     .run(head.history.restoreRevision,canonical(head));
@@ -202,15 +210,21 @@ describe("verified canonical FULL to NORMAL rebuild", () => {
           verifyPredecessor: (receipt, file, db) => verifyAndPrepareCloudLocalCommandPredecessor(receipt, file, db, target),
           activity: () => ({ complete: true, foreground: 0, reservedLaunches: 0, background: 0, idleHosts: 0, scopes: [] }),
           retire: async () => {}, markDesired: () => {}, readyRevision: () => 1, synchronize: async () => {} }).close();
-        new CloudLocalCommandQueue({ file: f.file, scope: target, engineLive: () => true, ready: () => true,
+        const finalQueue = new CloudLocalCommandQueue({ file: f.file, scope: target, engineLive: () => true, ready: () => true,
           history: () => ({ recordSequence: 5, eventSequence: 10 }), actors: {
-            authorizeCurrent: () => { throw new Error("no inherited execution"); }, reauthorizeRecorded: () => { throw new Error("no inherited execution"); } } }).close();
+            authorizeCurrent: () => { throw new Error("no inherited execution"); }, reauthorizeRecorded: () => { throw new Error("no inherited execution"); } } });
+        // A sealed successor must ACK its inherited projection as well as its
+        // own writes. Retained history alone is no longer an empty mirror.
+        for (let batch = finalQueue.peekMirrorBatch(); batch; batch = finalQueue.peekMirrorBatch())
+          finalQueue.acknowledgeMirror({ version: 1, writerEpoch: target.writerEpoch, batchId: batch.batchId, through: batch.through });
+        expect(finalQueue.mirrorDrained()).toBe(true);
+        const sealedSequence = finalQueue.mirroredSequence; finalQueue.close();
         const recordSequence = (f.db.prepare("SELECT next_rev-1 AS rev FROM sync_meta WHERE id=0").get() as { rev: number }).rev;
-        for (const [key, value] of [["sealedWriter", target.writerEpoch], ["journalHead", "12"], ["mirrorHead", "12"]])
+        for (const [key, value] of [["sealedWriter", target.writerEpoch], ["journalHead", String(sealedSequence)], ["mirrorHead", String(sealedSequence)]])
           f.full.prepare("INSERT OR REPLACE INTO local_command_metadata(key,value) VALUES(?,?)").run(key, value);
         f.full.prepare("INSERT INTO local_command_streams VALUES(?,?,10,1)").run(target.engineInstanceId, target.writerEpoch);
-        const descriptor = { version: 1 as const, scope: target, sealId: randomUUID(), sequence: 12, recordSequence, eventSequence: 10,
-          inventorySha256: cloudLocalCommandSealInventory(f.full, { scope: target, sequence: 12, recordSequence, eventSequence: 10 }) };
+        const descriptor = { version: 1 as const, scope: target, sealId: randomUUID(), sequence: sealedSequence, recordSequence, eventSequence: 10,
+          inventorySha256: cloudLocalCommandSealInventory(f.full, { scope: target, sequence: sealedSequence, recordSequence, eventSequence: 10 }) };
         const successorSeal = { ...descriptor, sha256: createHash("sha256").update(canonicalCloudLocalCommandWriterSealDescriptor(descriptor)).digest("hex") };
         f.writeSeal(successorSeal); f.full.pragma("wal_checkpoint(TRUNCATE)");
         const successorNormal = join(f.root, "recovered-normal.sqlite"); f.db.prepare("VACUUM INTO ?").run(successorNormal);
