@@ -6,6 +6,7 @@ export const HOURLY_PATH = ".github/workflows/zeros-dev-e2e.yml";
 export const HOURLY_NAME = "Zeros dev E2E";
 export const REPO = "/repos/Withso/zeros";
 const WORKFLOW = `${REPO}/actions/workflows/zeros-dev-e2e.yml`;
+const SKIPPED_PROFILE_JOB_NAME = "inputs.profile == 'gate0' && 'gate0' || 'lifecycle'";
 const integer = value => Number.isSafeInteger(value) && value > 0;
 const identifier = value => typeof value === "string" && /^[1-9][0-9]{0,19}$/.test(value);
 const sha = value => typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
@@ -39,10 +40,15 @@ function collection(value, key) {
 export async function lifecycleJob(api, run) {
   const response = await api.get(`${REPO}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
   const jobs = collection(response, "jobs");
-  if (response.total_count !== jobs.length || jobs.length !== 1 || !["lifecycle", "gate0"].includes(jobs[0].name) ||
-    jobs[0].name === "gate0" && run.event !== "workflow_dispatch" ||
+  if (response.total_count !== jobs.length || jobs.length !== 1 ||
     jobs[0].run_attempt !== run.run_attempt || jobs[0].status !== "completed" || !Array.isArray(jobs[0].steps)) throw failure("artifact_invalid");
-  return jobs[0];
+  const job = jobs[0];
+  // GitHub leaves this name unevaluated when the job-level condition skips it.
+  // Only schedule proves the profile; preserve the skip so it can never be green.
+  if (job.name === SKIPPED_PROFILE_JOB_NAME && run.event === "schedule" && run.status === "completed" &&
+    job.conclusion === "skipped" && job.steps.length === 0) return { ...job, name: "lifecycle" };
+  if (!["lifecycle", "gate0"].includes(job.name) || job.name === "gate0" && run.event !== "workflow_dispatch") throw failure("artifact_invalid");
+  return job;
 }
 function productNeverStarted(job) {
   if (job.conclusion === "skipped" && job.steps.length === 0) return true;

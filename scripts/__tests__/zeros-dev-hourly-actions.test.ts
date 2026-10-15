@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { planHourly, hourlyContext, hourlySnapshot, decideHourlyGate } from "../zeros-dev/hourly-actions.mjs";
+import { planHourly, hourlyContext, hourlySnapshot, decideHourlyGate, lifecycleJob } from "../zeros-dev/hourly-actions.mjs";
 
 const run = (id: number, overrides = {}) => ({ id, run_number: id, run_attempt: 1, path: ".github/workflows/zeros-dev-e2e.yml", name: "Zeros dev E2E",
   head_sha: "a".repeat(40), head_branch: "main", event: "schedule", status: "completed", conclusion: "success",
   repository: { full_name: "Withso/zeros" }, head_repository: { full_name: "Withso/zeros" },
   created_at: "2026-10-14T00:00:00Z", updated_at: "2026-10-14T00:08:00Z", ...overrides });
 const context = { workflowRunId: "17", attempt: 1, sourceSha: "a".repeat(40) };
+// Exact API name from the skipped scheduled run 38666579898.
+const skippedExpression = "inputs.profile == 'gate0' && 'gate0' || 'lifecycle'";
 const completedJob = (overrides = {}) => ({ name: "lifecycle", status: "completed", conclusion: "success", run_attempt: 1,
   completed_at: "2026-10-14T00:08:00Z", steps: [
     { name: "Execute Alpha product lifecycle", status: "completed", conclusion: "success" },
@@ -49,12 +51,25 @@ describe("hourly Actions predecessor and gate policy", () => {
     f.get.mockImplementation(async url => url.includes("/artifacts") ? { total_count: 0, artifacts: [] } : get(url));
     await expect(planHourly(f, context)).rejects.toThrow("zeros_dev_artifact_invalid");
   });
-  it("can start after a disabled schedule only when job metadata proves the product entry never ran", async () => {
+  it.each(["lifecycle", skippedExpression])("can start after a disabled schedule with job name %s only when the product never ran", async name => {
     const current = run(17, { status: "in_progress", conclusion: null }), skipped = run(16, { conclusion: "skipped" });
     const f = api([current, skipped]), original = f.get.getMockImplementation()!;
     f.get.mockImplementation(async url => url.includes("/artifacts") ? { total_count: 0, artifacts: [] }
-      : url.includes("/jobs") ? { total_count: 1, jobs: [completedJob({conclusion:"skipped",steps:[]})] } : original(url));
+      : url.includes("/jobs") ? { total_count: 1, jobs: [completedJob({name,conclusion:"skipped",steps:[]})] } : original(url));
     expect(await planHourly(f, context)).toMatchObject({ bootstrap: true, previous: null });
+  });
+  it.each([
+    { label: "manual dispatch", runOverrides: { event: "workflow_dispatch" }, jobOverrides: {} },
+    { label: "unfinished run", runOverrides: { status: "in_progress" }, jobOverrides: {} },
+    { label: "successful job", runOverrides: {}, jobOverrides: { conclusion: "success" } },
+    { label: "failed job", runOverrides: {}, jobOverrides: { conclusion: "failure" } },
+    { label: "unfinished job", runOverrides: {}, jobOverrides: { status: "in_progress" } },
+    { label: "nonempty steps", runOverrides: {}, jobOverrides: { steps: [{ name: "Execute Alpha product lifecycle", status: "completed", conclusion: "skipped" }] } },
+    { label: "different attempt", runOverrides: {}, jobOverrides: { run_attempt: 2 } },
+    { label: "different expression", runOverrides: {}, jobOverrides: { name: `${skippedExpression} ` } },
+  ])("rejects a raw job name with $label", async ({ runOverrides, jobOverrides }) => {
+    const f = { get: vi.fn(async () => ({ total_count: 1, jobs: [completedJob({ name: skippedExpression, conclusion: "skipped", steps: [], ...jobOverrides })] })) };
+    await expect(lifecycleJob(f, run(16, runOverrides))).rejects.toThrow("zeros_dev_artifact_invalid");
   });
   it("bootstraps only when this is the first authoritative main run", async () => {
     expect(await planHourly(api([run(17, { status: "in_progress", conclusion: null })]), context)).toMatchObject({ bootstrap: true, previous: null });
@@ -117,14 +132,16 @@ describe("hourly Actions predecessor and gate policy", () => {
       : { total_count: 1, workflow_runs: [run(17, { run_attempt: 2, status: "in_progress", conclusion: null })] }) };
     await expect(hourlySnapshot(f)).rejects.toThrow("zeros_dev_artifact_invalid");
   });
-  it("does not activate from a successful workflow whose product job was skipped",async()=>{
-    const f={get:vi.fn(async(url:string)=>url.includes("/jobs")?{total_count:1,jobs:[completedJob({conclusion:"skipped",steps:[]})]}
+  it.each(["lifecycle", skippedExpression])("does not activate from a successful workflow whose %s job was skipped",async name=>{
+    const f={get:vi.fn(async(url:string)=>url.includes("/jobs")?{total_count:1,jobs:[completedJob({name,conclusion:"skipped",steps:[]})]}
       :{total_count:1,workflow_runs:[run(1)]})};
-    expect(await hourlySnapshot(f)).toMatchObject({activated:false});
+    const snapshot = await hourlySnapshot(f);
+    expect(snapshot).toMatchObject({activated:false,latest:{id:1}});
+    expect(decideHourlyGate(snapshot, true)).toMatchObject({allowed:true,code:"hourly_not_live",activated:false});
   });
-  it("does not let a disabled latest job pass after the first executed green",async()=>{
+  it.each(["lifecycle", skippedExpression])("does not let a disabled latest %s job pass after the first executed green",async name=>{
     const f={get:vi.fn(async(url:string)=>url.includes("status=success")?{total_count:2,workflow_runs:[run(17),run(1)]}
-      :url.includes("/runs/17/")?{total_count:1,jobs:[completedJob({conclusion:"skipped",steps:[]})]}
+      :url.includes("/runs/17/")?{total_count:1,jobs:[completedJob({name,conclusion:"skipped",steps:[]})]}
       :url.includes("/jobs")?{total_count:1,jobs:[completedJob()]}
       :{total_count:2,workflow_runs:[run(17),run(1)]})};
     expect(decideHourlyGate(await hourlySnapshot(f),true,Date.parse("2026-10-14T00:09:00Z"))).toMatchObject({allowed:false,code:"hourly_failed"});
@@ -136,11 +153,11 @@ describe("hourly Actions predecessor and gate policy", () => {
       : { total_count: 1, workflow_runs: [run(17, { run_attempt: 2, conclusion: "failure" })] }) };
     expect(decideHourlyGate(await hourlySnapshot(f), true, Date.parse("2026-10-14T00:09:00Z"))).toMatchObject({ activated: true, allowed: false, code: "hourly_failed" });
   });
-  it("never discards a receipt before an all-skipped predecessor",async()=>{
+  it.each(["lifecycle", skippedExpression])("never discards a receipt before an all-skipped %s predecessor",async name=>{
     const current=run(17,{status:"in_progress",conclusion:null}),rows=[current,run(16,{conclusion:"skipped"}),run(15)];
     const f=api(rows),original=f.get.getMockImplementation()!;
     f.get.mockImplementation(async url=>url.includes("/runs/16/artifacts")?{total_count:0,artifacts:[]}
-      :url.includes("/runs/16/attempts/1/jobs")?{total_count:1,jobs:[completedJob({conclusion:"skipped",steps:[]})]}
+      :url.includes("/runs/16/attempts/1/jobs")?{total_count:1,jobs:[completedJob({name,conclusion:"skipped",steps:[]})]}
       :url.includes("/runs/15/artifacts")?{total_count:1,artifacts:[{id:98,name:"zeros-dev-receipt-15-1",expired:false,size_in_bytes:100,
         digest:`sha256:${"d".repeat(64)}`,workflow_run:{id:15,head_sha:"a".repeat(40)}}]}:original(url));
     expect(await planHourly(f,context)).toMatchObject({bootstrap:false,artifactId:"98",previous:{workflowRunId:"15"}});

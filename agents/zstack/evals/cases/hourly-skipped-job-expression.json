@@ -1,0 +1,9 @@
+{
+  "id": "hourly-skipped-job-expression",
+  "kind": "replay",
+  "area": "release-dev-environment",
+  "fixedBy": "pr:519",
+  "symptom": "GitHub returned the unevaluated profile expression as the name of a skipped scheduled job. The hourly reader threw, blocking cloud PRs with hourly_unavailable before the first real canary green and preventing predecessor recovery.",
+  "rule": "Use the actual skipped-job API shape. Recognize only the exact expression on a completed scheduled run with one matching completed, skipped, zero-step job. Preserve never-started and non-green semantics, Gate 0 isolation, trusted run identity, activation, freshness and signed predecessor ownership. Check the trusted-base landing path before claiming a reviewed marker can repair an unavailable snapshot.",
+  "check": "pnpm test:git scripts/__tests__/zeros-dev-hourly-actions.test.ts scripts/__tests__/zeros-dev-hourly-gate.test.ts"
+}
