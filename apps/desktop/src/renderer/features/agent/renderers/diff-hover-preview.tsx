@@ -92,9 +92,14 @@ export const DiffHoverCard = memo(function DiffHoverCard({
     null,
   );
   const [requestedOpen, setOpen] = useState(false);
-  const open = enabled && requestedOpen;
+  const [dismissed, setDismissed] = useState(false);
+  const interactive = enabled && !dismissed;
+  const open = interactive && requestedOpen;
   useEffect(() => {
-    if (!enabled) setOpen(false);
+    if (!enabled) {
+      setOpen(false);
+      setDismissed(true);
+    }
   }, [enabled]);
   const [placement, setPlacement] = useState<DiffHoverPlacement>({
     side: "top",
@@ -166,7 +171,7 @@ export const DiffHoverCard = memo(function DiffHoverCard({
   }, [contentElement]);
 
   const handleOpenChange = useCallback((nextOpen: boolean) => {
-    if (!enabled) return;
+    if (!interactive) return;
     if (nextOpen) {
       boundaryRef.current =
         triggerRef.current?.closest(DIFF_HOVER_BOUNDARY_SELECTOR) ?? null;
@@ -176,7 +181,7 @@ export const DiffHoverCard = memo(function DiffHoverCard({
       });
     }
     setOpen(nextOpen);
-  }, [enabled]);
+  }, [interactive]);
 
   useBrowserLayoutEffect(() => {
     if (!open || !contentElement) return;
@@ -208,12 +213,15 @@ export const DiffHoverCard = memo(function DiffHoverCard({
   return (
     <HoverCard
       open={open}
-      enabled={enabled}
+      enabled={interactive}
       onOpenChange={handleOpenChange}
       openDelay={350}
       closeDelay={120}
     >
-      <HoverCardTrigger ref={triggerRef} asChild>
+      <HoverCardTrigger ref={triggerRef} asChild
+        onPointerEnter={() => setDismissed(false)}
+        onFocus={() => setDismissed(false)}
+        onClick={() => { setOpen(false); setDismissed(true); }}>
         {trigger}
       </HoverCardTrigger>
       <HoverCardContent

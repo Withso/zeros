@@ -118,10 +118,11 @@ export async function runToolPresentationSmoke({ page, check }) {
     );
   });
   const editButton = edit.getByRole("button", { name: /^Edit card.ts/ });
+  const editPill = edit.locator("[data-file-path]");
   const hoverPreview = page.locator(
     "[data-slot='hover-card-content'] [data-agent-diff-preview]",
   );
-  await editButton.hover({ position: { x: 8, y: 8 } });
+  await editPill.hover();
   await expect(hoverPreview).toHaveCount(1);
   await editButton.click({ position: { x: 8, y: 8 } });
   await expect(
@@ -130,7 +131,7 @@ export async function runToolPresentationSmoke({ page, check }) {
       .first(),
   ).toBeVisible();
   await page.mouse.move(0, 0);
-  await editButton.hover({ position: { x: 8, y: 8 } });
+  await editPill.hover();
   // Cross the documented 350ms hover delay while the edit remains expanded.
   await page.waitForTimeout(450);
   await expect(hoverPreview).toHaveCount(0);

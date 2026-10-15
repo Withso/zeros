@@ -384,9 +384,6 @@
       "apps/desktop/src/renderer/features/agent/composer-editor/pill-views.tsx": {
         "button": 1
       },
-      "apps/desktop/src/renderer/features/agent/composer-editor/pills.tsx": {
-        "button": 2
-      },
       "apps/desktop/src/renderer/features/agent/composer-editor/use-composer-editor.tsx": {
         "button": 1
       },
@@ -411,9 +408,6 @@
       },
       "apps/desktop/src/renderer/features/agent/queued-messages-card.tsx": {
         "button": 2
-      },
-      "apps/desktop/src/renderer/features/agent/renderers/event-row.tsx": {
-        "button": 1
       },
       "apps/desktop/src/renderer/features/agent/renderers/text-message.tsx": {
         "button": 1

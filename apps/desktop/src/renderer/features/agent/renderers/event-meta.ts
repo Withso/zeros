@@ -66,6 +66,8 @@ export interface EventMeta {
   /** When true, render `target` as a file/image TAG (FileTypeIcon + the
    *  bg1/border3 pill) instead of the plain command pill. */
   targetFile?: boolean;
+  /** Exact native path, kept separately from the concise displayed target. */
+  filePath?: string;
   /** Tag glyph kind when `targetFile` — file vs folder. */
   targetKind?: "file" | "folder";
   /** Optional trailing meta — line count, +/- diff numbers, duration
@@ -209,7 +211,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
 
   if (isImageGenerationTool(tool)) {
     const path = generatedImagePath(tool);
-    return { Icon: Sparkles, label: "Generate", target: path ? basename(path) : undefined, targetFile: !!path, targetKind: "file", expandable: true };
+    return { Icon: Sparkles, label: "Generate", target: path ? basename(path) : undefined, filePath: path ?? undefined, targetFile: !!path, targetKind: "file", expandable: true };
   }
 
   if (kind === "read") {
@@ -230,6 +232,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
         ? "Read image"
         : readLabel(lineCount),
       target: path ? basename(path) : tool.title,
+      filePath: path ?? undefined,
       targetFile: !!path,
       targetKind: "file",
       trailing: undefined,
@@ -252,6 +255,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       Icon: FileEdit,
       label: "Edit",
       target: path ? basename(path) : tool.title,
+      filePath: path ?? undefined,
       targetFile: !!path,
       targetKind: "file",
       trailing: diff ?? undefined,

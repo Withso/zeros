@@ -1516,7 +1516,7 @@ export async function runDiffFilesSmoke({
   });
   const preview = page.locator("[data-agent-diff-preview]");
   const placementEditRow = page
-    .locator('[data-testid="placement-edit-host"] button')
+    .locator('[data-testid="placement-edit-host"] [data-file-path]')
     .first();
   await placementEditRow.hover();
   const placementPreview = page.locator(
@@ -1563,6 +1563,7 @@ export async function runDiffFilesSmoke({
     "clear-top-preview-close",
   );
   const editRow = page.locator('[data-testid="edit-host"] button').first();
+  const editPill = page.locator('[data-testid="edit-host"] [data-file-path]');
   const editPreview = page.locator(
     '[aria-label="Diff preview for src/shared.ts"]',
   );
@@ -1570,8 +1571,11 @@ export async function runDiffFilesSmoke({
   // Enter at the row's leading edge so the just-closed placement fixture's
   // exit-animation box cannot intercept the pointer over the wide filename.
   await editRow.hover({ position: { x: 8, y: 8 } });
+  await page.waitForTimeout(450);
+  check("Edit label does not open a file preview", !(await editPreview.isVisible().catch(() => false)));
+  await editPill.hover();
   check(
-    "Edit hover opens its diff preview",
+    "Edit file pill hover opens its diff preview",
     await waitFor(
       () => editPreview.isVisible().catch(() => false),
       "edit-hover",
@@ -1637,6 +1641,30 @@ export async function runDiffFilesSmoke({
     "Read rows have no diff hover preview",
     !(await preview.isVisible().catch(() => false)),
   );
+  const readPill = page.locator('[data-testid="read-host"] [data-file-path]');
+  await readPill.click();
+  const fileOpen = await page.evaluate(() => {
+    const scope = window.__diffWorkbench();
+    return scope.tabs.find((tab) => tab.id === scope.activeId);
+  });
+  check("Read file pill opens a source tab without expanding the row", fileOpen.type === "files" && fileOpen.filePath === "src/shared.ts" && await readRow.getAttribute("aria-expanded") === "false");
+  await editPill.click();
+  const changesOpen = await page.evaluate(() => {
+    const scope = window.__diffWorkbench();
+    return scope.tabs.find((tab) => tab.id === scope.activeId);
+  });
+  check("Edit file pill opens Changes on the same file without expanding the row", changesOpen.type === "changes" && changesOpen.filePath === "src/shared.ts" && await editRow.getAttribute("aria-expanded") === "false");
+  await expect(editPreview).toBeHidden();
+  const imagePill = page.locator('[data-testid="image-read-host"] [data-file-path]');
+  await imagePill.hover();
+  await expect(page.locator("[data-image-hover-preview] img")).toBeVisible();
+  await imagePill.click();
+  const imageOpen = await page.evaluate(() => {
+    const scope = window.__diffWorkbench();
+    return scope.tabs.find((tab) => tab.id === scope.activeId);
+  });
+  check("Read image pill previews on hover and opens its own file tab", imageOpen.type === "files" && imageOpen.filePath === "art/logo.svg");
+  await page.getByTestId("parking-lot").hover();
 
   const footerPill = page.locator('[data-testid="footer-host"] button').first();
   await footerPill.focus();
