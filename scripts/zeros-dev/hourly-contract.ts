@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Gate0Schema } from "./gate0-contract";
+import { InfrastructureSchema } from "./infrastructure-contract";
 
 export const HourlySchema = z.object({
   version: z.literal(1), workflowRunId: z.string().regex(/^[1-9][0-9]{0,19}$/),
@@ -8,6 +9,7 @@ export const HourlySchema = z.object({
   // Absent on the original hourly receipts. A manual rehearsal shares exact
   // cleanup ownership but never supplies the hourly merge-gate result.
   rehearsal: Gate0Schema.optional(),
+  infrastructure: InfrastructureSchema.optional(),
   credentials: z.array(z.object({
     agent: z.enum(["claude", "codex", "cursor"]), id: z.string().uuid(), operationId: z.string().uuid(),
     kind: z.enum(["claude-api-key", "claude-setup-token", "codex-api-key", "codex-chatgpt", "cursor-api-key"]),
@@ -20,4 +22,6 @@ export const HourlySchema = z.object({
     sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).max(3),
   activeWindows: z.array(z.object({ readyObservedAt: z.string().datetime(), workCompletedAt: z.string().datetime(),
     durationMs: z.number().nonnegative().finite() }).strict()).max(6),
-}).strict().refine(value => value.rehearsal ? !value.complete || value.rehearsal.complete : value.activeWindows.length <= 2);
+}).strict().refine(value => value.infrastructure
+  ? !value.complete && !value.rehearsal && value.credentials.length === 0 && value.histories.length === 0
+  : value.rehearsal ? !value.complete || value.rehearsal.complete : value.activeWindows.length <= 2);

@@ -43,7 +43,9 @@ export function actionsMaterials(env: Readonly<Record<string, string | undefined
 }
 
 export class HourlyCredentials {
-  constructor(private readonly api: ProductApi, private readonly materials: ActionsMaterials) {}
+  // No new model material is required to retire previously signed credential
+  // debt. Automated agent work awaits the distinct release-check runner.
+  constructor(private readonly api: ProductApi, private readonly materials?: ActionsMaterials) {}
   private async root(): Promise<string> {
     return `/v1/organizations/${(await this.api.session.fixture()).organizationId}/agent-connections`;
   }
@@ -54,6 +56,7 @@ export class HourlyCredentials {
     return value;
   }
   async install(handle: RunHandle, signal: AbortSignal): Promise<void> {
+    if (!this.materials) throw new ZerosDevError("release_checks_unavailable");
     const hourly = handle.run.hourly;
     if (!hourly || hourly.credentials.length) throw new ZerosDevError("operation_conflict");
     await this.api.session.whoami();

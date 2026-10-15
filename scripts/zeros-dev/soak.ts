@@ -8,6 +8,7 @@ import type { EvidenceEvent } from "./evidence";
 import { beforeDeadline } from "./transport";
 import type { Gate0 } from "./gate0-contract";
 import type { CleanupSummary } from "./cleanup-contract";
+import { OWNER_SECTION7_COVERAGE, type Infrastructure } from "./infrastructure-contract";
 
 const HOUR = 3_600_000, DAY = 24 * HOUR;
 const runSchema = z.object({ id: z.number().int().positive().safe(), run_number: z.number().int().positive().safe(),
@@ -17,7 +18,7 @@ const runSchema = z.object({ id: z.number().int().positive().safe(), run_number:
   created_at: z.string().datetime(), repository: z.object({ full_name: z.literal("Withso/zeros") }), head_repository: z.object({ full_name: z.literal("Withso/zeros") }) });
 export type SoakWorkflowRun = z.infer<typeof runSchema>;
 type Api = { get(endpoint: string): Promise<unknown> };
-type Profile = "hourly" | "gate0" | "unknown";
+type Profile = "hourly" | "gate0" | "infrastructure" | "unknown";
 type Attempt = {
   workflowRunId: string; attempt: number; sourceSha: string; createdAt: string; completedAt?: string;
   profile: Profile; status: "passed" | "failed" | "incomplete";
@@ -25,10 +26,11 @@ type Attempt = {
   artifactSha256?: string; firstFailure?: { phase: EvidenceEvent["phase"] | "orchestration"; code: ErrorCode };
   phases?: EvidenceEvent[]; admission?: ReturnType<typeof summarizeSoakEvidence>["admission"];
   rehearsal?: Gate0;
+  infrastructure?: Infrastructure;
   cleanup?: CleanupSummary;
 };
 export type SoakOptions = { api: Api; read(run: SoakWorkflowRun, artifact: Record<string, unknown>): Promise<unknown>;
-  trust: PublicHourlyTrust; end: string; now?: () => number; signal?: AbortSignal };
+  trust: PublicHourlyTrust; end: string; profile?: "hourly" | "infrastructure"; now?: () => number; signal?: AbortSignal };
 const collection = (value: unknown, key: string) => {
   const shape = z.object({ total_count: z.number().int().nonnegative().safe(), [key]: z.array(z.unknown()).max(100) }).parse(value);
   const rows = shape[key] as unknown[];
@@ -39,6 +41,8 @@ const collection = (value: unknown, key: string) => {
 /** A historical report only. Never dispatch, rerun, log in, select credentials,
  * create a workspace or read .env.agent to collect public Actions evidence. */
 export async function collectSoak(options: SoakOptions) {
+  const profile = options.profile ?? "hourly";
+  if (profile !== "hourly" && profile !== "infrastructure") throw new ZerosDevError("invalid_request");
   const now = (options.now ?? Date.now)(), end = Date.parse(options.end), trust = PublicHourlyTrustSchema.parse(options.trust);
   if (!Number.isSafeInteger(end) || end % HOUR !== 0 || end > now || end < DAY) throw new ZerosDevError("invalid_request");
   const start = end - DAY, from = new Date(start).toISOString(), to = new Date(end).toISOString();
@@ -79,7 +83,7 @@ export async function collectSoak(options: SoakOptions) {
           run.head_sha !== latest.head_sha || run.created_at !== latest.created_at) throw new ZerosDevError("artifact_invalid");
         if (run.status !== "completed") { entry.code = "run_incomplete"; continue; }
         const job = await lifecycleJob(api, run);
-        entry.profile = job.name === "gate0" ? "gate0" : "hourly";
+        entry.profile = job.name === "gate0" ? "gate0" : job.name === "infrastructure" ? "infrastructure" : job.name === "lifecycle" ? "hourly" : "unknown";
         if (!Number.isFinite(Date.parse(job.completed_at)) || Date.parse(job.completed_at) > now + 60_000) throw new ZerosDevError("artifact_invalid");
         entry.completedAt = job.completed_at;
         if (Date.parse(job.completed_at) > end) { entry.code = "run_incomplete"; continue; }
@@ -97,20 +101,23 @@ export async function collectSoak(options: SoakOptions) {
         const primary = payload.runs.find(row => row.runId === payload.result.runId);
         if (Date.parse(payload.completedAt) < Date.parse(run.created_at) - 60_000 ||
           Date.parse(payload.completedAt) > Date.parse(job.completed_at) + 60_000 ||
-          primary && (entry.profile === "gate0") !== Boolean(primary.hourly?.rehearsal)) throw new ZerosDevError("artifact_invalid");
+          (entry.profile === "infrastructure") !== (payload.schema === "zeros.dev-infrastructure/v1") ||
+          primary && ((entry.profile === "gate0") !== Boolean(primary.hourly?.rehearsal) ||
+            (entry.profile === "infrastructure") !== Boolean(primary.hourly?.infrastructure))) throw new ZerosDevError("artifact_invalid");
         entry.artifactSha256 = artifact.digest.slice("sha256:".length);
-        if (payload.schema === "zeros.dev-hourly/v2") entry.cleanup = payload.cleanup;
+        if (payload.schema !== "zeros.dev-hourly/v1") entry.cleanup = payload.cleanup;
         const passed = payload.result.success && run.conclusion === "success" &&
-          (entry.profile === "hourly" ? productCompleted(job) : job.conclusion === "success");
+          productCompleted(job, entry.profile === "hourly" ? "lifecycle" : entry.profile);
         entry.status = passed ? "passed" : "failed"; entry.code = passed ? null : payload.result.code ?? "internal";
         const first = primary?.evidence.find(row => row.outcome === "failed");
         if (!passed) entry.firstFailure = { phase: first?.phase ?? "orchestration", code: first?.code ?? entry.code! as ErrorCode };
         if (primary) {
           entry.phases = primary.evidence;
           if (primary.hourly?.rehearsal) entry.rehearsal = primary.hourly.rehearsal;
+          if (primary.hourly?.infrastructure) entry.infrastructure = primary.hourly.infrastructure;
           const sample = { run: primary, result: payload.result, startedAt: run.created_at, completedAt: job.completed_at };
           entry.admission = summarizeSoakEvidence([sample]).admission;
-          if (entry.profile === "hourly") samples.push(sample);
+          if (entry.profile === profile) samples.push(sample);
         }
       } catch (error) { entry.status = "incomplete"; entry.code = error instanceof ZerosDevError ? error.code : "artifact_invalid"; }
     }
@@ -118,16 +125,19 @@ export async function collectSoak(options: SoakOptions) {
   }
   const slots = Array.from({ length: 24 }, (_, index) => {
     const begins = start + index * HOUR, ends = begins + HOUR;
-    const rows = attempts.filter(row => row.profile !== "gate0" && Date.parse(row.createdAt) >= begins && Date.parse(row.createdAt) < ends);
+    const rows = attempts.filter(row => (row.profile === profile || row.profile === "unknown") && Date.parse(row.createdAt) >= begins && Date.parse(row.createdAt) < ends);
     const status = rows.some(row => row.status === "failed") ? "failed" : !rows.length ? "missing"
-      : rows.some(row => row.status !== "passed" || row.profile !== "hourly") ? "incomplete" : "passed";
+      : rows.some(row => row.status !== "passed" || row.profile !== profile) ? "incomplete" : "passed";
     return { startedAt: new Date(begins).toISOString(), completedAt: new Date(ends).toISOString(), status,
       executions: rows.map(row => ({ workflowRunId: row.workflowRunId, attempt: row.attempt })) };
   });
-  const metrics = summarizeSoakEvidence(samples, state !== "complete" || attempts.some(row => row.profile !== "gate0" && row.status === "incomplete"));
+  const metrics = summarizeSoakEvidence(samples, state !== "complete" || attempts.some(row =>
+    (row.profile === profile || row.profile === "unknown") && row.status === "incomplete"));
   const status = slots.some(row => row.status === "failed") ? "failed" : state === "complete" && slots.every(row => row.status === "passed") &&
     metrics.transport.coverage === "complete" && metrics.admission.coverage === "complete" && metrics.active.coverage === "complete" ? "passed" : "incomplete";
-  return { schema: "zeros.dev-soak/v1" as const, generatedAt: new Date(now).toISOString(), window: { from, to, hours: 24 }, status, collection: state,
+  return { schema: profile === "infrastructure" ? "zeros.dev-infrastructure-soak/v1" as const : "zeros.dev-soak/v1" as const,
+    ...(profile === "infrastructure" ? { coverage: OWNER_SECTION7_COVERAGE } : {}),
+    generatedAt: new Date(now).toISOString(), window: { from, to, hours: 24 }, status, collection: state,
     publicKeySha256: createHash("sha256").update(Buffer.from(trust.publicKey, "base64url")).digest("hex"), slots, attempts, metrics,
     external: { idleDatabase: "unverified", databaseCpu: "unverified", actorConfirm: "unverified", controlPlaneEgress: "unverified", nativeUi: "unverified", betaLocal: "unverified" } };
 }

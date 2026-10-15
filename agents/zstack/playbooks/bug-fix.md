@@ -8,6 +8,10 @@
    For a scheduler, drive the real producer and consumer with a fake clock:
    assert no scheduled work after the queue drains, not just no requests.
    Cover records arriving during a pending flight and an open failure circuit.
+   For detached terminal proofs, exercise the real serialized terminal grid
+   and replay/live boundary. Persist allocation intent before starting work,
+   refuse uncertain restarts, and recheck output after the file read settles.
+   Bounded native output proves only the native task, never an agent transcript.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
    For worker failures, retain the first closed diagnostic before cleanup and

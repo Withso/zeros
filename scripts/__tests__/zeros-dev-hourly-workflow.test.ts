@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
-import { load } from "js-yaml";
+
+const { load } = createRequire(import.meta.url)("js-yaml") as { load(input: string): unknown };
 
 describe("hourly fixture workflow authority", () => {
   it("refreshes the required status from trusted main on PR, canary and freshness events without product secrets", () => {
@@ -23,28 +25,30 @@ describe("hourly fixture workflow authority", () => {
     expect(workflow.concurrency).toEqual({ group: "zeros-dev-alpha-fixture", "cancel-in-progress": false });
     const job = workflow.jobs.lifecycle;
     expect(Object.keys(workflow.jobs)).toEqual(["lifecycle"]);
-    expect(job["runs-on"]).toBe("ubuntu-24.04"); expect(job["timeout-minutes"]).toBe("${{ inputs.profile == 'gate0' && 135 || 15 }}");
+    expect(job["runs-on"]).toBe("ubuntu-24.04"); expect(job["timeout-minutes"]).toBe("${{ inputs.profile == 'gate0' && 135 || ((inputs.profile == 'infrastructure' || (github.event_name == 'schedule' && vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED == 'true')) && 65 || 15) }}");
     expect(job.if).toContain("github.ref == 'refs/heads/main'"); expect(job.if).toContain("github.repository == 'Withso/zeros'");
     expect(workflow.permissions).toEqual({ contents: "read", actions: "read" });
   });
   it("admits a separate owner-enabled manual Gate 0 profile under the same fixture lock", () => {
     const workflow = load(readFileSync(".github/workflows/zeros-dev-e2e.yml", "utf8")) as any;
-    expect(workflow.on.workflow_dispatch.inputs.profile).toEqual({ description: "Hourly canary or Gate 0 rehearsal", type: "choice", required: true,
-      default: "hourly", options: ["hourly", "gate0"] });
+    expect(workflow.on.workflow_dispatch.inputs.profile).toEqual({ description: "Hourly agents, full Gate 0, or infrastructure only", type: "choice", required: true,
+      default: "infrastructure", options: ["hourly", "gate0", "infrastructure"] });
     const job = workflow.jobs.lifecycle;
-    expect(job.name).toBe("${{ inputs.profile == 'gate0' && 'gate0' || 'lifecycle' }}");
-    expect(job.env.ZEROS_DEV_PROFILE).toBe("${{ inputs.profile || 'hourly' }}");
-    expect(job.if).toContain("github.event_name == 'workflow_dispatch' && inputs.profile == 'gate0' && vars.ZEROS_DEV_GATE0_ENABLED == 'true'");
+    expect(job.name).toBe("${{ (inputs.profile == 'infrastructure' || (github.event_name == 'schedule' && vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED == 'true')) && 'infrastructure' || (inputs.profile == 'gate0' && 'gate0' || 'lifecycle') }}");
+    expect(job.env.ZEROS_DEV_PROFILE).toBe("${{ github.event_name == 'schedule' && vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED == 'true' && 'infrastructure' || inputs.profile || 'hourly' }}");
+    expect(job.if).toContain("(inputs.profile == 'gate0' || inputs.profile == 'infrastructure') && vars.ZEROS_DEV_GATE0_ENABLED == 'true'");
+    expect(job.if).toContain("vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED == 'true'");
     expect(job.if).toContain("vars.ZEROS_DEV_E2E_ENABLED == 'true'");
     expect(job.steps.filter((step: any) => JSON.stringify(step.env ?? {}).includes("secrets.")).map((step: any) => step.name))
       .toEqual(["Execute Alpha product lifecycle"]);
   });
-  it("separates fixture secrets from agent secrets, preserves prior receipts and uploads only signed redacted output", () => {
+  it("supplies only fixture and cleanup secrets, preserves prior receipts and uploads only signed redacted output", () => {
     const workflow = load(readFileSync(".github/workflows/zeros-dev-e2e.yml", "utf8")) as any;
     const steps = workflow.jobs.lifecycle.steps;
     const run = steps.find((step: any) => step.name === "Execute Alpha product lifecycle");
     expect(run.env.ZEROS_DEV_FIXTURE_B64).toBe("${{ secrets.ZEROS_DEV_FIXTURE_B64 }}");
-    expect(run.env.AGENT_RUNTIME_CURSOR_API_KEY).toBe("${{ secrets.AGENT_RUNTIME_CURSOR_API_KEY }}");
+    expect(Object.keys(run.env).some(key => key.startsWith("AGENT_RUNTIME_"))).toBe(false);
+    expect(run.env.ZEROS_DEV_CLEANUP_HANDOFF_B64).toBe("${{ secrets.ZEROS_DEV_CLEANUP_HANDOFF_B64 }}");
     expect(run.run).toBe("pnpm exec tsx scripts/zeros-dev/hourly-main.ts");
     const restore = steps.find((step: any) => step.name === "Restore exact predecessor receipt");
     expect(restore.with["artifact-ids"]).toBe("${{ steps.plan.outputs.artifact_id }}");

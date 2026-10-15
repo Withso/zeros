@@ -324,7 +324,7 @@ enrolled device key** used by Actions:
 
 ```sh
 pnpm exec tsx scripts/zeros-dev/cli.ts cleanup handoff --runs <uuid>,<uuid> --output /absolute/private/fixture-cleanup.b64
-gh variable set ZEROS_DEV_CLEANUP_HANDOFF_B64 --repo Withso/zeros < /absolute/private/fixture-cleanup.b64
+gh secret set ZEROS_DEV_CLEANUP_HANDOFF_B64 --repo Withso/zeros < /absolute/private/fixture-cleanup.b64
 ```
 
 The export authenticates the original local receipts and performs only the
@@ -334,14 +334,23 @@ exact cleanup bindings and original receipt digests, with no password, device
 private key, provider credential, transcript or prompt. Do not hand off an
 active or evidence-held run. Missing retirement proof refuses the export.
 
-The optional Actions variable is a cleanup-only handoff, separate from the
+The optional Actions secret is a cleanup-only handoff, separate from the
 fixture secret. Imports cannot build, allocate, wake, stop, issue agent grants,
 connect a runtime, clean local credentials or supply a successful hourly
 result. Actions refreshes proof before admitting another workspace. It carries
 the consumed manifest digest and run UUIDs even after physical deletion, so an
-unchanged variable cannot resurrect work. A different manifest or a collision
+unchanged secret cannot resurrect work. A different manifest or a collision
 with existing intent is refused. Export the intended bootstrap set together;
-the owner may remove the variable after its consumption is checkpointed.
+the owner may remove the secret after its consumption is checkpointed.
+Use a secret even though the projection contains no provider credentials:
+Actions prints step environment values before the process can add masks.
+For an existing variable, upload the same verified private file as the secret,
+then remove the variable; never regenerate a consumed manifest. GitHub secrets
+cannot be read back: compare the locally verified digest with the consumed
+handoff digest in the device-signed Actions receipt. Do not print the base64
+value or put it in an argument. A module startup failure precedes masking and
+may leave no receipt; retain that first failure and require explicit reviewed
+recovery instead of silently skipping its predecessor.
 The local and Actions invocations still share fixture funding, Computer state
 and provider capacity, so keep live fixture work serialized by the operator.
 
@@ -440,7 +449,8 @@ remain intact until its inventory is complete and exact cleanup is approved.
 ## Hourly E2E in Actions
 
 `zeros-dev-e2e.yml` runs on main, hourly at minute 23 or by dispatch, with one
-serialized Alpha fixture and a fifteen-minute job limit. It uses the normal product
+serialized Alpha fixture. Its explicit profiles have separate coverage and
+deadlines; the dispatch default is `infrastructure`. It uses the normal product
 API and the desktop's RuntimeClient. Local Personal, organization-local and
 Beta/Production paths are not selected.
 
@@ -462,15 +472,16 @@ fixture values, device private-key envelope and fields, and native auth tokens
 before validating or writing the fixture. Both raw and JSON-escaped values are
 masked. Mask commands never enter the evidence writer or signed receipt.
 
-The execution step also receives the existing dedicated-test
-`AGENT_RUNTIME_ANTHROPIC_API_KEY`, `AGENT_RUNTIME_CLAUDE_CODE_OAUTH_TOKEN`,
-`AGENT_RUNTIME_OPENAI_API_KEY`, `AGENT_RUNTIME_CODEX_AUTH_JSON` and
-`AGENT_RUNTIME_CURSOR_API_KEY`. These stay in memory, never in `.env.agent`.
-API keys take precedence over native credentials to avoid rotating shared
-test accounts unnecessarily. The normal product credential and org-connection
-routes install fresh IDs for the run, select only the existing canary smoke
-models, and disconnect/revoke exactly those IDs afterward. A foreign selection
-is never overwritten, including during cleanup.
+The owner chose infrastructure automation plus a separate owner §7 agent/UI
+test. This workflow receives **no `AGENT_RUNTIME_*` credentials** and never asks
+for new API keys. Full `hourly` and `gate0` agent installation currently refuses
+with `release_checks_unavailable`; do not enable hourly until the separately
+reviewed v4 release-check runner supplies real agent coverage. Its future
+authority comes from existing Settings **Use for release checks** consent in
+the designated owner's organization, without copying credentials or lending
+owner authority to the fixture. Current runtime qualification is credential-free
+compatibility smoke, not model-turn evidence. Exact older signed credential
+debt remains cleanable without new material; foreign selections stay untouched.
 
 Before enabling `ZEROS_DEV_E2E_ENABLED=true`, configure the required status and
 owner-reviewed repair procedure in [CI](ci.md#hourly-zeros-dev-merge-requirement).
@@ -506,6 +517,17 @@ or change the fixture device to bypass this check. The owner must reconcile the
 exact recorded operation through the normal product path when automatic
 recovery cannot prove its outcome.
 
+The startup repair includes one explicit owner-reviewed prestart incident in
+`scripts/zeros-dev/prestart-recovery.mjs`. Its immutable source failed module
+transformation before the entrypoint could initialize a product client. The
+planner may cross **only that run, attempt, source and job**, after GitHub reports
+the exact failed execution/upload steps and no matching artifact. It carries
+`prestartRecovery` into the signed receipt and successor chain. Any mismatch or
+other missing receipt still blocks. This record grants neither cleanup authority
+nor a pass, and the original failed run stays red. Review this record with the
+owner's startup-fix merge; there is no reset variable, generic error-text bypass,
+deleted history or fabricated old receipt.
+
 After that, the scenario creates one `zd-` workspace, proves its Git checkout
 and writes a harmless marker, sends one minimal prompt to each agent, then
 stops and resumes. It checks the marker and hashes of the three durable chat
@@ -535,7 +557,7 @@ Agents can dispatch and inspect the canary with the normal release automation
 identity; neither operation needs provider keys in the checkout:
 
 ```sh
-pnpm agent:gh workflow run zeros-dev-e2e.yml --ref main
+pnpm agent:gh workflow run zeros-dev-e2e.yml --ref main -f profile=hourly
 pnpm agent:gh run list --workflow zeros-dev-e2e.yml --branch main --limit 5
 pnpm agent:gh run view <workflow-run-id> --json status,conclusion,jobs,url
 pnpm agent:gh run download <workflow-run-id> --name zeros-dev-receipt-<workflow-run-id>-<attempt> --dir <private-scratch>
@@ -552,80 +574,90 @@ complete product cleanup before rotating the fixture device or retiring its
 dedicated credentials. No successful live run or 24-hour soak is implied by
 the synthetic workflow tests.
 
-## Gate 0 rehearsal in Actions
+## Infrastructure rehearsal and soak in Actions
 
-The owner enables `ZEROS_DEV_GATE0_ENABLED=true` and dispatches the same trusted
-main workflow with `profile=gate0`:
+Owner option B separates infrastructure measurement from the owner's real
+agent/UI §7 test. Enable `ZEROS_DEV_GATE0_ENABLED=true` and dispatch:
 
 ```sh
-pnpm agent:gh workflow run zeros-dev-e2e.yml --ref main -f profile=gate0
+pnpm agent:gh workflow run zeros-dev-e2e.yml --ref main -f profile=infrastructure
 ```
 
-Run it after the corrected runtime qualifies and the held incident workspace
-has been released by its investigator. The rehearsal uses the same fixture
-concurrency group, signed predecessor recovery, normal product routes and
-Actions-only provider credentials as the hourly canary. It creates one new
-allowlisted workspace, installs only the approved test account credentials and
-retains every intent before execution. An uncertain predecessor blocks it.
+First migrate `ZEROS_DEV_CLEANUP_HANDOFF_B64` from a variable to an Actions
+**secret**, following the cleanup handoff instructions above. Reuse the same
+verified manifest; do not regenerate it after consumption. Delete the old
+variable. Secret masking is installed by Actions before it logs the step
+environment; JavaScript also masks it before fixture initialization. No raw
+manifest, password, key or token is evidence. Keep `ZEROS_DEV_E2E_ENABLED`
+disabled while automated agent coverage is unavailable.
 
-The separate `gate0` job name keeps rehearsals out of hourly activation and
-admission. The hourly profile retains its fifteen-minute job limit; the manual
-profile allows 135 minutes, with an 8,000-second overall allowance starting
-before installation. Computer preparation remains bounded at 300 seconds with
-at most one build. Individual connect, create, stop and resume deadlines stay
-unchanged, and cleanup retains its separate 140-second reserve.
+After the owner reviews the startup incident record, the planner preserves it
+as `prestartRecovery`; no rerun or manual deletion of the failed attempt is
+needed. It still authenticates/imports any real preceding signed receipt and
+the cleanup-only local handoff. An unknown fixture workspace blocks admission.
 
-The signed `hourly.rehearsal` proof covers these phases:
+The `infrastructure` job shares the fixture lock and exact cleanup allowlist.
+It refreshes the qualified Computer at most once, creates one workspace, checks
+terminal/file continuity across three stop/wake cycles, and requires one setup
+claim for create and each wake. It then starts an ordinary resident shared PTY
+task. Intent, exact session, run/fixture, boot/writer/funding scope, nonce and
+program hash are signed before installation/allocation; uncertain starts are
+never repeated. The helper detaches its observers before the client disconnects.
 
-- `model_eligibility` compares installed native providers and the selected
-  smoke models with the exact activated boot's funding-owner availability.
-  Missing, stale or unavailable eligibility fails closed. This is the product
-  input used by cloud model selection; native menu rendering and its reason/
-  action presentation remain part of the owner's desktop check.
-- `workload` spans at least sixty monotonic minutes. Thirteen sparse turns
-  rotate Claude, Codex and Cursor using the canary's minimal models and normal
-  Auto permissions. Each turn creates one small fixture file, verifies its
-  contents through the terminal and hashes its durable history. Permission
-  requests remain terminal; the harness never fabricates an approval.
-- Three stop/resume cycles record stop, ready and usable timings, plus file
-  and history continuity. Create and every wake require a successful setup
-  observation with exactly one claim. `setup_retried` and
-  `setup_observation_unavailable` retain the observed setup and keep the
-  rehearsal red. Any unplanned transport loss during work is terminal.
-- `detached_auth` refreshes through the existing session contract and records
-  only verified remaining validity. A short grant gives `detached_auth_window`.
-  A normal Codex turn runs a bounded 31-minute Python task. `detached_start`
-  proves its exact durable dispatch and a live heartbeat before disconnect.
-  `detached_wait` closes all device transport for at least thirty minutes,
-  without CP polling, session refresh, actor retirement or a hidden client.
-  The VM continues its ordinary authority checks against a healthy CP.
-- `detached_history` reconnects to the same boot/funding/execution identity
-  and requires the original terminal receipt, contiguous event replay,
-  retained transcript prefix and a complete monotonic VM heartbeat journal.
-  It never sends the task twice. Transcript data, prompts, file contents,
-  runtime destinations and credential values stay out of public artifacts;
-  receipts contain counts, durations and hashes.
+`detached_wait` measures 31 monotonic minutes with all client transports closed,
+without CP polling, token refresh or actor retirement. Auth headroom is verified
+before detach. Reconnect must reach the same boot, authority, writer, funding,
+root and original terminal. `detached_native_proof` checks untruncated bounded
+terminal replay, the retained first row and all 32 uniquely numbered, fsynced
+file/output rows, 45–90-second gaps, over 30 minutes of VM work and an unchanged
+program. The task retains its original 40-minute expiry; finish waits at most
+120 seconds. A replacement, missing/duplicate output or truncated replay fails.
+Public PTY replay has no event cursor: this is **native terminal/task output
+coverage**, never an agent transcript or cloud-event completeness claim.
 
-Actual socket attempts and authenticated ready events supply separate direct
-and relay counters. Closed authority reasons, losses and admission retries are
-recorded without using throttled logs as a denominator. Missing observation
-support remains unavailable. The first failed phase survives later disconnect,
-cleanup or logout failures. The same signed receipt carries pending cleanup
-to the next run.
+The original closed failure is checkpointed before bounded PTY/product cleanup.
+Scope changes forbid killing a successor PTY. Normal workspace deletion remains
+the fallback; compute retirement may pass with storage pending and
+`deletionConfirmed=false`, under the existing backlog limits. The final
+Computer pin is rechecked. Phases, UTC endpoints, measured active/detached
+durations and actual transport/retry counters remain in the signed artifact.
 
-Schedule this longer rehearsal before starting the clean 24-hour soak. It
-occupies the single fixture for roughly 95–120 minutes and can delay an hourly
-run beyond the unchanged two-hour freshness limit. It supplies no freshness
-exemption. The owner still verifies native cached-chat presentation, menu
-actions, the actual laptop-close experience and Beta Local behavior. A Linux
-rehearsal does not measure a CP outage or arbitrary expired-session continuity.
-UTC active windows and verified duration are available for the backend egress
-correlation; they cover completed workload observations, not billable VM time.
+The distinct `zeros.dev-infrastructure/v1` artifact and
+`zeros.dev-infrastructure-result/v1` result require these coverage values:
+`agents`, `accountModels`, `agentHistory` and `detachedAgent` are all
+`not_covered_owner_section7` — **not covered (owner §7 test)**. Infrastructure
+cannot set `hourly.complete`, activate/pass `zeros/dev-e2e`, fill an hourly soak
+slot or claim full Gate 0. The owner separately verifies an hour of Claude,
+Codex and Cursor work (§7.1), usable-account model menus (§7.2), cached chat
+during wakes (§7.3), and a long agent task with complete transcript (§7.4).
 
-Rollback disables `ZEROS_DEV_GATE0_ENABLED`. Keep this version of the receipt
-reader and the signed predecessor until product cleanup completes; older strict
-readers cannot interpret rehearsal fields. Local Personal, organization-local,
-owner switching and Beta/Production behavior retain their existing paths.
+The job allows 65 minutes, with a 3,800-second overall budget starting before
+dependency installation. Computer preparation keeps its 300-second bound;
+connect/create/stop requests keep their 30-second bounds, workspace observation
+180 seconds, and cleanup a separate 140-second reserve. The normal run is
+shorter than an hour; queued schedules remain serialized and never reset the
+budget. Missing telemetry remains unavailable.
+
+After the first infrastructure rehearsal, enable
+`ZEROS_DEV_INFRASTRUCTURE_ENABLED=true` for the minute-23 schedule. This selects
+infrastructure even if the old hourly opt-in was set, without an hourly pass.
+Keep Alpha source/runtime fixed during the owner's 24-hour infrastructure soak.
+Collect with `--profile infrastructure` below. Disable the infrastructure flag
+to stop the schedule and the Gate 0 flag to stop manual rehearsals. Keep signed
+cleanup debt and this reader until retirement finishes. The v4 release-check
+bridge stays on branches during the soak and lands afterward.
+
+## Full agent Gate 0 rehearsal contract
+
+The `gate0` agent profile remains unavailable pending the v4 release-check
+runner; selecting it currently refuses with `release_checks_unavailable`.
+Existing signed `hourly.rehearsal` fields remain readable and strict. A future
+bridge must compose independently named fixture lifecycle and owner-context
+agent results, retain their original deadlines and first failures, and prove
+one hour of real three-agent work, account-usable models, cached chat continuity
+and a detached long agent task with complete transcript. An automation permit
+cannot substitute for human-session expiry behavior or live model-menu UI
+checks. Infrastructure/native proof never fills those agent fields.
 
 ## Collect a 24-hour evidence pack
 
@@ -635,7 +667,7 @@ Actions-read token in `GITHUB_TOKEN` or `GH_TOKEN`. It never reads `.env.agent`,
 selects product credentials, dispatches work or contacts the CP/VM.
 
 ```sh
-pnpm exec tsx scripts/zeros-dev/soak-cli.ts \
+pnpm exec tsx scripts/zeros-dev/soak-cli.ts --profile infrastructure \
   --end <completed-UTC-hour> \
   --device-id <fixture-device-uuid> \
   --public-key <Ed25519-base64url-public-key> \
@@ -656,6 +688,14 @@ completed hourly evidence; missing, unfinished, expired or unverifiable evidence
 stays incomplete. Work finishing after the selected window cannot backfill it.
 Every earlier attempt is retained, so a green rerun does not erase a red run.
 Manual rehearsals have their own proof and cannot fill an hourly slot.
+
+`--profile infrastructure` selects the independently signed infrastructure
+profile and emits `zeros.dev-infrastructure-soak/v1`. Every selected hour needs
+an executed infrastructure run with valid native proof and cleanup; hourly and
+full Gate 0 runs cannot fill its slots. Every red attempt remains red after a
+successful retry. Agent/UI exclusions are mandatory in this report. A passing
+infrastructure window is the owner's option B soak, not a full agent/hourly
+result. Omit the flag or use `--profile hourly` only for the full hourly scope.
 
 The pack includes phase distributions, the first failed stage/code, setup and
 connection diagnostics, UTC active windows, direct/relay counts and distinct

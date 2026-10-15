@@ -10,6 +10,11 @@ import type { RunHandle } from "../zeros-dev/receipts";
 import { AlphaTransport } from "../zeros-dev/transport";
 import { parseFixture } from "../zeros-dev/config";
 import type { AdmissionObservation } from "../zeros-dev/admission-observation";
+import { runInfrastructure } from "../zeros-dev/infrastructure";
+import { initialInfrastructure } from "../zeros-dev/infrastructure-contract";
+import { Evidence } from "../zeros-dev/evidence";
+import { ZerosDevError } from "../zeros-dev/errors";
+import { computerBuild } from "../../apps/desktop/src/renderer/features/settings/__tests__/cloud-computer-v2-fixtures";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -250,4 +255,57 @@ describe("zeros-dev shared admission, agent and terminal loopback", () => {
     await expect(runtime.terminal(f.handle, { script: "printf fixture" })).rejects.toThrow("zeros_dev_command_uncertain");
     expect(f.handle.run.terminals?.[0]?.state).toBe("uncertain");
   });
+});
+
+it("keeps the admitted runtime alive when its completed connect-phase deadline expires during file work", async () => {
+  const f = await fixture();
+  const timeouts: Array<{ ms: number; controller: AbortController }> = [];
+  const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
+    const controller = new AbortController(); timeouts.push({ ms, controller }); return controller.signal;
+  });
+  f.handle.run.hourly = { version: 1, workflowRunId: "17", attempt: 1, sourceSha: "b".repeat(40),
+    credentials: [], histories: [], activeWindows: [], complete: false, infrastructure: initialInfrastructure() };
+  const active = computerBuild(), target = { runtimeId: `r1-${"c".repeat(64)}`, baseImageId: "fixture-base" };
+  let terminalSucceeded = false;
+  const api = {
+    assertFixtureEmpty: async () => {}, ensureRepository: async () => {},
+    computerState: async () => ({ active }), readComputerRuntime: async () => ({ ...target, selected: target }),
+    verifyComputerRuntime: async () => "confirmed", buildComputer: async () => {}, waitComputer: async () => active,
+    createWorkspace: async () => {
+      f.handle.run.create = { key: randomUUID(), body: { name: `zd-${f.handle.run.runId}`,
+        repository: { forge: "github.com", owner: "test-owner", name: "test-repo", revision: "main", githubInstallationId: randomUUID() } },
+        result: { id: f.workspace.id, createdBy: randomUUID(), createdAt: new Date().toISOString(), generation: 1 } };
+    },
+    waitWorkspace: async (_h: unknown, _state: unknown, _signal: unknown, observe?: (value: unknown) => void) => {
+      observe?.({ attempt: 1, claimCount: 1, state: "succeeded", errorCode: null });
+    },
+    // End this review probe immediately after the first successful file check.
+    lifecycle: async () => { throw new ZerosDevError("command_uncertain"); },
+    cleanup: async () => { f.handle.run.deletionConfirmed = true; return { planned: 1, confirmed: 1 }; },
+  };
+  try {
+    const result = await runInfrastructure({ handle: f.handle, api,
+      evidence: new Evidence(f.handle.run.runId, () => {}),
+      connect: async (_run: unknown, signal: AbortSignal) => {
+        const connectPhase = timeouts.filter(row => row.ms === 30_000).at(-1)!;
+        const runtime = await f.connect(signal);
+        const terminal = runtime.terminal.bind(runtime);
+        vi.spyOn(runtime, "terminal").mockImplementationOnce(async (handle, input, fileSignal) => {
+          // The 30s connection has completed. Its deadline now expires while
+          // the separate 60s file phase and overall run are still valid.
+          expect(fileSignal!.aborted).toBe(false);
+          connectPhase.controller.abort();
+          expect(fileSignal!.aborted).toBe(false);
+          const reply = await terminal(handle, input, fileSignal);
+          terminalSucceeded = reply.exitCode === 0;
+          return reply;
+        });
+        return runtime;
+      },
+      prepareDetachedAuth: async () => { throw new Error("must not reach native work"); },
+      native: () => { throw new Error("must not reach native work"); },
+    } as never).then(() => null, error => error);
+    expect(result).toMatchObject({ code: "command_uncertain" });
+    expect(terminalSucceeded).toBe(true);
+  } finally { timeoutSpy.mockRestore(); }
 });

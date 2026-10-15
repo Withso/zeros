@@ -1,12 +1,14 @@
 import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createGitHubApi } from "../ci/recovery-api.mjs";
+import { reviewedPrestartRecovery } from "./prestart-recovery.mjs";
 
 export const HOURLY_PATH = ".github/workflows/zeros-dev-e2e.yml";
 export const HOURLY_NAME = "Zeros dev E2E";
 export const REPO = "/repos/Withso/zeros";
 const WORKFLOW = `${REPO}/actions/workflows/zeros-dev-e2e.yml`;
 const SKIPPED_PROFILE_JOB_NAME = "inputs.profile == 'gate0' && 'gate0' || 'lifecycle'";
+const SKIPPED_INFRASTRUCTURE_JOB_NAME = "(inputs.profile == 'infrastructure' || (github.event_name == 'schedule' && vars.ZEROS_DEV_INFRASTRUCTURE_ENABLED == 'true')) && 'infrastructure' || (inputs.profile == 'gate0' && 'gate0' || 'lifecycle')";
 const integer = value => Number.isSafeInteger(value) && value > 0;
 const identifier = value => typeof value === "string" && /^[1-9][0-9]{0,19}$/.test(value);
 const sha = value => typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
@@ -20,7 +22,7 @@ export function hourlyContext(env) {
 export function actionsProfile(env) {
   hourlyContext(env);
   const profile = env.ZEROS_DEV_PROFILE ?? "hourly";
-  if (!["hourly", "gate0"].includes(profile) || profile === "gate0" && env.GITHUB_EVENT_NAME !== "workflow_dispatch")
+  if (!["hourly", "gate0", "infrastructure"].includes(profile) || profile === "gate0" && env.GITHUB_EVENT_NAME !== "workflow_dispatch")
     throw failure("actions_required");
   return profile;
 }
@@ -47,7 +49,11 @@ export async function lifecycleJob(api, run) {
   // Only schedule proves the profile; preserve the skip so it can never be green.
   if (job.name === SKIPPED_PROFILE_JOB_NAME && run.event === "schedule" && run.status === "completed" &&
     job.conclusion === "skipped" && job.steps.length === 0) return { ...job, name: "lifecycle" };
-  if (!["lifecycle", "gate0"].includes(job.name) || job.name === "gate0" && run.event !== "workflow_dispatch") throw failure("artifact_invalid");
+  // The current expression also depends on a variable. A skipped job cannot
+  // identify its chosen profile; it is only proof that no product step ran.
+  if (job.name === SKIPPED_INFRASTRUCTURE_JOB_NAME && run.event === "schedule" && run.status === "completed" &&
+    job.conclusion === "skipped" && job.steps.length === 0) return { ...job, name: "unselected" };
+  if (!["lifecycle", "gate0", "infrastructure"].includes(job.name) || job.name === "gate0" && run.event !== "workflow_dispatch") throw failure("artifact_invalid");
   return job;
 }
 function productNeverStarted(job) {
@@ -55,8 +61,8 @@ function productNeverStarted(job) {
   const steps = job.steps.filter(step => step.name === "Execute Alpha product lifecycle");
   return steps.length === 1 && steps[0].status === "completed" && steps[0].conclusion === "skipped";
 }
-export function productCompleted(job) {
-  return job.name === "lifecycle" && job.conclusion === "success" && ["Execute Alpha product lifecycle", "Save signed cleanup receipt"].every(name => {
+export function productCompleted(job, profile = "lifecycle") {
+  return ["lifecycle", "gate0", "infrastructure"].includes(profile) && job.name === profile && job.conclusion === "success" && ["Execute Alpha product lifecycle", "Save signed cleanup receipt"].every(name => {
     const steps = job.steps.filter(step => step.name === name);
     return steps.length === 1 && steps[0].status === "completed" && steps[0].conclusion === "success";
   });
@@ -74,19 +80,26 @@ export async function planHourly(api, execution) {
   const predecessor = async run => run.run_attempt > 1
     ? api.get(`${REPO}/actions/runs/${run.id}/attempts/${run.run_attempt - 1}`) : older.shift();
   let previous = await predecessor(current);
+  let prestartRecovery;
   for (let inspected = 0; previous && inspected < 100; inspected++) {
     if (!trustedHourlyRun(previous) || previous.status !== "completed") throw failure("artifact_invalid");
     const listed = await api.get(`${REPO}/actions/runs/${previous.id}/artifacts?per_page=100`), artifacts = collection(listed, "artifacts");
     if (listed.total_count !== artifacts.length) throw failure("artifact_invalid");
     const matches = artifacts.filter(row => row.name === `zeros-dev-receipt-${previous.id}-${previous.run_attempt}`), artifact = matches[0];
-    if (matches.length === 0 && productNeverStarted(await lifecycleJob(api, previous))) { previous = await predecessor(previous); continue; }
+    if (matches.length === 0) {
+      const job = await lifecycleJob(api, previous);
+      if (productNeverStarted(job)) { previous = await predecessor(previous); continue; }
+      const reviewed = reviewedPrestartRecovery(previous, job);
+      if (reviewed && !prestartRecovery) { prestartRecovery = reviewed; previous = await predecessor(previous); continue; }
+    }
     if (matches.length !== 1 || !integer(artifact.id) || artifact.expired || !Number.isSafeInteger(artifact.size_in_bytes) ||
       artifact.size_in_bytes <= 0 || artifact.size_in_bytes > 2 * 1024 * 1024 || !/^sha256:[a-f0-9]{64}$/.test(artifact.digest ?? "") ||
       artifact.workflow_run?.id !== previous.id || artifact.workflow_run?.head_sha !== previous.head_sha) throw failure("artifact_invalid");
-    return { execution, bootstrap: false, previous: { workflowRunId: String(previous.id), attempt: previous.run_attempt, sourceSha: previous.head_sha }, artifactId: String(artifact.id) };
+    return { execution, bootstrap: false, previous: { workflowRunId: String(previous.id), attempt: previous.run_attempt, sourceSha: previous.head_sha }, artifactId: String(artifact.id),
+      ...(prestartRecovery ? { prestartRecovery } : {}) };
   }
   if (previous || response.total_count !== rows.length) throw failure("artifact_invalid");
-  return { execution, bootstrap: true, previous: null, artifactId: null };
+  return { execution, bootstrap: true, previous: null, artifactId: null, ...(prestartRecovery ? { prestartRecovery } : {}) };
 }
 
 export async function hourlySnapshot(api) {
@@ -179,4 +192,6 @@ export async function planMain(env = process.env) {
     return 0;
   } catch { process.stderr.write('{"schema":"zeros.dev-error/v1","code":"artifact_invalid"}\n'); return 1; }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = await planMain();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  void planMain().then(code => { process.exitCode = code; });
+}

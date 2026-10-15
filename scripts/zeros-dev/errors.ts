@@ -12,7 +12,7 @@ export const ERROR_CODES = [
   "credentials_unsafe", "credentials_missing", "credentials_invalid", "credentials_changed", "credentials_busy",
   "receipt_invalid", "receipt_busy", "receipt_missing", "operation_conflict",
   "computer_required", "computer_failed", "repository_required", "workspace_failed", "workspace_not_running",
-  "agent_credential_required", "agent_failed", "permission_required", "command_uncertain",
+  "agent_credential_required", "agent_failed", "permission_required", "command_uncertain", "release_checks_unavailable",
   "runtime_unavailable", "runtime_changed", "runtime_pin_unconfirmed", "runtime_selection_unavailable", "runtime_selection_changed",
   "terminal_failed", "cleanup_pending", "cleanup_backlog_exceeded", "database_unavailable",
   "database_readonly_required", "input_contains_credentials", "cancelled", "internal", "history_changed", "actions_required", "artifact_invalid",
