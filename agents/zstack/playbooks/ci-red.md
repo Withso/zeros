@@ -61,6 +61,11 @@
   legitimately exceed the default 5 s test budget. Give only that case a justified bounded timeout,
   keep every assertion and every production deadline, and test callback overlap with held work and
   observed completion, never with a sleep or a manual worker tick.
+  Migration cases that execute the whole SQL ladder pay every migration transaction, even when
+  their final assertion is small. Reuse the ladder's explicit per-case budget for a reproduced
+  timeout; retain the real empty/populated upgrade and ledger-permission assertions.
+  Classify test-only budget fixes as timing scenarios: fixed-test replay overlays would erase
+  the failing timeout in the parent.
 - **Main red:** the CI incident bot opens a `fix(ci): restore …` PR. A green
   rerun at the same head resolves it; still land the deterministic fix.
 - **Cleanup blocking a repair release:** scope the readiness projection to the

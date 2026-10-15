@@ -339,6 +339,8 @@ d("migration ladder", () => {
 
   beforeEach(reset);
 
+  // Executes the full ladder before checking permissions. Use the same bounded
+  // 30 s budget as the intermediate-revision cases, including database transit.
   it("lets the runtime verify but never rewrite the migration ledger",async()=>{
     await runMigrations(pool);
     expect((await withSystemTx(pool,tx=>tx.query("SELECT name FROM schema_migrations"))).rowCount).toBe(LADDER.length);
@@ -346,7 +348,7 @@ d("migration ladder", () => {
       "INSERT INTO schema_migrations(name,checksum) VALUES('forged.sql','forged')","TRUNCATE schema_migrations"])
       await expect(withSystemTx(pool,tx=>tx.query(sql))).rejects.toMatchObject({code:"42501"});
     expect(await ledger()).toEqual(LADDER);
-  });
+  },30_000);
 
   it("applies cleanly to an empty database (the fresh-install path)", async () => {
     const ran = await runMigrations(pool);
@@ -1617,6 +1619,8 @@ d("migration ladder", () => {
     30_000,
   );
 
+  // This populated upgrade also applies every migration, then verifies the
+  // backfill and lease fences; it needs the intermediate-revision 30 s budget.
   it("backfills immutable setup inputs and safely requeues pre-lease running work", async () => {
     const setupMigrationIndex = LADDER.findIndex((file) =>
       file.endsWith("_cloud_workspace_setup_worker.sql"),
@@ -1705,7 +1709,7 @@ d("migration ladder", () => {
       lease_owner: null,
       lease_expires_at: null,
     });
-  });
+  }, 30_000);
 
   it("retires setup grants that predate execution-fence authority", async () => {
     const authorityMigrationIndex = LADDER.findIndex((file) =>
