@@ -1,0 +1,9 @@
+{
+  "id": "copy-incomplete-transcript",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pending",
+  "symptom": "Copy transcript interpreted an incomplete cloud projection as an empty conversation or the end of history.",
+  "rule": "Validate the current history receipt and restore head on every page before exposing bare rows to Copy (zstack-review).",
+  "check": "pnpm test:git apps/desktop/src/renderer/shell/__tests__/copy-restoring-transcript.test.ts"
+}
