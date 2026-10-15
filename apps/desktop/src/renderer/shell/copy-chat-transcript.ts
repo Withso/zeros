@@ -63,6 +63,10 @@ export async function copyChatTranscript(
     try {
       loaded = await loadFullTranscript(chatId);
     } catch (err) {
+      if ((err as { code?: unknown } | null)?.code === "cloud_history_incomplete") {
+        toast.info("This conversation is catching up. Try copying it again in a moment.");
+        return;
+      }
       // Don't surface err.message: past the not-connected case these are
       // transport/op strings ("workspace op 'messages.windowOlder' failed"),
       // which tell the user nothing actionable.
