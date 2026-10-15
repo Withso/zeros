@@ -8,6 +8,9 @@
    For a scheduler, drive the real producer and consumer with a fake clock:
    assert no scheduled work after the queue drains, not just no requests.
    Cover records arriving during a pending flight and an open failure circuit.
+   For display clocks, test multiple real consumers: one visible timer, zero
+   hidden timers, immediate wall-time catch-up on reveal, and final-unsubscribe
+   cleanup. A snapshot read must not consume another consumer's next tick.
    For detached terminal proofs, exercise the real serialized terminal grid
    and replay/live boundary. Persist allocation intent before starting work,
    refuse uncertain restarts, and recheck output after the file read settles.

@@ -381,6 +381,13 @@ Finished transcript, editor, xterm, iframe, and virtualized-diff trees can be mo
 
 Current deck helpers live in `apps/desktop/src/renderer/shell/retained-view-keys.ts` and `apps/desktop/src/renderer/shell/use-retained-view-keys.ts`.
 
+Background-task elapsed labels share `state/use-visible-clock.ts`: one timer
+per renderer with visible consumers, none when the document is hidden or all
+consumers are inactive. Reveal samples wall time immediately; elapsed state
+still comes from each chat's own `startedAt`. Snapshot reads do not advance or
+consume a pending publication. This display clock never controls task,
+authentication, or request deadlines, which retain their own authority.
+
 ### 5. Preserve identities through hot renders
 
 - Zustand consumers select the narrowest scalar/immutable slice they render. Event handlers read `store.getState()` when they do not need a subscription.
