@@ -7,6 +7,7 @@ import { CloudSendPreparation } from "../cloud-send-preparation";
 import * as lifecycle from "../session-reload-lifecycle";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import { hasBackgroundAgentWork } from "../background-task-state";
+import { queuedTranscriptPresentation } from "./helpers/queued-transcript-presentation";
 
 // Exercise the actual provider callbacks with an in-memory bridge/store. This
 // keeps Stop/Send now races deterministic without mounting unrelated app UI.
@@ -130,6 +131,7 @@ function setup(agentId = "claude", status = "streaming") {
     queueHeldRef: { current: new Set() },
     cancelGenerationsRef: { current: new Map() },
     cloudSendPreparationRef: { current: new CloudSendPreparation() },
+    cloudSendWaitRef: { current: { cancel: vi.fn() } },
     sendingChatsRef: { current: sending },
     flushBubbleRef: { current: flush },
     ensureInFlightRef: { current: new Map() },
@@ -201,6 +203,25 @@ function setup(agentId = "claude", status = "streaming") {
 afterEach(() => vi.useRealTimers());
 
 describe.each(["claude", "codex", "cursor"])("%s follow-up submission", agentId => {
+  it.each(["/personal/project", "/organization/project", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"])(
+    "shows Steer immediately in %s while native consumption is pending", async folder => {
+      const h = setup(agentId);
+      h.store.sessions.chat.cwd = folder;
+      h.context.cloudComputerV2 = isCloudWorkspace(folder);
+      await h.actions.sendPrompt("chat", "Steer now", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "steer");
+      await vi.waitFor(() => expect(h.requests).toHaveLength(1));
+      const projected = queuedTranscriptPresentation(h.store.sessions.chat.messages);
+      expect(projected.visibleMessages).toEqual([expect.objectContaining({ text: "Steer now", steeredTurnId: "A" })]);
+      expect(projected.queuedMessages.map(message => message.id)).toEqual(["B", "C", "D"]);
+      expect(h.store.sessions.chat.cloudSendWait).toBeUndefined();
+      const bubbleId = projected.visibleMessages[0]!.id;
+      h.store.sessions.chat.messages.push({ id: "continued", kind: "text", role: "agent", text: "Still working", createdAt: 10 });
+      h.requests[0]!.resolve({ type: "AGENT_STEERED", outcome: "delivered", turnId: "A" });
+      await vi.waitFor(() => expect(h.queue.get("chat")).toHaveLength(3));
+      expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).visibleMessages.map(message => message.id)).toEqual([bubbleId, "continued"]);
+    },
+  );
+
   it("keeps Queue as the default while a turn is working", async () => {
     const h = setup(agentId);
     await h.actions.sendPrompt("chat", "new follow-up");
@@ -236,6 +257,19 @@ describe.each(["claude", "codex", "cursor"])("%s follow-up submission", agentId 
 });
 
 describe("cloud steering preparation ownership", () => {
+  it("cancels a ready cloud preparation even when it has no Waiting presentation", async () => {
+    const h = setup("codex", "ready");
+    h.context.cloudComputerV2 = true;
+    h.store.sessions.chat.cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const stopped = h.actions.cancel("chat");
+    expect(h.context.cloudSendWaitRef.current.cancel).toHaveBeenCalledExactlyOnceWith("chat");
+    expect(h.queue.isPaused("chat")).toBe(true);
+    expect(h.requests).toHaveLength(1);
+    h.requests[0]!.resolve({ type: "AGENT_CANCELLED" });
+    await stopped;
+    expect(h.sent).toEqual([]);
+  });
+
   it.each(["stop", "execution", "workspace", "account"])("does not deliver an attachment prepared after %s changes", async changed => {
     const h = setup("claude");
     h.context.cloudComputerV2 = true;
@@ -678,3 +712,66 @@ describe.each(["claude", "codex", "cursor"])(
     });
   },
 );
+
+
+describe("ARCH receipt-owned optimistic steering", () => {
+  it("does not move or rebind an old receipt retry to a newer provider turn", async () => {
+    const h = setup("claude");
+    const first = h.actions.steerQueued("chat", "C");
+    h.requests[0]!.reject(new Error("reply lost"));
+    await first;
+    h.store.sessions.chat.executionId = "replacement";
+    h.store.sessions.chat.sessionId = "replacement";
+    h.store.sessions.chat.status = "streaming";
+    h.store.sessions.chat.messages.push({ id: "next-turn", kind: "text", role: "user", text: "New turn", createdAt: 20 });
+    h.context.activeProviderTurnId = () => "next-turn";
+    const before = h.store.sessions.chat.messages.map((message: { id: string }) => message.id);
+    const retry = h.actions.steerQueued("chat", "C");
+    const pending = h.store.sessions.chat.messages.find((message: { id: string }) => message.id === "C");
+    const pendingOrder = h.store.sessions.chat.messages.map((message: { id: string }) => message.id);
+    h.requests[1]!.resolve({ type: "AGENT_STEERED", outcome: "delivered", turnId: "A" });
+    await retry;
+    expect(h.requests[1]!.message).toMatchObject({ attemptId: h.requests[0]!.message.attemptId, executionId: "execution", sessionId: "execution" });
+    expect(h.sent).toEqual([]);
+    expect(pending.steeredTurnId).not.toBe("next-turn");
+    expect(pendingOrder).toEqual(before);
+  });
+
+  it.each([
+    { agent: "claude", folder: "/personal/project", outcome: "delivered", replaceExecution: false },
+    { agent: "codex", folder: "/organization/project", outcome: "interrupted", replaceExecution: true },
+    { agent: "cursor", folder: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", outcome: "rejected", replaceExecution: true },
+  ])("keeps $agent's original turn and position through a $outcome receipt in $folder", async ({ agent, folder, outcome, replaceExecution }) => {
+    const h = setup(agent);
+    h.store.sessions.chat.cwd = folder;
+    h.context.cloudComputerV2 = isCloudWorkspace(folder);
+    const first = h.actions.steerQueued("chat", "C");
+    h.requests[0]!.reject(new Error("reply lost"));
+    await first;
+    if (replaceExecution) {
+      h.store.sessions.chat.executionId = "replacement";
+      h.store.sessions.chat.sessionId = "replacement";
+    }
+    h.store.sessions.chat.messages.push({ id: "next-turn", kind: "text", role: "user", text: "Next turn", createdAt: 20 });
+    h.context.activeProviderTurnId = () => "next-turn";
+    const before = h.store.sessions.chat.messages.map((message: { id: string }) => message.id);
+    const retry = h.actions.steerQueued("chat", "C");
+    const pending = h.store.sessions.chat.messages.find((message: { id: string }) => message.id === "C");
+    const pendingOrder = h.store.sessions.chat.messages.map((message: { id: string }) => message.id);
+    h.requests[1]!.resolve(outcome === "rejected"
+      ? { type: "AGENT_ERROR", code: "SESSION_ACCESS_DENIED" }
+      : { type: "AGENT_STEERED", outcome, turnId: "A" });
+    await retry;
+    expect(h.requests[1]!.message).toMatchObject({ attemptId: h.requests[0]!.message.attemptId,
+      executionId: "execution", sessionId: "execution" });
+    expect(h.sent).toEqual([]);
+    expect(pending.steeredTurnId).toBe("A");
+    expect(pendingOrder).toEqual(before);
+    expect(h.store.sessions.chat.messages.map((message: { id: string }) => message.id)).toEqual(before);
+    expect(h.store.sessions.chat.messages.find((message: { id: string }) => message.id === "C").steeredTurnId).toBe("A");
+    if (outcome === "rejected") {
+      expect(h.queue.get("chat")!.find(entry => entry.bubbleId === "C")!.steerRequest).toBeDefined();
+      expect(h.queue.isPaused("chat")).toBe(true);
+    }
+  });
+});
