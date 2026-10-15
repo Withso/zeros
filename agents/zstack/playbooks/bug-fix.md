@@ -24,6 +24,11 @@
    confirmed prefix; otherwise replace the rendered buffer.
    When hiding a display clock, advance wall time with the next read held and
    require reset/countdown labels to catch up on reveal from retained data.
+   Keep account/owner clearing active when gating passive observation. Hold each
+   awaited boundary across hide and account resets, including late clear ACKs;
+   serial requests and a final owner-ID comparison alone do not fence A → B → A.
+   Let a held read observe hidden state before the visibility event runs; retiring
+   that read must still leave one catch-up for a quick reveal.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
    For worker failures, retain the first closed diagnostic before cleanup and

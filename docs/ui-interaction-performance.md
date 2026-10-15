@@ -189,6 +189,18 @@ five-minute automatic-failure backoff keep their existing behavior. This is
 the native account information surface; organization provider connections
 retain their separate cloud contract.
 
+The organization settings courier uses one visible-only 15-minute fallback
+and a 30-second focus freshness guard. Reveal catches up once when stale or
+invalidated; explicit settings and membership invalidations coalesce into one
+trailing read. Hidden windows and pending observations have no passive timer;
+every asynchronous tail rechecks visibility, the observation epoch and the
+account-store generation.
+Owner changes, account resets and sign-out still clear the Local engine context
+immediately while hidden. A late A → B → A response or clear acknowledgement
+cannot revive the old context; ordinary same-owner refresh failures retain the
+confirmed settings. Personal remains device-local and this courier never
+addresses a cloud VM. Local ownership migration retains its existing path.
+
 Deletion cleanup follows semantic path ownership, not raw equality: include
 normalized descendant cwd keys, but protect a separately registered nested
 repository (the most-specific known owner wins).
