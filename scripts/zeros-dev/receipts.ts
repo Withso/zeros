@@ -9,6 +9,7 @@ import { HourlySchema } from "./hourly-contract";
 import type { Fixture } from "./config";
 import { ZerosDevError } from "./errors";
 import { acquireRunLock } from "./run-lock";
+import { DeletionRetirementSchema } from "./cleanup-contract";
 
 const uuid=z.string().uuid(),digest=z.string().regex(/^[a-f0-9]{64}$/),positive=z.number().int().positive().safe();
 export const SourceSchema=z.object({revision:z.string().regex(/^[a-f0-9]{40}$/).nullable(),dirty:z.boolean()}).strict();
@@ -29,6 +30,8 @@ export const RunSchema=z.object({
   terminals:z.array(z.object({id:uuid,sha256:digest,state:z.enum(["uncertain","succeeded","failed"]),exitCode:z.number().int().min(0).max(255).nullable()}).strict()).max(50).optional(),
   evidence:z.array(EvidenceEventSchema).max(256),
   deletionConfirmed:z.boolean(),
+  retirement:DeletionRetirementSchema.optional(),
+  cleanupOnly:z.object({handoffSha256:digest,sourceRunSha256:digest}).strict().optional(),
   hourly:HourlySchema.optional(),
 }).strict();
 export type Run=z.infer<typeof RunSchema>;

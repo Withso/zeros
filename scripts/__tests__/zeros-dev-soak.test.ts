@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createCloudReplicaDeviceCredential } from "../../apps/desktop/src/engine/cloud-replica-device";
 import { RunSchema } from "../zeros-dev/receipts";
 import { collectSoak } from "../zeros-dev/soak";
+import { summarizeCleanup } from "../zeros-dev/cleanup-state";
+import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
 
 function fixture() {
   const end = "2026-10-15T00:00:00.000Z", start = Date.parse(end) - 24 * 3_600_000;
@@ -56,6 +58,27 @@ function fixture() {
 }
 
 describe("read-only signed 24-hour soak report", () => {
+  it("reports compute retirement separately from erasure and retains both red and green attempts", async () => {
+    const f = fixture(), run = f.runs[3]; f.install({ ...run }, "lifecycle", true);
+    run.run_attempt = 2; f.install(run);
+    for (const attempt of [1, 2]) {
+      const payload = f.payloads.get(`${run.id}/${attempt}`), local = payload.runs[0];
+      local.create = { key: randomUUID(), body: { name: `zd-${local.runId}`, repository: { forge: "github.com", owner: "fixture", name: "fixture",
+        revision: "main", githubInstallationId: randomUUID() } },
+      result: { id: randomUUID(), createdBy: f.credential.accountUserId, createdAt: local.createdAt, generation: 1 } };
+      local.deletionConfirmed = false;
+      retireFixtureCompute({ run: local, save: async () => {} }, payload.completedAt);
+      payload.runs = [RunSchema.parse(local)];
+      payload.schema = "zeros.dev-hourly/v2"; payload.cleanup = summarizeCleanup(payload.runs, payload.runs[0]);
+    }
+    const report = await collectSoak(f.options), rows = report.attempts.filter(row => row.workflowRunId === String(run.id));
+    expect(report.status).toBe("failed"); expect(rows.map(row => row.status)).toEqual(["failed", "passed"]);
+    expect(rows[0]!.firstFailure).toMatchObject({ phase: "workspace_resume_wait", code: "deadline" });
+    expect(rows.every(row => row.cleanup?.outcome === "compute_retired_storage_pending" && row.cleanup.deletionConfirmed === false)).toBe(true);
+    expect(rows[1]!.cleanup).toMatchObject({ pendingWorkspaces: 1, pendingGenerations: 1, reservedStorageMiB: 16_384, reservationCoverage: "complete" });
+    expect(report.attempts.find(row => row.workflowRunId !== String(run.id))!.cleanup).toBeUndefined();
+  });
+
   it("requires every hour and exposes timings, verified UTC active windows and separate transport denominators", async () => {
     const f = fixture(), report = await collectSoak(f.options);
     expect(report.status).toBe("passed"); expect(report.slots).toHaveLength(24);

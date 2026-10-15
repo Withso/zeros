@@ -7,6 +7,7 @@ import { Evidence } from "./evidence";
 import { ZerosDevError } from "./errors";
 import { beforeDeadline } from "./transport";
 import type { AdmissionObservation } from "./admission-observation";
+import { cleanupOutcome, requireComputeCleanup, summarizeCleanup } from "./cleanup-state";
 
 export const HOURLY_WORK_MS = 350_000;
 export const HOURLY_COMPUTER_MS = 300_000;
@@ -21,7 +22,14 @@ export type HourlyOptions = {
   api: Pick<ProductApi, "assertFixtureEmpty" | "ensureRepository" | "computerState" | "readComputerRuntime" | "verifyComputerRuntime" | "buildComputer" | "waitComputer" | "createWorkspace" | "waitWorkspace" | "lifecycle" | "cleanup">;
   credentials: CredentialPort; connect(run: Run, signal: AbortSignal, onAdmissionEvent?: (event: AdmissionObservation) => void): Promise<Runtime>; evidence: Evidence;
   signal?: AbortSignal; budgetMs?: number; computerMs?: number; workMs?: number; cleanupMs?: number; now?: () => number; monotonic?: () => number;
+  predecessors?: readonly Run[];
 };
+
+export function recordStoragePending(evidence: Evidence, run: Run): void {
+  if (cleanupOutcome(run) === "compute_retired_storage_pending") evidence.emit({
+    phase: "storage_pending", outcome: "pending", durationMs: 0, count: 1, cleanup: summarizeCleanup([run], run),
+  });
+}
 
 export async function recoverHourlyRun(options: {
   handle: RunHandle; api: Pick<ProductApi, "cleanup">; credentials: Pick<CredentialPort, "cleanup">;
@@ -32,14 +40,15 @@ export async function recoverHourlyRun(options: {
   try {
     await evidence.step("prior_cleanup", async () => {
       if (signal.aborted) throw new ZerosDevError("deadline");
-      await beforeDeadline(api.cleanup(handle, true, signal), signal);
-      if (handle.run.create && !handle.run.deletionConfirmed) throw new ZerosDevError("cleanup_pending");
+      await beforeDeadline(api.cleanup(handle, true, signal, { allowStoragePending: true }), signal);
+      requireComputeCleanup(handle.run);
+      recordStoragePending(evidence, handle.run);
     });
   } catch (error) { failed = error; }
   // The preceding delete/read can exhaust its budget. Revocation has its own
   // short reserve and cannot replace that first failure or authorize create.
   const revoke = AbortSignal.timeout(Math.min(options.revokeMs ?? 30_000, 30_000));
-  try { await evidence.step("credentials_cleanup", () => beforeDeadline(credentials.cleanup(handle, revoke), revoke)); }
+  try { if (!handle.run.cleanupOnly) await evidence.step("credentials_cleanup", () => beforeDeadline(credentials.cleanup(handle, revoke), revoke)); }
   catch (error) { failed ??= error; }
   if (failed) throw failed;
 }
@@ -108,7 +117,7 @@ export async function runHourly(options: HourlyOptions): Promise<void> {
       if (bound.aborted) throw new ZerosDevError("deadline");
       return beforeDeadline(task(), bound);
     }, admission);
-  await boundedStep("prior_cleanup", () => api.assertFixtureEmpty(preparation), preparation);
+  await boundedStep("prior_cleanup", () => api.assertFixtureEmpty(preparation, options.predecessors), preparation);
   await boundedStep("repository", () => api.ensureRepository(preparation), preparation);
   const { assertPin } = await prepareHourlyComputer(options, preparation);
   // A refresh never consumes the lifecycle's phase allowance or cleanup's
@@ -137,6 +146,7 @@ export async function runHourly(options: HourlyOptions): Promise<void> {
   try {
     await step("credentials_install", () => credentials.install(handle, signal));
     await step("computer_pin", () => assertPin(signal));
+    await step("prior_cleanup", () => api.assertFixtureEmpty(signal, options.predecessors));
     await step("workspace_create", () => api.createWorkspace(handle, signal));
     await step("workspace_create_wait", () => api.waitWorkspace(handle, "running", signal));
     const marker = `.zeros-dev-${handle.run.runId}`;
@@ -180,8 +190,9 @@ export async function runHourly(options: HourlyOptions): Promise<void> {
     const cleanup = AbortSignal.timeout(cleanupMs);
     try {
       await step("cleanup", async () => {
-        await api.cleanup(handle, true, AbortSignal.any([cleanup, AbortSignal.timeout(Math.max(1, cleanupMs - 30_000))]));
-        if (handle.run.create && !handle.run.deletionConfirmed) throw new ZerosDevError("cleanup_pending");
+        await api.cleanup(handle, true, AbortSignal.any([cleanup, AbortSignal.timeout(Math.max(1, cleanupMs - 30_000))]), { allowStoragePending: true });
+        requireComputeCleanup(handle.run);
+        recordStoragePending(evidence, handle.run);
       }, cleanup);
     } catch (error) { failed ??= error; }
     try { await step("credentials_cleanup", () => credentials.cleanup(handle, cleanup), cleanup); }

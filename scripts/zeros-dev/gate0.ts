@@ -6,10 +6,11 @@ import type { ProductApi } from "./product";
 import type { ZerosDevRuntime } from "./runtime";
 import { Evidence } from "./evidence";
 import { ZerosDevError } from "./errors";
+import { requireComputeCleanup } from "./cleanup-state";
 import { beforeDeadline } from "./transport";
 import { Gate0Runtime } from "./gate0-runtime";
 import { Gate0Schema, GATE0_WORK_MS, GATE0_DETACHED_MS, GATE0_TICK_MS, GATE0_TOTAL_MS } from "./gate0-contract";
-import { HOURLY_AGENTS, HOURLY_COMPUTER_MS, HOURLY_CLEANUP_MS, historyDigest, prepareHourlyComputer, type HourlyOptions } from "./hourly";
+import { HOURLY_AGENTS, HOURLY_COMPUTER_MS, HOURLY_CLEANUP_MS, historyDigest, prepareHourlyComputer, recordStoragePending, type HourlyOptions } from "./hourly";
 import type { AdmissionObservation } from "./admission-observation";
 import type { SetupObservation } from "./setup-observation";
 
@@ -91,11 +92,12 @@ export async function runGate0(options: Gate0Options): Promise<void> {
   let failed: unknown;
   try {
     const preparation = phaseBound(HOURLY_COMPUTER_MS);
-    await step("prior_cleanup", HOURLY_COMPUTER_MS, signal => api.assertFixtureEmpty(signal), preparation);
+    await step("prior_cleanup", HOURLY_COMPUTER_MS, signal => api.assertFixtureEmpty(signal, options.predecessors), preparation);
     await step("repository", HOURLY_COMPUTER_MS, signal => api.ensureRepository(signal), preparation);
     const { assertPin } = await prepareHourlyComputer(options, preparation);
     await step("credentials_install", 90_000, signal => credentials.install(handle, signal));
     await step("computer_pin", 30_000, signal => assertPin(signal));
+    await step("prior_cleanup", HOURLY_COMPUTER_MS, signal => api.assertFixtureEmpty(signal, options.predecessors));
     await step("workspace_create", 30_000, signal => api.createWorkspace(handle, signal));
     gate.initialSetup = await ready("workspace_create_wait"); await handle.save();
     let runtime = await connect();
@@ -186,8 +188,9 @@ export async function runGate0(options: Gate0Options): Promise<void> {
     for (const runtime of owned) { try { await close(runtime); } catch (error) { failed ??= error; } }
     const cleanupMs = Math.min(options.cleanupMs ?? HOURLY_CLEANUP_MS, HOURLY_CLEANUP_MS), cleanup = AbortSignal.timeout(cleanupMs);
     try { await step("cleanup", cleanupMs, async signal => {
-      await api.cleanup(handle, true, AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, cleanupMs - 30_000))]));
-      if (handle.run.create && !handle.run.deletionConfirmed) throw new ZerosDevError("cleanup_pending");
+      await api.cleanup(handle, true, AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, cleanupMs - 30_000))]), { allowStoragePending: true });
+      requireComputeCleanup(handle.run);
+      recordStoragePending(evidence, handle.run);
     }, cleanup); } catch (error) { failed ??= error; }
     try { await step("credentials_cleanup", cleanupMs, signal => credentials.cleanup(handle, signal), cleanup); }
     catch (error) { failed ??= error; }

@@ -6,6 +6,7 @@ import { Evidence } from "../zeros-dev/evidence";
 import { ZerosDevError } from "../zeros-dev/errors";
 import type { RunHandle } from "../zeros-dev/receipts";
 import { computerBuild } from "../../apps/desktop/src/renderer/features/settings/__tests__/cloud-computer-v2-fixtures";
+import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
 
 function fixture() {
   let elapsed = 0, rejectTask: (error: unknown) => void = () => {};
@@ -19,7 +20,8 @@ function fixture() {
     assertFixtureEmpty: vi.fn(async () => { calls.push("empty"); }), ensureRepository: vi.fn(async () => { calls.push("repo"); }),
     computerState: vi.fn(async () => ({ active })), readComputerRuntime: vi.fn(async () => ({ ...target, selected: target })),
     verifyComputerRuntime: vi.fn(async () => "confirmed"), buildComputer: vi.fn(), waitComputer: vi.fn(),
-    createWorkspace: vi.fn(async () => { calls.push("create"); handle.run.create = { key: randomUUID(), body: {} as never,
+    createWorkspace: vi.fn(async () => { calls.push("create"); handle.run.create = { key: randomUUID(), body: {
+      name: `zd-${handle.run.runId}`, repository: { forge: "github.com", owner: "fixture", name: "fixture", revision: "main", githubInstallationId: randomUUID() } },
       result: { id: randomUUID(), createdBy: randomUUID(), createdAt: new Date(origin).toISOString(), generation: 1 } }; }),
     waitWorkspace: vi.fn(async (_h, state, _signal?: AbortSignal, observe?: (value: unknown) => void) => {
       calls.push(`wait:${state}`); elapsed += 10_000;
@@ -71,6 +73,19 @@ function fixture() {
 }
 
 describe("Gate 0 manual rehearsal through product ports", () => {
+  it("can complete compute cleanup while the signed exact storage deletion stays pending", async () => {
+    const f = fixture();
+    f.api.cleanup.mockImplementation(async () => {
+      retireFixtureCompute(f.handle, new Date(f.options.now()).toISOString());
+      return { planned: 1, confirmed: 0 };
+    });
+    await expect(runGate0(f.options as never)).resolves.toBeUndefined();
+    expect(f.handle.run.hourly).toMatchObject({ complete: true, rehearsal: { complete: true } });
+    expect(f.handle.run.deletionConfirmed).toBe(false);
+    expect(f.handle.run.lifecycle.at(-1)).toMatchObject({ operation: "delete", confirmed: false });
+    expect(f.credentials.cleanup).toHaveBeenCalledOnce();
+  });
+
   it("does one create, a real-duration hour, three wakes and one 30-minute client gap before exact cleanup", async () => {
     const f = fixture(); await runGate0(f.options as never);
     expect(f.api.createWorkspace).toHaveBeenCalledOnce();

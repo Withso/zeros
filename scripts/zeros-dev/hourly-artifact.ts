@@ -10,6 +10,8 @@ import { SetupObservationSchema } from "./setup-observation";
 import { RuntimeObservationSchema } from "./runtime-observation";
 import { AdmissionObservationSchema } from "./admission-observation";
 import { TransportObservationSchema } from "./gate0-contract";
+import { CleanupHandoffReferenceSchema, CleanupSummarySchema, MAX_CARRIED_RUNS, type CleanupHandoffReference, type CleanupSummary } from "./cleanup-contract";
+import { cleanupOutcome, requireCleanupCapacity, requireComputeCleanup, summarizeCleanup } from "./cleanup-state";
 
 export const ExecutionSchema = z.object({ workflowRunId: z.string().regex(/^[1-9][0-9]{0,19}$/), attempt: z.number().int().min(1).max(100),
   sourceSha: z.string().regex(/^[a-f0-9]{40}$/) }).strict();
@@ -17,9 +19,12 @@ export type HourlyExecution = z.infer<typeof ExecutionSchema>;
 const resultSchema = z.object({ success: z.boolean(), code: z.enum(ERROR_CODES).nullable(), runId: z.string().uuid(),
   setup: SetupObservationSchema.optional(), runtime: RuntimeObservationSchema.optional(), admission: AdmissionObservationSchema.optional(),
   transport: TransportObservationSchema.optional() }).strict();
-const payloadSchema = z.object({ schema: z.literal("zeros.dev-hourly/v1"), execution: ExecutionSchema, deviceId: z.string().uuid(),
+const legacyPayloadSchema = z.object({ schema: z.literal("zeros.dev-hourly/v1"), execution: ExecutionSchema, deviceId: z.string().uuid(),
   result: resultSchema,
   runs: z.array(RunSchema).max(3), completedAt: z.string().datetime() }).strict();
+const currentPayloadSchema = legacyPayloadSchema.extend({ schema: z.literal("zeros.dev-hourly/v2"),
+  runs: z.array(RunSchema).max(MAX_CARRIED_RUNS), cleanup: CleanupSummarySchema, handoff: CleanupHandoffReferenceSchema.optional() }).strict();
+const payloadSchema = z.discriminatedUnion("schema", [legacyPayloadSchema, currentPayloadSchema]);
 const envelopeSchema = z.object({ payload: payloadSchema, signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict();
 const MAX_BYTES = 1024 * 1024;
 export const PublicHourlyTrustSchema = z.object({ deviceId: z.string().uuid(), publicKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
@@ -62,41 +67,57 @@ export function verifyPublicHourlyArtifact(raw: unknown, trust: PublicHourlyTrus
     const primary = payload.runs.find(run => run.runId === payload.result.runId);
     if (primary && (!primary.hourly || primary.hourly.workflowRunId !== expected.workflowRunId || primary.hourly.attempt !== expected.attempt ||
       primary.hourly.sourceSha !== expected.sourceSha || primary.source.dirty || primary.source.revision !== expected.sourceSha)) throw bad();
-    if (payload.result.success !== (payload.result.code === null) ||
-      payload.result.success && (!primary?.hourly?.complete || !primary.deletionConfirmed)) throw bad();
+    if (payload.result.success !== (payload.result.code === null) || primary?.cleanupOnly ||
+      new Set(payload.runs.map(run => run.fixtureSha256)).size > 1) throw bad();
+    if (payload.schema === "zeros.dev-hourly/v1") {
+      if (payload.runs.some(run => run.retirement || run.cleanupOnly) ||
+        payload.result.success && (!primary?.hourly?.complete || !primary.deletionConfirmed)) throw bad();
+    } else {
+      if (JSON.stringify(payload.cleanup) !== JSON.stringify(summarizeCleanup(payload.runs, primary)) ||
+        payload.runs.some(run => run.cleanupOnly && (run.hourly || run.cleanupOnly.handoffSha256 !== payload.handoff?.sha256 ||
+          !payload.handoff.runIds.includes(run.runId)))) throw bad();
+      if (payload.result.success) {
+        if (!primary?.hourly?.complete || payload.runs.some(run => run.hourly?.credentials.some(row => !row.revoked || !row.disconnected))) throw bad();
+        requireComputeCleanup(primary); requireCleanupCapacity(payload.runs);
+      }
+    }
     return payload;
   } catch { throw bad(); }
 }
 
-export async function importHourlyArtifact(file: string, store: RunStore, credential: CloudReplicaDeviceCredential, expected: HourlyExecution): Promise<void> {
+export async function importHourlyArtifact(file: string, store: RunStore, credential: CloudReplicaDeviceCredential, expected: HourlyExecution): Promise<{ handoff?: CleanupHandoffReference }> {
   const { envelope } = await readArtifact(file), { payload } = envelope;
   authenticate(envelope, credential, expected);
   for (const run of payload.runs) {
-    if (!run.hourly) throw bad();
+    if (!run.hourly && !run.cleanupOnly) throw bad();
     await store.withRun(run.runId, run.source, async handle => {
       // withRun/save rechecks fixture, device and all strict RunSchema fields.
       // Import into an empty store only; no artifact can rewrite local intent.
-      if (handle.run.create || handle.run.hourly || handle.run.prompts.length) throw bad();
+      if (handle.run.create || handle.run.hourly || handle.run.cleanupOnly || handle.run.prompts.length) throw bad();
       handle.run = run; await handle.save();
     });
   }
+  return payload.schema === "zeros.dev-hourly/v2" && payload.handoff ? { handoff: payload.handoff } : {};
 }
 
 export async function exportHourlyArtifact(file: string, store: RunStore, credential: CloudReplicaDeviceCredential,
-  execution: HourlyExecution, result: z.infer<typeof resultSchema>, options: { replace?: boolean } = {}): Promise<void> {
+  execution: HourlyExecution, result: z.infer<typeof resultSchema>, options: { replace?: boolean; handoff?: CleanupHandoffReference } = {}): Promise<CleanupSummary> {
   let output, parent, temporary: string | undefined;
   try {
     const runs = [];
     for (const id of await store.list()) {
       const run = await store.read(id);
-      if (!run.hourly) throw bad();
+      if (!run.hourly && !run.cleanupOnly || run.cleanupOnly && (run.hourly || run.cleanupOnly.handoffSha256 !== options.handoff?.sha256 ||
+        !options.handoff.runIds.includes(run.runId))) throw bad();
       // Carry uncertain resources until exact product cleanup confirms them.
       // Completed predecessors no longer need to be copied every hour.
-      if (id === result.runId || run.create && !run.deletionConfirmed || run.hourly.credentials.some(row => !row.revoked || !row.disconnected)) runs.push(run);
+      if (id === result.runId || run.create && cleanupOutcome(run) !== "physically_deleted" || run.hourly?.credentials.some(row => !row.revoked || !row.disconnected)) runs.push(run);
     }
-    const payload = payloadSchema.parse({ schema: "zeros.dev-hourly/v1", execution, result, runs,
-      deviceId: credential.deviceId, completedAt: new Date().toISOString() });
+    const payload = currentPayloadSchema.parse({ schema: "zeros.dev-hourly/v2", execution, result, runs,
+      deviceId: credential.deviceId, completedAt: new Date().toISOString(),
+      cleanup: summarizeCleanup(runs, runs.find(run => run.runId === result.runId)), ...(options.handoff ? { handoff: options.handoff } : {}) });
     const envelope = { payload, signature: sign(null, Buffer.from(JSON.stringify(payload)), key(credential)).toString("base64url") };
+    authenticate(envelope, credential, execution);
     const bytes = JSON.stringify(envelope) + "\n";
     if (Buffer.byteLength(bytes) > MAX_BYTES) throw bad();
     const directory = path.dirname(file);
@@ -118,6 +139,7 @@ export async function exportHourlyArtifact(file: string, store: RunStore, creden
       await rename(temporary, file); temporary = undefined;
     }
     await parent.sync();
+    return payload.cleanup;
   } catch { throw bad(); }
   finally {
     await output?.close(); await parent?.close();

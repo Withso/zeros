@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createPrivateKey, randomUUID, sign } from "node:crypto";
 import { mkdtemp, mkdir, readFile, writeFile, chmod, rm, symlink } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -7,6 +7,7 @@ import { createCloudReplicaDeviceCredential } from "../../apps/desktop/src/engin
 import { RunStore } from "../zeros-dev/receipts";
 import { exportHourlyArtifact, importHourlyArtifact, verifyPublicHourlyArtifact } from "../zeros-dev/hourly-artifact";
 import type { Fixture } from "../zeros-dev/config";
+import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -25,6 +26,70 @@ async function fixture() {
 }
 
 describe("cross-run signed Actions receipts", () => {
+  it.each(["physical", "storage-pending"])("reads a correctly signed legacy %s receipt with its original erasure requirement", async condition => {
+    const f = await fixture();
+    await f.store.withRun(f.runId, null, async h => {
+      h.run.create = { key: randomUUID(), body: { name: `zd-${f.runId}`, repository: { forge: "github.com", owner: "fixture", name: "fixture",
+        revision: "main", githubInstallationId: f.fixture.repository.installationId } },
+      result: { id: randomUUID(), createdBy: f.fixture.accountId, createdAt: new Date().toISOString(), generation: 1 } };
+      retireFixtureCompute(h); h.run.hourly!.complete = true;
+      if (condition === "physical") { h.run.deletionConfirmed = true; delete h.run.retirement; h.run.lifecycle.at(-1)!.confirmed = true; }
+      await h.save();
+    });
+    await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, { code: null, success: true, runId: f.runId });
+    const envelope = JSON.parse(await readFile(f.file, "utf8"));
+    envelope.payload.schema = "zeros.dev-hourly/v1"; delete envelope.payload.cleanup;
+    const key = createPrivateKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: f.credential.publicKey, d: f.credential.privateKey } });
+    envelope.signature = sign(null, Buffer.from(JSON.stringify(envelope.payload)), key).toString("base64url");
+    const trust = { deviceId: f.credential.deviceId, publicKey: f.credential.publicKey };
+    if (condition === "physical") {
+      expect(verifyPublicHourlyArtifact(envelope, trust, f.execution).schema).toBe("zeros.dev-hourly/v1");
+      await writeFile(f.file, JSON.stringify(envelope));
+      const next = new RunStore(path.join(f.root, "legacy"), f.fixture, f.credential);
+      await expect(importHourlyArtifact(f.file, next, f.credential, f.execution)).resolves.toEqual({});
+      expect((await next.read(f.runId)).deletionConfirmed).toBe(true);
+    } else {
+      expect(() => verifyPublicHourlyArtifact(envelope, trust, f.execution)).toThrow("zeros_dev_artifact_invalid");
+      delete envelope.payload.runs[0].retirement;
+      envelope.signature = sign(null, Buffer.from(JSON.stringify(envelope.payload)), key).toString("base64url");
+      expect(() => verifyPublicHourlyArtifact(envelope, trust, f.execution)).toThrow("zeros_dev_artifact_invalid");
+    }
+  });
+
+  it("exports a successful storage-pending result without claiming physical deletion", async () => {
+    const f = await fixture();
+    await f.store.withRun(f.runId, null, async h => {
+      h.run.create = { key: randomUUID(), body: { name: `zd-${f.runId}`, repository: { forge: "github.com", owner: "fixture", name: "fixture",
+        revision: "main", githubInstallationId: f.fixture.repository.installationId } },
+      result: { id: randomUUID(), createdBy: f.fixture.accountId, createdAt: new Date().toISOString(), generation: 1 } };
+      retireFixtureCompute(h, new Date().toISOString());
+      h.run.hourly!.complete = true; await h.save();
+    });
+    await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, { code: null, success: true, runId: f.runId });
+    const raw = JSON.parse(await readFile(f.file, "utf8"));
+    expect(raw.payload.schema).toBe("zeros.dev-hourly/v2");
+    const verified = verifyPublicHourlyArtifact(raw, { deviceId: f.credential.deviceId, publicKey: f.credential.publicKey }, f.execution);
+    expect(verified.runs[0]).toMatchObject({ deletionConfirmed: false, retirement: { status: "compute_retired_storage_pending" } });
+    expect(verified.result.success).toBe(true);
+  });
+
+  it("retains eight unresolved resources and a failed current attempt without truncating the signed chain", async () => {
+    const f = await fixture();
+    for (let i = 0; i < 8; i++) {
+      const id = randomUUID();
+      await f.store.withRun(id, { revision: f.execution.sourceSha, dirty: false }, async h => {
+        h.run.hourly = { version: 1, ...f.execution, credentials: [], histories: [], activeWindows: [], complete: false };
+        h.run.create = { key: randomUUID(), body: { name: `zd-${id}`, repository: { forge: "github.com", owner: "fixture", name: "fixture",
+          revision: "main", githubInstallationId: f.fixture.repository.installationId } } };
+        await h.save();
+      });
+    }
+    await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, { code: "cleanup_pending", success: false, runId: f.runId });
+    const raw = JSON.parse(await readFile(f.file, "utf8"));
+    expect(raw.payload.runs).toHaveLength(9);
+    expect(raw.payload.runs.filter((run: any) => run.create)).toHaveLength(8);
+  });
+
   it("verifies public receipts with a pinned public key and exact producer, without private credentials", async () => {
     const f = await fixture(); await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, { code: "cleanup_pending", success: false, runId: f.runId });
     const raw = JSON.parse(await readFile(f.file, "utf8"));

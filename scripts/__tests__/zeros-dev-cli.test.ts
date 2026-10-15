@@ -10,6 +10,15 @@ import { runCli } from "../zeros-dev/cli";
 import { ZerosDevError } from "../zeros-dev/errors";
 
 describe("documented zeros-dev Linux command", () => {
+  it("accepts only explicit local receipt IDs for the cleanup-only Actions handoff", () => {
+    const runs = [randomUUID(), randomUUID()].join(",");
+    expect(parseCommand(["cleanup", "handoff", "--runs", runs, "--output", "/private/fixture-handoff.b64"]))
+      .toEqual({ name: "cleanup handoff", options: { runs, output: "/private/fixture-handoff.b64" } });
+    for (const args of [["cleanup", "handoff", "--all"], ["cleanup", "handoff", "--runs", runs],
+      ["cleanup", "handoff", "--runs", "zd-fixture", "--output", "handoff.b64"]])
+      expect(() => parseCommand(args)).toThrow("zeros_dev_invalid_request");
+  });
+
   it("accepts an exact intended runtime for Computer verification without accepting a channel or origin",()=>{
     const runtime=`r1-${"a".repeat(64)}`;
     expect(parseCommand(["computer","build","--wait","--expect-runtime",runtime])).toEqual({name:"computer build",options:{wait:true,"expect-runtime":runtime}});

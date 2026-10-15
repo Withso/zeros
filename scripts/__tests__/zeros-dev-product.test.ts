@@ -8,6 +8,7 @@ import type { Run, RunHandle } from "../zeros-dev/receipts";
 import { computerBuild, computerState } from "../../apps/desktop/src/renderer/features/settings/__tests__/cloud-computer-v2-fixtures";
 import { createCloudWorkspaceRoutes } from "../../apps/control-plane/src/cloud-workspaces/routes";
 import { HttpError } from "../../apps/control-plane/src/authz";
+import { fixtureRetirement, retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
 
 const fixture=parseFixture({ZEROS_DEV_WORKOS_SUBJECT:"user_fixture",ZEROS_DEV_ACCOUNT_ID:"11111111-1111-4111-8111-111111111111",ZEROS_DEV_EMAIL:"fixture@example.test",
   ZEROS_DEV_ORGANIZATION_ID:"22222222-2222-4222-8222-222222222222",ZEROS_DEV_REPOSITORY:"test-owner/test-repo",ZEROS_DEV_REPOSITORY_ID:"1234",ZEROS_DEV_GITHUB_INSTALLATION_ID:"33333333-3333-4333-8333-333333333333"});
@@ -380,6 +381,103 @@ describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
     expect(await f.api.cleanup(f.handle,true)).toEqual({planned:1,confirmed:1});
     expect(f.handle.run.deletionConfirmed).toBe(true);
     expect(f.fetcher.mock.calls.some(([url])=>String(url).includes("/pending-deletion"))).toBe(true);
+  });
+
+  it("closes explicit compute cleanup on a fresh authenticated retirement and never reissues its accepted delete", async () => {
+    let clock = 0;
+    const f = setup(fixture, { now: () => clock, sleep: async ms => { clock += ms; } });
+    await f.api.createWorkspace(f.handle);
+    const original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, input) => {
+      if (String(url).endsWith("/deletion-retirement")) {
+        expect(input?.method).toBe("POST");
+        expect(JSON.parse(String(input?.body))).toEqual({ generation: 1, deleteIdempotencyKey: f.handle.run.lifecycle.at(-1)!.key });
+        return Response.json(fixtureRetirement(f.handle.run, new Date().toISOString()));
+      }
+      if (input?.method === "DELETE") {
+        const row = { ...workspace(), name: f.handle.run.create!.body.name, status: "deleting", generation: { ...workspace().generation, observedState: "stopped" } };
+        f.setWorkspace(row); return Response.json({ workspace: row });
+      }
+      return original(url, input);
+    });
+    const cleanup = f.api.cleanup.bind(f.api) as (...args: any[]) => Promise<unknown>;
+    await expect(cleanup(f.handle, true, undefined, { allowStoragePending: true })).resolves.toEqual({ planned: 1, confirmed: 0, storagePending: 1 });
+    expect(clock).toBe(0);
+    expect(f.handle.run.deletionConfirmed).toBe(false);
+    expect(f.handle.run.lifecycle.at(-1)).toMatchObject({ operation: "delete", confirmed: false });
+    expect(f.handle.run.retirement).toMatchObject({ status: "compute_retired_storage_pending", admissionFenced: true });
+    await expect(cleanup(f.handle, true, undefined, { allowStoragePending: true })).resolves.toMatchObject({ confirmed: 0, storagePending: 1 });
+    expect(f.fetcher.mock.calls.filter(([, input]) => input?.method === "DELETE")).toHaveLength(1);
+  });
+
+  it.each(["exact", "retired-deleting", "foreign-row", "live", "wrong-key", "wrong-org", "changed-generation", "unaccounted-generation",
+    "missing-proof", "unfenced", "cpu", "failed", "truncated", "missing-inventory", "stale", "expires-during-inventory", "old-debt"])(
+    "admits only current exact retirement: %s", async condition => {
+      const f = setup(); await f.api.createWorkspace(f.handle);
+      const proof = retireFixtureCompute(f.handle, new Date().toISOString());
+      if (condition === "wrong-key") proof.deleteIdempotencyKey = randomUUID();
+      if (condition === "wrong-org") proof.organizationId = randomUUID();
+      if (condition === "changed-generation") proof.currentGeneration = 2;
+      if (condition === "unaccounted-generation") { proof.generations.push({ ...proof.generations[0]!, generation: 2 }); proof.reserved.storageMiB *= 2; }
+      if (condition === "unfenced") Object.assign(proof, { admissionFenced: false });
+      if (condition === "cpu") Object.assign(proof.reserved, { cpuMillicores: 1 });
+      if (condition === "stale") proof.observedAt = new Date(Date.now() - 120_000).toISOString();
+      if (condition === "old-debt") proof.requestedAt = new Date(Date.now() - 8 * 3_600_000 - 1000).toISOString();
+      let restoreClock: (() => void) | undefined;
+      f.fetcher.mockClear();
+      f.fetcher.mockImplementation(async (url, input) => {
+        const target = new URL(String(url));
+        if (target.pathname.endsWith("/deletion-retirement")) {
+          expect(input?.method).toBe("POST");
+          return condition === "missing-proof" ? Response.json({}, { status: 404 }) : Response.json(proof);
+        }
+        expect(input?.method).toBe("GET");
+        if (target.pathname.endsWith("/cloud-workspaces")) return Response.json({ nextCursor: null, workspaces: [{ ...workspace(),
+          id: condition === "foreign-row" ? randomUUID() : workspace().id, name: f.handle.run.create!.body.name,
+          status: condition === "live" ? "ready" : "deleting", generation: { ...workspace().generation,
+            observedState: condition === "live" ? "running" : condition === "retired-deleting" ? "deleting" : "stopped" } }] });
+        if (condition === "expires-during-inventory") {
+          const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(proof.observedAt) + 60_001);
+          restoreClock = () => { clock.mockRestore(); };
+        }
+        return Response.json({ truncated: condition === "truncated", pendingDeletion: condition === "missing-inventory" ? [] : [{
+          workspaceId: workspace().id, generation: 1, state: condition === "failed" ? "failed" : "observing",
+          reserved: condition === "retired-deleting" ? { ...proof.reserved, cpuMillicores: 2000, memoryMiB: 4096 } : proof.reserved,
+        }] });
+      });
+      const result = f.api.assertFixtureEmpty(undefined, [f.handle.run]);
+      try {
+        if (["exact", "retired-deleting"].includes(condition)) await expect(result).resolves.toBeUndefined();
+        else await expect(result).rejects.toBeInstanceOf(ZerosDevError);
+      } finally { restoreClock?.(); }
+      expect(f.fetcher.mock.calls.every(([url, input]) => input?.method === "GET" || String(url).endsWith("/deletion-retirement"))).toBe(true);
+      expect(f.handle.run.deletionConfirmed).toBe(false);
+    });
+
+  it("rejects contradictory physical flags even when the catalog is empty", async () => {
+    const f = setup(); await f.api.createWorkspace(f.handle); retireFixtureCompute(f.handle, new Date().toISOString());
+    f.handle.run.deletionConfirmed = true;
+    f.fetcher.mockImplementation(async url => Response.json(String(url).endsWith("/pending-deletion")
+      ? { truncated: false, pendingDeletion: [] } : { workspaces: [], nextCursor: null }));
+    await expect(f.api.assertFixtureEmpty(undefined, [f.handle.run])).rejects.toMatchObject({ code: "receipt_invalid" });
+  });
+
+  it("recognizes positive physical completion after content purge without inferring it from 404", async () => {
+    const f = setup(); await f.api.createWorkspace(f.handle); retireFixtureCompute(f.handle, new Date().toISOString());
+    const proof: any = fixtureRetirement(f.handle.run, new Date().toISOString());
+    proof.status = "physically_deleted"; proof.deletionConfirmed = true; proof.reserved.storageMiB = 0;
+    proof.generations[0].status = "physically_deleted"; proof.generations[0].storageStage = "completed";
+    proof.generations[0].reserved.storageMiB = 0; proof.generations[0].expectedBy = null;
+    f.fetcher.mockImplementation(async (url, input) => {
+      expect(String(url)).toMatch(/\/deletion-retirement$/); expect(input?.method).toBe("POST");
+      return Response.json(proof);
+    });
+    await expect(f.api.cleanup(f.handle, true, undefined, { allowStoragePending: true })).resolves.toMatchObject({ confirmed: 1, storagePending: 0 });
+    expect(f.handle.run.deletionConfirmed).toBe(true); expect(f.handle.run.lifecycle.at(-1)?.confirmed).toBe(true);
+    const missing = setup(); await missing.api.createWorkspace(missing.handle); retireFixtureCompute(missing.handle, new Date().toISOString());
+    missing.fetcher.mockResolvedValue(Response.json({}, { status: 404 }));
+    await expect(missing.api.cleanup(missing.handle, true, undefined, { allowStoragePending: true })).rejects.toMatchObject({ code: "not_found" });
+    expect(missing.handle.run.deletionConfirmed).toBe(false);
   });
 
   it.each(["truncated","pending"])("does not turn a %s provider-deletion view into confirmed cleanup",async mode=>{

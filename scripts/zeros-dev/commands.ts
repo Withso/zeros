@@ -17,6 +17,7 @@ const COMMANDS = {
   "agent send": ["run", "agent", "model", "prompt-file", "prompt", "continue", "wait"], "chat tail": ["run", "prompt"],
   "terminal run": ["run", "script", "command"], "health cp": ["expect-source"], "health cp-logs": ["run"], "health vm": ["run"], "health db": ["run", "expect-runtime"],
   "scenario run smoke": ["run", "agent", "model", "prompt-file", "expect-source", "build-computer"], cleanup: ["run", "all", "apply"],
+  "cleanup handoff": ["runs", "output"],
 } satisfies Record<string, string[]>;
 export type CommandName = keyof typeof COMMANDS;
 export type Command = { name: CommandName; options: Record<string, string | true> };
@@ -38,7 +39,10 @@ export const HELP = `Alpha-only Linux zeros-dev (credentials: canonical .env.age
   health db --run UUID [--expect-runtime r1-SHA256]
   scenario run smoke --agent AGENT --model MODEL [--run UUID] [--build-computer] [--prompt-file FILE]
   cleanup --run UUID|--all [--apply]
+  cleanup handoff --runs UUID[,UUID...] --output FILE
 Lifecycle/build/prompt commands wait with finite deadlines. Cleanup defaults to a plan.
+Handoff reads at most four exact signed local receipts and current product retirement proof.
+It performs no lifecycle write; its 0600 output authorizes cleanup only in Actions.
 Input files: relative paths resolve from the current checkout; absolute paths also work.
 Use owned regular files (chmod 600 FILE), without links or group/world write access.
 Credential files are refused. --script must be nonempty and at most 2 KiB;
@@ -66,8 +70,13 @@ export function parseCommand(args: string[]): Command | null {
   if (options["expect-source"] && !/^[a-f0-9]{40}$/.test(String(options["expect-source"])) ||
     options["expect-runtime"] && !/^r1-[a-f0-9]{64}$/.test(String(options["expect-runtime"]))) throw new ZerosDevError("invalid_request");
   if (name === "cleanup" && (!!options.run === !!options.all)) throw new ZerosDevError("invalid_request");
-  if (!["login", "whoami", "logout", "org ensure", "repo ensure", "github connect", "health cp", "workspace create", "computer build", "scenario run smoke", "cleanup"].includes(name) && !options.run)
+  if (!["login", "whoami", "logout", "org ensure", "repo ensure", "github connect", "health cp", "workspace create", "computer build", "scenario run smoke", "cleanup", "cleanup handoff"].includes(name) && !options.run)
     throw new ZerosDevError("invalid_request");
+  if (name === "cleanup handoff") {
+    const ids = String(options.runs ?? "").split(",");
+    if (!options.output || ids.length > 4 || ids.some(id => !uuid.safeParse(id).success) || new Set(ids).size !== ids.length)
+      throw new ZerosDevError("invalid_request");
+  }
   if (name === "github connect") parseRepositorySelection(String(options.repository ?? ""), String(options["repository-id"] ?? ""));
   if (["agent send", "scenario run smoke"].includes(name) && (!z.enum(["claude", "codex", "cursor"]).safeParse(options.agent).success ||
     typeof options.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/.test(options.model))) throw new ZerosDevError("invalid_request");
@@ -88,6 +97,7 @@ export interface Services {
   healthDb(run: Run): ReturnType<typeof databaseHealth>;
   healthLogs(run: Run): ReturnType<typeof controlPlaneLogs>;
   githubConnect(repository: RepositorySelection, signal: AbortSignal, show: (url: string) => void): Promise<void>;
+  handoff?(runIds: string[], file: string, signal: AbortSignal): Promise<{ state: "ready"; sha256: string; runCount: number }>;
   write(value: unknown): void;
 }
 
@@ -110,6 +120,7 @@ export async function executeCommand(command: Command, services: Services, signa
   async function withRun(work: (handle: RunHandle) => Promise<void>, fresh = false) {
     const runs = await services.runs();
     await runs.withRun(runId, fresh ? await services.source() : null, async handle => {
+      if (handle.run.cleanupOnly && !["workspace status", "health vm"].includes(name)) throw new ZerosDevError("forbidden");
       await handle.save();
       services.write({ schema: "zeros.dev-context/v1", runId, localSource: handle.run.source });
       try { await work(handle); }
@@ -123,6 +134,10 @@ export async function executeCommand(command: Command, services: Services, signa
   }
   try {
     if (name === "login") { await evidence.step("login", () => services.session.login()); result({ authenticated: true }); }
+    else if (name === "cleanup handoff") {
+      if (!services.handoff) throw new ZerosDevError("invalid_request");
+      result(await services.handoff(String(options.runs).split(","), String(options.output), signal));
+    }
     else if (name === "logout") { await evidence.step("identity", () => services.session.logout()); result({ authenticated: false }); }
     else if (name === "whoami" || name === "org ensure") { await evidence.step("identity", () => services.session.whoami()); result({ fixture: "confirmed" }); }
     else if (name === "repo ensure") { await evidence.step("repository", () => services.api.ensureRepository(signal)); result({ fixture: "confirmed" }); }
