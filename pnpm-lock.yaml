@@ -20,7 +20,7 @@ overrides:
 
 patchedDependencies:
   '@radix-ui/react-scroll-area@1.2.10':
-    hash: 681cca897a9a9c64daf5a36e0929a673fbee38950bc0d9e30605d998c238a554
+    hash: 48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630
     path: patches/@radix-ui__react-scroll-area@1.2.10.patch
   app-builder-lib@26.8.1:
     hash: c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd
@@ -110,7 +110,7 @@ importers:
         version: 1.1.15(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-scroll-area':
         specifier: ^1.2.0
-        version: 1.2.10(patch_hash=681cca897a9a9c64daf5a36e0929a673fbee38950bc0d9e30605d998c238a554)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+        version: 1.2.10(patch_hash=48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-separator':
         specifier: ^1.1.8
         version: 1.1.8(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -8286,7 +8286,7 @@ snapshots:
       '@types/react': 18.3.28
       '@types/react-dom': 18.3.7(@types/react@18.3.28)
 
-  '@radix-ui/react-scroll-area@1.2.10(patch_hash=681cca897a9a9c64daf5a36e0929a673fbee38950bc0d9e30605d998c238a554)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
+  '@radix-ui/react-scroll-area@1.2.10(patch_hash=48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:
       '@radix-ui/number': 1.1.1
       '@radix-ui/primitive': 1.1.3
@@ -11921,7 +11921,7 @@ snapshots:
       '@radix-ui/react-progress': 1.1.7(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-radio-group': 1.3.8(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-roving-focus': 1.1.11(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      '@radix-ui/react-scroll-area': 1.2.10(patch_hash=681cca897a9a9c64daf5a36e0929a673fbee38950bc0d9e30605d998c238a554)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@radix-ui/react-scroll-area': 1.2.10(patch_hash=48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-select': 2.2.6(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-separator': 1.1.7(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-slider': 1.3.6(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)

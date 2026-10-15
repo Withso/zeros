@@ -1,8 +1,160 @@
 diff --git a/dist/index.js b/dist/index.js
-index 6e0a40d99edf0a3e2ed405455c25bed6a48c1c5a..0d3b0915488503fe1b63ab9c3cc6099da56ae0d4 100644
+index 6e0a40d99edf0a3e2ed405455c25bed6a48c1c5a..b023832e961fd197dafb8a4aa4c149c40d3ca2d4 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -607,7 +607,11 @@ var ScrollAreaThumbImpl = React2.forwardRef(
+@@ -482,6 +482,31 @@ var ScrollAreaScrollbarY = React2.forwardRef((props, forwardedRef) => {
+     }
+   );
+ });
++// Overlapping scrollbars share body/viewport styles but retire independently.
++var scrollAreaDragStyles = new WeakMap();
++function holdScrollAreaDragStyle(element, property, value) {
++  if (!element) return () => {};
++  const style = element.style;
++  const read = () => ({ value: style.getPropertyValue(property), priority: style.getPropertyPriority(property) });
++  const owns = () => style.getPropertyValue(property) === value && style.getPropertyPriority(property) === "";
++  let properties = scrollAreaDragStyles.get(element);
++  if (!properties) scrollAreaDragStyles.set(element, properties = new Map());
++  let lock = properties.get(property);
++  if (!lock) properties.set(property, lock = { count: 0, previous: read() });
++  else if (!owns()) lock.previous = read();
++  lock.count++;
++  style.setProperty(property, value);
++  let released = false;
++  return () => {
++    if (released) return;
++    released = true;
++    if (--lock.count === 0) {
++      properties.delete(property);
++      if (owns()) style.setProperty(property, lock.previous.value, lock.previous.priority);
++      if (properties.size === 0) scrollAreaDragStyles.delete(element);
++    }
++  };
++}
+ var [ScrollbarProvider, useScrollbarContext] = createScrollAreaContext(SCROLLBAR_NAME);
+ var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
+   const {
+@@ -501,19 +526,42 @@ var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
+   const [scrollbar, setScrollbar] = React2.useState(null);
+   const composeRefs = (0, import_react_compose_refs.useComposedRefs)(forwardedRef, (node) => setScrollbar(node));
+   const rectRef = React2.useRef(null);
+-  const prevWebkitUserSelectRef = React2.useRef("");
++  const dragRef = React2.useRef(null);
++  const thumbElementRef = React2.useRef(null);
++  const thumbChangeRef = React2.useRef(0);
+   const viewport = context.viewport;
+   const maxScrollPos = sizes.content - sizes.viewport;
+   const handleWheelScroll = (0, import_react_use_callback_ref.useCallbackRef)(onWheelScroll);
+   const handleThumbPositionChange = (0, import_react_use_callback_ref.useCallbackRef)(onThumbPositionChange);
+   const handleResize = useDebounceCallback(onResize, 10);
+   function handleDragScroll(event) {
+-    if (rectRef.current) {
++    const drag = dragRef.current;
++    if (rectRef.current && drag && event.pointerId === drag.pointerId &&
++        event.target === drag.element && event.timeStamp >= drag.startedAt) {
+       const x = event.clientX - rectRef.current.left;
+       const y = event.clientY - rectRef.current.top;
+       onDragScroll({ x, y });
+     }
+   }
++  function handleDragEnd(event) {
++    const drag = dragRef.current;
++    if (!drag || event && (event.pointerId !== drag.pointerId ||
++        event.target !== drag.element || event.timeStamp < drag.startedAt)) return;
++    // Capture loss can re-enter this path. Retire identity before releasing it.
++    dragRef.current = null;
++    rectRef.current = null;
++    onThumbPointerUp();
++    drag.releaseBodyStyle();
++    drag.releaseViewportStyle();
++    if (drag.element.hasPointerCapture(drag.pointerId)) {
++      drag.element.releasePointerCapture(drag.pointerId);
++    }
++  }
++  function handleLostPointerCapture(event) {
++    const drag = dragRef.current;
++    if (drag && !drag.element.hasPointerCapture(event.pointerId)) handleDragEnd(event);
++  }
++  (0, import_react_use_layout_effect.useLayoutEffect)(() => () => handleDragEnd(), [viewport, scrollbar, hasThumb]);
+   React2.useEffect(() => {
+     const handleWheel = (event) => {
+       const element = event.target;
+@@ -532,10 +580,32 @@ var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
+       scope: __scopeScrollArea,
+       scrollbar,
+       hasThumb,
+-      onThumbChange: (0, import_react_use_callback_ref.useCallbackRef)(onThumbChange),
+-      onThumbPointerUp: (0, import_react_use_callback_ref.useCallbackRef)(onThumbPointerUp),
++      onThumbChange: (0, import_react_use_callback_ref.useCallbackRef)((thumb) => {
++        const change = ++thumbChangeRef.current;
++        const previous = thumbElementRef.current;
++        const drag = dragRef.current;
++        if (thumb) {
++          if (drag && previous !== thumb && previous?.contains(drag.element)) handleDragEnd();
++          thumbElementRef.current = thumb;
++        } else if (previous) {
++          // React reassigns callback refs without removing their DOM nodes.
++          // Confirm removal after this commit; never retire a successor drag.
++          queueMicrotask(() => {
++            if (thumbChangeRef.current !== change || (previous.isConnected && scrollbar?.contains(previous))) return;
++            if (drag && dragRef.current === drag && previous.contains(drag.element)) handleDragEnd();
++            if (thumbElementRef.current === previous) thumbElementRef.current = null;
++          });
++        }
++        onThumbChange(thumb);
++      }),
++      onThumbPointerUp: (0, import_react_use_callback_ref.useCallbackRef)((event) => {
++        if (dragRef.current) handleDragEnd(event);
++        else onThumbPointerUp();
++      }),
+       onThumbPositionChange: handleThumbPositionChange,
+-      onThumbPointerDown: (0, import_react_use_callback_ref.useCallbackRef)(onThumbPointerDown),
++      onThumbPointerDown: (0, import_react_use_callback_ref.useCallbackRef)((position) => {
++        if (!dragRef.current) onThumbPointerDown(position);
++      }),
+       children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+         import_react_primitive.Primitive.div,
+         {
+@@ -544,26 +614,25 @@ var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
+           style: { position: "absolute", ...scrollbarProps.style },
+           onPointerDown: (0, import_primitive.composeEventHandlers)(props.onPointerDown, (event) => {
+             const mainPointer = 0;
+-            if (event.button === mainPointer) {
++            if (event.button === mainPointer && !dragRef.current) {
+               const element = event.target;
+               element.setPointerCapture(event.pointerId);
++              dragRef.current = {
++                pointerId: event.pointerId,
++                startedAt: event.timeStamp,
++                element,
++                viewport,
++                releaseBodyStyle: holdScrollAreaDragStyle(element.ownerDocument.body, "-webkit-user-select", "none"),
++                releaseViewportStyle: holdScrollAreaDragStyle(viewport, "scroll-behavior", "auto")
++              };
+               rectRef.current = scrollbar.getBoundingClientRect();
+-              prevWebkitUserSelectRef.current = document.body.style.webkitUserSelect;
+-              document.body.style.webkitUserSelect = "none";
+-              if (context.viewport) context.viewport.style.scrollBehavior = "auto";
+               handleDragScroll(event);
+             }
+           }),
+           onPointerMove: (0, import_primitive.composeEventHandlers)(props.onPointerMove, handleDragScroll),
+-          onPointerUp: (0, import_primitive.composeEventHandlers)(props.onPointerUp, (event) => {
+-            const element = event.target;
+-            if (element.hasPointerCapture(event.pointerId)) {
+-              element.releasePointerCapture(event.pointerId);
+-            }
+-            document.body.style.webkitUserSelect = prevWebkitUserSelectRef.current;
+-            if (context.viewport) context.viewport.style.scrollBehavior = "";
+-            rectRef.current = null;
+-          })
++          onPointerUp: (0, import_primitive.composeEventHandlers)(props.onPointerUp, handleDragEnd, { checkForDefaultPrevented: false }),
++          onPointerCancel: (0, import_primitive.composeEventHandlers)(props.onPointerCancel, handleDragEnd, { checkForDefaultPrevented: false }),
++          onLostPointerCapture: (0, import_primitive.composeEventHandlers)(props.onLostPointerCapture, handleLostPointerCapture, { checkForDefaultPrevented: false })
+         }
+       )
+     }
+@@ -607,7 +676,11 @@ var ScrollAreaThumbImpl = React2.forwardRef(
          };
          onThumbPositionChange();
          viewport.addEventListener("scroll", handleScroll);
@@ -16,10 +168,162 @@ index 6e0a40d99edf0a3e2ed405455c25bed6a48c1c5a..0d3b0915488503fe1b63ab9c3cc6099d
      }, [scrollAreaContext.viewport, debounceScrollEnd, onThumbPositionChange]);
      return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
 diff --git a/dist/index.mjs b/dist/index.mjs
-index fac521d1e293331d6c358170552a0d15ebbc04c6..5d48b876d41b38253a5c4378108bb3bb6f7d23ac 100644
+index fac521d1e293331d6c358170552a0d15ebbc04c6..bc660ca8675f7e171bcbea8ef59f0134ed0ac03c 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -562,7 +562,11 @@ var ScrollAreaThumbImpl = React2.forwardRef(
+@@ -437,6 +437,31 @@ var ScrollAreaScrollbarY = React2.forwardRef((props, forwardedRef) => {
+     }
+   );
+ });
++// Overlapping scrollbars share body/viewport styles but retire independently.
++var scrollAreaDragStyles = new WeakMap();
++function holdScrollAreaDragStyle(element, property, value) {
++  if (!element) return () => {};
++  const style = element.style;
++  const read = () => ({ value: style.getPropertyValue(property), priority: style.getPropertyPriority(property) });
++  const owns = () => style.getPropertyValue(property) === value && style.getPropertyPriority(property) === "";
++  let properties = scrollAreaDragStyles.get(element);
++  if (!properties) scrollAreaDragStyles.set(element, properties = new Map());
++  let lock = properties.get(property);
++  if (!lock) properties.set(property, lock = { count: 0, previous: read() });
++  else if (!owns()) lock.previous = read();
++  lock.count++;
++  style.setProperty(property, value);
++  let released = false;
++  return () => {
++    if (released) return;
++    released = true;
++    if (--lock.count === 0) {
++      properties.delete(property);
++      if (owns()) style.setProperty(property, lock.previous.value, lock.previous.priority);
++      if (properties.size === 0) scrollAreaDragStyles.delete(element);
++    }
++  };
++}
+ var [ScrollbarProvider, useScrollbarContext] = createScrollAreaContext(SCROLLBAR_NAME);
+ var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
+   const {
+@@ -456,19 +481,42 @@ var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
+   const [scrollbar, setScrollbar] = React2.useState(null);
+   const composeRefs = useComposedRefs(forwardedRef, (node) => setScrollbar(node));
+   const rectRef = React2.useRef(null);
+-  const prevWebkitUserSelectRef = React2.useRef("");
++  const dragRef = React2.useRef(null);
++  const thumbElementRef = React2.useRef(null);
++  const thumbChangeRef = React2.useRef(0);
+   const viewport = context.viewport;
+   const maxScrollPos = sizes.content - sizes.viewport;
+   const handleWheelScroll = useCallbackRef(onWheelScroll);
+   const handleThumbPositionChange = useCallbackRef(onThumbPositionChange);
+   const handleResize = useDebounceCallback(onResize, 10);
+   function handleDragScroll(event) {
+-    if (rectRef.current) {
++    const drag = dragRef.current;
++    if (rectRef.current && drag && event.pointerId === drag.pointerId &&
++        event.target === drag.element && event.timeStamp >= drag.startedAt) {
+       const x = event.clientX - rectRef.current.left;
+       const y = event.clientY - rectRef.current.top;
+       onDragScroll({ x, y });
+     }
+   }
++  function handleDragEnd(event) {
++    const drag = dragRef.current;
++    if (!drag || event && (event.pointerId !== drag.pointerId ||
++        event.target !== drag.element || event.timeStamp < drag.startedAt)) return;
++    // Capture loss can re-enter this path. Retire identity before releasing it.
++    dragRef.current = null;
++    rectRef.current = null;
++    onThumbPointerUp();
++    drag.releaseBodyStyle();
++    drag.releaseViewportStyle();
++    if (drag.element.hasPointerCapture(drag.pointerId)) {
++      drag.element.releasePointerCapture(drag.pointerId);
++    }
++  }
++  function handleLostPointerCapture(event) {
++    const drag = dragRef.current;
++    if (drag && !drag.element.hasPointerCapture(event.pointerId)) handleDragEnd(event);
++  }
++  useLayoutEffect(() => () => handleDragEnd(), [viewport, scrollbar, hasThumb]);
+   React2.useEffect(() => {
+     const handleWheel = (event) => {
+       const element = event.target;
+@@ -487,10 +535,32 @@ var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
+       scope: __scopeScrollArea,
+       scrollbar,
+       hasThumb,
+-      onThumbChange: useCallbackRef(onThumbChange),
+-      onThumbPointerUp: useCallbackRef(onThumbPointerUp),
++      onThumbChange: useCallbackRef((thumb) => {
++        const change = ++thumbChangeRef.current;
++        const previous = thumbElementRef.current;
++        const drag = dragRef.current;
++        if (thumb) {
++          if (drag && previous !== thumb && previous?.contains(drag.element)) handleDragEnd();
++          thumbElementRef.current = thumb;
++        } else if (previous) {
++          // React reassigns callback refs without removing their DOM nodes.
++          // Confirm removal after this commit; never retire a successor drag.
++          queueMicrotask(() => {
++            if (thumbChangeRef.current !== change || (previous.isConnected && scrollbar?.contains(previous))) return;
++            if (drag && dragRef.current === drag && previous.contains(drag.element)) handleDragEnd();
++            if (thumbElementRef.current === previous) thumbElementRef.current = null;
++          });
++        }
++        onThumbChange(thumb);
++      }),
++      onThumbPointerUp: useCallbackRef((event) => {
++        if (dragRef.current) handleDragEnd(event);
++        else onThumbPointerUp();
++      }),
+       onThumbPositionChange: handleThumbPositionChange,
+-      onThumbPointerDown: useCallbackRef(onThumbPointerDown),
++      onThumbPointerDown: useCallbackRef((position) => {
++        if (!dragRef.current) onThumbPointerDown(position);
++      }),
+       children: /* @__PURE__ */ jsx(
+         Primitive.div,
+         {
+@@ -499,26 +569,25 @@ var ScrollAreaScrollbarImpl = React2.forwardRef((props, forwardedRef) => {
+           style: { position: "absolute", ...scrollbarProps.style },
+           onPointerDown: composeEventHandlers(props.onPointerDown, (event) => {
+             const mainPointer = 0;
+-            if (event.button === mainPointer) {
++            if (event.button === mainPointer && !dragRef.current) {
+               const element = event.target;
+               element.setPointerCapture(event.pointerId);
++              dragRef.current = {
++                pointerId: event.pointerId,
++                startedAt: event.timeStamp,
++                element,
++                viewport,
++                releaseBodyStyle: holdScrollAreaDragStyle(element.ownerDocument.body, "-webkit-user-select", "none"),
++                releaseViewportStyle: holdScrollAreaDragStyle(viewport, "scroll-behavior", "auto")
++              };
+               rectRef.current = scrollbar.getBoundingClientRect();
+-              prevWebkitUserSelectRef.current = document.body.style.webkitUserSelect;
+-              document.body.style.webkitUserSelect = "none";
+-              if (context.viewport) context.viewport.style.scrollBehavior = "auto";
+               handleDragScroll(event);
+             }
+           }),
+           onPointerMove: composeEventHandlers(props.onPointerMove, handleDragScroll),
+-          onPointerUp: composeEventHandlers(props.onPointerUp, (event) => {
+-            const element = event.target;
+-            if (element.hasPointerCapture(event.pointerId)) {
+-              element.releasePointerCapture(event.pointerId);
+-            }
+-            document.body.style.webkitUserSelect = prevWebkitUserSelectRef.current;
+-            if (context.viewport) context.viewport.style.scrollBehavior = "";
+-            rectRef.current = null;
+-          })
++          onPointerUp: composeEventHandlers(props.onPointerUp, handleDragEnd, { checkForDefaultPrevented: false }),
++          onPointerCancel: composeEventHandlers(props.onPointerCancel, handleDragEnd, { checkForDefaultPrevented: false }),
++          onLostPointerCapture: composeEventHandlers(props.onLostPointerCapture, handleLostPointerCapture, { checkForDefaultPrevented: false })
+         }
+       )
+     }
+@@ -562,7 +631,11 @@ var ScrollAreaThumbImpl = React2.forwardRef(
          };
          onThumbPositionChange();
          viewport.addEventListener("scroll", handleScroll);
