@@ -71,7 +71,6 @@ localStorage.setItem(
   // A cloud actor's grants deliberately differ from this device's connections.
   JSON.stringify({ agents: policyCase && cloudFolder ? agents.map(agent => ({ ...agent, authenticated: true })) : agents, at: Date.now() }),
 );
-if (query.has("theme")) document.documentElement.setAttribute("data-theme", query.get("theme")!);
 
 async function main() {
   const React = await import("react");
@@ -155,7 +154,10 @@ async function main() {
     }
   }
   const liveEfforts = query.get("haikuEfforts");
-  const initialize = liveEfforts === null ? null : { protocolVersion: 1, _meta: { models: [{
+  const initialize = query.has("unavailableModel") ? { protocolVersion: 1, _meta: { modelsAccountScoped: true, models: [
+    { value: "grok-4.7", label: "Grok", selectable: false },
+    { value: "composer-2.5", label: "Composer", selectable: true, effortLevels: [] },
+  ] } } : liveEfforts === null ? null : { protocolVersion: 1, _meta: { models: [{
     value: "claude-haiku-5-5", label: "Haiku", effortLevels: liveEfforts === "none" ? [] : liveEfforts.split(","), supportsFast: false,
   }] } };
   const { pickAgentForNewChat } = await import("../features/settings/default-agent");
@@ -185,6 +187,13 @@ async function main() {
     shouldReclaimComposerFocus,
     OPEN_OVERLAY_SELECTOR,
   } = await import("../features/agent/composer-focus");
+  const theme = query.get("theme");
+  if (theme === "dark" || theme === "light") {
+    // The real store applies its preference on import; select the fixture
+    // theme there so component imports cannot silently reset a light run.
+    const { setPrefs } = await import("../shared/theme/store");
+    setPrefs({ mode: theme });
+  }
 
   function Harness() {
     const [agentId, setAgentId] = React.useState(initialAgentId);

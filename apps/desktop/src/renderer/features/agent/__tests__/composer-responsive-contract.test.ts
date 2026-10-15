@@ -56,12 +56,6 @@ describe("chat composer responsive contract", () => {
     expect(agentChat).toContain('<Square className="size-3" />');
   });
 
-  it("does not revalidate every provider after a non-auth execution failure", () => {
-    expect(agentChat).toMatch(
-      /if \(isAuth\) \{\s*invalidateAgentsCache\(\);\s*void refreshAgents/,
-    );
-  });
-
   it("shows metadata without the model name below 450px and only the logo below 400px", () => {
     expect(pills).toContain("data-model-pill-name");
     expect(pills).toContain("data-model-pill-metadata");

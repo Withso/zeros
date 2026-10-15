@@ -474,19 +474,35 @@ describe("cloud composer readiness queue", () => {
     expect(h.toasts.error).toHaveBeenCalledExactlyOnceWith("Message wasn't sent", expect.anything());
   });
   it("suppresses readiness toasts only for cloud queued waits and preserves Local initialization errors", () => {
-    let effect = "";
+    const effects: string[] = [];
     function collect(node: ts.Node) {
-      if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect" && node.arguments[0]?.getText(ast).includes("lastErrorLabelRef"))
-        effect = `(${node.arguments[0].getText(ast)})();`;
+      if (ts.isBlock(node)) {
+        const index = node.statements.findIndex(statement => ts.isVariableStatement(statement) &&
+          statement.declarationList.declarations.some(declaration => /^lastError.*Ref$/.test(declaration.name.getText(ast))));
+        if (index >= 0) effects.push(node.statements.slice(index, index + 2).map(statement => statement.getText(ast)).join("\n"));
+      }
       ts.forEachChild(node, collect);
     }
     collect(ast);
-    const code = ts.transpileModule(effect, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-    const toast = { error: vi.fn() }, env = { interactive: true, cloudComputerV2: true, isCloudWorkspace,
-      chatThread: { folder: "cloud://fixture" }, session: { status: "failed", cloudSendWait: { state: "waiting" } },
-      isErrorState: true, lastErrorLabelRef: { current: null }, labelForFailure: () => "Agent failed",
-      isTransportShaped: () => false, toast, chatId: "chat" };
-    vm.runInNewContext(code, env); expect(toast.error).not.toHaveBeenCalled();
-    vm.runInNewContext(code, { ...env, chatThread: { folder: "/local" } }); expect(toast.error).toHaveBeenCalledOnce();
+    expect(effects).toHaveLength(1);
+    expect(effects[0]).toContain("useEffect");
+    expect(effects[0]).toContain("toast.error");
+    const code = ts.transpileModule(`(() => { ${effects[0]!} })();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    for (const folder of ["cloud://fixture", "/local/personal", "/organization/local"]) {
+      const refs: Array<{ current: unknown }> = [];
+      let cursor = 0;
+      const toast = { error: vi.fn() }, env = { interactive: true, cloudComputerV2: true, isCloudWorkspace,
+        chatThread: { folder }, session: { status: "warming", agentId: "codex", cloudSendWait: { state: "waiting" } },
+        isErrorState: false, cloudCatalogGeneration: () => 1, labelForFailure: () => "Agent failed",
+        useRef: (initial: unknown) => refs[cursor++] ?? (refs[cursor - 1] = { current: initial }),
+        useEffect: (run: () => void) => run(), isTransportShaped: () => false, agentSessions: {}, toast, chatId: "chat" };
+      vm.runInNewContext(code, env);
+      // Observe a new failure, not a historical failed snapshot on mount.
+      env.session.status = "failed";
+      env.isErrorState = true;
+      cursor = 0;
+      vm.runInNewContext(code, env);
+      expect(toast.error).toHaveBeenCalledTimes(isCloudWorkspace(folder) ? 0 : 1);
+    }
   });
 });

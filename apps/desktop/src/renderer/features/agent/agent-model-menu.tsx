@@ -44,7 +44,7 @@ import {
   MENU_ITEM_RADIUS,
   MENU_SURFACE_INSET,
 } from "../../shared/ui/menu-surface";
-import { Switch, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Button, Switch, Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   Popover,
   PopoverContent,
@@ -123,7 +123,7 @@ interface AgentGroup {
 
 /** One flattened, searchable model row. */
 interface Row {
-  agent: BridgeRegistryAgent;
+  agent: WorkspaceRegistryAgent;
   family: string;
   model: ModelOption;
   unavailable?: boolean;
@@ -265,6 +265,19 @@ export function AgentModelMenu({
   // starts in the requested selected-only state.
   const [search, setSearch] = useState("");
   const [catalogOpen, setCatalogOpen] = useState(false);
+  const [availableOnly, setAvailableOnly] = useState(false);
+  const visibleGroups = useMemo(() => availableOnly
+    ? groups.map(group => ({ ...group, models: group.models.filter(model => !rowUnavailable(group.agent, model)) }))
+      .filter(group => group.models.length > 0)
+    : groups, [availableOnly, groups, rowUnavailable]);
+  const hasUnavailable = groups.some(group => group.models.some(model => rowUnavailable(group.agent, model)));
+  const hasAvailable = groups.some(group => group.models.some(model => !rowUnavailable(group.agent, model)));
+  const showAvailableModels = () => {
+    setAvailableOnly(true);
+    setSearch("");
+    setEditingModelKey(null);
+    setCatalogOpen(true);
+  };
   const [editingModelKey, setEditingModelKeyState] = useState<string | null>(
     null,
   );
@@ -277,6 +290,7 @@ export function AgentModelMenu({
     if (!open) return;
     setSearch("");
     setCatalogOpen(false);
+    setAvailableOnly(false);
     setEditingModelKey(null);
   }, [open, setEditingModelKey]);
 
@@ -321,7 +335,7 @@ export function AgentModelMenu({
   const rows = useMemo<Row[]>(() => {
     if (!searching) return [];
     const q = search.trim().toLowerCase();
-    return groups
+    return visibleGroups
       .flatMap((g) =>
         g.models.map((model) => ({
           agent: g.agent,
@@ -336,7 +350,7 @@ export function AgentModelMenu({
           r.model.value.toLowerCase().includes(q) ||
           agentTitle(r.agent, r.family).toLowerCase().includes(q),
       );
-  }, [groups, search, searching, rowUnavailable]);
+  }, [visibleGroups, search, searching, rowUnavailable]);
 
   // The row carrying the ✓: the current agent's current model (null model ⇒
   // its effective favorite, matching what the trigger pill displays).
@@ -364,6 +378,7 @@ export function AgentModelMenu({
       agent: group.agent,
       family: currentFamily,
       model,
+      unavailable: rowUnavailable(group.agent, model),
     };
   })();
 
@@ -388,6 +403,7 @@ export function AgentModelMenu({
   const canConfigureActive =
     !!value?.agentId &&
     !!activeModel &&
+    !activeRow?.unavailable &&
     (agentSupportsEffort(value.agentId, activeModel, initialize) ||
       agentSupportsFast(value.agentId, activeModel, initialize));
 
@@ -591,7 +607,7 @@ export function AgentModelMenu({
                 );
               })}
             </CommandList>
-          ) : groups.length > 0 ? (
+          ) : visibleGroups.length > 0 ? (
             <Popover
               open={catalogOpen}
               onOpenChange={(nextOpen) => {
@@ -613,7 +629,7 @@ export function AgentModelMenu({
                   className={cn(
                     "hover:bg-bg3-hover focus-visible:bg-bg3-hover text-fg1 mx-1.5 my-1.5 flex w-[calc(100%_-_0.75rem)] items-center gap-2 px-2 text-left outline-none",
                     MENU_ITEM_RADIUS,
-                    MODEL_ROW_HEIGHT,
+                    activeRow?.unavailable ? "min-h-7 py-1" : MODEL_ROW_HEIGHT,
                   )}
                   onPointerEnter={() => {
                     cancelCatalogClose();
@@ -667,8 +683,8 @@ export function AgentModelMenu({
                 onPointerEnter={cancelCatalogClose}
                 onPointerLeave={scheduleCatalogClose}
               >
-                {groups.length > 0 ? (
-                  groups.map((group, groupIndex) => (
+                {visibleGroups.length > 0 ? (
+                  visibleGroups.map((group, groupIndex) => (
                     <section
                       key={group.agent.id}
                       role="group"
@@ -756,6 +772,11 @@ export function AgentModelMenu({
                     No models found.
                   </div>
                 )}
+                {hasUnavailable && hasAvailable && !availableOnly && (
+                  <Button variant="ghost" size="compact" className="mt-1 w-full" onClick={showAvailableModels}>
+                    Show available models
+                  </Button>
+                )}
               </PopoverContent>
             </Popover>
           ) : (
@@ -766,6 +787,13 @@ export function AgentModelMenu({
             </div>
           )}
         </Command>
+        {hasUnavailable && hasAvailable && !availableOnly && (
+          <div className="border-border2 border-t p-1">
+            <Button variant="ghost" size="compact" className="w-full" onClick={showAvailableModels}>
+              Show available models
+            </Button>
+          </div>
+        )}
         {(groups.length > 0 || !registry?.some(agent => agent.runtimeUpgradeRequired)) && footer}
       </PopoverContent>
     </Popover>
@@ -791,11 +819,13 @@ function ModelRowDetails({
   return (
     <span
       className={cn(
-        "flex min-w-0 items-center gap-1.5 overflow-hidden",
+        "flex min-w-0 overflow-hidden",
+        row.unavailable ? "flex-col items-start gap-0" : "items-center gap-1.5",
         className,
       )}
       data-model-row-details
     >
+      <span className="flex min-w-0 items-center gap-1.5">
       <span data-model-name className="max-w-full shrink-0 truncate text-xs">
         {displayModelLabel(row.agent.id, row.model.label)}
       </span>
@@ -814,6 +844,14 @@ function ModelRowDetails({
           aria-label="Default model"
           className="text-fg2 size-3.5 shrink-0 fill-current"
         />
+      )}
+      </span>
+      {row.unavailable && (
+        <span data-model-unavailable-reason className="text-fg3 text-xxs">
+          {!isSelectableAgent(row.agent) ? "Connect this agent to use this model."
+            : row.agent.cloudModels !== undefined && !row.agent.cloudModels.includes(row.model.value)
+              ? "Not enabled for this workspace." : "Unavailable for this account."}
+        </span>
       )}
     </span>
   );
@@ -1141,7 +1179,7 @@ function SearchModelRow({
       }
       className={cn(
         "group/mi bg-bg3 hover:bg-bg3-hover focus-within:bg-bg3-hover mx-1 gap-0",
-        MODEL_ROW_HEIGHT,
+        row.unavailable ? "min-h-7 py-1" : MODEL_ROW_HEIGHT,
         !showCmdkSelection && "data-[selected=true]:bg-bg3",
         showCmdkSelection &&
           highlightMode === "pointer" &&
@@ -1224,7 +1262,7 @@ function CatalogModelRow({
       className={cn(
         "group/mi bg-bg3 hover:bg-bg3-hover focus-within:bg-bg3-hover relative flex items-center",
         MENU_ITEM_RADIUS,
-        MODEL_ROW_HEIGHT,
+        row.unavailable ? "min-h-7 py-1" : MODEL_ROW_HEIGHT,
       )}
     >
       <button

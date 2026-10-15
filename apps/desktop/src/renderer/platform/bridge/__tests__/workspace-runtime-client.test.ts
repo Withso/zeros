@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RuntimeClient, type ConnectionStatus } from "../ws-client";
+import { classifyRpcError, isRecoverable } from "../failure";
 import { CloudAgentConnection } from "../cloud-agent-connection";
 import {
   WorkspaceRuntimeClient,
@@ -167,6 +168,28 @@ function providerRouting(open: WorkspaceRuntimeOptions["open"]) {
 }
 
 describe("workspace runtime routing", () => {
+  it.each(["/personal/local", "/organization/local", cloudWorkspaceKey(a)])(
+    "classifies an account-retired %s list as cancelled ownership without replay or a provider failure",
+    async folder => {
+      const waiting = deferred<BridgeMessage>();
+      const local = vi.spyOn(RuntimeClient.prototype, "request").mockReturnValue(waiting.promise);
+      const peer = fakePeer(a), cloud = folder.startsWith("cloud://");
+      const open = vi.fn(async () => peer.peer);
+      const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+      try {
+        if (cloud) await client.warmWorkspace(a);
+        const request = client.chatSnapshot("all");
+        const classified = request.catch(error => classifyRpcError({ agentId: "codex", stage: "loadSession", error }));
+        client.clearCloudConnections();
+        waiting.resolve({ type: "WORKSPACE_RESPONSE", op: "chats.list", result: { chats: [{ id: "old", folder }], chatDeletions: [] } } as BridgeMessage);
+        const failure = await classified;
+        expect(failure).toMatchObject({ kind: "lifecycle-superseded", stage: "loadSession" });
+        expect(isRecoverable(failure as ReturnType<typeof classifyRpcError>)).toBe(false);
+        expect(open).toHaveBeenCalledTimes(cloud ? 1 : 0);
+        expect(local).toHaveBeenCalledOnce();
+      } finally { client.dispose(); }
+    },
+  );
   it("carries one supplied intent through settled opens, including preparation of a connected peer", async () => {
     const peer = fakePeer(a), prepare = vi.fn<NonNullable<CloudPeer["prepareForRun"]>>(async () => true);
     peer.peer.prepareForRun = prepare;

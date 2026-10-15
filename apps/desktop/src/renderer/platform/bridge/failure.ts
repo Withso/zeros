@@ -110,7 +110,7 @@ export function classifyRpcError(
   if (errCode === "ENGINE_SWAPPING") {
     return { kind: "transport-closed", message, ...base };
   }
-  if (LIFECYCLE_SUPERSEDED_RX.test(message)) {
+  if (errCode === "WORKSPACE_READ_SUPERSEDED" || LIFECYCLE_SUPERSEDED_RX.test(message)) {
     return { kind: "lifecycle-superseded", message, ...base };
   }
   if (SESSION_EXPIRED_RX.test(message)) {
