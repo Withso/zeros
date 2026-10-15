@@ -24,14 +24,19 @@ export class CloudWorkspaceInteraction {
     current(): { key: string; document: CloudWorkspaceDocument; stopVersion?: number } | null;
     visible(): boolean;
     focused(): boolean;
-    available(): boolean;
+    /** Unknown during the first native presence read. It may retain bounded
+     * intent, but cannot authorize presence or wake until positively true. */
+    available(): boolean | undefined;
+    /** Keep the gesture while an existing admission settles; never join a
+     * retiring admission as this gesture's one wake attempt. */
+    opening?(key: string): boolean;
     presence(key: string, present: boolean): boolean;
     wake(key: string, signal: AbortSignal): Promise<void>;
     failed?(key: string, error: unknown): void;
   }) { this.now = options.now ?? (() => performance.now()); }
 
   interact(otherWorkspaceRow = false): void {
-    if (this.closed || !this.options.visible() || !this.options.focused() || !this.options.available()) return;
+    if (this.closed || !this.options.visible() || !this.options.focused() || this.options.available() === false) return;
     this.lastInput = this.now();
     const selected = this.options.current();
     this.armed = !otherWorkspaceRow && selected ? {
@@ -45,7 +50,7 @@ export class CloudWorkspaceInteraction {
     if (!this.armed || !current || this.armed.key !== current.key || this.armed.generation !== current.document.generation.number ||
         this.now() - this.armed.at >= WAKE_INTENT_MS || !this.options.visible() || !this.options.focused() || !this.options.available() ||
         current.document.deletedAt || !current.document.capabilities.canWrite ||
-        !WAKE_STATES.has(current.document.status) || this.pending?.key === current.key) return;
+        !WAKE_STATES.has(current.document.status) || this.pending?.key === current.key || this.options.opening?.(current.key)) return;
     const interval = current.document.error ? INCIDENT_WAKE_INTERVAL_MS : WAKE_DEBOUNCE_MS;
     // A replacement runtime must not reset the incident retry budget.
     const identity = current.key;
@@ -68,10 +73,12 @@ export class CloudWorkspaceInteraction {
     const current = this.options.current();
     // A visible window beside another app stays present after recent input.
     // Focus gates trusted input/wake only; hide, lock and suspend withdraw now.
-    const available = this.options.visible() && this.options.available();
-    const interactive = available && this.options.focused();
-    if (!interactive || current?.key !== this.armed?.key || current?.stopVersion !== this.armed?.stopVersion) this.armed = null;
-    if (this.pending && (current?.key !== this.pending.key || current?.stopVersion !== this.pending.stopVersion || !interactive)) {
+    const visible = this.options.visible(), availability = this.options.available();
+    const available = visible && availability === true;
+    const canRetainIntent = visible && availability !== false && this.options.focused() && current &&
+      !current.document.deletedAt && current.document.capabilities.canWrite;
+    if (!canRetainIntent || current?.key !== this.armed?.key || current?.stopVersion !== this.armed?.stopVersion) this.armed = null;
+    if (this.pending && (current?.key !== this.pending.key || current?.stopVersion !== this.pending.stopVersion || !canRetainIntent)) {
       this.pending.controller.abort(); this.pending = null;
     }
     const key = current && !current.document.deletedAt && ["ready", "busy"].includes(current.document.status) &&
