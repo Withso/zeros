@@ -788,13 +788,16 @@ export class CloudRuntimeRegistration {
 
   /** Admission is already fenced by the engine. Retain heartbeat authority
    * while draining any older projection and then flushing a fresh one. */
-  pauseRecordForRuntimeHandoff(): Promise<void> {
+  pauseRecordForRuntimeHandoff(options?: { retryFailedFlush?: true }): Promise<void> {
     if (this.recordHandoffFlight) return this.recordHandoffFlight;
     const document = this.document;
     if (!document || !this.hasControlAuthority(document))
       return Promise.reject(new Error("Cloud runtime handoff authority is unavailable"));
-    if (this.recordHandoffPaused) return this.recordHandoffFlushed ? Promise.resolve()
-      : Promise.reject(new Error("Cloud runtime handoff record flush failed"));
+    if (this.recordHandoffPaused && this.recordHandoffFlushed) return Promise.resolve();
+    // A later authorized final capture may retry a failed flush while ordinary
+    // record synchronization and command admission remain parked.
+    if (this.recordHandoffPaused && !options?.retryFailedFlush)
+      return Promise.reject(new Error("Cloud runtime handoff record flush failed"));
     this.recordHandoffPaused = true;
     this.recordHandoffFlushed = false;
     const task = Promise.resolve().then(async () => {
@@ -1077,9 +1080,11 @@ export class CloudRuntimeRegistration {
       if (!this.recordHandoffPaused) void this.synchronizeDurableRecord(document, { initial: false }).catch(
         () => undefined,
       );
-      if (checkpointRequest && !this.recordHandoffPaused) {
+      // Record handoff fences writes, not authenticated checkpoint control.
+      // A cancelled/superseded final capture must not starve its replacement.
+      if (checkpointRequest && (!this.recordHandoffPaused ||
+          ["before_stop", "before_archive", "before_delete", "before_rebuild"].includes(checkpointRequest.reason)))
         this.dispatchCheckpointRequest(checkpointRequest, document);
-      }
       finish("completed");
     } catch (error) {
       finish("failed");
