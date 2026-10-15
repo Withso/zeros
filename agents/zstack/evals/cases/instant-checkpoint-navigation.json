@@ -1,0 +1,9 @@
+{
+  "id": "instant-checkpoint-navigation",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pr:535",
+  "symptom": "Choosing a distant loaded message in the navigator animated through history before reaching it.",
+  "rule": "Explicit message navigation jumps directly and pins the selected ID; layout corrections stay instantaneous and yield to user input (zstack-review).",
+  "check": "pnpm test:git apps/desktop/src/renderer/features/agent/__tests__/checkpoint-navigation-instant.test.ts"
+}
