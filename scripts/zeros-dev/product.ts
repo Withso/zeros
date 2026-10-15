@@ -11,7 +11,7 @@ import { AlphaTransport, type JsonRequest } from "./transport";
 import { ZerosDevError } from "./errors";
 import { readSetupProgress, type SetupObservation } from "./setup-observation";
 import { DeletionRetirementSchema, MAX_PENDING_WORKSPACES, RETIREMENT_FRESH_MS, type DeletionRetirement } from "./cleanup-contract";
-import { cleanupOutcome, requireCleanupCapacity, retirementMatchesRun } from "./cleanup-state";
+import { cleanupDeleteKey, cleanupOutcome, requireCleanupCapacity, retirementMatchesRun } from "./cleanup-state";
 
 const document=z.object({workspace:CloudWorkspaceDocumentSchema});
 const observedDocument=document.extend({setupProgress:z.unknown().optional()});
@@ -96,7 +96,7 @@ export class ProductApi {
     return {revision:result.repository.defaultBranch};
   }
   async buildComputer(handle:RunHandle,signal?:AbortSignal):Promise<CloudComputerV2BuildSummary>{
-    if(handle.run.cleanupOnly)throw new ZerosDevError("forbidden");
+    if(handle.run.cleanupOnly||handle.run.cleanupRecovery)throw new ZerosDevError("forbidden");
     await this.session.whoami();const fixture=await this.session.fixture();
     if(handle.run.computer?.result)return this.readBuild(handle.run,signal);
     if(!handle.run.computer){
@@ -160,7 +160,7 @@ export class ProductApi {
     if(receipt&&(row.generation.number<receipt.generation||!allowNextGeneration&&row.generation.number!==receipt.generation))throw new ZerosDevError("runtime_changed");
   }
   async createWorkspace(handle:RunHandle,signal?:AbortSignal):Promise<CloudWorkspaceDocument>{
-    if(handle.run.cleanupOnly)throw new ZerosDevError("forbidden");
+    if(handle.run.cleanupOnly||handle.run.cleanupRecovery)throw new ZerosDevError("forbidden");
     await this.session.whoami();const fixture=await this.session.fixture();
     if(handle.run.deletionConfirmed)throw new ZerosDevError("operation_conflict");
     if(handle.run.create?.result)return this.workspace(handle.run,signal);
@@ -191,6 +191,7 @@ export class ProductApi {
     if(workspace.name!==run.create?.body.name||!/^zd-[a-z0-9-]{1,100}$/.test(workspace.name))throw new ZerosDevError("identity_changed");
   }
   async lifecycle(handle:RunHandle,operation:"wake"|"stop"|"delete",signal?:AbortSignal):Promise<CloudWorkspaceDocument>{
+    if(handle.run.cleanupRecovery)throw new ZerosDevError("forbidden");
     if(handle.run.cleanupOnly&&operation!=="delete")throw new ZerosDevError("forbidden");
     await this.session.whoami();const fixture=await this.session.fixture();
     const previous=handle.run.lifecycle.at(-1);
@@ -212,6 +213,7 @@ export class ProductApi {
   }
   async waitWorkspace(handle:RunHandle,target:"running"|"stopped"|"deleted",signal?:AbortSignal,
     observeSetup?:(value:SetupObservation|undefined)=>void):Promise<CloudWorkspaceDocument>{
+    if(handle.run.cleanupRecovery)throw new ZerosDevError("forbidden");
     let setup:SetupObservation|undefined;
     try{return await this.observe(async bound=>{
       const pending=handle.run.lifecycle.at(-1);
@@ -246,13 +248,14 @@ export class ProductApi {
     const created=run.create?.result,intent=run.lifecycle.at(-1);
     if(!created)throw new ZerosDevError("command_uncertain");
     if(intent?.operation!=="delete"||intent.generation!==created.generation)throw new ZerosDevError("cleanup_pending");
+    const deleteIdempotencyKey=cleanupDeleteKey(run);if(!deleteIdempotencyKey)throw new ZerosDevError("receipt_invalid");
     const fixture=await this.session.fixture();
     if(created.createdBy!==fixture.accountId||!run.create||run.create.body.repository.forge!=="github.com"||
       !this.repositoryNameMatches(fixture,run.create.body.repository)||run.create.body.repository.githubInstallationId!==fixture.repository.installationId)
       throw new ZerosDevError("identity_changed");
     let proof:DeletionRetirement;
     try{proof=await this.request(`${this.root(fixture)}/${created.id}/deletion-retirement`,DeletionRetirementSchema,
-      {method:"POST",body:{generation:created.generation,deleteIdempotencyKey:intent.key},signal});}
+      {method:"POST",body:{generation:created.generation,deleteIdempotencyKey},signal});}
     catch(error){if(error instanceof ZerosDevError&&error.code==="operation_conflict")throw new ZerosDevError("cleanup_pending");throw error;}
     if(proof.organizationId!==fixture.organizationId||proof.ownerUserId!==fixture.accountId||!retirementMatchesRun(run,proof))
       throw new ZerosDevError("identity_changed");
@@ -262,7 +265,7 @@ export class ProductApi {
   async observeRetirement(handle:RunHandle,signal?:AbortSignal):Promise<DeletionRetirement>{
     const proof=await this.readRetirement(handle.run,signal);
     handle.run.retirement=proof;
-    if(proof.deletionConfirmed){handle.run.deletionConfirmed=true;handle.run.lifecycle.at(-1)!.confirmed=true;}
+    if(proof.deletionConfirmed){handle.run.deletionConfirmed=true;if(!handle.run.cleanupRecovery)handle.run.lifecycle.at(-1)!.confirmed=true;}
     await handle.save();return proof;
   }
   async cleanup(handle:RunHandle,apply=false,signal?:AbortSignal,options:{allowStoragePending?:boolean}={}):Promise<{planned:number;confirmed:number;storagePending?:number}>{
@@ -272,6 +275,13 @@ export class ProductApi {
     }
     if(!handle.run.create)return {planned:0,confirmed:0};
     if(!handle.run.create.result)throw new ZerosDevError("command_uncertain"); // reconcile the exact create first
+    if(handle.run.cleanupRecovery){
+      // A recovery observes the master's exact operator request. It never
+      // replays the failed key, issues a DELETE, or relabels the old attempt.
+      const proof=apply?await this.observeRetirement(handle,signal):await this.readRetirement(handle.run,signal);
+      if(apply&&!options.allowStoragePending&&!proof.deletionConfirmed)throw new ZerosDevError("cleanup_pending");
+      return {planned:0,confirmed:proof.deletionConfirmed?1:0,storagePending:proof.deletionConfirmed?0:1};
+    }
     if(apply&&options.allowStoragePending&&handle.run.lifecycle.at(-1)?.operation==="delete"){
       try{
         const proof=await this.observeRetirement(handle,signal);
@@ -313,7 +323,7 @@ export class ProductApi {
     return {planned:1,confirmed:1};
   }
   async grant(run:Run,agent:Agent,model:string,signal?:AbortSignal):Promise<string>{
-    if(run.cleanupOnly)throw new ZerosDevError("forbidden");
+    if(run.cleanupOnly||run.cleanupRecovery)throw new ZerosDevError("forbidden");
     const row=await this.workspace(run,signal),fixture=await this.session.fixture();
     const result=await this.request(`/v1/cloud-workspaces/${row.id}/agent-credentials/prepare`,AgentGrantsSchema,{method:"POST",body:{},idempotencyKey:randomUUID(),signal});
     const eligible=result.delegations.filter(grant=>grant.ownerUserId===fixture.accountId&&grant.kind.startsWith(`${agent}-`)&&grant.models.includes(model)&&Date.parse(grant.expiresAt)>Date.now());

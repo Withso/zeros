@@ -9,6 +9,8 @@ import { Evidence, assertNoCredentials, redactContent, type EvidenceEvent } from
 import { ZerosDevError, closedError, diagnosticEvidence } from "./errors";
 import type { AdmissionObservation } from "./admission-observation";
 import type { controlPlaneHealth, controlPlaneLogs, databaseHealth } from "./health";
+import { CleanupRecoveryExecutionSchema } from "./cleanup-recovery-contract";
+import type { CleanupRecoveryRequest } from "./cleanup-recovery";
 
 const COMMANDS = {
   login: [], whoami: [], logout: [], "org ensure": [], "repo ensure": [], "github connect": ["repository", "repository-id"],
@@ -18,6 +20,7 @@ const COMMANDS = {
   "terminal run": ["run", "script", "command"], "health cp": ["expect-source"], "health cp-logs": ["run"], "health vm": ["run"], "health db": ["run", "expect-runtime"],
   "scenario run smoke": ["run", "agent", "model", "prompt-file", "expect-source", "build-computer"], cleanup: ["run", "all", "apply"],
   "cleanup handoff": ["runs", "output"],
+  "cleanup recovery": ["artifact", "run", "workflow-run", "workflow-attempt", "expect-source", "approval", "output"],
 } satisfies Record<string, string[]>;
 export type CommandName = keyof typeof COMMANDS;
 export type Command = { name: CommandName; options: Record<string, string | true> };
@@ -40,9 +43,12 @@ export const HELP = `Alpha-only Linux zeros-dev (credentials: canonical .env.age
   scenario run smoke --agent AGENT --model MODEL [--run UUID] [--build-computer] [--prompt-file FILE]
   cleanup --run UUID|--all [--apply]
   cleanup handoff --runs UUID[,UUID...] --output FILE
+  cleanup recovery --artifact FILE --run UUID --workflow-run ID --workflow-attempt N --expect-source SHA --approval UUID --output FILE
 Lifecycle/build/prompt commands wait with finite deadlines. Cleanup defaults to a plan.
 Handoff reads at most four exact signed local receipts and current product retirement proof.
 It performs no lifecycle write; its 0600 output authorizes cleanup only in Actions.
+Recovery reads one exact failed Actions artifact and its approved operator DELETE retirement.
+It preserves the original failure and exports cleanup-only custody, never a DELETE or cached admission proof.
 Input files: relative paths resolve from the current checkout; absolute paths also work.
 Use owned regular files (chmod 600 FILE), without links or group/world write access.
 Credential files are refused. --script must be nonempty and at most 2 KiB;
@@ -66,7 +72,7 @@ export function parseCommand(args: string[]): Command | null {
       options[key] = value;
     }
   }
-  for (const key of ["run", "prompt", "command", "continue"]) if (options[key] && !uuid.safeParse(options[key]).success) throw new ZerosDevError("invalid_request");
+  for (const key of ["run", "prompt", "command", "continue", "approval"]) if (options[key] && !uuid.safeParse(options[key]).success) throw new ZerosDevError("invalid_request");
   if (options["expect-source"] && !/^[a-f0-9]{40}$/.test(String(options["expect-source"])) ||
     options["expect-runtime"] && !/^r1-[a-f0-9]{64}$/.test(String(options["expect-runtime"]))) throw new ZerosDevError("invalid_request");
   if (name === "cleanup" && (!!options.run === !!options.all)) throw new ZerosDevError("invalid_request");
@@ -77,6 +83,11 @@ export function parseCommand(args: string[]): Command | null {
     if (!options.output || ids.length > 4 || ids.some(id => !uuid.safeParse(id).success) || new Set(ids).size !== ids.length)
       throw new ZerosDevError("invalid_request");
   }
+  if (name === "cleanup recovery" && (!options.artifact || !options.output || !options.approval ||
+      !/^[1-9][0-9]{0,2}$/.test(String(options["workflow-attempt"] ?? "")) ||
+      !CleanupRecoveryExecutionSchema.safeParse({ workflowRunId: options["workflow-run"],
+        attempt: Number(options["workflow-attempt"]), sourceSha: options["expect-source"] }).success))
+    throw new ZerosDevError("invalid_request");
   if (name === "github connect") parseRepositorySelection(String(options.repository ?? ""), String(options["repository-id"] ?? ""));
   if (["agent send", "scenario run smoke"].includes(name) && (!z.enum(["claude", "codex", "cursor"]).safeParse(options.agent).success ||
     typeof options.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/.test(options.model))) throw new ZerosDevError("invalid_request");
@@ -98,6 +109,7 @@ export interface Services {
   healthLogs(run: Run): ReturnType<typeof controlPlaneLogs>;
   githubConnect(repository: RepositorySelection, signal: AbortSignal, show: (url: string) => void): Promise<void>;
   handoff?(runIds: string[], file: string, signal: AbortSignal): Promise<{ state: "ready"; sha256: string; runCount: number }>;
+  recovery?(request: CleanupRecoveryRequest, signal: AbortSignal): Promise<{ state: "ready"; sha256: string; runCount: number }>;
   write(value: unknown): void;
 }
 
@@ -120,7 +132,7 @@ export async function executeCommand(command: Command, services: Services, signa
   async function withRun(work: (handle: RunHandle) => Promise<void>, fresh = false) {
     const runs = await services.runs();
     await runs.withRun(runId, fresh ? await services.source() : null, async handle => {
-      if (handle.run.cleanupOnly && !["workspace status", "health vm"].includes(name)) throw new ZerosDevError("forbidden");
+      if ((handle.run.cleanupOnly || handle.run.cleanupRecovery) && !["workspace status", "health vm"].includes(name)) throw new ZerosDevError("forbidden");
       await handle.save();
       services.write({ schema: "zeros.dev-context/v1", runId, localSource: handle.run.source });
       try { await work(handle); }
@@ -137,6 +149,12 @@ export async function executeCommand(command: Command, services: Services, signa
     else if (name === "cleanup handoff") {
       if (!services.handoff) throw new ZerosDevError("invalid_request");
       result(await services.handoff(String(options.runs).split(","), String(options.output), signal));
+    }
+    else if (name === "cleanup recovery") {
+      if (!services.recovery) throw new ZerosDevError("invalid_request");
+      result(await services.recovery({ artifact: String(options.artifact), runId, approvalId: String(options.approval),
+        execution: { workflowRunId: String(options["workflow-run"]), attempt: Number(options["workflow-attempt"]), sourceSha: String(options["expect-source"]) },
+        file: String(options.output) }, signal));
     }
     else if (name === "logout") { await evidence.step("identity", () => services.session.logout()); result({ authenticated: false }); }
     else if (name === "whoami" || name === "org ensure") { await evidence.step("identity", () => services.session.whoami()); result({ fixture: "confirmed" }); }
