@@ -37,6 +37,8 @@ migration, publication, adoption and acceptance gates.
   `cloud:agent:e2e`, strict versus explicit PARTIAL scope, and pending provider proof.
 - [Boot funding and credential changes](agent-authentication-and-language-tools.md#negotiated-boot-funding):
   role consent, trust in the owner's keys, next-run cards, removal and warm-session Stop.
+- [Selected cloud agent accounts](agent-connection-health.md): selected-source health,
+  expiry, explicit reconnect and bounded selection recovery.
 - [Local queue and stopped history](data-and-sync.md#negotiated-local-queue-and-compact-history):
   at-most-once dispatch, compact journal, current-head fences and the 16 MiB cap.
 - [Direct ingress](client-runtime-contract.md#portable-runtime-ingress) and

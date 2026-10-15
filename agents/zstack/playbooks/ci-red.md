@@ -27,6 +27,11 @@
   Do not widen the CI input list merely to hide an unintended dependency.
 - **PR CI:** rerunning only the failed jobs is fine for a flake or infra
   failure. Record that it was a rerun.
+- **Pinned documentation inventories:** adding a guide under a directory with
+  an exact file allowlist also changes its layout contract. Run
+  `scripts/__tests__/repository-layout.test.ts` explicitly, update the owning
+  index and preserve existing entries. Docs lint and an interrupted full-root
+  run do not verify that inventory boundary.
 - **Trusted-base gate drift:** when workloads pass but the hourly gate reports
   `hourly_unavailable`, compare the policy checkout SHA with the current main
   workflow's job profiles. If main already contains the compatible reader,
