@@ -16,8 +16,8 @@
 //   3. the most-recently-touched live chat in that workspace
 //   4. with no remembered workspace, the most-recent live Local chat
 //   5. null — preserve the remembered workspace while its list revalidates.
-// A saved cloud id can precede its authorized chat row. Preserve that identity
-// until the exact cloud snapshot proves deletion; Local's snapshot cannot.
+// A saved id can precede its chat row. Preserve that identity for its remembered
+// owner until the corresponding backend confirms absence; a cold cache cannot.
 //
 // Pure and side-effect-free so the policy is unit-testable without the
 // app shell.
@@ -69,26 +69,23 @@ export function resolveBootActiveChatId(
 ): string | null {
   // 1. The exact chat the user had open, when still live.
   if (persistedId) {
-    const hit = chats.find((c) => c.id === persistedId && !c.archived);
-    if (hit) return hit.id;
+    const hit = chats.find((c) => c.id === persistedId);
+    if (hit && !hit.archived) return hit.id;
     const cloudFolder = cloudFolderForChatId(persistedId);
-    if (!cloudFolder && ctx.confirmedLocalChats === false) return persistedId;
-    if (cloudFolder && !ctx.confirmedCloudWorkspaces?.includes(cloudFolder) &&
-        !chats.some((c) => c.id === persistedId && c.archived)) return persistedId;
+    if (!hit && !cloudFolder && ctx.confirmedLocalChats === false &&
+        ctx.lastWorkspaceFolder && !isCloudWorkspace(ctx.lastWorkspaceFolder)) return persistedId;
+    if (!hit && cloudFolder && !ctx.confirmedCloudWorkspaces?.includes(cloudFolder)) return persistedId;
   }
   // 2./3. Land in the workspace the user left, on the chat they were viewing.
   const folder = ctx.lastWorkspaceFolder;
   if (folder) {
     const remembered = ctx.activeChatByFolder[folder];
     if (remembered) {
-      const hit = chats.find(
-        (c) => c.id === remembered && !c.archived && c.folder === folder,
-      );
-      if (hit) return hit.id;
-      if (!isCloudWorkspace(folder) && ctx.confirmedLocalChats === false) return remembered;
-      if (cloudFolderForChatId(remembered) === folder &&
-          !ctx.confirmedCloudWorkspaces?.includes(folder) &&
-          !chats.some((c) => c.id === remembered && c.archived)) return remembered;
+      const hit = chats.find((c) => c.id === remembered);
+      if (hit && !hit.archived && hit.folder === folder) return hit.id;
+      const cloudFolder = cloudFolderForChatId(remembered);
+      if (!hit && !cloudFolder && !isCloudWorkspace(folder) && ctx.confirmedLocalChats === false) return remembered;
+      if (!hit && cloudFolder === folder && !ctx.confirmedCloudWorkspaces?.includes(folder)) return remembered;
     }
     const inFolder = mostRecentLive(chats, (c) => c.folder === folder);
     return inFolder;

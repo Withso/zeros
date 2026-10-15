@@ -386,6 +386,9 @@ const bootActiveChatId = resolveBootActiveChatId(
   {
     lastWorkspaceFolder: persistedUiState.lastWorkspaceFolder ?? null,
     activeChatByFolder: persistedUiState.activeChatByFolder ?? {},
+    // Disk metadata is presentation, not proof that a missing Local chat was
+    // deleted. ChatsPersistence validates against the engine after boot.
+    confirmedLocalChats: false,
   },
 );
 
