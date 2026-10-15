@@ -231,6 +231,10 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await expect(editor).toHaveText("Keep this draft through Restart");
   check("Runtime toast Restart uses an explicit Stop then fresh wake, reconnects, and preserves the unsent draft", true);
   await runFollowUpBehaviorSmoke({ page, check, harnessBase });
+  await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
+  await expect(editor).toBeVisible();
+  const { checkIncrementalTranscriptPresentation } = await import("./ui-smoke-transcript-incremental.mjs");
+  await checkIncrementalTranscriptPresentation({ page, check });
   expect(errors).toEqual([]);
 }
 

@@ -67,6 +67,7 @@ import {
   type ChatScrollPosition,
 } from "./chat-scroll-anchor";
 import { isPlanReviewRequest } from "./renderers/plan-body";
+import { retainMessageReferences } from "./message-persistence-tracker";
 import { settledTurnStatus } from "./session-reload-lifecycle";
 import { loadPolicies, savePolicies, type PolicyRule } from "./policies";
 import { effortAdoptedEnvKey } from "./model-catalog";
@@ -193,7 +194,7 @@ export function mergeWindowedTail(
 ): AgentMessage[] {
   if (windowed.length === 0) return current;
   const anchor = current.findIndex((m) => m.id === windowed[0].id);
-  return anchor >= 0 ? [...current.slice(0, anchor), ...windowed] : windowed;
+  return retainMessageReferences(current, anchor >= 0 ? [...current.slice(0, anchor), ...windowed] : windowed);
 }
 
 /** Per-chat debounce timers for scroll-position persistence. Scroll

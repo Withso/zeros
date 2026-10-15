@@ -66,3 +66,19 @@ export function messageSnapshotsEqual(
   }
   return true;
 }
+
+/** Reuse unchanged durable rows from the same chat after a serialized read.
+ * The incoming window still owns membership/order, including truncation.
+ * Callers must finish their owner and restore-head checks before publishing. */
+export function retainMessageReferences(
+  current: AgentMessage[],
+  next: AgentMessage[],
+): AgentMessage[] {
+  if (current === next || current.length === 0) return next;
+  const known = new Map(current.map(message => [message.id, message]));
+  const shared = next.map(message => {
+    const previous = known.get(message.id);
+    return previous && messageSnapshotsEqual([previous], [message]) ? previous : message;
+  });
+  return shared.length === current.length && shared.every((message, index) => message === current[index]) ? current : shared;
+}
