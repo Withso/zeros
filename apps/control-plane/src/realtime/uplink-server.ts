@@ -15,8 +15,8 @@ import {
   UPLINK_CLOSE,
   UPLINK_DEFAULT_PING_INTERVAL_MS,
   UPLINK_HELLO_TIMEOUT_MS,
+  UPLINK_MAX_BINARY_FRAME_BYTES,
   UPLINK_MAX_CONTROL_FRAME_BYTES,
-  UPLINK_MAX_RELAY_CHUNK_BYTES,
   UPLINK_PATH,
   UPLINK_SUBPROTOCOL,
   UPLINK_WATERMARK_INTERVAL_MS,
@@ -28,9 +28,11 @@ import {
   UplinkStatusReadySchema,
   UplinkStatusReportSchema,
   negotiateUplinkProtocol,
+  parseUplinkRelayChunk,
   uplinkBearerToken,
   type UplinkActivityReport,
   type UplinkAuthDelta,
+  type UplinkRelayChunk,
   type UplinkHello,
   type UplinkStatusReport,
 } from "./uplink-protocol.js";
@@ -59,6 +61,10 @@ export interface UplinkExtension {
   /** True when the reliable frame type belongs to this extension; a thrown
    * error or `"invalid"` closes the uplink with 4400. */
   onFrame?(session: UplinkSession, t: string, d: Record<string, unknown>): boolean | "invalid";
+  /** True when the relay chunk's channel belongs to this extension; a
+   * thrown error closes the uplink with 4400. Unclaimed channels get a
+   * non-fatal `sys.error relay_channel_unknown` (contract error codes). */
+  onRelayChunk?(session: UplinkSession, chunk: UplinkRelayChunk): boolean;
   onClose?(session: UplinkSession): void;
 }
 
@@ -137,7 +143,7 @@ export class CloudEngineUplinkServer {
   private readonly wss = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
-    maxPayload: UPLINK_MAX_RELAY_CHUNK_BYTES + 8,
+    maxPayload: UPLINK_MAX_BINARY_FRAME_BYTES,
     handleProtocols: protocols => protocols.has(UPLINK_SUBPROTOCOL) ? UPLINK_SUBPROTOCOL : false,
   });
   private readonly all = new Set<UplinkConnection>();
@@ -319,6 +325,10 @@ export class CloudEngineUplinkServer {
     const previous = this.current.get(identity.engineInstanceId) ?? observed;
     this.current.set(identity.engineInstanceId, connection);
     if (!previous || previous === connection) return;
+    // One logical supersede is recorded exactly once, here. When the new
+    // connection resumed the lineage, the resume entry's callback already
+    // closed `previous`, but that callback never records; skipping a
+    // already-closed `previous` here would record zero instead.
     if (!previous.drained) {
       this.recordSupersede(identity);
       if (previous.address !== connection.address)
@@ -404,8 +414,8 @@ class UplinkConnection {
 
   private receive(data: RawData, isBinary: boolean): void {
     if (this.state === "closed") return;
-    if (isBinary) return this.invalid("frame_invalid");
     const buffer = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (isBinary) return this.relayChunk(buffer);
     if (buffer.byteLength > UPLINK_MAX_CONTROL_FRAME_BYTES) return this.invalid("frame_too_large");
     let parsed: unknown;
     try { parsed = JSON.parse(buffer.toString("utf8")); } catch { return this.invalid("frame_invalid"); }
@@ -455,6 +465,25 @@ class UplinkConnection {
       this.server.options.metric?.("capability_revocation_push_ms", Math.max(0, this.now() - createdAt));
     }
     // sys.ack carries only `a`; other unsequenced types are ignored.
+  }
+
+  /** Binary frames are relay chunks (contract "Binary relay frame"). Relay
+   * channels exist only after `relay.open`, which requires the welcome, so
+   * an earlier binary frame is a protocol violation. A chunk no extension
+   * claims is non-fatal: `sys.error relay_channel_unknown`, per the
+   * contract's error-code table. */
+  private relayChunk(frame: Buffer): void {
+    if (this.state !== "welcomed" || !this.session) return this.invalid("frame_before_welcome");
+    this.lastSeenAtMs = this.now();
+    const chunk = parseUplinkRelayChunk(frame);
+    if (!chunk) return this.invalid("frame_invalid");
+    for (const extension of this.server.options.extensions) {
+      if (!this.features.has(extension.feature) || !extension.onRelayChunk) continue;
+      try {
+        if (extension.onRelayChunk(this.session, chunk)) return;
+      } catch { return this.invalid("frame_invalid"); }
+    }
+    this.send({ t: "sys.error", d: { code: "relay_channel_unknown", channel: chunk.channel } });
   }
 
   private reliable(t: string, d: Record<string, unknown>): "ok" | "invalid" {

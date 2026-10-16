@@ -172,7 +172,38 @@ type RegistrationDocument = {
     token: string;
     intervalMs: number;
   };
+  /** S2: present only when this engine opted in and the organization's
+   * `realtime_uplink` flag was on at registration. */
+  uplink?: {
+    endpoint: string;
+  };
 };
+
+/** The engine speaks S2 uplink protocol 1; the CP advertises `uplink.endpoint`
+ * only to engines that send this header, so older control planes (strict
+ * body schema) and older engines (strict response keys) both keep working. */
+const ENGINE_UPLINK_OPT_IN_HEADER = "x-zeros-cloud-engine-uplink";
+
+function exactWssEndpoint(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length < 1 || raw.length > 4_096) {
+    return null;
+  }
+  try {
+    const value = new URL(raw);
+    if (
+      value.protocol !== "wss:" ||
+      value.username ||
+      value.password ||
+      value.search ||
+      value.hash
+    ) {
+      return null;
+    }
+    return value.toString();
+  } catch {
+    return null;
+  }
+}
 
 class CloudRuntimeRequestError extends Error {
   constructor(
@@ -572,6 +603,8 @@ export class CloudRuntimeRegistration {
           this.agentJournalMode = acknowledged ? journalMode : undefined;
           this.sourceWriterEpoch = acknowledged && journalMode === "local" ? sourceWriterEpoch ?? null : null;
         } } : undefined,
+      REQUEST_TIMEOUT_MS,
+      { [ENGINE_UPLINK_OPT_IN_HEADER]: "1" },
     );
     const document = this.parseRegistration(raw);
     this.document = document;
@@ -956,6 +989,9 @@ export class CloudRuntimeRegistration {
 
   private parseRegistration(raw: unknown): RegistrationDocument {
     const now = this.now();
+    // `uplink` is the only optional member: additive S2 advertisement, present
+    // only when this engine opted in and the organization's flag is on.
+    const optional = isRecord(raw) && raw.uplink !== undefined ? ["uplink"] : [];
     if (
       !isRecord(raw) ||
       !exactKeys(raw, [
@@ -965,7 +1001,12 @@ export class CloudRuntimeRegistration {
         "heartbeat",
         "leaseExpiresAtMs",
         "version",
+        ...optional,
       ]) ||
+      (raw.uplink !== undefined &&
+        (!isRecord(raw.uplink) ||
+          !exactKeys(raw.uplink, ["endpoint"]) ||
+          exactWssEndpoint(raw.uplink.endpoint) === null)) ||
       raw.version !== 1 ||
       raw.audience !== REGISTRATION_AUDIENCE ||
       raw.engineInstanceId !== this.config.engine.instanceId ||
@@ -991,7 +1032,26 @@ export class CloudRuntimeRegistration {
         token: String(raw.heartbeat.token),
         intervalMs: Number(raw.heartbeat.intervalMs),
       },
+      ...(raw.uplink !== undefined
+        ? { uplink: { endpoint: exactWssEndpoint((raw.uplink as Record<string, unknown>).endpoint)! } }
+        : {}),
     };
+  }
+
+  /** The advertised S2 uplink endpoint plus the credential it authenticates
+   * with, or null when the control plane did not advertise one (rollout flag
+   * off, or an older control plane). The HTTP heartbeat remains the lease
+   * owner either way. */
+  engineUplink(): { endpoint: string; token: string } | null {
+    const document = this.document;
+    if (!document?.uplink || this.stopped || this.authorityLost) return null;
+    return { endpoint: document.uplink.endpoint, token: document.heartbeat.token };
+  }
+
+  /** Asks for an immediate beat. A superseded uplink (4409) re-verifies its
+   * registration authority through the heartbeat before redialing (S2 rule 4). */
+  requestHeartbeatSoon(): void {
+    this.heartbeatSoon();
   }
 
   private scheduleHeartbeat(delayMs: number): void {
@@ -1428,6 +1488,7 @@ export class CloudRuntimeRegistration {
     body: Record<string, unknown>,
     negotiation?: { localCommandsVersion: 1; acknowledgement(acknowledged: boolean, journalMode?: "local" | "legacy", sourceWriterEpoch?: string): void },
     timeoutMs = REQUEST_TIMEOUT_MS,
+    extraHeaders?: Record<string, string>,
   ): Promise<unknown> {
     let response: Response;
     try {
@@ -1444,6 +1505,7 @@ export class CloudRuntimeRegistration {
           "content-type": "application/json",
           "user-agent": "zeros-cloud-engine",
           ...(negotiation ? { "x-zeros-cloud-local-commands": "1" } : {}),
+          ...extraHeaders,
         },
         body: JSON.stringify(body),
       });

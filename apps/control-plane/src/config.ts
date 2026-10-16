@@ -23,6 +23,7 @@ import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 import { validateDatabaseConnections } from "./database-config.js";
 import { developmentIdentity, type DevelopmentIdentity } from "./development-environment.js";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
+import { UPLINK_PATH } from "./realtime/uplink-protocol.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
 import { loadCloudRuntimeConfig, type CloudRuntimeConfig } from "./cloud-workspaces/runtime-config.js";
 import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
@@ -272,6 +273,11 @@ export type CloudWorkspaceBackendConfig = {
     timeoutSeconds: number;
     leaseMs: number;
     admissionTtlSeconds: number;
+    /** Public realtime origin (as a `wss` URL) advertised to engines that
+     * opt into the uplink at registration, while their organization's
+     * `realtime_uplink` flag is on. Null keeps registration answers
+     * uplink-free. */
+    engineUplinkEndpoint: string | null;
   } | null;
 };
 
@@ -595,6 +601,29 @@ function validatedServiceUrl(
       }`,
     );
   }
+  return url.toString().replace(/\/+$/, "");
+}
+
+/** The realtime service origin engines dial for the uplink: a
+ * credential-free HTTPS/WSS origin, normalized to `wss`. */
+function validatedRealtimeOrigin(raw: string, name: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`Invalid environment: ${name} must be a credential-free HTTPS or WSS origin`);
+  }
+  if (
+    (url.protocol !== "https:" && url.protocol !== "wss:") ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== "/"
+  ) {
+    throw new Error(`Invalid environment: ${name} must be a credential-free HTTPS or WSS origin`);
+  }
+  url.protocol = "wss:";
   return url.toString().replace(/\/+$/, "");
 }
 
@@ -1347,6 +1376,9 @@ function loadCloudWorkspaceConfig(
       leaseMs: setup.data.CLOUD_WORKSPACE_SETUP_LEASE_MS,
       admissionTtlSeconds:
         setup.data.CLOUD_WORKSPACE_SETUP_ADMISSION_TTL_SECONDS,
+      engineUplinkEndpoint: env.CLOUD_WORKSPACE_REALTIME_URL?.trim()
+        ? `${validatedRealtimeOrigin(env.CLOUD_WORKSPACE_REALTIME_URL.trim(), "CLOUD_WORKSPACE_REALTIME_URL")}${UPLINK_PATH}`
+        : null,
     };
   }
   const outboxRequested = [

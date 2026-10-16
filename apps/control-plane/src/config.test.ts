@@ -1067,8 +1067,33 @@ describe("cloud workspace backend configuration", () => {
         timeoutSeconds: 1_800,
         leaseMs: 60_000,
         admissionTtlSeconds: 120,
+        engineUplinkEndpoint: null,
       },
     });
+  });
+
+  it("advertises the uplink only from an explicit credential-free realtime origin", () => {
+    expect(
+      loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_REALTIME_URL: "https://realtime.example.test" })
+        .cloudWorkspaces?.setupExecution?.engineUplinkEndpoint,
+    ).toBe("wss://realtime.example.test/v1/uplink");
+    expect(
+      loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_REALTIME_URL: "wss://realtime.example.test/" })
+        .cloudWorkspaces?.setupExecution?.engineUplinkEndpoint,
+    ).toBe("wss://realtime.example.test/v1/uplink");
+    expect(
+      loadConfig(cloudSetupEnv()).cloudWorkspaces?.setupExecution?.engineUplinkEndpoint,
+    ).toBeNull();
+    for (const bad of [
+      "http://realtime.example.test",
+      "https://user:secret@realtime.example.test",
+      "https://realtime.example.test/some/path",
+      "https://realtime.example.test/?x=1",
+    ]) {
+      expect(() => loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_REALTIME_URL: bad })).toThrow(
+        /CLOUD_WORKSPACE_REALTIME_URL/,
+      );
+    }
   });
 
   it("defaults cloud setup to the shared engine protocol while retaining an explicit compatible-image override", () => {

@@ -202,6 +202,7 @@ import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "./agents/conta
 import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-action-runtime";
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
+import { CloudEngineUplinkClient, EngineUplinkAuthState } from "./cloud-engine-uplink";
 import { CloudEventRuntime } from "./cloud-event-runtime";
 import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome, type CloudAgentHistoryRestoreMetadata,
@@ -1144,6 +1145,9 @@ export class ZerosEngine {
   private ownerAccountName: string | null = null;
   private readonly cloudRuntimeConfig: CloudRuntimeConfig | null;
   private readonly cloudRuntimeRegistration: CloudRuntimeRegistration | null;
+  /** S2 uplink client; null on Local placements and whenever the control
+   * plane did not advertise an endpoint (rollout flag off or older CP). */
+  private cloudEngineUplink: CloudEngineUplinkClient | null = null;
   private readonly cloudDurabilityRuntime: CloudWorkspaceDurabilityRuntime | null;
   private readonly cloudRecordRuntime: CloudWorkspaceRecordRuntime | null;
   private readonly cloudCheckpointScheduler: CloudCheckpointScheduler | null;
@@ -3435,6 +3439,7 @@ export class ZerosEngine {
     try {
       this.cloudStartupPhase = "registration";
       await this.cloudRuntimeRegistration?.start();
+      this.startCloudEngineUplink();
       this.cloudEvents?.start();
       await this.initializeCloudAgentBoot();
     } catch (error) {
@@ -3544,6 +3549,9 @@ export class ZerosEngine {
       setDesignCaptureConfig(undefined);
       await settle(() => captureService.stop());
     }
+    const cloudEngineUplink = this.cloudEngineUplink;
+    this.cloudEngineUplink = null;
+    if (cloudEngineUplink) await settle(() => cloudEngineUplink.stop());
     if (this.cloudRuntimeRegistration && !this.cloudLegacyResidentRequiresFreshView) {
       await settle(() => this.cloudRuntimeRegistration!.stop());
     }
@@ -3638,6 +3646,41 @@ export class ZerosEngine {
     if (failures.length > 0) {
       throw new AggregateError(failures, "Zeros engine teardown failed");
     }
+  }
+
+  /** S2 engine uplink (contracts/s2-uplink.md): cloud placements only, and
+   * only when the control plane advertised an endpoint to this opted-in
+   * engine (the organization's `realtime_uplink` rollout flag was on at
+   * registration). The HTTP heartbeat remains the lease owner; the uplink
+   * carries push traffic and presence and parks without redialing when the
+   * control plane definitively refuses it. */
+  private startCloudEngineUplink(): void {
+    const registration = this.cloudRuntimeRegistration;
+    const config = this.cloudRuntimeConfig;
+    if (!registration || !config) return;
+    const advertised = registration.engineUplink();
+    if (!advertised) return;
+    const uplink = new CloudEngineUplinkClient({
+      endpoint: advertised.endpoint,
+      token: advertised.token,
+      identity: {
+        workspaceId: config.execution.workspaceId,
+        organizationId: config.execution.organizationId,
+        generation: config.execution.generation,
+        engineInstanceId: config.engine.instanceId,
+        bootId: registration.runtimeBootId,
+      },
+      runtimeVersion: VERSION,
+      // The in-memory S1 verifier state; track B binds the shared verifier
+      // (signature and epoch checks) to this state.
+      auth: new EngineUplinkAuthState(),
+      readiness: () => ({ ready: this.running, phase: this.running ? "ready" : "starting" }),
+      onReverifyAuthority: () => registration.requestHeartbeatSoon(),
+      onParked: reason =>
+        console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`),
+    });
+    this.cloudEngineUplink = uplink;
+    uplink.start();
   }
 
   private handleCloudRuntimeAuthorityLoss(): void {
