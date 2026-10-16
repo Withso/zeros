@@ -165,7 +165,7 @@ describe("job runner timing", () => {
     { retryAfterMs: 120_000, random: 0, expected: 120_000 },
     { retryAfterMs: 120_000, random: 1, expected: 144_000 },
     { retryAfterMs: 3_600_000, random: 0, expected: 300_000 },
-    { retryAfterMs: 3_600_000, random: 1, expected: 300_000 },
+    { retryAfterMs: 3_600_000, random: 1, expected: 360_000 },
   ])("treats a provider wait of $retryAfterMs ms as a jittered, capped floor of $expected ms (random $random)",
   async ({ retryAfterMs, random, expected }) => {
     const fake = scriptedPool({ claim: call => call === 0 ? claimed() : nothingDue() });

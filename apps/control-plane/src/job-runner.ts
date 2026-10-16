@@ -65,13 +65,15 @@ export function leaseSafetyMarginMs(leaseMs: number): number {
   return Math.min(5_000, Math.max(1_000, Math.floor(leaseMs / 10)));
 }
 
-/** A provider's requested wait is a floor, never a tight loop: jitter spreads
- * replicas that share one rate limit, and an hour- or day-long window is
- * capped like any other backoff (the fallback poll remains the outer net). */
+/** A provider's requested wait is a floor, never a tight loop: an hour- or
+ * day-long window is capped like any other backoff (the fallback poll remains
+ * the outer net), and jitter afterwards spreads replicas that share one rate
+ * limit, so capped waits land between 300 and 360 seconds instead of all on
+ * exactly 300. */
 export function retryAfterFloorMs(retryAfterMs: number | null, random: () => number = Math.random): number {
   if (retryAfterMs === null || retryAfterMs <= 0) return 0;
   const jitter = 1 + 0.2 * Math.min(1, Math.max(0, random()));
-  return Math.min(5 * 60_000, Math.round(retryAfterMs * jitter));
+  return Math.round(Math.min(5 * 60_000, retryAfterMs) * jitter);
 }
 
 type ActiveJob = {
