@@ -221,5 +221,10 @@ SELECT enqueue_cloud_lifecycle_job('cloud_workspace_drift', workspace.id, worksp
   FROM cloud_workspaces workspace JOIN cloud_workspace_provider_bindings binding
     ON binding.workspace_id = workspace.id AND binding.generation = workspace.current_generation
   WHERE workspace.status <> 'deleted';
-SELECT enqueue_cloud_lifecycle_job('cloud_diagnostic_cleanup', NULL, NULL, now());
+-- A fresh database must migrate to identical rows apart from timestamps (the
+-- reusable test baseline compares two replays), so this one-time seed of the
+-- singleton carries a fixed id instead of the column's random default.
+INSERT INTO control_plane_jobs (id, kind, dedupe_key, run_at)
+VALUES ('00000000-0000-4000-8000-000000000150', 'cloud_diagnostic_cleanup', 'singleton', now())
+ON CONFLICT (kind, dedupe_key) WHERE state IN ('queued','running') DO NOTHING;
 SELECT set_config('app.system', '', true);
