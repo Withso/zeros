@@ -117,6 +117,12 @@ authority supplies keys, epochs and engine tokens
   new owner row notifies `zeros_cloud_engine_uplink_owner`, and an instance
   holding an older uplink closes it with `4409`. After a listener reconnect
   every owned uplink re-reads its owner and authority.
+- **Framing.** Control frames are UTF-8 JSON text capped at 64 KiB; relay
+  data travels in binary frames (8-byte header, then a chunk of at most
+  256 KiB), never base64 in `d`, so the socket payload ceiling is
+  `UPLINK_MAX_BINARY_FRAME_BYTES`. A chunk for a channel no extension
+  claims gets a non-fatal `sys.error relay_channel_unknown`; malformed
+  headers close with `4400`.
 - **Security events.** An unregistered `bootId`, more than 3 supersedes of
   one engine instance in 10 min, or a supersede from another source address
   without an intervening `sys.drain` writes `security.uplink_*` to the

@@ -294,6 +294,44 @@ describe("engine uplink server", () => {
     expect(alerts).toEqual(["uplink_supersede_churn"]);
   });
 
+  it("routes binary relay chunks to the negotiated extension and answers unknown channels with sys.error", async () => {
+    const chunks: { channel: number; final: boolean; binary: boolean; payload: string }[] = [];
+    await start({ extensions: [{ feature: "relay.v1",
+      onRelayChunk: (_session, chunk) => {
+        if (chunk.channel !== 7) return false;
+        chunks.push({ channel: chunk.channel, final: chunk.final, binary: chunk.binary, payload: Buffer.from(chunk.payload).toString("utf8") });
+        return true;
+      } }] });
+    const { peer } = await connect({ features: ["relay.v1"] });
+    const chunk = (channel: number, payload: string, kind = 0x01, flags = 0) => {
+      const body = Buffer.from(payload, "utf8");
+      const frame = Buffer.alloc(8 + body.byteLength);
+      frame[0] = 0x01; frame[1] = kind; frame.writeUInt16BE(flags, 2); frame.writeUInt32BE(channel, 4);
+      body.copy(frame, 8);
+      return frame;
+    };
+    peer.ws.send(chunk(7, "hello"));
+    await until(() => chunks.length === 1);
+    expect(chunks[0]).toEqual({ channel: 7, final: false, binary: false, payload: "hello" });
+    peer.ws.send(chunk(7, "tail", 0x02, 1));
+    await until(() => chunks.length === 2);
+    expect(chunks[1]).toMatchObject({ final: true, binary: true });
+    peer.ws.send(chunk(8, "orphan"));
+    expect(await peer.next("sys.error")).toMatchObject({ d: { code: "relay_channel_unknown", channel: 8 } });
+    expect(peer.ws.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it.each([
+    ["a short header", Buffer.from([0x01, 0x01])],
+    ["an unknown version", Buffer.from([0x02, 0x01, 0, 0, 0, 0, 0, 7])],
+    ["an unknown kind", Buffer.from([0x01, 0x7f, 0, 0, 0, 0, 0, 7])],
+  ])("closes 4400 on %s", async (_name, frame) => {
+    await start();
+    const { peer } = await connect();
+    peer.ws.send(frame);
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
+  });
+
   it("closes 4409 when another instance records a newer owner, and ignores older ones", async () => {
     await start();
     const { peer } = await connect();

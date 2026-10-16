@@ -8,6 +8,39 @@ export const UPLINK_SUBPROTOCOL = "zeros-uplink.v1";
 export const UPLINK_PROTOCOLS: readonly number[] = [1];
 export const UPLINK_MAX_CONTROL_FRAME_BYTES = 64 * 1024;
 export const UPLINK_MAX_RELAY_CHUNK_BYTES = 256 * 1024;
+/** Relay data travels in binary frames: an 8-byte header, then one chunk
+ * (contract "Binary relay frame"; relay payload is never base64 in `d`). */
+export const UPLINK_RELAY_HEADER_BYTES = 8;
+export const UPLINK_RELAY_VERSION = 0x01;
+export const UPLINK_RELAY_KIND = { data: 0x01, dataFinal: 0x02 } as const;
+/** The largest frame the socket accepts: one chunk plus its header. Text
+ * frames are capped separately at `UPLINK_MAX_CONTROL_FRAME_BYTES`. */
+export const UPLINK_MAX_BINARY_FRAME_BYTES = UPLINK_MAX_RELAY_CHUNK_BYTES + UPLINK_RELAY_HEADER_BYTES;
+
+export type UplinkRelayChunk = Readonly<{
+  /** Last chunk of the relayed client message. */
+  final: boolean;
+  /** The relayed message is binary on the client socket; otherwise text. */
+  binary: boolean;
+  /** Channel assigned by `relay.open`. */
+  channel: number;
+  payload: Buffer;
+}>;
+
+/** Parses one binary relay frame; null on any malformed byte. Unknown flag
+ * bits are ignored so later minors can allocate them. */
+export function parseUplinkRelayChunk(frame: Buffer): UplinkRelayChunk | null {
+  if (frame.byteLength < UPLINK_RELAY_HEADER_BYTES || frame.byteLength > UPLINK_MAX_BINARY_FRAME_BYTES) return null;
+  if (frame[0] !== UPLINK_RELAY_VERSION) return null;
+  const kind = frame[1];
+  if (kind !== UPLINK_RELAY_KIND.data && kind !== UPLINK_RELAY_KIND.dataFinal) return null;
+  return Object.freeze({
+    final: kind === UPLINK_RELAY_KIND.dataFinal,
+    binary: (frame.readUInt16BE(2) & 1) === 1,
+    channel: frame.readUInt32BE(4),
+    payload: frame.subarray(UPLINK_RELAY_HEADER_BYTES),
+  });
+}
 export const UPLINK_DEFAULT_PING_INTERVAL_MS = 20_000;
 export const UPLINK_HELLO_TIMEOUT_MS = 10_000;
 export const UPLINK_ACK_DELAY_MS = 250;
