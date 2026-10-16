@@ -823,6 +823,7 @@ describe("repository layout contracts", () => {
       "computer-template-builds.md",
       "computer-template-retention.md",
       "computer-tools.md",
+      "contracts",
       "data-and-sync.md",
       "database-qualification.md",
       "engineering-reference.md",

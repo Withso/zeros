@@ -47,6 +47,8 @@ migration, publication, adoption and acceptance gates.
 - [Warm pool and reliability follow-ups](warm-pool.md): accounted prebooted capacity,
   broader inbox/outbox recovery, outbound VM transport, one multiplexed client↔backend channel,
   incremental transcript feeds and Mac send outbox with acks.
+- [Draft contracts](contracts/README.md): proposed, not yet frozen or implemented
+  capability (S1), VM uplink (S2) and client (S3) contracts for cloud workspaces.
 
 ## Behavior guides
 
