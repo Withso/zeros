@@ -66,6 +66,9 @@ failing input, or a reproduction. Drop anything you can't substantiate.
   deltas: a gate cannot tell a late hint from the first poll.
 - Provider-shaped fixtures match the real wire shape. Qualify against a real
   response at least once.
+- Retry waits and terminal codes come from the provider's documented error
+  envelope, not HTTP convention. Pin each documented wait field and each code
+  that ends an operation with a wire-shaped test.
 - Replay provider updates through the shared history reducer as well as the
   producer. An emitted replacement can look correct while an immutable consumer
   silently ignores it.
