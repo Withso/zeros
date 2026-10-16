@@ -636,7 +636,9 @@ class UplinkConnection {
     let nextMs: number;
     if (issued.ok) {
       this.send({ t: "auth.capability", d: { audience: "zeros:api", token: issued.token, expiresAtMs: issued.expiresAtMs } });
-      nextMs = Math.max(1_000, Math.floor((issued.expiresAtMs - this.now()) * 0.6));
+      // 60% of the lifetime (300 s cadence per the contract), floored so a
+      // near-past expiry can never drive a reissue loop.
+      nextMs = Math.max(5_000, Math.floor((issued.expiresAtMs - this.now()) * 0.6));
       if (!this.flowing) {
         const frames = this.lineage.outbox.replayAfter(this.peerLastReceived) ?? [];
         this.flowing = true;

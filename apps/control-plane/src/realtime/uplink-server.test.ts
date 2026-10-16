@@ -279,6 +279,18 @@ describe("engine uplink server", () => {
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.forbidden });
   });
 
+  it("floors capability renewal at 5 s even when the issuer returns a near-past expiry", async () => {
+    let issues = 0;
+    await start({ capabilities: { issue: async () => { issues += 1; return capability; } } });
+    capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 1_000 };
+    await connect();
+    expect(issues).toBe(1);
+    // 60% of a 1 s lifetime would reissue at 600 ms (1 s floor today); the
+    // contract cadence (300 s at 60%) never needs faster than 5 s.
+    await new Promise(resolve => setTimeout(resolve, 1_400));
+    expect(issues).toBe(1);
+  });
+
   it("closes 4403 when api refuses the engine capability from current authority", async () => {
     capability = { ok: false, reason: "authority" };
     await start();
