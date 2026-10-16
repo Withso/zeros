@@ -49,6 +49,8 @@ migration, publication, adoption and acceptance gates.
   incremental transcript feeds and Mac send outbox with acks.
 - [Draft contracts](contracts/README.md): proposed, not yet frozen or implemented
   capability (S1), VM uplink (S2) and client (S3) contracts for cloud workspaces.
+- [Realtime service](realtime.md): process roles, graceful drain, resume tokens,
+  the VM uplink and the device stream.
 
 ## Behavior guides
 

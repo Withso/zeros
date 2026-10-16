@@ -43,6 +43,9 @@ failing input, or a reproduction. Drop anything you can't substantiate.
   can't extend authority.
 - Windows tolerate ordinary clock skew and are compared against documented
   bounds.
+- A jittered retry has a minimum delay. Full jitter can draw zero, and a
+  zero-delay retry of a failure that arrives without yielding re-enters the
+  loop through promise callbacks and starves the event loop.
 
 **Database cost**
 - Price every recurring query: CPU per call times calls per second, against

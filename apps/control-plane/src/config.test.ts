@@ -280,6 +280,7 @@ describe("database authority configuration", () => {
       databaseMigrationsOnBoot: true,
       databasePoolMax: 6,
       processRole: "combined",
+      shutdownDrainMs: 0,
     });
     expect(loadConfig({ ...baseEnv(), DATABASE_MIGRATION_URL: "postgres://migrator@database.test/zeros", DATABASE_MIGRATIONS_ON_BOOT: "false", DATABASE_POOL_MAX: "6" })).toMatchObject({
       databaseMigrationUrl: "postgres://migrator@database.test:5432/zeros",
@@ -321,10 +322,15 @@ describe("database authority configuration", () => {
     expect(loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: "2" }).databasePoolMax).toBe(2);
   });
   it("separates API replica and worker roles without changing placement gates", () => {
-    for (const role of ["api", "worker", "combined"]) {
+    for (const role of ["api", "worker", "realtime", "combined"]) {
       expect(loadConfig({ ...baseEnv(), CONTROL_PLANE_PROCESS_ROLE: role }).processRole).toBe(role);
     }
     expect(() => loadConfig({ ...baseEnv(), CONTROL_PLANE_PROCESS_ROLE: "all" })).toThrow(/CONTROL_PLANE_PROCESS_ROLE/);
+  });
+  it("keeps the immediate shutdown unless a bounded drain window is configured", () => {
+    expect(loadConfig({ ...baseEnv(), CONTROL_PLANE_DRAIN_SECONDS: "30" }).shutdownDrainMs).toBe(30_000);
+    for (const value of ["-1", "121", "2.5", "bad"])
+      expect(() => loadConfig({ ...baseEnv(), CONTROL_PLANE_DRAIN_SECONDS: value })).toThrow(/CONTROL_PLANE_DRAIN_SECONDS/);
   });
   const psFixture = new URL("postgres://region.horizon.psdb.cloud:5432/zeros?sslmode=verify-full");
   psFixture.username = "app.branchtest";
