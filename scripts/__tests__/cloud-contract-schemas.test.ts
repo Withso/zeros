@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 const root = resolve(import.meta.dirname, "../..");
 const contracts = join(root, "docs/cloud-workspace/contracts");
+const cloudReadme = join(root, "docs/cloud-workspace/README.md");
 
 type JsonObject = Record<string, unknown>;
 
@@ -17,10 +18,12 @@ const expectedBlocks = {
   "s2-uplink-frames": { doc: "s2-uplink.md", lang: "json" },
   "s3-client-api": { doc: "s3-client-contract.md", lang: "yaml" },
   "s3-device-stream-events": { doc: "s3-client-contract.md", lang: "json" },
+  "s3-runtime-auth-frames": { doc: "s3-client-contract.md", lang: "json" },
 } as const;
 type BlockName = keyof typeof expectedBlocks;
 
 const MARKER = /^<!-- contract-schema: ([a-z0-9-]+) \((json|yaml)\) -->$/gm;
+const FENCE = /^```[^\n]*\n[\s\S]*?^```$/gm;
 
 function readDoc(name: string): string {
   return readFileSync(join(contracts, name), "utf8");
@@ -28,6 +31,10 @@ function readDoc(name: string): string {
 
 function contractDocs(): string[] {
   return readdirSync(contracts).filter(name => name.endsWith(".md")).sort();
+}
+
+function stripFences(text: string): string {
+  return text.replace(FENCE, "");
 }
 
 function markers(): { name: string; lang: string; doc: string }[] {
@@ -51,10 +58,6 @@ function json(name: BlockName): JsonObject {
   return JSON.parse(block(name)) as JsonObject;
 }
 
-function proseWithoutBlocks(doc: string): string {
-  return readDoc(doc).replace(/^<!-- contract-schema: [^\n]*\n```[a-z]*\n[\s\S]*?\n```$/gm, "");
-}
-
 function ajv() {
   // Frame schemas compose a shared envelope through allOf, which ajv's
   // strictRequired/strictTypes checks cannot see across; every other strict
@@ -64,12 +67,46 @@ function ajv() {
   return instance;
 }
 
-function frameTypes(schema: JsonObject): string[] {
+function defsByType(schema: JsonObject): Map<string, JsonObject> {
   const defs = schema.$defs as Record<string, JsonObject>;
-  return (schema.oneOf as { $ref: string }[]).map(({ $ref }) => {
-    const def = defs[$ref.replace("#/$defs/", "")]!;
-    return ((def.properties as JsonObject).t as { const: string }).const;
-  });
+  const map = new Map<string, JsonObject>();
+  for (const def of Object.values(defs)) {
+    const t = (def.properties as JsonObject | undefined)?.t as { const?: string } | undefined;
+    if (t?.const) map.set(t.const, def);
+  }
+  return map;
+}
+
+function payloadFields(prose: string, type: string): string[] | null {
+    const inline = new RegExp("`" + type.replaceAll(".", "\\.") + " \\{([^`]*)\\}`");
+  for (const line of prose.split("\n")) {
+    if (!line.includes(`\`${type}\``) && !inline.test(line)) continue;
+    const span = /`\{([^`]*)\}`/.exec(line) ?? inline.exec(line);
+    if (!span) continue;
+    const body = span[1]!;
+    // Nested payloads (maps, arrays of objects) are described in prose, not
+    // rechecked here.
+    if (body.includes("{") || body.includes("[")) return null;
+    const fields: string[] = [];
+    for (const part of body.replace(/"[^"]*"/g, "").split(",")) {
+      const name = part.split(":", 1)[0]!.trim().replace(/\?$/, "");
+      if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(name)) fields.push(name);
+    }
+    return fields;
+  }
+  return null;
+}
+
+function slug(heading: string): string {
+  return heading.trim().toLowerCase()
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/[^\p{L}\p{N} _-]/gu, "")
+    .replace(/\s+/g, "-");
+}
+
+function headingSlugs(absFile: string): string[] {
+  const prose = stripFences(readFileSync(absFile, "utf8"));
+  return [...prose.matchAll(/^#{1,6} +(.+?) *$/gm)].map(([, heading]) => slug(heading!));
 }
 
 function rewriteRefs(value: unknown): unknown {
@@ -94,6 +131,17 @@ function collectRefs(value: unknown, refs: string[] = []): string[] {
   return refs;
 }
 
+function collectInlineSchemas(value: unknown, out: unknown[] = []): unknown[] {
+  if (Array.isArray(value)) value.forEach(entry => collectInlineSchemas(entry, out));
+  else if (value && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === "schema" && entry && typeof entry === "object") out.push(entry);
+      else collectInlineSchemas(entry, out);
+    }
+  }
+  return out;
+}
+
 describe("cloud workspace contract sketches", () => {
   it("embeds each expected schema block exactly once, in its owning contract", () => {
     const found = markers();
@@ -110,6 +158,7 @@ describe("cloud workspace contract sketches", () => {
     "s1-capability-claims",
     "s2-uplink-frames",
     "s3-device-stream-events",
+    "s3-runtime-auth-frames",
   ] as const)("%s compiles and accepts its own examples", name => {
     const schema = json(name);
     const validate = ajv().compile(schema);
@@ -142,6 +191,46 @@ describe("cloud workspace contract sketches", () => {
     expect(validate({ ...client, claims: { ...client!.claims, aud: "zeros:api" } })).toBe(false);
   });
 
+  it("requires the full epoch key set per token kind", () => {
+    const schema = json("s1-capability-claims");
+    const validate = ajv().compile(schema);
+    const [client, engine] = schema.examples as { header: JsonObject; claims: JsonObject }[];
+    for (const key of ["wa", "wr", "me", "ac", "dk"]) {
+      const ep = { ...(client!.claims.ep as JsonObject) };
+      delete ep[key];
+      expect(validate({ ...client, claims: { ...client!.claims, ep } }), `client missing ${key}`).toBe(false);
+    }
+    expect(
+      validate({ ...engine, claims: { ...engine!.claims, ep: { wa: 12, wr: 3 } } }),
+      "engine token carries a client epoch",
+    ).toBe(false);
+    const engineMissing = { ...engine!, claims: { ...engine!.claims } };
+    delete (engineMissing.claims as JsonObject).ep;
+    expect(validate(engineMissing), "engine missing ep").toBe(false);
+  });
+
+  it("ties scopes and audiences to the token kind", () => {
+    const schema = json("s1-capability-claims");
+    const validate = ajv().compile(schema);
+    const [client, engine] = schema.examples as { header: JsonObject; claims: JsonObject }[];
+    expect(validate({
+      ...client,
+      claims: { ...client!.claims, scp: ["ws:read", "engine:checkpoint"] },
+    }), "client token with an engine scope").toBe(false);
+    expect(validate({
+      ...engine,
+      claims: { ...engine!.claims, scp: ["ws:read"] },
+    }), "engine token with a client scope").toBe(false);
+    expect(validate({
+      ...engine,
+      claims: { ...engine!.claims, aud: "zeros:realtime" },
+    }), "engine token for the client-facing realtime audience").toBe(false);
+    expect(validate({
+      ...client,
+      claims: { ...client!.claims, aud: "zeros:api" },
+    }), "client token for the engine audience").toBe(false);
+  });
+
   it("rejects unknown uplink frame types and sequenced unreliable frames", () => {
     const validate = ajv().compile(json("s2-uplink-frames"));
     expect(validate({ t: "sys.unknown", d: {} })).toBe(false);
@@ -152,12 +241,37 @@ describe("cloud workspace contract sketches", () => {
   it.each([
     ["s2-uplink.md", "s2-uplink-frames"],
     ["s3-client-contract.md", "s3-device-stream-events"],
+    ["s3-client-contract.md", "s3-runtime-auth-frames"],
   ] as const)("%s documents every frame type in its schema outside the schema block", (doc, name) => {
-    const prose = proseWithoutBlocks(doc);
+    const prose = stripFences(readDoc(doc)).replace(MARKER, "");
     expect(prose).not.toContain("contract-schema:");
-    for (const type of frameTypes(json(name))) {
+    for (const type of defsByType(json(name)).keys()) {
       expect(prose, type).toContain(`\`${type}\``);
     }
+  });
+
+  it.each([
+    ["s2-uplink.md", "s2-uplink-frames", 10],
+    ["s3-client-contract.md", "s3-device-stream-events", 10],
+    ["s3-client-contract.md", "s3-runtime-auth-frames", 1],
+  ] as const)("%s: %s prose field names exist in the schema", (doc, name, minimum) => {
+    const defs = defsByType(json(name));
+    const prose = stripFences(readDoc(doc));
+    let checked = 0;
+    for (const [type, def] of defs) {
+      const fields = payloadFields(prose, type);
+      if (!fields) continue;
+      checked += 1;
+      const payload = (def.properties as JsonObject).d as JsonObject;
+      const allowed = new Set([
+        "t", "s", "a", "d",
+        ...Object.keys((payload.properties as JsonObject | undefined) ?? {}),
+      ]);
+      for (const field of fields) {
+        expect(allowed.has(field), `${type}: ${field}`).toBe(true);
+      }
+    }
+    expect(checked, "fewer flat payloads checked than expected").toBeGreaterThanOrEqual(minimum);
   });
 
   it("parses the OpenAPI sketch, resolves every reference and compiles its schemas", () => {
@@ -173,6 +287,13 @@ describe("cloud workspace contract sketches", () => {
     for (const name of Object.keys(components.schemas!)) {
       expect(instance.getSchema(`openapi-components#/$defs/${name}`), name).toBeTruthy();
     }
+    const inline = collectInlineSchemas(api.paths);
+    expect(inline.length).toBeGreaterThan(0);
+    expect(() => instance.compile({
+      $id: "openapi-inline",
+      $defs: rewriteRefs(components.schemas),
+      allOf: inline.map(rewriteRefs),
+    })).not.toThrow();
     const paths = api.paths as Record<string, Record<string, { parameters?: { $ref?: string; name?: string; in?: string }[] }>>;
     for (const [path, operations] of Object.entries(paths)) {
       const templated = [...path.matchAll(/\{([A-Za-z]+)\}/g)].map(match => match[1]);
@@ -188,20 +309,46 @@ describe("cloud workspace contract sketches", () => {
     }
   });
 
-  it("links only to files that exist", () => {
+  it("links only to files that exist, and anchors to headings that exist", () => {
     const docs = contractDocs();
     expect(docs).toEqual(["README.md", "s1-capabilities.md", "s2-uplink.md", "s3-client-contract.md"]);
-    for (const doc of docs) {
-      const prose = proseWithoutBlocks(doc);
-      for (const [, target] of prose.matchAll(/\]\(([^)#\s]+)(?:#[^)]*)?\)/g)) {
+    // The contracts README anchors are validated; the cloud README only gets
+    // the file-exists check (its anchors target guides outside this suite).
+    const sources = [...docs.map(doc => join(contracts, doc)), cloudReadme];
+    for (const source of sources) {
+      const prose = stripFences(readFileSync(source, "utf8"));
+      const checkAnchors = dirname(source) === contracts;
+      for (const [, target] of prose.matchAll(/\]\(([^)\s]+)\)/g)) {
         if (/^[a-z]+:/.test(target!)) continue;
-        expect(existsSync(resolve(dirname(join(contracts, doc)), target!)), `${doc} -> ${target}`).toBe(true);
-      }
-      for (const [, file, anchor] of prose.matchAll(/\]\(([a-z0-9-]*\.md)?#(draft-schema[a-z0-9-]*)\)/g)) {
-        const headings = [...readDoc(file ?? doc).matchAll(/^#{2,4} (.+)$/gm)].map(([, heading]) =>
-          heading!.toLowerCase().replace(/[^a-z0-9 -]/g, "").replace(/ /g, "-"));
-        expect(headings, `${doc} -> ${file ?? ""}#${anchor}`).toContain(anchor);
+        const [filePart, anchor] = target!.split("#", 2);
+        const abs = filePart ? resolve(dirname(source), filePart) : source;
+        expect(existsSync(abs), `${source} -> ${target}`).toBe(true);
+        if (anchor && checkAnchors) {
+          expect(headingSlugs(abs), `${source} -> ${target}`).toContain(anchor);
+        }
       }
     }
+  });
+
+  it("cites repository paths that exist, with line ranges in bounds", () => {
+    const sourcePath = /`((?:apps|packages|scripts|docs)\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+)((?::[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*)?)`/g;
+    const sources = [...contractDocs().map(doc => join(contracts, doc)), cloudReadme];
+    let checked = 0;
+    for (const source of sources) {
+      const prose = stripFences(readFileSync(source, "utf8"));
+      for (const [, path, spec] of prose.matchAll(sourcePath)) {
+        const abs = join(root, path!);
+        expect(existsSync(abs), `${source} cites ${path}`).toBe(true);
+        checked += 1;
+        if (!spec) continue;
+        const lineCount = readFileSync(abs, "utf8").split("\n").length;
+        for (const group of spec.slice(1).split(",")) {
+          const [from, to] = group.split("-").map(Number);
+          expect(from!, `${path}:${group}`).toBeGreaterThanOrEqual(1);
+          expect(to ?? from!, `${path}:${group}`).toBeLessThanOrEqual(lineCount);
+        }
+      }
+    }
+    expect(checked, "no repository paths were checked").toBeGreaterThan(0);
   });
 });

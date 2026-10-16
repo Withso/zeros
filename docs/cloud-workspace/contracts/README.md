@@ -6,9 +6,9 @@ tests and migrations remain authoritative once they exist.
 
 | ID | Contract | Version | Status | Machine-readable sketch | Consumers |
 | --- | --- | --- | --- | --- | --- |
-| S1 | [Capabilities and revocation](s1-capabilities.md) | `zeros-cap` 1.0.0-draft.1 | DRAFT | [JSON Schema: header and claims](s1-capabilities.md#draft-schema-capability-header-and-claims) | Tracks A, B, C |
-| S2 | [VM uplink protocol](s2-uplink.md) | `zeros-uplink` 1.0.0-draft.1 | DRAFT | [JSON Schema: uplink text frames](s2-uplink.md#draft-schema-uplink-text-frames) | Tracks C, D, E |
-| S3 | [Client contract v1](s3-client-contract.md) | `zeros-client` 1.0.0-draft.1 | DRAFT | [OpenAPI 3.1: REST](s3-client-contract.md#draft-schema-rest-api-openapi-31), [JSON Schema: device stream frames](s3-client-contract.md#draft-schema-device-stream-frames) | Tracks C, F1, F2 |
+| S1 | [Capabilities and revocation](s1-capabilities.md) | `zeros-cap` 1.0.0-draft.2 | DRAFT | [JSON Schema: header and claims](s1-capabilities.md#draft-schema-capability-header-and-claims) | Tracks A, B, C |
+| S2 | [VM uplink protocol](s2-uplink.md) | `zeros-uplink` 1.0.0-draft.2 | DRAFT | [JSON Schema: uplink text frames](s2-uplink.md#draft-schema-uplink-text-frames) | Tracks C, D, E |
+| S3 | [Client contract v1](s3-client-contract.md) | `zeros-client` 1.0.0-draft.2 | DRAFT | [OpenAPI 3.1: REST](s3-client-contract.md#draft-schema-rest-api-openapi-31), [JSON Schema: device stream frames](s3-client-contract.md#draft-schema-device-stream-frames), [JSON Schema: runtime auth frames](s3-client-contract.md#draft-schema-runtime-auth-frames) | Tracks C, F1, F2 |
 
 Until freeze, each machine-readable sketch lives in a fenced block inside the
 contract that owns it, under a "Draft schema" heading and directly after a
@@ -48,8 +48,9 @@ client (SDK) ──REST──────────────► api ── 
   the previous major for at least one desktop release and one runtime
   qualification cycle. Engines and clients advertise `min`/`max`.
 - **`packages/protocol` changes are additive only.** Existing message shapes
-  do not change (plan §2.1). New runtime frames (`auth`, `auth.renew`,
-  `auth.ok`, `auth.renewed`) are new message types.
+  do not change (plan §2.1). The runtime auth frames (`auth`, `auth.ok`,
+  `auth.renew`, `auth.renewed`) are a pre-protocol handshake gated by the
+  `zeros-cap.v1` subprotocol, not new engine message types (S3, Part 3).
 - **One source of truth after freeze.** The hand-written schema blocks in
   these documents are review sketches. At freeze, track B/C implement them as Zod schemas in
   `packages/protocol` (Zod 4, exported to JSON Schema with
@@ -81,9 +82,9 @@ keeps the sketches valid while they are drafts.
 | # | Decision | Recommendation | Main rejected alternative |
 | --- | --- | --- | --- |
 | D1 | Token format (S1-Q1) | JWS compact, `EdDSA`/Ed25519, `jose` (already a dependency), pinned header | PASETO v4.public: new dependency on CP, engine and every client |
-| D2 | Signing-key storage (S1-Q2) | Settings-secret AES-256-GCM envelope code, **separate** keyring env and table | Reuse the settings keyring: forbidden by [security](../security.md) |
+| D2 | Signing-key storage (S1-Q2) | Generalised settings-secret AES-256-GCM envelope code (the seal hard-codes the settings binding AAD today), **separate** keyring env and table. Deliberately narrows plan §3 S1 ("stored with the existing settings-secret encryption") to the envelope code, because [security](../security.md) (`security.md:287-289`) forbids reusing the keyring | Reuse the settings keyring itself: forbidden |
 | D3 | Membership epoch granularity (S1-Q3) | Per `(organization, user)` | Per workspace: fan-out writes and larger verifier state |
-| D4 | Proof of possession (S1-Q4) | Required for client tokens on both routes, 0-RTT signed proof with the existing device key | Bearer-only tokens: a leaked token works from any machine for 5 min |
+| D4 | Proof of possession (S1-Q4, S1-Q8) | Required for client tokens on both routes, 0-RTT signed proof with the existing device key; every cloud client registers a trusted device (the Mac app already does). Keyless API/MCP/CLI clients get a scoped service-token grant in a later minor if needed | Bearer-only tokens: a leaked token works from any machine for 5 min |
 | D5 | Revocation transport | Epoch bump + existing `security_events` outbox in one transaction, NOTIFY to `realtime`, push over S2/S3 | Verifier polling the CP: reintroduces per-request reads |
 | D6 | Outage detection | Verifier-observed: uplink down ≥ 30 s **and** JWKS probe failing ≥ 30 s | Client-declared outage: unverifiable by the engine |
 | D7 | Uplink encoding (S2-Q1) | JSON text control frames; binary relay chunks with an 8-byte header | All-binary: harder to debug and schema-check at low frame rates |

@@ -1,6 +1,6 @@
 # S1. Capabilities and revocation
 
-Status: **DRAFT** · Contract ID `zeros-cap` · Version `1.0.0-draft.1` ·
+Status: **DRAFT** · Contract ID `zeros-cap` · Version `1.0.0-draft.2` ·
 Schema: [Draft schema: capability header and claims](#draft-schema-capability-header-and-claims)
 
 This contract defines the signed, workspace-scoped capability that replaces
@@ -22,7 +22,7 @@ Targets (decision G of the plan):
 | Property | Target |
 | --- | --- |
 | Revocation by push | ≤ 2 s p99 from the committing transaction to the verifier closing or downgrading the session |
-| Revocation if push is down | ≤ 5 min (capability lifetime) |
+| Revocation if push is down | About 5.5 min: the 300 s lifetime plus the 30 s expiry leeway in [verification](#verification) step 9 |
 | Full CP outage | Sessions authenticated before the outage stay open up to 30 min; new sessions need the CP |
 | Recovery | Missed epochs and revocations apply before any other traffic, then every open session is re-checked |
 | Renewal | Silent: no user-visible reconnect, no re-admission round trip on the runtime connection |
@@ -30,12 +30,16 @@ Targets (decision G of the plan):
 ## Token format
 
 **Decision (recommended): compact JWS, `alg: "EdDSA"` over Ed25519, signed and
-verified with `jose`.** `jose` is already a dependency of the CP
-(`apps/control-plane/src/runtime-oidc.ts`, `apps/control-plane/src/auth.ts`)
-and of the desktop/engine, so no new dependency is introduced. Ed25519
-primitives (`@noble`) already exist in
-`packages/protocol/src/crypto/primitives.ts` for environments without
-`jose`.
+verified with `jose`.** `jose` is already a CP dependency
+(`apps/control-plane/src/cloud-workspaces/runtime-oidc.ts`,
+`apps/control-plane/src/auth.ts`) and a root runtime dependency
+(`package.json:209`). Electron main imports it
+(`apps/desktop/electron/workos-desktop-client.ts`), but nothing under
+`apps/desktop/src` imports it today, so the engine verifier would be its first
+engine import and the runtime bundle must include it. The alternative for the
+engine is the existing Ed25519 primitives (`@noble`) in
+`packages/protocol/src/crypto/primitives.ts`. No new dependency is introduced
+either way.
 
 Rejected: PASETO v4.public. It removes algorithm agility by design, but adds a
 new runtime dependency to the CP, engine and every future client, and the
@@ -59,9 +63,9 @@ value), any other `typ`, a missing or unknown `kid`, and any `crit`, `jku`,
 | Claim | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `iss` | string (URL) | yes | CP issuer origin, configured per environment (`CLOUD_CAPABILITY_ISSUER`, proposed). |
-| `aud` | `"zeros:engine"` \| `"zeros:realtime"` \| `"zeros:api"` | yes | Exactly one audience. A token for one audience is never accepted by another. |
+| `aud` | `"zeros:engine"` \| `"zeros:realtime"` \| `"zeros:api"` | yes | Exactly one audience. Client tokens use `zeros:engine` or `zeros:realtime`; engine tokens use `zeros:api` only. A token for one audience is never accepted by another. |
 | `sub` | string | yes | Actor: `user:<uuid>` for client tokens, `engine:<engine-instance-uuid>` for engine-held tokens. |
-| `knd` | `"client"` \| `"engine"` | yes | Token kind; must agree with `sub`. |
+| `knd` | `"client"` \| `"engine"` | yes | Token kind; must agree with `sub`. Verifiers check it against the kind their endpoint expects and never select checks from it (step 6). |
 | `org` | uuid | yes | Organization that owns the workspace. |
 | `wsp` | uuid | yes | Cloud workspace ID. |
 | `gen` | positive integer | yes | Workspace generation number the token is valid for. |
@@ -94,12 +98,24 @@ grants exactly what the UI shows:
 | `ws:edit` | developer and above, executable generation (`canEdit`) | Write files, Git mutations, terminals, Design edits. |
 | `ws:manage` | manager and above (`canManage`) | Lifecycle and sharing operations through the runtime. |
 
-Engine scopes (engine-held tokens, `aud` `zeros:api` or `zeros:realtime`):
-`engine:uplink`, `engine:credentials.read`, `engine:history.write`,
-`engine:checkpoint`. Each maps one-to-one to an existing
-`/internal/v2/cloud-workspaces/engine/*` route family.
+Engine scopes (engine-held tokens, `aud` `zeros:api` only) map to existing
+engine route families:
 
-Unknown scopes are ignored by verifiers (additive evolution). A verifier never
+| Scope | Existing routes |
+| --- | --- |
+| `engine:credentials.read` | `/internal/v2/cloud-workspaces/engine/agent-credential-controls`, `…/agent-boot/*`, `…/agent-execution` |
+| `engine:history.write` | `/internal/v2/cloud-workspaces/engine/commands/mirror`, `…/commands/seal`; `/internal/v1/cloud-workspaces/engine/record/*`, `…/content/*`, `…/events` |
+| `engine:checkpoint` | `/internal/v1/cloud-workspaces/engine/checkpoint-hint`, `…/checkpoint-progress`, `…/checkpoints/commit`, `…/blobs` |
+
+The uplink itself is authenticated with the heartbeat credential (S2), so
+there is no `engine:uplink` scope. Other engine routes (register, heartbeat,
+usage, idle-stop, GitHub, actions, access admission) keep the heartbeat
+credential in v1.
+
+`ws:*` scopes exist only on client tokens and `engine:*` scopes only on engine
+tokens. The issuer never emits a cross-kind scope (the schema rejects it); a
+verifier that sees one ignores it and never grants it. Unknown scopes of the
+token's own kind are ignored too (additive evolution). A verifier never
 infers a scope from `role`.
 
 ### Epoch snapshot (`ep`)
@@ -115,8 +131,19 @@ infers a scope from `role`.
 `me` is deliberately per organization, not per workspace: a role change in one
 workspace revokes that user's tokens for every workspace in the organization
 and they silently renew. Role changes are rare, and one counter avoids
-fan-out writes and a per-workspace verifier table. Engine tokens carry only
-`wa`.
+fan-out writes and a per-workspace verifier table.
+
+The epoch key set is fixed per kind, and every key must be present:
+
+| Kind | Required `ep` keys |
+| --- | --- |
+| `client` | `wa`, `wr`, `me`, `ac`, `dk` |
+| `engine` | `wa` |
+
+A token missing any required key fails with `capability_malformed` (step 7);
+the verifier never treats a missing key as "nothing to check". Extra keys
+are allowed for additive evolution and are checked if the verifier knows
+them.
 
 Session and device revocation are terminal, so they are expressed as
 revocation entries (`sid` or `did` revoked), not counters. A verifier keeps
@@ -133,25 +160,36 @@ failing step determines the error code.
 3. `kid` in the verifier's active key set → else `capability_key_unknown`
    (the verifier may refresh keys once, rate-limited to 1/min, before failing).
 4. Ed25519 signature valid → else `capability_signature_invalid`.
-5. `iss` equals the configured issuer, `cv` supported → else
-   `capability_contract_unsupported`.
-6. `aud` equals the verifier's own audience → else `capability_audience_mismatch`.
-7. `wsp`, `org` match the verifier's workspace (engine) or the requested
+5. `iss` equals the configured issuer → else `capability_issuer_mismatch`.
+   `cv` is a supported major → else `capability_contract_unsupported` (the
+   only code that tells a client to update).
+6. `aud` equals the verifier's own audience **and** `knd` equals the kind the
+   endpoint expects: client-facing endpoints (runtime connect on the engine,
+   relay admission on `realtime`) pin `knd: "client"`; the engine route
+   families on `api` pin `knd: "engine"`. Else
+   `capability_audience_mismatch`. The verifier pins the pair; it never
+   selects checks from the token's own `knd`.
+7. Every epoch key required for the token's kind is present in `ep` → else
+   `capability_malformed` (fail closed; a missing key is not "nothing to
+   check").
+8. `wsp`, `org` match the verifier's workspace (engine) or the requested
    workspace (realtime, api); `gen` equals the current generation; `ein`
    matches when present → else `capability_workspace_mismatch` /
    `capability_generation_mismatch`.
-8. `nbf − 30 s ≤ now < exp + 30 s` (30 s clock-skew leeway) → else
+9. `nbf − 30 s ≤ now < exp + 30 s` (30 s clock-skew leeway) → else
    `capability_not_yet_valid` / `capability_expired`. See
    [outage rule](#outage-rule) for the only extension.
-9. For every epoch key `k` in `ep`: `ep[k] ≥ known[k]` → else
-   `capability_revoked`. If `ep[k] > known[k]`, the verifier raises
-   `known[k]` to `ep[k]` (tokens are CP-signed, so they are a valid epoch
-   source; this also closes older sessions sooner).
-10. `sid`, `did` not in the revocation set; `dkv ≥ known device key version`
+10. For every epoch key `k` in `ep`: `ep[k] ≥ known[k]` → else
+    `capability_revoked`. If `ep[k] > known[k]`, the verifier raises
+    `known[k]` to `ep[k]` (tokens are CP-signed, so they are a valid epoch
+    source; this also closes older sessions sooner).
+11. `sid`, `did` not in the revocation set; `dkv ≥ known device key version`
     → else `capability_revoked`.
-11. Client tokens: proof of possession valid → else `capability_proof_invalid`.
-12. Per message: the operation's required scope is in `scp` → else
-    `capability_scope_denied` (the session stays open).
+12. Client tokens (pinned in step 6): proof of possession valid → else
+    `capability_proof_invalid`.
+13. Per message: the operation's required scope is in `scp`, ignoring any
+    cross-kind scope → else `capability_scope_denied` (the session stays
+    open).
 
 ### Proof of possession (client tokens)
 
@@ -170,10 +208,18 @@ zeros-cap-pop-v1
 <route: direct | relay>
 ```
 
-The verifier checks the signature against `cnf.jwk`, `|now − timestampMs| ≤
-30 s` and that `(jti, nonce)` was not seen in the last 5 min. This needs no
-extra round trip and no CP call. A stolen token alone cannot open a session
-from another machine.
+The verifier rebuilds the message from its own `aud`, `wsp` and route (never
+from client-supplied values), checks the signature against `cnf.jwk`,
+`|now − timestampMs| ≤ 30 s` and that `(jti, nonce)` was not seen in the last
+5 min. This needs no extra round trip and no CP call. A stolen token alone
+cannot open a session from another machine.
+
+The replay cache is per verifier instance. A proof captured on one instance
+can be replayed on another within the 30 s timestamp window. Mitigation:
+`realtime` shards relay admission and the device stream by workspace, so one
+workspace's verifier state lives on one instance; the engine is a single
+instance per workspace. A shared replay set (S2-Q3's open question) closes
+the residual window if sharding is ever relaxed.
 
 Engine tokens carry no `cnf`: the VM is one trust domain and the engine's
 uplink credential is equivalent (see [security](../security.md)).
@@ -190,7 +236,7 @@ uplink credential is equivalent (see [security](../security.md)).
 
 In-band renewal: a client sends the new token (and a fresh PoP) over its
 existing runtime connection (`auth.renew`, S3). The verifier applies steps
-1–11 and swaps the session's token without reconnecting. If no valid renewal
+1–12 and swaps the session's token without reconnecting. If no valid renewal
 arrives before `exp + 30 s`, the session is closed with
 `capability_expired`.
 
@@ -200,13 +246,19 @@ arrives before `exp + 30 s`, the session is closed with
 - **Storage (recommended):** new table `cloud_capability_signing_keys(kid,
   public_jwk, sealed_private_key, state, created_at, activated_at,
   retire_after)` with `state ∈ next | current | retiring | retired | revoked`.
-  Private keys are sealed with the same AES-256-GCM-with-AAD envelope used for
-  settings secrets (`apps/control-plane/src/cloud-workspaces/settings.ts:510-556`
-  seal, `:602` open) but under a **separate keyring**
-  (`CLOUD_CAPABILITY_KEYS_JSON`, `CLOUD_CAPABILITY_CURRENT_KEY_VERSION`,
-  proposed), because [security](../security.md) forbids reusing the settings
-  keyring for other domains. AAD binds `kid` and the purpose string
-  `zeros-cap-signing-v1`.
+  Private keys are sealed with a generalised form of the
+  AES-256-GCM-with-AAD envelope used for settings secrets. Today's seal
+  hard-codes the settings binding AAD (`secretBindingAad(binding)`,
+  `apps/control-plane/src/cloud-workspaces/settings.ts:537-538`, seal at
+  `:510-556`, open at `:602`), so the envelope code is generalised to take
+  the AAD as a parameter; it is not reused as is. The sealing keyring is a
+  **separate keyring** (`CLOUD_CAPABILITY_KEYS_JSON`,
+  `CLOUD_CAPABILITY_CURRENT_KEY_VERSION`, proposed), because
+  [security](../security.md) (`security.md:287-289`) forbids reusing the
+  settings keyring for other domains. This deliberately narrows plan §3's
+  "stored with the existing settings-secret encryption" to mean the existing
+  envelope code, not the existing keyring. AAD binds `kid` and the purpose
+  string `zeros-cap-signing-v1`.
 - **Publication:** `GET /.well-known/zeros-capabilities/jwks.json` (public,
   `Cache-Control: max-age=300`), and the S2 `auth.keys` frame to every
   connected engine. The set contains `next`, `current` and `retiring` keys
@@ -225,7 +277,18 @@ Issued only by the `api` service:
   (S3), and pushed `capability.renewed` events on the device stream (S3).
   Issuance reads the actor's role and epochs once (one SQL statement, served
   by the track B authority cache where possible) and requires a valid CP
-  session plus a device proof.
+  session plus a device proof. Unlike today's runtime admission, where the
+  proof is optional and checked only when the device headers are present
+  (`apps/control-plane/src/cloud-workspaces/routes.ts:2065`), the proof is
+  **required**: every cloud client registers an Ed25519 device key with
+  `POST /v1/devices` (rows are `trusted` by default at registration,
+  migration 0027; verification requires that state,
+  `apps/control-plane/src/cloud-workspaces/replicas.ts:48`) and holds the
+  private key in platform storage. The Mac app already does this: Electron
+  main signs the admission proof
+  (`apps/desktop/electron/cloud-workspace-access-client.ts:919,932`). Web,
+  CLI, MCP and API clients must do the same; see S1-Q8 for clients without a
+  persistent key.
 - Engine tokens: `auth.capability` frame on the uplink (S2) after the uplink
   is authenticated with the engine's heartbeat credential.
 
@@ -283,7 +346,7 @@ On recovery the verifier, before processing any other frame or request:
 1. receives `auth.sync` (S2), which carries all current epochs and every
    revocation entry since the verifier's last applied cursor;
 2. applies it;
-3. re-checks every open session against steps 5–10;
+3. re-checks every open session against steps 5–11;
 4. requires every grace-extended session to present a valid renewal within
    30 s, else closes it with `capability_expired`.
 
@@ -301,6 +364,7 @@ for HTTP and the S2/S3 `error` frame for sockets.
 | `capability_malformed` | 401 | 4401 | Bug; report, do not retry with the same token |
 | `capability_key_unknown` | 401 | 4401 | Renew once |
 | `capability_signature_invalid` | 401 | 4401 | Renew once |
+| `capability_issuer_mismatch` | 401 | 4401 | Check the configured CP origin; report |
 | `capability_contract_unsupported` | 401 | 4426 | Update client |
 | `capability_audience_mismatch` | 401 | 4401 | Bug |
 | `capability_workspace_mismatch` | 403 | 4403 | Re-resolve workspace |
@@ -329,12 +393,17 @@ window.
 | Current path | Replacement | Track |
 | --- | --- | --- |
 | Per-request engine authority SQL, `apps/control-plane/src/cloud-workspaces/engine-authority.ts:169-216` | Engine token verification + authority cache keyed by `wa` | B |
-| Engine client-admission verification call, `apps/desktop/src/engine/cloud-runtime-registration.ts:828-875` → `/internal/v2/cloud-workspaces/engine/client-admission` | Local verification (steps 1–11) on the engine | B |
+| Engine client-admission verification call, `apps/desktop/src/engine/cloud-runtime-registration.ts:828-875` → `/internal/v2/cloud-workspaces/engine/client-admission` | Local verification (steps 1–12) on the engine | B |
 | Client authority renewal every lease/2 (lease ≤ 10 s), `apps/desktop/src/engine/transport/cloud.ts:154,554-607` | In-band `auth.renew` every ~3 min | B, F1 |
 | Actor-confirm renewal at half lifetime, `apps/desktop/src/engine/cloud-local-command-queue-boot.ts:380-396`; CP side `apps/control-plane/src/cloud-workspaces/agent-boot-credentials.ts:576,606-646` | Engine token renewal pushed over the uplink | B |
 | Warm-context request, `cloud-local-command-queue-boot.ts:410-435` | Engine token with `engine:credentials.read` | B |
-| Relay revalidation every 5 s, `apps/control-plane/src/cloud-workspaces/runtime-bridge.ts:351,753-771`; preview relay `preview-websocket-relay.ts:39` | Epoch push to `realtime` + token `exp` | B, C |
+| Client bridge revalidation every 5 s, `apps/control-plane/src/cloud-workspaces/runtime-bridge.ts:351,753-771` | Epoch push to `realtime` + token `exp` | B, C |
 | Provider resolver `FOR SHARE` authority read on runtime paths, `apps/control-plane/src/cloud-workspaces/provider-resolver.ts:122-173` | Authority cache; cleanup bypass at `:197-213` kept | A, B |
+
+Preview and PTY relay lanes (`preview-websocket-relay.ts:39` and friends)
+keep their current revalidation in v1. They are scoped separately from the
+engine, control and event lanes (see the resident outbound VM transport row
+in [warm-pool](../warm-pool.md)) and join the contract in a later minor.
 
 Each slice deletes the old path when it lands (decision F).
 
@@ -358,6 +427,7 @@ schemas only.
 | Replay of a revoked token | Epochs and revocation entries; learned epochs from newer tokens |
 | Signing key compromise | Sealed at rest under a dedicated keyring, emergency `revoked` state, 90-day rotation |
 | Engine forging client tokens | Engine holds no signing key; it only verifies |
+| Heartbeat credential used from off the VM | The uplink binds it to a registered `bootId` and rejects or alerts on mismatch (S2, [supersede rules](s2-uplink.md#supersede-and-the-heartbeat-credential)). Reading credential controls off the VM is possible with that credential today and is unchanged; receiving relayed client sessions and engine tokens through a hijacked uplink is new with S2 and is what the bootId rule bounds |
 | Compromised VM | Out of scope as a boundary: one trust domain per workspace. Engine tokens are scoped to that workspace and generation only |
 | Outage abuse (cutting the CP to keep access) | Grace only for pre-outage sessions, bounded at 30 min, requires the verifier itself to see the CP down |
 
@@ -366,12 +436,14 @@ schemas only.
 | # | Question | Recommendation |
 | --- | --- | --- |
 | S1-Q1 | JWS or PASETO v4.public? | JWS EdDSA via existing `jose`; pinned header. |
-| S1-Q2 | Reuse the settings-secret keyring for signing keys? | No. Same envelope code, separate keyring env (security.md forbids reuse). |
+| S1-Q2 | Reuse the settings-secret keyring for signing keys? | No. Generalised envelope code, separate keyring env (`security.md:287-289` forbids reuse). Narrows plan §3 S1 accordingly. |
 | S1-Q3 | Membership epoch per workspace or per organization? | Per `(org, user)`; rare changes, no fan-out. |
 | S1-Q4 | Require PoP for relay tokens too? | Yes; same proof, `route: relay`. |
 | S1-Q5 | Downgrade in place on role reduction? | Not in v1: close and reconnect. Revisit with real traffic. |
 | S1-Q6 | Bind client tokens to `ein`? | Optional claim; set it once the engine instance is known, so a replaced engine cannot accept old tokens even within one generation. |
 | S1-Q7 | Clock skew leeway | 30 s; Boat VMs and Macs run NTP. Alert if observed skew > 10 s. |
+| S1-Q8 | PoP for clients without a persistent device key (API, MCP, short-lived CLI)? | v1 requires a registered trusted device for every cloud client (the Mac app already proves possession via Electron main, `apps/desktop/electron/cloud-workspace-access-client.ts:919,932`). If a headless client cannot hold a key, add a scoped service-token grant without PoP in a later minor; do not weaken v1. |
+| S1-Q9 | Cross-instance PoP replay within the 30 s window | Shard verifier state by workspace so one workspace has one replay cache; revisit if S2-Q3 adds a shared store. |
 
 ## Draft schema: capability header and claims
 
@@ -415,7 +487,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
     "scope": {
       "type": "string",
       "pattern": "^(ws|engine):[a-z][a-z0-9.]{1,47}$",
-      "description": "Known v1 scopes: ws:read, ws:prompt, ws:edit, ws:manage, engine:uplink, engine:credentials.read, engine:history.write, engine:checkpoint. Verifiers ignore unknown scopes."
+      "description": "Known v1 scopes: ws:read, ws:prompt, ws:edit, ws:manage (client tokens only), engine:credentials.read, engine:history.write, engine:checkpoint (engine tokens only). Verifiers ignore unknown and cross-kind scopes."
     },
     "epochs": {
       "type": "object",
@@ -482,7 +554,9 @@ a review aid until freeze; the frozen source of truth will be Zod in
             "required": ["role", "sid", "did", "dkv", "cnf"],
             "properties": {
               "sub": { "pattern": "^user:" },
-              "aud": { "enum": ["zeros:engine", "zeros:realtime"] }
+              "aud": { "enum": ["zeros:engine", "zeros:realtime"] },
+              "scp": { "items": { "pattern": "^ws:" } },
+              "ep": { "required": ["wa", "wr", "me", "ac", "dk"] }
             }
           }
         },
@@ -493,7 +567,9 @@ a review aid until freeze; the frozen source of truth will be Zod in
             "not": { "anyOf": [{ "required": ["cnf"] }, { "required": ["sid"] }, { "required": ["did"] }] },
             "properties": {
               "sub": { "pattern": "^engine:" },
-              "aud": { "enum": ["zeros:api", "zeros:realtime"] }
+              "aud": { "const": "zeros:api" },
+              "scp": { "items": { "pattern": "^engine:" } },
+              "ep": { "not": { "anyOf": [{ "required": ["wr"] }, { "required": ["me"] }, { "required": ["ac"] }, { "required": ["dk"] }] } }
             }
           }
         }

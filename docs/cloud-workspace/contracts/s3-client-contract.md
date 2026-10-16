@@ -1,14 +1,18 @@
 # S3. Client contract v1 (cloud workspaces)
 
-Status: **DRAFT** · Contract ID `zeros-client` · Version `1.0.0-draft.1` ·
+Status: **DRAFT** · Contract ID `zeros-client` · Version `1.0.0-draft.2` ·
 Schemas: [Draft schema: REST API (OpenAPI 3.1)](#draft-schema-rest-api-openapi-31),
-[Draft schema: device stream frames](#draft-schema-device-stream-frames)
+[Draft schema: device stream frames](#draft-schema-device-stream-frames),
+[Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames)
 
 The one contract every cloud client uses: the Mac app first (through a
 cloud-only SDK), then web, Windows, Linux, mobile, API, MCP and CLI. It has
 three parts: REST commands and reads, one device stream for pushed state, and
-a runtime connection to the workspace engine. Local workspaces are not part
-of it.
+a runtime connection to the workspace engine. Part 3 authenticates the
+runtime connection defined in
+[client-runtime-contract.md](../client-runtime-contract.md); the engine
+message protocol itself stays as specified there and in `packages/protocol`.
+Local workspaces are not part of it.
 
 ## Purpose
 
@@ -50,14 +54,19 @@ and join the contract in later minor versions.
 
 ### Idempotency
 
-Every mutating request carries `Idempotency-Key`. The CP already requires it
-and accepts 8–128 characters of `[A-Za-z0-9._:-]`
-(`apps/control-plane/src/cloud-workspaces/routes.ts:106-111`, missing or
-invalid → `422 idempotency_key_required`). SDK clients generate a UUIDv4 when
-the user acts and persist it in the outbox. Replays return the original
-result with `Idempotency-Replayed: true`. Reusing a key for a different
-request returns `409 idempotency_key_reused`, the code the CP already uses for
-UI metadata (`workspace-ui-metadata.ts`); v1 adopts it for every command.
+Lifecycle and metadata commands (`POST …/cloud-workspaces`, wake, stop,
+archive, delete, rename) carry `Idempotency-Key`. The CP already requires it
+on those routes and accepts 8–128 characters of `[A-Za-z0-9._:-]`
+(`apps/control-plane/src/cloud-workspaces/routes.ts:106-111`); a missing or
+invalid key gets `422 idempotency_key_required` (`routes.ts:586`). SDK
+clients generate a UUIDv4 when the user acts and persist it in the outbox.
+Replays return the original result with `Idempotency-Replayed: true`.
+Reusing a key for a different body returns `409 idempotency_key_reused`
+(`routes.ts:839`). The new runtime endpoints (`runtime/connect`,
+`runtime/capabilities`) and `POST /v1/device-sessions` take no idempotency
+key: they are guarded by the device session and device proof, and repeating
+them is safe (connect re-issues equivalent capabilities, device sessions are
+cheap to re-create).
 
 ### Errors
 
@@ -140,14 +149,14 @@ stream cursor on resumable server events. Schema:
 
 | Type | Payload | Resumable |
 | --- | --- | --- |
-| `ready` | `{ deviceSessionId, cursor, resumed, heartbeatIntervalMs }` | — |
+| `ready` | `{ deviceSessionId, cursor, resumed, heartbeatIntervalMs, contract }` | — |
 | `catalog.changed` | `{ workspaceId, version, catalogVersion, op: "upsert" \| "remove", workspace? }` (full document on upsert) | yes |
 | `catalog.reset` | `{ reason }`: resume impossible; fetch the snapshot again | — |
 | `lifecycle.changed` | `{ workspaceId, version, status, generation, observedState, reason? }` | yes |
 | `presence.changed` | `{ workspaceId, members: [{ userId, state, since }] }` (latest-wins) | no |
 | `notification` | `{ id, kind, workspaceId, chatId?, turnId?, title, createdAt }` | yes |
 | `capability.renewed` | `{ workspaceId, clientSessionId, capabilities }` | no |
-| `capability.revoked` | `{ workspaceId?, reason, scope: "workspace" \| "account" \| "session" \| "device" }` | yes |
+| `capability.revoked` | `{ workspaceId?, reason, scope: "workspace" \| "account" \| "session" \| "device" \| "organization" }` | yes |
 | `heartbeat` | `{ ts }` every 20 s | — |
 | `pong` | `{ ts }` | — |
 | `drain` | `{ reconnectAfterMs }` | — |
@@ -173,7 +182,21 @@ does not replace `/v1/auth/events` in v1.
 ## Part 3: Runtime connection
 
 A client opens the runtime connection to one of the routes from
-`runtime/connect`. The first client frame authenticates:
+`runtime/connect`. Authentication is a **pre-protocol handshake**, not a
+`BaseMessage` of the engine protocol
+(`packages/protocol/src/messages.ts:52`): the client offers subprotocol
+`zeros-cap.v1` in `Sec-WebSocket-Protocol`, and a server that speaks this
+contract selects it (the engine's `handleProtocols` hook,
+`apps/desktop/src/engine/transport/cloud.ts:506-507`, picks from the offered
+set). For N−1 rollout the client may also offer `zeros-v1`; a server that
+selects `zeros-v1` does not speak this contract, and the client falls back to
+today's token-in-subprotocol behavior (`cloud.ts:70-110`) for one release
+cycle.
+
+The first client frame must be `auth` and must arrive within 10 s of the
+upgrade, or the server closes with `4401` (`capability_missing`). The frame
+is one JSON text message of at most 16 KiB, on top of the existing pre-auth
+connection limits (`cloud.ts:128-137`):
 
 ```json
 { "t": "auth", "d": { "capability": "<S1 token for this route's audience>",
@@ -187,10 +210,13 @@ verifies it locally (S1). On the relay route the frame carries the
 `"engine": { "capability", "proof" }` with the `zeros:engine` capability
 (proof signed with `route: relay`); `realtime` verifies its own token and
 forwards the engine pair in S2 `relay.open`. The verifier replies
-`auth.ok { sessionId, scopes, expiresAt }` or closes with the S1 code. Renewal is in-band: `auth.renew { capability, proof }` →
-`auth.renewed { expiresAt }`, without reconnecting. After `auth.ok` the
-existing engine message protocol flows unchanged; these frames are additive
-message types in `packages/protocol` (existing message shapes do not change).
+`auth.ok { sessionId, scopes, expiresAtMs }` or closes with the S1 close
+code. Renewal is in-band: the client sends `auth.renew` with a fresh
+capability and proof, and the verifier replies `auth.renewed` with the new
+`expiresAtMs`, without reconnecting. After `auth.ok` the existing engine
+message protocol flows unchanged; the handshake frames never appear inside
+it. Frame sketches:
+[Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames).
 
 ## SDK behaviors (normative for every client)
 
@@ -242,6 +268,7 @@ and the real CP.
 | Create | `cloud-workspaces.ts:331-364` | Same endpoint via outbox |
 | Runtime admission | `apps/desktop/electron/cloud-workspace-access-client.ts:457` → `routes.ts:2049` | `runtime/connect` |
 | Client authority renewal every 5 s (lease 10 s) | `apps/desktop/src/engine/transport/cloud.ts:154,554-607` | `auth.renew` every ~3 min, pushed |
+| Token-in-subprotocol runtime auth (`zeros-v1` parsing, `handleProtocols`) | `apps/desktop/src/engine/transport/cloud.ts:70-110,506-507` | `zeros-cap.v1` subprotocol and pre-protocol `auth` frame |
 | Direct-then-relay fallback after 5 s | `apps/desktop/src/renderer/platform/bridge/runtime-client.ts:29,591-603` | Hedged connect at 400 ms, first ready wins |
 | Relay bridge `/v1/cloud-workspaces/bridge` | `apps/control-plane/src/cloud-workspaces/engine-client-admission.ts:11` | Relay route over the uplink (S2) |
 | History pages | `apps/desktop/src/renderer/platform/cloud-history.ts:106` | Same endpoints |
@@ -304,7 +331,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
 openapi: 3.1.0
 info:
   title: Zeros cloud workspace client contract (S3)
-  version: 1.0.0-draft.1
+  version: 1.0.0-draft.2
   description: >-
     DRAFT review sketch of the REST half of client contract v1 for cloud
     workspaces. Existing endpoints keep their current request and response
@@ -922,7 +949,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://zeros.dev/schemas/cloud-contracts/s3-device-stream-events.schema.json",
   "title": "Zeros device stream (S3) frames",
-  "description": "DRAFT 1.0.0-draft.1. Review sketch. Envelope { t, d, c? }; c is an opaque cursor present on resumable server events. Clients ignore unknown event types and unknown fields.",
+  "description": "DRAFT 1.0.0-draft.2. Review sketch. Envelope { t, d, c? }; c is an opaque cursor present on resumable server events. Clients ignore unknown event types and unknown fields.",
   "oneOf": [
     { "$ref": "#/$defs/client.hello" },
     { "$ref": "#/$defs/client.attach" },
@@ -1197,7 +1224,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
           "properties": {
             "workspaceId": { "$ref": "#/$defs/uuid" },
             "reason": { "$ref": "#/$defs/code" },
-            "scope": { "enum": ["workspace", "account", "session", "device"] }
+            "scope": { "enum": ["workspace", "account", "session", "device", "organization"] }
           },
           "if": { "properties": { "scope": { "const": "workspace" } } },
           "then": { "required": ["workspaceId"] }
@@ -1246,6 +1273,152 @@ a review aid until freeze; the frozen source of truth will be Zod in
     { "t": "lifecycle.changed", "c": "c-2", "d": { "workspaceId": "33333333-3333-4333-8333-333333333333", "version": 41, "status": "running", "generation": 7, "observedState": "running" } },
     { "t": "capability.revoked", "c": "c-3", "d": { "workspaceId": "33333333-3333-4333-8333-333333333333", "reason": "membership_changed", "scope": "workspace" } },
     { "t": "presence.set", "d": { "workspaceId": "33333333-3333-4333-8333-333333333333", "state": "active" } }
+  ]
+}
+```
+
+## Draft schema: runtime auth frames
+
+JSON Schema 2020-12 for the pre-protocol handshake frames of Part 3. They
+are not `BaseMessage` messages and never appear after `auth.ok`. This sketch
+is a review aid until freeze; the frozen source of truth will be Zod in
+`packages/protocol`.
+
+<!-- contract-schema: s3-runtime-auth-frames (json) -->
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeros.dev/schemas/cloud-contracts/s3-runtime-auth-frames.schema.json",
+  "title": "Zeros runtime connection auth handshake (S3, pre-protocol)",
+  "description": "DRAFT 1.0.0-draft.2. Review sketch. Frames exchanged before the engine message protocol starts; envelope { t, d }, one JSON text message of at most 16 KiB. auth must arrive within 10 s of the WebSocket upgrade; renewal is in-band.",
+  "oneOf": [
+    { "$ref": "#/$defs/client.auth" },
+    { "$ref": "#/$defs/client.auth.renew" },
+    { "$ref": "#/$defs/server.auth.ok" },
+    { "$ref": "#/$defs/server.auth.renewed" }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "timestampMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "token": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 4096,
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+      "description": "S1 capability (JWS compact) for the route's audience."
+    },
+    "proof": {
+      "type": "object",
+      "required": ["timestampMs", "nonce", "signature"],
+      "properties": {
+        "timestampMs": { "$ref": "#/$defs/timestampMs" },
+        "nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{32}$" },
+        "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" }
+      },
+      "additionalProperties": false
+    },
+    "frame": {
+      "type": "object",
+      "required": ["t", "d"],
+      "properties": { "d": { "type": "object" } }
+    },
+    "client.auth": {
+      "allOf": [{ "$ref": "#/$defs/frame" }],
+      "properties": {
+        "t": { "const": "auth" },
+        "d": {
+          "type": "object",
+          "required": ["capability", "proof", "clientSessionId", "contract"],
+          "properties": {
+            "capability": { "$ref": "#/$defs/token" },
+            "proof": { "$ref": "#/$defs/proof" },
+            "clientSessionId": { "$ref": "#/$defs/uuid" },
+            "contract": { "type": "integer", "minimum": 1 },
+            "engine": {
+              "type": "object",
+              "required": ["capability", "proof"],
+              "properties": {
+                "capability": { "$ref": "#/$defs/token" },
+                "proof": { "$ref": "#/$defs/proof" }
+              },
+              "additionalProperties": false,
+              "description": "Relay route only: the zeros:engine capability and proof (signed with route: relay) that realtime forwards in S2 relay.open."
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "client.auth.renew": {
+      "allOf": [{ "$ref": "#/$defs/frame" }],
+      "properties": {
+        "t": { "const": "auth.renew" },
+        "d": {
+          "type": "object",
+          "required": ["capability", "proof"],
+          "properties": {
+            "capability": { "$ref": "#/$defs/token" },
+            "proof": { "$ref": "#/$defs/proof" }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "server.auth.ok": {
+      "allOf": [{ "$ref": "#/$defs/frame" }],
+      "properties": {
+        "t": { "const": "auth.ok" },
+        "d": {
+          "type": "object",
+          "required": ["sessionId", "scopes", "expiresAtMs"],
+          "properties": {
+            "sessionId": { "$ref": "#/$defs/uuid" },
+            "scopes": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+            },
+            "expiresAtMs": { "$ref": "#/$defs/timestampMs" }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "server.auth.renewed": {
+      "allOf": [{ "$ref": "#/$defs/frame" }],
+      "properties": {
+        "t": { "const": "auth.renewed" },
+        "d": {
+          "type": "object",
+          "required": ["expiresAtMs"],
+          "properties": { "expiresAtMs": { "$ref": "#/$defs/timestampMs" } },
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "t": "auth",
+      "d": {
+        "capability": "aaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccccccc",
+        "proof": { "timestampMs": 1760000000000, "nonce": "0123456789abcdef0123456789abcdef", "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+        "clientSessionId": "55555555-5555-4555-8555-555555555555",
+        "contract": 1
+      }
+    },
+    {
+      "t": "auth.ok",
+      "d": {
+        "sessionId": "66666666-6666-4666-8666-666666666666",
+        "scopes": ["ws:read", "ws:edit"],
+        "expiresAtMs": 1760000000300
+      }
+    }
   ]
 }
 ```
