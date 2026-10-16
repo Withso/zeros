@@ -106,7 +106,7 @@ export const FilesTab = React.memo(function FilesTab({
   const gitRefresh = useGitRefreshKey(cwd, workspaceId, active);
   const githubReview = useGithubReview({
     workspaceId: resolveReviewProvider(parseRemote(project?.originUrl)?.host ?? "github.com") ? workspaceId : undefined,
-    prNumber: workspace?.prNumber, cwd, active: active && !!tab.filePath, refreshKey: gitRefresh,
+    prNumber: workspace?.prNumber, cwd, active: active && !!tab.filePath,
   });
   // Whether the tree sidebar stacks a "Design files" section under the code
   // tree (design-files-pane.tsx). Decided here, from the same cached listing

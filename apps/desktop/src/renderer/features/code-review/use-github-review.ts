@@ -12,7 +12,6 @@ import {
   githubReviewCache,
   githubReviewKey,
   githubReviewTargetFromKey,
-  observeGithubReviewRefresh,
 } from "./github-review-cache";
 import {
   githubLineCommentForAnchor,
@@ -29,6 +28,9 @@ import {
   type ReviewCacheRequest,
 } from "./review-cache-forget";
 
+// Inline review lives on GitHub, not in the worktree: local refresh
+// generations (agent writes, builds) never re-read it. A confirmed head/base
+// change, a write from Zeros, focus/visibility, a reconnect and this interval do.
 const FRESH_MS = 45_000;
 const visible = () =>
   typeof document === "undefined" || document.visibilityState !== "hidden";
@@ -46,7 +48,6 @@ export function useGithubReview({
   prNumber,
   cwd,
   active,
-  refreshKey,
   confirmedHeadSha,
   confirmedBaseSha,
   renamedPaths,
@@ -55,7 +56,6 @@ export function useGithubReview({
   prNumber: number | null | undefined;
   cwd?: string;
   active: boolean;
-  refreshKey: number;
   /** Supplied only by the published PR diff, never a working-tree comparison. */
   confirmedHeadSha?: string;
   confirmedBaseSha?: string;
@@ -77,9 +77,6 @@ export function useGithubReview({
         : EMPTY_REVIEW_THREADS,
     [snapshot.data, key],
   );
-  useEffect(() => {
-    if (key) observeGithubReviewRefresh(key, refreshKey);
-  }, [key, refreshKey]);
   useEffect(() => {
     if (!key || !active) return;
     setDocumentVisible(visible());

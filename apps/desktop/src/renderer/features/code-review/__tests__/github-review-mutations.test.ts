@@ -88,7 +88,6 @@ function captureSource(owner: { cwd?: string } = { cwd }) {
       ...target,
       ...owner,
       active: true,
-      refreshKey: 0,
       confirmedHeadSha: sha,
       confirmedBaseSha: baseSha,
     });

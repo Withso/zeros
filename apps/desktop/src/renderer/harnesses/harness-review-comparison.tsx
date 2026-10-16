@@ -36,6 +36,9 @@ const comparisonFor = (prNumber: number) => {
   return comparison;
 };
 const diffReads: { prNumber: number; baseSha: string; headSha: string }[] = [];
+const inlineReads: number[] = [];
+// Local Git refresh generation (agent file writes, terminal edits).
+let localRefresh = 0;
 const posts: Record<string, unknown>[] = [];
 const held = new Map<number, () => void>();
 const fixtureParams = new URLSearchParams(location.search);
@@ -138,6 +141,7 @@ setActiveBridge({
   }) => {
     let result: unknown;
     if (op === "gh.prInlineReview") {
+      inlineReads.push(Number(params.prNumber));
       if (fixtureParams.has("holdMetadata")) await metadataReady;
       result = {
         ...comparisonFor(Number(params.prNumber)),
@@ -193,7 +197,7 @@ function render(): void {
           prNumber={currentPr}
           prUrl={prFor(currentPr).url}
           repoSlug={null}
-          refreshKey={0}
+          refreshKey={localRefresh}
           active
           agentWorking={false}
           sub="changes"
@@ -206,7 +210,12 @@ function render(): void {
 Object.assign(window, {
   reviewComparisonFixture: {
     diffReads,
+    inlineReads,
     posts,
+    bumpLocalRefresh: () => {
+      localRefresh += 1;
+      render();
+    },
     metadata: () => ({
       pr: peekReviewLiveData(provider, workspaceId, currentPr).pr,
       inline:

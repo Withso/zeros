@@ -120,6 +120,11 @@ interface Entry {
 
 const cache = new Map<string, Entry>();
 const REVIEW_RESUME_MIN_AGE_MS = 2_000;
+/** Local refresh generations arrive in bursts while an agent edits, builds and
+ * tests (one per watcher poll). Only a push or a gh write among them can change
+ * the PR, so a burst refreshes the snapshot's GitHub resources at most once per
+ * window, with a trailing read so the last change still lands. */
+export const REVIEW_REFRESH_KEY_MIN_INTERVAL_MS = 15_000;
 
 // Deletion purge (pr-cache-forget): snapshot keys are
 // `provider.cacheKey#workspaceId#reviewRef`, so the delimited infix match is exact.
@@ -148,6 +153,16 @@ export function shouldRefreshReviewOnResume(
     snap.loadedAt === 0 ||
     now - snap.loadedAt >= REVIEW_RESUME_MIN_AGE_MS
   );
+}
+
+/** Milliseconds to wait before a refresh-key bump may refresh the snapshot:
+ * 0 when the last full load is older than the window (or never happened). */
+export function refreshKeyRefreshDelay(
+  loadedAt: number,
+  now: number = Date.now(),
+): number {
+  if (loadedAt === 0) return 0;
+  return Math.max(0, loadedAt + REVIEW_REFRESH_KEY_MIN_INTERVAL_MS - now);
 }
 
 export type ReviewSnapshotRefreshTrigger =
@@ -481,13 +496,15 @@ export function useReviewLiveData(args: {
     if (e.snap.loadedAt === 0 && !e.inflightFull) void refresh();
   }, [key, refresh]);
 
-  // Event bus: engine git/gh writes + agent turn-end. Active → refresh now;
+  // Event bus: engine git/gh writes + agent turn-end. Active → refresh, at
+  // most once per REVIEW_REFRESH_KEY_MIN_INTERVAL_MS with a trailing read;
   // hidden → mark stale, the activation effect below settles it. Terminal
   // (merged/closed) PRs skip the lane entirely — local git activity cannot
   // change them, and every agent turn-end was re-pulling a merged PR's four
   // GitHub resources forever. The seen refreshKey is still recorded so a
   // later reopen doesn't replay stale generations.
   const lastRefreshKey = useRef(refreshKey);
+  const trailingRefresh = useRef<number | null>(null);
   useEffect(() => {
     if (refreshKey === lastRefreshKey.current) return;
     lastRefreshKey.current = refreshKey;
@@ -499,9 +516,33 @@ export function useReviewLiveData(args: {
     ) {
       return;
     }
-    if (active) void refresh();
-    else invalidate(key);
+    if (!active) {
+      invalidate(key);
+      return;
+    }
+    const delay = refreshKeyRefreshDelay(entryFor(key).snap.loadedAt);
+    if (delay === 0) {
+      void refresh();
+      return;
+    }
+    if (trailingRefresh.current != null) return;
+    trailingRefresh.current = window.setTimeout(() => {
+      trailingRefresh.current = null;
+      if (document.visibilityState === "hidden") invalidate(key);
+      else void refresh();
+    }, delay);
   }, [refreshKey, active, key, refresh]);
+  // A pending trailing read belongs to this key's visible surface. Leaving
+  // keeps its signal as staleness for the activation effect instead.
+  useEffect(
+    () => () => {
+      if (trailingRefresh.current == null) return;
+      window.clearTimeout(trailingRefresh.current);
+      trailingRefresh.current = null;
+      invalidate(key);
+    },
+    [active, key],
+  );
 
   // Activation: settle staleness (bus bump while hidden, or simply old data).
   // Deliberately NOT terminal-gated: this bounded once-per-activation read is
