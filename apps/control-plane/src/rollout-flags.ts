@@ -14,7 +14,14 @@ export const ROLLOUT_FLAG_CHANNEL = "zeros_cloud_rollout_flags";
  *   "disable" can never keep the relaxed path running. */
 export type RolloutFlagFeedLossBehavior = "retain" | "off";
 
-type RolloutFlagDefinition = { whileFeedUnavailable: RolloutFlagFeedLossBehavior; summary: string };
+type RolloutFlagDefinition = {
+  whileFeedUnavailable: RolloutFlagFeedLossBehavior;
+  summary: string;
+  /** Flags that must also be on for the same organization; without every
+   * one of them (transitively) this flag reads off, so a consumer that
+   * checks only this flag cannot run without its dependencies. */
+  requires?: readonly string[];
+};
 
 /** Known flag names. Rows for unknown names are ignored, so another branch
  * may enable a flag before this code knows it. Every flag defaults to off. */
@@ -22,7 +29,10 @@ export const ROLLOUT_FLAGS = {
   authority_cache_shadow: { whileFeedUnavailable: "retain", summary: "Evaluate the engine authority cache beside SQL and count mismatches" },
   authority_cache_enforce: { whileFeedUnavailable: "off", summary: "Serve engine authority from the cache" },
   capabilities: { whileFeedUnavailable: "retain", summary: "Issue and advertise S1 capabilities" },
-  realtime_uplink: { whileFeedUnavailable: "retain", summary: "Accept S2 VM uplinks" },
+  // An uplink cannot complete the S2 handshake without capability keys and
+  // epochs: advertising or accepting it without `capabilities` would loop
+  // engines at auth.sync, so the dependency reads the flag off instead.
+  realtime_uplink: { whileFeedUnavailable: "retain", summary: "Accept S2 VM uplinks", requires: ["capabilities"] },
   device_stream: { whileFeedUnavailable: "retain", summary: "Serve the S3 device stream" },
   credential_push: { whileFeedUnavailable: "retain", summary: "Push credential-control revisions over the uplink" },
   relay_over_uplink: { whileFeedUnavailable: "retain", summary: "Relay client sessions over the uplink" },
@@ -30,6 +40,16 @@ export const ROLLOUT_FLAGS = {
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;
+
+/** The flag is on in `set` and every transitive `requires` is too. */
+function flagEffective(set: ReadonlySet<string> | undefined, flag: string, seen: ReadonlySet<string> = new Set()): boolean {
+  if (!set?.has(flag)) return false;
+  for (const dependency of ROLLOUT_FLAGS[flag as RolloutFlagName]?.requires ?? []) {
+    if (seen.has(dependency)) continue;
+    if (!flagEffective(set, dependency, new Set(seen).add(flag))) return false;
+  }
+  return true;
+}
 
 export function isRolloutFlagName(value: unknown): value is RolloutFlagName {
   return typeof value === "string" && Object.hasOwn(ROLLOUT_FLAGS, value);
@@ -166,7 +186,7 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
     if (!this.current && definition.whileFeedUnavailable === "off") return false;
     // Rows are keyed by the canonical lowercase uuid text; callers may carry
     // the id from a route parameter or claim in another casing.
-    return this.values.get(orgId.toLowerCase())?.has(flag) ?? false;
+    return flagEffective(this.values.get(orgId.toLowerCase()), flag);
   }
 
   /** True when the snapshot was loaded after the current LISTEN session
@@ -179,7 +199,7 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
     const definition: RolloutFlagDefinition | undefined = ROLLOUT_FLAGS[flag];
     if (!definition) return false;
     if (!this.current && definition.whileFeedUnavailable === "off") return false;
-    for (const flags of this.values.values()) if (flags.has(flag)) return true;
+    for (const flags of this.values.values()) if (flagEffective(flags, flag)) return true;
     return false;
   }
 
