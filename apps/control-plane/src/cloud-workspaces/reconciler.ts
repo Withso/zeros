@@ -452,7 +452,6 @@ export class CloudWorkspaceReconciler {
       stoppedDriftIntervalMs: this.stoppedDriftIntervalMs };
   }
 
-  /** Enqueue any pending deadline that lost its job. */
   /** Hourly maintenance: repair missing or late jobs and purge terminally
    * failed rows, which nothing else ever deletes. */
   async auditJobs(): Promise<Partial<Record<LifecycleWork, number>>> {
