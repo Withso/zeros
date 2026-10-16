@@ -30,3 +30,6 @@ session itself.
 8. **Don't wait for an Alpha release after every merge.** Releases are
    cumulative. Make sure a successful one exists only when live Alpha behavior
    is needed: zeros-dev E2E, owner testing or a live qualification.
+9. **Before a release during a freeze,** list which deployables each pending
+   PR changes (control plane, cloud runtime, desktop), so the release's effect
+   is known before it ships.

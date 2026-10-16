@@ -25,6 +25,16 @@ WorkOS. Never use Beta or Production credentials or data.
     username, which carries a routing suffix;
   - delete the role afterwards and retry until a GET returns 404.
 
+## Diagnosis
+
+- For latency, first confirm that the control plane and the database run in
+  the same region, and measure one round trip. A cross-region hop is paid by
+  every query.
+- Release (alpha) runs only on a push to main. Before assuming Alpha runs
+  main, compare the last Release (alpha) run's head SHA with `origin/main`
+  and check the workflow's state. Merges made while it was disabled ship only
+  with the next push.
+
 ## Pins and rebuilds
 
 - Before asking anyone, the owner included, to rebuild a Computer, confirm
