@@ -56,6 +56,7 @@ import {
   type DatabaseCloudRuntimeAccessAdmissionService,
 } from "./runtime-access-admission.js";
 import { CloudEngineCheckpointHintRejected, type CloudEngineCheckpointHintInput } from "./engine-checkpoint-hints.js";
+import type { RolloutFlagReader } from "../rollout-flags.js";
 import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, CloudCheckpointProgressSchema } from "./checkpoint-progress-contract.js";
 import { CloudEngineCheckpointProgressRejected, CloudEngineCheckpointProgressUnavailable, type CloudEngineCheckpointProgressInput } from "./checkpoint-progress.js";
 
@@ -84,6 +85,18 @@ export const CLOUD_WORKSPACE_USAGE_PATH =
   "/internal/v1/cloud-workspaces/engine/usage";
 export const CLOUD_WORKSPACE_SETUP_RECOVERY_PATH =
   "/internal/v1/cloud-workspaces/setup/recovery";
+
+/** Registration-time uplink advertisement (S2): the response gains
+ * `uplink.endpoint` only for an engine that opted in with
+ * `x-zeros-cloud-engine-uplink: 1` while its organization's
+ * `realtime_uplink` flag is on. Older engines never send the header and
+ * never see the member, so their strict document parsing is untouched. */
+export const CLOUD_ENGINE_UPLINK_OPT_IN_HEADER = "x-zeros-cloud-engine-uplink";
+export type CloudWorkspaceEngineUplinkAdvertisement = {
+  /** Public `wss` endpoint engines dial (`CLOUD_WORKSPACE_REALTIME_URL` + `/v1/uplink`). */
+  endpoint: string;
+  flags: RolloutFlagReader;
+};
 
 const UUID = z.string().uuid();
 const POSITIVE_INTEGER = z.number().int().safe().positive();
@@ -578,8 +591,15 @@ export const cloudWorkspaceInternalResponseHeaders: MiddlewareHandler = async (c
 
 export function createCloudWorkspaceInternalRoutes(
   service: CloudWorkspaceInternalSetupService,
+  options?: { engineUplink?: CloudWorkspaceEngineUplinkAdvertisement },
 ): Hono {
   const routes = new Hono();
+  /** The additive `uplink` member, only for an opted-in engine of an
+   * organization whose `realtime_uplink` flag is on. */
+  const withUplinkAdvertisement = (body: Record<string, unknown>, organizationId: string, optedIn: boolean) =>
+    options?.engineUplink && optedIn && options.engineUplink.flags.enabled(organizationId, "realtime_uplink")
+      ? { ...body, uplink: { endpoint: options.engineUplink.endpoint } }
+      : body;
   const authenticateBlobIngress: MiddlewareHandler = async (c, next) => {
     if (c.req.method !== "POST") return next();
     const token = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);
@@ -665,7 +685,8 @@ export function createCloudWorkspaceInternalRoutes(
         c.header("x-zeros-cloud-agent-journal",journal.data);
       }
       const metadata=z.record(z.unknown()).safeParse(registered);
-      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;return c.json(legacy);}
+      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
+        return c.json(withUplinkAdvertisement(legacy,input.organizationId,c.req.header(CLOUD_ENGINE_UPLINK_OPT_IN_HEADER)==="1"));}
       return c.json(registered);
     } catch (error) {
       if (!(error instanceof CloudWorkspaceSetupMaterialError)) throw error;
@@ -702,7 +723,8 @@ export function createCloudWorkspaceInternalRoutes(
         c.header("x-zeros-cloud-agent-journal",journal.data);
       }
       const metadata=z.record(z.unknown()).safeParse(registered);
-      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;return c.json(legacy);}
+      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
+        return c.json(withUplinkAdvertisement(legacy,input.organizationId,c.req.header(CLOUD_ENGINE_UPLINK_OPT_IN_HEADER)==="1"));}
       return c.json(registered);
     } catch {
       return c.json({error:{code:"engine_registration_rejected",retryable:false}},403);

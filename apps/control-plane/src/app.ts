@@ -63,6 +63,7 @@ import {
   CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
   CLOUD_WORKSPACE_INTERNAL_PATHS,
   cloudWorkspaceInternalResponseHeaders,
+  type CloudWorkspaceEngineUplinkAdvertisement,
   type CloudWorkspaceInternalSetupService,
 } from "./cloud-workspaces/internal-routes.js";
 import { previewRequestFromEdge, type CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
@@ -107,6 +108,7 @@ export type CreateAppDependencies = {
   cloudGithubReads?: DatabaseCloudGithubReads;
   cloudIdleStop?: DatabaseCloudIdleStop;
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
+  cloudWorkspaceEngineUplink?: CloudWorkspaceEngineUplinkAdvertisement;
   cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
   cloudRuntimeServiceAccess?: DatabaseCloudRuntimeServiceAccess;
   cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver;
@@ -496,6 +498,9 @@ export function createApp(
       "/",
       createCloudWorkspaceInternalRoutes(
         dependencies.cloudWorkspaceInternalSetupService,
+        dependencies.cloudWorkspaceEngineUplink
+          ? { engineUplink: dependencies.cloudWorkspaceEngineUplink }
+          : undefined,
       ),
     );
   }

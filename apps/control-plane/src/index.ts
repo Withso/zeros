@@ -758,6 +758,14 @@ const app = createApp(config, pool, emailConfig, {
   ...(cloudWorkspaceInternalSetupService
     ? { cloudWorkspaceInternalSetupService }
     : {}),
+  // Advertise the uplink only where engines register (the API surface), only
+  // with a configured realtime origin, and read the same flag the realtime
+  // server enforces so an off flag never attracts dials it would refuse.
+  ...(cloudWorkspaceInternalSetupService && rolloutFlagSnapshot && config.cloudWorkspaces?.setupExecution?.engineUplinkEndpoint
+    ? { cloudWorkspaceEngineUplink: {
+        endpoint: config.cloudWorkspaces.setupExecution.engineUplinkEndpoint,
+        flags: rolloutFlagSnapshot } }
+    : {}),
   ...(cloudWorkspaceAccessService ? { cloudWorkspaceAccessService } : {}),
   ...(cloudWorkspaceProviderResolver ? { cloudWorkspaceProviderResolver } : {}),
   ...(cloudRuntimeServiceAccess ? { cloudRuntimeServiceAccess } : {}),
