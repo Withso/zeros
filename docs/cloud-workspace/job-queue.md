@@ -61,8 +61,12 @@ clock) and `src/job-queue.integration.test.ts`.
 - **Retries.** Exponential backoff with equal jitter: the ceiling is
   `min(maxMs, baseMs × 2^(attempt−1))`, the delay is half the ceiling plus a
   random share of the other half. Defaults: 5 s base, 15 min cap, 10 attempts.
-  A `JobError` can carry `retryAfterMs` (for example a provider `Retry-After`),
-  which raises the delay, and can be marked non-retryable, which fails at once.
+  A `JobError` can carry `retryAfterMs` (a provider's requested wait, such as
+  Boat's body-carried `retryAfterSeconds`), which is a floor on the delay: it
+  is jittered by up to 20 percent so replicas sharing one rate limit spread
+  out, and capped at 5 minutes so an hour- or day-long window never produces
+  a tight retry loop. A `JobError` can also be marked non-retryable, which
+  fails at once.
 - **Error codes.** `last_error_code` is a closed vocabulary
   (`JOB_ERROR_CODES` plus `lease_expired`). Handlers report a specific failure
   only through `JobError`; any other exception is stored as `handler_failed`,

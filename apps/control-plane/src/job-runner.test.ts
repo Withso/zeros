@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import type pg from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { JobRunner, type JobHandler } from "./job-runner.js";
+import { JobError } from "./job-queue.js";
 
 type Operation = "claim" | "complete" | "fail" | "extend" | "release" | "purge";
 type Result = { rows?: unknown[]; rowCount?: number };
@@ -158,6 +159,24 @@ describe("job runner timing", () => {
       "[jobs] claim failed (claim_failed); will retry",
       "[jobs] claim failed (database_unavailable); will retry",
     ]);
+  });
+
+  it.each([
+    { retryAfterMs: 120_000, random: 0, expected: 120_000 },
+    { retryAfterMs: 120_000, random: 1, expected: 144_000 },
+    { retryAfterMs: 3_600_000, random: 0, expected: 300_000 },
+    { retryAfterMs: 3_600_000, random: 1, expected: 300_000 },
+  ])("treats a provider wait of $retryAfterMs ms as a jittered, capped floor of $expected ms (random $random)",
+  async ({ retryAfterMs, random, expected }) => {
+    const fake = scriptedPool({ claim: call => call === 0 ? claimed() : nothingDue() });
+    const instance = runner(fake.pool, {
+      handle: () => rejected(new JobError("provider_rate_limited", { retryAfterMs })),
+    }, { random: () => random });
+    instance.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fake.count("fail")).toBe(1);
+    const failure = fake.calls.find(call => call.operation === "fail");
+    expect(failure?.statement).toContain(`now() + ${expected} * interval '1 millisecond'`);
   });
 
   it("does not release a lease whose completion is already in flight at shutdown", async () => {
