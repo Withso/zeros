@@ -19,6 +19,8 @@ export const mentionFilesCache = new KeyedAsyncCache<WorkspaceEntry[]>({
 interface WarmWorkspace {
   revision: string;
   checkedAt: number;
+  /** Last confirmed load for this workspace, any revision. */
+  loadedAt: number | null;
   users: number;
   paths: Map<string, WorkspaceEntry>;
   index?: WorkspacePathIndex;
@@ -27,6 +29,15 @@ const workspaces = new Map<string, WarmWorkspace>();
 const MAX_WARM_WORKSPACES = 16;
 const MAX_WARM_PATHS = 2048;
 const FRESH_MS = 2000;
+/** A newly revealed @ menu re-reads the filesystem when nothing has reported a
+ * change for this long, catching edits the watcher cannot see (ignored
+ * dependency and output folders). Each new revision is a full tree walk in the
+ * engine, so the window is not the 2 s query cache age. */
+const OPEN_REVALIDATE_MS = 10_000;
+/** Pointer and focus intent warm a workspace at most once per window and
+ * never mint a revision: hovering the composer while an agent edits files must
+ * not re-walk the tree. */
+const WARM_REUSE_MS = 60_000;
 // An opaque cache revision, not a credential. Separate renderer sessions must
 // not reuse a previous process's filesystem generation after a reload.
 const session = Math.random().toString(36).slice(2);
@@ -45,6 +56,7 @@ function warmWorkspace(cwd: string): WarmWorkspace {
   const workspace = workspaces.get(root) ?? {
     revision: nextRevision(),
     checkedAt: Date.now(),
+    loadedAt: null,
     users: 0,
     paths: new Map<string, WorkspaceEntry>(),
   };
@@ -93,6 +105,7 @@ async function fetchEntries(key: string): Promise<WorkspaceEntry[]> {
   // An invalidated response may still settle for its original caller, but
   // cannot seed the warm index with paths from a rejected generation.
   if (workspace.revision === revision && workspaces.get(cwd) === workspace) {
+    workspace.loadedAt = Date.now();
     let changed = false;
     if (paths.length < 64) {
       const present = new Set(entries.map((entry) => entry.path));
@@ -185,14 +198,35 @@ export class MentionFileSearch {
     if (key) this.request(key);
   }
 
+  /** The @ menu opened (or regained focus while open): read its current
+   * revision, minting a new one only when no change was reported for
+   * OPEN_REVALIDATE_MS. */
   refresh(cwd: string | null, query: string): void {
     if (cwd) {
       const workspace = warmWorkspace(cwd);
-      if (Date.now() - workspace.checkedAt > FRESH_MS)
+      if (Date.now() - workspace.checkedAt > OPEN_REVALIDATE_MS)
         invalidateMentionFiles(cwd);
     }
     this.search(cwd, query);
     if (this.key) this.request(this.key);
+  }
+
+  /** Pointer or focus intent with the menu closed: warm the bare-@ window once
+   * so typing @ answers immediately. It neither subscribes to file changes nor
+   * mints a revision, and repeats within WARM_REUSE_MS are free. */
+  prefetch(cwd: string | null): void {
+    if (!cwd) return;
+    const workspace = warmWorkspace(cwd);
+    pruneWorkspaces();
+    if (
+      workspace.loadedAt != null &&
+      Date.now() - workspace.loadedAt < WARM_REUSE_MS
+    )
+      return;
+    const key = keyFor(cwd, "");
+    void mentionFilesCache
+      .load(key, () => fetchEntries(key), { maxAgeMs: FRESH_MS })
+      .catch(() => {}); // The exact-key snapshot reports failure and retains rows.
   }
 
   clear(): void {

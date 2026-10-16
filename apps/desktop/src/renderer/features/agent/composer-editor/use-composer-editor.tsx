@@ -492,15 +492,16 @@ export function useComposerEditor(
   const originUrlRef = useRef(originUrl);
   originUrlRef.current = originUrl;
 
-  // Pointer/focus intent warms the shared filesystem index. Typing filters
-  // known paths immediately and asks the warm engine index for the full rank.
+  // Pointer/focus intent warms the shared filesystem index once; it never
+  // subscribes or forces a new tree walk. An open @ menu revalidates. Typing
+  // filters known paths immediately and asks the warm engine index for the
+  // full rank.
   const loadWorkspaceFiles = useCallback(() => {
     if (optsRef.current.attachmentImagesActive === false) return;
     const state = store.getSnapshot();
-    filesSearch.refresh(
-      optsRef.current.cwd,
-      state.open && state.trigger === "@" ? state.query : "",
-    );
+    if (state.open && state.trigger === "@")
+      filesSearch.refresh(optsRef.current.cwd, state.query);
+    else filesSearch.prefetch(optsRef.current.cwd);
   }, [filesSearch, store]);
 
   useLayoutEffect(() => {
@@ -789,8 +790,8 @@ export function useComposerEditor(
       resyncGraphIds(e);
       stageDocIntoGraph(e);
     },
-    // Re-read the workspace file list when the composer gains focus so @-files
-    // reflect mid-session creates/deletes (throttled inside loadWorkspaceFiles).
+    // Focus warms the @ index (at most once a minute, never a forced walk);
+    // file changes reach an open @ menu through the refresh bus.
     onFocus: () => loadWorkspaceFiles(),
     onUpdate: ({ editor: e }) => {
       setIsEmpty(e.isEmpty);

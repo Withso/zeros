@@ -170,7 +170,7 @@ describe("mention file search", () => {
     search.search("/a", "file");
     await tick();
     const previous = search.snapshot("/a", "file").data;
-    vi.advanceTimersByTime(2001);
+    vi.advanceTimersByTime(10_001);
     const refresh = deferred<string[]>();
     list.mockReturnValueOnce(refresh.promise);
     search.refresh("/a", "file");
@@ -233,5 +233,64 @@ describe("mention file search", () => {
     }
     search.clear();
     expect(mentionFilesCache.keys().length).toBeLessThanOrEqual(64);
+  });
+
+  it("warms on pointer or focus intent without subscribing to later file changes", async () => {
+    vi.useFakeTimers();
+    list.mockResolvedValue(["a.txt"]);
+    const search = new MentionFileSearch(() => {});
+    search.prefetch("/a");
+    await tick();
+    expect(list).toHaveBeenCalledTimes(1);
+    // An agent writes files while the menu is closed: nothing re-walks.
+    invalidateMentionFiles("/a");
+    invalidateMentionFiles("/a");
+    await tick();
+    expect(list).toHaveBeenCalledTimes(1);
+    // Repeated hover/focus within the warm window reuses the confirmed load.
+    vi.advanceTimersByTime(30_000);
+    search.prefetch("/a");
+    search.prefetch("/a/");
+    await tick();
+    expect(list).toHaveBeenCalledTimes(1);
+    // Past it, one warm read reaches the newest filesystem revision.
+    vi.advanceTimersByTime(31_000);
+    search.prefetch("/a");
+    await tick();
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list.mock.calls[1][2]).not.toBe(list.mock.calls[0][2]);
+    search.clear();
+  });
+
+  it("never mints a filesystem revision for intent alone", async () => {
+    vi.useFakeTimers();
+    list.mockResolvedValue(["a.txt"]);
+    const search = new MentionFileSearch(() => {});
+    search.prefetch("/a");
+    await tick();
+    vi.advanceTimersByTime(120_000);
+    search.prefetch("/a");
+    await tick();
+    // Same revision: the engine answers from its index without a walk.
+    expect(list.mock.calls[1][2]).toBe(list.mock.calls[0][2]);
+    search.clear();
+  });
+
+  it("revalidates an opened @ menu only after the open freshness window", async () => {
+    vi.useFakeTimers();
+    list.mockResolvedValue(["a.txt"]);
+    const search = new MentionFileSearch(() => {});
+    search.refresh("/a", "");
+    await tick();
+    vi.advanceTimersByTime(5_000);
+    search.refresh("/a", "");
+    await tick();
+    // Within the window the open reuses the same revision.
+    expect(new Set(list.mock.calls.map((call) => call[2])).size).toBe(1);
+    vi.advanceTimersByTime(6_000);
+    search.refresh("/a", "");
+    await tick();
+    expect(new Set(list.mock.calls.map((call) => call[2])).size).toBe(2);
+    search.clear();
   });
 });
