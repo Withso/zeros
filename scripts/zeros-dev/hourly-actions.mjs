@@ -2,6 +2,7 @@ import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createGitHubApi } from "../ci/recovery-api.mjs";
 import { reviewedPrestartRecovery } from "./prestart-recovery.mjs";
+import { reviewedChainRestart } from "./chain-restart.mjs";
 
 export const HOURLY_PATH = ".github/workflows/zeros-dev-e2e.yml";
 export const HOURLY_NAME = "Zeros dev E2E";
@@ -95,6 +96,9 @@ export async function planHourly(api, execution) {
     if (matches.length !== 1 || !integer(artifact.id) || artifact.expired || !Number.isSafeInteger(artifact.size_in_bytes) ||
       artifact.size_in_bytes <= 0 || artifact.size_in_bytes > 2 * 1024 * 1024 || !/^sha256:[a-f0-9]{64}$/.test(artifact.digest ?? "") ||
       artifact.workflow_run?.id !== previous.id || artifact.workflow_run?.head_sha !== previous.head_sha) throw failure("artifact_invalid");
+    // Its signer is retired, so the exact receipt starts a new chain instead.
+    const chainRestart = reviewedChainRestart(previous, artifact);
+    if (chainRestart) return { execution, bootstrap: true, previous: null, artifactId: null, chainRestart, ...(prestartRecovery ? { prestartRecovery } : {}) };
     return { execution, bootstrap: false, previous: { workflowRunId: String(previous.id), attempt: previous.run_attempt, sourceSha: previous.head_sha }, artifactId: String(artifact.id),
       ...(prestartRecovery ? { prestartRecovery } : {}) };
   }
@@ -183,14 +187,24 @@ export function decideHourlyGate(snapshot, cloudRequired, now = Date.now()) {
   return { allowed: good || !cloudRequired, code, alert: !good, activated: snapshot?.activated === true };
 }
 
+// A restart still restores the retired receipt, only so its exact bytes are
+// checked against the reviewed digest. It is never imported or authenticated.
+export function planOutputs(plan) {
+  const source = plan.previous?.workflowRunId ?? plan.chainRestart?.workflowRunId ?? "";
+  return `plan=${JSON.stringify(plan)}\nprevious_run=${source}\nartifact_id=${plan.artifactId ?? plan.chainRestart?.artifactId ?? ""}\n`;
+}
+
 export async function planMain(env = process.env) {
   try {
     const execution = hourlyContext(env), api = createGitHubApi({ token: env.GITHUB_TOKEN });
     const plan = { ...await planHourly(api, execution), profile: actionsProfile(env) };
     if (!env.GITHUB_OUTPUT) throw failure("actions_required");
-    appendFileSync(env.GITHUB_OUTPUT, `plan=${JSON.stringify(plan)}\nprevious_run=${plan.previous?.workflowRunId ?? ""}\nartifact_id=${plan.artifactId ?? ""}\n`);
+    appendFileSync(env.GITHUB_OUTPUT, planOutputs(plan));
     return 0;
-  } catch { process.stderr.write('{"schema":"zeros.dev-error/v1","code":"artifact_invalid"}\n'); return 1; }
+  } catch (error) {
+    const code = error instanceof Error && error.message === "zeros_dev_chain_restart_mismatch" ? "chain_restart_mismatch" : "artifact_invalid";
+    process.stderr.write(`{"schema":"zeros.dev-error/v1","code":"${code}"}\n`); return 1;
+  }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   void planMain().then(code => { process.exitCode = code; });

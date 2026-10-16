@@ -15,6 +15,7 @@ import { CleanupHandoffReferenceSchema, CleanupSummarySchema, MAX_CARRIED_RUNS, 
 import { cleanupOutcome, requireCleanupCapacity, requireComputeCleanup, summarizeCleanup } from "./cleanup-state";
 import { InfrastructureCoverageSchema, OWNER_SECTION7_COVERAGE } from "./infrastructure-contract";
 import { PRESTART_RECOVERY } from "./prestart-recovery.mjs";
+import { CHAIN_RESTART } from "./chain-restart.mjs";
 import { CleanupRecoveryReferenceSchema, type CleanupRecoveryReference } from "./cleanup-recovery-contract";
 
 export const ExecutionSchema = z.object({ workflowRunId: z.string().regex(/^[1-9][0-9]{0,19}$/), attempt: z.number().int().min(1).max(100),
@@ -24,6 +25,12 @@ export const PrestartRecoverySchema = z.object({ version: z.literal(1), workflow
   attempt: z.literal(1), sourceSha: z.literal(PRESTART_RECOVERY.sourceSha), jobId: z.literal(PRESTART_RECOVERY.jobId),
   cause: z.literal(PRESTART_RECOVERY.cause) }).strict();
 export type PrestartRecovery = z.infer<typeof PrestartRecoverySchema>;
+export const ChainRestartSchema = z.object({ version: z.literal(1), workflowRunId: z.literal(CHAIN_RESTART.workflowRunId),
+  attempt: z.literal(1), sourceSha: z.literal(CHAIN_RESTART.sourceSha), artifactId: z.literal(CHAIN_RESTART.artifactId),
+  artifactDigest: z.literal(CHAIN_RESTART.artifactDigest), receiptSha256: z.literal(CHAIN_RESTART.receiptSha256),
+  retiredDeviceId: z.literal(CHAIN_RESTART.retiredDeviceId), approvedOn: z.literal(CHAIN_RESTART.approvedOn),
+  reason: z.literal(CHAIN_RESTART.reason) }).strict();
+export type ChainRestart = z.infer<typeof ChainRestartSchema>;
 const resultSchema = z.object({ success: z.boolean(), code: z.enum(ERROR_CODES).nullable(), runId: z.string().uuid(),
   setup: SetupObservationSchema.optional(), runtime: RuntimeObservationSchema.optional(), admission: AdmissionObservationSchema.optional(),
   transport: TransportObservationSchema.optional(), nativeProof: NativeProofObservationSchema.optional() }).strict()
@@ -34,7 +41,8 @@ const legacyPayloadSchema = z.object({ schema: z.literal("zeros.dev-hourly/v1"),
   runs: z.array(RunSchema).max(3), completedAt: z.string().datetime() }).strict();
 const currentPayloadSchema = legacyPayloadSchema.extend({ schema: z.literal("zeros.dev-hourly/v2"),
   runs: z.array(RunSchema).max(MAX_CARRIED_RUNS), cleanup: CleanupSummarySchema, handoff: CleanupHandoffReferenceSchema.optional(),
-  prestartRecovery: PrestartRecoverySchema.optional(), cleanupRecovery: CleanupRecoveryReferenceSchema.optional() }).strict();
+  prestartRecovery: PrestartRecoverySchema.optional(), cleanupRecovery: CleanupRecoveryReferenceSchema.optional(),
+  chainRestart: ChainRestartSchema.optional() }).strict();
 const infrastructurePayloadSchema = currentPayloadSchema.extend({ schema: z.literal("zeros.dev-infrastructure/v1"),
   coverage: InfrastructureCoverageSchema }).strict();
 const payloadSchema = z.discriminatedUnion("schema", [legacyPayloadSchema, currentPayloadSchema, infrastructurePayloadSchema]);
@@ -49,7 +57,7 @@ const key = (value: CloudReplicaDeviceCredential) => {
 };
 
 const same = (a: { ino: number; dev: number }, b: { ino: number; dev: number }) => a.ino === b.ino && a.dev === b.dev;
-async function readArtifact(file: string, forbiddenFile?: string) {
+async function readBytes(file: string, forbiddenFile?: string) {
   let input;
   try {
     if (forbiddenFile && path.resolve(file) === path.resolve(forbiddenFile)) throw bad();
@@ -59,9 +67,21 @@ async function readArtifact(file: string, forbiddenFile?: string) {
     if (forbiddenFile && (same(before, await lstat(forbiddenFile)) || await realpath(file) === await realpath(forbiddenFile))) throw bad();
     const text = await input.readFile("utf8"), after = await input.stat(), named = await lstat(file);
     if (Buffer.byteLength(text) > MAX_BYTES || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ino !== named.ino || before.dev !== named.dev) throw bad();
-    return { envelope: envelopeSchema.parse(JSON.parse(text)), info: before, sha256: createHash("sha256").update(text).digest("hex") };
+    return { text, info: before, sha256: createHash("sha256").update(text).digest("hex") };
   } catch { throw bad(); }
   finally { await input?.close(); }
+}
+async function readArtifact(file: string, forbiddenFile?: string) {
+  const { text, info, sha256 } = await readBytes(file, forbiddenFile);
+  try { return { envelope: envelopeSchema.parse(JSON.parse(text)), info, sha256 }; } catch { throw bad(); }
+}
+
+/** No surviving key can authenticate the retired receipt. Its exact reviewed
+ * bytes bind the restart instead; they are neither parsed nor imported. */
+export async function verifyRetiredReceipt(file: string, restart: ChainRestart): Promise<void> {
+  const parsed = ChainRestartSchema.safeParse(restart);
+  if (!parsed.success) throw bad();
+  if ((await readBytes(file)).sha256 !== parsed.data.receiptSha256) throw new ZerosDevError("chain_restart_mismatch");
 }
 
 function authenticate(envelope: z.infer<typeof envelopeSchema>, credential: CloudReplicaDeviceCredential, expected: HourlyExecution): void {
@@ -79,6 +99,7 @@ export function verifyPublicHourlyArtifact(raw: unknown, trust: PublicHourlyTrus
       !verify(null, Buffer.from(JSON.stringify(payload)), createPublicKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: publicKey } }),
         Buffer.from(envelope.signature, "base64url")) || new Set(payload.runs.map(run => run.runId)).size !== payload.runs.length ||
       payload.runs.some(run => run.deviceId !== deviceId)) throw bad();
+    if (payload.schema !== "zeros.dev-hourly/v1" && payload.chainRestart?.retiredDeviceId === deviceId) throw bad();
     const primary = payload.runs.find(run => run.runId === payload.result.runId);
     if (primary && (!primary.hourly || primary.hourly.workflowRunId !== expected.workflowRunId || primary.hourly.attempt !== expected.attempt ||
       primary.hourly.sourceSha !== expected.sourceSha || primary.source.dirty || primary.source.revision !== expected.sourceSha)) throw bad();
@@ -141,7 +162,7 @@ export async function importHourlyArtifact(file: string, store: RunStore, creden
 export async function exportHourlyArtifact(file: string, store: RunStore, credential: CloudReplicaDeviceCredential,
   execution: HourlyExecution, result: z.infer<typeof resultSchema>, options: { replace?: boolean; handoff?: CleanupHandoffReference;
     profile?: "hourly" | "gate0" | "infrastructure"; prestartRecovery?: PrestartRecovery;
-    cleanupRecovery?: CleanupRecoveryReference } = {}): Promise<CleanupSummary> {
+    cleanupRecovery?: CleanupRecoveryReference; chainRestart?: ChainRestart } = {}): Promise<CleanupSummary> {
   let output, parent, temporary: string | undefined;
   try {
     const runs = [];
@@ -161,7 +182,8 @@ export async function exportHourlyArtifact(file: string, store: RunStore, creden
       deviceId: credential.deviceId, completedAt: new Date().toISOString(),
       cleanup: summarizeCleanup(runs, runs.find(run => run.runId === result.runId)), ...(options.handoff ? { handoff: options.handoff } : {}),
       ...(options.prestartRecovery ? { prestartRecovery: options.prestartRecovery } : {}),
-      ...(options.cleanupRecovery ? { cleanupRecovery: options.cleanupRecovery } : {}) });
+      ...(options.cleanupRecovery ? { cleanupRecovery: options.cleanupRecovery } : {}),
+      ...(options.chainRestart ? { chainRestart: options.chainRestart } : {}) });
     const envelope = { payload, signature: sign(null, Buffer.from(JSON.stringify(payload)), key(credential)).toString("base64url") };
     authenticate(envelope, credential, execution);
     const bytes = JSON.stringify(envelope) + "\n";
@@ -175,6 +197,7 @@ export async function exportHourlyArtifact(file: string, store: RunStore, creden
       authenticate(previous.envelope, credential, execution);
       if (previous.envelope.payload.result.runId !== result.runId || previous.envelope.payload.schema !== payload.schema ||
         JSON.stringify(previous.envelope.payload.prestartRecovery) !== JSON.stringify(payload.prestartRecovery) ||
+        JSON.stringify(previous.envelope.payload.chainRestart) !== JSON.stringify(payload.chainRestart) ||
         (previous.info.mode & 0o7777) !== 0o600) throw bad();
       if (previous.envelope.payload.cleanupRecovery &&
         JSON.stringify(previous.envelope.payload.cleanupRecovery) !== JSON.stringify(payload.cleanupRecovery)) throw bad();

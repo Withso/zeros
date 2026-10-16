@@ -18,7 +18,7 @@ export const ERROR_CODES = [
   "terminal_failed", "cleanup_pending", "cleanup_backlog_exceeded", "database_unavailable",
   "database_readonly_required", "input_contains_credentials", "cancelled", "internal", "history_changed", "actions_required", "artifact_invalid",
   "model_eligibility_unconfirmed", "workload_incomplete", "detached_auth_window", "detached_task_not_active", "detached_proof_incomplete", "transport_interrupted",
-  "setup_retried", "setup_observation_unavailable",
+  "setup_retried", "setup_observation_unavailable", "chain_restart_mismatch", "chain_restart_device_retired",
 ] as const;
 export type ErrorCode = typeof ERROR_CODES[number];
 export class ZerosDevError extends Error {
