@@ -537,13 +537,16 @@ class Connection {
     }
     this.socket = socket;
     socket.on("error", () => {});
+    // The hello timeout covers the whole pre-welcome phase — TCP/TLS, the
+    // upgrade and the server's welcome — so a black-holed dial (ws applies
+    // no handshake timeout once constructed here) cannot wait forever.
+    this.helloTimer = setTimeout(() => {
+      console.warn("[engine-uplink] no sys.welcome inside the hello timeout; redialing");
+      this.terminate(CLOSE.goingAway);
+    }, this.uplink.helloTimeoutMs);
+    this.helloTimer.unref?.();
     socket.on("open", () => {
       this.lastReceivedAtMs = this.uplink.now();
-      this.helloTimer = setTimeout(() => {
-        console.warn("[engine-uplink] no sys.welcome inside the hello timeout; redialing");
-        this.terminate(CLOSE.goingAway);
-      }, this.uplink.helloTimeoutMs);
-      this.helloTimer.unref?.();
       const offer = this.uplink.resumeOffer;
       this.offeredResume = offer !== null;
       this.send({

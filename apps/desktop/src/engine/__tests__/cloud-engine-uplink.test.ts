@@ -46,10 +46,11 @@ class FakeSocket implements EngineUplinkSocket {
   readonly closeCalls: Array<{ code?: number; reason?: string }> = [];
   terminated = false;
   readyState = 0;
-  constructor() {
-    // Like `ws`, the socket connects on construction.
+  constructor(options: { hang?: boolean } = {}) {
+    // Like `ws`, the socket connects on construction — unless it hangs
+    // (a black-holed TCP/TLS/upgrade never reaches "open").
     queueMicrotask(() => {
-      if (this.readyState !== 0) return;
+      if (this.readyState !== 0 || options.hang) return;
       this.readyState = 1;
       this.emitter.emit("open");
     });
@@ -229,6 +230,25 @@ describe("engine uplink client (socket level)", () => {
     await flush();
     expect(sockets[0]!.ofType("cred.ack")).toHaveLength(1);
     expect(sockets[0]!.ofType("status.ready")).toHaveLength(1);
+    client.stop();
+  });
+
+  it("redials when the dial never reaches open (a black-holed TCP/TLS/upgrade)", async () => {
+    const sockets: FakeSocket[] = [];
+    const { client } = fakeClient({ helloTimeoutMs: 50,
+      openSocket: () => { const socket = new FakeSocket({ hang: true }); sockets.push(socket); return socket; } });
+    client.start();
+    await flush();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.sent).toHaveLength(0); // never opened, no hello
+    await vi.advanceTimersByTimeAsync(50);    // the hello timeout covers the whole pre-welcome phase
+    await flush();
+    expect(sockets[0]!.terminated).toBe(true);
+    await vi.advanceTimersByTimeAsync(250);   // first backoff (random 0.5)
+    expect(sockets).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(50);
+    await flush();
+    expect(sockets[1]!.terminated).toBe(true);
     client.stop();
   });
 
