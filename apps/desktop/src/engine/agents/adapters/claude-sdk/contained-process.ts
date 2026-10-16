@@ -11,6 +11,7 @@ import type {
   BoundaryProcess,
   PreparedBoundary,
 } from "../../containment/types";
+import { localAgentCpuPriority } from "../../containment/agent-cpu-priority";
 
 const NATIVE_INPUT_OBSERVATION_MAX_BYTES = 2 * 1024 * 1024;
 const NATIVE_INPUT_HANDOFF_MAX_BYTES = 64 * 1024 * 1024;
@@ -161,6 +162,7 @@ export function spawnContainedClaudeProcess(
         cwd: options.cwd ?? process.cwd(),
         env: completeEnv,
         stdio: "pipe",
+        cpuPriority: localAgentCpuPriority(),
       })
     : undefined;
   let child:ChildProcessWithoutNullStreams;

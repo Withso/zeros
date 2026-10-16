@@ -107,6 +107,17 @@ describe("native provider process ownership", () => {
     } finally { await lease.close(); }
   });
 
+  it("keeps cloud agents at normal CPU priority: a local priority request never reaches the VM workload", async () => {
+    const { boundary, lease, workload } = await fixture();
+    try {
+      const launch = boundary.wrapSpawn({ command: "/opt/zeros-runtime/bin/node", args: ["native-host"], cwd: "/srv/zeros/workspace", env: {}, cpuPriority: "below-normal" });
+      boundary.cancelUnstartedLaunch(launch);
+      const forwarded = vi.mocked(workload.wrapSpawn).mock.calls[0]![0];
+      expect(forwarded).not.toHaveProperty("cpuPriority");
+      expect(launch.args).not.toContain("--priority");
+    } finally { await lease.close(); }
+  });
+
   it("does not release history or erase HOME while a native spawn is untracked", async () => {
     vi.useFakeTimers();
     const { boundary, lease, release, workload, nativeHome } = await fixture();
