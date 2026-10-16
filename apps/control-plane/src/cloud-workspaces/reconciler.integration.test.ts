@@ -2721,6 +2721,36 @@ d("cloud workspace reconciliation", () => {
       expect(await driftSchedule(seeded.workspaceId)).toEqual({ pushed: true, due: false, invalidated: false });
     });
 
+    it("moves the workspace's queued drift job with the schedule so it never chases", async () => {
+      const seeded = await seedWorkspace({ status: "ready", intentState: "succeeded",
+        providerResourceId: "bound-resource", observedState: "running" });
+      const provider = new InventoryProvider();
+      provider.items = [{ resourceId: "bound-resource", state: "running", computeStopped: false,
+        workspaceId: seeded.workspaceId, generation: 1 }];
+      const worker = reconciler(provider);
+      // An earlier event left a drift job due soon; the keep-alive must push
+      // it out with the schedule, or it would empty-run every margin interval.
+      await pool.query(
+        `UPDATE cloud_workspace_provider_bindings SET next_drift_check_at = now() + interval '10 minutes'
+         WHERE workspace_id = $1`, [seeded.workspaceId]);
+      const jobAt = () => pool.query(
+        `SELECT run_at > now() + interval '5 hours' AS pushed FROM control_plane_jobs
+         WHERE kind = 'cloud_workspace_drift' AND dedupe_key = $1 AND state = 'queued'`,
+        [`workspace:${seeded.workspaceId}`]).then((result) => result.rows[0]?.pushed);
+
+      await worker.reconcileOrphansOnce();
+      expect(await driftSchedule(seeded.workspaceId)).toEqual({ pushed: true, due: false, invalidated: false });
+      expect(await jobAt()).toBe(true);
+      // The forced path still wakes the same job at once.
+      await pool.query(
+        `UPDATE cloud_workspace_provider_bindings SET next_drift_check_at = now()
+         WHERE workspace_id = $1`, [seeded.workspaceId]);
+      expect((await pool.query(
+        `SELECT run_at <= now() AS due FROM control_plane_jobs
+         WHERE kind = 'cloud_workspace_drift' AND dedupe_key = $1 AND state = 'queued'`,
+        [`workspace:${seeded.workspaceId}`])).rows[0]).toEqual({ due: true });
+    });
+
     it.each([
       { name: "mismatched state", itemState: "stopped" as const, listed: true },
       { name: "a resource missing from the inventory", itemState: null, listed: false },

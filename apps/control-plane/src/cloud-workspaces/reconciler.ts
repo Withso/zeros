@@ -1654,25 +1654,39 @@ export class CloudWorkspaceReconciler {
                  AND binding.provider_connection_id = $7::uuid
                  AND binding.provider_connection_version = $8::bigint))
        )
-       UPDATE cloud_workspace_provider_bindings binding
-       SET next_drift_check_at = CASE WHEN scoped.seen_id IS NULL
-             OR scoped.seen_state IS DISTINCT FROM binding.observed_state
-             THEN clock_timestamp()
-             ELSE clock_timestamp() + ($4::bigint * interval '1 millisecond') END,
-           last_observed_at = CASE WHEN scoped.seen_id IS NULL
-             OR scoped.seen_state IS DISTINCT FROM binding.observed_state
-             THEN NULL ELSE binding.last_observed_at END
-       FROM scoped
-       WHERE binding.workspace_id = scoped.workspace_id
-         AND binding.provider = $1
-         AND binding.provider_resource_id = scoped.provider_resource_id
-         AND (((scoped.seen_id IS NULL
-                OR scoped.seen_state IS DISTINCT FROM binding.observed_state)
-               AND binding.next_drift_check_at > clock_timestamp())
-           OR ((scoped.seen_id IS NOT NULL
-                AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state)
-               AND binding.next_drift_check_at < clock_timestamp()
-                 + (($4::bigint - $4::bigint / 12) * interval '1 millisecond')))`,
+       , moved AS (
+         UPDATE cloud_workspace_provider_bindings binding
+         SET next_drift_check_at = CASE WHEN scoped.seen_id IS NULL
+               OR scoped.seen_state IS DISTINCT FROM binding.observed_state
+               THEN clock_timestamp()
+               ELSE clock_timestamp() + ($4::bigint * interval '1 millisecond') END,
+             last_observed_at = CASE WHEN scoped.seen_id IS NULL
+               OR scoped.seen_state IS DISTINCT FROM binding.observed_state
+               THEN NULL ELSE binding.last_observed_at END
+         FROM scoped
+         WHERE binding.workspace_id = scoped.workspace_id
+           AND binding.provider = $1
+           AND binding.provider_resource_id = scoped.provider_resource_id
+           AND (((scoped.seen_id IS NULL
+                  OR scoped.seen_state IS DISTINCT FROM binding.observed_state)
+                 AND binding.next_drift_check_at > clock_timestamp())
+             OR ((scoped.seen_id IS NOT NULL
+                  AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state)
+                 AND binding.next_drift_check_at < clock_timestamp()
+                   + (($4::bigint - $4::bigint / 12) * interval '1 millisecond')))
+         RETURNING binding.workspace_id, binding.next_drift_check_at,
+           (scoped.seen_id IS NOT NULL
+            AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state) AS matched
+       )
+       -- Enqueues only ever move a queued job earlier, so without this the
+       -- workspace's drift job would empty-run every keep-alive margin.
+       UPDATE control_plane_jobs job
+       SET run_at = moved.next_drift_check_at, updated_at = clock_timestamp()
+       FROM moved
+       WHERE moved.matched AND job.kind = 'cloud_workspace_drift'
+         AND job.state = 'queued'
+         AND job.dedupe_key = 'workspace:' || moved.workspace_id::text
+         AND job.run_at < moved.next_drift_check_at`,
       [
         scope.provider.name,
         ids,
