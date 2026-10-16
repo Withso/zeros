@@ -437,7 +437,7 @@ references, not as a template.
   radius scales a frame reads with `var()`), `styles/semantic-tokens.css` as a
   `css` source, and `tokens-live`, a one-shot `build` source that runs the
   preview mode of `scripts/design-system/build-tokens.mjs` into the private
-  `.zeros/design-styles/` folder when `styles/tokens/` changes while the Design
+  `<workspace>/.zeros/design-styles/` folder when `styles/tokens/` changes while the Design
   tab is open. Frames therefore use the app's utilities (`bg-bg2`, `p-3`,
   `rounded-md`, `text-xs`) and its tokens, including uncommitted edits.
 - `Zeros - Design/meta/canvas.json` names the themes: Dark is the default theme (`dark`,

@@ -466,8 +466,11 @@ describe("Design token preview", () => {
     const first = readFileSync(file, "utf8");
     const past = new Date(Date.now() - 60_000);
     utimesSync(file, past, past);
+    // Filesystems round utimes differently; compare the stored timestamp
+    // before and after the no-op, not the requested JavaScript precision.
+    const unchangedMtime = statSync(file).mtimeMs;
     expect(writeTokenPreview(root, output)).toBe(false);
-    expect(statSync(file).mtimeMs).toBe(past.getTime());
+    expect(statSync(file).mtimeMs).toBe(unchangedMtime);
     base.tokens.bg.$value = { colorSpace: "hsl", components: [0, 0, 9] };
     save("base.tokens.json", base);
     expect(writeTokenPreview(root, output)).toBe(true);

@@ -15,7 +15,7 @@ and the Electron runtime embedded in the desktop application. Optional
 JavaScript dependencies are included. Host-native optional packages are
 normalized to the macOS arm64 desktop and Linux x64 control-plane
 release contents: the staged Claude runtime, the staged Codex runtime, the
-packaged Cursor runtime, the packaged ripgrep binary, the macOS-only
+packaged Cursor runtime, the packaged ripgrep binary, the Parcel watcher, the macOS-only
 fsevents watcher, and the macOS-only Cua computer-use driver runtime
 are all included, as is the AXe iOS Simulator tool, a pinned release
 binary that is not an npm package.
@@ -761,7 +761,7 @@ PACKAGE INVENTORY (656 resolved package/version records)
 
 @parcel/watcher-darwin-arm64@2.5.6
   License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: desktop packaged runtime (macOS arm64)
   Source: https://github.com/parcel-bundler/watcher
   License documents: 5cfba9d57112
 
@@ -11749,7 +11749,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 DOCUMENT 5cfba9d57112
 SHA-256: 5cfba9d5711264d45a2431a53c79f597cef12720cc7c764db2602daa92d0bd2a
 Applies to: @parcel/watcher-darwin-arm64@2.5.6, @parcel/watcher@2.5.6
-Source labels: @parcel/watcher-darwin-arm64@2.5.6 — LICENSE; @parcel/watcher@2.5.6 — LICENSE
+Source labels: @parcel/watcher-darwin-arm64@2.5.6 — terms supplied by @parcel/watcher@2.5.6 — LICENSE; @parcel/watcher@2.5.6 — LICENSE
 ================================================================================
 
 MIT License
