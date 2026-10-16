@@ -86,6 +86,17 @@ export type CloudProviderIdentity = {
   generation: number;
 };
 
+/** One row of a provider's paged inventory: state without a per-resource
+ * inspect. Identity is the coordinator's own durable allocation evidence
+ * (Boat: the local journal); inventory it cannot place carries null. */
+export type CloudProviderInventoryItem = {
+  resourceId: string;
+  state: CloudProviderObservedState;
+  computeStopped: boolean;
+  workspaceId: string | null;
+  generation: number | null;
+};
+
 /** A fresh read of an irreversible, exact deletion receipt plus unavailable
  * compute. This is neither physical erasure nor boot/writer custody proof. */
 export type CloudProviderDeletionRetirement = CloudProviderIdentity & {
@@ -130,6 +141,11 @@ export interface CloudWorkspaceProvider {
   delete(resourceId: string): Promise<void>;
   /** Only resources bearing the provider adapter's managed marker. */
   listManaged(): AsyncIterable<CloudProviderResource>;
+  /** One paged listing of every resource in the provider account, without a
+   * per-resource inspect. Providers with a list API implement this; the
+   * reconciler then paces per-workspace drift checks from inventory
+   * mismatches instead of polling each workspace. */
+  listInventory?(): AsyncIterable<CloudProviderInventoryItem>;
   /** Exact durable allocation receipt, independent of mutable provider labels.
    * Without this proof, unbound inventory is quarantined, never adopted or
    * deleted by the orphan sweep. Normal bound lifecycle operations are separate. */

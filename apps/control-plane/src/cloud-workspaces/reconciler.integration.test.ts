@@ -9,12 +9,15 @@ import {
   CloudProviderError,
   type CloudProviderCreateInput,
   type CloudProviderIdentity,
+  type CloudProviderInventoryItem,
   type CloudProviderResource,
   type CloudWorkspaceProvider,
 } from "./provider.js";
 import { runtimeWitness } from "./runtime-test-fixtures.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
 import { readLifecycleDueInMs } from "./lifecycle-jobs.js";
+import { runDueLifecycleJobs } from "./lifecycle-job-test-utils.js";
+import { DatabaseCloudWorkspaceHealthService } from "./health.js";
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
 import { CloudWorkspaceCheckpointRequestWorker, enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
@@ -1870,6 +1873,32 @@ d("cloud workspace reconciliation", () => {
     },
   );
 
+  it.each([
+    { desiredState: "stopped" as const, status: "stopped", resourceState: "stopped" as const },
+    { desiredState: "archived" as const, status: "archived", resourceState: "archived" as const },
+  ])("checks a settled $status workspace on the slow drift cadence", async ({ desiredState, status, resourceState }) => {
+    const seeded = await seedWorkspace({ desiredState, status, intentState: "succeeded",
+      providerResourceId: "bound-resource", observedState: resourceState });
+    const provider = new FakeProvider();
+    provider.resources.set(
+      "bound-resource",
+      provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, resourceState, "bound-resource"),
+    );
+    const worker = reconciler(provider, { stoppedDriftIntervalMs: 6 * 60 * 60_000 });
+    // Observed an hour ago: due on the 1 s fast cadence, not on the 6 h one.
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET next_drift_check_at=now()-interval '1 second' WHERE workspace_id=$1",
+      [seeded.workspaceId]);
+    expect(await worker.reconcileDriftOnce()).toBe(false);
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET last_observed_at=now()-interval '7 hours' WHERE workspace_id=$1",
+      [seeded.workspaceId]);
+    expect(await worker.reconcileDriftOnce()).toBe(true);
+    const row = (await pool.query(
+      `SELECT next_drift_check_at > now()+interval '5 hours' AS slow
+       FROM cloud_workspace_provider_bindings WHERE workspace_id=$1`,
+      [seeded.workspaceId])).rows[0];
+    expect(row).toEqual({ slow: true });
+  });
+
   it("detects provider drift and converges stopped back to the desired running state", async () => {
     const seeded = await seedWorkspace({
       status: "ready",
@@ -1953,6 +1982,8 @@ d("cloud workspace reconciliation", () => {
   it("does not repeatedly queue Stop after confirmed compute shutdown with a failed snapshot",async()=>{
     const seeded=await seedWorkspace({status:'stopped',desiredState:'stopped',intentState:'succeeded',operation:'stop',providerResourceId:'bound-resource',observedState:'archived'});
     const provider=new FakeProvider();provider.resources.set('bound-resource',{...provider.make({workspaceId:seeded.workspaceId,generation:1},'failed','bound-resource'),computeStopped:true});
+    // A settled stopped workspace is due only on the slow cadence; force it.
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET last_observed_at=NULL WHERE workspace_id=$1",[seeded.workspaceId]);
     const worker=reconciler(provider);await worker.reconcileDriftOnce();
     const first=(await pool.query("SELECT status,last_error_code,version FROM cloud_workspaces WHERE id=$1",[seeded.workspaceId])).rows[0];
     expect(first).toMatchObject({status:'failed',last_error_code:'provider_snapshot_failed'});
@@ -2646,6 +2677,153 @@ d("cloud workspace reconciliation", () => {
     );
     expect(record.rows[0]).toMatchObject({ verified: true });
     expect(record.rows[0].observation_count).toBeGreaterThanOrEqual(2);
+  });
+
+  describe("inventory-driven drift", () => {
+    class InventoryProvider extends FakeProvider {
+      items: CloudProviderInventoryItem[] = [];
+      inspectCount = 0;
+      override async *listInventory(): AsyncIterable<CloudProviderInventoryItem> {
+        yield* this.items;
+      }
+      override async inspect(resourceId: string): Promise<CloudProviderResource | null> {
+        this.inspectCount += 1;
+        return super.inspect(resourceId);
+      }
+    }
+
+    const driftSchedule = (workspaceId: string) => pool.query(
+      `SELECT next_drift_check_at > now() + interval '5 hours' AS pushed,
+              next_drift_check_at <= now() AS due,
+              last_observed_at IS NULL AS invalidated
+       FROM cloud_workspace_provider_bindings WHERE workspace_id = $1`,
+      [workspaceId],
+    ).then((result) => result.rows[0]);
+
+    it("pushes an inventory-confirmed binding one fallback horizon out and stops inspecting it", async () => {
+      const seeded = await seedWorkspace({ status: "ready", intentState: "succeeded",
+        providerResourceId: "bound-resource", observedState: "running" });
+      const provider = new InventoryProvider();
+      provider.items = [{ resourceId: "bound-resource", state: "running", computeStopped: false,
+        workspaceId: seeded.workspaceId, generation: 1 }];
+      provider.resources.set("bound-resource", provider.make(
+        { workspaceId: seeded.workspaceId, generation: 1 }, "running", "bound-resource"));
+      const worker = reconciler(provider);
+
+      await worker.reconcileOrphansOnce();
+      expect(await driftSchedule(seeded.workspaceId)).toEqual({ pushed: true, due: false, invalidated: false });
+      // The queue agrees: no per-workspace drift run is due within five hours.
+      expect(await readLifecycleDueInMs(pool, "drift", seeded.workspaceId,
+        { provider: null, driftIntervalMs: 1_000 })).toBeGreaterThan(5 * 60 * 60_000);
+
+      // A steady second sweep neither rewrites the schedule nor inspects.
+      await worker.reconcileOrphansOnce();
+      expect(provider.inspectCount).toBe(0);
+      expect(await driftSchedule(seeded.workspaceId)).toEqual({ pushed: true, due: false, invalidated: false });
+    });
+
+    it("moves the workspace's queued drift job with the schedule so it never chases", async () => {
+      const seeded = await seedWorkspace({ status: "ready", intentState: "succeeded",
+        providerResourceId: "bound-resource", observedState: "running" });
+      const provider = new InventoryProvider();
+      provider.items = [{ resourceId: "bound-resource", state: "running", computeStopped: false,
+        workspaceId: seeded.workspaceId, generation: 1 }];
+      const worker = reconciler(provider);
+      // An earlier event left a drift job due soon; the keep-alive must push
+      // it out with the schedule, or it would empty-run every margin interval.
+      await pool.query(
+        `UPDATE cloud_workspace_provider_bindings SET next_drift_check_at = now() + interval '10 minutes'
+         WHERE workspace_id = $1`, [seeded.workspaceId]);
+      const jobAt = () => pool.query(
+        `SELECT run_at > now() + interval '5 hours' AS pushed FROM control_plane_jobs
+         WHERE kind = 'cloud_workspace_drift' AND dedupe_key = $1 AND state = 'queued'`,
+        [`workspace:${seeded.workspaceId}`]).then((result) => result.rows[0]?.pushed);
+
+      await worker.reconcileOrphansOnce();
+      expect(await driftSchedule(seeded.workspaceId)).toEqual({ pushed: true, due: false, invalidated: false });
+      expect(await jobAt()).toBe(true);
+      // The forced path still wakes the same job at once.
+      await pool.query(
+        `UPDATE cloud_workspace_provider_bindings SET next_drift_check_at = now()
+         WHERE workspace_id = $1`, [seeded.workspaceId]);
+      expect((await pool.query(
+        `SELECT run_at <= now() AS due FROM control_plane_jobs
+         WHERE kind = 'cloud_workspace_drift' AND dedupe_key = $1 AND state = 'queued'`,
+        [`workspace:${seeded.workspaceId}`])).rows[0]).toEqual({ due: true });
+    });
+
+    it.each([
+      { name: "mismatched state", itemState: "stopped" as const, listed: true },
+      { name: "a resource missing from the inventory", itemState: null, listed: false },
+    ])("forces $name due for an immediate inspect", async ({ itemState, listed }) => {
+      const seeded = await seedWorkspace({ status: "ready", intentState: "succeeded",
+        providerResourceId: "bound-resource", observedState: "running" });
+      const provider = new InventoryProvider();
+      if (listed && itemState) {
+        provider.items = [{ resourceId: "bound-resource", state: itemState, computeStopped: true,
+          workspaceId: seeded.workspaceId, generation: 1 }];
+        provider.resources.set("bound-resource", provider.make(
+          { workspaceId: seeded.workspaceId, generation: 1 }, itemState, "bound-resource"));
+      }
+      const worker = reconciler(provider);
+      // Prove the sweep pulls a far-future schedule back to now.
+      await pool.query(`UPDATE cloud_workspace_provider_bindings
+        SET next_drift_check_at = now() + interval '1 hour' WHERE workspace_id = $1`, [seeded.workspaceId]);
+
+      await worker.reconcileOrphansOnce();
+      expect(await driftSchedule(seeded.workspaceId)).toEqual({ pushed: false, due: true, invalidated: true });
+      expect(provider.inspectCount).toBe(0);
+
+      // The binding write enqueued that workspace's drift job; its run inspects.
+      expect(await runDueLifecycleJobs(pool, worker)).toBeGreaterThan(0);
+      expect(provider.inspectCount).toBe(1);
+      const observed = await pool.query(
+        `SELECT observed_state, last_observed_at IS NOT NULL AS fresh
+         FROM cloud_workspace_provider_bindings WHERE workspace_id = $1`,
+        [seeded.workspaceId]);
+      if (listed) expect(observed.rows[0]).toMatchObject({ observed_state: itemState, fresh: true });
+    });
+
+    it("ignores provider inventory the journal cannot place", async () => {
+      // The hosted provider account also holds sandboxes created outside the
+      // journal (runtime images, staging, qualification, computer templates,
+      // builder VMs, retirement). Quarantining them would stall
+      // provider_orphans health forever, since nothing may delete them and
+      // nothing clears the row when the stray goes away.
+      const provider = new InventoryProvider();
+      provider.items = [{ resourceId: "stray-resource", state: "running", computeStopped: false,
+        workspaceId: null, generation: null }];
+      const worker = reconciler(provider, { orphanGraceMs: 60_000 });
+
+      await worker.reconcileOrphansOnce();
+      await worker.reconcileOrphansOnce();
+
+      expect(provider.deleteCount).toBe(0);
+      expect((await pool.query(
+        "SELECT 1 FROM cloud_workspace_provider_orphans WHERE provider_resource_id = 'stray-resource'")).rowCount).toBe(0);
+      const health = new DatabaseCloudWorkspaceHealthService(pool, {
+        setupExecutionEnabled: true, durabilityEnabled: true, outboxDeliveryEnabled: false,
+      });
+      expect((await health.read()).operationalState).toBe("healthy");
+    });
+
+    it("recovers an unbound known generation from inventory and forces its refresh", async () => {
+      const seeded = await seedWorkspace({ intentState: "succeeded" });
+      const provider = new InventoryProvider();
+      provider.items = [{ resourceId: "recovered-resource", state: "running", computeStopped: false,
+        workspaceId: seeded.workspaceId, generation: 1 }];
+      provider.resources.set("recovered-resource", provider.make(
+        { workspaceId: seeded.workspaceId, generation: 1 }, "running", "recovered-resource"));
+      const worker = reconciler(provider);
+
+      await worker.reconcileOrphansOnce();
+      const binding = await pool.query(
+        `SELECT provider_resource_id, observed_state, next_drift_check_at <= now() AS due
+         FROM cloud_workspace_provider_bindings WHERE workspace_id = $1`,
+        [seeded.workspaceId]);
+      expect(binding.rows[0]).toEqual({
+        provider_resource_id: "recovered-resource", observed_state: "running", due: true });
+    });
   });
 
   it("does not mark asynchronous orphan deletion verified until inspection proves it", async () => {

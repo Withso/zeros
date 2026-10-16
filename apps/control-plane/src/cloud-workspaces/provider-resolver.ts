@@ -119,14 +119,21 @@ export class DatabaseCloudWorkspaceProviderResolver implements CloudWorkspacePro
     generation: number;
     purpose: CloudWorkspaceProviderPurpose;
   }): Promise<CloudWorkspaceProviderResolution> {
+    // Cleanup validates no authority or policy, so it reads one point-in-time
+    // snapshot: it skips the paid-authority and policy functions and takes no
+    // row locks. The locks are released at commit before remote I/O either
+    // way, so a cleanup resolution cannot change what a writer observes.
+    const cleanup = input.purpose === "cleanup";
     const row = await withRetryableSystemTx(this.pool, async (tx) => {
-      // Joined row marks do not establish a parent-first acquisition order.
-      // Heartbeat owns W before updating G (including an empty ports census),
-      // so acquire O -> W explicitly before the generation/connection locks.
-      if (!(await tx.query("SELECT 1 FROM organizations WHERE id=$1 FOR SHARE", [input.organizationId])).rowCount)
-        return null;
-      if (!(await tx.query("SELECT 1 FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE",
-        [input.workspaceId, input.organizationId])).rowCount) return null;
+      if (!cleanup) {
+        // Joined row marks do not establish a parent-first acquisition order.
+        // Heartbeat owns W before updating G (including an empty ports census),
+        // so acquire O -> W explicitly before the generation/connection locks.
+        if (!(await tx.query("SELECT 1 FROM organizations WHERE id=$1 FOR SHARE", [input.organizationId])).rowCount)
+          return null;
+        if (!(await tx.query("SELECT 1 FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE",
+          [input.workspaceId, input.organizationId])).rowCount) return null;
+      }
       const result = await tx.query<ResolvedRow>(
         `SELECT connection.id AS connection_id, connection.org_id,
                 connection.provider, connection.owner_kind,
@@ -141,12 +148,16 @@ export class DatabaseCloudWorkspaceProviderResolver implements CloudWorkspacePro
                 generation.image_ref, generation.sandbox_class, generation.architecture,
                 generation.cpu_millicores, generation.memory_mib,
                 generation.storage_mib,
-                cloud_workspace_paid_authority_live(
+                ${cleanup
+                  ? "true"
+                  : `cloud_workspace_paid_authority_live(
                   workspace.id, workspace.owner_user_id, $4
-                ) AS paid_authority_live,
-                cloud_workspace_generation_policy_current(
+                )`} AS paid_authority_live,
+                ${cleanup
+                  ? "true"
+                  : `cloud_workspace_generation_policy_current(
                   workspace.id, generation.generation, workspace.org_id
-                ) AS policy_authority_live
+                )`} AS policy_authority_live
          FROM cloud_workspace_generations generation
          JOIN cloud_workspaces workspace
            ON workspace.id = generation.workspace_id
@@ -161,13 +172,10 @@ export class DatabaseCloudWorkspaceProviderResolver implements CloudWorkspacePro
           AND version.version = generation.provider_connection_version
          WHERE generation.workspace_id = $1 AND generation.org_id = $2
            AND generation.generation = $3
-         FOR SHARE OF generation, workspace, connection, version`,
-        [
-          input.workspaceId,
-          input.organizationId,
-          input.generation,
-          this.workosEnabled,
-        ],
+         ${cleanup ? "" : "FOR SHARE OF generation, workspace, connection, version"}`,
+        cleanup
+          ? [input.workspaceId, input.organizationId, input.generation]
+          : [input.workspaceId, input.organizationId, input.generation, this.workosEnabled],
       );
       return result.rows[0] ?? null;
     });

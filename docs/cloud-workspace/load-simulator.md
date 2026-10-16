@@ -95,8 +95,12 @@ Per active workspace, one running engine and one connected desktop:
 | `client.catalog` | client | 30 s, `limit=100` | `apps/desktop/src/renderer/state/cloud-workspace-lifecycle.tsx` |
 
 The background workers run once per process at their configured intervals
-(`apps/control-plane/src/worker-polling-config.ts`). The reconciler checks drift for a workspace when its
-`last_observed_at` is older than the interval, and sweeps orphans every 60 s.
+(`apps/control-plane/src/worker-polling-config.ts`). Lifecycle due work runs as
+jobs (docs/cloud-workspace/job-queue.md): one engine-health cycle per running
+workspace per lease period (90 s), drift when a binding's `next_drift_check_at`
+passes (60 s while running or transitional, 6 h once settled stopped or
+archived), and the 60 s orphan sweep, which paces drift from Boat's paged
+inventory instead of inspecting each workspace.
 
 ## Metrics
 
@@ -107,6 +111,11 @@ The background workers run once per process at their configured intervals
 - **Round trips**: network exchanges with the server; a batched setup with
   several statements counts as one.
 - **Checkouts**: pool connection acquisitions.
+- **Notify commits/s**: commits that issued a NOTIFY. Explicit `pg_notify`
+  statements are counted client-side; job-queue wake-ups are issued by a
+  database trigger, so a LISTEN connection counts their deliveries (identical
+  notifications dedupe per transaction, so deliveries equal notifying commits
+  on that channel). PostgreSQL serializes notifying commits at commit time.
 - **RTT floor**: round trips multiplied by an assumed 5 ms database distance;
   the minimum added latency for a remote database.
 - **CP CPU ms/s**: control-plane process CPU time per wall second.
@@ -121,7 +130,13 @@ The background workers run once per process at their configured intervals
 - transactions per request: measured, no headroom, because a new transaction is
   a deliberate change;
 - statements and round trips per request: `ceil(measured × 1.25)`;
-- steady-state transactions per second: measured × 1.1, rounded up to 0.01.
+- steady-state transactions per second: measured × 1.1, rounded up to 0.01;
+- notifying commits per active workspace per second: observed between the
+  quiet and busiest scenario, × 1.1;
+- Boat calls per minute are enforced against the provider's 1000
+  requests/min/IP rate limit with a two-replica allowance: one paged
+  inventory list per minute (`ceil(sandboxes / 200)` calls) plus one inspect
+  per fallback-horizon drift run.
 
 Budgets are a ratchet. When a change makes a path cheaper, regenerate them with
 `--write-budgets src/load-sim/budgets.json` and commit the lower numbers. Do not
@@ -148,27 +163,34 @@ PostgreSQL 18.6 on loopback, Node 24, 4 CPUs, WorkOS authority on.
 | `provider.resolve` | 1 | 7 | 5 | 2.2 | 25 |
 | `worker.lifecycleJobClaim` | 1 | 5 | 1 | 0.9 | 5 |
 | `worker.reconcileOnce` | 1 | 5 | 3 | 4.5 | 15 |
-| `worker.reconcileDrift` (due) | 6 | 36 | 24 | 12.3 | 120 |
-| `worker.reconcileOrphans` | 1 empty, 2 at 1 workspace, 51 at 50 | | | | |
+| `worker.reconcileDrift` (due) | 6 | 36 | 24 | 12.8 | 120 |
+| `worker.reconcileOrphans` (inventory sweep) | 3 | 16 | 10 | 5.6 | 50 |
+| `worker.engineHealthJob` (full job cycle) | 5 | 25 | 9 | 7.4 | 45 |
+| `worker.jobAudit` (six due scans + purge) | 7 | 35 | 19 | 11.1 | 95 |
 
 ### Real time
 
-| Active workspaces | Tx/s | Tx/s per active | Statements/s | CP CPU ms/s | Server exec ms/s | Failures |
+| Active workspaces | Tx/s | Tx/s per active | Statements/s | Notify commits/s | CP CPU ms/s | Failures |
 | --- | --- | --- | --- | --- | --- | --- |
-| 0 (120 s) | 0.15 | n/a | 0.75 | 1.4 | 0.01 | 0 |
-| 1 | 2.90 | 2.75 | 28.5 | 7.2 | 13.2 | 0 |
-| 10 | 28.6 | 2.84 | 284.9 | 52.2 | 68.8 | 0 |
-| 50 | 145.1 | 2.90 | 1439.7 | 142.6 | 323.1 | 0 |
+| 0 (45 s) | 0.04 | n/a | 0.22 | 0 | 0.8 | 0 |
+| 1 | 2.93 | 2.89 | 29.0 | 0 | 7.0 | 0 |
+| 10 | 28.5 | 2.84 | 285.4 | 0.6 | 45.0 | 0 |
 
-The quiet control plane is within the 0.5 tx/s target. Server-side counts for
-the quiet run (0.62 tx/s) include autovacuum and statistics activity.
+The quiet control plane is within the 0.5 tx/s target. The notifying commits
+at 10 workspaces are the one-time job inserts right after seeding; the
+steady-state job cycle (reschedule to a future time, completion) is silent
+by design.
 
 ### Projection at nominal cadence
 
-One active workspace costs **2.98 tx/s** and 29.4 statements/s, about 300 times
-the 0.01 tx/s target. A running engine alone costs 2.32 tx/s; each connected
-desktop adds 0.67 tx/s. The reconciler adds 0.10 tx/s for drift checks and
-0.017 tx/s for the orphan sweep per workspace.
+One active workspace costs **2.92 tx/s** and 28.9 statements/s, about 290 times
+the 0.01 tx/s target. A running engine alone costs 2.26 tx/s; each connected
+desktop adds 0.67 tx/s; a settled stopped workspace costs 0.0003 tx/s. The
+reconciler's share is the engine-health job cycle (5 transactions every 90 s,
+0.056 tx/s per running workspace); inventory-paced drift and the orphan sweep
+add nothing while the listing confirms the bindings. One replica's Boat calls
+project to 4.4 per minute at 500 workspaces against the enforced 1000
+requests/min/IP budget (two replicas).
 
 ### Findings
 
@@ -181,8 +203,9 @@ desktop adds 0.67 tx/s. The reconciler adds 0.10 tx/s for drift checks and
    second-largest statement (1.6 s per window).
 4. The actor role and fingerprint `SELECT` behind renew and actor confirmation
    is third (0.8 s per window).
-5. The orphan sweep costs one transaction per workspace each 60 s, so its cost
-   grows linearly with inventory.
+5. The orphan sweep costs three transactions per 60 s per replica while the
+   paged listing confirms every binding; its marginal per-workspace cost is
+   zero in steady state.
 
 The provider resolver's connection query took 9.5 ms mean on loopback,
 compared with 25.4 ms measured on Alpha.

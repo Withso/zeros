@@ -39,13 +39,16 @@ export type SteadyOperation = keyof typeof STEADY_STATE_CADENCES;
 
 /** Reconciler work that grows with each running workspace. The background
  * reconciler drives these itself; `marginal` costs are measured as the
- * difference between one seeded workspace and an empty inventory. */
+ * difference between one seeded workspace and an empty inventory, and
+ * `runningOnly` work stops when the workspace does. */
 export const WORKER_PER_WORKSPACE_CADENCES = {
-  "worker.reconcileDrift": { periodSeconds: 60, marginal: false,
-    source: "reconciler.ts driftCandidate: due once last_observed_at is older than intervalMs (60 s default)" },
-  "worker.reconcileOrphans": { periodSeconds: 60, marginal: true,
-    source: "reconciler.ts orphanSweepAt: one sweep per 60 s, work per managed provider resource" },
-} as const satisfies Partial<Record<SimulatorOperationName, { periodSeconds: number; marginal: boolean; source: string }>>;
+  "worker.engineHealthJob": { periodSeconds: 90, marginal: false, runningOnly: true,
+    source: "lifecycle-jobs.ts DUE.engineHealth: one job run per engine lease period (90 s) while the workspace runs" },
+  "worker.reconcileDrift": { periodSeconds: 21_600, marginal: false, runningOnly: false,
+    source: "reconciler.ts sweepScopeInventory: the paged inventory keeps matched bindings pushed to the 6 h inventoryFallbackMs horizon; only then does a per-workspace drift inspect run" },
+  "worker.reconcileOrphans": { periodSeconds: 60, marginal: true, runningOnly: false,
+    source: "reconciler.ts orphanSweepAt: one paged inventory sweep per 60 s, work per managed provider resource" },
+} as const satisfies Partial<Record<SimulatorOperationName, { periodSeconds: number; marginal: boolean; runningOnly: boolean; source: string }>>;
 
 export type WorkerPerWorkspaceOperation = keyof typeof WORKER_PER_WORKSPACE_CADENCES;
 
@@ -138,6 +141,8 @@ export type ScenarioResult = {
   transactionsPerSecond: number;
   statementsPerSecond: number;
   roundTripsPerSecond: number;
+  /** Commits carrying a NOTIFY per second; the database serializes them. */
+  notifyingCommitsPerSecond: number;
   /** Client-measured database wall time per second (loopback). */
   clientDbMsPerSecond: number;
   /** Control-plane process CPU (user+system), simulator included. */
@@ -203,6 +208,7 @@ export async function runScenario(sim: Simulator, options: {
   await new Promise(resolve => setTimeout(resolve, options.warmupMs));
   const close = options.server ? await options.server.begin() : null;
   const providerBefore = new Map(sim.boat.calls);
+  const notificationsBefore = sim.notifications.count;
   const before = sim.meter.snapshot();
   const cpuBefore = process.cpuUsage();
   const started = performance.now();
@@ -233,6 +239,9 @@ export async function runScenario(sim: Simulator, options: {
     transactionsPerSecond: totals.transactions / seconds,
     statementsPerSecond: totals.statements / seconds,
     roundTripsPerSecond: totals.roundTrips / seconds,
+    // Client-visible pg_notify commits (e.g. checkpoint hints) plus
+    // trigger-issued job-channel wake-ups counted by the listener.
+    notifyingCommitsPerSecond: (totals.notifyingCommits + sim.notifications.count - notificationsBefore) / seconds,
     clientDbMsPerSecond: totals.clientDbMs / seconds,
     processCpuMsPerSecond: (cpu.user + cpu.system) / 1000 / seconds,
     operations: [...costs].filter(([, cost]) => cost.roundTrips || cost.calls).map(([operation, cost]) => ({
@@ -258,13 +267,24 @@ export type Projection = {
     byOperation: Array<{ operation: SteadyOperation; role: Cadence["role"]; requestsPerSecond: number; transactionsPerSecond: number }> };
   /** A running workspace with no desktop connected: engine loops and its reconciler share. */
   perRunningEngineTransactionsPerSecond: number;
+  /** A settled stopped workspace: no engine loops, no engine-health job, the
+   * drift fallback horizon and its sweep share only. */
+  perStoppedWorkspaceTransactionsPerSecond: number;
   /** The reconciler's share of perRunningEngineTransactionsPerSecond. */
   perWorkspaceWorker: Array<{ operation: WorkerPerWorkspaceOperation; transactionsPerCycle: number; transactionsPerSecond: number;
     statementsPerSecond: number }>;
   /** Added by each connected desktop. */
   perConnectedClientTransactionsPerSecond: number;
-  atWorkspaces: Array<{ workspaces: number; transactionsPerSecond: number; statementsPerSecond: number }>;
+  atWorkspaces: Array<{ workspaces: number; transactionsPerSecond: number; statementsPerSecond: number;
+    /** One replica's sweeps plus fallback drift inspects; every replica shares Boat's 1000/min/IP. */
+    boatCallsPerMinutePerReplica: number }>;
 };
+
+/** Boat calls one replica issues at N workspaces: one paged list per minute
+ * (200 per page) plus one inspect per fallback drift run (6 h horizon). */
+function projectedBoatCallsPerMinute(workspaces: number): number {
+  return Math.max(1, Math.ceil(workspaces / 200)) + workspaces * (60 / 21_600);
+}
 
 export function projectSteadyState(hotPaths: readonly HotPathResult[], quietTransactionsPerSecond: number,
   workspaceCounts: readonly number[], emptyInventory: readonly HotPathResult[] = []): Projection {
@@ -281,6 +301,9 @@ export function projectSteadyState(hotPaths: readonly HotPathResult[], quietTran
     });
   const workerPerSecond = perWorkspaceWorker.reduce((total, row) => total + row.transactionsPerSecond, 0);
   const workerStatementsPerSecond = perWorkspaceWorker.reduce((total, row) => total + row.statementsPerSecond, 0);
+  const stoppedWorkerPerSecond = perWorkspaceWorker
+    .filter(row => !WORKER_PER_WORKSPACE_CADENCES[row.operation].runningOnly)
+    .reduce((total, row) => total + row.transactionsPerSecond, 0);
   const byOperation = (Object.entries(STEADY_STATE_CADENCES) as [SteadyOperation, Cadence][]).map(([operation, cadence]) => {
     const hot = hotPaths.find(result => result.operation === operation);
     if (!hot) throw new Error(`missing hot-path measurement for ${operation}`);
@@ -297,10 +320,14 @@ export function projectSteadyState(hotPaths: readonly HotPathResult[], quietTran
   return {
     perWorkspace,
     perRunningEngineTransactionsPerSecond: sum("transactionsPerSecond", "engine") + workerPerSecond,
+    // The quiet floor is global, not per workspace; a stopped workspace adds
+    // only its non-running worker cycles (drift fallback, sweep share).
+    perStoppedWorkspaceTransactionsPerSecond: stoppedWorkerPerSecond,
     perWorkspaceWorker,
     perConnectedClientTransactionsPerSecond: sum("transactionsPerSecond", "client"),
     atWorkspaces: workspaceCounts.map(workspaces => ({ workspaces,
       transactionsPerSecond: quietTransactionsPerSecond + workspaces * perWorkspace.transactionsPerSecond,
-      statementsPerSecond: workspaces * perWorkspace.statementsPerSecond })),
+      statementsPerSecond: workspaces * perWorkspace.statementsPerSecond,
+      boatCallsPerMinutePerReplica: projectedBoatCallsPerMinute(workspaces) })),
   };
 }

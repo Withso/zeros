@@ -26,14 +26,17 @@ async function enforceCaps(tx: Tx) {
       FROM cloud_workspace_diagnostic_incidents row) bounded
     WHERE workspace_rank>8 OR org_rank>2048 OR global_rank>16384 OR org_bytes>8388608 OR global_bytes>67108864)`);
 }
-export async function runCloudDiagnosticCleanup(pool: pg.Pool): Promise<void> {
-  await withSystemTx(pool, async tx => {
+/** Publishes pending recovery bookkeeping (at most 256 incidents) and runs
+ * the hourly retention when due. Returns how many incidents this pass
+ * published, so the job runner re-runs at once while a backlog drains. */
+export async function runCloudDiagnosticCleanup(pool: pg.Pool): Promise<number> {
+  const published = await withSystemTx(pool, async tx => {
     await tx.query("SET LOCAL lock_timeout='500ms'; SET LOCAL statement_timeout='2s'");
     // Retry publication bookkeeping on every worker pass, even while hourly
     // cleanup is not due. The watermark is committed with ready; later stops
     // and new incidents cannot fabricate or lose that successful publication.
     // Skip contested rows and revisit next pass, with no global retention lock.
-    await tx.query(`WITH recovered AS MATERIALIZED (
+    const result = await tx.query(`WITH recovered AS MATERIALIZED (
       SELECT incident.id,workspace.diagnostic_recovery_at AS published_at,workspace.diagnostic_recovery_generation AS generation
       FROM cloud_workspace_diagnostic_incidents incident
       JOIN cloud_workspaces workspace ON workspace.id=incident.workspace_id AND workspace.org_id=incident.org_id
@@ -42,6 +45,7 @@ export async function runCloudDiagnosticCleanup(pool: pg.Pool): Promise<void> {
       ORDER BY incident.last_at,incident.id LIMIT 256 FOR UPDATE OF incident SKIP LOCKED)
       UPDATE cloud_workspace_diagnostic_incidents incident SET recovered_at=recovered.published_at,recovered_generation=recovered.generation
       FROM recovered WHERE incident.id=recovered.id`);
+    return result.rowCount ?? 0;
   });
   // Commit recovery row locks before requesting the retention lock: appenders
   // acquire the retention lock before their incident, so reversing that order
@@ -62,6 +66,7 @@ export async function runCloudDiagnosticCleanup(pool: pg.Pool): Promise<void> {
     await enforceCaps(tx);
     await tx.query("UPDATE cloud_workspace_diagnostic_cleanup SET completed_at=clock_timestamp(),next_run_at=clock_timestamp()+interval '1 hour' WHERE id");
   });
+  return published;
 }
 /** A stale claim cannot append evidence or rewrite a live incident. A failed
  * insert is diagnostic-only: callers must still execute their safety stop. */
