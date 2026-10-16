@@ -20,7 +20,8 @@ import { CloudWorkspaceCheckpointRequestWorker } from "../cloud-workspaces/check
 import { DatabaseCloudWorkspaceDurableRecordService } from "../cloud-workspaces/durable-record.js";
 import { DatabaseCloudWorkspaceEngineClientAdmissionService } from "../cloud-workspaces/engine-client-admission.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "../cloud-workspaces/engine-protocol-version.js";
-import { readLifecycleDeadlines } from "../cloud-workspaces/lifecycle-deadlines.js";
+import { LIFECYCLE_JOB_KINDS } from "../cloud-workspaces/lifecycle-jobs.js";
+import { claimJobs } from "../job-queue.js";
 import { cloudRuntimeRelayLimits } from "../cloud-workspaces/runtime-bridge-limits.js";
 import type { CloudProviderResource, CloudWorkspaceAccessProvider, CloudWorkspaceProvider } from "../cloud-workspaces/provider.js";
 import { CloudWorkspaceProviderRegistry } from "../cloud-workspaces/provider-registry.js";
@@ -267,7 +268,9 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
     },
     "provider.resolve": (w: SimulatedWorkspace) => apiResolver.resolve({ workspaceId: w.engine.workspaceId,
       organizationId: w.engine.organizationId, generation: 1, purpose: "lifecycle" }),
-    "worker.lifecycleDeadlines": () => readLifecycleDeadlines(worker, null, 60_000),
+    // An idle replica's only lifecycle read: one claim over the job kinds.
+    "worker.lifecycleJobClaim": () => claimJobs(worker, { owner: "load-sim", limit: 4,
+      kinds: Object.values(LIFECYCLE_JOB_KINDS).map(kind => ({ kind, leaseMs: 60_000 })) }),
     "worker.reconcileOnce": () => reconciler.runOnce(),
     "worker.reconcileDrift": () => reconciler.reconcileDriftOnce(),
     "worker.reconcileOrphans": () => reconciler.reconcileOrphansOnce(),

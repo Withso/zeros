@@ -731,7 +731,8 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     return false;
   }
 
-  async runOnce(): Promise<boolean> {
+  /** Reconcile one due lease, optionally only for one workspace. */
+  async runOnce(workspaceId: string | null = null): Promise<boolean> {
     // Durable hourly job runs even when no allocation is due; failure cannot
     // prevent the finite-lease safety path from running.
     await runCloudDiagnosticCleanup(this.options.pool).catch(() => undefined);
@@ -743,6 +744,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           await tx.query<Lease>(
             `WITH candidate AS (
       SELECT id FROM managed_compute_allocation_leases WHERE state<>'settled' AND next_check_at<=clock_timestamp()
+        AND ($2::uuid IS NULL OR workspace_id=$2)
         AND NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_transitions runtime
           WHERE runtime.workspace_id=managed_compute_allocation_leases.workspace_id
             AND ((runtime.phase IN ('activated','enrolling','checking') AND runtime.activation_deadline_at>clock_timestamp())
@@ -751,7 +753,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       UPDATE managed_compute_allocation_leases lease SET lease_owner=$1,lease_expires_at=clock_timestamp()+interval '5 minutes'
       FROM candidate WHERE lease.id=candidate.id RETURNING lease.*,clock_timestamp() AS observed_at,
         coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),lease.generation) AS current_generation`,
-            [this.workerId],
+            [this.workerId, workspaceId],
           )
         ).rows[0],
     );
