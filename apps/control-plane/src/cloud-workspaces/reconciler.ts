@@ -1655,6 +1655,15 @@ export class CloudWorkspaceReconciler {
          LEFT JOIN inventory ON inventory.resource_id = binding.provider_resource_id
          WHERE binding.provider = $1 AND binding.provider_resource_id IS NOT NULL
            AND workspace.status <> 'deleted'
+           -- An active restore incident excludes its workspace from drift
+           -- checks; the sweep must not push its schedule out either, or the
+           -- restore-resolution enqueue would find the check not due and the
+           -- first post-incident inspect (target and metadata refresh) would
+           -- wait out the fallback horizon.
+           AND NOT EXISTS (SELECT 1 FROM cloud_workspace_restore_incidents incident
+             WHERE incident.workspace_id = workspace.id
+               AND incident.source_generation = workspace.current_generation
+               AND incident.state IN ('queued','waiting_for_capacity','waiting_for_funding','restoring','recovery_needed'))
            AND (($5 = 'hosted' AND connection.credential_source = 'hosted')
              OR ($5 = 'delegated' AND binding.org_id = $6::uuid
                  AND binding.provider_connection_id = $7::uuid

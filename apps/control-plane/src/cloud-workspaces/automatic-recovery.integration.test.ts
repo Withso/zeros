@@ -117,6 +117,30 @@ suite("automatic Boat checkpoint recovery", () => {
     await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='deleted',deletion_verified_at=now() WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId]);
     expect(await readCloudWorkerNextDelay(pool, "recovery")).toBeLessThanOrEqual(0);
   });
+  it("does not let an inventory sweep defer the drift check that follows a restore incident", async () => {
+    await exhaust();
+    expect((await pool.query("SELECT state FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].state)
+      .toMatch(/queued|recovery_needed/);
+    const binding = (await pool.query("SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];
+    await pool.query(`UPDATE cloud_workspace_provider_bindings SET observed_state='running',last_observed_at=now(),
+      next_drift_check_at=now()-interval '1 minute' WHERE workspace_id=$1 AND generation=1`, [fixture.workspaceId]);
+    // The listing matches the recorded observation; an incident-free sweep
+    // would push the check six hours out.
+    const resource: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1, resourceId: binding.provider_resource_id,
+      state: "running", target: null, metadata: {} };
+    const provider: CloudWorkspaceProvider = { name: "boat", async find() { return [resource]; }, async inspect() { return resource; },
+      async create() { throw new Error("unused"); }, async start() { throw new Error("unused"); },
+      async stop() { return resource; }, async archive() { return resource; }, async delete() {},
+      async *listManaged() {},
+      async *listInventory() { yield { resourceId: binding.provider_resource_id, state: "running", computeStopped: false,
+        workspaceId: fixture.workspaceId, generation: 1 }; } };
+    await new CloudWorkspaceReconciler({ pool, provider, intervalMs: 60_000 }).reconcileOrphansOnce();
+    // While an incident is active the sweep leaves the schedule alone, so the
+    // restore-resolution trigger's enqueue finds the check due and the first
+    // post-incident drift run refreshes target and metadata at once.
+    expect((await pool.query("SELECT next_drift_check_at<=now() AS due FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=1",
+      [fixture.workspaceId])).rows[0]).toEqual({ due: true });
+  });
   function route(path = "", body?: unknown, key = randomUUID()) {
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", { id: fixture.userId }); await next(); });
