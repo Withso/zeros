@@ -831,6 +831,7 @@ describe("repository layout contracts", () => {
       "job-queue.md",
       "lifecycle-diagnostics.md",
       "live-runtime-updates.md",
+      "load-simulator.md",
       "mcp-and-skills.md",
       "native-access-acceptance.md",
       "native-preview-acceptance.md",
