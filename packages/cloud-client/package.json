@@ -1,0 +1,33 @@
+{
+  "name": "@zeros/cloud-client",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Cloud-only client SDK for Zeros cloud workspaces — S3 contract types generated from the frozen contract schemas, frame parsers, and the contract mock used by unit and conformance tests. Local workspaces never import this package.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./generated/rest": "./src/generated/rest.ts",
+    "./generated/device-stream": "./src/generated/device-stream.ts",
+    "./generated/runtime-auth": "./src/generated/runtime-auth.ts",
+    "./device-stream": "./src/device-stream.ts",
+    "./runtime-auth": "./src/runtime-auth.ts",
+    "./contract-source": "./src/contract-source.ts"
+  },
+  "scripts": {
+    "generate": "node scripts/generate-types.mjs",
+    "test": "pnpm --dir ../.. exec vitest run --config vitest.config.ts packages/cloud-client/src",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.0",
+    "@types/node": "^20.19.39",
+    "@types/ws": "^8.18.1",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "js-yaml": "4.3.2",
+    "typescript": "^5.7.3",
+    "ws": "^8.21.2"
+  }
+}
