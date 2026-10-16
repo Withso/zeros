@@ -238,10 +238,15 @@ export class CloudEngineUplinkServer {
       if (connection.identity?.workspaceId === workspaceId) void connection.recheck();
   }
 
-  /** Another realtime instance recorded a newer uplink for this engine. */
+  /** Another realtime instance recorded a newer uplink for this engine.
+   * Replica clocks are NTP-disciplined but not identical, so "newer" is a
+   * deterministic order: the later connect wins, ties (or skew within the
+   * connect gap) break by connection id. */
   ownerChanged(engineInstanceId: string, connectionId: string, connectedAtMs: number): void {
     const local = this.current.get(engineInstanceId);
-    if (!local || local.connectionId === connectionId || !(connectedAtMs > local.connectedAtMs)) return;
+    if (!local || local.connectionId === connectionId) return;
+    if (connectedAtMs < local.connectedAtMs ||
+        (connectedAtMs === local.connectedAtMs && connectionId < local.connectionId)) return;
     if (!local.drained) this.recordSupersede(local.identity!);
     local.supersede();
   }

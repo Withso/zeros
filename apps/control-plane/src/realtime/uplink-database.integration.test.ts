@@ -90,6 +90,20 @@ d("engine uplink database paths", () => {
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_engine_uplinks")).rows[0].n).toBe(1);
   });
 
+  it("breaks same-millisecond presence ties by connection id", async () => {
+    const store = new DatabaseUplinkPresenceStore(pool);
+    const at = Date.now();
+    const lower = snapshot({ connectionId: "00000000-0000-4000-8000-000000000001", connectedAtMs: at, lastSeenAtMs: at });
+    const higher = snapshot({ connectionId: "00000000-0000-4000-8000-000000000002", connectedAtMs: at, lastSeenAtMs: at, realtimeInstance: "realtime-b" });
+    await store.write(lower);
+    await store.write(higher);
+    expect(await row()).toMatchObject({ connection_id: higher.connectionId, realtime_instance: "realtime-b" });
+    await store.write({ ...lower, ready: true, phase: "ready" });
+    expect(await row()).toMatchObject({ connection_id: higher.connectionId, ready: false, phase: null });
+    await store.write({ ...higher, ready: true, phase: "ready" }); // the owner itself always re-writes
+    expect(await row()).toMatchObject({ connection_id: higher.connectionId, ready: true, phase: "ready" });
+  });
+
   it("notifies a new owner and authority loss, but not lease renewals", async () => {
     const listener = await pool.connect();
     const notices: { channel: string; payload: string }[] = [];

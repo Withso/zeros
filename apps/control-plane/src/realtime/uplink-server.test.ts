@@ -408,6 +408,22 @@ describe("engine uplink server", () => {
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.superseded });
   });
 
+  it("breaks same-millisecond owner ties deterministically by connection id", async () => {
+    await start();
+    const { peer } = await connect();
+    const local = uplink.presence(identity.engineInstanceId)!;
+    // Replica clocks are NTP-disciplined but not identical; a tie (or skew
+    // within the connect gap) breaks by connection id, higher wins.
+    const shift = (id: string, delta: number) => String.fromCharCode(id.charCodeAt(0) + delta) + id.slice(1);
+    const lowerId = shift(local.connectionId, -1);
+    const higherId = shift(local.connectionId, 1);
+    uplink.ownerChanged(identity.engineInstanceId, lowerId, local.connectedAtMs);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(peer.ws.readyState).toBe(WebSocket.OPEN);
+    uplink.ownerChanged(identity.engineInstanceId, higherId, local.connectedAtMs);
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.superseded });
+  });
+
   it("writes presence only on transitions, never per ping", async () => {
     await start();
     const { peer } = await connect();

@@ -113,10 +113,14 @@ authority supplies keys, epochs and engine tokens
 - **Ownership.** Presence lives in memory. `cloud_workspace_engine_uplinks`
   (migration 0151) is written only on connect, readiness change and loss,
   plus a 5 min watermark, through a bounded coalescing retry queue. Each
-  write carries a connection ID; a connect never overwrites a newer one. A
-  new owner row notifies `zeros_cloud_engine_uplink_owner`, and an instance
-  holding an older uplink closes it with `4409`. After a listener reconnect
-  every owned uplink re-reads its owner and authority.
+  write carries a connection ID; a connect never overwrites a newer one.
+  "Newer" is a deterministic order on unsynchronized replica clocks: the
+  later `connected_at` wins, and a same-millisecond tie (or skew within the
+  connect gap) breaks by connection ID, in both the in-memory owner rule
+  and the presence upsert fence. A new owner row notifies
+  `zeros_cloud_engine_uplink_owner`, and an instance holding an older
+  uplink closes it with `4409`. After a listener reconnect every owned
+  uplink re-reads its owner and authority.
 - **Framing.** Control frames are UTF-8 JSON text capped at 64 KiB; relay
   data travels in binary frames (8-byte header, then a chunk of at most
   256 KiB), never base64 in `d`, so the socket payload ceiling is
