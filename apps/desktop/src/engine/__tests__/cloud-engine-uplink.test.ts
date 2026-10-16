@@ -183,6 +183,37 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("buffers reliable frames until the connection's gate opens on the first auth.capability", async () => {
+    const { client, sockets } = fakeClient();
+    client.start();
+    await flush();
+    const socket = sockets[0]!;
+    expect(socket.ofType("sys.hello")).toHaveLength(1);
+    // Before sys.welcome a reliable frame must buffer only: the server
+    // closes 4400 frame_before_welcome on anything that early.
+    client.sendReliable("status.ready", { ready: false, phase: "booting" });
+    expect(socket.sent).toHaveLength(1); // only the hello
+    socket.frame({ t: "sys.welcome", d: {
+      protocol: 1, connectionId: "c-1", resumeToken: "r1", resumed: false,
+      pingIntervalMs: 20_000, leaseExpiresAtMs: Date.now() + 60_000, serverInstance: "s1", features: [],
+    } });
+    await flush();
+    // The handshake is not the gate: auth frames may flow, reliable frames may not.
+    socket.frame({ t: "auth.keys", d: { keys: [KEY] } });
+    socket.frame({ t: "auth.sync", d: { syncId: "sync-1", epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: "c-9", complete: true } });
+    await flush();
+    expect(socket.ofType("status.ready")).toHaveLength(0);
+    // The first capability opens the gate; the buffered frame flushes once.
+    socket.frame({ t: "auth.capability", d: { audience: "zeros:api", token: "cap-1", expiresAtMs: Date.now() + 300_000 } });
+    await flush();
+    expect(socket.ofType("status.ready")).toEqual([expect.objectContaining({ s: 1, d: { ready: false, phase: "booting" } })]);
+    // With the gate open, a new reliable frame goes out live.
+    client.sendReliable("status.ready", { ready: true, phase: "ready" });
+    expect(socket.ofType("status.ready")).toHaveLength(2);
+    expect(socket.ofType("status.ready")[1]).toMatchObject({ s: 2 });
+    client.stop();
+  });
+
   it("acks duplicate reliable frames without re-applying them, closing only on a real gap", async () => {
     const { client, sockets } = fakeClient();
     client.start();

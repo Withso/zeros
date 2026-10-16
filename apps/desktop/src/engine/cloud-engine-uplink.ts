@@ -284,7 +284,11 @@ export class CloudEngineUplinkClient {
 
   /** Reliable engine→CP frame (`status.ready`, later `cred.ack`, …). Frames
    * are buffered until acked and retransmitted on a resume; overflow drops
-   * the connection so both sides resync on the next hello. */
+   * the connection so both sides resync on the next hello. A frame leaves
+   * the socket only once the connection's gate is open (its first
+   * auth.capability): anything earlier would hit the server's
+   * frame_before_welcome or cross frozen handshake step 4, so pre-gate
+   * frames buffer and flush with the gate retransmit. */
   sendReliable(t: string, d: Record<string, unknown>): void {
     if (!this.started || this.stopped || this.parked) return;
     const s = this.outboxSent + 1;
@@ -299,7 +303,7 @@ export class CloudEngineUplinkClient {
     this.outbox.push(Object.freeze({ s, text, bytes }));
     this.outboxBytes += bytes;
     this.outboxSent = s;
-    this.connection?.sendRaw(text);
+    if (this.connection?.gateOpen) this.connection.sendRaw(text);
   }
 
   /* ---- connection-facing internals (the only dial/park/count site) ---- */
@@ -367,7 +371,12 @@ export class CloudEngineUplinkClient {
   welcomed(connection: Connection, resumed: boolean): void {
     this.options.metric?.("engine_uplink_hello_ms", this.clock() - connection.openedAtMs);
     this.resume = null;
-    if (!resumed) this.resetLineage();
+    // A refused resume starts a new lineage: drop the old lineage's unacked
+    // frames (feature modules resync current state instead). Pre-gate
+    // buffered frames on a connection that offered nothing are part of the
+    // fresh lineage — never transmitted, correctly numbered from s=1 — so
+    // they survive to flush at the gate.
+    if (!resumed && connection.offeredResume) this.resetLineage();
     if (connection.handoff) {
       this.handoff = null;
       const old = this.connection;
@@ -492,6 +501,12 @@ class Connection {
   welcomed = false;
   welcomedAtMs = 0;
   resumeToken: string | null = null;
+  /** Opens on this connection's first auth.capability (frozen step 4);
+   * reliable engine frames send live only while it is open. */
+  gateOpen = false;
+  /** The hello offered a resume token: a `resumed: false` welcome then
+   * means the server lost that lineage, and its unacked frames reset. */
+  offeredResume = false;
   /** Received `sys.drain`: a handoff dial owns this connection's lineage. */
   draining = false;
   private socket: EngineUplinkSocket | null = null;
@@ -529,6 +544,8 @@ class Connection {
         this.terminate(CLOSE.goingAway);
       }, this.uplink.helloTimeoutMs);
       this.helloTimer.unref?.();
+      const offer = this.uplink.resumeOffer;
+      this.offeredResume = offer !== null;
       this.send({
         t: "sys.hello",
         d: {
@@ -537,7 +554,7 @@ class Connection {
           ...options.identity,
           features: [...(options.features ?? [])],
           lastJournalSeq: 0,
-          ...(this.uplink.resumeOffer ? { resume: this.uplink.resumeOffer } : {}),
+          ...(offer ? { resume: offer } : {}),
           ...(options.auth.authCursor() ? { authCursor: options.auth.authCursor() } : {}),
         },
       });
@@ -706,6 +723,7 @@ class Connection {
     if (typeof d.token !== "string" || typeof d.expiresAtMs !== "number" || d.audience !== "zeros:api")
       return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
     this.uplink.config.auth.holdCapability({ token: d.token, expiresAtMs: d.expiresAtMs });
+    this.gateOpen = true;
     if (this.uplink.outboxPending()) {
       this.uplink.retransmit(this);
     } else if (this.uplink.config.readiness) {
