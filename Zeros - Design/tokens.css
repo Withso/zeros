@@ -1,11 +1,11 @@
-/* Zeros product tokens for this Design directory.
-   Generated regions mirror styles/tokens/ (DTCG) and the font, type and radius
-   scales in styles/zeros-tokens.css. `pnpm design:docs` rewrites them and
-   `pnpm check:ui` rejects a stale copy. Change product values in
-   styles/tokens/*.tokens.json, never inside a generated region.
-   Dark is the canvas Base theme; choose Themes → light in the Design tab for
-   Light. Design-only tokens go outside the generated regions and must not
-   reuse a generated name. */
+/* Design-only tokens for this Design directory.
+   Product tokens are not copied here: frames import the app's own
+   styles/zeros-tokens.css and styles/semantic-tokens.css as style sources
+   (meta/canvas.json `styles`), so they follow this checkout's files, and a
+   token preview rebuilds from styles/tokens/ while the Design tab is open.
+   Dark is the default theme and Light is under Themes. Change product values
+   in styles/tokens/*.tokens.json; this file only names Design-only values and
+   must not redeclare a product token, which would override the app's. */
 
 @layer reset {
   *, *::before, *::after { box-sizing: border-box; }
@@ -26,86 +26,6 @@
 }
 
 :root {
-  color-scheme: dark;
-  /* @generated tokens:design-dark:start */
-  --weight-medium: 450; /* 450 — medium font weight; softened from Tailwind 500 */
-  --weight-semibold: 500; /* 500 — semibold font weight; softened from Tailwind 600 */
-  --weight-bold: 600; /* 600 — bold font weight; softened from Tailwind 700 */
-  --bg0: hsl(0 0% 5%); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
-  --bg1: hsl(0 0% 7%); /* #121212 — default canvas / app backdrop + active chat window */
-  --pane-bg: var(--bg1); /* #121212 — contextual chat-pane surface; unfocused panes override it to bg0 */
-  --bg1-hover: hsl(0 0% 12%); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
-  --bg1-highlight: hsl(0 0% 9%); /* #171717 — highlighted content above bg1 */
-  --bg1-bright: hsl(0 0% 11%); /* #1C1C1C — filled section card on bg1 */
-  --bg2: hsl(0 0% 13%); /* #212121 — composer surface */
-  --bg2-hover: hsl(0 0% 15%); /* #262626 — hover on bg2 */
-  --bg2-highlight: hsl(0 0% 18%); /* #2E2E2E — dropdown trigger hover/open */
-  --bg3: var(--sidebar-bg); /* #171717 — floating popover surface */
-  --bg3-hover: var(--sidebar-bg-hover); /* #262626 — hover on bg3 (menu items) */
-  --bg4: hsl(0 0% 24%); /* #3D3D3D — rare */
-  --bg5: hsl(0 0% 37%); /* #5E5E5E — rare */
-  --fg1: hsl(0 0% 94%); /* #F0F0F0 — selected/highlighted text + icons */
-  --fg2: hsl(0 0% 72%); /* #B8B8B8 — default text + icon across app */
-  --fg3: hsl(0 0% 63%); /* #A1A1A1 — middle tier (one step below fg2) */
-  --muted-fg: hsl(0 0% 42%); /* #6B6B6B — supplemental metadata; 3:1 floor, fg3 on hover/selection */
-  --sidebar-bg: hsl(0 0% 9%); /* #171717 — repository sidebar background */
-  --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 — sidebar row hover and selected state */
-  --border1: hsl(0 0% 14%); /* #242424 — default for bg1 surfaces */
-  --border2: hsl(0 0% 18%); /* #2E2E2E — sidebar / composer focus / bg2 */
-  --border3: hsl(0 0% 24%); /* #3D3D3D — secondary btn / dropdown / input */
-  --border4: hsl(0 0% 30%); /* #4D4D4D — highlighted state of border3 */
-  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.35); /* #00000059 — floating surface shadow */
-  --dialog-title-size: 0.9375rem; /* 0.9375rem — 15px shared popup heading */
-  --dialog-close-radius: 999px; /* 999px — circular popup close button */
-  --scrim: rgba(0, 0, 0, 0.5); /* #00000080 — modal overlay veil */
-  --highlighted-bg: var(--bg2); /* #212121 — user msg bg (text: fg1/fg2) */
-  --highlighted-bright: hsl(0 0% 65%); /* #A6A6A6 — input focus border, brighter accents */
-  --inverted-bg: hsl(0 0% 92%); /* #EBEBEB — near-white on dark */
-  --inverted-fg: hsl(0 0% 5%); /* #0D0D0D — dark text/icon on the inverted fill */
-  --primary-button-bg: var(--inverted-bg); /* #EBEBEB — filled focal CTA; one per view */
-  --primary-button-hover: hsl(0 0% 83%); /* #D4D4D4 — lifted neutral */
-  --primary-button-fg: var(--inverted-fg); /* #0D0D0D — text/icon on the primary button */
-  --red-primary: hsl(0 91% 71%); /* #F87272 — −N counts, error accents */
-  --red-secondary: hsl(7 83% 39%); /* #B62411 — solid delete fills + delete icons */
-  --red-secondary-fg: hsl(0 0% 100%); /* #FFFFFF — text/icon on SOLID --red-secondary fills. THEME-STATIC (white in both themes — the red fill stays vivid in light, so fg1, which flips dark, can't sit on it). */
-  --red-secondary-hover: hsl(7 83% 36%); /* #A82110 — destructive hover fill */
-  --red-bg: hsl(3 26% 13.7%); /* #2C1B1A — error container surface */
-  --red-fg: hsl(20 97% 72%); /* #FDA172 — text/icon on --red-bg */
-  --green-primary: hsl(142 69% 58%); /* #4ADE80 — +N counts, success accents */
-  --green-bg: hsl(120 23% 17%); /* #213521 — success container surface */
-  --green-fg: hsl(142 75% 73%); /* #87EEAC — text/icon on --green-bg */
-  --yellow-primary: hsl(37 75% 60%); /* #E6AB4C — warning · modified · in-progress */
-  --yellow-bg: hsl(38 68% 17%); /* #49330E — warning container surface */
-  --yellow-fg: hsl(44 100% 50%); /* #FFBB00 — text/icon on --yellow-bg */
-  --yellow-icon: var(--yellow-primary); /* #E6AB4C — icons, status dots and tinted borders */
-  --yellow-wash: var(--yellow-primary); /* #E6AB4C — code-editor search-match washes */
-  --blue-primary: hsl(205 80% 73%); /* #83C3F1 — info · links · accents */
-  --blue-bg: hsl(226 57% 18%); /* #142048 — info container surface */
-  --blue-fg: hsl(211 96% 78%); /* #91C5FD — text/icon on --blue-bg */
-  --violet-primary: hsl(271 80% 73%); /* #BC83F1 — done · merged */
-  --violet-bg: hsl(255 21% 18%); /* #292438 — done container surface */
-  --violet-fg: hsl(265 66% 77%); /* #BE9EEB — text/icon on --violet-bg */
-  --brown-primary: hsl(9 46% 72%); /* #D8A197 — file paths · warm accents */
-  --brown-bg: hsl(10 15% 15%); /* #2C2221 — brown container surface */
-  --brown-fg: hsl(10 80% 72%); /* #F1927E — text/icon on --brown-bg */
-  --diff-addition: var(--green-primary); /* #4ADE80 — diff addition base */
-  --diff-deletion: var(--red-primary); /* #F87272 — diff deletion base */
-  --diff-neutral: var(--fg2); /* #B8B8B8 — neutral mixed into diff row fills */
-  /* @generated tokens:design-dark:end */
-  /* @generated tokens:design-scales:start */
-  --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  --text-xxs: 0.625rem;
-  --text-2xxs: 0.6875rem;
-  --text-3xxs: 0.75rem;
-  --text-xs: 0.8125rem;
-  --text-xs--line-height: calc(18 / 13);
-  --text-dialog-title: var(--dialog-title-size);
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  /* @generated tokens:design-scales:end */
-
   /* Design-only names for values the app writes as Tailwind utilities
      (docs/design-system.md §4 and §7). --space-N is Tailwind step N, so
      padding: var(--space-3) implements as p-3; half steps belong inside
@@ -127,64 +47,4 @@
   --space-12: 48px;
   --control-height: 28px;
   --control-height-compact: 24px;
-}
-
-[data-zd-theme="light"] {
-  color-scheme: light;
-  /* @generated tokens:design-light:start */
-  --bg0: hsl(0 0% 98%); /* #FAFAFA — INACTIVE chat window fill (below bg1) */
-  --bg1: hsl(0 0% 100%); /* #FFFFFF — default canvas / app backdrop + active chat window */
-  --bg1-hover: hsl(0 4% 95%); /* #F3F2F2 — hover on bg1 (tool calls, tabs) */
-  --bg1-highlight: hsl(0 0% 97%); /* #F7F7F7 — highlighted content above bg1 */
-  --bg1-bright: var(--bg2); /* #F3F3F2 — filled section card on bg1 */
-  --bg2: hsl(60 4% 95%); /* #F3F3F2 — composer surface */
-  --bg2-hover: hsl(60 4% 91%); /* #E9E9E7 — hover on bg2 */
-  --bg2-highlight: var(--bg5); /* #E0E0E0 — dropdown trigger hover/open */
-  --bg3: var(--bg1); /* #FFFFFF — floating popover surface */
-  --bg3-hover: var(--bg1-hover); /* #F3F2F2 — hover on bg3 (menu items) */
-  --bg4: hsl(0 0% 94%); /* #F0F0F0 — rare (deepest chip grey) */
-  --bg5: hsl(0 0% 88%); /* #E0E0E0 — rare (one step past bg4) */
-  --fg1: hsl(20 7% 16%); /* #2C2826 — selected/highlighted text + icons */
-  --fg2: hsl(20 4% 30.5%); /* #514D4B — default text + icon; 8.4:1 on white */
-  --fg3: hsl(20 4% 36%); /* #5F5B58 — middle tier (one step below fg2) */
-  --muted-fg: hsl(0 0% 42%); /* #6B6B6B — supplemental metadata; 3:1 floor, fg3 on hover/selection */
-  --sidebar-bg: hsl(60 9% 98%); /* #FAFAF9 — repository sidebar background */
-  --sidebar-bg-hover: hsl(60 2% 92%); /* #EBEBEA — sidebar row hover and selected state */
-  --border1: hsl(30 9% 91%); /* #EAE8E6 — default for bg1 surfaces */
-  --border2: hsl(30 9% 88%); /* #E3E0DE — sidebar / composer focus / bg2 */
-  --border3: hsl(60 3% 78%); /* #C9C9C5 — control outline at rest */
-  --border4: hsl(60 3% 72%); /* #BABAB5 — control outline on hover/open */
-  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.12); /* #0000001F — floating surface shadow */
-  --scrim: rgba(0, 0, 0, 0.5); /* #00000080 — modal overlay veil */
-  --highlighted-bg: hsl(30 5% 92%); /* #ECEBEA — user msg bg (text on it: fg1/fg2) */
-  --highlighted-bright: hsl(25 5% 45%); /* #78726D — input focus border, brighter accents */
-  --inverted-bg: hsl(20 7% 16%); /* #2C2826 — warm near-black */
-  --inverted-fg: hsl(0 0% 100%); /* #FFFFFF — text/icon on the inverted fill */
-  --primary-button-hover: hsl(22 6% 25%); /* #443F3C — lifted primary button fill */
-  --red-primary: hsl(0 72% 44%); /* #C11F1F — −N counts, error accents */
-  --red-secondary: hsl(0 72% 50%); /* #DB2424 — solid delete fills + delete icons */
-  --red-secondary-hover: hsl(0 72% 45%); /* #C52020 — destructive hover fill */
-  --red-bg: hsl(18 87% 91%); /* #FCE0D4 — error container surface */
-  --red-fg: hsl(18 89% 37.5%); /* #B53E0B — text/icon on --red-bg */
-  --green-primary: hsl(142 75% 25.5%); /* #107234 — +N counts, success accents */
-  --green-bg: hsl(134 38% 89%); /* #D8EEDD — success container surface */
-  --green-fg: hsl(142 70% 27.5%); /* #157739 — text/icon on --green-bg */
-  --yellow-primary: hsl(37 90% 28.5%); /* #8A5807 — warning · modified · in-progress (text) */
-  --yellow-bg: hsl(48 97% 89%); /* #FEF3C8 — warning container surface */
-  --yellow-fg: hsl(37 100% 30.5%); /* #9C6000 — text/icon on --yellow-bg */
-  --yellow-icon: hsl(37 90% 36%); /* #AE6F09 — icons, dots, tinted borders */
-  --yellow-wash: hsl(37 90% 60%); /* #F5AE3D — search-match highlight washes */
-  --blue-primary: hsl(221 83% 48.5%); /* #1556E2 — info · links · accents */
-  --blue-bg: hsl(214 100% 97%); /* #F0F6FF — info container surface */
-  --blue-fg: hsl(224 77% 48%); /* #1C4ED9 — text/icon on --blue-bg */
-  --violet-primary: hsl(271 80% 51%); /* #851EE6 — done · merged */
-  --violet-bg: hsl(274 93% 94%); /* #F2E1FE — done container surface */
-  --violet-fg: hsl(263 61% 46%); /* #652EBD — text/icon on --violet-bg */
-  --brown-primary: hsl(5 35% 43%); /* #944E47 — file paths · warm accents */
-  --brown-bg: hsl(5 74% 91%); /* #F9DAD7 — brown container surface */
-  --brown-fg: hsl(0 20% 40%); /* #7A5252 — text/icon on --brown-bg */
-  --diff-addition: hsl(142 75% 36%); /* #17A149 — diff addition base */
-  --diff-deletion: hsl(0 72% 51%); /* #DC2828 — diff deletion base */
-  --diff-neutral: hsl(20 4% 37%); /* #625D5B — neutral mixed into diff row fills */
-  /* @generated tokens:design-light:end */
 }

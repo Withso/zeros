@@ -331,7 +331,14 @@ export async function runFile(
       ? { uid: opts.identity.uid, gid: opts.identity.gid }
       : {}),
   });
+  let inputError: NodeJS.ErrnoException | undefined;
   if (opts.input !== undefined && child.child.stdin) {
+    // A command can exit before consuming stdin (for example check-ignore
+    // during watcher teardown). Its pipe error must not crash the engine;
+    // preserve the process exit and stderr as the authoritative failure.
+    child.child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+      inputError = error;
+    });
     child.child.stdin.write(opts.input);
     child.child.stdin.end();
   }
@@ -342,6 +349,9 @@ export async function runFile(
   }
   try {
     const { stdout, stderr } = await child;
+    if (inputError && inputError.code !== "EPIPE") {
+      throw Object.assign(inputError, { stdout, stderr });
+    }
     return { stdout: stdout ?? "", stderr: stderr ?? "" };
   } finally {
     if (group) opts.signal?.removeEventListener("abort", group.abort);

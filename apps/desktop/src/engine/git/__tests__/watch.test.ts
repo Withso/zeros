@@ -10,6 +10,7 @@ import chokidar, { type FSWatcher } from "chokidar";
 import { serializeDesignRegistration } from "../../design/manifest";
 
 import {
+  onWorktreeContentChange,
   startGitWatcher,
   type GitWatchChange,
   type GitWatcher,
@@ -108,6 +109,49 @@ afterEach(async () => {
 });
 
 describe("startGitWatcher", () => {
+  it.each(["personal-local", "organization-local", "organization-cloud"])(
+    "forwards polling-only additions and deletions to content listeners for %s",
+    async (workspaceId) => {
+      const root = await mkdtemp(join(tmpdir(), "zeros-content-poll-watch-"));
+      roots.push(root);
+      const tree = controlledPollingTree(root, 2);
+      const directory = join(root, "directory-1");
+      const children = tree.directories.get(directory)!;
+      const changes: GitWatchChange[] = [];
+      const content = vi.fn();
+      const unsubscribe = onWorktreeContentChange(content);
+      vi.useFakeTimers();
+      const watcher = startGitWatcher(
+        () => [{ root, workspaceId }],
+        (change) => changes.push(change),
+        { usePolling: true, worktreePollIntervalMs: 750, pollIntervalMs: 60_000, worktreeDebounceMs: 10 },
+      );
+      watchers.push(watcher);
+      try {
+        tree.native.emit("ready");
+        await watcher.ready;
+        const file = join(directory, "brand.tokens.json");
+        // No native add/unlink event: only the reconciler sees these changes.
+        children.set("brand.tokens.json", false);
+        await vi.advanceTimersByTimeAsync(760);
+        expect(tree.native.add).toHaveBeenCalledWith([file]);
+        expect(changes).toContainEqual({ workspaceIds: [workspaceId], coarse: false, worktreeChanged: true });
+        expect(content).toHaveBeenCalledExactlyOnceWith(root, file);
+        content.mockClear();
+        children.delete("brand.tokens.json");
+        await vi.advanceTimersByTimeAsync(750);
+        expect(content).toHaveBeenCalledExactlyOnceWith(root, file);
+        unsubscribe();
+        content.mockClear();
+        children.set("later.tokens.json", false);
+        await vi.advanceTimersByTimeAsync(750);
+        expect(content).not.toHaveBeenCalled();
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
+
   it("does no per-tick reconciliation work after a stable 5000-directory tree settles", async () => {
     const root = await mkdtemp(join(tmpdir(), "zeros-settled-poll-watch-"));
     roots.push(root);
@@ -346,6 +390,39 @@ describe("startGitWatcher", () => {
       coarse: false,
       worktreeChanged: true,
     });
+  });
+
+  it("reports each content change to listeners with its checkout, so builds need no watcher of their own", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-worktree-listen-"));
+    roots.push(root);
+    await mkdir(join(root, ".git", "logs"), { recursive: true });
+    await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(root, ".git", "index"), "index");
+    await writeFile(join(root, ".git", "logs", "HEAD"), "");
+    await mkdir(join(root, "styles", "tokens"), { recursive: true });
+    const seen: Array<[string, string]> = [];
+    const stop = onWorktreeContentChange((owner, file) => seen.push([owner, file]));
+    const broken = onWorktreeContentChange(() => { throw new Error("listener bug"); });
+    try {
+      const watcher = startGitWatcher(
+        () => [{ root, workspaceId: "workspace-listen" }],
+        () => {},
+        { pollIntervalMs: 25, worktreeDebounceMs: 10, awaitWriteFinishMs: 20, usePolling: true, worktreePollIntervalMs: 10 },
+      );
+      watchers.push(watcher);
+      await watcher.ready;
+      await writeFile(join(root, "styles", "tokens", "base.tokens.json"), "{}\n");
+      await waitFor(() => seen.some(([, file]) => file === join(root, "styles", "tokens", "base.tokens.json")));
+      expect(seen.find(([, file]) => file.endsWith("base.tokens.json"))![0]).toBe(root);
+      stop();
+      const count = seen.length;
+      await writeFile(join(root, "styles", "tokens", "light.tokens.json"), "{}\n");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(seen.length).toBe(count);
+    } finally {
+      stop();
+      broken();
+    }
   });
 
   it("marks Design recognition-file changes without classifying every source edit", async () => {

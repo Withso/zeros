@@ -153,13 +153,13 @@ describe("Code Design target admission", () => {
     ).rejects.toThrow("Cancelled");
   });
 
-  it("instructs cloud Design conversations to use the API", async () => {
+  it("instructs cloud Design conversations to author natively, as Local ones do", async () => {
     workspace = { ...workspace!, placement: "cloud" };
     const owner = new DesignCodeToolAdmissions({
       ...options,
       cloudWorker: true,
       mode: () => ({
-        get: () => ({ mode: "design", revision: 1 }),
+        get: () => ({ mode: "code", revision: 1 }),
         set: () => {
           throw new Error("unused");
         },
@@ -168,12 +168,16 @@ describe("Code Design target admission", () => {
     const tools = await owner.admit(input);
     try {
       const instruction = await tools!.preparePrompt!();
-      expect(instruction).toContain("design_transaction_apply");
-      expect(instruction).not.toContain("Use your normal Read, Write, Edit");
+      expect(instruction).toContain("Use your normal Read, Write, Edit");
+      expect(instruction).not.toContain("Cloud retains API authoring");
+      expect(instruction).not.toContain("Design writes require Design mode");
+      expect(instruction).toContain("This execution runs in a cloud workspace VM, which is the isolation boundary.");
       expect(instruction).toContain("Native frame verification is available through ordinary shell commands");
-      expect(instruction).toContain("<list|validate|capture|preview>");
-      expect(instruction).toContain("add --theme <name> for another theme the canvas Themes menu offers");
+      expect(instruction).toContain("<list|styles|validate|capture|preview>");
+      expect(instruction).toContain("add --theme <id> for another theme the canvas Themes menu offers");
       expect(instruction).toMatch(/Read the Zeros Design skill before Design work: '[^']*zeros-design-skill\/skills\/zeros-design\/SKILL\.md'/);
+      // Optional helpers stay available and need no Design mode to write.
+      expect(tools!.mcpServers).toHaveLength(1);
     } finally {
       await tools?.dispose();
     }
@@ -194,7 +198,7 @@ describe("Code Design target admission", () => {
   });
 
   it.each(["startup", "capacity"])(
-    "does not fall back to native cloud Design writes on MCP %s failure",
+    "keeps native cloud Design authoring when the optional API cannot start (%s)",
     async (failure) => {
       workspace = { ...workspace!, placement: "cloud" };
       const owner = new DesignCodeToolAdmissions({
@@ -219,9 +223,9 @@ describe("Code Design target admission", () => {
         const tools = await owner.admit(input);
         admitted.push(tools);
         expect(tools!.mcpServers).toEqual([]);
-        await expect(tools!.preparePrompt!()).rejects.toThrow(
-          "Design tools are unavailable",
-        );
+        const instruction = await tools!.preparePrompt!();
+        expect(instruction).toContain("Use your normal Read, Write, Edit");
+        expect(instruction).toContain("Design API tools are unavailable in this execution.");
       } finally {
         await Promise.all(admitted.map((tools) => tools?.dispose()));
       }

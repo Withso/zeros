@@ -1,31 +1,77 @@
 import path from "node:path";
 import { parse } from "parse5";
 import { compile } from "tailwindcss";
-import { DESIGN_TAILWIND_STYLESHEETS, DESIGN_TAILWIND_VERSION } from "./generated/tailwind-stylesheets";
+import { DESIGN_TAILWIND_PLUGIN_VERSIONS, DESIGN_TAILWIND_STYLESHEETS, DESIGN_TAILWIND_VERSION } from "./generated/tailwind-stylesheets";
 import { elementRecords } from "./source";
 
 // Compiled Tailwind style sources. A source names the application's Tailwind
 // v4 entry stylesheet; Zeros compiles it with its own bundled Tailwind for the
 // classes each frame uses. Imports resolve to CSS files inside the repository
-// only, and @plugin/@config modules are replaced by empty ones: nothing from
-// the repository executes.
+// only. `@plugin` names one of the widely used official plugins Zeros ships
+// (typography, forms, animate) runs Zeros' own copy; every other @plugin and
+// @config gets an empty module: nothing from the repository executes.
 
-export { DESIGN_TAILWIND_VERSION };
-export const MAX_TAILWIND_IMPORTS = 32;
+export { DESIGN_TAILWIND_PLUGIN_VERSIONS, DESIGN_TAILWIND_VERSION };
+
+/** Plugins Zeros bundles, loaded on first use. Their versions may differ from
+ * the application's; the source status names the bundled ones. */
+const BUNDLED_PLUGINS: Readonly<Record<string, () => Promise<unknown>>> = {
+  "@tailwindcss/typography": () => import("@tailwindcss/typography"),
+  "@tailwindcss/forms": () => import("@tailwindcss/forms"),
+  "tailwindcss-animate": () => import("tailwindcss-animate"),
+};
+
+async function bundledPlugin(id: string): Promise<unknown | null> {
+  const load = Object.hasOwn(BUNDLED_PLUGINS, id) ? BUNDLED_PLUGINS[id] : undefined;
+  if (!load) return null;
+  const loaded = (await load()) as { default?: unknown };
+  return loaded.default ?? loaded;
+}
+export const MAX_TAILWIND_IMPORTS = 1_024;
 export const MAX_TAILWIND_CANDIDATES = 4096;
 
 /** Reads a repository-relative POSIX file: CSS or a package manifest. */
 export type TailwindFileReader = (file: string) => Promise<string | null>;
+
+/** Why the reader returned null for a repository file. Consulted only to
+ * explain a skipped import, never to read anything. */
+export type TailwindFileDiagnosis = (file: string) => Promise<"missing" | "outside" | "link" | "too-large" | "unreadable">;
+
+/** Why an `@import` was not followed. */
+export type DesignTailwindImportProblem =
+  /** A package whose manifest is not in any node_modules: not installed yet. */
+  | "not-installed"
+  /** A link whose real location is outside the checkout. */
+  | "outside"
+  /** A symbolic link in the file's own name, which the reader never follows. */
+  | "link"
+  /** A relative file, or a package's own stylesheet, that does not exist. */
+  | "missing"
+  | "absolute"
+  | "remote"
+  /** A bundler or tsconfig path alias such as `@/…`, `~/…` or `#…`. */
+  | "alias"
+  /** A package that does not name a stylesheet. */
+  | "not-css"
+  | "too-large"
+  | "unreadable";
+
+export interface DesignTailwindSkippedImport {
+  id: string;
+  problem: DesignTailwindImportProblem;
+}
 
 export interface DesignTailwindCompiler {
   build(candidates: readonly string[]): string;
   /** Repository stylesheets the entry imported, sorted: Tailwind loads
    * imports concurrently, so load order is not stable. */
   imports: string[];
-  /** Imports that do not name a CSS file inside the repository. */
-  skippedImports: string[];
+  /** Imports that were not followed, with why, sorted by id. */
+  skippedImports: DesignTailwindSkippedImport[];
   /** `@plugin` and `@config` directives that were not run. */
   skippedModules: string[];
+  /** `@plugin` directives Zeros ran with its own bundled copy. */
+  bundledModules: string[];
 }
 
 const BUNDLED_BASE = "\0tailwindcss";
@@ -54,11 +100,26 @@ function insideRepository(file: string): boolean {
   return !!file && file !== ".." && !file.startsWith("../") && !path.posix.isAbsolute(file) && top !== ".git" && top !== ".zeros";
 }
 
+type Resolution = { file: string } | { problem: DesignTailwindImportProblem };
+
+function cssCandidates(file: string): string[] {
+  return file.endsWith(".css") ? [file] : [`${file}.css`, `${file}/index.css`];
+}
+
 async function firstCss(read: TailwindFileReader, file: string): Promise<string | null> {
-  for (const candidate of file.endsWith(".css") ? [file] : [`${file}.css`, `${file}/index.css`]) {
+  for (const candidate of cssCandidates(file)) {
     if (insideRepository(candidate) && (await read(candidate)) !== null) return candidate;
   }
   return null;
+}
+
+/** firstCss, explaining a miss by its most specific candidate. */
+async function resolveCss(read: TailwindFileReader, file: string, diagnose?: TailwindFileDiagnosis): Promise<Resolution> {
+  const found = await firstCss(read, file);
+  if (found) return { file: found };
+  const primary = cssCandidates(file)[0]!;
+  if (!insideRepository(primary)) return { problem: "outside" };
+  return { problem: diagnose ? await diagnose(primary) : "missing" };
 }
 
 /** The CSS target of a package `exports` entry: `style`, then `default`. */
@@ -103,40 +164,63 @@ function exportsTarget(exports: unknown, subpath: string): string | null {
 /** Resolve a package stylesheet the way CSS tooling does: the nearest
  * node_modules, then `exports` (style or default), `style`, a CSS `main`, or
  * index.css. */
-async function packageCss(read: TailwindFileReader, id: string, base: string): Promise<string | null> {
+async function packageCss(
+  read: TailwindFileReader,
+  id: string,
+  base: string,
+  diagnose?: TailwindFileDiagnosis,
+): Promise<Resolution> {
   const parts = id.split("/");
   const name = id.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
   const rest = parts.slice(id.startsWith("@") ? 2 : 1).join("/");
-  if (!name || (id.startsWith("@") && parts.length < 2)) return null;
+  if (!name || (id.startsWith("@") && parts.length < 2)) return { problem: "not-installed" };
   for (let directory = base; ; directory = path.posix.dirname(directory)) {
     const at = directory === "." ? "" : directory;
     const packageDirectory = path.posix.join(at, "node_modules", name);
-    const source = await read(`${packageDirectory}/package.json`);
+    const manifestFile = `${packageDirectory}/package.json`;
+    const source = await read(manifestFile);
     if (source !== null) {
       let manifest: Record<string, unknown>;
       try {
         manifest = JSON.parse(source) as Record<string, unknown>;
       } catch {
-        return null;
+        return { problem: "unreadable" };
       }
       const subpath = rest ? `./${rest}` : ".";
       const main = typeof manifest.main === "string" && manifest.main.endsWith(".css") ? manifest.main : null;
-      const target =
-        exportsTarget(manifest.exports, subpath) ??
-        (rest || (typeof manifest.style === "string" ? manifest.style : null) || main || "index.css");
-      const file = path.posix.normalize(path.posix.join(packageDirectory, target));
-      return file.startsWith(`${packageDirectory}/`) ? firstCss(read, file) : null;
+      const exported = exportsTarget(manifest.exports, subpath);
+      const declared = exported ?? (rest || (typeof manifest.style === "string" ? manifest.style : null) || main);
+      const file = path.posix.normalize(path.posix.join(packageDirectory, declared ?? "index.css"));
+      if (!file.startsWith(`${packageDirectory}/`)) return { problem: "outside" };
+      const resolved = await resolveCss(read, file, diagnose);
+      if ("file" in resolved || resolved.problem !== "missing") return resolved;
+      // A package that names no stylesheet, or names a script, is not CSS;
+      // one that names a stylesheet it lacks is an incomplete install.
+      return { problem: declared === null || (exported !== null && !/\.css$/i.test(exported)) ? "not-css" : "missing" };
     }
-    if (!at) return null;
+    // A link to a package stored outside the checkout is present but refused.
+    if (diagnose && (await diagnose(manifestFile)) === "outside") return { problem: "outside" };
+    if (!at) return { problem: "not-installed" };
   }
 }
 
-async function resolveImport(read: TailwindFileReader, id: string, base: string): Promise<string | null> {
-  if (!id || id.startsWith("/") || /^[a-z][a-z0-9+.-]*:/i.test(id)) return null;
-  const relative = path.posix.normalize(path.posix.join(base, id));
-  if (id.startsWith("./") || id.startsWith("../")) return firstCss(read, relative);
+async function resolveImport(
+  read: TailwindFileReader,
+  id: string,
+  base: string,
+  diagnose?: TailwindFileDiagnosis,
+): Promise<Resolution> {
+  if (!id) return { problem: "missing" };
+  if (/^[a-z][a-z0-9+.-]*:/i.test(id) || id.startsWith("//")) return { problem: "remote" };
+  if (id.startsWith("/")) return { problem: "absolute" };
+  if (id.startsWith("@/") || id.startsWith("~/") || id.startsWith("#")) return { problem: "alias" };
+  // `~package` is the webpack spelling of a package import.
+  const specifier = id.startsWith("~") ? id.slice(1) : id;
+  const relative = path.posix.normalize(path.posix.join(base, specifier));
+  if (specifier.startsWith("./") || specifier.startsWith("../")) return resolveCss(read, relative, diagnose);
   // CSS tooling prefers a relative file, then a package.
-  return (await firstCss(read, relative)) ?? packageCss(read, id, base);
+  const local = await firstCss(read, relative);
+  return local ? { file: local } : packageCss(read, specifier, base, diagnose);
 }
 
 function bundled(id: string, base: string): { path: string; base: string; content: string } | null {
@@ -155,24 +239,28 @@ function bundled(id: string, base: string): { path: string; base: string; conten
 }
 
 /** Compile one entry. `read` supplies every file, so a caller can replay a
- * compile from recorded contents without touching the disk. */
+ * compile from recorded contents without touching the disk; `diagnose` only
+ * explains imports that could not be read. */
 export async function compileDesignTailwind(
   entry: { file: string; content: string },
   read: TailwindFileReader,
+  diagnose?: TailwindFileDiagnosis,
 ): Promise<DesignTailwindCompiler> {
   const imports: string[] = [];
-  const skippedImports: string[] = [];
+  const skippedImports = new Map<string, DesignTailwindImportProblem>();
   const skippedModules: string[] = [];
+  const bundledModules: string[] = [];
   const compiler = await compile(entry.content, {
     base: path.posix.dirname(entry.file),
     async loadStylesheet(id: string, base: string) {
       const own = bundled(id, base);
       if (own) return own;
-      const file = await resolveImport(read, id, base);
-      if (!file) {
-        skippedImports.push(id);
+      const resolution = await resolveImport(read, id, base, diagnose);
+      if (!("file" in resolution)) {
+        if (!skippedImports.has(id)) skippedImports.set(id, resolution.problem);
         return { path: id, base, content: "" };
       }
+      const file = resolution.file;
       if (imports.length >= MAX_TAILWIND_IMPORTS) {
         throw new Error(`A Tailwind source may import at most ${MAX_TAILWIND_IMPORTS} stylesheets.`);
       }
@@ -180,6 +268,11 @@ export async function compileDesignTailwind(
       return { path: file, base: path.posix.dirname(file), content: (await read(file)) ?? "" };
     },
     async loadModule(id: string, base: string, resourceHint: "plugin" | "config") {
+      const plugin = resourceHint === "plugin" ? await bundledPlugin(id) : null;
+      if (plugin) {
+        bundledModules.push(`@plugin ${id}`);
+        return { path: id, base, module: plugin as never };
+      }
       skippedModules.push(`@${resourceHint} ${id}`);
       // An empty plugin or config: the rest of the stylesheet still compiles.
       return { path: id, base, module: resourceHint === "config" ? {} : () => {} };
@@ -189,7 +282,10 @@ export async function compileDesignTailwind(
   return {
     build: (candidates) => compiler.build([...candidates]),
     imports: sorted(imports),
-    skippedImports: sorted(skippedImports),
+    skippedImports: [...skippedImports]
+      .map(([id, problem]) => ({ id, problem }))
+      .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)),
     skippedModules: sorted(skippedModules),
+    bundledModules: sorted(bundledModules),
   };
 }

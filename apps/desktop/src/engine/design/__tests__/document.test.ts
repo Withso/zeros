@@ -49,6 +49,13 @@ import {
   setDesignRuntimeAudit,
 } from "../runtime-audits";
 
+/** Manual tokens a test needs; a new directory's tokens.css has none. */
+const TYPED_TOKENS = `@property --bg1 { syntax: "<color>"; inherits: true; initial-value: white; }
+@property --fg1 { syntax: "<color>"; inherits: true; initial-value: black; }
+:root { --bg1: white; --fg1: black; --accent: royalblue; }
+body { color: var(--fg1); background: var(--bg1); }
+`;
+
 describe("design document", () => {
   let root: string;
 
@@ -680,8 +687,24 @@ describe("design document", () => {
     ).not.toContain("contrast");
   });
 
+  it("seeds no placeholder tokens, and new frames take the app's background once its styles are synced", async () => {
+    await initializeDesignDocument(root);
+    expect((await readDesignTokensDocument(root)).tokens).toEqual([]);
+    const plain = await createDesignFrame(root, { title: "Plain" });
+    expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, plain.file), "utf8")).toContain("background-color:#ffffff;"); // check:ui ignore-line -- authored frame defaults.
+    const canvasFile = path.join(root, DESIGN_DIRECTORY_NAME, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+    canvas.styles = [{ id: "app", kind: "css", path: "styles/app.css" }];
+    await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
+    const synced = await createDesignFrame(root, { title: "Synced" });
+    const source = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, synced.file), "utf8");
+    expect(source).not.toContain("background-color");
+    expect(source).toContain("box-sizing:border-box; opacity:1;");
+  });
+
   it("parses typed tokens and counts their use across frames and stylesheets", async () => {
     await initializeDesignDocument(root);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, "tokens.css"), TYPED_TOKENS);
     await mkdir(path.join(root, DESIGN_DIRECTORY_NAME, "assets"), {
       recursive: true,
     });
@@ -703,13 +726,13 @@ describe("design document", () => {
     const tokenPath = path.join(root, DESIGN_DIRECTORY_NAME, "tokens.css");
     await writeFile(
       tokenPath,
-      `${await readFile(tokenPath, "utf8")}\n[data-zd-theme="dark"] {\n  --bg1: midnightblue;\n}\n`,
+      `${TYPED_TOKENS}\n[data-zd-theme="dark"] {\n  --bg1: midnightblue;\n}\n`,
     );
     const before = await readDesignTokensDocument(root);
     expect(before.themes).toEqual(["dark"]);
     expect(before.tokens.find((token) => token.name === "--bg1")).toMatchObject(
       {
-        value: expect.stringMatching(/^#[0-9a-f]{6}$/i),
+        value: "white",
         themeValues: { dark: "midnightblue" },
       },
     );
@@ -773,9 +796,9 @@ describe("design document", () => {
     expect(hydrated.srcDoc).toContain('oid.replace(/["\\\\]/g, "\\\\$&")');
     expect(hydrated.srcDoc).not.toContain("\\</body>");
     expect(hydrated.srcDoc).not.toContain("allow-same-origin");
-    expect(snapshot.tokens.some((token) => token.name === "--accent")).toBe(
-      true,
-    );
+    // A new directory has no placeholder Manual tokens; it offers to sync
+    // the application's styles instead.
+    expect(snapshot.tokens).toEqual([]);
     expect(snapshot.lint.checkedFiles).toEqual([created.file]);
   });
 
@@ -787,6 +810,7 @@ describe("design document", () => {
       title: "Stylesheet heavy",
     });
     const directory = path.join(root, DESIGN_DIRECTORY_NAME);
+    await writeFile(path.join(directory, "tokens.css"), TYPED_TOKENS);
     await writeFile(
       path.join(directory, oversized.file),
       `<!doctype html><html><head><meta name="zeros-frame" content="title=Oversized"></head><body><main data-oid="oversized">${"x".repeat(2 * 1024 * 1024)}</main></body></html>`,

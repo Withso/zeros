@@ -35,12 +35,15 @@ describe("compiling a Tailwind entry", () => {
   });
 
   it("replaces plugins and configs with empty modules and skips imports outside the repository", async () => {
-    const entry = '@import "tailwindcss"; @plugin "@tailwindcss/typography"; @config "./tailwind.config.js"; @import "https://fonts.example/a.css"; @import "../../outside.css"; @import "./missing.css"; @source inline("underline");';
+    const entry = '@import "tailwindcss"; @plugin "@acme/tailwind-plugin"; @config "./tailwind.config.js"; @import "https://fonts.example/a.css"; @import "../../outside.css"; @import "./missing.css"; @source inline("underline");';
     const compiler = await compileDesignTailwind({ file: "styles/app.css", content: entry }, reader({}));
     const css = compiler.build([]);
     expect(css).toContain(".underline");
-    expect(compiler.skippedModules).toEqual(["@config ./tailwind.config.js", "@plugin @tailwindcss/typography"]);
-    expect(compiler.skippedImports).toEqual(["../../outside.css", "./missing.css"]);
+    expect(compiler.skippedModules).toEqual(["@config ./tailwind.config.js", "@plugin @acme/tailwind-plugin"]);
+    expect(compiler.skippedImports).toEqual([
+      { id: "../../outside.css", problem: "outside" },
+      { id: "./missing.css", problem: "missing" },
+    ]);
     // Tailwind leaves remote imports in its output; the style source drops them.
     expect(css).toContain("https://fonts.example/a.css");
   });
@@ -68,7 +71,7 @@ describe("compiling a Tailwind entry", () => {
       "node_modules/exported/parts/extra.css",
       "node_modules/plain/index.css",
     ]);
-    expect(compiler.skippedImports).toEqual(["absent"]);
+    expect(compiler.skippedImports).toEqual([{ id: "absent", problem: "not-installed" }]);
   });
 
   it.each(["dark", "themes/dark", "$&", "$$"])("replaces every export-target wildcard with the literal subpath %s", async (subpath) => {
@@ -96,9 +99,61 @@ describe("compiling a Tailwind entry", () => {
     });
     const compiler = await compileDesignTailwind({ file: "styles/app.css", content: '@import "patterned/dark";' }, read);
     expect(compiler.imports).toEqual([]);
-    expect(compiler.skippedImports).toEqual(["patterned/dark"]);
+    expect(compiler.skippedImports).toEqual([{ id: "patterned/dark", problem: "outside" }]);
     expect(read.reads).not.toContain(outside);
     expect(compiler.build([])).not.toContain(".outside");
+  });
+
+  it("says why each import it could not follow was skipped", async () => {
+    const read = reader({
+      "node_modules/js-only/package.json": JSON.stringify({ main: "index.js", exports: { ".": { import: "./index.mjs" } } }),
+      "node_modules/scripted/package.json": JSON.stringify({ exports: { ".": "./index.js" } }),
+      "node_modules/broken/package.json": JSON.stringify({ style: "dist/broken.css" }),
+      "node_modules/webpack-style/package.json": JSON.stringify({ style: "theme.css" }),
+      "node_modules/webpack-style/theme.css": ".webpack-style { order: 1; }",
+    });
+    // Links stored outside the checkout exist but are refused by the reader.
+    const diagnose = async (file: string) => (file.startsWith("node_modules/linked/") ? "outside" as const : "missing" as const);
+    const entry = [
+      '@import "tailwindcss";',
+      '@import "/styles/absolute.css";',
+      '@import "@/styles/alias.css";',
+      '@import "~/styles/home.css";',
+      '@import "#styles/subpath.css";',
+      '@import "//cdn.example/remote.css";',
+      '@import "js-only";',
+      '@import "scripted";',
+      '@import "broken";',
+      '@import "linked";',
+      '@import "not-installed";',
+      '@import "~webpack-style";',
+    ].join(" ");
+    const compiler = await compileDesignTailwind({ file: "styles/app.css", content: entry }, read, diagnose);
+    expect(compiler.skippedImports).toEqual([
+      { id: "#styles/subpath.css", problem: "alias" },
+      { id: "//cdn.example/remote.css", problem: "remote" },
+      { id: "/styles/absolute.css", problem: "absolute" },
+      { id: "@/styles/alias.css", problem: "alias" },
+      { id: "broken", problem: "missing" },
+      { id: "js-only", problem: "not-css" },
+      { id: "linked", problem: "outside" },
+      { id: "not-installed", problem: "not-installed" },
+      { id: "scripted", problem: "not-css" },
+      { id: "~/styles/home.css", problem: "alias" },
+    ]);
+    expect(compiler.imports).toEqual(["node_modules/webpack-style/theme.css"]);
+    expect(compiler.build([])).toContain(".webpack-style");
+  });
+
+  it("runs Zeros' own copies of the official plugins, never the repository's, and skips the rest", async () => {
+    const entry = '@import "tailwindcss"; @plugin "@tailwindcss/typography"; @plugin "@tailwindcss/forms"; @plugin "tailwindcss-animate"; @plugin "daisyui";';
+    const compiler = await compileDesignTailwind({ file: "styles/app.css", content: entry }, reader({}));
+    expect(compiler.bundledModules).toEqual(["@plugin @tailwindcss/forms", "@plugin @tailwindcss/typography", "@plugin tailwindcss-animate"]);
+    expect(compiler.skippedModules).toEqual(["@plugin daisyui"]);
+    const css = compiler.build(["prose", "form-input", "animate-in", "fade-in"]);
+    expect(css).toContain(".prose");
+    expect(css).toContain(".form-input");
+    expect(css).toContain(".animate-in");
   });
 
   it("starts every frame from a fresh compile, so one frame's classes never reach another", async () => {

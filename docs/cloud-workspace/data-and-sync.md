@@ -712,14 +712,16 @@ cloud engine. The mutation carries the exact source revision; the cloud engine
 performs the sandbox filesystem CAS/write lock and returns a receipt. The local
 replica updates only after that authoritative write appears in the file stream.
 
-The canvas never writes directly into the synced folder. The shared
-agent session uses the same cloud Design API when admitted in Design mode;
-mode switching does not change cloud ownership or worker execution policy. An
-independently forked local workspace uses its own local engine/Design API and
-does not share the cloud workspace identity.
+The canvas never writes directly into the synced folder. Agents in the shared
+session author natively in the VM checkout, as Local agents do, with the cloud
+Design API as an optional helper; the VM engine's watcher announces their edits
+and the canvas re-reads through the API. Mode switching does not change cloud
+ownership or worker execution policy. An independently forked local workspace
+uses its own local engine/Design API and does not share the cloud workspace
+identity.
 The [Design authoring contract](../design-mode-roadmap.md#composer-and-shared-agent-lifecycle)
-owns mode selection and local-native versus cloud-API authoring. These paths
-remain subject to the deployed-cloud qualification gates.
+owns mode selection and authoring. These paths remain subject to the
+deployed-cloud qualification gates.
 
 ## Durable data model
 

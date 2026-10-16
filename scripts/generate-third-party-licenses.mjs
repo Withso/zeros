@@ -52,6 +52,13 @@ const PACKAGED_PLATFORM_PACKAGES = [
     packageName: "@vscode/ripgrep-darwin-arm64",
     license: "MIT",
   },
+  {
+    // Sass includes Parcel's watcher. Its native archives and JS wrapper
+    // carry the same MIT terms; only this native target enters the Mac app.
+    parentName: "@parcel/watcher",
+    packageName: "@parcel/watcher-darwin-arm64",
+    license: "MIT",
+  },
 ];
 
 // A darwin-only optional package is installed, and therefore packed into the
@@ -276,6 +283,7 @@ const isHostPlatformRecord = (record) =>
   record.name.startsWith("@anthropic-ai/claude-agent-sdk-") ||
   record.name.startsWith("@cursor/sdk-") ||
   record.name.startsWith("@vscode/ripgrep-") ||
+  record.name.startsWith("@parcel/watcher-") ||
   CUA_NATIVE_VARIANT.test(record.name) ||
   (record.name === "@openai/codex" &&
     CODEX_PLATFORM_VERSION.test(record.version));
@@ -804,7 +812,7 @@ const lines = [
   "JavaScript dependencies are included. Host-native optional packages are",
   "normalized to the macOS arm64 desktop and Linux x64 control-plane",
   "release contents: the staged Claude runtime, the staged Codex runtime, the",
-  "packaged Cursor runtime, the packaged ripgrep binary, the macOS-only",
+  "packaged Cursor runtime, the packaged ripgrep binary, the Parcel watcher, the macOS-only",
   "fsevents watcher, and the macOS-only Cua computer-use driver runtime",
   "are all included, as is the AXe iOS Simulator tool, a pinned release",
   "binary that is not an npm package.",

@@ -56,7 +56,7 @@ describe("actor roles at the worker message boundary",()=>{
       const f = fixture(role);
       await f.send({ type: "WORKSPACE_REQUEST", op: "design.page.select", params: { workspaceId: "local-main", directoryId: "design_fixture", pageId: "checkout" } });
       expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledOnce();
-      for (const op of ["design.page.create", "design.page.rename", "design.page.delete"]) {
+      for (const op of ["design.page.create", "design.page.rename", "design.page.delete", "design.themes.update", "design.styles.refresh"]) {
         f.engine.handleWorkspaceMessage.mockClear();
         await f.send({ type: "WORKSPACE_REQUEST", op, params: { workspaceId: "local-main", pageId: "checkout", expectedFrameIds: [] } });
         expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledTimes(["developer", "manager", "owner"].includes(role) ? 1 : 0);

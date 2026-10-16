@@ -1,17 +1,16 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, rmSync, utimesSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-
-import { designTokenThemeName } from "@zeros/design-web/css";
 
 import {
   buildTokens,
   checkGeneratedTokens,
   readTokenSources,
-  renderDesignTokenCss,
   renderMarketingTokenCss,
   renderTokenCss,
+  renderTokenPreviewCss,
+  writeTokenPreview,
 } from "../design-system/build-tokens.mjs";
 import {
   declarations,
@@ -64,24 +63,6 @@ const fixtureMarketingCss = `@import "tailwindcss";
 }
 @layer base { body { background: var(--bg); } }
 `;
-const DESIGN_FILE = "Zeros - Design/tokens.css";
-const DESIGN_LIGHT = '[data-zd-theme="light"]';
-const fixtureDesignCss = `@layer reset { body { background: var(--bg); } }
-:root {
-  color-scheme: dark;
-  /* @generated tokens:design-dark:start */
-  /* @generated tokens:design-dark:end */
-  /* @generated tokens:design-scales:start */
-  /* @generated tokens:design-scales:end */
-  --space-1: 4px;
-}
-${DESIGN_LIGHT} {
-  color-scheme: light;
-  /* @generated tokens:design-light:start */
-  /* @generated tokens:design-light:end */
-}
-`;
-
 const token = (type: string, value: unknown, name: string, section = "base", utility = false) => ({
   $type: type,
   $value: value,
@@ -98,10 +79,8 @@ function fixture() {
   temporaryRoots.push(root);
   mkdirSync(join(root, "styles/tokens"), { recursive: true });
   mkdirSync(join(root, "apps/marketing/src"), { recursive: true });
-  mkdirSync(join(root, "Zeros - Design"), { recursive: true });
   writeFileSync(join(root, "styles/zeros-tokens.css"), fixtureCss);
   writeFileSync(join(root, "apps/marketing/src/index.css"), fixtureMarketingCss);
-  writeFileSync(join(root, DESIGN_FILE), fixtureDesignCss);
   const base = { tokens: {
     bg: token("color", { colorSpace: "hsl", components: [0, 0, 7] }, "bg", "base", true),
     pane: token("color", "{tokens.bg}", "pane"),
@@ -161,7 +140,7 @@ describe("DTCG token generation", () => {
   it("round-trips idempotently and flags stale output without writing", () => {
     const { root, base, save } = fixture();
     expect(checkGeneratedTokens(root).map((finding: { file: string }) => finding.file)).toEqual([
-      "styles/zeros-tokens.css", "apps/marketing/src/index.css", DESIGN_FILE,
+      "styles/zeros-tokens.css", "apps/marketing/src/index.css",
     ]);
     buildTokens(root);
     const built = readFileSync(join(root, "styles/zeros-tokens.css"), "utf8");
@@ -469,57 +448,64 @@ describe("marketing token generation", () => {
   });
 });
 
-describe("Design directory token generation", () => {
-  it("renders Dark as the canvas Base theme, Light as the Design tab's light theme, and runtime scales", () => {
+describe("Design token preview", () => {
+  it("renders the token declarations alone, as the app stylesheet has them", () => {
     const { root } = fixture();
-    const css = renderDesignTokenCss(root);
-    const dark = extractBlock(css, ":root");
-    expect(dark).toContain("--bg: hsl(0 0% 7%); /* #121212 — bg description */");
-    expect(dark).toContain("--pane: var(--bg);");
-    expect(dark).toContain("--text-xs: 0.8125rem;");
-    expect(dark).toContain("--space-1: 4px;");
-    expect(extractBlock(css, DESIGN_LIGHT)).toContain("--bg: hsl(0 0% 100%); /* #FFFFFF — bg description */");
-    expect(designTokenThemeName(DESIGN_LIGHT)).toBe("light");
+    const css = renderTokenPreviewCss(root);
+    expect(extractBlock(css, ":root")).toContain("--bg: hsl(0 0% 7%);");
+    expect(extractBlock(css, ":root")).toContain("--pane: var(--bg);");
+    expect(extractBlock(css, '[data-theme="light"]')).toContain("--bg: hsl(0 0% 100%);");
+    expect(css).not.toMatch(/@import|@theme|--color-bg/);
   });
 
-  it("omits private ramp steps and rejects an export that depends on one", () => {
+  it("writes only to the private build folder, and only when the preview changed", () => {
     const { root, base, save } = fixture();
-    const tokens: Record<string, ReturnType<typeof token>> = base.tokens;
-    tokens["red-500"] = token("color", { colorSpace: "hsl", components: [0, 91, 71] }, "red-500");
+    const output = ".zeros/design-styles/zeros-tokens.css";
+    expect(writeTokenPreview(root, output)).toBe(true);
+    const file = join(root, output);
+    // Read each snapshot from one opened file, including its identity: a
+    // rewritten path must not supply metadata for different contents.
+    const snapshot = () => {
+      const descriptor = openSync(file, "r");
+      try {
+        const source = readFileSync(descriptor, "utf8");
+        const { mtimeMs, ino } = fstatSync(descriptor);
+        return { source, mtimeMs, ino };
+      } finally {
+        closeSync(descriptor);
+      }
+    };
+    const first = snapshot().source;
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(file, past, past);
+    // Filesystems round utimes differently; compare the stored timestamp
+    // before and after the no-op, not the requested JavaScript precision.
+    const unchanged = snapshot();
+    expect(writeTokenPreview(root, output)).toBe(false);
+    expect(snapshot()).toEqual(unchanged);
+    base.tokens.bg.$value = { colorSpace: "hsl", components: [0, 0, 9] };
     save("base.tokens.json", base);
-    expect(renderDesignTokenCss(root)).not.toContain("--red-500");
-    tokens.scrim.$value = "{tokens.red-500}";
-    save("base.tokens.json", base);
-    expect(() => renderDesignTokenCss(root)).toThrow(/--scrim depends on a private ramp step/);
+    expect(writeTokenPreview(root, output)).toBe(true);
+    const changed = snapshot().source;
+    expect(changed).not.toBe(first);
+    expect(changed).toContain("--bg: hsl(0 0% 9%);");
+    for (const bad of ["styles/zeros-tokens.css", ".zeros/design-styles/../x.css", ".zeros/design-styles/x.scss", "/tmp/x.css"]) {
+      expect(() => writeTokenPreview(root, bad), bad).toThrow(/\.zeros\/design-styles/);
+    }
+    expect(existsSync(join(root, "styles/zeros-tokens.css.tmp"))).toBe(false);
   });
 
-  it("rejects authored declarations that shadow generated tokens, including a Light value", () => {
-    const { root } = fixture();
-    for (const source of [
-      fixtureDesignCss.replace("  --space-1: 4px;", "  --bg: hsl(0 0% 9%);"),
-      fixtureDesignCss.replace("  --space-1: 4px;", "  --text-xs: 1rem;"),
-      fixtureDesignCss.replace("  /* @generated tokens:design-light:end */", "  /* @generated tokens:design-light:end */\n  --pane: hsl(0 0% 50%);"),
-    ]) expect(() => renderDesignTokenCss(root, source)).toThrow(/shadows generated --(bg|text-xs|pane)/);
-  });
-
-  it("flags a stale Design copy without writing and rebuilds it", () => {
-    const { root } = fixture();
-    buildTokens(root);
-    const file = join(root, DESIGN_FILE);
-    const generated = readFileSync(file, "utf8");
-    const stale = generated.replace("hsl(0 0% 100%)", "hsl(0 0% 99%)");
-    writeFileSync(file, stale);
-    expect(checkGeneratedTokens(root)).toEqual([expect.objectContaining({
-      file: DESIGN_FILE, message: expect.stringMatching(/stale.*pnpm design:docs/),
-    })]);
-    expect(readFileSync(file, "utf8")).toBe(stale);
-    buildTokens(root);
-    expect(readFileSync(file, "utf8")).toBe(generated);
-  });
-
-  it("keeps the repository Design directory tokens fresh", () => {
-    const css = readFileSync(join(ROOT, DESIGN_FILE), "utf8");
-    expect(renderDesignTokenCss(ROOT) === css, "Design directory token regions must be fresh").toBe(true);
+  it("previews the same declarations the repository stylesheet holds when it is fresh", () => {
+    const preview = renderTokenPreviewCss(ROOT);
+    const css = readFileSync(join(ROOT, "styles/zeros-tokens.css"), "utf8");
+    // The stylesheet spreads some values over lines; the preview keeps one.
+    const oneLine = (value?: string) => value?.replace(/\s+/g, " ").replace(/\(\s+/g, "(").replace(/\s+\)/g, ")").trim();
+    for (const selector of [":root", '[data-theme="light"]']) {
+      const previewed = declarations(extractBlock(preview, selector));
+      const app = declarations(extractBlock(css, selector));
+      expect(previewed.size).toBeGreaterThan(40);
+      for (const [name, value] of previewed) expect(oneLine(app.get(name)), `${selector} --${name}`).toBe(oneLine(value));
+    }
   });
 });
 

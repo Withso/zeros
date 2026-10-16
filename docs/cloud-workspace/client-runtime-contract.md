@@ -438,9 +438,10 @@ uses one durable action identity; it never Stop/re-prompts or rebinds a retry to
 the newest execution. Local vendor fallback and resolver behavior are unchanged.
 
 The same conversation and provider binding serve Code and Design. Mode updates
-compare the expected revision and refresh execution instructions. Local native
-Design authoring does not relax cloud API authoring or lifecycle-owned
-registration. Missing cloud tool admission never enables native fallback.
+compare the expected revision and refresh execution instructions. Local and
+cloud agents author Design natively; lifecycle-owned registration stays
+engine-owned. Missing tool admission leaves native authoring available and
+only the optional API helpers unavailable.
 
 ### Implemented command transport
 
@@ -930,7 +931,7 @@ concurrency and authorization lifetimes are bounded. General TCP/SSH forwarding
 requires its own qualified runtime service and is not implied by HTTP previews.
 
 The qualified cloud primary checkout uses its existing opaque `local-main`
-identity for Design initialization and API authoring. It needs no second local
+identity for Design initialization and authoring. It needs no second local
 worktree database row. This authority is supplied by immutable worker admission;
 remote requests cannot enable it on a local desktop.
 

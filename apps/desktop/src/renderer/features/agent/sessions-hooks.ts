@@ -153,3 +153,9 @@ export function useAgentSessions(): SessionsCtx {
   }
   return ctx;
 }
+
+/** The same actions, or null outside <AgentSessionsProvider> (isolated
+ *  surfaces and harnesses), for actions that fail only when invoked. */
+export function useOptionalAgentSessions(): SessionsCtx | null {
+  return useContext(ActionsCtx);
+}

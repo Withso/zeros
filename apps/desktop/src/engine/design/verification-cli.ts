@@ -16,26 +16,30 @@ export async function runDesignVerificationCli(args: string[], output: (line: st
   const [operation] = args;
   const flag = (name: string) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
   if (operation === "--help" || operation === "-h") {
-    output("design <list|validate|capture|preview> --url <workspace verification URL> [--frame screen.html] [--revision <source revision>] [--output .context/frame.png] [--theme <name>]");
+    output("design <list|styles|validate|capture|preview> --url <workspace verification URL> [--frame screen.html] [--revision <source revision>] [--output .context/frame.png] [--theme <name>]");
     return 0;
   }
-  if (!["list", "validate", "capture", "preview"].includes(operation ?? "")) throw new Error("Choose design list, validate, capture or preview. Use design --help for options.");
+  if (!["list", "styles", "validate", "capture", "preview"].includes(operation ?? "")) throw new Error("Choose design list, styles, validate, capture or preview. Use design --help for options.");
   const url = new URL(flag("--url") ?? "");
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || url.search || url.hash || !/^\/[a-f0-9]{48}$/.test(url.pathname))
     throw new Error("Use the local Design verification URL supplied by Zeros.");
   const frame = flag("--frame");
-  if (operation !== "list" && !isDesignFrameFile(frame))
+  // list and styles describe the whole directory, not one frame.
+  const directoryWide = operation === "list" || operation === "styles";
+  if (!directoryWide && !isDesignFrameFile(frame))
     throw new Error("--frame must name a registered HTML frame.");
   // A theme is a view of the same source, as in the canvas Themes control.
   const theme = args.includes("--theme") ? flag("--theme") ?? "" : undefined;
-  if (theme !== undefined && (operation === "list" || operation === "validate"))
+  if (theme !== undefined && (directoryWide || operation === "validate"))
     throw new Error("--theme applies to capture and preview.");
   if (theme !== undefined && !DESIGN_THEME_NAME.test(theme))
     throw new Error("--theme must name a theme, for example light.");
   const base =
     operation === "list"
       ? `${url}/frames`
-      : `${url}/${encodeDesignFramePath(frame!)}`;
+      : operation === "styles"
+        ? `${url}/styles`
+        : `${url}/${encodeDesignFramePath(frame!)}`;
   const request = async (target: string) => {
     const response = await fetch(target, { redirect: "error", signal: AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 3000) });
     if (!response.ok) {
@@ -45,6 +49,12 @@ export async function runDesignVerificationCli(args: string[], output: (line: st
     return response;
   };
   if (operation === "list") { output(JSON.stringify(await (await request(base)).json())); return 0; }
+  if (operation === "styles") {
+    // Errors fail the check; warnings are reported for the agent to judge.
+    const report = await (await request(base)).json() as { errors?: unknown[]; summary?: { error?: number } };
+    output(JSON.stringify(report));
+    return (report.summary?.error ?? 0) > 0 || (report.errors?.length ?? 0) > 0 ? 1 : 0;
+  }
   const expected = flag("--revision");
   const stateQuery = new URLSearchParams();
   if (expected) stateQuery.set("revision", expected);
@@ -68,7 +78,9 @@ export async function runDesignVerificationCli(args: string[], output: (line: st
   if (!filename) throw new Error("capture requires --output, for example .context/frame.png.");
   const response = await request(`${base}/capture${query}`);
   if (response.headers.get("x-design-revision") !== reference.revision) throw new Error("Capture returned a different revision.");
-  if ((response.headers.get("x-design-theme") ?? undefined) !== theme) throw new Error("Capture returned a different theme.");
+  // Without --theme the frame shows the directory's default theme, if named.
+  const shownTheme = response.headers.get("x-design-theme") ?? undefined;
+  if (theme !== undefined && shownTheme !== theme) throw new Error("Capture returned a different theme.");
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Capture returned no PNG.");
   const chunks: Uint8Array[] = [];
@@ -90,6 +102,6 @@ export async function runDesignVerificationCli(args: string[], output: (line: st
   const temporary = `${destination}.${randomUUID()}.tmp`;
   try { await writeFile(temporary, bytes, { flag: "wx" }); await rename(temporary, destination); }
   finally { await rm(temporary, { force: true }); }
-  output(JSON.stringify({ ...state, ...view, width: raster.width, height: raster.height, viewport, scale: raster.scale, path: destination, capturedAt: Number(response.headers.get("x-design-captured-at")), motion: "reduced", visualInspection: "Open this PNG with your ordinary image tool. Capturing alone is not visual inspection." }));
+  output(JSON.stringify({ ...state, ...view, ...(shownTheme ? { theme: shownTheme } : {}), width: raster.width, height: raster.height, viewport, scale: raster.scale, path: destination, capturedAt: Number(response.headers.get("x-design-captured-at")), motion: "reduced", visualInspection: "Open this PNG with your ordinary image tool. Capturing alone is not visual inspection." }));
   return 0;
 }

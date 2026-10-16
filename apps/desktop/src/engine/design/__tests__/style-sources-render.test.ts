@@ -101,8 +101,16 @@ describe("imported style sources in rendered frames", () => {
     await writeFile(path.join(root, "styles/files/brand.woff2"), font);
     await writeFile(
       path.join(root, "styles/app.css"),
-      "@font-face { font-family: Brand; src: url(./files/brand.woff2) format('woff2'); } :root { --brand: 1px; }",
+      "@font-face { font-family: Brand; src: url(./files/brand.woff2) format('woff2'); } :root { --brand: 1px; } .unused { font-family: Brand; }",
     );
+    // No rule the frame matches names the family yet, so it is not carried.
+    expect((await render()).html).not.toContain("@font-face");
+    await writeFile(
+      path.join(root, "styles/app.css"),
+      "@font-face { font-family: Brand; src: url(./files/brand.woff2) format('woff2'); } :root { --brand: 1px; } main { font-family: Brand; }",
+    );
+    const later = new Date(Date.now() + 5_000);
+    await utimes(path.join(root, "styles/app.css"), later, later);
     const rendered = (await render()).html;
     expect(rendered).toContain(`url("data:font/woff2;base64,${font.toString("base64")}") format('woff2')`);
   });
@@ -110,7 +118,7 @@ describe("imported style sources in rendered frames", () => {
   it.each(["css", "build", "tailwind"])("embeds %s source images and refreshes when they change or appear", async (kind) => {
     const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
     const asset = path.join(root, "styles/dot.png");
-    await writeFile(path.join(root, "styles/app.css"), `${kind === "tailwind" ? '@import "tailwindcss";' : ""} .hero { background-image: url(./dot.png); }`);
+    await writeFile(path.join(root, "styles/app.css"), `${kind === "tailwind" ? '@import "tailwindcss";' : ""} main { background-image: url(./dot.png); }`);
     await writeCanvas((canvas) => { canvas.styles = [{ id: "app", kind, path: "styles/app.css" }]; });
     const missing = await render();
     await writeFile(asset, png);

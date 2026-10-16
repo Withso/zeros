@@ -77,6 +77,16 @@ describe("page operations through WorkspaceService", () => {
       title: "Purchase",
       folder: "checkout",
     });
+    await service.handle("design.themes.update", { ...params, theme: { id: "light", label: "Day" } }, options);
+    const named = (await service.handle(
+      "design.themes.update",
+      { ...params, theme: { id: "dark", label: "Dark", base: true } },
+      options,
+    )) as { themes: unknown; snapshot: Snapshot & { themes: unknown } };
+    expect(named.themes).toEqual([{ id: "dark", label: "Dark", base: true }, { id: "light", label: "Day" }]);
+    expect(named.snapshot.themes).toEqual([{ id: "dark", label: "Dark", base: true }, { id: "light", label: "Day" }]);
+    await expect(service.handle("design.themes.update", { ...params, theme: { id: "Dark", label: "Dark" } }, options))
+      .rejects.toThrow(/lowercase letter/);
     const deleted = (await service.handle(
       "design.page.delete",
       { ...params, pageId: created.page.id, expectedFrameIds: [] },

@@ -6,7 +6,8 @@
 //
 //   styles/zeros-tokens.css          ← styles/tokens/*.tokens.json + resolver
 //   apps/marketing/src/index.css     ← same values, marketing export groups
-//   Zeros - Design/tokens.css        ← same values, public tokens + scales
+//   (Zeros - Design imports styles/zeros-tokens.css as a style source and
+//    previews styles/tokens/ edits live; it has no generated copy.)
 //   docs/design-tokens.md            ← styles/zeros-tokens.css,
 //                                       styles/global/platform.css,
 //                                       styles/policy/contrast-contract.json
@@ -26,7 +27,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildTokens, DESIGN_TOKENS_FILE, MARKETING_TOKENS_FILE, renderTokenCss } from "./build-tokens.mjs";
+import { buildTokens, MARKETING_TOKENS_FILE, renderTokenCss } from "./build-tokens.mjs";
 import { renderZstackFiles, ZSTACK_SKILLS_DIR } from "../zstack/render.mjs";
 import {
   evaluateContract,
@@ -319,7 +320,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   buildTokens(root);
   console.log(`wrote ${TOKENS_FILE}`);
   console.log(`wrote ${MARKETING_TOKENS_FILE}`);
-  console.log(`wrote ${DESIGN_TOKENS_FILE}`);
   for (const [rel, content] of Object.entries(generatedFiles(root))) {
     const path = join(root, rel);
     mkdirSync(dirname(path), { recursive: true });

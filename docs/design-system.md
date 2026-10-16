@@ -74,7 +74,7 @@ The full guide is `docs/design-system.md`; token values are in
    VM state (setting up, starting, sleeping, stopped, failed, archived). Follow
    RULES.md §8 (the `zeros-workspaces` skill) and state both impacts in the PR.
 9. **Mockups:** design Zeros screens in `Zeros - Design/` (the Design tab),
-   whose `tokens.css` is generated from the same sources; never hand-copy
+   whose frames import the app's own stylesheets live; never hand-copy
    token values into a standalone HTML file. To implement a frame, map its
    values to utilities (`var(--bg2)` is `bg-bg2`; a `--space-<step>` value is
    that Tailwind step, such as `p-3`) and its controls to the shared
@@ -395,8 +395,8 @@ Three other consumers use these tokens. The marketing site (`apps/marketing`)
 clones 26 public tokens, generated from the same sources and guarded by
 `apps/marketing/src/lib/__tests__/marketing-tokens.test.ts`; `apps/web` slices
 `styles/zeros-tokens.css` at build time for the dashboard; and the repository's
-Design directory receives every public token in `Zeros - Design/tokens.css`
-(§11).
+Design directory imports the app's stylesheets as style sources and previews
+`styles/tokens/` edits live (§11).
 
 ## 10. Changing the system
 
@@ -408,8 +408,8 @@ Design directory receives every public token in `Zeros - Design/tokens.css`
   `pnpm design:docs` to regenerate CSS, docs, and agent files. Feature-only
   aliases go in `styles/semantic-tokens.css`.
 - **Token value change:** edit `styles/tokens/*.tokens.json`, run
-  `pnpm design:docs` to regenerate app, marketing and Design directory
-  declarations, and pass the contrast contract.
+  `pnpm design:docs` to regenerate app and marketing declarations, and pass
+  the contrast contract. The Design tab previews the edit before that.
   Hue changes to a status family need design approval. CSS declarations inside
   `@generated` markers are generated; imports, explanations, type/radius/weight
   wiring, native appearance hints, named utilities and base rules stay authored.
@@ -430,22 +430,25 @@ feature. The older standalone mockups in `styles/Artifacts/` hand-copied token
 values and most no longer match the palette; treat them as historical
 references, not as a template.
 
-- `pnpm design:docs` generates the marked regions of `Zeros - Design/tokens.css`
-  from the same DTCG sources: every public token plus the font, type and radius
-  scales that `@theme inline` keeps compile-time-only. Dark is the canvas Base
-  theme and Light is its `light` theme (`[data-zd-theme="light"]`, chosen with
-  the canvas Themes control). Private ramp steps are omitted. Outside the
-  markers the file authors frame-only spacing steps (`--space-<step>`) and
-  control heights. `check:ui` rejects a stale copy or an authored declaration
-  that shadows a generated token.
-- The directory also declares the app's own stylesheets as imported style
-  sources ([imported style sources](design-mode-roadmap.md#imported-style-sources)):
-  `styles/zeros-tokens.css` as a `tailwind` source, compiled for each frame's
-  classes, and `styles/semantic-tokens.css` as a `css` source. Frames can
-  therefore use the app's utilities (`bg-bg2`, `p-3`, `rounded-md`,
-  `text-xs`) as well as its tokens.
-- A product token change goes to `styles/tokens/*.tokens.json`, never into a
-  generated region or the theme editor. An unadopted proposal stays in its
+- The directory imports the app's own stylesheets as style sources
+  ([imported style sources](design-mode-roadmap.md#imported-style-sources)),
+  read live from the checkout: `styles/zeros-tokens.css` as a `tailwind`
+  source, compiled for each frame's classes (Tailwind emits the font, type and
+  radius scales a frame reads with `var()`), `styles/semantic-tokens.css` as a
+  `css` source, and `tokens-live`, a one-shot `build` source that runs the
+  preview mode of `scripts/design-system/build-tokens.mjs` into the private
+  `<workspace>/.zeros/design-styles/` folder when `styles/tokens/` changes while the Design
+  tab is open. Frames therefore use the app's utilities (`bg-bg2`, `p-3`,
+  `rounded-md`, `text-xs`) and its tokens, including uncommitted edits.
+- `Zeros - Design/meta/canvas.json` names the themes: Dark is the default theme (`dark`,
+  whose values are `:root`) and Light is `light`; the app source maps
+  `[data-theme="dark"]` and `[data-theme="light"]` onto them.
+- `Zeros - Design/tokens.css` keeps only Design-only tokens: spacing steps
+  (`--space-<step>`), control heights and a 14px text size. A Manual token that
+  redeclares a product token would override the app's value; the theme editor
+  marks any that do.
+- A product token change goes to `styles/tokens/*.tokens.json`, never into
+  `tokens.css` or the theme editor. An unadopted proposal stays in its
   frame's own `<style>` and is labelled as a proposal.
 - Implementing a frame maps its values to utilities (`var(--bg2)` is `bg-bg2`,
   `var(--radius-md)` is `rounded-md`, and a `--space-<step>` value is that
@@ -456,5 +459,5 @@ references, not as a template.
 - Frames render Geist and Geist Mono through the `app` style source, whose
   Tailwind entry imports the installed `@fontsource-variable` packages; without
   installed dependencies they fall back to the system UI font. Native capture
-  shows the Base (Dark) theme unless given a theme name; capture `light` as
-  well (**judgment**).
+  shows the default (Dark) theme unless given a theme id; capture `light` as
+  well (**judgment**). `design styles` reports the sources' status.

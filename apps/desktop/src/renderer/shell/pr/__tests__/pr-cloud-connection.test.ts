@@ -20,8 +20,8 @@ vi.mock("react", async (original) => ({
 vi.mock("../../../platform/bridge/use-bridge", () => ({
   useBridge: () => fixture.bridge,
 }));
-vi.mock("../../../features/agent/sessions-hooks", () => ({
-  useAgentSessions: () => ({
+vi.mock("../../../features/agent/sessions-hooks", () => {
+  const sessions = () => ({
     getSession: () => ({
       agentId: "codex",
       sessionId: "execution",
@@ -29,8 +29,9 @@ vi.mock("../../../features/agent/sessions-hooks", () => ({
     }),
     sendPrompt: fixture.sendPrompt,
     prepareForSend: fixture.prepareForSend,
-  }),
-}));
+  });
+  return { useAgentSessions: sessions, useOptionalAgentSessions: sessions };
+});
 vi.mock("../../../state/store", () => ({
   useActiveChatId: () => "chat",
   useWorkspaceStore: { getState: () => ({ chats: fixture.chats }) },

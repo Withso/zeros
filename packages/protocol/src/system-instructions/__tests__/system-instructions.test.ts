@@ -74,7 +74,7 @@ describe("buildCodeAgentDesignTerritoryNotice", () => {
     const out = buildCodeAgentDesignTerritoryNotice("/workspace/Zeros Design");
     expect(out).toContain("/workspace/Zeros Design");
     expect(out).toContain("one Code/Design conversation");
-    expect(out).toContain("Local Code and Design work use the same normal provider tools");
+    expect(out).toContain("Local and cloud Code and Design work use the same normal provider tools");
     expect(out).toContain("explicit Design source edits do not require a mode switch, API apply or publish");
     expect(out).toContain("Git staging, commits, push, pull, merge and PR work use the same branch");
     expect(out).toContain("saving never stages or commits");
@@ -94,7 +94,7 @@ describe("buildCodeAgentDesignTerritoryNotice", () => {
   it("defers the authoring method to the execution-specific composer instructions", () => {
     const out = buildCodeAgentDesignTerritoryNotice("/workspace/Zeros Design");
     expect(out).toContain("Follow the current composer instructions for task intent and the execution's authoring method");
-    expect(out).toContain("Cloud conversations retain API authoring");
+    expect(out).not.toContain("Cloud conversations retain API authoring");
     expect(out).not.toContain("In Design mode use normal");
   });
 });
@@ -187,7 +187,7 @@ describe("buildFirstTurnSystemInstruction", () => {
       designDirectories: [],
     });
     expect(out).toContain("/ws/Zeros Design");
-    expect(out).toContain("Local Code and Design work use the same normal provider tools");
+    expect(out).toContain("Local and cloud Code and Design work use the same normal provider tools");
   });
   it("builds a Design-agent instruction without granting Code or Git mutation", () => {
     const out = buildFirstTurnSystemInstruction({

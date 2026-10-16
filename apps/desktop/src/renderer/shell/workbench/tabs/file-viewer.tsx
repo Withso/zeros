@@ -610,8 +610,9 @@ export function FileViewer({
 
   const canCopy = result?.kind === "text" && result.content != null;
 
-  // Local source editing also repairs conflicted Design metadata. Cloud keeps
-  // its existing API authoring policy until native cloud authoring is qualified.
+  // Local source editing also repairs conflicted Design metadata. In a cloud
+  // workspace, agents author Design natively but people's Files edits to
+  // Design paths stay refused by the engine (assertNoDesignPathWrites).
   const designReadOnly = result?.designPath === true && isCloudWorkspace(cwd);
   const sourceReadOnly = readOnly || designReadOnly;
   const hunkSource = useMemo(

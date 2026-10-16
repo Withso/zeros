@@ -436,6 +436,17 @@ describe("runFile — Bun native subprocess boundary", () => {
 
     await expect(running).rejects.toMatchObject({ name: "AbortError" });
   });
+
+  it.each([0, 7])("preserves exit %i when a Node subprocess closes stdin before reading its input", async (code) => {
+    vi.stubGlobal("Bun", undefined);
+    const running = runFile(process.execPath, ["-e", `process.stdout.write('result'); process.stderr.write('diagnostic'); process.exit(${code})`], {
+      // Larger than the pipe buffer so early exit deterministically breaks
+      // the pending write, as git check-ignore can do during watcher teardown.
+      input: "x".repeat(4 * 1024 * 1024), timeoutMs: 5_000,
+    });
+    if (code === 0) await expect(running).resolves.toEqual({ stdout: "result", stderr: "diagnostic" });
+    else await expect(running).rejects.toMatchObject({ code, stdout: "result", stderr: "diagnostic" });
+  });
 });
 
 describe("runGit — transient lock retry", () => {

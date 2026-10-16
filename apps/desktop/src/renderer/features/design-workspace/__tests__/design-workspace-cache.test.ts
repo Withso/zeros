@@ -197,6 +197,16 @@ describe("design workspace cache", () => {
     expect(stabilizeDesignWorkspaceSnapshot(previous, legacy).styleSources).toEqual([]);
   });
 
+  it("publishes a theme rename even when nothing else changed", () => {
+    const previous = { ...snapshot([]), themes: [{ id: "dark", label: "Base", base: true as const }] };
+    expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);
+    const renamed = { ...previous, themes: [{ id: "dark", label: "Dark", base: true as const }] };
+    const published = stabilizeDesignWorkspaceSnapshot(previous, renamed);
+    expect(published).not.toBe(previous);
+    expect(published.themes).toEqual(renamed.themes);
+    expect(stabilizeDesignWorkspaceSnapshot(previous, snapshot([])).themes).toEqual([]);
+  });
+
   it("retains identical catalogs but publishes changed registered IDs even without rendered frames", () => {
     const previous = { ...snapshot([]), pages: [{ id: "a", title: "A", folder: "a", frameFiles: ["a/missing.html"], frameIds: ["before"] }] };
     expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);
