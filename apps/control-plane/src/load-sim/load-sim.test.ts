@@ -1,7 +1,7 @@
 // Database-free unit tests for the load simulator's budget check, projection
 // guards, client-side cost meter and report file.
 
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -147,8 +147,12 @@ describe("writeReport", () => {
     for (const path of [first, second]) {
       expect(dirname(dirname(path))).toBe(root);
       expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
-      expect(statSync(path).mode & 0o777).toBe(0o600);
-      expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(report);
+      // Check and read the same open file, not the path twice.
+      const fd = openSync(path, "r");
+      try {
+        expect(fstatSync(fd).mode & 0o777).toBe(0o600);
+        expect(JSON.parse(readFileSync(fd, "utf8"))).toEqual(report);
+      } finally { closeSync(fd); }
     }
   }));
 
