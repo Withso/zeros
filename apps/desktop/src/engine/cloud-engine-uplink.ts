@@ -183,17 +183,27 @@ export interface EngineUplinkSocket {
   on(event: "error", listener: (error: Error) => void): void;
 }
 
+/** A pushed credential-control revision (S2 cred channel). */
+export type EngineUplinkCredentialRevision = Readonly<{ kind: "agent-controls" | "repository"; revision: number }>;
+/** The outcome the engine reports back in `cred.ack` after its exchange. */
+export type EngineUplinkCredentialAck = Readonly<{ result: "applied" | "failed"; code?: string }>;
+
 export type CloudEngineUplinkOptions = {
   endpoint: string;
   /** The heartbeat credential; the uplink authenticates with it once per connection. */
   token: string;
   identity: EngineUplinkIdentity;
   runtimeVersion: string;
-  /** Additive feature flags offered in the hello; none in the C2 slice. */
+  /** Additive feature flags offered in the hello; `cred.v1` negotiates the
+   * credential-control push. */
   features?: readonly string[];
   auth: EngineUplinkAuthSink;
   /** Current engine readiness, sent as `status.ready` once the gate opens. */
   readiness?: () => EngineUplinkReadiness;
+  /** Applies a pushed credential-control revision (runs the engine's
+   * credential exchange). Pushes coalesce to the latest revision per kind
+   * while one is in flight; the result is reported as `cred.ack`. */
+  onCredentialRevision?: (revision: EngineUplinkCredentialRevision) => Promise<EngineUplinkCredentialAck>;
   /** 4409: re-verify registration authority before the redial (S2 rule 4). */
   onReverifyAuthority?: () => void;
   /** Terminal close: the client parks and never redials (HTTP stays up). */
@@ -239,6 +249,12 @@ export class CloudEngineUplinkClient {
   private outboxSent = 0;
   private outboxAcked = 0;
   private inboundContiguous = 0;
+  /** Credential push: latest queued and latest acked-applied revision per
+   * kind. Survives reconnects — revisions are monotonic per binding, so the
+   * high-water stays valid across a lineage reset. */
+  private readonly credQueue = new Map<string, number>();
+  private readonly credApplied = new Map<string, number>();
+  private credFlight: Promise<void> | null = null;
 
   constructor(options: CloudEngineUplinkOptions) {
     this.options = options;
@@ -264,6 +280,11 @@ export class CloudEngineUplinkClient {
   }
 
   get parkReason(): EngineUplinkParkReason | null { return this.parked; }
+
+  /** True while a connection's gate is open (its first auth.capability
+   * arrived): pushed cred.revision frames flow, so the credential-control
+   * poll can back off to its slow fallback cadence. */
+  get established(): boolean { return this.connection?.gateOpen === true; }
 
   start(): void {
     if (this.started) return;
@@ -313,6 +334,46 @@ export class CloudEngineUplinkClient {
   reportReadiness(): void {
     if (!this.options.readiness) return;
     this.sendReliable("status.ready", { ...this.options.readiness() });
+  }
+
+  /** @internal A validated `cred.revision` arrived on the wire. Applies
+   * coalesce to the latest revision per kind while one is in flight, and
+   * each applied revision is acked exactly once (a re-push of an applied
+   * revision — the resync case — acks without re-running the exchange). */
+  pushCredentialRevision(revision: EngineUplinkCredentialRevision): void {
+    const handler = this.options.onCredentialRevision;
+    if (!handler) return; // nothing consumes pushes yet; the poll keeps working
+    if (revision.revision <= (this.credApplied.get(revision.kind) ?? 0)) {
+      this.sendReliable("cred.ack", { kind: revision.kind, revision: revision.revision, result: "applied" });
+      return;
+    }
+    this.credQueue.set(revision.kind, Math.max(revision.revision, this.credQueue.get(revision.kind) ?? 0));
+    this.credFlight ??= this.drainCredentialRevisions(handler)
+      .finally(() => { this.credFlight = null; });
+  }
+
+  private async drainCredentialRevisions(
+    handler: NonNullable<CloudEngineUplinkOptions["onCredentialRevision"]>,
+  ): Promise<void> {
+    for (;;) {
+      const next = this.credQueue.entries().next().value;
+      if (!next) return;
+      const [kind, revision] = next;
+      this.credQueue.delete(kind);
+      let outcome: EngineUplinkCredentialAck;
+      try {
+        outcome = await handler({ kind: kind as EngineUplinkCredentialRevision["kind"], revision });
+      } catch {
+        outcome = { result: "failed", code: "cred_fetch_failed" };
+      }
+      // A failed revision is not recorded: a later re-push retries the
+      // exchange (and the fallback poll converges regardless).
+      if (outcome.result === "applied")
+        this.credApplied.set(kind, Math.max(revision, this.credApplied.get(kind) ?? 0));
+      this.sendReliable("cred.ack", {
+        kind, revision, result: outcome.result, ...(outcome.code ? { code: outcome.code } : {}),
+      });
+    }
   }
 
   /* ---- connection-facing internals (the only dial/park/count site) ---- */
@@ -668,6 +729,14 @@ class Connection {
         return this.enqueueAuth(() => this.applyEpochs(frame.d ?? {}));
       case "auth.capability":
         return this.onCapability(frame.d ?? {});
+      case "cred.revision": {
+        const d = frame.d ?? {};
+        if ((d.kind !== "agent-controls" && d.kind !== "repository") ||
+            typeof d.revision !== "number" || !Number.isSafeInteger(d.revision) || d.revision < 1)
+          return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
+        this.uplink.pushCredentialRevision({ kind: d.kind, revision: d.revision });
+        return;
+      }
       default:
         // Unknown types on unsequenced channels are ignored; unknown
         // sequenced types are acked and ignored (the ack was scheduled).

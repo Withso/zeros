@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 import type { EngineCapabilityResult } from "../../../../control-plane/src/realtime/uplink-auth-source";
+import { UplinkCredentialPush } from "../../../../control-plane/src/realtime/uplink-cred";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "../../../../control-plane/src/realtime/uplink-authority";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "../../../../control-plane/src/realtime/uplink-presence";
 import { UPLINK_PATH } from "../../../../control-plane/src/realtime/uplink-protocol";
@@ -449,6 +450,81 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("applies pushed cred.revision coalesced, acks the applied revision, and dedupes re-pushes", async () => {
+    const applied: number[] = [];
+    let release: (() => void) | null = null;
+    const { client, sockets } = fakeClient({
+      onCredentialRevision: async ({ kind, revision }) => {
+        expect(kind).toBe("agent-controls");
+        applied.push(revision);
+        if (revision === 7) await new Promise<void>(resolve => { release = resolve; });
+        return { result: "applied" };
+      },
+    });
+    client.start();
+    await flush();
+    expect(client.established).toBe(false); // gate opens on the first capability
+    await serveHandshake(sockets[0]!);
+    expect(client.established).toBe(true);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    // While 7 is still applying, 8 and 9 arrive: they coalesce into one run.
+    sockets[0]!.frame({ t: "cred.revision", s: 2, d: { kind: "agent-controls", revision: 8 } });
+    sockets[0]!.frame({ t: "cred.revision", s: 3, d: { kind: "agent-controls", revision: 9 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(0); // nothing acked before its apply landed
+    release!();
+    await flush();
+    expect(applied).toEqual([7, 9]); // 8 was superseded mid-flight
+    expect(sockets[0]!.ofType("cred.ack")).toEqual([
+      expect.objectContaining({ s: 1, d: { kind: "agent-controls", revision: 7, result: "applied" } }),
+      expect.objectContaining({ s: 2, d: { kind: "agent-controls", revision: 9, result: "applied" } }),
+    ]);
+    // A re-push of an applied revision (resync) acks without re-applying.
+    sockets[0]!.frame({ t: "cred.revision", s: 4, d: { kind: "agent-controls", revision: 9 } });
+    await flush();
+    expect(applied).toEqual([7, 9]);
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(3);
+    client.stop();
+  });
+
+  it("acks a failed credential apply as failed with cred_fetch_failed, then applies a later push", async () => {
+    const outcomes: string[] = [];
+    let fail = true;
+    const { client, sockets } = fakeClient({
+      onCredentialRevision: async ({ revision }) => {
+        if (fail) throw new Error("exchange unavailable");
+        outcomes.push(`applied:${revision}`);
+        return { result: "applied" as const };
+      },
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")).toEqual([
+      expect.objectContaining({ d: { kind: "agent-controls", revision: 7, result: "failed", code: "cred_fetch_failed" } }),
+    ]);
+    fail = false;
+    sockets[0]!.frame({ t: "cred.revision", s: 2, d: { kind: "agent-controls", revision: 8 } });
+    await flush();
+    expect(outcomes).toEqual(["applied:8"]);
+    expect(sockets[0]!.ofType("cred.ack")[1]).toMatchObject({ d: { revision: 8, result: "applied" } });
+    client.stop();
+  });
+
+  it("closes 4400 on a malformed cred.revision", async () => {
+    const { client, sockets } = fakeClient({ onCredentialRevision: async () => ({ result: "applied" }) });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: "soon" } });
+    await flush();
+    expect(sockets[0]!.closeCalls[0]).toMatchObject({ code: 4400, reason: "frame_invalid" });
+    client.stop();
+  });
+
   it("acks in-order reliable CP frames and closes on a sequence gap, then redials", async () => {
     const { client, sockets } = fakeClient({ random: () => 0.5 });
     client.start();
@@ -642,6 +718,35 @@ describe("engine uplink client against the real control-plane server", () => {
     expect(client.state).toBe("connected");
     expect(metrics.some(([name]) => name === "engine_uplink_hello_ms")).toBe(true);
     expect(metrics.some(([name]) => name === "engine_uplink_auth_apply_ms")).toBe(true);
+  });
+
+  it("pushes credential revisions to a cred.v1 engine and receives its cred.ack", async () => {
+    let current: number | null = 7;
+    const acks: Array<Record<string, unknown>> = [];
+    let serverRef: CloudEngineUplinkServer | null = null;
+    const cred = new UplinkCredentialPush({
+      sessionFor: engineInstanceId => serverRef?.session(engineInstanceId) ?? null,
+      readRevision: async () => current,
+      onAck: (_session, ack) => { acks.push({ ...ack }); },
+    });
+    const a = await start({ extensions: [cred] });
+    serverRef = a.uplink;
+    const applied: number[] = [];
+    const client = makeClient({ endpoint: a.url, features: ["cred.v1"],
+      onCredentialRevision: async ({ revision }) => { applied.push(revision); return { result: "applied" }; } });
+    client.start();
+    // The resync push follows the gate; the engine applies and acks it.
+    await until(() => applied.length === 1 && acks.length === 1);
+    expect(applied).toEqual([7]);
+    expect(acks[0]).toMatchObject({ kind: "agent-controls", revision: 7, result: "applied" });
+    // A committed mutation notifies; the owning instance pushes the bump.
+    current = 8;
+    cred.revisionChanged(identity.engineInstanceId, 8);
+    await until(() => applied.length === 2 && acks.length === 2);
+    expect(applied).toEqual([7, 8]);
+    expect(acks[1]).toMatchObject({ kind: "agent-controls", revision: 8, result: "applied" });
+    // An engine without the feature is left to its poll (negotiation).
+    expect(client.established).toBe(true);
   });
 
   it("resumes after an unannounced loss and offers the applied auth cursor", async () => {
