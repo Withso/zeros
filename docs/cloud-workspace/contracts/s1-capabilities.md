@@ -1,6 +1,6 @@
 # S1. Capabilities and revocation
 
-Status: **FROZEN** · Contract ID `zeros-cap` · Version `1.0.0` ·
+Status: **FROZEN** · Contract ID `zeros-cap` · Version `1.0.1` ·
 Schema: [Draft schema: capability header and claims](#draft-schema-capability-header-and-claims)
 
 Draft 3 (freeze review): one verifier library (`jose`) and an explicit header
@@ -10,6 +10,12 @@ and merge rules for epoch snapshots; exact PoP encoding; pushed renewals are
 signed by `api` on request from `realtime`; an engine-token REST fallback
 while the uplink is down; a 60 s recovery renewal window. Frozen as 1.0.0 on
 2026-10-16 with no further changes.
+
+Changelog: **1.0.1** (editorial, no wire change) — the "under 1 KiB" size
+budget is reworded to "about 1 KiB": a maximal v1 client token (five epochs,
+four scopes, `ein`, `cnf`) measures 1026 bytes with a 23-character issuer, so
+the budget is guidance and the enforced bound is the 4 KiB ceiling of
+verification step 1, which issuers also apply before emitting a token.
 
 This contract defines the signed, workspace-scoped capability that replaces
 per-request authority SQL, actor-confirm renewals, client-authority renewals
@@ -102,7 +108,9 @@ that merely contains the expected value.
 | `jti` | string (22 base64url chars, 128 bits) | yes | Unique token ID for audit and replay accounting. |
 | `cv` | integer `1` | yes | Contract major version. |
 
-Size budget: under 1 KiB encoded. Tokens are never logged; only `jti`, `kid`,
+Size budget: about 1 KiB encoded. Issuers and verifiers enforce the 4 KiB
+bound of verification step 1; the budget keeps room for a longer issuer
+origin inside it. Tokens are never logged; only `jti`, `kid`,
 `sub` and `wsp` may appear in logs.
 
 ### Scopes
