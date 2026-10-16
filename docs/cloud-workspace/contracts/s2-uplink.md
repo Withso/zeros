@@ -320,7 +320,7 @@ review aid until freeze; the frozen source of truth will be Zod in
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://zeros.dev/schemas/cloud-contracts/s2-uplink-frames.schema.json",
   "title": "Zeros VM uplink (S2) text frames",
-  "description": "DRAFT 1.0.0-draft.1. Review sketch of uplink JSON text frames. Binary relay chunks are specified in s2-uplink.md. Receivers ignore unknown payload fields; frame types outside this list are handled by the unknown-type rule in s2-uplink.md.",
+  "description": "DRAFT 1.0.0-draft.2. Review sketch of uplink JSON text frames. Binary relay chunks are specified in s2-uplink.md. Receivers ignore unknown payload fields; frame types outside this list are handled by the unknown-type rule in s2-uplink.md.",
   "oneOf": [
     { "$ref": "#/$defs/sys.hello" },
     { "$ref": "#/$defs/sys.welcome" },

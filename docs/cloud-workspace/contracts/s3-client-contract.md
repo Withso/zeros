@@ -184,7 +184,7 @@ does not replace `/v1/auth/events` in v1.
 A client opens the runtime connection to one of the routes from
 `runtime/connect`. Authentication is a **pre-protocol handshake**, not a
 `BaseMessage` of the engine protocol
-(`packages/protocol/src/messages.ts:52`): the client offers subprotocol
+(`packages/protocol/src/messages.ts:221`): the client offers subprotocol
 `zeros-cap.v1` in `Sec-WebSocket-Protocol`, and a server that speaks this
 contract selects it (the engine's `handleProtocols` hook,
 `apps/desktop/src/engine/transport/cloud.ts:506-507`, picks from the offered
@@ -1315,7 +1315,7 @@ is a review aid until freeze; the frozen source of truth will be Zod in
       "required": ["timestampMs", "nonce", "signature"],
       "properties": {
         "timestampMs": { "$ref": "#/$defs/timestampMs" },
-        "nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{32}$" },
+        "nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{22}$" },
         "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" }
       },
       "additionalProperties": false
@@ -1406,7 +1406,7 @@ is a review aid until freeze; the frozen source of truth will be Zod in
       "t": "auth",
       "d": {
         "capability": "aaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccccccc",
-        "proof": { "timestampMs": 1760000000000, "nonce": "0123456789abcdef0123456789abcdef", "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+        "proof": { "timestampMs": 1760000000000, "nonce": "0123456789abcdef012345", "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
         "clientSessionId": "55555555-5555-4555-8555-555555555555",
         "contract": 1
       }

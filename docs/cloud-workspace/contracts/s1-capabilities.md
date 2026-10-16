@@ -458,7 +458,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://zeros.dev/schemas/cloud-contracts/s1-capability-claims.schema.json",
   "title": "Zeros capability (S1) protected header and claims",
-  "description": "DRAFT 1.0.0-draft.1. Review sketch; the frozen source of truth will be Zod in packages/protocol.",
+  "description": "DRAFT 1.0.0-draft.2. Review sketch; the frozen source of truth will be Zod in packages/protocol.",
   "type": "object",
   "required": ["header", "claims"],
   "additionalProperties": false,
