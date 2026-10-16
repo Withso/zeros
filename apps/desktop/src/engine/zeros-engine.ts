@@ -3681,6 +3681,9 @@ export class ZerosEngine {
       onReverifyAuthority: () => registration.requestHeartbeatSoon(),
       onParked: reason =>
         console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`),
+      // No engine metrics pipeline exists yet; the durations are per-connect
+      // and per-sync rarities, so the uplink log channel carries them.
+      metric: (name, valueMs) => console.info(`[engine-uplink] metric ${name}=${Math.round(valueMs)}ms`),
     });
     this.cloudEngineUplink = uplink;
     uplink.start();
