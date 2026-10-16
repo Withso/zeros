@@ -317,7 +317,10 @@ describe("engine uplink server", () => {
     await until(() => chunks.length === 2);
     expect(chunks[1]).toMatchObject({ final: true, binary: true });
     peer.ws.send(chunk(8, "orphan"));
-    expect(await peer.next("sys.error")).toMatchObject({ d: { code: "relay_channel_unknown", channel: 8 } });
+    // The frozen sys.error payload is { code, message, fatal }; `channel` is
+    // an additive hint receivers may ignore.
+    expect(await peer.next("sys.error")).toMatchObject({ d: {
+      code: "relay_channel_unknown", message: expect.any(String), fatal: false, channel: 8 } });
     expect(peer.ws.readyState).toBe(WebSocket.OPEN);
   });
 

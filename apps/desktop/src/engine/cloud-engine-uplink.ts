@@ -592,7 +592,10 @@ class Connection {
       // Relay channels arrive with C4; no channel can exist yet. The
       // contract's non-fatal answer is sys.error relay_channel_unknown.
       if (data.byteLength >= 8 && data[0] === 0x01)
-        this.send({ t: "sys.error", d: { code: "relay_channel_unknown", channel: data.readUInt32BE(4) } });
+        this.send({ t: "sys.error", d: {
+          code: "relay_channel_unknown", message: "no relay channel exists for this chunk",
+          fatal: false, channel: data.readUInt32BE(4),
+        } });
       return;
     }
     if (data.byteLength > MAX_CONTROL_FRAME_BYTES) return this.initiateClose(CLOSE.frameInvalid, "frame_too_large");

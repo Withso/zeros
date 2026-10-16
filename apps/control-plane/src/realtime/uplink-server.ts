@@ -483,7 +483,10 @@ class UplinkConnection {
         if (extension.onRelayChunk(this.session, chunk)) return;
       } catch { return this.invalid("frame_invalid"); }
     }
-    this.send({ t: "sys.error", d: { code: "relay_channel_unknown", channel: chunk.channel } });
+    this.send({ t: "sys.error", d: {
+      code: "relay_channel_unknown", message: "no negotiated extension claims this relay channel",
+      fatal: false, channel: chunk.channel,
+    } });
   }
 
   private reliable(t: string, d: Record<string, unknown>): "ok" | "invalid" {

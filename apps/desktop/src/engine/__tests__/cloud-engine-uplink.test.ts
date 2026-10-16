@@ -326,7 +326,10 @@ describe("engine uplink client (socket level)", () => {
     const chunk = Buffer.concat([Buffer.from([0x01, 0x01, 0, 0, 0, 0, 0, 7]), Buffer.from("payload")]);
     sockets[0]!.binary(chunk);
     await flush();
-    expect(sockets[0]!.ofType("sys.error")[0]!.d).toMatchObject({ code: "relay_channel_unknown", channel: 7 });
+    // The frozen sys.error payload is { code, message, fatal }; `channel` is
+    // an additive hint receivers may ignore.
+    expect(sockets[0]!.ofType("sys.error")[0]!.d).toMatchObject({
+      code: "relay_channel_unknown", message: expect.any(String), fatal: false, channel: 7 });
     expect(sockets[0]!.closeCalls).toHaveLength(0);
     client.stop();
   });
