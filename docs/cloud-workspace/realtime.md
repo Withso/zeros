@@ -131,6 +131,43 @@ authority supplies keys, epochs and engine tokens
 - **Lease.** The HTTP heartbeat still owns the engine lease in this release;
   the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
 
+## Engine uplink client
+
+`apps/desktop/src/engine/cloud-engine-uplink.ts` is the engine side of S2.
+Only a cloud engine constructs it, and only when the control plane
+advertised an endpoint: registration sends the opt-in header
+`x-zeros-cloud-engine-uplink: 1`, and the registration and
+runtime-registration responses carry `uplink: { endpoint }` only for an
+opted-in engine whose organization's `realtime_uplink` flag is on
+(`internal-routes.ts`; the endpoint comes from `CLOUD_WORKSPACE_REALTIME_URL`,
+a credential-free `https`/`wss` origin normalized to `wss://…/v1/uplink`).
+The response body stays byte-compatible for older engines and older control
+planes in both directions. Local placements never dial: without a cloud
+registration there is no uplink client at all.
+
+- **Lifecycle.** The client starts after durable registration
+  (`zeros-engine.ts`) with the heartbeat credential as its bearer token and
+  stops before the registration stops. `sys.hello` offers the applied
+  `authCursor` and, after an unclean loss, the resume token with the
+  acknowledged sequence; a `resumed: false` welcome starts a fresh lineage
+  and feature modules resync instead.
+- **Reconnects.** Every loss that is not terminal redials with full-jitter
+  backoff (250 ms base doubling to a 30 s cap, floored at 100 ms so a zero
+  jitter draw never spins, reset after 60 s connected). Terminal closes park
+  the client without redialing: `4401`/`4403` (credential or identity
+  definitively rejected), `4404` (rollout flag off), `4426` (no common
+  protocol). `4409` (superseded) first re-verifies registration authority
+  through an immediate heartbeat, then redials fresh.
+- **Drain.** On `sys.drain` the engine dials a replacement — offering the
+  live connection's resume token — before the old uplink's deadline, keeps
+  the old one until the replacement is welcomed, and retries a refused or
+  lost replacement while the drained uplink is still open.
+- **Auth.** `auth.keys`/`auth.sync`/`auth.epochs` drive the frozen S1
+  application points on an in-memory state (maximum-merge epochs, unioned
+  revocations, latest capability); the shared verifier (track B) binds
+  signature checks to that state. `engine_uplink_hello_ms` and
+  `engine_uplink_auth_apply_ms` are recorded per connect.
+
 ## Railway configuration (planned)
 
 This repository does not create or change Railway services. The realtime

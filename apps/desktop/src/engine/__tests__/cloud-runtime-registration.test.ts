@@ -1549,3 +1549,69 @@ it.each(["manual", "before_fork"] as const)("keeps %s outside final-only control
     expect(onCheckpointRequested).not.toHaveBeenCalled(); expect(sync).toHaveBeenCalledTimes(2);
   } finally { await registration.stop(); }
 });
+
+describe("engine uplink advertisement", () => {
+  const advertised = { uplink: { endpoint: "wss://realtime.example.test/v1/uplink" } };
+
+  function fixture(responseOverrides: Record<string, unknown> = {}) {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const response = { ...registrationResponse(), ...responseOverrides };
+    const fetcher = vi.fn<typeof fetch>(async url => new URL(String(url)).pathname.endsWith("/register")
+      ? Response.json(response)
+      : Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+          engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: NOW + 90_000 }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    return { registration, fetcher, runtime };
+  }
+
+  it("opts in with the uplink header on the registration POST", async () => {
+    const f = fixture();
+    await f.registration.start();
+    expect(f.fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({ "x-zeros-cloud-engine-uplink": "1" });
+    await f.registration.stop();
+  });
+
+  it("exposes the advertised endpoint with the heartbeat credential until stop", async () => {
+    const f = fixture(advertised);
+    await f.registration.start();
+    expect(f.registration.engineUplink()).toEqual({
+      endpoint: "wss://realtime.example.test/v1/uplink", token: `zwh_${"H".repeat(43)}`,
+    });
+    await f.registration.stop();
+    expect(f.registration.engineUplink()).toBeNull();
+  });
+
+  it("keeps working without the advertisement (older control plane or flag off)", async () => {
+    const f = fixture();
+    await f.registration.start();
+    expect(f.registration.engineUplink()).toBeNull();
+    expect(f.registration.readiness()).not.toBeNull();
+    await f.registration.stop();
+  });
+
+  it.each([
+    ["an https endpoint", { uplink: { endpoint: "https://realtime.example.test/v1/uplink" } }],
+    ["a credential-bearing endpoint", { uplink: { endpoint: "wss://u:p@realtime.example.test/v1/uplink" } }],
+    ["an endpoint with a query", { uplink: { endpoint: "wss://realtime.example.test/v1/uplink?x=1" } }],
+    ["extra uplink keys", { uplink: { endpoint: "wss://realtime.example.test/v1/uplink", token: "x" } }],
+    ["an unknown top-level member", { ...advertised, surprise: true }],
+  ])("rejects the registration document with %s", async (_label, overrides) => {
+    const f = fixture(overrides);
+    await expect(f.registration.start()).rejects.toThrow("registration");
+    await f.registration.stop();
+  });
+
+  it("requestHeartbeatSoon schedules an immediate beat on the heartbeat endpoint", async () => {
+    const f = fixture(advertised);
+    await f.registration.start();
+    expect(f.fetcher).toHaveBeenCalledTimes(1);
+    f.registration.requestHeartbeatSoon();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(String(f.fetcher.mock.calls[1]?.[0])).toBe(heartbeatEndpoint);
+    await f.registration.stop();
+  });
+});
