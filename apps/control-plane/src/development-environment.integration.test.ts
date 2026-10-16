@@ -13,7 +13,64 @@ import { DatabaseProMonthlyAllowance, readProComputeUsage } from "./cloud-worksp
 const url = process.env.TEST_DATABASE_URL;
 const database = url ? describe : describe.skip;
 
+// pg-pool resolves end() as soon as a client leaves its list, before the
+// client socket finishes closing (pg-pool _remove filters _clients
+// synchronously; client.end's socket 'end' arrives later). A
+// DROP DATABASE ... WITH (FORCE) issued in that window terminates a backend
+// whose half-closed client then raises a late 'error' — an unhandled error on
+// a listenerless pool. End owned pools first, then wait until the server
+// reports no remaining backends on the database before dropping it.
+async function dropOwnedDatabase(cluster: pg.Pool, databaseName: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const { rows } = await cluster.query(
+      "SELECT count(*)::int AS backends FROM pg_stat_activity WHERE datname = $1", [databaseName]);
+    if (rows[0].backends === 0 || Date.now() > deadline) break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  await cluster.query(`DROP DATABASE ${pg.escapeIdentifier(databaseName)} WITH (FORCE)`);
+}
+
 database("hosted Dev database ownership", () => {
+  it("ends a pool and force-drops its database without a late client error", async () => {
+    // Regression for the CI "Unhandled Errors" 57P01 teardown flake: pg-pool
+    // resolves end() before the client socket closes, so a FORCE drop in that
+    // window terminated a backend whose half-closed client then raised a late,
+    // unhandled pool error. SIGSTOP holds the backend across end() so the
+    // window is deterministic instead of a scheduler race.
+    const cluster = new pg.Pool({ connectionString: url, max: 1 });
+    const databaseName = `zeros_dev_teardown_${randomBytes(6).toString("hex")}`;
+    let backendPid: number | undefined;
+    try {
+      await cluster.query(`CREATE DATABASE ${pg.escapeIdentifier(databaseName)} TEMPLATE template0`);
+      const target = new URL(url!); target.pathname = `/${databaseName}`;
+      const pool = new pg.Pool({ connectionString: target.toString(), max: 1 });
+      const lateErrors: unknown[] = [];
+      pool.on("error", err => lateErrors.push(err));
+      backendPid = (await pool.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      process.kill(backendPid, "SIGSTOP");
+      try {
+        // end() resolves while the stopped backend still holds the socket open.
+        await pool.end();
+        const drop = dropOwnedDatabase(cluster, databaseName);
+        await new Promise(resolve => setTimeout(resolve, 200));
+        process.kill(backendPid, "SIGCONT");
+        backendPid = undefined;
+        await drop;
+        // Give any late socket delivery a chance to reach the client.
+        await new Promise(resolve => setTimeout(resolve, 200));
+        expect(lateErrors).toEqual([]);
+      } finally {
+        if (backendPid !== undefined) {
+          try { process.kill(backendPid, "SIGCONT"); } catch { /* already gone */ }
+        }
+      }
+    } finally {
+      await cluster.query(`DROP DATABASE IF EXISTS ${pg.escapeIdentifier(databaseName)} WITH (FORCE)`);
+      await cluster.end();
+    }
+  }, 60_000);
+
   it("migrates with the marker present and confines the runtime to its own readonly generation marker", async () => {
     const cluster = new pg.Pool({ connectionString: url, max: 1 });
     const suffix = randomBytes(6).toString("hex");
@@ -87,10 +144,13 @@ database("hosted Dev database ownership", () => {
       await expect(seedHostedFixture(input)).rejects.toThrow(/conflicts/);
       expect((await cluster.query(baselineSql)).rows).toEqual(baseline);
     } finally {
+      // pg-pool resolves end() before these clients' sockets finish closing;
+      // dropOwnedDatabase waits out the half-closed backends so the FORCE drop
+      // cannot deliver 57P01 to one of them as a late unhandled pool error.
       await runtime?.end();
       await admin.end();
       try {
-        if (databaseCreated) await cluster.query(`DROP DATABASE ${pg.escapeIdentifier(databaseName)} WITH (FORCE)`);
+        if (databaseCreated) await dropOwnedDatabase(cluster, databaseName);
       } finally {
         try { if (roleCreated) await cluster.query(`DROP ROLE ${role}`); }
         finally { await cluster.end(); }
