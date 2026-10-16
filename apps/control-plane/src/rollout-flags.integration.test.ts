@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPool, withSystemTx, withUserTx } from "./db.js";
-import { manageCloudRolloutFlag, type CloudRolloutFlagChange } from "./manage-cloud-rollout-flag.js";
+import { manageCloudRolloutFlag, RolloutFlagManagementError, type CloudRolloutFlagChange } from "./manage-cloud-rollout-flag.js";
 import { RolloutFlagSnapshot } from "./rollout-flags.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
 
@@ -72,7 +72,10 @@ d("per-organization rollout flags with PostgreSQL", () => {
   });
 
   it("refuses unknown flags, the wrong channel, the wrong organization, personal organizations and non-owners", async () => {
+    // Curated failures carry operator-safe messages the CLI prints verbatim.
     await expect(manageCloudRolloutFlag(pool, { ...input, flag: "not_a_flag" }, options())).rejects.toThrow(/invalid/);
+    await manageCloudRolloutFlag(pool, { ...input, flag: "not_a_flag" }, options())
+      .catch((error: unknown) => expect(error).toBeInstanceOf(RolloutFlagManagementError));
     await expect(manageCloudRolloutFlag(pool, input, { ...options(), channel: "alpha" })).rejects.toThrow(/channel/);
     await expect(manageCloudRolloutFlag(pool, { ...input, expectedOrgSlug: "other" }, options())).rejects.toThrow(/expected organization/);
     const personal = randomUUID();
@@ -80,6 +83,54 @@ d("per-organization rollout flags with PostgreSQL", () => {
     await expect(manageCloudRolloutFlag(pool, { ...input, orgId: personal, expectedOrgSlug: `personal-${personal.slice(0, 8)}` }, options())).rejects.toThrow(/collaborative/);
     await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [actor]);
     await expect(manageCloudRolloutFlag(pool, input, options())).rejects.toThrow(/platform owner/);
+  });
+
+  it("refuses a no-op change instead of writing a receipt (review NIT-7)", async () => {
+    await execute();
+    await expect(manageCloudRolloutFlag(pool, { ...input, operationId: randomUUID() }, options()))
+      .rejects.toThrow(/already/);
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_rollout_flag_changes")).rows[0].n).toBe(1);
+    expect((await pool.query("SELECT revision::int AS r FROM cloud_rollout_flags")).rows[0].r).toBe(1);
+  });
+
+  it("canonicalizes uuid casing so a replayed document is the same change (review NIT-8)", async () => {
+    const upper = { ...input, orgId: input.orgId.toUpperCase(), actorUserId: input.actorUserId.toUpperCase() };
+    const plan = await manageCloudRolloutFlag(pool, upper, options());
+    const done = await manageCloudRolloutFlag(pool, upper, { ...options(), execute: true, approval: plan.planSha256 });
+    expect(done.state).toBe("changed");
+    // The same operation with canonical casing is a replay, not a conflict.
+    expect((await manageCloudRolloutFlag(pool, input, options())).state).toBe("committed");
+    expect((await pool.query("SELECT org_id::text AS o FROM cloud_rollout_flags")).rows[0].o).toBe(org);
+  });
+
+  it("refuses organizations that are not active or not cloud-enabled (review NIT-9)", async () => {
+    await pool.query("UPDATE organizations SET cloud_workspaces_allowed=false WHERE id=$1", [org]);
+    await expect(manageCloudRolloutFlag(pool, input, options())).rejects.toThrow(/cloud/);
+    await pool.query("UPDATE organizations SET cloud_workspaces_allowed=true, lifecycle_status='purging' WHERE id=$1", [org]);
+    await expect(manageCloudRolloutFlag(pool, input, options())).rejects.toThrow(/cloud|active/);
+  });
+
+  it("requires production confirmation and refuses a Railway channel mismatch (review SHOULD-4)", async () => {
+    const production = { ...input, channel: "production" as const };
+    const optionsProduction = { databaseUrl: url!, channel: "production" };
+    // Planning is safe; executing requires the confirmation variable.
+    const plan = await manageCloudRolloutFlag(pool, production, optionsProduction);
+    expect(plan.state).toBe("planned");
+    await expect(manageCloudRolloutFlag(pool, production, { ...optionsProduction, execute: true, approval: plan.planSha256 }))
+      .rejects.toThrow(/PRODUCTION_CONFIRMED/);
+    await expect(manageCloudRolloutFlag(pool, production, {
+      ...optionsProduction, execute: true, approval: plan.planSha256, productionConfirmed: "true",
+      railwayEnvironmentName: "staging",
+    })).rejects.toThrow(/RAILWAY_ENVIRONMENT_NAME/);
+    const done = await manageCloudRolloutFlag(pool, production, {
+      ...optionsProduction, execute: true, approval: plan.planSha256, productionConfirmed: "true",
+      railwayEnvironmentName: "Production ",
+    });
+    expect(done.state).toBe("changed");
+    // Channel casing and whitespace are normalized before comparison.
+    const again = { ...input, operationId: randomUUID(), enabled: false };
+    const second = await manageCloudRolloutFlag(pool, { ...again, channel: "production" }, { databaseUrl: url!, channel: " Production" });
+    expect(second.state).toBe("planned");
   });
 
   it("delivers changes to the in-memory snapshot by NOTIFY and drops a deleted organization", async () => {

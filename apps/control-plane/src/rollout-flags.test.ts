@@ -21,6 +21,8 @@ function harness(initial: Array<{ org_id: string; flag: string }> = []) {
   const logger = { warn: vi.fn(), info: vi.fn() };
   const snapshot = new RolloutFlagSnapshot({
     load, logger, refreshMs: 3_600_000,
+    // Test-fast knobs; production defaults are 1–30 s backoff and 2 s staleness.
+    retryDelaysMs: [20, 40, 80], hintedReloadStaleMs: 25,
     subscribe: value => { handlers = value; return subscription; },
   });
   return {
@@ -134,5 +136,108 @@ describe("rollout flag snapshot", () => {
     expect(snapshot.enabled(rows[2]!.org_id, "capabilities")).toBe(false);
     expect(logger.warn).toHaveBeenCalledOnce();
     await snapshot.stop();
+  });
+
+  it("reads the same flag for any org id casing (review SHOULD-3)", async () => {
+    const letters = "aaaaaaaa-1111-4111-8111-111111111111";
+    const h = harness([{ org_id: letters, flag: "capabilities" }]);
+    await h.snapshot.start();
+    expect(h.snapshot.enabled(letters.toUpperCase(), "capabilities")).toBe(true);
+    expect(h.snapshot.enabled(letters, "capabilities")).toBe(true);
+    await h.snapshot.stop();
+  });
+
+  it("retries a failed reload with backoff instead of waiting for the safety refresh (review SHOULD-1)", async () => {
+    const h = harness([{ org_id: ORG, flag: "authority_cache_enforce" }]);
+    await h.snapshot.start();
+    h.handlers.onReady();
+    await vi.waitFor(() => expect(h.snapshot.enabled(ORG, "authority_cache_enforce")).toBe(true));
+    // Record the current mark at every emission: the failed reload drops it
+    // and the backoff retry, not the 60 s safety refresh, restores it.
+    const seen: boolean[] = [];
+    h.snapshot.onChange(() => seen.push(h.snapshot.feedCurrent()));
+    h.load.mockRejectedValueOnce(new Error("pool saturated"));
+    h.handlers.onNotification();
+    const calls = h.load.mock.calls.length;
+    await vi.waitFor(() => {
+      expect(h.load.mock.calls.length).toBeGreaterThan(calls);
+      expect(h.snapshot.enabled(ORG, "authority_cache_enforce")).toBe(true);
+    }, { timeout: 2_000 });
+    expect(seen).toContain(false);
+    expect(seen[seen.length - 1]).toBe(true);
+    await h.snapshot.stop();
+  });
+
+  it("drops the current mark when a hinted reload stays pending (review SHOULD-2)", async () => {
+    const h = harness([{ org_id: ORG, flag: "authority_cache_enforce" }, { org_id: ORG, flag: "capabilities" }]);
+    await h.snapshot.start();
+    h.handlers.onReady();
+    await vi.waitFor(() => expect(h.snapshot.enabled(ORG, "authority_cache_enforce")).toBe(true));
+    h.hold();
+    const pending = h.snapshot.reload();
+    await vi.waitFor(() => expect(h.load).toHaveBeenCalledTimes(3));
+    h.handlers.onNotification();
+    // The disable hint is still waiting on a hung load past the stale
+    // deadline: relaxing flags drop off, retained flags keep their value.
+    await vi.waitFor(() => expect(h.snapshot.feedCurrent()).toBe(false), { timeout: 2_000 });
+    expect(h.snapshot.enabled(ORG, "authority_cache_enforce")).toBe(false);
+    expect(h.snapshot.enabled(ORG, "capabilities")).toBe(true);
+    h.release();
+    await vi.waitFor(() => expect(h.load).toHaveBeenCalledTimes(4));
+    h.release();
+    await pending;
+    expect(h.snapshot.enabled(ORG, "authority_cache_enforce")).toBe(true);
+    await h.snapshot.stop();
+  });
+
+  it("never applies a read that a hint invalidated while it ran", async () => {
+    const h = harness([]); // the flag is off; the hung read will capture an enable
+    await h.snapshot.start();
+    h.handlers.onReady();
+    await vi.waitFor(() => expect(h.snapshot.feedCurrent()).toBe(true));
+    h.rows = [{ org_id: ORG, flag: "capabilities" }];
+    h.hold();
+    const pending = h.snapshot.reload(); // this read sees the enable…
+    await vi.waitFor(() => expect(h.load).toHaveBeenCalledTimes(3));
+    h.rows = []; // …but the disable commits while it is in flight
+    h.handlers.onNotification();
+    h.release();
+    // The pre-hint read is discarded instead of applied: the flag never
+    // flips on. The follow-up load (still manual) reads the disable.
+    await vi.waitFor(() => expect(h.load).toHaveBeenCalledTimes(4));
+    expect(h.snapshot.enabled(ORG, "capabilities")).toBe(false);
+    h.release();
+    await pending;
+    expect(h.snapshot.enabled(ORG, "capabilities")).toBe(false);
+    await h.snapshot.stop();
+  });
+
+  it("does not count unknown flag names against the row bound (review NIT-5)", async () => {
+    const rows = [
+      { org_id: "00000000-0000-4000-8000-000000000001", flag: "zz_future" },
+      { org_id: "00000000-0000-4000-8000-000000000002", flag: "zz_future" },
+      { org_id: ORG, flag: "capabilities" },
+    ];
+    const logger = { warn: vi.fn(), info: vi.fn() };
+    const load = vi.fn(async () => rows);
+    const snapshot = new RolloutFlagSnapshot({
+      load, logger, maxRows: 2,
+      subscribe: () => ({ start: async () => {}, healthy: () => true, stop: async () => {} }),
+    });
+    await snapshot.start();
+    expect(snapshot.enabled(ORG, "capabilities")).toBe(true);
+    expect(logger.warn).not.toHaveBeenCalled();
+    await snapshot.stop();
+  });
+
+  it("reads all-off after stop, including retained flags (review NIT-11)", async () => {
+    const h = harness([{ org_id: ORG, flag: "capabilities" }, { org_id: ORG, flag: "authority_cache_enforce" }]);
+    await h.snapshot.start();
+    h.handlers.onReady();
+    await vi.waitFor(() => expect(h.snapshot.enabled(ORG, "authority_cache_enforce")).toBe(true));
+    await h.snapshot.stop();
+    expect(h.snapshot.enabled(ORG, "capabilities")).toBe(false);
+    expect(h.snapshot.enabled(ORG, "authority_cache_enforce")).toBe(false);
+    expect(h.snapshot.feedCurrent()).toBe(false);
   });
 });

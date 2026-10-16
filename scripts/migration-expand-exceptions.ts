@@ -10,6 +10,10 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
     "enrollment-trigger": ["cloud_engine_runtime_binding", "cloud_engine_current_setup_fence"].map(trigger =>
       `DROP TRIGGER ${trigger} ON cloud_workspace_engine_instances;`),
   },
+  // 0004's default privileges grant zeros_app writes on every new table.
+  "0153_cloud_capability_keys.sql": {
+    "new-table-privileges": ["REVOKE ALL ON cloud_capability_signing_keys FROM PUBLIC, zeros_app;"],
+  },
   "0145_cloud_computer_named_snapshots.sql": {},
   "0146_cloud_provider_snapshot_recovery.sql": {},
   "0149_cloud_rollout_flags.sql": {

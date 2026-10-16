@@ -38,9 +38,11 @@ export function isRolloutFlagName(value: unknown): value is RolloutFlagName {
 export interface RolloutFlagReader {
   /** Memory only; never touches the database. */
   enabled(orgId: string, flag: RolloutFlagName): boolean;
+  /** Memory only; true when any organization has the flag on. */
+  anyEnabled(flag: RolloutFlagName): boolean;
 }
 
-export const ROLLOUT_FLAGS_OFF: RolloutFlagReader = Object.freeze({ enabled: () => false });
+export const ROLLOUT_FLAGS_OFF: RolloutFlagReader = Object.freeze({ enabled: () => false, anyEnabled: () => false });
 
 type Row = { org_id: string; flag: string };
 type Subscribe = (handlers: {
@@ -58,12 +60,20 @@ export type RolloutFlagSnapshotOptions = {
   refreshMs?: number;
   maxRows?: number;
   logger?: Pick<Console, "warn" | "info">;
+  /** Backoff schedule for retrying a failed reload; each entry is capped
+   * below `refreshMs`. Defaults to 1, 2, 4, 8, 15 and 30 s. */
+  retryDelaysMs?: readonly number[];
+  /** A reload that a hint is waiting on marks the snapshot not current after
+   * this long, so a hung read cannot keep a relaxing flag on. Default 2 s. */
+  hintedReloadStaleMs?: number;
   load?: (limit: number) => Promise<readonly Row[]>;
   subscribe?: Subscribe;
 };
 
 const DEFAULT_REFRESH_MS = 60_000;
 const DEFAULT_MAX_ROWS = 10_000;
+const DEFAULT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
+const DEFAULT_HINTED_RELOAD_STALE_MS = 2_000;
 
 /** In-process snapshot of enabled flags. Reloads the whole (small) table on
  * every NOTIFY hint, on every LISTEN (re)connect and on a slow timer. A
@@ -78,9 +88,14 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
   private again = false;
   private stopped = false;
   private timer: NodeJS.Timeout | undefined;
+  private retryTimer: NodeJS.Timeout | undefined;
+  private retryAttempt = 0;
+  private staleTimer: NodeJS.Timeout | undefined;
   private subscription: PostgresNotificationSubscription | undefined;
   private readonly listeners = new Set<() => void>();
   private readonly refreshMs: number;
+  private readonly retryDelaysMs: readonly number[];
+  private readonly hintedReloadStaleMs: number;
   private readonly maxRows: number;
   private readonly logger: Pick<Console, "warn" | "info">;
   private readonly load: (limit: number) => Promise<readonly Row[]>;
@@ -90,11 +105,18 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
     this.refreshMs = options.refreshMs ?? DEFAULT_REFRESH_MS;
     this.maxRows = options.maxRows ?? DEFAULT_MAX_ROWS;
     this.logger = options.logger ?? console;
+    this.retryDelaysMs = (options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS)
+      .map(delay => Math.max(1, Math.min(delay, Math.floor(this.refreshMs / 2))));
+    this.hintedReloadStaleMs = options.hintedReloadStaleMs ?? DEFAULT_HINTED_RELOAD_STALE_MS;
     const pool = options.pool;
     this.load = options.load ?? (async limit => {
       if (!pool) throw new Error("rollout_flag_pool_missing");
+      // Unknown names are filtered in SQL so rows written by a newer branch
+      // cannot consume this process's row bound.
+      const known = SqlFragment.list(Object.keys(ROLLOUT_FLAGS).map(name => SqlFragment.text(name, /^[a-z][a-z0-9_]{0,62}$/)));
       return (await withSystemStatement<Row>(pool, sql`SELECT org_id::text AS org_id, flag
-        FROM cloud_rollout_flags WHERE enabled ORDER BY org_id, flag LIMIT ${SqlFragment.integer(limit, 1, 1_000_000)}`)).rows;
+        FROM cloud_rollout_flags WHERE enabled AND flag IN (${known})
+        ORDER BY org_id, flag LIMIT ${SqlFragment.integer(limit, 1, 1_000_000)}`)).rows;
     });
     const listenerPool = options.listenerPool;
     this.subscribe = options.subscribe ?? (handlers => {
@@ -127,8 +149,13 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
     this.stopped = true;
     clearInterval(this.timer);
     this.timer = undefined;
+    clearTimeout(this.retryTimer);
+    clearTimeout(this.staleTimer);
+    this.retryTimer = this.staleTimer = undefined;
     this.listening = false;
     this.setCurrent(false);
+    // A stopped snapshot reads exactly like ROLLOUT_FLAGS_OFF, retain or not.
+    this.values = new Map();
     await this.subscription?.stop();
     await this.reloading;
   }
@@ -137,12 +164,24 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
     const definition: RolloutFlagDefinition | undefined = ROLLOUT_FLAGS[flag];
     if (!definition) return false;
     if (!this.current && definition.whileFeedUnavailable === "off") return false;
-    return this.values.get(orgId)?.has(flag) ?? false;
+    // Rows are keyed by the canonical lowercase uuid text; callers may carry
+    // the id from a route parameter or claim in another casing.
+    return this.values.get(orgId.toLowerCase())?.has(flag) ?? false;
   }
 
   /** True when the snapshot was loaded after the current LISTEN session
    * started, so every later change will arrive as a hint. */
   feedCurrent(): boolean { return this.current; }
+
+  /** True when any organization has the flag on. Process-level mount gates
+   * use this; per-organization admission still checks `enabled(orgId, …)`. */
+  anyEnabled(flag: RolloutFlagName): boolean {
+    const definition: RolloutFlagDefinition | undefined = ROLLOUT_FLAGS[flag];
+    if (!definition) return false;
+    if (!this.current && definition.whileFeedUnavailable === "off") return false;
+    for (const flags of this.values.values()) if (flags.has(flag)) return true;
+    return false;
+  }
 
   /** Called after any change to what `enabled` may return. */
   onChange(listener: () => void): () => void {
@@ -152,9 +191,36 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
 
   reload(): Promise<void> {
     if (this.stopped) return Promise.resolve();
-    if (this.reloading) { this.again = true; return this.reloading; }
-    this.reloading = this.run().finally(() => { this.reloading = undefined; });
+    if (this.reloading) {
+      this.again = true;
+      // A change hint is waiting on a read that has not finished. If the read
+      // outlives the staleness deadline, drop the current mark so a relaxing
+      // flag (authority_cache_enforce) cannot stay on for the whole query
+      // deadline; the rerun after the read repairs it.
+      this.staleTimer ??= setTimeout(() => {
+        this.staleTimer = undefined;
+        if (this.reloading) this.setCurrent(false);
+      }, this.hintedReloadStaleMs);
+      this.staleTimer.unref?.();
+      return this.reloading;
+    }
+    this.reloading = this.run().finally(() => {
+      this.reloading = undefined;
+      clearTimeout(this.staleTimer);
+      this.staleTimer = undefined;
+    });
     return this.reloading;
+  }
+
+  private scheduleRetry(): void {
+    if (this.stopped || this.retryTimer) return;
+    const delay = this.retryDelaysMs[Math.min(this.retryAttempt, this.retryDelaysMs.length - 1)]!;
+    this.retryAttempt += 1;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      void this.reload();
+    }, delay);
+    this.retryTimer.unref?.();
   }
 
   private async run(): Promise<void> {
@@ -165,14 +231,22 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
       try {
         rows = await this.load(this.maxRows + 1);
       } catch {
-        this.logger.warn("[rollout-flags] reload failed; feed-loss values apply until the next reload");
+        this.logger.warn("[rollout-flags] reload failed; retrying with backoff before the safety refresh");
         this.setCurrent(false);
+        this.scheduleRetry();
         continue;
       }
       if (this.stopped) return;
-      if (rows.length > this.maxRows) this.logger.warn("[rollout-flags] enabled flag rows exceed the bound; extra rows are ignored");
+      this.retryAttempt = 0;
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+      // A hint arrived while this read ran: the read may predate that commit,
+      // so discard it and let the loop read again instead of applying it.
+      if (this.again) continue;
+      const knownRows = rows.filter(row => isRolloutFlagName(row.flag));
+      if (knownRows.length > this.maxRows) this.logger.warn("[rollout-flags] enabled flag rows exceed the bound; extra rows are ignored");
       const next = new Map<string, Set<RolloutFlagName>>();
-      for (const row of rows.slice(0, this.maxRows)) {
+      for (const row of knownRows.slice(0, this.maxRows)) {
         if (!isRolloutFlagName(row.flag)) continue;
         let flags = next.get(row.org_id);
         if (!flags) next.set(row.org_id, flags = new Set());
