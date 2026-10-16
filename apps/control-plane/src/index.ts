@@ -66,6 +66,7 @@ import { DatabaseCloudWorkspaceEventService } from "./cloud-workspaces/event-str
 import { PostgresSecurityEventBroker, SecurityEventPublisher } from "./security-events.js";
 import { RolloutFlagSnapshot } from "./rollout-flags.js";
 import { EngineAuthorityCache, installEngineAuthorityCache } from "./cloud-workspaces/engine-authority-cache.js";
+import { CapabilitySigningKeyStore } from "./cloud-workspaces/capability-keys.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
@@ -199,6 +200,18 @@ const engineAuthorityCache = rolloutFlagSnapshot
   ? new EngineAuthorityCache({ pool, listenerPool, flags: rolloutFlagSnapshot }) : null;
 engineAuthorityCache?.start();
 installEngineAuthorityCache(engineAuthorityCache ?? undefined);
+// S1 capability signing keys: a dedicated keyring opens the sealed current
+// key; the store reloads on the keys NOTIFY. Without both envs there is no
+// issuer and every capability route fails closed.
+const capabilityKeyStore = rolloutFlagSnapshot && config.cloudWorkspaces?.capabilityKeyring
+  ? new CapabilitySigningKeyStore({ pool, listenerPool, keyring: config.cloudWorkspaces.capabilityKeyring }) : null;
+void capabilityKeyStore?.start();
+const cloudCapabilities = capabilityKeyStore && config.cloudWorkspaces?.capabilityIssuer
+  ? {
+      pool, keyStore: capabilityKeyStore, issuer: config.cloudWorkspaces.capabilityIssuer,
+      flags: rolloutFlagSnapshot!, workosEnabled: config.auth.provider === "workos",
+    }
+  : undefined;
 // Historical Computer retirement holds session locks across provider I/O and
 // query-pool callbacks. WorkOS may independently hold one worker query slot.
 const retirementLockPool = workerPool && runtimeReady && config.cloudWorkspaces?.boat &&
@@ -764,6 +777,7 @@ const app = createApp(config, pool, emailConfig, {
     ? { cloudWorkspaceEngineClientAdmissionService }
     : {}),
   ...(cloudWorkspaceHealthService ? { cloudWorkspaceHealthService } : {}),
+  ...(cloudCapabilities ? { cloudCapabilities } : {}),
 });
 
 let shuttingDown = false;
@@ -850,6 +864,7 @@ function shutdown(signal: string): void {
     stopSecurityEventPublisher(),
     rolloutFlagSnapshot?.stop(),
     engineAuthorityCache?.stop(),
+    capabilityKeyStore?.stop(),
   ]);
   const deadline = setTimeout(() => process.exit(1), 15_000);
   deadline.unref();

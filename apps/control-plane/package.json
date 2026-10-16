@@ -36,7 +36,8 @@
     "test:watch": "vitest",
     "load:relay": "tsx src/cloud-workspaces/runtime-bridge-load.ts",
     "load:db": "tsx src/load-sim/run.ts",
-    "cloud-runtime:manage": "tsx src/manage-cloud-agent-runtime.ts"
+    "cloud-runtime:manage": "tsx src/manage-cloud-agent-runtime.ts",
+    "cloud-capability-key:manage": "tsx src/manage-cloud-capability-key.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1136.0",

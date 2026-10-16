@@ -11,6 +11,9 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
       `DROP TRIGGER ${trigger} ON cloud_workspace_engine_instances;`),
   },
   // 0004's default privileges grant zeros_app writes on every new table.
+  "0153_cloud_capability_keys.sql": {
+    "new-table-privileges": ["REVOKE ALL ON cloud_capability_signing_keys FROM PUBLIC, zeros_app;"],
+  },
   "0149_cloud_rollout_flags.sql": {
     "new-table-privileges": ["cloud_rollout_flags", "cloud_rollout_flag_changes"].map(table =>
       `REVOKE ALL ON ${table} FROM PUBLIC, zeros_app;`),

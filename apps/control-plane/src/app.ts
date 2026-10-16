@@ -95,6 +95,12 @@ import { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService, 
 import { createReleaseCanaryAdmissionRoutes, createReleaseCanaryDesignationRoutes } from "./cloud-workspaces/release-canary-routes.js";
 import { cloudAgentCredentialKeys } from "./cloud-workspaces/agent-credentials.js";
 import { createRuntimePublicationRoutes, createRuntimeStaffRoutes, RUNTIME_STAFF_PATH, type RuntimePublicationDependencies } from "./cloud-workspaces/runtime-publication-routes.js";
+import {
+  CLOUD_CAPABILITY_ENGINE_PATH,
+  createCloudCapabilityEngineRoutes,
+  createCloudCapabilityKeyRoutes,
+  type CloudCapabilityService,
+} from "./cloud-workspaces/capability-routes.js";
 
 export type CreateAppDependencies = {
   zerosDevAuth?: ZerosDevAuthDependencies;
@@ -107,6 +113,7 @@ export type CreateAppDependencies = {
   cloudGithubReads?: DatabaseCloudGithubReads;
   cloudIdleStop?: DatabaseCloudIdleStop;
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
+  cloudCapabilities?: CloudCapabilityService;
   cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
   cloudRuntimeServiceAccess?: DatabaseCloudRuntimeServiceAccess;
   cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver;
@@ -173,6 +180,11 @@ export function createApp(
   }
   // Readiness stays public even during maintenance; /healthz remains liveness.
   app.route("/", createReleaseIdentityRoutes(config, pool, dependencies));
+  // The S1 key set is public and served from memory; verifiers must reach it
+  // whenever this process serves anything.
+  if (dependencies.cloudCapabilities) {
+    app.route("/", createCloudCapabilityKeyRoutes(dependencies.cloudCapabilities.keyStore));
+  }
   if (config.databaseMaintenanceMode) {
     // A restored database may contain deliverable outboxes and live sessions.
     // Do not even assemble provider/auth routers while fencing its writers.
@@ -497,6 +509,12 @@ export function createApp(
         dependencies.cloudWorkspaceInternalSetupService,
       ),
     );
+    // The engine-token REST fallback shares the internal surface's response
+    // headers and pre-auth rate limit (path-based middleware above).
+    if (dependencies.cloudCapabilities) {
+      app.use(CLOUD_CAPABILITY_ENGINE_PATH, cloudWorkspaceInternalResponseHeaders);
+      app.route("/", createCloudCapabilityEngineRoutes(dependencies.cloudCapabilities));
+    }
   }
 
   // CORS: the callers are the Electron renderer (localhost dev origin /
