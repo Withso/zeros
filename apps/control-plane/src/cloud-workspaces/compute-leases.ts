@@ -22,7 +22,7 @@ import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { assertSingleProviderResource } from "./provider.js";
 import { requestManagedComputeStop } from "./compute-credit-stop.js";
 import { classifyCloudFailure, diagnosticCode, type CloudDiagnostic, type CloudDiagnosticPhase, type ComputeFailureSite } from "./cloud-diagnostics.js";
-import { retainCloudDiagnostic, diagnosticStorageFailed, recoverCloudDiagnostic, runCloudDiagnosticCleanup } from "./cloud-diagnostic-store.js";
+import { retainCloudDiagnostic, diagnosticStorageFailed, recoverCloudDiagnostic } from "./cloud-diagnostic-store.js";
 import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
 
 export type ManagedComputePolicy = {
@@ -733,9 +733,6 @@ export class CloudWorkspaceComputeLeaseCoordinator {
 
   /** Reconcile one due lease, optionally only for one workspace. */
   async runOnce(workspaceId: string | null = null): Promise<boolean> {
-    // Durable hourly job runs even when no allocation is due; failure cannot
-    // prevent the finite-lease safety path from running.
-    await runCloudDiagnosticCleanup(this.options.pool).catch(() => undefined);
     const claimStarted = performance.now();
     const lease = await withRetryableSystemTx(
       this.options.pool,

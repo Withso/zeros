@@ -104,6 +104,14 @@ d("lifecycle jobs", () => {
     expect(await job("lifecycle", f.workspaceId)).toBeUndefined();
   });
 
+  it("runs the hourly diagnostic retention as its own job", async () => {
+    await pool.query("UPDATE cloud_workspace_diagnostic_cleanup SET next_run_at=now()-interval '1 second'");
+    expect((await job("diagnostics", null))?.delay_ms).toBeLessThanOrEqual(0);
+    expect(await runDue("diagnostics")).toBe(1);
+    expect((await pool.query("SELECT next_run_at > now()+interval '30 minutes' AS later FROM cloud_workspace_diagnostic_cleanup")).rows[0]).toEqual({ later: true });
+    expect((await job("diagnostics", null))?.delay_ms).toBeGreaterThan(30 * 60_000);
+  });
+
   it("records a deadline written during a run as that job's next run", async () => {
     const f = await seedReadyCloudWorkspace(pool);
     const [running] = await claim("engineHealth");
