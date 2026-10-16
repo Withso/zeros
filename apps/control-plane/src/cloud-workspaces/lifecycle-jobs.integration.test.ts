@@ -3,6 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { claimJobs, completeJob, type ClaimedJob } from "../job-queue.js";
+import { runDueLifecycleJobs } from "./lifecycle-job-test-utils.js";
 import { withSystemTx } from "../db.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
 import type { CloudWorkspaceProvider } from "./provider.js";
@@ -122,6 +123,25 @@ d("lifecycle jobs", () => {
     expect(await runDue("diagnostics")).toBe(1);
     expect((await pool.query("SELECT next_run_at > now()+interval '30 minutes' AS later FROM cloud_workspace_diagnostic_cleanup")).rows[0]).toEqual({ later: true });
     expect((await job("diagnostics", null))?.delay_ms).toBeGreaterThan(30 * 60_000);
+  });
+
+  it("drains a diagnostic publication backlog without empty-run backoff", async () => {
+    const f = await seedReadyCloudWorkspace(pool);
+    await pool.query(
+      `INSERT INTO cloud_workspace_diagnostic_incidents
+         (workspace_id, org_id, generation, operation_kind, operation_id, reason, first_cause, terminal_cause)
+       SELECT $1, $2, 1, 'engine', gen_random_uuid(), 'engine_expired', '{}'::jsonb, '{}'::jsonb
+       FROM generate_series(1, 300)`,
+      [f.workspaceId, f.organizationId]);
+    await pool.query(
+      "UPDATE cloud_workspaces SET diagnostic_recovery_at=now(), diagnostic_recovery_generation=1 WHERE id=$1",
+      [f.workspaceId]);
+    // One driver call drains every batch of 256; a backoff-paced drain would
+    // publish one batch and leave the rest for later runs.
+    await runDueLifecycleJobs(pool, reconciler(), ["diagnostics"]);
+    expect((await pool.query(
+      "SELECT count(*)::int AS count FROM cloud_workspace_diagnostic_incidents WHERE recovered_at IS NULL")).rows[0])
+      .toEqual({ count: 0 });
   });
 
   it("records a deadline written during a run as that job's next run", async () => {

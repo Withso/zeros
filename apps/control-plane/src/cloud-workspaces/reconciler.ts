@@ -480,7 +480,9 @@ export class CloudWorkspaceReconciler {
       case "lifecycle": await drain(() => this.runOnce(scope)); break;
       case "drift": if (await this.reconcileDriftOnce(scope)) processed = 1; break;
       // Work still due after a pass is contested (SKIP LOCKED): back off.
-      case "diagnostics": await runCloudDiagnosticCleanup(this.pool); break;
+      // A productive pass means a publication backlog may remain (256 per
+      // pass): reschedule at once instead of backing off.
+      case "diagnostics": processed = await runCloudDiagnosticCleanup(this.pool) > 0 ? 1 : 0; break;
     }
     // Completion deletes the job, so it is rescheduled even during shutdown;
     // work a shutdown interrupted is due again now, for another replica.
