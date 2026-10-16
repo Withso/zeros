@@ -37,6 +37,12 @@ const DEFAULT_WORKSPACE: WorkspaceDocument = {
 export interface ContractMockOptions {
   workspaces?: WorkspaceDocument[];
   deviceSessionId?: string;
+  /**
+   * Organizations that answer runtime/connect. An organization outside the
+   * list answers 404 cloud_workspaces_disabled — the legacy answer the SDK
+   * flag probe keys on (S3 flag discovery). Defaults to every org flagged.
+   */
+  flaggedOrganizations?: string[];
 }
 
 export interface ContractMock {
@@ -46,6 +52,13 @@ export interface ContractMock {
   ticket: string;
   /** The mock's current resumable stream position. */
   cursor: string;
+  /** Queue a one-shot fault for the next matching REST call. */
+  injectOnce(fault: {
+    method: string;
+    pathIncludes: string;
+    status: number;
+    body?: JsonObject;
+  }): void;
   close(): Promise<void>;
 }
 
@@ -89,6 +102,10 @@ export async function createContractMock(
   const ticket = `mock-ticket-${"t".repeat(32)}`;
   const cursor = "c-1";
   const idempotent = new Map<string, { status: number; body: JsonObject }>();
+  const faults: { method: string; pathIncludes: string; status: number; body?: JsonObject }[] = [];
+  const flagged = options.flaggedOrganizations
+    ? new Set(options.flaggedOrganizations)
+    : null;
   const sockets = new Set<WebSocket>();
 
   const helloValid = frameValidator(schemas.deviceStream, "client.hello");
@@ -128,7 +145,15 @@ export async function createContractMock(
     wsBase: string,
   ): void {
     const path = url.pathname;
-    const lifecycleMatch = /^\/v1\/organizations\/[^/]+\/cloud-workspaces\/([^/]+)(?:\/(wake|stop|archive))?$/.exec(path);
+    const faultIndex = faults.findIndex(
+      (fault) => fault.method === request.method && path.includes(fault.pathIncludes),
+    );
+    if (faultIndex >= 0) {
+      const [fault] = faults.splice(faultIndex, 1);
+      json(response, fault!.status, fault!.body ?? errorBody("injected_fault", "Injected test fault.", { retryable: fault!.status === 429 || fault!.status >= 500 }));
+      return;
+    }
+    const lifecycleMatch = /^\/v1\/organizations\/([^/]+)\/cloud-workspaces(?:\/([^/]+))?(?:\/(wake|stop|archive))?$/.exec(path);
     if (request.method === "POST" && path === "/v1/device-sessions") {
       json(response, 201, {
         deviceSessionId,
@@ -163,6 +188,13 @@ export async function createContractMock(
       return;
     }
     if (request.method === "POST" && path.endsWith("/runtime/connect")) {
+      // Unflagged orgs answer the legacy way; the SDK probe maps this to the
+      // legacy admission path for the org (S3 flag discovery, decision 1).
+      const organization = /^\/v1\/organizations\/([^/]+)\//.exec(path)?.[1];
+      if (flagged && organization && !flagged.has(organization)) {
+        json(response, 404, errorBody("cloud_workspaces_disabled", "Cloud workspaces v1 is not enabled for this organization."));
+        return;
+      }
       json(response, 201, {
         workspaceId: workspaces[0]!.id,
         generation: 7,
@@ -181,6 +213,11 @@ export async function createContractMock(
       return;
     }
     if (lifecycleMatch && ["POST", "PATCH", "DELETE"].includes(request.method ?? "")) {
+      const workspaceId = lifecycleMatch[2];
+      if (!workspaceId && request.method !== "POST") {
+        json(response, 404, errorBody("not_found", `No contract route for ${request.method} ${path}.`));
+        return;
+      }
       // Every lifecycle command carries an Idempotency-Key (S3 Part 1).
       const keyHeader = request.headers["idempotency-key"];
       if (typeof keyHeader !== "string" || !/^[A-Za-z0-9._:-]{8,128}$/.test(keyHeader)) {
@@ -193,8 +230,13 @@ export async function createContractMock(
         json(response, replay.status, replay.body, { "idempotency-replayed": "true" });
         return;
       }
-      const operation = lifecycleMatch[2] ?? (request.method === "POST" ? "create" : request.method === "PATCH" ? "rename" : "delete");
-      const status = request.method === "PATCH" ? 200 : 202;
+      const isCreate = !workspaceId;
+      const operation = lifecycleMatch[3] ?? (isCreate ? "create" : request.method === "PATCH" ? "rename" : "delete");
+      if (operation === "wake" && workspaces[0]!.status === "archived") {
+        json(response, 409, errorBody("workspace_archived", "An archived workspace cannot wake.", { retryable: false }));
+        return;
+      }
+      const status = isCreate ? 201 : request.method === "PATCH" ? 200 : 202;
       const payload: JsonObject =
         request.method === "PATCH"
           ? { workspace: workspaces[0]! }
@@ -332,6 +374,9 @@ export async function createContractMock(
     restUrl: `http://127.0.0.1:${port}`,
     ticket,
     cursor,
+    injectOnce: (fault) => {
+      faults.push(fault);
+    },
     close: () =>
       new Promise<void>((resolve) => {
         for (const socket of sockets) socket.terminate();

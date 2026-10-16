@@ -16,3 +16,19 @@ export {
   parseRuntimeAuthFrame,
   type RuntimeAuthParseResult,
 } from "./runtime-auth";
+export {
+  CloudRestClient,
+  CloudRestError,
+  classifyFailure,
+  retryDelayMs,
+  RETRY_BASE_MS,
+  RETRY_CAP_MS,
+} from "./rest-client";
+export type {
+  CloudRestClientOptions,
+  CloudRestResponse,
+  DeviceProofHeaders,
+  RetryDecision,
+} from "./rest-client";
+export { CloudOrgFlagCache, probeFromConnectFailure } from "./feature-probe";
+export type { CloudFlagState } from "./feature-probe";
