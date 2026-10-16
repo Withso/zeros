@@ -63,9 +63,12 @@ disconnects, keyed by an opaque resume token
 (`apps/control-plane/src/realtime/resume.ts`).
 
 - A token is 32 random bytes (base64url), single-use, bound to the
-  connection identity (organization, workspace, generation, engine instance
-  and boot ID), stored only as a SHA-256 digest, and rotated on every
-  `sys.welcome`.
+  connection identity (the heartbeat credential's digest, organization,
+  workspace, generation, engine instance and boot ID), stored only as a
+  SHA-256 digest, never logged, and rotated on every `sys.welcome`.
+- Only sequenced frames (those carrying `s`) are buffered. `sys.*`,
+  `auth.*` and `relay.*` frames are unsequenced, per connection, and never
+  replayed.
 - Each direction has one sequence space per lineage. Unacknowledged frames
   are bounded to 2 MiB or 2 000 frames; overflow closes with
   `4429 backpressure`.
@@ -74,6 +77,53 @@ disconnects, keyed by an opaque resume token
   resync idempotently. A token for a lineage that is still open supersedes
   it: this is how an engine reconnects before closing the old uplink during
   a drain.
+
+## Engine uplink server
+
+`apps/control-plane/src/realtime/uplink-server.ts` implements the frozen S2
+contract (`contracts/s2-uplink.md`, 1.0.0) at `/v1/uplink`. It is mounted
+only in `realtime` and `combined` processes, and only once the capability
+authority supplies keys, epochs and engine tokens
+(`realtime/uplink-auth-source.ts`; until then the uplink stays unmounted).
+
+- **Rollout.** A hello is admitted only while the organization's
+  `realtime_uplink` flag is on ([rollout flags](rollout-flags.md)). Turning
+  the flag off closes that organization's open uplinks with `4404`; engines
+  then keep the HTTP heartbeat and the credential poll, which stay in place.
+- **Admission.** One consistent authority read
+  (`readCurrentCloudEngineAuthority`) checks the heartbeat credential,
+  workspace, generation and engine instance, and compares the hello's
+  `bootId` with `cloud_workspace_engine_instances.runtime_boot_id`. Close
+  codes: `4401` only when the read succeeded and no engine holds the
+  credential; `4403` for a stale engine or an unregistered `bootId`;
+  `1011` when the read could not complete.
+- **Handshake.** `sys.welcome`, then `auth.keys` and `auth.sync` with a fresh
+  `syncId`. Until the engine's `auth.applied` the server sends only `sys.*`
+  frames; reliable frames queued meanwhile are held. It then sends an
+  `auth.capability` issued by `api` from current authority, retransmits
+  unacknowledged reliable frames on a resume, and lets feature modules
+  resync. Epoch deltas confirmed by `auth.applied` record
+  `capability_revocation_push_ms`.
+- **Teardown.** Authority is re-read every 60 s and at once on a
+  `zeros_cloud_engine_uplink_authority` notification (engine state,
+  revocation, credential or final checkpoint changes; workspace generation,
+  desired state, deletion, status liveness or authority epoch changes). A
+  loss closes with `4403`. An unavailable database never closes an
+  established uplink.
+- **Ownership.** Presence lives in memory. `cloud_workspace_engine_uplinks`
+  (migration 0151) is written only on connect, readiness change and loss,
+  plus a 5 min watermark, through a bounded coalescing retry queue. Each
+  write carries a connection ID; a connect never overwrites a newer one. A
+  new owner row notifies `zeros_cloud_engine_uplink_owner`, and an instance
+  holding an older uplink closes it with `4409`. After a listener reconnect
+  every owned uplink re-reads its owner and authority.
+- **Security events.** An unregistered `bootId`, more than 3 supersedes of
+  one engine instance in 10 min, or a supersede from another source address
+  without an intervening `sys.drain` writes `security.uplink_*` to the
+  organization's audit log and logs a `[security]` line for paging. These
+  are operator events, not the client-delivered `security_events` outbox.
+- **Lease.** The HTTP heartbeat still owns the engine lease in this release;
+  the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
 
 ## Railway configuration (planned)
 

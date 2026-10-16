@@ -65,6 +65,7 @@ describe("engine uplink server", () => {
   let authFails: boolean;
   let url: string;
   let enabled: boolean;
+  const flagListeners = new Set<() => void>();
   const peers: Peer[] = [];
   let identity: UplinkIdentity;
   const hello = (extra: Record<string, unknown> = {}) => ({ t: "sys.hello", d: {
@@ -72,7 +73,11 @@ describe("engine uplink server", () => {
 
   async function start(options: Partial<UplinkServerOptions> = {}) {
     uplink = new CloudEngineUplinkServer({
-      authority, rollout: () => enabled, realtimeInstance: "realtime-test",
+      authority, realtimeInstance: "realtime-test",
+      flags: {
+        enabled: (orgId, flag) => enabled && flag === "realtime_uplink" && orgId === identity.organizationId,
+        onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
+      },
       authSource: {
         keys: async () => { if (authFails) throw new Error("down"); return [KEY]; },
         snapshot: async (_identity, cursor) => ({ epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: cursor ?? "c-1", complete: cursor === undefined }),
@@ -145,6 +150,31 @@ describe("engine uplink server", () => {
     peer.send(hello(extra));
     await expect(peer.closed).resolves.toMatchObject({ code });
     expect(code === UPLINK_CLOSE.disabled ? authority.calls : 1).toBe(code === UPLINK_CLOSE.disabled ? 0 : 1);
+  });
+
+  it("closes open uplinks with 4404 and refuses new hellos once realtime_uplink turns off", async () => {
+    await start();
+    const { peer } = await connect();
+    enabled = false;
+    for (const listener of flagListeners) listener();
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.disabled });
+    const next = dial();
+    await next.opened;
+    next.send(hello());
+    await expect(next.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.disabled });
+    uplink.close();
+    expect(flagListeners.size).toBe(0);
+  });
+
+  it("reads the flag only for the canonical lowercase organization id", async () => {
+    await start();
+    expect(uplink.uplinkEnabled(identity.organizationId)).toBe(true);
+    expect(uplink.uplinkEnabled(identity.organizationId.toUpperCase())).toBe(false);
+    const peer = dial();
+    await peer.opened;
+    peer.send(hello({ organizationId: identity.organizationId.toUpperCase() }));
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
+    expect(authority.calls).toBe(0);
   });
 
   it("orders welcome, auth.keys, auth.sync and holds reliable frames until auth.applied and the capability", async () => {

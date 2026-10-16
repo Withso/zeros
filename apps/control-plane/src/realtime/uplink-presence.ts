@@ -68,6 +68,8 @@ export class DatabaseUplinkPresenceStore implements UplinkPresenceStore {
   }
 }
 
+const PRESENCE_RETRY_MIN_DELAY_MS = 100;
+
 /** Bounded, coalescing retry queue for presence writes. Only the latest
  * snapshot per connection is kept; a failed write retries with full jitter.
  * No uplink is ever closed because the database is slow or down. */
@@ -159,7 +161,10 @@ export class UplinkPresenceWriter {
       const attempt = (this.attempts.get(key) ?? 0) + 1;
       this.attempts.set(key, attempt);
       const cap = Math.min(30_000, 500 * 2 ** Math.min(attempt, 10));
-      this.retryAtMs.set(key, this.now() + Math.floor(this.random() * cap));
+      // The floor matters: a zero-delay retry of a write that rejects at once
+      // re-enters pump() through promise callbacks and starves the event loop.
+      const delay = Math.max(PRESENCE_RETRY_MIN_DELAY_MS, Math.floor(this.random() * cap));
+      this.retryAtMs.set(key, this.now() + delay);
     }).finally(() => {
       this.inFlight.delete(key);
       this.pump();

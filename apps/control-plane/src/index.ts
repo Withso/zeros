@@ -65,6 +65,12 @@ import { DatabaseCloudWorkspaceCommandService } from "./cloud-workspaces/command
 import { DatabaseCloudWorkspaceEventService } from "./cloud-workspaces/event-streams.js";
 import { PostgresSecurityEventBroker, SecurityEventPublisher } from "./security-events.js";
 import { RolloutFlagSnapshot } from "./rollout-flags.js";
+import { AuditUplinkSecurityAlerts } from "./realtime/uplink-alerts.js";
+import { uplinkCapabilityAuthority } from "./realtime/uplink-auth-source.js";
+import { DatabaseUplinkAuthority } from "./realtime/uplink-authority.js";
+import { startUplinkNotifications } from "./realtime/uplink-notifications.js";
+import { DatabaseUplinkPresenceStore, UplinkPresenceWriter } from "./realtime/uplink-presence.js";
+import { CloudEngineUplinkServer, realtimeInstanceId } from "./realtime/uplink-server.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
@@ -804,8 +810,31 @@ if (servesApi && cloudWorkspaceAccessService && migrationResult.status.state !==
     revalidate: (request, grant) => access.revalidatePreviewWebSocket(request, grant),
   });
 }
+// The S2 engine uplink is served by realtime and combined processes once the
+// capability authority supplies keys, epochs and engine tokens; each
+// organization is admitted only while its `realtime_uplink` flag is on.
+const uplinkAuth = processRole === "realtime" || processRole === "combined" ? uplinkCapabilityAuthority() : null;
+let cloudEngineUplink: CloudEngineUplinkServer | undefined;
+let uplinkPresence: UplinkPresenceWriter | undefined;
+let stopUplinkNotifications: () => Promise<void> = async () => {};
+if (uplinkAuth && rolloutFlagSnapshot && migrationResult.status.state === "current") {
+  const presenceStore = new DatabaseUplinkPresenceStore(pool);
+  const alerts = new AuditUplinkSecurityAlerts({ pool });
+  uplinkPresence = new UplinkPresenceWriter(presenceStore);
+  cloudEngineUplink = new CloudEngineUplinkServer({
+    authority: new DatabaseUplinkAuthority({ pool, workosEnabled: config.auth.provider === "workos", alerts }),
+    authSource: uplinkAuth.source,
+    capabilities: uplinkAuth.issuer,
+    flags: rolloutFlagSnapshot,
+    realtimeInstance: realtimeInstanceId(),
+    presence: uplinkPresence,
+    alerts,
+  });
+  stopUplinkNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore);
+}
 server.on("upgrade", (request, socket, head) => {
   if (!servesApi || shuttingDown || migrationResult.status.state !== "current") { socket.destroy(); return; }
+  if (cloudEngineUplink?.handleUpgrade(request, socket, head)) return;
   if (cloudRuntimeServiceRelay?.handleUpgrade(request, socket, head)) return;
   if (cloudPreviewWebSocketRelay?.handleUpgrade(request, socket, head)) return;
   if (!cloudRuntimeBridge?.handleUpgrade(request, socket, head)) socket.destroy();
@@ -821,6 +850,7 @@ function shutdown(signal: string): void {
   const backgroundStopped = Promise.allSettled([
     stopCloudWorkerNotifications(),
     stopCloudCheckpointHintNotifications(),
+    stopUplinkNotifications(),
     cloudGithubReads?.close(),
     githubWriteCleanupPending,
     stopCloudSetupWorker(),
@@ -855,6 +885,7 @@ function shutdown(signal: string): void {
       cloudRuntimeBridge?.drain(drainMs),
       cloudPreviewWebSocketRelay?.drain(drainMs),
       cloudRuntimeServiceRelay?.drain(drainMs),
+      cloudEngineUplink?.drain(drainMs),
     ]).then(() => closeServer(backgroundStopped, deadline));
   } else closeServer(backgroundStopped, deadline);
 }
@@ -865,9 +896,13 @@ function closeServer(backgroundStopped: Promise<unknown>, deadline: ReturnType<t
   closeCloudCheckpointHints();
   cloudPreviewWebSocketRelay?.close();
   cloudRuntimeServiceRelay?.close();
+  cloudEngineUplink?.close();
   server.close(() => {
     void backgroundStopped
       .then(async () => {
+        // A lost-uplink write that misses this window is overwritten by the
+        // next owner's connect; until then its stale last_seen_at marks it.
+        await uplinkPresence?.close(2_000);
         const pools = new Set([pool, listenerPool]);
         if (workerPool) pools.add(workerPool);
         if (retirementLockPool) pools.add(retirementLockPool);

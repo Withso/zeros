@@ -332,14 +332,6 @@ describe("database authority configuration", () => {
     for (const value of ["-1", "121", "2.5", "bad"])
       expect(() => loadConfig({ ...baseEnv(), CONTROL_PLANE_DRAIN_SECONDS: value })).toThrow(/CONTROL_PLANE_DRAIN_SECONDS/);
   });
-  it("keeps the engine uplink off unless organizations opt in", () => {
-    expect(loadConfig(baseEnv()).uplinkOrganizations).toEqual([]);
-    const first = "11111111-1111-4111-8111-111111111111", second = "22222222-2222-4222-8222-222222222222";
-    expect(loadConfig({ ...baseEnv(), CONTROL_PLANE_UPLINK_ORGANIZATIONS: ` ${first}, ${second.toUpperCase()},${first} ` })
-      .uplinkOrganizations).toEqual([first, second]);
-    for (const value of ["*", "all", `${first},not-a-uuid`, `${first},,${second}`])
-      expect(() => loadConfig({ ...baseEnv(), CONTROL_PLANE_UPLINK_ORGANIZATIONS: value })).toThrow(/CONTROL_PLANE_UPLINK_ORGANIZATIONS/);
-  });
   const psFixture = new URL("postgres://region.horizon.psdb.cloud:5432/zeros?sslmode=verify-full");
   psFixture.username = "app.branchtest";
   psFixture.password = "private-pass";

@@ -85,5 +85,3 @@ ALTER TABLE cloud_workspace_engine_uplinks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cloud_workspace_engine_uplinks FORCE ROW LEVEL SECURITY;
 CREATE POLICY system_only ON cloud_workspace_engine_uplinks FOR ALL USING (app_is_system()) WITH CHECK (app_is_system());
 GRANT SELECT, INSERT, UPDATE, DELETE ON cloud_workspace_engine_uplinks TO zeros_app;
-REVOKE ALL ON FUNCTION notify_cloud_engine_uplink_owner() FROM PUBLIC;
-REVOKE ALL ON FUNCTION notify_cloud_engine_uplink_authority() FROM PUBLIC;

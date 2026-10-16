@@ -28,6 +28,17 @@ describe("uplink presence writer", () => {
     expect(writer.size).toBe(0);
   });
 
+  it("never retries a failing write without a delay, even on a zero jitter draw", async () => {
+    let attempts = 0;
+    const writer = new UplinkPresenceWriter({ write: async () => { attempts += 1; throw new Error("down"); } },
+      { random: () => 0 });
+    writer.enqueue(snapshot(randomUUID(), 1));
+    await settle();
+    expect(attempts).toBe(1);
+    expect(writer.size).toBe(1);
+    await writer.close(0);
+  });
+
   it("bounds the queue by dropping the oldest pending connection", async () => {
     const writer = new UplinkPresenceWriter({ write: () => new Promise(() => {}) }, { maxPending: 3, concurrency: 1 });
     for (let i = 0; i < 6; i++) writer.enqueue(snapshot(randomUUID(), i));

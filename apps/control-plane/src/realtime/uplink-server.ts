@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
+import { hostname } from "node:os";
 import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 
@@ -33,7 +34,11 @@ import {
   type UplinkHello,
   type UplinkStatusReport,
 } from "./uplink-protocol.js";
-import type { UplinkRolloutGate } from "./uplink-rollout.js";
+import type { RolloutFlagReader } from "../rollout-flags.js";
+
+/** The rollout feed the uplink reads: `realtime_uplink` per organization,
+ * plus change notifications so a flag turned off closes open uplinks. */
+export type UplinkRolloutFlags = RolloutFlagReader & { onChange?(listener: () => void): () => void };
 
 /** What a feature module sees of one admitted uplink. */
 export interface UplinkSession {
@@ -87,7 +92,7 @@ export type UplinkServerOptions = {
   authority: UplinkAuthority;
   authSource: UplinkAuthSource;
   capabilities: EngineCapabilityIssuer;
-  rollout: UplinkRolloutGate;
+  flags: UplinkRolloutFlags;
   realtimeInstance: string;
   presence?: UplinkPresenceWriter;
   alerts?: UplinkSecurityAlerts;
@@ -169,6 +174,25 @@ export class CloudEngineUplinkServer {
     if (!Number.isSafeInteger(ping) || ping < 10_000 || ping > 30_000) throw new Error("uplink ping interval must be 10-30 s");
     this.resume = new ResumeStore<Lineage>({ now: this.options.now,
       ...(options.resumeRetentionMs !== undefined ? { retentionMs: options.resumeRetentionMs } : {}) });
+    this.stopFlagListener = this.options.flags.onChange?.(() => this.applyRollout()) ?? null;
+  }
+
+  private readonly stopFlagListener: (() => void) | null;
+
+  /** Organization ids reach the flag reader only in canonical lowercase
+   * form (the hello schema enforces it), so any other spelling reads off. */
+  uplinkEnabled(organizationId: string): boolean {
+    return this.options.flags.enabled(organizationId, "realtime_uplink");
+  }
+
+  /** A flag turned off closes that organization's uplinks with 4404; the
+   * engines stop dialing and keep the HTTP heartbeat and credential poll. */
+  applyRollout(): void {
+    for (const connection of [...this.all]) {
+      const organizationId = connection.identity?.organizationId;
+      if (organizationId && !this.uplinkEnabled(organizationId))
+        connection.close(UPLINK_CLOSE.disabled, "uplink_disabled", { park: false });
+    }
   }
 
   get size(): number { return this.all.size; }
@@ -275,6 +299,7 @@ export class CloudEngineUplinkServer {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stopFlagListener?.();
     for (const connection of [...this.all]) connection.close(UPLINK_CLOSE.goingAway, "going_away", { park: false });
     this.resume.close();
     this.wss.close();
@@ -471,7 +496,7 @@ class UplinkConnection {
     const options = this.server.options;
     const protocol = negotiateUplinkProtocol(hello.protocol);
     if (protocol === null) return this.refuse(UPLINK_CLOSE.protocolUnsupported, "protocol_unsupported");
-    if (!options.rollout(hello.organizationId)) return this.refuse(UPLINK_CLOSE.disabled, "uplink_disabled");
+    if (!this.server.uplinkEnabled(hello.organizationId)) return this.refuse(UPLINK_CLOSE.disabled, "uplink_disabled");
     const identity: UplinkIdentity = Object.freeze({
       workspaceId: hello.workspaceId, organizationId: hello.organizationId, generation: hello.generation,
       engineInstanceId: hello.engineInstanceId, bootId: hello.bootId,
@@ -485,6 +510,7 @@ class UplinkConnection {
       return this.refuse(UPLINK_CLOSE.forbidden, "uplink_forbidden");
     }
     if (this.server.isDraining()) return this.refuse(UPLINK_CLOSE.draining, "draining");
+    if (!this.server.uplinkEnabled(identity.organizationId)) return this.refuse(UPLINK_CLOSE.disabled, "uplink_disabled");
     this.identity = identity;
     this.protocol = protocol;
     this.leaseExpiresAtMs = verified.leaseExpiresAtMs;
@@ -700,6 +726,12 @@ class UplinkConnection {
     this.livenessTimer = this.watermarkTimer = this.authorityTimer = null;
     this.drainTimers = [];
   }
+}
+
+/** Identifies this process in presence rows and owner notifications. */
+export function realtimeInstanceId(env: NodeJS.ProcessEnv = process.env): string {
+  const replica = (env.RAILWAY_REPLICA_ID ?? hostname()).replace(/[^A-Za-z0-9:._-]+/g, "-").slice(0, 100) || "realtime";
+  return `${replica}:${process.pid}`;
 }
 
 function lineageKey(identity: UplinkIdentity, token: string): string {
