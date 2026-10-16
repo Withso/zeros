@@ -16,6 +16,7 @@ import {
 } from "./provider.js";
 import { WebSocketFrameMeter } from "./runtime-bridge-frame-meter.js";
 import { cloudBridgeCloseDiagnostic } from "./bridge-close-diagnostic.js";
+import { staggeredDrain } from "../realtime/drain.js";
 import {
   CLOUD_RUNTIME_RELAY_MAX_MESSAGE_BYTES,
   cloudRuntimeRelayLimits,
@@ -805,6 +806,23 @@ export class CloudRuntimeBridgeRelay {
         : pair.refuse("unavailable", 503),
     );
     return true;
+  }
+
+  /** Graceful shutdown: refuse new connections at once, then close admitted
+   * relays with 1012 (service restart) at random moments across the window
+   * so their clients reconnect to the replacement instance gradually. A
+   * relay keeps forwarding until its own moment. `close()` still ends
+   * whatever remains. */
+  drain(windowMs: number, random?: () => number): Promise<void> {
+    this.closed = true;
+    const admitted: Pair[] = [];
+    for (const pair of [...this.pairs])
+      if (pair.grant) admitted.push(pair);
+      else pair.refuse("closed");
+    return staggeredDrain({
+      items: admitted, windowMs, retire: pair => pair.retire("shutdown"), pending: () => this.pairs.size,
+      ...(random ? { random } : {}),
+    });
   }
 
   close(): void {

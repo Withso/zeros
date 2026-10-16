@@ -93,9 +93,9 @@ function config(github: GithubBackendConfig | null): Config {
   };
 }
 
-it("exposes only liveness and release readiness on a worker process", async () => {
+it.each(["worker", "realtime"] as const)("exposes only liveness and release readiness on a %s process", async processRole => {
   const query = vi.fn(async () => ({ rows: [] }));
-  const app = createApp({ ...config(null), processRole: "worker" }, { query } as unknown as pg.Pool, emailConfig as never);
+  const app = createApp({ ...config(null), processRole }, { query } as unknown as pg.Pool, emailConfig as never);
   expect((await app.request("/healthz")).status).toBe(200);
   for (const path of ["/v1/me", "/v1/cloud-workspaces", "/v1/auth/events", "/auth/login", "/internal/v1/runtime-bases"]) {
     expect((await app.request(path)).status).toBe(404);

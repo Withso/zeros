@@ -58,7 +58,9 @@ const EnvSchema = z.object({
   DATABASE_MIGRATIONS_ON_BOOT: z.enum(["true", "false"]).default("true"),
   DATABASE_MAINTENANCE_MODE: z.enum(["true", "false"]).default("false"),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(6),
-  CONTROL_PLANE_PROCESS_ROLE: z.enum(["api", "worker", "combined"]).default("combined"),
+  CONTROL_PLANE_PROCESS_ROLE: z.enum(["api", "worker", "realtime", "combined"]).default("combined"),
+  /** Graceful drain window on SIGTERM; 0 keeps the immediate close. */
+  CONTROL_PLANE_DRAIN_SECONDS: z.coerce.number().int().min(0).max(120).default(0),
   SLOW_REQUEST_LOG_MS: z.coerce.number().int().min(50).max(60_000).default(DEFAULT_SLOW_REQUEST_LOG_MS),
   DESKTOP_RELEASE_LEDGER_URL: z.string().optional(),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
@@ -316,8 +318,11 @@ export type Config = {
   databaseMigrationRole?: string;
   databaseMigrationsOnBoot?: boolean;
   databasePoolMax?: number;
-  /** Combined preserves existing deployments; dedicated workers scale independently. */
-  processRole?: "api" | "worker" | "combined";
+  /** Combined preserves existing deployments; dedicated workers and realtime
+   * replicas scale independently (docs/cloud-workspace/realtime.md). */
+  processRole?: "api" | "worker" | "realtime" | "combined";
+  /** SIGTERM drain window for WebSocket sessions; 0 closes them at once. */
+  shutdownDrainMs?: number;
   workerPollIntervalsMs?: WorkerPollIntervals;
   /** Requests at least this slow are logged once by route template. */
   slowRequestLogMs?: number;
@@ -1655,6 +1660,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
     databasePoolMax: e.DATABASE_POOL_MAX,
     processRole: e.CONTROL_PLANE_PROCESS_ROLE,
+    shutdownDrainMs: e.CONTROL_PLANE_DRAIN_SECONDS * 1_000,
     workerPollIntervalsMs: loadWorkerPollIntervals(env, cloudWorkspaces !== null),
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
     operationsAlertEmail: loadOperationsAlertEmail(env, diagnostics),
