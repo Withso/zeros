@@ -321,6 +321,27 @@ describe("engine uplink server", () => {
     expect(uplink.size).toBe(1);
   });
 
+  it("falls back to a fresh session on an out-of-range resume cursor without destroying the lineage", async () => {
+    await start();
+    const first = await connect();
+    const token = first.welcome.d!.resumeToken as string;
+    // One reliable frame sits unacked in the outbox (lastAcked 0, sent s=1).
+    uplink.session(identity.engineInstanceId)!.sendReliable("cred.revision", { kind: "agent-controls", revision: 7 });
+    expect(await first.peer.next()).toMatchObject({ t: "cred.revision", s: 1 });
+    first.peer.ws.terminate(); // peer_closed parks the lineage (park: true)
+    await until(() => uplink.size === 0);
+    // A cursor beyond anything the server sent cannot be replayed: fresh
+    // session, resumed:false — but the lineage must survive for the real
+    // owner that re-dials with a valid cursor.
+    const foreign = await connect({ resume: { token, lastReceivedSeq: 99 } });
+    expect(foreign.welcome.d).toMatchObject({ resumed: false });
+    foreign.peer.ws.terminate();
+    await until(() => uplink.size === 0);
+    const owner = await connect({ resume: { token, lastReceivedSeq: 0 } });
+    expect(owner.welcome.d).toMatchObject({ resumed: true });
+    expect(await owner.peer.next("cred.revision")).toMatchObject({ t: "cred.revision", s: 1, d: { revision: 7 } });
+  });
+
   it("records one churn event per resume-supersede, alerting only past the limit", async () => {
     await start();
     let live = await connect();

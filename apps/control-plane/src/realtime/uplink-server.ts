@@ -568,15 +568,22 @@ class UplinkConnection {
     this.leaseExpiresAtMs = verified.leaseExpiresAtMs;
     const offered = new Set(hello.features);
     this.features = new Set(options.extensions.map(extension => extension.feature).filter(feature => offered.has(feature)));
-    // A token resumes only with the credential, engine instance and bootId it was issued to.
+    // A token resumes only with the credential, engine instance and bootId
+    // it was issued to — and only when its cursor can be repaired. Peek
+    // first: a cursor the outbox cannot replay (a foreign or confused peer)
+    // falls back to a fresh session without consuming the lineage, so the
+    // real owner can still resume with a valid cursor.
     const key = lineageKey(identity, this.token);
     const observed = this.server.owner(identity.engineInstanceId);
     if (hello.resume) {
-      const taken = this.server.resume.take(hello.resume.token, key);
-      if (taken.resumed && taken.state.outbox.replayAfter(hello.resume.lastReceivedSeq)) {
-        this.lineage = taken.state;
-        this.resumed = true;
-        this.peerLastReceived = hello.resume.lastReceivedSeq;
+      const peeked = this.server.resume.peek(hello.resume.token, key);
+      if (peeked.resumable && peeked.state.outbox.replayableAfter(hello.resume.lastReceivedSeq)) {
+        const taken = this.server.resume.take(hello.resume.token, key);
+        if (taken.resumed) {
+          this.lineage = taken.state;
+          this.resumed = true;
+          this.peerLastReceived = hello.resume.lastReceivedSeq;
+        }
       }
     }
     this.lineage ??= { outbox: new ReliableOutbox(), inbound: new InboundSequence(), ready: false, phase: null, report: null, activity: null };
