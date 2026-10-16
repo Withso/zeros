@@ -27,7 +27,7 @@ import type {
 import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import { JobRunner } from "../job-runner.js";
-import { isValidJobOwner, type ClaimedJob } from "../job-queue.js";
+import { isValidJobOwner, purgeFailedJobs, type ClaimedJob } from "../job-queue.js";
 import {
   auditLifecycleJobs,
   DEFAULT_STOPPED_DRIFT_INTERVAL_MS,
@@ -453,10 +453,14 @@ export class CloudWorkspaceReconciler {
   }
 
   /** Enqueue any pending deadline that lost its job. */
+  /** Hourly maintenance: repair missing or late jobs and purge terminally
+   * failed rows, which nothing else ever deletes. */
   async auditJobs(): Promise<Partial<Record<LifecycleWork, number>>> {
     const repaired = await auditLifecycleJobs(this.pool, this.dueScope());
     const total = Object.values(repaired).reduce((sum, count) => sum + count, 0);
     if (total) this.logger.warn(`[cloud-workspace] lifecycle job audit repaired ${total} missing or late job(s)`);
+    const purged = await purgeFailedJobs(this.pool, { olderThanMs: 7 * 24 * 60 * 60_000, limit: 1_000 });
+    if (purged) this.logger.info(`[jobs] purged ${purged} terminally failed job(s)`);
     return repaired;
   }
 

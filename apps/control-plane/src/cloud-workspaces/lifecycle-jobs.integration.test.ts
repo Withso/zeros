@@ -125,6 +125,19 @@ d("lifecycle jobs", () => {
     expect((await job("diagnostics", null))?.delay_ms).toBeGreaterThan(30 * 60_000);
   });
 
+  it("purges terminally failed jobs after a week during the hourly audit", async () => {
+    const insert = (key: string, age: string) => pool.query(
+      `INSERT INTO control_plane_jobs (kind, dedupe_key, state, finished_at, last_error_code)
+       VALUES ('cloud_engine_health', $1, 'failed', now() - $2::interval, 'handler_failed')`,
+      [key, age]);
+    await insert("workspace:old", "8 days");
+    await insert("workspace:recent", "1 hour");
+    await reconciler().auditJobs();
+    const rows = (await pool.query(
+      "SELECT dedupe_key FROM control_plane_jobs WHERE state='failed' ORDER BY dedupe_key")).rows;
+    expect(rows).toEqual([{ dedupe_key: "workspace:recent" }]);
+  });
+
   it("drains a diagnostic publication backlog without empty-run backoff", async () => {
     const f = await seedReadyCloudWorkspace(pool);
     await pool.query(
