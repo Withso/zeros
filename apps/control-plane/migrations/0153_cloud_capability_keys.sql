@@ -82,6 +82,23 @@ CREATE TABLE cloud_capability_member_epochs (
   PRIMARY KEY (org_id, user_id)
 );
 
+-- Access loss per workspace (S1 "Snapshot scope"): recorded in the
+-- committing transaction when a change removes a principal's access to a
+-- workspace, so an auth snapshot lists a removed principal for that
+-- workspace only and nothing about other workspaces' members ever reaches
+-- a VM. A sharing-mode change bumps wr, which already kills every older
+-- token, so it records no rows. The hourly diagnostics retention pass prunes
+-- rows past twice the revocation retention window; readers filter by the
+-- window regardless, so the prune bound never affects correctness.
+CREATE TABLE cloud_capability_access_losses (
+  workspace_id uuid NOT NULL REFERENCES cloud_workspaces(id) ON DELETE CASCADE,
+  org_id uuid NOT NULL,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  lost_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (workspace_id, user_id)
+);
+CREATE INDEX cloud_capability_access_losses_prune ON cloud_capability_access_losses(lost_at);
+
 CREATE FUNCTION bump_cloud_capability_member_epoch(target_org uuid, target_user uuid) RETURNS void
 LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
@@ -90,11 +107,41 @@ BEGIN
     updated_at = clock_timestamp();
 END $$;
 
+CREATE FUNCTION record_cloud_capability_access_loss(target_workspace uuid, target_org uuid, target_user uuid) RETURNS void
+LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  INSERT INTO cloud_capability_access_losses(workspace_id, org_id, user_id) VALUES (target_workspace, target_org, target_user)
+  ON CONFLICT(workspace_id, user_id) DO UPDATE SET lost_at = clock_timestamp(), org_id = target_org;
+END $$;
+
 CREATE FUNCTION bump_cloud_capability_member_epoch_trigger() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF TG_OP <> 'INSERT' THEN
     PERFORM bump_cloud_capability_member_epoch(OLD.org_id, OLD.user_id);
+    -- Access loss, same transaction as the bump. These triggers fire on
+    -- INSERT / UPDATE OF role[, revoked_at] / DELETE, so for the two
+    -- membership tables an UPDATE is always a role change and only a DELETE
+    -- removes access; a guest grant also loses access when it is revoked.
+    -- The revoked_at probe stays nested: only guest grant rows have it, and
+    -- SQL does not promise short-circuit evaluation across record fields.
+    IF TG_TABLE_NAME = 'cloud_workspace_members' THEN
+      IF TG_OP = 'DELETE' THEN
+        PERFORM record_cloud_capability_access_loss(OLD.workspace_id, OLD.org_id, OLD.user_id);
+      END IF;
+    ELSIF TG_TABLE_NAME = 'cloud_workspace_guest_grants' THEN
+      IF TG_OP = 'DELETE' OR (OLD.revoked_at IS NULL AND NEW.revoked_at IS NOT NULL) THEN
+        PERFORM record_cloud_capability_access_loss(OLD.workspace_id, OLD.org_id, OLD.user_id);
+      END IF;
+    ELSIF TG_TABLE_NAME = 'organization_members' THEN
+      IF TG_OP = 'DELETE' THEN
+        -- The removed org member loses every organization-shared workspace.
+        INSERT INTO cloud_capability_access_losses(workspace_id, org_id, user_id)
+          SELECT workspace.id, OLD.org_id, OLD.user_id FROM cloud_workspaces workspace
+          WHERE workspace.org_id = OLD.org_id AND workspace.sharing_mode = 'organization' AND workspace.deleted_at IS NULL
+        ON CONFLICT(workspace_id, user_id) DO UPDATE SET lost_at = clock_timestamp(), org_id = OLD.org_id;
+      END IF;
+    END IF;
   END IF;
   IF TG_OP <> 'DELETE' AND (TG_OP = 'INSERT' OR NEW.user_id IS DISTINCT FROM OLD.user_id) THEN
     PERFORM bump_cloud_capability_member_epoch(NEW.org_id, NEW.user_id);
@@ -121,6 +168,7 @@ BEGIN
   IF TG_OP = 'UPDATE' AND OLD.accepted_by IS NOT NULL
      AND (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at OR NEW.accepted_by IS DISTINCT FROM OLD.accepted_by) THEN
     PERFORM bump_cloud_capability_member_epoch(OLD.org_id, OLD.accepted_by);
+    PERFORM record_cloud_capability_access_loss(OLD.workspace_id, OLD.org_id, OLD.accepted_by);
   END IF;
   RETURN NULL;
 END $$;
@@ -133,7 +181,14 @@ ALTER TABLE cloud_capability_member_epochs FORCE ROW LEVEL SECURITY;
 CREATE POLICY cloud_capability_member_epochs_system ON cloud_capability_member_epochs
   FOR ALL USING (app_is_system()) WITH CHECK (app_is_system());
 
+ALTER TABLE cloud_capability_access_losses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cloud_capability_access_losses FORCE ROW LEVEL SECURITY;
+CREATE POLICY cloud_capability_access_losses_system ON cloud_capability_access_losses
+  FOR ALL USING (app_is_system()) WITH CHECK (app_is_system());
+
 -- S1 sid: a stable per-session UUID the capability can name without exposing
--- the provider session id.
+-- the provider session id. The volatile default rewrites auth_sessions under
+-- ACCESS EXCLUSIVE; that is deliberate and bounded: the table holds one row
+-- per sign-in, lock_timeout is 5 s, and 0121/0029 set the precedent.
 ALTER TABLE auth_sessions ADD COLUMN id uuid NOT NULL DEFAULT gen_random_uuid();
 CREATE UNIQUE INDEX auth_sessions_id_key ON auth_sessions(id);
