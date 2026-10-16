@@ -30,6 +30,12 @@ type Generation = {
 };
 
 const unconfirmed = () => new HttpError(409, "cloud_workspace_retirement_unconfirmed", "Cloud workspace retirement is not confirmed");
+/** While storage deletion is blocked, the reconciler polls by re-claiming the
+ * same accepted delete (observing -> dispatching -> observing, every ~4 min).
+ * That flip proves nothing new. Every other field, including a move to any
+ * other intent state, must still match exactly. */
+const comparable = ({ workspace, generations }: { workspace: Workspace; generations: Generation[] }) => JSON.stringify([
+  { ...workspace, intent_state: workspace.intent_state === "dispatching" ? "observing" : workspace.intent_state }, generations]);
 const iso = (value: string) => new Date(value).toISOString();
 const reserved = (storageMiB: number) => ({ cpuMillicores: 0 as const, memoryMiB: 0 as const, storageMiB });
 
@@ -136,7 +142,7 @@ export class DatabaseCloudWorkspaceDeletionRetirement {
       throw error;
     }
     const after = await this.snapshot(input);
-    if (signal.aborted || JSON.stringify([before.workspace, before.generations]) !== JSON.stringify([after.workspace, after.generations])) throw unconfirmed();
+    if (signal.aborted || comparable(before) !== comparable(after)) throw unconfirmed();
     const physical = pending.size === 0;
     const w = after.workspace;
     if (physical && (w.status !== "deleted" || w.deleted_at === null || w.data_deleted_at === null || w.job_state !== "succeeded" || w.intent_state !== "succeeded")) throw unconfirmed();
