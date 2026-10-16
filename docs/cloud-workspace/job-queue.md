@@ -263,7 +263,34 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
 - **Audit.** Each replica runs `auditLifecycleJobs` hourly (first run jittered
   between 30 and 60 minutes after start): it gives every pending deadline
   without a job, or with a later one, a queued job at its due time and logs a
-  warning with the count. Under correct operation it repairs nothing.
+  warning with the count. Under correct operation it repairs nothing. The same
+  hourly pass purges terminal `failed` rows older than seven days
+  (`purgeFailedJobs`), which nothing else ever deletes.
+- **Cost.** The load simulator measures the per-workspace job cycle
+  (`worker.engineHealthJob`: claim, fenced handler claim, reschedule and
+  completion, 5 transactions every 90 s per running workspace) and the hourly
+  audit (`worker.jobAudit`, 7 transactions across the six due scans and the
+  purge); both carry absolute budgets in `src/load-sim/budgets.json`, along
+  with the notifying-commit rate, since PostgreSQL serializes commits that
+  issued a NOTIFY. Steady-state reschedules and completions are silent by
+  design; enqueues that insert a job or move it earlier notify one wake-up
+  per committing transaction.
+- **Enqueue row locks.** A domain writer's trigger enqueue takes the matching
+  job row's lock until commit even when the `ON CONFLICT ... WHERE` makes it
+  a no-op, and the diagnostics singleton serializes concurrent recovery
+  watermark writers on one row. This is bounded (job rows are leaf locks; the
+  runner's claims use `SKIP LOCKED` and never block), but a long system
+  transaction touching a domain table delays the matching job's settlement
+  past its lease, which reclaims and reruns it — fenced, so the cost is
+  wasted work only. If the singleton ever gets hot, key the diagnostics job
+  per org.
+- **No DELETE triggers.** The triggers cover inserts and updates only. No
+  current flow deletes a gating row while live work depends on it: retention
+  excludes requests with active intents, org teardown deletes workspaces with
+  their intents, data purge targets deleted workspaces, and restore-incident
+  deletion only removes rows that do not gate drift. A future flow that
+  deletes gating rows for live workspaces must enqueue explicitly or add a
+  DELETE trigger; until then the hourly audit bounds any miss.
 - **Wake-ups.** The process's shared worker LISTEN session wakes the runner on
   the queue channel and on the existing lifecycle hint; the runner's fallback
   poll is the reconciler interval, clamped to 1 s-5 min. The reconciler's own
@@ -272,8 +299,7 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
 - **Rollout.** Control-plane internal: the migration backfills one job per
   pending deadline, and older replicas during a deploy keep their own union
   polling and ignore the jobs; both paths claim through the same fenced
-  transactions. Drift stays per binding until list-based reconciliation
-  replaces it.
+  transactions.
 
 The P0.10 timer inventory also lists idle timers that later become queue- or
 event-driven: **C03** (the mirror idle timer, about 60 empty mirror checks a

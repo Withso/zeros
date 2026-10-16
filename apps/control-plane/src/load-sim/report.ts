@@ -44,12 +44,12 @@ export function formatReport(report: LoadSimulationReport): string {
       return [row.operation, fixed(empty?.perCall.transactions), fixed(one?.perCall.transactions), fixed(row.perCall.transactions), fixed(row.perCall.statements)];
     })));
   sections.push("## Real-time scenarios\n\n" + table(
-    ["Scenario", "Active", "Seconds", "Tx/s", "Tx/s per active", "Statements/s", "Round trips/s", "Client DB ms/s", "CP CPU ms/s", "Server tx/s", "Server exec ms/s", "Failures"],
+    ["Scenario", "Active", "Seconds", "Tx/s", "Tx/s per active", "Statements/s", "Round trips/s", "Notify commits/s", "Client DB ms/s", "CP CPU ms/s", "Server tx/s", "Server exec ms/s", "Failures"],
     report.scenarios.map(row => {
       const quiet = report.scenarios.find(item => item.activeWorkspaces === 0 && item.background === row.background);
       const perActive = row.activeWorkspaces ? (row.transactionsPerSecond - (quiet?.transactionsPerSecond ?? 0)) / row.activeWorkspaces : null;
       return [row.name, String(row.activeWorkspaces), fixed(row.durationSeconds, 1), fixed(row.transactionsPerSecond), fixed(perActive),
-        fixed(row.statementsPerSecond), fixed(row.roundTripsPerSecond), fixed(row.clientDbMsPerSecond), fixed(row.processCpuMsPerSecond),
+        fixed(row.statementsPerSecond), fixed(row.roundTripsPerSecond), fixed(row.notifyingCommitsPerSecond, 3), fixed(row.clientDbMsPerSecond), fixed(row.processCpuMsPerSecond),
         fixed(row.server?.transactionsPerSecond), fixed(row.server?.execMsPerSecond), String(Object.values(row.failures).reduce((a, b) => a + b, 0))];
     })));
   const largest = report.scenarios.at(-1);
@@ -60,13 +60,16 @@ export function formatReport(report: LoadSimulationReport): string {
   sections.push(`## Projection at nominal cadence\n\nPer active workspace: ${fixed(report.projection.perWorkspace.transactionsPerSecond, 3)} tx/s, ` +
     `${fixed(report.projection.perWorkspace.statementsPerSecond, 3)} statements/s, ${fixed(report.projection.perWorkspace.roundTripsPerSecond, 3)} round trips/s ` +
     `(running engine alone ${fixed(report.projection.perRunningEngineTransactionsPerSecond, 3)} tx/s; each connected desktop adds ` +
-    `${fixed(report.projection.perConnectedClientTransactionsPerSecond, 3)} tx/s).\n\n` +
+    `${fixed(report.projection.perConnectedClientTransactionsPerSecond, 3)} tx/s; settled stopped ${fixed(report.projection.perStoppedWorkspaceTransactionsPerSecond, 3)} tx/s).\n\n` +
     table(["Operation", "Role", "Requests/s", "Tx/s"], report.projection.perWorkspace.byOperation.map(row =>
       [row.operation, row.role, fixed(row.requestsPerSecond, 3), fixed(row.transactionsPerSecond, 3)])) + "\n\n" +
     table(["Reconciler share", "Tx per 60 s cycle", "Tx/s"], report.projection.perWorkspaceWorker.map(row =>
       [row.operation, fixed(row.transactionsPerCycle), fixed(row.transactionsPerSecond, 3)])) + "\n\n" +
-    table(["Workspaces", "Tx/s", "Statements/s"], report.projection.atWorkspaces.map(row =>
-      [String(row.workspaces), fixed(row.transactionsPerSecond), fixed(row.statementsPerSecond)])));
+    table(["Workspaces", "Tx/s", "Statements/s", "Boat calls/min/replica"], report.projection.atWorkspaces.map(row =>
+      [String(row.workspaces), fixed(row.transactionsPerSecond), fixed(row.statementsPerSecond), fixed(row.boatCallsPerMinutePerReplica, 2)])));
+  if (largest && Object.keys(largest.providerCalls).length) sections.push(`## Provider calls (${largest.name})\n\n` + table(
+    ["Call", "Per minute"],
+    Object.entries(largest.providerCalls).map(([name, count]) => [name, fixed(count / largest.durationSeconds * 60, 2)])));
   if (report.topStatements.length) sections.push(`## Top statements by server time (${largest?.name ?? ""})\n\n` + table(
     ["Total ms", "Calls", "Mean ms", "Query"],
     report.topStatements.slice(0, 10).map(row => [fixed(row.totalExecMs, 1), String(row.calls), fixed(row.meanExecMs, 3),
