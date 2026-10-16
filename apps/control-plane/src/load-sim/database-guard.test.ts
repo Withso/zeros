@@ -7,7 +7,7 @@ const unusedLookup: LookupAll = async () => { throw new Error("lookup must not r
 describe("assertDisposableLoopbackDatabase", () => {
   it("accepts loopback IP literals with an allow-listed database name", async () => {
     await expect(assertDisposableLoopbackDatabase("postgres://u:p@127.0.0.1:5432/zeros_load_sim", unusedLookup)).resolves.toBeUndefined();
-    await expect(assertDisposableLoopbackDatabase("postgres://u:p@127.4.5.6/zeros_load_sim_b", unusedLookup)).resolves.toBeUndefined();
+    await expect(assertDisposableLoopbackDatabase("postgres://127.4.5.6:5432/zeros_load_sim_b", unusedLookup)).resolves.toBeUndefined();
     await expect(assertDisposableLoopbackDatabase("postgres://u:p@[::1]:5432/zeros_load_sim", unusedLookup)).resolves.toBeUndefined();
   });
 
@@ -19,9 +19,11 @@ describe("assertDisposableLoopbackDatabase", () => {
   });
 
   it("refuses a DNS name that only looks like a loopback address", async () => {
-    await expect(assertDisposableLoopbackDatabase("postgres://u:p@127.attacker.example/zeros_load_sim", unusedLookup))
+    // Fixture TLD: the secrets gate allows only reserved test domains in
+    // credentialed URLs; the guard must refuse the lookalike either way.
+    await expect(assertDisposableLoopbackDatabase("postgres://u:p@127.attacker.test/zeros_load_sim", unusedLookup))
       .rejects.toThrow(/accepts only a loopback host/);
-    await expect(assertDisposableLoopbackDatabase("postgres://u:p@127.0.0.1.attacker.example/zeros_load_sim", unusedLookup))
+    await expect(assertDisposableLoopbackDatabase("postgres://u:p@127.0.0.1.attacker.test/zeros_load_sim", unusedLookup))
       .rejects.toThrow(/accepts only a loopback host/);
   });
 
