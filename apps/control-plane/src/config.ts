@@ -61,6 +61,18 @@ const EnvSchema = z.object({
   CONTROL_PLANE_PROCESS_ROLE: z.enum(["api", "worker", "realtime", "combined"]).default("combined"),
   /** Graceful drain window on SIGTERM; 0 keeps the immediate close. */
   CONTROL_PLANE_DRAIN_SECONDS: z.coerce.number().int().min(0).max(120).default(0),
+  /** Organizations whose cloud engines may hold a realtime uplink. Empty
+   * keeps every engine on the HTTP heartbeat and credential poll. */
+  CONTROL_PLANE_UPLINK_ORGANIZATIONS: z.string().default("").transform((value, context) => {
+    const trimmed = value.trim();
+    if (!trimmed) return [] as string[];
+    const ids = trimmed.split(",").map(item => item.trim().toLowerCase());
+    if (ids.length > 1_000 || ids.some(id => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id))) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "expected comma-separated organization UUIDs" });
+      return z.NEVER;
+    }
+    return [...new Set(ids)];
+  }),
   SLOW_REQUEST_LOG_MS: z.coerce.number().int().min(50).max(60_000).default(DEFAULT_SLOW_REQUEST_LOG_MS),
   DESKTOP_RELEASE_LEDGER_URL: z.string().optional(),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
@@ -323,6 +335,8 @@ export type Config = {
   processRole?: "api" | "worker" | "realtime" | "combined";
   /** SIGTERM drain window for WebSocket sessions; 0 closes them at once. */
   shutdownDrainMs?: number;
+  /** Per-organization rollout of the engine uplink (realtime.md). */
+  uplinkOrganizations?: readonly string[];
   workerPollIntervalsMs?: WorkerPollIntervals;
   /** Requests at least this slow are logged once by route template. */
   slowRequestLogMs?: number;
@@ -1661,6 +1675,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     databasePoolMax: e.DATABASE_POOL_MAX,
     processRole: e.CONTROL_PLANE_PROCESS_ROLE,
     shutdownDrainMs: e.CONTROL_PLANE_DRAIN_SECONDS * 1_000,
+    uplinkOrganizations: e.CONTROL_PLANE_UPLINK_ORGANIZATIONS,
     workerPollIntervalsMs: loadWorkerPollIntervals(env, cloudWorkspaces !== null),
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
     operationsAlertEmail: loadOperationsAlertEmail(env, diagnostics),
