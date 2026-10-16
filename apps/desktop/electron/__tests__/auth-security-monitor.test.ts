@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   WorkOSDesktopSecurityMonitor,
   consumeSecurityEventStream,
+  securityStreamEndLog,
   desktopSecurityEventAction,
 } from "../auth-security-monitor";
 
@@ -169,5 +170,16 @@ describe("desktop WorkOS security lifecycle", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("reports a network-dropped stream as a reconnect, not a warning", () => {
+    expect(securityStreamEndLog(new TypeError("fetch failed"))).toEqual({
+      level: "log",
+      message: "[auth-security] stream interrupted by the network; reconnecting",
+    });
+    expect(securityStreamEndLog(new Error("security stream unavailable"))).toEqual({
+      level: "warn",
+      message: "[auth-security] stream ended: Error",
+    });
   });
 });

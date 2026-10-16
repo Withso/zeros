@@ -270,6 +270,7 @@ export function initRendererLogCapture(): void {
   // for error tracking; this capture puts the same signal into the shareable
   // log stream (addEventListener, so both consumers coexist).
   window.addEventListener("error", (e) => {
+    if (isBenignWindowError(e.message)) return;
     enqueue(
       "error",
       `window.onerror: ${e.message} (${e.filename ?? "?"}:${e.lineno ?? "?"})`,
@@ -286,6 +287,23 @@ export function initRendererLogCapture(): void {
   window.addEventListener("pagehide", () => void flush());
 
   enqueue("info", "renderer log capture installed", ["log-store"]);
+}
+
+/** Browser notices delivered through window.onerror that are not failures. A
+ * ResizeObserver callback that resizes what it observes makes the browser defer
+ * the remaining notifications to the next frame and report this message; the
+ * layout settles and nothing is lost. Recording it at error level only buried
+ * real errors in shared logs. */
+const BENIGN_WINDOW_ERRORS = [
+  /^ResizeObserver loop completed with undelivered notifications\.?$/,
+  /^ResizeObserver loop limit exceeded$/,
+];
+
+export function isBenignWindowError(message: unknown): boolean {
+  return (
+    typeof message === "string" &&
+    BENIGN_WINDOW_ERRORS.some((pattern) => pattern.test(message.trim()))
+  );
 }
 
 /** Test-only: restore pristine state. Does NOT unpatch console (tests stub

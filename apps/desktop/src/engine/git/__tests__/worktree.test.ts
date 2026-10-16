@@ -1979,10 +1979,19 @@ printf ran > '${sentinel}'
     expect(gitDir).toBeTruthy();
     await rm(gitDir as string, { recursive: true, force: true });
 
-    expect(await reconcileInterruptedWorkspaceLifecycles()).toEqual({
-      recovered: 0,
-      failed: 1,
-    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await reconcileInterruptedWorkspaceLifecycles()).toEqual({
+        recovered: 0,
+        failed: 1,
+      });
+      // The retained journal repeats at every launch, so the line names the fix.
+      expect(String(logged.mock.calls.at(-1)?.[0])).toMatch(
+        /lifecycle recovery failed for create .*Create rollback is still pending.*\(Close processes using the workspace folder, then restart Zeros to retry recovery\.\)/,
+      );
+    } finally {
+      logged.mockRestore();
+    }
     expect(existsSync(row.path)).toBe(true);
     expect(getWorkspace(row.id).id).toBe(row.id);
     expect(getWorkspaceLifecycleStatus(row.id)).toMatchObject({
