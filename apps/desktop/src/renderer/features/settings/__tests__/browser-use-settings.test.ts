@@ -4,11 +4,13 @@ import {
   BROWSER_SETTINGS_ROWS,
   CLAUDE_CHROME_DOCS_URL,
   CLAUDE_CHROME_EXTENSION_URL,
+  browserRoutesFromEffective,
   browserSettingIsManaged,
   browserSettingPatch,
   browserSettingSnapshotSupersedesPending,
   browserSettingsFromEffective,
   browserStringSettingPatch,
+  inAppBrowserInUse,
 } from "../browser-use-settings";
 
 describe("Browser use settings", () => {
@@ -22,6 +24,15 @@ describe("Browser use settings", () => {
     expect(browserSettingPatch("auto_open", false)).toEqual({
       browser: { auto_open: false },
     });
+    expect(browserSettingPatch("codex_native", false)).toEqual({
+      browser: { codex_native: false },
+    });
+    expect(browserSettingPatch("in_app_enabled", false)).toEqual({
+      browser: { in_app_enabled: false },
+    });
+    expect(browserSettingPatch("show_agent_cursor", false)).toEqual({
+      browser: { show_agent_cursor: false },
+    });
   });
 
   it("keeps Claude external-Chrome access off until explicitly enabled", () => {
@@ -29,6 +40,8 @@ describe("Browser use settings", () => {
     expect(browserSettingsFromEffective({ browser: { enabled: true } }).claude_enabled).toBe(false);
     expect(browserSettingsFromEffective({})).toEqual({
       codex_enabled: true,
+      codex_native: true,
+      in_app_enabled: true,
       claude_enabled: false,
       auto_open: true,
       show_agent_cursor: true,
@@ -50,11 +63,80 @@ describe("Browser use settings", () => {
       }),
     ).toEqual({
       codex_enabled: true,
+      codex_native: true,
+      in_app_enabled: true,
       claude_enabled: false,
       auto_open: true,
       show_agent_cursor: false,
       navigation_approval: "always-ask",
     });
+    expect(
+      browserSettingsFromEffective({
+        browser: { codex_native: false, in_app_enabled: "no" },
+      }),
+    ).toMatchObject({ codex_native: false, in_app_enabled: true });
+  });
+
+  it("routes each agent the way the engine does", () => {
+    const open = { zerosBrowser: true };
+    expect(browserRoutesFromEffective({}, open)).toEqual({
+      codex: "codex-native",
+      claude: "zeros",
+      cursor: "zeros",
+    });
+    expect(
+      browserRoutesFromEffective(
+        { browser: { codex_native: false, claude_enabled: true } },
+        open,
+      ),
+    ).toEqual({ codex: "zeros", claude: "claude-chrome", cursor: "zeros" });
+    expect(
+      browserRoutesFromEffective(
+        { browser: { enabled: false, in_app_enabled: false } },
+        open,
+      ),
+    ).toEqual({ codex: "off", claude: "off", cursor: "off" });
+    expect(
+      browserRoutesFromEffective(
+        {
+          browser: {
+            codex_enabled: false,
+            in_app_enabled: false,
+            claude_enabled: true,
+          },
+        },
+        open,
+      ),
+    ).toEqual({ codex: "off", claude: "claude-chrome", cursor: "off" });
+  });
+
+  it("routes as before the Zeros browser while it is not available", () => {
+    const closed = { zerosBrowser: false };
+    expect(browserRoutesFromEffective({}, closed)).toEqual({
+      codex: "codex-native",
+      claude: "off",
+      cursor: "off",
+    });
+    expect(
+      browserRoutesFromEffective(
+        { browser: { codex_native: false, claude_enabled: true } },
+        closed,
+      ),
+    ).toEqual({ codex: "codex-native", claude: "claude-chrome", cursor: "off" });
+  });
+
+  it("applies the shared Browser rows while any agent can use the in-app browser", () => {
+    const open = { zerosBrowser: true };
+    expect(inAppBrowserInUse({ codex_enabled: true, in_app_enabled: false }, open)).toBe(true);
+    expect(inAppBrowserInUse({ codex_enabled: false, in_app_enabled: true }, open)).toBe(true);
+    expect(inAppBrowserInUse({ codex_enabled: false, in_app_enabled: false }, open)).toBe(false);
+    // Only Codex has the in-app browser while the Zeros browser is closed.
+    expect(
+      inAppBrowserInUse(
+        { codex_enabled: false, in_app_enabled: true },
+        { zerosBrowser: false },
+      ),
+    ).toBe(false);
   });
 
   it("persists the website-opening approval policy separately from consequential actions", () => {
@@ -70,25 +152,38 @@ describe("Browser use settings", () => {
     ).toBe("always-allow");
   });
 
-  it("keeps the Browser page to three concise Codex rows and one Claude row", () => {
-    expect(BROWSER_SETTINGS_ROWS.codex).toHaveLength(3);
-    expect(BROWSER_SETTINGS_ROWS.claude).toHaveLength(1);
-    expect(BROWSER_SETTINGS_ROWS.codex.map(({ label }) => label)).toEqual([
-      "Enable browser use",
-      "Open the Browser tab automatically",
-      "Approval for opening websites",
+  it("groups the Browser page into Codex, Claude and Cursor, and every-agent rows", () => {
+    expect(BROWSER_SETTINGS_ROWS.codex.map(({ key, label }) => [key, label])).toEqual([
+      ["codex_enabled", "Enable browser use"],
+      ["codex_native", "Use Codex’s built-in browser"],
     ]);
-    expect(BROWSER_SETTINGS_ROWS.claude[0]?.label).toBe(
-      "Use Claude Code with Chrome",
+    expect(BROWSER_SETTINGS_ROWS.inApp.map(({ key, label }) => [key, label])).toEqual([
+      ["in_app_enabled", "Allow Claude and Cursor to use the in-app browser"],
+      ["claude_enabled", "Use Claude Code with Chrome"],
+    ]);
+    expect(BROWSER_SETTINGS_ROWS.shared.map(({ key, label }) => [key, label])).toEqual([
+      ["auto_open", "Open the Browser tab automatically"],
+      ["navigation_approval", "Approval for opening websites"],
+      ["show_agent_cursor", "Show agent cursor"],
+    ]);
+    // Existing rows keep their meaning and wording; the every-agent rows no
+    // longer name Codex.
+    expect(BROWSER_SETTINGS_ROWS.codex[0].hint).toBe(
+      "Allow Codex to use the in-app browser.",
     );
-    expect(BROWSER_SETTINGS_ROWS.claude[0]?.hint).toBe(
+    expect(BROWSER_SETTINGS_ROWS.inApp[1].hint).toBe(
       "Requires a Claude login and Chrome extension.",
     );
-    for (const row of [
+    const rows = [
       ...BROWSER_SETTINGS_ROWS.codex,
-      ...BROWSER_SETTINGS_ROWS.claude,
-    ]) {
+      ...BROWSER_SETTINGS_ROWS.inApp,
+      ...BROWSER_SETTINGS_ROWS.shared,
+    ];
+    for (const row of rows) {
       expect(row.hint.length).toBeLessThanOrEqual(64);
+    }
+    for (const row of BROWSER_SETTINGS_ROWS.shared) {
+      expect(row.hint).not.toContain("Codex");
     }
   });
 

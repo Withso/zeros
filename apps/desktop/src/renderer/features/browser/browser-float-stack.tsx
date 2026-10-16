@@ -16,10 +16,12 @@ import { cn } from "../../shared/ui/cn";
 import { toast } from "../../shared/ui/primitives/elements";
 import { IconButton } from "../../shared/ui/primitives/icon-button";
 import { Toolbar, Tooltip } from "../../shared/ui/primitives";
+import { requestWorkbenchRestore } from "../../shell/workbench/workbench-visibility-controller";
 import { beginDesignPointerGesture } from "../design-workspace/design-pointer-gesture";
 import { browserPictureInPictureSize, browserPictureInPictureTitle } from "./browser-agent-picture-in-picture";
 import {
   clampBrowserFloatViewport,
+  closeBrowserFloat,
   dockBrowserTab,
   registerBrowserFloatSlot,
   resizeBrowserFloat,
@@ -324,6 +326,9 @@ function BrowserFloatBox({
     dispatch({ type: "ACTIVATE_WORKBENCH_TAB", id: entry.tabId, scope: entry.scope });
     onRevealWorkbench();
   };
+  const closeFloat = () => {
+    if (closeBrowserFloat(entry.key)) requestWorkbenchRestore();
+  };
 
   // One resize at a time. Escape, window blur and lost capture restore the
   // start size; unmounting mid-drag cancels the same way.
@@ -436,7 +441,7 @@ function BrowserFloatBox({
           <Tooltip label="Close">
             <IconButton
               size="compact"
-              onClick={() => dockBrowserTab(entry.key)}
+              onClick={closeFloat}
               label="Close floating preview"
             >
               <X aria-hidden="true" />

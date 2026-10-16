@@ -31,6 +31,7 @@ vi.mock("../tabs/changes-surface", () => ({
 }));
 vi.mock("../tabs/review-surface", () => ({ ReviewSurface: () => null }));
 vi.mock("../tabs/browser-tab", () => ({ BrowserTab: () => null }));
+vi.mock("../../../features/simulators/simulator-tab", () => ({ SimulatorTab: () => null }));
 
 describe("every WorkbenchTabType enters the status frame", () => {
   afterEach(() => {

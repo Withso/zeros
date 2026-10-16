@@ -58,6 +58,12 @@ const CODEX_STAGED = [
   "binaries/codex-cli-version.txt",
 ];
 const RIPGREP_STAGED = ["binaries/rg"];
+// The Cua computer-use driver is staged at pack time by
+// scripts/stage-cua-driver.mjs (downloaded + signature-verified, gitignored).
+const CUA_STAGED = ["binaries/cua-driver"];
+// AXe (iOS Simulator view and input) is staged at pack time by
+// scripts/stage-axe.mjs (downloaded + signature-verified, gitignored).
+const AXE_STAGED = ["binaries/axe"];
 const HOST_PROCESS_SUPERVISOR =
   "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs";
 const LEGAL_RESOURCES = [
@@ -71,6 +77,8 @@ const beforePackSource = readFileSync(
   "utf8",
 );
 const ripgrepStageSource = readFileSync("scripts/stage-ripgrep.mjs", "utf8");
+const cuaStageSource = readFileSync("scripts/stage-cua-driver.mjs", "utf8");
+const axeStageSource = readFileSync("scripts/stage-axe.mjs", "utf8");
 const sidecarSource = readFileSync("apps/desktop/electron/sidecar.ts", "utf8");
 
 const froms = [...yml.matchAll(/^\s*-?\s*from:\s*(.+)$/gm)].map((m) =>
@@ -221,7 +229,9 @@ for (const from of froms) {
   if (
     CLAUDE_STAGED.includes(from) ||
     CODEX_STAGED.includes(from) ||
-    RIPGREP_STAGED.includes(from)
+    RIPGREP_STAGED.includes(from) ||
+    CUA_STAGED.includes(from) ||
+    AXE_STAGED.includes(from)
   )
     continue;
   if (!existsSync(from))
@@ -282,6 +292,100 @@ if (!/stage-codex-cli\.mjs/.test(beforePackSource)) {
 }
 if (!/stage-ripgrep\.mjs/.test(beforePackSource)) {
   errs.push("beforePack must stage pinned ripgrep before packaging");
+}
+if (!/stage-cua-driver\.mjs/.test(beforePackSource)) {
+  errs.push(
+    "scripts/electron-before-pack.cjs no longer invokes stage-cua-driver.mjs — " +
+      "binaries/cua-driver would never be created and the packaged app would ship " +
+      "with Computer use permanently unavailable",
+  );
+}
+for (const staged of CUA_STAGED) {
+  if (!froms.includes(staged)) {
+    errs.push(
+      `electron-builder.yml has no extraResources \`from: ${staged}\` — the packaged ` +
+        `app would ship WITHOUT the Cua computer-use driver. Keep this in sync ` +
+        `with scripts/stage-cua-driver.mjs.`,
+    );
+  }
+}
+// The staging script is the supply-chain boundary for the driver executable:
+// it must pin the release SHA-256, thin the universal binary with lipo, and
+// re-verify the Developer ID signature afterwards.
+if (
+  !/52de49b5046df19245ad02ff9aa89ce9caf69e84988e1d0fac677611dd83e48c/.test(
+    cuaStageSource,
+  ) ||
+  !/lipo/.test(cuaStageSource) ||
+  !/codesign/.test(cuaStageSource)
+) {
+  errs.push(
+    "stage-cua-driver must pin the release SHA-256, thin with lipo, and verify the Developer ID signature",
+  );
+}
+if (!/stage-axe\.mjs/.test(beforePackSource)) {
+  errs.push(
+    "scripts/electron-before-pack.cjs no longer invokes stage-axe.mjs — " +
+      "binaries/axe would never be created and the packaged Simulator tab could not show devices",
+  );
+}
+for (const staged of AXE_STAGED) {
+  if (!froms.includes(staged)) {
+    errs.push(
+      `electron-builder.yml has no extraResources \`from: ${staged}\` — the packaged ` +
+        `app would ship WITHOUT AXe. Keep this in sync with scripts/stage-axe.mjs.`,
+    );
+  }
+}
+if (
+  !/7b76340b72e90d0f211bc7c4636f15009076eff07acef2f2b632b175debd8834/.test(axeStageSource) ||
+  !/lipo/.test(axeStageSource) ||
+  !/codesign/.test(axeStageSource)
+) {
+  errs.push(
+    "stage-axe must pin the release SHA-256, thin with lipo, and verify the Developer ID signatures",
+  );
+}
+// The user's simulator input goes through zeros-simulator-hid, built into
+// binaries/axe beside the frameworks it links; without it every touch waits
+// about a second for an AXe command.
+if (
+  !/buildSimulatorHid\(/.test(axeStageSource) ||
+  !/stage-axe\.mjs"\s*\)?\s*,\s*"--require-simulator-hid"/.test(beforePackSource)
+) {
+  errs.push(
+    "stage-axe must build zeros-simulator-hid, and scripts/electron-before-pack.cjs must pass " +
+      "--require-simulator-hid — the packaged app would send each simulator touch through AXe, " +
+      "about a second apiece",
+  );
+}
+// The SDK's native .node runtime and dylib are dlopen'd by path; inside the
+// asar that path is unreadable and importCuaSdk fails at runtime only.
+for (const glob of [
+  "**/node_modules/@trycua/**/*",
+  "**/node_modules/@ubjs/**/*",
+]) {
+  if (!yml.includes(`- "${glob}"`)) {
+    errs.push(
+      `electron-builder.yml asarUnpack must include "${glob}" — the Cua driver's native pieces cannot load from inside app.asar`,
+    );
+  }
+}
+// agent-device runs under ELECTRON_RUN_AS_NODE (no asar support) and
+// xcodebuild builds its XCTest runner from the project inside the package.
+if (!yml.includes(`- "**/node_modules/agent-device/**/*"`)) {
+  errs.push(
+    'electron-builder.yml asarUnpack must include "**/node_modules/agent-device/**/*" — agents could not use simulators in the packaged app',
+  );
+}
+if (
+  !/app\.asar\.unpacked/.test(
+    readFileSync("apps/desktop/electron/devices/agent-device.ts", "utf8"),
+  )
+) {
+  errs.push(
+    "electron/devices/agent-device.ts must resolve the packaged CLI from app.asar.unpacked",
+  );
 }
 for (const staged of RIPGREP_STAGED) {
   if (!froms.includes(staged)) {

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -73,6 +75,22 @@ describe("agent browser picture in picture presentation", () => {
         rendererEvent: "leave",
       }),
     ).toBe(false);
+  });
+
+  it("draws its hover toolbar with the shared agent control strip", () => {
+    const source = readFileSync(
+      resolve(
+        process.cwd(),
+        "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx",
+      ),
+      "utf8",
+    );
+    expect(source).toMatch(/<AgentControlBar\s+variant="strip"/);
+    expect(source).toContain('data-testid="browser-agent-pip-toolbar"');
+    expect(source).toContain('stopLabel="Stop agent browser work"');
+    expect(source).toContain('label="Hide browser picture in picture"');
+    expect(source).toContain('label="Restore browser column"');
+    expect(source).toMatch(/sessions\s*\.stopBrowserUse\(activeChatId/);
   });
 
   it("restores a user-hidden preview only for the next ownership interval", () => {

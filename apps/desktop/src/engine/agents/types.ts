@@ -38,7 +38,11 @@ import type {
   TurnUsage,
 } from "@zeros/protocol/agent-events";
 import type { ExecutionId, ProviderBinding } from "@zeros/protocol/identities";
-import type { AccountDetails, SteerOutcome } from "@zeros/protocol/messages";
+import type {
+  AccountDetails,
+  AgentCapabilityNotice,
+  SteerOutcome,
+} from "@zeros/protocol/messages";
 import type {
   ExecutionBoundaryPortsSnapshot,
   ExecutionBoundaryStatus,
@@ -174,6 +178,19 @@ export interface AgentGatewayEvents {
     outcome: QuestionOutcome,
   ) => void;
   onAgentStderr: (agentId: string, line: string) => void;
+  /** A session started without a native provider capability the user can
+   * act on. Delivered to local desktop clients only. */
+  onCapabilityNotice?: (
+    agentId: string,
+    event: { sessionId?: string; notice: AgentCapabilityNotice },
+  ) => void;
+  /** The provider's own computer use started acting in this session
+   * (`active`, repeated while it keeps acting) or its turn ended. Zeros'
+   * computer use makes other chats wait meanwhile. */
+  onNativeComputerUse?: (
+    agentId: string,
+    event: { sessionId: string; active: boolean },
+  ) => void;
   onAgentExit: (
     agentId: string,
     code: number | null,
@@ -219,6 +236,9 @@ export interface McpRemoteServerRegistration<T extends "http" | "sse"> {
    * their native mechanism. Adapters without that mechanism materialize
    * the value only in their in-memory SDK options. */
   headersFromEnv?: Record<string, string>;
+  /** Provider wait for one tool call. Only Codex has a short default (60 s);
+   * other providers already wait for the server. */
+  toolTimeoutSec?: number;
 }
 
 // ── Gateway construction shape (drop-in with AgentSessionManager) ──
@@ -313,6 +333,16 @@ export type AgentBrowserUse =
   | {
       readonly kind: "claude-agent-sdk";
     };
+
+/** Codex's built-in computer use (OpenAI's bundled computer-use plugins) for
+ * one Local session. Absent leaves the provider's own configuration alone.
+ * Zeros' computer use reaches agents as `zeros_computer` MCP tools through
+ * the session tool factory instead. */
+export interface AgentComputerUse {
+  /** False when Settings send Codex to Zeros' computer use or turn it off:
+   * the thread then gets neither the plugins nor their servers. */
+  readonly codexNative: boolean;
+}
 
 /** Narrow, engine-owned capability ports. The gateway consumes these product
  * domains rather than reaching into a provider's generic protocol surface.
@@ -541,6 +571,7 @@ export interface AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     browserUse?: AgentBrowserUse;
+    computerUse?: AgentComputerUse;
     systemInstruction?: string;
     territory?: AgentFilesystemTerritory;
     /** Zeros-owned outer process boundary. Adapters must route every process
@@ -565,6 +596,7 @@ export interface AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     browserUse?: AgentBrowserUse;
+    computerUse?: AgentComputerUse;
     systemInstruction?: string;
     territory?: AgentFilesystemTerritory;
     executionBoundary?: PreparedBoundary;

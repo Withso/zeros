@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en" style="background: transparent">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent control</title>
+  </head>
+  <!-- Main stacks this page over a live Browser page in a transparent view
+       (apps/desktop/electron/agent-control/overlay.ts), so everything around
+       the bar must let that page show through. -->
+  <body style="background: transparent; margin: 0; overflow: hidden">
+    <div id="root"></div>
+    <script
+      type="module"
+      src="/apps/desktop/src/renderer/agent-control-main.tsx"
+    ></script>
+  </body>
+</html>

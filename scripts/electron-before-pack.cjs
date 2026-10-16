@@ -108,4 +108,23 @@ exports.default = async function beforePack(context) {
     [path.join(projectDir, "scripts", "stage-ripgrep.mjs")],
     { cwd: projectDir, env: process.env, stdio: "inherit" },
   );
+
+  // Computer use has the same boundary: the Cua SDK (npm) spawns a separate
+  // `cua-driver` executable that no package archive ships. Stage the pinned,
+  // signature-verified universal tarball (thinned to arm64) to
+  // binaries/cua-driver for the extraResources copy below.
+  execFileSync(
+    process.execPath,
+    [path.join(projectDir, "scripts", "stage-cua-driver.mjs")],
+    { cwd: projectDir, env: process.env, stdio: "inherit" },
+  );
+
+  // The iOS Simulator tab streams and drives devices through AXe, a pinned,
+  // signature-verified release (not on npm) staged to binaries/axe, and
+  // sends the user's input through zeros-simulator-hid, built beside it.
+  execFileSync(
+    process.execPath,
+    [path.join(projectDir, "scripts", "stage-axe.mjs"), "--require-simulator-hid"],
+    { cwd: projectDir, env: process.env, stdio: "inherit" },
+  );
 };

@@ -19,9 +19,14 @@ import {
 } from "node:http";
 import {
   BROWSER_SERVICE_VERSION,
+  agentControlName,
+  browserControlDetail,
+  isAgentControlFamily,
   isBrowserElementRef,
   isBrowserProductId,
   isBrowserToolName,
+  type AgentControlFamily,
+  type BrowserAppearance,
   type BrowserConfirmationDecision,
   type BrowserConfirmationRequest,
   type BrowserAgentPointer,
@@ -33,12 +38,18 @@ import {
   type BrowserSessionReleaseRequest,
   type BrowserSessionReleaseResponse,
   type BrowserSessionState,
+  type BrowserSessionStopResponse,
   type BrowserToolInvokeRequest,
   type BrowserToolName,
   type BrowserToolResult,
 } from "@zeros/protocol/browser-tools";
 
+import type { AgentControlPresenter } from "../agent-control/overlay";
 import { parseBrowserAnnotations, type BrowserAnnotation } from "./annotations";
+import {
+  createBrowserAppearanceController,
+  type BrowserAppearanceController,
+} from "./appearance";
 import {
   persistBrowserScreenshot,
   persistBrowserTrace,
@@ -48,6 +59,8 @@ import {
   BrowserConfirmationBroker,
   classifyBrowserClick,
   classifyBrowserInput,
+  classifyBrowserKey,
+  type BrowserKeyTarget,
 } from "./confirmations";
 import {
   allocateBrowserDownload,
@@ -64,6 +77,9 @@ import {
   browserAgentPointerOverlayScript as agentPointerOverlayScript,
   browserAgentNavigationDisposition,
   browserActionLabel,
+  browserControlBarDisposition,
+  browserInputStopsAgent,
+  browserSurfaceIsPictureInPicture,
   commitBrowserTitleCandidate,
   browserElementActionLabel,
   browserFaviconNavigationDisposition,
@@ -76,7 +92,7 @@ import {
   browserPolicySnapshotIsCurrent,
   browserSessionShouldRemainAlive,
   browserSurfaceShouldBeVisible,
-  browserSurfaceCaptureDataUrl,
+  captureBrowserSurface,
   browserSurfaceHoverAfterAttach,
   browserSurfaceDetachAllowed,
   browserViewportAfterExplicitResize,
@@ -89,6 +105,7 @@ import {
   normalizedBrowserFaviconMime,
   orderedBrowserFaviconCandidates,
   normalizeCodexPageNavigateResult,
+  parseBrowserKeyChord,
   queueBrowserTitleCandidate,
   safeBrowserSvgFavicon,
   usableBrowserDocument,
@@ -121,6 +138,11 @@ const NAVIGATION_TIMEOUT_MS = 30_000;
 const USEFUL_DOCUMENT_TIMEOUT_MS = 3_000;
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const AGENT_ACTIVITY_LINGER_MS = 1_800;
+const AGENT_INPUT_READY_TIMEOUT_MS = 1_500;
+const PAGE_FRAME_TIMEOUT_MS = 1_000;
+// Electron runs context isolation in world 999 and reserves 1 << 20 upward
+// for extensions.
+const AGENT_PAGE_WORLD_ID = 1_000;
 const BROWSER_TITLE_SETTLE_MS = 300;
 const MAX_FAVICON_BYTES = 192 * 1024;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
@@ -222,6 +244,7 @@ interface BrowserLease {
   browserUseSocket: CodexBrowserUseRequest["socket"] | null;
   browserUseTurnId: string | null;
   disposeBrowserUseDebugger: () => void;
+  appearance: BrowserAppearanceController;
 }
 
 interface BrowserSessionRecord {
@@ -238,6 +261,11 @@ interface BrowserSessionRecord {
   activeOperations: number;
   /** Stop invalidates both the current action and calls queued behind it. */
   interruptionGeneration: number;
+  /** The Browser tab's page color scheme, kept here so a page reopened after
+   * a close gets it too. `null` follows the Zeros appearance. */
+  appearance: BrowserAppearance | null;
+  /** The agent that last drove the page, named on its control bar. */
+  agent: AgentControlFamily | null;
 }
 
 interface CodexBrowserBinding {
@@ -254,6 +282,17 @@ export interface ZerosBrowserServiceOptions {
   onConfirmationSettled?: (confirmationId: string) => void;
   /** Prevent all browser work when no trusted product surface is available. */
   isTrustedSurfaceAvailable?: () => boolean;
+  /** Shows which agent controls an attached page, with Stop. */
+  agentControl?: AgentControlPresenter;
+  /** The staged Zeros browser is open, so pages get its control bar and Esc
+   * takes them back. Open when omitted. */
+  zerosBrowserAvailable?: () => boolean;
+  /** The user took a page back with Esc or its control bar. The trusted
+   * Browser chrome's own Stop goes through `stopBrowserAction` instead. */
+  onUserStoppedAgent?: (stop: {
+    browserSessionId: string;
+    conversationId: string;
+  }) => void;
   maxSessions?: number;
   idleSessionMs?: number;
 }
@@ -277,6 +316,11 @@ export interface ZerosBrowserServiceHandle {
   park(browserSessionId: string, surfaceId: string): boolean;
   detach(browserSessionId: string, surfaceId: string): boolean;
   capture(browserSessionId: string): Promise<string | null>;
+  /** Applies a Browser tab's page color scheme; `null` follows Zeros. */
+  setAppearance(
+    browserSessionId: string,
+    appearance: BrowserAppearance | null,
+  ): boolean;
   control(
     browserSessionId: string,
     tool: "open" | "back" | "forward" | "reload",
@@ -288,11 +332,18 @@ export interface ZerosBrowserServiceHandle {
    * confirmation broker and `revokeConfirmationSurface` respectively. */
   clearBrowsingData(): Promise<number>;
   setUiPreferences(preferences: {
+    /** Some agent may use the in-app browser. Off closes every page. */
     browserEnabled: boolean;
+    /** Codex may drive pages through OpenAI's Browser plugin. Defaults on. */
+    codexNativeEnabled?: boolean;
     showAgentCursor: boolean;
     navigationApproval: "always-ask" | "always-allow";
   }): void;
+  /** Re-reads `zerosBrowserAvailable` for every open page's control bar. */
+  refreshAgentControl(): void;
   stopBrowserAction(browserSessionId: string): boolean;
+  /** Stop from the page's control bar; also reports `onUserStoppedAgent`. */
+  stopFromControlBar(browserSessionId: string): boolean;
   close(browserSessionId: string): boolean;
   sessionStates(): BrowserSessionState[];
   confirmationRequests(): BrowserConfirmationRequest[];
@@ -391,6 +442,7 @@ export async function startZerosBrowserService(
   const codexBrowserSessions = new Map<string, CodexBrowserBinding>();
   const cleanupTasks = new Set<Promise<void>>();
   let browserUiEnabled = true;
+  let codexNativeEnabled = true;
   let browserPolicyGeneration = 0;
   let showAgentCursor = true;
   let navigationApproval: "always-ask" | "always-allow" = "always-ask";
@@ -515,6 +567,8 @@ export async function startZerosBrowserService(
       operationTail: Promise.resolve(),
       activeOperations: 0,
       interruptionGeneration: 0,
+      appearance: null,
+      agent: null,
     };
     records.set(id, record);
     ownerSessions.set(key, id);
@@ -589,6 +643,8 @@ export async function startZerosBrowserService(
         return failure("Browser work was stopped by the user.");
       }
       if (record.lease) record.lease.actor = actor;
+      // An unnamed caller must not inherit the previous agent's name.
+      if (actor === "agent") record.agent = request.agent ?? null;
       const result = await executeTool(
         record,
         request.tool,
@@ -601,6 +657,7 @@ export async function startZerosBrowserService(
           navigationApproval,
           interrupted: () =>
             interruptionGeneration !== record.interruptionGeneration,
+          stopFromPage: stopFromControlBar,
         },
       );
       if (
@@ -629,6 +686,47 @@ export async function startZerosBrowserService(
   };
   const invoke = (request: BrowserToolInvokeRequest) =>
     invokeAs(request, "agent");
+
+  // Stop the agent's current action and keep the page. Shared by the trusted
+  // Browser tab Stop button (IPC) and the engine's per-turn cancel route.
+  const stopBrowserAction = (browserSessionId: string): boolean => {
+    if (!isBrowserProductId(browserSessionId)) return false;
+    const record = records.get(browserSessionId);
+    if (!record) return false;
+    for (const binding of codexBrowserSessions.values()) {
+      if (binding.browserSessionId === browserSessionId) {
+        binding.blockedTurnId = binding.activeTurnId;
+      }
+    }
+    record.interruptionGeneration += 1;
+    confirmations.clearSession(record.id);
+    const lease = record.lease;
+    if (!lease || lease.view.webContents.isDestroyed()) return false;
+    lease.view.webContents.stop();
+    for (const item of lease.activeDownloads) item.cancel();
+    releaseCodexNativeControl(lease);
+    void lease.view.webContents
+      .executeJavaScript(
+        `${agentPointerCleanupScript(lease.pointerOverlayId)};${agentWorkingOverlayScript(lease.workingOverlayId, false)}`,
+        true,
+      )
+      .catch(() => undefined);
+    publishState(options, record, "ready");
+    return true;
+  };
+
+  // The user took the page back from inside it (Esc) or from its control
+  // bar. Unlike the trusted Browser chrome, neither can settle the provider's
+  // pending Browser approval itself, so main relays the stop to the renderer.
+  const stopFromControlBar = (browserSessionId: string): boolean => {
+    const record = records.get(browserSessionId);
+    if (!record || !stopBrowserAction(browserSessionId)) return false;
+    options.onUserStoppedAgent?.({
+      browserSessionId,
+      conversationId: record.owner.conversationId,
+    });
+    return true;
+  };
 
   const controlAsUser = (
     browserSessionId: string,
@@ -871,6 +969,19 @@ export async function startZerosBrowserService(
         sendJson(response, 200, result);
         return;
       }
+      const stopMatch = /^\/v1\/sessions\/([^/]+)\/stop$/.exec(url.pathname);
+      if (stopMatch && request.method === "POST") {
+        const body = asRecord(await readJsonBody(request));
+        if (body.version !== BROWSER_SERVICE_VERSION) {
+          throw browserError("Unsupported Zeros browser service version.");
+        }
+        const result: BrowserSessionStopResponse = {
+          version: BROWSER_SERVICE_VERSION,
+          stopped: stopBrowserAction(decodeURIComponent(stopMatch[1]!)),
+        };
+        sendJson(response, 200, result);
+        return;
+      }
       const match = /^\/v1\/sessions\/([^/]+)(?:\/invoke)?$/.exec(url.pathname);
       if (
         match &&
@@ -887,6 +998,7 @@ export async function startZerosBrowserService(
             browserSessionId,
             tool: body.tool as BrowserToolName,
             arguments: (body.arguments ?? {}) as BrowserJsonValue,
+            ...(isAgentControlFamily(body.agent) ? { agent: body.agent } : {}),
           }),
         );
         return;
@@ -936,12 +1048,14 @@ export async function startZerosBrowserService(
           confirmations,
           pipe: () => browserUsePipe,
           browserEnabled: () => browserUiEnabled,
+          codexNativeEnabled: () => codexNativeEnabled,
           trustedSurfaceAvailable: () =>
             options.isTrustedSurfaceAvailable?.() !== false,
           showAgentCursor: () => showAgentCursor,
           navigationApproval: () => navigationApproval,
           touchRecord,
           scheduleLeaseCleanup,
+          stopFromPage: stopFromControlBar,
         }),
     });
   } catch (error) {
@@ -990,7 +1104,7 @@ export async function startZerosBrowserService(
         surfaceChanged,
         lease.surfaceHovered,
       );
-      const pictureInPicture = surfaceId.startsWith("browser-agent-pip");
+      const pictureInPicture = browserSurfaceIsPictureInPicture(surfaceId);
       const presentation = browserViewportPresentation(
         safeBounds,
         lease.sourceViewport,
@@ -1013,7 +1127,10 @@ export async function startZerosBrowserService(
         }),
       );
       touchRecord(record);
-      return sessionState(record);
+      const state = sessionState(record);
+      // Re-adding the page above raised it over its control bar.
+      syncAgentControlBar(options, record, state, true);
+      return state;
     },
     park(browserSessionId, surfaceId) {
       const record = records.get(browserSessionId);
@@ -1057,11 +1174,14 @@ export async function startZerosBrowserService(
       const record = records.get(browserSessionId);
       const lease = record?.lease;
       if (!lease || lease.view.webContents.isDestroyed()) return null;
-      const image = await lease.view.webContents.capturePage(undefined, {
-        stayHidden: true,
-        stayAwake: true,
-      });
-      return browserSurfaceCaptureDataUrl(image, MAX_RESPONSE_BYTES);
+      return captureBrowserSurface(lease.view.webContents, MAX_RESPONSE_BYTES);
+    },
+    setAppearance(browserSessionId, appearance) {
+      const record = records.get(browserSessionId);
+      if (!record) return false;
+      record.appearance = appearance;
+      void record.lease?.appearance.set(appearance);
+      return true;
     },
     control(browserSessionId, tool, args = {}) {
       return Promise.resolve(controlAsUser(browserSessionId, tool, args));
@@ -1094,6 +1214,14 @@ export async function startZerosBrowserService(
         browserPolicyGeneration += 1;
       }
       browserUiEnabled = preferences.browserEnabled;
+      const nativeWasEnabled = codexNativeEnabled;
+      codexNativeEnabled = preferences.codexNativeEnabled !== false;
+      if (nativeWasEnabled && !codexNativeEnabled) {
+        // Pages stay open for the Zeros tools; only plugin work in flight ends.
+        for (const binding of codexBrowserSessions.values()) {
+          binding.blockedTurnId = binding.activeTurnId;
+        }
+      }
       showAgentCursor = preferences.showAgentCursor;
       navigationApproval = preferences.navigationApproval;
       if (wasEnabled && !browserUiEnabled) {
@@ -1128,31 +1256,13 @@ export async function startZerosBrowserService(
           .catch(() => undefined);
       }
     },
-    stopBrowserAction(browserSessionId) {
-      if (!isBrowserProductId(browserSessionId)) return false;
-      const record = records.get(browserSessionId);
-      if (!record) return false;
-      for (const binding of codexBrowserSessions.values()) {
-        if (binding.browserSessionId === browserSessionId) {
-          binding.blockedTurnId = binding.activeTurnId;
-        }
+    refreshAgentControl() {
+      for (const record of records.values()) {
+        if (record.lease) syncAgentControlBar(options, record, sessionState(record));
       }
-      record.interruptionGeneration += 1;
-      confirmations.clearSession(record.id);
-      const lease = record.lease;
-      if (!lease || lease.view.webContents.isDestroyed()) return false;
-      lease.view.webContents.stop();
-      for (const item of lease.activeDownloads) item.cancel();
-      releaseCodexNativeControl(lease);
-      void lease.view.webContents
-        .executeJavaScript(
-          `${agentPointerCleanupScript(lease.pointerOverlayId)};${agentWorkingOverlayScript(lease.workingOverlayId, false)}`,
-          true,
-        )
-        .catch(() => undefined);
-      publishState(options, record, "ready");
-      return true;
     },
+    stopBrowserAction,
+    stopFromControlBar,
     close(browserSessionId) {
       const record = records.get(browserSessionId);
       if (!record) return false;
@@ -1203,11 +1313,15 @@ interface CodexBrowserUseContext {
   confirmations: BrowserConfirmationBroker;
   pipe(): CodexBrowserUsePipeHandle;
   browserEnabled(): boolean;
+  /** "Use Codex's built-in browser". Off leaves Codex the Zeros tools. */
+  codexNativeEnabled(): boolean;
   trustedSurfaceAvailable(): boolean;
   showAgentCursor(): boolean;
   navigationApproval(): "always-ask" | "always-allow";
   touchRecord(record: BrowserSessionRecord): void;
   scheduleLeaseCleanup(lease: BrowserLease): Promise<void>;
+  /** The user pressed Esc in an agent-controlled page. */
+  stopFromPage(browserSessionId: string): void;
 }
 
 /** Native IAB backend consumed by Codex's official bundled Browser plugin.
@@ -1245,6 +1359,11 @@ async function handleCodexBrowserUseRequest(
   if (request.method === "ping") return "pong";
   if (!context.browserEnabled()) {
     throw browserError("Browser use is disabled in Settings.");
+  }
+  if (!context.codexNativeEnabled()) {
+    throw browserError(
+      "Codex’s built-in browser is turned off in Settings > Browser.",
+    );
   }
   if (!context.trustedSurfaceAvailable()) {
     throw browserError("Browser use needs an open trusted Zeros window.");
@@ -1292,6 +1411,7 @@ async function handleCodexBrowserUseRequest(
       lease.codexTabDisposition = null;
     }
     lease.actor = "agent";
+    record.agent = "codex";
     lease.browserUseTurnId = request.turnId;
     lease.browserUseSocket = request.socket;
     lease.navigationApproval = context.navigationApproval();
@@ -1323,6 +1443,7 @@ async function handleCodexBrowserUseRequest(
         showAgentCursor: context.showAgentCursor(),
         navigationApproval: context.navigationApproval(),
         interrupted,
+        stopFromPage: context.stopFromPage,
       });
       record.lease = lease;
     }
@@ -1398,6 +1519,18 @@ async function handleCodexBrowserUseRequest(
         assertCodexBrowserTab(request.params, record, lease);
         return {};
       }
+      case "getCommittedTabUrl": {
+        // The official client checks URL policy and origin consent against
+        // this before every guarded command. It is only a read, so it never
+        // claims the page or publishes agent activity.
+        const lease = requireLease();
+        assertCodexBrowserTab(request.params, record, lease);
+        await ensureCodexBrowserUseReady(lease);
+        if (currentLease() !== lease) {
+          throw browserError("Browser tab is no longer available.");
+        }
+        return lease.view.webContents.getURL() || undefined;
+      }
       case "focusTab": {
         const lease = requireLease();
         assertCodexBrowserTab(request.params, record, lease);
@@ -1463,6 +1596,7 @@ async function handleCodexBrowserUseRequest(
           await updateAgentPointer(lease, x, y, "move");
           publishState(context.options, record, "working", "click");
         }
+        await preparePageForAgent(lease.view.webContents);
         lease.agentInputDepth += 1;
         try {
           await withTimeout(
@@ -1516,6 +1650,7 @@ async function handleCodexBrowserUseRequest(
           typeof target.sessionId === "string" ? target.sessionId : undefined;
         const timeoutMs = browserUseCommandTimeout(request.params.timeoutMs);
         const inputCommand = method.startsWith("Input.");
+        if (inputCommand) await preparePageForAgent(lease.view.webContents);
         // OpenAI's Browser plugin has already applied URL policy, site-status,
         // and origin-consent checks before its high-level navigate command is
         // lowered to Page.navigate. Scope this preapproval to that one CDP
@@ -1603,14 +1738,6 @@ async function handleCodexBrowserUseRequest(
           }
         }
       }
-      case "executeCdpWithCachedExpression":
-        // Current browser-client probes this optional optimization. Returning
-        // its exact sentinel makes the official client fall back to executeCdp
-        // with the full expression, keeping semantics correct without holding
-        // executable page code in a second host-side cache.
-        throw browserError(
-          unsupportedCodexBrowserMethodMessage(request.method),
-        );
       case "attachTarget":
       case "detachTarget":
         return {};
@@ -1623,8 +1750,13 @@ async function handleCodexBrowserUseRequest(
         return {};
       }
       default:
+        // The official client treats only this exact text as "not
+        // implemented" and then uses its fallback: a cached CDP expression is
+        // resent in full through executeCdp (so Zeros never caches page code),
+        // and optional reads, host-only commands and credential-target
+        // protection fail closed. Any other text is a hard command failure.
         throw browserError(
-          `Unsupported native Codex Browser Use method: ${request.method}`,
+          unsupportedCodexBrowserMethodMessage(request.method),
         );
     }
   } finally {
@@ -1916,6 +2048,7 @@ async function executeTool(
     showAgentCursor: boolean;
     navigationApproval: "always-ask" | "always-allow";
     interrupted: () => boolean;
+    stopFromPage: (browserSessionId: string) => void;
   },
 ): Promise<BrowserToolResult> {
   const args = asRecord(rawArguments);
@@ -2241,6 +2374,191 @@ async function executeTool(
       publishState(context.options, record, "ready", tool);
       return result;
     }
+    case "key": {
+      const chord = parseBrowserKeyChord(requireString(args.key, "key"));
+      if (!chord) {
+        return failure(
+          "Unsupported key. Use a named key such as Enter, Escape, Tab or ArrowDown, or one character, with optional Shift/Control/Alt/Meta.",
+        );
+      }
+      const ref = args.ref === undefined ? null : requireRef(args.ref);
+      const inspectedUserInputGeneration = lease.userInputGeneration;
+      const focused = asRecord(
+        await lease.view.webContents.executeJavaScript(
+          focusForKeyScript(lease.refAttribute, ref),
+          true,
+        ),
+      );
+      if (focused.ok !== true) {
+        return failure(String(focused.error ?? "The key could not be sent."));
+      }
+      if (
+        chord.text &&
+        chord.keyCode !== "Enter" &&
+        focused.password === true
+      ) {
+        return failure("Use the browser type tool for password fields.");
+      }
+      if (ref && context.actor === "agent" && context.showAgentCursor) {
+        await updateAgentPointer(
+          lease,
+          Number(focused.x),
+          Number(focused.y),
+          "type",
+        );
+        publishState(context.options, record, "working", tool);
+      }
+      const keyTarget = browserKeyTarget(focused);
+      const risk = classifyBrowserKey(chord.keyCode, keyTarget);
+      if (
+        risk &&
+        !(await confirmBrowserAction(
+          record,
+          lease,
+          context,
+          risk.category,
+          risk.label,
+          tool,
+        ))
+      ) {
+        return failure("The browser action was denied by the user.");
+      }
+      if (
+        context.actor === "agent" &&
+        !browserAgentActionStillOwnsPage(
+          inspectedUserInputGeneration,
+          lease.userInputGeneration,
+        )
+      ) {
+        return failure(
+          "The user took control of the browser; take a new snapshot before retrying.",
+        );
+      }
+      if (risk) {
+        assertBrowserActionNotInterrupted(context);
+        const current = asRecord(
+          await lease.view.webContents.executeJavaScript(
+            focusForKeyScript(lease.refAttribute, ref),
+            true,
+          ),
+        );
+        if (
+          current.ok !== true ||
+          !sameBrowserKeyTarget(keyTarget, browserKeyTarget(current))
+        ) {
+          return failure(
+            "The focused element changed while browser approval was pending; take a new snapshot before retrying.",
+          );
+        }
+      }
+      await preparePageForAgent(lease.view.webContents);
+      assertBrowserActionNotInterrupted(context);
+      lease.actor = context.actor;
+      lease.agentInputDepth += 1;
+      try {
+        const contents = lease.view.webContents;
+        contents.sendInputEvent({
+          type: "keyDown",
+          keyCode: chord.keyCode,
+          modifiers: chord.modifiers,
+        });
+        if (chord.text) {
+          contents.sendInputEvent({
+            type: "char",
+            keyCode: chord.text,
+            modifiers: chord.modifiers,
+          });
+        }
+        contents.sendInputEvent({
+          type: "keyUp",
+          keyCode: chord.keyCode,
+          modifiers: chord.modifiers,
+        });
+        await delay(30);
+      } finally {
+        lease.agentInputDepth = Math.max(0, lease.agentInputDepth - 1);
+      }
+      await settleAfterAction(lease.view.webContents);
+      assertBrowserActionNotInterrupted(context);
+      await waitForHostActions(lease);
+      assertBrowserActionNotInterrupted(context);
+      const result = await snapshotResult(lease);
+      assertBrowserActionNotInterrupted(context);
+      publishState(context.options, record, "ready", tool);
+      return result;
+    }
+    case "select": {
+      const ref = requireRef(args.ref);
+      const value =
+        args.value === undefined ? null : requireString(args.value, "value");
+      const label =
+        args.label === undefined ? null : requireString(args.label, "label");
+      if (value === null && label === null) {
+        return failure("Choose an option by value or label.");
+      }
+      const selected = asRecord(
+        await lease.view.webContents.executeJavaScript(
+          selectOptionScript(lease.refAttribute, ref, value, label),
+          true,
+        ),
+      );
+      if (selected.ok !== true) {
+        return failure(String(selected.error ?? "Choosing an option failed."));
+      }
+      if (context.actor === "agent" && context.showAgentCursor) {
+        await updateAgentPointer(
+          lease,
+          Number(selected.x),
+          Number(selected.y),
+          "click",
+        );
+        publishState(context.options, record, "working", tool);
+      }
+      await waitForHostActions(lease);
+      assertBrowserActionNotInterrupted(context);
+      const result = await snapshotResult(lease);
+      assertBrowserActionNotInterrupted(context);
+      publishState(context.options, record, "ready", tool);
+      return result;
+    }
+    case "wait": {
+      const text =
+        args.text === undefined
+          ? null
+          : requireString(args.text, "text").slice(0, 500);
+      const seconds =
+        args.seconds === undefined ? (text ? 10 : 1) : Number(args.seconds);
+      if (!Number.isFinite(seconds) || seconds < 0.1 || seconds > 10) {
+        return failure("Wait between 0.1 and 10 seconds.");
+      }
+      const deadline = Date.now() + Math.round(seconds * 1_000);
+      let found = text === null;
+      while (Date.now() < deadline) {
+        assertBrowserActionNotInterrupted(context);
+        if (text !== null) {
+          found = await lease.view.webContents
+            .executeJavaScript(
+              `(document.body?.innerText || "").includes(${JSON.stringify(text)})`,
+              true,
+            )
+            .then((value) => value === true)
+            .catch(() => false);
+          if (found) break;
+        }
+        await delay(Math.max(0, Math.min(250, deadline - Date.now())));
+      }
+      assertBrowserActionNotInterrupted(context);
+      if (!found) {
+        publishState(context.options, record, "ready", tool);
+        return failure(
+          `The text did not appear within ${seconds} seconds; take a new snapshot.`,
+        );
+      }
+      const result = await snapshotResult(lease);
+      assertBrowserActionNotInterrupted(context);
+      publishState(context.options, record, "ready", tool);
+      return result;
+    }
     case "scroll": {
       const x =
         args.x === undefined ? 0 : boundedInteger(args.x, "x", -10_000, 10_000);
@@ -2259,7 +2577,7 @@ async function executeTool(
         publishState(context.options, record, "working", tool);
       }
       await lease.view.webContents.executeJavaScript(
-        `window.scrollBy({left:${JSON.stringify(x)},top:${JSON.stringify(y)},behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"});true`,
+        `window.scrollBy({left:${JSON.stringify(x)},top:${JSON.stringify(y)},behavior:${JSON.stringify(agentScrollAnimates(lease))}&&!matchMedia("(prefers-reduced-motion: reduce)").matches?"smooth":"instant"});true`,
         true,
       );
       await delay(360);
@@ -2488,6 +2806,7 @@ function createLease(
     showAgentCursor: boolean;
     navigationApproval: "always-ask" | "always-allow";
     interrupted: () => boolean;
+    stopFromPage: (browserSessionId: string) => void;
   },
 ): BrowserLease {
   const domMarkers = browserDomMarkers(randomBytes(12).toString("hex"));
@@ -2518,8 +2837,9 @@ function createLease(
     height: 1_000,
   });
   parkingWindow.contentView.addChildView(view);
+  // No view background color: Electron also paints it behind pages that set
+  // no background of their own, so a dark color left them black-on-black.
   view.setBounds({ x: 0, y: 0, width: 1_440, height: 1_000 });
-  view.setBackgroundColor("#111111");
   view.webContents.setAudioMuted(true);
   view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   const lease: BrowserLease = {
@@ -2576,7 +2896,12 @@ function createLease(
     browserUseSocket: null,
     browserUseTurnId: null,
     disposeBrowserUseDebugger: NOOP,
+    appearance: createBrowserAppearanceController({
+      debugger: view.webContents.debugger,
+      isAlive: () => !view.webContents.isDestroyed(),
+    }),
   };
+  if (record.appearance) void lease.appearance.set(record.appearance);
 
   const navigationDetail = (
     event: Electron.Event & {
@@ -2853,7 +3178,28 @@ function createLease(
     });
     if (disposition === "block") event.preventDefault();
   };
-  view.webContents.on("before-input-event", guardDirectPageInput);
+  const guardDirectPageKeys = (event: Electron.Event, input: Electron.Input) => {
+    if (
+      record.lease === lease &&
+      lease.attachedTo !== lease.parkingWindow &&
+      browserInputStopsAgent({
+        actor: lease.actor,
+        agentDispatched: lease.agentInputDepth > 0,
+        type: input.type,
+        key: input.key,
+        meta: input.meta,
+        control: input.control,
+        alt: input.alt,
+        zerosBrowser: context.options.zerosBrowserAvailable?.() ?? true,
+      })
+    ) {
+      event.preventDefault();
+      context.stopFromPage(record.id);
+      return;
+    }
+    guardDirectPageInput(event);
+  };
+  view.webContents.on("before-input-event", guardDirectPageKeys);
   view.webContents.on("before-mouse-event", markSurfaceHover);
   view.webContents.on("before-mouse-event", guardDirectPageInput);
   view.webContents.on("render-process-gone", (_event, details) => {
@@ -3422,6 +3768,7 @@ async function screenshotResult(
 ): Promise<BrowserToolResult> {
   if (lease.view.webContents.isLoading())
     await waitForLoad(lease.view.webContents);
+  await preparePageForAgent(lease.view.webContents);
   // Agent chrome is visible in the shared page but is not website evidence.
   // Queue this after the working-state injection and restore it after capture,
   // so screenshots contain requested annotations but never the cyan tint or
@@ -3451,6 +3798,7 @@ async function screenshotResult(
         return failure(String(result.error ?? "Screenshot annotation failed."));
       }
     }
+    await waitForPageFrame(lease.view.webContents);
     const image = await lease.view.webContents.capturePage();
     if (interrupted())
       throw browserError("Browser work was stopped by the user.");
@@ -3502,13 +3850,17 @@ async function screenshotResult(
   }
 }
 
+/** Callers read the element's position right after scrolling it into view; a
+ * page's own `scroll-behavior: smooth` would still be animating it there. */
+const SCROLL_INTO_VIEW_OPTIONS = `{ block: "center", inline: "center", behavior: "instant" }`;
+
 function inspectClickScript(refAttribute: string, ref: string): string {
   const selector = `[${refAttribute}="${ref}"]`;
   return `(() => {
     const element = document.querySelector(${JSON.stringify(selector)});
     if (!element) return { ok: false, error: "Unknown or stale browser ref; take a new snapshot." };
     if (element.disabled || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected element is disabled." };
-    element.scrollIntoView({ block: "center", inline: "center" });
+    element.scrollIntoView(${SCROLL_INTO_VIEW_OPTIONS});
     const rect = element.getBoundingClientRect();
     const form = element.closest("form");
     const inputType = String(element.getAttribute("type") || "").toLowerCase();
@@ -3543,7 +3895,7 @@ function prepareClickScript(
     const currentHref = element.tagName === "A" ? element.href : null;
     if (currentHref !== inspectedHref) return { ok: false, error: "The link target changed; take a new snapshot before retrying." };
     if (element.disabled || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected element is disabled." };
-    element.scrollIntoView({ block: "center", inline: "center" });
+    element.scrollIntoView(${SCROLL_INTO_VIEW_OPTIONS});
     if (element.tagName === "A" && element.hasAttribute("target")) element.removeAttribute("target");
     const rect = element.getBoundingClientRect();
     return {
@@ -3560,7 +3912,7 @@ function inspectInputScript(refAttribute: string, ref: string): string {
     const element = document.querySelector(${JSON.stringify(selector)});
     if (!element) return { ok: false, error: "Unknown or stale browser ref; take a new snapshot." };
     if (element.disabled || element.readOnly || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected input is disabled or read-only." };
-    element.scrollIntoView({ block: "center", inline: "center" });
+    element.scrollIntoView(${SCROLL_INTO_VIEW_OPTIONS});
     const rect = element.getBoundingClientRect();
     const style = getComputedStyle(element);
     if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) return { ok: false, error: "The selected input is no longer visible." };
@@ -3642,12 +3994,13 @@ async function dispatchAgentClick(
   if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) {
     throw browserError("The browser click target is outside the viewport.");
   }
+  await preparePageForAgent(lease.view.webContents);
   lease.agentInputDepth += 1;
   try {
     if (lease.actor !== "agent" || lease.view.webContents.isDestroyed()) {
       throw browserError("Browser work was stopped by the user.");
     }
-    lease.view.webContents.sendInputEvent({ type: "mouseMove", x, y });
+    await dispatchAgentPointerMove(lease.view.webContents, x, y);
     // Hover handlers can move or cover a control. Yield once, then revalidate
     // the exact semantic ref and topmost hit target before the irreversible
     // mouse-down/up pair. This is also where the user sees the pointer arrive.
@@ -3688,6 +4041,106 @@ async function dispatchAgentClick(
     await delay(30);
   } finally {
     lease.agentInputDepth = Math.max(0, lease.agentInputDepth - 1);
+  }
+}
+
+/** A page parked in the hidden window drops mouse and key presses and cannot
+ * be captured: its widget starts hidden there, and Electron's
+ * `setBackgroundThrottling(false)` setter is what marks a hidden widget shown.
+ * Navigation replaces the widget, so this runs before every agent input and
+ * screenshot rather than once per lease. A new document also drops input while
+ * Chromium holds its paint, until its first paint or a few hundred
+ * milliseconds for a page that paints nothing. Waiting for the Paint Timing
+ * entry, rather than polling a capture, keeps the compositor animating: once a
+ * parked page is captured, its smooth scrolls stall. */
+async function preparePageForAgent(webContents: WebContents): Promise<void> {
+  if (webContents.isDestroyed()) return;
+  webContents.setBackgroundThrottling(false);
+  await withTimeout(
+    webContents.executeJavaScriptInIsolatedWorld(
+      AGENT_PAGE_WORLD_ID,
+      [{ code: AGENT_INPUT_READY_SCRIPT }],
+      false,
+    ),
+    AGENT_INPUT_READY_TIMEOUT_MS + 250,
+    "The page did not become ready for input.",
+  ).catch(() => undefined);
+}
+
+/** `capturePage` copies the frame the page drew last, which can predate a DOM
+ * change made just before the capture. */
+async function waitForPageFrame(webContents: WebContents): Promise<void> {
+  if (webContents.isDestroyed()) return;
+  await withTimeout(
+    webContents.executeJavaScriptInIsolatedWorld(
+      AGENT_PAGE_WORLD_ID,
+      [
+        {
+          code: "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
+        },
+      ],
+      false,
+    ),
+    PAGE_FRAME_TIMEOUT_MS,
+    "The page did not draw a frame.",
+  ).catch(() => undefined);
+}
+
+/** Resolves once the document has painted. A document that never paints is
+ * remembered after one timeout so later input is not delayed again; the
+ * isolated world keeps that flag and the Performance API out of page reach. */
+const AGENT_INPUT_READY_SCRIPT = `(() => {
+  if (window.__zerosInputReady || performance.getEntriesByType("paint").length > 0) return true;
+  return new Promise((resolve) => {
+    let timer = 0;
+    const observer = new PerformanceObserver(() => finish());
+    const finish = () => {
+      observer.disconnect();
+      clearTimeout(timer);
+      window.__zerosInputReady = true;
+      resolve(true);
+    };
+    observer.observe({ type: "paint" });
+    timer = setTimeout(finish, ${AGENT_INPUT_READY_TIMEOUT_MS});
+  });
+})()`;
+
+/** Smooth scrolling runs on the compositor, which stops animating a parked
+ * page once it was captured or shown and parked again. The scroll would stall
+ * and the snapshot report the old position; nobody watches a parked page. */
+function agentScrollAnimates(lease: BrowserLease): boolean {
+  return (
+    lease.attachedTo !== lease.parkingWindow &&
+    !lease.attachedTo.isDestroyed() &&
+    lease.attachedTo.isVisible()
+  );
+}
+
+/** `sendInputEvent` returns before the page handles a mouse move, which
+ * Chromium holds for the page's next frame, so hover handlers could run after
+ * the click target was revalidated. A CDP move resolves once the page has
+ * handled it. The page has one CDP session, which Codex and the Appearance
+ * override may share; only a session opened here is closed again. */
+async function dispatchAgentPointerMove(
+  webContents: WebContents,
+  x: number,
+  y: number,
+): Promise<void> {
+  const debug = webContents.debugger;
+  const attachedHere = !debug.isAttached();
+  if (attachedHere) debug.attach("1.3");
+  try {
+    await withTimeout(
+      debug.sendCommand("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x,
+        y,
+      }),
+      BROWSER_USE_CDP_TIMEOUT_MS,
+      "The page did not respond to the pointer.",
+    );
+  } finally {
+    if (attachedHere && debug.isAttached()) debug.detach();
   }
 }
 
@@ -3745,7 +4198,7 @@ function typeScript(
     const element = document.querySelector(${JSON.stringify(selector)});
     if (!element) return { ok: false, error: "Unknown or stale browser ref; take a new snapshot." };
     const text = ${JSON.stringify(text)};
-    element.scrollIntoView({ block: "center", inline: "center" });
+    element.scrollIntoView(${SCROLL_INTO_VIEW_OPTIONS});
     element.focus();
     if (element.isContentEditable) {
       if (${clear}) element.textContent = "";
@@ -3759,6 +4212,122 @@ function typeScript(
     element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
     return { ok: true, value: ${redactValue} ? "[redacted]" : ("value" in element ? String(element.value).slice(0, 300) : String(element.textContent || "").slice(0, 300)) };
+  })()`;
+}
+
+/** Focus the referenced element (or keep the current focus) and describe the
+ * element the key then reaches, which need not be the referenced one: focus
+ * follows open shadow roots and same-origin frames, and a frame Zeros can't
+ * read is reported as opaque. Described like a click target, plus whether
+ * text goes into it and, for a form field, its form's default button. A
+ * typing field's value is never read. */
+function focusForKeyScript(refAttribute: string, ref: string | null): string {
+  const selector = ref ? `[${refAttribute}="${ref}"]` : null;
+  return `(() => {
+    const selector = ${JSON.stringify(selector)};
+    let element = null;
+    if (selector) {
+      element = document.querySelector(selector);
+      if (!element) return { ok: false, error: "Unknown or stale browser ref; take a new snapshot." };
+      if (element.disabled || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected element is disabled." };
+      element.scrollIntoView(${SCROLL_INTO_VIEW_OPTIONS});
+      if (typeof element.focus === "function") element.focus();
+    }
+    const clean = (value) => String(value || "").trim().replace(/\\s+/g, " ").slice(0, 300);
+    const labelOf = (node) => clean(node.getAttribute("aria-label") || node.innerText || node.title || node.name) || clean(node.value);
+    let target = document.activeElement;
+    let opaque = false;
+    for (let depth = 0; target && depth < 16; depth += 1) {
+      if (target.shadowRoot && target.shadowRoot.activeElement) {
+        target = target.shadowRoot.activeElement;
+      } else if (target.tagName === "IFRAME" || target.tagName === "FRAME") {
+        let inner = null;
+        try { inner = target.contentDocument; } catch {}
+        if (!inner) { opaque = true; break; }
+        target = inner.activeElement;
+      } else break;
+    }
+    if (target && !opaque && (target === target.ownerDocument.body || target === target.ownerDocument.documentElement)) target = null;
+    const tagName = target ? target.tagName : "";
+    const inputType = target ? String(target.getAttribute("type") || "").toLowerCase() : "";
+    const field = tagName === "SELECT" || (tagName === "INPUT" && !["submit", "image", "button", "reset", "file"].includes(inputType));
+    const typing = Boolean(target) && !opaque && (Boolean(target.isContentEditable) || tagName === "TEXTAREA" || (field && inputType !== "checkbox" && inputType !== "radio"));
+    const owner = target && !opaque ? (target.form || (target.closest ? target.closest("form") : null)) : null;
+    const submitsForm = Boolean(owner && ((tagName === "BUTTON" && (!inputType || inputType === "submit")) || (tagName === "INPUT" && (inputType === "submit" || inputType === "image"))));
+    const form = field ? owner : null;
+    const submit = form ? form.querySelector('button[type=submit],input[type=submit],input[type=image],button:not([type])') : null;
+    const anchor = element || (document.activeElement && document.activeElement !== document.body ? document.activeElement : null);
+    const rect = anchor ? anchor.getBoundingClientRect() : { left: innerWidth / 2, top: innerHeight / 2, width: 0, height: 0 };
+    return {
+      ok: true,
+      target: Boolean(target),
+      opaque,
+      password: tagName === "INPUT" && inputType === "password",
+      tagName,
+      inputType,
+      label: target && !typing && !opaque ? labelOf(target) : "",
+      submitsForm,
+      typing,
+      implicitSubmit: Boolean(form),
+      submitLabel: submit ? labelOf(submit) || clean(submit.alt) : "",
+      x: Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2)),
+      y: Math.max(0, Math.min(innerHeight - 1, rect.top + rect.height / 2))
+    };
+  })()`;
+}
+
+function browserKeyTarget(
+  value: Record<string, unknown>,
+): BrowserKeyTarget | null {
+  if (value.target !== true) return null;
+  return {
+    label: String(value.label ?? ""),
+    tagName: String(value.tagName ?? ""),
+    inputType: String(value.inputType ?? ""),
+    submitsForm: value.submitsForm === true,
+    typing: value.typing === true,
+    implicitSubmit: value.implicitSubmit === true,
+    submitLabel: String(value.submitLabel ?? ""),
+    opaque: value.opaque === true,
+  };
+}
+
+function sameBrowserKeyTarget(
+  approved: BrowserKeyTarget | null,
+  current: BrowserKeyTarget | null,
+): boolean {
+  return JSON.stringify(approved) === JSON.stringify(current);
+}
+
+function selectOptionScript(
+  refAttribute: string,
+  ref: string,
+  value: string | null,
+  label: string | null,
+): string {
+  const selector = `[${refAttribute}="${ref}"]`;
+  return `(() => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    if (!element) return { ok: false, error: "Unknown or stale browser ref; take a new snapshot." };
+    if (element.tagName !== "SELECT") return { ok: false, error: "The selected element is not a dropdown; use click for custom menus." };
+    if (element.disabled || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected input is disabled or read-only." };
+    const value = ${JSON.stringify(value)};
+    const label = ${JSON.stringify(label)};
+    const normalize = (text) => String(text || "").trim().replace(/\\s+/g, " ");
+    const options = Array.from(element.options);
+    const index = options.findIndex((option) => !option.disabled && ((value !== null && option.value === value) || (label !== null && normalize(option.text) === normalize(label))));
+    if (index < 0) return { ok: false, error: "No option matches. Options: " + options.slice(0, 40).map((option) => normalize(option.text).slice(0, 60)).join(" | ") };
+    element.scrollIntoView(${SCROLL_INTO_VIEW_OPTIONS});
+    element.focus();
+    element.selectedIndex = index;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    const rect = element.getBoundingClientRect();
+    return {
+      ok: true,
+      x: Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2)),
+      y: Math.max(0, Math.min(innerHeight - 1, rect.top + rect.height / 2))
+    };
   })()`;
 }
 
@@ -3897,7 +4466,44 @@ function publishState(
   }
   const state = sessionState(record, effectiveStatus, tool);
   options.onSessionState?.(state);
+  syncAgentControlBar(options, record, state);
   return state;
+}
+
+function syncAgentControlBar(
+  options: ZerosBrowserServiceOptions,
+  record: BrowserSessionRecord,
+  state: BrowserSessionState,
+  raise = false,
+): void {
+  const presenter = options.agentControl;
+  if (!presenter) return;
+  const lease = record.lease;
+  if (!lease || lease.view.webContents.isDestroyed()) {
+    presenter.dispose(record.id);
+    return;
+  }
+  const attachedToTrustedWindow =
+    lease.attachedTo !== lease.parkingWindow && !lease.attachedTo.isDestroyed();
+  const disposition = browserControlBarDisposition({
+    actor: lease.actor,
+    status: state.status,
+    attachedToTrustedWindow,
+    surfaceId: lease.surfaceId,
+    zerosBrowser: options.zerosBrowserAvailable?.() ?? true,
+  });
+  if (disposition !== "show") {
+    presenter.hide(record.id, { immediate: disposition === "remove" });
+    return;
+  }
+  presenter.show(record.id, {
+    title: record.agent ? agentControlName(record.agent) : "Agent",
+    detail: browserControlDetail(state),
+    window: lease.attachedTo,
+    above: lease.view,
+    bounds: lease.view.getBounds(),
+    raise,
+  });
 }
 
 function sessionState(
@@ -3992,6 +4598,8 @@ function resizeLease(
 async function destroyLease(lease: BrowserLease): Promise<void> {
   if (lease.displayTitleTimer) clearTimeout(lease.displayTitleTimer);
   lease.displayTitleTimer = null;
+  // First, so releasing Codex's debugger below cannot schedule a reapply.
+  lease.appearance.dispose();
   lease.disposeBrowserUseDebugger();
   lease.disposeNetworkHandlers();
   lease.disposePermissionHandlers();

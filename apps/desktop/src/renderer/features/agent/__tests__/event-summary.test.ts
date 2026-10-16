@@ -8,6 +8,7 @@
 //   - the icon strip dedupes by activity kind, capped at 5
 
 import { describe, it, expect } from "vitest";
+import { Globe, Smartphone, SquareMousePointer } from "lucide-react";
 import {
   countEventSummary,
   formatEventSummary,
@@ -155,5 +156,32 @@ describe("summaryIcons", () => {
 
   it("returns no icons for a messages-only run", () => {
     expect(summaryIcons([agentText(), agentText()])).toEqual([]);
+  });
+
+  it("gives simulator and computer control their own icons, not the browser globe", () => {
+    const zerosTool = (id: string, title: string, rawInput: object) =>
+      ({
+        id,
+        kind: "tool",
+        toolCallId: id,
+        title,
+        toolKind: "mcp",
+        status: "completed",
+        rawInput,
+      }) as unknown as AgentMessage;
+    const device = "8F2A9C4E-1B3D-4E5F-8A7B-0C1D2E3F4A5B";
+    expect(
+      summaryIcons([
+        zerosTool("tap", "mcp__zeros_device__tap", {
+          device_id: device,
+          ref: "@e1",
+        }),
+        zerosTool("shot", "mcp__zeros_device__screenshot", {
+          device_id: device,
+        }),
+        zerosTool("click", "mcp__zeros_computer__click", { pid: 42 }),
+        browserTool("open"),
+      ]),
+    ).toEqual([Smartphone, SquareMousePointer, Globe]);
   });
 });

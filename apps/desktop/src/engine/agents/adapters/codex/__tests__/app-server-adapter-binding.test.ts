@@ -182,6 +182,7 @@ import { CodexAppServerAdapter } from "../app-server-adapter";
 function makeAdapter() {
   const onSessionUpdate = vi.fn();
   const onAgentStderr = vi.fn();
+  const onCapabilityNotice = vi.fn();
   const ctx = {
     projectRoot: "/tmp/proj",
     mcpServers: [],
@@ -192,12 +193,14 @@ function makeAdapter() {
       onQuestionRequest: vi.fn(),
       onAgentStderr,
       onAgentExit: vi.fn(),
+      onCapabilityNotice,
     },
   } as unknown as AgentAdapterContext;
   return {
     adapter: new CodexAppServerAdapter(ctx),
     onSessionUpdate,
     onAgentStderr,
+    onCapabilityNotice,
   };
 }
 
@@ -373,6 +376,187 @@ describe("Codex opaque provider bindings", () => {
       expect.stringMatching(/Official Browser runtime discovery failed/i),
     );
     await adapter.dispose();
+  });
+
+  it("tells the desktop when the installed Browser plugin cannot be used", async () => {
+    browserRuntime.resolve.mockImplementationOnce(
+      async (options: {
+        onUnavailable?: (reason: Record<string, string>) => void;
+      }) => {
+        options.onUnavailable?.({
+          code: "plugin-unsupported",
+          version: "27.1.0",
+          detail: "scripts/browser-service.mjs does not export handleRpc",
+        });
+        return null;
+      },
+    );
+    const { adapter, onAgentStderr, onCapabilityNotice } = makeAdapter();
+
+    const started = await adapter.newSession({
+      executionId: "execution-browser-unsupported",
+      cwd: "/tmp/proj",
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_unsupported",
+      },
+    });
+
+    expect(rt.startParams.at(-1)).toMatchObject({
+      config: { "plugins.browser@openai-bundled.enabled": false },
+    });
+    expect(browserHost.register).not.toHaveBeenCalled();
+    expect(onCapabilityNotice).toHaveBeenCalledExactlyOnceWith("codex", {
+      sessionId: "execution-browser-unsupported",
+      notice: {
+        code: "codex-browser-plugin-unsupported",
+        version: "27.1.0",
+      },
+    });
+    expect(onAgentStderr).toHaveBeenCalledWith(
+      "codex",
+      expect.stringMatching(/27\.1\.0.*does not export handleRpc/),
+    );
+    await adapter.disposeSession(started.session.sessionId);
+  });
+
+  it("stays quiet on the desktop when ChatGPT Desktop is not installed", async () => {
+    browserRuntime.resolve.mockImplementationOnce(
+      async (options: {
+        onUnavailable?: (reason: Record<string, string>) => void;
+      }) => {
+        options.onUnavailable?.({ code: "runtime-missing" });
+        return null;
+      },
+    );
+    const { adapter, onAgentStderr, onCapabilityNotice } = makeAdapter();
+
+    const started = await adapter.newSession({
+      executionId: "execution-browser-not-installed",
+      cwd: "/tmp/proj",
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_not_installed",
+      },
+    });
+
+    expect(onCapabilityNotice).not.toHaveBeenCalled();
+    expect(onAgentStderr).toHaveBeenCalledWith(
+      "codex",
+      expect.stringMatching(/Official Browser runtime unavailable/),
+    );
+    await adapter.disposeSession(started.session.sessionId);
+  });
+
+  const zerosBrowser = {
+    name: "zeros_browser",
+    transport: "http",
+    url: "http://127.0.0.1:9/mcp",
+    headersFromEnv: { Authorization: "ZEROS_BROWSER_TOOLS_CAPABILITY" },
+  } satisfies McpServerRegistration;
+  const bootedServerNames = () =>
+    (rt.bootOptions.at(-1)!.mcpServers as McpServerRegistration[]).map(
+      (server) => server.name,
+    );
+
+  it("drops the Zeros browser tools when Codex's built-in browser loads", async () => {
+    const { adapter, onCapabilityNotice } = makeAdapter();
+    const started = await adapter.newSession({
+      executionId: "execution-browser-native-wins",
+      cwd: "/tmp/proj",
+      mcpServers: [zerosBrowser],
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_native_wins",
+      },
+    });
+
+    expect(bootedServerNames()).toEqual(["node_repl"]);
+    expect(onCapabilityNotice).not.toHaveBeenCalled();
+    await adapter.disposeSession(started.session.sessionId);
+  });
+
+  it.each([
+    [
+      "an unsupported plugin",
+      { code: "plugin-unsupported", version: "27.1.0", detail: "no handleRpc" },
+      {
+        code: "codex-browser-plugin-unsupported",
+        version: "27.1.0",
+        fallback: "zeros-browser",
+      },
+    ],
+    [
+      "an incomplete plugin",
+      { code: "plugin-incomplete", version: "26.1.0", detail: "missing files" },
+      {
+        code: "codex-browser-plugin-incomplete",
+        version: "26.1.0",
+        fallback: "zeros-browser",
+      },
+    ],
+    ["a missing ChatGPT app", { code: "runtime-missing" }, null],
+  ])(
+    "keeps the Zeros browser as Codex's fallback for %s",
+    async (_label, reason, notice) => {
+      browserRuntime.resolve.mockImplementationOnce(
+        async (options: {
+          onUnavailable?: (reason: Record<string, string>) => void;
+        }) => {
+          options.onUnavailable?.(reason);
+          return null;
+        },
+      );
+      const { adapter, onAgentStderr, onCapabilityNotice } = makeAdapter();
+      const started = await adapter.newSession({
+        executionId: "execution-browser-fallback",
+        cwd: "/tmp/proj",
+        mcpServers: [zerosBrowser],
+        browserUse: {
+          kind: "codex-app-server",
+          browserSessionId: "browser_fallback",
+        },
+      });
+
+      expect(bootedServerNames()).toEqual(["zeros_browser"]);
+      expect(rt.startParams.at(-1)).toMatchObject({
+        config: { "plugins.browser@openai-bundled.enabled": false },
+      });
+      if (notice) {
+        expect(onCapabilityNotice).toHaveBeenCalledExactlyOnceWith("codex", {
+          sessionId: "execution-browser-fallback",
+          notice,
+        });
+      } else {
+        expect(onCapabilityNotice).not.toHaveBeenCalled();
+      }
+      expect(onAgentStderr).toHaveBeenCalledWith(
+        "codex",
+        expect.stringMatching(/Codex will use the Zeros browser/),
+      );
+      await adapter.disposeSession(started.session.sessionId);
+    },
+  );
+
+  it("tells the desktop Codex switched browsers when discovery fails", async () => {
+    browserRuntime.resolve.mockRejectedValueOnce(new Error("cache unreadable"));
+    const { adapter, onCapabilityNotice } = makeAdapter();
+    const started = await adapter.newSession({
+      executionId: "execution-browser-discovery-fallback",
+      cwd: "/tmp/proj",
+      mcpServers: [zerosBrowser],
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_discovery_fallback",
+      },
+    });
+
+    expect(bootedServerNames()).toEqual(["zeros_browser"]);
+    expect(onCapabilityNotice).toHaveBeenCalledExactlyOnceWith("codex", {
+      sessionId: "execution-browser-discovery-fallback",
+      notice: { code: "codex-browser-unavailable", fallback: "zeros-browser" },
+    });
+    await adapter.disposeSession(started.session.sessionId);
   });
 
   it("retires the runtime and session directory when thread startup fails", async () => {

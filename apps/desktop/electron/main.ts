@@ -101,22 +101,34 @@ try {
 import {
   app,
   BrowserWindow,
+  dialog,
+  globalShortcut,
+  ipcMain,
   nativeImage,
   nativeTheme,
   powerMonitor,
   screen,
   shell,
+  systemPreferences,
+  WebContentsView,
   type IpcMainInvokeEvent,
 } from "electron";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
+import { isAgentControlConfirmationDecision } from "@zeros/protocol/agent-control";
+import { readAgentControlAvailability } from "@zeros/protocol/agent-control-rollout";
 import {
   isBrowserConfirmationDecision,
   isBrowserProductId,
+  normalizeBrowserAppearance,
   type BrowserJsonValue,
 } from "@zeros/protocol/browser-tools";
+import {
+  readComputerUsePreferences,
+  type ComputerUsePreferences,
+} from "@zeros/protocol/computer-use-tools";
 import { registerIpcHandlers } from "./ipc/router";
 import { registerIframeSessionCommands } from "./ipc/iframe-session";
 import { registerIframePickerCommands } from "./ipc/iframe-picker";
@@ -150,6 +162,7 @@ import {
   currentRoot,
   shutdown as shutdownSidecar,
   setEngineSpawnBarrier,
+  setAgentControlServiceEnvironment,
   setBrowserServiceEnvironment,
   spawnEngine,
   startEngineCodeWatcher,
@@ -166,7 +179,10 @@ import { installDevToolsGuard } from "./devtools";
 import { installDevMainRestartCheck } from "./dev-main-restart";
 import { setupDeepLink } from "./deep-link";
 import { setupUpdater } from "./updater";
-import { pushProviderCredentialsToEngine } from "./sidecar";
+import {
+  pushAgentControlAvailabilityToEngine,
+  pushProviderCredentialsToEngine,
+} from "./sidecar";
 import { watchSecrets } from "./secret-store";
 import { setTokenStore as setGithubTokenStore } from "../src/engine/git/github";
 import {
@@ -204,12 +220,45 @@ import {
   type ZerosBrowserServiceHandle,
 } from "./browser/service";
 import {
+  agentControlOverlayWebPreferences,
+  createAgentControlOverlayHost,
+} from "./agent-control/overlay";
+import {
+  agentControlAvailability,
+  setAgentControlAvailability,
+} from "./agent-control/rollout";
+import {
+  createAgentControlRuntime,
+  type AgentControlRuntime,
+} from "./agent-control/runtime";
+import {
   browserRendererEventIsCurrent,
   normalizeBrowserViewBoundsForHost,
   shouldRevokeBrowserSurfaceForNavigation,
 } from "./browser/surface";
+import { createComputerControlPanel } from "./computer-use/control-panel";
+import {
+  createCuaDriverHost,
+  cuaDriverBinaryPath,
+  importCuaSdk,
+  runningAppBundleId,
+} from "./computer-use/driver";
+import {
+  createMacComputerPermissions,
+  isComputerPermissionKind,
+} from "./computer-use/permissions";
+import { chooseComputerApp } from "./ipc/commands/computer-use";
+import { simulatorCommands } from "./ipc/commands/simulators";
+import { captureDragIcon, captureThumbnail } from "./devices/capture-images";
+import { scaleScreenImage } from "./devices/screen-images";
+import {
+  createSimulatorRuntime,
+  type SimulatorRuntime,
+} from "./devices/simulator-runtime";
 
 let browserService: ZerosBrowserServiceHandle | null = null;
+let agentControlRuntime: AgentControlRuntime | null = null;
+let simulatorRuntime: SimulatorRuntime | null = null;
 let designCaptureService: DesignCaptureService | null = null;
 
 // Custom schemes must be privileged before Electron reaches ready. The handler
@@ -1322,9 +1371,37 @@ app.whenReady().then(async () => {
     designCaptureService = service;
     setDesignCaptureEnvironment({ url: service.url, token: service.token });
   }).catch(() => { console.warn("[Zeros] Design capture service unavailable."); });
+  // The bar that names the agent controlling a Browser tab page and lets the
+  // user stop it. Its page is a second entry of the renderer build.
+  const agentControlBar = createAgentControlOverlayHost({
+    ipc: ipcMain,
+    createView: () =>
+      new WebContentsView({
+        webPreferences: agentControlOverlayWebPreferences(
+          path.join(__dirname, "agent-control-preload.cjs"),
+        ),
+      }),
+    load: (view) =>
+      isDev
+        ? view.webContents.loadURL(
+            new URL("/agent-control.html", DEV_URL).toString(),
+          )
+        : view.webContents.loadFile(
+            path.join(__dirname, "..", "dist", "agent-control.html"),
+          ),
+    onStop: (browserSessionId) => {
+      browserService?.stopFromControlBar(browserSessionId);
+    },
+  });
+  app.once("will-quit", () => agentControlBar.disposeAll());
   const browserReady = startZerosBrowserService({
     artifactRoot: path.join(zerosDataDir(), "browser-artifacts"),
     isTrustedSurfaceAvailable: () => getMainWindow() !== null,
+    agentControl: agentControlBar,
+    zerosBrowserAvailable: () => agentControlAvailability().zerosBrowser,
+    // Settles the provider's pending Browser approval, as the Browser tab's
+    // own Stop does.
+    onUserStoppedAgent: (stop) => emitEvent("browser-agent-stopped", stop),
     onConfirmationRequest: (request) => {
       const confirmationWindow = getMainWindow();
       const confirmationEpoch = browserRendererEpoch;
@@ -1457,6 +1534,21 @@ app.whenReady().then(async () => {
       dataUrl: await (await readyBrowserService()).capture(browserSessionId),
     };
   });
+  setCommand("browser_session_appearance", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    const appearance =
+      args.appearance === "system"
+        ? null
+        : normalizeBrowserAppearance(args.appearance);
+    if (!isBrowserProductId(browserSessionId) || appearance === undefined) {
+      throw new Error("Invalid browser appearance request.");
+    }
+    return (await readyBrowserService()).setAppearance(
+      browserSessionId,
+      appearance,
+    );
+  });
   setCommand("browser_session_close", async (args, event) => {
     trustedBrowserWindow(event);
     const browserSessionId = args.browserSessionId;
@@ -1512,6 +1604,8 @@ app.whenReady().then(async () => {
     trustedBrowserWindow(event);
     if (
       typeof args.browserEnabled !== "boolean" ||
+      (args.codexNativeEnabled !== undefined &&
+        typeof args.codexNativeEnabled !== "boolean") ||
       typeof args.showAgentCursor !== "boolean" ||
       (args.navigationApproval !== "always-ask" &&
         args.navigationApproval !== "always-allow")
@@ -1520,11 +1614,293 @@ app.whenReady().then(async () => {
     }
     (await readyBrowserService()).setUiPreferences({
       browserEnabled: args.browserEnabled,
+      ...(typeof args.codexNativeEnabled === "boolean"
+        ? { codexNativeEnabled: args.codexNativeEnabled }
+        : {}),
       showAgentCursor: args.showAgentCursor,
       navigationApproval: args.navigationApproval,
     });
     return true;
   });
+  // Simulator tabs: DeviceHub boots and shows simulators and shuts down idle
+  // ones Zeros booted. It runs no device tools until a Simulator tab or an
+  // agent asks.
+  const simulators = createSimulatorRuntime({
+    platform: process.platform,
+    packaged: IS_PACKAGED,
+    resourcesPath: process.resourcesPath,
+    repoRoot: path.resolve(__dirname, ".."),
+    dataDir: zerosDataDir(),
+    execPath: process.execPath,
+    env: process.env,
+    encodeJpeg: (pixels, width, height) =>
+      nativeImage.createFromBitmap(pixels, { width, height }).toJPEG(80),
+    scaleScreen: (source, size) => scaleScreenImage(nativeImage, source, size),
+    thumbnail: async (png) => captureThumbnail(nativeImage, png),
+    // Screenshots and recordings go where Simulator.app saves them.
+    downloadsDir: () => app.getPath("downloads"),
+    // As with computer use, a window that mounts later reads the snapshot.
+    onSnapshot: (snapshot) => {
+      agentControlRuntime?.devices?.syncDevices(snapshot);
+      if (getMainWindow()) emitEvent("simulator-hub-state", snapshot);
+    },
+    onFrame: (frame) => {
+      if (getMainWindow()) emitEvent("simulator-frame", frame);
+    },
+    onRecordings: (snapshot) => {
+      if (getMainWindow()) emitEvent("simulator-recordings", snapshot);
+    },
+    onRecordingEnd: (end) => {
+      if (getMainWindow()) emitEvent("simulator-recording-end", end);
+    },
+    log: (message) => console.warn(`[Zeros] ${message}`),
+  });
+  simulatorRuntime = simulators;
+  // Zeros computer use: app approvals, the floating control bar, the Cua
+  // Driver child and the endpoint the engine forwards `zeros_computer` and
+  // `zeros_device` calls to. The driver starts, and macOS is asked for
+  // access, only after the user turns computer use on.
+  const computerUseHome = path.join(zerosDataDir(), "computer-use");
+  const loadCuaSdk = () =>
+    importCuaSdk({
+      packaged: IS_PACKAGED,
+      resourcesPath: process.resourcesPath,
+    });
+  const cuaDriverExecutable = () =>
+    cuaDriverBinaryPath({
+      packaged: IS_PACKAGED,
+      resourcesPath: process.resourcesPath,
+      repoRoot: path.resolve(__dirname, ".."),
+      exists: (file) => fs.existsSync(file),
+    });
+  const agentControl = createAgentControlRuntime({
+    platform: process.platform,
+    selfPid: process.pid,
+    host: createCuaDriverHost({
+      loadSdk: async () => {
+        await fs.promises.mkdir(computerUseHome, {
+          recursive: true,
+          mode: 0o700,
+        });
+        return loadCuaSdk();
+      },
+      binaryPath: cuaDriverExecutable,
+      hostBundleId: runningAppBundleId(process.execPath, "com.zeros"),
+      home: computerUseHome,
+      log: (message) => console.warn(`[Zeros] ${message}`),
+    }),
+    permissions: createMacComputerPermissions({
+      platform: process.platform,
+      systemPreferences,
+      openExternal: (url) => shell.openExternal(url),
+      requestWithSdk: async () => {
+        (await loadCuaSdk()).requestMacOsPermissions();
+      },
+    }),
+    createPanel: (onStop) =>
+      createComputerControlPanel({
+        ipc: ipcMain,
+        createWindow: () => {
+          // A non-activating panel floats over full-screen apps on every
+          // Space without taking focus from the app being controlled.
+          const panelWindow = new BrowserWindow({
+            show: false,
+            type: "panel",
+            frame: false,
+            transparent: true,
+            backgroundColor: "#00000000",
+            hasShadow: false,
+            resizable: false,
+            movable: false,
+            minimizable: false,
+            maximizable: false,
+            fullscreenable: false,
+            focusable: false,
+            skipTaskbar: true,
+            alwaysOnTop: true,
+            webPreferences: agentControlOverlayWebPreferences(
+              path.join(__dirname, "agent-control-preload.cjs"),
+            ),
+          });
+          // Above the controlled app's own floating panels, below its menus.
+          panelWindow.setAlwaysOnTop(true, "status");
+          panelWindow.setContentProtection(true);
+          panelWindow.excludedFromShownWindowsMenu = true;
+          panelWindow.webContents.setWindowOpenHandler(() => ({
+            action: "deny",
+          }));
+          panelWindow.webContents.on("will-navigate", (event) =>
+            event.preventDefault(),
+          );
+          return panelWindow;
+        },
+        load: (panelWindow) =>
+          isDev
+            ? panelWindow.loadURL(
+                new URL("/agent-control.html", DEV_URL).toString(),
+              )
+            : panelWindow.loadFile(
+                path.join(__dirname, "..", "dist", "agent-control.html"),
+              ),
+        workArea: () =>
+          screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+            .workArea,
+        shortcuts: globalShortcut,
+        onStop,
+      }),
+    driverInstalled: () => cuaDriverExecutable() !== null,
+    isTrustedSurfaceAvailable: () => getMainWindow() !== null,
+    onConfirmationRequest: (request) => {
+      const confirmationWindow = getMainWindow();
+      const confirmationEpoch = browserRendererEpoch;
+      void whenRendererReady().then(() => {
+        // As with Browser approvals, a prompt never moves across trusted
+        // renderer lifecycles; the agent can try again.
+        if (
+          !confirmationWindow ||
+          !browserRendererEventIsCurrent({
+            capturedEpoch: confirmationEpoch,
+            currentEpoch: browserRendererEpoch,
+            sameWindow: getMainWindow() === confirmationWindow,
+          })
+        ) {
+          agentControl.confirmations.respond(request.id, "deny");
+          return;
+        }
+        emitEvent("agent-control-confirmation-request", request);
+      });
+    },
+    onConfirmationSettled: (confirmationId) => {
+      emitEvent("agent-control-confirmation-settled", { confirmationId });
+    },
+    onComputerState: (state) => {
+      // A window that mounts later reads the snapshot itself; buffering
+      // this for a cold launch would only crowd out deep links.
+      if (getMainWindow()) emitEvent("computer-use-state", state);
+    },
+    ...(process.platform === "darwin"
+      ? {
+          devices: {
+            hub: simulators.hub,
+            automation: simulators.automation,
+            inspectAppBundle: simulators.inspectAppBundle,
+            screen: simulators.screen,
+            onState: (state) => {
+              if (getMainWindow()) emitEvent("simulator-agent-state", state);
+            },
+            onTouch: (touch) => {
+              if (getMainWindow()) emitEvent("simulator-agent-touch", touch);
+            },
+            onAction: (deviceId, agent, action) =>
+              simulators.captures.noteAction(deviceId, agent, action),
+            available: () => agentControlAvailability().simulators,
+          },
+        }
+      : {}),
+    log: (message) => console.warn(`[Zeros] ${message}`),
+  });
+  agentControlRuntime = agentControl;
+  const agentControlReady = agentControl.ready.then((service) => {
+    if (service) {
+      setAgentControlServiceEnvironment({
+        url: service.baseUrl,
+        token: service.token,
+      });
+    }
+  });
+  setCommand("agent_control_confirmation_respond", (args, event) => {
+    trustedBrowserWindow(event);
+    const confirmationId = args.confirmationId;
+    const decision = args.decision;
+    if (
+      !isBrowserProductId(confirmationId) ||
+      !isAgentControlConfirmationDecision(decision)
+    ) {
+      throw new Error("Invalid Zeros approval response.");
+    }
+    return agentControl.confirmations.respond(confirmationId, decision);
+  });
+  setCommand("agent_control_confirmation_requests", (_args, event) => {
+    trustedBrowserWindow(event);
+    return agentControl.confirmations.pendingRequests();
+  });
+  // The renderer's Settings, held so the rollout can turn computer use off
+  // and back on without waiting for the next Settings push.
+  let computerPreferences: ComputerUsePreferences | null = null;
+  const applyComputerPreferences = () => {
+    if (!computerPreferences) return;
+    agentControl.computer.setPreferences({
+      ...computerPreferences,
+      enabled:
+        computerPreferences.enabled && agentControlAvailability().computerUse,
+    });
+  };
+  // The trusted renderer decides which staged agent control features this
+  // copy of Zeros has open. Main applies that to what it shows and runs, then
+  // resolves once the engine, which admits and routes the tools, has it too.
+  setCommand("agent_control_availability_update", async (args, event) => {
+    trustedBrowserWindow(event);
+    const availability = readAgentControlAvailability(args);
+    if (!availability) throw new Error("Invalid agent control availability.");
+    if (setAgentControlAvailability(availability)) {
+      browserService?.refreshAgentControl();
+      applyComputerPreferences();
+    }
+    await pushAgentControlAvailabilityToEngine();
+    return true;
+  });
+  setCommand("computer_use_preferences_update", (args, event) => {
+    trustedBrowserWindow(event);
+    const preferences = readComputerUsePreferences(args);
+    if (!preferences) throw new Error("Invalid computer use preferences.");
+    computerPreferences = preferences;
+    applyComputerPreferences();
+    return true;
+  });
+  setCommand("computer_use_state", (_args, event) => {
+    trustedBrowserWindow(event);
+    return agentControl.computer.state();
+  });
+  setCommand("computer_use_status", (_args, event) => {
+    trustedBrowserWindow(event);
+    return agentControl.computerStatus();
+  });
+  setCommand("computer_use_permissions_request", async (_args, event) => {
+    trustedBrowserWindow(event);
+    return agentControl.requestComputerPermissions();
+  });
+  setCommand("computer_use_permissions_open", async (args, event) => {
+    trustedBrowserWindow(event);
+    if (!isComputerPermissionKind(args.kind)) {
+      throw new Error("Invalid computer use permission.");
+    }
+    await agentControl.permissions.openSettings(args.kind);
+    return true;
+  });
+  setCommand("computer_use_choose_app", async (_args, event) => {
+    const window = trustedBrowserWindow(event);
+    return chooseComputerApp((options) => dialog.showOpenDialog(window, options));
+  });
+  for (const [name, handler] of Object.entries(
+    simulatorCommands({
+      hub: simulators.hub,
+      deviceUse: agentControl.devices,
+      captures: simulators.captures,
+      startDrag: (event, saved) => {
+        event.sender.startDrag({
+          file: saved.path,
+          icon: captureDragIcon(nativeImage, saved),
+        });
+      },
+      openAndroidStudio: async () => {
+        const studio = simulators.androidStudio();
+        return studio ? (await shell.openPath(studio)) === "" : false;
+      },
+      trust: trustedBrowserWindow,
+    }),
+  )) {
+    setCommand(name, handler);
+  }
   let startAuthSecurityMonitor = () => {};
   const userPresence = desktopUserPresence(powerMonitor, emitEvent);
   setCommand("app_user_presence", (_args, event) => {
@@ -1588,7 +1964,21 @@ app.whenReady().then(async () => {
       void authSecurityMonitor.stop();
     });
   }
-  setEngineSpawnBarrier(Promise.all([githubAuthReady, browserReady, designCaptureReady]));
+  setEngineSpawnBarrier(
+    Promise.all([
+      githubAuthReady,
+      browserReady,
+      designCaptureReady,
+      agentControlReady,
+    ]),
+  );
+  // Approvals belong to the window that showed them; a closed or reloaded
+  // renderer denies what it can no longer answer, and its simulator views end.
+  const revokeConfirmationSurfaces = () => {
+    void browserService?.revokeConfirmationSurface();
+    agentControl.revokeConfirmationSurface();
+    simulators.hub.stopAllViews();
+  };
   const root = defaultProjectRoot();
   const engineBoot = spawnEngine(root);
   const disposeDevMainRestart = installDevMainRestartCheck({
@@ -1613,12 +2003,12 @@ app.whenReady().then(async () => {
   startAuthSecurityMonitor();
   win.on("closed", () => {
     browserRendererEpoch += 1;
-    void browserService?.revokeConfirmationSurface();
+    revokeConfirmationSurfaces();
   });
   win.webContents.on("did-start-navigation", (details) => {
     if (shouldRevokeBrowserSurfaceForNavigation(details)) {
       browserRendererEpoch += 1;
-      void browserService?.revokeConfirmationSurface();
+      revokeConfirmationSurfaces();
     }
   });
 
@@ -1690,12 +2080,12 @@ app.whenReady().then(async () => {
       setMainWindow(next);
       next.on("closed", () => {
         browserRendererEpoch += 1;
-        void browserService?.revokeConfirmationSurface();
+        revokeConfirmationSurfaces();
       });
       next.webContents.on("did-start-navigation", (details) => {
         if (shouldRevokeBrowserSurfaceForNavigation(details)) {
           browserRendererEpoch += 1;
-          void browserService?.revokeConfirmationSurface();
+          revokeConfirmationSurfaces();
         }
       });
       registerIframeSessionCommands({ mainWindow: next });
@@ -1719,7 +2109,12 @@ let subscriptionsStopped = false;
 app.on("before-quit", (event) => {
   if (!subscriptionsStopped) {
     event.preventDefault();
-    subscriptionShutdown ??= Promise.allSettled([stopProviderSubscriptions(), stopCloudProviderAuth(), prepareAttachmentsForQuit()]).then(() => {
+    // Recordings are saved, then DeviceHub shuts down the simulators Zeros
+    // booted, each waiting a few seconds at most, and agent-device's daemon
+    // stops with its XCTest runners.
+    const devices = simulatorRuntime;
+    simulatorRuntime = null;
+    subscriptionShutdown ??= Promise.allSettled([stopProviderSubscriptions(), stopCloudProviderAuth(), prepareAttachmentsForQuit(), devices?.dispose()]).then(() => {
       subscriptionsStopped = true;
       app.quit();
     });
@@ -1734,6 +2129,12 @@ app.on("before-quit", (event) => {
   browserService = null;
   setBrowserServiceEnvironment(null);
   if (service) void service.stop().catch(() => {});
+  // Ends any computer use, hides its bar and stops the Cua Driver child,
+  // which also exits with this process if its shutdown has not finished.
+  const agentControl = agentControlRuntime;
+  agentControlRuntime = null;
+  setAgentControlServiceEnvironment(null);
+  if (agentControl) void agentControl.stop().catch(() => {});
   // Interactive PTYs are now engine-owned (apps/desktop/src/renderer/platform/pty.ts → engine bridge),
   // and the engine reaps them on its own shutdown (Engine.stop → pty.killAll).
   // Killing the sidecar above tears the engine down, so there are no

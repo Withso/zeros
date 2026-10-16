@@ -46,8 +46,10 @@ references to consult before changing their area, not temporary task plans.
 | Extensions                    | [Extension discovery](extension-discovery.md): MCP, skills, provider inventory, authorization and session lifetime                                    |
 | Codex adapter                 | [App-server compatibility](codex-app-server-compatibility.md): pinned protocol, classifications, host requests and packaged runtime                   |
 | Claude adapter                | [Event coverage](claude-event-coverage.md): installed SDK event inventory and regression obligations; refresh with provider upgrades                  |
-| Browser                       | [Browser service](browser-service.md): provider-native integration, identity, hosting, isolation and artifacts                                        |
-| Native computer use           | [Computer and browser use](native-computer-use.md): official plugin ownership, host permissions and transcript behavior                               |
+| Agent control                 | [Agent control](agent-control.md): which browser each agent uses, `zeros_browser` tools, approvals, the control bar, Stop and Esc, and the staged rollout |
+| Browser                       | [Browser service](browser-service.md): page hosting, identity, isolation, Codex’s IAB host and artifacts                                              |
+| Native computer use           | [Computer and browser use](native-computer-use.md): the opt-in Cua driver runtime, its packaging and staging, official Codex plugin ownership, host permissions and transcript behavior |
+| Simulators                    | [Simulators](simulators.md): the Simulator tab, DeviceHub, idle shutdown, `zeros_device` tools and Settings → Simulators                              |
 
 ## Operations and active programs
 

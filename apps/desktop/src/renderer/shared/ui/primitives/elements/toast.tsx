@@ -38,7 +38,7 @@
 
 import * as React from "react";
 import { X, CircleCheck, CircleX, TriangleAlert, Info } from "lucide-react";
-import { Toaster as SonnerToaster, toast as sonnerToast } from "sonner";
+import { Toaster as SonnerToaster, toast as sonnerToast, useSonner } from "sonner";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { Button } from "@/renderer/shared/ui/primitives/button";
@@ -235,12 +235,65 @@ baseToast.dismiss = (id) => {
 
 export const toast: ToastApi = baseToast;
 
+/** The toasts' inset from the window's bottom-right corner. */
+export const TOAST_OFFSET_PX = 24;
+
+const SHOWN_TOAST_SELECTOR =
+  '[data-sonner-toast]:not([data-removed="true"]):not([data-visible="false"])';
+/** Toasts slide, stack and spread with 400ms transitions. */
+const TOAST_SETTLE_MS = 450;
+
+function measureToastReach(): number {
+  const viewportHeight = window.innerHeight;
+  let top = viewportHeight;
+  for (const node of document.querySelectorAll(SHOWN_TOAST_SELECTOR)) {
+    const rect = node.getBoundingClientRect();
+    if (rect.height > 0 && rect.top < top) top = rect.top;
+  }
+  return Math.max(0, Math.round(viewportHeight - top));
+}
+
+/** How far above the window's bottom edge the toasts reach, so another
+ * surface in the bottom-right corner can sit clear of them: 0 with none.
+ * Follows toasts as they arrive, stack, spread and leave, while `enabled`. */
+export function useToastReach(enabled = true): number {
+  const { toasts } = useSonner();
+  const [reach, setReach] = React.useState(0);
+  React.useLayoutEffect(() => {
+    if (!enabled) return;
+    let frame = 0;
+    const measure = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const next = measureToastReach();
+        setReach((current) => (current === next ? current : next));
+      });
+    };
+    measure();
+    const settle = window.setTimeout(measure, TOAST_SETTLE_MS);
+    const onTransitionEnd = (event: TransitionEvent) => {
+      if (event.target instanceof Element && event.target.closest("[data-sonner-toaster]")) {
+        measure();
+      }
+    };
+    document.addEventListener("transitionend", onTransitionEnd, true);
+    window.addEventListener("resize", measure);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(settle);
+      document.removeEventListener("transitionend", onTransitionEnd, true);
+      window.removeEventListener("resize", measure);
+    };
+  }, [enabled, toasts]);
+  return enabled ? reach : 0;
+}
+
 /** Mount once at the app shell root. No props expected. */
 export function Toaster() {
   return (
     <SonnerToaster
       position="bottom-right"
-      offset={24}
+      offset={TOAST_OFFSET_PX}
       gap={10}
       visibleToasts={3}
       // We render custom JSX; suppress sonner's default chrome so our

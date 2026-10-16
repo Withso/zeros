@@ -70,6 +70,8 @@ import {
   LogOut,
   Lock,
   Globe2,
+  MousePointerClick,
+  Smartphone,
   Trash2,
   type LucideIcon,
 } from "lucide-react";
@@ -120,6 +122,8 @@ import { CodeThemePreview } from "./code-theme-preview";
 import { useOrganizationProjects } from "../../state/use-organization-projects";
 import { ProvidersPanel } from "./providers-panel";
 import { BrowserUsePanel } from "./browser-use-panel";
+import { ComputerUsePanel } from "./computer-use-panel";
+import { SimulatorsPanel } from "./simulators-panel";
 import { TerminalAgentsSection } from "./terminal-agents-section";
 import { GitDefaultsSection } from "./git-defaults-section";
 import { useExperimentalFeature } from "./experimental-features";
@@ -129,6 +133,12 @@ import {
 } from "./dashboard-settings";
 import { useInternalFeature, useIsInternalUser } from "./internal-features";
 import { FollowUpBehaviorSetting } from "./follow-up-behavior-setting";
+import {
+  AGENT_CONTROL_FEATURE_ROWS,
+  agentControlFeaturesAt,
+  useAgentControlFeatureActive,
+} from "./agent-control-rollout";
+import type { AgentControlFeature } from "@zeros/protocol/agent-control-rollout";
 import {
   UserEnvironmentPanel,
   isRepoSectionId,
@@ -198,6 +208,8 @@ type SectionId =
   | "models"
   | "providers"
   | "browser-use"
+  | "computer-use"
+  | "simulators"
   | "terminal-agents"
   | "environment"
   | "git"
@@ -264,6 +276,18 @@ const SECTIONS: SectionDef[] = [
     label: "Browser",
     icon: Globe2,
     Panel: BrowserUsePanel,
+  },
+  {
+    id: "computer-use",
+    label: "Computer use",
+    icon: MousePointerClick,
+    Panel: ComputerUsePanel,
+  },
+  {
+    id: "simulators",
+    label: "Simulators",
+    icon: Smartphone,
+    Panel: SimulatorsPanel,
   },
   // Gated by the `terminalAgents` experimental flag — hidden from the
   // sidebar (and not resolvable as an active section) until the user
@@ -343,7 +367,7 @@ const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
   },
   {
     label: "Agents",
-    ids: ["models", "providers", "cloud-mcp", "cloud-skills", "browser-use", "terminal-agents"],
+    ids: ["models", "providers", "cloud-mcp", "cloud-skills", "browser-use", "computer-use", "simulators", "terminal-agents"],
   },
   { label: "Workspace", ids: ["cloud-computer", "environment", "git"] },
 ];
@@ -622,18 +646,25 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   // non-internal account) can never leave the panel reachable.
   const [terminalAgentsEnabled] = useExperimentalFeature("terminalAgents");
   const internalUser = useIsInternalUser();
+  // Agent control rollout (agent-control-rollout.ts): a closed feature has
+  // no Settings page.
+  const computerUseActive = useAgentControlFeatureActive("computerUse");
+  const simulatorsActive = useAgentControlFeatureActive("simulators");
   const availableSections = useMemo(
     () =>
       SECTIONS.filter(
         (s) =>
-          // Chrome setup is reachable for every owner. BrowserUsePanel selects
-          // device controls or cloud guidance from the workspace placement.
-          (local ? !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id) : ["providers", "integrations", "cloud-computer", "cloud-mcp", "cloud-skills", "browser-use"].includes(s.id)) &&
+          // Chrome setup is reachable for every owner. BrowserUsePanel,
+          // ComputerUsePanel and SimulatorsPanel select device controls or
+          // cloud guidance from the workspace placement.
+          (local ? !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id) : ["providers", "integrations", "cloud-computer", "cloud-mcp", "cloud-skills", "browser-use", "computer-use", "simulators"].includes(s.id)) &&
           (cloudEnabled || !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id)) &&
           (s.id !== "terminal-agents" || terminalAgentsEnabled) &&
+          (s.id !== "computer-use" || computerUseActive) &&
+          (s.id !== "simulators" || simulatorsActive) &&
           (s.id !== "internal" || internalUser),
       ),
-    [terminalAgentsEnabled, internalUser, local, cloudEnabled],
+    [terminalAgentsEnabled, internalUser, local, cloudEnabled, computerUseActive, simulatorsActive],
   );
   const activeSection: SectionDef | null =
     selection.scope === "user"
@@ -1550,8 +1581,35 @@ function ExperimentalPanel() {
             aria-label="Show gibberish agent thinking"
           />
         </SettingsRow>
+        {agentControlFeaturesAt("experimental").map((feature) => (
+          <ExperimentalAgentControlRow key={feature} feature={feature} />
+        ))}
       </SettingsGroup>
     </div>
+  );
+}
+
+function ExperimentalAgentControlRow({
+  feature,
+}: {
+  feature: AgentControlFeature;
+}) {
+  const [on, setOn] = useExperimentalFeature(feature);
+  const row = AGENT_CONTROL_FEATURE_ROWS[feature];
+  return (
+    <SettingsRow label={row.label} hint={row.hint}>
+      <Switch checked={on} onCheckedChange={setOn} aria-label={row.label} />
+    </SettingsRow>
+  );
+}
+
+function InternalAgentControlRow({ feature }: { feature: AgentControlFeature }) {
+  const [on, setOn] = useInternalFeature(feature);
+  const row = AGENT_CONTROL_FEATURE_ROWS[feature];
+  return (
+    <SettingsRow label={row.label} hint={row.hint}>
+      <Switch checked={on} onCheckedChange={setOn} aria-label={row.label} />
+    </SettingsRow>
   );
 }
 
@@ -1568,6 +1626,7 @@ function ExperimentalPanel() {
 // staff-only, so the headline stands alone (2026-09-14).
 function InternalPanel() {
   const [copyLogs, setCopyLogs] = useInternalFeature("copyLogs");
+  const agentControlFeatures = agentControlFeaturesAt("internal");
   return (
     <div className="flex flex-col gap-6">
       <SettingsGroup>
@@ -1582,6 +1641,13 @@ function InternalPanel() {
           />
         </SettingsRow>
       </SettingsGroup>
+      {agentControlFeatures.length > 0 ? (
+        <SettingsGroup title="Agent control">
+          {agentControlFeatures.map((feature) => (
+            <InternalAgentControlRow key={feature} feature={feature} />
+          ))}
+        </SettingsGroup>
+      ) : null}
     </div>
   );
 }

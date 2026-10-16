@@ -36,7 +36,13 @@ export {
   type CodeBlockProps,
   type CodeBlockCopyButtonProps,
 } from "./code-block";
-export { toast, Toaster, type ToastVariant } from "./toast";
+export {
+  toast,
+  Toaster,
+  TOAST_OFFSET_PX,
+  useToastReach,
+  type ToastVariant,
+} from "./toast";
 export {
   showUpdateToast,
   dismissUpdateToast,

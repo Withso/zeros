@@ -43,7 +43,14 @@ export async function runNewTabEnvironmentSmoke({ page, check }) {
     "the 280px add menu aligns below plus with the requested radius and search height",
     true,
   );
-  await expect(menu.getByRole("option")).toHaveCount(4);
+  await expect(menu.getByRole("option")).toHaveCount(6);
+  for (const name of ["iOS Simulator", "Android Simulator"]) {
+    await expect(
+      menu
+        .getByRole("option", { name, exact: true })
+        .locator("svg.lucide-smartphone"),
+    ).toBeVisible();
+  }
   await expect(environment.locator("svg.lucide-play")).toBeVisible();
   await environment.hover();
   await expect(submenu).toBeVisible();
@@ -195,7 +202,7 @@ export async function runNewTabEnvironmentSmoke({ page, check }) {
     menu.getByRole("option", { name: "Build", exact: true }),
   ).toBeVisible();
   await search.fill("   ");
-  await expect(menu.getByRole("option")).toHaveCount(4);
+  await expect(menu.getByRole("option")).toHaveCount(6);
   check(
     "action search follows live names and icons, supports fuzzy matches, and restores the default menu when cleared",
     true,

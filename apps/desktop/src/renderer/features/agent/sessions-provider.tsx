@@ -22,6 +22,7 @@ import { backfillLocalPromptTranscript, LocalPromptRecoveryError, requestLocalPr
 
 import { SendQueue } from "./send-queue";
 import { notifyAgentSendFailure } from "./agent-send-failure-toast";
+import { notifyAgentCapabilityNotice } from "./agent-capability-notice-toast";
 import { hasPromptAttachmentReferences, refreshPromptAttachments } from "./refresh-prompt-attachments";
 import { reconcileHistoryMessages } from "./history-message-identity";
 import React, {
@@ -44,6 +45,7 @@ import type {
   AgentBoundaryPortOpenedMessage,
   AgentAgentsListMessage,
   AgentAgentInitializedMessage,
+  AgentCapabilityNoticeMessage,
   AgentErrorMessage,
   AgentGoalChangedMessage,
   AgentConfigurationProvenanceMessage,
@@ -158,7 +160,7 @@ import { countPromptAttachments } from "./attachment-reference";
 import { ActionsCtx, type SessionsActions, type CloudQueuedPrompt } from "./sessions-context";
 import { registerAttachmentSourceOwner } from "./attachment-source-retention";
 import { questionRequestIsBrowserApproval } from "./pending-question-tools";
-import { nativeInvoke } from "../../platform/runtime";
+import { nativeInvoke, nativeListen } from "../../platform/runtime";
 import {
   admissionRouteWithoutFlight,
   admissionCancellationAction,
@@ -1200,6 +1202,13 @@ export function AgentSessionsProvider({
       schedule();
     });
 
+    const unsubCapabilityNotice = bridge.on(
+      "AGENT_CAPABILITY_NOTICE",
+      (raw) => {
+        notifyAgentCapabilityNotice(raw as AgentCapabilityNoticeMessage);
+      },
+    );
+
     const unsubExit = bridge.on("AGENT_AGENT_EXITED", (raw) => {
       const msg = raw as {
         agentId: string;
@@ -1249,6 +1258,7 @@ export function AgentSessionsProvider({
       unsubQuestionSettled();
       unsubProviderQuota();
       unsubStderr();
+      unsubCapabilityNotice();
       unsubExit();
       // Answer-ack watchdogs are deliberately NOT cleared here: a bridge swap
       // is the very failure the watchdog guards against (the send dropped on
@@ -4627,6 +4637,26 @@ export function AgentSessionsProvider({
     [bridge, getStore, cancel, drainNextQueued],
   );
 
+  // Browser-origin and Browser consequence approvals park the provider
+  // before another pipe command can report the revoked lease. Settle
+  // only that Browser question; never cancel or steer the whole turn.
+  const dismissBrowserApproval = useCallback(
+    (chatId: string) => {
+      const head = getStore().sessions[chatId]?.pendingQuestions?.[0];
+      if (head && questionRequestIsBrowserApproval(head.request)) {
+        respondToQuestion(
+          chatId,
+          { outcome: { outcome: "dismissed" } },
+          // Scoped Browser Stop must never fall through the generic answer
+          // recovery path, whose final fallback intentionally interrupts the
+          // whole turn. The native Browser lease is already revoked here.
+          { deliveryWatchdog: false },
+        );
+      }
+    },
+    [getStore, respondToQuestion],
+  );
+
   const stopBrowserUse = useCallback<SessionsActions["stopBrowserUse"]>(
     async (chatId, browserSessionId) => {
       let stopError: unknown;
@@ -4635,25 +4665,33 @@ export function AgentSessionsProvider({
       } catch (error) {
         stopError = error;
       } finally {
-        // Browser-origin and Browser consequence approvals park the provider
-        // before another pipe command can report the revoked lease. Settle
-        // only that Browser question; never cancel or steer the whole turn.
-        const head = getStore().sessions[chatId]?.pendingQuestions?.[0];
-        if (head && questionRequestIsBrowserApproval(head.request)) {
-          respondToQuestion(
-            chatId,
-            { outcome: { outcome: "dismissed" } },
-            // Scoped Browser Stop must never fall through the generic answer
-            // recovery path, whose final fallback intentionally interrupts the
-            // whole turn. The native Browser lease is already revoked here.
-            { deliveryWatchdog: false },
-          );
-        }
+        dismissBrowserApproval(chatId);
       }
       if (stopError) throw stopError;
     },
-    [getStore, respondToQuestion],
+    [dismissBrowserApproval],
   );
+
+  // The page's control bar and Esc inside the page stop the agent in main.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void nativeListen<{ conversationId?: unknown }>(
+      "browser-agent-stopped",
+      (event) => {
+        if (typeof event?.conversationId === "string") {
+          dismissBrowserApproval(event.conversationId);
+        }
+      },
+    ).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [dismissBrowserApproval]);
 
   const setMode = useCallback<SessionsActions["setMode"]>(
     async (chatId, modeId) => {

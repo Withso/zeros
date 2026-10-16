@@ -66,6 +66,37 @@ const PACKAGED_MACOS_ONLY_PACKAGES = [
     repository: "https://github.com/fsevents/fsevents",
     termsDirectory: "third_party/fsevents",
   },
+  {
+    // The Cua computer-use driver binary and its N-API runtime are
+    // redistributed through extraResources. The archive ships only a NOTICE;
+    // the declared MIT + MPL-2.0 terms sit beside it under third_party/.
+    parentName: "@trycua/cua-driver",
+    name: "@trycua/cua-driver-darwin-arm64",
+    license: "MIT AND MPL-2.0",
+    repository: "https://github.com/trycua/cua",
+    termsDirectory: "third_party/trycua-cua-driver",
+  },
+  {
+    parentName: "@ubjs/node",
+    name: "@ubjs/node-darwin-arm64",
+    license: "MPL-2.0",
+    repository: "https://github.com/jhugman/uniffi-bindgen-react-native",
+    termsDirectory: "third_party/mpl-2.0",
+  },
+];
+
+// Release binaries that are not npm packages. A stage script downloads each at
+// a pinned version and SHA-256, electron-builder ships it through
+// extraResources, and its reviewed upstream terms sit under third_party/.
+const STAGED_RELEASE_BINARIES = [
+  {
+    name: "AXe",
+    versionScript: "scripts/stage-axe.mjs",
+    versionConstant: "AXE_VERSION",
+    license: "MIT AND Apache-2.0",
+    repository: "https://github.com/cameroncooke/AXe",
+    termsDirectory: "third_party/axe",
+  },
 ];
 
 /** Version suffix npm's Codex platform aliases carry (`0.146.0-darwin-arm64`).
@@ -235,10 +266,17 @@ function runNpmLicenseInventory(cwd, surface) {
   return [...records.values()];
 }
 
+// The Cua SDK and its N-API runtime install whichever native variant matches
+// the host (linux-x64-gnu on Linux preflight). Only darwin-arm64 ships, and
+// PACKAGED_MACOS_ONLY_PACKAGES records it on every host.
+const CUA_NATIVE_VARIANT =
+  /^@(?:trycua\/cua-driver|ubjs\/node)-(?:darwin|linux|win32)-/;
+
 const isHostPlatformRecord = (record) =>
   record.name.startsWith("@anthropic-ai/claude-agent-sdk-") ||
   record.name.startsWith("@cursor/sdk-") ||
   record.name.startsWith("@vscode/ripgrep-") ||
+  CUA_NATIVE_VARIANT.test(record.name) ||
   (record.name === "@openai/codex" &&
     CODEX_PLATFORM_VERSION.test(record.version));
 
@@ -390,14 +428,61 @@ function electronRuntimeRecord() {
   };
 }
 
+function stagedReleaseRecords() {
+  return STAGED_RELEASE_BINARIES.map((target) => {
+    const source = readFileSync(join(ROOT, target.versionScript), "utf8");
+    const version = new RegExp(
+      `export const ${target.versionConstant} = "(\\d+\\.\\d+\\.\\d+)"`,
+    ).exec(source)?.[1];
+    if (!version) {
+      throw new Error(
+        `${target.name}: ${target.versionScript} no longer pins ${target.versionConstant}`,
+      );
+    }
+    return {
+      name: target.name,
+      version,
+      license: target.license,
+      author: "",
+      homepage: target.repository,
+      repository: target.repository,
+      repositoryKey: target.repository.toLowerCase(),
+      packagePath: join(ROOT, target.termsDirectory),
+      surfaces: new Set([
+        `desktop packaged runtime (${PACKAGED_DESKTOP_PLATFORM})`,
+      ]),
+      documentIds: [],
+    };
+  });
+}
+
+// License documents a package keeps below its root for code it adapted from
+// another project and ships. Missing ones fail closed.
+const NESTED_LICENSE_DOCUMENTS = new Map([
+  // Its simulator accessibility bridge adapts Meta's idb (MIT).
+  ["agent-device", ["apple/snapshot-bridge/LICENSE.idb"]],
+]);
+
 function packageDocuments(record) {
   const files = readdirSync(record.packagePath)
     .filter((name) => LICENSE_FILE.test(name))
     .sort((a, b) => a.localeCompare(b));
-  return [...files.map((name) => ({
-    label: `${record.documentSourceLabel || `${record.name}@${record.version}`} — ${name}`,
-    text: normalizeText(readFileSync(join(record.packagePath, name), "utf8")),
-  })), ...(record.additionalDocuments ?? [])];
+  const source = record.documentSourceLabel || `${record.name}@${record.version}`;
+  const nested = (NESTED_LICENSE_DOCUMENTS.get(record.name) ?? []).map((relative) => {
+    const file = join(record.packagePath, relative);
+    if (!existsSync(file)) {
+      throw new Error(`${record.name}: expected license document ${relative} is missing`);
+    }
+    return { label: `${source} — ${relative}`, text: normalizeText(readFileSync(file, "utf8")) };
+  });
+  return [
+    ...files.map((name) => ({
+      label: `${source} — ${name}`,
+      text: normalizeText(readFileSync(join(record.packagePath, name), "utf8")),
+    })),
+    ...nested,
+    ...(record.additionalDocuments ?? []),
+  ];
 }
 
 function runtimeSystemAssetRecords() {
@@ -520,6 +605,16 @@ function fallbackDocuments(record) {
       text: bsd3Terms(holder),
     });
   }
+  if (key.includes("mpl-2.0")) {
+    const mplPath = join(ROOT, "third_party/mpl-2.0/LICENSE");
+    if (!existsSync(mplPath)) {
+      throw new Error("The reviewed MPL-2.0 license copy is missing");
+    }
+    documents.push({
+      label: `${record.name}@${record.version} — declared MPL-2.0 terms (archive omitted a standalone file; reviewed copy)`,
+      text: normalizeText(readFileSync(mplPath, "utf8")),
+    });
+  }
   if (record.name === "gsap") {
     const gsapPath = join(ROOT, "third_party/gsap/LICENSE");
     if (!existsSync(gsapPath)) {
@@ -567,6 +662,7 @@ for (const record of [
   ...marketingRecords,
   ...webRecords,
   electronRuntimeRecord(),
+  ...stagedReleaseRecords(),
   ...runtimeSystemAssetRecords(),
 ]) {
   const key = `${record.name}@${record.version}`;
@@ -708,8 +804,10 @@ const lines = [
   "JavaScript dependencies are included. Host-native optional packages are",
   "normalized to the macOS arm64 desktop and Linux x64 control-plane",
   "release contents: the staged Claude runtime, the staged Codex runtime, the",
-  "packaged Cursor runtime, the packaged ripgrep binary, and the macOS-only",
-  "fsevents watcher are all included.",
+  "packaged Cursor runtime, the packaged ripgrep binary, the macOS-only",
+  "fsevents watcher, and the macOS-only Cua computer-use driver runtime",
+  "are all included, as is the AXe iOS Simulator tool, a pinned release",
+  "binary that is not an npm package.",
   "Electron's distribution also carries its Chromium notices",
   "file. See THIRD-PARTY-NOTICES.md for the vendor release requirements.",
   "",

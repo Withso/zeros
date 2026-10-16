@@ -5,8 +5,9 @@
 // Output lands at `<repo>/dist-electron/`:
 //   - main.cjs     (app entry, package.json "main" points here)
 //   - preload.cjs  (injected via BrowserWindow webPreferences.preload)
+//   - agent-control-preload.cjs  (the agent control bar over a Browser page)
 //
-// Both are CommonJS because Electron's main process loader expects
+// All are CommonJS because Electron's main process loader expects
 // CJS by default. We switch to .cjs extension so Node doesn't try to
 // interpret them as ESM due to package.json's implicit type.
 // ──────────────────────────────────────────────────────────
@@ -18,6 +19,7 @@ export default defineConfig({
   entry: {
     main: "apps/desktop/electron/main.ts",
     preload: "apps/desktop/electron/preload.ts",
+    "agent-control-preload": "apps/desktop/electron/agent-control-preload.ts",
     // (preload-webview.ts deleted with the iframe migration —
     // workbench browser tabs are <iframe> elements, no separate
     // preload context to inject into.)
@@ -96,6 +98,10 @@ export default defineConfig({
     // apps/desktop/src/engine/git/github.ts). If tsup tries to inline it, the bundle
     // hits ERR_REQUIRE_ESM at app boot.
     "@octokit/rest",
+    // The Cua Driver SDK is ESM with a native library that a packaged app
+    // loads from app.asar.unpacked; main imports it on first computer use
+    // (apps/desktop/electron/computer-use/driver.ts).
+    "@trycua/cua-driver",
     // Native modules — never bundle, electron-rebuild handles the
     // platform-specific binary.
     "better-sqlite3",

@@ -263,6 +263,16 @@ export default defineConfig(({ command, mode }) => ({
       "@lezer/highlight",
     ],
   },
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        // The bar main stacks over a page an agent controls
+        // (apps/desktop/electron/agent-control/overlay.ts).
+        "agent-control": path.resolve(__dirname, "agent-control.html"),
+      },
+    },
+  },
   // Module workers (syntax.worker.ts) need ESM output for code-splitting.
   // Shiki has dynamic imports internally
   // for grammars/themes; the default "iife" worker format rejects

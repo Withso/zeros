@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   Globe2,
+  Smartphone,
   SquareMousePointer,
 } from "lucide-react";
 
@@ -11,11 +12,14 @@ import {
   cachedBrowserFavicon,
   useConversationBrowserActivity,
 } from "../../browser/browser-session-activity-store";
+import { useComputerUseWaitText } from "../../agent-control/computer-use-state-store";
 import {
+  browserActivityGroupLabel,
   browserActivityGroupStatus,
   resolveBrowserActivityPresentation,
   resolveBrowserActionUrls,
   browserActivityUsesWebsiteIcon,
+  type AgentControlSurface,
   type BrowserToolActivity,
 } from "../../browser/browser-tool-activity";
 import type { AgentToolMessage } from "../use-agent-session";
@@ -27,11 +31,13 @@ import { ListRow } from "@/renderer/shared/ui/primitives/list-row";
 const MAX_VISIBLE_ACTIONS = 24;
 
 export const BrowserActivityCard = memo(function BrowserActivityCard({
+  surface = "browser",
   events,
   actions,
   closed,
   ctx,
 }: {
+  surface?: AgentControlSurface;
   events: AgentToolMessage[];
   actions: BrowserToolActivity[];
   closed: boolean;
@@ -42,6 +48,11 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
   const latest = actions.at(-1);
   const groupStatus = browserActivityGroupStatus(events, closed);
   const running = groupStatus === "browsing";
+  // While another chat holds the computer, say whose turn it is instead of
+  // the queued action title.
+  const computerWaitText = useComputerUseWaitText(
+    surface === "computer" ? ctx.chatId : undefined,
+  );
   const { faviconDataUrl: liveFaviconDataUrl } =
     resolveBrowserActivityPresentation(actions, running, session);
   const faviconDataUrl =
@@ -57,21 +68,19 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
     resolveBrowserActionUrls(actions).slice(-MAX_VISIBLE_ACTIONS);
   const omitted = Math.max(0, actions.length - visible.length);
   const Chevron = open ? ChevronDown : ChevronRight;
-  const statusLabel = running
-    ? "Browsing"
-    : failed
-      ? "Browser use failed"
-      : "Used the browser";
-  const liveTitles = running
-    ? actions
-        .filter(
-          (action) =>
-            action.status === "pending" || action.status === "in_progress",
-        )
-        .map((action) => action.label)
-        .slice(-2)
-        .join(" · ") || latest?.label
-    : undefined;
+  const statusLabel = browserActivityGroupLabel(surface, groupStatus);
+  const liveTitles =
+    running && !computerWaitText
+      ? actions
+          .filter(
+            (action) =>
+              action.status === "pending" || action.status === "in_progress",
+          )
+          .map((action) => action.label)
+          .slice(-2)
+          .join(" · ") || latest?.label
+      : undefined;
+  const liveText = running ? (computerWaitText ?? liveTitles) : undefined;
 
   return (
     <div className="max-w-full" data-browser-activity-count={actions.length}>
@@ -92,7 +101,13 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
                 ? new URL("/favicon.ico", latest.url).href
                 : undefined)
             }
-            fallback={hasWebsiteActivity ? Globe2 : SquareMousePointer}
+            fallback={
+              hasWebsiteActivity
+                ? Globe2
+                : surface === "simulator"
+                  ? Smartphone
+                  : SquareMousePointer
+            }
             active={ctx.attachmentImagesActive !== false}
             className={
               failed ? "text-red-primary size-3.5" : "text-fg2 size-3.5"
@@ -100,10 +115,8 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
           />
         </span>
         <span className="text-fg1 min-w-0 truncate text-sm">{statusLabel}</span>
-        {liveTitles ? (
-          <span className="text-fg2 min-w-0 truncate text-xs">
-            {liveTitles}
-          </span>
+        {liveText ? (
+          <span className="text-fg2 min-w-0 truncate text-xs">{liveText}</span>
         ) : null}
         <Chevron className="text-fg3 size-3 shrink-0" aria-hidden="true" />
       </ListRow>
@@ -111,7 +124,7 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
         <div className="border-border1 mt-1 ml-2 flex max-w-[680px] flex-col border-l pl-3">
           {omitted > 0 ? (
             <div className="text-fg3 py-1 text-xs">
-              {omitted} earlier browser actions condensed
+              {omitted} earlier {surface} actions condensed
             </div>
           ) : null}
           {visible.map((_action, index) => {

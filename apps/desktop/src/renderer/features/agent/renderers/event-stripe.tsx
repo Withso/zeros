@@ -195,6 +195,7 @@ export const EventStripe = memo(function EventStripe({
             const content =
               item.kind === "browser-activity" ? (
                 <BrowserActivityCard
+                  surface={item.surface}
                   events={item.events}
                   actions={item.actions}
                   closed={item.closed}

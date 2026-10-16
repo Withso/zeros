@@ -107,6 +107,7 @@ export const scenarioRegistry = [
     460,
     650,
   ),
+  fresh("simulator-tab", "simulator-tab", "runSimulatorTabSmoke", 900, 760),
   fresh("cloud-replica", "cloud-replicas", "runCloudReplicaSmoke", 1100, 850),
   fresh("cloud-preview", "cloud-previews", "runCloudPreviewSmoke", 900, 650),
   fresh("cloud-design-assets", "cloud-design-assets", "runCloudDesignAssetsSmoke", 900, 650),

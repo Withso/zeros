@@ -7,12 +7,23 @@ import {
 // ──────────────────────────────────────────────────────────
 
 import type { BrowserTabVariant } from "../../features/browser/variant-types";
-import { isBrowserProductId } from "@zeros/protocol/browser-tools";
+import {
+  isBrowserProductId,
+  normalizeBrowserAppearance,
+  type BrowserAppearance,
+} from "@zeros/protocol/browser-tools";
+import {
+  isSimulatorDeviceId,
+  isSimulatorPlatform,
+  simulatorPlatformLabel,
+  type SimulatorPlatform,
+} from "@zeros/protocol/simulators";
 import {
   Diff as DiffIcon,
   Globe,
   File as FileIcon,
   GitPullRequestArrow,
+  Smartphone,
   Terminal,
   PenTool,
   type LucideIcon,
@@ -24,7 +35,8 @@ export type WorkbenchTabType =
   | "review"
   | "browser"
   | "terminal"
-  | "files";
+  | "files"
+  | "simulator";
 export type ReviewSubtab =
   | "changes"
   | "description"
@@ -135,9 +147,16 @@ export interface WorkbenchTab {
   deviceToolbar?: boolean;
   /** Browser tab: device preset id; absent means Custom. Validated on use. */
   devicePreset?: string;
+  /** Browser tab: page color scheme; absent means System (follow Zeros). */
+  appearance?: BrowserAppearance;
   viewportWidth?: number;
   viewportHeight?: number;
   variants?: BrowserTabVariant[];
+  /** Simulator tab: which simulators it offers. */
+  simulatorPlatform?: SimulatorPlatform;
+  /** Simulator tab: the attached device, as DeviceHub names it. Absent shows
+   * the setup screen; a device that no longer exists shows it too. */
+  simulatorDeviceId?: string;
 }
 
 /** A bounded, per-workspace browser history used by the + quick-open menu.
@@ -437,6 +456,21 @@ export function createBrowserTab(opts?: {
   };
 }
 
+/** Build a closable Simulator tab. Each tab shows at most one device, and
+ * several tabs can show different devices at once. */
+export function createSimulatorTab(
+  platform: SimulatorPlatform,
+  deviceId?: string,
+): WorkbenchTab {
+  return {
+    id: nextId("simulator"),
+    type: "simulator",
+    title: simulatorPlatformLabel(platform),
+    simulatorPlatform: platform,
+    ...(isSimulatorDeviceId(deviceId) ? { simulatorDeviceId: deviceId } : {}),
+  };
+}
+
 /** Build THE Changes tab — a pinned home tab for the branch's
  *  change review surface (PR status row + filterable changed-file sidebar +
  *  diff viewer — see ChangesWorkbenchSurface). One per worktree, can't be closed. Its
@@ -493,6 +527,10 @@ export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
     label: "File",
     icon: FileIcon,
   },
+  simulator: {
+    label: "Simulator",
+    icon: Smartphone,
+  },
 };
 
 // The worktree's PR review surface is THE pinned "review" home tab above
@@ -524,6 +562,7 @@ const CURRENT_TAB_TYPES = new Set<WorkbenchTabType>([
   "review",
   "browser",
   "files",
+  "simulator",
 ]);
 const REVIEW_SUBTABS = new Set<ReviewSubtab>([
   "changes",
@@ -606,6 +645,8 @@ export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
  *     stripped), enabling the multi-browser policy;
  *   • Terminal tabs with a valid destination keep their placement; the retired
  *     generic Terminal tabs without a session identity are removed;
+ *   • Simulator tabs with a known platform survive with only their platform
+ *     and a well-formed device id; others are removed;
  *   • order is [fixed Files home, Design, Changes, Review, ...other closable
  *     tabs].
  *  Result never becomes empty because the home tabs remain. */
@@ -667,6 +708,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         reviewSubtab: undefined,
         changesView: validChangesView(firstChanges.changesView),
         browserConversationId: undefined,
+        appearance: undefined,
         fileTreeVisible: undefined,
         viewerMode: undefined,
       }
@@ -679,6 +721,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         reviewSubtab: validReviewSubtab(firstReview.reviewSubtab),
         changesView: undefined,
         browserConversationId: undefined,
+        appearance: undefined,
         viewerMode: undefined,
         fileTreeVisible: undefined,
       }
@@ -686,6 +729,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
   const seenTerminalIds = new Set<string>();
   const closable: WorkbenchTab[] = tabs
     .filter((t) => {
+      if (t.type === "simulator") return isSimulatorPlatform(t.simulatorPlatform);
       if (t.type !== "terminal")
         return t.type === "files" || t.type === "browser";
       const id = t.terminalId;
@@ -705,6 +749,20 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
       return true;
     })
     .map((tab) => {
+      if (tab.type === "simulator") {
+        // Only its own identity survives: a simulator tab never carries file,
+        // browser or terminal state, whatever an older build or an edit left.
+        const platform = tab.simulatorPlatform as SimulatorPlatform;
+        return {
+          id: tab.id,
+          type: tab.type,
+          title: simulatorPlatformLabel(platform),
+          simulatorPlatform: platform,
+          ...(isSimulatorDeviceId(tab.simulatorDeviceId)
+            ? { simulatorDeviceId: tab.simulatorDeviceId }
+            : {}),
+        };
+      }
       if (tab.type === "terminal") {
         return {
           id: tab.id,
@@ -733,6 +791,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
           reviewSubtab: undefined,
           changesView: undefined,
           browserConversationId: undefined,
+          appearance: undefined,
           fileTreeVisible: filePath
             ? typeof tab.fileTreeVisible === "boolean"
               ? tab.fileTreeVisible
@@ -779,6 +838,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
           typeof tab.devicePreset === "string" && tab.devicePreset.length <= 64
             ? tab.devicePreset
             : undefined,
+        appearance: normalizeBrowserAppearance(tab.appearance),
         variants: Array.isArray(tab.variants) ? tab.variants : undefined,
         reviewSubtab: undefined,
         changesView: undefined,

@@ -821,9 +821,17 @@
           "type": "boolean",
           "description": "Enable Codex browser use in the in-app Chromium tab."
         },
+        "codex_native": {
+          "type": "boolean",
+          "description": "Let Codex use its built-in Browser plugin. Off, Codex uses the Zeros browser tools instead."
+        },
         "claude_enabled": {
           "type": "boolean",
           "description": "Enable Claude's official external Chrome integration."
+        },
+        "in_app_enabled": {
+          "type": "boolean",
+          "description": "Let Claude and Cursor use the in-app Zeros browser when Claude is not set to use Chrome."
         },
         "provider": {
           "type": "string",
@@ -845,6 +853,56 @@
             "always-allow"
           ],
           "description": "Whether agents ask before opening a website. Consequential actions remain separately gated."
+        }
+      }
+    },
+    "computer_use": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Let agents control Mac apps with Zeros computer use."
+        },
+        "codex_native": {
+          "type": "boolean",
+          "description": "Let Codex use its built-in computer use. Off, Codex uses Zeros computer use when it is enabled."
+        },
+        "show_agent_cursor": {
+          "type": "boolean",
+          "description": "Show the agent's cursor while it controls an app."
+        },
+        "blocked_apps": {
+          "maxItems": 256,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "description": "Bundle IDs of apps agents may never see or control. Zeros itself is always blocked."
+        }
+      }
+    },
+    "simulators": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Let agents use the iOS and Android simulators in Zeros."
+        },
+        "idle_shutdown": {
+          "type": "string",
+          "enum": [
+            "15m",
+            "30m",
+            "1h",
+            "2h",
+            "never"
+          ],
+          "description": "Shut down simulators Zeros booted after this long without use. Simulators booted outside Zeros are never shut down."
+        },
+        "show_agent_touches": {
+          "type": "boolean",
+          "description": "Show where the agent touches while it uses a simulator."
         }
       }
     },

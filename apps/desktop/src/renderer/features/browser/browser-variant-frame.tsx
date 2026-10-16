@@ -4,6 +4,7 @@
 
 import React, { useMemo, useState, useCallback, useEffect } from "react";
 import { Check, Copy, Trash2 } from "lucide-react";
+import type { BrowserAppearance } from "@zeros/protocol/browser-tools";
 import type { BrowserTabVariant } from "./variant-types";
 import {
   BROWSER_VARIANT_MIN_HEIGHT,
@@ -19,6 +20,8 @@ import { toast } from "../../shared/ui/primitives/elements";
 
 interface BrowserVariantFrameProps {
   variant: BrowserTabVariant;
+  /** The tab's page color scheme, so a fork renders like its source page. */
+  appearance?: BrowserAppearance;
   canvasZoom: number;
   onDelete: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -30,6 +33,7 @@ const CHROME_H = 34;
 
 export function BrowserVariantFrame({
   variant,
+  appearance,
   canvasZoom,
   onDelete,
   onRename,
@@ -263,6 +267,7 @@ export function BrowserVariantFrame({
             className="block size-full border-0"
             style={{
               pointerEvents: isResizing ? "none" : "auto",
+              colorScheme: appearance,
             }}
           />
         </div>

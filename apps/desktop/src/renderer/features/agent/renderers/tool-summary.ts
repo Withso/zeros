@@ -30,6 +30,8 @@ import {
   Plug,
   Search as SearchIcon,
   PenTool,
+  Smartphone,
+  SquareMousePointer,
   Terminal,
 } from "lucide-react";
 import type { ComponentType } from "react";
@@ -114,10 +116,18 @@ export function summaryIcons(
         if (!seenKinds.has("design")) { seenKinds.add("design"); out.push(PenTool); }
         continue;
       }
-      if (browserToolActivity(e)) {
-        if (!seenKinds.has("browser")) {
-          seenKinds.add("browser");
-          out.push(Globe);
+      const activity = browserToolActivity(e);
+      if (activity) {
+        const surface = activity.surface ?? "browser";
+        if (!seenKinds.has(surface)) {
+          seenKinds.add(surface);
+          out.push(
+            surface === "simulator"
+              ? Smartphone
+              : surface === "computer"
+                ? SquareMousePointer
+                : Globe,
+          );
         }
         continue;
       }

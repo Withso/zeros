@@ -13,6 +13,16 @@ import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
 import { useWorkspaceStore } from "../state/workspace-store";
 
+// A local development build, where a video's key frames (part of the
+// simulators rollout) are on. Native commands fail as they do in a browser.
+window.__ZEROS_NATIVE__ = {
+  localDevelopment: true,
+  invoke: async (command: string) => {
+    throw new Error(`${command} has no native host in this harness.`);
+  },
+  on: () => () => {},
+};
+
 const cwd = "/attachment-harness";
 useWorkspaceStore.setState({
   chats: [{ id: "attachment-harness-chat", folder: cwd, agentId: "claude", agentName: "Claude", model: null, effort: "high", permissionMode: "auto", title: "Attachment edit", createdAt: 1, updatedAt: 1 }],
@@ -144,6 +154,8 @@ declare global {
   interface Window {
     composerAttachmentsHarness: {
       records: () => string[];
+      /** The saved bytes of the record named `name`, or null. */
+      recordBytes: (name: string) => Uint8Array | null;
       operations: () => string[];
       finishEdit: () => void;
       failEdit: () => void;
@@ -152,6 +164,9 @@ declare global {
 }
 window.composerAttachmentsHarness = {
   records: () => [...records.values()].map((r) => r.relativePath),
+  recordBytes: (name) =>
+    [...records.values()].find((r) => r.relativePath.endsWith(`/${name}`))
+      ?.bytes ?? null,
   operations: () => [...operations],
   finishEdit: () => finishEdit?.(),
   failEdit: () => failEdit?.(),

@@ -25,6 +25,7 @@ const originalOrder = [
   "create-source-tooltip-escape",
   "cloud-workspace",
   "workbench-status",
+  "simulator-tab",
   "cloud-replica",
   "cloud-preview",
   "cloud-design-assets",
