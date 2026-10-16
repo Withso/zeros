@@ -1217,3 +1217,56 @@ describe('Boat compute metering and lease authority', () => {
     expect(f.fetcher).not.toHaveBeenCalled();
   });
 });
+
+describe("paged inventory", () => {
+  const listPage = (sandboxes: unknown[], pageInfo: Record<string, unknown>) =>
+    json({ ok: true, type: "sandbox.list", sandboxes, pageInfo });
+
+  it("pages one listing with the inspect state mapping and journal identity", async () => {
+    const f = fixture();
+    await f.allocate();
+    f.fetcher.mockClear();
+    const known = sandbox("ready").sandbox;
+    const stray = { ...sandbox("idle").sandbox, id: "bx_abcdefgh" };
+    const archiving = { ...sandbox("archived", {}).sandbox, id: "bx_98765432",
+      snapshotAvailable: false, lastSnapshotStatus: "in_progress" };
+    f.fetcher
+      .mockResolvedValueOnce(listPage([known, archiving], { nextCursor: "cursor-2", hasMore: true, limit: 200 }))
+      .mockResolvedValueOnce(listPage([stray, { garbage: true }], { nextCursor: null, hasMore: false, limit: 200 }));
+
+    const observed = [];
+    for await (const item of f.provider.listInventory!()) observed.push(item);
+
+    expect(observed).toEqual([
+      { resourceId: RESOURCE, state: "running", computeStopped: false,
+        workspaceId: INPUT.workspaceId, generation: INPUT.generation },
+      { resourceId: "bx_98765432", state: "archiving", computeStopped: true,
+        workspaceId: null, generation: null },
+      { resourceId: "bx_abcdefgh", state: "running", computeStopped: false,
+        workspaceId: null, generation: null },
+    ]);
+    expect(f.fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://boat.dev/api/v1/sandboxes?limit=200",
+      "https://boat.dev/api/v1/sandboxes?limit=200&cursor=cursor-2",
+    ]);
+  });
+
+  it("fails the sweep on a page it cannot parse", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json({ ok: true, type: "sandbox.list" }));
+    await expect(f.provider.listInventory!()[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      code: "provider_response_invalid",
+    });
+  });
+
+  it("rejects a cursor that could escape the request path", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(listPage([], { nextCursor: "../admin?x=", hasMore: true }));
+    const iterator = f.provider.listInventory!();
+    await expect(iterator[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      code: "provider_response_invalid",
+    });
+    expect(f.fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+

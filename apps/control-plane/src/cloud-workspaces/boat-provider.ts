@@ -14,6 +14,7 @@ import {
   CloudProviderError,
   type CloudProviderCreateInput,
   type CloudProviderIdentity,
+  type CloudProviderInventoryItem,
   type CloudProviderObservedState,
   type CloudProviderResource,
   type CloudProviderDeletionRetirement,
@@ -48,6 +49,16 @@ const SandboxSchema = z.object({
     .optional(),
   monitoring: z.boolean().optional(),
 });
+/** Archived means durable only with a completed snapshot; anything else is
+ * still archiving or failed. Both the inspect and the paged-inventory paths
+ * must agree, or the sweep would re-inspect a matching binding forever. */
+function observedState(sandbox: z.infer<typeof SandboxSchema>): CloudProviderObservedState {
+  return sandbox.state === "archived" &&
+      (sandbox.snapshotAvailable !== true || sandbox.lastSnapshotStatus !== "completed")
+    ? (["queued", "in_progress"].includes(sandbox.lastSnapshotStatus ?? "") ? "archiving" : "failed")
+    : STATES[sandbox.state];
+}
+
 const BillingTeamSchema = z.object({ id: z.string() });
 const DeletionSchema = z.object({
   id: z.string().regex(/^bdop_[a-f0-9]{32}$/),
@@ -210,12 +221,7 @@ export class BoatWorkspaceProvider
     if (!parsed.success || parsed.data.id !== record.resourceId)
       throw failure("provider_response_invalid");
     const sandbox = parsed.data;
-    const state =
-      sandbox.state === "archived" &&
-      (sandbox.snapshotAvailable !== true ||
-        sandbox.lastSnapshotStatus !== "completed")
-        ? (["queued", "in_progress"].includes(sandbox.lastSnapshotStatus ?? "") ? "archiving" : "failed")
-        : STATES[sandbox.state];
+    const state = observedState(sandbox);
     // Live compute on an unconfirmed wallet is never reported as usable, so no
     // lifecycle or metering path can admit or renew it. Stop still applies.
     const billingScope = this.billingScope(value);
@@ -728,6 +734,33 @@ export class BoatWorkspaceProvider
           state: "deleting", target: null, metadata: { deletionStatus: "blocked" } };
       }
     }
+  }
+
+  /** The paged list replaces one inspect per sandbox: identity comes from
+   * the local allocation journal, state from the same mapping inspect uses,
+   * minus the billing/template checks that only an inspect can certify. */
+  async *listInventory(): AsyncIterable<CloudProviderInventoryItem> {
+    const records = new Map<string, CloudProviderOperationRecord>();
+    for await (const record of this.options.operations.list())
+      if (record.resourceId) records.set(record.resourceId, record);
+    let cursor: string | null = null;
+    do {
+      const page = await this.client.listSandboxes({ cursor });
+      for (const value of page.sandboxes) {
+        const parsed = SandboxSchema.safeParse(value);
+        // One malformed record must not lose the rest of the page.
+        if (!parsed.success) continue;
+        const record = records.get(parsed.data.id);
+        yield {
+          resourceId: parsed.data.id,
+          state: observedState(parsed.data),
+          computeStopped: parsed.data.state === "archived" || parsed.data.state === "cancelled",
+          workspaceId: record?.workspaceId ?? null,
+          generation: record?.generation ?? null,
+        };
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
   }
 
   async createSshAccess(resourceId: string, expiresInMinutes: number) {

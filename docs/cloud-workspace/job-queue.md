@@ -226,6 +226,18 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   query and the claim apply the longer cadence, and the release reschedules
   on the candidate's own cadence. Any trigger enqueue (`next_drift_check_at`,
   an intent completing) still wakes it at once.
+- **Inventory paces drift for providers with a paged list.** Boat's
+  `GET /sandboxes` pages (200 per page) replace one inspect per sandbox per
+  minute: the 60-second managed-resource sweep compares each scoped binding
+  against the listing. A match pushes the binding's `next_drift_check_at`
+  one fallback horizon out (`inventoryFallbackMs`, default 6 h); a missing
+  or mismatched resource is forced due now, which the binding trigger turns
+  into that workspace's drift job — the only runs that inspect. If sweeps
+  stop, the fallback horizon expires and per-workspace drift inspects resume
+  on their own. Boat calls drop from one inspect per workspace per minute to
+  `ceil(sandboxes / 200)` list calls per minute per replica, far under the
+  1000 requests/min/IP rate limit; a provider `retryAfterMs` wait floors the
+  job retry (jittered up to 20 percent, capped at 5 minutes).
 | `diagnostics` | `cloud_diagnostic_cleanup` | `singleton` | cleanup `next_run_at`; recovery watermark or a publishable incident | `runCloudDiagnosticCleanup` |
 
 - **Triggers, not TypeScript enqueues.** They cover every writer, including

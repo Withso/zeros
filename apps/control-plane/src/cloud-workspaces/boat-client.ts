@@ -354,4 +354,41 @@ export class BoatApiClient {
       );
     }
   }
+
+  /** One page of the account's sandboxes for inventory sweeps. A page holds
+   * full sandbox documents, so no per-sandbox inspect follows. */
+  async listSandboxes(
+    input: { cursor?: string | null; limit?: number } = {},
+  ): Promise<{ sandboxes: unknown[]; nextCursor: string | null }> {
+    const limit = input.limit ?? 200;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+      throw new Error("Invalid Boat list page size");
+    const cursor = input.cursor ?? null;
+    // The cursor goes into the request path; pinning its character set keeps
+    // request()'s path validation a real boundary.
+    if (cursor !== null && !/^[A-Za-z0-9_-]{1,512}$/.test(cursor))
+      throw new CloudProviderError(
+        "provider_response_invalid",
+        "Boat returned an invalid response",
+        false,
+      );
+    const page = await this.request(
+      `/sandboxes?limit=${limit}${cursor ? `&cursor=${cursor}` : ""}`,
+    );
+    const pageInfo =
+      page.pageInfo && typeof page.pageInfo === "object" && !Array.isArray(page.pageInfo)
+        ? (page.pageInfo as Record<string, unknown>)
+        : null;
+    if (!Array.isArray(page.sandboxes) || !pageInfo)
+      throw new CloudProviderError(
+        "provider_response_invalid",
+        "Boat returned an invalid response",
+        false,
+      );
+    const nextCursor =
+      pageInfo.hasMore === true && typeof pageInfo.nextCursor === "string"
+        ? pageInfo.nextCursor
+        : null;
+    return { sandboxes: page.sandboxes, nextCursor };
+  }
 }
