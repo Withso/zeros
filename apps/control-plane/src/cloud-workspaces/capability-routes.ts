@@ -57,8 +57,11 @@ function capabilityError(c: Context, error: unknown) {
 
 /** The engine-token REST fallback (S1 "Issuance"): while its uplink has been
  * down for at least 30 s the engine may request a token directly with its
- * heartbeat credential and registered boot id, at most once a minute. Behind
- * the `capabilities` rollout flag; unknown organizations get a 404. */
+ * heartbeat credential and registered boot id, at most once a minute. The
+ * budget is per api process: N replicas allow N requests per minute per
+ * engine, which is accepted for a fallback that only fires during a
+ * `realtime` outage. Behind the `capabilities` rollout flag; unknown
+ * organizations get a 404. */
 export function createCloudCapabilityEngineRoutes(service: CloudCapabilityService): Hono {
   const app = new Hono();
   const issuedAt = new Map<string, number>();

@@ -58,7 +58,9 @@ async function sign(store: CapabilitySigningKeyStore, claims: CapabilityClaims):
   return {
     token,
     expiresAt: new Date(claims.exp * 1000),
-    renewAt: new Date(claims.iat * 1000 + CAPABILITY_TOKEN_LIFETIME_SECONDS * 600),
+    // 60% of the actual lifetime, which a session or guest deadline may have
+    // clamped below the full 300 s; renewAt must never land past exp.
+    renewAt: new Date(claims.iat * 1000 + (claims.exp - claims.iat) * 600),
   };
 }
 

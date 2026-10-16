@@ -87,3 +87,42 @@ reconnect-loop on. At roughly 126 bytes per principal with two devices the
 bound holds about 480 principals per workspace; beyond it, shrinking the
 snapshot (omitting principals unchanged inside the window, or a chunked
 sync) is a contract minor tracked with the contract owner.
+
+## Capability signing keys runbook
+
+S1 signing keys are Ed25519, sealed at rest with the dedicated
+`CLOUD_CAPABILITY_KEYS_JSON` keyring (never the settings keyring) and stored
+as rows in `cloud_capability_signing_keys`. The published set is at most
+`next` + `current` + `retiring`; only `current` signs. Every change goes
+through `pnpm --dir apps/control-plane cloud-capability-key:manage` with a
+change document in `CLOUD_CAPABILITY_KEY_CHANGE_FILE`, dry-run first,
+`CLOUD_CAPABILITY_KEY_PLAN_SHA256=<planSha256>` and `--execute` to apply,
+exactly like the rollout-flag command: both channel sources must agree
+(`CONTROL_PLANE_CAPABILITY_KEY_CHANNEL` and `RAILWAY_ENVIRONMENT_NAME`), and
+production execution needs
+`CONTROL_PLANE_CAPABILITY_KEY_PRODUCTION_CONFIRMED=true`. Every executed
+change writes a `cloud_capability_key_changes` receipt; a replayed
+`operationId` naming another change is refused.
+
+Normal rotation:
+
+1. `create` with a fresh `kid` (`cap-<yyyy>-<mm>-<suffix>`). The key enters
+   `next` and is published in the JWKS immediately.
+2. Wait at least 24 h (skipped for a channel's first key: there is no
+   `current` to overlap) so every verifier has seen `next`.
+3. `activate`: `next` becomes `current`, the old `current` becomes `retiring`
+   and stays published another 24 h.
+4. `retire` once the overlap elapsed: `retiring` becomes `retired` and leaves
+   the JWKS.
+
+Emergency: `revoke` removes a key from the published set at once; verifiers
+reject its tokens on their next key-set refresh (push, or the 5 min JWKS
+refetch while push is down). Issuance fails closed (503) until a replacement
+is created and activated, so stage the replacement first when the revocation
+is precautionary.
+
+Keyring rotation (`CLOUD_CAPABILITY_KEYS_JSON`) rotates only the envelope:
+add the new version, set `CLOUD_CAPABILITY_CURRENT_KEY_VERSION` to it, and
+keep every version that still seals a live key; a sealed key is only ever
+opened with its recorded version. Rotating the keyring never reseals or
+changes a signing key, so it needs no publish window.
