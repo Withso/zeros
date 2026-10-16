@@ -5,14 +5,21 @@
 // ============================================
 
 import { execFile } from "node:child_process";
-import path from "node:path";
 
 import type {
+  OtherAppResourceUsage,
   ProcessMetricsSnapshot,
-  ProcessResourceKind,
   ProcessResourceMetric,
   ProcessResourceTotals,
+  SystemMemoryPressure,
+  SystemResourceState,
 } from "../src/renderer/platform/process-metrics-types";
+import {
+  appBundleName,
+  describeProcess,
+  isZerosBundle,
+  type ProcessRole,
+} from "./process-labels";
 
 // Below this gap the ps TIME clock (centisecond resolution) has too few ticks
 // to divide into a meaningful rate, so a delta would read as a wild spike or a
@@ -20,8 +27,10 @@ import type {
 // — only a burst, such as the immediate re-sample on a visibility change.
 const MIN_CPU_BASELINE_MS = 250;
 const MAX_CPU_BASELINE_MS = 10_000;
-const MAX_PROCESS_NAME_LENGTH = 80;
 const MAX_TERMINAL_ROOTS = 256;
+/** A footprint read older than this no longer describes the live tree. */
+export const FOOTPRINT_MAX_AGE_MS = 30_000;
+const MAX_ARG_PIDS_PER_READ = 512;
 
 export interface RawProcessSample {
   pid: number;
@@ -57,6 +66,43 @@ export interface ProcessMetricsCaptureInput {
   terminalRootsKnown: boolean;
   rows: readonly RawProcessSample[];
   electronProcesses: readonly ElectronProcessDescriptor[];
+  /** This app's executable; Zeros re-runs it as Node for host scripts. */
+  appExecutable?: string | null;
+  /** Most recent physical-footprint read, applied only to processes that
+   * already existed when it started. */
+  footprint?: FootprintRead | null;
+  system?: SystemResourceState | null;
+}
+
+/** One `top -l 1 -stats pid,mem` read. `readAt` is when the read STARTED. */
+export interface FootprintRead {
+  readAt: number;
+  bytesByPid: ReadonlyMap<number, number>;
+  /** top's "PhysMem: …" summary line, kept for the diagnostics report. */
+  physMem: string | null;
+  /** top's "CPU usage: …" summary line, kept for the diagnostics report. */
+  cpuUsage: string | null;
+}
+
+/** argv for one process identity, read with its start key so a reused PID
+ * can never inherit another process's command line. */
+export interface ProcessArgsRow {
+  pid: number;
+  startKey: string;
+  args: string;
+}
+
+/** Every process in the last capture, for the diagnostics report only. */
+export interface SampledProcessRow {
+  pid: number;
+  parentPid: number;
+  command: string;
+  startKey: string;
+  cpuTimeSeconds: number;
+  cpuPercent: number;
+  rssBytes: number;
+  footprintBytes: number | null;
+  owned: boolean;
 }
 
 export interface ProcessTableRead {
@@ -109,7 +155,9 @@ interface TotalsPeak {
 }
 
 /** Parse cumulative process CPU time in the BSD/GNU ps forms
- * [[days-]hours:]minutes:seconds[.fraction]. */
+ * [[days-]hours:]minutes:seconds[.fraction]. BSD (macOS) ps prints
+ * minutes:seconds with minutes unbounded ("83:27.80"), so only the
+ * three-field GNU clock bounds minutes below 60. */
 export function parseCpuTime(value: string): number | null {
   const input = value.trim();
   if (!input) return null;
@@ -134,7 +182,7 @@ export function parseCpuTime(value: string): number | null {
 
   const [hours, minutes, seconds] =
     fields.length === 3 ? fields : [0, fields[0], fields[1]];
-  if (minutes >= 60 || seconds >= 60) return null;
+  if ((fields.length === 3 && minutes >= 60) || seconds >= 60) return null;
   return days * 86_400 + hours * 3_600 + minutes * 60 + seconds;
 }
 
@@ -205,6 +253,180 @@ export function parseProcessTable(stdout: string): RawProcessSample[] {
   return rows;
 }
 
+const LSTART_PREFIX =
+  /^\s*(\d+)\s+(\S+)\s+(\S+)\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})(?:\s(.*))?$/;
+
+/** Parse `ps -ww -o pid=,lstart=,args=` under the C locale. */
+export function parseProcessArgs(stdout: string): ProcessArgsRow[] {
+  const rows: ProcessArgsRow[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = LSTART_PREFIX.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+    rows.push({
+      pid,
+      startKey: `${match[2]} ${match[3]} ${Number(match[4])} ${match[5]} ${match[6]}`,
+      args: (match[7] ?? "").trim(),
+    });
+  }
+  return rows;
+}
+
+const UNIT_BYTES: Record<string, number> = {
+  B: 1,
+  K: 1024,
+  M: 1024 ** 2,
+  G: 1024 ** 3,
+  T: 1024 ** 4,
+};
+
+/** Parse `top -l 1 -stats pid,mem` (macOS). MEM is the physical footprint
+ * Activity Monitor shows, which counts compressed pages that resident size
+ * omits. */
+export function parseFootprint(
+  stdout: string,
+  readAt: number,
+): FootprintRead {
+  const bytesByPid = new Map<number, number>();
+  let physMem: string | null = null;
+  let cpuUsage: string | null = null;
+  let inTable = false;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!inTable) {
+      if (line.startsWith("PhysMem:")) physMem = line.trim().slice(0, 200);
+      else if (line.startsWith("CPU usage:")) cpuUsage = line.trim().slice(0, 200);
+      else if (/^\s*PID\s+MEM\b/.test(line)) inTable = true;
+      continue;
+    }
+    const match = /^\s*(\d+)\s+(\d+(?:\.\d+)?)([BKMGT])?[+-]?\s*$/.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const bytes = Math.round(Number(match[2]) * UNIT_BYTES[match[3] ?? "B"]);
+    if (Number.isSafeInteger(pid) && pid >= 0 && Number.isFinite(bytes))
+      bytesByPid.set(pid, bytes);
+  }
+  return { readAt, bytesByPid, physMem, cpuUsage };
+}
+
+const PRESSURE_LEVELS: Record<string, SystemMemoryPressure> = {
+  "1": "normal",
+  "2": "warning",
+  "4": "critical",
+};
+
+function parseSwapBytes(text: string, field: string): number | null {
+  const match = new RegExp(`${field}\\s*=\\s*([\\d.]+)([KMG])`).exec(text);
+  if (!match) return null;
+  const value = Number(match[1]) * UNIT_BYTES[match[2]];
+  return Number.isFinite(value) ? Math.round(value) : null;
+}
+
+/** Parse named `sysctl vm.swapusage kern.memorystatus_level
+ * kern.memorystatus_vm_pressure_level` output. A missing key stays null. */
+export function parseSystemSysctl(stdout: string): Pick<
+  SystemResourceState,
+  "memoryPressure" | "memoryFreePercent" | "swapUsedBytes" | "swapTotalBytes"
+> {
+  const values = new Map<string, string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const at = line.indexOf(":");
+    if (at > 0) values.set(line.slice(0, at).trim(), line.slice(at + 1).trim());
+  }
+  const swap = values.get("vm.swapusage") ?? "";
+  const freeText = values.get("kern.memorystatus_level") ?? "";
+  const free = /^\d+$/.test(freeText) ? Number(freeText) : Number.NaN;
+  return {
+    memoryPressure:
+      PRESSURE_LEVELS[values.get("kern.memorystatus_vm_pressure_level") ?? ""] ??
+      null,
+    memoryFreePercent:
+      Number.isFinite(free) && free >= 0 && free <= 100 ? free : null,
+    swapUsedBytes: parseSwapBytes(swap, "used"),
+    swapTotalBytes: parseSwapBytes(swap, "total"),
+  };
+}
+
+function execText(
+  file: string,
+  args: readonly string[],
+  timeout: number,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      file,
+      [...args],
+      {
+        timeout,
+        maxBuffer: 4 * 1024 * 1024,
+        encoding: "utf8",
+        env: { ...process.env, LC_ALL: "C" },
+      },
+      (error, stdout) => {
+        // sysctl exits non-zero when one requested key is unknown but still
+        // prints the others; callers parse whatever arrived.
+        if (error && !stdout) reject(error);
+        else resolve(stdout);
+      },
+    );
+  });
+}
+
+/** argv for specific Zeros-tree PIDs. Never called for the whole system on the
+ * sampling path. */
+export async function readProcessArgs(
+  pids: readonly number[],
+): Promise<ProcessArgsRow[]> {
+  const unique = [...new Set(pids)]
+    .filter((pid) => Number.isSafeInteger(pid) && pid > 0)
+    .slice(0, MAX_ARG_PIDS_PER_READ);
+  if (unique.length === 0) return [];
+  return parseProcessArgs(
+    await execText(
+      "/bin/ps",
+      ["-ww", "-o", "pid=,lstart=,args=", "-p", unique.join(",")],
+      2_000,
+    ),
+  );
+}
+
+/** argv for every process. Only the user-initiated diagnostics copy uses it,
+ * to find detached processes that belong to Zeros. */
+export async function readAllProcessArgs(): Promise<ProcessArgsRow[]> {
+  return parseProcessArgs(
+    await execText("/bin/ps", ["-axww", "-o", "pid=,lstart=,args="], 3_000),
+  );
+}
+
+/** One physical-footprint read. Costs ~0.4 s of CPU on macOS, so callers
+ * throttle it to the open inspector and the diagnostics copy. */
+export async function readFootprint(): Promise<FootprintRead | null> {
+  if (process.platform !== "darwin") return null;
+  const readAt = Date.now();
+  return parseFootprint(
+    await execText("/usr/bin/top", ["-l", "1", "-stats", "pid,mem"], 5_000),
+    readAt,
+  );
+}
+
+/** macOS memory pressure, free percentage and swap. Cheap: one sysctl exec. */
+export async function readSystemSysctl(): Promise<
+  ReturnType<typeof parseSystemSysctl> | null
+> {
+  if (process.platform !== "darwin") return null;
+  return parseSystemSysctl(
+    await execText(
+      "/usr/sbin/sysctl",
+      [
+        "vm.swapusage",
+        "kern.memorystatus_level",
+        "kern.memorystatus_vm_pressure_level",
+      ],
+      1_000,
+    ),
+  );
+}
+
 /** One bounded, argv-free process-table read. The child PID is returned so the
  * reducer can remove the sampler from its own snapshot. */
 export function readProcessTable(): Promise<ProcessTableRead> {
@@ -246,19 +468,7 @@ function roundMetric(value: number): number {
   return Math.round(finiteNonNegative(value) * 1_000) / 1_000;
 }
 
-function processName(command: string): string {
-  const cleaned = command
-    .replace(/\s+<defunct>\s*$/, "")
-    .replace(/\p{Cc}/gu, " ")
-    .trim();
-  const base = path.basename(cleaned) || "Process";
-  return base.slice(0, MAX_PROCESS_NAME_LENGTH);
-}
-
-function electronPresentation(descriptor: ElectronProcessDescriptor): {
-  name: string;
-  kind: ProcessResourceKind;
-} {
+function electronPresentation(descriptor: ElectronProcessDescriptor): ProcessRole {
   switch (descriptor.type) {
     case "Browser":
       return { name: "Main", kind: "main" };
@@ -344,16 +554,84 @@ function totals(
   };
 }
 
+/** Every PID owned by this app: Electron's own processes plus every OS
+ * descendant of main or any Chromium child. Chromium can report a just-created
+ * process before ps observes it, so every authoritative Electron PID seeds the
+ * walk. */
+export function ownedProcessIds(
+  rows: readonly RawProcessSample[],
+  appPid: number,
+  electronPids: readonly number[],
+  samplerPid: number | null,
+): Set<number> {
+  const childrenByParent = new Map<number, number[]>();
+  for (const row of rows) {
+    if (row.pid === samplerPid) continue;
+    const children = childrenByParent.get(row.parentPid) ?? [];
+    children.push(row.pid);
+    childrenByParent.set(row.parentPid, children);
+  }
+  const owned = descendantsOf([appPid, ...electronPids], childrenByParent);
+  for (const pid of electronPids) owned.add(pid);
+  return owned;
+}
+
+function argsKey(pid: number, startKey: string): string {
+  return `${pid}\u0000${startKey}`;
+}
+
 /** Stateful delta reducer. One instance serves the app lifetime so CPU and peak
  * values survive popover closes while dead process identities are pruned on
  * every sample. */
 export class ProcessMetricsTracker {
   private previousCaptureAt: number | null = null;
+  /** CPU clock of every sampled process, so other Zeros apps and the
+   * diagnostics report get rates as well as this app's tree. */
   private previous = new Map<number, PreviousProcess>();
   private processPeaks = new Map<string, ProcessPeak>();
   private identitySequence = 0;
   private allPeak = emptyPeak();
   private excludingTerminalsPeak: TotalsPeak | null = null;
+  /** argv of live owned identities, held in main only. */
+  private argsByIdentity = new Map<string, string>();
+  /** When each live identity was first sampled; a footprint read applies only
+   * to processes that already existed when it started. */
+  private firstSeenAt = new Map<string, number>();
+  private lastRows: SampledProcessRow[] = [];
+
+  /** Owned PIDs whose current identity has no argv yet. */
+  missingArgPids(input: Pick<
+    ProcessMetricsCaptureInput,
+    "rows" | "appPid" | "electronProcesses" | "samplerPid"
+  >): number[] {
+    const owned = ownedProcessIds(
+      input.rows,
+      input.appPid,
+      input.electronProcesses.map((process) => process.pid),
+      input.samplerPid,
+    );
+    const missing: number[] = [];
+    for (const row of input.rows) {
+      if (owned.has(row.pid) && !this.argsByIdentity.has(argsKey(row.pid, row.startKey)))
+        missing.push(row.pid);
+    }
+    return missing;
+  }
+
+  /** Remember argv read for exact process identities. */
+  recordArgs(rows: readonly ProcessArgsRow[]): void {
+    for (const row of rows) this.argsByIdentity.set(argsKey(row.pid, row.startKey), row.args);
+  }
+
+  /** argv for one live identity, for the diagnostics report. */
+  argsFor(pid: number, startKey: string): string | null {
+    return this.argsByIdentity.get(argsKey(pid, startKey)) ?? null;
+  }
+
+  /** Every process in the last capture, with rates. Report use only. */
+  sampledRows(): readonly SampledProcessRow[] {
+    return this.lastRows;
+  }
 
   capture(input: ProcessMetricsCaptureInput): ProcessMetricsSnapshot {
     const intervalMs =
@@ -364,6 +642,7 @@ export class ProcessMetricsTracker {
       intervalMs != null &&
       intervalMs >= MIN_CPU_BASELINE_MS &&
       intervalMs <= MAX_CPU_BASELINE_MS;
+    const maxCpu = Math.max(1, input.logicalCpuCount) * 100;
 
     const rowsByPid = new Map<number, RawProcessSample>();
     const childrenByParent = new Map<number, number[]>();
@@ -378,13 +657,12 @@ export class ProcessMetricsTracker {
     const electronByPid = new Map(
       input.electronProcesses.map((process) => [process.pid, process]),
     );
-    // Chromium can report a just-created process before ps observes it. Seed
-    // every authoritative Electron PID, then walk OS children from all seeds.
-    const owned = descendantsOf(
-      [input.appPid, ...electronByPid.keys()],
-      childrenByParent,
+    const owned = ownedProcessIds(
+      input.rows,
+      input.appPid,
+      [...electronByPid.keys()],
+      input.samplerPid,
     );
-    for (const pid of electronByPid.keys()) owned.add(pid);
 
     const terminal = input.terminalRootsKnown
       ? descendantsOf(
@@ -393,9 +671,60 @@ export class ProcessMetricsTracker {
         )
       : new Set<number>();
 
+    const footprint =
+      input.footprint &&
+      input.sampledAt - input.footprint.readAt <= FOOTPRINT_MAX_AGE_MS
+        ? input.footprint
+        : null;
+    const ownBundle = input.appExecutable
+      ? appBundleName(input.appExecutable)
+      : null;
+
     const nextPrevious = new Map<number, PreviousProcess>();
+    const nextFirstSeen = new Map<string, number>();
+    const liveArgKeys = new Set<string>();
     const livePeakIds = new Set<string>();
     const processes: ProcessResourceMetric[] = [];
+    const sampledRows: SampledProcessRow[] = [];
+    const otherApps = new Map<string, OtherAppResourceUsage>();
+    let footprintApplied = false;
+
+    const footprintFor = (pid: number, identity: string): number | null => {
+      if (!footprint) return null;
+      const bytes = footprint.bytesByPid.get(pid);
+      const firstSeen = this.firstSeenAt.get(identity) ?? input.sampledAt;
+      return bytes != null && firstSeen <= footprint.readAt ? bytes : null;
+    };
+
+    // Rates and identities for every row, then this app's tree in PID order.
+    const identities = new Map<number, string>();
+    const osCpu = new Map<number, number>();
+    for (const row of rowsByPid.values()) {
+      const previous = this.previous.get(row.pid);
+      const sameIdentity =
+        !!previous &&
+        previous.startKey === row.startKey &&
+        row.cpuTimeSeconds >= previous.cpuTimeSeconds;
+      const descriptor = electronByPid.get(row.pid);
+      const identity =
+        descriptor?.creationTime != null
+          ? `${row.pid}:${descriptor.creationTime}`
+          : sameIdentity
+            ? previous.identity
+            : `${row.pid}:${input.sampledAt}:${++this.identitySequence}`;
+      identities.set(row.pid, identity);
+      nextFirstSeen.set(identity, this.firstSeenAt.get(identity) ?? input.sampledAt);
+      let cpu = 0;
+      if (cpuReady && sameIdentity && previous && intervalMs != null)
+        cpu = ((row.cpuTimeSeconds - previous.cpuTimeSeconds) * 100_000) / intervalMs;
+      osCpu.set(row.pid, roundMetric(Math.min(cpu, maxCpu)));
+      nextPrevious.set(row.pid, {
+        startKey: row.startKey,
+        cpuTimeSeconds: row.cpuTimeSeconds,
+        identity,
+      });
+    }
+    this.firstSeenAt = nextFirstSeen;
 
     for (const pid of [...owned].sort((a, b) => a - b)) {
       const row = rowsByPid.get(pid);
@@ -404,45 +733,47 @@ export class ProcessMetricsTracker {
 
       const command =
         row?.command ?? descriptor?.name ?? descriptor?.type ?? "Process";
-      const previous = this.previous.get(pid);
-      const sameIdentity =
-        !!previous &&
-        !!row &&
-        previous.startKey === row.startKey &&
-        row.cpuTimeSeconds >= previous.cpuTimeSeconds;
       const identity =
-        descriptor?.creationTime != null
+        identities.get(pid) ??
+        (descriptor?.creationTime != null
           ? `${pid}:${descriptor.creationTime}`
-          : sameIdentity
-            ? previous.identity
-            : `${pid}:${input.sampledAt}:${++this.identitySequence}`;
+          : `${pid}:${input.sampledAt}:${++this.identitySequence}`);
 
       let cpuPercent = 0;
       if (cpuReady) {
-        if (descriptor?.cpuPercent != null) {
-          // app.getAppMetrics() exposes an interval CPU value for Chromium's
-          // own processes and is more precise than the portable ps clock. The
-          // OS delta remains the source for sidecar/agent/PTY descendants.
-          cpuPercent = finiteNonNegative(descriptor.cpuPercent);
-        } else if (sameIdentity && row && previous && intervalMs != null) {
-          cpuPercent =
-            ((row.cpuTimeSeconds - previous.cpuTimeSeconds) * 100_000) /
-            intervalMs;
-        }
+        // app.getAppMetrics() exposes an interval CPU value for Chromium's
+        // own processes and is more precise than the portable ps clock. The
+        // OS delta remains the source for sidecar/agent/PTY descendants.
+        cpuPercent =
+          descriptor?.cpuPercent != null
+            ? finiteNonNegative(descriptor.cpuPercent)
+            : (osCpu.get(pid) ?? 0);
       }
-      cpuPercent = roundMetric(
-        Math.min(cpuPercent, Math.max(1, input.logicalCpuCount) * 100),
-      );
+      cpuPercent = roundMetric(Math.min(cpuPercent, maxCpu));
 
-      const electronMemory = descriptor?.workingSetBytes;
+      const footprintBytes = footprintFor(pid, identity);
+      if (footprintBytes != null && pid === input.appPid) footprintApplied = true;
       const memoryBytes = Math.round(
-        finiteNonNegative(electronMemory, finiteNonNegative(row?.rssBytes)),
+        footprintBytes ??
+          finiteNonNegative(
+            descriptor?.workingSetBytes,
+            finiteNonNegative(row?.rssBytes),
+          ),
       );
-      const presentation = descriptor
+      let args: string | null = null;
+      if (row) {
+        const key = argsKey(pid, row.startKey);
+        args = this.argsByIdentity.get(key) ?? null;
+        if (args != null) liveArgKeys.add(key);
+      }
+      const presentation: ProcessRole = descriptor
         ? electronPresentation(descriptor)
-        : pid === input.enginePid
-          ? { name: "Sidecar", kind: "sidecar" as const }
-          : { name: processName(command), kind: "process" as const };
+        : describeProcess({
+            command,
+            args,
+            isEngine: pid === input.enginePid,
+            appExecutable: input.appExecutable ?? null,
+          });
       const parentPid = descriptor
         ? null
         : row && owned.has(row.parentPid)
@@ -469,18 +800,55 @@ export class ProcessMetricsTracker {
         peakMemoryBytes: peak.memoryBytes,
         terminal: terminal.has(pid),
       });
-
-      if (row) {
-        nextPrevious.set(pid, {
-          startKey: row.startKey,
-          cpuTimeSeconds: row.cpuTimeSeconds,
-          identity,
-        });
-      }
     }
+
+    const ownedCpu = new Map(
+      processes.map((process) => [process.pid, process.cpuPercent]),
+    );
+    for (const row of rowsByPid.values()) {
+      const identity = identities.get(row.pid)!;
+      const isOwned = owned.has(row.pid);
+      const footprintBytes = footprintFor(row.pid, identity);
+      const cpuPercent = isOwned
+        ? (ownedCpu.get(row.pid) ?? osCpu.get(row.pid) ?? 0)
+        : (osCpu.get(row.pid) ?? 0);
+      sampledRows.push({
+        pid: row.pid,
+        parentPid: row.parentPid,
+        command: row.command,
+        startKey: row.startKey,
+        cpuTimeSeconds: row.cpuTimeSeconds,
+        cpuPercent,
+        rssBytes: row.rssBytes,
+        footprintBytes,
+        owned: isOwned,
+      });
+      if (isOwned) continue;
+      const bundle = appBundleName(row.command);
+      if (!isZerosBundle(bundle) || bundle === ownBundle) continue;
+      const app = otherApps.get(bundle) ?? {
+        name: bundle,
+        processCount: 0,
+        cpuPercent: 0,
+        memoryBytes: 0,
+      };
+      app.processCount += 1;
+      app.cpuPercent = roundMetric(app.cpuPercent + cpuPercent);
+      app.memoryBytes += Math.round(footprintBytes ?? row.rssBytes);
+      otherApps.set(bundle, app);
+    }
+    this.lastRows = sampledRows;
 
     for (const identity of this.processPeaks.keys()) {
       if (!livePeakIds.has(identity)) this.processPeaks.delete(identity);
+    }
+    for (const key of this.argsByIdentity.keys()) {
+      if (!liveArgKeys.has(key)) {
+        const [pidText, startKey] = key.split("\u0000");
+        const row = rowsByPid.get(Number(pidText));
+        if (!row || row.startKey !== startKey || !owned.has(row.pid))
+          this.argsByIdentity.delete(key);
+      }
     }
 
     const allCpu = roundMetric(
@@ -529,6 +897,15 @@ export class ProcessMetricsTracker {
       logicalCpuCount: Math.max(1, Math.floor(input.logicalCpuCount)),
       systemMemoryBytes: Math.max(0, Math.round(input.systemMemoryBytes)),
       terminalRootsKnown: input.terminalRootsKnown,
+      memorySource: footprintApplied ? "footprint" : "resident",
+      footprintAgeMs:
+        footprintApplied && footprint
+          ? Math.max(0, input.sampledAt - footprint.readAt)
+          : null,
+      system: input.system ?? null,
+      otherApps: [...otherApps.values()].sort(
+        (left, right) => right.memoryBytes - left.memoryBytes,
+      ),
       totals: {
         all: totals(processes, this.allPeak),
         excludingTerminals,

@@ -5,6 +5,7 @@ import type {
   ProcessResourceTotals,
 } from "../../platform/process-metrics";
 import {
+  buildOtherAppNodes,
   buildResourceView,
   collectResourceNodeIds,
   copyResourceReport,
@@ -13,6 +14,7 @@ import {
   formatResourceMemory,
   resolveResourceScope,
   selectResourceSnapshot,
+  systemSummaryParts,
 } from "../resource-monitor-model";
 
 function metric(
@@ -129,6 +131,10 @@ function snapshot(
     logicalCpuCount: 8,
     systemMemoryBytes: 16 * 1024 ** 3,
     terminalRootsKnown: excludingTerminals != null,
+    memorySource: "resident" as const,
+    footprintAgeMs: null,
+    system: null,
+    otherApps: [],
     totals: { all: allTotals, excludingTerminals },
     processes,
   };
@@ -339,5 +345,90 @@ describe("resource monitor presentation", () => {
     expect(report).toContain("node ×2 [PIDs 310, 311]");
     expect(report).not.toContain("vite");
     expect(report).not.toContain("/Applications/");
+  });
+});
+
+describe("Mac context and other Zeros apps", () => {
+  const GB = 1024 ** 3;
+  it("summarizes pressure, free memory, swap, load and abnormal thermal state with words", () => {
+    expect(
+      systemSummaryParts(
+        {
+          sampledAt: 1,
+          memoryPressure: "warning",
+          memoryFreePercent: 11.4,
+          swapUsedBytes: 6 * GB,
+          swapTotalBytes: 7 * GB,
+          loadAverage: [17.5, 14.3, 11.9],
+          thermalState: "serious",
+        },
+        10,
+      ),
+    ).toEqual([
+      { id: "pressure", label: "Memory pressure", value: "Warning", tone: "warning" },
+      { id: "free", label: "", value: "11% free", tone: "default" },
+      { id: "swap", label: "Swap", value: "6.0 of 7.0 GB", tone: "warning" },
+      { id: "load", label: "Load", value: "17.5 / 10 cores", tone: "critical" },
+      { id: "thermal", label: "Thermal", value: "Serious", tone: "critical" },
+    ]);
+  });
+
+  it("omits unknown values instead of reporting zero, and stays quiet when healthy", () => {
+    expect(systemSummaryParts(null, 8)).toEqual([]);
+    expect(
+      systemSummaryParts(
+        {
+          sampledAt: 1,
+          memoryPressure: "normal",
+          memoryFreePercent: null,
+          swapUsedBytes: 0,
+          swapTotalBytes: 0,
+          loadAverage: [2, 2, 2],
+          thermalState: "nominal",
+        },
+        8,
+      ),
+    ).toEqual([
+      { id: "pressure", label: "Memory pressure", value: "Normal", tone: "default" },
+      { id: "swap", label: "Swap", value: "None", tone: "default" },
+      { id: "load", label: "Load", value: "2.0 / 8 cores", tone: "default" },
+    ]);
+  });
+
+  it("sorts other Zeros apps like the process tree and reports them in the fallback copy", () => {
+    const nodes = buildOtherAppNodes(
+      [
+        { name: "Zeros Beta", processCount: 2, cpuPercent: 1, memoryBytes: 900 },
+        { name: "Zeros Alpha", processCount: 4, cpuPercent: 6.4, memoryBytes: 350 },
+      ],
+      "cpu",
+      "desc",
+    );
+    expect(nodes.map((node) => [node.name, node.kind, node.count])).toEqual([
+      ["Zeros Alpha", "other-app", 4],
+      ["Zeros Beta", "other-app", 2],
+    ]);
+    const report = copyResourceReport({
+      sampledAt: 1,
+      logicalCpuCount: 8,
+      scanDurationMs: 1,
+      includeTerminal: true,
+      totals: allTotals,
+      view: [],
+      otherApps: nodes,
+      memorySource: "footprint",
+      system: {
+        sampledAt: 1,
+        memoryPressure: "critical",
+        memoryFreePercent: 4,
+        swapUsedBytes: null,
+        swapTotalBytes: null,
+        loadAverage: null,
+        thermalState: null,
+      },
+    });
+    expect(report).toContain("Memory: physical footprint");
+    expect(report).toContain("Mac: Memory pressure Critical · 4% free");
+    expect(report).toContain("Other Zeros apps\n  Zeros Alpha ×4");
   });
 });

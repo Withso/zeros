@@ -63,7 +63,10 @@ import { readFile, readImageThumbnail, writeFile } from "./files";
 import { skillsList } from "./skills";
 import { discoverLocalhostServices } from "./localhost";
 import { notifySend } from "./notifications";
-import { processMetricsSnapshot } from "./process-metrics";
+import {
+  processDiagnosticsReport,
+  processMetricsSnapshot,
+} from "./process-metrics";
 import { agentAttachmentWrite } from "./agent-attachments";
 import { registerAttachmentSourceIpc } from "../attachment-source";
 import { designExportPng } from "./design-export";
@@ -246,6 +249,7 @@ export function registerAllCommands(): void {
   // Notifications, updater, and process
   setCommand("notify_send", notifySend);
   setCommand("process_metrics_snapshot", processMetricsSnapshot);
+  setCommand("process_diagnostics_report", processDiagnosticsReport);
   setCommand("updater_check", updaterCheck);
   setCommand("updater_install", updaterInstall);
   setCommand("updater_status", updaterStatus);

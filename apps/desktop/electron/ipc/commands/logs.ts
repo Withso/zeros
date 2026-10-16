@@ -52,7 +52,7 @@ const MAX_EXPORT_CHARS = 500_000;
 /** The scrubbed recent tail, capped to MAX_EXPORT_CHARS (newest kept) and
  *  trimmed to whole lines so a truncated tail stays valid JSONL. Single source
  *  for both the submission payload and the View export. */
-function scrubbedRecentTail(): string {
+export function scrubbedRecentTail(): string {
   const scrubbed = redactLogSecrets(readRecentLogs());
   if (scrubbed.length <= MAX_EXPORT_CHARS) return scrubbed;
   const tail = scrubbed.slice(-MAX_EXPORT_CHARS);
