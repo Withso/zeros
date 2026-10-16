@@ -3,7 +3,7 @@ import { COMPUTER_NAMED_REF, isComputerTemplateSnapshotName, type ComputerSnapsh
 import type { ComputerSnapshotIdentity } from "./computer-template-snapshot-boat.js";
 import { assertHostedDevAdmission } from "../development-environment.js";
 import { z } from "zod";
-import { BoatApiClient, BoatCreateRejectedError, type BoatApiClientOptions, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
+import { BoatApiClient, BoatCreateRejectedError, BoatSnapshotExpiredError, type BoatApiClientOptions, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
 import { setBoatDisplayName, type BoatDisplayName } from "./boat-display-name.js";
 import { computeMicroUsd, type CloudProviderComputeUsage, type CloudWorkspaceComputeProvider } from "./provider-compute.js";
 import type {
@@ -586,10 +586,18 @@ export class BoatWorkspaceProvider
       throw failure("provider_operation_pending", true);
     if (current.state === "failed")
       throw failure(current.metadata.snapshotMissing === true ? "provider_snapshot_missing" : "provider_snapshot_unavailable");
-    await this.client.request(`/sandboxes/${resourceId}/resume`, {
-      method: "POST",
-      body: { ttlSeconds },
-    });
+    try {
+      await this.client.request(`/sandboxes/${resourceId}/resume`, {
+        method: "POST",
+        body: { ttlSeconds },
+      });
+    } catch (error) {
+      // The allocation was just confirmed owned, stopped and on the expected
+      // wallet and template, so Boat's statement that it deleted the disk is
+      // the same evidence as an inspected missing capture.
+      if (error instanceof BoatSnapshotExpiredError) throw failure("provider_snapshot_missing");
+      throw error;
+    }
     return (
       (await this.inspect(resourceId)) ??
       (() => {
