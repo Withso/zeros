@@ -17,6 +17,7 @@ import { runtimeWitness } from "./runtime-test-fixtures.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
 import { readLifecycleDueInMs } from "./lifecycle-jobs.js";
 import { runDueLifecycleJobs } from "./lifecycle-job-test-utils.js";
+import { DatabaseCloudWorkspaceHealthService } from "./health.js";
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
 import { CloudWorkspaceCheckpointRequestWorker, enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
@@ -2783,21 +2784,27 @@ d("cloud workspace reconciliation", () => {
       if (listed) expect(observed.rows[0]).toMatchObject({ observed_state: itemState, fresh: true });
     });
 
-    it("quarantines inventory the journal cannot place and never deletes it", async () => {
+    it("ignores provider inventory the journal cannot place", async () => {
+      // The hosted provider account also holds sandboxes created outside the
+      // journal (runtime images, staging, qualification, computer templates,
+      // builder VMs, retirement). Quarantining them would stall
+      // provider_orphans health forever, since nothing may delete them and
+      // nothing clears the row when the stray goes away.
       const provider = new InventoryProvider();
       provider.items = [{ resourceId: "stray-resource", state: "running", computeStopped: false,
         workspaceId: null, generation: null }];
       const worker = reconciler(provider, { orphanGraceMs: 60_000 });
 
       await worker.reconcileOrphansOnce();
-      await pool.query("UPDATE cloud_workspace_provider_orphans SET first_seen_at = now() - interval '2 minutes'");
       await worker.reconcileOrphansOnce();
 
       expect(provider.deleteCount).toBe(0);
-      const orphan = await pool.query(
-        `SELECT workspace_id_hint, generation_hint, observation_count
-         FROM cloud_workspace_provider_orphans WHERE provider_resource_id = 'stray-resource'`);
-      expect(orphan.rows[0]).toEqual({ workspace_id_hint: null, generation_hint: null, observation_count: 2 });
+      expect((await pool.query(
+        "SELECT 1 FROM cloud_workspace_provider_orphans WHERE provider_resource_id = 'stray-resource'")).rowCount).toBe(0);
+      const health = new DatabaseCloudWorkspaceHealthService(pool, {
+        setupExecutionEnabled: true, durabilityEnabled: true, outboxDeliveryEnabled: false,
+      });
+      expect((await health.read()).operationalState).toBe("healthy");
     });
 
     it("recovers an unbound known generation from inventory and forces its refresh", async () => {

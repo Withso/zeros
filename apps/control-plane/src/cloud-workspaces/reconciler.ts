@@ -1724,7 +1724,14 @@ export class CloudWorkspaceReconciler {
       return boundIds;
     });
     for (const id of ids) {
-      if (!bound.has(id)) await this.reconcileSweepResource(scope, inventory.get(id)!, null);
+      if (bound.has(id)) continue;
+      const item = inventory.get(id)!;
+      // Inventory outside the journal (runtime images, staging,
+      // qualification, computer templates, builder VMs, retirement) is not
+      // ours to track. Quarantining it would stall provider_orphans health
+      // permanently: nothing may delete a stray, and nothing clears its row.
+      if (item.workspaceId === null || item.generation === null) continue;
+      await this.reconcileSweepResource(scope, item, null);
     }
   }
 
