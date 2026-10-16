@@ -1,0 +1,342 @@
+// Contract mock for the S3 client contract: REST + device stream + runtime
+// auth handshake in one in-process server, driven by the frozen markdown
+// schemas (request frames validated with ajv, responses built to validate).
+// Unit and conformance tests share it; nothing here ships in the app.
+
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
+
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
+import { WebSocketServer, type WebSocket } from "ws";
+
+import {
+  loadContractSchemas,
+  type JsonObject,
+} from "../src/contract-source";
+import type { WorkspaceDocument } from "../src/generated/rest";
+
+const SUPPORTED_CONTRACT = 1;
+const HEARTBEAT_INTERVAL_MS = 20000;
+// Token shape per the contract: three base64url segments, 32+ chars.
+const MOCK_TOKEN = `AAAAAAAAAAAAAAAA.${"b".repeat(38)}.${"c".repeat(43)}`;
+const NOW_ISO = "2026-10-16T00:00:00.000Z";
+
+const DEFAULT_WORKSPACE: WorkspaceDocument = {
+  id: "33333333-3333-4333-8333-333333333333",
+  organizationId: "22222222-2222-4222-8222-222222222222",
+  version: 41,
+  status: "running",
+  placement: "cloud",
+};
+
+export interface ContractMockOptions {
+  workspaces?: WorkspaceDocument[];
+  deviceSessionId?: string;
+}
+
+export interface ContractMock {
+  /** Base http:// URL of the REST half. */
+  restUrl: string;
+  /** A currently valid device-stream ticket. */
+  ticket: string;
+  /** The mock's current resumable stream position. */
+  cursor: string;
+  close(): Promise<void>;
+}
+
+function ajv() {
+  const instance = new Ajv2020({
+    strict: true,
+    strictTypes: false,
+    strictRequired: false,
+    allErrors: true,
+  });
+  addFormats(instance);
+  return instance;
+}
+
+function frameValidator(
+  schema: JsonObject,
+  defKey: string,
+): (value: unknown) => boolean {
+  const validate = ajv().compile({ $defs: schema.$defs, $ref: `#/$defs/${defKey}` });
+  return (value) => validate(value) as boolean;
+}
+
+async function readBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(chunk as Buffer);
+  if (chunks.length === 0) return undefined;
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+export async function createContractMock(
+  options: ContractMockOptions = {},
+): Promise<ContractMock> {
+  const schemas = loadContractSchemas();
+  const workspaces = options.workspaces ?? [DEFAULT_WORKSPACE];
+  const deviceSessionId =
+    options.deviceSessionId ?? "77777777-7777-4777-8777-777777777777";
+  const ticket = `mock-ticket-${"t".repeat(32)}`;
+  const cursor = "c-1";
+  const idempotent = new Map<string, { status: number; body: JsonObject }>();
+  const sockets = new Set<WebSocket>();
+
+  const helloValid = frameValidator(schemas.deviceStream, "client.hello");
+  const readyValid = frameValidator(schemas.deviceStream, "server.ready");
+  const resetValid = frameValidator(schemas.deviceStream, "server.catalog.reset");
+  const pongValid = frameValidator(schemas.deviceStream, "server.pong");
+  const authValid = frameValidator(schemas.runtimeAuth, "client.auth");
+  const authOkValid = frameValidator(schemas.runtimeAuth, "server.auth.ok");
+  const renewValid = frameValidator(schemas.runtimeAuth, "client.auth.renew");
+  const renewedValid = frameValidator(schemas.runtimeAuth, "server.auth.renewed");
+
+  const send = (socket: WebSocket, frame: JsonObject, valid: (v: unknown) => boolean) => {
+    if (!valid(frame))
+      throw new Error(`contract mock would send an invalid ${String(frame.t)} frame`);
+    socket.send(JSON.stringify(frame));
+  };
+
+  const errorBody = (code: string, message: string, extra?: JsonObject): JsonObject => ({
+    error: { code, message, ...extra },
+  });
+
+  const json = (response: ServerResponse, status: number, body: JsonObject, headers: Record<string, string> = {}) => {
+    response.writeHead(status, { "content-type": "application/json", ...headers });
+    response.end(JSON.stringify(body));
+  };
+
+  const capabilities = () => ({
+    engine: { token: MOCK_TOKEN, expiresAt: NOW_ISO },
+    realtime: { token: MOCK_TOKEN, expiresAt: NOW_ISO },
+  });
+
+  function handleRest(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+    body: unknown,
+    wsBase: string,
+  ): void {
+    const path = url.pathname;
+    const lifecycleMatch = /^\/v1\/organizations\/[^/]+\/cloud-workspaces\/([^/]+)(?:\/(wake|stop|archive))?$/.exec(path);
+    if (request.method === "POST" && path === "/v1/device-sessions") {
+      json(response, 201, {
+        deviceSessionId,
+        stream: {
+          url: `${wsBase}/v1/device-stream`,
+          ticket,
+          ticketExpiresAt: NOW_ISO,
+        },
+        contract: SUPPORTED_CONTRACT,
+        heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+      }, { "cache-control": "no-store" });
+      return;
+    }
+    if (request.method === "GET" && path === "/v1/cloud-workspaces") {
+      json(response, 200, { workspaces, nextCursor: null, catalogVersion: 9 });
+      return;
+    }
+    if (request.method === "GET" && path === "/.well-known/zeros-capabilities/jwks.json") {
+      json(response, 200, {
+        keys: [
+          {
+            kty: "OKP",
+            crv: "Ed25519",
+            x: "A".repeat(43),
+            kid: "mock-key-1",
+            use: "sig",
+            alg: "EdDSA",
+            zeros_state: "current",
+          },
+        ],
+      }, { "cache-control": "max-age=300" });
+      return;
+    }
+    if (request.method === "POST" && path.endsWith("/runtime/connect")) {
+      json(response, 201, {
+        workspaceId: workspaces[0]!.id,
+        generation: 7,
+        capabilities: capabilities(),
+        routes: [
+          { kind: "direct", url: `${wsBase}/runtime/direct`, priority: 0 },
+          { kind: "relay", url: `${wsBase}/runtime/relay`, priority: 1 },
+        ],
+        renewAt: NOW_ISO,
+        relayHedgeMs: 400,
+      }, { "cache-control": "no-store" });
+      return;
+    }
+    if (request.method === "POST" && path.endsWith("/runtime/capabilities")) {
+      json(response, 201, { capabilities: capabilities(), renewAt: NOW_ISO }, { "cache-control": "no-store" });
+      return;
+    }
+    if (lifecycleMatch && ["POST", "PATCH", "DELETE"].includes(request.method ?? "")) {
+      // Every lifecycle command carries an Idempotency-Key (S3 Part 1).
+      const keyHeader = request.headers["idempotency-key"];
+      if (typeof keyHeader !== "string" || !/^[A-Za-z0-9._:-]{8,128}$/.test(keyHeader)) {
+        json(response, 400, errorBody("idempotency_key_missing", "Lifecycle commands require an Idempotency-Key header."));
+        return;
+      }
+      const scoped = `${request.method} ${path} ${keyHeader}`;
+      const replay = idempotent.get(scoped);
+      if (replay) {
+        json(response, replay.status, replay.body, { "idempotency-replayed": "true" });
+        return;
+      }
+      const operation = lifecycleMatch[2] ?? (request.method === "POST" ? "create" : request.method === "PATCH" ? "rename" : "delete");
+      const status = request.method === "PATCH" ? 200 : 202;
+      const payload: JsonObject =
+        request.method === "PATCH"
+          ? { workspace: workspaces[0]! }
+          : { workspace: workspaces[0]!, intent: { operation, acceptedAt: NOW_ISO } };
+      idempotent.set(scoped, { status, body: payload });
+      json(response, status, payload);
+      return;
+    }
+    json(response, 404, errorBody("not_found", `No contract route for ${request.method} ${path}.`));
+  }
+
+  function handleDeviceStream(socket: WebSocket): void {
+    let greeted = false;
+    socket.on("message", (data) => {
+      let frame: JsonObject;
+      try {
+        frame = JSON.parse(String(data)) as JsonObject;
+      } catch {
+        socket.close(4401, "bad_frame");
+        return;
+      }
+      if (!greeted) {
+        if (frame.t !== "hello" || !helloValid(frame)) {
+          socket.close(4401, "hello_expected");
+          return;
+        }
+        const d = frame.d as {
+          contract: { min: number; max: number };
+          ticket: string;
+          resume?: { cursor: string };
+        };
+        if (d.contract.min > SUPPORTED_CONTRACT || d.contract.max < SUPPORTED_CONTRACT) {
+          socket.close(4426, "no_common_contract");
+          return;
+        }
+        if (d.ticket !== ticket) {
+          socket.close(4401, "ticket_invalid");
+          return;
+        }
+        greeted = true;
+        const resumed = d.resume?.cursor === cursor;
+        send(socket, {
+          t: "ready",
+          d: {
+            deviceSessionId,
+            cursor,
+            resumed,
+            heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+            contract: SUPPORTED_CONTRACT,
+          },
+        }, readyValid);
+        if (d.resume && !resumed)
+          send(socket, { t: "catalog.reset", d: { reason: "resume_expired" } }, resetValid);
+        return;
+      }
+      if (frame.t === "ping") {
+        send(socket, { t: "pong", d: { ts: (frame.d as JsonObject).ts } }, pongValid);
+      }
+      // attach, detach, presence.set and ack need no answer in v1.
+    });
+  }
+
+  function handleRuntime(socket: WebSocket): void {
+    let authenticated = false;
+    socket.on("message", (data) => {
+      let frame: JsonObject;
+      try {
+        frame = JSON.parse(String(data)) as JsonObject;
+      } catch {
+        socket.close(4400, "bad_frame");
+        return;
+      }
+      const handshake = typeof frame.t === "string" && frame.type === undefined;
+      if (!authenticated) {
+        if (frame.t !== "auth" || !authValid(frame)) {
+          socket.close(4401, "capability_missing");
+          return;
+        }
+        authenticated = true;
+        send(socket, {
+          t: "auth.ok",
+          d: {
+            sessionId: "66666666-6666-4666-8666-666666666666",
+            scopes: ["ws:read", "ws:edit"],
+            expiresAtMs: 1760000000300,
+          },
+        }, authOkValid);
+        return;
+      }
+      if (!handshake) return; // Engine protocol messages flow unchanged.
+      if (frame.t === "auth.renew" && renewValid(frame)) {
+        send(socket, { t: "auth.renewed", d: { expiresAtMs: 1760000000300 } }, renewedValid);
+        return;
+      }
+      // Any other t-shaped frame after auth.ok is a protocol violation.
+      socket.close(4400, "unexpected_handshake_frame");
+    });
+  }
+
+  const wss = new WebSocketServer({ noServer: true });
+  const server: Server = createServer((request, response) => {
+    void (async () => {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      const address = server.address();
+      const wsBase = `wss://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+      handleRest(request, response, url, await readBody(request), wsBase);
+    })().catch((error: unknown) => {
+      json(response, 500, errorBody("mock_failure", String(error)));
+    });
+  });
+  server.on("upgrade", (request, socket, head) => {
+    const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    const handler =
+      path === "/v1/device-stream"
+        ? handleDeviceStream
+        : path === "/runtime/direct" || path === "/runtime/relay"
+          ? handleRuntime
+          : null;
+    if (!handler) {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      sockets.add(ws);
+      ws.on("close", () => sockets.delete(ws));
+      handler(ws);
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+
+  return {
+    restUrl: `http://127.0.0.1:${port}`,
+    ticket,
+    cursor,
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const socket of sockets) socket.terminate();
+        wss.close();
+        server.close(() => resolve());
+      }),
+  };
+}
