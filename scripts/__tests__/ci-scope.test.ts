@@ -443,6 +443,8 @@ describe("CI scope additive requests", () => {
     ["ci:control-plane-db", "control-plane-db"],
     ["ci:packaging", "packaging"],
     ["ci:web", "web"],
+    ["ci:cloud-chaos", "cloud-chaos"],
+    ["ci:cloud-scale", "cloud-scale"],
   ])("adds %s without removing floor lanes", (label, lane) => {
     const changes = [change("apps/desktop/src/renderer/app-shell.tsx")];
     const floor = decide(changes);

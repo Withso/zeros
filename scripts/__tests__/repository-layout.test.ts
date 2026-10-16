@@ -834,6 +834,7 @@ describe("repository layout contracts", () => {
       "lifecycle-diagnostics.md",
       "live-runtime-updates.md",
       "load-simulator.md",
+      "local-seams.json",
       "mcp-and-skills.md",
       "native-access-acceptance.md",
       "native-preview-acceptance.md",

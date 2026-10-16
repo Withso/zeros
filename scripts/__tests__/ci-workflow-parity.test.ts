@@ -58,6 +58,12 @@ const PR_ONLY_JOBS = new Set([
   "assurance",
   "extended",
   "full-assurance",
+  // Advisory cloud-program lanes (wave 2, track G): pull-request only, gated
+  // on their policy lane, never part of the Preflight parity surface.
+  "local-untouched",
+  "cloud-chaos",
+  "cloud-scale",
+  "cloud-client",
 ]);
 // The Alpha gate and composer browser shards run only in full Preflight.
 const PREFLIGHT_ONLY_JOBS = new Set(["alpha-gate"]);

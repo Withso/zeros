@@ -150,7 +150,10 @@
   },
   "lane_names": [
     "ci-config",
+    "cloud-chaos",
+    "cloud-client",
     "cloud-runtime",
+    "cloud-scale",
     "control-plane",
     "control-plane-db",
     "dependencies-toolchain",
@@ -484,6 +487,21 @@
       "include": ["**"],
       "input_source": "control-plane-database",
       "lanes": ["control-plane", "control-plane-db"]
+    },
+    {
+      "id": "cloud-chaos",
+      "include": ["apps/control-plane/src/chaos/**"],
+      "lanes": ["cloud-chaos"]
+    },
+    {
+      "id": "cloud-load-scale",
+      "include": ["apps/control-plane/src/load-sim/**"],
+      "lanes": ["cloud-scale"]
+    },
+    {
+      "id": "cloud-client-sdk",
+      "include": ["packages/cloud-client/**"],
+      "lanes": ["cloud-client"]
     }
   ],
   "jobs": {
@@ -524,6 +542,48 @@
     "secret-scan": ["commit-range-secrets"]
   },
   "checks": {
+    "local-untouched": {
+      "when": {
+        "always": true,
+        "full": true,
+        "any_lanes": []
+      },
+      "execution_group": "scope-core",
+      "commands": ["node scripts/ci/local-untouched.mjs"],
+      "runs_elsewhere": ".github/workflows/ci.yml:local-untouched (advisory until the owner requires it)"
+    },
+    "cloud-chaos": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["cloud-chaos"]
+      },
+      "execution_group": "control-plane-chaos",
+      "commands": ["pnpm --dir apps/control-plane exec vitest run src/chaos"],
+      "runs_elsewhere": ".github/workflows/ci.yml:cloud-chaos (advisory until the owner requires it)"
+    },
+    "cloud-load-scale": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["cloud-scale"]
+      },
+      "execution_group": "control-plane-load-scale",
+      "commands": [
+        "pnpm --dir apps/control-plane exec vitest run --glob 'src/load-sim/*.scale.test.ts'"
+      ],
+      "runs_elsewhere": ".github/workflows/ci.yml:cloud-scale (advisory until the owner requires it)"
+    },
+    "cloud-client-sdk": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["cloud-client"]
+      },
+      "execution_group": "cloud-client",
+      "commands": ["pnpm --dir packages/cloud-client test"],
+      "runs_elsewhere": ".github/workflows/ci.yml:cloud-client (advisory until the owner requires it)"
+    },
     "tracked-secrets": {
       "when": {
         "always": true,
