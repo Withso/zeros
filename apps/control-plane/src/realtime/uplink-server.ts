@@ -15,7 +15,7 @@ import {
   UPLINK_CLOSE,
   UPLINK_DEFAULT_PING_INTERVAL_MS,
   UPLINK_HELLO_TIMEOUT_MS,
-  UPLINK_MAX_BINARY_FRAME_BYTES,
+  UPLINK_MAX_SOCKET_PAYLOAD_BYTES,
   UPLINK_MAX_CONTROL_FRAME_BYTES,
   UPLINK_PATH,
   UPLINK_SUBPROTOCOL,
@@ -145,7 +145,7 @@ export class CloudEngineUplinkServer {
   private readonly wss = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
-    maxPayload: UPLINK_MAX_BINARY_FRAME_BYTES,
+    maxPayload: UPLINK_MAX_SOCKET_PAYLOAD_BYTES,
     handleProtocols: protocols => protocols.has(UPLINK_SUBPROTOCOL) ? UPLINK_SUBPROTOCOL : false,
   });
   private readonly all = new Set<UplinkConnection>();

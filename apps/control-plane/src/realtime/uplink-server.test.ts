@@ -8,7 +8,7 @@ import type { UplinkSecurityAlertKind } from "./uplink-alerts.js";
 import type { EngineCapabilityResult } from "./uplink-auth-source.js";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "./uplink-authority.js";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "./uplink-presence.js";
-import { UPLINK_CLOSE, UPLINK_PATH, UPLINK_SUBPROTOCOL } from "./uplink-protocol.js";
+import { UPLINK_CLOSE, UPLINK_MAX_BINARY_FRAME_BYTES, UPLINK_PATH, UPLINK_SUBPROTOCOL } from "./uplink-protocol.js";
 import { CloudEngineUplinkServer, type UplinkServerOptions } from "./uplink-server.js";
 
 vi.setConfig({ testTimeout: 15_000 });
@@ -385,6 +385,15 @@ describe("engine uplink server", () => {
     const { peer } = await connect();
     peer.ws.send(frame);
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
+  });
+
+  it("closes 4400 frame_invalid on an oversized binary frame (the contract's size violation, not 1009)", async () => {
+    await start();
+    const { peer } = await connect();
+    const frame = Buffer.alloc(UPLINK_MAX_BINARY_FRAME_BYTES + 1, 0);
+    frame[0] = 0x01; frame[1] = 0x01;
+    peer.ws.send(frame);
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid, reason: "frame_invalid" });
   });
 
   it("closes 4409 when another instance records a newer owner, and ignores older ones", async () => {

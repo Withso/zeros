@@ -16,6 +16,10 @@ export const UPLINK_RELAY_KIND = { data: 0x01, dataFinal: 0x02 } as const;
 /** The largest frame the socket accepts: one chunk plus its header. Text
  * frames are capped separately at `UPLINK_MAX_CONTROL_FRAME_BYTES`. */
 export const UPLINK_MAX_BINARY_FRAME_BYTES = UPLINK_MAX_RELAY_CHUNK_BYTES + UPLINK_RELAY_HEADER_BYTES;
+/** The ws hard ceiling sits 1 KiB above the exact caps so an oversized
+ * frame reaches the parser and closes 4400 (the contract's size
+ * violation) instead of dying at the socket with an unspecified 1009. */
+export const UPLINK_MAX_SOCKET_PAYLOAD_BYTES = UPLINK_MAX_BINARY_FRAME_BYTES + 1024;
 
 export type UplinkRelayChunk = Readonly<{
   /** Last chunk of the relayed client message. */
