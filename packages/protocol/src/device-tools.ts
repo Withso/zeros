@@ -550,7 +550,9 @@ function appBundlePath(value: unknown): string {
   ) {
     fail(APP_PATH_ERROR);
   }
-  const trimmed = value.replace(/\/+$/, "");
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  const trimmed = value.slice(0, end);
   const apk = /\.apk$/i.test(trimmed);
   if (
     (apk && trimmed !== value) ||

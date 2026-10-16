@@ -247,4 +247,19 @@ describe("Android screen elements", () => {
     expect(androidElementType("android.view.View", false, true)).toBe("CheckBox");
     expect(androidElementType("android.widget.LinearLayout", false, false)).toBe("Group");
   });
+
+  it("tells a switch from a view switcher", () => {
+    for (const className of [
+      "android.widget.Switch",
+      "androidx.appcompat.widget.SwitchCompat",
+      "com.google.android.material.switchmaterial.SwitchMaterial",
+      "com.google.android.material.materialswitch.MaterialSwitch",
+      "android.widget.ToggleButton",
+    ]) {
+      expect(androidElementType(className, true, true), className).toBe("Switch");
+    }
+    expect(androidElementType("android.widget.ViewSwitcher", false, false)).toBe("Group");
+    expect(androidElementType("android.widget.TextSwitcher", false, false)).toBe("Group");
+    expect(androidElementType("android.widget.ImageSwitcher", true, false)).toBe("Button");
+  });
 });

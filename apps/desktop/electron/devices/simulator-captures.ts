@@ -14,7 +14,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { constants } from "node:fs";
-import { copyFile, link, lstat, mkdir, readFile, rm } from "node:fs/promises";
+import { copyFile, link, lstat, mkdir, open, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { MAX_ATTACHMENT_BYTES } from "@zeros/protocol/attachment-policy";
@@ -142,6 +142,14 @@ function message(error: unknown): string {
 
 function code(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | null)?.code;
+}
+
+function goneFromDownloads(saved: SavedCapture): Error {
+  return new Error(
+    saved.capture.kind === "screenshot"
+      ? "That screenshot isn't in Downloads anymore."
+      : "That recording isn't in Downloads anymore.",
+  );
 }
 
 /** Width and height from a PNG's header. */
@@ -334,32 +342,37 @@ export class SimulatorCaptures {
 
   /** The saved file for a drag or Finder, if it is still where Zeros put it. */
   async savedFile(captureId: string): Promise<SavedCapture> {
-    const saved = isSimulatorCaptureId(captureId) ? this.saved.get(captureId) : undefined;
-    if (!saved) throw new Error("That capture is no longer available.");
+    const saved = this.knownCapture(captureId);
     const info = await lstat(saved.path).catch(() => null);
-    if (!info?.isFile()) {
-      throw new Error(
-        saved.capture.kind === "screenshot"
-          ? "That screenshot isn't in Downloads anymore."
-          : "That recording isn't in Downloads anymore.",
-      );
-    }
+    if (!info?.isFile()) throw goneFromDownloads(saved);
     return saved;
   }
 
   /** A capture's bytes, for Add to chat. */
   async file(captureId: string): Promise<SimulatorCaptureFile> {
-    const saved = await this.savedFile(captureId);
-    const info = await lstat(saved.path);
-    if (info.size > MAX_ATTACHMENT_BYTES) {
-      throw new Error("That recording is too large to add to a chat. It's in Downloads.");
+    const saved = this.knownCapture(captureId);
+    // Check and read through one descriptor so nothing can be swapped in
+    // between; a link or a pipe put in the capture's place is refused.
+    const handle = await open(
+      saved.path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    ).catch(() => null);
+    if (!handle) throw goneFromDownloads(saved);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw goneFromDownloads(saved);
+      if (info.size > MAX_ATTACHMENT_BYTES) {
+        throw new Error("That recording is too large to add to a chat. It's in Downloads.");
+      }
+      const bytes = await handle.readFile();
+      return {
+        fileName: saved.capture.fileName,
+        mimeType: SIMULATOR_CAPTURE_MIME_TYPES[saved.capture.kind],
+        bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+      };
+    } finally {
+      await handle.close();
     }
-    const bytes = await readFile(saved.path);
-    return {
-      fileName: saved.capture.fileName,
-      mimeType: SIMULATOR_CAPTURE_MIME_TYPES[saved.capture.kind],
-      bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
-    };
   }
 
   // ── Annotation ───────────────────────────────────────────
@@ -436,6 +449,12 @@ export class SimulatorCaptures {
 
   private ensureOpen(): void {
     if (this.disposed) throw new Error("Zeros is quitting.");
+  }
+
+  private knownCapture(captureId: string): SavedCapture {
+    const saved = isSimulatorCaptureId(captureId) ? this.saved.get(captureId) : undefined;
+    if (!saved) throw new Error("That capture is no longer available.");
+    return saved;
   }
 
   private async workFile(extension: string): Promise<string> {

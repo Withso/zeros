@@ -197,6 +197,9 @@ describe("simulator tool argument validation", () => {
         path: "/Users/me/app/build/outputs/apk/debug/app-debug.apk",
       },
     });
+    expect(
+      parseDeviceToolCall("install_app", { device_id: UDID, path: `/tmp/App.app${"/".repeat(4_000)}` }),
+    ).toEqual({ ok: true, call: { tool: "install_app", deviceId: UDID, path: "/tmp/App.app" } });
     for (const path of [
       "App.app",
       "/tmp/App.ipa",
@@ -205,6 +208,8 @@ describe("simulator tool argument validation", () => {
       "/tmp/app.apk/",
       "/tmp/../app.apk",
       "/tmp/app.aab",
+      "/",
+      `/${"/".repeat(4_000)}x`,
     ]) {
       expect(parseDeviceToolCall("install_app", { device_id: UDID, path })).toMatchObject({
         ok: false,

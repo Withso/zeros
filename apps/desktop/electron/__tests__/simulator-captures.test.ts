@@ -1,11 +1,23 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  truncate,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { MAX_ATTACHMENT_BYTES } from "@zeros/protocol/attachment-policy";
 import type {
   SimulatorRecordingEnd,
   SimulatorRecordingsSnapshot,
@@ -665,6 +677,28 @@ describe("SimulatorCaptures", () => {
     await rm(saved.path);
     await expect(h.captures.file(capture.id)).rejects.toThrow(
       "That screenshot isn't in Downloads anymore.",
+    );
+  });
+
+  it("adds a capture to a chat only while it is the file Zeros saved", async () => {
+    const capture = await h.captures.screenshot(PHONE);
+    const saved = await h.captures.savedFile(capture.id);
+    const elsewhere = path.join(root, "elsewhere.png");
+    await rename(saved.path, elsewhere);
+    await symlink(elsewhere, saved.path);
+    await expect(h.captures.file(capture.id)).rejects.toThrow(
+      "That screenshot isn't in Downloads anymore.",
+    );
+    await rm(saved.path);
+    await mkdir(saved.path);
+    await expect(h.captures.file(capture.id)).rejects.toThrow(
+      "That screenshot isn't in Downloads anymore.",
+    );
+    await rm(saved.path, { recursive: true });
+    await rename(elsewhere, saved.path);
+    await truncate(saved.path, MAX_ATTACHMENT_BYTES + 1);
+    await expect(h.captures.file(capture.id)).rejects.toThrow(
+      "That recording is too large to add to a chat. It's in Downloads.",
     );
   });
 

@@ -13,6 +13,16 @@ import { describe, expect, it } from "vitest";
 
 const builder = readFileSync("electron-builder.yml", "utf8");
 
+/** Removes comments until none are left, so one can't hide inside another. */
+function withoutComments(xml: string): string {
+  let previous: string;
+  do {
+    previous = xml;
+    xml = xml.replace(/<!--[\s\S]*?-->/g, "");
+  } while (xml !== previous);
+  return xml;
+}
+
 describe("macOS automation packaging", () => {
   it("lets signed app and helper processes request Apple Events consent", () => {
     const entitlementPaths = [
@@ -20,7 +30,7 @@ describe("macOS automation packaging", () => {
     ].map((match) => match[1].trim().replace(/^["']|["']$/g, ""));
     expect(entitlementPaths).toHaveLength(2);
     for (const file of entitlementPaths) {
-      const plist = readFileSync(file, "utf8").replace(/<!--[\s\S]*?-->/g, "");
+      const plist = withoutComments(readFileSync(file, "utf8"));
       expect(plist, file).toMatch(
         /<key>com\.apple\.security\.automation\.apple-events<\/key>\s*<true\s*\/>/,
       );

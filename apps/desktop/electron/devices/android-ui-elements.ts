@@ -63,7 +63,7 @@ function ownWords(node: UiNode): string | null {
 export function androidElementType(className: string, clickable: boolean, checkable: boolean): string {
   const name = className.slice(className.lastIndexOf(".") + 1);
   if (/EditText$|AutoCompleteTextView$/.test(name)) return "TextField";
-  if (/Switch|ToggleButton$/.test(name)) return "Switch";
+  if (/(?:Switch(?:Compat|Material)?|ToggleButton)$/.test(name)) return "Switch";
   if (/CheckBox$|CheckedTextView$/.test(name)) return "CheckBox";
   if (/RadioButton$/.test(name)) return "RadioButton";
   if (/SeekBar$|Slider$|RatingBar$/.test(name)) return "Slider";
