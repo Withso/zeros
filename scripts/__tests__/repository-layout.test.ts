@@ -828,6 +828,7 @@ describe("repository layout contracts", () => {
       "engineering-reference.md",
       "enterprise-and-self-hosting.md",
       "infrastructure-and-operations.md",
+      "job-queue.md",
       "lifecycle-diagnostics.md",
       "live-runtime-updates.md",
       "mcp-and-skills.md",
