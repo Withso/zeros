@@ -38,6 +38,7 @@ import type {
   BoundaryProcess,
   PreparedBoundary,
 } from "../../containment/types";
+import { localAgentCpuPriority } from "../../containment/agent-cpu-priority";
 
 const DEFAULT_GRACEFUL_SHUTDOWN_MS = 2_000;
 const DEFAULT_FORCE_SHUTDOWN_MS = 1_000;
@@ -118,6 +119,7 @@ export function spawnStdioAgent(
     cwd: opts.cwd,
     env: opts.env ?? {},
     stdio: "pipe",
+    cpuPriority: localAgentCpuPriority(),
   });
   const spawnOpts: SpawnOptions = {
     cwd: launch?.cwd ?? opts.cwd,

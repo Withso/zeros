@@ -1129,6 +1129,9 @@ export class HostExecutionBoundary implements ExecutionBoundary {
           "--parent-pid",
           String(process.pid),
           ...(cloudEntry ? ["--cloud-workload"] : []),
+          ...(!cloudEntry && spawnRequest.cpuPriority === "below-normal"
+            ? ["--priority", "below-normal"]
+            : []),
           "--",
           spawnRequest.command,
           ...spawnRequest.args,

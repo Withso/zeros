@@ -51,6 +51,7 @@ import type {
   BoundaryProcess,
   PreparedBoundary,
 } from "../../../containment/types";
+import { localAgentCpuPriority } from "../../../containment/agent-cpu-priority";
 import type {
   CursorSdkModule,
   SdkAgent,
@@ -844,6 +845,7 @@ export function spawnSubprocessTransport(
     cwd: hostCwd,
     env,
     stdio: "pipe",
+    cpuPriority: localAgentCpuPriority(),
   });
 
   let child: ChildProcess;
