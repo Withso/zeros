@@ -71,22 +71,9 @@ export function createGithubReviewCache(
   });
 }
 export const githubReviewCache = createGithubReviewCache();
-const refreshVersions = new Map<string, number>();
-/** Several visible surfaces share the same Git invalidation without issuing a
- * second follow-up request simply because each received the broadcast. */
-export function observeGithubReviewRefresh(key: string, version: number): void {
-  const previous = refreshVersions.get(key);
-  if (previous !== undefined && previous !== version)
-    githubReviewCache.invalidate(key);
-  refreshVersions.delete(key);
-  refreshVersions.set(key, version);
-  while (refreshVersions.size > 128)
-    refreshVersions.delete(refreshVersions.keys().next().value!);
-}
 registerPrWorkspaceCacheForget((workspaceId) => {
   for (const key of githubReviewCache.keys()) {
     if (githubReviewTargetFromKey(key).workspaceId !== workspaceId) continue;
     githubReviewCache.forget(key);
-    refreshVersions.delete(key);
   }
 });
