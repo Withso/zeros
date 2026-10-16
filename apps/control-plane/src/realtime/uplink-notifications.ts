@@ -6,10 +6,23 @@ import type { CloudEngineUplinkServer } from "./uplink-server.js";
 
 export const UPLINK_OWNER_CHANNEL = "zeros_cloud_engine_uplink_owner";
 export const UPLINK_AUTHORITY_CHANNEL = "zeros_cloud_engine_uplink_authority";
+export const UPLINK_CRED_REVISION_CHANNEL = "zeros_cloud_agent_credential_revision";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/** The credential-push surface the listener routes revision bumps to. */
+export interface UplinkCredNotificationSink {
+  revisionChanged(engineInstanceId: string, revision: number): void;
+}
+
 export function handleUplinkNotification(server: Pick<CloudEngineUplinkServer, "ownerChanged" | "revalidate" | "revalidateWorkspace">,
-  channel: string, payload: string): void {
+  channel: string, payload: string, cred?: UplinkCredNotificationSink): void {
+  if (channel === UPLINK_CRED_REVISION_CHANNEL) {
+    const [engineInstanceId, revisionText] = payload.split(":");
+    const revision = Number(revisionText);
+    if (engineInstanceId && UUID.test(engineInstanceId) && Number.isSafeInteger(revision) && revision >= 1)
+      cred?.revisionChanged(engineInstanceId, revision);
+    return;
+  }
   if (channel === UPLINK_OWNER_CHANNEL) {
     const [engineInstanceId, connectionId, connectedAt] = payload.split(":");
     const connectedAtMs = Number(connectedAt);
@@ -32,15 +45,18 @@ export function startUplinkNotifications(
   server: CloudEngineUplinkServer,
   presence: Pick<DatabaseUplinkPresenceStore, "owners">,
   logger: Pick<Console, "warn"> = console,
+  cred?: UplinkCredNotificationSink,
 ): () => Promise<void> {
   const listener = postgresNotificationSubscription(pool, {
-    channels: [UPLINK_OWNER_CHANNEL, UPLINK_AUTHORITY_CHANNEL],
-    onNotification: notice => handleUplinkNotification(server, notice.channel, notice.payload ?? ""),
+    channels: [UPLINK_OWNER_CHANNEL, UPLINK_AUTHORITY_CHANNEL, ...(cred ? [UPLINK_CRED_REVISION_CHANNEL] : [])],
+    onNotification: notice => handleUplinkNotification(server, notice.channel, notice.payload ?? "", cred),
     onReady: () => {
       server.revalidate();
       void presence.owners(server.ownedEngineInstances()).then(rows => {
         for (const row of rows) server.ownerChanged(row.engineInstanceId, row.connectionId, row.connectedAtMs);
       }).catch(() => {});
+      // A revision bump lost while the listener was down is repaired at the
+      // next gate open (the extension pushes the current revision there).
     },
     onUnavailable: () => logger.warn("[realtime] uplink notifications unavailable; owners and authority rely on the periodic recheck"),
   });

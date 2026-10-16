@@ -66,6 +66,7 @@ import { DatabaseCloudWorkspaceEventService } from "./cloud-workspaces/event-str
 import { PostgresSecurityEventBroker, SecurityEventPublisher } from "./security-events.js";
 import { RolloutFlagSnapshot } from "./rollout-flags.js";
 import { AuditUplinkSecurityAlerts } from "./realtime/uplink-alerts.js";
+import { UplinkCredentialPush } from "./realtime/uplink-cred.js";
 import { uplinkCapabilityAuthority } from "./realtime/uplink-auth-source.js";
 import { DatabaseUplinkAuthority } from "./realtime/uplink-authority.js";
 import { startUplinkNotifications } from "./realtime/uplink-notifications.js";
@@ -830,6 +831,20 @@ if (uplinkAuth && rolloutFlagSnapshot && migrationResult.status.state === "curre
   const presenceStore = new DatabaseUplinkPresenceStore(pool);
   const alerts = new AuditUplinkSecurityAlerts({ pool });
   uplinkPresence = new UplinkPresenceWriter(presenceStore);
+  // Credential-control push (S2 cred channel): the binding's desired
+  // revision is read at the gate and on every notified bump. The engine's
+  // exchange re-reads authority; the notification is only a hint.
+  const uplinkCredPush = new UplinkCredentialPush({
+    sessionFor: engineInstanceId => cloudEngineUplink?.session(engineInstanceId) ?? null,
+    readRevision: async identity => {
+      const row = (await pool.query<{ desired_cache_revision: string }>(
+        "SELECT desired_cache_revision FROM cloud_agent_boot_bindings WHERE engine_instance_id=$1 AND retired_at IS NULL",
+        [identity.engineInstanceId])).rows[0];
+      if (!row) return null;
+      const revision = Number(row.desired_cache_revision);
+      return Number.isSafeInteger(revision) && revision >= 1 ? revision : null;
+    },
+  });
   cloudEngineUplink = new CloudEngineUplinkServer({
     authority: new DatabaseUplinkAuthority({ pool, workosEnabled: config.auth.provider === "workos", alerts }),
     authSource: uplinkAuth.source,
@@ -838,8 +853,9 @@ if (uplinkAuth && rolloutFlagSnapshot && migrationResult.status.state === "curre
     realtimeInstance: realtimeInstanceId(),
     presence: uplinkPresence,
     alerts,
+    extensions: [uplinkCredPush],
   });
-  stopUplinkNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore);
+  stopUplinkNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore, console, uplinkCredPush);
 }
 server.on("upgrade", (request, socket, head) => {
   if (!servesApi || shuttingDown || migrationResult.status.state !== "current") { socket.destroy(); return; }

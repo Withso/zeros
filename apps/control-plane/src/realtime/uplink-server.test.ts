@@ -7,6 +7,7 @@ import WebSocket from "ws";
 import type { UplinkSecurityAlertKind } from "./uplink-alerts.js";
 import type { EngineCapabilityResult } from "./uplink-auth-source.js";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "./uplink-authority.js";
+import { UplinkCredentialPush } from "./uplink-cred.js";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "./uplink-presence.js";
 import { UPLINK_CLOSE, UPLINK_MAX_BINARY_FRAME_BYTES, UPLINK_PATH, UPLINK_SUBPROTOCOL } from "./uplink-protocol.js";
 import { CloudEngineUplinkServer, type UplinkServerOptions } from "./uplink-server.js";
@@ -358,6 +359,34 @@ describe("engine uplink server", () => {
     await expect(live.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.superseded });
     expect(fourth.welcome.d).toMatchObject({ resumed: true });
     expect(alerts).toEqual(["uplink_supersede_churn"]);
+  });
+
+  it("pushes cred.revision to cred.v1 uplinks on changes and resyncs the current revision at the gate", async () => {
+    const currentRevision: number | null = 7;
+    const acks: Array<Record<string, unknown>> = [];
+    const cred = new UplinkCredentialPush({
+      sessionFor: engineInstanceId => uplink.session(engineInstanceId),
+      readRevision: async () => currentRevision,
+      onAck: (_session, ack) => { acks.push(ack); },
+    });
+    await start({ extensions: [cred] });
+    // An engine that did not offer cred.v1 (an older build mid-deploy) is
+    // never pushed: no resync frame at the gate, no change push.
+    const legacy = await connect();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(legacy.peer.frames).toEqual([]);
+    legacy.peer.ws.terminate();
+    const { peer } = await connect({ features: ["cred.v1"] });
+    // Contract resync: the current revision follows the gate.
+    expect(await peer.next("cred.revision")).toMatchObject({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    cred.revisionChanged(identity.engineInstanceId, 8);
+    expect(await peer.next("cred.revision")).toMatchObject({ s: 2, d: { kind: "agent-controls", revision: 8 } });
+    cred.revisionChanged(randomUUID(), 9); // not owned by this instance: no push
+    peer.send({ t: "cred.ack", s: 1, d: { kind: "agent-controls", revision: 8, result: "applied" } });
+    await until(() => acks.length === 1);
+    expect(acks[0]).toEqual({ kind: "agent-controls", revision: 8, result: "applied" });
+    peer.send({ t: "cred.ack", s: 2, d: { kind: "agent-controls", revision: "oops", result: "applied" } });
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
   });
 
   it("dispatches unsequenced engine frames to extensions and keeps ignoring unknown types", async () => {

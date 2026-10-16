@@ -6,7 +6,7 @@ import { seedReadyCloudWorkspace } from "../cloud-workspaces/test-fixtures.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { AuditUplinkSecurityAlerts } from "./uplink-alerts.js";
 import { DatabaseUplinkAuthority, type UplinkIdentity } from "./uplink-authority.js";
-import { UPLINK_AUTHORITY_CHANNEL, UPLINK_OWNER_CHANNEL, handleUplinkNotification } from "./uplink-notifications.js";
+import { UPLINK_AUTHORITY_CHANNEL, UPLINK_CRED_REVISION_CHANNEL, UPLINK_OWNER_CHANNEL, handleUplinkNotification } from "./uplink-notifications.js";
 import { DatabaseUplinkPresenceStore, type UplinkPresenceSnapshot } from "./uplink-presence.js";
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -16,6 +16,7 @@ d("engine uplink database paths", () => {
   let pool: pg.Pool;
   let identity: UplinkIdentity;
   let token: string;
+  let ownerUserId: string;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
@@ -25,6 +26,7 @@ d("engine uplink database paths", () => {
       "SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [f.engineInstanceId])).rows[0]!.runtime_boot_id;
     identity = { workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1, engineInstanceId: f.engineInstanceId, bootId: boot };
     token = f.heartbeatToken;
+    ownerUserId = f.userId;
   });
 
   const authority = (alerts?: AuditUplinkSecurityAlerts) =>
@@ -129,6 +131,37 @@ d("engine uplink database paths", () => {
       expect(server.ownerChanged).toHaveBeenCalledWith(identity.engineInstanceId, first.connectionId, first.connectedAtMs);
       expect(server.revalidateWorkspace).toHaveBeenCalledWith(identity.workspaceId);
       expect(server.revalidate).toHaveBeenCalledWith([identity.engineInstanceId]);
+    } finally {
+      await listener.query("UNLISTEN *");
+      listener.release();
+    }
+  });
+
+  it("notifies a credential-control revision bump and routes it to the push extension", async () => {
+    const listener = await pool.connect();
+    const notices: { channel: string; payload: string }[] = [];
+    try {
+      listener.on("notification", notice => notices.push({ channel: notice.channel, payload: notice.payload ?? "" }));
+      await listener.query(`LISTEN ${UPLINK_CRED_REVISION_CHANNEL}`);
+      const writerEpoch = randomUUID();
+      await pool.query(`INSERT INTO cloud_workspace_local_command_writers
+        (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+      [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+      await pool.query(`INSERT INTO cloud_agent_boot_bindings
+        (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+      [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+      // Only a desired-revision bump notifies; other column updates do not.
+      await pool.query("UPDATE cloud_agent_boot_bindings SET credentials_initialized=true WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+      await pool.query("UPDATE cloud_agent_boot_bindings SET desired_cache_revision=desired_cache_revision+1 WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+      for (let i = 0; i < 50 && notices.length < 1; i++) await new Promise(resolve => setTimeout(resolve, 20));
+      expect(notices).toEqual([{ channel: UPLINK_CRED_REVISION_CHANNEL, payload: `${identity.engineInstanceId}:2` }]);
+      const server = { ownerChanged: vi.fn(), revalidate: vi.fn(), revalidateWorkspace: vi.fn() };
+      const cred = { revisionChanged: vi.fn() };
+      handleUplinkNotification(server, UPLINK_CRED_REVISION_CHANNEL, notices[0]!.payload, cred);
+      expect(cred.revisionChanged).toHaveBeenCalledWith(identity.engineInstanceId, 2);
+      expect(server.revalidate).not.toHaveBeenCalled();
     } finally {
       await listener.query("UNLISTEN *");
       listener.release();
