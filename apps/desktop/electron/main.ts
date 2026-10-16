@@ -184,6 +184,7 @@ import {
   pushProviderCredentialsToEngine,
 } from "./sidecar";
 import { watchSecrets } from "./secret-store";
+import { migrateLocalProviderSecrets } from "./local-provider-secrets";
 import { setTokenStore as setGithubTokenStore } from "../src/engine/git/github";
 import {
   githubSelectedTokenStore,
@@ -433,14 +434,14 @@ try {
 app.setName(CHANNEL_NAME);
 app.setPath("userData", zerosDataDir());
 
-// (dev) Shared login: point secrets at the channel-PRIMARY dir (com.zeros.dev),
+// (dev) Shared login: point secrets at the channel-PRIMARY dir (com.zeros.dev
+// or com.zeros.local for account-free Local development),
 // so every worktree shares ONE secrets.json — decrypted by the ONE per-channel
 // keychain key above → log in once, every worktree authed. ZEROS_ISOLATE=1 opts a
 // worktree OUT (its secrets stay in its own per-instance userData). Only
 // meaningful in dev (stable/beta have a single instance where the two dirs
 // coincide). Set before secret-store or spawnEngine read it.
 if (
-  !IS_LOCAL_DEVELOPMENT &&
   process.env.ZEROS_CHANNEL === "dev" &&
   process.env.ZEROS_ISOLATE !== "1"
 ) {
@@ -1284,6 +1285,14 @@ function setupDockBrand(): void {
 
 
 app.whenReady().then(async () => {
+  if (IS_LOCAL_DEVELOPMENT && process.env.ZEROS_SHARED_SECRETS_DIR) {
+    try {
+      migrateLocalProviderSecrets(app.getPath("userData"));
+    } catch {
+      // Keep both stores intact; a later launch can retry after Keychain unlock.
+      console.warn("[provider-auth] Previous Local credentials could not be migrated.");
+    }
+  }
   setupDockBrand();
 
   setGithubTokenStore(githubSelectedTokenStore);

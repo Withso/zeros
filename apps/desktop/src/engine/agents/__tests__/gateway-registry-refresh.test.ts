@@ -136,6 +136,12 @@ describe("provider registry authentication refresh", () => {
         (await gateway.refreshRegistry()).find((a) => a.id === "claude")
           ?.authenticated,
       ).toBe(false);
+      // Only renewing this selected account retires its rejected credentials.
+      profile.mockReturnValue({
+        id: "00000000-0000-4000-8000-000000000001", state: "connected",
+        configDir: "/private/profile", revision: 2,
+      });
+      expect((await gateway.refreshRegistry()).find((a) => a.id === "claude")?.authenticated).toBe(true);
     } finally {
       await gateway.dispose();
       vi.restoreAllMocks();

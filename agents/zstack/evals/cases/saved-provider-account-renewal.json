@@ -1,0 +1,9 @@
+{
+  "id": "saved-provider-account-renewal",
+  "kind": "replay",
+  "area": "desktop-native",
+  "fixedBy": "pending",
+  "symptom": "Saved disconnected accounts lacked a working Sign in action, stale probes could overwrite a reselected account, and renewed credentials retained the previous runtime rejection.",
+  "rule": "Renew the exact saved entry, preserve selection on cancellation, fence account and credential generations, and clean up late login after removal. See the local-provider-auth-persistence change fragment.",
+  "check": "pnpm exec vitest run apps/desktop/electron/__tests__/provider-account-manager.test.ts apps/desktop/electron/__tests__/provider-subscription-drivers.test.ts apps/desktop/src/engine/agents/__tests__/gateway-registry-refresh.test.ts apps/desktop/src/renderer/features/settings/__tests__/subscription-connection.test.ts apps/desktop/src/renderer/features/settings/__tests__/subscription-connection-panel.test.ts"
+}

@@ -21,6 +21,7 @@ export interface SubscriptionDriver {
   /** Must settle only after its processes and callback listeners are stopped. */
   login(options: {
     signal: AbortSignal;
+    accountId?: string;
     onCodeRequired: (submit: (code: string) => void) => void;
   }): Promise<SubscriptionAccount>;
 }
@@ -54,6 +55,7 @@ export class ProviderSubscriptionController {
     done: Promise<void>;
     submit?: (code: string) => void;
     timedOut: boolean;
+    accountId?: string;
   } | null = null;
   private disposed = false;
   private lastAccount: SubscriptionAccount = { state: "disconnected" };
@@ -117,11 +119,15 @@ export class ProviderSubscriptionController {
     return promise;
   }
 
-  connect(): ProviderSubscriptionStatus {
+  connect(accountId?: string): ProviderSubscriptionStatus {
     if (this.disposed || this.changing) throw new SubscriptionError("failed");
-    if (this.attempt) return this.snapshot;
+    if (this.attempt) {
+      if (this.attempt.accountId !== accountId) throw new SubscriptionError("failed");
+      return this.snapshot;
+    }
     const attempt = {
       id: randomUUID(),
+      accountId,
       abort: new AbortController(),
       done: Promise.resolve(),
       timedOut: false,
@@ -146,6 +152,7 @@ export class ProviderSubscriptionController {
         attempt.abort.signal.throwIfAborted();
         return this.driver.login({
           signal: attempt.abort.signal,
+          accountId,
           onCodeRequired: (submit) => {
             if (this.attempt !== attempt || attempt.abort.signal.aborted)
               return;

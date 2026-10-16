@@ -31,6 +31,15 @@ function fixture() {
 }
 
 describe("native provider subscription connection", () => {
+  it("passes the selected saved account through the browser ceremony", async () => {
+    const { controller, driver } = fixture();
+    const accountId = "00000000-0000-4000-8000-000000000001";
+    controller.connect(accountId);
+    await vi.waitFor(() => expect(driver.login).toHaveBeenCalledOnce());
+    expect(driver.login).toHaveBeenCalledWith(expect.objectContaining({ accountId }));
+    await controller.dispose();
+  });
+
   it("stops a failure-recovery probe when the app quits", async () => {
     const { driver, controller } = fixture();
     vi.mocked(driver.login).mockRejectedValue(new Error("failed"));

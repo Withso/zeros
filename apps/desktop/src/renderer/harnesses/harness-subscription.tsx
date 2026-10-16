@@ -82,6 +82,7 @@ const statuses = new Map<
   BrowserSubscriptionProvider,
   ProviderSubscriptionStatus
 >();
+const reconnectingAccounts = new Map<BrowserSubscriptionProvider, string>();
 if (usageFixture || queueFixture) {
   for (const [index, provider] of ids.entries()) {
     const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
@@ -136,11 +137,14 @@ const publish = (status: ProviderSubscriptionStatus) => {
 const finishAccountLogin = (
   status: ProviderSubscriptionStatus,
 ): ProviderSubscriptionStatus => {
-  const id = crypto.randomUUID();
+  const reconnectId = reconnectingAccounts.get(status.provider);
+  reconnectingAccounts.delete(status.provider);
+  const existing = status.accounts?.find(account => account.id === reconnectId);
+  const id = existing?.id ?? crypto.randomUUID();
   const email =
-    (status.accounts?.length ?? 0) === 0
+    existing?.email ?? ((status.accounts?.length ?? 0) === 0
       ? "user@example.test"
-      : "second@example.test";
+      : "second@example.test");
   return {
     ...status,
     state: "connected",
@@ -148,7 +152,7 @@ const finishAccountLogin = (
     plan: "Pro",
     error: undefined,
     activeAccountId: id,
-    accounts: [
+    accounts: existing ? status.accounts!.map(account => account.id === id ? { ...account, state: "connected" as const } : account) : [
       ...(status.accounts ?? []),
       { id, state: "connected", email, plan: "Pro" },
     ],
@@ -173,6 +177,7 @@ window.__ZEROS_NATIVE__ = {
   async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
     if (command === "keychain_get")
       return (secrets.get(args?.account as string) ?? null) as T;
+    if (command === "keychain_has") return secrets.has(args?.account as string) as T;
     if (command === "keychain_set") {
       secrets.set(args?.account as string, args?.value as string);
       return undefined as T;
@@ -221,6 +226,8 @@ window.__ZEROS_NATIVE__ = {
     }
     if (args?.action === "status") counts.reads++;
     if (args?.action === "connect") {
+      if (typeof args.accountId === "string") reconnectingAccounts.set(provider, args.accountId);
+      else reconnectingAccounts.delete(provider);
       counts.browser++;
       result = {
         ...status,
@@ -621,6 +628,11 @@ function Harness() {
           Toggle read-only transcript
         </Button>
         <Button onClick={() => setSettings(false)}>Return to chat</Button>
+        <Button onClick={() => {
+          const status = statuses.get(provider);
+          if (status?.activeAccountId) publish({ ...status, state: "expired", revision: status.revision + 1,
+            accounts: status.accounts?.map(account => account.id === status.activeAccountId ? { ...account, state: "expired" } : account) });
+        }}>Expire selected account</Button>
         <Button onClick={() => requestProviderSettings(provider)}>
           Settings
         </Button>

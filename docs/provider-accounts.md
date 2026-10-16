@@ -11,13 +11,17 @@ profile and activates it only after successful browser authentication. Cancel,
 timeout, and failed verification preserve the existing selection. Selecting a
 saved account verifies that exact profile; removing the selected account leaves
 the method unconnected rather than selecting another account automatically.
+Expired or disconnected entries offer **Sign in**, which renews that saved entry
+without adding another row. Cancellation leaves the current selection intact.
 
 ## Storage and isolation
 
 Electron main owns `provider-accounts-<provider>` in the encrypted secret store.
 The blob contains stable UUIDs, the active selection, connection metadata and,
 for Cursor, the SDK-issued expiring credential. Updates use the store's existing
-cross-process compare-and-swap. The renderer receives only UUIDs, email,
+cross-process mutation lock. Selection and credential generations live in an
+encrypted companion entry committed in the same transaction, keeping the strict
+version-1 account record readable by older development worktrees. The renderer receives only UUIDs, email,
 plan/team, expiry and connection state. Paths, OAuth URLs, tokens and API keys
 are not included in account status IPC.
 
@@ -28,6 +32,12 @@ instances. Main selects `CLAUDE_CONFIG_DIR` or `CODEX_HOME`; a renderer or
 repository cannot supply an account profile. Claude's default host OAuth token
 callback is disabled for an isolated profile so it cannot return the device
 account's token. Native providers retain ownership of refresh and keychain use.
+On macOS, new Zeros-managed Codex profiles set
+`cli_auth_credentials_store = "keyring"`; existing profiles and external CLI
+configuration retain their storage choice. Claude owns its native Keychain
+entries. Cursor subscription credentials and all three API keys use Electron
+`safeStorage` encryption, whose macOS encryption key is held in Keychain.
+They are not stored in renderer preferences or repository files.
 
 These are separate native profiles. New profiles start with provider defaults;
 Zeros settings and repository instructions still apply. Existing native personal
@@ -49,8 +59,17 @@ credential changes. Isolated entries still ignore changes to another CLI account
 Selection changes are serialized with native status reads and pending sign-ins.
 The engine receives credentials and identity from the same native snapshot over
 private stdin. Main waits for an acknowledgment from that exact engine generation
-on the private control pipe before completing a switch. Shared-store changes
+on the private control pipe before completing a switch or API-key change.
+Explicit native method selection takes precedence over stale per-checkout user
+preferences; managed policy retains precedence. An empty background subscription
+probe cannot disable an existing Cursor API connection. Shared-store changes
 invalidate active settings views; hidden views do not poll.
+
+Successful renewal advances the selected account's private credential generation,
+so a rejection of its previous credentials cannot block the new login. Late
+verification results cannot overwrite an A → B → A selection. Removing an
+account during sign-in prevents it from being re-added and cleans up credentials
+written by a late native login.
 
 An in-flight turn finishes under its original account. Before accepting its next
 message, the engine retires a process whose authentication identity has changed.
@@ -132,6 +151,11 @@ Settings lists saved accounts as a nested radio group under Account. Each row's
 ellipsis menu disconnects that account; disconnecting an inactive account does
 not select it or change the active one. The device-account marker remains wire
 metadata for compatibility and is no longer displayed.
+
+Chat initialization and transient reconnects do not emit generic provider-error
+toasts. Terminal startup failures stay in the affected chat, prompt failures
+retain their turn notice, and authentication failures retain their Sign in
+action. Opening or revealing a chat does not replay an error notification.
 
 The `zeros.agent.enabledAgents` preference is retired and ignored by current
 clients, without rewriting it for older clients. Composer models require a

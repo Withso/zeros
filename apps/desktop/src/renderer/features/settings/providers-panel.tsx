@@ -85,7 +85,7 @@ import { useCachedRead } from "../../state/use-cached-read";
 import { getSetting, setSetting } from "../../platform/settings";
 import {
   deleteSecret,
-  getSecret,
+  hasSecret,
   setSecret,
   SECRET_ACCOUNTS,
 } from "../../platform/secrets";
@@ -645,25 +645,31 @@ function ProviderCard({
   // (readable via DevTools / a shoulder-surf of the password reveal) for no
   // benefit. The input is replace-only: blank until the user types a new key.
   useEffect(() => {
+    if (!surfaceActive) return;
     if (!supportsApiKey || !vendor) {
       setApiKeyLoaded(true);
       return;
     }
     let cancelled = false;
-    (async () => {
+    let revision = 0;
+    const refresh = async () => {
+      const requested = ++revision;
       try {
-        const v = await getSecret(vendor.secretAccount);
-        if (!cancelled) setKeyConfigured(!!v?.trim());
+        const configured = await hasSecret(vendor.secretAccount);
+        if (!cancelled && requested === revision) setKeyConfigured(configured);
       } catch {
-        /* keychain miss — leave blank */
+        /* Retain the last confirmed presence while native storage is unavailable. */
       } finally {
-        if (!cancelled) setApiKeyLoaded(true);
+        if (!cancelled && requested === revision) setApiKeyLoaded(true);
       }
-    })();
+    };
+    void refresh();
+    const unsubscribe = subscribeProviderAuth(() => void refresh());
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [supportsApiKey, vendor]);
+  }, [native, supportsApiKey, vendor, surfaceActive]);
 
   // ── persistence helpers ────────────────────────────────
 

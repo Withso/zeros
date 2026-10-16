@@ -239,10 +239,12 @@ registry still lists it. Unavailable menu rows retain their saved identity,
 explain the reason, and offer a view of eligible choices without changing the
 selection or favorite.
 
-Agent error toasts report a new failure observed by the active exact chat. Mount,
-reveal, unchanged replay and owner changes do not notify historical state. Keep
-the failure in the transcript/authentication notice; distinct new failures still
-notify, even with the same short label. Typed ownership cancellation stays quiet
+Agent failures stay in the affected chat: terminal initialization failures use an
+inline notice before any prompt exists, prompt failures use their turn notice,
+and authentication failures keep their Sign in action. Routine reconnects and
+superseded preparation stay quiet. Mount, reveal, unchanged replay and owner
+changes do not notify historical state. Keep failures in their contextual notice;
+new terminal failures update that notice. Typed ownership cancellation stays quiet
 and never authorizes a resend. A cloud authentication failure invalidates only
 that workspace's cloud metadata; Local connection probes stay Local. Do not copy
 provider failure prose into console logs from a render effect.

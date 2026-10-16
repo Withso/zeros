@@ -10,6 +10,30 @@ afterEach(() => {
 });
 
 describe("native Local development admission", () => {
+  it.each([false, true])("shares the channel secret store across checkouts (local=%s)", (local) => {
+    const source = fs.readFileSync("apps/desktop/electron/main.ts", "utf8");
+    const start = source.indexOf('// (dev) Shared login:');
+    const end = source.indexOf('// Chromium cache', start);
+    const env: Record<string, string> = { ZEROS_CHANNEL: "dev" };
+    vm.runInNewContext(transformSync(source.slice(start, end), { loader: "ts" }).code, {
+      IS_LOCAL_DEVELOPMENT: local,
+      process: { env },
+      zerosChannelDataDir: () => local ? "/data/com.zeros.local" : "/data/com.zeros.dev",
+    });
+    expect(env.ZEROS_SHARED_SECRETS_DIR).toBe(local ? "/data/com.zeros.local" : "/data/com.zeros.dev");
+  });
+
+  it.each(["alpha", "beta", "stable"])("never shares a development store with %s", (channel) => {
+    const source = fs.readFileSync("apps/desktop/electron/main.ts", "utf8");
+    const start = source.indexOf('// (dev) Shared login:');
+    const end = source.indexOf('// Chromium cache', start);
+    const env: Record<string, string> = { ZEROS_CHANNEL: channel };
+    vm.runInNewContext(transformSync(source.slice(start, end), { loader: "ts" }).code, {
+      IS_LOCAL_DEVELOPMENT: false, process: { env }, zerosChannelDataDir: () => "/data/shared",
+    });
+    expect(env.ZEROS_SHARED_SECRETS_DIR).toBeUndefined();
+  });
+
   it.each([
     [true, "1", "dev", true],
     [true, undefined, "dev", false],

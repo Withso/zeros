@@ -34,6 +34,7 @@ const runs = new Map<
   BrowserSubscriptionProvider,
   {
     cancelRequested: boolean;
+    accountId?: string;
     starting: boolean;
     start: Promise<ProviderSubscriptionStatus>;
     done: Promise<ProviderSubscriptionStatus>;
@@ -133,9 +134,12 @@ function waitForCompletion(
 
 export function connectSubscription(
   provider: BrowserSubscriptionProvider,
+  accountId?: string,
 ): Promise<ProviderSubscriptionStatus> {
   const previous = runs.get(provider);
   if (previous) {
+    if (previous.accountId !== accountId)
+      return cancelSubscription(provider).then(() => previous.done).then(() => connectSubscription(provider, accountId));
     // Native completion is published before the old promise's finally clears
     // this map. A new Add account click in that interval must start a new
     // ceremony after cleanup, rather than silently rejoining the cancelled one.
@@ -143,7 +147,7 @@ export function connectSubscription(
       previous.cancelRequested ||
       subscriptionCache.getSnapshot(provider).data?.state !== "connecting"
     )
-      return previous.done.then(() => connectSubscription(provider));
+      return previous.done.then(() => connectSubscription(provider, accountId));
     return previous.done;
   }
   const current = subscriptionCache.getSnapshot(provider).data;
@@ -159,6 +163,7 @@ export function connectSubscription(
     });
   const run = {
     cancelRequested: false,
+    accountId,
     starting: true,
     start: Promise.resolve({} as ProviderSubscriptionStatus),
     done: Promise.resolve({} as ProviderSubscriptionStatus),
@@ -167,13 +172,6 @@ export function connectSubscription(
   run.start = bounded(
     Promise.resolve().then(async () => {
       await listen();
-      if (!run.cancelRequested) {
-        setProviderPrefs(provider, {
-          ...getProviderPrefs(provider),
-          authMethod: "cli",
-        });
-        await flushAgentPreferences();
-      }
       if (run.cancelRequested) {
         run.starting = false;
         const status = await readSubscription(provider);
@@ -183,6 +181,7 @@ export function connectSubscription(
         await nativeInvoke("provider_subscription", {
           provider,
           action: "connect",
+          ...(accountId ? { accountId } : {}),
         }),
       );
       if (status.provider !== provider)
@@ -218,8 +217,14 @@ export function connectSubscription(
   );
   run.done = run.start
     .then(async (status) => {
-      if (status.state !== "connecting" || !status.attemptId) return status;
-      return waitForCompletion(provider, status.attemptId);
+      const completed = status.state === "connecting" && status.attemptId
+        ? await waitForCompletion(provider, status.attemptId)
+        : status;
+      if (completed.state === "connected" && !completed.error && !run.cancelRequested) {
+        setProviderPrefs(provider, { ...getProviderPrefs(provider), authMethod: "cli" });
+        await flushAgentPreferences();
+      }
+      return completed;
     })
     .catch(async (error: unknown) => {
       run.starting = false;

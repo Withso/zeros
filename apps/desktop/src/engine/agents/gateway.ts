@@ -3903,7 +3903,8 @@ export class AgentGateway {
         configured.cliBinary ?? null,
         usesProviderApiKey(this.projectRoot, agentId)
           ? null
-          : providerAccountProfile(agentId)?.id,
+          : [providerAccountProfile(agentId)?.id, providerAccountProfile(agentId)?.revision,
+            providerAccountProfile(agentId)?.configDir],
         ...variables.map(
           (key) => configured.env?.[key] ?? process.env[key] ?? null,
         ),

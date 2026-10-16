@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { MoreVertical, RefreshCw } from "lucide-react";
 import {
   RadioGroup,
@@ -59,8 +59,22 @@ export function SubscriptionConnectionPanel({
   const [submitting, setSubmitting] = useState(false);
   const [changingAccount, setChangingAccount] = useState(false);
   const [accountMenu, setAccountMenu] = useState<string | null>(null);
+  const surface = useMemo(
+    () => ({ provider, surfaceActive }),
+    [provider, surfaceActive],
+  );
+  const currentSurface = useRef<object | null>(surface);
+  currentSurface.current = surface;
+  useEffect(() => {
+    currentSurface.current = surface;
+    setChangingAccount(false);
+    setSubmitting(false);
+    return () => {
+      currentSurface.current = null;
+    };
+  }, [surface]);
   const changeAccount = async (id: string, remove = false) => {
-    if (changingAccount) return;
+    if (!surfaceActive || changingAccount) return;
     setChangingAccount(true);
     setError(undefined);
     try {
@@ -69,11 +83,12 @@ export function SubscriptionConnectionPanel({
         action: remove ? "remove-account" : "select-account",
         accountId: id,
       });
-      await onChanged();
+      if (currentSurface.current === surface) await onChanged();
     } catch {
-      setError("Could not change the account. Refresh and try again.");
+      if (currentSurface.current === surface)
+        setError("Could not change the account. Refresh and try again.");
     } finally {
-      setChangingAccount(false);
+      if (currentSurface.current === surface) setChangingAccount(false);
     }
   };
   const notified = useRef<string>();
@@ -100,13 +115,15 @@ export function SubscriptionConnectionPanel({
     setShowCode(false);
     setError(undefined);
   }, [provider, status?.attemptId, status?.canSubmitCode, surfaceActive]);
-  const act = async (action: "connect" | "cancel") => {
+  const act = async (action: "connect" | "cancel", accountId?: string) => {
+    if (!surfaceActive || !native) return;
     setError(undefined);
     try {
-      if (action === "connect") await connectSubscription(provider);
+      if (action === "connect") await connectSubscription(provider, accountId);
       else if (action === "cancel") await cancelSubscription(provider);
     } catch {
-      setError("Could not update the connection. Refresh and try again.");
+      if (currentSurface.current === surface)
+        setError("Could not update the connection. Refresh and try again.");
     }
   };
   const submit = async (event: React.FormEvent) => {
@@ -119,11 +136,12 @@ export function SubscriptionConnectionPanel({
     try {
       await submitSubscriptionCode(status.attemptId, value);
     } catch {
-      setError(
-        "The sign-in code could not be submitted. Refresh the connection and try again.",
-      );
+      if (currentSurface.current === surface)
+        setError(
+          "The sign-in code could not be submitted. Refresh the connection and try again.",
+        );
     } finally {
-      setSubmitting(false);
+      if (currentSurface.current === surface) setSubmitting(false);
     }
   };
   return (
@@ -169,32 +187,45 @@ export function SubscriptionConnectionPanel({
                     className="[&>span:last-child]:min-w-0 [&>span:last-child]:truncate"
                     label={`${label}${account.plan ? ` · ${account.plan}` : ""}${account.state !== "connected" ? " · Sign in required" : ""}`}
                   />
-                  <DropdownMenu
-                    open={surfaceActive && accountMenu === account.id}
-                    onOpenChange={(open) =>
-                      setAccountMenu(open ? account.id : null)
-                    }
-                  >
-                    <DropdownMenuTrigger asChild>
+                  <div className="flex items-center gap-1">
+                    {account.state !== "connected" && (
                       <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        disabled={disabled}
-                        aria-label={`Account options for ${label}`}
+                        variant="secondary"
+                        size="sm"
+                        disabled={!native || disabled}
+                        aria-label={`Sign in to ${label}`}
+                        onClick={() => void act("connect", account.id)}
                       >
-                        <MoreVertical className="size-4" aria-hidden="true" />
+                        Sign in
                       </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem
-                        className="text-red-primary focus:text-red-primary"
-                        disabled={disabled}
-                        onSelect={() => void changeAccount(account.id, true)}
-                      >
-                        Disconnect
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                    )}
+                    <DropdownMenu
+                      open={surfaceActive && accountMenu === account.id}
+                      onOpenChange={(open) =>
+                        setAccountMenu(open ? account.id : null)
+                      }
+                    >
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          disabled={disabled}
+                          aria-label={`Account options for ${label}`}
+                        >
+                          <MoreVertical className="size-4" aria-hidden="true" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          className="text-red-primary focus:text-red-primary"
+                          disabled={disabled}
+                          onSelect={() => void changeAccount(account.id, true)}
+                        >
+                          Disconnect
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
                 </div>
               );
             })}

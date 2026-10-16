@@ -241,7 +241,7 @@ describe("provider browser authorization boundary", () => {
       "login",
       "--claudeai",
     ]);
-    login.child.stdout.write("Opening https://claude.com/cai/oauth/author");
+    login.child.stdout.write("Help: https://code.claude.com/docs/en/authentication\nOpening https://claude.com/cai/oauth/author");
     expect(openBrowser).not.toHaveBeenCalled();
     login.child.stdout.write(
       "ize?state=sample&code_challenge=sample\nPaste the code here if prompted > ",

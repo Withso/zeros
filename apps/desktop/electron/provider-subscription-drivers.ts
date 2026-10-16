@@ -1,4 +1,5 @@
 import { normalizeCodexUsage, type ProviderUsageData } from "./provider-usage";
+import { stripVTControlCharacters } from "node:util";
 import {
   providerUsageIdentity,
   type BrowserSubscriptionProvider,
@@ -247,22 +248,26 @@ export function createSubscriptionDriver(
             ["auth", "login", "--claudeai"],
             signal,
             async (proc) => {
-              let tail = "";
+              const tails = { stdout: "", stderr: "" };
               let opened: Promise<void> | undefined;
               let codeReady = false;
               let fail!: (error: unknown) => void;
               const failed = new Promise<never>((_, reject) => {
                 fail = reject;
               });
-              const onData = (chunk: Buffer) => {
+              const onData = (stream: "stdout" | "stderr", chunk: Buffer) => {
                 // Parse only complete URL tokens; stdout may split PKCE parameters
                 // across chunks. Neither raw output nor authorization URLs leave main.
-                tail = (tail + chunk.toString()).slice(-16_384);
+                tails[stream] = (tails[stream] + chunk.toString()).slice(-16_384);
+                const tail = stripVTControlCharacters(tails[stream]);
                 if (!opened) {
-                  const match = /https:\/\/[^\s<>"']+(?=[\s<>"'])/.exec(tail);
-                  if (match) {
+                  for (const match of tail.matchAll(/https:\/\/[^\s<>"']+(?=[\s<>"'])/g)) {
+                    // Help/update links are not authorization URLs. Ignore them
+                    // without ending the real native sign-in ceremony.
+                    try { subscriptionBrowserUrl(provider, match[0]); } catch { continue; }
                     opened = openBrowser(match[0], signal);
                     void opened.catch(fail);
+                    break;
                   }
                 }
                 if (
@@ -279,8 +284,10 @@ export function createSubscriptionDriver(
                   });
                 }
               };
-              proc.child.stdout?.on("data", onData);
-              proc.child.stderr?.on("data", onData);
+              const onStdout = (chunk: Buffer) => onData("stdout", chunk);
+              const onStderr = (chunk: Buffer) => onData("stderr", chunk);
+              proc.child.stdout?.on("data", onStdout);
+              proc.child.stderr?.on("data", onStderr);
               try {
                 const result = await Promise.race([proc.exited, failed]);
                 if (
@@ -292,9 +299,9 @@ export function createSubscriptionDriver(
                   throw new SubscriptionError("failed");
                 await opened;
               } finally {
-                proc.child.stdout?.off("data", onData);
-                proc.child.stderr?.off("data", onData);
-                tail = "";
+                proc.child.stdout?.off("data", onStdout);
+                proc.child.stderr?.off("data", onStderr);
+                tails.stdout = tails.stderr = "";
               }
             },
           );
