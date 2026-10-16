@@ -218,6 +218,49 @@ export async function withUserTx<T>(
   }
 }
 
+/** One-round-trip system transaction for a single statement: BEGIN, the same
+ * role and RLS context as `withSystemTx`, the statement and COMMIT travel as
+ * one simple-protocol batch. That protocol cannot bind parameters, so callers
+ * must build `statement` only from strictly validated identifiers, integers
+ * and UUIDs, never from free text. A failed batch costs one extra ROLLBACK. */
+export async function withSystemStatement<R extends pg.QueryResultRow>(
+  pool: pg.Pool,
+  statement: string,
+): Promise<pg.QueryResult<R>> {
+  assertWorkOSProviderLockHeld();
+  if (statement.includes(";")) throw new Error("system_statement_must_be_single");
+  const started = performance.now();
+  let client: pg.PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    recordPoolWait(performance.now() - started);
+    throw acquireError(error);
+  }
+  const acquired = performance.now();
+  const connection = observeOwnedConnection(client);
+  let discard = false;
+  try {
+    connection.assert();
+    const results = await client.query(
+      `BEGIN; ${ENTER_APP_ROLE}; SELECT set_config('app.system', 'on', true); ${statement}; COMMIT`,
+    ) as unknown as pg.QueryResult<R>[];
+    connection.assert();
+    if (!Array.isArray(results) || results.length !== 5) throw new Error("system_statement_batch_invalid");
+    return results[3]!;
+  } catch (err) {
+    if (!connection.lost)
+      await client.query("ROLLBACK").catch(() => {
+        discard = true;
+      });
+    if (connection.lost) throw new DatabaseConnectionLostError();
+    throw err;
+  } finally {
+    connection.release(discard);
+    recordTransactionTiming(acquired - started, performance.now() - started);
+  }
+}
+
 /** System-context transaction (no acting user): JIT signup, webhooks. */
 export async function withSystemTx<T>(
   pool: pg.Pool,
