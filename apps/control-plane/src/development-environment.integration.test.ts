@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { connect, createServer, type AddressInfo, type Socket } from "node:net";
 import pg from "pg";
 import { describe, it, expect } from "vitest";
 import { createPool, withSystemTx } from "./db.js";
@@ -31,41 +32,77 @@ async function dropOwnedDatabase(cluster: pg.Pool, databaseName: string): Promis
   await cluster.query(`DROP DATABASE ${pg.escapeIdentifier(databaseName)} WITH (FORCE)`);
 }
 
+// A TCP relay in front of the test server. While held, it queues the client's
+// bytes and half-close instead of forwarding them, so the backend stays
+// connected after its client has sent Terminate. Unlike signalling the backend
+// process, this also works when the server runs in another PID namespace, such
+// as CI's Postgres service container.
+async function holdingRelay(server: URL) {
+  const upstream = { host: server.hostname.replace(/^\[(.*)\]$/, "$1"), port: Number(server.port || 5432) };
+  let holding = false;
+  const held: Array<() => void> = [];
+  const sockets = new Set<Socket>();
+  const forward = (action: () => void) => { if (holding) held.push(action); else action(); };
+  const listener = createServer({ allowHalfOpen: true }, client => {
+    const backend = connect({ ...upstream, allowHalfOpen: true });
+    for (const socket of [client, backend]) {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+      socket.on("error", () => { client.destroy(); backend.destroy(); });
+    }
+    client.on("data", chunk => forward(() => backend.write(chunk)));
+    client.on("end", () => forward(() => backend.end()));
+    backend.on("data", chunk => client.write(chunk));
+    backend.on("end", () => client.end());
+  });
+  await new Promise<void>(resolve => listener.listen(0, "127.0.0.1", resolve));
+  return {
+    port: (listener.address() as AddressInfo).port,
+    hold() { holding = true; },
+    release() { holding = false; for (const action of held.splice(0)) action(); },
+    async close() {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>(resolve => listener.close(() => resolve()));
+    },
+  };
+}
+
 database("hosted Dev database ownership", () => {
   it("ends a pool and force-drops its database without a late client error", async () => {
     // Regression for the CI "Unhandled Errors" 57P01 teardown flake: pg-pool
     // resolves end() before the client socket closes, so a FORCE drop in that
     // window terminated a backend whose half-closed client then raised a late,
-    // unhandled pool error. SIGSTOP holds the backend across end() so the
-    // window is deterministic instead of a scheduler race.
+    // unhandled pool error. The relay holds the client's Terminate across
+    // end(), so the window is deterministic instead of a scheduler race.
+    const relay = await holdingRelay(new URL(url!));
     const cluster = new pg.Pool({ connectionString: url, max: 1 });
     const databaseName = `zeros_dev_teardown_${randomBytes(6).toString("hex")}`;
-    let backendPid: number | undefined;
+    const clientBackends = async () => (await cluster.query(
+      "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND backend_type = 'client backend'",
+      [databaseName])).rows[0].n;
     try {
       await cluster.query(`CREATE DATABASE ${pg.escapeIdentifier(databaseName)} TEMPLATE template0`);
-      const target = new URL(url!); target.pathname = `/${databaseName}`;
+      const target = new URL(url!);
+      target.hostname = "127.0.0.1"; target.port = String(relay.port); target.pathname = `/${databaseName}`;
       const pool = new pg.Pool({ connectionString: target.toString(), max: 1 });
       const lateErrors: unknown[] = [];
       pool.on("error", err => lateErrors.push(err));
-      backendPid = (await pool.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
-      process.kill(backendPid, "SIGSTOP");
-      try {
-        // end() resolves while the stopped backend still holds the socket open.
-        await pool.end();
-        const drop = dropOwnedDatabase(cluster, databaseName);
-        await new Promise(resolve => setTimeout(resolve, 200));
-        process.kill(backendPid, "SIGCONT");
-        backendPid = undefined;
-        await drop;
-        // Give any late socket delivery a chance to reach the client.
-        await new Promise(resolve => setTimeout(resolve, 200));
-        expect(lateErrors).toEqual([]);
-      } finally {
-        if (backendPid !== undefined) {
-          try { process.kill(backendPid, "SIGCONT"); } catch { /* already gone */ }
-        }
-      }
+      await pool.query("SELECT 1");
+      relay.hold();
+      await pool.end();
+      // The window is open: end() has resolved, but the held Terminate keeps
+      // the backend connected.
+      expect(await clientBackends()).toBe(1);
+      const drop = dropOwnedDatabase(cluster, databaseName);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      relay.release();
+      await drop;
+      // Give any late socket delivery a chance to reach the client.
+      await new Promise(resolve => setTimeout(resolve, 200));
+      expect(lateErrors).toEqual([]);
     } finally {
+      relay.release();
+      await relay.close();
       await cluster.query(`DROP DATABASE IF EXISTS ${pg.escapeIdentifier(databaseName)} WITH (FORCE)`);
       await cluster.end();
     }
