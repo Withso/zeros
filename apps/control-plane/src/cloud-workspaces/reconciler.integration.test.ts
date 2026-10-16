@@ -1870,6 +1870,32 @@ d("cloud workspace reconciliation", () => {
     },
   );
 
+  it.each([
+    { desiredState: "stopped" as const, status: "stopped", resourceState: "stopped" as const },
+    { desiredState: "archived" as const, status: "archived", resourceState: "archived" as const },
+  ])("checks a settled $status workspace on the slow drift cadence", async ({ desiredState, status, resourceState }) => {
+    const seeded = await seedWorkspace({ desiredState, status, intentState: "succeeded",
+      providerResourceId: "bound-resource", observedState: resourceState });
+    const provider = new FakeProvider();
+    provider.resources.set(
+      "bound-resource",
+      provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, resourceState, "bound-resource"),
+    );
+    const worker = reconciler(provider, { stoppedDriftIntervalMs: 6 * 60 * 60_000 });
+    // Observed an hour ago: due on the 1 s fast cadence, not on the 6 h one.
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET next_drift_check_at=now()-interval '1 second' WHERE workspace_id=$1",
+      [seeded.workspaceId]);
+    expect(await worker.reconcileDriftOnce()).toBe(false);
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET last_observed_at=now()-interval '7 hours' WHERE workspace_id=$1",
+      [seeded.workspaceId]);
+    expect(await worker.reconcileDriftOnce()).toBe(true);
+    const row = (await pool.query(
+      `SELECT next_drift_check_at > now()+interval '5 hours' AS slow
+       FROM cloud_workspace_provider_bindings WHERE workspace_id=$1`,
+      [seeded.workspaceId])).rows[0];
+    expect(row).toEqual({ slow: true });
+  });
+
   it("detects provider drift and converges stopped back to the desired running state", async () => {
     const seeded = await seedWorkspace({
       status: "ready",
@@ -1953,6 +1979,8 @@ d("cloud workspace reconciliation", () => {
   it("does not repeatedly queue Stop after confirmed compute shutdown with a failed snapshot",async()=>{
     const seeded=await seedWorkspace({status:'stopped',desiredState:'stopped',intentState:'succeeded',operation:'stop',providerResourceId:'bound-resource',observedState:'archived'});
     const provider=new FakeProvider();provider.resources.set('bound-resource',{...provider.make({workspaceId:seeded.workspaceId,generation:1},'failed','bound-resource'),computeStopped:true});
+    // A settled stopped workspace is due only on the slow cadence; force it.
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET last_observed_at=NULL WHERE workspace_id=$1",[seeded.workspaceId]);
     const worker=reconciler(provider);await worker.reconcileDriftOnce();
     const first=(await pool.query("SELECT status,last_error_code,version FROM cloud_workspaces WHERE id=$1",[seeded.workspaceId])).rows[0];
     expect(first).toMatchObject({status:'failed',last_error_code:'provider_snapshot_failed'});

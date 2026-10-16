@@ -218,6 +218,14 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
 | `engineHealth` | `cloud_engine_health` | `workspace:<id>` | engine enrollment, state or revocation change, shortened lease; workspace becoming running and ready or busy, or a new generation; an intent leaving the active states | `stopUnavailableCloudEngine` |
 | `compute` | `cloud_compute_lease` | `workspace:<id>` | allocation lease state, check time or lease; runtime transition phase or deadlines | `CloudWorkspaceComputeLeaseCoordinator.runOnce` |
 | `drift` | `cloud_workspace_drift` | `workspace:<id>` | binding `next_drift_check_at`; restore incident state; an intent leaving the active states | `reconcileDriftOnce` |
+
+- **Drift cadence follows the settled state.** Running and transitional
+  workspaces re-observe every reconciler interval (60 s). A workspace whose
+  desired and actual state have both settled into `stopped` or `archived`
+  re-observes every `stoppedDriftIntervalMs` (default 6 h): both the due
+  query and the claim apply the longer cadence, and the release reschedules
+  on the candidate's own cadence. Any trigger enqueue (`next_drift_check_at`,
+  an intent completing) still wakes it at once.
 | `diagnostics` | `cloud_diagnostic_cleanup` | `singleton` | cleanup `next_run_at`; recovery watermark or a publishable incident | `runCloudDiagnosticCleanup` |
 
 - **Triggers, not TypeScript enqueues.** They cover every writer, including

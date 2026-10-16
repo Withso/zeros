@@ -104,6 +104,18 @@ d("lifecycle jobs", () => {
     expect(await job("lifecycle", f.workspaceId)).toBeUndefined();
   });
 
+  it("reads the slow drift cadence once a workspace settles stopped and the fast one while running", async () => {
+    const f = await seedReadyCloudWorkspace(pool);
+    const slowScope = { provider: null, driftIntervalMs: 60_000, stoppedDriftIntervalMs: 6 * 60 * 60_000 };
+    await pool.query(`UPDATE cloud_workspace_provider_bindings
+      SET last_observed_at=now(), next_drift_check_at=now()-interval '1 second' WHERE workspace_id=$1`, [f.workspaceId]);
+    const running = await readLifecycleDueInMs(pool, "drift", f.workspaceId, slowScope);
+    expect(running).toBeGreaterThan(0);
+    expect(running).toBeLessThanOrEqual(60_000);
+    await pool.query("UPDATE cloud_workspaces SET desired_state='stopped', status='stopped' WHERE id=$1", [f.workspaceId]);
+    expect(await readLifecycleDueInMs(pool, "drift", f.workspaceId, slowScope)).toBeGreaterThan(5 * 60 * 60_000);
+  });
+
   it("runs the hourly diagnostic retention as its own job", async () => {
     await pool.query("UPDATE cloud_workspace_diagnostic_cleanup SET next_run_at=now()-interval '1 second'");
     expect((await job("diagnostics", null))?.delay_ms).toBeLessThanOrEqual(0);

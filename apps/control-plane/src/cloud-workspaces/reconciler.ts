@@ -26,6 +26,7 @@ import { JobRunner } from "../job-runner.js";
 import { isValidJobOwner, type ClaimedJob } from "../job-queue.js";
 import {
   auditLifecycleJobs,
+  DEFAULT_STOPPED_DRIFT_INTERVAL_MS,
   LIFECYCLE_JOB_KINDS,
   lifecycleWorkForJob,
   rescheduleLifecycleJob,
@@ -82,6 +83,8 @@ type DriftCandidate = {
   provider: string;
   providerResourceId: string | null;
   driftLeaseUntil: Date;
+  /** This candidate's observation cadence, by its settled state. */
+  intervalMs: number;
 };
 
 type ReconcileLogger = Pick<Console, "info" | "warn" | "error">;
@@ -100,6 +103,9 @@ export type CloudWorkspaceReconcilerOptions = {
   paidAuthorityRecheckIntervalMs?: number;
   workerId?: string;
   logger?: ReconcileLogger;
+  /** Drift cadence for workspaces settled stopped or archived (default 6 h).
+   * Running and transitional workspaces keep intervalMs. */
+  stoppedDriftIntervalMs?: number;
   /** Concurrent lifecycle jobs per process. The default, 1, keeps the
    * former tick's serial provider calls. */
   jobConcurrency?: number;
@@ -236,6 +242,13 @@ function boundedMetadata(
   return JSON.stringify({ truncated: true });
 }
 
+/** Settled resting workspaces drift-check on the slow cadence; running and
+ * transitional ones keep the fast one. */
+function driftCadenceMs(desiredState: DesiredState, status: string, intervalMs: number, stoppedIntervalMs: number): number {
+  return (desiredState === "stopped" && status === "stopped") || (desiredState === "archived" && status === "archived")
+    ? stoppedIntervalMs : intervalMs;
+}
+
 function retryDelayMs(attempt: number, providerDelayMs?: number): number {
   const exponential = Math.min(
     5 * 60_000,
@@ -292,6 +305,7 @@ export class CloudWorkspaceReconciler {
   private readonly leaseMs: number;
   private readonly orphanGraceMs: number;
   private readonly maxManagedResourcesPerSweep: number;
+  private readonly stoppedDriftIntervalMs: number;
   private cleanupScopeOffset = 0;
   private readonly workerId: string;
   private readonly logger: ReconcileLogger;
@@ -317,6 +331,7 @@ export class CloudWorkspaceReconciler {
       ...(options.providerResolver?{providerResolver:options.providerResolver}:{}),workosEnabled:options.workosEnabled===true,
       ...(options.computePolicy?{policy:options.computePolicy}:{}),logger:options.logger??console});
     this.intervalMs = options.intervalMs ?? 60_000;
+    this.stoppedDriftIntervalMs = options.stoppedDriftIntervalMs ?? DEFAULT_STOPPED_DRIFT_INTERVAL_MS;
     this.leaseMs = options.leaseMs ?? 10 * 60_000;
     this.orphanGraceMs = options.orphanGraceMs ?? 60 * 60_000;
     this.maxManagedResourcesPerSweep =
@@ -355,7 +370,10 @@ export class CloudWorkspaceReconciler {
     this.logger = options.logger ?? console;
     this.jobAuditIntervalMs = options.jobAuditIntervalMs ?? 60 * 60_000;
     if (!Number.isSafeInteger(this.jobAuditIntervalMs) || this.jobAuditIntervalMs < 1_000 ||
-      this.jobAuditIntervalMs > 24 * 60 * 60_000) {
+      this.jobAuditIntervalMs > 24 * 60 * 60_000 ||
+      !Number.isSafeInteger(this.stoppedDriftIntervalMs) ||
+      this.stoppedDriftIntervalMs < Math.max(60_000, this.intervalMs) ||
+      this.stoppedDriftIntervalMs > 7 * 24 * 60 * 60_000) {
       throw new Error("Cloud workspace reconciler timing is invalid");
     }
     // Replicas start together after a deploy; spread their audits.
@@ -415,7 +433,8 @@ export class CloudWorkspaceReconciler {
   }
 
   private dueScope() {
-    return { provider: this.providerResolver ? null : this.provider.name, driftIntervalMs: this.intervalMs };
+    return { provider: this.providerResolver ? null : this.provider.name, driftIntervalMs: this.intervalMs,
+      stoppedDriftIntervalMs: this.stoppedDriftIntervalMs };
   }
 
   /** Enqueue any pending deadline that lost its job. */
@@ -1261,7 +1280,9 @@ export class CloudWorkspaceReconciler {
            AND ($3::uuid IS NULL OR cw.id = $3)
            AND pb.next_drift_check_at <= clock_timestamp()
            AND (pb.last_observed_at IS NULL OR
-                pb.last_observed_at < now() - ($2::bigint * interval '1 millisecond'))
+                pb.last_observed_at < now() - (CASE WHEN (cw.desired_state='stopped' AND cw.status='stopped')
+                  OR (cw.desired_state='archived' AND cw.status='archived')
+                  THEN $4::bigint ELSE $2::bigint END * interval '1 millisecond'))
            AND NOT EXISTS (
              SELECT 1 FROM cloud_workspace_lifecycle_intents i
              WHERE i.workspace_id = cw.id
@@ -1271,7 +1292,7 @@ export class CloudWorkspaceReconciler {
          ORDER BY pb.next_drift_check_at, pb.last_observed_at NULLS FIRST, cw.updated_at, cw.id
          FOR UPDATE OF cw, pb SKIP LOCKED
          LIMIT 1`,
-        [this.providerResolver ? null : this.provider.name, this.intervalMs, workspaceId],
+        [this.providerResolver ? null : this.provider.name, this.intervalMs, workspaceId, this.stoppedDriftIntervalMs],
       );
       const row = result.rows[0];
       if (!row) return null;
@@ -1291,6 +1312,7 @@ export class CloudWorkspaceReconciler {
             provider: row.provider,
             providerResourceId: row.provider_resource_id,
             driftLeaseUntil: claim.rows[0]!.next_drift_check_at,
+            intervalMs: driftCadenceMs(row.desired_state, row.status, this.intervalMs, this.stoppedDriftIntervalMs),
           };
     });
   }
@@ -1307,7 +1329,7 @@ export class CloudWorkspaceReconciler {
         `UPDATE cloud_workspace_provider_bindings
          SET next_drift_check_at=clock_timestamp()+($4::bigint * interval '1 millisecond')
          WHERE workspace_id=$1 AND generation=$2 AND next_drift_check_at=$3`,
-        [candidate.workspaceId,candidate.generation,candidate.driftLeaseUntil,this.intervalMs],
+        [candidate.workspaceId,candidate.generation,candidate.driftLeaseUntil,candidate.intervalMs],
       ));
     }
   }
@@ -1350,7 +1372,7 @@ export class CloudWorkspaceReconciler {
          SET next_drift_check_at=clock_timestamp()+($4::bigint * interval '1 millisecond')
          WHERE workspace_id=$1 AND generation=$2 AND next_drift_check_at=$3`,
         [candidate.workspaceId,candidate.generation,candidate.driftLeaseUntil,
-          Math.max(this.intervalMs,30_000,retryDelayMs(1,failure.retryAfterMs))],
+          Math.max(candidate.intervalMs,30_000,retryDelayMs(1,failure.retryAfterMs))],
       ));
       this.logger.warn(
         `[cloud-workspace] drift observation failed (${failure.code})`,
