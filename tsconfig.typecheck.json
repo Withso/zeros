@@ -15,6 +15,11 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
+    // Repeated local runs (agents re-run `pnpm typecheck` after every change)
+    // re-check only what changed. The build info stays in node_modules/.cache,
+    // never in source; a fresh checkout or CI still checks everything.
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.cache/zeros-typecheck/app.tsbuildinfo",
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["node"]
