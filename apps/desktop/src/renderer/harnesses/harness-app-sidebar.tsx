@@ -120,15 +120,25 @@ const runningIds = new Set(["ws-boston"]);
 const requests: { op: string; params?: Record<string, unknown> }[] = [];
 let deferChangeLines = false;
 const pendingChangeLines: (() => void)[] = [];
-const resourceTotals = {
-  cpuPercent: 4,
-  memoryBytes: 1.2 * 1024 ** 3,
-  peakCpuPercent: 10,
-  peakCpuAt: 1,
-  peakMemoryBytes: 1.2 * 1024 ** 3,
-  peakMemoryAt: 1,
-  processCount: 4,
-};
+const resourceTotals = params.has("resource-pressure")
+  ? {
+      cpuPercent: 149.7,
+      memoryBytes: 6.1 * 1024 ** 3,
+      peakCpuPercent: 238,
+      peakCpuAt: 1,
+      peakMemoryBytes: 7.3 * 1024 ** 3,
+      peakMemoryAt: 1,
+      processCount: 9,
+    }
+  : {
+      cpuPercent: 4,
+      memoryBytes: 1.2 * 1024 ** 3,
+      peakCpuPercent: 10,
+      peakCpuAt: 1,
+      peakMemoryBytes: 1.2 * 1024 ** 3,
+      peakMemoryAt: 1,
+      processCount: 4,
+    };
 const resourceSnapshot: ProcessMetricsSnapshot = {
   sampledAt: 1,
   samplingIntervalMs: 1_000,
@@ -137,8 +147,36 @@ const resourceSnapshot: ProcessMetricsSnapshot = {
   logicalCpuCount: 8,
   systemMemoryBytes: 16 * 1024 ** 3,
   terminalRootsKnown: true,
+  memorySource: "footprint",
+  footprintAgeMs: 500,
+  system: params.has("resource-pressure")
+    ? {
+        sampledAt: 1,
+        memoryPressure: "warning",
+        memoryFreePercent: 11,
+        swapUsedBytes: 6 * 1024 ** 3,
+        swapTotalBytes: 7 * 1024 ** 3,
+        loadAverage: [17.5, 14.3, 11.9],
+        thermalState: "nominal",
+      }
+    : null,
+  otherApps: params.has("resource-pressure")
+    ? [{ name: "Zeros Alpha", processCount: 4, cpuPercent: 6.4, memoryBytes: 350 * 1024 ** 2 }]
+    : [],
   totals: { all: resourceTotals, excludingTerminals: resourceTotals },
-  processes: [],
+  processes: params.has("resource-pressure")
+    ? [
+        { id: "main", pid: 100, parentPid: null, name: "Main", kind: "main", cpuPercent: 0.3, memoryBytes: 397 * 1024 ** 2, peakCpuPercent: 1, peakMemoryBytes: 397 * 1024 ** 2, terminal: false },
+        { id: "renderer", pid: 200, parentPid: null, name: "Renderer", kind: "renderer", cpuPercent: 21, memoryBytes: 1.2 * 1024 ** 3, peakCpuPercent: 155, peakMemoryBytes: 2.1 * 1024 ** 3, terminal: false },
+        { id: "engine", pid: 300, parentPid: 100, name: "Engine", kind: "sidecar", cpuPercent: 18, memoryBytes: 430 * 1024 ** 2, peakCpuPercent: 26, peakMemoryBytes: 494 * 1024 ** 2, terminal: false },
+        { id: "supervisor", pid: 310, parentPid: 300, name: "Agent supervisor", kind: "helper", cpuPercent: 0, memoryBytes: 9 * 1024 ** 2, peakCpuPercent: 0, peakMemoryBytes: 9 * 1024 ** 2, terminal: false },
+        { id: "codex", pid: 320, parentPid: 310, name: "Codex", kind: "agent", cpuPercent: 12, memoryBytes: 94 * 1024 ** 2, peakCpuPercent: 12, peakMemoryBytes: 94 * 1024 ** 2, terminal: false },
+        { id: "shell", pid: 330, parentPid: 320, name: "zsh", kind: "process", cpuPercent: 0, memoryBytes: 3 * 1024 ** 2, peakCpuPercent: 0, peakMemoryBytes: 3 * 1024 ** 2, terminal: false },
+        { id: "pnpm", pid: 340, parentPid: 330, name: "pnpm typecheck", kind: "process", cpuPercent: 0.4, memoryBytes: 60 * 1024 ** 2, peakCpuPercent: 1, peakMemoryBytes: 60 * 1024 ** 2, terminal: false },
+        { id: "tsc", pid: 350, parentPid: 340, name: "tsc", kind: "process", cpuPercent: 98, memoryBytes: 3.9 * 1024 ** 3, peakCpuPercent: 104, peakMemoryBytes: 4.0 * 1024 ** 3, terminal: false },
+        { id: "pty", pid: 360, parentPid: 300, name: "Terminal host", kind: "helper", cpuPercent: 0, memoryBytes: 14 * 1024 ** 2, peakCpuPercent: 0, peakMemoryBytes: 14 * 1024 ** 2, terminal: false },
+      ]
+    : [],
 };
 const agents = [
   {
@@ -164,6 +202,11 @@ Object.assign(window, {
     invoke: async (op: string, invokeParams?: Record<string, unknown>) => {
       requests.push({ op, params: invokeParams });
       if (op === "process_metrics_snapshot") return resourceSnapshot;
+      if (op === "process_diagnostics_report")
+        return {
+          text: "# Zeros diagnostics report\n## Recent app logs (secret-scrubbed JSONL, newest last)\n",
+          logCharacters: 120,
+        };
       return null;
     },
   },

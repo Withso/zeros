@@ -5,7 +5,10 @@ import {
   ProcessMetricsTracker,
   normalizeTerminalRoots,
   parseCpuTime,
+  parseFootprint,
+  parseProcessArgs,
   parseProcessTable,
+  parseSystemSysctl,
   type ProcessMetricsCaptureInput,
 } from "../process-metrics";
 
@@ -160,6 +163,41 @@ malformed row
     expect(parseCpuTime("2-03:04:05.50")).toBe(183_845.5);
     expect(parseCpuTime("not-a-time")).toBeNull();
   });
+
+  it("keeps macOS processes past an hour of CPU, whose ps clock counts minutes without bound", () => {
+    // macOS prints accumulated CPU time as MMM:SS.ss. An engine that has used
+    // 77 minutes of CPU must not vanish (with every agent below it).
+    expect(parseCpuTime("77:46.90")).toBe(4_666.9);
+    expect(parseCpuTime("108:33.73")).toBeCloseTo(6_513.73, 5);
+    expect(parseCpuTime("1234:05.06")).toBeCloseTo(74_045.06, 5);
+    expect(parseCpuTime("01:60.00")).toBeNull();
+    expect(parseCpuTime("01:60:00")).toBeNull();
+
+    const rows = parseProcessTable(`
+  100     1 47888  83:27.80 Wed Oct 15 11:55:23 2026 /Applications/Zeros.app/Contents/MacOS/Zeros
+  300   100 170480  77:35.86 Wed Oct 15 11:55:26 2026 /Applications/Zeros.app/Contents/Resources/zeros-engine
+  400   300 25024   0:12.50 Thu Oct 16 10:01:00 2026 /Applications/Zeros.app/Contents/Resources/codex-runtime/vendor/aarch64-apple-darwin/bin/codex
+`);
+    expect(rows.map((row) => row.pid)).toEqual([100, 300, 400]);
+
+    const tracker = new ProcessMetricsTracker();
+    const snapshot = tracker.capture({
+      sampledAt: 1_000,
+      scanDurationMs: 5,
+      appPid: 100,
+      enginePid: 300,
+      samplerPid: null,
+      logicalCpuCount: 10,
+      systemMemoryBytes: 16 * 1024 ** 3,
+      terminalPids: [],
+      terminalRootsKnown: true,
+      rows,
+      electronProcesses: [{ pid: 100, type: "Browser", creationTime: 1 }],
+    });
+    expect(snapshot.processes.map((process) => process.pid)).toEqual([
+      100, 300, 400,
+    ]);
+  });
 });
 
 describe("ProcessMetricsTracker", () => {
@@ -187,7 +225,7 @@ describe("ProcessMetricsTracker", () => {
     ).toMatchObject({ name: "Renderer", kind: "renderer", parentPid: null });
     expect(
       first.processes.find((process) => process.pid === 300),
-    ).toMatchObject({ name: "Sidecar", kind: "sidecar", parentPid: 100 });
+    ).toMatchObject({ name: "Engine", kind: "sidecar", parentPid: 100 });
     expect(
       first.processes.find((process) => process.pid === 400)?.terminal,
     ).toBe(true);
@@ -394,5 +432,189 @@ describe("ProcessMetricsScanCoordinator", () => {
     expect(scans).toBe(2);
     release();
     await expect(third).resolves.toEqual({ terminalPids: [4] });
+  });
+});
+
+describe("Mac context parsing", () => {
+  it("reads physical footprint and the PhysMem summary from top", () => {
+    const read = parseFootprint(
+      `Processes: 392 total, 3 running, 389 sleeping, 2361 threads
+CPU usage: 42.28% user, 33.42% sys, 24.28% idle
+PhysMem: 15G used (12G wired, 1305M compressor), 159M unused.
+
+PID    MEM
+90733  1150M
+90831  430M+
+99956  6801K
+400    1248M-
+1      21M
+0      10M
+`,
+      5_000,
+    );
+    expect(read.readAt).toBe(5_000);
+    expect(read.bytesByPid.get(90733)).toBe(1150 * 1024 ** 2);
+    expect(read.bytesByPid.get(90831)).toBe(430 * 1024 ** 2);
+    expect(read.bytesByPid.get(99956)).toBe(6801 * KB);
+    expect(read.bytesByPid.get(400)).toBe(1248 * 1024 ** 2);
+    expect(read.physMem).toBe(
+      "PhysMem: 15G used (12G wired, 1305M compressor), 159M unused.",
+    );
+    expect(read.cpuUsage).toContain("24.28% idle");
+  });
+
+  it("reads memory pressure, free percentage and swap, leaving unknown keys null", () => {
+    expect(
+      parseSystemSysctl(`vm.swapusage: total = 7168.00M  used = 6005.31M  free = 1162.69M  (encrypted)
+kern.memorystatus_level: 13
+kern.memorystatus_vm_pressure_level: 2
+`),
+    ).toEqual({
+      memoryPressure: "warning",
+      memoryFreePercent: 13,
+      swapUsedBytes: Math.round(6005.31 * 1024 ** 2),
+      swapTotalBytes: 7168 * 1024 ** 2,
+    });
+    expect(parseSystemSysctl("kern.memorystatus_level: \n")).toEqual({
+      memoryPressure: null,
+      memoryFreePercent: null,
+      swapUsedBytes: null,
+      swapTotalBytes: null,
+    });
+  });
+
+  it("keys argv by start time so a reused PID never inherits a command line", () => {
+    expect(
+      parseProcessArgs(`  300 Wed Oct 15 11:55:26 2026     /Applications/Zeros.app/Contents/Resources/zeros-engine serve --port 24193
+  401 Thu Oct  2 09:01:00 2026 node /work/node_modules/vitest/vitest.mjs run
+  402 Thu Oct 16 09:01:00 2026
+malformed
+`),
+    ).toEqual([
+      {
+        pid: 300,
+        startKey: "Wed Oct 15 11:55:26 2026",
+        args: "/Applications/Zeros.app/Contents/Resources/zeros-engine serve --port 24193",
+      },
+      {
+        pid: 401,
+        // Same normalization as parseProcessTable: the padded day collapses.
+        startKey: "Thu Oct 2 09:01:00 2026",
+        args: "node /work/node_modules/vitest/vitest.mjs run",
+      },
+      {
+        pid: 402,
+        startKey: "Thu Oct 16 09:01:00 2026",
+        args: "",
+      },
+    ]);
+  });
+});
+
+describe("ProcessMetricsTracker roles, footprint and other Zeros apps", () => {
+  const APP = "/Applications/Zeros.app/Contents/MacOS/Zeros";
+  function input(sampledAt: number, footprintAt?: number): ProcessMetricsCaptureInput {
+    return {
+      sampledAt,
+      scanDurationMs: 4,
+      appPid: 100,
+      enginePid: 300,
+      samplerPid: null,
+      logicalCpuCount: 10,
+      systemMemoryBytes: 16 * 1024 ** 3,
+      terminalPids: [],
+      terminalRootsKnown: true,
+      appExecutable: APP,
+      rows: [
+        { pid: 100, parentPid: 1, rssBytes: 100 * KB, cpuTimeSeconds: 1, startKey: "a", command: APP },
+        { pid: 300, parentPid: 100, rssBytes: 300 * KB, cpuTimeSeconds: 1, startKey: "b", command: "/Applications/Zeros.app/Contents/Resources/zeros-engine" },
+        { pid: 310, parentPid: 300, rssBytes: 10 * KB, cpuTimeSeconds: 1, startKey: "c", command: APP },
+        { pid: 320, parentPid: 310, rssBytes: 20 * KB, cpuTimeSeconds: 1, startKey: "d", command: "/Applications/Zeros.app/Contents/Resources/codex-runtime/vendor/aarch64-apple-darwin/bin/codex" },
+        { pid: 330, parentPid: 320, rssBytes: 4_000 * KB, cpuTimeSeconds: 1, startKey: "e", command: "node" },
+        { pid: 900, parentPid: 1, rssBytes: 50 * KB, cpuTimeSeconds: 1, startKey: "f", command: "/Applications/Zeros Alpha.app/Contents/MacOS/Zeros Alpha" },
+        { pid: 901, parentPid: 900, rssBytes: 70 * KB, cpuTimeSeconds: 1, startKey: "g", command: "/Applications/Zeros Alpha.app/Contents/Resources/zeros-engine" },
+        { pid: 950, parentPid: 1, rssBytes: 80 * KB, cpuTimeSeconds: 1, startKey: "h", command: "/Applications/Zeroscope.app/Contents/MacOS/Zeroscope" },
+      ],
+      electronProcesses: [{ pid: 100, type: "Browser", creationTime: 1 }],
+      footprint:
+        footprintAt == null
+          ? null
+          : {
+              readAt: footprintAt,
+              bytesByPid: new Map([
+                [100, 400 * KB],
+                [330, 9_000 * KB],
+                [900, 500 * KB],
+              ]),
+              physMem: null,
+              cpuUsage: null,
+            },
+    };
+  }
+
+  it("labels engine, supervisor, agent and tool rows from argv held in main", () => {
+    const tracker = new ProcessMetricsTracker();
+    const first = input(1_000);
+    expect(tracker.missingArgPids(first)).toEqual([100, 300, 310, 320, 330]);
+    tracker.recordArgs([
+      { pid: 310, startKey: "c", args: `${APP} /Applications/Zeros.app/Contents/Resources/host-process-supervisor.mjs --pending /x -- codex` },
+      { pid: 320, startKey: "d", args: "codex app-server -c mcp_servers.a.url=\"http://127.0.0.1:1/mcp\"" },
+      { pid: 330, startKey: "e", args: "node /w/node_modules/.bin/../typescript/bin/tsc --noEmit -p tsconfig.typecheck.json" },
+    ]);
+    const snapshot = tracker.capture(first);
+    const names = Object.fromEntries(
+      snapshot.processes.map((process) => [process.pid, [process.name, process.kind]]),
+    );
+    expect(names).toEqual({
+      100: ["Main", "main"],
+      300: ["Engine", "sidecar"],
+      310: ["Agent supervisor", "helper"],
+      320: ["Codex", "agent"],
+      330: ["tsc", "process"],
+    });
+    expect(tracker.missingArgPids(input(2_000))).toEqual([100, 300]);
+    // Nothing argv-shaped reaches the renderer snapshot.
+    expect(JSON.stringify(snapshot)).not.toContain("tsconfig");
+    expect(JSON.stringify(snapshot)).not.toContain("127.0.0.1");
+  });
+
+  it("applies physical footprint only to processes that existed when the read started", () => {
+    const tracker = new ProcessMetricsTracker();
+    tracker.capture(input(1_000));
+    const withFootprint = tracker.capture(input(2_000, 1_500));
+    expect(withFootprint.memorySource).toBe("footprint");
+    expect(withFootprint.footprintAgeMs).toBe(500);
+    expect(withFootprint.processes.find((p) => p.pid === 330)?.memoryBytes).toBe(9_000 * KB);
+    // No footprint entry: resident size remains.
+    expect(withFootprint.processes.find((p) => p.pid === 300)?.memoryBytes).toBe(300 * KB);
+
+    // A process first sampled after the read started cannot borrow its PID's
+    // footprint value.
+    const fresh = new ProcessMetricsTracker();
+    const late = fresh.capture(input(2_000, 1_500));
+    expect(late.memorySource).toBe("resident");
+    expect(late.processes.find((p) => p.pid === 330)?.memoryBytes).toBe(4_000 * KB);
+
+    // A stale read is ignored entirely.
+    const stale = tracker.capture(input(40_000, 1_500));
+    expect(stale.memorySource).toBe("resident");
+    expect(stale.footprintAgeMs).toBeNull();
+  });
+
+  it("totals other Zeros channel apps without counting look-alike bundles", () => {
+    const tracker = new ProcessMetricsTracker();
+    tracker.capture(input(1_000));
+    const next = input(2_000, 1_500);
+    next.rows[5].cpuTimeSeconds = 1.5;
+    const snapshot = tracker.capture(next);
+    expect(snapshot.otherApps).toEqual([
+      {
+        name: "Zeros Alpha",
+        processCount: 2,
+        cpuPercent: 50,
+        memoryBytes: 500 * KB + 70 * KB,
+      },
+    ]);
+    expect(snapshot.processes.some((process) => process.pid >= 900)).toBe(false);
   });
 });

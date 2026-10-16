@@ -16,6 +16,7 @@ import React, {
   useState,
 } from "react";
 import {
+  AppWindow,
   ArrowDown,
   ArrowUp,
   ChevronDown,
@@ -28,6 +29,7 @@ import {
 } from "lucide-react";
 
 import {
+  processDiagnosticsReport,
   processMetricsSnapshot,
   type ProcessMetricsSnapshot,
   type ProcessResourceTotals,
@@ -49,7 +51,9 @@ import { ScrollArea } from "../shared/ui/primitives/scroll-area";
 import { Separator } from "../shared/ui/primitives/separator";
 import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { toast } from "../shared/ui/primitives/elements";
+import { copyToClipboardWithFallback } from "../shared/lib/clipboard";
 import {
+  buildOtherAppNodes,
   buildResourceView,
   collectResourceNodeIds,
   copyResourceReport,
@@ -58,9 +62,11 @@ import {
   formatResourceMemory,
   resolveResourceScope,
   selectResourceSnapshot,
+  systemSummaryParts,
   type ResourceSortDirection,
   type ResourceSortKey,
   type ResourceViewNode,
+  type SystemSummaryTone,
 } from "./resource-monitor-model";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 
@@ -111,6 +117,13 @@ interface ResourceProcessRowProps {
   /** Toggles this node's ephemeral disclosure state. */
   onToggle: (id: string) => void;
 }
+
+// Complete class strings per tone so the UI checks can see every utility.
+const SYSTEM_TONE_CLASS: Record<SystemSummaryTone, string> = {
+  default: "text-fg2",
+  warning: "text-yellow-primary font-medium",
+  critical: "text-red-primary font-medium",
+};
 
 // --- HELPERS ---
 
@@ -223,6 +236,11 @@ const ResourceProcessRow = memo(function ResourceProcessRow({
           <span className="text-fg1 flex min-w-0 items-center gap-2 text-xs">
             {node.kind === "app" ? (
               <Cpu className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
+            ) : node.kind === "other-app" ? (
+              <AppWindow
+                className="text-fg2 size-3.5 shrink-0"
+                aria-hidden="true"
+              />
             ) : node.terminal ? (
               <SquareTerminal
                 className="text-fg2 size-3.5 shrink-0"
@@ -424,6 +442,9 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
         const next = await processMetricsSnapshot({
           terminalPids: ownership.pids,
           terminalRootsKnown: ownership.known,
+          // The open inspector keeps the physical-footprint read fresh; the
+          // closed icon never pays for it.
+          detail: open,
         });
         if (disposed || generation !== requestGeneration.current || !next)
           return;
@@ -500,6 +521,28 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
   );
   const renderedRows = rows.slice(0, MAX_RENDERED_PROCESS_ROWS);
   const rowsOmitted = rows.length > MAX_RENDERED_PROCESS_ROWS;
+  const otherAppNodes = useMemo(
+    () =>
+      open && displaySnapshot
+        ? buildOtherAppNodes(
+            displaySnapshot.otherApps ?? [],
+            sortKey,
+            sortDirection,
+          )
+        : [],
+    [displaySnapshot, open, sortDirection, sortKey],
+  );
+  const systemParts = useMemo(
+    () =>
+      displaySnapshot
+        ? systemSummaryParts(
+            displaySnapshot.system ?? null,
+            displaySnapshot.logicalCpuCount,
+          )
+        : [],
+    [displaySnapshot],
+  );
+  const memoryIsFootprint = displaySnapshot?.memorySource === "footprint";
 
   // Bound disclosure state to the current live identities. Stable IDs retain
   // collapse choices; exited/reused processes cannot accumulate forever. The
@@ -538,26 +581,57 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     });
   }, []);
 
-  /** Copy only the already-sanitized renderer model; native command lines were
-   * never sent across the IPC boundary. */
+  // Dedupes repeated clicks while main builds the report.
+  const [copying, setCopying] = useState(false);
+
+  /** Copy the full diagnostics report Electron main builds (process tree with
+   * scrubbed command lines, Mac memory context, recent scrubbed app logs).
+   * Command lines never cross into the renderer except inside that text. If
+   * main cannot build it, fall back to the renderer's own snapshot. */
   const handleCopy = useCallback(async (): Promise<void> => {
-    if (!displaySnapshot || !totals) return;
+    if (!displaySnapshot || !totals || copying) return;
+    setCopying(true);
     try {
-      await navigator.clipboard.writeText(
-        copyResourceReport({
-          sampledAt: displaySnapshot.sampledAt,
-          logicalCpuCount: displaySnapshot.logicalCpuCount,
-          scanDurationMs: displaySnapshot.scanDurationMs,
-          includeTerminal: includesTerminal,
-          totals,
-          view,
-        }),
+      const ownership = terminalOwnership.current;
+      let text: string | null = null;
+      let withLogs = false;
+      try {
+        const report = await processDiagnosticsReport({
+          terminalPids: ownership.pids,
+          terminalRootsKnown: ownership.known,
+        });
+        if (report?.text) {
+          text = report.text;
+          withLogs = report.logCharacters > 0;
+        }
+      } catch {
+        // An older main process lacks the command; the snapshot still helps.
+      }
+      text ??= copyResourceReport({
+        sampledAt: displaySnapshot.sampledAt,
+        logicalCpuCount: displaySnapshot.logicalCpuCount,
+        scanDurationMs: displaySnapshot.scanDurationMs,
+        includeTerminal: includesTerminal,
+        totals,
+        view,
+        system: displaySnapshot.system ?? null,
+        otherApps: otherAppNodes,
+        memorySource: displaySnapshot.memorySource,
+      });
+      if (!(await copyToClipboardWithFallback(text))) {
+        toast.error("Couldn't write to the clipboard — focus the app and retry.");
+        return;
+      }
+      const kb = Math.max(1, Math.round(text.length / 1024));
+      toast.success(
+        withLogs
+          ? `Diagnostics copied — ${kb} KB with recent app logs`
+          : `Resource snapshot copied — ${kb} KB`,
       );
-      toast.success("Resource snapshot copied");
-    } catch {
-      toast.error("Couldn't copy the resource snapshot");
+    } finally {
+      setCopying(false);
     }
-  }, [displaySnapshot, includesTerminal, totals, view]);
+  }, [copying, displaySnapshot, includesTerminal, otherAppNodes, totals, view]);
 
   if (!ready) return null;
 
@@ -576,7 +650,9 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       ? "Exclude terminal processes"
       : "Include terminal processes";
   const triggerLabel = totals
-    ? `${formatResourceMemory(totals.memoryBytes)} resident memory, ${scopeLabel}`
+    ? `${formatResourceMemory(totals.memoryBytes)} ${
+        memoryIsFootprint ? "memory" : "resident memory"
+      }, ${scopeLabel}`
     : "Collecting app resource usage";
 
   return (
@@ -635,6 +711,24 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                     ? "Resource sampling is unavailable. Retrying automatically."
                     : "Collecting the first resource sample…"}
                 </div>
+              )}
+              {systemParts.length > 0 && (
+                <p className="text-muted-fg mt-1 text-xs">
+                  Mac:{" "}
+                  {systemParts.map((part, index) => (
+                    <React.Fragment key={part.id}>
+                      {index > 0 && " · "}
+                      <span className="whitespace-nowrap">
+                        {part.label && `${part.label} `}
+                        <span
+                          className={`tabular-nums ${SYSTEM_TONE_CLASS[part.tone]}`}
+                        >
+                          {part.value}
+                        </span>
+                      </span>
+                    </React.Fragment>
+                  ))}
+                </p>
               )}
             </div>
             <Inline gap={1} align="center" className="shrink-0">
@@ -700,13 +794,17 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                   <GitFork aria-hidden="true" />
                 </Button>
               </Tooltip>
-              <Tooltip label="Copy resource snapshot" side="bottom">
+              <Tooltip
+                label="Copy diagnostics: processes, Mac memory and recent app logs"
+                side="bottom"
+              >
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon-sm"
-                  aria-label="Copy resource snapshot"
-                  disabled={!displaySnapshot || !totals}
+                  aria-label="Copy diagnostics"
+                  aria-busy={copying}
+                  disabled={!displaySnapshot || !totals || copying}
                   onClick={() => void handleCopy()}
                 >
                   <Copy aria-hidden="true" />
@@ -802,6 +900,28 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                       </div>
                     </div>
                   )}
+                  {otherAppNodes.length > 0 && (
+                    <>
+                      <div role="row">
+                        <div
+                          role="gridcell"
+                          className="text-muted-fg px-4 pt-2 pb-1 text-xs"
+                        >
+                          Other Zeros apps on this Mac
+                        </div>
+                      </div>
+                      {otherAppNodes.map((node) => (
+                        <ResourceProcessRow
+                          key={node.id}
+                          node={node}
+                          depth={0}
+                          collapsed={false}
+                          cpuReady={displaySnapshot.cpuReady}
+                          onToggle={handleToggle}
+                        />
+                      ))}
+                    </>
+                  )}
                 </div>
               </ScrollArea>
             </div>
@@ -826,8 +946,11 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
               <span>Waiting for a confirmed sample</span>
             )}
             <span>
-              100% CPU = one core · memory = resident working set · sampled
-              peaks are since monitoring started
+              100% CPU = one core ·{" "}
+              {memoryIsFootprint
+                ? "memory = physical footprint, as in Activity Monitor"
+                : "memory = resident working set"}{" "}
+              · sampled peaks are since monitoring started
             </span>
           </div>
         </PopoverContent>
