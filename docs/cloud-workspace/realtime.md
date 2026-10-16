@@ -89,7 +89,11 @@ authority supplies keys, epochs and engine tokens
 - **Rollout.** A hello is admitted only while the organization's
   `realtime_uplink` flag is on ([rollout flags](rollout-flags.md)). Turning
   the flag off closes that organization's open uplinks with `4404`; engines
-  then keep the HTTP heartbeat and the credential poll, which stay in place.
+  then keep the HTTP heartbeat and the credential poll, which stay in
+  place. Rollback limitation: a `4404`-parked engine does not re-dial on
+  its own — the advertisement arrives with registration, so a parked engine
+  picks the endpoint up again only at its next restart or re-registration
+  (the heartbeat itself never carries it).
 - **Admission.** One consistent authority read
   (`readCurrentCloudEngineAuthority`) checks the heartbeat credential,
   workspace, generation and engine instance, and compares the hello's
@@ -182,6 +186,7 @@ service, when an operator adds it, uses:
 | Image and start command | Same as the control-plane service |
 | `CONTROL_PLANE_PROCESS_ROLE` | `realtime` |
 | `CONTROL_PLANE_DRAIN_SECONDS` | `30` |
+| `CLOUD_WORKSPACE_REALTIME_URL` (also set on the `api` service, which advertises) | the service's credential-free public origin, e.g. `https://realtime.example.com` |
 | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | at least the drain window plus 15 (`45`), so SIGKILL never cuts the drain short |
 | `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS` | long enough for the replacement to pass `/healthz` before the old instance is signalled |
 | `DATABASE_MIGRATIONS_ON_BOOT` | `false`; the API service owns boot migrations |
