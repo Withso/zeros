@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { planHourly, planMain, planOutputs, hourlyContext, actionsProfile, hourlySnapshot, decideHourlyGate, lifecycleJob } from "../zeros-dev/hourly-actions.mjs";
-import { CHAIN_RESTART } from "../zeros-dev/chain-restart.mjs";
+import { CHAIN_RESTART, reviewedChainRestart } from "../zeros-dev/chain-restart.mjs";
 
 const run = (id: number, overrides = {}) => ({ id, run_number: id, run_attempt: 1, path: ".github/workflows/zeros-dev-e2e.yml", name: "Zeros dev E2E",
   head_sha: "a".repeat(40), head_branch: "main", event: "schedule", status: "completed", conclusion: "success",
@@ -130,11 +130,42 @@ describe("hourly Actions predecessor and gate policy", () => {
     expect(planOutputs({ ...await planHourly(f, context), profile: "infrastructure" }))
       .toMatch(/\nprevious_run=38737559526\nartifact_id=11977255852\n$/);
   });
-  it("crosses only product-skipped runs between the restart receipt and the first new-chain run", async () => {
-    const previous = restartRun(), skipped = run(16, { conclusion: "skipped" });
-    const f = restartApi([run(17, { status: "in_progress", conclusion: null }), skipped, previous], id => id === previous.id ? [restartArtifact(previous)] : [],
+  it("crosses only product-skipped scheduled runs between the restart receipt and the first new-chain run", async () => {
+    const previous = restartRun(), skipped = [16, 15, 14, 13, 12].map(id => run(id, { conclusion: "skipped" }));
+    const f = restartApi([run(17, { status: "in_progress", conclusion: null }), ...skipped, previous], id => id === previous.id ? [restartArtifact(previous)] : [],
       () => completedJob({ name: infrastructureExpression, conclusion: "skipped", steps: [] }));
-    expect(await planHourly(f, context)).toMatchObject({ bootstrap: true, previous: null, chainRestart: CHAIN_RESTART });
+    expect(await planHourly(f, context)).toEqual({ execution: context, bootstrap: true, previous: null, artifactId: null, chainRestart: CHAIN_RESTART });
+  });
+  it("never restarts across a newer executed run that left no receipt", async () => {
+    const previous = restartRun(), failed = run(16, { event: "workflow_dispatch", conclusion: "failure" });
+    const f = restartApi([run(17, { status: "in_progress", conclusion: null }), failed, previous], id => id === previous.id ? [restartArtifact(previous)] : [],
+      () => completedJob({ name: "infrastructure", conclusion: "failure", steps: ["Execute Alpha product lifecycle", "Save signed cleanup receipt"]
+        .map(name => ({ name, status: "completed", conclusion: "failure" })) }));
+    await expect(planHourly(f, context)).rejects.toThrow("zeros_dev_artifact_invalid");
+    expect(f.get.mock.calls.some(([url]) => url.includes(`/runs/${previous.id}/`))).toBe(false);
+  });
+  it("refuses the pinned receipt once its artifact has expired", async () => {
+    const previous = restartRun(), f = restartApi([run(17, { status: "in_progress", conclusion: null }), previous],
+      () => [restartArtifact(previous, { expired: true })]);
+    await expect(planHourly(f, context)).rejects.toThrow("zeros_dev_artifact_invalid");
+  });
+  it("selects the restart record directly only for the exact pinned run and artifact", () => {
+    const exact = restartRun(), artifact = restartArtifact(exact);
+    expect(reviewedChainRestart(exact, artifact)).toEqual(CHAIN_RESTART);
+    expect(reviewedChainRestart(exact, artifact)).not.toBe(CHAIN_RESTART);
+    const unrelated = run(16, { event: "workflow_dispatch", conclusion: "failure" });
+    expect(reviewedChainRestart(unrelated, { id: 99, name: "zeros-dev-receipt-16-1", digest: `sha256:${"c".repeat(64)}`,
+      workflow_run: { id: 16, head_sha: "a".repeat(40) } })).toBeNull();
+    const changes: [string, object, object][] = [
+      ["attempt", { run_attempt: 2 }, {}], ["head_sha", { head_sha: "f".repeat(40) }, {}], ["event", { event: "schedule" }, {}],
+      ["status", { status: "in_progress" }, {}], ["conclusion", { conclusion: "success" }, {}],
+      ["artifact id", {}, { id: 11977255853 }], ["artifact name", {}, { name: "zeros-dev-receipt-38737559526-2" }],
+      ["digest", {}, { digest: `sha256:${"d".repeat(64)}` }], ["workflow_run.id", {}, { workflow_run: { id: 38737559527, head_sha: exact.head_sha } }],
+      ["workflow_run.head_sha", {}, { workflow_run: { id: exact.id, head_sha: "f".repeat(40) } }],
+    ];
+    for (const [change, runChange, artifactChange] of changes)
+      expect(() => reviewedChainRestart({ ...exact, ...runChange }, { ...artifact, ...artifactChange }), change)
+        .toThrow("zeros_dev_chain_restart_mismatch");
   });
   it.each([
     { change: "attempt", run: { run_attempt: 2 }, artifact: {} },
