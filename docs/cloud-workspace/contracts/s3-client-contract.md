@@ -1,9 +1,16 @@
 # S3. Client contract v1 (cloud workspaces)
 
-Status: **DRAFT** · Contract ID `zeros-client` · Version `1.0.0-draft.2` ·
+Status: **FROZEN** · Contract ID `zeros-client` · Version `1.0.0` ·
 Schemas: [Draft schema: REST API (OpenAPI 3.1)](#draft-schema-rest-api-openapi-31),
 [Draft schema: device stream frames](#draft-schema-device-stream-frames),
 [Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames)
+
+Draft 3 (freeze review): relay-route renewal is end to end between client and
+engine; an explicit rule for telling handshake frames from engine messages
+after `auth.ok`; device sessions can be re-ticketed for resume; `no-store` on
+every response that carries a credential; device-stream fan-out follows
+current access; a 5 s renewal retry cap after an outage. Frozen as 1.0.0 on
+2026-10-16 with no further changes.
 
 The one contract every cloud client uses: the Mac app first (through a
 cloud-only SDK), then web, Windows, Linux, mobile, API, MCP and CLI. It has
@@ -91,6 +98,21 @@ The ticket is single-use, valid 60 s, and bound to the account, CP session
 and device. It exists because browser WebSocket clients cannot set an
 `Authorization` header; tokens never go into URLs.
 
+To reconnect the device stream (and resume), the client calls the same
+endpoint with its existing `deviceSessionId` in the body. If that device
+session belongs to the same account, CP session and device and has not
+expired, the response keeps the same `deviceSessionId` with a new ticket;
+otherwise the server creates a new device session, and the client cannot
+resume.
+
+Credential hygiene: every response that carries a capability or a ticket
+(`device-sessions`, `runtime/connect`, `runtime/capabilities`) sets
+`Cache-Control: no-store`. Capabilities, tickets and resume cursors never
+appear in URLs, logs, error messages or close reasons; route URLs carry no
+credentials, and the S3 `auth` frame is the only carrier. SDKs hold
+capabilities in memory only and never persist them (the outbox and snapshot
+cache hold no credentials).
+
 ### Runtime connect
 
 Request body: `{ "deviceSessionId", "routes": ["direct", "relay"],
@@ -162,12 +184,25 @@ stream cursor on resumable server events. Schema:
 | `drain` | `{ reconnectAfterMs }` | — |
 | `error` | `{ code, message, fatal }` | — |
 
+Fan-out follows current access: `realtime` sends `catalog.changed`,
+`lifecycle.changed`, `presence.changed` and `notification` for a workspace
+only to device sessions whose account currently has access to it, and
+re-evaluates that on the same security events that bump S1 epochs (`me`,
+`wr`, `ac`). A removed member's device sessions get `catalog.changed` with
+`op: "remove"` and nothing further for that workspace.
+
 Resume: the server keeps resumable events for 10 min per device session.
 `hello.resume.cursor` older than that, or a different `realtime` instance
 without the history, yields `ready { resumed: false }` followed by
 `catalog.reset`; the client re-reads the snapshot (REST) while keeping its
 last confirmed view on screen. Resource `version` comparisons make
-duplicates harmless.
+duplicates harmless. On a successful resume, replayed `capability.revoked`
+events are sent before any other replayed event.
+
+Close codes: `4401` for a missing, expired or reused ticket (fetch a new one
+through `POST /v1/device-sessions`), `4426` when no common contract major
+exists (update the client), `4503` while draining (reconnect after
+`reconnectAfterMs`). Other closes reconnect with backoff.
 
 Heartbeat: the server sends `heartbeat` every 20 s; the client treats 45 s of
 silence as dead and reconnects with full-jitter backoff (250 ms base, 30 s
@@ -214,8 +249,25 @@ forwards the engine pair in S2 `relay.open`. The verifier replies
 code. Renewal is in-band: the client sends `auth.renew` with a fresh
 capability and proof, and the verifier replies `auth.renewed` with the new
 `expiresAtMs`, without reconnecting. After `auth.ok` the existing engine
-message protocol flows unchanged; the handshake frames never appear inside
-it. Frame sketches:
+message protocol flows unchanged; the handshake frames are never engine
+messages.
+
+Telling them apart after `auth.ok`: a text message whose top-level JSON
+object has a `t` member and no `type` member is a handshake frame
+(`auth.renew` from the client, `auth.renewed` from the engine). Engine
+protocol messages always carry `type` and never a top-level `t`
+(`BaseMessage`, `packages/protocol/src/messages.ts:221`). Any other handshake
+frame after `auth.ok` closes the connection with `4400`.
+
+Relay route specifics: `realtime` terminates only the first `auth` frame
+(verifying the `zeros:realtime` capability and forwarding the `engine` pair in
+S2 `relay.open`). From then on the channel is end to end: the engine sends
+`auth.ok`, and `auth.renew` / `auth.renewed` travel inside the channel
+between client and engine. On the relay route `auth.renew` carries the
+`zeros:engine` capability with a proof signed with `route: relay`. The
+`zeros:realtime` token gates admission only and is not renewed in band;
+pushed renewals still include it for the next relay admission. Frame
+sketches:
 [Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames).
 
 ## SDK behaviors (normative for every client)
@@ -240,7 +292,10 @@ it. Frame sketches:
    start relay immediately. If the winner later fails, reconnect with the
    same race.
 5. **Silent renewal.** Renew from `capability.renewed` pushes; fall back to
-   `POST …/runtime/capabilities` at 80% of lifetime. On `capability.revoked`
+   `POST …/runtime/capabilities` at 80% of lifetime. Once a token is past
+   `exp` while its session is still open (S1 full-CP-outage grace), retry
+   renewal with a 5 s backoff cap instead of 30 s, so the session renews
+   within S1's 60 s recovery window. On `capability.revoked`
    or a 4403 close, close that workspace's runtime connections, try one
    connect, and show access lost only if connect is denied.
 6. **Presence on transitions only.** Send `presence.set` when focus,
@@ -309,15 +364,15 @@ not part of this contract and do not change.
 
 ## Open questions
 
-| # | Question | Recommendation |
-| --- | --- | --- |
-| S3-Q1 | Device stream over WebSocket or SSE? | WebSocket: it carries client frames (`attach`, `presence.set`, `ack`), and the same `realtime` service already terminates WebSockets. |
-| S3-Q2 | Should connect wake a stopped workspace? | No. Wake is an explicit, idempotent user command; connect stays side-effect free. |
-| S3-Q3 | Hedge delay | 400 ms default, server-tunable in 300–500 ms via `relayHedgeMs`. |
-| S3-Q4 | Replace `/v1/auth/events` with the device stream? | Not in v1; Local org workspaces depend on it. Reconsider once every client uses the SDK. |
-| S3-Q5 | Outbox persistence location on the Mac | Electron main, per account, bounded (500 entries, 7 days), cleared on sign-out. |
-| S3-Q6 | Version path prefix (`/v2/…`) for new endpoints? | No; keep `/v1` and evolve additively; the contract major is negotiated in bodies and frames. |
-| S3-Q7 | Push full documents or deltas in `catalog.changed`? | Full documents (bounded, already schema-validated by the client); deltas later if size matters. |
+| # | Question | Recommendation | Answer (freeze review) |
+| --- | --- | --- | --- |
+| S3-Q1 | Device stream over WebSocket or SSE? | WebSocket: it carries client frames (`attach`, `presence.set`, `ack`), and the same `realtime` service already terminates WebSockets. | Accepted. |
+| S3-Q2 | Should connect wake a stopped workspace? | No. Wake is an explicit, idempotent user command; connect stays side-effect free. | Accepted. |
+| S3-Q3 | Hedge delay | 400 ms default, server-tunable in 300–500 ms via `relayHedgeMs`. | Accepted. |
+| S3-Q4 | Replace `/v1/auth/events` with the device stream? | Not in v1; Local org workspaces depend on it. Reconsider once every client uses the SDK. | Accepted (a Local seam, plan §2.1). |
+| S3-Q5 | Outbox persistence location on the Mac | Electron main, per account, bounded (500 entries, 7 days), cleared on sign-out. | Accepted; the outbox never stores capabilities or tickets. |
+| S3-Q6 | Version path prefix (`/v2/…`) for new endpoints? | No; keep `/v1` and evolve additively; the contract major is negotiated in bodies and frames. | Accepted. |
+| S3-Q7 | Push full documents or deltas in `catalog.changed`? | Full documents (bounded, already schema-validated by the client); deltas later if size matters. | Accepted. |
 
 ## Draft schema: REST API (OpenAPI 3.1)
 
@@ -331,9 +386,9 @@ a review aid until freeze; the frozen source of truth will be Zod in
 openapi: 3.1.0
 info:
   title: Zeros cloud workspace client contract (S3)
-  version: 1.0.0-draft.2
+  version: 1.0.0
   description: >-
-    DRAFT review sketch of the REST half of client contract v1 for cloud
+    FROZEN reference sketch of the REST half of client contract v1 for cloud
     workspaces. Existing endpoints keep their current request and response
     shapes; schemas below constrain only the fields the contract relies on.
     New endpoints are marked x-zeros-status new. Local workspaces are not part
@@ -370,7 +425,10 @@ paths:
               $ref: '#/components/schemas/DeviceSessionRequest'
       responses:
         '201':
-          description: Device session created.
+          description: Device session created, or re-ticketed when the request named a current deviceSessionId.
+          headers:
+            Cache-Control:
+              schema: { const: no-store }
           content:
             application/json:
               schema:
@@ -576,6 +634,9 @@ paths:
       responses:
         '201':
           description: Fresh capabilities.
+          headers:
+            Cache-Control:
+              schema: { const: no-store }
           content:
             application/json:
               schema:
@@ -819,6 +880,9 @@ components:
       required: [deviceId, client]
       properties:
         deviceId: { $ref: '#/components/schemas/Uuid' }
+        deviceSessionId:
+          $ref: '#/components/schemas/Uuid'
+          description: Optional. Re-ticket this device session (same account, CP session and device) so the device stream can resume.
         client:
           type: object
           required: [platform, appVersion, contract]
@@ -949,7 +1013,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://zeros.dev/schemas/cloud-contracts/s3-device-stream-events.schema.json",
   "title": "Zeros device stream (S3) frames",
-  "description": "DRAFT 1.0.0-draft.2. Review sketch. Envelope { t, d, c? }; c is an opaque cursor present on resumable server events. Clients ignore unknown event types and unknown fields.",
+  "description": "FROZEN 1.0.0. Reference sketch. Envelope { t, d, c? }; c is an opaque cursor present on resumable server events. Clients ignore unknown event types and unknown fields.",
   "oneOf": [
     { "$ref": "#/$defs/client.hello" },
     { "$ref": "#/$defs/client.attach" },
@@ -1279,8 +1343,9 @@ a review aid until freeze; the frozen source of truth will be Zod in
 
 ## Draft schema: runtime auth frames
 
-JSON Schema 2020-12 for the pre-protocol handshake frames of Part 3. They
-are not `BaseMessage` messages and never appear after `auth.ok`. This sketch
+JSON Schema 2020-12 for the handshake frames of Part 3. They are not
+`BaseMessage` messages; `auth` and `auth.ok` precede the engine protocol, and
+`auth.renew` / `auth.renewed` may follow `auth.ok` in band. This sketch
 is a review aid until freeze; the frozen source of truth will be Zod in
 `packages/protocol`.
 
@@ -1290,7 +1355,7 @@ is a review aid until freeze; the frozen source of truth will be Zod in
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://zeros.dev/schemas/cloud-contracts/s3-runtime-auth-frames.schema.json",
   "title": "Zeros runtime connection auth handshake (S3, pre-protocol)",
-  "description": "DRAFT 1.0.0-draft.2. Review sketch. Frames exchanged before the engine message protocol starts; envelope { t, d }, one JSON text message of at most 16 KiB. auth must arrive within 10 s of the WebSocket upgrade; renewal is in-band.",
+  "description": "FROZEN 1.0.0. Reference sketch. Handshake frames: auth and auth.ok before the engine message protocol starts, auth.renew and auth.renewed in band after it, told apart from engine messages by a top-level t and no type member. Envelope { t, d }, one JSON text message of at most 16 KiB. auth must arrive within 10 s of the WebSocket upgrade.",
   "oneOf": [
     { "$ref": "#/$defs/client.auth" },
     { "$ref": "#/$defs/client.auth.renew" },
