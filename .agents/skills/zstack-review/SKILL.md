@@ -39,6 +39,13 @@ failing input, or a reproduction. Drop anything you can't substantiate.
 - Windows tolerate ordinary clock skew and are compared against documented
   bounds.
 
+**Database cost**
+- Price every recurring query: CPU per call times calls per second, against
+  the database's CPU budget (its vCPU share times 1000 ms/s). On a 1/16-vCPU
+  database (62.5 ms/s), a 25 ms query once a second uses 40% of it.
+- Background loops are state-aware. Archived and stopped resources are not
+  polled at running cadence; derive the next due time from the state.
+
 **Compatibility**
 - New wire fields are optional and N/N−1 tested. Persisted keys and
   externally observable identifiers are preserved or migrated explicitly.
