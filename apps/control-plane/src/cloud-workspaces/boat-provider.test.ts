@@ -1259,14 +1259,42 @@ describe("paged inventory", () => {
     });
   });
 
-  it("rejects a cursor that could escape the request path", async () => {
+  it("encodes an opaque cursor instead of rejecting its characters", async () => {
+    // Boat cursors are opaque; a standard base64 cursor carries +/=. The
+    // operator inventory (cloud-provider-evidence.ts) pages the same endpoint
+    // with exactly this encoding.
     const f = fixture();
-    f.fetcher.mockResolvedValueOnce(listPage([], { nextCursor: "../admin?x=", hasMore: true }));
+    f.fetcher
+      .mockResolvedValueOnce(listPage([], { nextCursor: "c+2/=~*", hasMore: true }))
+      .mockResolvedValueOnce(listPage([], { nextCursor: null, hasMore: false }));
+    for await (const _ of f.provider.listInventory!()) { /* drain */ }
+    expect(f.fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://boat.dev/api/v1/sandboxes?limit=200",
+      "https://boat.dev/api/v1/sandboxes?limit=200&cursor=c%2B2%2F%3D%7E%2A",
+    ]);
+  });
+
+  it("fails the sweep when Boat repeats an inventory cursor", { timeout: 10_000 }, async () => {
+    const f = fixture();
+    f.fetcher.mockImplementation(() =>
+      Promise.resolve(listPage([], { nextCursor: "cursor-loop", hasMore: true })));
     const iterator = f.provider.listInventory!();
     await expect(iterator[Symbol.asyncIterator]().next()).rejects.toMatchObject({
       code: "provider_response_invalid",
     });
-    expect(f.fetcher).toHaveBeenCalledTimes(1);
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails the sweep beyond the inventory page limit", { timeout: 10_000 }, async () => {
+    const f = fixture();
+    let page = 0;
+    f.fetcher.mockImplementation(() =>
+      Promise.resolve(listPage([], { nextCursor: `cursor-${++page}`, hasMore: true })));
+    const iterator = f.provider.listInventory!();
+    await expect(iterator[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      code: "provider_response_invalid",
+    });
+    expect(f.fetcher).toHaveBeenCalledTimes(100);
   });
 });
 

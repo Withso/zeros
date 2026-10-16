@@ -130,6 +130,10 @@ export type BoatWorkspaceProviderOptions = BoatApiClientOptions & {
   now?: () => number;
 };
 
+/** Pages of 200 sandboxes one sweep may follow before a provider pagination
+ * bug is assumed; the sweep must never spin against Boat's rate limit. */
+const MAX_INVENTORY_PAGES = 100;
+
 function failure(code: string, retryable = false): CloudProviderError {
   return new CloudProviderError(
     code,
@@ -744,9 +748,10 @@ export class BoatWorkspaceProvider
     for await (const record of this.options.operations.list())
       if (record.resourceId) records.set(record.resourceId, record);
     let cursor: string | null = null;
-    do {
-      const page = await this.client.listSandboxes({ cursor });
-      for (const value of page.sandboxes) {
+    const seen = new Set<string>();
+    for (let page = 0; page < MAX_INVENTORY_PAGES; page++) {
+      const listed = await this.client.listSandboxes({ cursor });
+      for (const value of listed.sandboxes) {
         const parsed = SandboxSchema.safeParse(value);
         // One malformed record must not lose the rest of the page.
         if (!parsed.success) continue;
@@ -759,8 +764,23 @@ export class BoatWorkspaceProvider
           generation: record?.generation ?? null,
         };
       }
-      cursor = page.nextCursor;
-    } while (cursor);
+      cursor = listed.nextCursor;
+      if (!cursor) return;
+      // A provider pagination bug must not spin the sweep against the rate
+      // limit: bound the pages and refuse a cursor already followed.
+      if (seen.has(cursor))
+        throw new CloudProviderError(
+          "provider_response_invalid",
+          "Boat repeated an inventory cursor",
+          false,
+        );
+      seen.add(cursor);
+    }
+    throw new CloudProviderError(
+      "provider_response_invalid",
+      "Boat inventory exceeds the page limit",
+      false,
+    );
   }
 
   async createSshAccess(resourceId: string, expiresInMinutes: number) {
