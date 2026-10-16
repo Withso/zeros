@@ -218,6 +218,7 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
 | `engineHealth` | `cloud_engine_health` | `workspace:<id>` | engine enrollment, state or revocation change, shortened lease; workspace becoming running and ready or busy, or a new generation; an intent leaving the active states | `stopUnavailableCloudEngine` |
 | `compute` | `cloud_compute_lease` | `workspace:<id>` | allocation lease state, check time or lease; runtime transition phase or deadlines | `CloudWorkspaceComputeLeaseCoordinator.runOnce` |
 | `drift` | `cloud_workspace_drift` | `workspace:<id>` | binding `next_drift_check_at`; restore incident state; an intent leaving the active states | `reconcileDriftOnce` |
+| `diagnostics` | `cloud_diagnostic_cleanup` | `singleton` | cleanup `next_run_at`; recovery watermark or a publishable incident | `runCloudDiagnosticCleanup` |
 
 - **Drift cadence follows the settled state.** Running and transitional
   workspaces re-observe every reconciler interval (60 s). A workspace whose
@@ -237,9 +238,7 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   on their own. Boat calls drop from one inspect per workspace per minute to
   `ceil(sandboxes / 200)` list calls per minute per replica, far under the
   1000 requests/min/IP rate limit; a provider `retryAfterMs` wait floors the
-  job retry (jittered up to 20 percent, capped at 5 minutes).
-| `diagnostics` | `cloud_diagnostic_cleanup` | `singleton` | cleanup `next_run_at`; recovery watermark or a publishable incident | `runCloudDiagnosticCleanup` |
-
+  job retry (capped at 5 minutes, then jittered up to 20 percent).
 - **Triggers, not TypeScript enqueues.** They cover every writer, including
   stored functions and operator repairs, and commit with the domain write.
   Every source table is written only in system transactions, so the
