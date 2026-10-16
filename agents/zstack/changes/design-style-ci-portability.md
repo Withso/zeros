@@ -9,7 +9,9 @@
 - Symptom: the token preview's no-op write test failed only on Linux.
   Cause: the filesystem rounded the requested `utimes` value by a microsecond.
   Rule: compare the stored timestamp before and after the operation. Encoded in
-  `scripts/__tests__/design-system-tokens.test.ts`.
+  `scripts/__tests__/design-system-tokens.test.ts`. Snapshot contents, timestamp
+  and inode through one open descriptor: separate path-based stat/read calls
+  also trigger CodeQL's filesystem race check in otherwise private fixtures.
 - Symptom: macOS watcher tests passed their assertions but failed the job with
   an uncaught `EPIPE`. Cause: a Git child exited before consuming stdin.
   Rule: handle pipe errors while preserving the child's exit status and stderr;

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, rmSync, utimesSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -463,19 +463,32 @@ describe("Design token preview", () => {
     const output = ".zeros/design-styles/zeros-tokens.css";
     expect(writeTokenPreview(root, output)).toBe(true);
     const file = join(root, output);
-    const first = readFileSync(file, "utf8");
+    // Read each snapshot from one opened file, including its identity: a
+    // rewritten path must not supply metadata for different contents.
+    const snapshot = () => {
+      const descriptor = openSync(file, "r");
+      try {
+        const source = readFileSync(descriptor, "utf8");
+        const { mtimeMs, ino } = fstatSync(descriptor);
+        return { source, mtimeMs, ino };
+      } finally {
+        closeSync(descriptor);
+      }
+    };
+    const first = snapshot().source;
     const past = new Date(Date.now() - 60_000);
     utimesSync(file, past, past);
     // Filesystems round utimes differently; compare the stored timestamp
     // before and after the no-op, not the requested JavaScript precision.
-    const unchangedMtime = statSync(file).mtimeMs;
+    const unchanged = snapshot();
     expect(writeTokenPreview(root, output)).toBe(false);
-    expect(statSync(file).mtimeMs).toBe(unchangedMtime);
+    expect(snapshot()).toEqual(unchanged);
     base.tokens.bg.$value = { colorSpace: "hsl", components: [0, 0, 9] };
     save("base.tokens.json", base);
     expect(writeTokenPreview(root, output)).toBe(true);
-    expect(readFileSync(file, "utf8")).not.toBe(first);
-    expect(readFileSync(file, "utf8")).toContain("--bg: hsl(0 0% 9%);");
+    const changed = snapshot().source;
+    expect(changed).not.toBe(first);
+    expect(changed).toContain("--bg: hsl(0 0% 9%);");
     for (const bad of ["styles/zeros-tokens.css", ".zeros/design-styles/../x.css", ".zeros/design-styles/x.scss", "/tmp/x.css"]) {
       expect(() => writeTokenPreview(root, bad), bad).toThrow(/\.zeros\/design-styles/);
     }
