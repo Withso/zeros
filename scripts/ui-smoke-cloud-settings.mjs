@@ -3,6 +3,12 @@ import { runCloudComputerV2Smoke } from "./ui-smoke-cloud-computer-v2.mjs";
 import { runCloudComputerRefreshSmoke, runCloudComputerSlowRefreshSmoke } from "./ui-smoke-cloud-computer.mjs";
 
 export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseChecksOnly = false }) {
+  if (!releaseChecksOnly) {
+    // Keep the existing default-provider test's browser storage independent.
+    const healthPage = await page.context().browser().newPage();
+    try { await runCloudConnectionHealthSmoke({ page: healthPage, check, harnessBase }); }
+    finally { await healthPage.close(); }
+  }
   page.setDefaultTimeout(15_000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -474,5 +480,97 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
     await runCloudComputerSlowRefreshSmoke({ page: slowPage, check, harnessBase });
   } finally {
     await slowPage.close();
+  }
+}
+
+/** Real Settings and native ceremony consumer; only metadata/IPC transport is
+ * synthetic. No provider material, workspace admission or automatic retry. */
+export async function runCloudConnectionHealthSmoke({ page, check, harnessBase }) {
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+  const selectedId = "66666666-6666-4666-8666-666666666666";
+  const importedId = "77777777-7777-4777-8777-777777777777";
+  for (const theme of ["dark", "light"]) {
+    const imported = { id: importedId, kind: "codex-chatgpt", displayName: "New account", revision: 6, revoked: false, connectionMethod: "account" };
+    const state = {
+      credentials: [{ ...imported, id: selectedId, displayName: "Expired account", revision: 7 }, { ...imported }],
+      connections: [{ provider: "codex", revision: 12, credentialId: selectedId, models: [], connected: false,
+        health: { version: 1, status: "expired", observedAt: "2026-10-15T11:00:00Z",
+          selectedCredentialRevision: 7, credentialRevision: 7, materialVersion: 3,
+          expiresAt: "2026-10-15T10:59:00Z", refresh: "reconnect_required" } }],
+    };
+    const selections = [];
+    const routeMetadata = async route => {
+      const request = route.request(), path = new URL(request.url()).pathname;
+      if (request.method() === "GET" && path === `/v1/organizations/${organizationId}/agent-connections`)
+        return route.fulfill({ json: state });
+      expect(path).toBe(`/v1/organizations/${organizationId}/agent-connections/codex`);
+      expect(request.method()).toBe("PUT");
+      const body = request.postDataJSON();
+      selections.push(body);
+      if (selections.length === 1) {
+        expect(body).toMatchObject({ expectedRevision: 12, credentialId: importedId, credentialRevision: 6 });
+        state.connections[0].revision = 14;
+        state.credentials[1].revision = 8;
+        return route.fulfill({ status: 409, json: { error: { code: "agent_credential_conflict", message: "Synthetic conflict detail" } } });
+      }
+      expect(selections).toHaveLength(2);
+      expect(body).toMatchObject({ expectedRevision: 14, credentialId: importedId, credentialRevision: 8 });
+      state.connections[0] = { ...state.connections[0], revision: 15, credentialId: importedId, connected: true,
+        health: { ...state.connections[0].health, status: "ready", selectedCredentialRevision: 8,
+          credentialRevision: 8, expiresAt: null, refresh: "idle" } };
+      return route.fulfill({ json: { revision: 15 } });
+    };
+    await page.route("https://api.example.test/v1/**", routeMetadata);
+    try {
+      await page.goto(`${harnessBase}/harness-cloud-settings.html`);
+      await page.getByRole("tab", { name: "Codex", exact: true }).click();
+      await page.evaluate(async ({ theme, imported }) => {
+        const { setPrefs } = await import("/apps/desktop/src/renderer/shared/theme/store.ts");
+        setPrefs({ mode: theme });
+        const native = globalThis.window.__ZEROS_NATIVE__, invoke = native.invoke.bind(native);
+        native.invoke = async (command, args) => {
+          const result = await invoke(command, args);
+          return command === "cloud_provider_auth" && args.action === "connect"
+            ? { ...result, state: "connected", credential: imported } : result;
+        };
+      }, { theme, imported });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const oldRow = page.getByText("Expired account", { exact: true }).locator("../..");
+      await expect(oldRow.getByText("Connection expired · Account", { exact: true })).toBeVisible();
+      await expect(oldRow.getByRole("button", { name: "Disconnect", exact: true })).toBeVisible();
+      await expect(page.getByText("Connected · Account", { exact: true })).toHaveCount(0);
+      expect(selections).toHaveLength(0);
+      await oldRow.getByRole("button", { name: "Reconnect", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Codex", exact: true });
+      await expect(dialog.getByLabel("Account name", { exact: true })).toHaveValue("Expired account");
+      await expect(dialog.getByLabel("Connected", { exact: true })).toHaveCount(0);
+      await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+      await expect(page.getByText("Your saved accounts changed. Review the refreshed list, then connect again.", { exact: true })).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Connect", exact: true })).toBeEnabled();
+      await expect(dialog.getByText("New account", { exact: true })).toBeVisible();
+      expect(selections).toHaveLength(1);
+      const nativeConnects = () => page.evaluate(() => globalThis.window.cloudSettingsNativeCalls
+        .filter(row => row.command === "cloud_provider_auth" && row.action === "connect").length);
+      expect(await nativeConnects()).toBe(1);
+      await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByText("Connected · Account", { exact: true })).toBeVisible();
+      expect(selections).toHaveLength(2);
+      expect(await nativeConnects()).toBe(1);
+      delete state.connections[0].health;
+      await page.evaluate(async () => {
+        const { cloudOrganizationConnectionsCache } = await import("/apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts");
+        cloudOrganizationConnectionsCache.invalidateAll();
+      });
+      await expect(page.getByText("Selected · Status unavailable · Account", { exact: true })).toBeVisible();
+      await expect(page.getByText("Connected · Account", { exact: true })).toHaveCount(0);
+      expect(selections).toHaveLength(2);
+      check(`${theme} expired cloud account reconnects once, preserves its import on conflict and retries explicitly with refreshed revisions`, true);
+      expect(errors).toEqual([]);
+    } finally {
+      await page.unroute("https://api.example.test/v1/**", routeMetadata);
+    }
   }
 }

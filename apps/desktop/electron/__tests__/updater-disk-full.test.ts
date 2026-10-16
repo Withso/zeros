@@ -131,4 +131,32 @@ describe("disk-full staging failures", () => {
       kind: "ready",
     });
   });
+
+  it("logs a transient network failure once, as a warning without a stack", () => {
+    expect(updater.isTransientNetworkError(new Error("net::ERR_NETWORK_CHANGED"))).toBe(true);
+    expect(updater.isTransientNetworkError("net::ERR_INTERNET_DISCONNECTED")).toBe(true);
+    expect(
+      updater.isTransientNetworkError(Object.assign(new Error("getaddrinfo"), { code: "ENOTFOUND" })),
+    ).toBe(true);
+    expect(updater.isTransientNetworkError(new Error("HttpError: 404"))).toBe(false);
+    expect(
+      updater.isTransientNetworkError(new Error("x: No space left on device")),
+    ).toBe(false);
+
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const logger = mocks.libraryUpdater.logger as { error(m: unknown): void };
+      logger.error(new Error("net::ERR_NETWORK_CHANGED"));
+      expect(error).not.toHaveBeenCalled();
+      mocks.libraryUpdater.emit("error", new Error("net::ERR_NETWORK_CHANGED"));
+      expect(warn).toHaveBeenCalledTimes(1);
+      // A real failure keeps its full detail at error level.
+      logger.error(new Error("Cannot parse latest-mac.yml"));
+      expect(error).toHaveBeenCalledTimes(1);
+    } finally {
+      error.mockRestore();
+      warn.mockRestore();
+    }
+  });
 });

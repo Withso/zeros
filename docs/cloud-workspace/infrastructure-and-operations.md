@@ -303,6 +303,26 @@ rows, missing bindings, unsupported identities or incomplete proof refuse the
 whole observation with `409/cloud_workspace_retirement_unconfirmed`.
 Missing or foreign authority returns 404. The response is never cached.
 
+After a failed delete, an explicitly accepted fresh DELETE binds the existing
+workspace deletion job to its own intent. Replaying an older key returns that
+intent's retained result and cannot rebind or reset the successor's job. The
+selected intent must still be accepted, match the job and current generation,
+and pass every retirement check. Earlier failed intents remain unchanged audit
+history; they do not independently veto positive proof for a later accepted
+delete. This does not transfer a signed harness receipt to the new request.
+
+If a successor was already accepted before this linkage correction deployed,
+deployment alone does not update the job. Replay its same idempotency key after
+deployment. The compatibility path adopts only a current-generation accepted
+successor whose bound predecessor had already failed before that request began,
+with no third DELETE in that generation. It preserves worker progress and leases.
+Ambiguous history remains unconfirmed; timestamps alone never choose among
+competing requests. Keep the original failed request and every signed failure.
+The guarded operator can reconcile this linkage on replay even if the target
+has since become deleted. That branch changes only the existing job binding;
+it creates no intent or job and never restarts a failed record purge. Record
+purge retry still requires the separate explicit operator mode below.
+
 `compute_retired_storage_pending` requires desired deleted, retired engine and
 runtime access, settled compute leases and reservations, and no pending setup or
 generation transition. Every pending Boat allocation must have its exact
@@ -854,3 +874,36 @@ matrix on an adopted qualified v4 pin before release claims.
 - Provider-validation scripts stay outside shipping application graphs.
 - Add a separate execution-coordinator app only if it becomes independently
   built, deployed, scaled, and operated.
+
+### Temporary control-plane unavailability and finite compute
+
+A running managed allocation retains its already funded provider deadline when
+known transient database failures interrupt reconciliation. Connection loss,
+acquisition exhaustion, PostgreSQL transaction rollback exhaustion and bounded
+lock/statement timeouts classify as `control_plane_unavailable`. This is not
+permission to renew compute, accept new work or retry an ambiguous transaction.
+Only confirmed rollback outcomes (`40001`/`40P01`) receive the existing DB-only
+transaction retry; connection loss may have followed a committed write.
+
+Each new reconciliation observes the same allocation, reservation, generation
+and worker claim before writing. Existing cumulative meter/reservation keys
+make a committed result observable without double charging or replaying a
+provider create, start or renewal. An unavailable authority re-read is unknown;
+a positive revocation or permanent ledger failure still closes authority.
+
+Retry delay remains bounded by the earlier of `funded_until` and
+`provider_expires_at`, reserving the existing five-minute checkpoint window and
+15-second stop margin. A missing DB clock uses the claim's observed server time
+plus monotonic elapsed time, conservatively including the claim round trip.
+A total DB outage cannot commit a new schedule or checkpoint request; the
+provider's original finite deadline remains the final limit, and no funds or
+provider TTL are extended. Once the checkpoint margin is reached, an exact
+claim/generation stop reports control-plane unavailability rather than an
+unspecified safety failure. The stored reason enum stays compatible; the closed
+stop class and compute throw site are additive diagnostic JSON, without raw
+exception text, queries, paths or customer content.
+
+This applies to CP-managed cloud allocations only. Local Personal and
+organization-local engines do not call these services; their offline lifecycle
+and owner switching remain unchanged. It does not change authority tokens,
+WorkOS sessions, idle policy, provider pricing or the native process model.

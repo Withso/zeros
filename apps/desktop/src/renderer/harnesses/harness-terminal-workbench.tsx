@@ -427,6 +427,8 @@ if (cloudFixture) {
   };
 }
 window.__ZEROS_NATIVE__ = {
+  // A local development build, so the "+" menu offers simulators.
+  localDevelopment: true,
   invoke: async <T,>(command: string) =>
     (command === "get_engine_root" ? "/terminal-fixture/ambient" : null) as T,
   on: (name, callback) => {

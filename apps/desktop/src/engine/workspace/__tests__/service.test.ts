@@ -57,6 +57,12 @@ import { MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES } from "../../files/context-graph";
 import { rememberRecognizedDesignDirectories } from "../../design/recognition-store";
 import { withWorkspaceGitMutation } from "../../git/mutation-lock";
 import { firstUseDesignDirectoryNameForRepo } from "../../design/directory";
+import { releaseZerosComputerUse } from "../../agent-control/control-service-client";
+
+vi.mock("../../agent-control/control-service-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../agent-control/control-service-client")>()),
+  releaseZerosComputerUse: vi.fn(async () => false),
+}));
 
 const PNG_1X1_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -249,6 +255,23 @@ describe("WorkspaceService", () => {
       await expect(svc.handle("chats.setComposerMode", { ...params, folder: `${dir}/moved` })).rejects.toThrow("workspace changed");
       await svc.handle("chats.delete", { id: params.chatId });
       await expect(svc.handle("chats.setComposerMode", params)).rejects.toThrow("workspace changed");
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+    }
+  });
+
+  it("gives the Mac back and forgets the chat's app approvals when the conversation is deleted", async () => {
+    const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
+    setZerosDbPathForTesting(path.join(stateDir, "delete-computer-use.db"));
+    try {
+      vi.mocked(releaseZerosComputerUse).mockClear();
+      await svc.handle("chats.upsert", { chat: { id: "computer-chat", folder: dir } });
+      await svc.handle("chats.delete", { id: "computer-chat" });
+      expect(releaseZerosComputerUse).toHaveBeenCalledWith(
+        { workspaceId: LOCAL_MAIN_WORKSPACE_ID, conversationId: "computer-chat" },
+        "retire",
+      );
     } finally {
       closeZerosDb();
       setZerosDbPathForTesting(null);

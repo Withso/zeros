@@ -111,7 +111,11 @@ describe("native Codex tool presentation", () => {
       appId: "com.apple.Calculator",
     });
     expect(browserToolActivity(tool)).toBeNull();
-    expect(groupBrowserToolActivity([tool])[0]?.kind).toBe("event");
+    expect(groupBrowserToolActivity([tool])[0]).toMatchObject({
+      kind: "browser-activity",
+      surface: "computer",
+      actions: [{ appId: "com.apple.Calculator", surface: "computer" }],
+    });
   });
   it("reads the provider raw envelope and rejects non-web screenshot URLs", () => {
     const tool = call({

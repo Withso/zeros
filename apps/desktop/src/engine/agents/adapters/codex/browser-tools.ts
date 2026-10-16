@@ -18,6 +18,9 @@ import type { CodexUserInput } from "./app-server";
  * with it inside one merged thread config. */
 export const BROWSER_PLUGIN_ID = "browser@openai-bundled";
 const MAX_BROWSER_CLIENT_BYTES = 16 * 1024 * 1024;
+const MAX_BROWSER_SERVICE_BYTES = 64 * 1024 * 1024;
+const BROWSER_INSTRUCTIONS =
+  "Control the in-app browser in conjunction with the Browser Plugin.";
 
 /** The official macOS Browser helper applies its own Seatbelt profile. A
  * process that already carries the optional deny-bearing kernel profile cannot
@@ -51,6 +54,19 @@ export interface CodexNativeBrowserSkill {
   path: string;
 }
 
+/** Why no Browser runtime was registered. Only the plugin-* codes describe an
+ * installed OpenAI plugin that Zeros could not use; the others mean ChatGPT or
+ * Codex Desktop is simply absent. */
+export type CodexNativeBrowserUnavailable =
+  | { code: "codex-cli-missing" }
+  | { code: "runtime-missing" }
+  | { code: "plugin-missing" }
+  | {
+      code: "plugin-incomplete" | "plugin-unsupported";
+      version: string;
+      detail: string;
+    };
+
 export interface ResolveCodexNativeBrowserRuntimeOptions {
   runtimeRoots?: readonly string[];
   pluginRoots?: readonly string[];
@@ -59,6 +75,8 @@ export interface ResolveCodexNativeBrowserRuntimeOptions {
   platform?: NodeJS.Platform;
   arch?: string;
   env?: Record<string, string | undefined>;
+  /** Receives the reason once when the result is null. */
+  onUnavailable?: (reason: CodexNativeBrowserUnavailable) => void;
 }
 
 /** The official Codex Browser plugin is the only browser surface exposed to
@@ -81,6 +99,10 @@ export function codexBrowserThreadConfig(
 export async function resolveCodexNativeBrowserRuntime(
   options: ResolveCodexNativeBrowserRuntimeOptions = {},
 ): Promise<CodexNativeBrowserRuntime | null> {
+  const unavailable = (reason: CodexNativeBrowserUnavailable): null => {
+    options.onUnavailable?.(reason);
+    return null;
+  };
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   const env = options.env ?? process.env;
@@ -91,9 +113,11 @@ export async function resolveCodexNativeBrowserRuntime(
   );
   const codexCliPath =
     options.codexCliPath?.trim() || env.ZEROS_CODEX_CLI_PATH?.trim();
-  if (!codexCliPath || !isAbsolute(codexCliPath)) return null;
+  if (!codexCliPath || !isAbsolute(codexCliPath)) {
+    return unavailable({ code: "codex-cli-missing" });
+  }
   const trustedCodexCli = await regularFile(codexCliPath);
-  if (!trustedCodexCli) return null;
+  if (!trustedCodexCli) return unavailable({ code: "codex-cli-missing" });
 
   const runtimeRoots = options.runtimeRoots
     ? [...options.runtimeRoots]
@@ -102,48 +126,100 @@ export async function resolveCodexNativeBrowserRuntime(
     ? [...options.pluginRoots]
     : await defaultBrowserPluginRoots(codexHome, env);
 
+  let runtime: Awaited<ReturnType<typeof inspectRuntime>> = null;
   for (const runtimeCandidate of runtimeRoots) {
-    const runtime = await inspectRuntime(runtimeCandidate, platform, arch);
-    if (!runtime) continue;
-    for (const pluginCandidate of pluginRoots) {
-      const plugin = await inspectBrowserPlugin(pluginCandidate);
-      if (!plugin) continue;
-      return {
-        pluginId: BROWSER_PLUGIN_ID,
-        pluginRoot: plugin.root,
-        browserSkill: {
-          name: "control-in-app-browser",
-          path: plugin.browserSkillPath,
-        },
-        mcpServer: {
-          name: "node_repl",
-          transport: "stdio",
-          command: runtime.nodeReplPath,
-          args: [],
-          startupTimeoutSec: 120,
-          env: {
-            BROWSER_USE_AVAILABLE_BACKENDS: "iab",
-            BROWSER_USE_CODEX_APP_BUILD_FLAVOR: "prod",
-            BROWSER_USE_CODEX_APP_VERSION: plugin.version,
-            CODEX_CLI_PATH: trustedCodexCli,
-            CODEX_HOME: codexHome,
-            NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS: "1000",
-            NODE_REPL_NODE_MODULE_DIRS: runtime.nodeModulesPath,
-            NODE_REPL_NODE_PATH: runtime.nodePath,
-            NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S:
-              plugin.browserClientSha256,
-            NODE_REPL_TRUSTED_CODE_PATHS: [
-              codexHome,
-              runtime.nodeModulesPath,
-            ].join(delimiter),
-            NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER:
-              "Control the in-app browser in conjunction with the Browser Plugin.",
-          },
-        },
-      };
-    }
+    runtime = await inspectRuntime(runtimeCandidate, platform, arch);
+    if (runtime) break;
   }
-  return null;
+  if (!runtime) return unavailable({ code: "runtime-missing" });
+
+  let firstProblem: CodexNativeBrowserUnavailable | undefined;
+  for (const pluginCandidate of pluginRoots) {
+    const inspection = await inspectBrowserPlugin(pluginCandidate);
+    if (inspection.kind === "missing") continue;
+    if (inspection.kind !== "ready") {
+      firstProblem ??= {
+        code:
+          inspection.kind === "incomplete"
+            ? "plugin-incomplete"
+            : "plugin-unsupported",
+        version: inspection.version,
+        detail: inspection.detail,
+      };
+      continue;
+    }
+    const plugin = inspection.plugin;
+    return {
+      pluginId: BROWSER_PLUGIN_ID,
+      pluginRoot: plugin.root,
+      browserSkill: {
+        name: "control-in-app-browser",
+        path: plugin.browserSkillPath,
+      },
+      mcpServer: {
+        name: "node_repl",
+        transport: "stdio",
+        command: runtime.nodeReplPath,
+        args: [],
+        startupTimeoutSec: 120,
+        env: await nodeReplBrowserEnv({
+          codexCliPath: trustedCodexCli,
+          codexHome,
+          plugin,
+          runtime,
+        }),
+      },
+    };
+  }
+  return unavailable(firstProblem ?? { code: "plugin-missing" });
+}
+
+/** The 26.803 plugin ran its client in the kernel and node_repl pinned that
+ * client by hash. From 26.1007 the client calls nodeRepl.rpc("browser"), which
+ * node_repl only defines when NODE_REPL_TRUSTED_SERVICES names a service; its
+ * trusted host then imports the service only from NODE_REPL_TRUSTED_CODE_PATHS.
+ * The values mirror what ChatGPT Desktop passes for its own Browser. */
+async function nodeReplBrowserEnv(options: {
+  codexCliPath: string;
+  codexHome: string;
+  plugin: BrowserPlugin;
+  runtime: NonNullable<Awaited<ReturnType<typeof inspectRuntime>>>;
+}): Promise<Record<string, string>> {
+  const { codexHome, plugin, runtime } = options;
+  const trustedCodePaths = [codexHome, runtime.nodeModulesPath];
+  const common = {
+    BROWSER_USE_AVAILABLE_BACKENDS: "iab",
+    BROWSER_USE_CODEX_APP_BUILD_FLAVOR: "prod",
+    BROWSER_USE_CODEX_APP_VERSION: plugin.version,
+    CODEX_CLI_PATH: options.codexCliPath,
+    CODEX_HOME: codexHome,
+    NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS: "1000",
+    NODE_REPL_NODE_MODULE_DIRS: runtime.nodeModulesPath,
+    NODE_REPL_NODE_PATH: runtime.nodePath,
+    NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER: BROWSER_INSTRUCTIONS,
+  };
+  if (plugin.trust.kind === "client-sha256") {
+    return {
+      ...common,
+      NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S: plugin.trust.sha256,
+      NODE_REPL_TRUSTED_CODE_PATHS: trustedCodePaths.join(delimiter),
+    };
+  }
+  // Plugin roots are realpaths; CODEX_HOME may still be spelled through a
+  // symlink, so compare against both spellings before widening trust.
+  const realCodexHome = await directory(codexHome);
+  const covered = [...trustedCodePaths, realCodexHome].some(
+    (root) => root && (root === plugin.root || isInside(root, plugin.root)),
+  );
+  if (!covered) trustedCodePaths.push(plugin.root);
+  return {
+    ...common,
+    BROWSER_USE_TINYSKY_ENABLED: "0",
+    NODE_REPL_TRUSTED_CODE_PATHS: trustedCodePaths.join(delimiter),
+    NODE_REPL_TRUSTED_SERVICES: JSON.stringify({
+      browser: plugin.trust.servicePath,
+    }),
+  };
 }
 
 /** `node_repl` is an official Codex MCP dependency, but its name is also a
@@ -294,14 +370,25 @@ function runtimeManifestPath(
     : fallback;
 }
 
-async function inspectBrowserPlugin(candidate: string): Promise<{
-  browserClientSha256: string;
+interface BrowserPlugin {
   browserSkillPath: string;
   root: string;
+  trust:
+    | { kind: "client-sha256"; sha256: string }
+    | { kind: "service"; servicePath: string };
   version: string;
-} | null> {
+}
+
+type BrowserPluginInspection =
+  | { kind: "missing" }
+  | { kind: "incomplete" | "unsupported"; version: string; detail: string }
+  | { kind: "ready"; plugin: BrowserPlugin };
+
+async function inspectBrowserPlugin(
+  candidate: string,
+): Promise<BrowserPluginInspection> {
   const root = await directory(candidate);
-  if (!root) return null;
+  if (!root) return { kind: "missing" };
   const manifest = await readJsonObject(
     join(root, ".codex-plugin", "plugin.json"),
   );
@@ -318,29 +405,100 @@ async function inspectBrowserPlugin(candidate: string): Promise<{
     manifest.version.length === 0 ||
     manifest.version.length > 128
   ) {
-    return null;
+    return { kind: "missing" };
   }
+  const version = manifest.version;
+  const incomplete = (detail: string): BrowserPluginInspection => ({
+    kind: "incomplete",
+    version,
+    detail,
+  });
   const browserClientPath = await regularFileInside(
     root,
     join(root, "scripts", "browser-client.mjs"),
   );
-  if (!browserClientPath) return null;
+  if (!browserClientPath) {
+    return incomplete("scripts/browser-client.mjs is missing");
+  }
   const browserSkillPath = await regularFileInside(
     root,
     join(root, "skills", "control-in-app-browser", "SKILL.md"),
   );
-  if (!browserSkillPath) return null;
-  const source = await readCappedFile(
+  if (!browserSkillPath) {
+    return incomplete("skills/control-in-app-browser/SKILL.md is missing");
+  }
+  const client = await readCappedFile(
     browserClientPath,
     MAX_BROWSER_CLIENT_BYTES,
   );
-  if (!source) return null;
-  return {
+  if (!client) {
+    return incomplete("scripts/browser-client.mjs could not be read");
+  }
+  const servicePath = await regularFileInside(
     root,
-    version: manifest.version,
-    browserSkillPath,
-    browserClientSha256: createHash("sha256").update(source).digest("hex"),
+    join(root, "scripts", "browser-service.mjs"),
+  );
+  if (servicePath) {
+    const service = await readCappedFile(
+      servicePath,
+      MAX_BROWSER_SERVICE_BYTES,
+    );
+    if (!service) {
+      return incomplete("scripts/browser-service.mjs could not be read");
+    }
+    if (!exportsHandleRpc(service.toString("utf8"))) {
+      return {
+        kind: "unsupported",
+        version,
+        detail: "scripts/browser-service.mjs does not export handleRpc",
+      };
+    }
+    return {
+      kind: "ready",
+      plugin: {
+        root,
+        version,
+        browserSkillPath,
+        trust: { kind: "service", servicePath },
+      },
+    };
+  }
+  if (clientNeedsTrustedService(client.toString("utf8"))) {
+    return incomplete(
+      "scripts/browser-client.mjs needs scripts/browser-service.mjs, which is missing",
+    );
+  }
+  return {
+    kind: "ready",
+    plugin: {
+      root,
+      version,
+      browserSkillPath,
+      trust: {
+        kind: "client-sha256",
+        sha256: createHash("sha256").update(client).digest("hex"),
+      },
+    },
   };
+}
+
+/** node_repl's trusted host rejects a service module without this export. */
+function exportsHandleRpc(source: string): boolean {
+  return (
+    /\bexport\s*\{[^}]*?\b(?:[\w$]+\s+as\s+)?handleRpc\s*[,}]/.test(source) ||
+    /\bexport\s+(?:async\s+)?(?:function\s*\*?|const|let|var)\s*handleRpc\b/.test(
+      source,
+    )
+  );
+}
+
+/** A client that reaches its service over nodeRepl.rpc cannot run on the
+ * hash-pinned contract, so its missing service must fail closed. */
+function clientNeedsTrustedService(source: string): boolean {
+  return (
+    source.includes("trusted Node REPL browser service") ||
+    /\.rpc\s*!==?\s*["']function["']/.test(source)
+  );
 }
 
 const CODEX_BROWSER_SKILL_MARKER = "$control-in-app-browser";
@@ -455,7 +613,7 @@ async function readJsonObject(
  *
  * The size guard and the bytes we return have to describe the same inode.
  * Checking with stat() and then reading the path again leaves a window where the
- * plugin cache can swap the file, so the hash we pin into
+ * plugin cache can swap the file, so the hash we pin into the legacy
  * NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S would cover bytes that never passed
  * the cap. Opening once and asking the handle closes it: the fstat and the read
  * both follow the descriptor, whatever the path points at afterwards.

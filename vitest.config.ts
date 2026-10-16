@@ -20,12 +20,18 @@ export default defineConfig({
       // Design workspaces: portable document parsing, lint, and MCP contracts.
       "apps/desktop/src/engine/design/__tests__/**/*.test.ts",
       "apps/desktop/src/engine/agents/**/__tests__/**/*.test.ts",
+      // Zeros-owned browser, computer and simulator tools for every agent.
+      "apps/desktop/src/engine/agent-control/__tests__/**/*.test.ts",
       "apps/desktop/src/renderer/state/__tests__/**/*.test.ts",
       // Native renderer boundary parsers (pure validation, no Electron host).
       "apps/desktop/src/renderer/platform/__tests__/**/*.test.ts",
       // Pure-function @-mention helpers (fuzzy file/folder ranking).
       "apps/desktop/src/renderer/features/agent/__tests__/**/*.test.ts",
       "apps/desktop/src/renderer/features/browser/__tests__/**/*.test.ts",
+      // Agent control chrome shared by the browser, computer use and simulators.
+      "apps/desktop/src/renderer/features/agent-control/__tests__/**/*.test.ts",
+      // Simulator tabs: hub mirror, idle toasts, live-view geometry and input.
+      "apps/desktop/src/renderer/features/simulators/__tests__/**/*.test.ts",
       "apps/desktop/src/renderer/features/update/__tests__/**/*.test.ts",
       // Feature-owned renderer helpers and interaction contracts.
       "apps/desktop/src/renderer/features/agent-extensions/__tests__/**/*.test.ts",

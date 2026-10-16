@@ -5,9 +5,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { CircleStop, Globe2, Maximize2, Minus } from "lucide-react";
+import { Globe2, Maximize2, Minus } from "lucide-react";
 
 import { nativeInvoke } from "../../platform/runtime";
+import { AgentControlBar } from "../agent-control/agent-control-bar";
 import { useAgentSessions } from "../agent/sessions-hooks";
 import { useWorkspaceStore } from "../../state/store";
 import { workbenchScopeForFolder } from "../../state/workspace-store";
@@ -406,65 +407,57 @@ export function BrowserAgentPictureInPicture({
         }
       }}
     >
-      <div
-        className={[
-          "border-border1 bg-bg1/95 absolute inset-x-0 top-0 z-10 flex h-7 items-center gap-1.5 border-b px-2 text-left backdrop-blur-sm transition-opacity duration-150",
-          chromeVisible ? "opacity-100" : "pointer-events-none opacity-0",
-        ].join(" ")}
+      <AgentControlBar
+        variant="strip"
+        className="absolute inset-x-0 top-0 z-1"
+        visible={chromeVisible}
         data-testid="browser-agent-pip-toolbar"
-      >
-        {activity?.faviconDataUrl ? (
-          <img
-            src={activity.faviconDataUrl}
-            alt=""
-            className="size-3 shrink-0 rounded-[2px]"
-          />
-        ) : (
-          <Globe2 className="text-fg2 size-3 shrink-0" aria-hidden="true" />
-        )}
-        <span
-          className="text-fg1 text-2xxs min-w-0 flex-1 truncate text-left"
-          title={pipTitle}
-        >
-          {pipTitle}
-        </span>
-        <IconButton
-          type="button"
-          motion="none"
-          className="pointer-events-auto"
-          disabled={stopping}
-          onClick={(event) => {
-            event.stopPropagation();
-            if (!browserSessionId || !activeChatId || stopping) return;
-            setStopping(true);
-            void sessions
-              .stopBrowserUse(activeChatId, browserSessionId)
-              .catch(() => undefined)
-              .finally(() => setStopping(false));
-          }}
-          label="Stop agent browser work"
-        >
-          <CircleStop className="size-3" aria-hidden="true" />
-        </IconButton>
-        <IconButton
-          type="button"
-          motion="none"
-          className="pointer-events-auto"
-          onClick={() => setHiddenSessionId(browserSessionId ?? null)}
-          label="Hide browser picture in picture"
-        >
-          <Minus className="size-3" aria-hidden="true" />
-        </IconButton>
-        <IconButton
-          type="button"
-          motion="none"
-          className="pointer-events-auto"
-          onClick={restoreBrowser}
-          label="Restore browser column"
-        >
-          <Maximize2 className="size-3" aria-hidden="true" />
-        </IconButton>
-      </div>
+        leading={
+          activity?.faviconDataUrl ? (
+            <img
+              src={activity.faviconDataUrl}
+              alt=""
+              className="size-3 shrink-0 rounded-[2px]"
+            />
+          ) : (
+            <Globe2 className="text-fg2 size-3 shrink-0" aria-hidden="true" />
+          )
+        }
+        title={pipTitle}
+        stopLabel="Stop agent browser work"
+        stopping={stopping}
+        escapeHint
+        onStop={() => {
+          if (!browserSessionId || !activeChatId) return;
+          setStopping(true);
+          void sessions
+            .stopBrowserUse(activeChatId, browserSessionId)
+            .catch(() => undefined)
+            .finally(() => setStopping(false));
+        }}
+        actions={
+          <>
+            <IconButton
+              type="button"
+              motion="none"
+              className="pointer-events-auto"
+              onClick={() => setHiddenSessionId(browserSessionId ?? null)}
+              label="Hide browser picture in picture"
+            >
+              <Minus className="size-3" aria-hidden="true" />
+            </IconButton>
+            <IconButton
+              type="button"
+              motion="none"
+              className="pointer-events-auto"
+              onClick={restoreBrowser}
+              label="Restore browser column"
+            >
+              <Maximize2 className="size-3" aria-hidden="true" />
+            </IconButton>
+          </>
+        }
+      />
       <div ref={hostRef} className="bg-bg1 absolute inset-0">
         {parked && capture ? (
           <img

@@ -11,6 +11,8 @@
 // provenance is what renders "Inherited from User" in the repo settings UI.
 // ──────────────────────────────────────────────────────────
 
+import { DEFAULT_COMPUTER_BLOCKED_APPS } from "@zeros/protocol/computer-use-tools";
+import { DEFAULT_SIMULATOR_SETTINGS } from "@zeros/protocol/simulators";
 import {
   sanitizeLayer,
   type RawSettingsDoc,
@@ -31,14 +33,25 @@ export const DEFAULT_SETTINGS: RawSettingsDoc = {
   browser: {
     enabled: true,
     codex_enabled: true,
+    codex_native: true,
     // External Chrome shares the user's signed-in browser profile. Unlike the
     // isolated Codex host, it is opt-in until the user explicitly enables it.
     claude_enabled: false,
+    in_app_enabled: true,
     provider: "isolated",
     auto_open: true,
     show_agent_cursor: true,
     navigation_approval: "always-ask",
   },
+  computer_use: {
+    // Controlling Mac apps needs Accessibility and Screen Recording grants,
+    // so Zeros computer use stays off until the user turns it on.
+    enabled: false,
+    codex_native: true,
+    show_agent_cursor: true,
+    blocked_apps: [...DEFAULT_COMPUTER_BLOCKED_APPS],
+  },
+  simulators: { ...DEFAULT_SIMULATOR_SETTINGS },
 };
 
 export interface SettingsLayers {
@@ -179,10 +192,10 @@ export function resolveSettings(layers: SettingsLayers): ResolvedSettings {
 }
 
 /** `browser.enabled` was the original isolated-browser switch. It remains a
- * compatibility fallback for Codex and a fail-closed master disable for both
- * providers, but a legacy true value must not silently opt users into Claude's
- * external signed-in Chrome profile. Provider-specific leaves otherwise win at
- * the same or a stronger layer. */
+ * compatibility fallback for Codex and a fail-closed master disable for every
+ * agent, but a legacy true value must not silently opt users into Claude's
+ * external signed-in Chrome profile or undo a stronger in-app opt-out.
+ * Provider-specific leaves otherwise win at the same or a stronger layer. */
 function materializeBrowserProviderSettings(
   effective: RawSettingsDoc,
   sources: Record<string, SettingsLayerName>,
@@ -196,7 +209,11 @@ function materializeBrowserProviderSettings(
     legacySource === undefined ? -1 : (ranks.get(legacySource) ?? -1);
   const legacyValue = browser.enabled !== false;
 
-  for (const key of ["codex_enabled", "claude_enabled"] as const) {
+  for (const key of [
+    "codex_enabled",
+    "claude_enabled",
+    "in_app_enabled",
+  ] as const) {
     const path = `browser.${key}`;
     const providerSource = sources[path];
     const providerRank =
@@ -204,7 +221,7 @@ function materializeBrowserProviderSettings(
     if (providerRank >= legacyRank && typeof browser[key] === "boolean") {
       continue;
     }
-    if (key === "claude_enabled" && legacyValue) continue;
+    if (key !== "codex_enabled" && legacyValue) continue;
     browser[key] = legacyValue;
     if (legacySource) sources[path] = legacySource;
   }

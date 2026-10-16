@@ -10,6 +10,7 @@ import type { Fixture } from "./config";
 import { ZerosDevError } from "./errors";
 import { acquireRunLock } from "./run-lock";
 import { DeletionRetirementSchema } from "./cleanup-contract";
+import { CleanupRecoveryReferenceSchema, recoveryMatchesRun } from "./cleanup-recovery-contract";
 
 const uuid=z.string().uuid(),digest=z.string().regex(/^[a-f0-9]{64}$/),positive=z.number().int().positive().safe();
 export const SourceSchema=z.object({revision:z.string().regex(/^[a-f0-9]{40}$/).nullable(),dirty:z.boolean()}).strict();
@@ -33,7 +34,10 @@ export const RunSchema=z.object({
   retirement:DeletionRetirementSchema.optional(),
   cleanupOnly:z.object({handoffSha256:digest,sourceRunSha256:digest}).strict().optional(),
   hourly:HourlySchema.optional(),
+  cleanupRecovery:CleanupRecoveryReferenceSchema.optional(),
 }).strict().superRefine((run,context)=>{
+  if(run.cleanupRecovery&&!recoveryMatchesRun(run,run.cleanupRecovery))
+    context.addIssue({code:"custom",message:"Cleanup recovery binding is inconsistent"});
   const infrastructure=run.hourly?.infrastructure,intent=infrastructure?.intent;
   if(!infrastructure)return;
   if(run.prompts.length||intent&&(intent.runId!==run.runId||intent.fixtureSha256!==run.fixtureSha256||

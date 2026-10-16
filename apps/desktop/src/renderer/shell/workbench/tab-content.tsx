@@ -14,6 +14,7 @@ import { useSourceTarget } from "./tabs/changes-tab";
 import { useChangesFilter } from "./tabs/changes-filter-store";
 import { scopeIdentity } from "./tabs/changes-scope";
 import { CloudHistoryNotice } from "../pr/cloud-history-notice";
+import { SimulatorTab } from "../../features/simulators/simulator-tab";
 import type { Workspace } from "../../platform/git";
 
 interface TabBodyProps {
@@ -36,6 +37,7 @@ const TAB_BODY_MAP: Record<
   review: ReviewSurface,
   browser: BrowserTab,
   files: FilesTab,
+  simulator: SimulatorTab,
 };
 
 function TabContentFrame({
@@ -91,6 +93,7 @@ const TAB_CONTENT_MAP: Record<
   design: TabContentFrame,
   browser: TabContentFrame,
   terminal: TabContentFrame,
+  simulator: TabContentFrame,
 };
 
 export function WorkbenchTabContent(props: TabBodyProps) {

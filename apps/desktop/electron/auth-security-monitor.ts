@@ -64,7 +64,28 @@ type SecurityEvent = {
   createdAt: string;
 };
 
-type MonitorLogger = Pick<Console, "warn" | "error">;
+type MonitorLogger = Pick<Console, "warn" | "error"> &
+  Partial<Pick<Console, "log">>;
+
+/** How a closed security stream is reported. A long-lived stream dropped by
+ * the network (sleep, a Wi-Fi or VPN change) surfaces from fetch as a
+ * TypeError and reconnects with backoff: an ordinary event, not a warning. */
+export function securityStreamEndLog(error: unknown): {
+  level: "log" | "warn";
+  message: string;
+} {
+  if (error instanceof TypeError)
+    return {
+      level: "log",
+      message: "[auth-security] stream interrupted by the network; reconnecting",
+    };
+  return {
+    level: "warn",
+    message: `[auth-security] stream ended: ${
+      error instanceof Error ? error.name : "unknown"
+    }`,
+  };
+}
 
 export type WorkOSDesktopSecurityMonitorOptions = {
   baseUrl: string;
@@ -567,11 +588,10 @@ export class WorkOSDesktopSecurityMonitor {
     )
       .catch((error) => {
         if (!controller.signal.aborted) {
-          this.logger.warn(
-            `[auth-security] stream ended: ${
-              error instanceof Error ? error.name : "unknown"
-            }`,
-          );
+          const ended = securityStreamEndLog(error);
+          if (ended.level === "log" && this.logger.log)
+            this.logger.log(ended.message);
+          else this.logger.warn(ended.message);
         }
       })
       .finally(() => {

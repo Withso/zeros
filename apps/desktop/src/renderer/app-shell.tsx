@@ -73,9 +73,20 @@ import { useShortcutsHotkey } from "./shell/use-shortcuts-hotkey";
 import { ShortcutsPalette } from "./shell/shortcuts-palette";
 import { FeedbackDialog } from "./shell/dialogs/feedback-dialog";
 import { onFeedbackDialogRequest } from "./shell/feedback-controller";
-import { onWorkbenchCollapseRequest } from "./shell/workbench/workbench-visibility-controller";
+import {
+  nextWorkbenchColumnState,
+  onWorkbenchCollapseRequest,
+  onWorkbenchRestoreRequest,
+  persistedWorkbenchCollapsed,
+  type WorkbenchColumnEvent,
+  type WorkbenchColumnState,
+} from "./shell/workbench/workbench-visibility-controller";
 import { isFeedbackConfigured } from "./features/feedback/submit-feedback";
 import { BrowserConfirmationController } from "./features/browser/browser-confirmation-controller";
+import { AgentControlConfirmationController } from "./features/agent-control/agent-control-confirmation-controller";
+import { ComputerUseController } from "./features/agent-control/computer-use-controller";
+import { SimulatorController } from "./features/simulators/simulator-controller";
+import { SimulatorAgentController } from "./features/simulators/simulator-agent-controller";
 import { BrowserSessionController } from "./features/browser/browser-session-controller";
 import { BrowserAgentPictureInPicture } from "./features/browser/browser-agent-picture-in-picture";
 import { AppSidebar } from "./shell/app-sidebar";
@@ -813,35 +824,43 @@ function ShellRouter() {
   // welcome surfaces always opened with workbench hidden — confusing.
   // Now: only the user's explicit toggle (window-chrome icon or
   // ⌥⌘B shortcut) drives the collapse, and it applies universally.
-  const [workbenchCollapsed, setWorkbenchCollapsed] = React.useState<boolean>(
-    () => getSetting<boolean>(WORKBENCH_COLLAPSED_KEY, false),
+  const [workbenchColumn, setWorkbenchColumn] = React.useState<WorkbenchColumnState>(
+    () => ({
+      collapsed: getSetting<boolean>(WORKBENCH_COLLAPSED_KEY, false),
+      hiddenByFloat: false,
+    }),
   );
-  const toggleWorkbench = React.useCallback(() => {
-    if (!workspaceToolsAvailable) return;
-    setWorkbenchCollapsed((prev) => {
-      const next = !prev;
-      setSetting(WORKBENCH_COLLAPSED_KEY, next);
-      return next;
-    });
-  }, [workspaceToolsAvailable]);
-  const revealWorkbench = React.useCallback(() => {
-    if (!workspaceToolsAvailable) return;
-    setWorkbenchCollapsed((previous) => {
-      if (!previous) return previous;
-      setSetting(WORKBENCH_COLLAPSED_KEY, false);
-      return false;
-    });
-  }, [workspaceToolsAvailable]);
-  // Floating a Browser preview over the chat hides the column it came from.
-  const collapseWorkbench = React.useCallback(() => {
-    if (!workspaceToolsAvailable) return;
-    setWorkbenchCollapsed((previous) => {
-      if (previous) return previous;
-      setSetting(WORKBENCH_COLLAPSED_KEY, true);
-      return true;
-    });
-  }, [workspaceToolsAvailable]);
-  React.useEffect(() => onWorkbenchCollapseRequest(collapseWorkbench), [collapseWorkbench]);
+  const workbenchCollapsed = workbenchColumn.collapsed;
+  const updateWorkbenchColumn = React.useCallback(
+    (event: WorkbenchColumnEvent) => {
+      if (!workspaceToolsAvailable) return;
+      setWorkbenchColumn((previous) => {
+        const next = nextWorkbenchColumnState(previous, event);
+        if (next === previous) return previous;
+        setSetting(WORKBENCH_COLLAPSED_KEY, persistedWorkbenchCollapsed(next));
+        return next;
+      });
+    },
+    [workspaceToolsAvailable],
+  );
+  const toggleWorkbench = React.useCallback(
+    () => updateWorkbenchColumn("toggle"),
+    [updateWorkbenchColumn],
+  );
+  const revealWorkbench = React.useCallback(
+    () => updateWorkbenchColumn("reveal"),
+    [updateWorkbenchColumn],
+  );
+  // Floating a Browser preview over the chat hides the column it came from;
+  // closing the last float brings it back unless the user changed it since.
+  React.useEffect(
+    () => onWorkbenchCollapseRequest(() => updateWorkbenchColumn("float")),
+    [updateWorkbenchColumn],
+  );
+  React.useEffect(
+    () => onWorkbenchRestoreRequest(() => updateWorkbenchColumn("floats-closed")),
+    [updateWorkbenchColumn],
+  );
 
   // ⌥⌘B anywhere toggles Workbench. Skipped inside editable surfaces so
   // we don't steal from native text-input bindings (if any use ⌥⌘B).
@@ -947,6 +966,7 @@ function ShellRouter() {
         onRevealBrowser={revealWorkbench}
         workbenchCollapsed={workbenchCollapsed}
       />
+      <SimulatorAgentController onRevealWorkbench={revealWorkbench} />
       <BrowserAgentPictureInPicture
         visible={workspaceToolsAvailable && workbenchCollapsed}
         onRestore={revealWorkbench}
@@ -1267,6 +1287,9 @@ export function AppShellBody() {
           <CloudWorkspaceLifecycle />
           <ChatUnreadTracking />
           <BrowserConfirmationController />
+          <AgentControlConfirmationController />
+          <ComputerUseController />
+          <SimulatorController />
           <ShellRouter />
         </AgentSessionsProvider>
       </BridgeProvider>

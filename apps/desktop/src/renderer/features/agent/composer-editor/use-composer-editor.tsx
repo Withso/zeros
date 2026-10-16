@@ -9,7 +9,8 @@
 //   • the @/slash/# Suggestion bridge wired to the EXISTING filters via refs
 //     (editor is created once, yet always sees current files/commands/PRs)
 //   • the attachment side store (bytes by id; nodes reference by id)
-//   • drag-drop / paste / file-pick → inline attachment pills at the caret
+//   • drag-drop / paste / file-pick → inline attachment pills at the caret,
+//     with a video's key frames and timeline text joining it once read
 //   • the image-preview lightbox
 //   • serialize() → { displayText, segments, attachments, json } for submit,
 //     drafts, and the inline sent-bubble
@@ -35,6 +36,7 @@ import Document from "@tiptap/extension-document";
 import Paragraph from "@tiptap/extension-paragraph";
 import Text from "@tiptap/extension-text";
 import { Placeholder, UndoRedo } from "@tiptap/extensions";
+import { closeHistory } from "@tiptap/pm/history";
 import { X as XIcon } from "lucide-react";
 
 import { Tooltip } from "@/renderer/shared/ui/primitives";
@@ -58,7 +60,11 @@ import {
   collectAttachmentIds,
   collectSourceKeys,
   findAttachmentsBySourceKey,
+  positionAfterAttachment,
 } from "./attachment-keys";
+import { isVideoFile } from "./video-key-frames";
+import { videoContextFiles } from "./video-context-files";
+import { isAgentControlFeatureActive } from "../../settings/agent-control-rollout";
 import {
   executeGraphSync,
   planGraphSync,
@@ -168,8 +174,16 @@ export interface ComposerEditorApi {
   isEmpty: boolean;
   /** Snapshot the editor for submit / draft. Null before the editor mounts. */
   serialize: () => ComposerSerialized | null;
-  /** Stage files (paste/drop/pick) as inline attachment pills at the caret. */
+  /** Stage files (paste/drop/pick) as inline attachment pills at the caret.
+   *  A video's key frames and timeline text follow it once they are read. */
   insertFiles: (files: FileList | File[] | null | undefined) => Promise<void>;
+  /** True while a video in the document is still having its key frames
+   *  read. A send waits for them (waitForAttachmentReads) so they go with
+   *  the video instead of landing in the next message. */
+  hasPendingAttachmentReads: () => boolean;
+  /** Resolves once every video still in the document has its key frames
+   *  and timeline beside it, or turned out to have none. */
+  waitForAttachmentReads: () => Promise<void>;
   /** Stage a SYNTHESIZED text attachment (a chat transcript) under a
    *  caller-owned key, replacing anything already staged under that key — so
    *  switching a transcript from concise to full swaps the chip instead of
@@ -247,6 +261,42 @@ export function removeBySourceKey(ed: Editor, sourceKey: string): boolean {
   // Already sorted highest-position-first — see findAttachmentsBySourceKey.
   for (const hit of hits) tr.delete(hit.from, hit.to);
   ed.view.dispatch(tr);
+  return true;
+}
+
+/** Put `attachments` just after `besideId`'s node, each with its separator
+ *  space, for files that arrive after the one they belong with (a video's
+ *  key frames). The caret maps through the insert, so typing since the drop
+ *  stays whole. Always its own undo step, however soon it follows the drop
+ *  or precedes more typing: ⌘Z takes the additions back and keeps the
+ *  video. False once that node has left the document.
+ *
+ *  Like removeBySourceKey, the side store must already hold the bytes:
+ *  onUpdate stages the new nodes during this dispatch. Exported for the
+ *  test, which drives it against a real EditorState + history plugin. */
+export function insertAttachmentsAfter(
+  ed: Editor,
+  besideId: string,
+  attachments: readonly ComposerAttachment[],
+): boolean {
+  if (attachments.length === 0) return false;
+  const place = positionAfterAttachment(ed.state.doc, besideId);
+  if (!place) return false;
+  const { schema } = ed.state;
+  const nodes = place.spaced ? [] : [schema.text(" ")];
+  for (const a of attachments) {
+    nodes.push(
+      schema.nodes.attachment!.create({
+        attachmentId: a.id,
+        name: a.name,
+        mimeType: a.mimeType,
+        kind: a.kind,
+      }),
+      schema.text(" "),
+    );
+  }
+  ed.view.dispatch(closeHistory(ed.state.tr.insert(place.at, nodes)));
+  ed.view.dispatch(closeHistory(ed.state.tr));
   return true;
 }
 
@@ -442,15 +492,16 @@ export function useComposerEditor(
   const originUrlRef = useRef(originUrl);
   originUrlRef.current = originUrl;
 
-  // Pointer/focus intent warms the shared filesystem index. Typing filters
-  // known paths immediately and asks the warm engine index for the full rank.
+  // Pointer/focus intent warms the shared filesystem index once; it never
+  // subscribes or forces a new tree walk. An open @ menu revalidates. Typing
+  // filters known paths immediately and asks the warm engine index for the
+  // full rank.
   const loadWorkspaceFiles = useCallback(() => {
     if (optsRef.current.attachmentImagesActive === false) return;
     const state = store.getSnapshot();
-    filesSearch.refresh(
-      optsRef.current.cwd,
-      state.open && state.trigger === "@" ? state.query : "",
-    );
+    if (state.open && state.trigger === "@")
+      filesSearch.refresh(optsRef.current.cwd, state.query);
+    else filesSearch.prefetch(optsRef.current.cwd);
   }, [filesSearch, store]);
 
   useLayoutEffect(() => {
@@ -739,8 +790,8 @@ export function useComposerEditor(
       resyncGraphIds(e);
       stageDocIntoGraph(e);
     },
-    // Re-read the workspace file list when the composer gains focus so @-files
-    // reflect mid-session creates/deletes (throttled inside loadWorkspaceFiles).
+    // Focus warms the @ index (at most once a minute, never a forced walk);
+    // file changes reach an open @ menu through the refresh bus.
     onFocus: () => loadWorkspaceFiles(),
     onUpdate: ({ editor: e }) => {
       setIsEmpty(e.isEmpty);
@@ -787,11 +838,79 @@ export function useComposerEditor(
     stageDocIntoGraph(ed);
   }, [provisioning, cwd, stageDocIntoGraph]);
 
+  // ── videos' key frames ──
+  //
+  // A video brings up to eight key frames and a timeline text, read here on
+  // the Mac so a cloud chat gets them too. Reading takes a moment, so they
+  // join the video's chip when ready, keyed by its attachment id. A
+  // programmatic swap (send, draft or edit seed) or unmount abandons them.
+  const videoReadsRef = useRef(
+    new Map<string, { read: Promise<void>; controller: AbortController }>(),
+  );
+  const abandonVideoReads = useCallback(() => {
+    for (const { controller } of videoReadsRef.current.values()) controller.abort();
+    videoReadsRef.current.clear();
+  }, []);
+  useEffect(() => abandonVideoReads, [abandonVideoReads]);
+  const readVideoContext = useCallback(
+    (videoId: string, video: File) => {
+      const controller = new AbortController();
+      const { signal } = controller;
+      const reads = videoReadsRef.current;
+      // Still there: the user may have taken the video out while it was read.
+      const videoStaged = () => {
+        const ed = editorRef.current;
+        return !signal.aborted && !!ed && !ed.isDestroyed &&
+          positionAfterAttachment(ed.state.doc, videoId) !== null;
+      };
+      const read = videoContextFiles({ name: video.name, blob: video }, signal)
+        .then(async (files) => {
+          if (files.length === 0 || !videoStaged()) return;
+          const v = optsRef.current;
+          const atts = await filesToAttachments(files, {
+            agentName: v.agentName,
+            agentSupportsImage: v.agentSupportsImage,
+            modelId: v.modelId,
+          });
+          const ed = editorRef.current;
+          if (!ed || !videoStaged()) return;
+          for (const a of atts) attachmentMapRef.current.set(a.id, a);
+          insertAttachmentsAfter(ed, videoId, atts);
+          setIsEmpty(ed.isEmpty);
+          syncSourceKeys(ed);
+        })
+        .catch((error: unknown) => {
+          console.warn("[Zeros] couldn't add a video's key frames:", error);
+        })
+        .finally(() => {
+          if (reads.get(videoId)?.read === read) reads.delete(videoId);
+        });
+      reads.set(videoId, { read, controller });
+    },
+    [syncSourceKeys],
+  );
+  const videoReadsInDocument = useCallback((): Promise<void>[] => {
+    const ed = editorRef.current;
+    if (!ed || ed.isDestroyed || videoReadsRef.current.size === 0) return [];
+    const present = new Set(collectAttachmentIds(ed.state.doc));
+    return [...videoReadsRef.current]
+      .filter(([videoId]) => present.has(videoId))
+      .map(([, { read }]) => read);
+  }, []);
+  const hasPendingAttachmentReads = useCallback(
+    () => videoReadsInDocument().length > 0,
+    [videoReadsInDocument],
+  );
+  const waitForAttachmentReads = useCallback(async () => {
+    await Promise.allSettled(videoReadsInDocument());
+  }, [videoReadsInDocument]);
+
   // ── attachment staging ──
   const insertFiles = useCallback(
     async (files: FileList | File[] | null | undefined) => {
       const v = optsRef.current;
-      const atts = await filesToAttachments(files, {
+      const picked = Array.from(files ?? []);
+      const atts = await filesToAttachments(picked, {
         agentName: v.agentName,
         agentSupportsImage: v.agentSupportsImage,
         modelId: v.modelId,
@@ -816,8 +935,17 @@ export function useComposerEditor(
       ed.chain().focus().insertContent(content).run();
       setIsEmpty(ed.isEmpty);
       syncSourceKeys(ed);
+      // Even a video too large to attach gets its frames: they still show
+      // the agent what it can't receive. Key frames roll out with simulators.
+      if (!isAgentControlFeatureActive("simulators")) return;
+      atts.forEach((a, index) => {
+        const file = picked[index];
+        if (file && isVideoFile({ name: file.name, mimeType: file.type })) {
+          readVideoContext(a.id, file);
+        }
+      });
     },
-    [syncSourceKeys],
+    [syncSourceKeys, readVideoContext],
   );
   insertFilesRef.current = insertFiles;
 
@@ -1009,6 +1137,7 @@ export function useComposerEditor(
 
   const clear = useCallback(() => {
     const ed = editorRef.current;
+    abandonVideoReads();
     attachmentMapRef.current.clear();
     if (ed) {
       // Suppressed: clear() runs on SEND (and programmatic resets) — the
@@ -1024,11 +1153,12 @@ export function useComposerEditor(
     } else {
       graphIdsRef.current = new Set();
     }
-  }, [resyncGraphIds]);
+  }, [abandonVideoReads, resyncGraphIds]);
 
   const setContent = useCallback(
     (content: ComposerInitialContent) => {
       const ed = editorRef.current;
+      abandonVideoReads();
       attachmentMapRef.current.clear();
       for (const a of content.attachments)
         attachmentMapRef.current.set(a.id, a);
@@ -1047,12 +1177,13 @@ export function useComposerEditor(
         graphIdsRef.current = new Set(content.attachments.map((a) => a.id));
       }
     },
-    [syncSourceKeys, resyncGraphIds, stageDocIntoGraph],
+    [abandonVideoReads, syncSourceKeys, resyncGraphIds, stageDocIntoGraph],
   );
 
   const setText = useCallback(
     (text: string) => {
       const ed = editorRef.current;
+      abandonVideoReads();
       attachmentMapRef.current.clear();
       if (ed) {
         ed.commands.setContent(
@@ -1073,7 +1204,7 @@ export function useComposerEditor(
         graphIdsRef.current = new Set();
       }
     },
-    [syncSourceKeys, resyncGraphIds],
+    [abandonVideoReads, syncSourceKeys, resyncGraphIds],
   );
 
   const appendText = useCallback((text: string) => {
@@ -1181,6 +1312,8 @@ export function useComposerEditor(
     isEmpty,
     serialize,
     insertFiles,
+    hasPendingAttachmentReads,
+    waitForAttachmentReads,
     insertTextAttachment,
     removeAttachmentBySourceKey,
     stagedSourceKeys,

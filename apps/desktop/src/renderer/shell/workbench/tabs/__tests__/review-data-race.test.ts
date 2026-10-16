@@ -12,6 +12,8 @@ import {
   peekReviewLiveData,
   prefetchReviewLiveData,
   shouldPollReviewChecks,
+  REVIEW_REFRESH_KEY_MIN_INTERVAL_MS,
+  refreshKeyRefreshDelay,
   shouldRefreshReviewSnapshot,
   shouldRefreshReviewOnResume,
 } from "../review-data";
@@ -210,5 +212,14 @@ describe("Review live-data races", () => {
     expect(peekReviewLiveData(provider, "workspace-race", 42).pr?.title).toBe(
       "fresh",
     );
+  });
+
+  it("spaces local refresh-key reads of an open PR's GitHub resources", () => {
+    const window = REVIEW_REFRESH_KEY_MIN_INTERVAL_MS;
+    expect(refreshKeyRefreshDelay(0, 10_000)).toBe(0);
+    expect(refreshKeyRefreshDelay(10_000, 10_000)).toBe(window);
+    expect(refreshKeyRefreshDelay(10_000, 10_000 + window - 1)).toBe(1);
+    expect(refreshKeyRefreshDelay(10_000, 10_000 + window)).toBe(0);
+    expect(refreshKeyRefreshDelay(10_000, 10_000 + window * 3)).toBe(0);
   });
 });

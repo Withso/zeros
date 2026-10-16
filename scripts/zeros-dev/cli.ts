@@ -15,6 +15,8 @@ import { HELP, parseCommand, executeCommand, type Services } from "./commands";
 import { ZerosDevError, closedError } from "./errors";
 import { connectGithub } from "./github";
 import { exportCleanupHandoff } from "./cleanup-handoff";
+import { exportCleanupRecovery } from "./cleanup-recovery";
+import { parseCloudReplicaDeviceCredential } from "../../apps/desktop/src/engine/cloud-replica-device";
 
 async function source(checkout: string): Promise<Source> {
   const exec = promisify(execFile);
@@ -46,6 +48,21 @@ async function services(checkout: string, write: (value: unknown) => void): Prom
     runs: loadRuns,
     handoff: async (runIds, output, signal) => exportCleanupHandoff({ file: path.resolve(checkout, output), runIds,
       store: await loadRuns(), credential: await session.device(), api, signal }),
+    recovery: async (request, signal) => {
+      const fixture = await session.fixture();
+      let credential;
+      try {
+        const raw = (await store.read()).values.ZEROS_DEV_DEVICE_PRIVATE_KEY_B64;
+        if (!raw || raw.length > 8192 || Buffer.from(raw, "base64").toString("base64") !== raw) throw new Error();
+        credential = parseCloudReplicaDeviceCredential(JSON.parse(Buffer.from(raw, "base64").toString("utf8")));
+        if (!credential.deviceId || credential.accountUserId !== fixture.accountId) throw new Error();
+      } catch { throw new ZerosDevError("credentials_invalid"); }
+      // Recovery must use the already enrolled signer, never enroll a device
+      // or alter local run receipts just to export a failed Actions predecessor.
+      await session.whoami();
+      return exportCleanupRecovery({ ...request, artifact: path.resolve(checkout, request.artifact), file: path.resolve(checkout, request.file),
+        credentialFile: file, fixture, credential, api, signal });
+    },
     content: async (input, limit) => {
       const target = path.resolve(checkout, input);
       let handle;

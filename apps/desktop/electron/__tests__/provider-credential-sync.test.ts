@@ -1,5 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
-import { ProviderCredentialSync } from "../provider-credential-sync";
+import {
+  EngineAppliedSync,
+  ProviderCredentialSync,
+} from "../provider-credential-sync";
+
+describe("engine-applied host updates", () => {
+  it("finishes only on its own acknowledgment type", async () => {
+    const sync = new EngineAppliedSync(
+      "engine.agentControlAvailabilityApplied",
+      "The engine did not confirm.",
+    );
+    const child = {};
+    const writes: string[] = [];
+    const done = vi.fn();
+    const sending = sync.send(child, (id) => writes.push(id)).then(done);
+    expect(
+      sync.acknowledge(child, {
+        type: "engine.providerCredentialsApplied",
+        requestId: writes[0],
+      }),
+    ).toBe(false);
+    await Promise.resolve();
+    expect(done).not.toHaveBeenCalled();
+    expect(
+      sync.acknowledge(child, {
+        type: "engine.agentControlAvailabilityApplied",
+        requestId: writes[0],
+      }),
+    ).toBe(true);
+    await sending;
+    expect(done).toHaveBeenCalledOnce();
+  });
+});
 
 describe("private engine credential acknowledgment", () => {
   it("waits for the exact request and engine generation before finishing a switch", async () => {

@@ -1,10 +1,14 @@
 import { z } from "zod";
+import { isDatabaseUnavailable } from "../db.js";
 import { CloudProviderError } from "./provider.js";
 import { ClosedDiagnosticSchema } from "./runtime-contract.js";
 
 export const diagnosticPhases = ["provider_inspect", "meter_read", "ledger_commit", "authority_check", "provider_renew", "final_settlement",
   "setup_admission", "bootstrap", "runtime", "supervisor", "image_preflight", "repository", "credential_projection", "image_launch", "engine_launch", "engine_readiness"] as const;
 export type CloudDiagnosticPhase = typeof diagnosticPhases[number];
+const computeFailureSites = ["allocation_binding", "allocation_observation", "meter_commit", "renewal_plan",
+  "renewal_reservation", "renewal_commit", "reconciliation_bookkeeping", "retry_proof"] as const;
+export type ComputeFailureSite = typeof computeFailureSites[number];
 const imageChecks = z.object({ metadata: z.boolean().optional(), source: z.boolean().optional(), engine: z.boolean().optional(),
   osRelease: z.boolean().optional(), packageInventory: z.boolean().optional(), node: z.boolean().optional(),
   execution: z.boolean().optional(), report: z.boolean().optional(), profile: z.boolean().optional(), qualified: z.boolean().optional(),
@@ -70,7 +74,7 @@ const codes = new Set([
   "compute_credit_funding_mode_conflict", "compute_credit_meter_rejected", "compute_credit_period_unavailable", "compute_credit_scope_not_found", "compute_credit_scope_rejected", "compute_credit_unavailable", "compute_credit_user_funding_required",
   "provider_access_cleanup_unverified", "provider_account_unverified", "provider_authorization_failed", "provider_budget_exhausted", "provider_create_outcome_unknown", "provider_credential_rejected", "provider_delete_unverified", "provider_deletion_blocked", "provider_deletion_pending", "provider_deletion_unconfirmed", "provider_generation_mismatch", "provider_generation_retired", "provider_identity_invalid", "provider_lease_invalid", "provider_lease_unconfirmed", "provider_monitoring_unconfirmed", "provider_not_found", "provider_operation_conflict", "provider_operation_pending", "provider_paused_requires_stop", "provider_profile_unsupported", "provider_request_failed", "provider_request_invalid", "provider_resource_configuration_mismatch", "provider_resource_id_invalid", "provider_resource_lost", "provider_resource_mismatch", "provider_resource_missing", "provider_response_too_large", "provider_snapshot_configuration_mismatch", "provider_snapshot_identity_mismatch", "provider_snapshot_unavailable", "provider_temporarily_unavailable", "provider_usage_invalid", "provider_vm_preflight_unavailable", "provider_vm_quota_exhausted", "provider_vm_quota_unavailable",
   "compute_credit_invalid", "compute_policy_unavailable", "compute_previous_lease_pending", "compute_credit_conflict", "compute_lease_busy", "compute_policy_changed", "compute_lease_unfunded",
-  "provider_usage_unavailable", "provider_lease_unavailable", "compute_reconciliation_failed", "compute_lease_superseded", "compute_provider_unqualified", "compute_absence_unconfirmed",
+  "provider_usage_unavailable", "provider_lease_unavailable", "compute_reconciliation_failed", "control_plane_unavailable", "compute_lease_superseded", "compute_provider_unqualified", "compute_absence_unconfirmed",
   "compute_final_meter_unavailable", "compute_stop_meter_unconfirmed", "compute_lease_unconfirmed", "compute_settlement_incomplete",
   "compute_credit_exhausted", "compute_scope_unavailable", "compute_delete_settlement", "compute_allocation_retry_expired",
   "provider_identity_mismatch", "provider_request_unavailable", "provider_request_timeout", "provider_rate_limited",
@@ -87,6 +91,7 @@ const codes = new Set([
 export function diagnosticCode(value: unknown): string { return typeof value === "string" && codes.has(value) ? value : "compute_reconciliation_failed"; }
 const sqlState = /^(?:08|22|23|25|28|40|42|53|54|55|57|58|XX)[A-Z0-9]{3}$/;
 export const cloudDiagnosticSchema = z.object({ phase: z.enum(diagnosticPhases), code: z.string().refine(value => codes.has(value)),
+  site: z.enum(computeFailureSites).optional(),
   providerCode: z.string().refine(value => codes.has(value)).optional(), sqlState: z.string().regex(sqlState).optional(),
   httpClass: z.enum(["1xx", "2xx", "3xx", "4xx", "5xx"]).optional(),
   errorClass: z.enum(["provider", "database", "timeout", "abort", "type", "range", "unknown"]), retryable: z.boolean(),
@@ -94,16 +99,17 @@ export const cloudDiagnosticSchema = z.object({ phase: z.enum(diagnosticPhases),
   providerTtlMs: z.number().int().min(-86_400_000).max(86_400_000).optional(), retryCount: z.number().int().min(0).max(10000).optional(),
   decision: z.enum(["checkpoint", "direct_stop", "retry", "stale", "reject_setup"]).optional(), claim: z.enum(["current", "stale"]).optional(),
   // Additive JSON evidence preserves the released database reason enum.
-  stopReason: z.literal("provider_outage").optional(),
+  stopReason: z.enum(["provider_outage", "control_plane_unavailable"]).optional(),
   setup: setupDiagnosticSchema.optional(),
 }).strict();
 export type CloudDiagnostic = z.infer<typeof cloudDiagnosticSchema>;
 export function classifyCloudFailure(error: unknown, phase: CloudDiagnosticPhase): CloudDiagnostic {
   const raw = error && typeof error === "object" ? error as { code?: unknown; name?: unknown; status?: unknown; statusCode?: unknown; httpStatus?: unknown } : {};
   const state = typeof raw.code === "string" && sqlState.test(raw.code) ? raw.code : undefined;
-  const code = diagnosticCode(raw.code);
+  const unavailable = isDatabaseUnavailable(error);
+  const code = unavailable ? "control_plane_unavailable" : diagnosticCode(raw.code);
   const status = raw.httpStatus ?? raw.status ?? raw.statusCode;
-  return { phase, code, errorClass: state ? "database" : error instanceof CloudProviderError ? "provider" :
+  return { phase, code, errorClass: state || unavailable ? "database" : error instanceof CloudProviderError ? "provider" :
     raw.name === "TimeoutError" ? "timeout" : raw.name === "AbortError" ? "abort" : error instanceof TypeError ? "type" : error instanceof RangeError ? "range" : "unknown",
     retryable: error instanceof CloudProviderError ? error.retryable : true,
     ...(state ? { sqlState: state } : {}),
@@ -112,6 +118,7 @@ export function classifyCloudFailure(error: unknown, phase: CloudDiagnosticPhase
   };
 }
 export function cloudStopReason(reason: string, stopReason?: unknown) {
+  if (reason === "control_plane_unavailable" || stopReason === "control_plane_unavailable") return { code: "control_plane_unavailable", message: "Workspace stopped because the control plane was unavailable before its compute lease expired" };
   if (reason === "provider_outage" || stopReason === "provider_outage") return { code: "provider_outage", message: "Workspace stopped because a provider outage exhausted its compute lease runway" };
   if (["budget_stop", "compute_credit_exhausted"].includes(reason)) return { code: "budget_stop", message: "Managed compute stopped at its funded limit" };
   if (["engine_expired", "engine_lease_expired", "engine_unavailable", "engine_heartbeat_expired"].includes(reason)) return { code: "engine_expired", message: "Workspace stopped because its engine lease expired" };

@@ -5,6 +5,7 @@ import type {
   AgentToolMessage,
 } from "../../agent/use-agent-session";
 import {
+  browserActivityGroupLabel,
   browserActivityGroupStatus,
   browserActivityUsesWebsiteIcon,
   browserActivityTailClosed,
@@ -15,6 +16,42 @@ import {
   resolveBrowserActionUrls,
   resolveBrowserActivityPresentation,
 } from "../browser-tool-activity";
+
+function mcpTool(
+  id: string,
+  title: string,
+  rawInput: Record<string, unknown>,
+): AgentToolMessage {
+  return {
+    id,
+    kind: "tool",
+    toolCallId: id,
+    title,
+    toolKind: "mcp",
+    status: "completed",
+    rawInput,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+}
+
+function nativeCua(
+  id: string,
+  title: string,
+  surface: unknown,
+  code: string,
+  status: AgentToolMessage["status"] = "completed",
+): AgentToolMessage {
+  return {
+    ...mcpTool(id, "cua_repl:js", {
+      server: "cua_repl",
+      tool: "js",
+      arguments: { title, code },
+    }),
+    status,
+    ...(surface ? { rawOutput: { _meta: { "codex/toolSurface": surface } } } : {}),
+  };
+}
 
 function tool(
   id: string,
@@ -248,6 +285,478 @@ describe("compact browser transcript activity", () => {
       tool: "open",
       label: "Opened",
       target: "docs.example.net",
+    });
+  });
+
+  it("recognizes zeros_browser calls in each provider's native MCP envelope", () => {
+    expect(
+      browserToolActivity(
+        mcpTool("codex", "zeros_browser:open", {
+          server: "zeros_browser",
+          tool: "open",
+          arguments: { url: "https://example.com/docs" },
+        }),
+      ),
+    ).toMatchObject({ tool: "open", label: "Opened", target: "example.com" });
+    expect(
+      browserToolActivity(
+        mcpTool("claude", "mcp__zeros_browser__click", {
+          ref: "b3_0123456789abcdef01234567",
+        }),
+      ),
+    ).toMatchObject({ tool: "click", label: "Clicked", target: "b3" });
+    expect(
+      browserToolActivity(
+        mcpTool("cursor", "mcp", {
+          providerIdentifier: "zeros_browser",
+          toolName: "open",
+          args: { url: "https://docs.example.net/start" },
+        }),
+      ),
+    ).toMatchObject({
+      tool: "open",
+      label: "Opened",
+      target: "docs.example.net",
+    });
+    expect(
+      browserToolActivity(
+        mcpTool("cursor-child", "MCP snapshot", {
+          providerIdentifier: "zeros_browser",
+          toolName: "snapshot",
+          args: {},
+        }),
+      ),
+    ).toMatchObject({ tool: "snapshot", label: "Read page" });
+    expect(
+      browserToolActivity(
+        mcpTool("cursor-qualified", "MCP mcp__zeros_browser__back", {
+          toolName: "mcp__zeros_browser__back",
+        }),
+      ),
+    ).toMatchObject({ tool: "back", label: "Went back" });
+  });
+
+  it("lets explicit foreign MCP identity win over a zeros_browser-looking name", () => {
+    expect(
+      browserToolActivity(
+        mcpTool("codex-foreign", "mcp__zeros_browser__open", {
+          server: "another-browser",
+          tool: "open",
+          arguments: { url: "https://example.com" },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      browserToolActivity(
+        mcpTool("cursor-foreign", "MCP mcp__zeros_browser__open", {
+          providerIdentifier: "another-browser",
+          toolName: "open",
+          args: { url: "https://example.com" },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      browserToolActivity(
+        mcpTool("cursor-unknown", "mcp", {
+          providerIdentifier: "zeros_browser",
+          toolName: "evaluate",
+          args: {},
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("groups a Cursor zeros_browser burst into one Browser activity", () => {
+    const grouped = groupBrowserToolActivity([
+      mcpTool("cursor-open", "mcp", {
+        providerIdentifier: "zeros_browser",
+        toolName: "open",
+        args: { url: "https://example.com" },
+      }),
+      mcpTool("cursor-read", "mcp", {
+        providerIdentifier: "zeros_browser",
+        toolName: "snapshot",
+        args: {},
+      }),
+    ]);
+    expect(grouped).toMatchObject([
+      {
+        kind: "browser-activity",
+        surface: "browser",
+        actions: [{ tool: "open" }, { tool: "snapshot" }],
+      },
+    ]);
+  });
+
+  it("groups Codex computer-use calls into their own activity instead of dropping them", () => {
+    const textEdit = {
+      kind: "computerUse",
+      app: { kind: "appId", appId: "com.apple.TextEdit" },
+    };
+    const calculator = {
+      kind: "computerUse",
+      app: { kind: "appId", appId: "com.apple.Calculator" },
+    };
+    const events: AgentMessage[] = [
+      nativeCua(
+        "browse",
+        "Open the docs",
+        null,
+        "await tab.goto('https://example.com/docs')",
+      ),
+      nativeCua("type", "Type the note", textEdit, "await textEdit.type('hi')"),
+      nativeCua(
+        "read",
+        "Read the total",
+        calculator,
+        "await calculator.getAXState()",
+      ),
+      nativeCua(
+        "save",
+        "Save the note",
+        null,
+        "await textEdit.press('cmd+s')",
+        "in_progress",
+      ),
+      {
+        ...mcpTool("legacy", "computer-use:click", {
+          server: "computer-use",
+          tool: "click",
+          arguments: { x: 4, y: 8 },
+        }),
+        status: "in_progress",
+      },
+    ];
+    const grouped = groupBrowserToolActivity(events);
+    expect(grouped).toMatchObject([
+      {
+        kind: "browser-activity",
+        surface: "browser",
+        closed: true,
+        actions: [{ label: "Open the docs" }],
+      },
+      {
+        kind: "browser-activity",
+        surface: "computer",
+        closed: false,
+        actions: [
+          {
+            label: "Type the note",
+            surface: "computer",
+            appId: "com.apple.TextEdit",
+            external: true,
+          },
+          { label: "Read the total", appId: "com.apple.Calculator" },
+          { label: "Save the note", status: "in_progress" },
+          { label: "Use computer", status: "in_progress" },
+        ],
+      },
+    ]);
+    const computer = grouped[1];
+    if (computer?.kind !== "browser-activity") {
+      throw new Error("Expected a computer activity group.");
+    }
+    expect(computer.actions.some(browserActivityUsesWebsiteIcon)).toBe(false);
+    expect(browserToolActivity(events[1]!)).toBeNull();
+    expect(partitionBrowserActivityForSummary(events)).toMatchObject({
+      browserEvents: [{ id: "browse" }],
+      otherEvents: [
+        { id: "type" },
+        { id: "read" },
+        { id: "save" },
+        { id: "legacy" },
+      ],
+    });
+  });
+
+  it("labels each activity group by what the agent controlled", () => {
+    expect(browserActivityGroupLabel("browser", "browsing")).toBe("Browsing");
+    expect(browserActivityGroupLabel("browser", "used")).toBe(
+      "Used the browser",
+    );
+    expect(browserActivityGroupLabel("browser", "failed")).toBe(
+      "Browser use failed",
+    );
+    expect(browserActivityGroupLabel("computer", "browsing")).toBe(
+      "Using the computer",
+    );
+    expect(browserActivityGroupLabel("computer", "used")).toBe(
+      "Used the computer",
+    );
+    expect(browserActivityGroupLabel("computer", "failed")).toBe(
+      "Computer use failed",
+    );
+  });
+
+  it("labels Zeros computer use the same way for every provider family", () => {
+    // Codex: server (or namespace) plus tool.
+    expect(
+      browserToolActivity(
+        mcpTool("codex-open", "zeros_computer/open_app", {
+          server: "zeros_computer",
+          tool: "open_app",
+          arguments: { bundle_id: "com.apple.TextEdit" },
+        }),
+      ),
+    ).toMatchObject({
+      surface: "computer",
+      tool: "open",
+      label: "Opened app",
+      target: "com.apple.TextEdit",
+      appId: "com.apple.TextEdit",
+      external: true,
+    });
+    // Claude: the qualified MCP title, with the arguments as rawInput.
+    expect(
+      browserToolActivity(
+        mcpTool("claude-type", "mcp__zeros_computer__type_text", {
+          pid: 42,
+          text: "hello",
+        }),
+      ),
+    ).toMatchObject({ surface: "computer", tool: "type", label: "Typed" });
+    // Cursor: providerIdentifier plus toolName.
+    expect(
+      browserToolActivity(
+        mcpTool("cursor-shot", "mcp", {
+          providerIdentifier: "zeros_computer",
+          toolName: "screenshot",
+          args: { pid: 42, window_id: 7 },
+        }),
+      ),
+    ).toMatchObject({
+      surface: "computer",
+      tool: "screenshot",
+      label: "Captured screenshot",
+    });
+    // A foreign server with a computer-looking title stays out.
+    expect(
+      browserToolActivity(
+        mcpTool("foreign", "mcp__zeros_computer__click", {
+          server: "another-computer",
+          tool: "click",
+          arguments: {},
+        }),
+      ),
+    ).toBeNull();
+    // Unknown zeros_computer tool names stay out.
+    expect(
+      browserToolActivity(
+        mcpTool("unknown", "mcp__zeros_computer__explode", { pid: 1 }),
+      ),
+    ).toBeNull();
+  });
+
+  it("groups a Zeros computer-use burst into its own computer activity", () => {
+    const grouped = groupBrowserToolActivity([
+      tool("browse", { tool: "open", url: "https://example.com" }),
+      mcpTool("open-app", "mcp__zeros_computer__open_app", {
+        bundle_id: "com.apple.TextEdit",
+      }),
+      mcpTool("press", "mcp__zeros_computer__press_key", {
+        pid: 42,
+        key: "return",
+      }),
+    ]);
+    expect(grouped).toMatchObject([
+      {
+        kind: "browser-activity",
+        surface: "browser",
+        closed: true,
+        actions: [{ tool: "open" }],
+      },
+      {
+        kind: "browser-activity",
+        surface: "computer",
+        closed: false,
+        actions: [
+          { label: "Opened app", appId: "com.apple.TextEdit" },
+          { label: "Pressed key", tool: "key" },
+        ],
+      },
+    ]);
+  });
+
+  it("shows authored computer failure sentences and hides raw driver errors", () => {
+    const failedClick = (id: string, text: string): AgentToolMessage => ({
+      ...mcpTool(id, "mcp__zeros_computer__click", { pid: 42 }),
+      status: "failed",
+      rawOutput: [{ type: "text", text }],
+    });
+    for (const [id, text] of [
+      ["blocked", "Safari is blocked in Settings > Computer use."],
+      ["off", "Computer use is turned off in Settings > Computer use."],
+      ["denied", "The user did not allow Codex to control Safari."],
+      [
+        "permission",
+        "Zeros needs Accessibility access to use your Mac. The user can turn it on in Settings > Computer use.",
+      ],
+    ] as const) {
+      expect(browserToolActivity(failedClick(id, text))).toMatchObject({
+        surface: "computer",
+        detail: text,
+      });
+    }
+    expect(
+      browserToolActivity(
+        failedClick(
+          "raw",
+          "Error: connect ECONNREFUSED /private/var/run/driver.sock",
+        ),
+      ),
+    ).toMatchObject({ detail: "Computer action failed." });
+    // A successful call carries no failure detail.
+    expect(
+      browserToolActivity(mcpTool("ok", "mcp__zeros_computer__click", { pid: 42 }))
+        ?.detail,
+    ).toBeUndefined();
+  });
+
+  it("labels Zeros simulator use the same way for every provider family", () => {
+    const device = "8F2A9C4E-1B3D-4E5F-8A7B-0C1D2E3F4A5B";
+    // Codex: server (or namespace) plus tool.
+    expect(
+      browserToolActivity(
+        mcpTool("codex-tap", "zeros_device/tap", {
+          server: "zeros_device",
+          tool: "tap",
+          arguments: { device_id: device, ref: "@e3" },
+        }),
+      ),
+    ).toMatchObject({
+      surface: "simulator",
+      tool: "click",
+      label: "Tapped",
+      phase: "browse",
+      surfaceScope: "simulator",
+      external: true,
+    });
+    // Claude: the qualified MCP title, with the arguments as rawInput. An iOS
+    // bundle ID is the row's target but never a Mac app icon.
+    const launch = browserToolActivity(
+      mcpTool("claude-launch", "mcp__zeros_device__launch_app", {
+        device_id: device,
+        bundle_id: "com.apple.mobilesafari",
+      }),
+    );
+    expect(launch).toMatchObject({
+      surface: "simulator",
+      tool: "open",
+      label: "Opened app",
+      target: "com.apple.mobilesafari",
+    });
+    expect(launch?.appId).toBeUndefined();
+    // Cursor: providerIdentifier plus toolName.
+    expect(
+      browserToolActivity(
+        mcpTool("cursor-shot", "mcp", {
+          providerIdentifier: "zeros_device",
+          toolName: "screenshot",
+          args: { device_id: device },
+        }),
+      ),
+    ).toMatchObject({
+      surface: "simulator",
+      tool: "screenshot",
+      label: "Captured screenshot",
+    });
+    // A foreign server with a simulator-looking title stays out.
+    expect(
+      browserToolActivity(
+        mcpTool("foreign", "mcp__zeros_device__tap", {
+          server: "another-device",
+          tool: "tap",
+          arguments: {},
+        }),
+      ),
+    ).toBeNull();
+    // Unknown zeros_device tool names stay out.
+    expect(
+      browserToolActivity(
+        mcpTool("unknown", "mcp__zeros_device__explode", { device_id: device }),
+      ),
+    ).toBeNull();
+  });
+
+  it("describes simulator gestures by what they did", () => {
+    const device = "8F2A9C4E-1B3D-4E5F-8A7B-0C1D2E3F4A5B";
+    const label = (tool: string, args: Record<string, unknown>) =>
+      browserToolActivity(
+        mcpTool(tool, `mcp__zeros_device__${tool}`, {
+          device_id: device,
+          ...args,
+        }),
+      )?.label;
+    expect(label("tap", { x: 10, y: 20, count: 2 })).toBe("Double-tapped");
+    expect(label("tap", { ref: "@e1", hold_ms: 800 })).toBe("Long-pressed");
+    expect(label("pinch", { scale: 2 })).toBe("Zoomed in");
+    expect(label("pinch", { scale: 0.5 })).toBe("Zoomed out");
+    expect(label("scroll", { direction: "down" })).toBe("Scrolled down");
+    expect(label("scroll", { direction: "sideways" })).toBe("Scrolled");
+    expect(label("rotate", { orientation: "landscape-left" })).toBe(
+      "Rotated to landscape",
+    );
+    expect(label("rotate", { orientation: "portrait" })).toBe(
+      "Rotated to portrait",
+    );
+    expect(label("set_appearance", { appearance: "dark" })).toBe(
+      "Switched to dark appearance",
+    );
+    expect(label("press_button", { button: "home" })).toBe(
+      "Pressed the Home button",
+    );
+    expect(label("press_button", { button: "lock" })).toBe(
+      "Pressed the side button",
+    );
+    expect(label("open_url", { url: "https://example.com/a" })).toBe(
+      "Opened link",
+    );
+    expect(label("boot_device", {})).toBe("Started simulator");
+    expect(label("list_devices", {})).toBe("Listed simulators");
+  });
+
+  it("groups a Zeros simulator burst into its own simulator activity", () => {
+    const device = "8F2A9C4E-1B3D-4E5F-8A7B-0C1D2E3F4A5B";
+    const events = [
+      tool("browse", { tool: "open", url: "https://example.com" }),
+      mcpTool("snapshot", "mcp__zeros_device__snapshot", { device_id: device }),
+      mcpTool("tap", "mcp__zeros_device__tap", {
+        device_id: device,
+        ref: "@e2",
+      }),
+      mcpTool("open-app", "mcp__zeros_computer__open_app", {
+        bundle_id: "com.apple.TextEdit",
+      }),
+    ];
+    const grouped = groupBrowserToolActivity(events);
+    expect(grouped).toMatchObject([
+      { kind: "browser-activity", surface: "browser", closed: true },
+      {
+        kind: "browser-activity",
+        surface: "simulator",
+        closed: true,
+        actions: [{ label: "Read screen" }, { label: "Tapped" }],
+      },
+      { kind: "browser-activity", surface: "computer", closed: false },
+    ]);
+    const simulator = grouped[1];
+    if (simulator?.kind !== "browser-activity") {
+      throw new Error("Expected a simulator activity group.");
+    }
+    expect(simulator.actions.some(browserActivityUsesWebsiteIcon)).toBe(false);
+    expect(browserActivityGroupLabel("simulator", "browsing")).toBe(
+      "Using the simulator",
+    );
+    expect(browserActivityGroupLabel("simulator", "used")).toBe(
+      "Used the simulator",
+    );
+    expect(browserActivityGroupLabel("simulator", "failed")).toBe(
+      "Simulator use failed",
+    );
+    // The summary keeps browser favicons for browser work only.
+    expect(partitionBrowserActivityForSummary(events)).toMatchObject({
+      browserEvents: [{ id: "browse" }],
+      otherEvents: [{ id: "snapshot" }, { id: "tap" }, { id: "open-app" }],
     });
   });
 

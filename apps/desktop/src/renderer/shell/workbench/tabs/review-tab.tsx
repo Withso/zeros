@@ -293,11 +293,15 @@ export function ReviewView({
   const renamedPaths = useMemo(() => new Map(files.flatMap(file => file.oldPath ? [[file.oldPath, file.path] as const] : [])), [files]);
   const githubReview = useGithubReview({
     workspaceId: provider.family === "github" ? workspaceId : undefined,
-    prNumber, cwd, active: active && sub === "changes", refreshKey,
+    prNumber, cwd, active: active && sub === "changes",
     confirmedHeadSha: filesHeadSha, confirmedBaseSha: filesBaseSha, renamedPaths,
   });
   const reviewHeadSha = githubReview.snapshot?.headSha;
   const reviewBaseSha = githubReview.snapshot?.baseSha;
+  // A published PR diff does not live in the worktree, so local refresh
+  // generations (agent writes, builds) never re-download it; its head and base
+  // SHAs are the comparison identity. A local base diff still follows them.
+  const diffGeneration = provider.getDiff ? 0 : refreshKey;
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
@@ -318,7 +322,7 @@ export function ReviewView({
     if (
       retainedFiles !== undefined &&
       meta &&
-      meta.refreshKey === refreshKey &&
+      meta.refreshKey === diffGeneration &&
       (!snap.pr?.headSha || retainedFiles.headSha === snap.pr.headSha) &&
       (!reviewHeadSha || retainedFiles.headSha === reviewHeadSha) &&
       (!reviewBaseSha || retainedFiles.baseSha === reviewBaseSha) &&
@@ -327,7 +331,7 @@ export function ReviewView({
       return;
     }
     const revision: ReviewFilesRevision = [
-      refreshKey,
+      diffGeneration,
       snap.pr?.headSha,
       reviewHeadSha,
       reviewBaseSha,
@@ -394,7 +398,7 @@ export function ReviewView({
           setFilesReloadNonce((nonce) => nonce + 1);
           return;
         }
-        cacheReviewFiles(filesKey, nextFiles, refreshKey);
+        cacheReviewFiles(filesKey, nextFiles, diffGeneration);
         setFilesSnapshot({
           key: filesKey,
           files: nextFiles.files,
@@ -429,7 +433,7 @@ export function ReviewView({
     return () => {
       cancelled = true;
     };
-  }, [active, provider, workspaceId, prNumber, baseBranch, filesKey, refreshKey, filesReloadNonce, snap.pr?.headSha, reviewHeadSha, reviewBaseSha]);
+  }, [active, provider, workspaceId, prNumber, baseBranch, filesKey, diffGeneration, filesReloadNonce, snap.pr?.headSha, reviewHeadSha, reviewBaseSha]);
 
   const pr = snap.pr;
   useWorkbenchStatusSource(

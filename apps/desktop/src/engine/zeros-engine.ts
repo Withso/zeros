@@ -106,6 +106,33 @@ import {
   isDesignMetadataRepoPath,
 } from "./design/metadata";
 import { DesignCodeToolAdmissions } from "./design/code-tool-admission";
+import { readAgentControlAvailability } from "@zeros/protocol/agent-control-rollout";
+import { isAgentControlFamily } from "@zeros/protocol/browser-tools";
+import type { ComputerUseOwner } from "@zeros/protocol/computer-use-tools";
+import { AgentControlToolAdmissions } from "./agent-control/admission";
+import {
+  agentControlFeatureAvailable,
+  setAgentControlAvailability,
+} from "./agent-control/availability";
+import { computerUseRouteForWorkspace } from "./agent-control/computer-use-settings";
+import {
+  invokeZerosComputerTool,
+  invokeZerosDeviceTool,
+  releaseZerosComputerUse,
+  releaseZerosDeviceUse,
+  reportNativeComputerUse,
+  resolveAgentControlServiceConfig,
+} from "./agent-control/control-service-client";
+import { NativeComputerUseReports } from "./agent-control/native-computer-use";
+import { deviceToolRouteForWorkspace } from "./agent-control/simulator-settings";
+import { composeAgentSessionToolFactories } from "./agents/session-tools";
+import {
+  acquireZerosBrowserToolSession,
+  browserRouteForWorkspace,
+  invokeZerosBrowserTool,
+  resolveBrowserServiceConfig,
+  stopZerosBrowserAction,
+} from "./browser/browser-tool-client";
 import { CodeReviewAgentTools } from "./agents/code-review-tools";
 import { codeReviewAgentActor, codeReviewProfileName } from "./code-review/actors";
 import { CodeReviewError } from "./code-review/errors";
@@ -970,6 +997,8 @@ export class ZerosEngine {
    *  permission prompts go to LOCAL clients only, and a relay client may not act
    *  on it. Empty for sessions with no managed workspace (never restricted). */
   private readonly sessionWorkspace = new Map<string, string>();
+  /** Codex's built-in computer use, forwarded so other chats wait for it. */
+  private readonly nativeComputerUse = new NativeComputerUseReports(reportNativeComputerUse);
   /** Agent sessionIds with a `prompt()` currently in flight. Lets turns.reset
    *  cancel a live turn ENGINE-side before truncating the timeline it streams
    *  into (the renderer's footer does the same, but a reset arriving from any
@@ -1132,6 +1161,12 @@ export class ZerosEngine {
     boot: CloudLocalAgentBootRuntime | null; completion: Omit<CloudEngineFinalCompletion, "challenge">;
   } | null = null;
   private cloudLocalSealFlight: Promise<void> | null = null;
+  /** Once final sealing starts, cancellation can retry control but never
+   * reopen ordinary admission, even before the immutable seal is written. */
+  private cloudFinalCheckpointSealSource: {
+    lifecycle: CloudLocalCommandWriterLifecycle; boot: CloudLocalAgentBootRuntime;
+    registration: CloudRuntimeRegistration; scope: CloudLocalAgentBootRuntime["scope"];
+  } | null = null;
   private cloudLocalHistoryRestored = false;
   private cloudLocalCommandPredecessor: CloudLocalCommandPredecessor | null = null;
   private cloudLocalHistoryRestoreHeads = new Map<string, CloudLocalCommandHistoryHead>();
@@ -1167,7 +1202,7 @@ export class ZerosEngine {
   private cloudHandoffRequests = 0;
   private cloudHandoffWatchersDirty = false;
   private cloudIdleReservation: (() => boolean) | null = null;
-  private cloudIdleCheckpoint: { id: string; promise: Promise<void> } | null = null;
+  private cloudIdleCheckpoint: { id: string; promise: Promise<void>; pending: boolean } | null = null;
   private cloudCheckpointProgress: { id: string; reporter: CloudCheckpointProgressReporter } | null = null;
   private cloudCheckpointProgressUnsupported = false;
   private cloudIdleCaptureId: string | null = null;
@@ -2201,7 +2236,7 @@ export class ZerosEngine {
       projectRoot: this.root,
       executionBoundary: this.executionBoundary,
       ...(this.cloudAgentLegacyFactory ? { cloudAgentExecutionFactory: this.cloudAgentLegacyFactory } : {}),
-      sessionToolFactory: new DesignCodeToolAdmissions({
+      sessionToolFactory: composeAgentSessionToolFactories([new DesignCodeToolAdmissions({
         workspaceTools: (input) => {
           const actor = codeReviewAgentActor(input);
           const scope = actor ? this.workspace.codeReviewAgentScope(input) : null;
@@ -2227,7 +2262,36 @@ export class ZerosEngine {
               workspaceIds: [workspaceId],
             }),
           ),
-      }).admit,
+      }).admit, new AgentControlToolAdmissions({
+        cloudWorker: this.cloudWorker !== null,
+        resolveWorkspace: (id) => this.workspace.designAgentWorkspace(id),
+        browser: {
+          configured: () => resolveBrowserServiceConfig() !== null,
+          route: (family, workspacePath, repoRoot) =>
+            browserRouteForWorkspace(family, workspacePath, repoRoot),
+          acquire: (owner) => acquireZerosBrowserToolSession(owner),
+          invoke: (request) => invokeZerosBrowserTool(request),
+          stop: (browserSessionId) => stopZerosBrowserAction({ browserSessionId }),
+        },
+        computer: {
+          configured: () =>
+            process.platform === "darwin" &&
+            resolveAgentControlServiceConfig() !== null,
+          route: (family, workspacePath, repoRoot) =>
+            computerUseRouteForWorkspace(family, workspacePath, repoRoot),
+          invoke: (request, signal) => invokeZerosComputerTool(request, { signal }),
+          release: (owner, reason) => releaseZerosComputerUse(owner, reason),
+        },
+        device: {
+          configured: () =>
+            process.platform === "darwin" &&
+            resolveAgentControlServiceConfig() !== null,
+          route: (family, workspacePath, repoRoot) =>
+            deviceToolRouteForWorkspace(family, workspacePath, repoRoot),
+          invoke: (request, signal) => invokeZerosDeviceTool(request, { signal }),
+          release: (owner, reason) => releaseZerosDeviceUse(owner, reason),
+        },
+      }).admit]),
       ...(this.cloud
         ? { previewGatewayFactory: this.cloudWorker?.version === 4
             ? new CloudNativePreviewGatewayFactory() : new CloudPreviewGatewayFactory() }
@@ -2597,6 +2661,35 @@ export class ZerosEngine {
               line,
             }),
           );
+        },
+        onCapabilityNotice: (agentId, { sessionId, notice }) => {
+          // The capability is a desktop install (ChatGPT's Browser plugin), so
+          // only the desktop that owns it can act on the notice.
+          this.router.broadcastLocal(
+            createMessage({
+              type: "AGENT_CAPABILITY_NOTICE",
+              source: "engine",
+              agentId,
+              ...(sessionId ? { sessionId } : {}),
+              notice,
+            }),
+          );
+        },
+        onNativeComputerUse: (agentId, { sessionId, active }) => {
+          void this.nativeComputerUse.update(sessionId, active, () => {
+            const workspaceId = this.sessionWorkspace.get(sessionId);
+            const conversationId = this.sessionChat.get(sessionId);
+            // Only Zeros computer use waits for a built-in one.
+            if (this.cloud || !agentControlFeatureAvailable("computerUse") ||
+                !workspaceId || !conversationId || !isAgentControlFamily(agentId)) return null;
+            return {
+              owner: {
+                workspaceId: workspaceId as ComputerUseOwner["workspaceId"],
+                conversationId: conversationId as ComputerUseOwner["conversationId"],
+              },
+              agent: agentId,
+            };
+          });
         },
         onAgentExit: (
           agentId: string,
@@ -3869,13 +3962,16 @@ export class ZerosEngine {
     // Explicit final requests can also be redelivered after an ambiguous
     // response. Share their reconciliation just like an idle capture.
     if (this.cloudIdleCheckpoint?.id === directive.id) return this.cloudIdleCheckpoint.promise;
+    if (this.cloudIdleCheckpoint?.pending) return Promise.reject(new Error("cloud checkpoint is already in progress"));
     const progress = this.checkpointProgressReporter(directive, authority);
     progress?.stage("checkpoint_received");
     const promise = this.performCloudCheckpointRequest(directive, authority, progress);
-    this.cloudIdleCheckpoint = { id: directive.id, promise };
-    void promise.catch(error => {
+    const checkpoint = { id: directive.id, promise, pending: true };
+    this.cloudIdleCheckpoint = checkpoint;
+    void promise.then(() => { checkpoint.pending = false; }, error => {
+      checkpoint.pending = false;
       progress?.fail(error);
-      if (this.cloudIdleCheckpoint?.id === directive.id) this.cloudIdleCheckpoint = null;
+      if (this.cloudIdleCheckpoint === checkpoint) this.cloudIdleCheckpoint = null;
     });
     return promise;
   }
@@ -3930,10 +4026,33 @@ export class ZerosEngine {
       await this.cloudRuntimeRegistration?.idleStopRequest({ kind: "cancel", requestId: directive.id }).catch(() => undefined);
       throw error;
     }
+    const retainQuiescence = ["before_stop", "before_archive", "before_delete", "before_rebuild"].includes(directive.reason);
+    const source = this.cloudFinalCheckpointSealSource;
+    const retryFinal = this.cloudRuntimeCheckpointQuiescing && source !== null && source !== undefined &&
+      retainQuiescence && !directive.idleStop;
+    const seal = this.cloudLocalWriterLifecycle?.seal;
+    const assertFinalRetry = () => {
+      if (!retryFinal) return;
+      const config = this.cloudRuntimeConfig, boot = this.cloudAgentBoot, scope = boot?.scope;
+      // The same current engine may finish final capture using its frozen
+      // writer. Neither a manual/idle request nor stale scope can reopen it.
+      if (!this.running || !this.cloudWorker || this.cloudRuntimeAuthorityStopping || !config || !scope ||
+          !boot?.authorityActive || this.cloudLocalWriterLifecycle !== source.lifecycle || boot !== source.boot ||
+          this.cloudRuntimeRegistration !== source.registration || !source.registration.hasRuntimeHandoffAuthority() ||
+          Object.entries(source.scope).some(([key, value]) => scope[key as keyof typeof scope] !== value) ||
+          directive.deadlineAtMs <= Date.now() ||
+          scope.organizationId !== authority.organizationId || scope.workspaceId !== authority.workspaceId ||
+          scope.generation !== authority.generation || scope.engineInstanceId !== authority.engineInstanceId ||
+          config.execution.organizationId !== scope.organizationId || config.execution.workspaceId !== scope.workspaceId ||
+          config.execution.generation !== scope.generation || config.engine.instanceId !== scope.engineInstanceId ||
+          (seal && Object.entries(seal.scope).some(([key, value]) => scope[key as keyof typeof scope] !== value)))
+        throw new CloudCommandRuntimeError("engine_authority_rejected");
+    };
+    assertFinalRetry();
     if (
       this.cloudRuntimeHandoffFenced || !this.cloudDurabilityRuntime ||
       !this.cloudRecordRuntime ||
-      (this.cloudRuntimeCheckpointQuiescing && !idleReserved)
+      (this.cloudRuntimeCheckpointQuiescing && !idleReserved && !retryFinal)
     ) {
       throw new Error("cloud checkpoint runtime is unavailable");
     }
@@ -3941,12 +4060,6 @@ export class ZerosEngine {
     this.cloudIdleReservation = null;
     this.cloudIdleCaptureId = directive.idleStop ? directive.id : null;
     this.cloud?.setHumanServicesPaused(true);
-    const retainQuiescence = [
-      "before_stop",
-      "before_archive",
-      "before_delete",
-      "before_rebuild",
-    ].includes(directive.reason);
     try {
       progress?.stage("service_pause");
       if (this.cloudWorkloads && !this.cloudWorkloadCheckpointFence) {
@@ -3954,37 +4067,57 @@ export class ZerosEngine {
         this.cloudWorkloadCheckpointPreserved = directive.idleStop === true;
       }
       this.cloudResidentCheckpointFence ??= this.fenceCloudResidentWorkloads(directive.idleStop ? "preserve" : "drain");
-      try { await Promise.all([this.cloudHumanServices?.pause(),this.cloudLanguageServices?.pause()]); }
-      catch (error) { progress?.fail(error); this.handleCloudRuntimeAuthorityLoss(); throw error; }
-      await this.cloudCheckpointScheduler?.pause();
-      progress?.stage("process_starts");
-      await this.waitForWorkspaceProcessStartSnapshot(
-        "cloud-final-checkpoint",
-        [...new Set([
-          ...this.globalDesignAuthorityStarts,
-          ...this.cloudWorkspaceMutations,
-          ...[...this.workspaceProcessStarts.values()].flatMap(starts => [...starts]),
-        ])],
-      );
-      progress?.stage("setup_stop");
-      await this.setup.stopAllAndProve();
-      progress?.stage("run_stop");
-      await this.runs.stopAllAndProve();
-      progress?.stage("agent_retirement");
-      await this.retireAllCodeAgentSessionsForTerritoryChange();
+      // A sealed NORMAL database is read-only custody. Skip work that may
+      // publish mutable state; the original workload tickets still drain below.
+      if (!seal) {
+        try { await Promise.all([this.cloudHumanServices?.pause(),this.cloudLanguageServices?.pause()]); }
+        catch (error) { progress?.fail(error); this.handleCloudRuntimeAuthorityLoss(); throw error; }
+        await this.cloudCheckpointScheduler?.pause();
+        progress?.stage("process_starts");
+        await this.waitForWorkspaceProcessStartSnapshot(
+          "cloud-final-checkpoint",
+          [...new Set([
+            ...this.globalDesignAuthorityStarts,
+            ...this.cloudWorkspaceMutations,
+            ...[...this.workspaceProcessStarts.values()].flatMap(starts => [...starts]),
+          ])],
+        );
+        progress?.stage("setup_stop");
+        await this.setup.stopAllAndProve();
+        progress?.stage("run_stop");
+        await this.runs.stopAllAndProve();
+        progress?.stage("agent_retirement");
+        await this.retireAllCodeAgentSessionsForTerritoryChange();
+      }
       progress?.stage("workload_drain");
       if (this.cloudWorkloads && this.cloudWorkloadCheckpointFence) {
         if (directive.idleStop) {
           await this.joinCloudPreservedWorkloads(this.cloudWorkloadCheckpointFence, this.cloudResidentCheckpointFence);
           if (!stillIdle?.() || await this.cloudIdleUserProcesses() || !stillIdle?.())
             throw new Error("Cloud workspace is no longer idle");
-        } else await this.drainCloudWorkloads(this.cloudWorkloadCheckpointFence, this.cloudResidentCheckpointFence);
+        } else {
+          // An earlier idle seal retained original shells under a preserve
+          // ticket. Explicit final control needs a distinct immutable drain.
+          const resident = this.cloudWorkloadCheckpointPreserved
+            ? this.cloudResidentCheckpointDrainFence ??= this.fenceCloudResidentWorkloads("drain")
+            : this.cloudResidentCheckpointFence;
+          await this.drainCloudWorkloads(this.cloudWorkloadCheckpointFence, resident);
+        }
       }
       progress?.stage("terminal_drain");
       if (!directive.idleStop) await this.terminals.clear();
-      progress?.stage("record_flush");
-      await this.cloudRecordRuntime.flush(authority);
-      if (retainQuiescence && this.cloudLocalWriterLifecycle) await this.sealCloudLocalWriter(progress);
+      if (!seal) {
+        progress?.stage("record_flush");
+        await this.cloudRecordRuntime.flush(authority);
+      }
+      assertFinalRetry();
+      if (retainQuiescence && this.cloudLocalWriterLifecycle) {
+        if (!this.cloudAgentBoot || !this.cloudRuntimeRegistration) throw new CloudCommandRuntimeError("engine_authority_rejected");
+        this.cloudFinalCheckpointSealSource ??= { lifecycle: this.cloudLocalWriterLifecycle, boot: this.cloudAgentBoot,
+          registration: this.cloudRuntimeRegistration, scope: { ...this.cloudAgentBoot.scope } };
+        await this.sealCloudLocalWriter(progress);
+      }
+      assertFinalRetry();
       progress?.stage("durability_capture");
       await this.cloudDurabilityRuntime.checkpoint(directive, authority, stillIdle ?? undefined);
       // A cancelled idle capture must leave terminal access intact. Clear the
@@ -4045,7 +4178,7 @@ export class ZerosEngine {
     this.cloudFinalCheckpointReconciliationTimer = null;
     // A durable frozen writer cannot be reopened by checkpoint cancellation.
     // Only source retirement/replacement can install a fresh writer epoch.
-    if (this.cloudLocalWriterLifecycle?.seal || this.cloudUnresolvedFinalCheckpoint) return;
+    if (this.cloudFinalCheckpointSealSource || this.cloudLocalWriterLifecycle?.seal || this.cloudUnresolvedFinalCheckpoint) return;
     const workloads = this.cloudWorkloads;
     const checkpointFence = this.cloudWorkloadCheckpointFence;
     const idleFence = this.cloudWorkloadIdleFence;
@@ -4557,7 +4690,7 @@ export class ZerosEngine {
         progress?.stage("event_flush");
         await this.cloudEvents!.flush();
         progress?.stage("record_handoff");
-        await registration.pauseRecordForRuntimeHandoff();
+        await registration.pauseRecordForRuntimeHandoff({ retryFailedFlush: true });
       },
       freezeNormal: sealZerosDbForRuntimeHandoff,
       request: (seal,signal) => registration.localCommandSealRequest(seal,signal),
@@ -12465,6 +12598,7 @@ export class ZerosEngine {
       credentials?: unknown;
       requestId?: unknown;
       data?: unknown;
+      availability?: unknown;
     };
     try {
       msg = JSON.parse(line);
@@ -12509,6 +12643,18 @@ export class ZerosEngine {
           this.publishPrivateHostControl(`${JSON.stringify({ type: "engine.providerCredentialsApplied", requestId: msg.requestId })}\n`);
         }
         void this.agents.refreshRegistry().catch(() => {});
+      }
+      return;
+    }
+    if (msg.type === "host.agentControlAvailability") {
+      // Control tools read this when they admit, route and run a call, so an
+      // agent that starts after the confirmation sees the new rollout.
+      const availability = readAgentControlAvailability(msg.availability);
+      if (!this.cloudWorker && availability) {
+        setAgentControlAvailability(availability);
+        if (typeof msg.requestId === "string" && /^[0-9a-f-]{36}$/i.test(msg.requestId)) {
+          this.publishPrivateHostControl(`${JSON.stringify({ type: "engine.agentControlAvailabilityApplied", requestId: msg.requestId })}\n`);
+        }
       }
       return;
     }

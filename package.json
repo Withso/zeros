@@ -34,6 +34,9 @@
     "build:ripgrep": "node scripts/stage-ripgrep.mjs",
     "stage:claude-cli": "node scripts/stage-claude-cli.mjs",
     "stage:codex-cli": "node scripts/stage-codex-cli.mjs",
+    "stage:cua-driver": "node scripts/stage-cua-driver.mjs",
+    "stage:axe": "node scripts/stage-axe.mjs",
+    "build:simulator-hid": "node scripts/build-simulator-hid.mjs",
     "smoke:engine": "node scripts/smoke-engine.mjs",
     "smoke:attachment-storage": "tsx scripts/smoke-attachment-storage.mts",
     "smoke:attachment-electron": "node scripts/smoke-attachment-electron.mjs",
@@ -125,7 +128,7 @@
     "test:git:watch": "vitest --config vitest.config.ts",
     "check:design-containment": "node scripts/run-explicit-vitest.mjs packages/design-web/src/__tests__/foundation-acceptance.test.ts packages/design-web/src/__tests__/playwright-renderer.test.ts apps/desktop/src/engine/agents/__tests__/gateway-cwd-hint.test.ts apps/desktop/src/engine/agents/__tests__/territory-resolution.test.ts apps/desktop/src/engine/agents/adapters/shared/__tests__/stdio-process.test.ts apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-params.test.ts apps/desktop/src/engine/agents/adapters/claude-sdk/__tests__/adapter.test.ts apps/desktop/src/engine/agents/adapters/claude-sdk/__tests__/contained-process.test.ts apps/desktop/src/engine/design/__tests__/agent-isolation.test.ts apps/desktop/src/engine/design/__tests__/containment-guarantees.test.ts apps/desktop/src/engine/design/__tests__/design-agent-capability.test.ts apps/desktop/src/engine/design/__tests__/design-agent-mcp.test.ts apps/desktop/src/engine/design/__tests__/document-write-lock.test.ts apps/desktop/src/engine/design/__tests__/screenshots.test.ts apps/desktop/src/engine/files/__tests__/design-lock.test.ts apps/desktop/src/engine/git/__tests__/forge.test.ts apps/desktop/src/engine/git/__tests__/mutation-lock.test.ts apps/desktop/src/engine/git/__tests__/worktree.test.ts apps/desktop/src/engine/db/__tests__/migrations.test.ts apps/desktop/src/engine/workspace/__tests__/service.test.ts apps/desktop/src/engine/design/__tests__/code-tool-admission.test.ts apps/desktop/src/engine/design/__tests__/code-tools.test.ts apps/desktop/src/engine/design/__tests__/request-store.test.ts apps/desktop/src/engine/design/__tests__/source-sanitizer.test.ts apps/desktop/src/engine/design/__tests__/assets-budget.test.ts apps/desktop/src/engine/agents/__tests__/gateway-product-tools.test.ts apps/desktop/src/engine/agents/__tests__/session-tools.test.ts",
     "test:workspace-lifecycle": "vitest run --config vitest.config.ts apps/desktop/src/engine/git/__tests__/workspace-base-lifecycle.test.ts apps/desktop/src/engine/git/__tests__/branch-catalog.test.ts apps/desktop/src/engine/git/__tests__/branch.test.ts apps/desktop/src/engine/git/__tests__/default-branch-freshness.test.ts apps/desktop/src/engine/git/__tests__/watch.test.ts apps/desktop/src/engine/git/__tests__/cleanup.test.ts apps/desktop/src/engine/git/__tests__/worktree.test.ts apps/desktop/src/engine/git/__tests__/worktree-seed.test.ts apps/desktop/src/engine/git/__tests__/workspace-files.test.ts apps/desktop/src/engine/git/__tests__/cross-tool.test.ts apps/desktop/src/engine/git/__tests__/workspace-git-regressions.test.ts apps/desktop/src/engine/git/__tests__/repo-scripts.test.ts apps/desktop/src/engine/git/__tests__/git-exec.test.ts apps/desktop/src/engine/git/__tests__/engine-token-store.test.ts apps/desktop/src/engine/git/__tests__/github.test.ts apps/desktop/src/engine/git/__tests__/publish-github.test.ts apps/desktop/src/engine/git/__tests__/sync-workspace-pr.test.ts apps/desktop/src/engine/settings/__tests__/files.test.ts apps/desktop/src/engine/settings/__tests__/resolve.test.ts apps/desktop/src/engine/settings/__tests__/schema.test.ts apps/desktop/src/engine/workspace/__tests__/service.test.ts apps/desktop/src/engine/pty/__tests__/registry.test.ts apps/desktop/src/engine/pty/__tests__/service.test.ts apps/desktop/src/engine/agents/__tests__/gateway-end-session.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/workspace-bridge.test.ts apps/desktop/src/renderer/platform/__tests__/workspace-operation-errors.test.ts apps/desktop/src/renderer/features/agent/__tests__/new-chat-defaults.test.ts apps/desktop/src/renderer/features/agent/__tests__/sessions-store-agent-exit.test.ts apps/desktop/src/renderer/features/agent/__tests__/sessions-store-detach.test.ts apps/desktop/src/renderer/shared/lib/__tests__/workspace-card-action.test.ts apps/desktop/src/renderer/features/repositories/__tests__/repo-branch-catalog-cache.test.ts apps/desktop/src/renderer/shell/workbench/__tests__/fresh-workspace.test.ts apps/desktop/src/renderer/state/__tests__/active-chat-per-workspace.test.ts apps/desktop/src/renderer/state/__tests__/archive-navigation.test.ts apps/desktop/src/renderer/state/__tests__/keyed-async-cache.test.ts apps/desktop/src/renderer/state/__tests__/live-workspace-selectors.test.ts apps/desktop/src/renderer/state/__tests__/pending-workspaces.test.ts apps/desktop/src/renderer/state/__tests__/workspace-cache-transitions.test.ts apps/desktop/src/renderer/state/__tests__/workspace-create-intents.test.ts apps/desktop/src/renderer/state/__tests__/workspace-list-persistence.test.ts apps/desktop/src/renderer/state/__tests__/workspace-resolution.test.ts apps/desktop/src/renderer/state/__tests__/chat-panes-store.test.ts apps/desktop/src/renderer/state/__tests__/chat-selection-invariant.test.ts",
-    "lint": "eslint apps/desktop/src apps/desktop/electron",
+    "lint": "eslint --cache --cache-strategy content --cache-location node_modules/.cache/zeros-eslint/ apps/desktop/src apps/desktop/electron",
     "typecheck": "pnpm typecheck:app && pnpm typecheck:electron && pnpm typecheck:packages",
     "typecheck:app": "tsc --noEmit -p tsconfig.typecheck.json",
     "typecheck:electron": "tsc --noEmit -p apps/desktop/electron/tsconfig.typecheck.json",
@@ -171,6 +174,7 @@
     "@replit/codemirror-indentation-markers": "^6.5.3",
     "@tailwindcss/forms": "^0.5.11",
     "@tailwindcss/typography": "^0.5.20",
+    "@tanstack/react-virtual": "3.14.20",
     "@tiptap/core": "3.31.2",
     "@tiptap/extension-document": "3.31.2",
     "@tiptap/extension-mention": "3.31.2",
@@ -180,6 +184,7 @@
     "@tiptap/pm": "3.31.2",
     "@tiptap/react": "3.31.2",
     "@tiptap/suggestion": "3.31.2",
+    "@trycua/cua-driver": "0.34.1",
     "@uiw/react-codemirror": "^4.25.10",
     "@vscode/ripgrep": "^1.18.0",
     "@xterm/addon-fit": "^0.11.0",
@@ -189,6 +194,7 @@
     "@zeros/design-core": "workspace:*",
     "@zeros/design-web": "workspace:*",
     "@zeros/protocol": "workspace:*",
+    "agent-device": "0.21.26",
     "better-sqlite3": "^13.0.2",
     "chokidar": "^4.0.3",
     "class-variance-authority": "^0.7.1",
@@ -262,6 +268,9 @@
     "vite": "^7.3.5",
     "vitest": "^4.1.11",
     "wait-on": "^9.0.5"
+  },
+  "optionalDependencies": {
+    "@trycua/cua-driver-darwin-arm64": "0.34.1"
   },
   "keywords": [
     "coding-agents",

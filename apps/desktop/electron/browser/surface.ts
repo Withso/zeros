@@ -363,6 +363,63 @@ export function browserInputDisposition(input: {
   return input.actor === "user" ? "allow" : "block";
 }
 
+/** Plain Esc pressed by the user inside an agent-owned page takes control
+ * back, like the control bar's Stop. Keys the agent dispatches itself pass
+ * through under `agentDispatched`, so the agent can still press Esc. */
+export function browserInputStopsAgent(input: {
+  actor: "agent" | "user";
+  agentDispatched: boolean;
+  type: string;
+  key: string;
+  meta?: boolean;
+  control?: boolean;
+  alt?: boolean;
+  /** The staged Zeros browser, which brought Esc and the control bar, is
+   * open. */
+  zerosBrowser: boolean;
+}): boolean {
+  return (
+    input.zerosBrowser &&
+    input.actor === "agent" &&
+    !input.agentDispatched &&
+    input.type === "keyDown" &&
+    input.key === "Escape" &&
+    !input.meta &&
+    !input.control &&
+    !input.alt
+  );
+}
+
+export function browserSurfaceIsPictureInPicture(
+  surfaceId: string | null,
+): boolean {
+  return surfaceId?.startsWith("browser-agent-pip") === true;
+}
+
+/** The Browser tab's control bar follows agent ownership for the whole turn,
+ * like the page input lock, and fades out when control returns in place. A
+ * page leaving the tab removes it at once so it never floats over renderer
+ * UI. Picture in picture has its own hover strip. */
+export function browserControlBarDisposition(input: {
+  actor: "agent" | "user" | undefined;
+  status: BrowserSessionState["status"];
+  attachedToTrustedWindow: boolean;
+  surfaceId: string | null;
+  /** The staged Zeros browser is open. */
+  zerosBrowser: boolean;
+}): "show" | "fade" | "remove" {
+  if (
+    !input.zerosBrowser ||
+    input.status === "closed" ||
+    !input.attachedToTrustedWindow ||
+    input.surfaceId === null ||
+    browserSurfaceIsPictureInPicture(input.surfaceId)
+  ) {
+    return "remove";
+  }
+  return input.actor === "agent" ? "show" : "fade";
+}
+
 export type BrowserAgentNavigationDisposition = "allow" | "confirm";
 
 /** Main-frame navigations initiated by page code during agent ownership use
@@ -695,6 +752,26 @@ export function browserSurfaceCaptureDataUrl(
   return Buffer.byteLength(jpeg, "utf8") <= maximumBytes ? jpeg : null;
 }
 
+interface BrowserSurfaceCapturable {
+  capturePage(
+    rect: undefined,
+    options: { stayHidden: boolean; stayAwake: boolean },
+  ): Promise<BrowserSurfaceCaptureImage>;
+}
+
+/** Chromium sometimes refuses the copy ("UnknownVizError"). Callers keep the
+ * image they already have either way, so that is no capture rather than a
+ * failed command. */
+export async function captureBrowserSurface(
+  contents: BrowserSurfaceCapturable,
+  maximumBytes: number,
+): Promise<string | null> {
+  const image = await contents
+    .capturePage(undefined, { stayHidden: true, stayAwake: true })
+    .catch(() => null);
+  return image ? browserSurfaceCaptureDataUrl(image, maximumBytes) : null;
+}
+
 function actionRecord(
   value: BrowserJsonValue,
 ): Record<string, BrowserJsonValue> {
@@ -724,12 +801,22 @@ export function browserActionLabel(
       return "Clicking…";
     case "type":
       return "Typing…";
+    case "key": {
+      const key = typeof args.key === "string" ? args.key.trim() : "";
+      return /^[A-Za-z0-9+]{1,40}$/.test(key)
+        ? `Pressing ${key}…`
+        : "Pressing a key…";
+    }
+    case "select":
+      return "Choosing an option…";
     case "scroll": {
       const y = Number(args.y ?? 0);
       if (y > 0) return "Scrolling down…";
       if (y < 0) return "Scrolling up…";
       return "Scrolling page…";
     }
+    case "wait":
+      return "Waiting for the page…";
     case "upload":
       return "Preparing upload…";
     case "resize":
@@ -873,6 +960,74 @@ function differentHttpDocument(left: string, right: string): boolean {
   } catch {
     return false;
   }
+}
+
+const BROWSER_NAMED_KEYS: ReadonlyMap<string, string> = new Map([
+  ["enter", "Enter"],
+  ["return", "Enter"],
+  ["escape", "Escape"],
+  ["esc", "Escape"],
+  ["tab", "Tab"],
+  ["backspace", "Backspace"],
+  ["delete", "Delete"],
+  ["arrowup", "Up"],
+  ["arrowdown", "Down"],
+  ["arrowleft", "Left"],
+  ["arrowright", "Right"],
+  ["up", "Up"],
+  ["down", "Down"],
+  ["left", "Left"],
+  ["right", "Right"],
+  ["home", "Home"],
+  ["end", "End"],
+  ["pageup", "PageUp"],
+  ["pagedown", "PageDown"],
+  ["space", "Space"],
+]);
+
+const BROWSER_KEY_MODIFIERS: ReadonlyMap<
+  string,
+  "shift" | "control" | "alt" | "meta"
+> = new Map([
+  ["shift", "shift"],
+  ["control", "control"],
+  ["ctrl", "control"],
+  ["alt", "alt"],
+  ["option", "alt"],
+  ["meta", "meta"],
+  ["cmd", "meta"],
+  ["command", "meta"],
+]);
+
+export interface BrowserKeyChord {
+  /** Electron `sendInputEvent` key code. */
+  keyCode: string;
+  modifiers: Array<"shift" | "control" | "alt" | "meta">;
+  /** Text Chromium inserts for the key, when it produces any. */
+  text: string | null;
+}
+
+/** Parse the `key` tool's chord (`Enter`, `Shift+Tab`, `Meta+A`, `a`). Only
+ * named navigation keys and single printable characters are accepted, so a
+ * chord can never smuggle text longer than one character. */
+export function parseBrowserKeyChord(value: string): BrowserKeyChord | null {
+  const parts = value.trim().split("+");
+  if (parts.length === 0 || parts.length > 4) return null;
+  const rawKey = parts.at(-1) ?? "";
+  const modifiers: BrowserKeyChord["modifiers"] = [];
+  for (const part of parts.slice(0, -1)) {
+    const modifier = BROWSER_KEY_MODIFIERS.get(part.trim().toLowerCase());
+    if (!modifier || modifiers.includes(modifier)) return null;
+    modifiers.push(modifier);
+  }
+  const named = BROWSER_NAMED_KEYS.get(rawKey.trim().toLowerCase());
+  const bare = modifiers.every((modifier) => modifier === "shift");
+  if (named) {
+    const text = named === "Enter" ? "\r" : named === "Space" ? " " : null;
+    return { keyCode: named, modifiers, text: bare ? text : null };
+  }
+  if ([...rawKey].length !== 1 || /[\p{C}\s]/u.test(rawKey)) return null;
+  return { keyCode: rawKey, modifiers, text: bare ? rawKey : null };
 }
 
 /** Add the page's accessible control name to trusted activity chrome without

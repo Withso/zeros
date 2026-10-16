@@ -15,8 +15,10 @@ and the Electron runtime embedded in the desktop application. Optional
 JavaScript dependencies are included. Host-native optional packages are
 normalized to the macOS arm64 desktop and Linux x64 control-plane
 release contents: the staged Claude runtime, the staged Codex runtime, the
-packaged Cursor runtime, the packaged ripgrep binary, and the macOS-only
-fsevents watcher are all included.
+packaged Cursor runtime, the packaged ripgrep binary, the macOS-only
+fsevents watcher, and the macOS-only Cua computer-use driver runtime
+are all included, as is the AXe iOS Simulator tool, a pinned release
+binary that is not an npm package.
 Electron's distribution also carries its Chromium notices
 file. See THIRD-PARTY-NOTICES.md for the vendor release requirements.
 
@@ -30,7 +32,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.296: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.37: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (647 resolved package/version records)
+PACKAGE INVENTORY (656 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.296
@@ -1356,6 +1358,20 @@ PACKAGE INVENTORY (647 resolved package/version records)
   Source: https://github.com/tailwindlabs/tailwindcss-typography
   License documents: 60e0b68c0f35
 
+@tanstack/react-virtual@3.14.20
+  License: MIT
+  Surfaces: root pnpm workspace
+  Author: Tanner Linsley
+  Source: https://github.com/TanStack/virtual
+  License documents: a405ee70c632
+
+@tanstack/virtual-core@3.19.5
+  License: MIT
+  Surfaces: root pnpm workspace
+  Author: Tanner Linsley
+  Source: https://github.com/TanStack/virtual
+  License documents: a405ee70c632
+
 @tiptap/core@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
@@ -1421,6 +1437,18 @@ PACKAGE INVENTORY (647 resolved package/version records)
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
+
+@trycua/cua-driver-darwin-arm64@0.34.1
+  License: MIT AND MPL-2.0
+  Surfaces: desktop packaged runtime (macOS arm64)
+  Source: https://github.com/trycua/cua
+  License documents: 1f256ecad192, 5c5f18ddfa4b, 66a466cc022b
+
+@trycua/cua-driver@0.34.1
+  License: MIT
+  Surfaces: root pnpm workspace
+  Source: https://github.com/trycua/cua
+  License documents: 38dd393132c9
 
 @types/debug@4.1.13
   License: MIT
@@ -1518,6 +1546,26 @@ PACKAGE INVENTORY (647 resolved package/version records)
   Source: https://github.com/DefinitelyTyped/DefinitelyTyped
   License documents: c2cfccb812fe
 
+@ubjs/core@0.31.0-3
+  License: MPL-2.0
+  Surfaces: root pnpm workspace
+  Author: James Hugman <james@hugman.tv>
+  Source: https://github.com/jhugman/uniffi-bindgen-react-native
+  License documents: 1f256ecad192
+
+@ubjs/node-darwin-arm64@0.31.0-3
+  License: MPL-2.0
+  Surfaces: desktop packaged runtime (macOS arm64)
+  Source: https://github.com/jhugman/uniffi-bindgen-react-native
+  License documents: 1f256ecad192
+
+@ubjs/node@0.31.0-3
+  License: MPL-2.0
+  Surfaces: root pnpm workspace
+  Author: James Hugman <james@hugman.tv>
+  Source: https://github.com/jhugman/uniffi-bindgen-react-native
+  License documents: 1f256ecad192
+
 @uiw/codemirror-extensions-basic-setup@4.25.10
   License: MIT
   Surfaces: root pnpm workspace
@@ -1606,6 +1654,13 @@ accepts@2.0.0
   Source: https://github.com/jshttp/accepts
   License documents: 71f83c4c0621
 
+agent-device@0.21.26
+  License: MIT
+  Surfaces: root pnpm workspace
+  Author: Callstack
+  Source: https://github.com/callstack/agent-device
+  License documents: 313773e4c4a8, 64f25cb04776
+
 ajv-formats@3.0.1
   License: MIT
   Surfaces: root pnpm workspace
@@ -1660,6 +1715,12 @@ available-typed-arrays@1.0.7
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/inspect-js/available-typed-arrays
   License documents: 6d0917530cf3
+
+AXe@1.8.0
+  License: MIT AND Apache-2.0
+  Surfaces: desktop packaged runtime (macOS arm64)
+  Source: https://github.com/cameroncooke/AXe
+  License documents: 1f99407bfe3e, 770af8291f70, da6d3703ed11, fef28fc4165c
 
 bail@2.0.2
   License: MIT
@@ -4375,7 +4436,7 @@ zwitch@2.0.4
   Source: https://github.com/wooorm/zwitch
   License documents: ca4662cb5d1b
 
-LICENSE AND NOTICE TEXTS (327 unique documents)
+LICENSE AND NOTICE TEXTS (336 unique documents)
 ------------------------
 
 ================================================================================
@@ -7373,8 +7434,8 @@ OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHE
 ================================================================================
 DOCUMENT 1f256ecad192
 SHA-256: 1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5
-Applies to: dompurify@3.4.16
-Source labels: dompurify@3.4.16 — LICENSE-MPL
+Applies to: @trycua/cua-driver-darwin-arm64@0.34.1, @ubjs/core@0.31.0-3, @ubjs/node-darwin-arm64@0.31.0-3, @ubjs/node@0.31.0-3, dompurify@3.4.16
+Source labels: @trycua/cua-driver-darwin-arm64@0.34.1 — LICENSE.mpl-2.0; @ubjs/core@0.31.0-3 — repository-level copy from @ubjs/node-darwin-arm64@0.31.0-3 — LICENSE; @ubjs/node-darwin-arm64@0.31.0-3 — LICENSE; @ubjs/node@0.31.0-3 — repository-level copy from @ubjs/node-darwin-arm64@0.31.0-3 — LICENSE; dompurify@3.4.16 — LICENSE-MPL
 ================================================================================
 
 Mozilla Public License Version 2.0
@@ -7750,6 +7811,30 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 
   This Source Code Form is "Incompatible With Secondary Licenses", as
   defined by the Mozilla Public License, v. 2.0.
+
+================================================================================
+DOCUMENT 1f99407bfe3e
+SHA-256: 1f99407bfe3e277ccc657d86652a249ad3504524b955dc35068b8197d78e4fb6
+Applies to: AXe@1.8.0
+Source labels: AXe@1.8.0 — NOTICE.md
+================================================================================
+
+# AXe release contents
+
+Zeros redistributes the AXe 1.8.0 macOS release archive
+(`AXe-macOS-v1.8.0-universal.tar.gz`) from
+https://github.com/cameroncooke/AXe for the iOS Simulator tab. The only
+change is removing each binary's x86_64 slice with `lipo`.
+
+- `axe`: AXe, MIT, Copyright (c) 2025 Cameron Cooke. See `LICENSE`.
+- `Frameworks/FBControlCore.framework`, `FBDeviceControl.framework`,
+  `FBSimulatorControl.framework` and `XCTestBootstrap.framework`: idb
+  (https://github.com/facebook/idb), MIT, Copyright (c) Meta Platforms, Inc.
+  and affiliates. See `LICENSE.idb`.
+- `axe` statically links swift-argument-parser 1.5.0
+  (https://github.com/apple/swift-argument-parser, revision
+  41982a3656a71c768319979febd796c6fd111d5c), Apache-2.0 with the Swift
+  Runtime Library Exception. See `LICENSE.swift-argument-parser`.
 
 ================================================================================
 DOCUMENT 1fe6958409c8
@@ -9002,6 +9087,37 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
+DOCUMENT 313773e4c4a8
+SHA-256: 313773e4c4a8a3f21fd682842f4661e2b23502f71b700f18084586d1ce74d49a
+Applies to: agent-device@0.21.26
+Source labels: agent-device@0.21.26 — apple/snapshot-bridge/LICENSE.idb
+================================================================================
+
+The Simulator AX bridge contains code adapted from Meta Platforms, Inc. idb
+v1.5.2, specifically SimulatorFrameworkBridge/AccessibilityService.m and
+SimulatorFrameworkBridge/AccessibilityRuntime.m.
+
+Copyright (c) Meta Platforms, Inc. and affiliates.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
 DOCUMENT 3239e134eb6e
 SHA-256: 3239e134eb6e6d64538ca76498c7fcb08a395249dd9d4af9927bf6d0169ee429
 Applies to: @noble/curves@2.2.0, @noble/hashes@2.2.0
@@ -9059,6 +9175,35 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+================================================================================
+DOCUMENT 38dd393132c9
+SHA-256: 38dd393132c9efa83c16c1e1e2cb3cc1460c3633a7aaa2adf70c1af9958f4bf4
+Applies to: @trycua/cua-driver@0.34.1
+Source labels: @trycua/cua-driver@0.34.1 — declared MIT terms (archive omitted a standalone file)
+================================================================================
+
+MIT License
+
+Copyright (c) the @trycua/cua-driver contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ================================================================================
 DOCUMENT 395c95f20598
@@ -11555,6 +11700,35 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
+DOCUMENT 5c5f18ddfa4b
+SHA-256: 5c5f18ddfa4b3eea2a15f36723e4b591f2a6d7777954cbbfdf93e2dc193cff76
+Applies to: @trycua/cua-driver-darwin-arm64@0.34.1
+Source labels: @trycua/cua-driver-darwin-arm64@0.34.1 — LICENSE.mit
+================================================================================
+
+MIT License
+
+Copyright (c) the Cua Driver contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
 DOCUMENT 5c932d88256b
 SHA-256: 5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3
 Applies to: ansi-regex@6.2.2, decompress-response@6.0.0, default-shell@2.2.0, escape-string-regexp@5.0.0, execa@5.1.1, fix-path@5.0.0, get-stream@6.0.1, is-plain-obj@4.1.0, is-stream@2.0.1, mimic-response@3.1.0, onetime@5.1.2, shell-env@4.0.3, shell-path@3.1.0, strip-ansi@7.2.0
@@ -11991,6 +12165,35 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
+DOCUMENT 64f25cb04776
+SHA-256: 64f25cb04776a886b0acd79fe7345a7ae09bed9952fa6774a5b2041ecba763f3
+Applies to: agent-device@0.21.26
+Source labels: agent-device@0.21.26 — LICENSE
+================================================================================
+
+MIT License
+
+Copyright (c) 2026 Callstack
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
 DOCUMENT 6582629e2979
 SHA-256: 6582629e2979466878f6014313dcc2f3756c9616148682227ce3063dde310750
 Applies to: picocolors@1.1.1
@@ -12012,6 +12215,26 @@ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+================================================================================
+DOCUMENT 66a466cc022b
+SHA-256: 66a466cc022b4bf4a41f678e4d31d9b82098cc55cc364d6e9295366dfd02cef2
+Applies to: @trycua/cua-driver-darwin-arm64@0.34.1
+Source labels: @trycua/cua-driver-darwin-arm64@0.34.1 — NOTICE.md
+================================================================================
+
+# Cua Driver Node runtime notice
+
+`cua_driver_node_runtime.node` is a compatibility build derived from the N-API
+runtime in `uniffi-bindgen-react-native` 0.31.0-3, copyright its contributors
+and licensed under the Mozilla Public License 2.0.
+
+The corresponding source is the pinned npm development dependency plus the
+deterministic transformations in `scripts/build-node-runtime.mjs`. The source
+and build script are available in the Cua repository at the release tag that
+matches this package.
+
+<https://www.mozilla.org/MPL/2.0/>
 
 ================================================================================
 DOCUMENT 6895190430d8
@@ -12520,6 +12743,225 @@ SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
 OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+================================================================================
+DOCUMENT 770af8291f70
+SHA-256: 770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55
+Applies to: AXe@1.8.0
+Source labels: AXe@1.8.0 — LICENSE.swift-argument-parser
+================================================================================
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+    TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+    1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+    2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+    3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+    4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+    5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+    6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+    7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+    8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+    9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+    END OF TERMS AND CONDITIONS
+
+    APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+    Copyright [yyyy] [name of copyright owner]
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+
+
+## Runtime Library Exception to the Apache 2.0 License: ##
+
+
+    As an exception, if you use this Software to compile your source code and
+    portions of this Software are embedded into the binary product as a result,
+    you may redistribute such product without providing attribution as would
+    otherwise be required by Sections 4(a), 4(b) and 4(d) of the License.
 
 ================================================================================
 DOCUMENT 784fd7232e10
@@ -15454,6 +15896,35 @@ MIT License
 Copyright (c) 2018 - present Microsoft Corporation
 
 All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+DOCUMENT a405ee70c632
+SHA-256: a405ee70c632bb938acb7ac5f210e814409b3760ea9d2329d8ed8ffcfd11a0e7
+Applies to: @tanstack/react-virtual@3.14.20, @tanstack/virtual-core@3.19.5
+Source labels: @tanstack/react-virtual@3.14.20 — LICENSE; @tanstack/virtual-core@3.19.5 — LICENSE
+================================================================================
+
+MIT License
+
+Copyright (c) 2021-present Tanner Linsley
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19507,8 +19978,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT da6d3703ed11
 SHA-256: da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93
-Applies to: use-sync-external-store@1.6.0
-Source labels: use-sync-external-store@1.6.0 — LICENSE
+Applies to: AXe@1.8.0, use-sync-external-store@1.6.0
+Source labels: AXe@1.8.0 — LICENSE.idb; use-sync-external-store@1.6.0 — LICENSE
 ================================================================================
 
 MIT License
@@ -23317,6 +23788,35 @@ IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
 CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+================================================================================
+DOCUMENT fef28fc4165c
+SHA-256: fef28fc4165c72b1f0e4ce94654ba44ad7ff7d5d2538b3d01e66e9cc5be3c4f6
+Applies to: AXe@1.8.0
+Source labels: AXe@1.8.0 — LICENSE
+================================================================================
+
+MIT License
+
+Copyright (c) 2025 Cameron Cooke
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ================================================================================
 DOCUMENT ffd8b33b3545

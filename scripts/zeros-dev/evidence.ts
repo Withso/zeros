@@ -7,6 +7,7 @@ import { AdmissionObservationSchema, type AdmissionObservation } from "./admissi
 import type { AgentValues } from "./config";
 import { TransportObservationSchema } from "./gate0-contract";
 import { CleanupSummarySchema } from "./cleanup-contract";
+import { NativeProofObservationSchema } from "./native-proof-observation";
 
 export const EvidenceEventSchema=z.object({
   phase:z.enum(["login","identity","repository","computer_build","computer_wait","workspace_create","workspace_resume","workspace_stop","workspace_delete",
@@ -21,7 +22,9 @@ export const EvidenceEventSchema=z.object({
   admission:AdmissionObservationSchema.optional(),
   transport:TransportObservationSchema.optional(),
   cleanup:CleanupSummarySchema.optional(),
-}).strict();
+  nativeProof:NativeProofObservationSchema.optional(),
+}).strict().refine(event=>!event.nativeProof||event.outcome==="failed"&&event.code==="detached_proof_incomplete"&&
+  ["detached_start","detached_native_proof"].includes(event.phase),"Native diagnostic requires a failed native proof phase");
 export type EvidenceEvent=z.infer<typeof EvidenceEventSchema>;
 export class Evidence {
   readonly events:EvidenceEvent[]=[];

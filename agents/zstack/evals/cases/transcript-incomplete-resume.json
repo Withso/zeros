@@ -1,0 +1,9 @@
+{
+  "id": "transcript-incomplete-resume",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pr:532",
+  "symptom": "An empty restored cloud read or attach snapshot falsely confirmed no history and session admission discarded provisional presentation.",
+  "rule": "Keep incomplete current history unknown and preserve exact-owner presentation through admission without bypassing newer restore fences (zstack-review).",
+  "check": "pnpm test:git apps/desktop/src/renderer/features/agent/__tests__/cloud-transcript-cache-hydrate.test.ts apps/desktop/src/renderer/features/agent/__tests__/sessions-store-cloud-snapshot.test.ts apps/desktop/src/renderer/features/agent/__tests__/sessions-store-history-head.test.ts apps/desktop/src/renderer/features/agent/__tests__/transcript-bind-presentation.test.ts"
+}

@@ -2,6 +2,16 @@ import type { Run } from "./receipts";
 import { DeletionRetirementSchema, FIXTURE_STORAGE_MIB, MAX_PENDING_AGE_MS, MAX_PENDING_STORAGE_MIB,
   MAX_PENDING_WORKSPACES, type CleanupSummary, type DeletionRetirement } from "./cleanup-contract";
 import { ZerosDevError } from "./errors";
+import { CleanupRecoveryReferenceSchema, recoveryDeleteKey, recoveryMatchesRun } from "./cleanup-recovery-contract";
+
+export function cleanupDeleteKey(run: Run): string | null {
+  if (run.cleanupRecovery) {
+    const reference = CleanupRecoveryReferenceSchema.safeParse(run.cleanupRecovery);
+    return reference.success && recoveryMatchesRun(run, reference.data) ? recoveryDeleteKey(reference.data) : null;
+  }
+  const last = run.lifecycle.at(-1);
+  return last?.operation === "delete" ? last.key : null;
+}
 
 export function retirementMatchesRun(run: Run, value: unknown): value is DeletionRetirement {
   const parsed = DeletionRetirementSchema.safeParse(value), created = run.create?.result, last = run.lifecycle.at(-1);
@@ -10,12 +20,13 @@ export function retirementMatchesRun(run: Run, value: unknown): value is Deletio
   return proof.workspaceId === created.id && proof.currentGeneration === created.generation &&
     proof.ownerUserId === created.createdBy && proof.createdBy === created.createdBy && proof.createdAt === created.createdAt &&
     proof.name === run.create?.body.name && /^zd-[a-z0-9-]{1,100}$/.test(proof.name) &&
-    proof.deleteIdempotencyKey === last.key && last.generation === created.generation &&
+    proof.deleteIdempotencyKey === cleanupDeleteKey(run) && last.generation === created.generation &&
     proof.generations.length === known.size && proof.generations.every(row => known.has(row.generation));
 }
 
 export function cleanupOutcome(run: Run): CleanupSummary["outcome"] {
   if (!run.create) return "none";
+  if (run.cleanupRecovery && !retirementMatchesRun(run, run.retirement)) return "unconfirmed";
   if (run.deletionConfirmed) return !run.retirement || retirementMatchesRun(run, run.retirement) && run.retirement.deletionConfirmed
     ? "physically_deleted" : "unconfirmed";
   if (retirementMatchesRun(run, run.retirement) && run.retirement.status === "compute_retired_storage_pending")

@@ -231,7 +231,7 @@ export function DispatcherComposer({
   // Enter / ⌘Enter route here through a ref (the editor is built once, so it
   // can't close over the latest handler directly). Declared before the editor
   // hook so the onSubmit closure resolves it; assigned below.
-  const submitRef = useRef<() => void>(() => {});
+  const submitRef = useRef<(afterReads?: boolean) => void>(() => {});
 
   const composer = useComposerEditor({
     agentId,
@@ -252,6 +252,8 @@ export function DispatcherComposer({
   const {
     serialize,
     insertFiles,
+    hasPendingAttachmentReads,
+    waitForAttachmentReads,
     editorContent,
     suggestionPopup,
     imagePreviewOverlay,
@@ -259,13 +261,38 @@ export function DispatcherComposer({
     dragHandlers,
   } = composer;
 
-  submitRef.current = () => {
-    if (busy || disabled) return;
+  // Create waits while a dropped video's key frames are still being read, so
+  // they seed the first message with the video.
+  const [readingAttachments, setReadingAttachments] = useState(false);
+  const readingAttachmentsRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  submitRef.current = (afterReads = false) => {
+    if (busy || disabled || readingAttachmentsRef.current) return;
     if (designMode) {
-      design.onCreate();
+      // Switched to Design while the frames were read: that was not a
+      // Create of the design workspace.
+      if (!afterReads) design.onCreate();
       return;
     }
     if (!selection) return;
+    if (hasPendingAttachmentReads()) {
+      readingAttachmentsRef.current = true;
+      setReadingAttachments(true);
+      void waitForAttachmentReads().finally(() => {
+        readingAttachmentsRef.current = false;
+        if (!mountedRef.current) return;
+        setReadingAttachments(false);
+        submitRef.current(true);
+      });
+      return;
+    }
     const snapshot = serialize();
     const hasContent = snapshot != null && !snapshot.isEmpty;
     onCreate({
@@ -462,9 +489,11 @@ export function DispatcherComposer({
                 size="sm"
                 type="submit"
                 className="h-7 gap-1.5"
-                disabled={busy || disabled || (!designMode && !selection)}
+                disabled={
+                  busy || readingAttachments || disabled || (!designMode && !selection)
+                }
               >
-                {busy ? (
+                {busy || readingAttachments ? (
                   <ZerosSpinner size={16} tone="inverted" />
                 ) : (
                   <>

@@ -89,11 +89,16 @@ export function registerAttachmentSourceIpc(): void {
 export async function prepareAttachmentsForQuit(): Promise<void> {
   const contents = getMainWindow()?.webContents;
   if (!contents || contents.isDestroyed()) return;
+  // A renderer that is gone never answers, as when the signal that quits
+  // the app ended it first.
+  if (contents.isCrashed() || contents.mainFrame.isDestroyed()) return;
   const token = randomUUID();
   await new Promise<void>((resolve) => {
     const finish = () => {
       clearTimeout(timer);
       ipcMain.removeListener("zeros:attachment-quit-ready", acknowledge);
+      contents.removeListener("render-process-gone", finish);
+      contents.removeListener("destroyed", finish);
       resolve();
     };
     const acknowledge = (event: IpcMainEvent, value: unknown) => {
@@ -106,6 +111,8 @@ export async function prepareAttachmentsForQuit(): Promise<void> {
     };
     const timer = setTimeout(finish, 30_000);
     ipcMain.on("zeros:attachment-quit-ready", acknowledge);
+    contents.once("render-process-gone", finish);
+    contents.once("destroyed", finish);
     contents.send("zeros:prepare-attachment-quit", token);
   });
 }

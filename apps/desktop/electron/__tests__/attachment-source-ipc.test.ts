@@ -8,7 +8,14 @@ const mocks = vi.hoisted(() => ({
   handle: vi.fn(),
   on: vi.fn(),
   removeListener: vi.fn(),
-  contents: { mainFrame: {}, send: vi.fn(), isDestroyed: () => false },
+  contents: {
+    mainFrame: { isDestroyed: vi.fn(() => false) },
+    send: vi.fn(),
+    isDestroyed: () => false,
+    isCrashed: vi.fn(() => false),
+    once: vi.fn(),
+    removeListener: vi.fn(),
+  },
 }));
 vi.mock("electron", () => ({
   clipboard: { readBuffer: mocks.readBuffer, readHTML: mocks.readHTML },
@@ -123,4 +130,31 @@ it("waits for the owning renderer to persist pending sources before quitting", a
   await pending;
   expect(finished).toBe(true);
   expect(mocks.removeListener).toHaveBeenCalled();
+});
+
+it("quits without waiting on a renderer that is gone", async () => {
+  mocks.contents.isCrashed.mockReturnValueOnce(true);
+  await prepareAttachmentsForQuit();
+  mocks.contents.mainFrame.isDestroyed.mockReturnValueOnce(true);
+  await prepareAttachmentsForQuit();
+  expect(mocks.contents.send).not.toHaveBeenCalled();
+});
+
+it("stops waiting when the renderer goes away before it answers", async () => {
+  for (const event of ["render-process-gone", "destroyed"]) {
+    vi.clearAllMocks();
+    const pending = prepareAttachmentsForQuit();
+    expect(mocks.contents.send).toHaveBeenCalledOnce();
+    const gone = mocks.contents.once.mock.calls.find((call) => call[0] === event)?.[1] as
+      | (() => void)
+      | undefined;
+    expect(gone).toBeTypeOf("function");
+    gone!();
+    await pending;
+    expect(mocks.removeListener).toHaveBeenCalledWith(
+      "zeros:attachment-quit-ready",
+      expect.any(Function),
+    );
+    expect(mocks.contents.removeListener).toHaveBeenCalledWith(event, gone);
+  }
 });

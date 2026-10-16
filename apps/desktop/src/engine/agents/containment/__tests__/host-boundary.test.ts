@@ -413,6 +413,58 @@ describe("host execution boundary", () => {
     }
   });
 
+  it("runs a local agent host and its descendants below normal CPU priority on request", async () => {
+    if (process.platform === "win32") return;
+    const prepared = await new HostExecutionBoundary().prepare({
+      executionId: "below-normal-priority",
+      actor: "agent-code",
+      cwd: process.cwd(),
+      workspaceRoot: process.cwd(),
+    });
+    const readPriority = async (
+      args: string[],
+      cpuPriority?: "below-normal",
+    ): Promise<number> => {
+      const tracked = await prepared.spawn({
+        command: process.execPath,
+        args,
+        cwd: process.cwd(),
+        env: { PATH: process.env.PATH ?? "" },
+        stdio: "pipe",
+        ...(cpuPriority ? { cpuPriority } : {}),
+      });
+      return await new Promise<number>((resolve, reject) => {
+        let value = "";
+        tracked.stdout?.on("data", (chunk: Buffer | string) => {
+          value += chunk.toString();
+        });
+        tracked.wait().then(
+          () => resolve(Number(value.trim())),
+          (error) => reject(error),
+        );
+      });
+    };
+    // A grandchild reports its niceness: tool commands an agent runs inherit
+    // the host's priority.
+    const grandchild = [
+      "-e",
+      "const {execFileSync}=require('node:child_process');process.stdout.write(execFileSync(process.execPath,['-e','process.stdout.write(String(require(\\'node:os\\').getPriority()))']).toString())",
+    ];
+    try {
+      const own = (await import("node:os")).getPriority();
+      expect(await readPriority(grandchild, "below-normal")).toBeGreaterThanOrEqual(
+        Math.max(own, 10),
+      );
+      // Without the request (and with a target argument that merely looks
+      // like the supervisor flag) priority is inherited unchanged.
+      expect(
+        await readPriority([...grandchild, "--priority", "below-normal"]),
+      ).toBe(own);
+    } finally {
+      await prepared.stopAndProve().catch(() => undefined);
+    }
+  });
+
   it("durably recovers a native process group after its owning engine crashes", async () => {
     if (process.platform === "win32") return;
     const dataRoot = await mkdtemp(path.join(tmpdir(), "zeros-host-recovery-"));

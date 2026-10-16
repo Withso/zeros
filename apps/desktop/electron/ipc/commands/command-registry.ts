@@ -15,7 +15,11 @@ import { cloudTranscriptCacheRead, cloudTranscriptCacheWrite, cloudTranscriptCac
 import { cursorSubscription } from "./cursor-subscription";
 import { providerSubscription } from "./provider-subscription";
 import { cloudProviderAuth } from "./cloud-provider-auth";
-import { nativeAppIcons, toolArtworkImages } from "./computer-use";
+import {
+  nativeAppIcons,
+  nativeAppNames,
+  toolArtworkImages,
+} from "./computer-use";
 import {
   dialogPickFolder,
   engineResetToDefault,
@@ -59,7 +63,10 @@ import { readFile, readImageThumbnail, writeFile } from "./files";
 import { skillsList } from "./skills";
 import { discoverLocalhostServices } from "./localhost";
 import { notifySend } from "./notifications";
-import { processMetricsSnapshot } from "./process-metrics";
+import {
+  processDiagnosticsReport,
+  processMetricsSnapshot,
+} from "./process-metrics";
 import { agentAttachmentWrite } from "./agent-attachments";
 import { registerAttachmentSourceIpc } from "../attachment-source";
 import { designExportPng } from "./design-export";
@@ -172,6 +179,7 @@ export function registerAllCommands(): void {
   // open-a-worktree-in-a-detected-IDE launcher. See commands/open-apps.ts.
   setCommand("detect_open_apps", detectOpenApps);
   setCommand("native_app_icons", nativeAppIcons);
+  setCommand("native_app_names", nativeAppNames);
   setCommand("tool_artwork_images", toolArtworkImages);
   setCommand("open_in_app", openInApp);
 
@@ -241,6 +249,7 @@ export function registerAllCommands(): void {
   // Notifications, updater, and process
   setCommand("notify_send", notifySend);
   setCommand("process_metrics_snapshot", processMetricsSnapshot);
+  setCommand("process_diagnostics_report", processDiagnosticsReport);
   setCommand("updater_check", updaterCheck);
   setCommand("updater_install", updaterInstall);
   setCommand("updater_status", updaterStatus);

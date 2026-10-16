@@ -400,6 +400,46 @@ export async function checkSidebarReselection({ page, check, harnessBase }) {
   );
 }
 
+export async function checkSidebarResourceDiagnostics({
+  page,
+  check,
+  harnessBase,
+}) {
+  await resetHarness(page, harnessBase, "?resource-pressure");
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {});
+  await page.getByRole("button", { name: "App resources", exact: true }).click();
+  const details = page.getByRole("dialog", { name: "App resources" });
+  await expect(details).toBeVisible();
+  // The whole Zeros tree — engine, supervisor, agent and the agent's tools —
+  // is listed by role, with Mac pressure and other Zeros apps beside it.
+  for (const name of ["Engine", "Agent supervisor", "Codex", "pnpm typecheck", "tsc"])
+    await expect(details.getByText(name, { exact: true })).toBeVisible();
+  await expect(details).toContainText("Mac: Memory pressure Warning");
+  await expect(details).toContainText("Swap 6.0 of 7.0 GB");
+  await expect(details).toContainText("Other Zeros apps on this Mac");
+  await expect(details).toContainText("Zeros Alpha");
+  await expect(details).toContainText("memory = physical footprint");
+  // The open inspector asks main to keep the footprint read fresh.
+  const snapshotRequests = await page.evaluate(() =>
+    window.appSidebarRequests.filter((request) => request.op === "process_metrics_snapshot"),
+  );
+  expect(snapshotRequests.some((request) => request.params?.detail === true)).toBe(true);
+  await details.getByRole("button", { name: "Copy diagnostics", exact: true }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.appSidebarRequests.some((request) => request.op === "process_diagnostics_report"),
+      ),
+    )
+    .toBe(true);
+  await expect(page.getByText(/Diagnostics copied — \d+ KB with recent app logs/)).toBeVisible();
+  await page.keyboard.press("Escape");
+  check(
+    "Resources lists the engine, agents and their tools, Mac pressure and other Zeros apps; Copy builds the native diagnostics report",
+    true,
+  );
+}
+
 export const appSidebarRegressionChecks = [
   checkSidebarNarrowHeader,
   checkSidebarHistory,
@@ -407,4 +447,5 @@ export const appSidebarRegressionChecks = [
   checkSidebarRetiredLocalMain,
   checkSidebarHiddenReads,
   checkSidebarReselection,
+  checkSidebarResourceDiagnostics,
 ];

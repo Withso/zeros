@@ -57,4 +57,17 @@ describe("native application artwork cache", () => {
       ids.every((id) => resource.cache.getSnapshot(id).data === null),
     ).toBe(true);
   });
+  it("applies the caller's sanitizer to each value", async () => {
+    const resource = createNativeAppArtworkResource(
+      async () => ({ "com.apple.Safari": "  Safari  ", "com.example.Bad": "x".repeat(201) }),
+      (value) =>
+        typeof value === "string" && value.trim().length <= 200 ? value.trim() : null,
+    );
+    await Promise.all([
+      resource.load("com.apple.Safari"),
+      resource.load("com.example.Bad"),
+    ]);
+    expect(resource.cache.getSnapshot("com.apple.Safari").data).toBe("Safari");
+    expect(resource.cache.getSnapshot("com.example.Bad").data).toBeNull();
+  });
 });

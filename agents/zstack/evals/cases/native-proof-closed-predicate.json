@@ -1,0 +1,9 @@
+{
+  "id": "native-proof-closed-predicate",
+  "kind": "replay",
+  "area": "cloud workspace validation",
+  "fixedBy": "pr:540",
+  "symptom": "A failed native detached proof loses the exact PTY, replay, heartbeat or file predicate in its signed artifact, preventing first-failure classification.",
+  "rule": "Attach only a strict closed predicate to failed native evidence, preserve it before cleanup, and keep legacy signed bytes and all proof requirements unchanged.",
+  "check": "pnpm test:git scripts/__tests__/zeros-dev-infrastructure-native.test.ts scripts/__tests__/zeros-dev-native-proof-observation.test.ts scripts/__tests__/zeros-dev-infrastructure.test.ts scripts/__tests__/zeros-dev-hourly-artifact.test.ts scripts/__tests__/zeros-dev-hourly-main.test.ts"
+}

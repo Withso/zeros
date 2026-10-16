@@ -51,6 +51,35 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
     expect(args.join(" ")).not.toContain("Bearer");
   });
 
+  it("raises Codex's per-tool wait for servers whose tools wait on a person", () => {
+    expect(
+      buildMcpServerOverrides([
+        {
+          name: "zeros_browser",
+          transport: "http",
+          url: "http://127.0.0.1:43124/mcp",
+          headersFromEnv: { Authorization: "ZEROS_BROWSER_TOOLS_CAPABILITY" },
+          toolTimeoutSec: 600,
+        },
+        {
+          name: "unbounded",
+          transport: "http",
+          url: "http://127.0.0.1:43125/mcp",
+          toolTimeoutSec: 86_400,
+        },
+      ]),
+    ).toEqual([
+      "-c",
+      'mcp_servers.zeros_browser.url="http://127.0.0.1:43124/mcp"',
+      "-c",
+      'mcp_servers.zeros_browser.env_http_headers={ "Authorization" = "ZEROS_BROWSER_TOOLS_CAPABILITY" }',
+      "-c",
+      "mcp_servers.zeros_browser.tool_timeout_sec=600",
+      "-c",
+      'mcp_servers.unbounded.url="http://127.0.0.1:43125/mcp"',
+    ]);
+  });
+
   it("emits command/args/env for a stdio server", () => {
     const args = buildMcpServerOverrides([
       {

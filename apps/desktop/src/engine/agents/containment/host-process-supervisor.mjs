@@ -22,6 +22,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const VERSION = 1;
@@ -41,6 +42,13 @@ function fail(message) {
 function option(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+/** A supervisor-only option: never read from the target's own arguments. */
+function supervisorOption(name) {
+  const end = targetSeparator >= 0 ? targetSeparator : process.argv.length;
+  const index = process.argv.slice(0, end).indexOf(name);
+  return index >= 0 && index + 1 < end ? process.argv[index + 1] : undefined;
 }
 
 function readPending(file) {
@@ -132,6 +140,7 @@ async function run() {
   const token = option("--token");
   const expectedOwnerPid = Number(option("--owner-pid"));
   const expectedParentPid = Number(option("--parent-pid"));
+  const priority = supervisorOption("--priority");
   const separator = process.argv.indexOf("--");
   const targetCommand =
     separator >= 0 ? process.argv[separator + 1] : undefined;
@@ -149,6 +158,8 @@ async function run() {
     !Number.isSafeInteger(expectedParentPid) ||
     expectedParentPid <= 0 ||
     process.ppid !== expectedParentPid ||
+    (priority !== undefined && priority !== "below-normal") ||
+    (priority !== undefined && cloudWorkload) ||
     typeof targetCommand !== "string" ||
     targetCommand.length === 0 ||
     targetCommand.includes("\0") ||
@@ -283,6 +294,17 @@ async function run() {
     process.kill(-process.pid, "SIGKILL");
   }, 50);
   parentWatch.unref?.();
+
+  // Niceness is inherited at fork, so lowering the supervisor before it starts
+  // the target covers the agent and every build or test it runs. Raising it
+  // back would need privileges; a host that is already lower keeps its value.
+  if (priority === "below-normal") {
+    try {
+      os.setPriority(os.constants.priority.PRIORITY_BELOW_NORMAL);
+    } catch {
+      // Best effort: priority never decides whether the agent may start.
+    }
+  }
 
   child = spawn(targetCommand, targetArgs, {
     cwd: process.cwd(),

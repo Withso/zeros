@@ -45,4 +45,25 @@ describe("browser working chrome", () => {
     expect(strip).toContain("ordinaryBrowserFavicon");
     expect(strip).toContain("useBrowserTabFavicon");
   });
+
+  it("settles the Browser approval when the page's control bar or Esc stops the agent", () => {
+    const sessionsProvider = readFileSync(
+      resolve(
+        process.cwd(),
+        "apps/desktop/src/renderer/features/agent/sessions-provider.tsx",
+      ),
+      "utf8",
+    );
+    // Main already stopped the page; the renderer only settles the question,
+    // exactly as the Browser tab's own Stop does.
+    const listener = sessionsProvider.match(
+      /nativeListen<[^>]*>\(\s*"browser-agent-stopped"[\s\S]*?\}\s*\)/,
+    )?.[0];
+    expect(listener).toBeDefined();
+    expect(listener).toContain("dismissBrowserApproval(");
+    expect(listener).not.toContain("browser_session_stop");
+    expect(sessionsProvider).toMatch(
+      /const stopBrowserUse[\s\S]*?dismissBrowserApproval\(chatId\)/,
+    );
+  });
 });

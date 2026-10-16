@@ -9,6 +9,7 @@ import {
   flushBackoffMs,
   formatLogArg,
   formatLogArgs,
+  isBenignWindowError,
   recordFlushFailure,
   recordFlushSuccess,
 } from "../renderer-log";
@@ -98,3 +99,20 @@ describe("flush circuit breaker", () => {
     expect(circuitAllowsAttempt(c, 6_000)).toBe(true);
   });
 });
+
+describe("isBenignWindowError", () => {
+  it("drops the browser's deferred ResizeObserver notice but keeps real errors", () => {
+    expect(
+      isBenignWindowError(
+        "ResizeObserver loop completed with undelivered notifications.",
+      ),
+    ).toBe(true);
+    expect(isBenignWindowError("ResizeObserver loop limit exceeded")).toBe(true);
+    expect(isBenignWindowError("TypeError: x is undefined")).toBe(false);
+    expect(
+      isBenignWindowError("ResizeObserver loop completed; then TypeError"),
+    ).toBe(false);
+    expect(isBenignWindowError(undefined)).toBe(false);
+  });
+});
+

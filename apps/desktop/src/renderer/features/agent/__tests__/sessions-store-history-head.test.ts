@@ -20,6 +20,18 @@ beforeEach(() => {
     agentId: "codex", transcriptState: "resident", messages: [reply, bubble], hasTranscript: true });
 });
 describe("normalized cloud transcript restore fences", () => {
+  it("does not turn an incomplete restored control snapshot into a confirmed empty conversation", () => {
+    useSessionsStore.getState().applyCloudHistoryRestoreHead(chat, head);
+    useSessionsStore.getState().installCloudSnapshot(chat, {
+      version: 1, conversationId: chat, agentId: "codex", executionId: null, session: null, initialize: null,
+      messages: [], activeTurn: null, permissions: [], questions: [],
+      historyRestore: { projection: head.projection, historyHeads: [head.head!] },
+    });
+    expect(useSessionsStore.getState().sessions[chat]).toMatchObject({
+      messages: [bubble], transcriptState: "loading", hasTranscript: true,
+    });
+  });
+
   it("does not use a provisional disk head as successor authority even for identical bytes", () => {
     const before: CloudHistoryRestoreFence = { ...head, head: { ...head.head!, recordSequence: 3,
       manifestSha256: "a".repeat(64), incompleteReason: null } };

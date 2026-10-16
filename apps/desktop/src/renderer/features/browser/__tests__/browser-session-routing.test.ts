@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  browserSessionAppearanceToSync,
   browserSessionShouldExpandWorkbench,
   browserSessionEndsAgentOwnership,
   planBrowserSessionClose,
@@ -246,6 +247,72 @@ describe("agent browser workbench routing", () => {
         conversationId: "conversation-a",
       }),
     ).toEqual([]);
+  });
+
+  it("syncs the conversation tab's page appearance to its live session once per change", () => {
+    const tab: WorkbenchTab = {
+      ...createBrowserTab({
+        url: "https://example.com/",
+        browserConversationId: "conversation-a",
+      }),
+      appearance: "dark",
+    };
+    const other = createBrowserTab({
+      url: "https://other.example/",
+      browserConversationId: "conversation-b",
+    });
+    const session = browserState({
+      browserSessionId: "browser-a",
+      conversationId: "conversation-a",
+      url: "https://example.com/",
+    });
+
+    expect(browserSessionAppearanceToSync([other, tab], session, undefined)).toBe(
+      "dark",
+    );
+    expect(browserSessionAppearanceToSync([tab], session, "dark")).toBeNull();
+    expect(browserSessionAppearanceToSync([tab], session, "light")).toBe("dark");
+    // System is sent explicitly too: main may still hold an earlier choice.
+    const system = { ...tab, appearance: undefined };
+    expect(browserSessionAppearanceToSync([system], session, undefined)).toBe(
+      "system",
+    );
+    expect(browserSessionAppearanceToSync([system], session, "dark")).toBe(
+      "system",
+    );
+    expect(browserSessionAppearanceToSync([system], session, "system")).toBeNull();
+  });
+
+  it("does not sync appearance for a closed session or a conversation without a tab", () => {
+    const tab: WorkbenchTab = {
+      ...createBrowserTab({
+        url: "https://example.com/",
+        browserConversationId: "conversation-a",
+      }),
+      appearance: "light",
+    };
+    const session = browserState({
+      browserSessionId: "browser-a",
+      conversationId: "conversation-a",
+      url: "https://example.com/",
+    });
+    expect(
+      browserSessionAppearanceToSync(
+        [tab],
+        { ...session, status: "closed" },
+        undefined,
+      ),
+    ).toBeNull();
+    expect(
+      browserSessionAppearanceToSync(
+        [tab],
+        { ...session, conversationId: "conversation-b" },
+        undefined,
+      ),
+    ).toBeNull();
+    // A user preview tab never drives an agent session.
+    const preview = { ...createBrowserTab({ url: "https://example.com/" }), appearance: "dark" as const };
+    expect(browserSessionAppearanceToSync([preview], session, undefined)).toBeNull();
   });
 
   it("suppresses late live state after an explicit tab close until native close settles", () => {

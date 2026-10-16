@@ -19,6 +19,7 @@ import { isCloudWorkspaceLifecyclePending } from "../../../state/cloud-workspace
 import { notifyAgentSendFailure } from "../agent-send-failure-toast";
 import { hasBackgroundAgentWork } from "../background-task-state";
 import { getFollowUpBehavior } from "../../settings/follow-up-behavior";
+import { queuedTranscriptPresentation } from "./helpers/queued-transcript-presentation";
 
 const encoding = vi.hoisted(() => ({ run: vi.fn() }));
 const mocks = vi.hoisted(() => ({ failureToast: vi.fn() }));
@@ -58,7 +59,11 @@ function harness(cloud = true, status = "stopped", resident = true) {
   const doc = { status, generation: { number: 7 }, capabilities: { canWrite: true }, deletedAt: null, error: null as { message: string } | null };
   const slot: any = { agentId: "codex", cwd: folder, status: "warming", transcriptState: resident ? "resident" : "loading", messages: [], sessionId: null };
   const store = { sessions: { chat: slot } as Record<string, typeof slot>, patchSession: (id: string, patch: object) => Object.assign(store.sessions[id], patch),
-    setSession: (id: string, value: typeof slot) => { store.sessions[id] = value; }, setPendingLocalTurn: vi.fn(), hydrateChatPolicies: vi.fn(async () => {}) };
+    pendingLocalTurns: {} as Record<string, string>,
+    setSession: (id: string, value: typeof slot) => { store.sessions[id] = value; },
+    setPendingLocalTurn: vi.fn((id: string, turnId: string | null) => {
+      if (turnId) store.pendingLocalTurns[id] = turnId; else delete store.pendingLocalTurns[id];
+    }), hydrateChatPolicies: vi.fn(async () => {}) };
   const wait = new CloudSendWait(); waits.push(wait);
   const prepare = vi.fn<(chatId: string, wakeIntent?: { id: string }) => Promise<void>>(() => wake.promise), delivered = vi.fn(), toasts = { error: vi.fn(), warning: vi.fn(), info: vi.fn() };
   const failureNotice = vi.fn();
@@ -114,6 +119,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
     cloudQueuedPrompt, redactLogSecrets: (s: string) => s, setCloudSendError: cloudError,
     notifyAgentSendFailure: failureNotice, crypto: provider.crypto,
     designFrameContext: { capture: () => null, pin: vi.fn() }, hasPendingTextAttachmentDelivery: () => false, transcriptAttachesRef: { current: new Set() },
+    composerAttachmentsReading: () => false, waitForComposerAttachmentReads: vi.fn(async () => {}),
     useSessionsStore: { getState: () => store }, useWorkspaceStore: { getState: () => workspace }, transcriptParkedChatRef: { current: null },
     serializeComposerState: () => current, sendPastPermission: () => "send", planReview: null, bareInlineSlashCommand: () => null,
     composerLiveRef: { current: null }, dispatch, recordWorkspaceActivity: vi.fn(), agentsList: null, envForChat: () => ({}),
@@ -131,6 +137,41 @@ function harness(cloud = true, status = "stopped", resident = true) {
 }
 
 describe("cloud composer readiness queue", () => {
+  it.each(["stopped", "waking", "setting_up", "ready"])("paints the first cloud user bubble before %s preparation completes", async status => {
+    const h = harness(true, status);
+    await h.send();
+    const bubbleId = h.queue.get("chat")![0].bubbleId;
+    const projected = queuedTranscriptPresentation(h.store.sessions.chat.messages);
+    expect(projected.visibleMessages).toEqual([expect.objectContaining({ id: bubbleId, text: h.draft.displayText })]);
+    expect(projected.queuedMessages).toEqual([]);
+    expect(h.delivered).not.toHaveBeenCalled();
+    expect(h.store.sessions.chat.cloudSendWait?.state).toBe("waiting");
+    h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledExactlyOnceWith(bubbleId, expect.anything());
+    expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).visibleMessages).toHaveLength(1);
+  });
+
+  it.each(["ready", "busy"])("sends an admitted %s follow-up without presenting first-session Waiting", async status => {
+    const h = harness(true, status);
+    Object.assign(h.store.sessions.chat, { status: "ready", sessionId: "admitted" });
+    await h.send();
+    expect(h.store.sessions.chat.cloudSendWait).toBeUndefined();
+    expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).visibleMessages).toEqual([
+      expect.objectContaining({ text: h.draft.displayText }),
+    ]);
+    h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledOnce();
+    expect(h.provider.ensureSessionRef.current).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicit queued follow-up behind the optimistic opening turn", async () => {
+    const h = harness(); await h.send(); h.type("After this finishes"); await h.send();
+    const projected = queuedTranscriptPresentation(h.store.sessions.chat.messages);
+    expect(projected.visibleMessages).toHaveLength(1);
+    expect(projected.queuedMessages).toEqual([expect.objectContaining({ text: "After this finishes" })]);
+    expect(h.queue.get("chat")).toHaveLength(2);
+  });
+
   it.each(["task", "report", "workflow"])("waits for native background %s work before preparing and delivering a cloud queue", async work => {
     const h = harness(true, "ready");
     Object.assign(h.store.sessions.chat, { status: "ready", sessionId: "admitted" });
@@ -250,7 +291,7 @@ describe("cloud composer readiness queue", () => {
     expect(h.queue.get("chat")).toHaveLength(1); expect(h.clear).toHaveBeenCalledOnce();
     expect(h.provider.actions.getQueuedDraft("chat", h.queue.get("chat")![0].bubbleId).json).toBe(h.draft.json);
     expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting"); expect(encoding.run).not.toHaveBeenCalled();
-    expect(h.store.setPendingLocalTurn).not.toHaveBeenCalled();
+    expect(h.store.setPendingLocalTurn).toHaveBeenCalledExactlyOnceWith("chat", h.queue.get("chat")![0].bubbleId);
     expect(h.delivered).not.toHaveBeenCalled(); expect(h.toasts.error).not.toHaveBeenCalled();
     expect(h.failureNotice).not.toHaveBeenCalled();
   });
@@ -361,6 +402,9 @@ describe("cloud composer readiness queue", () => {
     const h = harness(true, "ready"); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
     await vi.advanceTimersByTimeAsync(179_999); expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
     await vi.advanceTimersByTimeAsync(1); expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "failed", message: expect.stringContaining("three minutes") });
+    expect(h.store.pendingLocalTurns.chat).toBeUndefined();
+    expect(h.store.sessions.chat.activeTurnStartedAt).toBeNull();
+    expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).queuedMessages).toEqual([expect.objectContaining({ id })]);
     expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ chatId: "chat", attemptId: id, reason: "queued_timeout", onRetry: expect.any(Function) }));
     h.provider.actions.editQueued("chat", id, { text: "Retained" });
     expect(h.queue.get("chat")![0].args[1]).toBe("Retained"); h.ready(); await vi.advanceTimersByTimeAsync(0);
@@ -386,6 +430,8 @@ describe("cloud composer readiness queue", () => {
     expect(h.prepare).toHaveBeenCalledOnce(); expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "failed", message: "Your Codex connection expired. Reconnect to continue" });
     expect(h.store.sessions.chat.cloudAdmissionFailure).toMatchObject({ action: "reconnect", turnId: h.queue.get("chat")![0].bubbleId });
     expect(h.queue.get("chat")).toHaveLength(1); expect(h.delivered).not.toHaveBeenCalled(); expect(h.toasts.error).not.toHaveBeenCalled();
+    expect(h.store.pendingLocalTurns.chat).toBeUndefined();
+    expect(queuedTranscriptPresentation(h.store.sessions.chat.messages).queuedMessages).toHaveLength(1);
     expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ error: expect.objectContaining({ message: "cloud_agent_credential_expired" }),
       attemptId: h.queue.get("chat")![0].bubbleId }));
   });

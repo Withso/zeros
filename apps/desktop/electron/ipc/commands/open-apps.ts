@@ -303,9 +303,9 @@ export async function appIconDataUrl(appPath: string): Promise<string | null> {
 }
 
 /** Resolve only a bundle identifier. Spotlight output is verified against the
- * bundle's Info.plist before artwork is read; no renderer-authored path or
+ * bundle's Info.plist before it is used; no renderer-authored path or
  * executable is accepted and applications are never launched here. */
-export async function nativeAppIconByBundleId(bundleId: string): Promise<string | null> {
+async function appPathByBundleId(bundleId: string): Promise<string | null> {
   if (process.platform !== "darwin" || !/^[\w-]+(?:\.[\w-]+)+$/.test(bundleId) || bundleId.length > 255) return null;
   // Spotlight can be disabled or omit system apps. Launch Services owns the
   // installed-app registry and this AppKit query neither launches an app nor
@@ -314,12 +314,46 @@ export async function nativeAppIconByBundleId(bundleId: string): Promise<string 
   const candidates = registered ? [registered] : (await mdfind(bundleId)).slice(0, 8);
   for (const candidate of candidates) {
     if (!candidate.endsWith(".app") || !path.isAbsolute(candidate)) continue;
-    try {
-      const actual = (await execFileText("/usr/bin/plutil", ["-extract", "CFBundleIdentifier", "raw", "-o", "-", path.join(candidate, "Contents/Info.plist")], 2000)).trim();
-      if (actual.toLowerCase() === bundleId.toLowerCase()) return await appIconDataUrl(candidate);
-    } catch { /* app was uninstalled or Spotlight returned a stale hit */ }
+    const actual = await appBundleIdentifier(candidate);
+    if (actual?.toLowerCase() === bundleId.toLowerCase()) return candidate;
   }
   return null;
+}
+
+/** An .app bundle's CFBundleIdentifier, or null when it has none. */
+async function appBundleIdentifier(appPath: string): Promise<string | null> {
+  try {
+    const value = (await execFileText("/usr/bin/plutil", ["-extract", "CFBundleIdentifier", "raw", "-o", "-", path.join(appPath, "Contents/Info.plist")], 2000)).trim();
+    return value || null;
+  } catch {
+    // The app was uninstalled, Spotlight returned a stale hit, or the bundle
+    // has no identifier.
+    return null;
+  }
+}
+
+/** The name Finder lists the app under. */
+function appBundleName(appPath: string): string {
+  return path.basename(appPath, ".app");
+}
+
+export async function nativeAppIconByBundleId(bundleId: string): Promise<string | null> {
+  const appPath = await appPathByBundleId(bundleId);
+  return appPath ? appIconDataUrl(appPath) : null;
+}
+
+export async function nativeAppNameByBundleId(bundleId: string): Promise<string | null> {
+  const appPath = await appPathByBundleId(bundleId);
+  return appPath ? appBundleName(appPath) : null;
+}
+
+/** The bundle ID and name of an app the user chose in the open panel. */
+export async function appBundleIdentity(
+  appPath: string,
+): Promise<{ bundleId: string; name: string } | null> {
+  if (process.platform !== "darwin" || !path.isAbsolute(appPath) || !appPath.endsWith(".app")) return null;
+  const bundleId = await appBundleIdentifier(appPath);
+  return bundleId ? { bundleId, name: appBundleName(appPath) } : null;
 }
 
 export interface DetectedOpenApp {

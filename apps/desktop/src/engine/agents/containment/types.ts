@@ -82,6 +82,11 @@ export interface BoundarySpawnRequest {
   /** Complete child environment. Implementations must never ambient-merge. */
   env: Readonly<Record<string, string>>;
   stdio?: "pipe" | "inherit";
+  /** Local host launches: start the target, and so every process it runs,
+   * below normal CPU priority, so an agent's builds and tests yield to the
+   * app and the user's own work. Boundaries that own a dedicated machine
+   * (cloud) ignore it. */
+  cpuPriority?: "below-normal";
 }
 
 /** Trusted description used to prepare one repository-controlled command.

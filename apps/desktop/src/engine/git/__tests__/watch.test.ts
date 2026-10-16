@@ -5,6 +5,7 @@ import fs, { existsSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import chokidar, { type FSWatcher } from "chokidar";
 import { serializeDesignRegistration } from "../../design/manifest";
 
@@ -525,6 +526,86 @@ describe("startGitWatcher", () => {
     before = changes;
     await writeFile(buildFile, "after\n");
     await waitFor(() => changes > before);
+  });
+
+  it("never polls or reports folders Git ignores whole, including ones created later", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-ignored-watch-"));
+    roots.push(root);
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    git("init", "-q");
+    await writeFile(
+      join(root, ".gitignore"),
+      "dist/\n.context/\ncoverage/\n.zeros/\n",
+    );
+    await mkdir(join(root, ".zeros"), { recursive: true });
+    await writeFile(join(root, ".zeros", "settings.toml"), "");
+    await mkdir(join(root, "src"), { recursive: true });
+    await mkdir(join(root, "dist", "assets"), { recursive: true });
+    await mkdir(join(root, ".context", "logs"), { recursive: true });
+    const source = join(root, "src", "app.ts");
+    await writeFile(source, "export {};\n");
+    await writeFile(join(root, "dist", "assets", "app.js"), "before\n");
+    await writeFile(join(root, ".context", "logs", "typecheck.log"), "");
+    git("add", "-A");
+    git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "init");
+
+    let changes = 0;
+    let recognitionChanges = 0;
+    const watcher = startGitWatcher(
+      () => [{ root, workspaceId: "workspace-ignored" }],
+      (change) => {
+        changes += 1;
+        if (change.designRecognitionChanged) recognitionChanges += 1;
+      },
+      {
+        pollIntervalMs: 60_000,
+        worktreeDebounceMs: 10,
+        awaitWriteFinishMs: 20,
+        usePolling: true,
+        worktreePollIntervalMs: 10,
+      },
+    );
+    watchers.push(watcher);
+    await watcher.ready;
+
+    // An agent's build output and redirected command log stream into
+    // ignored folders: nothing to refresh, and nothing polled.
+    for (let i = 0; i < 5; i += 1) {
+      await writeFile(join(root, "dist", "assets", "app.js"), `build ${i}\n`);
+      await writeFile(join(root, ".context", "logs", "typecheck.log"), `line ${i}\n`);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(changes).toBe(0);
+
+    // Tracked source still refreshes.
+    await writeFile(source, "export const changed = true;\n");
+    await waitFor(() => changes > 0);
+
+    // `.zeros/` is ignored, but its legacy Design pointer stays a live
+    // recognition input.
+    await writeFile(join(root, ".zeros", "design-dir.toml"), 'directory = "Design"\n');
+    await waitFor(() => recognitionChanges > 0);
+
+    // A test run creates a new ignored folder: at most its creation is
+    // reported, then its churn is not.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const beforeCreation = changes;
+    await mkdir(join(root, "coverage"), { recursive: true });
+    await writeFile(join(root, "coverage", "index.html"), "0\n");
+    // The creation itself is reported once; classifying it takes one batched
+    // check-ignore, given a generous budget for a starved CI event loop.
+    await waitFor(() => changes > beforeCreation);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const afterCreation = changes;
+    for (let i = 0; i < 5; i += 1) {
+      await writeFile(join(root, "coverage", "index.html"), `${i}\n`);
+      await writeFile(join(root, "coverage", `chunk-${i}.js`), `${i}\n`);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(changes).toBe(afterCreation);
   });
 
   it("does not recurse into nested agent worktree roots", async () => {

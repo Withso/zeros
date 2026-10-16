@@ -10,6 +10,7 @@ import type { RuntimeExecutionIdentity } from "../../apps/desktop/src/renderer/p
 import type { RunHandle } from "./receipts";
 import type { ZerosDevRuntime } from "./runtime";
 import { ZerosDevError } from "./errors";
+import type { NativeProofObservation } from "./native-proof-observation";
 import { beforeDeadline } from "./transport";
 
 const MAX_BYTES = 64 * 1024, MAX_TASK_MS = 40 * 60_000, MIN_TASK_MS = 30 * 60_000;
@@ -38,7 +39,8 @@ export type InfrastructureNativeIntent = z.infer<typeof InfrastructureNativeInte
 export type InfrastructureNativeTask = z.infer<typeof InfrastructureNativeTaskSchema>;
 export type InfrastructureNativeProof = z.infer<typeof InfrastructureNativeProofSchema>;
 const fileSchema = z.object({ programSha256: digest, outputSha256: digest, rows: z.array(rowSchema).length(32) }).strict();
-const badProof = () => new ZerosDevError("detached_proof_incomplete");
+const badProof = (predicate: NativeProofObservation["predicate"]) =>
+  new ZerosDevError("detached_proof_incomplete", undefined, undefined, undefined, undefined, undefined, undefined, { predicate });
 const directory = (runId: string) => `.zeros-dev-infra-${runId}`;
 const python = (program: string) => `printf '%s' '${Buffer.from(program).toString("base64")}' | base64 -d | python3`;
 
@@ -93,11 +95,13 @@ function lines(text: string): string[] {
 function rows(text: string, intent: InfrastructureNativeIntent): z.infer<typeof rowSchema>[] {
   const result: z.infer<typeof rowSchema>[] = [];
   for (const line of lines(text)) if (line.includes("ZEROS_DEV_NATIVE ")) {
-    if (!line.startsWith("ZEROS_DEV_NATIVE ")) throw badProof();
+    if (!line.startsWith("ZEROS_DEV_NATIVE ")) throw badProof("row_prefix");
     let value: unknown;
-    try { value = JSON.parse(line.slice("ZEROS_DEV_NATIVE ".length)); } catch { throw badProof(); }
+    try { value = JSON.parse(line.slice("ZEROS_DEV_NATIVE ".length)); } catch { throw badProof("row_json"); }
     const parsed = rowSchema.safeParse(value);
-    if (!parsed.success || parsed.data.run !== intent.runId || parsed.data.nonce !== intent.nonce || parsed.data.n !== result.length) throw badProof();
+    if (!parsed.success) throw badProof("row_schema");
+    if (parsed.data.run !== intent.runId || parsed.data.nonce !== intent.nonce) throw badProof("row_identity");
+    if (parsed.data.n !== result.length) throw badProof("row_sequence");
     result.push(parsed.data);
   }
   return result;
@@ -150,16 +154,17 @@ export class InfrastructureNative {
     let notify: (() => void) | undefined;
     const off = [subscribeBridgePtyData(this.runtime.client, event => {
       if (event.sessionId !== sessionId) return;
-      if (typeof event.data !== "string" || Buffer.byteLength(prefix) + Buffer.byteLength(text) + Buffer.byteLength(event.data) > MAX_BYTES) failure = badProof();
+      if (typeof event.data !== "string" || Buffer.byteLength(prefix) + Buffer.byteLength(text) + Buffer.byteLength(event.data) > MAX_BYTES) failure ??= badProof("output_limit");
       else text += event.data;
       notify?.();
     }), subscribeBridgePtyExit(this.runtime.client, event => {
-      if (event.sessionId === sessionId) { failure = badProof(); notify?.(); }
+      if (event.sessionId === sessionId) { failure ??= badProof("pty_exit"); notify?.(); }
     })];
     const read = () => { if (failure) throw failure; return prefix + text; };
     return {
       seed(value: string) {
-        if (seeded || Buffer.byteLength(value) + Buffer.byteLength(text) > MAX_BYTES) throw badProof();
+        if (seeded) throw badProof("replay_seed");
+        if (Buffer.byteLength(value) + Buffer.byteLength(text) > MAX_BYTES) throw badProof("output_limit");
         prefix = value; seeded = true; notify?.();
       },
       read,
@@ -187,7 +192,7 @@ export class InfrastructureNative {
   async begin(signal: AbortSignal): Promise<InfrastructureNativeTask> {
     if (this.began) throw new ZerosDevError("operation_conflict");
     this.began = true;
-    if (this.handle.run.cleanupOnly || this.handle.run.deletionConfirmed) throw new ZerosDevError("forbidden");
+    if (this.handle.run.cleanupOnly || this.handle.run.cleanupRecovery || this.handle.run.deletionConfirmed) throw new ZerosDevError("forbidden");
     const scope = this.scope(), startedAtMs = Date.now(), runId = this.handle.run.runId, nonce = randomUUID();
     const intent = InfrastructureNativeIntentSchema.parse({ version: 1, kind: "native-terminal-task", runId,
       fixtureSha256: this.handle.run.fixtureSha256, sessionId: `zd-infra-${runId}`, nonce, scope, scopeSha256: sha(JSON.stringify(scope)),
@@ -209,12 +214,12 @@ export class InfrastructureNative {
         bridgePtyWrite(this.runtime.client, { sessionId: intent.sessionId, data: `stty -echo; python3 '${directory(runId)}/task.py'\n` });
         const firstRow = await observed.wait(text => {
           const found = rows(text, intent);
-          if (found.length > 1 || lines(text).some(line => line.startsWith("ZEROS_DEV_NATIVE_DONE "))) throw badProof();
+          if (found.length > 1 || lines(text).some(line => line.startsWith("ZEROS_DEV_NATIVE_DONE "))) throw badProof("begin_output");
           return found[0];
         }, bound);
         check();
         const task = InfrastructureNativeTaskSchema.safeParse({ ...intent, firstRow });
-        if (!task.success) throw badProof();
+        if (!task.success) throw badProof("begin_row");
         return task.data;
       } finally { observed.close(); }
     });
@@ -225,41 +230,53 @@ export class InfrastructureNative {
     if (!parsed.success) throw new ZerosDevError("receipt_invalid");
     const task = parsed.data, intent = this.intent(task), left = intent.deadlineAtMs - Date.now();
     if (left <= 0) throw new ZerosDevError("deadline");
-    if (Date.now() - intent.startedAtMs <= MIN_TASK_MS) throw badProof();
+    if (Date.now() - intent.startedAtMs <= MIN_TASK_MS) throw badProof("elapsed_window");
     return this.guarded(intent.scope, signal, Math.min(left, 120_000), async (bound, check) => {
       const observed = this.observe(intent.sessionId);
       try {
         const mapped = cloudOutgoing(this.runtime.scope, { type: "PTY_CREATE", cwd: cloudWorkspaceKey(this.runtime.scope) });
         const created = await beforeDeadline(bridgePtyCreate(this.runtime.client, { sessionId: intent.sessionId, cwd: String(mapped.cwd), cols: 240, rows: 80 }), bound);
         check();
-        if (!created || created.reattached !== true || created.cwd !== this.runtime.scope.root || created.replayTruncated !== false ||
-          typeof created.replay !== "string" || !created.replay.length || created.replayBytes !== Buffer.byteLength(created.replay) || created.replayBytes > MAX_BYTES) throw badProof();
+        // Scope/deadline still win; otherwise preserve an observer failure
+        // that arrived before this reply or its replay can be classified.
+        observed.read();
+        // The shared bridge returns null for a refused/failed request. Keep
+        // that distinguishable from valid reattach output without its body.
+        if (!created) throw badProof("pty_create_unavailable");
+        if (created.reattached !== true) throw badProof("pty_not_reattached");
+        if (created.cwd !== this.runtime.scope.root) throw badProof("pty_cwd");
+        if (created.replayTruncated !== false) throw badProof("replay_truncated");
+        if (typeof created.replay !== "string" || !created.replay.length) throw badProof("replay_missing");
+        if (created.replayBytes !== Buffer.byteLength(created.replay) || created.replayBytes > MAX_BYTES) throw badProof("replay_bytes");
         observed.seed(created.replay);
         // The first row must be present in the replay itself, not supplied by a
         // new command or a later live write after reconnect.
-        if (JSON.stringify(rows(created.replay, intent)[0]) !== JSON.stringify(task.firstRow)) throw badProof();
+        if (JSON.stringify(rows(created.replay, intent)[0]) !== JSON.stringify(task.firstRow)) throw badProof("replay_first_row");
         const complete = await observed.wait(text => lines(text).some(line => line === `ZEROS_DEV_NATIVE_DONE ${intent.nonce}`) ? text : undefined, bound);
         const samples = rows(complete, intent);
-        if (samples.length !== 32 || lines(complete).filter(line => line.startsWith("ZEROS_DEV_NATIVE_DONE ")).length !== 1 ||
-          JSON.stringify(samples[0]) !== JSON.stringify(task.firstRow)) throw badProof();
+        if (samples.length !== 32) throw badProof("row_count");
+        if (lines(complete).filter(line => line.startsWith("ZEROS_DEV_NATIVE_DONE ")).length !== 1) throw badProof("completion_marker");
+        if (JSON.stringify(samples[0]) !== JSON.stringify(task.firstRow)) throw badProof("first_row");
         const gaps = samples.slice(1).map((row, index) => row.ms - samples[index]!.ms);
-        if (gaps.some(gap => gap < 45_000 || gap > 90_000)) throw badProof();
+        if (gaps.some(gap => gap < 45_000 || gap > 90_000)) throw badProof("heartbeat_gap");
         const taskDurationMs = samples[31]!.ms - samples[0]!.ms;
-        if (taskDurationMs <= MIN_TASK_MS) throw badProof();
+        if (taskDurationMs <= MIN_TASK_MS) throw badProof("task_duration");
         check();
         const file = await beforeDeadline(this.runtime.terminal(this.handle, { script: fileCheck(intent) }, bound), bound);
         check();
         const finalText = observed.read();
         if (JSON.stringify(rows(finalText, intent)) !== JSON.stringify(samples) ||
-          lines(finalText).filter(line => line.startsWith("ZEROS_DEV_NATIVE_DONE ")).length !== 1) throw badProof();
-        if (file.exitCode !== 0 || file.truncated || Buffer.byteLength(file.output) > MAX_BYTES) throw badProof();
+          lines(finalText).filter(line => line.startsWith("ZEROS_DEV_NATIVE_DONE ")).length !== 1) throw badProof("output_changed");
+        if (file.exitCode !== 0 || file.truncated || Buffer.byteLength(file.output) > MAX_BYTES) throw badProof("file_output");
         const candidates = lines(file.output).filter(line => line.startsWith("ZEROS_DEV_NATIVE_FILE "));
-        if (candidates.length !== 1) throw badProof();
+        if (candidates.length !== 1) throw badProof("file_marker");
         let decoded: unknown;
-        try { decoded = JSON.parse(candidates[0]!.slice("ZEROS_DEV_NATIVE_FILE ".length)); } catch { throw badProof(); }
+        try { decoded = JSON.parse(candidates[0]!.slice("ZEROS_DEV_NATIVE_FILE ".length)); } catch { throw badProof("file_json"); }
         const result = fileSchema.safeParse(decoded), outputSha256 = sha(samples.map(row => JSON.stringify(row) + "\n").join(""));
-        if (!result.success || result.data.programSha256 !== intent.programSha256 || result.data.outputSha256 !== outputSha256 ||
-          JSON.stringify(result.data.rows) !== JSON.stringify(samples)) throw badProof();
+        if (!result.success) throw badProof("file_schema");
+        if (result.data.programSha256 !== intent.programSha256) throw badProof("program_hash");
+        if (result.data.outputSha256 !== outputSha256) throw badProof("output_hash");
+        if (JSON.stringify(result.data.rows) !== JSON.stringify(samples)) throw badProof("file_rows");
         return InfrastructureNativeProofSchema.parse({ version: 1, kind: "native-terminal-task", scopeSha256: intent.scopeSha256,
           sessionSha256: sha(intent.sessionId), programSha256: intent.programSha256, outputSha256, rowCount: 32, taskDurationMs,
           maxHeartbeatGapMs: Math.max(...gaps), replayBytes: created.replayBytes, replayTruncated: false });

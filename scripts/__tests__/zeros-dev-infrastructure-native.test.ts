@@ -145,29 +145,89 @@ describe("infrastructure native detached task", () => {
     expect(f.client.send).not.toHaveBeenCalled(); expect(f.listeners()).toBe(0);
   });
 
-  it.each(["new-terminal", "cwd", "truncation", "byte-count", "missing-first", "duplicate", "nonce", "duration", "gap", "file-hash", "source-hash"] as const)(
+  it.each(["denied", "new-terminal", "cwd", "truncation", "empty", "byte-count", "missing-first", "duplicate", "nonce", "duration", "gap", "pty-exit", "file-hash", "source-hash"] as const)(
     "refuses %s without restarting or rewriting the task", async kind => {
       const f = fixture(), task = await f.make().begin(signal()); f.complete();
       const request = f.client.request.getMockImplementation()!;
       f.client.request.mockImplementationOnce(async value => {
+        if (kind === "denied") throw new Error("synthetic-private-provider-rejection");
         const reply = await request(value);
         if (kind === "new-terminal") reply.reattached = false;
         if (kind === "cwd") reply.cwd = "/elsewhere";
         if (kind === "truncation") reply.replayTruncated = true;
+        if (kind === "empty") reply.replay = "";
         if (kind === "missing-first") reply.replay = reply.replay.replace(rowText(f.rows()[0]), "");
-        if (kind === "duplicate") reply.replay += rowText(f.rows()[0]);
+        if (kind === "duplicate") reply.replay += "\r\n" + rowText(f.rows()[0]);
         if (kind === "nonce") reply.replay = reply.replay.replace(f.intent().nonce, randomUUID());
-        if (kind === "duration") reply.replay = reply.replay.replace('"ms":1860000', '"ms":1800000');
+        if (kind === "duration") reply.replay = f.rows().map(row => rowText({ ...row, ms: row.n * 58_000 })).join("") + `ZEROS_DEV_NATIVE_DONE ${task.nonce}\r\n`;
         if (kind === "gap") reply.replay = reply.replay.replace('"ms":60000', '"ms":100000');
+        if (kind === "pty-exit") f.emit("PTY_EXIT", { sessionId: task.sessionId, exitCode: 0, signal: null });
         reply.replayBytes = Buffer.byteLength(reply.replay) + (kind === "byte-count" ? 1 : 0);
         return reply;
       });
       if (kind === "file-hash" || kind === "source-hash") f.runtime.terminal.mockResolvedValueOnce({ exitCode: 0, truncated: false,
         output: `ZEROS_DEV_NATIVE_FILE ${JSON.stringify({ ...f.fileProof(), [kind === "file-hash" ? "outputSha256" : "programSha256"]: "f".repeat(64) })}\n` });
-      await expect(f.make().finish(task, signal())).rejects.toMatchObject({ code: "detached_proof_incomplete" });
+      const predicate = { denied: "pty_create_unavailable", "new-terminal": "pty_not_reattached", cwd: "pty_cwd",
+        truncation: "replay_truncated", empty: "replay_missing", "byte-count": "replay_bytes", "missing-first": "row_sequence",
+        duplicate: "row_sequence", nonce: "row_identity", duration: "task_duration", gap: "heartbeat_gap", "pty-exit": "pty_exit",
+        "file-hash": "output_hash", "source-hash": "program_hash" }[kind];
+      await expect(f.make().finish(task, signal())).rejects.toMatchObject({ code: "detached_proof_incomplete", nativeProof: { predicate } });
       expect(f.client.send.mock.calls.filter(([message]) => message.type === "PTY_WRITE")).toHaveLength(1);
       expect(f.listeners()).toBe(0);
     });
+
+  it("keeps the first closed observer failure when another event arrives before reattach completes", async () => {
+    const f = fixture(), task = await f.make().begin(signal()); f.complete();
+    const request = f.client.request.getMockImplementation()!;
+    f.client.request.mockImplementationOnce(async value => {
+      f.emit("PTY_EXIT", { sessionId: task.sessionId, exitCode: 0, signal: null });
+      f.emit("PTY_DATA", { sessionId: task.sessionId, data: "x".repeat(65_537) });
+      return request(value);
+    });
+    await expect(f.make().finish(task, signal())).rejects.toMatchObject({ code: "detached_proof_incomplete", nativeProof: { predicate: "pty_exit" } });
+    expect(f.runtime.terminal).toHaveBeenCalledOnce();
+    expect(f.listeners()).toBe(0);
+  });
+
+  it.each(["denied", "cwd", "replay-limit"] as const)(
+    "retains an observed PTY_EXIT before a later %s reply failure", async kind => {
+      const f = fixture(), task = await f.make().begin(signal()); f.complete();
+      const request = f.client.request.getMockImplementation()!;
+      f.client.request.mockImplementationOnce(async value => {
+        f.emit("PTY_EXIT", { sessionId: task.sessionId, exitCode: 0, signal: null });
+        if (kind === "denied") throw new Error("private later refusal");
+        const reply = await request(value);
+        if (kind === "cwd") reply.cwd = "/later-wrong-root";
+        if (kind === "replay-limit") { reply.replay = "x".repeat(65_537); reply.replayBytes = 65_537; }
+        return reply;
+      });
+      await expect(f.make().finish(task, signal())).rejects.toMatchObject({ code: "detached_proof_incomplete", nativeProof: { predicate: "pty_exit" } });
+      expect(f.runtime.terminal).toHaveBeenCalledTimes(1);
+      expect(f.client.send.mock.calls.filter(([message]) => message.type === "PTY_WRITE")).toHaveLength(1);
+      expect(f.listeners()).toBe(0);
+    });
+
+  it("retains an earlier PTY_EXIT when the later file result also fails", async () => {
+    const f = fixture(), task = await f.make().begin(signal()); f.complete();
+    f.runtime.terminal.mockImplementationOnce(async () => {
+      f.emit("PTY_EXIT", { sessionId: task.sessionId, exitCode: 0, signal: null });
+      return { exitCode: 1, truncated: true, output: "private later failure" };
+    });
+    await expect(f.make().finish(task, signal())).rejects.toMatchObject({ code: "detached_proof_incomplete", nativeProof: { predicate: "pty_exit" } });
+    expect(f.listeners()).toBe(0);
+  });
+
+  it.each(["runtime_changed", "deadline"] as const)("keeps %s ahead of a latched native observation", async code => {
+    const f = fixture(), task = await f.make().begin(signal()), controller = new AbortController(); f.complete();
+    f.client.request.mockImplementationOnce(async () => {
+      f.emit("PTY_EXIT", { sessionId: task.sessionId, exitCode: 0, signal: null });
+      if (code === "runtime_changed") f.identity({ ...f.client.executionIdentity, authorityEpoch: 3 });
+      else controller.abort();
+      throw new Error("private later refusal");
+    });
+    await expect(f.make().finish(task, controller.signal)).rejects.toMatchObject({ code });
+    expect(f.runtime.terminal).toHaveBeenCalledTimes(1); expect(f.listeners()).toBe(0);
+  });
 
   it("does not accept a complete-looking remote proof before the original elapsed window or after its deadline", async () => {
     const f = fixture(), task = await f.make().begin(signal());

@@ -177,4 +177,121 @@ export async function runComposerAttachmentsSmoke({ page, check }) {
   await expect(page.locator(".composer-pm")).toContainText("Unsaved edit survives reload");
   await expect(page.getByRole("button", { name: "Remove replacement.txt", exact: true })).toBeVisible();
   check("reload preserves the live sent-message edit and replacement attachment", true);
+
+  await runVideoContextCheck({ page, url, check });
+}
+
+async function runVideoContextCheck({ page, url, check }) {
+  await page.goto(url);
+  const composer = page.locator(".composer-pm");
+  await composer.evaluate(async (element) => {
+    // The page records its own WebM: the bundled Chromium decodes no H.264.
+    // Three long, flat scenes give the scene sampler settled pictures.
+    const canvas = document.createElement("canvas");
+    canvas.width = 180;
+    canvas.height = 360;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#ff0000";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    const recorder = new MediaRecorder(canvas.captureStream(30), {
+      mimeType: "video/webm",
+    });
+    const chunks = [];
+    recorder.ondataavailable = (event) => chunks.push(event.data);
+    const stopped = new Promise((resolve) => {
+      recorder.onstop = resolve;
+    });
+    recorder.start(250);
+    for (const color of ["#ff0000", "#0000ff", "#00ff00"]) {
+      const until = performance.now() + 1500;
+      while (performance.now() < until) {
+        context.fillStyle = color;
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    }
+    recorder.stop();
+    await stopped;
+    const clipboardData = new DataTransfer();
+    clipboardData.items.add(
+      new File(chunks, "Sign in flow.webm", { type: "video/webm" }),
+    );
+    element.dispatchEvent(
+      new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData,
+      }),
+    );
+  });
+  const timelinePill = page.getByRole("button", {
+    name: "Remove Sign-in-flow-timeline.txt",
+    exact: true,
+  });
+  await expect(timelinePill).toBeVisible({ timeout: 20_000 });
+  const names = await composer.evaluate((element) => {
+    const found = [];
+    element.editor.state.doc.descendants((node) => {
+      if (node.type.name === "attachment") found.push(node.attrs.name);
+    });
+    return found;
+  });
+  const frames = names.slice(1, -1);
+  check(
+    "a pasted video stages its key frames, then its timeline, right after it",
+    names[0] === "Sign in flow.webm" &&
+      names.at(-1) === "Sign-in-flow-timeline.txt" &&
+      frames.length >= 2 &&
+      frames.every((name, index) => name === `Sign-in-flow-frame-${index + 1}.jpg`),
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (all) =>
+          all.every((name) => window.composerAttachmentsHarness.recordBytes(name)),
+        names,
+      ),
+    )
+    .toBe(true);
+  const saved = await page.evaluate(async (frameNames) => {
+    const harness = window.composerAttachmentsHarness;
+    const colors = [];
+    for (const name of frameNames) {
+      const bitmap = await createImageBitmap(
+        new Blob([harness.recordBytes(name)], { type: "image/jpeg" }),
+      );
+      const canvas = new OffscreenCanvas(1, 1);
+      const context = canvas.getContext("2d");
+      context.drawImage(bitmap, bitmap.width / 2, bitmap.height / 2, 1, 1, 0, 0, 1, 1);
+      const [red, green, blue] = context.getImageData(0, 0, 1, 1).data;
+      const only = (high, ...low) => high > 160 && low.every((value) => value < 96);
+      colors.push(
+        only(red, green, blue)
+          ? "red"
+          : only(green, red, blue)
+            ? "green"
+            : only(blue, red, green)
+              ? "blue"
+              : `rgb(${red}, ${green}, ${blue})`,
+      );
+    }
+    return {
+      colors,
+      timeline: new TextDecoder().decode(
+        harness.recordBytes("Sign-in-flow-timeline.txt"),
+      ),
+    };
+  }, frames);
+  // The change back to green is the last frame's picture, so it adds none.
+  check(
+    "the key frames are the first frame, each new scene and the last frame",
+    JSON.stringify(saved.colors) === JSON.stringify(["red", "blue", "green"]),
+  );
+  check(
+    "the staged timeline names each key frame and why it was kept",
+    saved.timeline.startsWith("Video: Sign in flow.webm\nLength: 00:0") &&
+      saved.timeline.includes(" Sign-in-flow-frame-1.jpg: first frame\n") &&
+      saved.timeline.includes(" Sign-in-flow-frame-2.jpg: the picture changed\n") &&
+      saved.timeline.includes(" Sign-in-flow-frame-3.jpg: last frame\n"),
+  );
 }

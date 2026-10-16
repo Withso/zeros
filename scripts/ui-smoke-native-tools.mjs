@@ -7,6 +7,7 @@ export async function runNativeToolsSmoke({ page, check }) {
   const transcript = page.locator("#transcript");
   const row = (name) => transcript.getByRole("button", { name, exact: true });
   await row("Used the browser").click();
+  await row("Used the computer").click();
   await expect(row("Find Chrome tabs").locator("img")).toHaveCount(1);
   await expect(row("Inspect website").locator("img")).toHaveCount(1);
   await expect(row("Inspect Calculator").locator("img")).toHaveCount(1);
@@ -73,6 +74,7 @@ export async function runNativeToolsSmoke({ page, check }) {
   );
 
   await page.reload();
+  await row("Used the computer").click();
   await expect(row("Inspect Calculator").locator("img")).toHaveCount(1);
   await page.getByRole("button", { name: "Switch host", exact: true }).click();
   await expect(row("Inspect Calculator").locator("img")).toHaveCount(0);

@@ -22,8 +22,9 @@ import { ExecutionSchema, PrestartRecoverySchema, type PrestartRecovery, importH
 import { actionsProfile, hourlyContext } from "./hourly-actions.mjs";
 import { runGate0, productGate0Probe } from "./gate0";
 import { GATE0_TOTAL_MS } from "./gate0-contract";
-import { importCleanupHandoff } from "./cleanup-handoff";
+import { importCleanupInput } from "./cleanup-recovery";
 import type { CleanupHandoffReference, CleanupSummary } from "./cleanup-contract";
+import type { CleanupRecoveryReference } from "./cleanup-recovery-contract";
 import { runInfrastructure } from "./infrastructure";
 import { InfrastructureNative } from "./infrastructure-native";
 import { initialInfrastructure, INFRASTRUCTURE_TOTAL_MS, OWNER_SECTION7_COVERAGE } from "./infrastructure-contract";
@@ -137,6 +138,7 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
   let execution: z.infer<typeof ExecutionSchema> | undefined, artifact: string | undefined;
   let profile: z.infer<typeof profileSchema> | undefined;
   let handoff: CleanupHandoffReference | undefined, cleanup: CleanupSummary | undefined, prestartRecovery: PrestartRecovery | undefined;
+  let cleanupRecovery: CleanupRecoveryReference | undefined, sourceArtifactSha256: string | undefined;
   try {
     execution = ExecutionSchema.parse(hourlyContext(env));
     profile = profileSchema.parse(actionsProfile(env));
@@ -159,25 +161,28 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
     const context = path.join(root, ".context"); await ownedDirectory(context);
     store = new RunStore(path.join(context, "zeros-dev"), fixture, credential);
     if (plan.previous) {
-      const previous = await importHourlyArtifact(path.join(temporary, "zeros-dev-previous", "receipt.json"), store, credential, plan.previous);
+      const previous = await importHourlyArtifact(path.join(temporary, "zeros-dev-previous", "receipt.json"), store, credential, plan.previous,
+        { includeSourceDigest: true });
       handoff = previous.handoff; prestartRecovery ??= previous.prestartRecovery;
+      cleanupRecovery = previous.cleanupRecovery; sourceArtifactSha256 = previous.sourceArtifactSha256;
     }
     const runs = store, device = credential, identity = execution, outputFile = artifact;
     const uncertain = { runId, success: false, code: "command_uncertain" as const };
     // An initial checkpoint precedes authentication or any product write. All
     // subsequent intent saves atomically replace only this signed execution.
-    await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { handoff, profile, prestartRecovery });
+    await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { handoff, profile, prestartRecovery, cleanupRecovery });
     historyVerified = true;
     if (env.ZEROS_DEV_CLEANUP_HANDOFF_B64) {
-      handoff = await importCleanupHandoff(env.ZEROS_DEV_CLEANUP_HANDOFF_B64, runs, device, handoff);
-      await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff, profile, prestartRecovery });
+      ({ handoff, cleanupRecovery } = await importCleanupInput(env.ZEROS_DEV_CLEANUP_HANDOFF_B64, runs, device,
+        { sourceArtifactSha256, handoff, cleanupRecovery }));
+      await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff, profile, prestartRecovery, cleanupRecovery });
     }
     let checkpoints = Promise.resolve();
     const withRun = <T>(id: string, source: Source | null, work: (handle: RunHandle) => Promise<T>) => runs.withRun(id, source, async handle => {
       const save = handle.save;
       handle.save = async () => {
         await save();
-        const checkpoint = checkpoints.then(async () => { await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff, profile, prestartRecovery }); });
+        const checkpoint = checkpoints.then(async () => { await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff, profile, prestartRecovery, cleanupRecovery }); });
         checkpoints = checkpoint.catch(() => {}); await checkpoint;
       };
       return work(handle);
@@ -252,7 +257,7 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
       catch (error) { fail(error); }
     }
     if (historyVerified && store && credential && execution && artifact) {
-      try { cleanup = await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code, ...diagnostic }, { replace: true, handoff, profile, prestartRecovery }); }
+      try { cleanup = await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code, ...diagnostic }, { replace: true, handoff, profile, prestartRecovery, cleanupRecovery }); }
       catch { code ??= "artifact_invalid"; }
     }
     write({ schema: profile === "infrastructure" ? "zeros.dev-infrastructure-result/v1" : "zeros.dev-hourly-result/v1",

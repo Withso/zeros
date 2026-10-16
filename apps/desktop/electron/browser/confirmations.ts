@@ -27,6 +27,23 @@ export interface BrowserClickRiskInput {
   submitsForm?: boolean;
 }
 
+/** The element a key press reaches, as the page describes it. */
+export interface BrowserKeyTarget extends BrowserClickRiskInput {
+  /** Text goes into it, so Space types and Enter clicks nothing. */
+  typing?: boolean;
+  /** Enter in it submits its form. */
+  implicitSubmit?: boolean;
+  /** The label of that form's default button. */
+  submitLabel?: string;
+  /** Focus is inside a frame Zeros can't read. */
+  opaque?: boolean;
+}
+
+export interface BrowserKeyRisk {
+  category: BrowserRiskCategory;
+  label: string;
+}
+
 interface PendingConfirmation {
   request: BrowserConfirmationRequest;
   resolve: (decision: BrowserConfirmationDecision) => void;
@@ -247,6 +264,39 @@ export function classifyBrowserClick(
     return "external-submit";
   }
   return null;
+}
+
+/** Enter or Space on a control clicks it, so the key pauses exactly where a
+ * click on that control would, under the control's own name. Enter in a form
+ * field submits the form through its default button. What a key does inside a
+ * frame Zeros can't read is unknown, so it pauses as a submission. */
+export function classifyBrowserKey(
+  keyCode: string,
+  target: BrowserKeyTarget | null,
+): BrowserKeyRisk | null {
+  if ((keyCode !== "Enter" && keyCode !== "Space") || !target) return null;
+  if (target.opaque) {
+    return {
+      category: "external-submit",
+      label: `Press ${keyCode} inside an embedded frame`,
+    };
+  }
+  if (keyCode === "Enter" && target.implicitSubmit) {
+    const label = target.submitLabel?.trim() ?? "";
+    return {
+      category:
+        classifyBrowserClick({ label, submitsForm: true }) ?? "external-submit",
+      label: label || "Submit this form",
+    };
+  }
+  if (target.typing) return null;
+  const category = classifyBrowserClick(target);
+  return category
+    ? {
+        category,
+        label: target.label.trim() || "Submit information to this site",
+      }
+    : null;
 }
 
 export function classifyBrowserInput(

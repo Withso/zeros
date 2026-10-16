@@ -1,0 +1,9 @@
+{
+  "id": "transcript-history-status",
+  "kind": "scenario",
+  "area": "renderer",
+  "fixedBy": "pr:547",
+  "symptom": "Incomplete cloud history displayed a permanent progress banner even with readable rows; a new empty chat flashed loading while its first read was held.",
+  "rule": "agents/zstack/changes/transcript-history-status.md: distinguish history coverage from active work, keep exact-owner rows, and bound only cold-load presentation with hidden timers retired.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

@@ -4,6 +4,7 @@ import {
   GitPullRequestArrow,
   Globe,
   PenTool,
+  Smartphone,
   Terminal,
 } from "lucide-react";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
@@ -78,6 +79,16 @@ export const WORKBENCH_STATUS_ADAPTERS = {
       unavailable: "The terminal isn't available.",
     },
     icon: Terminal,
+  },
+  simulator: {
+    noun: "the simulator",
+    subject: "The simulator",
+    empty: {
+      pending: "The simulator opens when the workspace is ready.",
+      retryable: "Retry to load the simulator.",
+      unavailable: "The simulator isn't available.",
+    },
+    icon: Smartphone,
   },
 } satisfies Record<
   WorkbenchTabType,
@@ -321,6 +332,9 @@ export function workbenchStatusKey(
     tab.url,
     tab.browserConversationId,
     target,
+    ...(tab.type === "simulator"
+      ? [tab.simulatorPlatform, tab.simulatorDeviceId]
+      : []),
   ]);
 }
 

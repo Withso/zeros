@@ -58,6 +58,11 @@
    For stop/seal races, hold background replies across the admission fence and
    local cancellation. Assert authority and heartbeats survive through a real
    seal, while explicit revocation and wrong identities remain terminal.
+   For cancelled final checkpoints, keep authenticated final control separate
+   from record-write admission. Retry against the original frozen writer without
+   reopening NORMAL or claims; exercise heartbeat delivery, failed handoff flush,
+   lost seal ACK, cancellation ACK, replacement final capture and original drain
+   tickets together. A generic cancellation label does not identify the failed gate.
    For packaged imports, reproduce against staged
    sources; a checkout import or bundled CLI can hide a missing source file.
    For periodic disconnects, inspect client retirement timers before blaming
@@ -73,6 +78,12 @@
    Inventory independent session-lock holders and hold them concurrently across
    provider barriers; their callbacks and an unrelated worker transaction must
    still progress. Count every lock pool in steady and rollout surge budgets.
+   For finite compute leases, distinguish unavailable DB proof from revoked
+   authority. Terminate the real connection before and after COMMIT, exhaust
+   pool capacity and transaction retries, then re-observe the same allocation,
+   reservation, generation and claim. Preserve existing prepaid runway only;
+   never replay provider I/O or ambiguous funding. Keep monotonic DB-time bounds,
+   closed throw sites, deadline stops and permanent-corruption controls covered.
    For renewal telemetry, test real success, refusal, concurrency and retirement
    paths. Use a separate monotonic clock, closed labels and bounded aggregates;
    never let logging alter authority outcomes or add idle timers. State exactly
@@ -98,6 +109,24 @@
    proof and a post-I/O authority recheck; preserve storage debt and the D1 gate.
    Test the actual record purge so a signed carry can later retire from positive
    retained proof, never from a missing row or a provider 404 alone.
+   For a failed delete followed by a fresh accepted retry, bind cleanup to the
+   successor without rewriting the failed intent. Replay the older key after
+   the successor and after its job fails; neither replay may rebind or reset
+   that job. Recheck current intent failure and replacement across provider I/O.
+   Also replay a successor accepted by the old producer before deployment:
+   deployment alone cannot repair request-time linkage. Require unambiguous
+   exact intent custody, keep its key and preserve worker progress and leases.
+   Cover operator skips after physical completion; linkage reconciliation must
+   not turn into an implicit retry of a failed record purge.
+   If an operator must replace a failed DELETE, retain the original attempt
+   and append exact signed cleanup-only custody. Exercise exporter, Actions
+   restore, fresh successor proof and consumed replay together; recovery must
+   neither redispatch DELETE nor relabel the failed source as successful.
+   For account selection, observe the exact selected revision and material;
+   vault presence and refresh metadata are not authority. Re-read durable state
+   after expiry, require positive release or retirement, and commit bounded
+   closure progress. Preserve explicit IDs and committed lost-ACK replay; only
+   a later explicit request may start a separately fenced successor.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates

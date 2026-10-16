@@ -24,12 +24,16 @@ import {
 // ──────────────────────────────────────────────────────────
 
 import { useCallback, useSyncExternalStore } from "react";
+import type { AgentControlFeature } from "@zeros/protocol/agent-control-rollout";
 
-/** The set of experimental feature flags. */
+/** The set of experimental feature flags. Agent control features use theirs
+ *  only while their rollout stage is `experimental`
+ *  (agent-control-rollout.ts). */
 export type ExperimentalFeature =
   | "terminalAgents"
   | "hideArchivedWorkspacesAfter15Days"
-  | "gibberishAgentThinking";
+  | "gibberishAgentThinking"
+  | AgentControlFeature;
 
 const STORAGE_KEY = "zeros.experimentalFeatures";
 

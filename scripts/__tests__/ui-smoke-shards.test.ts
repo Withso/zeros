@@ -25,6 +25,7 @@ const originalOrder = [
   "create-source-tooltip-escape",
   "cloud-workspace",
   "workbench-status",
+  "simulator-tab",
   "cloud-replica",
   "cloud-preview",
   "cloud-design-assets",
@@ -97,6 +98,8 @@ const originalOrder = [
   "pr-actions",
   "activity-disclosure",
   "sticky-bottom",
+  "scroll-area-cleanup",
+  "scroll-area-drag",
   "subscription",
 ];
 

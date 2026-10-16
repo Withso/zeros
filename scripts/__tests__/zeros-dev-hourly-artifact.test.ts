@@ -9,6 +9,7 @@ import { exportHourlyArtifact, importHourlyArtifact, verifyPublicHourlyArtifact 
 import type { Fixture } from "../zeros-dev/config";
 import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
 import { PRESTART_RECOVERY } from "../zeros-dev/prestart-recovery.mjs";
+import { initialInfrastructure } from "../zeros-dev/infrastructure-contract";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -27,6 +28,28 @@ async function fixture() {
 }
 
 describe("cross-run signed Actions receipts", () => {
+  it("signs the first native predicate alongside a later cleanup failure and rejects edited diagnostics", async () => {
+    const f = await fixture();
+    await f.store.withRun(f.runId, null, async h => {
+      h.run.hourly!.infrastructure = initialInfrastructure();
+      h.run.evidence.push({ phase: "detached_native_proof", outcome: "failed", durationMs: 1324,
+        code: "detached_proof_incomplete", nativeProof: { predicate: "pty_create_unavailable" } });
+      h.run.evidence.push({ phase: "cleanup", outcome: "failed", durationMs: 110_000, code: "cleanup_pending" });
+      await h.save();
+    });
+    await exportHourlyArtifact(f.file, f.store, f.credential, f.execution,
+      { code: "detached_proof_incomplete", success: false, runId: f.runId, nativeProof: { predicate: "pty_create_unavailable" } }, { profile: "infrastructure" });
+    const raw = JSON.parse(await readFile(f.file, "utf8")), trust = { deviceId: f.credential.deviceId, publicKey: f.credential.publicKey };
+    const verified = verifyPublicHourlyArtifact(raw, trust, f.execution);
+    expect(verified.runs[0]!.evidence).toEqual((await f.store.read(f.runId)).evidence);
+    expect(verified.runs[0]!.evidence[0]).toMatchObject({ nativeProof: { predicate: "pty_create_unavailable" } });
+    expect(verified.result).toMatchObject({ success: false, code: "detached_proof_incomplete", nativeProof: { predicate: "pty_create_unavailable" } });
+    const next = new RunStore(path.join(f.root, "diagnostic-import"), f.fixture, f.credential);
+    await importHourlyArtifact(f.file, next, f.credential, f.execution);
+    expect((await next.read(f.runId)).evidence).toEqual(verified.runs[0]!.evidence);
+    raw.payload.runs[0].evidence[0].nativeProof.predicate = "heartbeat_gap";
+    expect(() => verifyPublicHourlyArtifact(raw, trust, f.execution)).toThrow("zeros_dev_artifact_invalid");
+  });
   it("signs and preserves the exact reviewed prestart incident without pretending it produced an artifact", async () => {
     const f = await fixture(), result = { code: "command_uncertain" as const, success: false, runId: f.runId };
     await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, result, { prestartRecovery: PRESTART_RECOVERY });

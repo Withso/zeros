@@ -21,7 +21,13 @@ import { invalidateDesignManifestDiscovery } from "../design/metadata";
 // already the engine's supported watcher. No event writes or respawns the
 // engine; bursts are debounced into one renderer invalidation. Internal .git /
 // .zeros state and dependency trees are excluded; tracked build/dist files are
-// intentionally still observed because they appear in All Files/Changes. The
+// intentionally still observed because they appear in All Files/Changes.
+// Folders Git itself reports as ignored and untracked (an agent's `dist/`,
+// `coverage/`, or `.context/` command logs) are neither polled nor reported:
+// their churn cannot change any Git view, and during agent builds it otherwise
+// re-ran every Changes, Files and review read per poll. The exclusion comes
+// from Git (`ls-files --ignored --directory`, `check-ignore` for folders created
+// later), never from a name heuristic. The
 // git-dir poll remains a bounded mtime+ctime+size guard — and its filesystem
 // work is fully ASYNC (fs.promises) with a single-flight guard: the engine is
 // single-threaded under Bun, and the old sync walk (readdirSync + a statSync
@@ -57,6 +63,8 @@ import {
 
 import chokidar, { type ChokidarOptions, type FSWatcher } from "chokidar";
 
+import { runGit } from "./git-exec";
+
 import { DESIGN_CANVAS_FILE } from "../design/directory-registry";
 import { DESIGN_CANVAS_FILE as PUBLIC_DESIGN_CANVAS_FILE } from "../design/canvas-file";
 import { isDesignMetadataRepoPath } from "../design/metadata";
@@ -68,6 +76,14 @@ import {
 const POLL_INTERVAL_MS = 1_000;
 const WORKTREE_DEBOUNCE_MS = 75;
 const POLLING_DIRECTORY_SETTLE_PASSES = 3;
+/** Bounds the Git-ignored folder set per root; a larger set keeps the first
+ * entries (Git lists shallow folders first) and still watches the rest. */
+const MAX_IGNORED_DIRECTORIES = 4_096;
+/** New folders are classified in small batches; `.gitignore` edits re-list. */
+const IGNORE_CHECK_DEBOUNCE_MS = 150;
+/** Catches rule sources no worktree event reports (.git/info/exclude, the
+ * global excludes file) and folders that became tracked with `add -f`. */
+const IGNORED_DIRECTORY_REFRESH_MS = 5 * 60_000;
 
 /** Per-worktree git-dir files that change on a terminal/agent git op. */
 const GIT_STATE_FILES = ["HEAD", "index", "logs/HEAD"] as const;
@@ -140,6 +156,16 @@ function isInsideNestedToolWorktree(
   if (!boundary) return false;
   try {
     lstatSync(join(boundary, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Only a checkout with a `.git` marker can be asked what it ignores. */
+function existsGitMarker(root: string): boolean {
+  try {
+    lstatSync(join(root, ".git"));
     return true;
   } catch {
     return false;
@@ -400,6 +426,91 @@ function isDesignRecognitionChange(
   );
 }
 
+/** `.zeros/` is normally ignored, yet its legacy Design pointers
+ * (`design-dir.toml`, `design/`) are recognition inputs this watcher must keep
+ * reporting; WORKTREE_IGNORED_PATHS already narrows the rest of it. */
+function mayExcludeIgnoredDirectory(root: string, directory: string): boolean {
+  const rel = relative(root, directory);
+  return (
+    rel !== "" &&
+    !rel.startsWith("..") &&
+    !isAbsolute(rel) &&
+    !rel.split(sep).includes(".zeros")
+  );
+}
+
+function isInsideAny(filePath: string, directories: ReadonlySet<string>): boolean {
+  if (directories.size === 0) return false;
+  let current = resolve(filePath);
+  for (;;) {
+    if (directories.has(current)) return true;
+    const parent = dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
+/** Folders Git ignores whole (no tracked file inside), as absolute paths. Null
+ * when the root is not a readable repository: nothing is excluded then. */
+export async function listGitIgnoredDirectories(
+  root: string,
+): Promise<string[] | null> {
+  try {
+    const { stdout } = await runGit(
+      root,
+      [
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+      ],
+      { readOnly: true, timeoutMs: 15_000, maxBufferBytes: 32 * 1024 * 1024 },
+    );
+    const directories: string[] = [];
+    for (const entry of stdout.split("\0")) {
+      if (!entry.endsWith("/")) continue;
+      const directory = resolve(root, entry.slice(0, -1));
+      if (!mayExcludeIgnoredDirectory(root, directory)) continue;
+      directories.push(directory);
+      if (directories.length >= MAX_IGNORED_DIRECTORIES) break;
+    }
+    return directories;
+  } catch {
+    return null;
+  }
+}
+
+/** Which of these folders (absolute, inside root) Git ignores. A failed check
+ * keeps watching them. */
+async function gitIgnoredAmong(
+  root: string,
+  directories: readonly string[],
+): Promise<string[]> {
+  const relativeByInput = new Map<string, string>();
+  for (const directory of directories) {
+    if (!mayExcludeIgnoredDirectory(root, directory)) continue;
+    const rel = relative(root, directory);
+    relativeByInput.set(`${rel.split(sep).join("/")}/`, directory);
+  }
+  if (relativeByInput.size === 0) return [];
+  try {
+    const { stdout } = await runGit(root, ["check-ignore", "-z", "--stdin"], {
+      readOnly: true,
+      timeoutMs: 10_000,
+      input: `${[...relativeByInput.keys()].join("\0")}\0`,
+    });
+    return stdout
+      .split("\0")
+      .map((entry) => relativeByInput.get(entry))
+      .filter((directory): directory is string => directory !== undefined);
+  } catch {
+    // Exit 1 means none is ignored; anything else keeps watching them.
+    return [];
+  }
+}
+
 /** Watch every known working tree plus its git-dir state. `targets` is
  * re-evaluated each poll so newly created/removed worktrees are subscribed
  * without an engine restart. */
@@ -432,6 +543,7 @@ export function startGitWatcher(
   const watcherOptions = (
     watchedRoot: string,
     usePolling: boolean,
+    ignoredDirectories: ReadonlySet<string>,
   ): ChokidarOptions => ({
     // Never exclude a directory merely because it LOOKS generated. Published
     // libraries legitimately track dist/, repositories can contain src/build/
@@ -441,6 +553,7 @@ export function startGitWatcher(
       ...WORKTREE_IGNORED_PATHS,
       (candidatePath: string) =>
         isInsideNestedToolWorktree(watchedRoot, candidatePath),
+      (candidatePath: string) => isInsideAny(candidatePath, ignoredDirectories),
     ],
     ignoreInitial: true,
     persistent: true,
@@ -533,6 +646,13 @@ export function startGitWatcher(
     reconcileReady: boolean;
     reconcileTimer: ReturnType<typeof setInterval> | null;
     reconcileInFlight: Promise<void> | null;
+    /** Folders Git ignores whole; never polled or reported. */
+    ignoredDirectories: Set<string>;
+    /** When the ignored set was last listed; the Git-state poll re-lists. */
+    ignoreListedAt: number;
+    ignoreCheckTimer: ReturnType<typeof setTimeout> | null;
+    pendingIgnoreChecks: Set<string>;
+    ignoreRelistPending: boolean;
   };
   // One Chokidar instance per semantic root is intentional. `unwatch(root)` on
   // a shared macOS FSEvents stream can keep following the inode after an atomic
@@ -546,6 +666,9 @@ export function startGitWatcher(
   const closeRootWatcher = async (entry: RootWatcher): Promise<void> => {
     entry.reconcileReady = false;
     stopReconcileTimer(entry);
+    if (entry.ignoreCheckTimer) clearTimeout(entry.ignoreCheckTimer);
+    entry.ignoreCheckTimer = null;
+    entry.pendingIgnoreChecks.clear();
     if (entry.reconcileInFlight) await entry.reconcileInFlight;
     entry.settlingDirectories.clear();
     await entry.watcher.close();
@@ -558,7 +681,60 @@ export function startGitWatcher(
     isPathInsideRoot(filePath, entry.target.root) &&
     !WORKTREE_IGNORED_PATHS.some((pattern) => pattern.test(filePath)) &&
     !isInsideNestedToolWorktree(entry.target.root, filePath) &&
+    !isInsideAny(filePath, entry.ignoredDirectories) &&
     !isInsideSuspendedRoot(filePath);
+  /** Stop observing folders that became Git-ignored and resume ones that no
+   * longer are. */
+  const applyIgnoredDirectories = (
+    entry: RootWatcher,
+    next: readonly string[],
+    replace: boolean,
+  ): void => {
+    if (!rootWatcherIsCurrent(entry)) return;
+    const nextSet = new Set(next);
+    const added = next.filter((directory) => !entry.ignoredDirectories.has(directory));
+    const removed = replace
+      ? [...entry.ignoredDirectories].filter((directory) => !nextSet.has(directory))
+      : [];
+    for (const directory of removed) entry.ignoredDirectories.delete(directory);
+    for (const directory of added) {
+      if (entry.ignoredDirectories.size >= MAX_IGNORED_DIRECTORIES) break;
+      entry.ignoredDirectories.add(directory);
+      removeSettlingDirectory(entry, directory);
+    }
+    if (added.length > 0) entry.watcher.unwatch?.(added);
+    if (removed.length > 0) entry.watcher.add(removed);
+  };
+  const relistIgnoredDirectories = async (entry: RootWatcher): Promise<void> => {
+    entry.ignoreListedAt = Date.now();
+    if (!existsGitMarker(entry.target.root)) return;
+    const directories = await listGitIgnoredDirectories(entry.target.root);
+    if (directories) applyIgnoredDirectories(entry, directories, true);
+  };
+  const scheduleIgnoreCheck = (
+    entry: RootWatcher,
+    directory: string | null,
+  ): void => {
+    if (directory) entry.pendingIgnoreChecks.add(resolve(directory));
+    else entry.ignoreRelistPending = true;
+    if (entry.ignoreCheckTimer) return;
+    entry.ignoreCheckTimer = setTimeout(() => {
+      entry.ignoreCheckTimer = null;
+      if (!rootWatcherIsCurrent(entry)) return;
+      const relist = entry.ignoreRelistPending;
+      const pending = [...entry.pendingIgnoreChecks];
+      entry.ignoreRelistPending = false;
+      entry.pendingIgnoreChecks.clear();
+      if (relist) {
+        void relistIgnoredDirectories(entry);
+        return;
+      }
+      void gitIgnoredAmong(entry.target.root, pending).then((ignored) => {
+        if (ignored.length > 0) applyIgnoredDirectories(entry, ignored, false);
+      });
+    }, IGNORE_CHECK_DEBOUNCE_MS);
+    entry.ignoreCheckTimer.unref?.();
+  };
   const ensureReconcileTimer = (entry: RootWatcher): void => {
     if (
       !entry.reconcileReady ||
@@ -717,9 +893,10 @@ export function startGitWatcher(
     invalidateWhenReady = false,
   ): Promise<void> => {
     const key = rootKey(target.root);
+    const ignoredDirectories = new Set<string>();
     const native = chokidar.watch(
       target.root,
-      watcherOptions(target.root, polling),
+      watcherOptions(target.root, polling, ignoredDirectories),
     );
     const entry: RootWatcher = {
       watcher: native,
@@ -729,11 +906,20 @@ export function startGitWatcher(
       reconcileReady: false,
       reconcileTimer: null,
       reconcileInFlight: null,
+      ignoredDirectories,
+      ignoreListedAt: Date.now(),
+      ignoreCheckTimer: null,
+      pendingIgnoreChecks: new Set(),
+      ignoreRelistPending: false,
     };
     rootWatchers.set(key, entry);
+    // Listing usually lands before the initial scan reaches those folders;
+    // anything already scanned is unwatched when it does.
+    const ignoresApplied = relistIgnoredDirectories(entry).catch(() => {});
     const becameReady = new Promise<void>((resolveRootReady) => {
       native.once("ready", () => {
         void (async () => {
+          await ignoresApplied;
           if (polling && rootWatcherIsCurrent(entry)) {
             const watched = native.getWatched();
             for (const [directory, children] of Object.entries(watched)) {
@@ -769,6 +955,11 @@ export function startGitWatcher(
     });
     native.on("all", (_event, filePath) => {
       if (rootWatchers.get(key) !== entry) return;
+      // Churn inside a Git-ignored folder changes no Git view; an unwatch can
+      // trail a few already-queued callbacks.
+      if (isInsideAny(filePath, entry.ignoredDirectories)) return;
+      if (_event === "addDir") scheduleIgnoreCheck(entry, filePath);
+      else if (basename(filePath) === ".gitignore") scheduleIgnoreCheck(entry, null);
       const changed = changedTargetForPath(filePath, targetsByRoot);
       if (
         (changed && isSuspended(changed.root)) ||
@@ -890,6 +1081,15 @@ export function startGitWatcher(
     const watchTargets = readTargets(targets);
     if (!watchTargets) return;
     syncWorkingTreeTargets(watchTargets);
+    // Rule sources no worktree event reports (.git/info/exclude, the global
+    // excludes file, `add -f`) re-list on this existing poll, adding no timer.
+    const tickAt = Date.now();
+    for (const entry of rootWatchers.values()) {
+      if (tickAt - entry.ignoreListedAt >= IGNORED_DIRECTORY_REFRESH_MS) {
+        entry.ignoreListedAt = tickAt;
+        scheduleIgnoreCheck(entry, null);
+      }
+    }
 
     const paths = new Map<
       string,

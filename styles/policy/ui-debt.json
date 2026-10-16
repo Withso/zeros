@@ -232,9 +232,6 @@
       "apps/desktop/src/renderer/features/agent/renderers/markdown-code-block.tsx": {
         "z-10": 1
       },
-      "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx": {
-        "z-10": 1
-      },
       "apps/desktop/src/renderer/features/design-workspace/design-canvas.tsx": {
         "z-40": 1
       },

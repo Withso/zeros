@@ -275,7 +275,16 @@ export class DesignAgentMcpServer {
   private readonly initializing = new Set<StreamableHTTPServerTransport>();
 
   constructor(
-    private readonly options: { token: string } & (
+    private readonly options: {
+      token: string;
+      /** Other product tool sets (agent control) reuse this transport under
+       * their own provider-visible name and credential variable. */
+      name?: string;
+      credentialEnv?: string;
+      /** Provider-side wait for one tool call, for tools that can wait on a
+       * person (website approvals). */
+      toolTimeoutSec?: number;
+    } & (
       | { manager: DesignAgentCapabilityManager; handler?: never }
       | { handler: DesignMcpToolHandler; manager?: never }
     ),
@@ -290,12 +299,15 @@ export class DesignAgentMcpServer {
 
   get registration(): Extract<McpServerRegistration, { transport: "http" }> {
     return {
-      name: SERVER_NAME,
+      name: this.options.name ?? SERVER_NAME,
       transport: "http",
       url: this.url,
       headersFromEnv: {
-        Authorization: DESIGN_AGENT_CAPABILITY_ENV,
+        Authorization: this.options.credentialEnv ?? DESIGN_AGENT_CAPABILITY_ENV,
       },
+      ...(this.options.toolTimeoutSec
+        ? { toolTimeoutSec: this.options.toolTimeoutSec }
+        : {}),
     };
   }
 
@@ -353,7 +365,7 @@ export class DesignAgentMcpServer {
 
   private makeServer(): Server {
     const server = new Server(
-      { name: SERVER_NAME, version: SERVER_VERSION },
+      { name: this.options.name ?? SERVER_NAME, version: SERVER_VERSION },
       { capabilities: { tools: {} } },
     );
     server.setRequestHandler(ListToolsRequestSchema, async () => ({

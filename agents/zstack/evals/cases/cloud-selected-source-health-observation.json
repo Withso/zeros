@@ -1,0 +1,9 @@
+{
+  "id": "cloud-selected-source-health-observation",
+  "kind": "replay",
+  "area": "cloud-agent-credentials",
+  "fixedBy": "pr:530",
+  "symptom": "An expired selected cloud account looks connected because vault or unrelated refresh metadata is mistaken for the selected source's current usability.",
+  "rule": "The bug-fix playbook requires exact selected revision and material observations; absent, stale, future or mismatched refresh metadata cannot promise authority or automatic recovery.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/agent-connection-health.integration.test.ts src/cloud-workspaces/agent-connection-health.test.ts"
+}

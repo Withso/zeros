@@ -1,4 +1,38 @@
 import type { AgentSessionState } from "./use-agent-session";
+import { cloudHistoryFencesMatch, type CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
+
+/** Native confirmation follows the exact owner/head through local queued or
+ * streamed array updates. It never establishes CP completeness. Eviction and
+ * invalidation retire receipts; the map also has an independent hard bound. */
+export class NativeTranscriptSnapshots {
+  private readonly snapshots = new Map<string, {
+    head: CloudHistoryRestoreFence;
+    cwd: AgentSessionState["cwd"];
+    executionId: AgentSessionState["executionId"];
+    sessionId: AgentSessionState["sessionId"];
+    isCurrent: () => boolean;
+  }>();
+
+  confirm(chatId: string, slot: AgentSessionState | undefined, head: CloudHistoryRestoreFence,
+    isCurrent: (() => boolean) | undefined): void {
+    if (!slot || !slot.messages.length || !isCurrent || head.head?.deleted) return;
+    this.snapshots.delete(chatId);
+    this.snapshots.set(chatId, { head, cwd: slot.cwd,
+      executionId: slot.executionId, sessionId: slot.sessionId, isCurrent });
+    while (this.snapshots.size > 64) this.snapshots.delete(this.snapshots.keys().next().value!);
+  }
+
+  matches(chatId: string, slot: AgentSessionState, head: CloudHistoryRestoreFence): boolean {
+    const snapshot = this.snapshots.get(chatId);
+    return !!snapshot && slot.messages.length > 0 && slot.transcriptState === "resident" && !slot.transcriptPresentation &&
+      !head.head?.deleted && snapshot.cwd === slot.cwd &&
+      snapshot.executionId === slot.executionId && snapshot.sessionId === slot.sessionId &&
+      cloudHistoryFencesMatch(snapshot.head, head) && snapshot.isCurrent();
+  }
+
+  delete(chatId: string): void { this.snapshots.delete(chatId); }
+  clear(): void { this.snapshots.clear(); }
+}
 
 /** Display readiness is deliberately weaker than transcript authority. Only
  * the exact eligible cloud window can bypass a loading presentation. */

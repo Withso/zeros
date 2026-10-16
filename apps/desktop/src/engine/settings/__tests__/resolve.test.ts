@@ -9,11 +9,31 @@ describe("resolveSettings — precedence", () => {
     expect(r.effective.browser).toEqual({
       enabled: true,
       codex_enabled: true,
+      codex_native: true,
       claude_enabled: false,
+      in_app_enabled: true,
       provider: "isolated",
       auto_open: true,
       show_agent_cursor: true,
       navigation_approval: "always-ask",
+    });
+    expect(r.effective.computer_use).toEqual({
+      enabled: false,
+      codex_native: true,
+      show_agent_cursor: true,
+      blocked_apps: [
+        "com.apple.keychainaccess",
+        "com.apple.Passwords",
+        "com.apple.systempreferences",
+        "com.1password.1password",
+        "com.agilebits.onepassword7",
+        "com.bitwarden.desktop",
+      ],
+    });
+    expect(r.effective.simulators).toEqual({
+      enabled: true,
+      idle_shutdown: "30m",
+      show_agent_touches: true,
     });
     expect(r.effective.design).toBeUndefined();
     expect(r.sources["git.remote"]).toBe("default");
@@ -186,12 +206,15 @@ describe("resolveSettings — layer hygiene", () => {
     expect(disabled.effective.browser).toEqual({
       enabled: false,
       codex_enabled: true,
+      codex_native: true,
       claude_enabled: false,
+      in_app_enabled: false,
       provider: "isolated",
       auto_open: true,
       show_agent_cursor: true,
       navigation_approval: "always-ask",
     });
+    expect(disabled.sources["browser.in_app_enabled"]).toBe("user");
     expect(disabled.sources["browser.enabled"]).toBe("user");
     expect(disabled.sources["browser.codex_enabled"]).toBe("user");
     expect(disabled.sources["browser.claude_enabled"]).toBe("user");
@@ -205,15 +228,77 @@ describe("resolveSettings — layer hygiene", () => {
 
   it("lets a managed shared browser policy override weaker provider settings", () => {
     const resolved = resolveSettings({
-      user: { browser: { codex_enabled: true, claude_enabled: true } },
+      user: {
+        browser: {
+          codex_enabled: true,
+          claude_enabled: true,
+          in_app_enabled: true,
+        },
+      },
       managed: { browser: { enabled: false } },
     });
     expect(resolved.effective.browser).toMatchObject({
       codex_enabled: false,
       claude_enabled: false,
+      in_app_enabled: false,
     });
     expect(resolved.sources["browser.codex_enabled"]).toBe("managed");
     expect(resolved.sources["browser.claude_enabled"]).toBe("managed");
+    expect(resolved.sources["browser.in_app_enabled"]).toBe("managed");
+  });
+
+  it("never lets the legacy browser switch turn the in-app browser back on", () => {
+    const resolved = resolveSettings({
+      user: { browser: { in_app_enabled: false } },
+      managed: { browser: { enabled: true } },
+    });
+    expect(resolved.effective.browser).toMatchObject({
+      codex_enabled: true,
+      in_app_enabled: false,
+    });
+    expect(resolved.sources["browser.in_app_enabled"]).toBe("user");
+  });
+
+  it("lets an organization lock computer use and ignores repository files", () => {
+    const resolved = resolveSettings({
+      user: {
+        computer_use: {
+          enabled: true,
+          codex_native: false,
+          blocked_apps: ["com.apple.Notes"],
+        },
+      },
+      repoLocal: { computer_use: { enabled: true } },
+      managed: { computer_use: { enabled: false } },
+    });
+    expect(resolved.effective.computer_use).toMatchObject({
+      enabled: false,
+      codex_native: false,
+      blocked_apps: ["com.apple.Notes"],
+    });
+    expect(resolved.sources["computer_use.enabled"]).toBe("managed");
+    expect(resolved.sources["computer_use.blocked_apps"]).toBe("user");
+    expect(resolved.warnings).toEqual([
+      expect.stringContaining("repo-local: computer_use: user-only key"),
+    ]);
+  });
+
+  it("lets an organization lock simulator access and ignores repository files", () => {
+    const resolved = resolveSettings({
+      user: { simulators: { enabled: true, idle_shutdown: "never" } },
+      repoLocal: { simulators: { idle_shutdown: "15m" } },
+      managed: { simulators: { enabled: false } },
+    });
+    expect(resolved.effective.simulators).toEqual({
+      enabled: false,
+      idle_shutdown: "never",
+      show_agent_touches: true,
+    });
+    expect(resolved.sources["simulators.enabled"]).toBe("managed");
+    expect(resolved.sources["simulators.idle_shutdown"]).toBe("user");
+    expect(resolved.warnings).toEqual([
+      expect.stringContaining("repo-local: simulators: user-only key"),
+    ]);
   });
 
   it("drops invalid leaves with warnings but keeps valid siblings", () => {

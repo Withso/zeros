@@ -17,6 +17,8 @@ import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-s
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import { transcriptParentId } from "./transcript-parent";
 import { useCloudTranscriptLatency, useCloudTranscriptLoading } from "./use-cloud-transcript-latency";
+import { useTranscriptHistoryStatus } from "./use-transcript-history-status";
+import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { hasTranscriptPresentation } from "./transcript-retention";
 import { startCloudSubmitSpan } from "../../state/cloud-workspace-latency";
 import React, {
@@ -78,17 +80,22 @@ import {
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
 import { cloudQueuedPrompt } from "./cloud-queued-prompt";
-import { agentActivity } from "./agent-activity";
+import { agentActivity, chatAgentActivity } from "./agent-activity";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
 import { PermissionCard } from "./permission-card";
 import { useComposerCardFocus } from "./use-composer-card-focus";
 import {
   browserConfirmationShouldTakeComposer,
-  browserConfirmationToPermissionRequest,
-  respondToBrowserConfirmation,
   useBrowserConfirmation,
 } from "../browser/browser-confirmation-store";
+import { useAgentControlConfirmation } from "../agent-control/agent-control-confirmation-store";
+import {
+  nativeConfirmationFailureText,
+  nativeConfirmationToPermissionRequest,
+  nextNativeConfirmation,
+  respondToNativeConfirmation,
+} from "../agent-control/native-confirmation";
 import { PlanReviewCard } from "./plan-review-card";
 import { GoalCard } from "./goal-card";
 import { QuestionCard } from "./question-card";
@@ -402,6 +409,7 @@ export function AgentChat({
   const cloudNativeCapabilities=session.boundary?.cloudExecution?.capabilities??session.session?.nativeCapabilities;
   const goalsAvailable=!isCloudWorkspace(chatThread?.folder)||cloudNativeCapabilities?.goals===true;
   const browserConfirmation = useBrowserConfirmation(chatId);
+  const agentControlConfirmation = useAgentControlConfirmation(chatId);
   const workflows = session.workflows;
   const activeWorkflow = useMemo(
     () => pickActiveWorkflow(workflows),
@@ -486,10 +494,9 @@ export function AgentChat({
         string,
         import("./use-agent-session").AgentMessage[]
       >();
-      // Follow-ups render in the QueuedMessagesCard, not as transcript
-      // bubbles. The first send waiting only for session admission is the one
-      // exception: it is already the active turn, so it stays in the timeline
-      // with the live timer while the provider session becomes ready.
+      // Deliberately parked follow-ups render in the queue card. An accepted
+      // opening prompt and a send awaiting native consumption are already
+      // visible bubbles; delivery bookkeeping must not hide the user's send.
       const queuedMessages: AgentTextMessage[] = [];
       // Tool calls present in THIS window. A child is only shadowed when its
       // parent SubagentCard is here to render it — the hydrate window (or a
@@ -507,7 +514,8 @@ export function AgentChat({
         if (
           m.kind === "text" &&
           m.queued &&
-          m.queuedPresentation !== "active-turn"
+          m.queuedPresentation !== "active-turn" &&
+          m.queuedDelivery !== "sending"
         ) {
           queuedMessages.push(m);
           shadowed.add(m.id);
@@ -583,7 +591,7 @@ export function AgentChat({
     !readOnly &&
     (agentFamily(session.agentId) === "claude"
       ? activity === "running"
-      : session.status === "streaming");
+      : chatAgentActivity(session) === "running");
   // QuestionCard's submit hook routes through session.sendPrompt (see the
   // RendererContext contract).
   const respondToQuestion = useCallback(
@@ -1285,6 +1293,13 @@ export function AgentChat({
   const transcriptPaintReady = useSessionsStore((s) =>
     !!chatId && hasTranscriptPresentation(s.sessions[chatId]),
   );
+  const transcriptCatchingUp = useSessionsStore((s) => {
+    const head = chatId ? s.cloudHistoryRestoreHeads[chatId] : undefined;
+    // Native rows can be resident while the current FULL head is incomplete.
+    // Residency describes paintable rows, not confirmed history coverage.
+    return !!chatId && !!s.sessions[chatId] &&
+      !!head && !head.head?.deleted && !cloudHistoryFenceHasTranscript(head);
+  });
   useCloudTranscriptLatency(chatThread?.folder ?? session.cwd, chatId, surfaceActive,
     transcriptPaintReady, hasSessionMessages);
   // Which turn (if any) this renderer has an unsettled prompt for. The tail's
@@ -1868,6 +1883,8 @@ export function AgentChat({
     isEmpty: composerEmpty,
     serialize: serializeComposerState,
     insertFiles: addFiles,
+    hasPendingAttachmentReads: composerAttachmentsReading,
+    waitForAttachmentReads: waitForComposerAttachmentReads,
     insertTextAttachment: stageTextAttachment,
     removeAttachmentBySourceKey: unstageAttachment,
     stagedSourceKeys,
@@ -1942,23 +1959,19 @@ export function AgentChat({
   // locally stateful and the dialog still opens from the exact-key cache.
   const transcriptRowLive =
     session.transcriptState === "resident" &&
+    !transcriptCatchingUp &&
     session.messages.length === 0 &&
     !session.error &&
     !!chatThread?.folder;
-  const [showTranscriptLoading, setShowTranscriptLoading] = useState(false);
-  useEffect(() => {
-    if (!surfaceActive || session.transcriptState === "resident" || transcriptPaintReady) {
-      setShowTranscriptLoading(false);
-      return;
-    }
-    // Genuine cold DB load. Delay the indicator so normal local reads do not
-    // flash; this is not masking a waterfall—the retained deck already warms
-    // likely destinations and the composer stays intact while the exact read
-    // completes.
-    const timer = window.setTimeout(() => setShowTranscriptLoading(true), 180);
-    return () => window.clearTimeout(timer);
-  }, [chatId, surfaceActive, session.transcriptState, transcriptPaintReady]);
-  const transcriptLoadingVisible = showTranscriptLoading && surfaceActive && !transcriptPaintReady && session.transcriptState !== "resident";
+  const transcriptHistoryStatus = useTranscriptHistoryStatus({
+    identity: JSON.stringify([chatThread?.folder ?? session.cwd, chatId]),
+    active: surfaceActive,
+    hasMessages: session.messages.length > 0,
+    hasTranscript: session.hasTranscript,
+    resident: session.transcriptState === "resident",
+    incomplete: transcriptCatchingUp,
+  });
+  const transcriptLoadingVisible = transcriptHistoryStatus === "loading";
   useCloudTranscriptLoading(chatThread?.folder ?? session.cwd, chatId, transcriptLoadingVisible);
   const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
     useChatTranscriptSummaries(
@@ -3345,28 +3358,32 @@ export function AgentChat({
   // EXCEPT Claude's plan review, which isn't a gate (planReview →
   // <PlanReviewCard>). Codex's bodiless switch_mode escalation is a real gate,
   // so it still routes here.
-  const browserPermissionCardActive = browserConfirmationShouldTakeComposer({
-    browserPending: Boolean(browserConfirmation),
+  const nativeConfirmation = nextNativeConfirmation(
+    browserConfirmation,
+    agentControlConfirmation,
+  );
+  const nativePermissionCardActive = browserConfirmationShouldTakeComposer({
+    browserPending: Boolean(nativeConfirmation),
     providerPermissionPending: Boolean(session.pendingPermission),
     providerIsPlanReview: Boolean(planReview),
   });
   const providerPermissionCardActive =
-    !!session.pendingPermission && !planReview && !browserPermissionCardActive;
-  // Browser confirmations are main-process gates owned by the exact chat that
-  // started the browser session. They reuse this existing card instead of a
-  // global dialog. A provider-native hard permission remains ahead of them;
-  // non-blocking plan review yields so asynchronous browser work cannot stall
-  // with no visible decision surface.
+    !!session.pendingPermission && !planReview && !nativePermissionCardActive;
+  // Native confirmations are main-process gates owned by the exact chat that
+  // started the browser session or asked to control an app or simulator. They
+  // reuse this existing card instead of a global dialog. A provider-native
+  // hard permission remains ahead of them; non-blocking plan review yields so
+  // asynchronous browser work cannot stall with no visible decision surface.
   const permissionCardActive =
-    providerPermissionCardActive || browserPermissionCardActive;
+    providerPermissionCardActive || nativePermissionCardActive;
   const permissionRequest = useMemo(
     () =>
-      browserPermissionCardActive && browserConfirmation
-        ? browserConfirmationToPermissionRequest(browserConfirmation)
+      nativePermissionCardActive && nativeConfirmation
+        ? nativeConfirmationToPermissionRequest(nativeConfirmation)
         : (session.pendingPermission?.request ?? null),
     [
-      browserConfirmation,
-      browserPermissionCardActive,
+      nativeConfirmation,
+      nativePermissionCardActive,
       session.pendingPermission,
     ],
   );
@@ -3374,17 +3391,17 @@ export function AgentChat({
     (
       response: import("../../platform/bridge/agent-events").RequestPermissionResponse,
     ) => {
-      if (browserPermissionCardActive && browserConfirmation) {
-        void respondToBrowserConfirmation(browserConfirmation, response).catch(
+      if (nativePermissionCardActive && nativeConfirmation) {
+        void respondToNativeConfirmation(nativeConfirmation, response).catch(
           () => {
-            toast.error("Couldn't respond to the browser permission request.");
+            toast.error(nativeConfirmationFailureText(nativeConfirmation));
           },
         );
         return;
       }
       if (session.pendingPermission) session.respondToPermission(response);
     },
-    [browserConfirmation, browserPermissionCardActive, session],
+    [nativeConfirmation, nativePermissionCardActive, session],
   );
 
   // Permissions take priority over questions. Every card sits above the
@@ -3688,16 +3705,21 @@ export function AgentChat({
     const forkAttachmentPending = chatId
       ? hasPendingTextAttachmentDelivery(chatId)
       : false;
+    // Same for a dropped video whose key frames are still being read: they
+    // go with the video rather than into the next message.
+    const attachmentReadsPending = override === undefined && composerAttachmentsReading();
     if (
       hydrateNeeded ||
       transcriptAttachesRef.current.size > 0 ||
-      forkAttachmentPending
+      forkAttachmentPending ||
+      attachmentReadsPending
     ) {
       setSendPreparing(true);
       try {
         if (hydrateNeeded) await session.hydrateChat();
         await Promise.allSettled([...transcriptAttachesRef.current]);
         if (chatId) await waitForPendingTextAttachmentDeliveries(chatId);
+        if (attachmentReadsPending) await waitForComposerAttachmentReads();
       } finally {
         setSendPreparing(false);
       }
@@ -4775,6 +4797,14 @@ export function AgentChat({
                 <span aria-hidden="true">Loading conversation…</span>
               </div>
             )}
+            {transcriptHistoryStatus === "unavailable" && (
+              <div role="status" aria-label="Chat history unavailable" className="text-fg3 flex items-center gap-2 py-2 text-xs">
+                <span>Chat history isn’t available yet.</span>
+                <Button variant="ghost" size="sm" onClick={() => { void session.hydrateChat().catch(() => {}); }}>
+                  Retry
+                </Button>
+              </div>
+            )}
             {/* Empty transcript → state what this workspace IS (created /
               branched from / setup script), not what the session is doing.
               2026-07-29: replaced "Session ready. Ask the agent anything."
@@ -4786,11 +4816,13 @@ export function AgentChat({
               session shows its own failure UI and provenance would read as
               reassurance the user shouldn't take. */}
             {readOnly &&
+              !transcriptCatchingUp &&
               session.transcriptState === "resident" &&
               session.messages.length === 0 && (
                 <p className="text-fg2 text-sm">No chat history.</p>
               )}
             {!readOnly &&
+              !transcriptCatchingUp &&
               session.transcriptState === "resident" &&
               session.messages.length === 0 &&
               !session.error && (
@@ -5269,7 +5301,7 @@ export function AgentChat({
             still-live composer. Approve allows the gate + exits
             Plan mode; typing a follow-up below refines the plan (see
             handleSend's plan-review branch). */}
-          {planReview && !browserPermissionCardActive && (
+          {planReview && !nativePermissionCardActive && (
             <PlanReviewCard
               planText={readPlan(planReview.request.toolCall.rawInput)}
               onApprove={approvePlan}

@@ -18,6 +18,32 @@ import { createPool, createMigrationPool, withSystemTx, withUserTx } from "./db.
 afterEach(() => vi.restoreAllMocks());
 
 describe("database connection resilience", () => {
+  it.each(["user", "system"] as const)("OF19 normalizes raw %s pool acquire failure before any callback", async kind => {
+    const work = vi.fn();
+    for (const error of [new Error("timeout exceeded when trying to connect"), new Error("Connection terminated due to connection timeout")]) {
+      const pool = { connect: vi.fn().mockRejectedValue(error) } as unknown as ReturnType<typeof createPool>;
+      await expect(kind === "user" ? withUserTx(pool, "user-1", work) : withSystemTx(pool, work))
+        .rejects.toMatchObject({ code: "database_acquire_timeout" });
+      expect(pool.connect).toHaveBeenCalledOnce();
+    }
+    for (const code of ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "EAI_AGAIN"]) {
+      const pool = { connect: vi.fn().mockRejectedValue(Object.assign(new Error("private-acquire-detail"), { code })) } as unknown as ReturnType<typeof createPool>;
+      await expect(kind === "user" ? withUserTx(pool, "user-1", work) : withSystemTx(pool, work))
+        .rejects.toMatchObject({ code: "database_acquire_unavailable", message: "Database connection is temporarily unavailable" });
+      expect(pool.connect).toHaveBeenCalledOnce();
+    }
+    expect(work).not.toHaveBeenCalled();
+  });
+
+  it("OF19 does not normalize authentication or unknown pool failures", async () => {
+    for (const error of [Object.assign(new Error("private-auth-detail"), { code: "28P01" }), new Error("private-unknown-detail")]) {
+      const pool = { connect: vi.fn().mockRejectedValue(error) } as unknown as ReturnType<typeof createPool>;
+      const work = vi.fn();
+      await expect(withSystemTx(pool, work)).rejects.toBe(error);
+      expect(work).not.toHaveBeenCalled();
+    }
+  });
+
   it("reserves separate bounded pools without giving workers the interactive deadline", async () => {
     createPool("postgres://operator@database.test/zeros", { workload: "api" });
     expect(pools.options.at(-1)).toMatchObject({ max: 6, connectionTimeoutMillis: 1_000, statement_timeout: 5_000 });

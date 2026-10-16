@@ -34,12 +34,37 @@ export class DatabaseAcquireTimeoutError extends Error {
   }
 }
 
+export class DatabaseAcquireUnavailableError extends Error {
+  readonly code = "database_acquire_unavailable";
+  constructor() {
+    super("Database connection is temporarily unavailable");
+    this.name = "DatabaseAcquireUnavailableError";
+  }
+}
+
 function acquireError(error: unknown): unknown {
   // These are pg-pool's queue and new-connection deadlines. Do not turn SQL,
   // authentication, or uncertain transaction failures into retryable acquires.
-  return error instanceof Error && (error.message === "timeout exceeded when trying to connect" ||
+  if (error instanceof Error && (error.message === "timeout exceeded when trying to connect" ||
     error.message === "Connection terminated due to connection timeout")
-    ? new DatabaseAcquireTimeoutError() : error;
+  ) return new DatabaseAcquireTimeoutError();
+  // Normalize transport errors only at acquisition, before a transaction
+  // exists. An arbitrary application/provider error with an errno is not DB proof.
+  if (error && typeof error === "object" && "code" in error && typeof error.code === "string" &&
+      ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"].includes(error.code))
+    return new DatabaseAcquireUnavailableError();
+  return error;
+}
+
+/** Availability is not transaction retry permission. In particular, connection
+ * loss may follow COMMIT: callers must re-observe durable state before writing. */
+export function isDatabaseUnavailable(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  return typeof error.code === "string" && [
+    "database_acquire_timeout", "database_acquire_unavailable", "database_connection_lost",
+    "40001", "40P01", "55P03", "57014", "53300", "57P01", "57P02", "57P03",
+    "08000", "08001", "08003", "08006", "08007",
+  ].includes(error.code);
 }
 
 type ConnectCallback = Parameters<pg.Pool["connect"]>[0];
@@ -160,7 +185,7 @@ export async function withUserTx<T>(
     client = await pool.connect();
   } catch (error) {
     recordPoolWait(performance.now() - started);
-    throw error;
+    throw acquireError(error);
   }
   const acquired = performance.now();
   const connection = observeOwnedConnection(client);
@@ -206,7 +231,7 @@ export async function withSystemTx<T>(
     client = await pool.connect();
   } catch (error) {
     recordPoolWait(performance.now() - started);
-    throw error;
+    throw acquireError(error);
   }
   const acquired = performance.now();
   const connection = observeOwnedConnection(client);

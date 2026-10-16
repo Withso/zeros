@@ -19,6 +19,9 @@ overrides:
   source-map-js: 1.2.2
 
 patchedDependencies:
+  '@radix-ui/react-scroll-area@1.2.10':
+    hash: 48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630
+    path: patches/@radix-ui__react-scroll-area@1.2.10.patch
   app-builder-lib@26.8.1:
     hash: c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd
     path: patches/app-builder-lib@26.8.1.patch
@@ -107,7 +110,7 @@ importers:
         version: 1.1.15(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-scroll-area':
         specifier: ^1.2.0
-        version: 1.2.10(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+        version: 1.2.10(patch_hash=48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-separator':
         specifier: ^1.1.8
         version: 1.1.8(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -135,6 +138,9 @@ importers:
       '@tailwindcss/typography':
         specifier: ^0.5.20
         version: 0.5.20(tailwindcss@4.2.1)
+      '@tanstack/react-virtual':
+        specifier: 3.14.20
+        version: 3.14.20(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@tiptap/core':
         specifier: 3.31.2
         version: 3.31.2(@tiptap/pm@3.31.2)
@@ -162,6 +168,9 @@ importers:
       '@tiptap/suggestion':
         specifier: 3.31.2
         version: 3.31.2(@floating-ui/dom@1.7.6)(@tiptap/core@3.31.2(@tiptap/pm@3.31.2))(@tiptap/pm@3.31.2)
+      '@trycua/cua-driver':
+        specifier: 0.34.1
+        version: 0.34.1
       '@uiw/react-codemirror':
         specifier: ^4.25.10
         version: 4.25.10(@babel/runtime@7.29.7)(@codemirror/autocomplete@6.20.3)(@codemirror/language@6.12.3)(@codemirror/lint@6.9.7)(@codemirror/search@6.7.1)(@codemirror/state@6.6.0)(@codemirror/theme-one-dark@6.1.3)(@codemirror/view@6.43.1)(codemirror@6.0.2)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -189,6 +198,9 @@ importers:
       '@zeros/protocol':
         specifier: workspace:*
         version: link:packages/protocol
+      agent-device:
+        specifier: 0.21.26
+        version: 0.21.26
       better-sqlite3:
         specifier: ^13.0.2
         version: 13.0.2
@@ -403,6 +415,10 @@ importers:
       wait-on:
         specifier: ^9.0.5
         version: 9.0.5
+    optionalDependencies:
+      '@trycua/cua-driver-darwin-arm64':
+        specifier: 0.34.1
+        version: 0.34.1
 
   apps/marketing:
     dependencies:
@@ -3074,6 +3090,15 @@ packages:
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
 
+  '@tanstack/react-virtual@3.14.20':
+    resolution: {integrity: sha512-9hbhFlc0lznjXmWYDB/KEl7PJxEPz0Qnj2FzJFse98miGvXtx7jzjE5jlasmtczmZ6TxXsyI4v7PuyGQm2q1nQ==}
+    peerDependencies:
+      react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+      react-dom: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+
+  '@tanstack/virtual-core@3.19.5':
+    resolution: {integrity: sha512-X/wq6DtSK/XClznMM+I4JE63yyIwmyPk4Ts83bD0VKaIbwHNdRsO5QipCPX+3OovqYyr0puQNpbmp8+SPhspNg==}
+
   '@tiptap/core@3.31.2':
     resolution: {integrity: sha512-TB+8pLk1k+fCpuPQ6vGNNhSRlvIiOks79oWGykCVut2nbRpQ8GsORP9VK6Eahj2fzdQA96UQMIcK7AxoOZG/2w==}
     peerDependencies:
@@ -3139,6 +3164,39 @@ packages:
       '@floating-ui/dom': ^1.0.0
       '@tiptap/core': 3.31.2
       '@tiptap/pm': 3.31.2
+
+  '@trycua/cua-driver-darwin-arm64@0.34.1':
+    resolution: {integrity: sha512-GSTwGvNVkg7uMrdvaxwqD9m6cbknDpceaJAdL4bnVTPHjSIk1Jw5Sf/3DpYT1NSqzLgz1ipia306l0LxlsDpmQ==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@trycua/cua-driver-darwin-x64@0.34.1':
+    resolution: {integrity: sha512-9LNIqARZrdptxiAu3xRO45MPxUuvGtA7Na2yAaibI92p0kps9bRYGV+Rcm+yIxuupdg07Jwyo8Up+FO4rxrQNw==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@trycua/cua-driver-linux-arm64-gnu@0.34.1':
+    resolution: {integrity: sha512-0UDbpOSyGCfq4w5kgKLzKOD7Ms2K5likULF4FY+T2nvmeL3Sf+LyhXEhs8TNuZ8fwgW5TauMq1kYb6LK5ofFGQ==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@trycua/cua-driver-linux-x64-gnu@0.34.1':
+    resolution: {integrity: sha512-RyrYm28rmi8cXzlrdaR5Qi8WQ+jRaZ3Qo8govoOyq5vcjqUefN3G5fPRjxl4MpqqanXs7pwUYVF+d4Gwjq7HoQ==}
+    cpu: [x64]
+    os: [linux]
+
+  '@trycua/cua-driver-win32-arm64-msvc@0.34.1':
+    resolution: {integrity: sha512-jmqDxZTL1+mAWMAnVKfZF+J5bEZok3SjwUOdA4o8hzD74mPLPJO8RUXsvPp4SYtMnnUO6JsDZvz4xrW5m99d6w==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@trycua/cua-driver-win32-x64-msvc@0.34.1':
+    resolution: {integrity: sha512-DBjd+cb8x+HM8xvTvhq4//5HxZm2+ZNS5ZENy969KZppwAN9jzdzXEy0qboWbutGGzFfFv1TglPBLGxRYA3UGA==}
+    cpu: [x64]
+    os: [win32]
+
+  '@trycua/cua-driver@0.34.1':
+    resolution: {integrity: sha512-6r/s28tw2mf9PBawwzfHSSwdbx9kZ+rqy6Hpv4oTRsz2CwG/vl5oWLlNQu/YQy9zuZzCdwXGidmZR0tla2k+4w==}
 
   '@types/babel__core@7.20.5':
     resolution: {integrity: sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA==}
@@ -3303,6 +3361,52 @@ packages:
   '@typescript-eslint/visitor-keys@8.59.4':
     resolution: {integrity: sha512-U3gxVaDVnuZKhSspW/MzMxE1kq7zOdc072FcSNoqA1I9p8HyKbBFfEHoWckBAMgNMph4MamwS5iTVzFmrnt8TQ==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+
+  '@ubjs/core@0.31.0-3':
+    resolution: {integrity: sha512-39XrJgUZ2VVb561sSnkXPhczNoeBsNiSRArecsV0JE7CJq69ajFkcn9/tBAUS2NpgHkLIDU+z6Ks2+1wXnboxg==}
+
+  '@ubjs/node-darwin-arm64@0.31.0-3':
+    resolution: {integrity: sha512-GGQVPLkVo4Gc8qVLW4IGvS8bjl8eHXyeP4a97ntGmsAdXwE5gsS29o8xUEFROjhwHKD+9sgVeblCSWVG3CpHsw==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@ubjs/node-darwin-x64@0.31.0-3':
+    resolution: {integrity: sha512-2sc47u4XFYOsbmP5EW+Gx8m/yGrYnfFDFQm6+kz7goSWTNg84eEiz3COs9HKJDVuNJ5Khv5XipTO8CFadMLXCw==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@ubjs/node-linux-arm64-gnu@0.31.0-3':
+    resolution: {integrity: sha512-YStVXhYz/5jvlWf/p4fhiVT72unYAbGugifFC9QmO/+hnroQDAQ5t8SARbsc15G4olMcamdIB+GETiUB7gmaYg==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@ubjs/node-linux-arm64-musl@0.31.0-3':
+    resolution: {integrity: sha512-Izp4nvfy/LmibzFowAztkoDOksCR2fb2zl6fh1ojR1HEsg0rAGruxtI8d3fn8DI0lBXwqmn6SF///oD4mFNJPQ==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@ubjs/node-linux-x64-gnu@0.31.0-3':
+    resolution: {integrity: sha512-Xdm21blyg5U/kW6s7OMvgrr8coGTkUlt26DVR9x8gKISif+E3YwdEskbFScWqystAiJnfjw7xHEc8UMu0Qlz7Q==}
+    cpu: [x64]
+    os: [linux]
+
+  '@ubjs/node-linux-x64-musl@0.31.0-3':
+    resolution: {integrity: sha512-fFQ9BWS6i2LUH9SJgD9oEiKXXo/say59vHy7usFe1t7C2xvwvP34f5SuxXmWP9R8fHyA0aC4kIZ+TTwyHSv1Kw==}
+    cpu: [x64]
+    os: [linux]
+
+  '@ubjs/node-win32-arm64-msvc@0.31.0-3':
+    resolution: {integrity: sha512-ID6rSz1NmPsWTNBBNAw4OnJ5Dj8pcbtNJtdPB3OxcGigLBd/e0x7buhSI7os6Mo5iYtEdCynBRQHFJwub5XSPg==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@ubjs/node-win32-x64-msvc@0.31.0-3':
+    resolution: {integrity: sha512-wevs+Y+szwcCUT8IJFbB4/1nfxyRv/51l8oG7FGUPWD1xLPyuHfJBG27C+PDeC7KRzes/2n6aLo4DGZbr/LYTw==}
+    cpu: [x64]
+    os: [win32]
+
+  '@ubjs/node@0.31.0-3':
+    resolution: {integrity: sha512-qNMpi2LICNwxGXZyRF8fSDBSpbezyZbEsydrbiMPJOmtOWr4tmZIEl7jkWGHVGShoBvHfFo4eHp5B4UVP928Cg==}
 
   '@uiw/codemirror-extensions-basic-setup@4.25.10':
     resolution: {integrity: sha512-P3vytLlpE62KYSWrMUnwDCv2lvaQDuDZzyj03mHntuHo5bSl34fRZpjTY3kQTPGuXHxkGSYpoPFFj+hMTqaaMQ==}
@@ -3475,6 +3579,16 @@ packages:
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
+
+  agent-device@0.21.26:
+    resolution: {integrity: sha512-r118m43Xmbs1YRKy7jCNqdOjeF+7/QxfclxObjCj9y2jqSdPEqPXPhLPI6x7wLCnPe0qfntvWgbWXQKOcN3lWA==}
+    engines: {node: '>=22.12'}
+    hasBin: true
+    peerDependencies:
+      ai: ^6.0.0 || ^7.0.0
+    peerDependenciesMeta:
+      ai:
+        optional: true
 
   ajv-formats@3.0.1:
     resolution: {integrity: sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==}
@@ -8330,7 +8444,7 @@ snapshots:
       '@types/react': 18.3.28
       '@types/react-dom': 18.3.7(@types/react@18.3.28)
 
-  '@radix-ui/react-scroll-area@1.2.10(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
+  '@radix-ui/react-scroll-area@1.2.10(patch_hash=48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:
       '@radix-ui/number': 1.1.1
       '@radix-ui/primitive': 1.1.3
@@ -9052,6 +9166,14 @@ snapshots:
       tailwindcss: 4.2.2
       vite: 7.3.6(@types/node@20.19.39)(jiti@2.6.1)(lightningcss@1.32.0)(sass@1.105.1)(tsx@4.22.4)(yaml@2.9.0)
 
+  '@tanstack/react-virtual@3.14.20(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
+    dependencies:
+      '@tanstack/virtual-core': 3.19.5
+      react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
+
+  '@tanstack/virtual-core@3.19.5': {}
+
   '@tiptap/core@3.31.2(@tiptap/pm@3.31.2)':
     dependencies:
       '@tiptap/pm': 3.31.2
@@ -9131,6 +9253,36 @@ snapshots:
       '@floating-ui/dom': 1.7.6
       '@tiptap/core': 3.31.2(@tiptap/pm@3.31.2)
       '@tiptap/pm': 3.31.2
+
+  '@trycua/cua-driver-darwin-arm64@0.34.1':
+    optional: true
+
+  '@trycua/cua-driver-darwin-x64@0.34.1':
+    optional: true
+
+  '@trycua/cua-driver-linux-arm64-gnu@0.34.1':
+    optional: true
+
+  '@trycua/cua-driver-linux-x64-gnu@0.34.1':
+    optional: true
+
+  '@trycua/cua-driver-win32-arm64-msvc@0.34.1':
+    optional: true
+
+  '@trycua/cua-driver-win32-x64-msvc@0.34.1':
+    optional: true
+
+  '@trycua/cua-driver@0.34.1':
+    dependencies:
+      '@ubjs/core': 0.31.0-3
+      '@ubjs/node': 0.31.0-3
+    optionalDependencies:
+      '@trycua/cua-driver-darwin-arm64': 0.34.1
+      '@trycua/cua-driver-darwin-x64': 0.34.1
+      '@trycua/cua-driver-linux-arm64-gnu': 0.34.1
+      '@trycua/cua-driver-linux-x64-gnu': 0.34.1
+      '@trycua/cua-driver-win32-arm64-msvc': 0.34.1
+      '@trycua/cua-driver-win32-x64-msvc': 0.34.1
 
   '@types/babel__core@7.20.5':
     dependencies:
@@ -9349,6 +9501,43 @@ snapshots:
       '@typescript-eslint/types': 8.59.4
       eslint-visitor-keys: 5.0.1
 
+  '@ubjs/core@0.31.0-3': {}
+
+  '@ubjs/node-darwin-arm64@0.31.0-3':
+    optional: true
+
+  '@ubjs/node-darwin-x64@0.31.0-3':
+    optional: true
+
+  '@ubjs/node-linux-arm64-gnu@0.31.0-3':
+    optional: true
+
+  '@ubjs/node-linux-arm64-musl@0.31.0-3':
+    optional: true
+
+  '@ubjs/node-linux-x64-gnu@0.31.0-3':
+    optional: true
+
+  '@ubjs/node-linux-x64-musl@0.31.0-3':
+    optional: true
+
+  '@ubjs/node-win32-arm64-msvc@0.31.0-3':
+    optional: true
+
+  '@ubjs/node-win32-x64-msvc@0.31.0-3':
+    optional: true
+
+  '@ubjs/node@0.31.0-3':
+    optionalDependencies:
+      '@ubjs/node-darwin-arm64': 0.31.0-3
+      '@ubjs/node-darwin-x64': 0.31.0-3
+      '@ubjs/node-linux-arm64-gnu': 0.31.0-3
+      '@ubjs/node-linux-arm64-musl': 0.31.0-3
+      '@ubjs/node-linux-x64-gnu': 0.31.0-3
+      '@ubjs/node-linux-x64-musl': 0.31.0-3
+      '@ubjs/node-win32-arm64-msvc': 0.31.0-3
+      '@ubjs/node-win32-x64-msvc': 0.31.0-3
+
   '@uiw/codemirror-extensions-basic-setup@4.25.10(@codemirror/autocomplete@6.20.3)(@codemirror/commands@6.10.3)(@codemirror/language@6.12.3)(@codemirror/lint@6.9.7)(@codemirror/search@6.7.1)(@codemirror/state@6.6.0)(@codemirror/view@6.43.1)':
     dependencies:
       '@codemirror/autocomplete': 6.20.3
@@ -9522,6 +9711,8 @@ snapshots:
   acorn@8.16.0: {}
 
   agent-base@7.1.4: {}
+
+  agent-device@0.21.26: {}
 
   ajv-formats@3.0.1(ajv@8.20.0):
     optionalDependencies:
@@ -11982,7 +12173,7 @@ snapshots:
       '@radix-ui/react-progress': 1.1.7(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-radio-group': 1.3.8(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-roving-focus': 1.1.11(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      '@radix-ui/react-scroll-area': 1.2.10(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@radix-ui/react-scroll-area': 1.2.10(patch_hash=48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-select': 2.2.6(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-separator': 1.1.7(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-slider': 1.3.6(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)

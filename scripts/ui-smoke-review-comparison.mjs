@@ -275,6 +275,33 @@ export async function runReviewComparisonSmoke({
       );
     }
 
+    if (!scenario || scenario === "local-refresh") {
+      await open();
+      await expect(marker("b")).toBeVisible();
+      const githubReads = () =>
+        page.evaluate(() => ({
+          diff: window.reviewComparisonFixture.diffReads.length,
+          inline: window.reviewComparisonFixture.inlineReads.length,
+        }));
+      const before = await githubReads();
+      // An agent writing files bumps the local refresh generation repeatedly.
+      // Neither the published PR diff nor its inline review lives in the
+      // worktree, so none of these reach GitHub.
+      for (let bump = 0; bump < 4; bump += 1) {
+        await page.evaluate(() =>
+          window.reviewComparisonFixture.bumpLocalRefresh(),
+        );
+        await page.waitForTimeout(50);
+      }
+      await page.waitForTimeout(300);
+      expect(await githubReads()).toEqual(before);
+      await expect(marker("b")).toBeVisible();
+      check(
+        "ReviewView keeps the published PR diff and inline review through local refreshes",
+        true,
+      );
+    }
+
     if (!scenario || scenario === "pr") {
       await open(true);
       await page.evaluate(() => window.reviewComparisonFixture.selectPr(43));

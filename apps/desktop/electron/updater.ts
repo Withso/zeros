@@ -423,11 +423,38 @@ function checkAutomatically(reason: string): void {
   void checkForUpdatesShared().catch((err) => {
     // Offline/feed failures are expected background conditions. The updater's
     // error event logs the detail; retain any already-staged update status.
+    // A network failure is already that one line.
+    if (isTransientNetworkError(err)) return;
     console.warn(
       "[updater] automatic check failed:",
       err instanceof Error ? err.message : err,
     );
   });
+}
+
+const TRANSIENT_NETWORK_ERROR =
+  /net::ERR_(?:NETWORK_CHANGED|INTERNET_DISCONNECTED|NAME_NOT_RESOLVED|NAME_RESOLUTION_FAILED|ADDRESS_UNREACHABLE|NETWORK_IO_SUSPENDED|CONNECTION_(?:RESET|REFUSED|CLOSED|ABORTED|TIMED_OUT|FAILED)|TIMED_OUT|PROXY_CONNECTION_FAILED|NETWORK_ACCESS_DENIED)\b/;
+const TRANSIENT_NETWORK_CODES = new Set([
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ENETUNREACH",
+  "ENETDOWN",
+  "EHOSTUNREACH",
+]);
+
+/** True for an updater failure caused by the network itself (offline, a Wi-Fi
+ * or VPN change, DNS). The scheduler retries on its own, so one warning is
+ * enough; a stack trace at error level only buries real failures. Exported for
+ * tests. */
+export function isTransientNetworkError(err: unknown): boolean {
+  if (typeof err === "string") return TRANSIENT_NETWORK_ERROR.test(err);
+  if (!err || typeof err !== "object") return false;
+  const { code, message } = err as { code?: unknown; message?: unknown };
+  if (typeof code === "string" && TRANSIENT_NETWORK_CODES.has(code)) return true;
+  return typeof message === "string" && TRANSIENT_NETWORK_ERROR.test(message);
 }
 
 /** True when an updater failure is the staging extraction running out of disk
@@ -500,11 +527,14 @@ export function setupUpdater(): void {
   autoUpdater.logger = {
     info: (m) => console.log("[updater]", m),
     warn: (m) => console.error("[updater] WARN", m),
-    error: (m) =>
+    // The "error" event below records a network failure once as a warning.
+    error: (m) => {
+      if (isTransientNetworkError(m)) return;
       console.error(
         "[updater]",
         m instanceof Error ? (m.stack ?? m.message) : m,
-      ),
+      );
+    },
     debug: (m) => console.log("[updater:debug]", m),
   };
 

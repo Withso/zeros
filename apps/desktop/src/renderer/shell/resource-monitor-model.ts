@@ -5,10 +5,12 @@
 // ============================================
 
 import type {
+  OtherAppResourceUsage,
   ProcessMetricsSnapshot,
   ProcessResourceKind,
   ProcessResourceMetric,
   ProcessResourceTotals,
+  SystemResourceState,
 } from "../platform/process-metrics";
 
 export type ResourceSortKey = "name" | "cpu" | "memory";
@@ -20,7 +22,9 @@ export interface ResourceViewNode {
   pids: number[];
   parentPid: number | null;
   name: string;
-  kind: ProcessResourceKind | "app";
+  /** "app" is the synthetic root for this app; "other-app" rows total another
+   * Zeros channel app (for example Alpha) running on the same Mac. */
+  kind: ProcessResourceKind | "app" | "other-app";
   cpuPercent: number;
   memoryBytes: number;
   peakCpuPercent: number;
@@ -299,6 +303,127 @@ export function formatResourceMemory(bytes: number): string {
   return `${(safe / 1024 ** 3).toFixed(2)} GB`;
 }
 
+/** One row per other Zeros channel app, sorted like the process tree. */
+export function buildOtherAppNodes(
+  otherApps: readonly OtherAppResourceUsage[],
+  sortKey: ResourceSortKey,
+  sortDirection: ResourceSortDirection,
+): ResourceViewNode[] {
+  return sortTree(
+    otherApps.map((other) => ({
+      id: `other-app:${other.name}`,
+      pid: null,
+      pids: [],
+      parentPid: null,
+      name: other.name,
+      kind: "other-app" as const,
+      cpuPercent: other.cpuPercent,
+      memoryBytes: other.memoryBytes,
+      peakCpuPercent: other.cpuPercent,
+      peakMemoryBytes: other.memoryBytes,
+      terminal: false,
+      count: other.processCount,
+      children: [],
+    })),
+    sortKey,
+    sortDirection,
+  );
+}
+
+export type SystemSummaryTone = "default" | "warning" | "critical";
+
+/** "6.0 of 7.0 GB" for gigabyte totals; otherwise both values in full. */
+function formatUsedOfTotal(used: number, total: number): string {
+  const GB = 1024 ** 3;
+  if (total >= GB) return `${(used / GB).toFixed(1)} of ${(total / GB).toFixed(1)} GB`;
+  return `${formatResourceMemory(used)} of ${formatResourceMemory(total)}`;
+}
+
+export interface SystemSummaryPart {
+  id: "pressure" | "free" | "swap" | "load" | "thermal";
+  label: string;
+  value: string;
+  tone: SystemSummaryTone;
+}
+
+const PRESSURE_LABELS = {
+  normal: "Normal",
+  warning: "Warning",
+  critical: "Critical",
+} as const;
+
+const THERMAL_LABELS = {
+  nominal: "Nominal",
+  fair: "Fair",
+  serious: "Serious",
+  critical: "Critical",
+} as const;
+
+/** Compact Mac context. Unknown values are omitted rather than shown as zero;
+ * tone always accompanies a word, never color alone. */
+export function systemSummaryParts(
+  system: SystemResourceState | null,
+  logicalCpuCount: number,
+): SystemSummaryPart[] {
+  if (!system) return [];
+  const parts: SystemSummaryPart[] = [];
+  if (system.memoryPressure) {
+    parts.push({
+      id: "pressure",
+      label: "Memory pressure",
+      value: PRESSURE_LABELS[system.memoryPressure],
+      tone:
+        system.memoryPressure === "critical"
+          ? "critical"
+          : system.memoryPressure === "warning"
+            ? "warning"
+            : "default",
+    });
+  }
+  if (system.memoryFreePercent != null) {
+    parts.push({
+      id: "free",
+      label: "",
+      value: `${Math.round(system.memoryFreePercent)}% free`,
+      tone: "default",
+    });
+  }
+  if (system.swapUsedBytes != null && system.swapTotalBytes != null) {
+    parts.push({
+      id: "swap",
+      label: "Swap",
+      value:
+        system.swapTotalBytes > 0
+          ? formatUsedOfTotal(system.swapUsedBytes, system.swapTotalBytes)
+          : "None",
+      tone:
+        system.swapTotalBytes > 0 &&
+        system.swapUsedBytes / system.swapTotalBytes >= 0.8
+          ? "warning"
+          : "default",
+    });
+  }
+  if (system.loadAverage) {
+    const load = system.loadAverage[0];
+    const cores = Math.max(1, logicalCpuCount);
+    parts.push({
+      id: "load",
+      label: "Load",
+      value: `${load.toFixed(1)} / ${cores} cores`,
+      tone: load > cores * 1.5 ? "critical" : load > cores ? "warning" : "default",
+    });
+  }
+  if (system.thermalState && system.thermalState !== "nominal") {
+    parts.push({
+      id: "thermal",
+      label: "Thermal",
+      value: THERMAL_LABELS[system.thermalState],
+      tone: system.thermalState === "fair" ? "warning" : "critical",
+    });
+  }
+  return parts;
+}
+
 function reportRows(nodes: readonly ResourceViewNode[], depth = 0): string[] {
   const lines: string[] = [];
   for (const node of nodes) {
@@ -324,9 +449,13 @@ export interface CopyResourceReportOptions {
   includeTerminal: boolean;
   totals: ProcessResourceTotals;
   view: readonly ResourceViewNode[];
+  system?: SystemResourceState | null;
+  otherApps?: readonly ResourceViewNode[];
+  memorySource?: ProcessMetricsSnapshot["memorySource"];
 }
 
-/** Produce a support-ready snapshot without argv/cwd/env data. */
+/** Produce a support-ready snapshot without argv/cwd/env data. This is the
+ * fallback when the native diagnostics report is unavailable. */
 export function copyResourceReport({
   sampledAt,
   logicalCpuCount,
@@ -334,7 +463,13 @@ export function copyResourceReport({
   includeTerminal,
   totals,
   view,
+  system = null,
+  otherApps = [],
+  memorySource = "resident",
 }: CopyResourceReportOptions): string {
+  const mac = systemSummaryParts(system, logicalCpuCount)
+    .map((part) => (part.label ? `${part.label} ${part.value}` : part.value))
+    .join(" · ");
   return [
     "Zeros resource snapshot",
     `Sampled: ${new Date(sampledAt).toISOString()}`,
@@ -349,7 +484,12 @@ export function copyResourceReport({
     `Sampling overhead: ${Math.round(scanDurationMs)} ms`,
     "Peaks: sampled since monitoring started",
     `100% CPU = one fully used core (${logicalCpuCount} logical cores)`,
+    `Memory: ${memorySource === "footprint" ? "physical footprint" : "resident size"}`,
+    ...(mac ? [`Mac: ${mac}`] : []),
     "",
     ...reportRows(view),
+    ...(otherApps.length > 0
+      ? ["", "Other Zeros apps", ...reportRows(otherApps, 1)]
+      : []),
   ].join("\n");
 }

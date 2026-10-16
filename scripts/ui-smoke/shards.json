@@ -37,6 +37,8 @@
     "shared-default-model",
     "design-canvas-refinements",
     "sticky-bottom",
+    "scroll-area-cleanup",
+    "scroll-area-drag",
     "cloud-preview",
     "design-selection",
     "tools",
@@ -85,6 +87,7 @@
     "folder-files",
     "code-review-retention",
     "folder-design-setup",
-    "context-gauge"
+    "context-gauge",
+    "simulator-tab"
   ]
 ]

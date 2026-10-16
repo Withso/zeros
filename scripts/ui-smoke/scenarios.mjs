@@ -107,6 +107,7 @@ export const scenarioRegistry = [
     460,
     650,
   ),
+  fresh("simulator-tab", "simulator-tab", "runSimulatorTabSmoke", 900, 760),
   fresh("cloud-replica", "cloud-replicas", "runCloudReplicaSmoke", 1100, 850),
   fresh("cloud-preview", "cloud-previews", "runCloudPreviewSmoke", 900, 650),
   fresh("cloud-design-assets", "cloud-design-assets", "runCloudDesignAssetsSmoke", 900, 650),
@@ -338,6 +339,8 @@ export const scenarioRegistry = [
     800,
   ),
   shared("sticky-bottom", "sticky-bottom", "runStickyBottomSmoke", 1100, 800),
+  fresh("scroll-area-cleanup", "scroll-area-cleanup", "runScrollAreaCleanupSmoke", 900, 650),
+  fresh("scroll-area-drag", "scroll-area-drag", "runScrollAreaDragSmoke", 900, 650),
   // Subscription installs a context-wide clock. Keep it last, including in its
   // shard; its context is also isolated from other units in a sharded run.
   shared("subscription", "subscription", "runSubscriptionSmoke", 1100, 800),
