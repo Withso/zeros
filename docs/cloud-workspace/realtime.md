@@ -136,6 +136,16 @@ authority supplies keys, epochs and engine tokens
   without an intervening `sys.drain` writes `security.uplink_*` to the
   organization's audit log and logs a `[security]` line for paging. These
   are operator events, not the client-delivered `security_events` outbox.
+- **Credential push.** The `cred.v1` extension (`uplink-cred.ts`) replaces
+  the engine's 500 ms credential-control poll while the uplink is up
+  (P0.10 C01). At the gate it pushes the boot binding's current desired
+  revision (the contract's resync rule), and a trigger on
+  `cloud_agent_boot_bindings.desired_cache_revision` (migration 0152)
+  notifies every bump, routed to the owning instance over
+  `zeros_cloud_agent_credential_revision`. The notification is only a hint:
+  the engine's exchange re-reads authority. `cred.ack` (`applied`/`failed`)
+  arrives over the reliable channel; a lost notification while the listener
+  was down is repaired at the next gate open.
 - **Lease.** The HTTP heartbeat still owns the engine lease in this release;
   the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
 
@@ -175,6 +185,12 @@ registration there is no uplink client at all.
   revocations, latest capability); the shared verifier (track B) binds
   signature checks to that state. `engine_uplink_hello_ms` and
   `engine_uplink_auth_apply_ms` are recorded per connect.
+- **Credential push.** The engine offers `cred.v1`; a pushed `cred.revision`
+  runs the same credential-controls exchange the poll runs (coalesced to
+  the latest revision per kind while one is in flight) and is answered with
+  `cred.ack`. The poll stays as the fallback: 500 ms while the uplink's
+  gate is closed, a 30 s safety cadence once it is open
+  (`controlsPollIntervalMs` in `cloud-local-command-queue-boot.ts`).
 
 ## Railway configuration (planned)
 
