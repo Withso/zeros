@@ -320,11 +320,16 @@ export class CloudEngineUplinkClient {
   }
   /** @internal */ get inboundAck(): number { return this.inboundContiguous; }
 
-  /** @internal A reliable CP frame landed in order; returns false on a gap. */
-  acceptInbound(s: number): boolean {
-    if (s !== this.inboundContiguous + 1) return false;
+  /** @internal A reliable CP frame landed. Duplicates after a replay (the
+   * drain-handoff case: a frame in flight on the drained socket also lands
+   * on the replacement's retransmit) are acked again but never re-applied;
+   * only a true gap redials for the retransmit. */
+  acceptInbound(s: number): "new" | "duplicate" | "gap" {
+    if (!Number.isSafeInteger(s) || s < 1) return "gap";
+    if (s <= this.inboundContiguous) return "duplicate";
+    if (s !== this.inboundContiguous + 1) return "gap";
     this.inboundContiguous = s;
-    return true;
+    return "new";
   }
 
   /** @internal */ outboxPending(): boolean { return this.outbox.length > 0; }
@@ -608,10 +613,13 @@ class Connection {
     if (!frame || typeof frame.t !== "string") return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
     if (frame.a !== undefined) this.uplink.ackOutbound(frame.a);
     if (frame.s !== undefined) {
-      // Reliable CP→engine frames are exactly-once across a resume; a gap is
-      // repaired by the server's retransmit, so redial with the token.
-      if (!this.uplink.acceptInbound(frame.s)) return this.initiateClose(CLOSE.normal, "sequence_gap");
+      // Reliable CP→engine frames are exactly-once across a resume. A gap
+      // is repaired by the server's retransmit, so redial with the token;
+      // a duplicate is acked again but never re-applied.
+      const inbound = this.uplink.acceptInbound(frame.s);
+      if (inbound === "gap") return this.initiateClose(CLOSE.normal, "sequence_gap");
       this.scheduleAck();
+      if (inbound === "duplicate") return;
     }
     switch (frame.t) {
       case "sys.welcome":

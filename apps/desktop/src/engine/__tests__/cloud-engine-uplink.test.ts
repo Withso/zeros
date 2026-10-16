@@ -183,6 +183,32 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("acks duplicate reliable frames without re-applying them, closing only on a real gap", async () => {
+    const { client, sockets } = fakeClient();
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    const acks = () => sockets[0]!.ofType("sys.ack").map(frame => frame.a);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    await vi.advanceTimersByTimeAsync(250); // ack delay
+    expect(acks()).toEqual([1]);
+    // A replayed duplicate — the drain-handoff case: the frame landed on the
+    // drained socket after the replacement's hello, and the server replays
+    // it on the replacement. Acked again, never re-applied, never a gap.
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    expect(sockets[0]!.closeCalls).toEqual([]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(acks()).toEqual([1, 1]);
+    expect(sockets[0]!.closeCalls).toEqual([]);
+    // A true gap still closes 1000 sequence_gap for the redial-resume.
+    sockets[0]!.frame({ t: "cred.revision", s: 3, d: { revision: 9 } });
+    await flush();
+    expect(sockets[0]!.closeCalls[0]).toMatchObject({ code: 1000, reason: "sequence_gap" });
+    client.stop();
+  });
+
   it("terminates a silent uplink after two ping intervals and redials", async () => {
     let nowMs = 1_000_000;
     const sockets: FakeSocket[] = [];
