@@ -11,13 +11,13 @@
 // in-memory fake, and engines/desktops are simulated at their real cadences.
 // See docs/cloud-workspace/load-simulator.md.
 
-import { promises as dns } from "node:dns";
 import { readFileSync, writeFileSync } from "node:fs";
 import { cpus } from "node:os";
 import { parseArgs } from "node:util";
 import pg from "pg";
 import { rebuildMigratedTestDatabase } from "../test-database.js";
 import { budgetsFromMeasurement, checkBudgets, type LoadBudgets } from "./budgets.js";
+import { assertDisposableLoopbackDatabase } from "./database-guard.js";
 import { createSimulator } from "./harness.js";
 import { DatabaseCostMeter } from "./instrument.js";
 import { formatReport, writeReport, type LoadSimulationReport } from "./report.js";
@@ -34,35 +34,6 @@ const LOAD_SIMULATOR_CAPS = { workspaces: 200, durationSeconds: 600, iterations:
 const usage = `Usage: load:db [--workspaces 0,1,10,50] [--duration 30] [--quiet-duration 120] [--warmup 5] [--iterations 25]
                [--no-background] [--workos off] [--out <report.json>] [--write-budgets <budgets.json>]
 Requires LOAD_SIM_DATABASE_URL pointing at a disposable loopback database; it is rebuilt.`;
-
-/** The simulator rebuilds its database with DROP SCHEMA, so only names in this allow-list are disposable. */
-const LOAD_SIM_DATABASE_NAME = /^zeros_load_sim[A-Za-z0-9_-]*$/;
-
-function isLoopbackAddress(address: string): boolean {
-  return address === "::1" || address.startsWith("127.");
-}
-
-async function assertDisposableLoopbackDatabase(url: string): Promise<void> {
-  let parsed: URL;
-  try { parsed = new URL(url); } catch { throw new Error("LOAD_SIM_DATABASE_URL is not a valid URL"); }
-  // pg-connection-string copies query parameters into the config first and
-  // only falls back to the URL host when `host` is unset, so
-  // `?host=prod.example.com` would silently override the validated loopback.
-  if ([...parsed.searchParams.keys()].length > 0)
-    throw new Error("LOAD_SIM_DATABASE_URL must not carry query parameters: pg applies them over the URL host, bypassing the loopback check");
-  const host = parsed.hostname.replace(/^\[|\]$/g, "");
-  if (host === "localhost") {
-    // Guard against a localhost that resolves somewhere unexpected.
-    const addresses = await dns.lookup("localhost", { all: true });
-    if (!addresses.length || addresses.some(({ address }) => !isLoopbackAddress(address)))
-      throw new Error("The load simulator rebuilds its database and localhost must resolve only to loopback addresses");
-  } else if (!isLoopbackAddress(host)) {
-    throw new Error("The load simulator rebuilds its database and accepts only a loopback host");
-  }
-  const database = decodeURIComponent(parsed.pathname.slice(1));
-  if (!LOAD_SIM_DATABASE_NAME.test(database))
-    throw new Error(`The load simulator drops and rebuilds its database, so the database name must match ${LOAD_SIM_DATABASE_NAME.source} (got "${database}")`);
-}
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);

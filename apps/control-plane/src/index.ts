@@ -64,6 +64,7 @@ import { createCloudRuntimeServiceRelay } from "./cloud-workspaces/runtime-servi
 import { DatabaseCloudWorkspaceCommandService } from "./cloud-workspaces/commands.js";
 import { DatabaseCloudWorkspaceEventService } from "./cloud-workspaces/event-streams.js";
 import { PostgresSecurityEventBroker, SecurityEventPublisher } from "./security-events.js";
+import { RolloutFlagSnapshot } from "./rollout-flags.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
@@ -191,6 +192,12 @@ let cloudWorkspaceEngineClientAdmissionService:
   | undefined;
 let cloudWorkspaceProviderResolver: CloudWorkspaceProviderResolver | undefined;
 const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending";
+// Per-organization rollout flags for new cloud paths, read from memory on hot
+// paths. Without the cloud runtime (maintenance, a pending controlled
+// migration) every flag reads as off.
+const rolloutFlagSnapshot = config.cloudWorkspaces && runtimeReady
+  ? new RolloutFlagSnapshot({ pool, listenerPool }) : null;
+void rolloutFlagSnapshot?.start();
 // Historical Computer retirement holds session locks across provider I/O and
 // query-pool callbacks. WorkOS may independently hold one worker query slot.
 const retirementLockPool = workerPool && runtimeReady && config.cloudWorkspaces?.boat &&
@@ -836,6 +843,7 @@ function shutdown(signal: string): void {
     workosSync?.stop() ?? Promise.resolve(),
     securityEventBroker.stop(),
     stopSecurityEventPublisher(),
+    rolloutFlagSnapshot?.stop(),
   ]);
   const deadline = setTimeout(() => process.exit(1), 15_000 + drainMs);
   deadline.unref();

@@ -845,6 +845,7 @@ describe("repository layout contracts", () => {
       "realtime.md",
       "relay-capacity.md",
       "release-worker-qualification.md",
+      "rollout-flags.md",
       "runtime-bundles.md",
       "runtime-images.md",
       "runtime-lifecycle-acceptance.md",

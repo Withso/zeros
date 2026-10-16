@@ -1,0 +1,9 @@
+{
+  "id": "cloud-retirement-reconciler-poll",
+  "kind": "replay",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:565",
+  "symptom": "The trigger canary's prior_cleanup reported cleanup_pending for a correctly storage-pending predecessor. The reconciler re-claims a blocked Boat delete every ~257 s, flipping the intent observing -> dispatching -> observing for ~0.9 s, and a retirement read whose before/after snapshots straddled that flip returned 409.",
+  "rule": "A before/after consistency check must tolerate only the state that the system's own pollers cycle through without new evidence, and must keep refusing every other change. Sample the live row for a full poll period before calling a snapshot stable. Pin each tolerated edge, plus a transition that must still be refused, with held-provider tests.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/deletion-retirement.integration.test.ts"
+}

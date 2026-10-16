@@ -1,0 +1,9 @@
+{
+  "id": "load-sim-url-guard-lookalike-host",
+  "kind": "replay",
+  "area": "control-plane-workers",
+  "fixedBy": "cecadcac53a4a9f43f00da711b392cb1b33a1d5a",
+  "symptom": "The load simulator, which drops and rebuilds its database, accepted 127.attacker.example as a loopback host because the guard tested the host string for a 127. prefix.",
+  "rule": "A destructive tool's URL guard validates the effective target: no query parameters, only loopback IP literals, localhost only after resolution, and an allow-listed database name. See skills/zstack-review/SKILL.md (Security).",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/load-sim/database-guard.test.ts"
+}
