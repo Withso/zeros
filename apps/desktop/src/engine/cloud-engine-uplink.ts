@@ -306,6 +306,15 @@ export class CloudEngineUplinkClient {
     if (this.connection?.gateOpen) this.connection.sendRaw(text);
   }
 
+  /** Pushes the current readiness as `status.ready` (track E: the engine
+   * marks ready when its inputs change, not only at the gate). Safe at any
+   * time: pre-gate the frame buffers and flushes with the gate retransmit;
+   * before start or after park it is a no-op. */
+  reportReadiness(): void {
+    if (!this.options.readiness) return;
+    this.sendReliable("status.ready", { ...this.options.readiness() });
+  }
+
   /* ---- connection-facing internals (the only dial/park/count site) ---- */
 
   /** @internal */ now(): number { return this.clock(); }

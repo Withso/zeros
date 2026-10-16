@@ -3525,6 +3525,9 @@ export class ZerosEngine {
       return;
     }
     this.running = false;
+    // The CP records the not-ready transition before the uplink closes
+    // (the uplink itself is stopped a few steps below).
+    this.cloudEngineUplink?.reportReadiness();
     this.cloud?.setHumanServicesPaused(true);
     const humanServicesRetired = settle(() => this.cloudHumanServices?.pause());
     const languageServicesRetired = settle(() => this.cloudLanguageServices?.pause());

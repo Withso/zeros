@@ -233,6 +233,20 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("reports a readiness change when the engine pushes it (track E: hello marks ready)", async () => {
+    let ready = false;
+    const { client, sockets } = fakeClient({ readiness: () => ({ ready, phase: ready ? "ready" : "starting" }) });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    expect(sockets[0]!.ofType("status.ready")).toEqual([expect.objectContaining({ s: 1, d: { ready: false, phase: "starting" } })]);
+    ready = true;
+    client.reportReadiness();
+    expect(sockets[0]!.ofType("status.ready")).toHaveLength(2);
+    expect(sockets[0]!.ofType("status.ready")[1]).toMatchObject({ s: 2, d: { ready: true, phase: "ready" } });
+    client.stop();
+  });
+
   it("serializes auth applications in frame order; auth.applied waits for keys and the snapshot", async () => {
     const applied: string[] = [];
     let resolveKeys!: () => void;
