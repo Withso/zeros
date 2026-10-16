@@ -276,6 +276,24 @@ describe("engine uplink server", () => {
     expect(uplink.size).toBe(1);
   });
 
+  it("records one churn event per resume-supersede, alerting only past the limit", async () => {
+    await start();
+    let live = await connect();
+    for (let n = 0; n < 3; n++) {
+      const next = await connect({ resume: { token: live.welcome.d!.resumeToken as string, lastReceivedSeq: 0 } });
+      await expect(live.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.superseded });
+      expect(next.welcome.d).toMatchObject({ resumed: true });
+      live = next;
+    }
+    // Three real supersedes sit at the limit, not past it: a double count
+    // would have raised the churn alert after the second.
+    expect(alerts).toEqual([]);
+    const fourth = await connect({ resume: { token: live.welcome.d!.resumeToken as string, lastReceivedSeq: 0 } });
+    await expect(live.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.superseded });
+    expect(fourth.welcome.d).toMatchObject({ resumed: true });
+    expect(alerts).toEqual(["uplink_supersede_churn"]);
+  });
+
   it("closes 4409 when another instance records a newer owner, and ignores older ones", async () => {
     await start();
     const { peer } = await connect();

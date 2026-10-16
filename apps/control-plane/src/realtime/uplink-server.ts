@@ -319,6 +319,10 @@ export class CloudEngineUplinkServer {
     const previous = this.current.get(identity.engineInstanceId) ?? observed;
     this.current.set(identity.engineInstanceId, connection);
     if (!previous || previous === connection) return;
+    // One logical supersede is recorded exactly once, here. When the new
+    // connection resumed the lineage, the resume entry's callback already
+    // closed `previous`, but that callback never records; skipping a
+    // already-closed `previous` here would record zero instead.
     if (!previous.drained) {
       this.recordSupersede(identity);
       if (previous.address !== connection.address)
