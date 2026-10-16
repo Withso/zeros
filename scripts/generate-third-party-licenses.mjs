@@ -266,10 +266,17 @@ function runNpmLicenseInventory(cwd, surface) {
   return [...records.values()];
 }
 
+// The Cua SDK and its N-API runtime install whichever native variant matches
+// the host (linux-x64-gnu on Linux preflight). Only darwin-arm64 ships, and
+// PACKAGED_MACOS_ONLY_PACKAGES records it on every host.
+const CUA_NATIVE_VARIANT =
+  /^@(?:trycua\/cua-driver|ubjs\/node)-(?:darwin|linux|win32)-/;
+
 const isHostPlatformRecord = (record) =>
   record.name.startsWith("@anthropic-ai/claude-agent-sdk-") ||
   record.name.startsWith("@cursor/sdk-") ||
   record.name.startsWith("@vscode/ripgrep-") ||
+  CUA_NATIVE_VARIANT.test(record.name) ||
   (record.name === "@openai/codex" &&
     CODEX_PLATFORM_VERSION.test(record.version));
 

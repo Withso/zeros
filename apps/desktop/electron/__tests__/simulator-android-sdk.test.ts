@@ -242,7 +242,7 @@ describe("readRunningEmulators", () => {
         "avd.id=Medium_Phone_API_37.0",
         "port.serial=5554",
         "grpc.port=8554",
-        "grpc.token=abcdefgh12345678",
+        "grpc.token=abcdefgh12345678", // gitleaks:allow — synthetic emulator gRPC token
         "cmdline=emulator -avd Medium_Phone_API_37.0 -no-window",
       ].join("\n"),
     );
@@ -258,7 +258,7 @@ describe("readRunningEmulators", () => {
         avdId: "Medium_Phone_API_37.0",
         serial: "emulator-5554",
         grpcPort: 8554,
-        token: "abcdefgh12345678",
+        token: "abcdefgh12345678", // gitleaks:allow — synthetic emulator gRPC token
       },
       { pid: 300, avdId: "Studio_Device", serial: "emulator-5558", grpcPort: 8556, token: null },
     ]);
