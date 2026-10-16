@@ -723,6 +723,9 @@ class Connection {
     if (typeof d.token !== "string" || typeof d.expiresAtMs !== "number" || d.audience !== "zeros:api")
       return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
     this.uplink.config.auth.holdCapability({ token: d.token, expiresAtMs: d.expiresAtMs });
+    // Step 4 (retransmit the unacked outbox, else report readiness) runs on
+    // the connection's FIRST capability; renewals only hold the new token.
+    if (this.gateOpen) return;
     this.gateOpen = true;
     if (this.uplink.outboxPending()) {
       this.uplink.retransmit(this);

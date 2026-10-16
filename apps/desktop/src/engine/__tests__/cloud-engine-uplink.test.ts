@@ -214,6 +214,24 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("runs the step-4 retransmit only on the connection's first capability, not on renewals", async () => {
+    const { client, sockets } = fakeClient({ readiness: () => ({ ready: true, phase: "ready" }) });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    expect(sockets[0]!.ofType("status.ready")).toHaveLength(1); // gate resync
+    client.sendReliable("cred.ack", { kind: "agent-controls", revision: 7 });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(1);
+    // A 60% renewal holds the new token but must not retransmit the unacked
+    // cred.ack or re-send readiness.
+    sockets[0]!.frame({ t: "auth.capability", d: { audience: "zeros:api", token: "cap-2", expiresAtMs: Date.now() + 300_000 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(1);
+    expect(sockets[0]!.ofType("status.ready")).toHaveLength(1);
+    client.stop();
+  });
+
   it("acks duplicate reliable frames without re-applying them, closing only on a real gap", async () => {
     const { client, sockets } = fakeClient();
     client.start();
