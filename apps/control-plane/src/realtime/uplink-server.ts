@@ -612,27 +612,35 @@ class UplinkConnection {
     this.authTimer = null;
     for (const delta of this.pendingDeltas.splice(0)) this.send({ t: "auth.epochs", d: delta });
     await this.issueCapability();
-    if (this.state !== "welcomed" || !this.lineage) return;
-    const frames = this.lineage.outbox.replayAfter(this.peerLastReceived) ?? [];
-    this.flowing = true;
-    for (const frame of frames) this.sendText(frame.text);
-    for (const extension of this.server.options.extensions)
-      if (this.features.has(extension.feature)) extension.onOpen?.(this.session!, this.resumed);
   }
 
-  /** Each engine token is issued by `api` from current authority. */
+  /** Each engine token is issued by `api` from current authority. The gate
+   * opens only on the first successful issue — a transient issuer failure
+   * retries with full-jitter backoff (floored at 100 ms so a zero draw
+   * never spins) while buffered reliable frames keep waiting; an authority
+   * refusal closes 4403. Frozen handshake step 4 order: the capability,
+   * then the resume retransmit, then extension `onOpen`. */
   private async issueCapability(): Promise<void> {
     if (this.capabilityTimer) clearTimeout(this.capabilityTimer);
     this.capabilityTimer = null;
     const options = this.server.options;
     const issued = await options.capabilities.issue(this.identity!).catch(() => ({ ok: false as const, reason: "unavailable" as const }));
-    if (this.state !== "welcomed") return;
-    let nextMs = options.capabilityRetryMs;
+    if (this.state !== "welcomed" || !this.lineage) return;
+    if (!issued.ok && issued.reason === "authority")
+      return this.close(UPLINK_CLOSE.forbidden, "uplink_forbidden", { park: false });
+    let nextMs: number;
     if (issued.ok) {
       this.send({ t: "auth.capability", d: { audience: "zeros:api", token: issued.token, expiresAtMs: issued.expiresAtMs } });
       nextMs = Math.max(1_000, Math.floor((issued.expiresAtMs - this.now()) * 0.6));
-    } else if (issued.reason === "authority") {
-      return this.close(UPLINK_CLOSE.forbidden, "uplink_forbidden", { park: false });
+      if (!this.flowing) {
+        const frames = this.lineage.outbox.replayAfter(this.peerLastReceived) ?? [];
+        this.flowing = true;
+        for (const frame of frames) this.sendText(frame.text);
+        for (const extension of this.server.options.extensions)
+          if (this.features.has(extension.feature)) extension.onOpen?.(this.session!, this.resumed);
+      }
+    } else {
+      nextMs = Math.max(100, Math.floor(options.random() * options.capabilityRetryMs));
     }
     this.capabilityTimer = setTimeout(() => void this.issueCapability(), nextMs);
     this.capabilityTimer.unref?.();

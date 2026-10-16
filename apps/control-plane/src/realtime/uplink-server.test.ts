@@ -204,6 +204,39 @@ describe("engine uplink server", () => {
     expect(metrics.map(([name]) => name)).toEqual(["uplink_auth_sync_ms"]);
   });
 
+  it("holds the gate until the first successful auth.capability, retrying a down issuer with a floored jitter", async () => {
+    capability = { ok: false, reason: "unavailable" };
+    let issues = 0;
+    const opened: boolean[] = [];
+    await start({
+      capabilityRetryMs: 300, random: () => 0,
+      capabilities: { issue: async () => { issues += 1; return capability; } },
+      extensions: [{ feature: "cred.v1", onOpen: () => { opened.push(true); } }],
+    });
+    const peer = dial();
+    await peer.opened;
+    peer.send(hello({ features: ["cred.v1"] }));
+    await peer.next("sys.welcome");
+    await peer.next("auth.keys");
+    const sync = await peer.next("auth.sync");
+    peer.send({ t: "auth.applied", d: { syncId: sync.d!.syncId, authCursor: "c-1" } });
+    await until(() => issues >= 1);
+    uplink.session(identity.engineInstanceId)!.sendReliable("cred.revision", { kind: "agent-controls", revision: 7 });
+    // Several floored retries happen while the issuer is down, but nothing
+    // flows: no capability, no reliable frame, no extension onOpen.
+    await new Promise(resolve => setTimeout(resolve, 450));
+    expect(issues).toBeGreaterThanOrEqual(2);
+    expect(issues).toBeLessThanOrEqual(8); // the 100 ms floor: never a spin
+    expect(peer.frames).toEqual([]);
+    expect(opened).toEqual([]);
+    // Recovery: the capability lands first, then the retransmit/buffered
+    // frame, then onOpen (frozen handshake step 4).
+    capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 300_000 };
+    expect((await peer.next()).t).toBe("auth.capability");
+    expect(await peer.next()).toMatchObject({ t: "cred.revision", s: 1, d: { revision: 7 } });
+    expect(opened).toEqual([true]);
+  });
+
   it("closes 1011 when the auth source cannot answer and 4400 on a foreign syncId", async () => {
     authFails = true;
     await start();
