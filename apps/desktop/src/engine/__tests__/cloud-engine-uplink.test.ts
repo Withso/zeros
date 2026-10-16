@@ -233,6 +233,45 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("serializes auth applications in frame order; auth.applied waits for keys and the snapshot", async () => {
+    const applied: string[] = [];
+    let resolveKeys!: () => void;
+    const keysDurable = new Promise<void>(resolve => { resolveKeys = resolve; });
+    // A sink whose key write is slow ("resolves once durable"): the track-B
+    // verifier binding will be one. auth.applied must wait for it.
+    const sink: EngineUplinkAuthSink = {
+      authCursor: () => undefined,
+      applyKeys: async () => { await keysDurable; applied.push("keys"); },
+      applySync: async sync => { applied.push(`sync@${sync.authCursor}`); },
+      applyDelta: async delta => { applied.push(`delta@${delta.authCursor}`); },
+      holdCapability: () => {},
+    };
+    const { client, sockets } = fakeClient({ auth: sink });
+    client.start();
+    await flush();
+    const socket = sockets[0]!;
+    socket.frame({ t: "sys.welcome", d: {
+      protocol: 1, connectionId: "c-1", resumeToken: "r1", resumed: false,
+      pingIntervalMs: 20_000, leaseExpiresAtMs: Date.now() + 60_000, serverInstance: "s1", features: [],
+    } });
+    await flush();
+    socket.frame({ t: "auth.keys", d: { keys: [KEY] } });
+    socket.frame({ t: "auth.sync", d: { syncId: "s1", epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: "c-9", complete: true } });
+    socket.frame({ t: "auth.epochs", d: { epochs: { wa: 5 }, revocations: [], authCursor: "c-10" } });
+    await flush();
+    // Keys are still landing: nothing applied out of order, no auth.applied.
+    expect(applied).toEqual([]);
+    expect(socket.ofType("auth.applied")).toHaveLength(0);
+    resolveKeys();
+    await flush();
+    expect(applied).toEqual(["keys", "sync@c-9", "delta@c-10"]);
+    const appliedFrames = socket.ofType("auth.applied");
+    expect(appliedFrames).toHaveLength(2); // one per sync/delta, in order
+    expect(appliedFrames[0]!.d).toMatchObject({ syncId: "s1", authCursor: "c-9" });
+    expect(appliedFrames[1]!.d).toMatchObject({ authCursor: "c-10" });
+    client.stop();
+  });
+
   it("redials when the dial never reaches open (a black-holed TCP/TLS/upgrade)", async () => {
     const sockets: FakeSocket[] = [];
     const { client } = fakeClient({ helloTimeoutMs: 50,

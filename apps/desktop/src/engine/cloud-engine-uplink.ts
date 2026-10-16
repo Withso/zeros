@@ -652,11 +652,11 @@ class Connection {
         console.warn(`[engine-uplink] sys.error ${String(frame.d?.code ?? "unknown")}${frame.d?.fatal === true ? " (fatal)" : ""}`);
         return;
       case "auth.keys":
-        return void this.applyKeys(frame.d ?? {});
+        return this.enqueueAuth(() => this.applyKeys(frame.d ?? {}));
       case "auth.sync":
-        return void this.applySync(frame.d ?? {});
+        return this.enqueueAuth(() => this.applySync(frame.d ?? {}));
       case "auth.epochs":
-        return void this.applyEpochs(frame.d ?? {});
+        return this.enqueueAuth(() => this.applyEpochs(frame.d ?? {}));
       case "auth.capability":
         return this.onCapability(frame.d ?? {});
       default:
@@ -686,6 +686,18 @@ class Connection {
     }, Math.min(5_000, this.pingIntervalMs));
     this.pingTimer.unref?.();
     this.livenessTimer.unref?.();
+  }
+
+  /** Auth applications serialize per connection in frame order: the sink
+   * resolves once durable, so without a chain an `auth.applied` could reach
+   * the CP (opening its gate) while keys are still landing, or a delta
+   * could apply under a slower snapshot. A rejected link must not wedge the
+   * chain — the apply methods handle failures themselves (close + redial,
+   * which re-sends keys and the snapshot from the cursor). */
+  private authChain: Promise<void> = Promise.resolve();
+
+  private enqueueAuth(work: () => Promise<void>): void {
+    this.authChain = this.authChain.then(work).catch(() => {});
   }
 
   private async applyKeys(d: Record<string, unknown>): Promise<void> {
