@@ -12,6 +12,9 @@ import type {
   ExecutionBoundaryStatus,
 } from "@zeros/protocol/containment";
 import type { AgentGoal } from "@zeros/protocol/agent-events";
+import type { BrowserRoute } from "@zeros/protocol/browser-tools";
+import type { ComputerUseRoute } from "@zeros/protocol/computer-use-tools";
+import type { DeviceToolRoute } from "@zeros/protocol/device-tools";
 
 export interface SessionExecutionActor {
   agentRole?: "code" | "design";
@@ -36,11 +39,12 @@ export function executionActorForRecovery(
   return agentRole === "code" ? { agentRole } : {};
 }
 
+export type CapabilityRefreshFamily = "codex" | "claude" | "cursor";
+
 /** Resolve the exact live route that may be torn down and resumed to pick up a
  * provider boot capability. This is intentionally narrower than ordinary
- * session recovery: only native Codex and Claude bindings for the same adapter
- * are safe. A legacy locator could mint a different conversation, while
- * Cursor's browser lifecycle is outside Zeros and must never enter this path. */
+ * session recovery: only native bindings for the same adapter are safe, since
+ * a legacy locator could mint a different conversation. */
 export function providerCapabilityRefreshExecution(input: {
   providerFamily: string;
   agentId: string | null;
@@ -50,7 +54,9 @@ export function providerCapabilityRefreshExecution(input: {
 }): string | null {
   const binding = input.providerBinding;
   if (
-    (input.providerFamily !== "codex" && input.providerFamily !== "claude") ||
+    (input.providerFamily !== "codex" &&
+      input.providerFamily !== "claude" &&
+      input.providerFamily !== "cursor") ||
     !input.agentId ||
     binding?.kind !== "native" ||
     binding.providerId !== input.agentId ||
@@ -61,27 +67,52 @@ export function providerCapabilityRefreshExecution(input: {
   return input.executionId ?? input.sessionId ?? null;
 }
 
-/** Decide whether a Browser setting edge changes provider boot arguments.
- * Claude requires an explicit `--chrome`/`--no-chrome` process argument on
- * both edges. Codex only needs a reboot when enabling its boot-time plugin;
- * disabling is enforced immediately by Zeros' browser policy gate. */
-export function providerCapabilityRefreshNeeded(input: {
-  providerFamily: string;
-  previousEnabled: boolean | null;
-  enabled: boolean;
-}): boolean {
-  if (
-    input.previousEnabled === null ||
-    input.previousEnabled === input.enabled
-  ) {
-    return false;
+/** What a change to one agent family's Browser route means for its live
+ * sessions. A provider fixes its browser when it boots: Codex loads OpenAI's
+ * Browser plugin, Claude Code takes `--chrome` or `--no-chrome`, and every
+ * agent lists the `zeros_browser` tools once. Any new route other than "off"
+ * therefore needs an idle resume. Zeros refuses an "off" route on each call,
+ * so a refresh still queued for that family is moot ("cancel"), except that
+ * only a resume removes Claude Code's `--chrome`. */
+export function browserRouteRefreshAction(input: {
+  providerFamily: CapabilityRefreshFamily;
+  previous: BrowserRoute | null;
+  next: BrowserRoute;
+}): "refresh" | "cancel" | "none" {
+  if (input.previous === null || input.previous === input.next) return "none";
+  if (input.next !== "off" || input.previous === "claude-chrome") {
+    return "refresh";
   }
-  if (input.providerFamily === "claude") return true;
-  return (
-    input.providerFamily === "codex" &&
-    input.previousEnabled === false &&
-    input.enabled
-  );
+  return input.providerFamily === "claude" ? "none" : "cancel";
+}
+
+/** The same rule for Computer use. `zeros_computer` tools are listed only
+ * when a provider boots on the "zeros" route, and Codex keeps or drops its
+ * built-in computer use at boot, so every new route other than "off" needs an
+ * idle resume. Zeros refuses its own tools per call once the route is "off",
+ * but only a resume turns off Codex's built-in computer use. */
+export function computerRouteRefreshAction(input: {
+  providerFamily: CapabilityRefreshFamily;
+  previous: ComputerUseRoute | null;
+  next: ComputerUseRoute;
+}): "refresh" | "cancel" | "none" {
+  if (input.previous === null || input.previous === input.next) return "none";
+  if (input.next !== "off" || input.previous === "codex-native") {
+    return "refresh";
+  }
+  return input.providerFamily === "codex" ? "none" : "cancel";
+}
+
+/** The same rule for simulators, which every agent family uses alike.
+ * `zeros_device` tools are listed only when a provider boots with simulator
+ * use on; once it is off Zeros refuses them per call, so no resume is
+ * needed. */
+export function deviceRouteRefreshAction(input: {
+  previous: DeviceToolRoute | null;
+  next: DeviceToolRoute;
+}): "refresh" | "cancel" | "none" {
+  if (input.previous === null || input.previous === input.next) return "none";
+  return input.next === "zeros" ? "refresh" : "cancel";
 }
 
 /** A queued boot-capability refresh belongs to the provider family that
@@ -89,7 +120,7 @@ export function providerCapabilityRefreshNeeded(input: {
  * idle, refreshing the replacement provider would apply an unrelated setting
  * and could unnecessarily tear down a newly-created session. */
 export function providerCapabilityRefreshStillTargetsFamily(input: {
-  requestedFamily: "codex" | "claude";
+  requestedFamily: CapabilityRefreshFamily;
   currentFamily: string;
 }): boolean {
   return input.requestedFamily === input.currentFamily;

@@ -155,7 +155,9 @@ describe("sanitizeLayer", () => {
           browser: {
             enabled: false,
             codex_enabled: true,
+            codex_native: false,
             claude_enabled: false,
+            in_app_enabled: false,
             provider: "isolated",
             auto_open: false,
             show_agent_cursor: true,
@@ -168,7 +170,9 @@ describe("sanitizeLayer", () => {
         browser: {
           enabled: false,
           codex_enabled: true,
+          codex_native: false,
           claude_enabled: false,
+          in_app_enabled: false,
           provider: "isolated",
           auto_open: false,
           show_agent_cursor: true,
@@ -203,6 +207,81 @@ describe("sanitizeLayer", () => {
     );
     expect(repo.doc.browser).toBeUndefined();
     expect(repo.warnings).toEqual([expect.stringContaining("user-only")]);
+  });
+
+  it("keeps computer use engine-owned and drops unknown control switches", () => {
+    const valid = {
+      computer_use: {
+        enabled: true,
+        codex_native: false,
+        show_agent_cursor: false,
+        blocked_apps: ["com.apple.Notes"],
+      },
+    };
+    expect(sanitizeLayer(valid, "user")).toEqual({ doc: valid, warnings: [] });
+    expect(sanitizeLayer(valid, "managed").doc).toEqual(valid);
+
+    const invalid = sanitizeLayer(
+      {
+        computer_use: {
+          enabled: "yes",
+          unrestricted: true,
+          blocked_apps: "com.apple.Notes",
+        },
+      },
+      "user",
+    );
+    expect(invalid.doc).toEqual({ computer_use: {} });
+    expect(invalid.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("computer_use.enabled"),
+        expect.stringContaining("computer_use.unrestricted"),
+        expect.stringContaining("computer_use.blocked_apps"),
+      ]),
+    );
+
+    for (const layer of ["repo", "repo-local", "workspace-local"] as const) {
+      const repo = sanitizeLayer(valid, layer);
+      expect(repo.doc.computer_use).toBeUndefined();
+      expect(repo.warnings).toEqual([expect.stringContaining("user-only")]);
+    }
+  });
+
+  it("keeps simulator access user-owned and drops unknown switches", () => {
+    const valid = {
+      simulators: {
+        enabled: false,
+        idle_shutdown: "2h",
+        show_agent_touches: false,
+      },
+    };
+    expect(sanitizeLayer(valid, "user")).toEqual({ doc: valid, warnings: [] });
+    expect(sanitizeLayer(valid, "managed").doc).toEqual(valid);
+
+    const invalid = sanitizeLayer(
+      {
+        simulators: {
+          enabled: "yes",
+          idle_shutdown: 30,
+          physical_devices: true,
+        },
+      },
+      "user",
+    );
+    expect(invalid.doc).toEqual({ simulators: {} });
+    expect(invalid.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("simulators.enabled"),
+        expect.stringContaining("simulators.idle_shutdown"),
+        expect.stringContaining("simulators.physical_devices"),
+      ]),
+    );
+
+    for (const layer of ["repo", "repo-local", "workspace-local"] as const) {
+      const repo = sanitizeLayer(valid, layer);
+      expect(repo.doc.simulators).toBeUndefined();
+      expect(repo.warnings).toEqual([expect.stringContaining("user-only")]);
+    }
   });
 
   it("round-trips every Models setting and validates Claude's idle timeout", () => {

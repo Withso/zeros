@@ -3,17 +3,18 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "../../../platform/git";
 
-const state = vi.hoisted(() => ({ organization: { id: "org-a", isPersonal: false } as { id: string; isPersonal: boolean } | null, selected: "org-a", workspace: null as Pick<Workspace, "path" | "organizationId" | "placement"> | null, read: vi.fn(), layer: vi.fn() }));
+const state = vi.hoisted(() => ({ organization: { id: "org-a", isPersonal: false } as { id: string; isPersonal: boolean } | null, selected: "org-a", workspace: null as Pick<Workspace, "path" | "organizationId" | "placement"> | null, read: vi.fn(), layer: vi.fn(), zerosBrowser: true }));
 vi.mock("../../team/team-store", () => ({ useActiveOrganization: () => state.organization, getActiveOrganizationIdSnapshot: () => state.selected }));
 vi.mock("../../../state/use-active-workspace", () => ({ useActiveWorkspace: () => ({ workspace: state.workspace }) }));
 vi.mock("../use-settings", () => ({ useResolvedSettings: () => { state.read(); return { resolved: { effective: {} }, refresh() {} }; }, useSettingsLayer: () => { state.layer(); return { write: vi.fn() }; } }));
 vi.mock("../../../platform/app", () => ({ shellOpenUrl: vi.fn() }));
 vi.mock("../../../shared/ui/primitives/elements", () => ({ toast: { error: vi.fn() } }));
+vi.mock("../agent-control-rollout", () => ({ useAgentControlFeatureActive: () => state.zerosBrowser }));
 import { BrowserUsePanel } from "../browser-use-panel";
 import { NativeBrowserAvailability } from "../../agent/native-browser-availability";
 import type { CloudBrowserCapability } from "@zeros/protocol/containment";
 
-beforeEach(() => { state.organization = { id: "org-a", isPersonal: false }; state.selected = "org-a"; state.workspace = { path: "cloud://org-a/workspace", organizationId: "org-a", placement: "cloud" }; vi.clearAllMocks(); });
+beforeEach(() => { state.zerosBrowser = true; state.organization = { id: "org-a", isPersonal: false }; state.selected = "org-a"; state.workspace = { path: "cloud://org-a/workspace", organizationId: "org-a", placement: "cloud" }; vi.clearAllMocks(); });
 describe("native browser availability rendering", () => {
   it("shares unavailable, disabled and ready presentation without conflating provider scopes", () => {
     const scope = { version: 1, provider: "codex", credentialKind: "codex-chatgpt", runtimeProfile: "zeros-cloud-worker-v3" } as const;
@@ -95,5 +96,28 @@ describe("native browser availability rendering", () => {
     expect(html).toContain("Get extension");
     expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-codex-enabled"/);
     expect(html).toMatch(/aria-checked="false"[^>]*id="browser-use-claude-enabled"/);
+    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-codex-native"/);
+    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-in-app-enabled"/);
+    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-auto-open"/);
+    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-show-agent-cursor"/);
+  });
+
+  it("shows only Codex's own browser and Claude in Chrome while the Zeros browser is not available", () => {
+    state.zerosBrowser = false;
+    state.organization = { id: "personal", isPersonal: true };
+    state.selected = "";
+    const html = renderToStaticMarkup(createElement(BrowserUsePanel));
+    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-codex-enabled"/);
+    expect(html).toMatch(/aria-checked="false"[^>]*id="browser-use-claude-enabled"/);
+    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-auto-open"/);
+    expect(html).toContain("Approval for opening websites");
+    expect(html).not.toContain('id="browser-use-codex-native"');
+    expect(html).not.toContain('id="browser-use-in-app-enabled"');
+    expect(html).not.toContain('id="browser-use-show-agent-cursor"');
+  });
+
+  it("lists Cursor's cloud browser limits beside Codex and Claude", () => {
+    const html = renderToStaticMarkup(createElement(BrowserUsePanel));
+    expect(html).toContain("Cursor does not expose a native browser integration.");
   });
 });

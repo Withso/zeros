@@ -134,6 +134,23 @@ describe("internal feature flags", () => {
     signedOut();
     expect(store.isInternalFeatureActive("releaseCanaries" as any)).toBe(false);
   });
+  it("starts staged agent control features on for staff only", async () => {
+    const backing = installLocalStorageStub();
+    const store = await freshStore();
+    for (const feature of ["zerosBrowser", "computerUse", "simulators"] as const) {
+      expect(store.isInternalFeatureEnabled(feature)).toBe(true);
+      signedInAs("developer");
+      expect(store.isInternalFeatureActive(feature)).toBe(true);
+      signedInAs(null);
+      expect(store.isInternalFeatureActive(feature)).toBe(false);
+    }
+    signedInAs("developer");
+    store.setInternalFeatureEnabled("simulators", false);
+    expect(store.isInternalFeatureActive("simulators")).toBe(false);
+    expect(JSON.parse(backing.get("zeros.internalFeatures")!)).toEqual({
+      simulators: false,
+    });
+  });
   it("defaults off, flips on, and persists to localStorage", async () => {
     const backing = installLocalStorageStub();
     const store = await freshStore();

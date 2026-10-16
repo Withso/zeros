@@ -24,8 +24,10 @@ import {
   promptFailureShouldRecover,
   promptFailureShouldResumeProvider,
   queuedPromptPresentation,
+  browserRouteRefreshAction,
+  computerRouteRefreshAction,
+  deviceRouteRefreshAction,
   providerCapabilityRefreshCanRun,
-  providerCapabilityRefreshNeeded,
   providerCapabilityRefreshExecution,
   providerCapabilityRefreshStillTargetsFamily,
   queuedSendNowAction,
@@ -177,7 +179,7 @@ describe("session reload lifecycle", () => {
     );
   });
 
-  it("reloads only an idle native Codex or Claude execution for a boot-scoped capability", () => {
+  it("reloads only an idle native Codex, Claude or Cursor execution for a boot-scoped capability", () => {
     const nativeBinding = {
       version: 1 as const,
       providerId: "codex-app-server",
@@ -207,10 +209,20 @@ describe("session reload lifecycle", () => {
         },
       }),
     ).toBe("execution-claude");
+    // Cursor lists `zeros_browser` tools when its SDK agent resumes.
+    expect(
+      providerCapabilityRefreshExecution({
+        providerFamily: "cursor",
+        agentId: "cursor",
+        executionId: "execution-cursor",
+        sessionId: "execution-cursor",
+        providerBinding: { ...nativeBinding, providerId: "cursor" },
+      }),
+    ).toBe("execution-cursor");
     expect(
       providerCapabilityRefreshExecution({
         ...candidate,
-        providerFamily: "cursor",
+        providerFamily: "",
       }),
     ).toBeNull();
     expect(
@@ -252,49 +264,70 @@ describe("session reload lifecycle", () => {
     ).toBe(false);
   });
 
-  it("refreshes Claude for either Browser toggle edge and Codex only when enabling", () => {
-    expect(
-      providerCapabilityRefreshNeeded({
-        providerFamily: "claude",
-        previousEnabled: false,
-        enabled: true,
-      }),
-    ).toBe(true);
-    expect(
-      providerCapabilityRefreshNeeded({
-        providerFamily: "claude",
-        previousEnabled: true,
-        enabled: false,
-      }),
-    ).toBe(true);
-    expect(
-      providerCapabilityRefreshNeeded({
-        providerFamily: "codex",
-        previousEnabled: false,
-        enabled: true,
-      }),
-    ).toBe(true);
-    expect(
-      providerCapabilityRefreshNeeded({
-        providerFamily: "codex",
-        previousEnabled: true,
-        enabled: false,
-      }),
-    ).toBe(false);
-    expect(
-      providerCapabilityRefreshNeeded({
-        providerFamily: "cursor",
-        previousEnabled: false,
-        enabled: true,
-      }),
-    ).toBe(false);
-    expect(
-      providerCapabilityRefreshNeeded({
-        providerFamily: "claude",
-        previousEnabled: null,
-        enabled: true,
-      }),
-    ).toBe(false);
+  it.each([
+    // Settings first load: nothing booted under an older route.
+    ["codex", null, "codex-native", "none"],
+    ["codex", "codex-native", "codex-native", "none"],
+    // A new route that is not "off" changes what the provider loads at boot.
+    ["codex", "off", "codex-native", "refresh"],
+    ["codex", "off", "zeros", "refresh"],
+    ["codex", "codex-native", "zeros", "refresh"],
+    ["codex", "zeros", "codex-native", "refresh"],
+    // Zeros refuses an "off" route per call, so a queued refresh is moot.
+    ["codex", "codex-native", "off", "cancel"],
+    ["codex", "zeros", "off", "cancel"],
+    ["claude", "off", "zeros", "refresh"],
+    ["claude", "zeros", "claude-chrome", "refresh"],
+    ["claude", "claude-chrome", "zeros", "refresh"],
+    // Only a resume removes Claude Code's `--chrome` flag.
+    ["claude", "claude-chrome", "off", "refresh"],
+    // A queued Claude refresh may still have to remove `--chrome`.
+    ["claude", "zeros", "off", "none"],
+    ["cursor", "off", "zeros", "refresh"],
+    ["cursor", "zeros", "off", "cancel"],
+  ] as const)(
+    "%s Browser route %s → %s needs %s",
+    (providerFamily, previous, next, action) => {
+      expect(
+        browserRouteRefreshAction({ providerFamily, previous, next }),
+      ).toBe(action);
+    },
+  );
+
+  it.each([
+    ["codex", null, "codex-native", "none"],
+    ["codex", "zeros", "zeros", "none"],
+    // Codex keeps or drops its built-in computer use when it boots.
+    ["codex", "codex-native", "zeros", "refresh"],
+    ["codex", "zeros", "codex-native", "refresh"],
+    ["codex", "off", "codex-native", "refresh"],
+    ["codex", "codex-native", "off", "refresh"],
+    // A queued Codex refresh may still have to drop the built-in plugin.
+    ["codex", "zeros", "off", "none"],
+    // `zeros_computer` tools are listed only at boot.
+    ["claude", "off", "zeros", "refresh"],
+    ["cursor", "off", "zeros", "refresh"],
+    // Zeros refuses its own tools per call once the route is off.
+    ["claude", "zeros", "off", "cancel"],
+    ["cursor", "zeros", "off", "cancel"],
+  ] as const)(
+    "%s Computer use route %s → %s needs %s",
+    (providerFamily, previous, next, action) => {
+      expect(
+        computerRouteRefreshAction({ providerFamily, previous, next }),
+      ).toBe(action);
+    },
+  );
+
+  it.each([
+    [null, "zeros", "none"],
+    ["zeros", "zeros", "none"],
+    // `zeros_device` tools are listed only at boot.
+    ["off", "zeros", "refresh"],
+    // Zeros refuses them per call once simulator use is off.
+    ["zeros", "off", "cancel"],
+  ] as const)("Simulator route %s → %s needs %s", (previous, next, action) => {
+    expect(deviceRouteRefreshAction({ previous, next })).toBe(action);
   });
 
   it("drops a queued browser refresh after the chat switches provider families", () => {
@@ -316,6 +349,12 @@ describe("session reload lifecycle", () => {
         currentFamily: "cursor",
       }),
     ).toBe(false);
+    expect(
+      providerCapabilityRefreshStillTargetsFamily({
+        requestedFamily: "cursor",
+        currentFamily: "cursor",
+      }),
+    ).toBe(true);
   });
 
   it("queues behind an adopted prompt even though the renderer send lock was reset", () => {

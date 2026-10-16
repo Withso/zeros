@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { ExternalLink } from "lucide-react";
 
 import { Button } from "../../shared/ui/primitives/button";
@@ -18,6 +25,7 @@ import { SettingsGroup, SettingsRow } from "./settings-ui";
 import { useResolvedSettings, useSettingsLayer } from "./use-settings";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization } from "../team/team-store";
 import { NativeBrowserAvailability } from "../agent/native-browser-availability";
+import { useAgentControlFeatureActive } from "./agent-control-rollout";
 import {
   BROWSER_SETTINGS_ROWS,
   CLAUDE_CHROME_DOCS_URL,
@@ -28,8 +36,11 @@ import {
   browserSettingsFromEffective,
   browserStringSettingPatch,
   browserStringSettingSnapshotSupersedesPending,
+  inAppBrowserInUse,
   type BrowserBooleanSetting,
   type BrowserNavigationApproval,
+  type BrowserStringSetting,
+  type BrowserUseSettingsValue,
 } from "./browser-use-settings";
 
 interface PendingBrowserSetting {
@@ -43,9 +54,52 @@ type PendingBrowserSettings = Partial<
   Record<BrowserBooleanSetting, PendingBrowserSetting>
 >;
 
-const [codexEnabledRow, autoOpenRow, navigationApprovalRow] =
-  BROWSER_SETTINGS_ROWS.codex;
-const [claudeEnabledRow] = BROWSER_SETTINGS_ROWS.claude;
+const [codexEnabledRow, codexNativeRow] = BROWSER_SETTINGS_ROWS.codex;
+const [inAppEnabledRow, claudeEnabledRow] = BROWSER_SETTINGS_ROWS.inApp;
+const [autoOpenRow, navigationApprovalRow, showAgentCursorRow] =
+  BROWSER_SETTINGS_ROWS.shared;
+const BOOLEAN_SETTINGS: readonly BrowserBooleanSetting[] = [
+  "codex_enabled",
+  "codex_native",
+  "in_app_enabled",
+  "claude_enabled",
+  "auto_open",
+  "show_agent_cursor",
+];
+
+function BrowserSwitchRow({
+  id,
+  row,
+  checked,
+  managed,
+  disabled,
+  onCheckedChange,
+  children,
+}: {
+  id: string;
+  row: { label: string; hint: string };
+  checked: boolean;
+  managed: boolean;
+  disabled: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  children?: ReactNode;
+}) {
+  return (
+    <SettingsRow label={row.label} hint={row.hint} htmlFor={id}>
+      <div className="flex items-center gap-2">
+        {children}
+        {managed ? <span className="text-fg3 text-xs">Managed</span> : null}
+        <Switch
+          id={id}
+          aria-label={row.label}
+          checked={checked}
+          disabled={disabled}
+          onCheckedChange={onCheckedChange}
+        />
+      </div>
+    </SettingsRow>
+  );
+}
 
 function openClaudeChromeUrl(url: string): void {
   void shellOpenUrl(url).catch(() => {
@@ -75,6 +129,7 @@ function OrganizationBrowserUsePanel({ organizationId }: { organizationId: strin
     <SettingsGroup title="Browser use">
       <SettingsRow label="Codex" hint={<NativeBrowserAvailability provider="codex" />} />
       <SettingsRow label="Claude" hint={<NativeBrowserAvailability provider="claude" />} />
+      <SettingsRow label="Cursor" hint={<NativeBrowserAvailability provider="cursor" />} />
     </SettingsGroup>
   );
 }
@@ -82,6 +137,9 @@ function OrganizationBrowserUsePanel({ organizationId }: { organizationId: strin
 function LocalBrowserUsePanel() {
   const resolved = useResolvedSettings();
   const layer = useSettingsLayer("user");
+  // Without the Zeros browser only Codex's own browser and Claude in Chrome
+  // remain, so their rows are all this page shows.
+  const zerosBrowser = useAgentControlFeatureActive("zerosBrowser");
   const [pending, setPending] = useState<PendingBrowserSettings>({});
   const [pendingNavigation, setPendingNavigation] = useState<{
     value: BrowserNavigationApproval;
@@ -98,25 +156,17 @@ function LocalBrowserUsePanel() {
     () => browserSettingsFromEffective(resolved.resolved?.effective),
     [resolved.resolved],
   );
-  const values = {
-    codex_enabled: pending.codex_enabled?.value ?? confirmed.codex_enabled,
-    claude_enabled: pending.claude_enabled?.value ?? confirmed.claude_enabled,
-    auto_open: pending.auto_open?.value ?? confirmed.auto_open,
-    navigation_approval:
-      pendingNavigation?.value ?? confirmed.navigation_approval,
-  };
   const sources = resolved.resolved?.sources as
     | Record<string, unknown>
     | undefined;
-  const managed = {
-    codex_enabled: browserSettingIsManaged(sources, "codex_enabled"),
-    claude_enabled: browserSettingIsManaged(sources, "claude_enabled"),
-    auto_open: browserSettingIsManaged(sources, "auto_open"),
-    navigation_approval: browserSettingIsManaged(
-      sources,
-      "navigation_approval",
-    ),
-  };
+  const values: BrowserUseSettingsValue = { ...confirmed };
+  for (const key of BOOLEAN_SETTINGS) {
+    values[key] = pending[key]?.value ?? confirmed[key];
+  }
+  values.navigation_approval =
+    pendingNavigation?.value ?? confirmed.navigation_approval;
+  const managed = (key: BrowserBooleanSetting | BrowserStringSetting) =>
+    browserSettingIsManaged(sources, key);
 
   // A write updates the layer cache immediately, while the resolved cache is
   // replaced by the following settings broadcast. Retain the optimistic value
@@ -234,74 +284,89 @@ function LocalBrowserUsePanel() {
   );
 
   const settingsUnavailable = !resolved.resolved || Boolean(resolved.error);
+  const switchDisabled = (key: BrowserBooleanSetting) =>
+    settingsUnavailable || managed(key) || pending[key]?.settled === false;
+  const sharedRowsOff = !inAppBrowserInUse(values, { zerosBrowser });
+  const switchRow = (
+    key: BrowserBooleanSetting,
+    row: { label: string; hint: string },
+    options: { inactive?: boolean; children?: ReactNode } = {},
+  ) => (
+    <BrowserSwitchRow
+      id={`browser-use-${key.replace(/_/g, "-")}`}
+      row={row}
+      checked={values[key]}
+      managed={managed(key)}
+      disabled={switchDisabled(key) || options.inactive === true}
+      onCheckedChange={(checked) => updateSetting(key, checked)}
+    >
+      {options.children}
+    </BrowserSwitchRow>
+  );
 
-  // One "Browser use" heading over two untitled cards: Codex's rows, then
-  // Claude's. 12px between the cards (they're one section), vs the 24px
-  // that separates sections elsewhere.
+  // One "Browser use" heading over three untitled cards: Codex's rows,
+  // Claude's and Cursor's, then the rows for every agent. 12px between the
+  // cards (they're one section), vs the 24px that separates sections
+  // elsewhere.
   return (
     <div className="flex flex-col gap-3">
       <SettingsGroup title="Browser use">
-        <SettingsRow
-          label={codexEnabledRow.label}
-          hint={codexEnabledRow.hint}
-          htmlFor="browser-use-codex-enabled"
-        >
-          <div className="flex items-center gap-2">
-            {managed.codex_enabled ? (
-              <span className="text-fg3 text-xs">Managed</span>
-            ) : null}
-            <Switch
-              id="browser-use-codex-enabled"
-              aria-label={codexEnabledRow.label}
-              checked={values.codex_enabled}
-              disabled={
-                settingsUnavailable ||
-                managed.codex_enabled ||
-                pending.codex_enabled?.settled === false
-              }
-              onCheckedChange={(checked) =>
-                updateSetting("codex_enabled", checked)
-              }
-            />
-          </div>
-        </SettingsRow>
-        <SettingsRow
-          label={autoOpenRow.label}
-          hint={autoOpenRow.hint}
-          htmlFor="browser-use-auto-open"
-        >
-          <div className="flex items-center gap-2">
-            {managed.auto_open ? (
-              <span className="text-fg3 text-xs">Managed</span>
-            ) : null}
-            <Switch
-              id="browser-use-auto-open"
-              aria-label={autoOpenRow.label}
-              checked={values.auto_open}
-              disabled={
-                settingsUnavailable ||
-                managed.auto_open ||
-                !values.codex_enabled ||
-                pending.auto_open?.settled === false
-              }
-              onCheckedChange={(checked) => updateSetting("auto_open", checked)}
-            />
-          </div>
-        </SettingsRow>
+        {switchRow("codex_enabled", codexEnabledRow)}
+        {zerosBrowser
+          ? switchRow("codex_native", codexNativeRow, {
+              inactive: !values.codex_enabled,
+            })
+          : null}
+      </SettingsGroup>
+
+      <SettingsGroup>
+        {zerosBrowser ? switchRow("in_app_enabled", inAppEnabledRow) : null}
+        {switchRow("claude_enabled", claudeEnabledRow, {
+          children: (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-fg2"
+                aria-label="Install the Claude in Chrome extension"
+                onClick={() =>
+                  openClaudeChromeUrl(CLAUDE_CHROME_EXTENSION_URL)
+                }
+              >
+                Get extension
+                <ExternalLink className="size-3" aria-hidden="true" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-fg2"
+                aria-label="Open Claude Code Chrome documentation"
+                onClick={() => openClaudeChromeUrl(CLAUDE_CHROME_DOCS_URL)}
+              >
+                Docs
+                <ExternalLink className="size-3" aria-hidden="true" />
+              </Button>
+            </>
+          ),
+        })}
+      </SettingsGroup>
+
+      <SettingsGroup>
+        {switchRow("auto_open", autoOpenRow, { inactive: sharedRowsOff })}
         <SettingsRow
           label={navigationApprovalRow.label}
           hint={navigationApprovalRow.hint}
         >
           <div className="flex items-center gap-2">
-            {managed.navigation_approval ? (
+            {managed("navigation_approval") ? (
               <span className="text-fg3 text-xs">Managed</span>
             ) : null}
             <Select
               value={values.navigation_approval}
               disabled={
                 settingsUnavailable ||
-                managed.navigation_approval ||
-                !values.codex_enabled ||
+                managed("navigation_approval") ||
+                sharedRowsOff ||
                 pendingNavigation?.settled === false
               }
               onValueChange={(value) =>
@@ -318,53 +383,11 @@ function LocalBrowserUsePanel() {
             </Select>
           </div>
         </SettingsRow>
-      </SettingsGroup>
-
-      <SettingsGroup>
-        <SettingsRow
-          label={claudeEnabledRow.label}
-          hint={claudeEnabledRow.hint}
-          htmlFor="browser-use-claude-enabled"
-        >
-          <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-fg2"
-              aria-label="Install the Claude in Chrome extension"
-              onClick={() => openClaudeChromeUrl(CLAUDE_CHROME_EXTENSION_URL)}
-            >
-              Get extension
-              <ExternalLink className="size-3" aria-hidden="true" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-fg2"
-              aria-label="Open Claude Code Chrome documentation"
-              onClick={() => openClaudeChromeUrl(CLAUDE_CHROME_DOCS_URL)}
-            >
-              Docs
-              <ExternalLink className="size-3" aria-hidden="true" />
-            </Button>
-            {managed.claude_enabled ? (
-              <span className="text-fg3 text-xs">Managed</span>
-            ) : null}
-            <Switch
-              id="browser-use-claude-enabled"
-              aria-label={claudeEnabledRow.label}
-              checked={values.claude_enabled}
-              disabled={
-                settingsUnavailable ||
-                managed.claude_enabled ||
-                pending.claude_enabled?.settled === false
-              }
-              onCheckedChange={(checked) =>
-                updateSetting("claude_enabled", checked)
-              }
-            />
-          </div>
-        </SettingsRow>
+        {zerosBrowser
+          ? switchRow("show_agent_cursor", showAgentCursorRow, {
+              inactive: sharedRowsOff,
+            })
+          : null}
       </SettingsGroup>
     </div>
   );

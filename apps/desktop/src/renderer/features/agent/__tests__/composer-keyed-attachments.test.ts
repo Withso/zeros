@@ -22,6 +22,7 @@ import { AttachmentNode } from "../composer-editor/nodes";
 import {
   collectSourceKeys,
   findAttachmentsBySourceKey,
+  positionAfterAttachment,
 } from "../composer-editor/attachment-keys";
 
 const schema = getSchema([Document, Paragraph, Text, AttachmentNode]);
@@ -193,5 +194,41 @@ describe("findAttachmentsBySourceKey", () => {
         "",
       ),
     ).toEqual([]);
+  });
+});
+
+describe("positionAfterAttachment", () => {
+  it("lands past the node and its separator space", () => {
+    // Paragraph opens at 0, the video atom is 1..2, its space 2..3.
+    expect(
+      positionAfterAttachment(
+        doc({ id: "video", name: "clip.mp4" }, { text: " look" }),
+        "video",
+      ),
+    ).toEqual({ at: 3, spaced: true });
+  });
+
+  it("follows the node wherever the user has moved it", () => {
+    expect(
+      positionAfterAttachment(
+        doc({ text: "see " }, { id: "video", name: "clip.mp4" }, { text: " here" }),
+        "video",
+      ),
+    ).toEqual({ at: 7, spaced: true });
+  });
+
+  it("says when the separator space is gone", () => {
+    expect(
+      positionAfterAttachment(doc({ id: "video", name: "clip.mp4" }, { text: "hi" }), "video"),
+    ).toEqual({ at: 2, spaced: false });
+    expect(positionAfterAttachment(doc({ id: "video", name: "clip.mp4" }), "video")).toEqual({
+      at: 2,
+      spaced: false,
+    });
+  });
+
+  it("is null once the node has left the document", () => {
+    expect(positionAfterAttachment(doc({ id: "other", name: "a.png" }), "video")).toBeNull();
+    expect(positionAfterAttachment(doc({ id: "video", name: "clip.mp4" }), "")).toBeNull();
   });
 });

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   browserFloatEntries,
   browserFloatKey,
+  closeBrowserFloat,
   dockBrowserTab,
   floatBrowserTab,
   isBrowserTabFloating,
@@ -63,6 +64,18 @@ describe("float registry", () => {
 
     dockBrowserTab(browserFloatKey(localScope, "local-1"));
     expect(isBrowserTabFloating(browserFloatKey(localScope, "local-1"))).toBe(false);
+  });
+
+  it("closing a float reports when its scope has no float left", () => {
+    floatBrowserTab({ scope: localScope, tabId: "a" });
+    floatBrowserTab({ scope: localScope, tabId: "b" });
+    floatBrowserTab({ scope: cloudScope, tabId: "a" });
+    expect(closeBrowserFloat(browserFloatKey(localScope, "a"))).toBe(false);
+    expect(closeBrowserFloat(browserFloatKey(localScope, "b"))).toBe(true);
+    expect(isBrowserTabFloating(browserFloatKey(localScope, "b"))).toBe(false);
+    expect(isBrowserTabFloating(browserFloatKey(cloudScope, "a"))).toBe(true);
+    // A float that already docked closes nothing.
+    expect(closeBrowserFloat(browserFloatKey(localScope, "b"))).toBe(false);
   });
 
   it("falls back to a desktop viewport for unmeasured or invalid sizes", () => {

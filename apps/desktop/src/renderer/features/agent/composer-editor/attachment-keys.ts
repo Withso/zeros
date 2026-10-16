@@ -48,6 +48,29 @@ export function collectAttachmentIds(doc: ProseMirrorNode): string[] {
   return ids;
 }
 
+/** Where attachments that belong with `attachmentId`'s node go: just past it
+ *  and the separator space after it, wherever the user has moved it since.
+ *  `spaced` is false when that space is gone, so the caller adds one. Null
+ *  once the node has left the document. */
+export function positionAfterAttachment(
+  doc: ProseMirrorNode,
+  attachmentId: string,
+): { at: number; spaced: boolean } | null {
+  if (!attachmentId) return null;
+  let place: { at: number; spaced: boolean } | null = null;
+  doc.descendants((node, pos) => {
+    if (place) return false;
+    if (node.type.name !== "attachment") return;
+    if (node.attrs.attachmentId !== attachmentId) return;
+    const to = pos + node.nodeSize;
+    const after = doc.nodeAt(to);
+    const spaced = !!(after?.isText && after.text?.startsWith(" "));
+    place = { at: spaced ? to + 1 : to, spaced };
+    return false;
+  });
+  return place;
+}
+
 /** Attachment nodes carrying `sourceKey`, ordered HIGHEST POSITION FIRST.
  *
  *  The order is the whole point. Every delete shifts the positions of

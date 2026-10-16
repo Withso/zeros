@@ -50,6 +50,7 @@ describe("native Code product tool admission", () => {
           dispose: vi.fn(async () => {}),
           preparePrompt: vi.fn(() => "<system_instruction>Current composer mode: Design.</system_instruction>"),
           cancel: vi.fn(),
+          endPrompt: vi.fn(async () => {}),
         };
         admitted.push(tools);
         return tools;
@@ -136,6 +137,19 @@ describe("native Code product tool admission", () => {
     expect(admitted[0]!.preparePrompt).toHaveBeenCalledTimes(2);
     await gateway.cancel("fixture", created.executionId);
     expect(admitted[0]!.cancel).toHaveBeenCalledOnce();
+    expect(admitted[0]!.dispose).not.toHaveBeenCalled();
+  });
+
+  it("settles product tools after every native prompt, including failed ones", async () => {
+    const created = await gateway.newSession("fixture", { cwd: root, conversationId: "durable-chat" });
+    const adapter = (gateway as unknown as { adapters: Map<string, AgentAdapter> }).adapters.get("fixture")!;
+    await gateway.prompt("fixture", created.executionId, [{ type: "text", text: "Open the site" }]);
+    expect(admitted[0]!.endPrompt).toHaveBeenCalledOnce();
+    vi.mocked(adapter.prompt).mockRejectedValueOnce(new Error("Provider failed"));
+    await expect(
+      gateway.prompt("fixture", created.executionId, [{ type: "text", text: "Again" }]),
+    ).rejects.toThrow("Provider failed");
+    expect(admitted[0]!.endPrompt).toHaveBeenCalledTimes(2);
     expect(admitted[0]!.dispose).not.toHaveBeenCalled();
   });
 });

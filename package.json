@@ -34,6 +34,9 @@
     "build:ripgrep": "node scripts/stage-ripgrep.mjs",
     "stage:claude-cli": "node scripts/stage-claude-cli.mjs",
     "stage:codex-cli": "node scripts/stage-codex-cli.mjs",
+    "stage:cua-driver": "node scripts/stage-cua-driver.mjs",
+    "stage:axe": "node scripts/stage-axe.mjs",
+    "build:simulator-hid": "node scripts/build-simulator-hid.mjs",
     "smoke:engine": "node scripts/smoke-engine.mjs",
     "smoke:attachment-storage": "tsx scripts/smoke-attachment-storage.mts",
     "smoke:attachment-electron": "node scripts/smoke-attachment-electron.mjs",
@@ -172,6 +175,7 @@
     "@tiptap/pm": "3.31.2",
     "@tiptap/react": "3.31.2",
     "@tiptap/suggestion": "3.31.2",
+    "@trycua/cua-driver": "0.34.1",
     "@uiw/react-codemirror": "^4.25.10",
     "@vscode/ripgrep": "^1.18.0",
     "@xterm/addon-fit": "^0.11.0",
@@ -181,6 +185,7 @@
     "@zeros/design-core": "workspace:*",
     "@zeros/design-web": "workspace:*",
     "@zeros/protocol": "workspace:*",
+    "agent-device": "0.21.26",
     "better-sqlite3": "^13.0.2",
     "chokidar": "^4.0.3",
     "class-variance-authority": "^0.7.1",
@@ -252,6 +257,9 @@
     "vite": "^7.3.5",
     "vitest": "^4.1.11",
     "wait-on": "^9.0.5"
+  },
+  "optionalDependencies": {
+    "@trycua/cua-driver-darwin-arm64": "0.34.1"
   },
   "keywords": [
     "coding-agents",

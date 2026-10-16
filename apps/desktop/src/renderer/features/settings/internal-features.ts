@@ -58,6 +58,10 @@ import {
 // the same render cycle, plus a "storage" listener for multi-window sync.
 
 import { useCallback, useSyncExternalStore } from "react";
+import {
+  AGENT_CONTROL_FEATURES,
+  type AgentControlFeature,
+} from "@zeros/protocol/agent-control-rollout";
 
 import { getTeamStoreState, useTeams } from "../team/team-store";
 
@@ -91,10 +95,33 @@ export function useIsInternalUser(): boolean {
 
 /** The set of internal feature flags.
  *  - `copyLogs` — ⇧⌘L copies the scrubbed recent-log tail (the exact
- *    bytes a feedback submission shares) to the clipboard. */
-export type InternalFeature = "copyLogs" | "releaseCanaries";
+ *    bytes a feedback submission shares) to the clipboard.
+ *  - Agent control features while their rollout stage is `internal`
+ *    (agent-control-rollout.ts). */
+export type InternalFeature =
+  | "copyLogs"
+  | "releaseCanaries"
+  | AgentControlFeature;
 
 const STORAGE_KEY = "zeros.internalFeatures";
+
+// A stored retired key must never read as on.
+const KNOWN: ReadonlySet<string> = new Set<InternalFeature>([
+  "copyLogs",
+  "releaseCanaries",
+  ...AGENT_CONTROL_FEATURES,
+]);
+// Staff dogfood these unless they turn them off.
+const ON_BY_DEFAULT: ReadonlySet<string> = new Set<InternalFeature>([
+  "releaseCanaries",
+  ...AGENT_CONTROL_FEATURES,
+]);
+
+function flagOn(persisted: PersistedShape, feature: InternalFeature): boolean {
+  if (!KNOWN.has(feature)) return false;
+  const value = persisted[feature];
+  return value === true || (value === undefined && ON_BY_DEFAULT.has(feature));
+}
 
 // Read the retired key for serialized compatibility; it grants no access.
 type PersistedShape = Partial<Record<InternalFeature | "cloudComputerV2", boolean>>;
@@ -143,8 +170,7 @@ function getSnapshot(): PersistedShape {
  *  panel's switches); runtime behavior must use `isInternalFeatureActive`
  *  so the allowlist is enforced. */
 export function isInternalFeatureEnabled(feature: InternalFeature): boolean {
-  return feature === "copyLogs" && current[feature] === true ||
-    feature === "releaseCanaries" && (current[feature] === true || current[feature] === undefined);
+  return flagOn(current, feature);
 }
 
 /** Flip a flag and notify every subscriber. Always swaps the snapshot
@@ -184,8 +210,7 @@ export function useInternalFeature(
   feature: InternalFeature,
 ): [boolean, (on: boolean) => void] {
   const persisted = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  const on = feature === "copyLogs" && persisted[feature] === true ||
-    feature === "releaseCanaries" && (persisted[feature] === true || persisted[feature] === undefined);
+  const on = flagOn(persisted, feature);
   const set = useCallback(
     (next: boolean) => setInternalFeatureEnabled(feature, next),
     [feature],

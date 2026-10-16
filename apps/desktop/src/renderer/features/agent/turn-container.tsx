@@ -601,6 +601,8 @@ function TurnPromptEditor({
     isEmpty: composerEmpty,
     serialize,
     insertFiles: addFiles,
+    hasPendingAttachmentReads,
+    waitForAttachmentReads,
     editorContent,
     suggestionPopup,
     imagePreviewOverlay,
@@ -680,6 +682,18 @@ function TurnPromptEditor({
 
   const submitEdit = useCallback(async () => {
     if (submittingRef.current) return;
+    // A dropped video's key frames are still being read: they go with it.
+    if (hasPendingAttachmentReads()) {
+      submittingRef.current = true;
+      setSubmitting(true);
+      try {
+        await waitForAttachmentReads();
+      } finally {
+        submittingRef.current = false;
+        if (mountedRef.current) setSubmitting(false);
+      }
+      if (!mountedRef.current) return;
+    }
     const s = serialize();
     const trimmed = (s?.displayText ?? "").trim();
     const attachments = s?.attachments ?? [];
@@ -710,7 +724,15 @@ function TurnPromptEditor({
         if (editor && !editor.isDestroyed) editor.setEditable(true);
       }
     }
-  }, [serialize, onEdit, onCancel, onClearDraft, editor]);
+  }, [
+    serialize,
+    onEdit,
+    onCancel,
+    onClearDraft,
+    editor,
+    hasPendingAttachmentReads,
+    waitForAttachmentReads,
+  ]);
   submitRef.current = submitEdit;
 
   const sendDisabled = composerEmpty || submitting;

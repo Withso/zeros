@@ -8,6 +8,8 @@ import {
   browserFaviconFallbackNeeded,
   browserAgentNavigationDisposition,
   browserInputDisposition,
+  browserInputStopsAgent,
+  browserControlBarDisposition,
   browserElementActionLabel,
   browserNavigationPublishStatus,
   browserOperationNeedsReadySettlement,
@@ -24,6 +26,7 @@ import {
   browserSurfaceShouldBeVisible,
   browserSurfaceHoverAfterAttach,
   browserSurfaceCaptureDataUrl,
+  captureBrowserSurface,
   browserSurfaceDetachAllowed,
   browserViewportAfterExplicitResize,
   browserViewportForAttachedBounds,
@@ -39,6 +42,7 @@ import {
   fetchBrowserFaviconDataUrl,
   normalizedBrowserFaviconMime,
   orderedBrowserFaviconCandidates,
+  parseBrowserKeyChord,
   safeBrowserSvgFavicon,
 } from "../browser/surface";
 import { canonicalBrowserOriginGrantKey } from "@zeros/protocol/browser-tools";
@@ -469,6 +473,81 @@ describe("Zeros native browser surface", () => {
     ).toBe("allow");
   });
 
+  it("stops the agent only on the user's own plain Esc", () => {
+    const esc = {
+      actor: "agent" as const,
+      agentDispatched: false,
+      type: "keyDown",
+      key: "Escape",
+      zerosBrowser: true,
+    };
+    expect(browserInputStopsAgent(esc)).toBe(true);
+    // Before the Zeros browser, Esc did not take a page back.
+    expect(browserInputStopsAgent({ ...esc, zerosBrowser: false })).toBe(false);
+    // An Esc the agent sends itself must reach the page untouched.
+    expect(browserInputStopsAgent({ ...esc, agentDispatched: true })).toBe(
+      false,
+    );
+    expect(browserInputStopsAgent({ ...esc, actor: "user" })).toBe(false);
+    expect(browserInputStopsAgent({ ...esc, type: "keyUp" })).toBe(false);
+    expect(browserInputStopsAgent({ ...esc, key: "Enter" })).toBe(false);
+    for (const modifier of ["meta", "control", "alt"] as const) {
+      expect(browserInputStopsAgent({ ...esc, [modifier]: true })).toBe(false);
+    }
+  });
+
+  it("shows the Browser tab control bar only while an agent owns an attached workbench page", () => {
+    const working = {
+      actor: "agent" as const,
+      status: "working" as const,
+      attachedToTrustedWindow: true,
+      surfaceId: "workbench:tab-1",
+      zerosBrowser: true,
+    };
+    expect(browserControlBarDisposition(working)).toBe("show");
+    // Before the Zeros browser, the tab had no control bar.
+    expect(
+      browserControlBarDisposition({ ...working, zerosBrowser: false }),
+    ).toBe("remove");
+    expect(
+      browserControlBarDisposition({
+        ...working,
+        status: "awaiting-confirmation",
+      }),
+    ).toBe("show");
+    // Ownership is turn-scoped, so the bar stays between actions.
+    expect(browserControlBarDisposition({ ...working, status: "ready" })).toBe(
+      "show",
+    );
+    // Control returning in place fades the bar out over the page.
+    expect(browserControlBarDisposition({ ...working, actor: "user" })).toBe(
+      "fade",
+    );
+    expect(
+      browserControlBarDisposition({ ...working, actor: undefined }),
+    ).toBe("fade");
+    // A page leaving the tab takes the bar with it at once.
+    expect(
+      browserControlBarDisposition({ ...working, status: "closed" }),
+    ).toBe("remove");
+    expect(
+      browserControlBarDisposition({
+        ...working,
+        attachedToTrustedWindow: false,
+      }),
+    ).toBe("remove");
+    // Picture in picture keeps its own hover strip.
+    expect(
+      browserControlBarDisposition({
+        ...working,
+        surfaceId: "browser-agent-pip:conversation-1",
+      }),
+    ).toBe("remove");
+    expect(browserControlBarDisposition({ ...working, surfaceId: null })).toBe(
+      "remove",
+    );
+  });
+
   it("keeps cross-site page navigation behind the website approval boundary", () => {
     const base = {
       actor: "agent" as const,
@@ -592,6 +671,22 @@ describe("Zeros native browser surface", () => {
     ).toBeNull();
   });
 
+  it("captures without showing the page, and answers no capture when Chromium can't copy it", async () => {
+    const png = "data:image/png;base64,AAAA";
+    const capturePage = vi.fn(async () => ({
+      toDataURL: () => png,
+      toJPEG: () => Buffer.alloc(0),
+    }));
+    await expect(captureBrowserSurface({ capturePage }, 1024)).resolves.toBe(png);
+    expect(capturePage).toHaveBeenCalledWith(undefined, {
+      stayHidden: true,
+      stayAwake: true,
+    });
+
+    capturePage.mockRejectedValueOnce(new Error("UnknownVizError"));
+    await expect(captureBrowserSurface({ capturePage }, 1024)).resolves.toBeNull();
+  });
+
   it("publishes concise action copy without leaking typed values", () => {
     expect(browserActionLabel("snapshot", {})).toBe("Reading page…");
     expect(browserActionLabel("scroll", { y: 720 })).toBe("Scrolling down…");
@@ -601,6 +696,45 @@ describe("Zeros native browser surface", () => {
     expect(browserActionLabel("open", { url: "https://example.com/a" })).toBe(
       "Opening example.com…",
     );
+    expect(browserActionLabel("key", { key: "Enter" })).toBe("Pressing Enter…");
+    expect(browserActionLabel("key", { key: "<script>" })).toBe(
+      "Pressing a key…",
+    );
+    expect(browserActionLabel("select", { value: "secret" })).toBe(
+      "Choosing an option…",
+    );
+    expect(browserActionLabel("wait", { text: "Done" })).toBe(
+      "Waiting for the page…",
+    );
+  });
+
+  it("parses only named keys and single characters as key chords", () => {
+    expect(parseBrowserKeyChord("Enter")).toEqual({
+      keyCode: "Enter",
+      modifiers: [],
+      text: "\r",
+    });
+    expect(parseBrowserKeyChord("shift+tab")).toEqual({
+      keyCode: "Tab",
+      modifiers: ["shift"],
+      text: null,
+    });
+    expect(parseBrowserKeyChord("Cmd+A")).toEqual({
+      keyCode: "A",
+      modifiers: ["meta"],
+      text: null,
+    });
+    expect(parseBrowserKeyChord("x")).toEqual({
+      keyCode: "x",
+      modifiers: [],
+      text: "x",
+    });
+    expect(parseBrowserKeyChord("ArrowDown")?.keyCode).toBe("Down");
+    expect(parseBrowserKeyChord("hello")).toBeNull();
+    expect(parseBrowserKeyChord("Hyper+A")).toBeNull();
+    expect(parseBrowserKeyChord("Shift+Shift+A")).toBeNull();
+    expect(parseBrowserKeyChord("\u0007")).toBeNull();
+    expect(parseBrowserKeyChord("")).toBeNull();
   });
 
   it("enriches visible element actions with bounded accessible labels", () => {

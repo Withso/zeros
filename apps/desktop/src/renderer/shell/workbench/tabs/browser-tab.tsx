@@ -17,7 +17,7 @@
 //   - Back / forward / reload buttons work
 //   - URL bar tracks internal navigation
 //   - ⋯ menu: Hard Reload, DevTools / separate preview window, device
-//     toolbar, Clear Cache + Clear Cookies via IPC
+//     toolbar, page Appearance (per tab), Clear Cache + Clear Cookies via IPC
 //   - Float preview: the live viewport moves over the chat without reloading
 
 import React, {
@@ -28,6 +28,7 @@ import React, {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import type { BrowserAppearance } from "@zeros/protocol/browser-tools";
 import { workspacePreviewAvailable } from "../../../platform/cloud-workspace-access";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import { useCloudWorkspaceAccountAccess } from "../../../features/team/cloud-workspace-account-access";
@@ -92,6 +93,7 @@ import {
   variantNeedsLiveLayer,
 } from "../../../features/browser/variant-types";
 import { applyForkManifestFields } from "../../../features/browser/variant-artifact";
+import { BrowserAppearanceMenu } from "../../../features/browser/browser-appearance-menu";
 import {
   useWorkspaceStore,
   useWorkspaceDispatch,
@@ -212,7 +214,8 @@ function UnavailableBrowser() {
 /** The workbench and agent share one Electron WebContentsView. Attaching moves
  * that view from its hidden parking window into this exact rectangle; it does
  * not reload, copy cookies, or create a second page. */
-function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
+function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
+  const dispatch = useWorkspaceDispatch();
   const conversationId = tab.browserConversationId;
   const presence = useBrowserSessionAgentPresence(conversationId, active);
   const activity = presence.activity;
@@ -526,6 +529,24 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
     });
   }, [activity?.url, address, control, tab.url]);
 
+  const changeAppearance = useCallback(
+    (appearance: BrowserAppearance | undefined) => {
+      dispatch({
+        type: "UPDATE_WORKBENCH_TAB",
+        id: tab.id,
+        scope,
+        updates: { appearance },
+      });
+      if (!browserSessionId) return;
+      // The browser session controller resends on the session's next state.
+      void nativeInvoke("browser_session_appearance", {
+        browserSessionId,
+        appearance: appearance ?? "system",
+      }).catch(() => undefined);
+    },
+    [browserSessionId, dispatch, scope, tab.id],
+  );
+
   const awaitingConfirmation = activity?.status === "awaiting-confirmation";
   const closed = activity?.status === "closed";
   const browserLocked = presence.active || awaitingConfirmation;
@@ -634,6 +655,8 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
               />
             </div>
           </form>
+          {/* Appearance is a tab preference, so the menu stays available while
+              the agent drives or before it opens a page. */}
           <DropdownMenu>
             <Tooltip label="More">
               <DropdownMenuTrigger asChild>
@@ -641,17 +664,24 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
                   variant="ghost"
                   size="icon-sm"
                   className="text-fg2 hover:text-fg1 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 size-6"
-                  disabled={!browserSessionId || browserLocked}
                   aria-label="More browser actions"
                 >
                   <MoreHorizontal size={14} />
                 </Button>
               </DropdownMenuTrigger>
             </Tooltip>
-            <DropdownMenuContent align="end" className="min-w-[150px]">
-              <DropdownMenuItem onClick={() => void control("reload")}>
+            <DropdownMenuContent align="end" className="min-w-[180px]">
+              <DropdownMenuItem
+                onClick={() => void control("reload")}
+                disabled={!browserSessionId || browserLocked}
+              >
                 Reload
               </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <BrowserAppearanceMenu
+                appearance={tab.appearance}
+                onAppearanceChange={changeAppearance}
+              />
             </DropdownMenuContent>
           </DropdownMenu>
         </PanelHeader>
@@ -1971,6 +2001,8 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
           onOpenWindow={openWindow}
           devToolsUnavailable={devToolsUnavailable}
           onOpenDevTools={openDevTools}
+          appearance={tab.appearance}
+          onAppearanceChange={(appearance) => updateTab({ appearance })}
         />
         {deviceMode && (
           <BrowserDeviceToolbar
@@ -2141,9 +2173,13 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
                   // autoFocus but fork/close clicks were falling
                   // through to the page underneath.
                   // During Space+pan, block iframe so canvas pan wins.
+                  // Chromium gives the page this frame's color scheme as its
+                  // prefers-color-scheme, live and across origins. Unset, the
+                  // frame inherits the Zeros theme.
                   style={{
                     pointerEvents:
                       isResizing || chipVisible || spaceHeld ? "none" : "auto",
+                    colorScheme: tab.appearance,
                   }}
                   sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-presentation allow-storage-access-by-user-activation allow-downloads"
                   // Do not advertise clipboard-read, geolocation, camera, or
@@ -2212,6 +2248,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
                   <BrowserVariantFrame
                     key={variant.id}
                     variant={variant}
+                    appearance={tab.appearance}
                     canvasZoom={canvasViewport.zoom}
                     onDelete={deleteVariant}
                     onRename={renameVariant}
@@ -2297,6 +2334,9 @@ interface BrowserChromeProps {
   devToolsUnavailable: string | null;
   /** Inspects the tab's own iframe; never opens a preview window. */
   onOpenDevTools: () => void;
+  /** The page's color scheme; undefined follows Zeros. */
+  appearance: BrowserAppearance | undefined;
+  onAppearanceChange: (appearance: BrowserAppearance | undefined) => void;
 }
 
 function BrowserChrome({
@@ -2318,6 +2358,8 @@ function BrowserChrome({
   onOpenWindow,
   devToolsUnavailable,
   onOpenDevTools,
+  appearance,
+  onAppearanceChange,
 }: BrowserChromeProps) {
   const {
     state,
@@ -2570,6 +2612,10 @@ function BrowserChrome({
           >
             Show device toolbar
           </DropdownMenuCheckboxItem>
+          <BrowserAppearanceMenu
+            appearance={appearance}
+            onAppearanceChange={onAppearanceChange}
+          />
           <DropdownMenuSeparator />
           <DropdownMenuItem
             onClick={() => void clearCookies()}

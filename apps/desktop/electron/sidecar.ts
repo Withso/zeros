@@ -51,7 +51,11 @@ import { secretsFilePath, getSecret, setSecret } from "./secret-store";
 import { githubCredentialStore } from "./github-auth-runtime";
 import { getProductAccountIdForMain } from "./ipc/commands/auth-session";
 import { githubCredentialForEngine } from "./github-engine-credential";
-import { ProviderCredentialSync } from "./provider-credential-sync";
+import {
+  EngineAppliedSync,
+  ProviderCredentialSync,
+} from "./provider-credential-sync";
+import { agentControlAvailability } from "./agent-control/rollout";
 import { readProviderCredentialsForEngine } from "./provider-credentials";
 import {
   MCP_VAULT_ACCOUNT,
@@ -1093,11 +1097,14 @@ let spawnChain: Promise<unknown> = Promise.resolve();
 // it while the renderer can paint its validated boot snapshot in parallel.
 let engineSpawnBarrier: Promise<void> = Promise.resolve();
 
-/** Private main→engine capability courier. Kept outside process.env so shell,
- * updater, and other main-process children cannot inherit the browser bearer.
- * The engine captures and scrubs these two names before it spawns an agent. */
+/** Private main→engine capability couriers. Kept outside process.env so shell,
+ * updater, and other main-process children cannot inherit a service bearer.
+ * The engine captures and scrubs each URL/token pair before it spawns an
+ * agent. */
 let browserServiceEnvironment: { url: string; token: string } | null = null;
 let designCaptureEnvironment: { url: string; token: string } | null = null;
+let agentControlServiceEnvironment: { url: string; token: string } | null =
+  null;
 export function setDesignCaptureEnvironment(value: { url: string; token: string } | null): void {
   designCaptureEnvironment = value;
 }
@@ -1107,6 +1114,12 @@ export function setBrowserServiceEnvironment(
   value: { url: string; token: string } | null,
 ): void {
   browserServiceEnvironment = value;
+}
+
+export function setAgentControlServiceEnvironment(
+  value: { url: string; token: string } | null,
+): void {
+  agentControlServiceEnvironment = value;
 }
 
 export function setEngineSpawnBarrier(barrier: Promise<unknown>): void {
@@ -1323,6 +1336,11 @@ async function doSpawnEngine(
   if (browserServiceEnvironment) {
     extraEnv.ZEROS_BROWSER_SERVICE_URL = browserServiceEnvironment.url;
     extraEnv.ZEROS_BROWSER_SERVICE_TOKEN = browserServiceEnvironment.token;
+  }
+  if (agentControlServiceEnvironment) {
+    extraEnv.ZEROS_AGENT_CONTROL_SERVICE_URL = agentControlServiceEnvironment.url;
+    extraEnv.ZEROS_AGENT_CONTROL_SERVICE_TOKEN =
+      agentControlServiceEnvironment.token;
   }
   if (secretsFile) extraEnv.ZEROS_SECRETS_FILE = secretsFile;
   if (legacyAgentDb) extraEnv.ZEROS_LEGACY_AGENT_DB = legacyAgentDb;
@@ -1556,7 +1574,13 @@ async function doSpawnEngine(
       ) {
         return;
       }
-      if (state.child === child && providerCredentialSync.acknowledge(child, controlValue)) return;
+      if (
+        state.child === child &&
+        (providerCredentialSync.acknowledge(child, controlValue) ||
+          agentControlAvailabilitySync.acknowledge(child, controlValue))
+      ) {
+        return;
+      }
       void handleCloudReplicaEngineControl(
         controlValue,
         (responseLine) => {
@@ -1686,6 +1710,7 @@ async function doSpawnEngine(
   // subprocesses from inheriting a durable credential.
   void pushGithubCredentialToEngine();
   void pushProviderCredentialsToEngine().catch(() => {});
+  void pushAgentControlAvailabilityToEngine().catch(() => {});
 
   // Seed only the short-lived WorkOS bearer and public device identity. The
   // Ed25519 private key remains in Electron safeStorage; signing requests make
@@ -1894,6 +1919,26 @@ export async function pushProviderCredentialsToEngine(): Promise<void> {
     child.stdin.write(`${JSON.stringify({ type: "host.providerCredentials", requestId, credentials })}\n`);
   });
   emitEvent("provider-auth-changed", {});
+}
+
+/** Hand the engine main's agent control rollout, which it applies when it
+ * admits and routes control tools. Resolves once that engine confirms, so a
+ * capability refresh that follows boots the agent with it. */
+const agentControlAvailabilitySync = new EngineAppliedSync(
+  "engine.agentControlAvailabilityApplied",
+  "The engine did not confirm the agent control change.",
+);
+export async function pushAgentControlAvailabilityToEngine(): Promise<void> {
+  const child = state.child;
+  if (!child || child.killed || !child.stdin?.writable) return;
+  const availability = agentControlAvailability();
+  await agentControlAvailabilitySync.send(child, (requestId) => {
+    if (state.child !== child || !child.stdin?.writable || child.killed)
+      throw new Error("Engine changed");
+    child.stdin.write(
+      `${JSON.stringify({ type: "host.agentControlAvailability", requestId, availability })}\n`,
+    );
+  });
 }
 
 /** Refresh/clear the engine's in-memory cloud-replica session over the private

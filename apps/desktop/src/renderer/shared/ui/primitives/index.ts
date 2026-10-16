@@ -71,6 +71,7 @@ export {
 } from "./tooltip";
 export { Tabs, TabsList, TabsTrigger, TabsContent } from "./tabs";
 export { Toolbar } from "./toolbar";
+export { SplitButton, type SplitButtonProps } from "./split-button";
 export { ScrollArea, ScrollBar } from "./scroll-area";
 export { Switch } from "./switch";
 export { Slider } from "./slider";

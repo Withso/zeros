@@ -67,6 +67,7 @@ import {
   useConversationBrowserActivity,
 } from "../../features/browser/browser-session-activity-store";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
+import { leaveSimulatorAnnotation } from "../../features/simulators/simulator-annotation-actions";
 import { nativeInvoke } from "../../platform/runtime";
 import {
   forgetBrowserTabFavicon,
@@ -133,6 +134,13 @@ export function WorkbenchTabStrip({
         }).catch(() => undefined);
       }
     }
+    if (tab.type === "simulator") {
+      // Marks drawn on the device's screen are asked about first.
+      leaveSimulatorAnnotation(tab.id, () =>
+        dispatch({ type: "REMOVE_WORKBENCH_TAB", id: tab.id, scope }),
+      );
+      return;
+    }
     dispatch({ type: "REMOVE_WORKBENCH_TAB", id: tab.id });
   };
 
@@ -160,6 +168,9 @@ export function WorkbenchTabStrip({
                 canClose={
                   tab.type === "terminal" ||
                   tab.type === "browser" ||
+                  // Closing leaves the device running; idle shutdown stops
+                  // one Zeros booted.
+                  tab.type === "simulator" ||
                   // The fixed Files home only offers ✕ while a file is open
                   // (✕ = close the file); blank, there is nothing to close.
                   (tab.type === "files" && (!tab.fixed || !!tab.filePath))

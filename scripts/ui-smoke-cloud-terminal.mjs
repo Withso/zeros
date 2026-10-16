@@ -24,6 +24,15 @@ export async function runCloudTerminalSmoke({ page, check, harnessBase }) {
   await page
     .getByRole("button", { name: "New File, Browser, or Terminal tab" })
     .click();
+  await expect(
+    page.getByRole("option", { name: "Terminal", exact: true }),
+  ).toBeVisible();
+  // Simulators run on the Mac, so a cloud workspace never offers them.
+  for (const name of ["iOS Simulator", "Android Simulator"]) {
+    await expect(page.getByRole("option", { name, exact: true })).toHaveCount(
+      0,
+    );
+  }
   await page.getByRole("option", { name: "Terminal", exact: true }).click();
   const main = page.locator("[data-terminal-workbench]");
   const tabs = page.getByRole("tablist", { name: "Workspace panels" });

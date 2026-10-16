@@ -21,6 +21,7 @@
 import { z } from "zod";
 import { personalPreferencesSchema } from "@zeros/protocol/personal-preferences";
 import { GITHUB_AUTH_METHODS } from "@zeros/protocol/github-auth";
+import { SIMULATOR_IDLE_SHUTDOWN_CHOICES } from "@zeros/protocol/simulators";
 import {
   DESIGN_DIRECTORY_ID_PATTERN,
   sanitizeDesignDirectoryName,
@@ -494,11 +495,12 @@ const workspacesSchema = z
   })
   .partial();
 
-/** Browser-use policy is shared product configuration, while execution remains
- * provider-native: Codex Browser/IAB, Claude in Chrome, and no Cursor surface
- * until its SDK exposes one. Keep the machine trust posture in the
- * engine-owned settings file; never turn this table into a shared MCP/tool
- * contract. */
+/** Browser-use routing policy (docs/agent-control.md). Codex uses its built-in
+ * Browser plugin over the in-app IAB host, or the engine's `zeros_browser`
+ * tools when that switch is off or the plugin cannot start. Claude uses its
+ * official Chrome integration when chosen, otherwise `zeros_browser`, as does
+ * Cursor. Keep the machine trust posture in the engine-owned settings file;
+ * unknown keys in this table are never projected. */
 const browserSchema = z
   .object({
     /** Compatibility policy for settings written before provider-specific
@@ -511,9 +513,19 @@ const browserSchema = z
     codex_enabled: z
       .boolean()
       .describe("Enable Codex browser use in the in-app Chromium tab."),
+    codex_native: z
+      .boolean()
+      .describe(
+        "Let Codex use its built-in Browser plugin. Off, Codex uses the Zeros browser tools instead.",
+      ),
     claude_enabled: z
       .boolean()
       .describe("Enable Claude's official external Chrome integration."),
+    in_app_enabled: z
+      .boolean()
+      .describe(
+        "Let Claude and Cursor use the in-app Zeros browser when Claude is not set to use Chrome.",
+      ),
     provider: z
       .literal("isolated")
       .describe(
@@ -534,6 +546,48 @@ const browserSchema = z
       .describe(
         "Whether agents ask before opening a website. Consequential actions remain separately gated.",
       ),
+  })
+  .partial();
+
+/** Computer-use policy (docs/agent-control.md). Zeros computer use drives Mac
+ * apps through the bundled Cua Driver; Codex keeps its built-in computer use
+ * unless that switch is off. Like `[browser]`, unknown keys are never
+ * projected, so no hand-written switch can widen what agents may control. */
+const computerUseSchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .describe("Let agents control Mac apps with Zeros computer use."),
+    codex_native: z
+      .boolean()
+      .describe(
+        "Let Codex use its built-in computer use. Off, Codex uses Zeros computer use when it is enabled.",
+      ),
+    show_agent_cursor: z
+      .boolean()
+      .describe("Show the agent's cursor while it controls an app."),
+    blocked_apps: z
+      .array(z.string().max(255))
+      .max(256)
+      .describe(
+        "Bundle IDs of apps agents may never see or control. Zeros itself is always blocked.",
+      ),
+  })
+  .partial();
+
+const simulatorsSchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .describe("Let agents use the iOS and Android simulators in Zeros."),
+    idle_shutdown: z
+      .enum(SIMULATOR_IDLE_SHUTDOWN_CHOICES)
+      .describe(
+        "Shut down simulators Zeros booted after this long without use. Simulators booted outside Zeros are never shut down.",
+      ),
+    show_agent_touches: z
+      .boolean()
+      .describe("Show where the agent touches while it uses a simulator."),
   })
   .partial();
 
@@ -566,6 +620,8 @@ export const userSettingsSchema = repoSettingsSchema.extend({
   models: modelsSchema.optional(),
   workspaces: workspacesSchema.optional(),
   browser: browserSchema.optional(),
+  computer_use: computerUseSchema.optional(),
+  simulators: simulatorsSchema.optional(),
   tool_approvals_enabled: z.boolean().optional(),
   github: githubSchema.optional(),
   providers: z.record(z.string(), providerSchema).optional(),
@@ -581,6 +637,8 @@ export const repoLocalSettingsSchema = userSettingsSchema
     env_files: true,
     models: true,
     browser: true,
+    computer_use: true,
+    simulators: true,
     tool_approvals_enabled: true,
     providers: true,
     github: true,
@@ -628,6 +686,8 @@ export const USER_ONLY_KEYS = [
   "models",
   "workspaces",
   "browser",
+  "computer_use",
+  "simulators",
   "tool_approvals_enabled",
   "github",
   "providers",
@@ -641,6 +701,8 @@ const USER_ONLY_BY_LAYER: Record<string, readonly string[]> = {
     "agent_preferences_version",
     "models",
     "browser",
+    "computer_use",
+    "simulators",
     "tool_approvals_enabled",
     "providers",
     "github",
@@ -652,6 +714,8 @@ const USER_ONLY_BY_LAYER: Record<string, readonly string[]> = {
     "agent_preferences_version",
     "models",
     "browser",
+    "computer_use",
+    "simulators",
     "tool_approvals_enabled",
     "providers",
     "workspaces",
@@ -930,9 +994,15 @@ const TABLE_SHAPES: Record<string, Record<string, z.ZodType>> = {
   prompts: promptsSchema.shape,
   workspaces: workspacesSchema.shape,
   browser: browserSchema.shape,
+  computer_use: computerUseSchema.shape,
+  simulators: simulatorsSchema.shape,
   github: githubSchema.shape,
   design: designSchema.shape,
 };
+
+/** Privileged control policy: unknown switches stay out of effective
+ * settings until they have an explicit schema and review. */
+const CLOSED_TABLES = new Set(["browser", "computer_use", "simulators"]);
 
 /** Per-leaf sanitize of one raw layer document. Layer-aware: user-only keys
  *  found in repo-scoped layers are dropped with a warning. */
@@ -1079,16 +1149,16 @@ export function sanitizeLayer(
     }
     const shape = hasOwn(TABLE_SHAPES, key) ? TABLE_SHAPES[key] : undefined;
     if (shape) {
-      // Browser policy is a privileged product boundary. Unlike ordinary
-      // forward-compatible tables, do not project unknown browser switches
-      // (for example a hand-written raw-CDP escape hatch) into effective
-      // settings before that capability has an explicit schema and review.
+      // Browser and computer-use policy are privileged product boundaries.
+      // Unlike ordinary forward-compatible tables, do not project unknown
+      // switches (for example a hand-written raw-CDP or unrestricted-driver
+      // escape hatch) into effective settings.
       const table = sanitizeTable(
         shape,
         value,
         key,
         warnings,
-        !repositoryScoped && key !== "browser",
+        !repositoryScoped && !CLOSED_TABLES.has(key),
       );
       if (table) doc[key] = table;
       continue;

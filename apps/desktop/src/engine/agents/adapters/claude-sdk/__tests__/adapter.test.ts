@@ -7274,6 +7274,50 @@ describe("Claude native MCP identity", () => {
     } finally { await adapter.dispose(); }
   });
 
+  it.each([
+    { server: "zeros_browser", registered: true, source: "dynamic", mode: "default", allowed: true },
+    { server: "zeros_browser", registered: true, source: "dynamic", mode: "plan", allowed: false },
+    { server: "zeros_browser", registered: true, source: "project", mode: "default", allowed: false },
+    { server: "zeros_browser", registered: true, source: undefined, mode: "default", allowed: false },
+    { server: "zeros_browser", registered: false, source: "dynamic", mode: "default", allowed: false },
+    { server: "zeros_computer", registered: true, source: "dynamic", mode: "default", allowed: true },
+    { server: "zeros_computer", registered: true, source: "dynamic", mode: "plan", allowed: false },
+    { server: "zeros_computer", registered: true, source: "plugin", mode: "default", allowed: false },
+    { server: "zeros_computer", registered: false, source: "dynamic", mode: "default", allowed: false },
+    { server: "zeros_device", registered: true, source: "dynamic", mode: "default", allowed: true },
+    { server: "zeros_device", registered: true, source: "dynamic", mode: "plan", allowed: false },
+    { server: "zeros_device", registered: true, source: "project", mode: "default", allowed: false },
+    { server: "zeros_device", registered: false, source: "dynamic", mode: "default", allowed: false },
+  ])("runs the engine's control tools without a permission card only from its own registration: %j", async ({ server, registered, source, mode, allowed }) => {
+    const perms: PermCapture[] = [];
+    const live = makePushableQuery();
+    const ctx = makeCtx([], perms);
+    // A registered sibling namespace never vouches for another one.
+    ctx.mcpServers = [
+      { name: server === "zeros_browser" ? "zeros_computer" : "zeros_browser", transport: "http", url: "http://127.0.0.1:8/mcp" },
+      ...(registered ? [{ name: server, transport: "http" as const, url: "http://127.0.0.1:9/mcp" }] : []),
+    ];
+    const adapter = new ClaudeSdkAdapter(ctx, { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Browse")] }).catch(() => null);
+      await tick();
+      if (mode !== "default") await adapter.setMode({ sessionId: session.sessionId, modeId: mode });
+      const callback = live.captured[0].canUseTool as (name: string, input: object, options: object) => Promise<unknown>;
+      const decision = callback(`mcp__${server}__click`, { ref: "b1" }, { signal: new AbortController().signal, toolUseID: "browser",
+        ...(source === undefined ? {} : { mcpServer: { name: server, source } }) });
+      if (allowed) {
+        await expect(decision).resolves.toEqual({ behavior: "allow", updatedInput: { ref: "b1" } });
+        expect(perms).toHaveLength(0);
+      } else {
+        await vi.waitFor(() => expect(perms).toHaveLength(1));
+        adapter.respondToPermission({ permissionId: perms[0].id, response: { outcome: { outcome: "selected", optionId: "reject_once" } } });
+        await decision;
+      }
+      live.push(resultOk("browser")); await turn;
+    } finally { await adapter.dispose(); }
+  });
+
   it.each([true, false])("keeps the running query's browser permission identity when enabled=%s changes", async (enabled) => {
     const perms: PermCapture[] = [];
     const live = makePushableQuery();

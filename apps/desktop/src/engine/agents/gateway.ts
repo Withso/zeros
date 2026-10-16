@@ -92,6 +92,7 @@ import {
   browserUseEnabledForWorkspace,
   stripBrowserServiceCredentials,
 } from "../browser/browser-tool-client";
+import { computerUseRouteForWorkspace } from "../agent-control/computer-use-settings";
 import {
   AGENT_MANIFEST,
   bundledRuntimeVersion,
@@ -120,6 +121,7 @@ import {
 import type {
   AgentAdapter,
   AgentBrowserUse,
+  AgentComputerUse,
   AgentAdapterContext,
   AgentCapabilityPorts,
   AgentGatewayEvents,
@@ -4149,8 +4151,10 @@ export class AgentGateway {
 
   /** Resolve only browser capabilities the selected provider exposes natively.
    * Codex receives an opaque IAB host id for its official Browser plugin;
-   * Claude receives its official Agent SDK/Chrome flag; Cursor receives none.
-   * Browser startup failures degrade only this capability. */
+   * Claude receives its official Agent SDK/Chrome flag. The in-app Zeros
+   * browser reaches every provider as `zeros_browser` MCP tools through the
+   * session tool factory instead. Browser startup failures degrade only this
+   * capability. */
   private async resolveBrowserUse(
     agentId: string,
     cwd: string,
@@ -4202,6 +4206,33 @@ export class AgentGateway {
       this.events.onAgentStderr(
         agentId,
         `[zeros-browser] capability unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
+  }
+
+  /** Whether a Local Codex thread keeps its built-in computer use. Settings
+   * are read once per provider start; a change reaches a running chat when
+   * the renderer resumes it. Other agents get Zeros' computer use only, as
+   * `zeros_computer` tools from the session tool factory. */
+  private resolveComputerUse(
+    agentId: string,
+    cwd: string,
+    mainRepoRoot?: string,
+  ): AgentComputerUse | undefined {
+    if (agentId !== "codex" || process.platform !== "darwin") return undefined;
+    try {
+      return {
+        codexNative:
+          computerUseRouteForWorkspace(agentId, cwd, mainRepoRoot) ===
+          "codex-native",
+      };
+    } catch (error) {
+      this.events.onAgentStderr(
+        agentId,
+        `[zeros-computer] settings unavailable: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -5192,6 +5223,9 @@ export class AgentGateway {
             opts.conversationId,
             mainRepoRoot,
           );
+    const computerUse = cloudAdmission
+      ? undefined
+      : this.resolveComputerUse(agentId, cwd, mainRepoRoot);
     // Keep the provider, user MCP registry, hooks and plugins in the same
     // session. Product tools have separately revocable engine authority.
     try {
@@ -5212,6 +5246,7 @@ export class AgentGateway {
         cliBinary: spawn.cliBinary,
         mcpServers,
         ...(browserUse ? { browserUse } : {}),
+        ...(computerUse ? { computerUse } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
         ...(territory && actor === "agent-code" ? { territory } : {}),
         executionBoundary: preparedBoundary,
@@ -5519,6 +5554,9 @@ export class AgentGateway {
       opts.conversationId,
       mainRepoRoot,
     );
+    const computerUse = cloudAdmission
+      ? undefined
+      : this.resolveComputerUse(agentId, cwd, mainRepoRoot);
     try {
       opts.onExecutionCreated?.(executionId);
       opts.admissionSignal?.throwIfAborted();
@@ -5540,6 +5578,7 @@ export class AgentGateway {
         cliBinary: spawn.cliBinary,
         mcpServers,
         ...(browserUse ? { browserUse } : {}),
+        ...(computerUse ? { computerUse } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
         ...(territory ? { territory } : {}),
         executionBoundary: preparedBoundary,
@@ -6357,6 +6396,23 @@ export class AgentGateway {
     onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void,
   ): Promise<PromptResponse> {
     this.sessionTools.beginPrompt(sessionId);
+    try {
+      return await this.promptAfterBegin(agentId, sessionId, prompt, turnId, onNativePromptStage, onNativeOutput);
+    } finally {
+      // Every exit, including validation failures and Stop, hands surfaces the
+      // turn borrowed (the in-app browser, a computer or simulator) back to the user.
+      await this.sessionTools.endPrompt(sessionId);
+    }
+  }
+
+  private async promptAfterBegin(
+    agentId: string,
+    sessionId: string,
+    prompt: ContentBlock[],
+    turnId?: string,
+    onNativePromptStage?: (stage: NativePromptStage) => void,
+    onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void,
+  ): Promise<PromptResponse> {
     await this.awaitAdapterStartupSettled(sessionId);
     const boundary = this.executionBoundaries.get(sessionId);
     if (this.executionBoundary.backend === "cloud-worker") {

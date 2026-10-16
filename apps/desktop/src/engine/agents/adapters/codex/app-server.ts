@@ -1661,6 +1661,14 @@ export function buildMcpServerOverrides(
           `${base}.env_http_headers=${tomlInlineTable(s.headersFromEnv)}`,
         );
       }
+      if (
+        typeof s.toolTimeoutSec === "number" &&
+        Number.isInteger(s.toolTimeoutSec) &&
+        s.toolTimeoutSec > 0 &&
+        s.toolTimeoutSec <= 3_600
+      ) {
+        args.push("-c", `${base}.tool_timeout_sec=${s.toolTimeoutSec}`);
+      }
     } else {
       args.push("-c", `${base}.command="${escapeTomlString(s.command)}"`);
       if (s.args && s.args.length > 0) {

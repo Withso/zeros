@@ -103,6 +103,33 @@ import {
   isDesignMetadataRepoPath,
 } from "./design/metadata";
 import { DesignCodeToolAdmissions } from "./design/code-tool-admission";
+import { readAgentControlAvailability } from "@zeros/protocol/agent-control-rollout";
+import { isAgentControlFamily } from "@zeros/protocol/browser-tools";
+import type { ComputerUseOwner } from "@zeros/protocol/computer-use-tools";
+import { AgentControlToolAdmissions } from "./agent-control/admission";
+import {
+  agentControlFeatureAvailable,
+  setAgentControlAvailability,
+} from "./agent-control/availability";
+import { computerUseRouteForWorkspace } from "./agent-control/computer-use-settings";
+import {
+  invokeZerosComputerTool,
+  invokeZerosDeviceTool,
+  releaseZerosComputerUse,
+  releaseZerosDeviceUse,
+  reportNativeComputerUse,
+  resolveAgentControlServiceConfig,
+} from "./agent-control/control-service-client";
+import { NativeComputerUseReports } from "./agent-control/native-computer-use";
+import { deviceToolRouteForWorkspace } from "./agent-control/simulator-settings";
+import { composeAgentSessionToolFactories } from "./agents/session-tools";
+import {
+  acquireZerosBrowserToolSession,
+  browserRouteForWorkspace,
+  invokeZerosBrowserTool,
+  resolveBrowserServiceConfig,
+  stopZerosBrowserAction,
+} from "./browser/browser-tool-client";
 import { CodeReviewAgentTools } from "./agents/code-review-tools";
 import { codeReviewAgentActor, codeReviewProfileName } from "./code-review/actors";
 import { CodeReviewError } from "./code-review/errors";
@@ -961,6 +988,8 @@ export class ZerosEngine {
    *  permission prompts go to LOCAL clients only, and a relay client may not act
    *  on it. Empty for sessions with no managed workspace (never restricted). */
   private readonly sessionWorkspace = new Map<string, string>();
+  /** Codex's built-in computer use, forwarded so other chats wait for it. */
+  private readonly nativeComputerUse = new NativeComputerUseReports(reportNativeComputerUse);
   /** Agent sessionIds with a `prompt()` currently in flight. Lets turns.reset
    *  cancel a live turn ENGINE-side before truncating the timeline it streams
    *  into (the renderer's footer does the same, but a reset arriving from any
@@ -2135,7 +2164,7 @@ export class ZerosEngine {
       projectRoot: this.root,
       executionBoundary: this.executionBoundary,
       ...(this.cloudAgentLegacyFactory ? { cloudAgentExecutionFactory: this.cloudAgentLegacyFactory } : {}),
-      sessionToolFactory: new DesignCodeToolAdmissions({
+      sessionToolFactory: composeAgentSessionToolFactories([new DesignCodeToolAdmissions({
         workspaceTools: (input) => {
           const actor = codeReviewAgentActor(input);
           const scope = actor ? this.workspace.codeReviewAgentScope(input) : null;
@@ -2161,7 +2190,36 @@ export class ZerosEngine {
               workspaceIds: [workspaceId],
             }),
           ),
-      }).admit,
+      }).admit, new AgentControlToolAdmissions({
+        cloudWorker: this.cloudWorker !== null,
+        resolveWorkspace: (id) => this.workspace.designAgentWorkspace(id),
+        browser: {
+          configured: () => resolveBrowserServiceConfig() !== null,
+          route: (family, workspacePath, repoRoot) =>
+            browserRouteForWorkspace(family, workspacePath, repoRoot),
+          acquire: (owner) => acquireZerosBrowserToolSession(owner),
+          invoke: (request) => invokeZerosBrowserTool(request),
+          stop: (browserSessionId) => stopZerosBrowserAction({ browserSessionId }),
+        },
+        computer: {
+          configured: () =>
+            process.platform === "darwin" &&
+            resolveAgentControlServiceConfig() !== null,
+          route: (family, workspacePath, repoRoot) =>
+            computerUseRouteForWorkspace(family, workspacePath, repoRoot),
+          invoke: (request, signal) => invokeZerosComputerTool(request, { signal }),
+          release: (owner, reason) => releaseZerosComputerUse(owner, reason),
+        },
+        device: {
+          configured: () =>
+            process.platform === "darwin" &&
+            resolveAgentControlServiceConfig() !== null,
+          route: (family, workspacePath, repoRoot) =>
+            deviceToolRouteForWorkspace(family, workspacePath, repoRoot),
+          invoke: (request, signal) => invokeZerosDeviceTool(request, { signal }),
+          release: (owner, reason) => releaseZerosDeviceUse(owner, reason),
+        },
+      }).admit]),
       ...(this.cloud
         ? { previewGatewayFactory: this.cloudWorker?.version === 4
             ? new CloudNativePreviewGatewayFactory() : new CloudPreviewGatewayFactory() }
@@ -2531,6 +2589,35 @@ export class ZerosEngine {
               line,
             }),
           );
+        },
+        onCapabilityNotice: (agentId, { sessionId, notice }) => {
+          // The capability is a desktop install (ChatGPT's Browser plugin), so
+          // only the desktop that owns it can act on the notice.
+          this.router.broadcastLocal(
+            createMessage({
+              type: "AGENT_CAPABILITY_NOTICE",
+              source: "engine",
+              agentId,
+              ...(sessionId ? { sessionId } : {}),
+              notice,
+            }),
+          );
+        },
+        onNativeComputerUse: (agentId, { sessionId, active }) => {
+          void this.nativeComputerUse.update(sessionId, active, () => {
+            const workspaceId = this.sessionWorkspace.get(sessionId);
+            const conversationId = this.sessionChat.get(sessionId);
+            // Only Zeros computer use waits for a built-in one.
+            if (this.cloud || !agentControlFeatureAvailable("computerUse") ||
+                !workspaceId || !conversationId || !isAgentControlFamily(agentId)) return null;
+            return {
+              owner: {
+                workspaceId: workspaceId as ComputerUseOwner["workspaceId"],
+                conversationId: conversationId as ComputerUseOwner["conversationId"],
+              },
+              agent: agentId,
+            };
+          });
         },
         onAgentExit: (
           agentId: string,
@@ -12287,6 +12374,7 @@ export class ZerosEngine {
       credentials?: unknown;
       requestId?: unknown;
       data?: unknown;
+      availability?: unknown;
     };
     try {
       msg = JSON.parse(line);
@@ -12331,6 +12419,18 @@ export class ZerosEngine {
           this.publishPrivateHostControl(`${JSON.stringify({ type: "engine.providerCredentialsApplied", requestId: msg.requestId })}\n`);
         }
         void this.agents.refreshRegistry().catch(() => {});
+      }
+      return;
+    }
+    if (msg.type === "host.agentControlAvailability") {
+      // Control tools read this when they admit, route and run a call, so an
+      // agent that starts after the confirmation sees the new rollout.
+      const availability = readAgentControlAvailability(msg.availability);
+      if (!this.cloudWorker && availability) {
+        setAgentControlAvailability(availability);
+        if (typeof msg.requestId === "string" && /^[0-9a-f-]{36}$/i.test(msg.requestId)) {
+          this.publishPrivateHostControl(`${JSON.stringify({ type: "engine.agentControlAvailabilityApplied", requestId: msg.requestId })}\n`);
+        }
       }
       return;
     }

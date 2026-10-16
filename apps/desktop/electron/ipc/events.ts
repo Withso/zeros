@@ -23,6 +23,15 @@
 //   main-process-error { ... }
 //   browser-confirmation-request { ... } (trusted consequence prompt)
 //   browser-session-state { ... } (Zeros-owned browser activity)
+//   agent-control-confirmation-request { ... } (app or simulator approval)
+//   agent-control-confirmation-settled { confirmationId }
+//   computer-use-state { ... } (which chat uses the Mac, which wait)
+//   simulator-hub-state { ... } (devices, setup and idle-shutdown notices)
+//   simulator-frame    { viewId, seq, width, height, jpeg } (a live view)
+//   simulator-agent-state { version, holders } (which chats use which simulators)
+//   simulator-agent-touch { deviceId, kind, at, to? } (where an agent touched)
+//   simulator-recordings { version, recordings } (which simulators are recording)
+//   simulator-recording-end { deviceId, reason, capture | error } (a recording the tab didn't stop)
 //   browser-frame-navigated { frameName, url, title, loading, inPage?, cancelled?, cancelledUrl? }
 //   browser-frame-favicon { frameName, pageUrl, faviconDataUrl }
 // ──────────────────────────────────────────────────────────

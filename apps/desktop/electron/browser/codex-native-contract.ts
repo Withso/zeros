@@ -217,8 +217,9 @@ export function codexTurnSettlementDisposition(
   };
 }
 
-/** The official browser-client detects optional wire methods by comparing this
- * exact failure string, then transparently falls back to executeCdp. */
+/** The official Browser client detects optional wire methods by comparing this
+ * exact failure string (the text its own JSON-RPC peer sends for a method with
+ * no handler), then uses that method's fallback, such as executeCdp. */
 export function unsupportedCodexBrowserMethodMessage(method: string): string {
   return `No handler registered for method: ${method}`;
 }

@@ -122,6 +122,15 @@ export function dockBrowserTab(key: string): void {
   emit();
 }
 
+/** Docks a float the user closed. Returns true when no float of its scope
+ * remains. */
+export function closeBrowserFloat(key: string): boolean {
+  const closed = entries.find((entry) => entry.key === key);
+  if (!closed) return false;
+  dockBrowserTab(key);
+  return !entries.some((entry) => entry.scope === closed.scope);
+}
+
 export function updateBrowserFloatViewport(
   key: string,
   viewport: BrowserFloatViewport,

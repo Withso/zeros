@@ -1,10 +1,72 @@
 # Native Codex computer and browser use
 
 Zeros runs Codex through its pinned app-server. The installed Computer Use,
-Chrome and Browser plugins remain provider capabilities; Zeros does not bundle
-a replacement computer-control implementation or copy the user's browser
-credentials. The provider owns its tool definitions, skills, hooks, application
-and website approvals, and control-session lifecycle.
+Chrome and Browser plugins remain provider capabilities; Zeros does not copy
+the user's browser credentials. The provider owns its tool definitions,
+skills, hooks, application and website approvals, and control-session
+lifecycle.
+
+Separately, **Settings → Computer use** turns on Zeros' own computer-control
+runtime (the pinned Cua driver below), which any local agent family can then
+use through the `zeros_computer` tools. The two paths are independent: Codex's
+native plugins stay provider-owned, and the Zeros runtime stays off until the
+user enables it. Zeros computer use reaches users in stages; while its
+[rollout](agent-control.md#rollout) keeps it closed, Settings → Computer use
+is hidden and Codex keeps its native plugins.
+
+## Zeros computer use (Cua driver)
+
+The Zeros computer-use runtime runs in the Electron main process, not the
+engine: screen and input control follow the app's macOS TCC grants, so the
+feature exists for Local workspaces only and is honestly unavailable in cloud
+workspaces. `electron/computer-use/` owns the driver host (private worker
+lifecycle with bounded restart backoff, trusted sessions with TTLs, and
+allowlisted, host-authored failure text); `src/engine/agents/` exposes the
+`zeros_computer` MCP tools to Claude, Codex, and Cursor sessions when the
+user's settings allow them.
+
+The npm package `@trycua/cua-driver` is only the SDK. The process that
+performs control is the separate `cua-driver` executable, published on the
+matching `trycua/cua` GitHub release and shipped by no npm archive:
+
+- `scripts/stage-cua-driver.mjs` (`pnpm stage:cua-driver`) downloads the
+  pinned `cua-driver-rs-<version>-darwin-universal-binary.tar.gz`, verifies
+  its SHA-256, extracts the executable, thins it to arm64 with `lipo` (which
+  preserves the hardened-runtime signature), and re-verifies the Developer ID
+  authority. The version, URL, and hash are pinned in the script and must move
+  together with the `@trycua/cua-driver` dependency and its platform package
+  pin (below); the script refuses to stage when either pin differs.
+- Development resolves `binaries/cua-driver`; the packaged app resolves
+  `Contents/Resources/cua-driver` via an `extraResources` entry, and
+  `beforePack` runs the staging script so every packaging entrypoint gets it.
+- The SDK's native node runtime and `libcua_driver_sdk.dylib` are dlopen'd by
+  path, so `@trycua/**` and `@ubjs/**` sit in `asarUnpack`, and the packaged
+  main process imports the SDK from `app.asar.unpacked`
+  (`importCuaSdk` in `electron/computer-use/driver.ts`).
+- Those two files ship in the SDK's optional platform package,
+  `@trycua/cua-driver-darwin-arm64`, which `package.json` also lists under
+  `optionalDependencies` at the SDK's exact version. electron-builder's pnpm
+  collector packs an optional dependency only when it is linked at the
+  repository root, which pnpm never does for a transitive one; without the
+  root entry the packaged app silently lacks the SDK's native library.
+- `pnpm check:packaging-paths` name-matches the staged path, the
+  `extraResources` entry, the `asarUnpack` globs, and the staging script's
+  hash/`lipo`/`codesign` steps.
+
+The driver's MPL-2.0/MIT terms and its upstream NOTICE are inventoried in
+`THIRD-PARTY-LICENSES.txt` with reviewed copies under
+[`third_party/trycua-cua-driver/`](../third_party/trycua-cua-driver) and
+[`third_party/mpl-2.0/`](../third_party/mpl-2.0); see
+[`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md).
+
+Permissions follow the host app: the driver runs embedded, so Accessibility
+and Screen Recording grants belong to Zeros itself, and the Settings page
+walks the user through granting them (status polling, request, and deep links
+into System Settings). App and simulator approvals arrive as permission cards
+in the requesting chat and are answered through the agent-control contract in
+[`agent-control.md`](agent-control.md). Transcript rows reuse the browser
+activity card with a computer surface; another chat holding the computer shows
+a waiting line instead of the queued action.
 
 ## Runtime and profile ownership
 
@@ -72,9 +134,11 @@ attribution and authorization results for the specific permission. Accessibility
 denial, missing Automation entitlements, and missing tools are distinct failures.
 A generic "enable Zeros" instruction is not reliable without that attribution.
 
-Zeros has no separate Computer use settings page. The Tools inventory reports
-the selected session's runtime connection; it does not equate that connection
-or the helper's installation with macOS permission readiness.
+Codex's native computer use has no Zeros settings page (the separate Zeros
+runtime above has its own); its setup stays in Codex/ChatGPT and macOS. The
+Tools inventory reports the selected session's runtime connection; it does
+not equate that connection or the helper's installation with macOS permission
+readiness.
 
 The user enables permissions in macOS and restarts the helper if requested.
 Codex still enforces app/site approval, browser profile selection, locked-use

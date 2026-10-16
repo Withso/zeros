@@ -3,10 +3,14 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { File, Globe, Plus, Terminal } from "lucide-react";
+import { File, Globe, Plus, Smartphone, Terminal } from "lucide-react";
 import { addWorkbenchTerminal, openWorkbenchTerminal } from "./open-terminal";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { prefetchSettingsForRepo } from "../../features/settings/use-settings";
+import { warmSimulatorHub } from "../../features/simulators/simulator-hub-store";
+import { reusableSimulatorTab } from "../../features/simulators/simulator-tab-model";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { useAgentControlFeatureActive } from "../../features/settings/agent-control-rollout";
 import {
   NEW_TAB_MENU_CHROME,
   NewTabEnvironmentMenu,
@@ -32,7 +36,7 @@ import {
   PopoverTrigger,
   Tooltip,
 } from "@/renderer/shared/ui/primitives";
-import { createBrowserTab, createEmptyFilesTab } from "./tab-model";
+import { createBrowserTab, createEmptyFilesTab, createSimulatorTab } from "./tab-model";
 import { buildDirectFileOpenAction } from "./direct-file-open";
 import { searchRecentBrowsers, searchWorkspaceFiles } from "./quick-open";
 import { useChatCwd } from "../use-chat-cwd";
@@ -41,6 +45,15 @@ import {
   peekWorkspaceFiles,
 } from "../workspace-files-cache";
 import { looksLikeBrowserUrl, normalizeBrowserUrl } from "./tabs/localhost-url";
+import {
+  simulatorPlatformLabel,
+  type SimulatorPlatform,
+} from "@zeros/protocol/simulators";
+
+const SIMULATOR_ITEMS: ReadonlyArray<{ value: string; platform: SimulatorPlatform }> = [
+  { value: "new-ios-simulator", platform: "ios" },
+  { value: "new-android-simulator", platform: "android" },
+];
 
 export function WorkbenchNewTabMenu({
   terminalFolder,
@@ -55,6 +68,7 @@ export function WorkbenchNewTabMenu({
   const recentBrowsers = useRecentWorkbenchBrowsers();
   const cwd = useChatCwd();
   const { workspace } = useActiveWorkspace();
+  const simulatorsActive = useAgentControlFeatureActive("simulators");
   const menuRef = useRef<HTMLDivElement | null>(null);
   // Whether the + palette is currently visible.
   const [open, setOpen] = useState(false);
@@ -190,6 +204,19 @@ export function WorkbenchNewTabMenu({
     close();
   };
 
+  // Simulators run on this Mac, so cloud workspaces don't offer them.
+  const simulatorsAvailable = simulatorsActive && !isCloudWorkspace(scope);
+  /** Open a Simulator tab, reusing one that has no device yet. */
+  const addSimulator = (platform: SimulatorPlatform) => {
+    const blank = reusableSimulatorTab(tabs, platform);
+    dispatch(
+      blank
+        ? { type: "ACTIVATE_WORKBENCH_TAB", id: blank.id }
+        : { type: "ADD_WORKBENCH_TAB", tab: createSimulatorTab(platform) },
+    );
+    close();
+  };
+
   return (
     <Popover
       open={open}
@@ -230,6 +257,9 @@ export function WorkbenchNewTabMenu({
           onValueChange={(value) => {
             setSelection(value);
             if (value !== "environment") setEnvironmentOpen(false);
+            if (SIMULATOR_ITEMS.some((item) => item.value === value)) {
+              warmSimulatorHub();
+            }
           }}
           className="min-h-0 rounded-none [&_[data-slot=command-input-wrapper]]:h-10 [&_[data-slot=command-input-wrapper]]:shrink-0 [&_[data-slot=command-input-wrapper]_svg]:size-3.5"
         >
@@ -273,6 +303,18 @@ export function WorkbenchNewTabMenu({
                   <Terminal className="size-3.5" />
                   <span>Terminal</span>
                 </CommandItem>
+                {simulatorsAvailable &&
+                  SIMULATOR_ITEMS.map(({ value, platform }) => (
+                    <CommandItem
+                      key={value}
+                      value={value}
+                      onSelect={() => addSimulator(platform)}
+                      onPointerEnter={warmSimulatorHub}
+                    >
+                      <Smartphone className="size-3.5" />
+                      <span>{simulatorPlatformLabel(platform)}</span>
+                    </CommandItem>
+                  ))}
                 <NewTabEnvironmentMenu
                   open={environmentOpen}
                   onOpenChange={setEnvironmentOpen}

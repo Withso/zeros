@@ -1,6 +1,7 @@
 import {
   BROWSER_TOOL_NAMES,
   isBrowserProductId,
+  type BrowserAppearance,
   type BrowserSessionState,
 } from "@zeros/protocol/browser-tools";
 
@@ -302,6 +303,27 @@ export function planBrowserSessionOpen(
     actions.push({ type: "ACTIVATE_WORKBENCH_TAB", id: existing.id });
   }
   return actions;
+}
+
+/** The page color scheme main should apply to a live agent session, or null
+ * when nothing needs sending. The conversation's Browser tab owns the choice,
+ * including an unmounted tab, so the agent sees the page the user chose.
+ * `synced` is what was last sent for this session; System is sent explicitly
+ * because main may still hold an earlier choice for the same session. */
+export function browserSessionAppearanceToSync(
+  tabs: readonly WorkbenchTab[],
+  session: Pick<BrowserSessionState, "conversationId" | "status">,
+  synced: BrowserAppearance | "system" | undefined,
+): BrowserAppearance | "system" | null {
+  if (session.status === "closed") return null;
+  const tab = tabs.find(
+    (candidate) =>
+      candidate.type === "browser" &&
+      candidate.browserConversationId === session.conversationId,
+  );
+  if (!tab) return null;
+  const desired = tab.appearance ?? "system";
+  return desired === synced ? null : desired;
 }
 
 /** Closing a native process lease closes its durable browser tab as well. The

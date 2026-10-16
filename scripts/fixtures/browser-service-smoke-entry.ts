@@ -6,12 +6,15 @@ import { endianness, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection } from "node:net";
 
-import { app, BrowserWindow, nativeImage } from "electron";
+import { app, BaseWindow, BrowserWindow, nativeImage } from "electron";
+import type { WebContents } from "electron";
 
+import type { AgentControlPresentation } from "../../apps/desktop/electron/agent-control/overlay";
 import { startZerosBrowserService } from "../../apps/desktop/electron/browser/service";
 import { encodeCodexBrowserUseFrame } from "../../apps/desktop/electron/codex-browser-use-pipe";
 import { setMainWindow } from "../../apps/desktop/electron/ipc/events";
 import { registerIframePickerCommands } from "../../apps/desktop/electron/ipc/iframe-picker";
+import { registerIpcHandlers } from "../../apps/desktop/electron/ipc/router";
 
 async function listen(
   server: ReturnType<typeof createServer>,
@@ -24,6 +27,10 @@ async function listen(
   assert(address && typeof address !== "string");
   return address.port;
 }
+
+// The ordinary-tab window closes midway. Without a listener Electron quits on
+// the last window close and exits 0 before the remaining checks run.
+app.on("window-all-closed", () => {});
 
 app
   .whenReady()
@@ -85,8 +92,20 @@ app
         <button aria-label="Visit another site" onclick="location.href='http://127.0.0.1:${landingPort}/landing'">Visit another site</button>
         <button aria-label="Visit blocked site" onclick="location.href='http://127.0.0.1:${landingPort}/blocked'">Visit blocked site</button>
         <input type="file" aria-label="Evidence file">
+        <select aria-label="Plan size" onchange="document.querySelector('#result').textContent='plan '+this.value"><option value="s">Small</option><option value="l">Large</option></select>
+        <form onsubmit="event.preventDefault();document.querySelector('#result').textContent='searched '+this.q.value"><input name="q" aria-label="Search query"></form>
+        <form onsubmit="event.preventDefault();document.querySelector('#result').textContent='submitted '+event.submitter.getAttribute('aria-label')"><button aria-label="Save settings">Save settings</button><button aria-label="Delete account">Delete account</button></form>
         <div style="height:2200px"></div>
+        <button aria-label="Far below" onclick="document.querySelector('#result').textContent='far clicked'">Far below</button>
         <div id="result"></div>
+        <!-- CSS, not a matchMedia listener: a parked page renders no frames,
+             so change events wait, while the snapshot's innerText restyles. -->
+        <style>
+          html { scroll-behavior: smooth }
+          @media (prefers-color-scheme: dark) { .scheme-light { display: none } }
+          @media (prefers-color-scheme: light) { .scheme-dark { display: none } }
+        </style>
+        <p><span class="scheme-dark">Page scheme dark</span><span class="scheme-light">Page scheme light</span></p>
         <script>
           const role = new URLSearchParams(location.search).get('role');
           if (role === 'writer') localStorage.setItem('zeros-browser-smoke', 'private');
@@ -120,6 +139,7 @@ app
         },
       });
       setMainWindow(iframeWindow);
+      registerIpcHandlers();
       registerIframePickerCommands({ mainWindow: iframeWindow });
       await iframeWindow.loadFile(iframeShellPath);
       await assertEventually(
@@ -150,8 +170,9 @@ app
       // Invoke through main's registered handler by exposing the same one-shot
       // bridge shape the production preload uses. This remains renderer-script
       // free: only the fixed action enum + bounded URL cross the boundary.
+      // The trailing `true` keeps the uncloneable function out of the result.
       await iframeWindow.webContents.executeJavaScript(
-        `window.__zerosNativeControl = (action, url) => require("electron").ipcRenderer.invoke("zeros:invoke", { cmd: "browser:control-iframe", args: { frameName: "zeros-browser-ordinary-smoke", action, ...(url ? { url } : {}) } })`,
+        `window.__zerosNativeControl = (action, url) => require("electron").ipcRenderer.invoke("zeros:invoke", { cmd: "browser:control-iframe", args: { frameName: "zeros-browser-ordinary-smoke", action, ...(url ? { url } : {}) } }); true`,
         true,
       );
       const firstControl = await controlOrdinaryFrame(
@@ -189,8 +210,27 @@ app
         browserSessionId: string;
         faviconDataUrl?: string;
       }> = [];
+      const controlBar: ControlBarCall[] = [];
+      const userStops: Array<{
+        browserSessionId: string;
+        conversationId: string;
+      }> = [];
+      let zerosBrowserOpen = true;
       service = await startZerosBrowserService({
         artifactRoot,
+        zerosBrowserAvailable: () => zerosBrowserOpen,
+        agentControl: {
+          show: (sessionId, presentation) =>
+            controlBar.push({ kind: "show", sessionId, presentation }),
+          hide: (sessionId, hideOptions) =>
+            controlBar.push({
+              kind: "hide",
+              sessionId,
+              immediate: hideOptions?.immediate === true,
+            }),
+          dispose: (sessionId) => controlBar.push({ kind: "dispose", sessionId }),
+        },
+        onUserStoppedAgent: (stop) => userStops.push(stop),
         onSessionState: (state) => states.push(state),
         onConfirmationRequest: (request) => {
           confirmations.push(request.category);
@@ -249,10 +289,10 @@ app
       const uploadPath = join(movedWorkspaceRoot, "evidence.txt");
       await writeFile(uploadPath, "browser upload evidence", { mode: 0o600 });
 
-      const invoke = async (tool: string, args: unknown = {}) => {
+      const invoke = async (tool: string, args: unknown = {}, agent?: string) => {
         const response = await request(
           `/v1/sessions/${first.browserSessionId}/invoke`,
-          { version: 1, tool, arguments: args },
+          { version: 1, tool, arguments: args, ...(agent ? { agent } : {}) },
         );
         assert.equal(response.ok, true);
         return (await response.json()) as {
@@ -382,11 +422,118 @@ app
         "navigation",
       ]);
 
+      const formSnapshot = JSON.parse(
+        (await invoke("snapshot")).content[0]!.text!,
+      ) as { elements: Array<{ ref: string; name: string }> };
+      const planRef = formSnapshot.elements.find(
+        ({ name }) => name === "Plan size",
+      )?.ref;
+      assert(planRef);
+      const planned = await invoke("select", { ref: planRef, label: "Large" });
+      assert.equal(planned.success, true);
+      assert.match(planned.content[0]!.text ?? "", /plan l/);
+      const searchRef = (
+        JSON.parse(planned.content[0]!.text!) as {
+          elements: Array<{ ref: string; name: string }>;
+        }
+      ).elements.find(({ name }) => name === "Search query")?.ref;
+      assert(searchRef);
+      const typedQuery = await invoke("type", {
+        ref: searchRef,
+        text: "zeros",
+      });
+      assert.equal(typedQuery.success, true);
+      const currentSearchRef = (
+        JSON.parse(typedQuery.content[0]!.text!) as {
+          elements: Array<{ ref: string; name: string }>;
+        }
+      ).elements.find(({ name }) => name === "Search query")?.ref;
+      assert(currentSearchRef);
+      const submitted = await invoke("key", {
+        key: "Enter",
+        ref: currentSearchRef,
+      });
+      assert.equal(submitted.success, true);
+      assert.equal(confirmations.at(-1), "external-submit");
+      assert.equal(
+        (await invoke("wait", { text: "searched zeros", seconds: 2 })).success,
+        true,
+      );
+      assert.equal(
+        (await invoke("wait", { text: "never shown", seconds: 0.3 })).success,
+        false,
+      );
+      assert.equal((await invoke("key", { key: "Hyper+Q" })).success, false);
+
+      // Enter or Space on a control clicks it, so the key pauses exactly
+      // where clicking that control would, under the control's own name.
+      const freshRef = async (name: string) => {
+        const { elements } = JSON.parse(
+          (await invoke("snapshot")).content[0]!.text!,
+        ) as { elements: Array<{ ref: string; name: string }> };
+        const ref = elements.find((element) => element.name === name)?.ref;
+        assert(ref, `${name} is missing from the snapshot`);
+        return ref;
+      };
+      const beforeKeys = confirmations.length;
+      assert.equal(
+        (await invoke("key", { key: "Enter", ref: await freshRef("Pay now") }))
+          .success,
+        true,
+      );
+      assert.equal(
+        (await invoke("wait", { text: "paid", seconds: 2 })).success,
+        true,
+      );
+      assert.equal(
+        (
+          await invoke("key", {
+            key: "Space",
+            ref: await freshRef("Delete account"),
+          })
+        ).success,
+        true,
+      );
+      assert.equal(
+        (await invoke("wait", { text: "submitted Delete account", seconds: 2 }))
+          .success,
+        true,
+      );
+      assert.equal(
+        (
+          await invoke("key", {
+            key: "Enter",
+            ref: await freshRef("Delete account"),
+          })
+        ).success,
+        true,
+      );
+      assert.deepEqual(confirmations.slice(beforeKeys), [
+        "payment",
+        "destructive",
+        "destructive",
+      ]);
+
+      // The page is parked and has already taken agent input, so a smooth
+      // scroll would stall in the compositor. The page also sets
+      // `scroll-behavior: smooth`, which must not leave a click measuring its
+      // target before the target scrolled into view.
       const scrolled = await invoke("scroll", { y: 600 });
       const scrolledSnapshot = JSON.parse(scrolled.content[0]!.text!) as {
         scroll: { y: number };
+        elements: Array<{ ref: string; name: string }>;
       };
-      assert(scrolledSnapshot.scroll.y > 0);
+      assert(
+        scrolledSnapshot.scroll.y >= 600,
+        `scroll reached ${scrolledSnapshot.scroll.y}`,
+      );
+      const farRef = scrolledSnapshot.elements.find(
+        ({ name }) => name === "Far below",
+      )?.ref;
+      assert(farRef);
+      const farClicked = await invoke("click", { ref: farRef });
+      assert.equal(farClicked.success, true);
+      assert.match(farClicked.content[0]!.text ?? "", /far clicked/);
 
       const screenshot = await invoke("screenshot");
       assert.equal(
@@ -421,6 +568,19 @@ app
       assert.match(
         reader.content[0]!.type === "text" ? reader.content[0].text : "",
         /isolated/,
+      );
+      // No input has shown this parked page's widget yet; a capture of a
+      // hidden widget has no surface to copy.
+      const parkedScreenshot = await service.invoke({
+        version: 1,
+        browserSessionId: second.browserSessionId,
+        tool: "screenshot",
+        arguments: {},
+      });
+      assert.equal(parkedScreenshot.success, true);
+      assert.equal(
+        parkedScreenshot.content.some(({ type }) => type === "image"),
+        true,
       );
       const released = await request("/v1/sessions/release", {
         version: 1,
@@ -464,6 +624,34 @@ app
         /isolated/,
       );
 
+      // The Browser tab's Appearance is emulated per session and survives
+      // navigation. The Codex section below also ends the shared debugger
+      // session, after which the choice must come back.
+      const pageScheme = async () =>
+        /Page scheme (dark|light)/.exec(
+          (await invoke("snapshot")).content[0]?.text ?? "",
+        )?.[1];
+      const followedScheme = await pageScheme();
+      assert(followedScheme);
+      const chosenScheme = followedScheme === "dark" ? "light" : "dark";
+      assert.equal(
+        service.setAppearance(first.browserSessionId, chosenScheme),
+        true,
+      );
+      await assertEventually(
+        async () => (await pageScheme()) === chosenScheme,
+        "The Browser appearance did not reach the open page.",
+      );
+      assert.equal(
+        (
+          await invoke("open", {
+            url: `http://127.0.0.1:${fixturePort}/?role=reader`,
+          })
+        ).success,
+        true,
+      );
+      assert.equal(await pageScheme(), chosenScheme);
+
       // Native Codex IAB lifecycle: app-server turn completion must hand the
       // exact retained WebContents back even when node_repl never calls
       // tabs.finalize() (timeout/kernel reset). The settlement is idempotent,
@@ -489,14 +677,36 @@ app
         ).result?.type,
         "iab",
       );
-      assert(
+      const nativeTab = (
+        await nativeBrowserRequest<{ id: number }>(
+          service.codexBrowserUsePipePath,
+          "createTab",
+          nativeParams,
+        )
+      ).result;
+      assert(nativeTab?.id);
+      // The split Browser client checks URL policy and origin consent against
+      // the committed URL before guarded commands, and falls back only on the
+      // exact no-handler text for optional methods it probes.
+      assert.equal(
         (
-          await nativeBrowserRequest<{ id: number }>(
+          await nativeBrowserRequest<string>(
             service.codexBrowserUsePipePath,
-            "createTab",
-            nativeParams,
+            "getCommittedTabUrl",
+            { ...nativeParams, tabId: nativeTab.id },
           )
-        ).result?.id,
+        ).result,
+        `http://127.0.0.1:${fixturePort}/?role=reader`,
+      );
+      assert.equal(
+        (
+          await nativeBrowserRequest(
+            service.codexBrowserUsePipePath,
+            "executeTabRead",
+            { ...nativeParams, tabId: nativeTab.id },
+          )
+        ).error?.message,
+        "No handler registered for method: executeTabRead",
       );
       const settleNativeTurn = (browserSessionId = first.browserSessionId) =>
         request("/v1/providers/codex/turn-ended", {
@@ -566,11 +776,27 @@ app
       assert.equal(afterStoppedTurn.result?.length, 1);
       await settleNativeTurn();
 
+      await assertEventually(
+        async () => (await pageScheme()) === chosenScheme,
+        "The Browser appearance did not return after Codex released the page.",
+      );
+      assert.equal(service.setAppearance(first.browserSessionId, null), true);
+      await assertEventually(
+        async () => (await pageScheme()) === followedScheme,
+        "System appearance did not return the page to the app's scheme.",
+      );
+
       const interrupted = invoke("open", {
         url: `http://127.0.0.1:${fixturePort}/slow`,
       });
       await new Promise((resolve) => setTimeout(resolve, 150));
-      assert.equal(service.stopBrowserAction(first.browserSessionId), true);
+      // The engine stops an agent turn through the authenticated HTTP route;
+      // it applies the same interruption as the Browser tab's Stop button.
+      const stopped = await request(
+        `/v1/sessions/${first.browserSessionId}/stop`,
+        { version: 1 },
+      );
+      assert.deepEqual(await stopped.json(), { version: 1, stopped: true });
       assert.equal((await interrupted).success, false);
       assert.equal(
         (
@@ -580,6 +806,121 @@ app
         ).success,
         true,
       );
+
+      // The Browser tab's control bar names the agent driving an attached
+      // page. Keys the agent sends reach the page; Esc from the user takes the
+      // page back like the bar's Stop and is reported, so the renderer can
+      // settle a pending Browser approval.
+      const lastControlBarCall = () => {
+        const call = controlBar.at(-1);
+        assert(call, "The service never drove the control bar.");
+        return call;
+      };
+      const tabSurfaceId = "browser-smoke-tab";
+      const tabBounds = { x: 0, y: 48, width: 960, height: 600 };
+      const workbench = new BaseWindow({ show: false, width: 960, height: 648 });
+      try {
+        assert.equal((await invoke("snapshot", {}, "cursor")).success, true);
+        assert(
+          service.attach(
+            first.browserSessionId,
+            workbench,
+            tabBounds,
+            tabSurfaceId,
+          ),
+        );
+        const shown = lastControlBarCall();
+        assert(shown.kind === "show", "Attaching did not show the control bar.");
+        assert.equal(shown.sessionId, first.browserSessionId);
+        assert.equal(shown.presentation.title, "Cursor");
+        assert.equal(shown.presentation.detail, "Using the browser");
+        assert.equal(shown.presentation.window, workbench);
+        assert.deepEqual(shown.presentation.bounds, tabBounds);
+        assert.equal(shown.presentation.raise, true);
+        const page = shown.presentation.above.webContents;
+        assert.match(page.getURL(), /role=reader/);
+
+        assert.equal(
+          (await invoke("key", { key: "Escape" }, "cursor")).success,
+          true,
+        );
+        assert.equal(userStops.length, 0);
+        assert.equal(lastControlBarCall().kind, "show");
+
+        // Picture in picture keeps its own hover strip instead.
+        assert(
+          service.attach(
+            first.browserSessionId,
+            workbench,
+            { x: 600, y: 400, width: 320, height: 200 },
+            "browser-agent-pip-smoke",
+          ),
+        );
+        assert.deepEqual(lastControlBarCall(), {
+          kind: "hide",
+          sessionId: first.browserSessionId,
+          immediate: true,
+        });
+        assert(
+          service.attach(
+            first.browserSessionId,
+            workbench,
+            tabBounds,
+            tabSurfaceId,
+          ),
+        );
+        assert.equal(lastControlBarCall().kind, "show");
+
+        // While the Zeros browser rollout is closed the agent keeps the page,
+        // but the bar is gone and the user's Esc does not stop the agent.
+        zerosBrowserOpen = false;
+        service.refreshAgentControl();
+        assert.deepEqual(lastControlBarCall(), {
+          kind: "hide",
+          sessionId: first.browserSessionId,
+          immediate: true,
+        });
+        pressEscape(page);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.equal(userStops.length, 0);
+        zerosBrowserOpen = true;
+        service.refreshAgentControl();
+        assert.equal(lastControlBarCall().kind, "show");
+
+        const beforeUserEscape = controlBar.length;
+        pressEscape(page);
+        await assertEventually(
+          () => userStops.length === 1,
+          "Esc in an agent-owned page did not stop the agent.",
+        );
+        assert.deepEqual(userStops, [
+          {
+            browserSessionId: first.browserSessionId,
+            conversationId: "conversation-a",
+          },
+        ]);
+        const afterUserEscape = controlBar.slice(beforeUserEscape);
+        assert(
+          afterUserEscape.some(
+            (call) => call.kind === "hide" && !call.immediate,
+          ),
+          "Taking the page back did not fade the control bar.",
+        );
+        assert(!afterUserEscape.some((call) => call.kind === "show"));
+        // The page is the user's now, and so is Esc.
+        pressEscape(page);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.equal(userStops.length, 1);
+
+        assert(service.detach(first.browserSessionId, tabSurfaceId));
+        assert.deepEqual(lastControlBarCall(), {
+          kind: "hide",
+          sessionId: first.browserSessionId,
+          immediate: true,
+        });
+      } finally {
+        workbench.destroy();
+      }
 
       const finalized = await invoke("close");
       assert.equal(finalized.success, true);
@@ -599,11 +940,20 @@ app
         },
       );
       assert.equal(closed.status, 204);
+      // The runner treats a clean exit without this line as a failure.
+      console.log("zeros-browser-service-smoke: complete");
     } finally {
       if (iframeWindow && !iframeWindow.isDestroyed()) iframeWindow.close();
       if (service) await service.stop();
-      await new Promise<void>((resolve) => fixture.close(() => resolve()));
-      await new Promise<void>((resolve) => landing.close(() => resolve()));
+      // Chromium's network process can hold a socket it opened ahead of a
+      // request that never came. Node counts it as active, so close() alone
+      // would wait on it after every page is gone.
+      for (const server of [fixture, landing]) {
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        });
+      }
       await rm(artifactRoot, { recursive: true, force: true });
       await rm(movedWorkspaceRoot, { recursive: true, force: true });
       app.quit();
@@ -613,6 +963,20 @@ app
     console.error(error);
     app.exit(1);
   });
+
+type ControlBarCall =
+  | {
+      kind: "show";
+      sessionId: string;
+      presentation: AgentControlPresentation;
+    }
+  | { kind: "hide"; sessionId: string; immediate: boolean }
+  | { kind: "dispose"; sessionId: string };
+
+function pressEscape(page: WebContents): void {
+  page.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
+  page.sendInputEvent({ type: "keyUp", keyCode: "Escape" });
+}
 
 function owner(conversationId: string, workspaceRoot: string) {
   return {

@@ -52,8 +52,13 @@ try {
       }.`,
     );
   }
+  if (!result.stdout?.includes("zeros-browser-service-smoke: complete")) {
+    throw new Error(
+      "Electron browser service harness exited before running every check.",
+    );
+  }
   console.log(
-    "✓ smoke:browser-service — identity, workspace relocation, owner release, loopback auth, isolation, agent and ordinary-tab favicon publication, ordinary-tab live Back/Forward/Reload, tokenized stale-ref rejection, trusted/occlusion-safe clicks, explicit/script/redirect cross-site confirmations and denial, consequential confirmations, cancellable downloads/navigation, visible scroll, uploads, clean screenshots, traces, retained close handoff, and browsing-data reset passed",
+    "✓ smoke:browser-service — identity, workspace relocation, owner release, loopback auth, isolation, agent and ordinary-tab favicon publication, ordinary-tab live Back/Forward/Reload, tokenized stale-ref rejection, trusted/occlusion-safe clicks, explicit/script/redirect cross-site confirmations and denial, consequential confirmations, key/select/wait actions with Enter-submit and Enter/Space control confirmations, HTTP action stop, the attached page's agent control bar with Esc takeover and a closed Zeros browser rollout, cancellable downloads/navigation, parked-page scroll and screenshots, click targets on smooth-scrolling pages, uploads, clean screenshots, traces, Appearance emulation across navigation and Codex debugger release, native IAB committed-URL reads and optional-method fallback, retained close handoff, and browsing-data reset passed",
   );
 } finally {
   rmSync(scratch, { recursive: true, force: true });

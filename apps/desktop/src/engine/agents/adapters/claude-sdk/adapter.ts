@@ -92,6 +92,9 @@ import type {
 } from "@zeros/protocol/agent-events";
 import type { AccountDetails } from "@zeros/protocol/messages";
 import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
+import { BROWSER_TOOL_NAMESPACE } from "@zeros/protocol/browser-tools";
+import { COMPUTER_TOOL_NAMESPACE } from "@zeros/protocol/computer-use-tools";
+import { DEVICE_TOOL_NAMESPACE } from "@zeros/protocol/device-tools";
 import { buildCodeAgentDesignTerritoryNotice } from "@zeros/protocol/system-instructions";
 
 import {
@@ -655,6 +658,30 @@ function isClaudeChromeTool(
   // wrappers omit provenance; retain that narrow query-owned fallback.
   return server === undefined ||
     (server?.name === "claude-in-chrome" && server.source === "dynamic");
+}
+
+const ZEROS_CONTROL_NAMESPACES: readonly string[] = [
+  BROWSER_TOOL_NAMESPACE,
+  COMPUTER_TOOL_NAMESPACE,
+  DEVICE_TOOL_NAMESPACE,
+];
+
+/** The engine's own control tools (in-app browser, computer use, simulators).
+ * Their hosts ask the user before a risky website, the first action in each
+ * app or on each simulator, and every simulator boot, so a per-call tool card
+ * would only repeat it. Trust needs the engine registration
+ * and its host-config provenance; a project or plugin namesake keeps the
+ * normal permission card. */
+function isZerosControlTool(
+  toolName: string,
+  registered: ReadonlySet<string>,
+  server?: { name: string; source: string },
+): boolean {
+  return (
+    server?.source === "dynamic" &&
+    registered.has(server.name) &&
+    toolName.startsWith(`mcp__${server.name}__`)
+  );
 }
 
 function claudeChromeSessionPermission(input: {
@@ -3281,7 +3308,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  We raise the same permission UI the hook path used, await the user's
    *  decision (keyed by permissionId so N concurrent/subagent requests
    *  resolve independently — no deadlock), and map it to allow/deny. */
-  private canUseTool(state: SdkSession, nativeChromeEnabled: boolean) {
+  private canUseTool(
+    state: SdkSession,
+    nativeChromeEnabled: boolean,
+    zerosControlServers: ReadonlySet<string> = new Set(),
+  ) {
     return (
       toolName: string,
       input: Record<string, unknown>,
@@ -3326,6 +3357,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           input,
           options,
         );
+      }
+      if (
+        state.permissionMode !== "plan" &&
+        isZerosControlTool(toolName, zerosControlServers, options.mcpServer)
+      ) {
+        return Promise.resolve({ behavior: "allow", updatedInput: input });
       }
       const requiresExplicitApproval =
         options.defaultToNo === true || options.suppressAlwaysAllowRule === true;
@@ -4591,7 +4628,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // pendingRestart), so gated modes get canUseTool back before the next turn.
       ...(state.permissionMode === "bypass"
         ? { allowDangerouslySkipPermissions: true }
-        : { canUseTool: this.canUseTool(state, state.browserUse && !sessionMcp.some((server) => server.name === "claude-in-chrome")) }),
+        : { canUseTool: this.canUseTool(
+            state,
+            state.browserUse && !sessionMcp.some((server) => server.name === "claude-in-chrome"),
+            new Set(
+              sessionMcp
+                .filter((server) => server.transport === "http" && ZEROS_CONTROL_NAMESPACES.includes(server.name))
+                .map((server) => server.name),
+            ),
+          ) }),
       // (A) Blocking-dialog channel. Wired defensively: if this CLI routes
       // AskUserQuestion through onUserDialog we handle it here; otherwise the
       // canUseTool special-case (B) covers it. Deliberately exclude Claude in

@@ -1,11 +1,11 @@
-// Internal Zeros browser-host contract.
+// Zeros browser-host contract.
 //
 // Electron main owns the browser runtime. The session/confirmation/state wire
 // shapes cross only trusted Zeros boundaries. The semantic tool inventory is
-// retained for browser-chrome compatibility, smoke tests, and old transcript
-// decoding; provider adapters MUST NOT advertise it. Codex uses OpenAI's
-// Browser plugin/IAB contract, Claude uses its official Chrome integration,
-// and Cursor receives no browser tools.
+// the `zeros_browser` MCP server the engine serves to Claude and Cursor, and
+// to Codex when its built-in Browser plugin is switched off or unavailable.
+// Codex otherwise keeps OpenAI's Browser plugin/IAB contract, and Claude keeps
+// its official Chrome integration when the user chooses it.
 
 import type { ConversationId, WorkspaceId } from "./identities";
 
@@ -23,7 +23,10 @@ export const BROWSER_TOOL_NAMES = [
   "snapshot",
   "click",
   "type",
+  "key",
+  "select",
   "scroll",
+  "wait",
   "upload",
   "resize",
   "back",
@@ -61,9 +64,8 @@ const EMPTY_OBJECT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-/** Internal semantic executor manifest. This is not an agent capability and
- * must never be translated into an MCP, dynamic-tool, or SDK custom-tool
- * namespace. Raw CDP and host-computer control are deliberately absent. */
+/** Semantic executor manifest, advertised verbatim as the `zeros_browser` MCP
+ * tool list. Raw CDP and host-computer control are deliberately absent. */
 export const BROWSER_TOOL_DEFINITIONS: readonly BrowserToolDefinition[] = [
   {
     name: "open",
@@ -115,6 +117,35 @@ export const BROWSER_TOOL_DEFINITIONS: readonly BrowserToolDefinition[] = [
     },
   },
   {
+    name: "key",
+    description:
+      "Press one key or shortcut, such as Enter, Escape, Tab, ArrowDown or Meta+A, optionally focusing a referenced element first. Enter in a form field, Enter or Space on a control a click would confirm, and either key inside a frame from another origin pause for a Zeros confirmation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", maxLength: 40 },
+        ref: { type: "string", pattern: BROWSER_ELEMENT_REF_PATTERN },
+      },
+      required: ["key"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "select",
+    description:
+      "Choose an option in a referenced select element by its value or visible label, then return a fresh semantic snapshot.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string", pattern: BROWSER_ELEMENT_REF_PATTERN },
+        value: { type: "string", maxLength: 1_000 },
+        label: { type: "string", maxLength: 1_000 },
+      },
+      required: ["ref"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "scroll",
     description:
       "Visibly scroll the shared page by a bounded horizontal and/or vertical distance, then return a fresh semantic snapshot.",
@@ -123,6 +154,19 @@ export const BROWSER_TOOL_DEFINITIONS: readonly BrowserToolDefinition[] = [
       properties: {
         x: { type: "integer", minimum: -10_000, maximum: 10_000 },
         y: { type: "integer", minimum: -10_000, maximum: 10_000 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "wait",
+    description:
+      "Wait until text appears on the page, or for a short delay, for at most 10 seconds. Returns a fresh semantic snapshot.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", maxLength: 500 },
+        seconds: { type: "number", minimum: 0.1, maximum: 10 },
       },
       additionalProperties: false,
     },
@@ -246,11 +290,20 @@ export interface BrowserSessionReleaseResponse {
   released: boolean;
 }
 
+/** Stop the agent's current browser action without closing the page. The
+ * same interruption the Browser tab's Stop button applies. */
+export interface BrowserSessionStopResponse {
+  version: typeof BROWSER_SERVICE_VERSION;
+  stopped: boolean;
+}
+
 export interface BrowserToolInvokeRequest {
   version: typeof BROWSER_SERVICE_VERSION;
   browserSessionId: string;
   tool: BrowserToolName;
   arguments: BrowserJsonValue;
+  /** The admitted agent, named on the page's control bar. */
+  agent?: AgentControlFamily;
 }
 
 export type BrowserToolContent =
@@ -353,6 +406,53 @@ export interface BrowserSessionState {
   agentActivityUntil?: number;
 }
 
+/** Agents that drive Zeros-owned browser, computer, and simulator control. */
+export const AGENT_CONTROL_FAMILIES = ["claude", "codex", "cursor"] as const;
+export type AgentControlFamily = (typeof AGENT_CONTROL_FAMILIES)[number];
+
+const AGENT_CONTROL_NAMES: Record<AgentControlFamily, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  cursor: "Cursor",
+};
+
+export function isAgentControlFamily(
+  value: unknown,
+): value is AgentControlFamily {
+  return (
+    typeof value === "string" &&
+    (AGENT_CONTROL_FAMILIES as readonly string[]).includes(value)
+  );
+}
+
+/** The name trusted control chrome and approval cards show for an agent. */
+export function agentControlName(family: AgentControlFamily): string {
+  return AGENT_CONTROL_NAMES[family];
+}
+
+/** What trusted control chrome says the agent is doing with its page. A
+ * finished action's label stays on the state for history, so it only shows
+ * while that action is still running. */
+export function browserControlDetail(
+  state: Pick<BrowserSessionState, "status" | "action">,
+): string {
+  if (state.status === "awaiting-confirmation") return "Waiting for approval";
+  if (state.status === "working" && state.action?.label) {
+    return state.action.label;
+  }
+  return "Using the browser";
+}
+
+/** A Browser tab's explicit page color scheme. Absent means System: the page
+ * follows the Zeros appearance, so "system" is never stored. */
+export type BrowserAppearance = "light" | "dark";
+
+export function normalizeBrowserAppearance(
+  value: unknown,
+): BrowserAppearance | undefined {
+  return value === "light" || value === "dark" ? value : undefined;
+}
+
 /** Browser origin permission identity shared by the official-provider adapter
  * and native host. Only apex/www redirects coalesce; subdomains, schemes, and
  * non-default ports retain independent grants. */
@@ -364,6 +464,59 @@ export function canonicalBrowserOriginGrantKey(value: string): string | null {
     return `${url.protocol}//${hostname}${url.port ? `:${url.port}` : ""}`;
   } catch {
     return null;
+  }
+}
+
+/** Which browser an agent family uses in a Local workspace. Cloud workspaces
+ * get none of these; callers check placement first. */
+export type BrowserRoute = "off" | "codex-native" | "claude-chrome" | "zeros";
+
+/** The `[browser]` settings table, normalized with the shipped defaults. */
+export interface BrowserRouteSettings {
+  /** "Enable browser use" for Codex. */
+  codexEnabled: boolean;
+  /** "Use Codex's built-in browser". Off routes Codex to `zeros_browser`. */
+  codexNative: boolean;
+  /** "Use Claude Code with Chrome". Takes Claude off the in-app browser. */
+  claudeChrome: boolean;
+  /** "Allow Claude and Cursor to use the in-app browser". */
+  inAppEnabled: boolean;
+}
+
+export function browserRouteSettings(raw: unknown): BrowserRouteSettings {
+  const table =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
+  const flag = (key: string, fallback: boolean) =>
+    typeof table[key] === "boolean" ? (table[key] as boolean) : fallback;
+  // `enabled` predates the per-provider switches; it still decides Codex
+  // when `codex_enabled` was never written.
+  return {
+    codexEnabled: flag("codex_enabled", flag("enabled", true)),
+    codexNative: flag("codex_native", true),
+    claudeChrome: flag("claude_enabled", false),
+    inAppEnabled: flag("in_app_enabled", true),
+  };
+}
+
+/** The routing table in docs/agent-control.md. A Codex built-in browser that
+ * turns out to be unusable falls back to `zeros` at session start. */
+export function resolveBrowserRoute(
+  agentFamily: string,
+  settings: BrowserRouteSettings,
+): BrowserRoute {
+  switch (agentFamily) {
+    case "codex":
+      if (!settings.codexEnabled) return "off";
+      return settings.codexNative ? "codex-native" : "zeros";
+    case "claude":
+      if (settings.claudeChrome) return "claude-chrome";
+      return settings.inAppEnabled ? "zeros" : "off";
+    case "cursor":
+      return settings.inAppEnabled ? "zeros" : "off";
+    default:
+      return "off";
   }
 }
 

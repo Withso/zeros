@@ -133,7 +133,7 @@ afterAll(() => {
   else process.env.CODEX_HOME = realCodexHome;
 });
 
-function makeAdapter() {
+function makeAdapter(emit: Partial<AgentAdapterContext["emit"]> = {}) {
   rt.startThreadParams = [];
   rt.methodOrder = [];
   rt.configReadError = null;
@@ -150,6 +150,7 @@ function makeAdapter() {
       onQuestionRequest: vi.fn(),
       onAgentStderr: vi.fn(),
       onAgentExit: vi.fn(),
+      ...emit,
     },
   } as unknown as AgentAdapterContext;
   return new CodexAppServerAdapter(ctx);
@@ -404,6 +405,93 @@ describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
     const config = configOfThreadStart();
     expect(config.plugins).toBeUndefined();
     expect(config["plugins.browser@openai-bundled.enabled"]).toBe(false);
+  });
+
+  it("keeps Codex's built-in computer use unless Settings turn it off", async () => {
+    for (const computerUse of [undefined, { codexNative: true }]) {
+      const adapter = makeAdapter();
+      await adapter.newSession({
+        cwd: "/tmp/proj",
+        ...(computerUse ? { computerUse } : {}),
+      });
+      const config = configOfThreadStart();
+      expect(config.mcp_servers).not.toHaveProperty("cua_repl");
+      expect(
+        Object.keys(config).filter((key) => key.includes("computer-use")),
+      ).toEqual([]);
+      await adapter.dispose();
+    }
+  });
+
+  it("turns off Codex's built-in computer use for the thread", async () => {
+    const adapter = makeAdapter();
+    // A configured HTTP namesake stays a valid transport when disabled.
+    rt.mcpServers = { "computer-use": { url: "https://cu.example/mcp" } };
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      computerUse: { codexNative: false },
+    });
+    const config = configOfThreadStart();
+    expect(config.mcp_servers).toMatchObject({
+      cua_repl: { enabled: false, command: "zeros-disabled-mcp-server" },
+      "computer-use": { enabled: false, url: "https://cu.example/mcp" },
+    });
+    expect(config["plugins.computer-use@openai-bundled.enabled"]).toBe(false);
+    expect(
+      config["plugins.unified-computer-use@openai-bundled.enabled"],
+    ).toBe(false);
+    expect(config.plugins).toBeUndefined();
+    await adapter.dispose();
+
+    // Never disable a server Zeros itself registered under that name.
+    const own = makeAdapter();
+    await own.newSession({
+      cwd: "/tmp/proj",
+      computerUse: { codexNative: false },
+      mcpServers: [{ name: "cua_repl", transport: "stdio", command: "own" }],
+    });
+    expect(configOfThreadStart().mcp_servers).not.toHaveProperty("cua_repl");
+    await own.dispose();
+  });
+
+  it("reports Codex's built-in computer use while it acts and when the turn settles", async () => {
+    const onNativeComputerUse = vi.fn();
+    const adapter = makeAdapter({ onNativeComputerUse });
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    const { bootCodexAppServerRuntime } = await import("../app-server");
+    const runtime = await vi.mocked(bootCodexAppServerRuntime).mock.results.at(
+      -1,
+    )!.value;
+    const itemStarted = (server: string, type = "mcpToolCall") => {
+      for (const [method, handler] of vi.mocked(runtime.onNotification).mock
+        .calls) {
+        if (method !== "item/started") continue;
+        (handler as (params: unknown) => void)({
+          threadId: "thread-title",
+          turnId: "turn-1",
+          item: { type, id: `call-${server}`, server, tool: "js", arguments: {}, status: "inProgress" },
+        });
+      }
+    };
+    itemStarted("node_repl");
+    itemStarted("cua_repl", "dynamicToolCall");
+    expect(onNativeComputerUse).not.toHaveBeenCalled();
+    itemStarted("cua_repl");
+    itemStarted("computer-use");
+    expect(onNativeComputerUse.mock.calls).toEqual([
+      ["codex", { sessionId: session.executionId, active: true }],
+    ]);
+
+    await adapter.prompt({
+      sessionId: session.executionId!,
+      prompt: [{ type: "text", text: "Use TextEdit" }],
+    });
+    expect(onNativeComputerUse).toHaveBeenLastCalledWith("codex", {
+      sessionId: session.executionId,
+      active: false,
+    });
+    await adapter.dispose();
+    expect(onNativeComputerUse).toHaveBeenCalledTimes(2);
   });
 
   it("does not start a chat with unimported local MCP when its configuration cannot be read", async () => {

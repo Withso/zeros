@@ -1,12 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { initialAgentControlAvailability } from "@zeros/protocol/agent-control-rollout";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { setAgentControlAvailability } from "../../agent-control/availability";
 import {
   acquireZerosBrowserHost,
+  acquireZerosBrowserToolSession,
+  browserRouteForWorkspace,
   browserUseEnabledForWorkspace,
+  invokeZerosBrowserTool,
   registerCodexBrowserUseSession,
   releaseZerosBrowserConversation,
   resolveBrowserServiceConfig,
   settleCodexBrowserUseTurn,
+  stopZerosBrowserAction,
   stripBrowserServiceCredentials,
 } from "../../browser/browser-tool-client";
 import { opSettingsResolve } from "../../settings/ops";
@@ -32,7 +38,15 @@ describe("Zeros browser tool client", () => {
       sources: {},
       warnings: [],
     });
+    setAgentControlAvailability({
+      zerosBrowser: true,
+      computerUse: true,
+      simulators: true,
+    });
   });
+  afterEach(() =>
+    setAgentControlAvailability(initialAgentControlAvailability()),
+  );
 
   it("accepts only credential-free loopback service URLs", () => {
     expect(resolveBrowserServiceConfig(ENV)).toEqual({
@@ -61,6 +75,8 @@ describe("Zeros browser tool client", () => {
         ZEROS_BROWSER_SERVICE_TOKEN: "secret",
         ZEROS_DESIGN_CAPTURE_URL: "http://127.0.0.1:2",
         ZEROS_DESIGN_CAPTURE_TOKEN: "fixture-private-capture",
+        ZEROS_AGENT_CONTROL_SERVICE_URL: "http://127.0.0.1:3",
+        ZEROS_AGENT_CONTROL_SERVICE_TOKEN: "control-secret",
       }),
     ).toEqual({ KEEP: "yes" });
     expect(
@@ -304,6 +320,284 @@ describe("Zeros browser tool client", () => {
       }),
     ).resolves.toBeNull();
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("does not allocate an IAB host when Codex should use the Zeros browser", async () => {
+    vi.mocked(opSettingsResolve).mockReturnValue({
+      effective: {
+        browser: { codex_enabled: true, codex_native: false, provider: "isolated" },
+      },
+      sources: {},
+      warnings: [],
+    });
+    const fetchImpl = vi.fn<typeof fetch>();
+
+    await expect(
+      acquireZerosBrowserHost({
+        workspaceId: "workspace-zeros-route",
+        conversationId: "conversation-zeros-route",
+        workspaceRoot: "/tmp/project",
+        env: ENV,
+        fetchImpl,
+      }),
+    ).resolves.toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("keeps Codex on its built-in browser while the Zeros browser is closed", async () => {
+    setAgentControlAvailability(initialAgentControlAvailability());
+    vi.mocked(opSettingsResolve).mockReturnValue({
+      effective: {
+        browser: { codex_enabled: true, codex_native: false, provider: "isolated" },
+      },
+      sources: {},
+      warnings: [],
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json({
+        version: 1,
+        browserSessionId: "browser_native",
+        capabilities: { codexIab: true },
+      }),
+    );
+
+    await expect(
+      acquireZerosBrowserHost({
+        workspaceId: "workspace-closed",
+        conversationId: "conversation-closed",
+        workspaceRoot: "/tmp/project",
+        env: ENV,
+        fetchImpl,
+      }),
+    ).resolves.toEqual({ browserSessionId: "browser_native" });
+    fetchImpl.mockImplementationOnce(
+      async () => new Response(null, { status: 204 }),
+    );
+    await expect(
+      releaseZerosBrowserConversation("workspace-closed", "conversation-closed"),
+    ).resolves.toBe(true);
+  });
+
+  it("routes each agent from the workspace browser settings", () => {
+    expect(browserRouteForWorkspace("codex", "/tmp/project")).toBe(
+      "codex-native",
+    );
+    expect(browserRouteForWorkspace("claude", "/tmp/project")).toBe("zeros");
+    expect(browserRouteForWorkspace("cursor", "/tmp/project")).toBe("zeros");
+    vi.mocked(opSettingsResolve).mockReturnValue({
+      effective: {
+        browser: {
+          codex_native: false,
+          claude_enabled: true,
+          in_app_enabled: false,
+          provider: "isolated",
+        },
+      },
+      sources: {},
+      warnings: [],
+    });
+    expect(browserRouteForWorkspace("codex", "/tmp/project")).toBe("zeros");
+    expect(browserRouteForWorkspace("claude", "/tmp/project")).toBe(
+      "claude-chrome",
+    );
+    expect(browserRouteForWorkspace("cursor", "/tmp/project")).toBe("off");
+    vi.mocked(opSettingsResolve).mockReturnValue({
+      effective: { browser: { provider: "remote" } },
+      sources: {},
+      warnings: [],
+    });
+    expect(() => browserRouteForWorkspace("cursor", "/tmp/project")).toThrow(
+      "Unsupported Zeros browser provider setting",
+    );
+  });
+
+  it("acquires a tool session without the Codex switch or its IAB capability", async () => {
+    vi.mocked(opSettingsResolve).mockReturnValue({
+      effective: { browser: { codex_enabled: false, provider: "isolated" } },
+      sources: {},
+      warnings: [],
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json({ version: 1, browserSessionId: "browser_tools" }),
+    );
+
+    await expect(
+      acquireZerosBrowserToolSession({
+        workspaceId: "workspace-tools",
+        conversationId: "conversation-tools",
+        workspaceRoot: "/tmp/project",
+        env: ENV,
+        fetchImpl,
+      }),
+    ).resolves.toEqual({ browserSessionId: "browser_tools" });
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:43123/v1/sessions/acquire",
+    );
+    await expect(
+      acquireZerosBrowserToolSession({
+        workspaceId: "workspace-tools",
+        conversationId: "conversation-tools",
+        workspaceRoot: "/tmp/project",
+        env: {},
+        fetchImpl,
+      }),
+    ).resolves.toBeNull();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("invokes one browser tool through the authenticated host", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json({
+        version: 1,
+        success: true,
+        content: [
+          { type: "text", text: '{"url":"https://example.com/"}' },
+          { type: "image", data: "AAAA", mimeType: "image/jpeg" },
+        ],
+      }),
+    );
+
+    await expect(
+      invokeZerosBrowserTool({
+        browserSessionId: "browser_tools",
+        tool: "open",
+        arguments: { url: "https://example.com" },
+        env: ENV,
+        fetchImpl,
+      }),
+    ).resolves.toEqual({
+      version: 1,
+      success: true,
+      content: [
+        { type: "text", text: '{"url":"https://example.com/"}' },
+        { type: "image", data: "AAAA", mimeType: "image/jpeg" },
+      ],
+    });
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:43123/v1/sessions/browser_tools/invoke",
+    );
+    expect(fetchImpl.mock.calls[0]?.[1]?.headers).toMatchObject({
+      authorization: "Bearer service-secret",
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
+      version: 1,
+      tool: "open",
+      arguments: { url: "https://example.com" },
+    });
+  });
+
+  it("names the agent driving the page for the host's control bar", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json({ version: 1, success: true, content: [] }),
+    );
+    await invokeZerosBrowserTool({
+      browserSessionId: "browser_tools",
+      tool: "snapshot",
+      arguments: {},
+      agent: "codex",
+      env: ENV,
+      fetchImpl,
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
+      version: 1,
+      tool: "snapshot",
+      arguments: {},
+      agent: "codex",
+    });
+    await expect(
+      invokeZerosBrowserTool({
+        browserSessionId: "browser_tools",
+        tool: "snapshot",
+        arguments: {},
+        agent: "droid" as never,
+        env: ENV,
+        fetchImpl,
+      }),
+    ).rejects.toThrow("Invalid Zeros browser tool request");
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an unknown tool, an unsafe session id and a malformed result", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json({ version: 1, success: true, content: [{ type: "video" }] }),
+    );
+    await expect(
+      invokeZerosBrowserTool({
+        browserSessionId: "browser_tools",
+        tool: "evaluate" as never,
+        arguments: {},
+        env: ENV,
+        fetchImpl,
+      }),
+    ).rejects.toThrow("Invalid Zeros browser tool request");
+    await expect(
+      invokeZerosBrowserTool({
+        browserSessionId: "browser/../escape",
+        tool: "snapshot",
+        arguments: {},
+        env: ENV,
+        fetchImpl,
+      }),
+    ).rejects.toThrow("Invalid Zeros browser tool request");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await expect(
+      invokeZerosBrowserTool({
+        browserSessionId: "browser_tools",
+        tool: "snapshot",
+        arguments: {},
+        env: ENV,
+        fetchImpl,
+      }),
+    ).rejects.toThrow("invalid tool result");
+  });
+
+  it("aborts an in-flight invoke with the caller's signal", async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn<typeof fetch>(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(init.signal!.reason),
+          );
+        }),
+    );
+    const pending = invokeZerosBrowserTool({
+      browserSessionId: "browser_tools",
+      tool: "wait",
+      arguments: { seconds: 5 },
+      signal: controller.signal,
+      env: ENV,
+      fetchImpl,
+    });
+    controller.abort(new Error("stopped"));
+    await expect(pending).rejects.toThrow("stopped");
+  });
+
+  it("stops the current browser action without closing the page", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json({ version: 1, stopped: true }),
+    );
+    await expect(
+      stopZerosBrowserAction({
+        browserSessionId: "browser_tools",
+        env: ENV,
+        fetchImpl,
+      }),
+    ).resolves.toBe(true);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:43123/v1/sessions/browser_tools/stop",
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
+      version: 1,
+    });
+    await expect(
+      stopZerosBrowserAction({
+        browserSessionId: "browser/../escape",
+        env: ENV,
+        fetchImpl,
+      }),
+    ).resolves.toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an unsupported browser host before allocating it", async () => {

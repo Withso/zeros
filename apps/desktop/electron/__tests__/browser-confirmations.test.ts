@@ -4,6 +4,7 @@ import {
   BrowserConfirmationBroker,
   classifyBrowserClick,
   classifyBrowserInput,
+  classifyBrowserKey,
 } from "../browser/confirmations";
 
 describe("Zeros browser consequential-action confirmations", () => {
@@ -31,6 +32,67 @@ describe("Zeros browser consequential-action confirmations", () => {
     expect(classifyBrowserInput("password")).toBe("authentication");
     expect(classifyBrowserInput("file")).toBe("file-upload");
     expect(classifyBrowserInput("email")).toBeNull();
+  });
+
+  it("weighs Enter or Space on a focused control as clicking that control", () => {
+    const pay = { label: "Pay now", tagName: "BUTTON" };
+    expect(classifyBrowserKey("Enter", pay)).toEqual({ category: "payment", label: "Pay now" });
+    expect(classifyBrowserKey("Space", pay)).toEqual({ category: "payment", label: "Pay now" });
+    expect(classifyBrowserKey("Escape", pay)).toBeNull();
+    expect(classifyBrowserKey("Enter", { label: "View details", tagName: "A" })).toBeNull();
+    // A form's own submit button pauses under its own name, not the form's
+    // first button.
+    const remove = {
+      label: "Delete account",
+      tagName: "BUTTON",
+      submitsForm: true,
+      submitLabel: "Save settings",
+    };
+    expect(classifyBrowserKey("Enter", remove)).toEqual({
+      category: "destructive",
+      label: "Delete account",
+    });
+    expect(classifyBrowserKey("Space", remove)).toEqual({
+      category: "destructive",
+      label: "Delete account",
+    });
+    expect(
+      classifyBrowserKey("Space", { label: "", tagName: "BUTTON", submitsForm: true }),
+    ).toEqual({ category: "external-submit", label: "Submit information to this site" });
+  });
+
+  it("pauses Enter in a form field as its default button and lets typing keys through", () => {
+    const field = {
+      label: "",
+      tagName: "INPUT",
+      typing: true,
+      implicitSubmit: true,
+      submitLabel: "Place order",
+    };
+    expect(classifyBrowserKey("Enter", field)).toEqual({
+      category: "payment",
+      label: "Place order",
+    });
+    expect(classifyBrowserKey("Enter", { ...field, submitLabel: "" })).toEqual({
+      category: "external-submit",
+      label: "Submit this form",
+    });
+    expect(classifyBrowserKey("Space", field)).toBeNull();
+    expect(classifyBrowserKey("Enter", { label: "", tagName: "TEXTAREA", typing: true })).toBeNull();
+    expect(classifyBrowserKey("Enter", null)).toBeNull();
+  });
+
+  it("pauses Enter or Space that land in a frame Zeros can't read", () => {
+    const frame = { label: "", tagName: "IFRAME", opaque: true };
+    expect(classifyBrowserKey("Enter", frame)).toEqual({
+      category: "external-submit",
+      label: "Press Enter inside an embedded frame",
+    });
+    expect(classifyBrowserKey("Space", frame)).toEqual({
+      category: "external-submit",
+      label: "Press Space inside an embedded frame",
+    });
+    expect(classifyBrowserKey("Tab", frame)).toBeNull();
   });
 
   it("never turns a sensitive allow-site answer into a persistent grant", async () => {

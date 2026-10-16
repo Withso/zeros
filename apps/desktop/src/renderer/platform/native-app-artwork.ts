@@ -3,8 +3,16 @@ import { safeToolImageSource } from "@zeros/protocol/tool-artwork";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { nativeInvoke, useNativeRuntime } from "./runtime";
 
+function safeAppName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const name = value.trim();
+  return name && name.length <= 200 ? name : null;
+}
+
 export function createNativeAppArtworkResource(
   read: (bundleIds: string[]) => Promise<Record<string, string | null>>,
+  sanitize: (value: unknown) => string | null = (value) =>
+    safeToolImageSource(value) ?? null,
 ) {
   const cache = new KeyedAsyncCache<string | null>({
     maxEntries: 128,
@@ -19,8 +27,7 @@ export function createNativeAppArtworkResource(
     const result = await read(batch.map(([id]) => id)).catch(
       () => ({}) as Record<string, string | null>,
     );
-    for (const [id, settle] of batch)
-      settle(safeToolImageSource(result?.[id]) ?? null);
+    for (const [id, settle] of batch) settle(sanitize(result?.[id]));
     scheduled = false;
     if (pending.size) {
       scheduled = true;
@@ -43,14 +50,27 @@ export function createNativeAppArtworkResource(
   return { cache, load };
 }
 
-type ImageCommand = "native_app_icons" | "tool_artwork_images";
+type NativeCommand =
+  | "native_app_icons"
+  | "native_app_names"
+  | "tool_artwork_images";
 type ImageResult = Record<string, string | null>;
 const resources = new WeakMap<
   object,
-  Map<ImageCommand, ReturnType<typeof createNativeAppArtworkResource>>
+  Map<NativeCommand, ReturnType<typeof createNativeAppArtworkResource>>
 >();
 const unavailable = createNativeAppArtworkResource(async () => ({}));
-function currentResource(command: ImageCommand) {
+function readNative(command: NativeCommand, ids: string[]) {
+  switch (command) {
+    case "native_app_icons":
+      return nativeInvoke<ImageResult>("native_app_icons", { bundleIds: ids });
+    case "native_app_names":
+      return nativeInvoke<ImageResult>("native_app_names", { bundleIds: ids });
+    case "tool_artwork_images":
+      return nativeInvoke<ImageResult>("tool_artwork_images", { urls: ids });
+  }
+}
+function currentResource(command: NativeCommand) {
   const bridge =
     typeof window !== "undefined" ? window.__ZEROS_NATIVE__ : undefined;
   if (!bridge) return unavailable;
@@ -61,15 +81,24 @@ function currentResource(command: ImageCommand) {
   }
   let resource = commands.get(command);
   if (!resource) {
-    resource = createNativeAppArtworkResource((ids) => {
-      if (window.__ZEROS_NATIVE__ !== bridge) return Promise.resolve({});
-      return command === "native_app_icons"
-        ? nativeInvoke<ImageResult>("native_app_icons", { bundleIds: ids })
-        : nativeInvoke<ImageResult>("tool_artwork_images", { urls: ids });
-    });
+    resource = createNativeAppArtworkResource(
+      (ids) => {
+        if (window.__ZEROS_NATIVE__ !== bridge) return Promise.resolve({});
+        return readNative(command, ids);
+      },
+      command === "native_app_names" ? safeAppName : undefined,
+    );
     commands.set(command, resource);
   }
   return resource;
+}
+
+function nativeBundleId(bundleId: string | undefined): string {
+  return bundleId &&
+    bundleId.length <= 255 &&
+    /^[\w-]+(?:\.[\w-]+)+$/.test(bundleId)
+    ? bundleId
+    : "";
 }
 
 export function useNativeAppIcon(
@@ -78,11 +107,18 @@ export function useNativeAppIcon(
 ): string | null {
   useNativeRuntime();
   const resource = currentResource("native_app_icons");
-  const id =
-    bundleId && bundleId.length <= 255 && /^[\w-]+(?:\.[\w-]+)+$/.test(bundleId)
-      ? bundleId
-      : "";
-  return useCachedArtwork(resource, id, active);
+  return useCachedArtwork(resource, nativeBundleId(bundleId), active);
+}
+
+/** The installed app's name, or null until Launch Services answers or when
+ * the app is not installed. */
+export function useNativeAppName(
+  bundleId: string | undefined,
+  active: boolean,
+): string | null {
+  useNativeRuntime();
+  const resource = currentResource("native_app_names");
+  return useCachedArtwork(resource, nativeBundleId(bundleId), active);
 }
 
 export function useToolArtworkImage(

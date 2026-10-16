@@ -145,10 +145,11 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
   }
 
   // The organization-owned Browser use panel must be reachable by the same
-  // Chrome notice action, including its honest cloud availability explanation.
+  // Chrome notice action, including its honest cloud availability explanation
+  // on each agent row (Codex, Claude and Cursor).
   await page.goto(`${transcript}?owner=organization&placement=cloud`);
   await page.getByRole("button", { name: "Open Settings", exact: true }).click();
-  await expect(page.getByText("Native browser is unavailable in cloud workspaces.", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("Native browser is unavailable in cloud workspaces.", { exact: true })).toHaveCount(3);
   await expect(page.locator("#browser-use-claude-enabled")).toHaveCount(0);
   check("Cloud Chrome setup opens the existing organization Browser use availability panel", true);
 
@@ -162,20 +163,20 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
   check("Organization-local Chrome setup opens the device controls and extension action", true);
   await page.evaluate(() => window.claudeRuntimeUi.selectPlacement("cloud"));
   await expect(localChrome).toHaveCount(0);
-  await expect(cloudGuidance).toHaveCount(2);
+  await expect(cloudGuidance).toHaveCount(3);
   await page.evaluate(() => window.claudeRuntimeUi.selectPlacement("local"));
   await expect(localChrome).toBeVisible();
   await expect(cloudGuidance).toHaveCount(0);
   await page.evaluate(() => window.claudeRuntimeUi.selectOwner("other"));
   await expect(localChrome).toHaveCount(0);
-  await expect(cloudGuidance).toHaveCount(2);
+  await expect(cloudGuidance).toHaveCount(3);
   await page.evaluate(() => window.claudeRuntimeUi.selectOwner("personal"));
   await expect(localChrome).toBeVisible();
   await page.evaluate(() => window.claudeRuntimeUi.selectOwner("organization"));
   await expect(localChrome).toBeVisible();
   await page.evaluate(() => window.claudeRuntimeUi.selectPlacement(null));
   await expect(localChrome).toHaveCount(0);
-  await expect(cloudGuidance).toHaveCount(2);
+  await expect(cloudGuidance).toHaveCount(3);
   check("Browser settings follow placement and exact owner through Local, cloud, Personal and cleared workspace selections", true);
 
   for (const theme of ["dark", "light"]) {

@@ -197,6 +197,36 @@ describe("Design-agent MCP boundary", () => {
     expect(response.status).toBe(403);
   });
 
+  it("serves another product tool set under its own name and credential", async () => {
+    await server.stop();
+    server = new DesignAgentMcpServer({
+      token,
+      name: "zeros_browser",
+      credentialEnv: "ZEROS_BROWSER_TOOLS_CAPABILITY",
+      toolTimeoutSec: 600,
+      handler: {
+        assertActive() {},
+        listTools: () => [{ name: "snapshot", inputSchema: { type: "object" } }],
+        callTool: async () => ({ content: [{ type: "text", text: "ok" }] }),
+      },
+    });
+    await server.start();
+    expect(server.registration).toEqual({
+      name: "zeros_browser",
+      transport: "http",
+      url: server.url,
+      headersFromEnv: { Authorization: "ZEROS_BROWSER_TOOLS_CAPABILITY" },
+      toolTimeoutSec: 600,
+    });
+    const connected = await connect();
+    expect(
+      (await connected.listTools()).tools.map((tool) => tool.name),
+    ).toEqual(["snapshot"]);
+    await expect(
+      connected.callTool({ name: "snapshot", arguments: {} }),
+    ).resolves.toMatchObject({ content: [{ type: "text", text: "ok" }] });
+  });
+
   it("rejects unknown session identifiers instead of creating a replacement session", async () => {
     const response = await fetch(server.url, {
       method: "POST",

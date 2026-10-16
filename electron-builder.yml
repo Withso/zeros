@@ -128,6 +128,23 @@ extraResources:
     to: codex-runtime
   - from: binaries/codex-cli-version.txt
     to: codex-cli-version.txt
+  # The Cua computer-use driver executable. No npm archive ships it:
+  # scripts/stage-cua-driver.mjs downloads the pinned, SHA-256-verified
+  # universal tarball at beforePack, thins it to arm64 (preserving the
+  # Developer ID signature, which is re-verified), and stages it at
+  # binaries/cua-driver. electron/computer-use/driver.ts resolves the packed
+  # copy as process.resourcesPath/cua-driver; plain Resources, like claude,
+  # because the SDK's private worker execs it.
+  - from: binaries/cua-driver
+    to: cua-driver
+  # AXe, the iOS Simulator tool behind live views and the user's input. Not on
+  # npm: scripts/stage-axe.mjs downloads the pinned, SHA-256-verified release
+  # at beforePack, thins every Mach-O to arm64 (re-verifying each Developer ID
+  # signature) and stages binaries/axe, the executable beside the idb
+  # frameworks it loads through @executable_path/Frameworks.
+  # electron/devices/axe.ts resolves process.resourcesPath/axe/axe.
+  - from: binaries/axe
+    to: axe
   # Repository and third-party terms must travel with every binary release.
   # The generated bundle contains the exact locked production inventory and
   # license/NOTICE texts; `pnpm check:licenses` rejects drift before packaging.
@@ -198,6 +215,7 @@ mac:
   # URLs to our .app.
   extendInfo:
     NSAppleEventsUsageDescription: Zeros needs permission to interact with other apps for computer and browser tasks you request.
+    NSDownloadsFolderUsageDescription: Zeros saves the simulator screenshots and recordings you take to your Downloads folder.
     CFBundleURLTypes:
       - CFBundleURLName: Zeros
         CFBundleURLSchemes:
@@ -323,3 +341,16 @@ asarUnpack:
   # from the dependency graph entirely (no pnpm-lock entry, nothing depends on it),
   # so the glob matched nothing and was removed. `bindings` / `file-uri-to-path`
   # above SURVIVE it — they belong to better-sqlite3, not sqlite3.
+  # The Cua computer-use SDK loads its native node runtime (.node) and
+  # libcua_driver_sdk.dylib BY PATH, which cannot point into the asar. The
+  # main process imports the SDK from app.asar.unpacked when packaged (see
+  # importCuaSdk in electron/computer-use/driver.ts). The globs match pnpm's
+  # nested .pnpm layout too (@ubjs/* are @trycua/cua-driver's own deps).
+  - "**/node_modules/@trycua/**/*"
+  - "**/node_modules/@ubjs/**/*"
+  # agent-device (agent simulator tools and rotation) runs on Electron's own
+  # Node under ELECTRON_RUN_AS_NODE, which has no asar support, and xcodebuild
+  # builds its XCTest runner from the Xcode project inside the package, so it
+  # needs real files. electron/devices/agent-device.ts resolves its CLI from
+  # app.asar.unpacked. It has no dependencies of its own.
+  - "**/node_modules/agent-device/**/*"

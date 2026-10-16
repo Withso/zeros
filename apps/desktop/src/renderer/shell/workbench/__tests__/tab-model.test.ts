@@ -7,6 +7,7 @@ import {
   createChangesTab,
   createEmptyFilesTab,
   createFilesTab,
+  createSimulatorTab,
   defaultScopeFor,
   defaultTabs,
   findBlankFilesTab,
@@ -124,6 +125,84 @@ describe("tab factories", () => {
     });
     expect(blank.id).not.toBe(docs.id);
     expect(blank.pinned).toBeUndefined();
+  });
+
+  it("creates Simulator tabs titled by platform, with a device only when it is well formed", () => {
+    const ios = createSimulatorTab("ios", "FBF8387E-9B7A-4F2A-9ACE-6BDF338E0108");
+    const android = createSimulatorTab("android");
+    expect(ios).toMatchObject({
+      type: "simulator",
+      title: "iOS Simulator",
+      simulatorPlatform: "ios",
+      simulatorDeviceId: "FBF8387E-9B7A-4F2A-9ACE-6BDF338E0108",
+    });
+    expect(android).toEqual({
+      id: android.id,
+      type: "simulator",
+      title: "Android Simulator",
+      simulatorPlatform: "android",
+    });
+    expect(createSimulatorTab("ios", "--udid").simulatorDeviceId).toBeUndefined();
+    expect(ios.id).not.toBe(android.id);
+  });
+});
+
+describe("Simulator tabs across a reload", () => {
+  it("restore with their device and lose every other tab type's state", () => {
+    const tab = {
+      ...createSimulatorTab("ios", "FBF8387E-9B7A-4F2A-9ACE-6BDF338E0108"),
+      title: "Renamed",
+      pinned: true,
+      fixed: true,
+      url: "https://example.com",
+      filePath: "src/app.ts",
+      terminalId: "setup",
+    } as WorkbenchTab;
+    const restored = normalizeWorkbenchTabs(JSON.parse(JSON.stringify([tab]))).find(
+      (item) => item.id === tab.id,
+    );
+    expect(restored).toEqual({
+      id: tab.id,
+      type: "simulator",
+      title: "iOS Simulator",
+      simulatorPlatform: "ios",
+      simulatorDeviceId: "FBF8387E-9B7A-4F2A-9ACE-6BDF338E0108",
+    });
+  });
+
+  it("drop a tab with an unknown platform and forget a malformed device", () => {
+    const restored = normalizeWorkbenchTabs([
+      { id: "sim-a", type: "simulator", title: "x", simulatorPlatform: "watchos" },
+      { id: "sim-b", type: "simulator", title: "x" },
+      {
+        id: "sim-c",
+        type: "simulator",
+        title: "x",
+        simulatorPlatform: "android",
+        simulatorDeviceId: "../avd",
+      },
+    ] as unknown as WorkbenchTab[]);
+    expect(restored.filter((tab) => tab.type === "simulator")).toEqual([
+      {
+        id: "sim-c",
+        type: "simulator",
+        title: "Android Simulator",
+        simulatorPlatform: "android",
+      },
+    ]);
+  });
+
+  it("stay closable, mount only while active or recently viewed, and keep their workspace", () => {
+    const tab = createSimulatorTab("ios");
+    expect(shouldMountWorkbenchTab(tab, "other", new Set())).toBe(false);
+    expect(shouldMountWorkbenchTab(tab, tab.id, new Set())).toBe(true);
+    const out = migrateScopes({
+      "/repo/main": { tabs: [tab], activeId: tab.id, recentBrowsers: [] },
+      "/repo/feature": { tabs: [], activeId: null, recentBrowsers: [] },
+    });
+    expect(out["/repo/main"].activeId).toBe(tab.id);
+    expect(out["/repo/main"].tabs.find((item) => item.id === tab.id)?.pinned).toBeUndefined();
+    expect(out["/repo/feature"].tabs.some((item) => item.type === "simulator")).toBe(false);
   });
 });
 
@@ -424,6 +503,73 @@ describe("normalizeWorkbenchTabs", () => {
       out
         .filter((tab) => tab.type !== "browser")
         .every((tab) => tab.browserConversationId === undefined),
+    ).toBe(true);
+  });
+
+  it("restores each Browser tab's own appearance and drops invalid or misplaced values", () => {
+    const out = normalizeWorkbenchTabs([
+      {
+        id: "dark",
+        type: "browser",
+        title: "Dark",
+        url: "https://example.com/",
+        appearance: "dark",
+      },
+      {
+        id: "agent-light",
+        type: "browser",
+        title: "Agent",
+        url: "https://example.com/",
+        browserConversationId: "conversation-a",
+        appearance: "light",
+      },
+      {
+        id: "blank-dark",
+        type: "browser",
+        title: "Browser",
+        url: "",
+        appearance: "dark",
+      },
+      {
+        id: "system",
+        type: "browser",
+        title: "System",
+        url: "https://example.com/",
+        appearance: "system" as unknown as WorkbenchTab["appearance"],
+      },
+      {
+        id: "corrupt",
+        type: "browser",
+        title: "Corrupt",
+        url: "https://example.com/",
+        appearance: 1 as unknown as WorkbenchTab["appearance"],
+      },
+      {
+        id: "file",
+        type: "files",
+        title: "a.ts",
+        filePath: "a.ts",
+        appearance: "dark",
+      },
+      {
+        id: "changes",
+        type: "changes",
+        title: "Changes",
+        appearance: "dark",
+      },
+    ]);
+    const appearance = (id: string) =>
+      out.find((tab) => tab.id === id)?.appearance;
+    expect(appearance("dark")).toBe("dark");
+    expect(appearance("agent-light")).toBe("light");
+    // A choice made on the start page applies to the first site it opens.
+    expect(appearance("blank-dark")).toBe("dark");
+    expect(appearance("system")).toBeUndefined();
+    expect(appearance("corrupt")).toBeUndefined();
+    expect(
+      out
+        .filter((tab) => tab.type !== "browser")
+        .every((tab) => tab.appearance === undefined),
     ).toBe(true);
   });
 

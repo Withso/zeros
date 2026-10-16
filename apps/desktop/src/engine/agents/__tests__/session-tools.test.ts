@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AgentSessionToolRegistry,
+  composeAgentSessionToolFactories,
   type AgentSessionTools,
 } from "../session-tools";
 
@@ -153,5 +154,88 @@ describe("session tool ownership", () => {
     registry.beginPrompt("late");
     expect(tools.beginPrompt).toHaveBeenCalledOnce();
     await registry.dispose();
+  });
+
+  it("settles the turn for the exact execution and never lets a failure escape", async () => {
+    const first = { ...resource(), endPrompt: vi.fn(async () => { throw new Error("handoff failed"); }) };
+    const second = { ...resource(), endPrompt: vi.fn() };
+    const registry = new AgentSessionToolRegistry(async ({ executionId }) =>
+      executionId === "one" ? first : second,
+    );
+    await registry.admit({ executionId: "one", cwd: "/a" }, [], {});
+    await registry.admit({ executionId: "two", cwd: "/b" }, [], {});
+    await expect(registry.endPrompt("one")).resolves.toBeUndefined();
+    expect(first.endPrompt).toHaveBeenCalledOnce();
+    expect(second.endPrompt).not.toHaveBeenCalled();
+    await expect(registry.endPrompt("missing")).resolves.toBeUndefined();
+    await registry.dispose();
+  });
+
+  it("settles a turn only after every overlapping prompt for that execution has ended", async () => {
+    const tools = { ...resource(), beginPrompt: vi.fn(), endPrompt: vi.fn() };
+    const registry = new AgentSessionToolRegistry(async () => tools);
+    await registry.admit({ executionId: "one", cwd: "/a" }, [], {});
+    registry.beginPrompt("one");
+    // A rejected double-send begins and ends while the first turn still runs.
+    registry.beginPrompt("one");
+    await registry.endPrompt("one");
+    expect(tools.endPrompt).not.toHaveBeenCalled();
+    await registry.endPrompt("one");
+    expect(tools.endPrompt).toHaveBeenCalledOnce();
+    await registry.dispose();
+  });
+});
+
+describe("composed session tools", () => {
+  const input = { executionId: "run", cwd: "/w", signal: new AbortController().signal };
+  const named = (name: string, envName: string) => ({
+    env: { [envName]: `Bearer ${name}` },
+    mcpServers: [{ name, transport: "http" as const, url: `http://127.0.0.1:1/${name}`, headersFromEnv: { Authorization: envName } }],
+    revoke: vi.fn(),
+    dispose: vi.fn(async () => {}),
+  });
+
+  it("merges every admitted owner and fans out each lifecycle hook", async () => {
+    const design = { ...named("design-draft", "DESIGN_CAP"), preparePrompt: vi.fn(async () => "design rules"), beginPrompt: vi.fn(), cancel: vi.fn(), suspend: vi.fn(() => vi.fn()) };
+    const control = { ...named("zeros_browser", "CONTROL_CAP"), preparePrompt: vi.fn(() => ""), endPrompt: vi.fn(), cancel: vi.fn() };
+    const factory = composeAgentSessionToolFactories([async () => design, async () => null, async () => control]);
+    const tools = (await factory(input))!;
+    expect(tools.env).toEqual({ DESIGN_CAP: "Bearer design-draft", CONTROL_CAP: "Bearer zeros_browser" });
+    expect(tools.mcpServers.map((server) => server.name)).toEqual(["design-draft", "zeros_browser"]);
+    await expect(tools.preparePrompt?.()).resolves.toBe("design rules");
+    tools.beginPrompt?.();
+    tools.cancel?.();
+    await tools.endPrompt?.();
+    const resume = tools.suspend?.();
+    resume?.();
+    expect(design.beginPrompt).toHaveBeenCalledOnce();
+    expect(design.cancel).toHaveBeenCalledOnce();
+    expect(control.cancel).toHaveBeenCalledOnce();
+    expect(control.endPrompt).toHaveBeenCalledOnce();
+    expect(design.suspend.mock.results[0]?.value).toHaveBeenCalledOnce();
+    tools.revoke();
+    expect(design.revoke).toHaveBeenCalledOnce();
+    expect(control.revoke).toHaveBeenCalledOnce();
+    await tools.dispose();
+    expect(design.dispose).toHaveBeenCalledOnce();
+    expect(control.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("returns null when no owner admits tools", async () => {
+    await expect(composeAgentSessionToolFactories([async () => null])(input)).resolves.toBeNull();
+  });
+
+  it("retires already-admitted owners when another owner fails or collides", async () => {
+    const design = named("design-draft", "DESIGN_CAP");
+    const failing = composeAgentSessionToolFactories([async () => design, async () => { throw new Error("boom"); }]);
+    await expect(failing(input)).rejects.toThrow("boom");
+    expect(design.revoke).toHaveBeenCalled();
+    expect(design.dispose).toHaveBeenCalledOnce();
+
+    const left = named("zeros_browser", "SAME_CAP");
+    const right = named("zeros_computer", "SAME_CAP");
+    await expect(composeAgentSessionToolFactories([async () => left, async () => right])(input)).rejects.toThrow(/same/i);
+    expect(left.dispose).toHaveBeenCalledOnce();
+    expect(right.dispose).toHaveBeenCalledOnce();
   });
 });

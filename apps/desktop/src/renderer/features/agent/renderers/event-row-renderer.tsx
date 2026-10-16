@@ -18,7 +18,13 @@ import { cursorSearchOutput } from "./search-output";
 // ──────────────────────────────────────────────────────────
 
 import { memo, useState } from "react";
-import { FileText, Globe2, Settings, SquareMousePointer } from "lucide-react";
+import {
+  FileText,
+  Globe2,
+  Settings,
+  Smartphone,
+  SquareMousePointer,
+} from "lucide-react";
 
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { Button } from "@/renderer/shared/ui";
@@ -323,7 +329,13 @@ export function NativeBrowserToolRow({
     <ToolIdentityIcon
       appId={activity?.appId}
       faviconUrl={siteIcon}
-      fallback={usesWebsiteIcon ? Globe2 : SquareMousePointer}
+      fallback={
+        usesWebsiteIcon
+          ? Globe2
+          : activity?.surface === "simulator"
+            ? Smartphone
+            : SquareMousePointer
+      }
       active={ctx.attachmentImagesActive !== false}
       className="size-3"
     />

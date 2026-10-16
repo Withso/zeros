@@ -151,6 +151,48 @@ available.
   whose integrity matches `pnpm-lock.yaml`, is stored at
   [`third_party/fsevents/LICENSE`](third_party/fsevents/LICENSE) so every host
   reproduces it in the generated bundle.
+- **Cua computer-use driver (macOS desktop):** `@trycua/cua-driver` (MIT) and
+  its darwin-arm64 runtime archive (MIT AND MPL-2.0) power the native
+  Computer use feature. The runtime's `cua_driver_node_runtime.node` derives
+  from `uniffi-bindgen-react-native` under MPL-2.0; the archive's
+  `node-runtime-NOTICE.md` points at the release tag carrying its
+  corresponding source (MPL-2.0 §3.2). The exact NOTICE plus reviewed MPL-2.0
+  and MIT texts are stored at
+  [`third_party/trycua-cua-driver/`](third_party/trycua-cua-driver) so every
+  host reproduces them in the generated bundle. The driver's `@ubjs/core`,
+  `@ubjs/node`, and `@ubjs/node-darwin-arm64` dependencies are MPL-2.0 and
+  omit standalone license files; the reviewed canonical copy at
+  [`third_party/mpl-2.0/LICENSE`](third_party/mpl-2.0/LICENSE) is reproduced
+  for each of them.
+- **AXe iOS Simulator tool (macOS desktop):** AXe 1.8.0 (MIT,
+  https://github.com/cameroncooke/AXe) streams simulator screens and sends
+  the user's input for the iOS Simulator tab. It is not an npm package:
+  `scripts/stage-axe.mjs` downloads the pinned release archive by SHA-256,
+  removes x86_64 slices and re-verifies its Developer ID signatures. The
+  archive also carries Meta's idb frameworks (MIT), and `axe` statically links
+  Apple's swift-argument-parser 1.5.0 (Apache-2.0 with the Swift Runtime
+  Library Exception). Zeros' own `zeros-simulator-hid`, built beside it,
+  links those idb frameworks at run time and copies none of their code. The
+  exact upstream texts and a provenance note are stored at
+  [`third_party/axe/`](third_party/axe) and reproduced in the generated
+  bundle.
+- **agent-device (macOS desktop):** `agent-device` 0.21.26 (MIT, Callstack,
+  https://github.com/callstack/agent-device) performs agents' touch, text and
+  app actions on iOS simulators and Android virtual devices, and turns iOS
+  simulators. It ships unpacked so Electron's Node can run it and Xcode can
+  build its XCTest runner from the project inside the package. The package
+  also carries two small Android helper apps it builds itself, an input
+  method and a snapshot helper, which it installs on an Android device while
+  an agent uses it. Its simulator accessibility bridge adapts code from
+  Meta's idb (MIT); that notice, `apple/snapshot-bridge/LICENSE.idb`, is
+  reproduced in the generated bundle with the package's own `LICENSE`.
+- **Simulator device frames (macOS desktop):** the Simulator tab reads device
+  frames from the user's own Xcode (`/Library/Developer/DeviceKit`) and
+  Android Studio (its `device-art-resources`, Apache-2.0). Zeros converts
+  them on the Mac and never bundles, commits or uploads them, so neither is
+  redistributed; without them the tab draws its own frame. The Android setup
+  screen carries the "Android and Android Studio are trademarks of Google
+  LLC." attribution.
 
 ### Cloud Design capture
 

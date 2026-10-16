@@ -316,6 +316,11 @@ import { forgetDesignSelection } from "../design/selection";
 import { scanNativeMcpConfigs } from "../agents/mcp-scan";
 import { resolveMcpServers } from "../agents/mcp-registry";
 import { releaseZerosBrowserConversation } from "../browser/browser-tool-client";
+import {
+  releaseZerosComputerUse,
+  releaseZerosDeviceUse,
+} from "../agent-control/control-service-client";
+import type { ComputerUseOwner } from "@zeros/protocol/computer-use-tools";
 import type { McpGateway } from "../agents/gateway/server";
 import {
   listProjects,
@@ -4044,9 +4049,19 @@ export class WorkspaceService {
         // without this a deleted chat leaks its rows AND its pinned git commits.
         const loc = getChatLocation(id);
         if (loc?.workspaceId) {
-          await releaseZerosBrowserConversation(loc.workspaceId, id).catch(
-            () => false,
-          );
+          const owner: ComputerUseOwner = {
+            workspaceId: loc.workspaceId as ComputerUseOwner["workspaceId"],
+            conversationId: id as ComputerUseOwner["conversationId"],
+          };
+          await Promise.all([
+            releaseZerosBrowserConversation(loc.workspaceId, id).catch(
+              () => false,
+            ),
+            // Both also forget the apps and simulators this chat was allowed
+            // to use.
+            releaseZerosComputerUse(owner, "retire").catch(() => false),
+            releaseZerosDeviceUse(owner, "retire").catch(() => false),
+          ]);
         }
         if (loc?.folder) await deleteAllChatSnapshotRefs(loc.folder, id);
         deleteTurnsForChat(id);

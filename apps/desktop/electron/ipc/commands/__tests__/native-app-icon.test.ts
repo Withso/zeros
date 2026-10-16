@@ -12,7 +12,11 @@ vi.mock("node:fs/promises", () => ({
   rm: async () => {},
 }));
 vi.mock("../shell", () => ({ APPLESCRIPT_ESC: (value: string) => value }));
-import { nativeAppIconByBundleId } from "../open-apps";
+import {
+  appBundleIdentity,
+  nativeAppIconByBundleId,
+  nativeAppNameByBundleId,
+} from "../open-apps";
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.resetAllMocks();
@@ -54,5 +58,27 @@ describe("native app artwork discovery", () => {
     expect(mocks.exec.mock.calls.some(([cmd]) => cmd.endsWith("sips"))).toBe(
       false,
     );
+    expect(await nativeAppNameByBundleId("com.example.Fixture")).toBeNull();
+  });
+  it("names a verified app by its bundle's file name", async () => {
+    vi.stubGlobal("process", { ...process, platform: "darwin" });
+    mocks.exec.mockImplementation((cmd, _args, _opts, callback) =>
+      callback(
+        null,
+        cmd.endsWith("osascript")
+          ? "/System/Applications/Utilities/Keychain Access.app\n"
+          : cmd.endsWith("plutil")
+            ? "com.apple.keychainaccess\n"
+            : "",
+      ),
+    );
+    expect(await nativeAppNameByBundleId("com.apple.keychainaccess")).toBe(
+      "Keychain Access",
+    );
+    expect(
+      await appBundleIdentity("/System/Applications/Utilities/Keychain Access.app"),
+    ).toEqual({ bundleId: "com.apple.keychainaccess", name: "Keychain Access" });
+    expect(await appBundleIdentity("relative/Keychain Access.app")).toBeNull();
+    expect(await appBundleIdentity("/Applications/Notes.txt")).toBeNull();
   });
 });

@@ -1,15 +1,38 @@
 import {
   BROWSER_SERVICE_VERSION,
+  browserRouteSettings,
+  isAgentControlFamily,
   isBrowserProductId,
-  type BrowserSessionAcquireResponse,
+  isBrowserToolName,
+  resolveBrowserRoute,
+  type AgentControlFamily,
+  type BrowserJsonValue,
+  type BrowserRoute,
+  type BrowserToolContent,
+  type BrowserToolName,
+  type BrowserToolResult,
 } from "@zeros/protocol/browser-tools";
+import { gateBrowserRouteSettings } from "@zeros/protocol/agent-control-rollout";
 
+import { agentControlAvailability } from "../agent-control/availability";
+import {
+  AGENT_CONTROL_SERVICE_TOKEN_ENV,
+  AGENT_CONTROL_SERVICE_URL_ENV,
+} from "../agent-control/control-service-client";
+import {
+  loopbackServiceConfig,
+  type LoopbackServiceConfig,
+} from "../agent-control/loopback-service";
 import { opSettingsResolve } from "../settings/ops";
 
 const URL_ENV = "ZEROS_BROWSER_SERVICE_URL";
 const TOKEN_ENV = "ZEROS_BROWSER_SERVICE_TOKEN";
 const ACQUIRE_TIMEOUT_MS = 5_000;
 const TURN_SETTLE_TIMEOUT_MS = 2_000;
+// One action can wait for a website approval (4 min) and then a download
+// (5 min) inside the host. Stay above both so the host reports the outcome.
+const INVOKE_TIMEOUT_MS = 10 * 60_000;
+const STOP_TIMEOUT_MS = 2_000;
 const MAX_RESPONSE_BYTES = 12 * 1024 * 1024;
 
 type BrowserServiceEnv = Record<string, string | undefined>;
@@ -24,10 +47,7 @@ const inheritedServiceEnv: BrowserServiceEnv = {
 delete process.env[URL_ENV];
 delete process.env[TOKEN_ENV];
 
-export interface BrowserServiceConfig {
-  readonly baseUrl: string;
-  readonly token: string;
-}
+export type BrowserServiceConfig = LoopbackServiceConfig;
 
 interface AcquireZerosBrowserHostOptions {
   workspaceId: string;
@@ -63,6 +83,22 @@ interface SettleCodexBrowserUseTurnOptions {
   fetchImpl?: typeof fetch;
 }
 
+interface InvokeZerosBrowserToolOptions {
+  browserSessionId: string;
+  tool: BrowserToolName;
+  arguments: BrowserJsonValue;
+  agent?: AgentControlFamily;
+  signal?: AbortSignal;
+  env?: BrowserServiceEnv;
+  fetchImpl?: typeof fetch;
+}
+
+interface StopZerosBrowserActionOptions {
+  browserSessionId: string;
+  env?: BrowserServiceEnv;
+  fetchImpl?: typeof fetch;
+}
+
 const activeBindings = new Map<string, ActiveBrowserBinding>();
 const ownerGenerations = new Map<string, number>();
 
@@ -71,50 +107,32 @@ const ownerGenerations = new Map<string, number>();
 export function resolveBrowserServiceConfig(
   env: BrowserServiceEnv = inheritedServiceEnv,
 ): BrowserServiceConfig | null {
-  const rawUrl = env[URL_ENV]?.trim();
-  const token = env[TOKEN_ENV]?.trim();
-  if (!rawUrl || !token || token.length > 1_024) return null;
-  try {
-    const url = new URL(rawUrl);
-    const loopback =
-      url.hostname === "127.0.0.1" ||
-      url.hostname === "::1" ||
-      url.hostname === "[::1]" ||
-      url.hostname === "localhost";
-    if (
-      url.protocol !== "http:" ||
-      !loopback ||
-      url.username ||
-      url.password ||
-      url.search ||
-      url.hash ||
-      (url.pathname !== "/" && url.pathname !== "")
-    ) {
-      return null;
-    }
-    return { baseUrl: url.origin, token };
-  } catch {
-    return null;
-  }
+  return loopbackServiceConfig(env[URL_ENV], env[TOKEN_ENV]);
 }
+
+/** Main→engine capabilities that no provider subprocess may inherit. */
+const HOST_CAPABILITY_ENV = [
+  URL_ENV,
+  TOKEN_ENV,
+  "ZEROS_DESIGN_CAPTURE_URL",
+  "ZEROS_DESIGN_CAPTURE_TOKEN",
+  AGENT_CONTROL_SERVICE_URL_ENV,
+  AGENT_CONTROL_SERVICE_TOKEN_ENV,
+] as const;
 
 export function stripBrowserServiceCredentials(
   env: Record<string, string> | undefined,
 ): Record<string, string> | undefined {
   if (
     !env ||
-    (!Object.prototype.hasOwnProperty.call(env, URL_ENV) &&
-      !Object.prototype.hasOwnProperty.call(env, TOKEN_ENV) &&
-      !Object.prototype.hasOwnProperty.call(env, "ZEROS_DESIGN_CAPTURE_URL") &&
-      !Object.prototype.hasOwnProperty.call(env, "ZEROS_DESIGN_CAPTURE_TOKEN"))
+    !HOST_CAPABILITY_ENV.some((name) =>
+      Object.prototype.hasOwnProperty.call(env, name),
+    )
   ) {
     return env;
   }
   const safe = { ...env };
-  delete safe[URL_ENV];
-  delete safe[TOKEN_ENV];
-  delete safe.ZEROS_DESIGN_CAPTURE_URL;
-  delete safe.ZEROS_DESIGN_CAPTURE_TOKEN;
+  for (const name of HOST_CAPABILITY_ENV) delete safe[name];
   return safe;
 }
 
@@ -147,18 +165,58 @@ export function browserUseEnabledForWorkspace(
   return true;
 }
 
-/** Acquire the single Zeros browser identity for a workspace+conversation.
- * Absence/disablement is an optional capability; malformed or unreachable
- * configured services reject so the gateway can emit one diagnostic and
- * continue agent startup without browser tools. */
+/** Which browser `agentFamily` uses in this Local workspace. Throws on an
+ * unsupported host backend so callers fail the capability closed. */
+export function browserRouteForWorkspace(
+  agentFamily: string,
+  workspaceRoot: string,
+  mainRepoRoot?: string,
+): BrowserRoute {
+  const browser = opSettingsResolve(workspaceRoot, mainRepoRoot).effective
+    .browser as { provider?: unknown } | undefined;
+  if (browser?.provider !== undefined && browser.provider !== "isolated") {
+    throw new Error("Unsupported Zeros browser provider setting.");
+  }
+  return resolveBrowserRoute(
+    agentFamily,
+    gateBrowserRouteSettings(
+      browserRouteSettings(browser),
+      agentControlAvailability(),
+    ),
+  );
+}
+
+/** Acquire the conversation's browser as the IAB host for Codex's built-in
+ * Browser plugin. Null unless Codex's route is its built-in browser; malformed
+ * or unreachable configured services reject so the gateway can emit one
+ * diagnostic and continue agent startup without it. */
 export async function acquireZerosBrowserHost(
   options: AcquireZerosBrowserHostOptions,
 ): Promise<{ browserSessionId: string } | null> {
   if (
-    !browserUseEnabledForWorkspace(options.workspaceRoot, options.mainRepoRoot)
+    browserRouteForWorkspace(
+      "codex",
+      options.workspaceRoot,
+      options.mainRepoRoot,
+    ) !== "codex-native"
   ) {
     return null;
   }
+  return acquireOwnerSession(options, true);
+}
+
+/** Acquire the same conversation-owned browser for the `zeros_browser` tools.
+ * The caller has already applied the routing table for its agent. */
+export async function acquireZerosBrowserToolSession(
+  options: Omit<AcquireZerosBrowserHostOptions, "mainRepoRoot">,
+): Promise<{ browserSessionId: string } | null> {
+  return acquireOwnerSession(options, false);
+}
+
+async function acquireOwnerSession(
+  options: AcquireZerosBrowserHostOptions,
+  requireCodexIab: boolean,
+): Promise<{ browserSessionId: string } | null> {
   if (!isBrowserProductId(options.workspaceId)) {
     throw new Error("Zeros browser workspace identity is invalid.");
   }
@@ -184,7 +242,7 @@ export async function acquireZerosBrowserHost(
     },
     ACQUIRE_TIMEOUT_MS,
   );
-  const parsed = parseAcquireResponse(acquired);
+  const parsed = parseAcquireResponse(acquired, requireCodexIab);
   const binding = {
     browserSessionId: parsed.browserSessionId,
     config,
@@ -274,6 +332,67 @@ export async function settleCodexBrowserUseTurn(
   return result.settled;
 }
 
+/** Run one `zeros_browser` tool in the conversation's browser. Tool failures
+ * come back as `success: false`; transport and contract errors reject. */
+export async function invokeZerosBrowserTool(
+  options: InvokeZerosBrowserToolOptions,
+): Promise<BrowserToolResult> {
+  if (
+    !isToolSessionId(options.browserSessionId) ||
+    !isBrowserToolName(options.tool) ||
+    (options.agent !== undefined && !isAgentControlFamily(options.agent))
+  ) {
+    throw new Error("Invalid Zeros browser tool request.");
+  }
+  const config = resolveBrowserServiceConfig(options.env);
+  if (!config) {
+    throw new Error(
+      "The Zeros browser is unavailable; restart the desktop app.",
+    );
+  }
+  return parseToolResult(
+    await requestJson(
+      options.fetchImpl ?? fetch,
+      `${config.baseUrl}/v1/sessions/${encodeURIComponent(options.browserSessionId)}/invoke`,
+      config,
+      {
+        version: BROWSER_SERVICE_VERSION,
+        tool: options.tool,
+        arguments: options.arguments,
+        ...(options.agent ? { agent: options.agent } : {}),
+      },
+      INVOKE_TIMEOUT_MS,
+      options.signal,
+    ),
+  );
+}
+
+/** Interrupt the agent's current browser action and keep the page, as the
+ * Browser tab's Stop button does. */
+export async function stopZerosBrowserAction(
+  options: StopZerosBrowserActionOptions,
+): Promise<boolean> {
+  if (!isToolSessionId(options.browserSessionId)) return false;
+  const config = resolveBrowserServiceConfig(options.env);
+  if (!config) return false;
+  const result = asRecord(
+    await requestJson(
+      options.fetchImpl ?? fetch,
+      `${config.baseUrl}/v1/sessions/${encodeURIComponent(options.browserSessionId)}/stop`,
+      config,
+      { version: BROWSER_SERVICE_VERSION },
+      STOP_TIMEOUT_MS,
+    ),
+  );
+  if (
+    result.version !== BROWSER_SERVICE_VERSION ||
+    typeof result.stopped !== "boolean"
+  ) {
+    throw new Error("Zeros browser service returned an invalid stop result.");
+  }
+  return result.stopped;
+}
+
 /** Detach the product resource when its Zeros conversation is deleted. Agent
  * execution teardown deliberately does not call this: resume/rebuild must keep
  * the same conversation-owned browser lease. */
@@ -343,6 +462,7 @@ async function requestJson(
   config: BrowserServiceConfig,
   body: Record<string, unknown>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -355,7 +475,9 @@ async function requestJson(
         "content-type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: controller.signal,
+      signal: signal
+        ? AbortSignal.any([controller.signal, signal])
+        : controller.signal,
     });
     const declaredLength = Number(response.headers.get("content-length"));
     if (
@@ -383,7 +505,10 @@ async function requestJson(
   }
 }
 
-function parseAcquireResponse(value: unknown): BrowserSessionAcquireResponse {
+function parseAcquireResponse(
+  value: unknown,
+  requireCodexIab: boolean,
+): { browserSessionId: string } {
   const record = asRecord(value);
   const capabilities =
     record.capabilities &&
@@ -393,23 +518,60 @@ function parseAcquireResponse(value: unknown): BrowserSessionAcquireResponse {
       : {};
   if (
     record.version !== BROWSER_SERVICE_VERSION ||
-    !isBrowserProductId(record.browserSessionId) ||
-    !String(record.browserSessionId).startsWith("browser_")
+    !isToolSessionId(record.browserSessionId)
   ) {
     throw new Error(
       "Zeros browser service returned an invalid session identity.",
     );
   }
-  if (capabilities.codexIab !== true) {
+  if (requireCodexIab && capabilities.codexIab !== true) {
     throw new Error(
       "Zeros browser service does not provide native Codex IAB; restart the desktop app.",
     );
   }
+  return { browserSessionId: record.browserSessionId };
+}
+
+function parseToolResult(value: unknown): BrowserToolResult {
+  const invalid = () =>
+    new Error("Zeros browser service returned an invalid tool result.");
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw invalid();
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    record.version !== BROWSER_SERVICE_VERSION ||
+    typeof record.success !== "boolean" ||
+    !Array.isArray(record.content)
+  ) {
+    throw invalid();
+  }
+  const content = record.content.map((item): BrowserToolContent => {
+    const entry =
+      item && typeof item === "object" && !Array.isArray(item)
+        ? (item as Record<string, unknown>)
+        : {};
+    if (entry.type === "text" && typeof entry.text === "string") {
+      return { type: "text", text: entry.text };
+    }
+    if (
+      entry.type === "image" &&
+      typeof entry.data === "string" &&
+      entry.mimeType === "image/jpeg"
+    ) {
+      return { type: "image", data: entry.data, mimeType: "image/jpeg" };
+    }
+    throw invalid();
+  });
   return {
     version: BROWSER_SERVICE_VERSION,
-    browserSessionId: record.browserSessionId,
-    capabilities: { codexIab: true },
+    success: record.success,
+    content,
   };
+}
+
+function isToolSessionId(value: unknown): value is string {
+  return isBrowserProductId(value) && value.startsWith("browser_");
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

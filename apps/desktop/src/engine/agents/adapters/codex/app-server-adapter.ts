@@ -68,6 +68,7 @@ import type {
   AgentBrowserUse,
   AgentCapabilityPorts,
   AgentAdapterContext,
+  AgentComputerUse,
   AgentFilesystemTerritory,
   ContentBlock,
   InitializeResponse,
@@ -113,11 +114,17 @@ import {
   mergeCodexNativeBrowserMcp,
   resolveCodexNativeBrowserRuntime,
   type CodexNativeBrowserSkill,
+  type CodexNativeBrowserUnavailable,
 } from "./browser-tools";
 import {
   registerCodexBrowserUseSession,
   settleCodexBrowserUseTurn,
 } from "../../../browser/browser-tool-client";
+import {
+  codexComputerUseThreadConfig,
+  isCodexComputerUseServer,
+  withCodexComputerUseDisabled,
+} from "./computer-use";
 import { resolveCodexBinary } from "./binary-resolver";
 import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
 
@@ -148,7 +155,10 @@ import {
 } from "../../session-paths";
 import { mergeCommands } from "@zeros/protocol/builtin-commands";
 import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
-import { canonicalBrowserOriginGrantKey } from "@zeros/protocol/browser-tools";
+import {
+  BROWSER_TOOL_NAMESPACE,
+  canonicalBrowserOriginGrantKey,
+} from "@zeros/protocol/browser-tools";
 import type {
   AgentConfigurationProvenance,
   AgentGoal,
@@ -208,6 +218,9 @@ const POST_CANCEL_INTERRUPT_MS = 15_000;
  *  delivers a finished child's report). Local scheduling — sub-second in
  *  practice; 1.5s is a comfortable margin that only collab turns ever pay. */
 const COLLAB_GRACE_MS = 1_500;
+
+/** Main forgets an unrefreshed built-in computer use after 3 minutes. */
+const NATIVE_COMPUTER_USE_REFRESH_MS = 60_000;
 
 /** Fail-closed response used whenever lifecycle teardown abandons a parked
  * approval without a user choice. */
@@ -659,6 +672,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  agent-wide + broadcast, so an intentional teardown is tracked here
    *  to suppress it. */
   private readonly disposing = new Set<string>();
+  /** Zeros session id → when its built-in computer use was last reported
+   * active. Present until the turn settles or the session goes away. */
+  private readonly nativeComputerUse = new Map<string, number>();
   /** Memoized InitializeResponse — built once, then replaced in place when
    *  model/list discovery (discoverModels) populates `_meta.models`. The
    *  gateway re-polls initialize (modelsDynamic) until that lands. */
@@ -1077,6 +1093,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     browserUse?: AgentBrowserUse;
+    computerUse?: AgentComputerUse;
     systemInstruction?: string;
     territory?: AgentFilesystemTerritory;
     executionBoundary?: PreparedBoundary;
@@ -1088,6 +1105,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       cliBinary: opts.cliBinary,
       mcpServers: opts.mcpServers,
       browserUse: opts.browserUse,
+      computerUse: opts.computerUse,
       systemInstruction: opts.systemInstruction,
       territory: opts.territory,
       executionBoundary: opts.executionBoundary,
@@ -1159,6 +1177,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     browserUse?: AgentBrowserUse;
+    computerUse?: AgentComputerUse;
     systemInstruction?: string;
     territory?: AgentFilesystemTerritory;
     executionBoundary?: PreparedBoundary;
@@ -1184,6 +1203,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       cliBinary: opts.cliBinary,
       mcpServers: opts.mcpServers,
       browserUse: opts.browserUse,
+      computerUse: opts.computerUse,
       systemInstruction: opts.systemInstruction,
       territory: opts.territory,
       executionBoundary: opts.executionBoundary,
@@ -1625,8 +1645,32 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // `turnEnded` event. A timed-out/reset node_repl batch can also skip
       // tabs.finalize(), so app-server turn settlement is the authoritative
       // fallback that restores the exact retained page to normal user control.
+      this.endNativeComputerUse(session.zerosSessionId);
       await this.settleNativeBrowserTurn(session);
     }
+  }
+
+  /** Codex's built-in computer use acted in this session. Repeats refresh
+   * main's expiry for a long turn without a report per action. */
+  private noteNativeComputerUse(zerosSessionId: string): void {
+    const now = Date.now();
+    const last = this.nativeComputerUse.get(zerosSessionId);
+    if (last !== undefined && now - last < NATIVE_COMPUTER_USE_REFRESH_MS) {
+      return;
+    }
+    this.nativeComputerUse.set(zerosSessionId, now);
+    this.ctx.emit.onNativeComputerUse?.(this.agentId, {
+      sessionId: zerosSessionId,
+      active: true,
+    });
+  }
+
+  private endNativeComputerUse(zerosSessionId: string): void {
+    if (!this.nativeComputerUse.delete(zerosSessionId)) return;
+    this.ctx.emit.onNativeComputerUse?.(this.agentId, {
+      sessionId: zerosSessionId,
+      active: false,
+    });
   }
 
   private async settleNativeBrowserTurn(session: CodexSession): Promise<void> {
@@ -2143,6 +2187,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (!s) return;
     s.cancelRequested = true;
     s.notifications.endAgentActivity();
+    this.endNativeComputerUse(sessionId);
     this.clearBackgroundTaskPoll(s);
     this.drainPendingApprovals(s, s.runtimeAlive);
     this.drainPendingQuestions(s, s.runtimeAlive);
@@ -2189,6 +2234,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     for (const s of all) {
       s.cancelRequested = true;
       s.notifications.endAgentActivity();
+      this.endNativeComputerUse(s.zerosSessionId);
       this.disposing.add(s.zerosSessionId);
       this.clearBackgroundTaskPoll(s);
     }
@@ -2231,6 +2277,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     mcpServers?: McpServerRegistration[];
     /** Official app-server Browser plugin bound to Zeros' native IAB host. */
     browserUse?: AgentBrowserUse;
+    /** Whether this thread keeps Codex's built-in computer use. */
+    computerUse?: AgentComputerUse;
     /** Zeros' first-turn instruction body → `developerInstructions` on
      *  thread/start AND thread/resume (see `nativeSystemInstruction`). */
     systemInstruction?: string;
@@ -2281,6 +2329,21 @@ export class CodexAppServerAdapter implements AgentAdapter {
       mcpServers = mcpServers.filter((server) => server.transport !== "sse");
     }
     if (opts.browserUse?.kind === "codex-app-server") {
+      // Agent control admits `zeros_browser` for Codex too. It stays only when
+      // the built-in browser cannot start, so Codex never sees two browsers.
+      const zerosBrowserFallback = mcpServers.some(
+        (server) => server.name === BROWSER_TOOL_NAMESPACE,
+      );
+      const withoutNative = zerosBrowserFallback
+        ? "Codex will use the Zeros browser for this thread."
+        : "Codex will continue without Browser for this thread.";
+      const noticeFallback = () => {
+        if (!zerosBrowserFallback) return;
+        this.ctx.emit.onCapabilityNotice?.(this.agentId, {
+          sessionId: zerosSessionId,
+          notice: { code: "codex-browser-unavailable", fallback: "zeros-browser" },
+        });
+      };
       const containmentReason = codexNativeBrowserUnavailableReason({
         contained: hasKernelExecutionBoundary(opts.executionBoundary),
       });
@@ -2288,12 +2351,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
         effectiveBrowserUse = undefined;
         this.ctx.emit.onAgentStderr(
           this.agentId,
-          `[codex-app-server] ${containmentReason}. Codex will continue without Browser for this thread.`,
+          `[codex-app-server] ${containmentReason}. ${withoutNative}`,
         );
+        noticeFallback();
       } else {
         let nativeBrowser: Awaited<
           ReturnType<typeof resolveCodexNativeBrowserRuntime>
         > = null;
+        let unavailable = undefined as CodexNativeBrowserUnavailable | undefined;
         try {
           const codexBinary = await resolveCodexBinary({
             override: opts.cliBinary,
@@ -2301,6 +2366,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
           nativeBrowser = await resolveCodexNativeBrowserRuntime({
             codexCliPath: codexBinary.path,
             codexHome: opts.env?.CODEX_HOME,
+            onUnavailable: (reason) => {
+              unavailable = reason;
+            },
           });
         } catch (error) {
           // Browser is an optional per-thread capability. A stale plugin cache
@@ -2311,18 +2379,44 @@ export class CodexAppServerAdapter implements AgentAdapter {
             this.agentId,
             `[codex-app-server] Official Browser runtime discovery failed: ${
               error instanceof Error ? error.message : String(error)
-            }. Codex will continue without Browser for this thread.`,
+            }. ${withoutNative}`,
           );
+          noticeFallback();
         }
         if (nativeBrowser) {
-          mcpServers = mergeCodexNativeBrowserMcp(mcpServers, nativeBrowser);
+          mcpServers = mergeCodexNativeBrowserMcp(mcpServers, nativeBrowser)
+            .filter((server) => server.name !== BROWSER_TOOL_NAMESPACE);
           nativeBrowserSkill = nativeBrowser.browserSkill;
         } else if (effectiveBrowserUse) {
           effectiveBrowserUse = undefined;
-          this.ctx.emit.onAgentStderr(
-            this.agentId,
-            "[codex-app-server] Official Browser runtime unavailable: install or update ChatGPT/Codex Desktop so browser@openai-bundled and its node_repl runtime are present. Zeros browser tools will not be substituted.",
-          );
+          if (
+            unavailable?.code === "plugin-incomplete" ||
+            unavailable?.code === "plugin-unsupported"
+          ) {
+            this.ctx.emit.onAgentStderr(
+              this.agentId,
+              `[codex-app-server] Official Browser plugin ${unavailable.version} cannot be used: ${unavailable.detail}. ${withoutNative}`,
+            );
+            this.ctx.emit.onCapabilityNotice?.(this.agentId, {
+              sessionId: zerosSessionId,
+              notice: {
+                code:
+                  unavailable.code === "plugin-incomplete"
+                    ? "codex-browser-plugin-incomplete"
+                    : "codex-browser-plugin-unsupported",
+                version: unavailable.version,
+                ...(zerosBrowserFallback
+                  ? { fallback: "zeros-browser" as const }
+                  : {}),
+              },
+            });
+          } else {
+            // Not installed is a normal setup, not a fault: no notice.
+            this.ctx.emit.onAgentStderr(
+              this.agentId,
+              `[codex-app-server] Official Browser runtime unavailable: install or update ChatGPT/Codex Desktop so browser@openai-bundled and its node_repl runtime are present. ${withoutNative}`,
+            );
+          }
         }
       }
     }
@@ -2382,18 +2476,25 @@ export class CodexAppServerAdapter implements AgentAdapter {
         cloudExtensions &&
         !nativeMcp.shadowedAccountServerNames?.includes("codex_apps") &&
         !mcpServers.some((server) => server.name === "codex_apps");
-      nativeMcpConfig = mcpDisabledThreadConfig(
-        scopeNativeMcpSurface(nativeMcp, {
-          serverNames: [
-            ...(cloudExtensions
-              ? ["codex_apps"].filter(
-                  (name) => !nativeMcp.shadowedAccountServerNames?.includes(name),
-                )
-              : []),
-            ...mcpServers.map((server) => server.name),
-          ],
-        }),
-      );
+      nativeMcpConfig = {
+        ...mcpDisabledThreadConfig(
+          scopeNativeMcpSurface(
+            withCodexComputerUseDisabled(nativeMcp, opts.computerUse),
+            {
+              serverNames: [
+                ...(cloudExtensions
+                  ? ["codex_apps"].filter(
+                      (name) =>
+                        !nativeMcp.shadowedAccountServerNames?.includes(name),
+                    )
+                  : []),
+                ...mcpServers.map((server) => server.name),
+              ],
+            },
+          ),
+        ),
+        ...codexComputerUseThreadConfig(opts.computerUse),
+      };
     } catch (error) {
       await runtime.dispose().catch(() => {});
       await removeSessionDir(zerosSessionId).catch(() => {});
@@ -2782,6 +2883,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
     session.runtimeAlive = false;
     session.notifications.endAgentActivity();
+    if (this.sessions.get(session.zerosSessionId) === session) {
+      this.endNativeComputerUse(session.zerosSessionId);
+    }
     // Clear lifecycle state tied to the dead runtime:
     //   - activeTurnId → a later cancel() would interrupt a dead turn id.
     //   - pendingApprovals → respondToPermission would look OK but the
@@ -3814,6 +3918,19 @@ export class CodexAppServerAdapter implements AgentAdapter {
         notifications.handle(m, params);
       });
     }
+    runtime.onNotification("item/started", (params) => {
+      const { threadId, item } = params as {
+        threadId?: unknown;
+        item?: { type?: unknown; server?: unknown };
+      };
+      if (
+        item?.type === "mcpToolCall" &&
+        isCodexComputerUseServer(item.server) &&
+        notifications.hasThread(threadId)
+      ) {
+        this.noteNativeComputerUse(owner.zerosSessionId);
+      }
+    });
     for (const method of [
       "item/mcpToolCall/progress",
       "hook/started",

@@ -15,7 +15,11 @@ import { cloudTranscriptCacheRead, cloudTranscriptCacheWrite, cloudTranscriptCac
 import { cursorSubscription } from "./cursor-subscription";
 import { providerSubscription } from "./provider-subscription";
 import { cloudProviderAuth } from "./cloud-provider-auth";
-import { nativeAppIcons, toolArtworkImages } from "./computer-use";
+import {
+  nativeAppIcons,
+  nativeAppNames,
+  toolArtworkImages,
+} from "./computer-use";
 import {
   dialogPickFolder,
   engineResetToDefault,
@@ -172,6 +176,7 @@ export function registerAllCommands(): void {
   // open-a-worktree-in-a-detected-IDE launcher. See commands/open-apps.ts.
   setCommand("detect_open_apps", detectOpenApps);
   setCommand("native_app_icons", nativeAppIcons);
+  setCommand("native_app_names", nativeAppNames);
   setCommand("tool_artwork_images", toolArtworkImages);
   setCommand("open_in_app", openInApp);
 
