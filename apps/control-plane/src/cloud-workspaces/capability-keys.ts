@@ -3,7 +3,7 @@ import type pg from "pg";
 
 import { withSystemStatement } from "../db.js";
 import { postgresNotificationSubscription, type PostgresNotificationSubscription } from "../postgres-notifications.js";
-import { SqlFragment, sql } from "../sql-fragment.js";
+import { sql } from "../sql-fragment.js";
 import type { CapabilityKeyring } from "./capability-keyring.js";
 import { CAPABILITY_KEY_ID_PATTERN, type CapabilityDeviceKey } from "./capability-contract.js";
 

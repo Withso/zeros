@@ -38,9 +38,11 @@ export function isRolloutFlagName(value: unknown): value is RolloutFlagName {
 export interface RolloutFlagReader {
   /** Memory only; never touches the database. */
   enabled(orgId: string, flag: RolloutFlagName): boolean;
+  /** Memory only; true when any organization has the flag on. */
+  anyEnabled(flag: RolloutFlagName): boolean;
 }
 
-export const ROLLOUT_FLAGS_OFF: RolloutFlagReader = Object.freeze({ enabled: () => false });
+export const ROLLOUT_FLAGS_OFF: RolloutFlagReader = Object.freeze({ enabled: () => false, anyEnabled: () => false });
 
 type Row = { org_id: string; flag: string };
 type Subscribe = (handlers: {

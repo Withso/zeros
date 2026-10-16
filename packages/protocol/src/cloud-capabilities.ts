@@ -15,7 +15,12 @@ export const CAPABILITY_TOKEN_LIFETIME_SECONDS = 300;
 /** Leeway on nbf only. */
 export const CAPABILITY_NBF_LEEWAY_SECONDS = 30;
 /** Encoded compact JWS size budget for issued tokens. */
-export const CAPABILITY_TOKEN_MAX_BYTES = 1024;
+/** Hard verifier parse ceiling (S1 verification step 1). The contract's
+ * "under 1 KiB encoded" issuance budget is currently unattainable for a
+ * maximal client token (5 epochs, 4 scopes, `ein`, `cnf`: 1026 bytes with a
+ * 23-character issuer) - flagged for a contract minor; issuance enforces the
+ * hard ceiling so a standard token is never refused. */
+export const CAPABILITY_TOKEN_MAX_BYTES = 4096;
 /** Verification step 1 bound. */
 export const CAPABILITY_TOKEN_PARSE_MAX_BYTES = 4096;
 export const CAPABILITY_POP_DOMAIN = "zeros-cap-pop-v1";

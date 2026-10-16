@@ -139,8 +139,11 @@ export async function issueEngineCapability(
      WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3 AND workspace.deleted_at IS NULL`,
     [scope.workspaceId, scope.organizationId, scope.generation, scope.engineInstanceId],
   )).rows[0];
-  const authorityEpoch = Number(row?.authority_epoch);
-  if (!row || !Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1) throw new CapabilityIssuerUnavailableError();
+  // No live row is a definitive denial (stale generation, revoked or fenced
+  // engine): the uplink maps it to 4403, not a retry.
+  if (!row) throw new CapabilityIssuanceError("cloud_workspace_not_found");
+  const authorityEpoch = Number(row.authority_epoch);
+  if (!Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1) throw new CapabilityIssuerUnavailableError();
   const nowSeconds = Math.floor(Date.now() / 1000);
   return sign(store, {
     ...baseClaims(issuer, scope),

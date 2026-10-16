@@ -97,8 +97,10 @@ export async function manageCloudCapabilityKey(
           if (current && key.created_at.getTime() + OVERLAP_MS > now) {
             throw new Error("A next capability key must be published for at least 24 hours before activation");
           }
-          const transitions: Transition[] = [{ kid: request.kid, from: "next", to: "current" }];
+          // Demote before promoting: the one-current index is not deferrable.
+          const transitions: Transition[] = [];
           if (current) transitions.push({ kid: current.kid, from: "current", to: "retiring" });
+          transitions.push({ kid: request.kid, from: "next", to: "current" });
           return { transitions, generated: false };
         }
         case "retire": {
@@ -120,7 +122,7 @@ export async function manageCloudCapabilityKey(
         }
       }
     };
-    const { transitions, generated } = plan();
+    const { transitions } = plan();
     const planSha256 = hash({ targetSha256, requestSha256, transitions, keyringVersion: options.keyring.currentKeyVersion, principal: authority.principal });
     if (!transitions.length) {
       await client.query("ROLLBACK");

@@ -61,6 +61,18 @@ d("capability keys and issuance with PostgreSQL", () => {
     return value;
   }
 
+  /** Tests age a key row to fast-forward the 24 h publication rules; the
+   * identity trigger forbids that update, so it is lifted for the statement
+   * (the test database owner may). */
+  async function ageKey(key: string, assignments: string) {
+    await pool.query("ALTER TABLE cloud_capability_signing_keys DISABLE TRIGGER cloud_capability_key_identity");
+    try {
+      await pool.query(`UPDATE cloud_capability_signing_keys SET ${assignments} WHERE kid=$1`, [key]);
+    } finally {
+      await pool.query("ALTER TABLE cloud_capability_signing_keys ENABLE TRIGGER cloud_capability_key_identity");
+    }
+  }
+
   async function activateFirst(suffix = "a") {
     await execute(doc("create", kid(suffix)));
     return execute(doc("activate", kid(suffix)));
@@ -72,15 +84,15 @@ d("capability keys and issuance with PostgreSQL", () => {
     await execute(doc("activate", kid("a")));
     await execute(doc("create", kid("b")));
     await expect(execute(doc("activate", kid("b")))).rejects.toThrow(/24 hours/);
-    await pool.query("UPDATE cloud_capability_signing_keys SET created_at=clock_timestamp()-interval '25 hours' WHERE kid=$1", [kid("b")]);
+    await ageKey(kid("b"), "created_at=clock_timestamp()-interval '25 hours'");
     await execute(doc("activate", kid("b")));
     let rows = (await pool.query("SELECT kid,state FROM cloud_capability_signing_keys ORDER BY created_at")).rows;
-    expect(rows).toEqual([{ kid: kid("a"), state: "retiring" }, { kid: kid("b"), state: "current" }]);
+    expect(rows).toEqual([{ kid: kid("b"), state: "current" }, { kid: kid("a"), state: "retiring" }]);
     await expect(execute(doc("retire", kid("a")))).rejects.toThrow(/24 hours/);
-    await pool.query("UPDATE cloud_capability_signing_keys SET retire_after=clock_timestamp()-interval '1 second' WHERE kid=$1", [kid("a")]);
+    await ageKey(kid("a"), "retire_after=clock_timestamp()-interval '1 second'");
     await execute(doc("retire", kid("a")));
     rows = (await pool.query("SELECT kid,state FROM cloud_capability_signing_keys ORDER BY created_at")).rows;
-    expect(rows).toEqual([{ kid: kid("a"), state: "retired" }, { kid: kid("b"), state: "current" }]);
+    expect(rows).toEqual([{ kid: kid("b"), state: "current" }, { kid: kid("a"), state: "retired" }]);
     // Emergency revocation removes the key from the published set at once.
     await execute(doc("revoke", kid("b")));
     expect((await pool.query("SELECT state FROM cloud_capability_signing_keys WHERE kid=$1", [kid("b")])).rows[0]).toEqual({ state: "revoked" });
@@ -103,7 +115,7 @@ d("capability keys and issuance with PostgreSQL", () => {
     await vi.waitFor(() => expect(value.signer()?.kid).toBe(kid("a")));
     expect(value.publicKeySet().map(entry => entry.kid)).toEqual([kid("a")]);
     await execute(doc("create", kid("b")));
-    await pool.query("UPDATE cloud_capability_signing_keys SET created_at=clock_timestamp()-interval '25 hours' WHERE kid=$1", [kid("b")]);
+    await ageKey(kid("b"), "created_at=clock_timestamp()-interval '25 hours'");
     await execute(doc("activate", kid("b")));
     await vi.waitFor(() => expect(value.signer()?.kid).toBe(kid("b")));
     expect(value.publicKeySet().map(entry => entry.kid).sort()).toEqual([kid("a"), kid("b")]);
@@ -135,7 +147,7 @@ d("capability keys and issuance with PostgreSQL", () => {
     expect(Buffer.byteLength(issued.token)).toBeLessThanOrEqual(1024);
     await expect(withSystemTx(pool, tx => issueEngineCapability(tx, value, ISSUER, {
       organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, generation: 2, engineInstanceId: fixture.engineInstanceId,
-    }))).rejects.toBeInstanceOf(CapabilityIssuerUnavailableError);
+    }))).rejects.toMatchObject({ code: "cloud_workspace_not_found" });
   });
 
   async function deviceAndSession(userId: string) {
@@ -178,6 +190,7 @@ d("capability keys and issuance with PostgreSQL", () => {
     await pool.query("INSERT INTO team_members(team_id,org_id,user_id,role) VALUES($1,$2,$3,'member')", [pro.teamId, pro.organizationId, member]);
     await pool.query("INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,'developer')", [pro.workspaceId, pro.organizationId, member]);
     await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')", [member]);
+    await pool.query("INSERT INTO cloud_workspace_writer_slots(workspace_id,slot,user_id,invitation_id) VALUES($1,2,$2,NULL)", [pro.workspaceId, member]);
     await activateFirst();
     const value = await store();
     await vi.waitFor(() => expect(value.signer()).not.toBeNull());
@@ -204,7 +217,6 @@ d("capability keys and issuance with PostgreSQL", () => {
     await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')", [guest]);
     await pool.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,created_by,expires_at)
       VALUES($1,$2,$3,$4,'viewer',$5,clock_timestamp()+interval '120 seconds')`, [randomUUID(), pro.workspaceId, pro.organizationId, guest, pro.userId]);
-    await pool.query("INSERT INTO cloud_workspace_writer_slots(workspace_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [pro.workspaceId, guest]).catch(() => {});
     await activateFirst();
     const value = await store();
     await vi.waitFor(() => expect(value.signer()).not.toBeNull());

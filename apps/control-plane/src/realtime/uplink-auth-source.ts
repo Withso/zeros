@@ -76,10 +76,10 @@ SELECT
   (SELECT row_to_json(workspace_row) FROM workspace_row) AS workspace,
   (SELECT coalesce(jsonb_object_agg(user_id, epoch), '{}') FROM member_epochs) AS members,
   (SELECT coalesce(jsonb_object_agg(user_id, epoch), '{}') FROM account_epochs) AS accounts,
-  (SELECT coalesce(jsonb_object_agg(device_id, epoch) FILTER (WHERE revoked_at IS NULL), '{}') FROM device_epochs) AS devices,
+  (SELECT coalesce(jsonb_object_agg(device_id, epoch), '{}') FROM device_epochs WHERE revoked_at IS NULL) AS devices,
   (SELECT coalesce(jsonb_agg(jsonb_build_object('kind', 'device', 'id', device_id, 'until',
-       floor(extract(epoch FROM revoked_at)*1000)+$3) FILTER (WHERE revoked_at IS NOT NULL
-       AND revoked_at>clock_timestamp()-make_interval(secs=>$3::double precision/1000))), '[]') FROM device_epochs) AS device_revocations,
+       floor(extract(epoch FROM revoked_at)*1000)+$3)), '[]') FROM device_epochs
+     WHERE revoked_at IS NOT NULL AND revoked_at>clock_timestamp()-make_interval(secs=>$3::double precision/1000)) AS device_revocations,
   (SELECT coalesce(jsonb_agg(jsonb_build_object('kind', 'session', 'id', id, 'until',
        floor(extract(epoch FROM revoked_at)*1000)+$3)), '[]') FROM session_revocations) AS session_revocations`;
 
