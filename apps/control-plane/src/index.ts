@@ -65,6 +65,7 @@ import { DatabaseCloudWorkspaceCommandService } from "./cloud-workspaces/command
 import { DatabaseCloudWorkspaceEventService } from "./cloud-workspaces/event-streams.js";
 import { PostgresSecurityEventBroker, SecurityEventPublisher } from "./security-events.js";
 import { RolloutFlagSnapshot } from "./rollout-flags.js";
+import { EngineAuthorityCache, installEngineAuthorityCache } from "./cloud-workspaces/engine-authority-cache.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
@@ -192,6 +193,12 @@ const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.s
 const rolloutFlagSnapshot = config.cloudWorkspaces && runtimeReady
   ? new RolloutFlagSnapshot({ pool, listenerPool }) : null;
 void rolloutFlagSnapshot?.start();
+// Engine authority cache: shadow comparison and fence-free reads, each behind
+// its rollout flag. Without flags it only holds a LISTEN subscription.
+const engineAuthorityCache = rolloutFlagSnapshot
+  ? new EngineAuthorityCache({ pool, listenerPool, flags: rolloutFlagSnapshot }) : null;
+engineAuthorityCache?.start();
+installEngineAuthorityCache(engineAuthorityCache ?? undefined);
 // Historical Computer retirement holds session locks across provider I/O and
 // query-pool callbacks. WorkOS may independently hold one worker query slot.
 const retirementLockPool = workerPool && runtimeReady && config.cloudWorkspaces?.boat &&
@@ -842,6 +849,7 @@ function shutdown(signal: string): void {
     securityEventBroker.stop(),
     stopSecurityEventPublisher(),
     rolloutFlagSnapshot?.stop(),
+    engineAuthorityCache?.stop(),
   ]);
   const deadline = setTimeout(() => process.exit(1), 15_000);
   deadline.unref();

@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
 import type { Tx } from "../db.js";
+import { installedEngineAuthorityCache, type EngineAuthorityCache, type EngineAuthorityMode } from "./engine-authority-cache.js";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -67,6 +68,46 @@ function validIdentityInput(input: {
  * starts at BEGIN, not after a slow query or a later response. Mutators retain
  * assertCurrentCloudEngineAuthority and its existing parent/engine locks. */
 export async function readCurrentCloudEngineAuthority(
+  tx: Tx,
+  input: {
+    workspaceId: string; organizationId: string; generation: number;
+    engineInstanceId: string; heartbeatToken: string; workosEnabled: boolean;
+  },
+): Promise<CurrentCloudEngineAuthority & { version: 1; confirmedUntilMs: number }> {
+  const cache = installedEngineAuthorityCache();
+  if (!cache?.shadowing(input.organizationId) || !validIdentityInput(input)) return readCurrentCloudEngineAuthoritySql(tx, input);
+  const hash = tokenHash(input.heartbeatToken), mode = { kind: "read" } as const;
+  // Only an allowed answer is served from memory; a miss or denial asks SQL.
+  if (cache.enforcing(input.organizationId)) {
+    const cached = cache.lookup(input, hash, mode);
+    if (cached?.allowed) {
+      cache.recordEnforcedHit();
+      return { version: 1, workspaceId: input.workspaceId, organizationId: input.organizationId, generation: input.generation,
+        authorityEpoch: cached.authorityEpoch, accountUserId: cached.accountUserId, engineInstanceId: input.engineInstanceId,
+        confirmedUntilMs: Math.min(Date.now() + 10_000, cached.leaseExpiresAtMs) };
+    }
+  }
+  return observeEngineAuthority(cache, input, hash, mode, readCurrentCloudEngineAuthoritySql(tx, input));
+}
+
+async function observeEngineAuthority<T extends CurrentCloudEngineAuthority>(
+  cache: EngineAuthorityCache,
+  input: { workspaceId: string; organizationId: string; generation: number; engineInstanceId: string; workosEnabled: boolean },
+  hash: Buffer,
+  mode: EngineAuthorityMode,
+  sql: Promise<T>,
+): Promise<T> {
+  try {
+    const authority = await sql;
+    cache.observe(input, hash, mode, { allowed: true, authorityEpoch: authority.authorityEpoch, accountUserId: authority.accountUserId, leaseExpiresAtMs: 0 });
+    return authority;
+  } catch (error) {
+    if (error instanceof CloudWorkspaceEngineAuthorityError) cache.observe(input, hash, mode, { allowed: false });
+    throw error;
+  }
+}
+
+async function readCurrentCloudEngineAuthoritySql(
   tx: Tx,
   input: {
     workspaceId: string; organizationId: string; generation: number;
@@ -145,6 +186,18 @@ export async function assertCloudEngineIdentityForIdempotentReplay(
 /** Caller must use a system transaction. Parent scope precedes workspace and
  * engine locks, including implicit foreign-key locks during publication. */
 export async function assertCurrentCloudEngineAuthority(
+  tx: Tx,
+  input: Parameters<typeof assertCurrentCloudEngineAuthoritySql>[1],
+): Promise<CurrentCloudEngineAuthority> {
+  // Shadow only: this path's row locks are the mutation fence, so the cache
+  // never replaces it. Enforcement applies to fence-free reads.
+  const cache = installedEngineAuthorityCache();
+  if (!cache?.shadowing(input.organizationId) || !validIdentityInput(input)) return assertCurrentCloudEngineAuthoritySql(tx, input);
+  return observeEngineAuthority(cache, input, tokenHash(input.heartbeatToken),
+    { kind: "assert", transitionRecordSync: input.transitionRecordSync === true }, assertCurrentCloudEngineAuthoritySql(tx, input));
+}
+
+async function assertCurrentCloudEngineAuthoritySql(
   tx: Tx,
   input: {
     workspaceId: string;
