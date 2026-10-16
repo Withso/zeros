@@ -393,7 +393,15 @@ d("durable job queue", () => {
       silent.release();
     }
     await vi.waitFor(() => expect(ran).toBe(true), { timeout: 5_000, interval: 20 });
-    expect(claims[claimsBefore]! - startedAt).toBeGreaterThanOrEqual(1_990);
+    // No timing floor on the claim that finds the job: replica mode already
+    // guarantees no hint fired, and the poll timer is armed independently of
+    // the insert, so a poll that was already due may legitimately claim the
+    // job immediately after it commits. The waitFor above is the assertion —
+    // with the hint lost, only the poll can run the job, and five seconds is
+    // five poll intervals. An absolute floor only measures timer phase and
+    // flakes whenever the gate above resolves on a late hint claim (for
+    // example a slow LISTEN subscription) instead of on the first poll.
+    expect(claims.length).toBeGreaterThan(claimsBefore);
   });
 
   it("re-reads the queue when the LISTEN session is lost and restored", async () => {
