@@ -70,6 +70,29 @@ CREATE POLICY cloud_capability_keys_owner ON cloud_capability_signing_keys
 REVOKE ALL ON cloud_capability_signing_keys FROM PUBLIC, zeros_app;
 GRANT SELECT ON cloud_capability_signing_keys TO zeros_app;
 
+-- Operator audit for signing-key lifecycle changes, the
+-- cloud_rollout_flag_changes pattern: one row per executed operation,
+-- written in the same transaction; a replayed operation_id naming another
+-- change is refused. The runtime role never reads it.
+CREATE TABLE cloud_capability_key_changes (
+  operation_id uuid PRIMARY KEY,
+  actor_user_id uuid NOT NULL,
+  channel text NOT NULL CHECK (channel IN ('development','alpha','beta','production')),
+  target_sha256 text NOT NULL CHECK (target_sha256 ~ '^[a-f0-9]{64}$'),
+  request_sha256 text NOT NULL CHECK (request_sha256 ~ '^[a-f0-9]{64}$'),
+  plan_sha256 text NOT NULL CHECK (plan_sha256 ~ '^[a-f0-9]{64}$'),
+  transitions jsonb NOT NULL,
+  reason text NOT NULL CHECK (length(reason) BETWEEN 16 AND 512),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+ALTER TABLE cloud_capability_key_changes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cloud_capability_key_changes FORCE ROW LEVEL SECURITY;
+CREATE POLICY cloud_capability_key_changes_owner ON cloud_capability_key_changes
+  FOR ALL USING (current_user = pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid = 'public.cloud_capability_key_changes'::regclass)))
+  WITH CHECK (current_user = pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid = 'public.cloud_capability_key_changes'::regclass)));
+-- zeros-expand-exception: new-table-privileges Narrows the default grants of a table created in this migration
+REVOKE ALL ON cloud_capability_key_changes FROM PUBLIC, zeros_app;
+
 -- Membership epochs (S1 ep.me), per (organization, user). An absent row reads
 -- as epoch 1; the first bump creates epoch 2 so a bump always lands above
 -- every token issued before it. Bumped by triggers on every membership, role,

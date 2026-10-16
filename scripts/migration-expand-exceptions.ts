@@ -12,7 +12,10 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
   },
   // 0004's default privileges grant zeros_app writes on every new table.
   "0153_cloud_capability_keys.sql": {
-    "new-table-privileges": ["REVOKE ALL ON cloud_capability_signing_keys FROM PUBLIC, zeros_app;"],
+    "new-table-privileges": [
+      "REVOKE ALL ON cloud_capability_signing_keys FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_capability_key_changes FROM PUBLIC, zeros_app;",
+    ],
   },
   "0145_cloud_computer_named_snapshots.sql": {},
   "0146_cloud_provider_snapshot_recovery.sql": {},

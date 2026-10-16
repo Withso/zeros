@@ -8,7 +8,9 @@ import { parseDatabaseTarget } from "./database-target.js";
 import { createMigrationPool } from "./db.js";
 import { isRolloutFlagName } from "./rollout-flags.js";
 
-/** Errors with messages curated for operators; the CLI prints only these. */
+/** Errors with messages curated for operators; the operator CLIs print only
+ * these. Shared with the capability-key command, which reuses the channel
+ * validation below. */
 export class RolloutFlagManagementError extends Error {
   constructor(message: string) {
     super(message);
@@ -17,6 +19,40 @@ export class RolloutFlagManagementError extends Error {
 }
 
 const curated = (message: string): never => { throw new RolloutFlagManagementError(message); };
+
+/** Channel and production gate shared by the operator commands (rollout
+ * flags and capability keys): both channel sources must agree, the channel
+ * is normalized, and executing against production needs the command's
+ * explicit confirmation variable. */
+export function validateOperatorChannel(options: {
+  channel: string;
+  execute?: boolean | undefined;
+  railwayEnvironmentName?: string | undefined;
+  productionConfirmed?: string | undefined;
+  /** Operator-facing names for error messages, per command. */
+  channelVariable: string;
+  confirmationVariable: string;
+  subject: string;
+}): string {
+  const channel = options.channel.trim().toLowerCase();
+  if (!["development", "alpha", "beta", "production"].includes(channel)) {
+    throw new RolloutFlagManagementError(`${options.channelVariable} must be development, alpha, beta, or production`);
+  }
+  const railway = options.railwayEnvironmentName?.trim().toLowerCase();
+  if (railway && railway !== channel) {
+    throw new RolloutFlagManagementError(`${options.subject} channel does not match RAILWAY_ENVIRONMENT_NAME`);
+  }
+  if (options.execute && channel === "production" && options.productionConfirmed !== "true") {
+    throw new RolloutFlagManagementError(`${options.confirmationVariable}=true is required for production confirmation`);
+  }
+  return channel;
+}
+
+const ROLLOUT_FLAG_CHANNEL_VARIABLES = {
+  channelVariable: "CONTROL_PLANE_ROLLOUT_FLAG_CHANNEL",
+  confirmationVariable: "CONTROL_PLANE_ROLLOUT_FLAG_PRODUCTION_CONFIRMED",
+  subject: "Rollout flag",
+} as const;
 
 const ChangeSchema = z.object({
   operationId: z.string().uuid().transform(value => value.toLowerCase()),
@@ -29,24 +65,6 @@ const ChangeSchema = z.object({
   reason: z.string().trim().min(16).max(512),
 }).strict();
 export type CloudRolloutFlagChange = z.input<typeof ChangeSchema>;
-
-/** Channel and production gate, mirroring manage-cloud-workspace-entitlement:
- * both channel sources must agree, and executing against production needs the
- * explicit confirmation variable. */
-function validateChannel(options: { channel: string; execute?: boolean | undefined; railwayEnvironmentName?: string | undefined; productionConfirmed?: string | undefined }): string {
-  const channel = options.channel.trim().toLowerCase();
-  if (!["development", "alpha", "beta", "production"].includes(channel)) {
-    curated("CONTROL_PLANE_ROLLOUT_FLAG_CHANNEL must be development, alpha, beta, or production");
-  }
-  const railway = options.railwayEnvironmentName?.trim().toLowerCase();
-  if (railway && railway !== channel) {
-    curated("Rollout flag channel does not match RAILWAY_ENVIRONMENT_NAME");
-  }
-  if (options.execute && channel === "production" && options.productionConfirmed !== "true") {
-    curated("CONTROL_PLANE_ROLLOUT_FLAG_PRODUCTION_CONFIRMED=true is required for production confirmation");
-  }
-  return channel;
-}
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 type FlagState = { enabled: boolean; revision: string } | null;
@@ -65,7 +83,7 @@ export async function manageCloudRolloutFlag(
   const parsed = ChangeSchema.safeParse(input);
   if (!parsed.success) curated("Rollout flag document is invalid");
   const request = parsed.data!;
-  const channel = validateChannel(options);
+  const channel = validateOperatorChannel({ ...options, ...ROLLOUT_FLAG_CHANNEL_VARIABLES });
   if (request.channel !== channel) curated("Rollout flag deployment channel mismatch");
   const target = parseDatabaseTarget(options.databaseUrl);
   const targetSha256 = hash([request.channel, target.hostname, target.port, target.pathname, decodeURIComponent(target.username)]);

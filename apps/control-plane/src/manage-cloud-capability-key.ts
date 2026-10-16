@@ -12,20 +12,22 @@ import {
   sealCapabilityPrivateKey,
 } from "./cloud-workspaces/capability-keys.js";
 import { CAPABILITY_KEY_ID_PATTERN } from "./cloud-workspaces/capability-contract.js";
+import { RolloutFlagManagementError, validateOperatorChannel } from "./manage-cloud-rollout-flag.js";
 
+const ChannelSchema = z.string().trim().toLowerCase().pipe(z.enum(["development", "alpha", "beta", "production"]));
 const ChangeSchema = z.discriminatedUnion("action", [
   z.object({
-    operationId: z.string().uuid(),
-    channel: z.enum(["development", "alpha", "beta", "production"]),
-    actorUserId: z.string().uuid(),
+    operationId: z.string().uuid().transform(value => value.toLowerCase()),
+    channel: ChannelSchema,
+    actorUserId: z.string().uuid().transform(value => value.toLowerCase()),
     reason: z.string().trim().min(16).max(512),
     action: z.literal("create"),
     kid: z.string().regex(CAPABILITY_KEY_ID_PATTERN),
   }).strict(),
   z.object({
-    operationId: z.string().uuid(),
-    channel: z.enum(["development", "alpha", "beta", "production"]),
-    actorUserId: z.string().uuid(),
+    operationId: z.string().uuid().transform(value => value.toLowerCase()),
+    channel: ChannelSchema,
+    actorUserId: z.string().uuid().transform(value => value.toLowerCase()),
     reason: z.string().trim().min(16).max(512),
     action: z.enum(["activate", "retire", "revoke"]),
     kid: z.string().regex(CAPABILITY_KEY_ID_PATTERN),
@@ -46,12 +48,23 @@ type KeyRow = { kid: string; state: string; created_at: Date; activated_at: Date
 export async function manageCloudCapabilityKey(
   pool: pg.Pool,
   input: unknown,
-  options: { databaseUrl: string; channel: string; keyring: CapabilityKeyring; execute?: boolean; approval?: string | undefined },
+  options: {
+    databaseUrl: string; channel: string; keyring: CapabilityKeyring; execute?: boolean; approval?: string | undefined;
+    railwayEnvironmentName?: string | undefined; productionConfirmed?: string | undefined;
+  },
 ) {
   const parsed = ChangeSchema.safeParse(input);
-  if (!parsed.success) throw new Error("Capability key document is invalid");
+  if (!parsed.success) throw new RolloutFlagManagementError("Capability key document is invalid");
   const request = parsed.data;
-  if (request.channel !== options.channel) throw new Error("Capability key deployment channel mismatch");
+  // Both channel sources must agree and production execution is confirmed,
+  // exactly like the rollout-flag command.
+  const channel = validateOperatorChannel({
+    ...options,
+    channelVariable: "CONTROL_PLANE_CAPABILITY_KEY_CHANNEL",
+    confirmationVariable: "CONTROL_PLANE_CAPABILITY_KEY_PRODUCTION_CONFIRMED",
+    subject: "Capability key",
+  });
+  if (request.channel !== channel) throw new RolloutFlagManagementError("Capability key deployment channel mismatch");
   const target = parseDatabaseTarget(options.databaseUrl);
   const targetSha256 = hash([request.channel, target.hostname, target.port, target.pathname, decodeURIComponent(target.username)]);
   const requestSha256 = hash(request);
@@ -59,17 +72,30 @@ export async function manageCloudCapabilityKey(
   try {
     await client.query("BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; SELECT set_config('app.system','on',true)");
     const authority = (await client.query<{ principal: string; database: string; allowed: boolean }>(`SELECT current_user AS principal,current_database() AS database,
-      current_user<>'zeros_app' AND pg_get_userbyid(relowner)=current_user AS allowed FROM pg_class
-      WHERE oid='public.cloud_capability_signing_keys'::regclass`)).rows[0];
+      current_user<>'zeros_app' AND bool_and(pg_get_userbyid(relowner)=current_user) AS allowed FROM pg_class
+      WHERE oid IN ('public.cloud_capability_signing_keys'::regclass,'public.cloud_capability_key_changes'::regclass)`)).rows[0];
     if (!authority?.allowed || authority.database !== decodeURIComponent(target.pathname.slice(1))) {
-      throw new Error("Capability key changes require the exact database migration owner");
+      throw new RolloutFlagManagementError("Capability key changes require the exact database migration owner");
     }
+    // FOR SHARE fences a concurrent demotion of the actor for this transaction.
     const actor = (await client.query<{ auth_status: string; deleted_at: Date | null; staff_role: string | null }>(
-      "SELECT auth_status,deleted_at,staff_role FROM users WHERE id=$1", [request.actorUserId])).rows[0];
+      "SELECT auth_status,deleted_at,staff_role FROM users WHERE id=$1 FOR SHARE", [request.actorUserId])).rows[0];
     if (!actor || actor.auth_status !== "active" || actor.deleted_at || actor.staff_role !== "platform_owner") {
-      throw new Error("Capability key changes require an active platform owner");
+      throw new RolloutFlagManagementError("Capability key changes require an active platform owner");
     }
     await client.query("SELECT pg_advisory_xact_lock(830741862)");
+    // A receipt means this operation id already ran: replay it verbatim, or
+    // refuse an id that now names another change.
+    const receipt = (await client.query<{ request_sha256: string; target_sha256: string; plan_sha256: string; transitions: Transition[] }>(
+      "SELECT request_sha256,target_sha256,plan_sha256,transitions FROM cloud_capability_key_changes WHERE operation_id=$1",
+      [request.operationId])).rows[0];
+    if (receipt) {
+      if (receipt.request_sha256 !== requestSha256 || receipt.target_sha256 !== targetSha256) {
+        throw new RolloutFlagManagementError("Capability key operation already identifies another change");
+      }
+      await client.query("ROLLBACK");
+      return { state: "replayed" as const, planSha256: receipt.plan_sha256, targetSha256: receipt.target_sha256, transitions: receipt.transitions };
+    }
     const keys = (await client.query<KeyRow>(`SELECT kid,state,created_at,activated_at,retire_after
       FROM cloud_capability_signing_keys ORDER BY created_at FOR UPDATE`)).rows;
     const byState = (state: string) => keys.filter(key => key.state === state);
@@ -132,7 +158,7 @@ export async function manageCloudCapabilityKey(
       await client.query("ROLLBACK");
       return { state: "planned" as const, planSha256, targetSha256, transitions };
     }
-    if (options.approval !== planSha256) throw new Error("Capability key plan changed; inspect the current target before execution");
+    if (options.approval !== planSha256) throw new RolloutFlagManagementError("Capability key plan changed; inspect the current target before execution");
     let publicJwk: unknown;
     for (const transition of transitions) {
       if (transition.to === "next") {
@@ -155,6 +181,13 @@ export async function manageCloudCapabilityKey(
         await client.query(`UPDATE cloud_capability_signing_keys SET state=$2 WHERE kid=$1`, [transition.kid, transition.to]);
       }
     }
+    // The audit receipt commits with the change; its operation id is the
+    // idempotency fence for replays.
+    await client.query(`INSERT INTO cloud_capability_key_changes
+      (operation_id,actor_user_id,channel,target_sha256,request_sha256,plan_sha256,transitions,reason)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [request.operationId, request.actorUserId, channel, targetSha256, requestSha256, planSha256,
+        JSON.stringify(transitions), request.reason]);
     await client.query("COMMIT");
     return { state: "changed" as const, planSha256, targetSha256, transitions, ...(publicJwk ? { publicJwk } : {}) };
   } catch (error) {
@@ -167,31 +200,39 @@ export async function manageCloudCapabilityKey(
 
 async function main() {
   const file = process.env.CLOUD_CAPABILITY_KEY_CHANGE_FILE, databaseUrl = process.env.DATABASE_URL;
-  const channel = process.env.RAILWAY_ENVIRONMENT_NAME ?? process.env.CONTROL_PLANE_CAPABILITY_KEY_CHANNEL;
-  if (!file || !databaseUrl || !channel) throw new Error("Capability key configuration is incomplete");
+  // Both channel sources must agree; neither silently wins (the rollout-flag
+  // command behaves the same way).
+  const channel = process.env.CONTROL_PLANE_CAPABILITY_KEY_CHANNEL;
+  if (!file || !databaseUrl || !channel) throw new RolloutFlagManagementError("Capability key configuration is incomplete");
   const keyring = loadCapabilityKeyring(process.env);
-  if (!keyring) throw new Error("Capability key changes require the CLOUD_CAPABILITY_KEYS_JSON keyring");
+  if (!keyring) throw new RolloutFlagManagementError("Capability key changes require the CLOUD_CAPABILITY_KEYS_JSON keyring");
   const args = process.argv.slice(2);
-  if (args.length > 1 || args.some(arg => arg !== "--execute")) throw new Error("Unsupported operator arguments");
+  if (args.length > 1 || args.some(arg => arg !== "--execute")) throw new RolloutFlagManagementError("Unsupported operator arguments");
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   let input: unknown;
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > 16384) throw new Error("Invalid operator document");
+    if (!stat.isFile() || stat.size > 16384) throw new RolloutFlagManagementError("Invalid operator document");
     input = JSON.parse(readFileSync(fd, "utf8"));
   } finally { closeSync(fd); }
   const pool = createMigrationPool(databaseUrl, { maxConnections: 1 });
   try {
     const result = await manageCloudCapabilityKey(pool, input, {
       databaseUrl, channel, keyring, execute: args.includes("--execute"), approval: process.env.CLOUD_CAPABILITY_KEY_PLAN_SHA256,
+      railwayEnvironmentName: process.env.RAILWAY_ENVIRONMENT_NAME,
+      productionConfirmed: process.env.CONTROL_PLANE_CAPABILITY_KEY_PRODUCTION_CONFIRMED,
     });
     console.log(JSON.stringify(result));
   } finally { await pool.end(); }
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  void main().catch(() => {
-    console.error("[capability-key] request failed; inspect the target, owner, actor, key id and approval");
+  void main().catch((error: unknown) => {
+    // Curated messages are safe and useful; anything else stays generic so a
+    // driver error cannot echo connection details into operator logs.
+    console.error(error instanceof RolloutFlagManagementError
+      ? `[capability-key] ${error.message}`
+      : "[capability-key] request failed; inspect the target, owner, actor, key id and approval");
     process.exitCode = 1;
   });
 }

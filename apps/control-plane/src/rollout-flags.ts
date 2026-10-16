@@ -44,7 +44,8 @@ export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;
 /** The flag is on in `set` and every transitive `requires` is too. */
 function flagEffective(set: ReadonlySet<string> | undefined, flag: string, seen: ReadonlySet<string> = new Set()): boolean {
   if (!set?.has(flag)) return false;
-  for (const dependency of ROLLOUT_FLAGS[flag as RolloutFlagName]?.requires ?? []) {
+  const definition: RolloutFlagDefinition | undefined = (ROLLOUT_FLAGS as Record<string, RolloutFlagDefinition>)[flag];
+  for (const dependency of definition?.requires ?? []) {
     if (seen.has(dependency)) continue;
     if (!flagEffective(set, dependency, new Set(seen).add(flag))) return false;
   }
