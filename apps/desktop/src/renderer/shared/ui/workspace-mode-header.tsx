@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, type ReactNode } from "react";
-import { Code2, PenTool, Plus, type LucideIcon } from "lucide-react";
+import { Code2, MessageSquarePlus, PenTool, Plus, type LucideIcon } from "lucide-react";
 
 import { workspaceSetMode, type Workspace } from "../../platform/git";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
@@ -21,6 +21,7 @@ import {
   markDesignDirectoryTargetExists,
   useDesignDirectoryTarget,
 } from "../../state/design-directory-target";
+import { requestDesignSyncAgent } from "../../state/design-sync-intent";
 import { cn } from "./cn";
 import { Button } from "./primitives/button";
 import {
@@ -57,9 +58,12 @@ export type CreateDesignDirectoryOption =
       /** Repo-relative folder the engine will create ("<repo> - Design"). */
       directory: string;
       onConfirm: () => void;
+      /** Create it, then have a new agent chat set up style syncing. */
+      onConfirmWithAgent?: () => void;
     };
 
 export const CREATE_DESIGN_DIRECTORY_LABEL = "Create design directory";
+export const CREATE_DESIGN_DIRECTORY_WITH_AGENT_LABEL = "Create and ask agent to sync styles";
 
 export interface WorkspaceModeToggleViewProps {
   mode: WorkspaceMode;
@@ -154,6 +158,19 @@ export function WorkspaceModeToggleView({
                       : "Checking design directory…"}
                   </span>
                 </DropdownMenuItem>
+                {creationReady && createDesignDirectory.onConfirmWithAgent ? (
+                  <DropdownMenuItem
+                    data-workspace-mode-create-agent-item=""
+                    onSelect={() => createDesignDirectory.onConfirmWithAgent?.()}
+                  >
+                    <MessageSquarePlus
+                      className="text-fg2"
+                      strokeWidth={1.5}
+                      aria-hidden="true"
+                    />
+                    <span>{CREATE_DESIGN_DIRECTORY_WITH_AGENT_LABEL}</span>
+                  </DropdownMenuItem>
+                ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
           );
@@ -315,16 +332,23 @@ function useCreateDesignDirectoryOption(
       : null;
   const previewPending =
     relevant && target.data === undefined && target.error === null;
+  const workspaceId = workspace.id;
   return useMemo(() => {
     if (directory !== null) {
       return {
         state: "ready" as const,
         directory,
         onConfirm: () => setMode("design"),
+        // Nothing syncs on its own; the Design surface opens the agent chat
+        // once the new directory has loaded.
+        onConfirmWithAgent: () => {
+          requestDesignSyncAgent(workspaceId);
+          setMode("design");
+        },
       };
     }
     return previewPending ? { state: "loading" as const } : null;
-  }, [directory, previewPending, setMode]);
+  }, [directory, previewPending, setMode, workspaceId]);
 }
 
 function OwnedWorkspaceModeHeader({

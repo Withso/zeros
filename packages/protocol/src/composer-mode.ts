@@ -12,7 +12,13 @@ export const composerModeSnapshotSchema = z
 export type ComposerModeSnapshot = z.infer<typeof composerModeSnapshotSchema>;
 
 export const DESIGN_MCP_SERVER = "design-draft";
+/** Local and cloud executions author Design natively. "api" remains for an
+ * execution policy that requires semantic API writes; none does today. */
 export type DesignAuthoringMethod = "native" | "api";
+
+/** Cloud executions author like Local ones; this states their boundary. */
+export const CLOUD_EXECUTION_NOTICE =
+  "This execution runs in a cloud workspace VM, which is the isolation boundary. There is no agent sandbox; agents share the non-root engine identity and can read engine and other-conversation state.";
 
 /** A frame's output format is independent of the agent's authoring tools. */
 export const DESIGN_FRAME_AUTHORING_INSTRUCTION =

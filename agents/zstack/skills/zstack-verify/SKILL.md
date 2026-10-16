@@ -15,7 +15,7 @@ gates: `pnpm typecheck`, `pnpm lint`, `pnpm check:ui`,
 | Touched | Also run |
 |---|---|
 | Renderer UI, styling or tokens | `pnpm check:ui`; after a token or contrast change, `pnpm design:docs` |
-| Frames in `Zeros - Design/` | `design validate` and `design capture` from the frame context, then inspect the PNG. Add `--theme light` to capture Light; the default is the Base (Dark) theme. |
+| Frames in `Zeros - Design/` | `design validate` and `design capture` from the frame context, then inspect the PNG. Add `--theme light` to capture Light; the default is the Dark theme. |
 | Composer, overlay, focus or popover | `pnpm test:ui-smoke`. Label the PR `ci:ui-smoke`. |
 | Performance-sensitive UI | exact-key and race tests, `pnpm build:ui` |
 | Electron IPC or preload | `pnpm check:preload` and the relevant Electron tests |
@@ -109,3 +109,8 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   Playwright-backed Design suites also need `npx playwright install chromium`.
   Before blaming your diff for a red local run, rerun the failing files in a
   clean checkout of your base commit.
+- `pnpm test:ui-smoke` stops at the first scenario that throws, so one base
+  failure hides every later scenario. Confirm the failure on the base commit,
+  then run the rest from an untracked copy of `scripts/` without that scenario
+  (registry and partition), with the affected scenarios in one shard; delete
+  the copy afterwards.

@@ -7,6 +7,9 @@ import {
 } from "@zeros/protocol/design-capture";
 import { assertDesignCapturePng } from "./capture-service";
 import { prepareFrameRenderSource } from "./render-preparation";
+import { readCanvas } from "./document-storage";
+import { readDesignThemeCatalog } from "./themes";
+import { withDesignTheme } from "./source";
 
 const inherited = {
   url: process.env.ZEROS_DESIGN_CAPTURE_URL,
@@ -158,6 +161,11 @@ export function createDesignCaptureRenderer(
     renderComposed,
     async render(input) {
       input.signal?.throwIfAborted();
+      // API captures use the same default as the canvas. Read the theme and
+      // imported styles from one canvas snapshot; renderComposed callers have
+      // already chosen their theme (for example an explicit CLI preview).
+      const canvas = await readCanvas(workspacePath).catch(() => undefined);
+      const theme = canvas ? readDesignThemeCatalog(canvas).baseId : null;
       const composed = await prepareFrameRenderSource(
         workspacePath,
         input.state.files[input.state.entryFile]!,
@@ -165,10 +173,11 @@ export function createDesignCaptureRenderer(
         input.state.files,
         undefined,
         input.state.entryFile,
+        canvas,
       );
       return renderComposed({
         ...input,
-        html: composed.sanitized,
+        html: theme === null ? composed.sanitized : withDesignTheme(composed.sanitized, theme),
         sourceVersion: composed.sourceVersion,
       });
     },

@@ -4461,6 +4461,8 @@ describe("WorkspaceService", () => {
         "utf8",
       ),
     ).toMatch(/<main\b[^>]*>\s*<\/main>/);
+    // New directories start without Manual tokens; this test edits one later.
+    fs.writeFileSync(path.join(workspace.path, designDirectory, "tokens.css"), ":root { --accent: blue; }\n");
     const textReply = (await svc.handle("design.frame.create", {
       workspaceId: workspace.workspaceId,
       title: "Loose text",

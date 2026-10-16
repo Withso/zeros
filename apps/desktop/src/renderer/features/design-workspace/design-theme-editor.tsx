@@ -18,6 +18,7 @@ import {
   ClipboardPaste,
   Clock3,
   Hash,
+  Layers,
   Palette,
   Plus,
   RotateCcw,
@@ -32,6 +33,7 @@ import type { DesignOperation, DesignTransaction } from "@zeros/design-core";
 import type {
   DesignCanvasFrameWire,
   DesignStyleSourceWire,
+  DesignThemeWire,
   DesignTokenWire,
 } from "../../platform/git";
 import {
@@ -52,6 +54,8 @@ import {
 import { cn } from "../../shared/ui/cn";
 import {
   applyDesignTransactionCached,
+  refreshDesignStylesCached,
+  updateDesignThemeCached,
   updateDesignTokenCached,
 } from "./state/design-workspace-cache";
 import { useDesignFoundation } from "./state/use-design-foundation";
@@ -70,19 +74,34 @@ import {
   DesignThemeSourceStatus,
   designStyleSourceTokens,
 } from "./design-theme-sources";
+import { designSourceFixBrief, designSyncBrief } from "./design-agent-brief";
+import { useAskDesignAgent } from "./design-agent-sync";
+import {
+  designThemeIdFromName,
+  designThemeLabel,
+  designThemeView,
+} from "./design-themes";
 import "./design-theme-editor.css";
 
 const NO_STYLE_SOURCES: readonly DesignStyleSourceWire[] = [];
+/** The default theme's column, which has no theme id of its own. */
+const BASE_THEME_KEY = "__base__";
 const NO_STYLE_SOURCE_ERRORS: readonly string[] = [];
 
 interface DesignThemeEditorProps {
   workspaceId: string | null;
+  /** The workspace's chat folder (path or cloud key), where "Ask agent"
+   * opens a new chat; the Design directory's name for its brief. */
+  workspaceFolder?: string | null;
+  directory?: string | null;
   frame: DesignCanvasFrameWire | null;
   tokens: readonly DesignTokenWire[];
   tokenSourceVersion: string | null;
   /** Imported style sources; absent on older engines. */
   styleSources?: readonly DesignStyleSourceWire[];
   styleSourceErrors?: readonly string[];
+  /** Theme names; absent on older engines, whose default theme is "Base". */
+  themeNames?: readonly DesignThemeWire[];
   activeTheme: string | null;
   /** An inactive (retained, hidden) Design surface keeps its window mounted,
    * with drafts and position, but hidden and inert over the other tab. */
@@ -153,6 +172,8 @@ function errorMessage(error: unknown): string {
 function ThemeValueField({
   token,
   theme,
+  themeLabel,
+  baseLabel,
   value,
   inheritedValue,
   disabled,
@@ -161,6 +182,9 @@ function ThemeValueField({
 }: {
   token: DesignTokenWire;
   theme: string | null;
+  /** This column's theme name, and the default theme's. */
+  themeLabel: string;
+  baseLabel: string;
   value: string;
   inheritedValue?: string;
   disabled: boolean;
@@ -249,19 +273,19 @@ function ThemeValueField({
   return (
     <Tooltip
       className="zd-theme-tooltip"
-      label={inherited ? "Inherits Base" : undefined}
+      label={inherited ? `Inherits ${baseLabel}` : undefined}
     >
       <div className="zd-field zd-theme-value-field">
         {type === "color" ? (
           <Tooltip
             className="zd-theme-tooltip"
-            label={`Edit ${token.name} ${theme ?? "base"} color`}
+            label={`Edit ${token.name} ${themeLabel} color`}
             shortcut="Alt+↓"
           >
             <span ref={swatchRef} className="zd-theme-swatch-anchor">
               <DesignColorPicker
                 value={effectiveValue}
-                label={`${token.name} ${theme ?? "base"}`}
+                label={`${token.name} ${themeLabel}`}
                 disabled={disabled || saving}
                 side="right"
                 className="zd-theme-swatch-button"
@@ -287,7 +311,7 @@ function ThemeValueField({
           placeholder={inherited ? inheritedValue : undefined}
           disabled={disabled || saving}
           className="zd-theme-input"
-          aria-label={`${token.name} ${theme ?? "base"} ${inherited ? "inherited " : ""}value`}
+          aria-label={`${token.name} ${themeLabel} ${inherited ? "inherited " : ""}value`}
           aria-keyshortcuts={
             [
               type === "color" ? "Alt+ArrowDown" : "",
@@ -339,14 +363,14 @@ function ThemeValueField({
         {onReset ? (
           <Tooltip
             className="zd-theme-tooltip"
-            label="Reset to Base"
+            label={`Reset to ${baseLabel}`}
             shortcut="Alt+Enter"
           >
             <button
               type="button"
               tabIndex={-1}
               className="zd-icon-button zd-theme-reset"
-              aria-label="Reset to Base"
+              aria-label={`Reset to ${baseLabel}`}
               aria-keyshortcuts="Alt+Enter"
               disabled={disabled || saving}
               onPointerDown={(event) => event.preventDefault()}
@@ -390,11 +414,14 @@ function importSummary(imports: readonly DesignCssVariableImport[]): string {
 
 export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   workspaceId,
+  workspaceFolder = null,
+  directory = null,
   frame,
   tokens,
   tokenSourceVersion,
   styleSources = NO_STYLE_SOURCES,
   styleSourceErrors = NO_STYLE_SOURCE_ERRORS,
+  themeNames,
   activeTheme,
   active,
   open,
@@ -446,34 +473,70 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
     [sourceId, styleSources],
   );
   const readOnly = selectedSource !== null;
+  // Manual tokens load after imported sources, so a Manual token with an
+  // imported name overrides the app's value in every frame.
+  const importedBy = useMemo(() => {
+    const titles = new Map<string, string[]>();
+    for (const source of styleSources) {
+      for (const token of source.tokens) {
+        titles.set(token.name, [...(titles.get(token.name) ?? []), source.title]);
+      }
+    }
+    return titles;
+  }, [styleSources]);
+  const overriddenInSource = useMemo(() => {
+    if (!selectedSource) return 0;
+    const manual = new Set(tokens.map((token) => token.name));
+    return selectedSource.tokens.filter((token) => manual.has(token.name)).length;
+  }, [selectedSource, tokens]);
   const sourceTokens = useMemo(
     () => (selectedSource ? designStyleSourceTokens(selectedSource) : null),
     [selectedSource],
   );
   const visibleTokens = sourceTokens ?? tokens;
-  const showSources = styleSources.length > 0 || styleSourceErrors.length > 0;
+  // Sources always show, so an unsynced directory offers "Ask agent to sync".
+  const showSources = Boolean(workspaceId);
+  const askAgent = useAskDesignAgent(workspaceFolder);
+  const agentDirectory = directory ?? "Design";
+  const [updatingStyles, setUpdatingStyles] = useState(false);
+  const updateStyles = () => {
+    if (!workspaceId || updatingStyles) return;
+    setUpdatingStyles(true);
+    void refreshDesignStylesCached(workspaceId)
+      .catch((error: unknown) => {
+        toast.error("Couldn't update styles", { description: errorMessage(error) });
+      })
+      .finally(() => setUpdatingStyles(false));
+  };
 
-  const themes = useMemo(
+  // Every theme the canvas can preview, named; any source may define one.
+  const themeView = useMemo(
     () =>
-      [
-        ...new Set([
-          ...(selectedSource?.themes ?? []),
-          ...visibleTokens.flatMap((token) => Object.keys(token.themeValues)),
-        ]),
-      ].sort((left, right) => left.localeCompare(right)),
-    [selectedSource, visibleTokens],
+      designThemeView(themeNames, [
+        ...tokens.flatMap((token) => Object.keys(token.themeValues)),
+        ...styleSources.flatMap((source) => source.themes),
+      ]),
+    [styleSources, themeNames, tokens],
   );
-  // The canvas can preview any theme a source defines, whichever is shown.
-  const previewThemes = useMemo(
-    () =>
-      [
-        ...new Set([
-          ...tokens.flatMap((token) => Object.keys(token.themeValues)),
-          ...styleSources.flatMap((source) => source.themes),
-        ]),
-      ].sort((left, right) => left.localeCompare(right)),
-    [styleSources, tokens],
-  );
+  const previewThemes = themeView.others;
+  // Columns for the shown variables; the default theme is the Base column.
+  const themes = useMemo(() => {
+    const shown = new Set([
+      ...(selectedSource?.themes ?? []),
+      ...visibleTokens.flatMap((token) => Object.keys(token.themeValues)),
+    ]);
+    shown.delete(themeView.baseId ?? "");
+    return [
+      ...themeView.others.filter((theme) => shown.has(theme)),
+      ...[...shown]
+        .filter((theme) => !themeView.others.includes(theme))
+        .sort((left, right) => left.localeCompare(right)),
+    ];
+  }, [selectedSource, themeView, visibleTokens]);
+  const [renamingTheme, setRenamingTheme] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  // Escape removes the field; a blur that removal may fire must not save it.
+  const renameCancelled = useRef(false);
   const parsedImport = useMemo(() => {
     try {
       return { imports: parseDesignCssVariables(cssDraft), error: null };
@@ -598,12 +661,14 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   };
 
   const addTheme = async () => {
-    const theme = newTheme.trim().toLocaleLowerCase();
-    if (!theme || themeNameInvalid || !canAddTheme) return;
+    // People name a theme; its id is derived for tokens.css and frames.
+    const label = newTheme.trim();
+    const theme = designThemeIdFromName(label);
+    if (!label || !theme || themeNameInvalid || !canAddTheme) return;
     try {
       await applyOperations(
         `theme:${theme}`,
-        `Create ${theme} theme`,
+        `Create ${label} theme`,
         tokens.map((token, index) =>
           tokenOperation(
             { name: token.name, theme, value: token.value },
@@ -611,6 +676,10 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
           ),
         ),
       );
+      // A name the id already reads as needs no declaration.
+      if (workspaceId && label !== designThemeLabel(theme)) {
+        await updateDesignThemeCached(workspaceId, { id: theme, label });
+      }
       setNewTheme("");
       setNewThemeOpen(false);
       onActiveThemeChange(theme);
@@ -640,10 +709,49 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
     tokens,
   );
   const variableNameInvalid = variableNameIssue !== null;
+  const newThemeId = designThemeIdFromName(newTheme);
   const themeNameInvalid =
     Boolean(newTheme.trim()) &&
-    (!/^[a-z][a-z0-9_-]{0,63}$/.test(newTheme.trim().toLocaleLowerCase()) ||
-      themes.includes(newTheme.trim().toLocaleLowerCase()));
+    (!newThemeId ||
+      newThemeId === themeView.baseId ||
+      themeView.others.includes(newThemeId));
+
+  const startRename = (theme: string | null) => {
+    renameCancelled.current = false;
+    setRenamingTheme(theme ?? BASE_THEME_KEY);
+    setRenameDraft(themeView.label(theme));
+  };
+  const commitRename = async (theme: string | null) => {
+    if (renameCancelled.current) return;
+    const label = renameDraft.trim();
+    setRenamingTheme(null);
+    if (!workspaceId || !label || label === themeView.label(theme)) return;
+    // Naming the default theme gives `:root` an id frames carry.
+    const id = theme ?? themeView.baseId ?? designThemeIdFromName(label);
+    if (!id) {
+      toast.error("Couldn't rename the theme", {
+        description: "A theme name needs a letter.",
+      });
+      return;
+    }
+    if (theme === null && !themeView.baseId && themeView.others.includes(id)) {
+      toast.error("Couldn't rename the theme", {
+        description: `${themeView.label(id)} is already a theme.`,
+      });
+      return;
+    }
+    try {
+      await updateDesignThemeCached(workspaceId, {
+        id,
+        label,
+        ...(theme === null ? { base: true } : {}),
+      });
+    } catch (error) {
+      toast.error("Couldn't rename the theme", {
+        description: errorMessage(error),
+      });
+    }
+  };
 
   const togglePaste = () => {
     setPasteOpen((current) => !current);
@@ -828,6 +936,11 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                     sources={styleSources}
                     errors={styleSourceErrors}
                     manualCount={tokens.length}
+                    {...(workspaceFolder
+                      ? { onAskAgent: () => askAgent(designSyncBrief(agentDirectory, styleSources)) }
+                      : {})}
+                    onUpdate={updateStyles}
+                    updating={updatingStyles}
                     selectedId={selectedSource?.id ?? null}
                     onSelect={(id) => {
                       setSourceId(id);
@@ -885,9 +998,9 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                   />
                 </div>
                 <Select
-                  value={activeTheme ?? "__base__"}
+                  value={activeTheme ?? BASE_THEME_KEY}
                   onValueChange={(value) =>
-                    onActiveThemeChange(value === "__base__" ? null : value)
+                    onActiveThemeChange(value === BASE_THEME_KEY ? null : value)
                   }
                 >
                   <SelectTrigger
@@ -897,10 +1010,12 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__base__">Base</SelectItem>
+                    <SelectItem value={BASE_THEME_KEY}>
+                      {themeView.baseLabel}
+                    </SelectItem>
                     {previewThemes.map((theme) => (
                       <SelectItem key={theme} value={theme}>
-                        {theme}
+                        {themeView.label(theme)}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -942,7 +1057,13 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
               </div>
 
               {selectedSource ? (
-                <DesignThemeSourceStatus source={selectedSource} />
+                <DesignThemeSourceStatus
+                  source={selectedSource}
+                  overriddenCount={overriddenInSource}
+                  {...(workspaceFolder
+                    ? { onAskAgentToFix: () => askAgent(designSourceFixBrief(agentDirectory, selectedSource)) }
+                    : {})}
+                />
               ) : null}
 
               {pasteOpen && !readOnly ? (
@@ -1029,22 +1150,63 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                     </div>
                     {[null, ...themes].map((theme) => (
                       <div
-                        key={theme ?? "__base__"}
+                        key={theme ?? BASE_THEME_KEY}
                         role="columnheader"
                         className="zd-theme-mode-heading"
                       >
-                        <button
-                          type="button"
-                          className={cn(
-                            "zd-theme-mode",
-                            activeTheme === theme &&
-                              "zd-design-theme-mode-active",
-                          )}
-                          aria-pressed={activeTheme === theme}
-                          onClick={() => onActiveThemeChange(theme)}
-                        >
-                          {theme ?? "Base"}
-                        </button>
+                        {renamingTheme === (theme ?? BASE_THEME_KEY) ? (
+                          <div className="zd-field">
+                            <Input
+                              autoFocus
+                              value={renameDraft}
+                              className="zd-theme-input"
+                              aria-label={`Rename ${themeView.label(theme)}`}
+                              onChange={(event) =>
+                                setRenameDraft(event.target.value)
+                              }
+                              onBlur={() => void commitRename(theme)}
+                              onKeyDown={(event) => {
+                                if (event.nativeEvent.isComposing) return;
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  event.currentTarget.blur();
+                                } else if (event.key === "Escape") {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  renameCancelled.current = true;
+                                  setRenamingTheme(null);
+                                }
+                              }}
+                            />
+                          </div>
+                        ) : (
+                          <Tooltip
+                            className="zd-theme-tooltip"
+                            label="Double-click to rename"
+                            shortcut="F2"
+                          >
+                            <button
+                              type="button"
+                              className={cn(
+                                "zd-theme-mode",
+                                activeTheme === theme &&
+                                  "zd-design-theme-mode-active",
+                              )}
+                              aria-pressed={activeTheme === theme}
+                              aria-keyshortcuts="F2"
+                              disabled={!workspaceId}
+                              onClick={() => onActiveThemeChange(theme)}
+                              onDoubleClick={() => startRename(theme)}
+                              onKeyDown={(event) => {
+                                if (event.key !== "F2") return;
+                                event.preventDefault();
+                                startRename(theme);
+                              }}
+                            >
+                              {themeView.label(theme)}
+                            </button>
+                          </Tooltip>
+                        )}
                       </div>
                     ))}
                     <div role="columnheader" className="zd-theme-add-mode">
@@ -1205,6 +1367,9 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                           token.syntax,
                         );
                         const Icon = THEME_TYPE_ICONS[type];
+                        const overrides = readOnly
+                          ? undefined
+                          : importedBy.get(token.name);
                         return (
                           <div
                             key={token.name}
@@ -1230,7 +1395,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                                 label={
                                   readOnly
                                     ? `${token.name} · ${selectedSource!.path}`
-                                    : `${token.name} · ${token.usageCount} ${token.usageCount === 1 ? "use" : "uses"}`
+                                    : `${token.name} · ${token.usageCount} ${token.usageCount === 1 ? "use" : "uses"}${overrides ? ` · overrides ${overrides.join(", ")}` : ""}`
                                 }
                               >
                                 <span
@@ -1240,10 +1405,17 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                                   {token.name}
                                 </span>
                               </Tooltip>
+                              {overrides ? (
+                                <Layers
+                                  aria-hidden="true"
+                                  data-design-theme-overrides=""
+                                  className="text-muted-fg size-3.5 shrink-0"
+                                />
+                              ) : null}
                             </div>
                             {[null, ...themes].map((theme) => (
                               <div
-                                key={theme ?? "__base__"}
+                                key={theme ?? BASE_THEME_KEY}
                                 role="cell"
                                 className="zd-theme-value-cell"
                               >
@@ -1258,13 +1430,18 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                                     }
                                   >
                                     {theme === null
-                                      ? value
+                                      ? themeView.baseId
+                                        ? (token.themeValues[themeView.baseId] ??
+                                          value)
+                                        : value
                                       : (token.themeValues[theme] ?? value)}
                                   </span>
                                 ) : (
                                   <ThemeValueField
                                     token={token}
                                     theme={theme}
+                                    themeLabel={themeView.label(theme)}
+                                    baseLabel={themeView.baseLabel}
                                     value={
                                       theme === null
                                         ? value
@@ -1293,7 +1470,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                                         ? () =>
                                             applyOperations(
                                               `reset:${theme}:${token.name}`,
-                                              `Reset ${token.name} in ${theme} to Base`,
+                                              `Reset ${token.name} in ${themeView.label(theme)} to ${themeView.baseLabel}`,
                                               [
                                                 {
                                                   operationId: `theme-reset-${crypto.randomUUID()}`,

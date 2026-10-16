@@ -146,6 +146,66 @@ describe("native Design verification", () => {
     expect(html).toContain('[data-zd-theme="sepia"]{--gap:3px}');
   });
 
+  it("shows the named default theme when no theme is given, and accepts it by id", async () => {
+    await mkdir(path.join(root, "styles"), { recursive: true });
+    await writeFile(path.join(root, "styles/app.css"), ':root{--gap:2px} [data-theme="dark"]{--gap:4px}');
+    const canvasFile = path.join(root, directory, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+    canvas.styles = [{ id: "app", title: "App", kind: "css", path: "styles/app.css", themes: { dark: '[data-theme="dark"]' } }];
+    canvas.themes = [{ id: "dark", label: "Dark", base: true }];
+    await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
+    const output = path.join(root, ".context", "phone-default.png");
+    expect(await runDesignVerificationCli(["capture", "--url", url, "--frame", frame, "--output", output], () => {})).toBe(0);
+    expect(render.mock.calls.at(-1)![0].html).toMatch(/<html[^>]* data-zd-theme="dark"/);
+    expect(await runDesignVerificationCli(["capture", "--url", url, "--frame", frame, "--output", output, "--theme", "dark"], () => {})).toBe(0);
+    expect(render.mock.calls.at(-1)![0].html).toContain('[data-zd-theme="dark"]{--gap:4px}');
+    const state = await (await fetch(`${url}/${frame}/state`)).json();
+    const html = await (await fetch(`${url}/${frame}/document?revision=${state.reference.revision}`)).text();
+    expect(html).toMatch(/<html[^>]* data-zd-theme="dark"/);
+  });
+
+  it("reports every style source's status through the read-only styles check", async () => {
+    const lines: string[] = [];
+    expect(await runDesignVerificationCli(["styles", "--url", url], (line) => lines.push(line))).toBe(0);
+    expect(JSON.parse(lines.pop()!)).toEqual({ directory, sources: [], errors: [], summary: { ready: 0, warning: 0, error: 0 } });
+
+    await mkdir(path.join(root, "styles"), { recursive: true });
+    await writeFile(path.join(root, "styles/app.css"), ':root{--bg1:black} [data-theme="light"]{--bg1:white}');
+    const canvasFile = path.join(root, directory, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+    canvas.styles = [
+      { id: "app", title: "App", kind: "css", path: "styles/app.css", themes: { light: '[data-theme="light"]', dark: ".dark" } },
+      { id: "gone", title: "Gone", kind: "css", path: "styles/gone.css" },
+      { id: "Bad Id", kind: "css", path: "styles/app.css" },
+    ];
+    await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
+    const before = await readFile(canvasFile, "utf8");
+    expect(await runDesignVerificationCli(["styles", "--url", url], (line) => lines.push(line))).toBe(1);
+    const report = JSON.parse(lines.pop()!);
+    expect(report.summary).toEqual({ ready: 0, warning: 1, error: 1 });
+    expect(report.errors).toEqual(["Style source 3 needs an id that starts with a letter (letters, digits, _ or -)."]);
+    expect(report.sources).toEqual([
+      {
+        id: "app", title: "App", kind: "css", path: "styles/app.css", status: "warning", tokens: 1, themes: ["light", "dark"],
+        bytes: expect.any(Number), messages: [{ level: "warning", text: 'Theme "dark": no rule uses the selector .dark.', action: "agent" }],
+      },
+      {
+        id: "gone", title: "Gone", kind: "css", path: "styles/gone.css", status: "error", tokens: 0, themes: [], bytes: 0,
+        messages: [{ level: "error", text: "styles/gone.css does not exist.", action: "agent" }],
+      },
+    ]);
+    expect(await readFile(canvasFile, "utf8")).toBe(before);
+
+    canvas.styles = [{ id: "app", title: "App", kind: "css", path: "styles/app.css", themes: { light: '[data-theme="light"]' } }];
+    await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
+    expect(await runDesignVerificationCli(["styles", "--url", url], (line) => lines.push(line))).toBe(0);
+    expect(JSON.parse(lines.pop()!).summary).toEqual({ ready: 1, warning: 0, error: 0 });
+    await expect(runDesignVerificationCli(["styles", "--url", url, "--theme", "light"]))
+      .rejects.toThrow("--theme applies to capture and preview.");
+    now += 31 * 60_000;
+    await expect(runDesignVerificationCli(["styles", "--url", url])).rejects.toThrow("This Design preview expired");
+  });
+
   it.each([
     { width: 390, height: 3000, rasterWidth: 266, rasterHeight: 2048 },
     { width: 390.5, height: 844.25, rasterWidth: 391, rasterHeight: 845 },

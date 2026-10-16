@@ -10,14 +10,16 @@ them.
    and how Local and cloud workspaces differ, including each cloud VM state
    (RULES.md §8).
 2. **Design first when the look changes.** Mock it in `Zeros - Design/` (the
-   Design tab) and follow its `rules.md`. Frames link `../tokens.css`, which
-   `pnpm design:docs` generates from `styles/tokens/`. Never hand-copy token
-   values into a standalone HTML file; a product token change goes to
-   `styles/tokens/*.tokens.json`.
+   Design tab) and follow its `rules.md`. Frames import the app's own
+   stylesheets live as style sources and link `../tokens.css` for Design-only
+   tokens. Never hand-copy token values into a standalone HTML file; a product
+   token change goes to `styles/tokens/*.tokens.json`, which the Design tab
+   previews before `pnpm design:docs` regenerates the CSS.
 3. **Verify the frame, then get approval.** Run `design validate` and
    `design capture` from the frame context and inspect the PNG yourself.
-   Capture both themes: the default is Base (Dark), and `--theme light`
-   captures Light the way the canvas Themes menu shows it. Existing visual behavior is a
+   Capture both themes: the default is Dark, and `--theme light` captures
+   Light the way the canvas Themes menu shows it. `design styles` confirms the
+   imported sources are ready. Existing visual behavior is a
    contract (RULES.md §3), so implement a visual change only after the user
    approves the frame.
 4. **Red.** A bug needs a failing test or ui-smoke assertion first; a behavior

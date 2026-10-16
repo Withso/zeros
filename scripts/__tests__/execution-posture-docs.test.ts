@@ -64,8 +64,8 @@ describe("documented VM execution posture", () => {
     expect(design).not.toMatch(/pinned ZSR supervisor|check:zsr/);
     expect(design).toContain("UID 10003");
     expect(design).toContain("Chromium sandboxing is explicitly enabled");
-    expect(design).toContain("Cloud retains API authoring for now");
-    expect(design).toContain("not OS-enforced");
+    expect(design).toContain("Cloud workers author like Local ones");
+    expect(design).not.toContain("Cloud retains API authoring for now");
     expect(design).toContain("__zsr_cap");
   });
 

@@ -175,6 +175,8 @@ interface LinkedStylesheet {
   token: string;
   css: string;
   variables?: readonly string[];
+  /** Identity only: the size of CSS left empty here. */
+  bytes?: number;
 }
 
 /** Replace each local stylesheet link with an empty, hash-tagged placeholder. */
@@ -462,17 +464,24 @@ async function importedStylesheets(
   entryFile: string,
   canvas: CanvasDocument | undefined,
   html: string,
-  stylesheetVariables: readonly string[],
+  linked: readonly LinkedStylesheet[],
   identityOnly: boolean,
 ): Promise<{ markup: string; sheets: LinkedStylesheet[] }> {
   const document = canvas ?? (await readCanvas(workspacePath).catch(() => null));
   if (!document) return { markup: "", sheets: [] };
   const sheets: LinkedStylesheet[] = [];
   let markup = "";
-  const sources = await frameStyleSources(workspacePath, document, entryFile, { html, stylesheetVariables, build: !identityOnly });
+  // Each imported source is pruned to what this frame can use, including the
+  // fonts and variables the frame's own stylesheets name.
+  const sources = await frameStyleSources(workspacePath, document, entryFile, {
+    html,
+    stylesheetVariables: linked.flatMap((sheet) => sheet.variables ?? []),
+    stylesheets: linked.map((sheet) => sheet.css),
+    build: !identityOnly,
+  });
   for (const [index, source] of sources.entries()) {
     const token = `s${index}-${source.revision}`;
-    sheets.push({ token, css: source.css.replace(/<\/style/gi, "<\\/style") });
+    sheets.push({ token, css: source.css.replace(/<\/style/gi, "<\\/style"), ...(source.bytes === undefined ? {} : { bytes: source.bytes }) });
     markup += `<style data-zeros-style-source="${source.id}" data-zeros-sheet="${token}"></style>`;
   }
   return { markup, sheets };
@@ -515,7 +524,7 @@ export async function prepareFrameRenderSource(
   // Tailwind needs classes from the expanded frame and variables read by its
   // linked sheets. The latter are extracted once per prepared stylesheet.
   const imported = await importedStylesheets(workspacePath, entryFile, canvas, expanded.html,
-    linked.sheets.flatMap((sheet) => sheet.variables ?? []), options.identityOnly === true);
+    linked.sheets, options.identityOnly === true);
   const withImported = imported.markup
     ? insertDesignHeadMarkup(linked.html, imported.markup)
     : linked.html;
@@ -541,7 +550,7 @@ export async function prepareFrameRenderSource(
   if (options.identityOnly) {
     // Splicing fills empty placeholders, so the document's size is known
     // without building it; identity and document fail the same frames.
-    const bytes = sheets.reduce((total, sheet) => total + utf8Bytes(sheet.css), utf8Bytes(skeleton));
+    const bytes = sheets.reduce((total, sheet) => total + (sheet.bytes ?? utf8Bytes(sheet.css)), utf8Bytes(skeleton));
     if (bytes > MAX_SANITIZED_RENDER_BYTES) {
       throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
     }

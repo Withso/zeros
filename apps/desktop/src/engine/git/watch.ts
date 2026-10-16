@@ -324,6 +324,31 @@ function isPathInsideRoot(filePath: string, root: string): boolean {
   );
 }
 
+/** Raw content events, for consumers that react to particular files (live
+ * Design style build inputs) without a watcher of their own. Listeners run for
+ * every event before debouncing, so they must be cheap and never throw. */
+type WorktreeContentListener = (root: string, absolutePath: string) => void;
+const contentListeners = new Set<WorktreeContentListener>();
+
+export function onWorktreeContentChange(listener: WorktreeContentListener): () => void {
+  contentListeners.add(listener);
+  return () => {
+    contentListeners.delete(listener);
+  };
+}
+
+function notifyContentListeners(root: string, filePath: string): void {
+  if (contentListeners.size === 0) return;
+  const absolutePath = resolve(filePath);
+  for (const listener of contentListeners) {
+    try {
+      listener(root, absolutePath);
+    } catch {
+      // A consumer's failure must never stop the watcher.
+    }
+  }
+}
+
 function changedTargetForPath(
   filePath: string,
   targetsByRoot: ReadonlyMap<string, GitWatchTarget>,
@@ -656,6 +681,9 @@ export function startGitWatcher(
               for (const [filePath, directoryChanged] of changed) {
                 const target =
                   changedTargetForPath(filePath, targetsByRoot) ?? entry.target;
+                // Reconciliation can discover paths that emitted no native
+                // event. Input-driven consumers need these changes as well.
+                notifyContentListeners(target.root, filePath);
                 scheduleWorktreeChange(
                   target,
                   isDesignRecognitionChange(filePath, directoryChanged),
@@ -761,6 +789,7 @@ export function startGitWatcher(
             parent?.children.delete(basename(observedPath));
         }
       }
+      notifyContentListeners((changed ?? entry.target).root, filePath);
       // An active root always has an owner. Falling back to its bound target
       // covers an OS path spelling that differs from path.resolve while still
       // retaining the exact workspace/coarse identity.

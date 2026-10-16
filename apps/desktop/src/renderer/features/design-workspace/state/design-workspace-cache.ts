@@ -19,6 +19,8 @@ import {
   designDuplicateFrame,
   designCreatePage,
   designRenamePage,
+  designUpdateTheme,
+  designRefreshStyles,
   designDeletePage,
   designFrame,
   designInsertAsset,
@@ -755,6 +757,7 @@ type DesignStyleSourceSnapshot = NonNullable<
 >[number];
 const NO_STYLE_SOURCES: DesignStyleSourceSnapshot[] = [];
 const NO_STYLE_SOURCE_ERRORS: string[] = [];
+const NO_THEMES: NonNullable<DesignWorkspaceSnapshotWire["themes"]> = [];
 
 /** The revision hashes the imported CSS, so equal revisions carry equal tokens. */
 function sameStyleSource(
@@ -952,6 +955,11 @@ export function stabilizeDesignWorkspaceSnapshot(
     next.styleSourceErrors ?? NO_STYLE_SOURCE_ERRORS,
     (left, right) => left === right,
   );
+  const themes = stableArray(
+    previous.themes ?? NO_THEMES,
+    next.themes ?? NO_THEMES,
+    (left, right) => left.id === right.id && left.label === right.label && left.base === right.base,
+  );
   const assets = stableArray(previous.assets, next.assets, sameAsset);
   const violations = stableArray(
     previous.lint.violations,
@@ -976,6 +984,7 @@ export function stabilizeDesignWorkspaceSnapshot(
     next.tokenSourceVersion === previous.tokenSourceVersion &&
     styleSources === (previous.styleSources ?? NO_STYLE_SOURCES) &&
     styleSourceErrors === (previous.styleSourceErrors ?? NO_STYLE_SOURCE_ERRORS) &&
+    themes === (previous.themes ?? NO_THEMES) &&
     assets === previous.assets &&
     lint === previous.lint
     ? previous
@@ -989,6 +998,7 @@ export function stabilizeDesignWorkspaceSnapshot(
         tokenSourceVersion: next.tokenSourceVersion,
         styleSources,
         styleSourceErrors,
+        themes,
         assets,
         lint,
       };
@@ -1222,6 +1232,24 @@ export async function createDesignPageCached(workspaceId: string, title?: string
 export async function renameDesignPageCached(workspaceId: string, pageId: string, title: string) {
   return runLocalDesignMutation(workspaceId, async () => {
     const result = await designRenamePage(workspaceId, pageId, title);
+    return { ...result, snapshot: publishDesignWorkspaceSnapshot(workspaceId, result.snapshot) };
+  });
+}
+
+/** The theme editor's Update: the engine re-reads every imported source and
+ * runs its builds, then this workspace's snapshot is read again. */
+export async function refreshDesignStylesCached(workspaceId: string): Promise<DesignWorkspaceSnapshotWire | undefined> {
+  await designRefreshStyles(workspaceId);
+  return refreshDesignWorkspaceSnapshot(workspaceId);
+}
+
+/** Name a theme, or make it the default, from the theme editor. */
+export async function updateDesignThemeCached(
+  workspaceId: string,
+  theme: { id: string; label: string; base?: boolean },
+) {
+  return runLocalDesignMutation(workspaceId, async () => {
+    const result = await designUpdateTheme(workspaceId, theme);
     return { ...result, snapshot: publishDesignWorkspaceSnapshot(workspaceId, result.snapshot) };
   });
 }

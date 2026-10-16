@@ -39,8 +39,9 @@ import path from "node:path";
 import { designAssetUploadSchema, prepareDesignAssetUpload, withDesignAssetUpload } from "./asset-upload";
 import { escapeAttribute } from "./source";
 import { readCanvas } from "./document-storage";
-import { setDesignStyleBuildPresence } from "./style-builds";
-import { designStyleBuildSettings } from "./style-sources";
+import { refreshDesignStyleBuilds, setDesignStyleBuildPresence } from "./style-builds";
+import { retryDesignFonts } from "./style-fonts";
+import { designStyleBuildSettings, forgetDesignStyleSourceCaches } from "./style-sources";
 import {
   designDirectoryFromSettings,
   designDocumentMetadataPath,
@@ -114,6 +115,7 @@ import {
 import { DEFAULT_DESIGN_DIRECTORY_NAME } from "./directory-registry";
 import { stickyRecognizedDesignDirectories } from "./recognition-store";
 import { withDesignWorkspaceMutation } from "./document-write-lock";
+import { upsertDesignTheme } from "./theme-lifecycle";
 import { setDesignRuntimeAudit } from "./runtime-audits";
 import { normalizeDesignScreenshot, setDesignScreenshot } from "./screenshots";
 import { setDesignSelection } from "./selection";
@@ -216,6 +218,7 @@ export interface DesignWorkspaceRouteHost {
 const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.capture",
   "design.styleBuilds.presence",
+  "design.styles.refresh",
   "design.context.create",
   "design.context.inspect",
   "design.verification.open",
@@ -247,6 +250,7 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.page.rename",
   "design.page.delete",
   "design.page.select",
+  "design.themes.update",
   "design.frame.rename",
   "design.frame.duplicate",
   "design.frame.delete",
@@ -293,6 +297,18 @@ export async function handleDesignWorkspaceRoute(
       return host.withDesignReadWorkspace(workspaceId, remote, async ({ root }) => {
         const canvas = present ? await readCanvas(root).catch(() => null) : null;
         await setDesignStyleBuildPresence(root, present, canvas ? designStyleBuildSettings(root, canvas) : []);
+        return { ok: true };
+      });
+    }
+    case "design.styles.refresh": {
+      // The theme editor's Update: re-read every imported source from disk
+      // and run its builds now. The caller re-reads the snapshot afterwards.
+      const workspaceId = reqStr(params, "workspaceId");
+      return host.withDesignReadWorkspace(workspaceId, remote, async ({ root }) => {
+        forgetDesignStyleSourceCaches(root);
+        retryDesignFonts();
+        const canvas = await readCanvas(root).catch(() => null);
+        await refreshDesignStyleBuilds(root, canvas ? designStyleBuildSettings(root, canvas) : []);
         return { ok: true };
       });
     }
@@ -1146,6 +1162,18 @@ export async function handleDesignWorkspaceRoute(
         }
         return { page, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
       });
+    }
+    case "design.themes.update": {
+      // Name one theme, or make it the default, from the theme editor.
+      const workspace = host.resolveDesignWorkspace(reqStr(params, "workspaceId"), remote);
+      const theme = params.theme as Record<string, unknown> | null | undefined;
+      if (!theme || typeof theme.id !== "string" || typeof theme.label !== "string" || (theme.base !== undefined && typeof theme.base !== "boolean"))
+        throw new Error("design.themes.update requires a theme with a string id and label.");
+      const input = { id: theme.id, label: theme.label, ...(theme.base === true ? { base: true } : {}) };
+      return withDesignWorkspaceMutation(workspace.path, async () => ({
+        themes: await upsertDesignTheme(workspace.path, input),
+        snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }),
+      }));
     }
     case "design.frame.create": {
       const workspace = host.resolveDesignWorkspace(

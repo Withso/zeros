@@ -60,6 +60,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
 }
 
 export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
+  await runDesignCatalogThemesSmoke({ page, check });
   // The harness uses a sandboxed runtime and production Radix primitives;
   // bridge-backed writes are covered by the engine suites.
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -2710,7 +2711,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     "theme editor exposes a Base and named-mode matrix",
     (await themeDialog.getByText("Base", { exact: true }).count()) >= 2 &&
       (await themeDialog
-        .getByRole("button", { name: "dark", exact: true })
+        .getByRole("button", { name: "Dark", exact: true })
         .count()) === 1,
   );
   const inheritedThemeValue = themeDialog.locator(
@@ -2729,7 +2730,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         "rgba(0, 0, 0, 0)",
   );
   const themeValue = themeDialog.locator("[data-design-theme-value]").first();
-  const themeOverride = themeDialog.getByRole("textbox", { name: /^--accent dark (inherited )?value$/ });
+  const themeOverride = themeDialog.getByRole("textbox", { name: /^--accent Dark (inherited )?value$/ });
   const themeOverrideBefore = await themeOverride.inputValue();
   await themeOverride.fill("");
   await expect(themeOverride).not.toHaveAttribute("data-design-theme-inherited", "true");
@@ -2738,7 +2739,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await expect(themeOverride).not.toHaveAttribute("data-design-theme-inherited", "true");
   check("clearing a theme override restores it on blur instead of implying deletion", true);
   const themeAccentName = themeDialog.getByText("--accent", { exact: true });
-  const themeAccentBase = themeDialog.getByRole("textbox", { name: "--accent base value", exact: true });
+  const themeAccentBase = themeDialog.getByRole("textbox", { name: "--accent Base value", exact: true });
   await themeAccentName.focus();
   await themeAccentName.press("Tab");
   await expect(themeAccentBase).toBeFocused();
@@ -2795,7 +2796,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       (await canvasWorld.getAttribute("style")) ===
         worldTransformBeforeThemeScroll,
   );
-  await themeDialog.getByRole("button", { name: "dark", exact: true }).click();
+  await themeDialog.getByRole("button", { name: "Dark", exact: true }).click();
   const themePreviewApplied = await waitFor(
     () =>
       homeRuntime
@@ -2829,7 +2830,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   check(
     "theme type rail filters the matrix without hiding mode controls",
     (await themeDialog.locator('[data-design-theme-row]').count()) === 1 &&
-      (await themeDialog.getByRole("button", { name: "dark", exact: true }).isVisible()),
+      (await themeDialog.getByRole("button", { name: "Dark", exact: true }).isVisible()),
   );
   await themeFilters.getByRole("button", { name: "All", exact: true }).click();
   const themeSearch = themeDialog.getByRole("textbox", { name: "Search theme variables" });
@@ -2840,7 +2841,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       (await themeDialog.getByText("--space-20", { exact: true }).isVisible()),
   );
   await themeSearch.fill("");
-  const themeSizeValue = themeDialog.getByRole("textbox", { name: "--space-1 base value", exact: true });
+  const themeSizeValue = themeDialog.getByRole("textbox", { name: "--space-1 Base value", exact: true });
   await themeSizeValue.focus();
   await themeSizeValue.press("ArrowUp");
   await expect(themeSizeValue).toHaveValue("5px");
@@ -2851,6 +2852,39 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     "theme numeric drafts step in ones and tens and Escape restores the value",
     (await themeSizeValue.inputValue()) === "4px" && (await themeDialog.isVisible()),
   );
+  // Theme names: Escape cancels a rename; Enter saves the name, keeping the id.
+  const darkMode = themeDialog.getByRole("button", { name: "Dark", exact: true });
+  await darkMode.dblclick();
+  const renameDark = themeDialog.getByRole("textbox", { name: "Rename Dark", exact: true });
+  await expect(renameDark).toBeFocused();
+  await renameDark.fill("Night");
+  await renameDark.press("Escape");
+  await expect(renameDark).toHaveCount(0);
+  check(
+    "Escape cancels a theme rename without saving it",
+    (await page.evaluate(() => window.__zerosHarnessDesignThemeUpdates?.length ?? -1)) === 0 &&
+      (await darkMode.isVisible()) &&
+      (await themeDialog.isVisible()),
+  );
+  await darkMode.focus();
+  await darkMode.press("F2");
+  await expect(renameDark).toBeFocused();
+  await renameDark.fill("Night");
+  await renameDark.press("Enter");
+  const nightMode = themeDialog.getByRole("button", { name: "Night", exact: true });
+  await expect(nightMode).toBeVisible();
+  check(
+    "renaming a theme saves its name and keeps its id",
+    JSON.stringify(await page.evaluate(() => window.__zerosHarnessDesignThemeUpdates)) ===
+      JSON.stringify([{ id: "dark", label: "Night" }]),
+  );
+  // Restore the name the remaining checks use.
+  await nightMode.focus();
+  await nightMode.press("F2");
+  const renameNight = themeDialog.getByRole("textbox", { name: "Rename Night", exact: true });
+  await renameNight.fill("Dark");
+  await renameNight.press("Enter");
+  await expect(darkMode).toBeVisible();
   await themeDialog.getByRole("button", { name: "Add theme", exact: true }).click();
   const newThemeName = themeDialog.getByRole("textbox", { name: "New theme name" });
   await expect(newThemeName).toBeFocused();
@@ -5698,4 +5732,29 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       "design-dense-layer-end",
     )) && (await denseViewport.evaluate((element) => element.scrollTop > 0)),
   );
+}
+
+export async function runDesignCatalogThemesSmoke({ page, check }) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`, { waitUntil: "networkidle" });
+  await page.evaluate(async () => {
+    const { updateDesignThemeCached } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    await updateDesignThemeCached("ws_design_harness", { id: "catalog-only", label: "Catalog only" });
+  });
+  await page.getByRole("button", { name: "Open theme editor", exact: true }).click();
+  const preview = page.getByRole("combobox", { name: "Preview theme", exact: true });
+  await preview.click();
+  await page.getByRole("option", { name: "Catalog only", exact: true }).click();
+  await expect(preview).toHaveText("Catalog only");
+  // A new confirmed snapshot must not clear a valid catalog-only selection.
+  await page.evaluate(async () => {
+    const { updateDesignThemeCached } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    await updateDesignThemeCached("ws_design_harness", { id: "catalog-only", label: "Catalog renamed" });
+  });
+  await expect(preview).toHaveText("Catalog renamed");
+  const frames = page.locator('[data-design-frame="home.html"] iframe');
+  await expect(frames.first().contentFrame().locator("html")).toHaveAttribute("data-zd-theme", "catalog-only");
+  check("catalog-only themes remain selected and reach the live frame after revalidation", true);
+  await preview.click();
+  await page.getByRole("option", { name: "Base", exact: true }).click();
 }

@@ -9,6 +9,8 @@ import type { CanvasDocument } from "../document-model";
 import {
   configureDesignStyleBuilds,
   designStyleBuildSetting,
+  designStyleInputChanged,
+  refreshDesignStyleBuilds,
   hasRunningDesignStyleBuilds,
   resetDesignStyleBuildsForTests,
   setDesignStyleBuildPresence,
@@ -139,11 +141,68 @@ describe("live build-command style sources", () => {
     expect(built.messages[0]!.text).toBe('Live: Zeros runs "node build.cjs" when src change, while Design is open (from your settings).');
     await open();
     expect(lines("runs.log")).toBe(1);
+    // The engine's worktree watcher reports content changes; the build has no
+    // watcher of its own. Its own output and unrelated files never re-run it.
+    designStyleInputChanged(root, path.join(root, output));
+    designStyleInputChanged(root, path.join(root, "README.md"));
+    designStyleInputChanged(path.join(root, "elsewhere"), path.join(root, "src/app.css"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(lines("runs.log")).toBe(1);
     writeFileSync(path.join(root, "src/app.css"), ":root { --gap: 2px; }");
+    designStyleInputChanged(root, path.join(root, "src/app.css"));
+    designStyleInputChanged(root, path.join(root, "src/app.css"));
     await vi.waitFor(() => expect(lines("runs.log")).toBe(2), { timeout: 5_000 });
     await settleDesignStyleBuildRunsForTests();
     expect((await frameStyleSources(root, canvas, "page/home.html"))[0]!.css).toContain("--runs: 2");
     await vi.waitFor(() => expect(changed).toHaveBeenCalledWith(path.resolve(root)));
+  });
+
+  it("runs every one-shot build again when the person presses Update", async () => {
+    setUp('command = "node build.cjs"\ninputs = ["src"]');
+    await open();
+    await settleDesignStyleBuildRunsForTests();
+    expect(lines("runs.log")).toBe(1);
+    await refreshDesignStyleBuilds(root, designStyleBuildSettings(root, canvas));
+    await vi.waitFor(() => expect(lines("runs.log")).toBe(2), { timeout: 5_000 });
+    await settleDesignStyleBuildRunsForTests();
+    expect((await frameStyleSources(root, canvas, "page/home.html"))[0]!.css).toContain("--runs: 2");
+  });
+
+  it("stops re-running on input changes once the idle time after leaving Design passes", async () => {
+    // Long enough for a settled input change and a process start.
+    configure({ idleMs: 1_500 });
+    setUp('command = "node build.cjs"\ninputs = ["src"]');
+    await open();
+    await settleDesignStyleBuildRunsForTests();
+    await leave();
+    // Within the idle time a build is still live.
+    designStyleInputChanged(root, path.join(root, "src/app.css"));
+    await vi.waitFor(() => expect(lines("runs.log")).toBe(2), { timeout: 5_000 });
+    await vi.waitFor(async () => expect((await status()).messages[0]!.text).toBe("Paused until you open Design."), { timeout: 5_000 });
+    designStyleInputChanged(root, path.join(root, "src/app.css"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(lines("runs.log")).toBe(2);
+  });
+
+  it("refreshes the canvas after a one-shot run only when the run changed something", async () => {
+    writeFileSync(path.join(root, "same.cjs"), `const fs = require("node:fs");
+fs.appendFileSync("runs.log", "run\\n");
+const out = process.env.ZEROS_DESIGN_STYLE_OUTPUT;
+fs.mkdirSync(require("node:path").dirname(out), { recursive: true });
+const css = ":root { --same: 1; }";
+if (!fs.existsSync(out) || fs.readFileSync(out, "utf8") !== css) fs.writeFileSync(out, css);
+`);
+    setUp('command = "node same.cjs"\ninputs = ["src"]');
+    await open();
+    await settleDesignStyleBuildRunsForTests();
+    await vi.waitFor(() => expect(changed).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    changed.mockReset();
+    designStyleInputChanged(root, path.join(root, "src/app.css"));
+    await vi.waitFor(() => expect(lines("runs.log")).toBe(2), { timeout: 5_000 });
+    await settleDesignStyleBuildRunsForTests();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(changed).not.toHaveBeenCalled();
   });
 
   it("keeps a watch build running while Design is open, and stops it after the idle time", async () => {

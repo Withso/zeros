@@ -18,6 +18,7 @@ import {
   GitMergeConflict,
   GitPullRequestCreate,
   GitPullRequestDraft,
+  Palette,
 } from "lucide-react";
 
 /** The auto-sent PR actions that produce a chat message. Direct actions
@@ -28,7 +29,9 @@ export type AutoActionKind =
   | "create-draft-pr"
   | "resolve"
   | "commit-and-push"
-  | "update-branch";
+  | "update-branch"
+  /** Design's "Ask agent to sync" and "Ask agent to fix" style sources. */
+  | "design-sync";
 
 interface IconProps {
   className?: string;
@@ -70,6 +73,7 @@ const AUTO_ACTION_ICON: Record<AutoActionKind, ComponentType<IconProps>> = {
   resolve: GitMergeConflict,
   "commit-and-push": CommitPushIcon,
   "update-branch": ArrowDown,
+  "design-sync": Palette,
 };
 
 /** Icon for an auto-action kind; null for unknown kinds (a future kind

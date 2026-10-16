@@ -114,11 +114,21 @@ export interface DesignStyleSourceWire {
   kind: string;
   path: string;
   status: "ready" | "warning" | "error";
-  messages: { level: "info" | "warning" | "error"; text: string }[];
+  /** `action` says what resolves a message: "update" (the Update button) or
+   * "agent" (Ask agent to fix). Absent on older engines. */
+  messages: { level: "info" | "warning" | "error"; text: string; action?: "update" | "agent" }[];
   themes: string[];
   tokens: { name: string; value: string; themeValues: Record<string, string> }[];
   bytes: number;
   revision: string | null;
+}
+
+/** A theme with its display name. `base` marks the default theme, whose
+ * values are `:root`; frames carry its id when no other theme is chosen. */
+export interface DesignThemeWire {
+  id: string;
+  label: string;
+  base?: true;
 }
 
 export interface DesignTokenMutationWire {
@@ -168,6 +178,8 @@ export interface DesignWorkspaceSnapshotWire {
   /** Absent on older engines, which have no imported style sources. */
   styleSources?: DesignStyleSourceWire[];
   styleSourceErrors?: string[];
+  /** Absent on older engines, whose default theme is always "Base". */
+  themes?: DesignThemeWire[];
   assets: DesignAssetWire[];
   lint: DesignLintReportWire;
 }
@@ -643,6 +655,15 @@ export async function bridgeDesignStyleBuildPresence(
   });
 }
 
+/** The theme editor's Update: re-read every imported source and run its
+ * builds now. The caller re-reads the snapshot afterwards. */
+export async function bridgeDesignRefreshStyles(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<void> {
+  await workspaceOp(bridge, "design.styles.refresh", { workspaceId });
+}
+
 export async function bridgeDesignSetRuntimeAudit(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -686,6 +707,19 @@ export async function bridgeDesignRenamePage(bridge: RuntimeClient, workspaceId:
   return designPageMutationReply(await workspaceOp(bridge, "design.page.rename", {
     workspaceId, pageId, title,
   }), "design.page.rename");
+}
+
+export async function bridgeDesignUpdateTheme(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  theme: { id: string; label: string; base?: boolean },
+): Promise<{ themes: DesignThemeWire[]; snapshot: DesignWorkspaceSnapshotWire }> {
+  const result = await workspaceOp(bridge, "design.themes.update", { workspaceId, theme }) as {
+    themes?: DesignThemeWire[]; snapshot?: DesignWorkspaceSnapshotWire;
+  } | null;
+  if (!Array.isArray(result?.themes) || !result.snapshot || !isDesignWorkspaceSnapshotWire(result.snapshot))
+    throw new Error("design.themes.update: malformed engine response");
+  return { themes: result.themes, snapshot: normalizeDesignWorkspaceSnapshotPages(result.snapshot) };
 }
 
 export async function bridgeDesignDeletePage(bridge: RuntimeClient, workspaceId: string, pageId: string, expectedFrameIds: readonly string[]): Promise<{

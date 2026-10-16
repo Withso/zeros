@@ -65,7 +65,7 @@ never delete them to bypass admission or silently discard unpublished work.
 | Proposal/result storage and existing human review compatibility                      | Retained internally; not exposed through the v1 conversation tool catalog |
 | Frame-context routes, composer source/image attachments and HTTP preview              | Implemented; native capture requires a qualified host                                   |
 | Conflict detection, paused canvas, Retry/Cancel                                      | Implemented; semantic Design conflict resolution deferred                 |
-| Deployed-cloud Design continuity                                                     | Qualification open; local worker fixtures do not qualify deployment       |
+| Deployed-cloud Design continuity and native cloud agent authoring                   | Native authoring implemented; deployed qualification open                 |
 | Controls/media, code/web/tool surfaces, lite components and advanced orchestration   | Phases 2–8; not implemented by the native-authoring enhancement           |
 
 Do not infer delivery from old branch notes or test counts. The current source
@@ -436,7 +436,7 @@ other folders' staged and committed states independent. Directory renaming moves
 source and manifest together in one scoped commit; the private selection retains
 the same ID. Shared workspace Git can include recognized Design roots and legacy
 metadata. Local file-editor and explicit discard routes use that same checkout;
-remote/API-only authoring keeps its existing guard.
+remote and cloud file-editor writes to Design paths keep their existing guard.
 Archives finish recoverable writes before capturing source and metadata.
 
 Design writes maintain an idempotent block in the root `.gitignore`: ignore
@@ -676,9 +676,9 @@ views retire pending opens. Cloud wire translation maps only typed reference
 owners between the cloud workspace key and the engine's primary workspace ID;
 authored source and preview URLs are not rewritten.
 
-Cloud conversation context also supplies the native verification command. This
-enables shell validation/capture inside the VM without changing cloud API-only
-Design authoring, provider permissions or Plan behavior. A Mac must use the
+Cloud conversation context also supplies the native verification command, so
+cloud agents validate and capture inside the VM as Local agents do, without
+changing provider permissions or Plan behavior. A Mac must use the
 Browser tab's cloud host rather than opening the VM's loopback URL directly.
 `verification-service.ts` uses existing composition/sanitization and
 inlines the same local CSS/assets. The only script belongs to a trusted wrapper;
@@ -712,7 +712,7 @@ an available provider browser, never assume `iab` or use a `file://` workaround.
 | Human Code workflow      | Normal native files and Git            | Shared source editing and explicit Git operations                      | Native host                        |
 | Shared Code/Design agent | Normal provider tools and permissions  | Native file tools and optional API in either local context | Native host process lifecycle      |
 | Human Design surface     | Read-only Code context                 | Semantic Design API transactions                                      | Trusted application process        |
-| Cloud worker agent       | Normal VM provider tools and cloud policy | Design API authoring policy; not OS-enforced | Same non-root `zeros-engine` (10003), no agent sandbox |
+| Cloud worker agent       | Normal VM provider tools and cloud policy | Native file tools and optional API in the VM checkout | Same non-root `zeros-engine` (10003), no agent sandbox |
 | External terminal/editor | Normal same-user authority             | Normal same-user authority                                            | Outside the Zeros actor guarantee  |
 
 Native Code deliberately has no per-agent sandbox, VM, OrbStack machine, local container,
@@ -724,8 +724,7 @@ provider and host behavior.
 Agents receive recognized roots and default task intent. Local native tools and
 the shared Files editor can edit Code and Design in either context; explicit
 requests override the default intent. Managed Git includes both. Cloud workers
-retain their API-only Design policy. Cloud retains API authoring for now; that
-policy does not prevent same-user shell edits. Provider permissions and same-user host
+author natively in their VM checkout as well. Provider permissions and same-user host
 authority remain independent of the composer tag.
 
 View identity never selects execution posture. Local Design directory changes
@@ -790,8 +789,9 @@ make Code files read-only.
   a fresh capability read; they preserve the provider and MCP endpoint. Existing
   cloud execution-boundary transitions retain their separate lifecycle policy.
 - API writes retain the existing owner/directory checks, document CAS,
-  durable request receipts, journal recovery, and actor-local undo. On API-only
-  workers, Code mode cannot apply a cached or queued Design write. Already-admitted journals finish or
+  durable request receipts, journal recovery, and actor-local undo. An
+  execution configured for API-only authoring (none is, today) cannot apply a
+  cached or queued Design write in Code mode. Already-admitted journals finish or
   recover consistently even if Stop or a mode change arrives during commit.
 - Stop cancels pending Design work. A subsequent prompt starts a new tool turn;
   late prompt preparation and steering cannot clear Stop. Session disposal
@@ -800,16 +800,17 @@ make Code files read-only.
   helpers remain read-only until the conversation exists. Local provider file
   tools follow their normal permissions. Deleted/archived owners are rejected.
   Invalid workspace ownership blocks Design prompts. At the 16-execution MCP
-  capacity limit, local native file authoring remains usable with validated directory
-  context; optional helpers require a free connection. Cloud Design prompts
-  require the API connection and stop if it is unavailable or saturated. No credential or provider
-  permission is broadened.
+  capacity limit, native file authoring remains usable with validated directory
+  context, Local and cloud alike; optional helpers require a free connection.
+  No credential or provider permission is broadened.
 
-Cloud workers retain their sandbox policy, which prevents native Design file
-writes. Their prompts and mode-switch replies use the Design API authoring
-instructions: discover capabilities, create frames and apply semantic edits at
-an exact revision. If the API connection is unavailable or at capacity, Design
-prompts stop until it is restored; they cannot fall back to native writes.
+Cloud workers author like Local ones: native file tools in their VM checkout,
+with the same instructions plus a note that the VM is the isolation boundary
+(`CLOUD_EXECUTION_NOTICE`). The Design API helpers stay optional; when their
+connection is unavailable or at capacity, native authoring continues. The VM
+engine's worktree watcher announces native edits, so the Mac canvas refreshes
+through the cloud Design API as for any other file change. People's Files and
+Git writes to Design paths in a cloud workspace remain refused.
 
 The engine supplies the active directory, its workspace and mode revision with
 each prompt/steer. Agent switches use that revision, return fresh instructions,
@@ -933,22 +934,47 @@ records pass unknown fields through:
 - `meta/design.toml` is not used: its strict v2/v3 schema would make every
   older engine reject the directory.
 - `engine/design/style-sources.ts` owns the contract. A source path is
-  repository-relative, a regular `.css` file outside `.git` and `.zeros`, read
+  repository-relative, a regular file outside `.git` and `.zeros`, read
   through the symlink-safe reader rooted at the workspace checkout, and at most
-  2 MiB; a directory declares at most 16 sources. Nothing in the repository
-  executes.
+  32 MiB; a directory declares at most 16 sources. Kinds are `css`, `tailwind`,
+  `sass` and `build`. Nothing in the repository executes, except a `build`
+  source's declared command.
+- Nothing syncs automatically. A new directory's `tokens.css` holds only a
+  reset (no placeholder tokens), and the person's agent declares sources,
+  themes and fonts from the `zeros-design` skill when asked ("Create and ask
+  agent to sync styles" in the Design menu, or "Ask agent to sync" in the
+  theme editor, opens a new chat with the default agent). There is no write
+  API; `zeros-engine design styles` (`/styles` on the verification service)
+  is the read-only check. The theme editor's **Update** (`design.styles.refresh`)
+  forgets this checkout's cached results, reruns its builds and retries failed
+  font downloads; a source whose own message has `action: "agent"` shows
+  **Ask agent to fix**, and `action: "update"` messages (a package setup has
+  not installed, a failed download) point to Update. Status wording follows the
+  workspace's setup state: a missing package is "waiting" while setup runs.
 - `kind: "css"` imports the file as plain CSS. Import skips `@import` and build-tool
   directives (`@tailwind`, `@source`, `@plugin`, `@config`, `@apply`, …),
   lifts Tailwind `@theme` custom properties into `:root`, drops comments, and
   rewrites each `themes` selector to `[data-zd-theme="<name>"]` so the canvas
-  Themes control applies it.
+  Themes control applies it. A `themes` value of `@media (prefers-color-scheme:
+  dark|light)` instead rewrites those media blocks to rules scoped by
+  `:where([data-zd-theme="<name>"])`, which keeps specificity; Tailwind's
+  nested default dark variant becomes `:where(…) &`. Any other `@media` mapping
+  is a catalog error.
+- `meta/canvas.json` `themes` (`engine/design/themes.ts`) names theme ids and
+  marks one default (`"base": true`): `[{ "id": "dark", "label": "Dark",
+  "base": true }, { "id": "light", "label": "Light" }]`. The default's values
+  are `:root`, frames also carry `data-zd-theme="<id>"` for it, and capture and
+  preview without `--theme` show it. The snapshot's `themes` merges the list
+  with every theme `tokens.css` and the sources use; the theme editor renames
+  and adds themes through `design.themes.update` (one upsert, lifecycle- and
+  role-gated like other document edits).
 - `@font-face` rules are kept. Each `src` URL resolves against the source
   file, must stay inside the repository (outside `.git` and `.zeros`) and name
   a `.woff2`, `.woff`, `.ttf` or `.otf` file, and is embedded as a `data:` URL,
-  at most 4 MiB of fonts per source. Earlier URLs in a `src` list claim the
+  at most 16 MiB of fonts per source. Earlier URLs in a `src` list claim the
   budget first. References that cannot be embedded (remote, missing, other
   types, over budget) are kept and reported as a warning; the status names the
-  embedded size every frame carries. A package stylesheet such as
+  embedded size. A package stylesheet such as
   `node_modules/@fontsource-variable/geist/index.css` resolves through pnpm's
   directory links because the reader follows parent links whose canonical
   target stays inside the checkout. Zeros' own Design directory declares the
@@ -963,8 +989,39 @@ records pass unknown fields through:
   as warnings, and existing `data:` URLs and fragment references are preserved.
 - A result is cached by the source file's size and modification time and by
   the signature of every asset it tried to embed, including `missing`, so an
-  installed or edited asset refreshes its frames. The cache holds at most 64
-  results and 32 MiB.
+  installed or edited asset refreshes its frames. Every style cache (resolved
+  sources, Tailwind and Sass generations, per-frame Tailwind builds, App fonts)
+  shares one size-weighted least-recently-used budget of 64 MiB
+  (`engine/design/style-cache.ts`); the newest entry always stays, so a source
+  larger than the budget is still read once per change.
+- Large stylesheets are imported 512 KB at a time: `splitDesignCss` cuts after
+  top-level statements (never inside strings, comments or parentheses), each
+  piece is parsed, mapped, embedded and indexed, and the piece indexes are
+  joined. Measured on macOS with a 30 MB synthetic design system: 3.5 s to
+  resolve once, a 231 MB transient heap (1.3 GB parsed whole), and about 31 MB
+  of heap plus 64 MB of typed arrays retained.
+- **Each frame receives only what it uses** (`engine/design/style-prune.ts`).
+  A source is indexed once per revision while it is stringified: every
+  top-level statement, and every statement inside `@media`, `@supports`,
+  `@layer`, `@container`, `@scope` and `@starting-style`, becomes a unit with
+  offsets. Rules are kept when one selector's classes, ids and element names
+  all occur in the frame's expanded HTML; attribute selectors, pseudo-classes
+  and their arguments never prune, so theme selectors and states such as
+  `[open]` keep working. Other statements are always kept; a pruned named
+  layer leaves `@layer name;` so the layer order holds. Across all of a
+  frame's sources, `@font-face` rules are kept for families the kept CSS, the
+  frame's markup or its own stylesheets name, directly or through the custom
+  properties they read, and only when their `unicode-range` covers printable
+  ASCII or a character the frame shows (an unknown named entity keeps every
+  range); `@keyframes` are kept when named. Features and custom property names
+  are 32-bit hashes in typed arrays, so a collision only keeps extra CSS. A
+  frame's sheet revision hashes the source revisions and the frame's feature
+  signature, so identity and document agree; identity measures pruned sizes
+  (cached by that signature) so an oversized frame still fails from its
+  identity, while an uncompiled Tailwind source counts as 0. The 30 MB source
+  gives frames 0.1–0.2 MB in 9–16 ms (0.5 ms for a cached identity), and
+  Zeros' own frame drops from 173 KB to 98 KB (six Geist faces to the two
+  Latin ones it uses).
 - Every frame receives every source in declaration order unless its frame
   record lists `styles` (an ordered list of IDs, or `[]` for none). Imported
   `<style data-zeros-style-source>` blocks are inserted at the start of `head`
@@ -983,10 +1040,15 @@ records pass unknown fields through:
   the compiled sidecar has no `node_modules`). `engine/design/style-tailwind.ts`
   resolves `@import` to CSS files inside the repository only: relative files,
   then packages through the nearest `node_modules` (`exports` with the `style`
-  or `default` condition, `style`, a CSS `main`, or `index.css`), at most 32
-  imports and 4 MiB of CSS. `@plugin` and `@config` receive empty modules, so
-  no repository JavaScript runs and the rest still compiles; `@source` is
-  ignored. Assets in every imported file are embedded as for `css` sources.
+  or `default` condition, `style`, a CSS `main`, or `index.css`), at most 1,024
+  imports and 64 MiB of CSS. Each skipped import is classified (`missing`,
+  `not-installed`, `outside`, `link`, `remote`, `absolute`, `alias`, `not-css`,
+  `too-large`) and worded by setup state. `@plugin "@tailwindcss/typography"`,
+  `"@tailwindcss/forms"` and `"tailwindcss-animate"` run Zeros' own bundled
+  copies (versions from codegen, named in the status); other `@plugin`s and
+  `@config` receive empty modules, so no repository JavaScript runs and the
+  rest still compiles; `@source` is ignored. Assets in every imported file are
+  embedded as for `css` sources.
 - One compile of the entry records every file it read (CSS, package manifests
   and assets, with `missing` for each lookup that found nothing) and is reused
   while all of their signatures hold. Tailwind's builds are cumulative, so each
@@ -997,7 +1059,34 @@ records pass unknown fields through:
   once per prepared stylesheet revision, including supplied snapshot CSS.
   A frame's sheet revision hashes the generation and its candidates,
   so identity needs no compile; documents build on demand, cached by that
-  revision (256 builds, 32 MiB). A frame's Tailwind CSS is limited to 8 MiB.
+  revision in the shared budget, and are then pruned like every other source.
+  A frame's pruned Tailwind CSS is limited to 8 MiB. Plain CSS an entry
+  imports is still compiled into each frame's build before pruning; moving it
+  out of the per-frame compile is a follow-up.
+- `kind: "sass"` compiles a `.scss` or `.sass` entry with the bundled Dart
+  Sass (`engine/design/style-sass.ts`, loaded on first use). One importer
+  resolves `@use`, `@forward` and `@import` through a private `zrepo:` scheme to
+  partials inside the repository and to packages in `node_modules` (`pkg:`,
+  bare names and `~name`; `exports` with the `sass`, `style` or `default`
+  condition, then `sass`, `style` or a stylesheet `main`), at most 1,024 files.
+  Sass's own filesystem loading is never used. A generation records every
+  file it read, including misses, and its CSS is then imported as plain CSS.
+- **App fonts** (`engine/design/style-fonts.ts`) is a source the engine adds
+  first, as `@fonts`, when `meta/canvas.json` `fonts` declares fonts or any
+  source imports Google Fonts: `{ "family", "provider": "google", "variable",
+  "weights", "italic", "subsets", "fallback" }` or `{ "family", "provider":
+  "local", "path", "weight", "style", "variable" }`. A `variable` sets the
+  custom property the application's `next/font` sets. Google stylesheets
+  (declared fonts as CSS2 URLs, latin by default, and sources' `@import url(
+  fonts.googleapis.com/…)`, which no longer warn) download in the background
+  from `fonts.googleapis.com` and `fonts.gstatic.com` only, with no redirects,
+  20 s, 512 KiB of CSS, 4 MiB per file and 16 MiB per stylesheet. The embedded
+  CSS is written once to `<channel data>/design-fonts/<hash>.css`, shared by
+  every workspace on the machine (each cloud VM keeps its own); memory keeps
+  only each URL's state. Rendering never waits: frames show the fallback until
+  the download lands, then the engine broadcasts `designStyles` for the waiting
+  workspaces. Failures are remembered until Update. Local fonts are read from
+  the checkout.
   Measured on macOS, compiling Zeros' own entry (`styles/zeros-tokens.css`,
   with tw-animate and both Geist packages) takes 12–20 ms warm per frame.
 - `kind: "build"` imports the CSS file a command writes, as a `css` source,
@@ -1032,7 +1121,10 @@ records pass unknown fields through:
   until stopped (restarted after an exit at 1 s, 5 s and 30 s, then reported
   as failed until Design reopens); a one-shot command runs when Design opens
   and again 150 ms after a change under its `inputs` (chokidar, ignoring
-  `node_modules`, `.git` and the output), coalescing changes made during a run.
+  `node_modules`, `.git` and the output, reported by the engine's worktree
+  watcher through `onWorktreeContentChange`, so a one-shot build holds no
+  watcher of its own), coalescing changes made during a run, and refreshes the
+  canvas only when a run changed the output or the build's state.
   A failed one-shot command also retries when Design reopens; presence
   heartbeats alone do not retry it.
   Commands run through `runContainedInlineScript` with the setup script
@@ -1057,8 +1149,8 @@ records pass unknown fields through:
   settings removal/replacement and session eviction. It blocks replacement
   commands; a later stop retries that same boundary before releasing it.
   Follow-ups: hot-swapping a frame's
-  imported stylesheet without reloading it, warming on pointer intent, and
-  in-process Sass and Less.
+  imported stylesheet without reloading it, warming on pointer intent,
+  in-process Less, and taking plain CSS out of per-frame Tailwind compiles.
 
 #### Fonts in Design CSS
 
@@ -1074,9 +1166,10 @@ stylesheets are: a font loaded from `zeros-design:` by an opaque-origin frame
 would need a CORS-enabled protocol response.
 
 A frame's identity applies the same 15 MiB document limit as its document,
-from the skeleton and the byte length of each sheet it would splice, so a
-frame whose imported sources are too large fails in snapshots and lint as
-well as on render.
+from the skeleton, the byte length of each linked sheet and the pruned length
+of each imported source it would splice (an uncompiled Tailwind source counts
+as 0), so a frame whose imported sources are too large fails in snapshots and
+lint as well as on render.
 
 #### Shared stylesheet preparation
 
@@ -1921,7 +2014,7 @@ reduced motion; unpinned host pixels are never treated as a stable baseline.
 
 | Resource               | Bound and behavior                                                                                                                                                            |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Product tool sessions  | 16 admitted or starting executions per engine. Further local sessions retain native authoring with validated context; cloud Design requires API admission.                    |
+| Product tool sessions  | 16 admitted or starting executions per engine. Further sessions retain native authoring with validated context, Local and cloud.                    |
 | Per endpoint           | 8 MCP sessions, 32 connections, 4 concurrent request-body reads, 4 active tools.                                                                                              |
 | Requests               | 4 MiB HTTP body, 16 KiB headers, 512 KiB semantic tool input; excess work is rejected.                                                                                        |
 | Replies                | 2 MiB serialized tool result; source/projection callers use pages.                                                                                                            |
@@ -2371,10 +2464,9 @@ A Linux harness does not establish macOS energy, GPU, or native browser results.
 
 ### 2.6 Design API, concurrent actors, and autonomous jobs
 
-**One session, two composer modes.** Local native sessions use normal file
-authoring in either local context plus optional scoped Design API writes. Cloud workers
-use API authoring under their existing execution policy. Both reuse the same
-provider conversation. Code mode may
+**One session, two composer modes.** Local and cloud sessions use normal file
+authoring in either context plus optional scoped Design API writes; a cloud
+worker authors in its VM checkout. Both reuse the same provider conversation. Code mode may
 inspect and edit Code and Design according to the explicit task; the tag sets the default target.
 The user switches modes, or explicitly authorizes the agent to switch for the
 requested work. Merely selecting a frame or viewing the Design tab never grants

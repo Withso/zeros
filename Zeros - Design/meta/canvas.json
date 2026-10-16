@@ -36,6 +36,7 @@
       "kind": "tailwind",
       "path": "styles/zeros-tokens.css",
       "themes": {
+        "dark": "[data-theme=\"dark\"]",
         "light": "[data-theme=\"light\"]"
       }
     },
@@ -47,6 +48,30 @@
       "themes": {
         "light": "[data-theme=\"light\"]"
       }
+    },
+    {
+      "id": "tokens-live",
+      "title": "Token preview",
+      "kind": "build",
+      "path": ".zeros/design-styles/zeros-tokens.css",
+      "command": "node scripts/design-system/build-tokens.mjs --preview .zeros/design-styles/zeros-tokens.css",
+      "inputs": [
+        "styles/tokens"
+      ],
+      "themes": {
+        "light": "[data-theme=\"light\"]"
+      }
+    }
+  ],
+  "themes": [
+    {
+      "id": "dark",
+      "label": "Dark",
+      "base": true
+    },
+    {
+      "id": "light",
+      "label": "Light"
     }
   ]
 }

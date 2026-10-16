@@ -12,7 +12,8 @@ import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
 import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
-import { configureDesignStyleBuilds, hasRunningDesignStyleBuilds, stopDesignStyleBuilds } from "./design/style-builds";
+import { configureDesignStyleBuilds, designStyleInputChanged, hasRunningDesignStyleBuilds, stopDesignStyleBuilds } from "./design/style-builds";
+import { configureDesignFonts } from "./design/style-fonts";
 import type { DesignCaptureService } from "./design/capture-service";
 // ──────────────────────────────────────────────────────────
 // ZerosEngine — The heart of Zeros V2
@@ -60,7 +61,7 @@ import {
   seedUserSettingsFromLegacyRoot,
 } from "./settings/files";
 import { startSettingsWatcher, type SettingsWatcher } from "./settings/watch";
-import { startGitWatcher, type GitWatcher } from "./git/watch";
+import { onWorktreeContentChange, startGitWatcher, type GitWatcher } from "./git/watch";
 import { invalidateWorkspaceChangeProbes } from "./git/workspace-change-probe";
 import { LocalTransport } from "./transport/local";
 import { CloudTransport, parseCloudTransportPort } from "./transport/cloud";
@@ -836,6 +837,8 @@ export class ZerosEngine {
   private watcher: FileWatcher;
   private settingsWatcher: SettingsWatcher | null = null;
   private gitWatcher: GitWatcher | null = null;
+  /** Forwards worktree content events to live one-shot style builds. */
+  private stopStyleBuildInputs: (() => void) | null = null;
   /** Coalesce filesystem invalidations behind one authority-reconciliation
    * lane. Settings and Git watchers can fire together for one checkout; this
    * prevents overlapping session retirement/territory publication. */
@@ -1407,6 +1410,11 @@ export class ZerosEngine {
         const workspaceId = getWorkspaceByPath(workspacePath)?.id;
         return workspaceId ? this.setup.whenSettled(workspaceId) : null;
       },
+      // Status wording only: a missing package is "waiting" while setup runs.
+      setupState: (workspacePath) => {
+        const workspaceId = getWorkspaceByPath(workspacePath)?.id;
+        return workspaceId ? this.setup.info(workspaceId).state : null;
+      },
       // Only Design re-reads; Files and Changes ignore a rebuilt output.
       changed: (workspacePath) => {
         const workspaceId = getWorkspaceByPath(workspacePath)?.id;
@@ -1416,6 +1424,21 @@ export class ZerosEngine {
             source: "engine",
             kinds: ["designStyles"],
             ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
+          }),
+        );
+      },
+    });
+    // A Google font finished downloading: canvases showing its fallback
+    // re-read their styles.
+    configureDesignFonts({
+      onReady: (roots) => {
+        const workspaceIds = roots.flatMap((root) => getWorkspaceByPath(root)?.id ?? []);
+        this.broadcast(
+          createMessage({
+            type: "DB_CHANGED",
+            source: "engine",
+            kinds: ["designStyles"],
+            ...(workspaceIds.length ? { workspaceIds } : {}),
           }),
         );
       },
@@ -3251,6 +3274,9 @@ export class ZerosEngine {
     // bypass bridge writes. Watch worktree content (create/change/delete) and
     // stat-poll tiny git-dir state (stage/commit/checkout), then broadcast one
     // workspaces invalidation so File / All Files / Changes re-pull together.
+    // One-shot Design style builds re-run on their inputs from this watcher,
+    // rather than each running a watcher of its own.
+    this.stopStyleBuildInputs = onWorktreeContentChange(designStyleInputChanged);
     this.gitWatcher = startGitWatcher(
       () => this.cloudRuntimeHandoffFenced ? [] : this.workspace.gitWatchTargets(),
       (change) => {
@@ -3418,6 +3444,7 @@ export class ZerosEngine {
     await settle(() => this.cloudLocalWriterLifecycle?.close());
     await settle(() => stopDesignVerification());
     configureDesignStyleBuilds(null);
+    configureDesignFonts({ onReady: null });
     const captureService = this.designCaptureService;
     this.designCaptureService = undefined;
     if (captureService) {
@@ -3500,6 +3527,8 @@ export class ZerosEngine {
     if (settingsWatcher) await settle(() => settingsWatcher.stop());
     const gitWatcher = this.gitWatcher;
     this.gitWatcher = null;
+    this.stopStyleBuildInputs?.();
+    this.stopStyleBuildInputs = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {

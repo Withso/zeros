@@ -16,7 +16,7 @@
 import { useCallback } from "react";
 import { legacyProviderBinding } from "@zeros/protocol/identities";
 
-import { useAgentSessions } from "../../features/agent/sessions-hooks";
+import { useOptionalAgentSessions } from "../../features/agent/sessions-hooks";
 import { envForChat } from "../../features/agent/model-catalog";
 import type { AutoActionKind } from "../../features/agent/auto-action";
 import { useBridge } from "../../platform/bridge/use-bridge";
@@ -55,22 +55,37 @@ export interface SendToActiveChatArgs {
 export function useSendToActiveChat(
   workspacePath: string,
 ): (args: SendToActiveChatArgs) => boolean {
-  const sessions = useAgentSessions();
-  const bridge = useBridge();
-  const cloudComputerV2 = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspacePath)?.organizationId);
   // Capture the click's chat across PR preflight awaits. Reading the global
   // active id when those finish would redirect the action after navigation.
   const activeChatId = useActiveChatId();
+  const sendToChat = useSendToChat(workspacePath);
+  return useCallback(
+    (args: SendToActiveChatArgs) => sendToChat(activeChatId, args),
+    [activeChatId, sendToChat],
+  );
+}
+
+/** Send to one exact chat in this workspace, for actions that open a chat of
+ * their own (Design's "Ask agent to sync") as well as the active one. */
+export function useSendToChat(
+  workspacePath: string,
+): (chatId: string | null, args: SendToActiveChatArgs) => boolean {
+  const maybeSessions = useOptionalAgentSessions();
+  const bridge = useBridge();
+  const cloudComputerV2 = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspacePath)?.organizationId);
 
   return useCallback(
-    ({
-      text,
-      displayText,
-      bubbleAttachments,
-      segments,
-      autoAction,
-      onSettled,
-    }: SendToActiveChatArgs) => {
+    (
+      activeChatId: string | null,
+      {
+        text,
+        displayText,
+        bubbleAttachments,
+        segments,
+        autoAction,
+        onSettled,
+      }: SendToActiveChatArgs,
+    ) => {
       const targetChat = (preparing = false) => {
         const chat = useWorkspaceStore
           .getState()
@@ -83,7 +98,7 @@ export function useSendToActiveChat(
           throw new Error("Open or start a chat in this workspace first.");
         }
         if (chat.kind === "terminal") {
-          throw new Error("Open an agent chat to send this PR action.");
+          throw new Error("Open an agent chat to send this action.");
         }
         if (!chat.agentId) {
           throw new Error("Choose an agent for this chat first.");
@@ -103,6 +118,11 @@ export function useSendToActiveChat(
           description: error instanceof Error ? error.message : String(error),
         });
       };
+      const sessions = maybeSessions;
+      if (!sessions) {
+        reportError(new Error("Agent chats are unavailable here."));
+        return false;
+      }
       try {
         targetChat(true);
       } catch (error) {
@@ -162,7 +182,7 @@ export function useSendToActiveChat(
         }
         if (targetChat().agentId !== chat.agentId) {
           throw new Error(
-            "This chat's agent changed. Try the PR action again.",
+            "This chat's agent changed. Try the action again.",
           );
         }
         const sendArgs: Parameters<typeof sessions.sendPrompt> = [
@@ -181,6 +201,6 @@ export function useSendToActiveChat(
         .finally(() => onSettled?.());
       return true;
     },
-    [sessions, bridge, activeChatId, workspacePath, cloudComputerV2],
+    [maybeSessions, bridge, workspacePath, cloudComputerV2],
   );
 }

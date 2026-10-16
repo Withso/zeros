@@ -113,7 +113,8 @@ import {
 } from "./frame-lifecycle";
 import { getDesignRuntimeAudit } from "./runtime-audits";
 import { readSafeRegularFile } from "./safe-files";
-import { readDesignStyleSources } from "./style-sources";
+import { readDesignStyleSourceCatalog, readDesignStyleSources } from "./style-sources";
+import { mergeDesignThemes, readDesignThemeCatalog } from "./themes";
 
 export { listDesignAssets,type DesignAssetSummary } from "./assets";
 export { designDirectoryNameFor } from "./directory-registry";
@@ -1081,8 +1082,12 @@ export async function readDesignWorkspaceSnapshot(
       tokens: tokensDocument.tokens,
       tokenSourceVersion: tokensDocument.sourceVersion,
       // The CSS itself reaches frames through rendering, not the snapshot.
-      styleSources: styleSources.sources.map(({ css: _css, ...status }) => status),
+      styleSources: styleSources.sources.map(({ css: _css, fontImports: _fontImports, ...status }) => status),
       styleSourceErrors: styleSources.errors,
+      themes: mergeDesignThemes(readDesignThemeCatalog(context.canvas), [
+        ...tokensDocument.themes,
+        ...styleSources.sources.flatMap((source) => source.themes),
+      ]),
       assets,
       lint: {
         ...lint,
@@ -1559,11 +1564,20 @@ export async function readDesignThemeNames(
   }
   const canvas = await readCanvas(workspacePath).catch(() => null);
   if (canvas) {
-    for (const source of (await readDesignStyleSources(workspacePath, canvas)).sources) {
-      for (const theme of source.themes) themes.add(theme);
+    // Declared mappings and names; nothing is compiled to list them.
+    for (const declaration of readDesignStyleSourceCatalog(canvas).declarations) {
+      for (const theme of Object.keys(declaration.themes)) themes.add(theme);
     }
+    for (const theme of readDesignThemeCatalog(canvas).themes) themes.add(theme.id);
   }
   return [...themes].sort();
+}
+
+/** The id of the named default theme, which frames carry when no other theme
+ * is chosen; null when `:root` has no name. */
+export async function readDesignBaseTheme(workspacePath: string): Promise<string | null> {
+  const canvas = await readCanvas(workspacePath).catch(() => null);
+  return canvas ? readDesignThemeCatalog(canvas).baseId : null;
 }
 
 export async function readDesignTokensDocument(

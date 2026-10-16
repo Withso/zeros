@@ -7,24 +7,17 @@
 // Only marked declaration groups change; imports, explanations, theme resets,
 // type/radius wiring, native color-scheme hints and base rules stay authored.
 // ============================================================
-import { readFileSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { declarations, extractBlock, extractBlockRange, hslToRgb, toHex, TOKENS_FILE } from "./token-palette.mjs";
 
 export const TOKEN_RESOLVER_FILE = "styles/tokens/zeros.resolver.json";
 export const MARKETING_TOKENS_FILE = "apps/marketing/src/index.css";
-// The repository's registered Design directory; rename this with the directory.
-export const DESIGN_TOKENS_FILE = "Zeros - Design/tokens.css";
-// The Design tab applies a named theme as `data-zd-theme` on each frame root.
-const DESIGN_LIGHT_THEME = '[data-zd-theme="light"]';
-const DESIGN_SCALE = /^(?:font-(?:sans|mono)|text-[a-z0-9-]+|radius-[a-z0-9]+)$/;
-// Numeric ramp steps stay private to the app palette, as check:ui requires of
-// components; frames use the family anchors.
-const PRIVATE_RAMP = "--(?:red|green|yellow|blue|violet|brown)-\\d{2,3}";
-const isPrivateRamp = new RegExp(`^${PRIVATE_RAMP}$`);
-const usesPrivateRamp = new RegExp(`var\\(${PRIVATE_RAMP}\\)`);
+// The Design tab's private, Git-excluded build folder: the only place the
+// token preview writes.
+const DESIGN_PREVIEW_OUTPUT = /^\.zeros\/design-styles\/[A-Za-z0-9._-]+\.css$/;
 const EXTENSION = "org.zeros";
 const ALIAS = /^\{([a-z0-9-]+(?:\.[a-z0-9-]+)*)\}$/;
 const SECTION = /^[a-z0-9-]+$/;
@@ -407,45 +400,36 @@ export function renderMarketingTokenCss(root = process.cwd(), css) {
   return result;
 }
 
-/** The repository's Design directory renders the product palette: Dark is the
- * canvas Base theme and Light is its `light` theme. Frames have no Tailwind
- * build, so the font, type and radius scales that `@theme inline` keeps
- * compile-time-only are mirrored as runtime custom properties. */
-export function renderDesignTokenCss(root = process.cwd(), css) {
-  const source = css ?? readFileSync(join(root, DESIGN_TOKENS_FILE), "utf8");
+/** The token declarations alone, as renderTokenCss writes them into
+ * styles/zeros-tokens.css, for the Design tab's live preview of
+ * styles/tokens/ edits. Nothing in the checkout changes. */
+export function renderTokenPreviewCss(root = process.cwd()) {
   const { base, lightOverrides, themes } = readTokenSources(root);
-  const scales = [...declarations(extractBlock(readFileSync(join(root, TOKENS_FILE), "utf8"), "@theme inline"))]
-    .filter(([name]) => DESIGN_SCALE.test(name));
-  const exported = (tokens) => [...tokens.values()].filter((entry) => !isPrivateRamp.test(entry.cssName));
-  const line = (entry, theme) => {
-    const value = tokenCss(entry, theme, false);
-    if (usesPrivateRamp.test(value)) fail(`Design export ${entry.cssName} depends on a private ramp step: ${value}`, entry.file);
-    return `  ${entry.cssName}: ${value}; ${description(entry, theme)}`;
-  };
-  const regions = new Map([
-    ["design-dark", { selector: ":root", declarations: exported(base).map((entry) => line(entry, themes.dark)) }],
-    ["design-scales", { selector: ":root", declarations: scales.map(([name, value]) => `  --${name}: ${value};`) }],
-    ["design-light", { selector: DESIGN_LIGHT_THEME, declarations: exported(lightOverrides).map((entry) => line(entry, themes.light)) }],
-  ]);
-  const ranges = new Map([":root", DESIGN_LIGHT_THEME].map((selector) => [selector, blockRange(source, selector, DESIGN_TOKENS_FILE)]));
-  const result = replaceTokenRegions(source, regions, ranges, DESIGN_TOKENS_FILE);
-  // Design-only tokens may extend the palette; a shadowed product token would
-  // silently fork it, including a Light value the theme editor appends.
-  const generated = new Set([...exported(base).map((entry) => entry.cssName.slice(2)), ...scales.map(([name]) => name)]);
-  for (const [start, end] of ranges.values()) {
-    for (const name of declarations(source.slice(start, end).replace(GENERATION_REGION, "")).keys()) {
-      if (generated.has(name)) {
-        fail(`Unmarked declaration shadows generated --${name}; change product tokens in styles/tokens/ instead`, DESIGN_TOKENS_FILE);
-      }
-    }
-  }
-  return result;
+  const block = (selector, tokens, theme) =>
+    `${selector} {\n${[...tokens.values()].map((entry) => `  ${entry.cssName}: ${tokenCss(entry, theme, false)};`).join("\n")}\n}\n`;
+  return "/* Generated from styles/tokens/ by build-tokens.mjs --preview for the Design tab. */\n" +
+    block(":root", base, themes.dark) + block('[data-theme="light"]', lightOverrides, themes.light);
+}
+
+/** Write the preview only when it changed, atomically, so an unchanged save
+ * neither touches the file nor refreshes the canvas. */
+export function writeTokenPreview(root, output) {
+  if (!DESIGN_PREVIEW_OUTPUT.test(output)) fail("--preview writes a .css file in .zeros/design-styles/", output);
+  const css = renderTokenPreviewCss(root);
+  const target = join(root, output);
+  let current = null;
+  try { current = readFileSync(target, "utf8"); } catch { /* first build */ }
+  if (current === css) return false;
+  mkdirSync(dirname(target), { recursive: true });
+  const temporary = `${target}.${process.pid}.tmp`;
+  writeFileSync(temporary, css);
+  renameSync(temporary, target);
+  return true;
 }
 
 const TOKEN_OUTPUTS = [
   [TOKENS_FILE, renderTokenCss],
   [MARKETING_TOKENS_FILE, renderMarketingTokenCss],
-  [DESIGN_TOKENS_FILE, renderDesignTokenCss],
 ];
 
 export function buildTokens(root = process.cwd()) {
@@ -481,7 +465,17 @@ export function checkGeneratedTokens(root = process.cwd()) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  if (process.argv.includes("--check")) {
+  if (process.argv.includes("--preview")) {
+    // One short process per change while the Design tab is open: no watcher,
+    // no package manager, and no write when nothing changed.
+    const output = process.argv[process.argv.indexOf("--preview") + 1] ?? "";
+    try {
+      console.log(writeTokenPreview(process.cwd(), output) ? `wrote ${output}` : `${output} unchanged`);
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = 1;
+    }
+  } else if (process.argv.includes("--check")) {
     const violations = checkGeneratedTokens();
     for (const violation of violations) console.error(`${violation.file}: ${violation.message}`);
     if (violations.length) process.exitCode = 1;

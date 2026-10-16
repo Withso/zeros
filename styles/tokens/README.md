@@ -50,10 +50,10 @@ generated into `apps/marketing/src/index.css` by both `pnpm design:docs` and
 `pnpm check:tokens`, independent string-parity tests retained, and marketing's
 art-direction tokens and selectors kept hand-written.
 
-The same commands generate the repository's Design directory tokens in
-`Zeros - Design/tokens.css`: every public token, with Dark in `:root` (the
-canvas Base theme) and Light overrides in `[data-zd-theme="light"]` (the Design
-tab's `light` theme), plus the font, type and radius scales from `@theme inline`
-as runtime custom properties. Private numeric ramp steps are omitted, and a
-public token that depends on one fails. Authored Design-only declarations may
-extend the file outside its markers but must not reuse a generated name.
+The repository's Design directory has no generated copy: it imports
+`styles/zeros-tokens.css` and `styles/semantic-tokens.css` as style sources.
+While the Design tab is open, `node scripts/design-system/build-tokens.mjs
+--preview .zeros/design-styles/zeros-tokens.css` renders the token declarations
+from these JSON files into that private, Git-excluded file whenever
+`styles/tokens/` changes, writing only when the output changed, so frames show
+a token edit before `pnpm design:docs` regenerates the tracked CSS.

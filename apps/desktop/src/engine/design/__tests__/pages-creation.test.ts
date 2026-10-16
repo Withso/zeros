@@ -77,7 +77,9 @@ describe("creating Design pages layouts", () => {
     expect(read("rules.md")).toContain("meta/canvas.json");
     expect(read("rules.md")).toContain("page");
     expect(read("rules.md")).not.toContain("pages[0]");
-    expect(read("tokens.css")).toContain(":root");
+    // No placeholder tokens: the theme editor asks to sync the app's styles.
+    expect(read("tokens.css")).toContain("@layer reset");
+    expect(read("tokens.css")).not.toContain("--");
     const before = read("meta/canvas.json");
     await withDesignDirectoryNameLease(root, directory, () =>
       initializeDesignDocument(root),
@@ -104,7 +106,7 @@ describe("creating Design pages layouts", () => {
     expect(readDirectoryDesignLayout(root, directory)?.kind).toBe("meta-v3");
     expect(read("page-1/home.html")).toBe(source);
     expect(read("meta/notes.txt")).toBe("Keep this file");
-    expect(read("tokens.css")).toContain(":root");
+    expect(read("tokens.css")).toContain("@layer reset");
     expect(read("rules.md")).toContain("meta/canvas.json");
     expect(
       Object.keys(decodeCanvasFile(read("meta/canvas.json")).frames as object),

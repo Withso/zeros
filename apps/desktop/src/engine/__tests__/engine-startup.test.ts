@@ -14,7 +14,7 @@ vi.mock("../agents/adapters/cursor-sdk/host/host-client", () => ({ disposeCursor
 vi.mock("../git/credential-broker", () => ({ closeGitCredentialBroker: vi.fn(), prepareGitCredentialShellEnvironment: vi.fn(), setGitCredentialSource: vi.fn() }));
 vi.mock("../settings/files", async original => ({ ...await original<object>(), seedUserSettingsFromLegacyRoot: vi.fn() }));
 vi.mock("../settings/watch", () => ({ startSettingsWatcher: () => ({ stop: vi.fn() }) }));
-vi.mock("../git/watch", () => ({ startGitWatcher: () => ({ stop: vi.fn() }) }));
+vi.mock("../git/watch", () => ({ startGitWatcher: () => ({ stop: vi.fn() }), onWorktreeContentChange: () => () => {} }));
 vi.mock("../agents/session-paths", async original => ({ ...await original<object>(), sweepDeadSessions: async () => 0 }));
 vi.mock("../framework-detector", async original => ({ ...await original<object>(), detectFramework: () => ({ framework: "unknown" }) }));
 vi.mock("../git/cloud-primary-workspace", () => ({ ensureCloudPrimaryWorkspace: capture.ensurePrimary }));

@@ -92,7 +92,7 @@ export async function designPromptContext(
     if (!nativeVerification || !target || !readDirectoryDesignManifest(target.workspacePath, target.directory)) return context;
     const verification = await openDesignVerification(target);
     assertCurrent();
-    return `${context}\nNative frame verification is available through ordinary shell commands: ${verification.command} <list|validate|capture|preview> --url '${verification.url}' --frame '<page.folder>/<name>.html'. Omit --frame for list. Capture requires --output '<png-output-path>'; use --revision to require a previously validated source revision. Capture and preview show the base theme; add --theme <name> for another theme the canvas Themes menu offers. ${verification.captureAvailable ? "Capture uses the native PNG renderer; inspect its saved PNG with your normal image tool." : "PNG capture is unavailable on this host; validation and the HTTP preview remain available."} Preview returns an HTTP URL using the canvas's sanitized HTML/CSS and assets. Use the browser actually available through your provider's native browser tooling; do not assume an iab backend exists or navigate to file://. A successful lint or capture is not proof of visual inspection or application behavior. Verification URLs expire after 30 minutes; request fresh frame context if expired.`;
+    return `${context}\nNative frame verification is available through ordinary shell commands: ${verification.command} <list|styles|validate|capture|preview> --url '${verification.url}' --frame '<page.folder>/<name>.html'. Omit --frame for list and styles; styles reports each imported style source's status and exits 1 on errors. Capture requires --output '<png-output-path>'; use --revision to require a previously validated source revision. Capture and preview show the default theme; add --theme <id> for another theme the canvas Themes menu offers. ${verification.captureAvailable ? "Capture uses the native PNG renderer; inspect its saved PNG with your normal image tool." : "PNG capture is unavailable on this host; validation and the HTTP preview remain available."} Preview returns an HTTP URL using the canvas's sanitized HTML/CSS and assets. Use the browser actually available through your provider's native browser tooling; do not assume an iab backend exists or navigate to file://. A successful lint or capture is not proof of visual inspection or application behavior. Verification URLs expire after 30 minutes; request fresh frame context if expired.`;
   } catch (error) {
     assertCurrent();
     if (target?.assertInspectionCurrent) target.assertInspectionCurrent();
@@ -154,6 +154,8 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
       resolveTarget(): Promise<DesignCodeToolTarget | null>;
       authoringMethod?: DesignAuthoringMethod;
       nativeVerification?: boolean;
+      /** Placement context appended to the composer instruction (cloud). */
+      executionNotice?: string;
       renderer?: DesignHeadlessRenderer;
       onChanged?: () => void;
       workspaceTools?: AgentWorkspaceTools;
@@ -214,7 +216,12 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
     };
     const context = await designPromptContext(() => this.options.resolveTarget(), snapshot.mode, assertCurrent, this.options.authoringMethod, this.options.nativeVerification);
     assertCurrent();
-    return wrapSystemInstruction(`${composerModeInstruction(snapshot.mode, snapshot.revision, this.options.authoringMethod)} ${context}`);
+    return wrapSystemInstruction(`${this.instruction(snapshot.mode, snapshot.revision)} ${context}`);
+  }
+
+  private instruction(mode: "code" | "design", revision: number): string {
+    const instruction = composerModeInstruction(mode, revision, this.options.authoringMethod);
+    return this.options.executionNotice ? `${instruction} ${this.options.executionNotice}` : instruction;
   }
 
   listTools(): Tool[] {
@@ -292,7 +299,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
       );
       return textResult({
         composerMode,
-        systemInstruction: `${composerModeInstruction(composerMode.mode, composerMode.revision, this.options.authoringMethod)} ${context}`,
+        systemInstruction: `${this.instruction(composerMode.mode, composerMode.revision)} ${context}`,
       });
     }
     const writes = isDesignWriteTool(name, raw);

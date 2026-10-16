@@ -599,6 +599,7 @@ const WRITE_OPS = new Set<string>([
   // Starts and idles the person's own Design style builds, the same
   // repository-task controls as Run.
   "design.styleBuilds.presence",
+  "design.styles.refresh",
   // These mutate only the engine-owned MCP vault/authorization flight. OAuth
   // tokens never leave the engine; begin/complete carries only the short-lived
   // authorization URL/code over the authenticated cloud bridge.
@@ -630,6 +631,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.page.create",
   "design.page.rename",
   "design.page.delete",
+  "design.themes.update",
   "git.reviewHunk",
   "git.resolveConflict",
   "design.capture",
@@ -777,6 +779,7 @@ const DESIGN_DOCUMENT_MUTATIONS = new Set<string>([
   "design.page.create",
   "design.page.rename",
   "design.page.delete",
+  "design.themes.update",
   "design.transaction.apply",
   "design.review.resolve",
   "design.history.undo",

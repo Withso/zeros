@@ -70,6 +70,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "design.page.create",
   "design.page.rename",
   "design.page.delete",
+  "design.themes.update",
   "design.initialize",
   "design.transaction.apply",
   "design.history.undo",

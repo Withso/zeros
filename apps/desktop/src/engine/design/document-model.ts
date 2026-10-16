@@ -1,3 +1,4 @@
+import type { DesignThemeSummary } from "./themes";
 import { type DesignAssetSummary } from "./assets";
 import type { DesignStyleSourceStatus } from "./style-sources";
 // ──────────────────────────────────────────────────────────
@@ -200,6 +201,9 @@ export interface DesignWorkspaceSnapshot {
   styleSources: DesignStyleSourceStatus[];
   /** Problems with the declared list itself. */
   styleSourceErrors: string[];
+  /** Every theme the directory uses, named; the default theme first when it
+   * has a name (meta/canvas.json `themes`). */
+  themes: DesignThemeSummary[];
   assets: DesignAssetSummary[];
   lint: DesignLintReport;
 }

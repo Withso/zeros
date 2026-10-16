@@ -64,7 +64,7 @@ The full guide is `docs/design-system.md`; token values are in
    VM state (setting up, starting, sleeping, stopped, failed, archived). Follow
    RULES.md §8 (the `zeros-workspaces` skill) and state both impacts in the PR.
 9. **Mockups:** design Zeros screens in `Zeros - Design/` (the Design tab),
-   whose `tokens.css` is generated from the same sources; never hand-copy
+   whose frames import the app's own stylesheets live; never hand-copy
    token values into a standalone HTML file. To implement a frame, map its
    values to utilities (`var(--bg2)` is `bg-bg2`; a `--space-<step>` value is
    that Tailwind step, such as `p-3`) and its controls to the shared
