@@ -11,6 +11,7 @@
 // in-memory fake, and engines/desktops are simulated at their real cadences.
 // See docs/cloud-workspace/load-simulator.md.
 
+import { promises as dns } from "node:dns";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { cpus, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -35,11 +36,33 @@ const usage = `Usage: load:db [--workspaces 0,1,10,50] [--duration 30] [--quiet-
                [--no-background] [--workos off] [--out <report.json>] [--write-budgets <budgets.json>]
 Requires LOAD_SIM_DATABASE_URL pointing at a disposable loopback database; it is rebuilt.`;
 
-function assertDisposableLoopbackDatabase(url: string): void {
-  let host: string;
-  try { host = new URL(url).hostname; } catch { throw new Error("LOAD_SIM_DATABASE_URL is not a URL"); }
-  if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(host))
+/** The simulator rebuilds its database with DROP SCHEMA, so only names in this allow-list are disposable. */
+const LOAD_SIM_DATABASE_NAME = /^zeros_load_sim[A-Za-z0-9_-]*$/;
+
+function isLoopbackAddress(address: string): boolean {
+  return address === "::1" || address.startsWith("127.");
+}
+
+async function assertDisposableLoopbackDatabase(url: string): Promise<void> {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error("LOAD_SIM_DATABASE_URL is not a valid URL"); }
+  // pg-connection-string copies query parameters into the config first and
+  // only falls back to the URL host when `host` is unset, so
+  // `?host=prod.example.com` would silently override the validated loopback.
+  if ([...parsed.searchParams.keys()].length > 0)
+    throw new Error("LOAD_SIM_DATABASE_URL must not carry query parameters: pg applies them over the URL host, bypassing the loopback check");
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (host === "localhost") {
+    // Guard against a localhost that resolves somewhere unexpected.
+    const addresses = await dns.lookup("localhost", { all: true });
+    if (!addresses.length || addresses.some(({ address }) => !isLoopbackAddress(address)))
+      throw new Error("The load simulator rebuilds its database and localhost must resolve only to loopback addresses");
+  } else if (!isLoopbackAddress(host)) {
     throw new Error("The load simulator rebuilds its database and accepts only a loopback host");
+  }
+  const database = decodeURIComponent(parsed.pathname.slice(1));
+  if (!LOAD_SIM_DATABASE_NAME.test(database))
+    throw new Error(`The load simulator drops and rebuilds its database, so the database name must match ${LOAD_SIM_DATABASE_NAME.source} (got "${database}")`);
 }
 
 async function main(): Promise<void> {
@@ -61,7 +84,7 @@ async function main(): Promise<void> {
   if (values.help) { console.log(usage); return; }
   const databaseUrl = process.env.LOAD_SIM_DATABASE_URL;
   if (!databaseUrl) throw new Error(`LOAD_SIM_DATABASE_URL is required.\n${usage}`);
-  assertDisposableLoopbackDatabase(databaseUrl);
+  await assertDisposableLoopbackDatabase(databaseUrl);
   const scenarios = values.workspaces.split(",").map(value => Number(value.trim()));
   const durationSeconds = Number(values.duration), quietDurationSeconds = Number(values["quiet-duration"]), warmupSeconds = Number(values.warmup), iterations = Number(values.iterations);
   if (scenarios.some(count => !Number.isSafeInteger(count) || count < 0 || count > LOAD_SIMULATOR_CAPS.workspaces) ||
@@ -139,10 +162,21 @@ async function main(): Promise<void> {
     for (const violation of violations) {
       console.error(violation.metric === "budget" ? `[load:db] ${violation.subject} has no entry in budgets.json`
         : violation.metric === "measured" ? `[load:db] budgets.json lists ${violation.subject}, which was not measured`
+        : violation.metric === "transactionsFloor" ? `[load:db] ${violation.subject} must cost at least one transaction per request (floor ${violation.budget}, measured ${violation.measured})`
         : `[load:db] over budget: ${violation.subject} ${violation.metric} ${violation.measured} > ${violation.budget}`);
     }
     if (violations.length) process.exitCode = 1;
     else console.error("[load:db] within budgets.json");
+    // A scenario whose operations failed only under real-time concurrency must
+    // not pass green just because the budgets held.
+    for (const result of results) {
+      const failed = Object.entries(result.failures);
+      if (!failed.length) continue;
+      console.error(`[load:db] FAIL: scenario "${result.name}" recorded operation failures: ` +
+        failed.map(([operation, count]) => `${operation} ×${count}`).join(", ") +
+        (result.firstFailure ? ` (first: ${result.firstFailure})` : ""));
+      process.exitCode = 1;
+    }
     const quietRate = results.find(result => result.activeWorkspaces === 0)?.transactionsPerSecond;
     console.error(`[load:db] targets: quiet ${quietRate?.toFixed(3) ?? "n/a"} tx/s (target ${budgets.targets.quietTransactionsPerSecond}); ` +
       `per active workspace ${report.projection.perWorkspace.transactionsPerSecond.toFixed(3)} tx/s (target ${budgets.targets.perActiveWorkspaceTransactionsPerSecond})`);

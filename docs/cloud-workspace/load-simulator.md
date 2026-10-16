@@ -15,7 +15,11 @@ product behavior.
 ## Running it
 
 The command line rebuilds the target database from migrations on every run, so
-point it at a disposable loopback database. Non-loopback hosts are refused.
+point it at a disposable loopback database. The URL is validated before
+anything is dropped: query parameters are refused outright (pg would apply
+them over the URL host, so `?host=…` could redirect the rebuild), the host
+must be loopback (`localhost` only after it resolves to loopback addresses),
+and the database name must match `zeros_load_sim…`.
 
 ```sh
 LOAD_SIM_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/zeros_load_sim \
@@ -37,9 +41,9 @@ pnpm --dir apps/control-plane load:db -- --workspaces 0,1,10 --duration 20 --out
 | `--out` | `$TMPDIR/zeros-load-sim/report-<time>.json` | JSON report path; the Markdown tables are always printed. |
 | `--write-budgets` | none | Write budgets derived from this run (see "Budgets"). |
 
-The run exits with code 1 when a measurement exceeds `budgets.json`. It also
-prints the measured quiet and per-active-workspace rates beside the plan
-targets.
+The run exits with code 1 when a measurement exceeds `budgets.json` or when
+any scenario records an operation failure. It also prints the measured quiet
+and per-active-workspace rates beside the plan targets.
 
 If `pg_stat_statements` is preloaded on the server, the command line installs it
 in a separate `load_sim` schema and reports the top statements by server time.

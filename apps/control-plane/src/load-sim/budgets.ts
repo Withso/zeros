@@ -48,6 +48,8 @@ export function checkBudgets(budgets: LoadBudgets, hotPaths: readonly HotPathRes
       violations.push({ subject: operation, metric: "measured", measured: 0, budget: 1 });
       continue;
     }
+    // Floor: an operation that costs zero transactions has silently become a no-op.
+    if (row.perCall.transactions < 1) violations.push({ subject: operation, metric: "transactionsFloor", measured: row.perCall.transactions, budget: 1 });
     for (const metric of ["transactions", "statements", "roundTrips"] as const) {
       if (row.perCall[metric] > budget[metric]) violations.push({ subject: operation, metric, measured: row.perCall[metric], budget: budget[metric] });
     }
