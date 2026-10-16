@@ -1,7 +1,15 @@
 # S2. VM uplink protocol
 
-Status: **DRAFT** · Contract ID `zeros-uplink` · Version `1.0.0-draft.2` ·
+Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.0.0` ·
 Schema: [Draft schema: uplink text frames](#draft-schema-uplink-text-frames)
+
+Draft 3 (freeze review): the `auth` and `relay` channels are per-connection
+(unsequenced) and never replayed on resume; every connection, resumed or not,
+starts with `auth.keys` and `auth.sync`, confirmed by the new `auth.applied`;
+cross-instance uplink ownership; relay routing by verified identity only;
+uplink teardown on authority loss; `4401` only on a definitive credential
+rejection; resume tokens bound to the engine identity. Frozen as 1.0.0 on
+2026-10-16 with no further changes.
 
 One outbound WebSocket from each cloud engine to the `realtime` service
 carries liveness, readiness, activity, credential-control revisions, epochs
@@ -26,8 +34,9 @@ in v1; they are scoped separately from the engine, control and event lanes
 - **Secrets never traverse `realtime`.** Frames carry revisions and
   identifiers. The engine fetches secret material (credential controls,
   repository credentials) from `api` with its engine capability (S1).
-- **Ordered recovery.** After (re)connect, the CP sends `auth.sync` first and
-  nothing else until the engine acknowledges it (S1 outage rule).
+- **Ordered recovery.** After every (re)connect, resumed or not, the CP sends
+  `auth.keys` and `auth.sync` first and nothing but `sys.*` frames until the
+  engine confirms with `auth.applied` (S1 outage rule).
 
 ## Transport
 
@@ -87,11 +96,19 @@ reassembles up to the existing 64 MiB message ceiling
    `bootId` against durable facts (one read; see the supersede rules below),
    then replies `sys.welcome` (unsequenced) with the chosen `protocol`, the
    intersected `features`, a new `resumeToken`, `resumed: true|false`,
-   `pingIntervalMs` (default 20 000), and the lease deadline.
-3. CP sends `auth.sync` (sequenced). The engine applies it and acks it. Until
-   that ack, the CP sends nothing else and the engine admits no new client
-   sessions (direct or relay).
-4. Normal traffic.
+   `pingIntervalMs` (default 20 000), and the lease deadline. A resume token
+   is accepted only with the same credential, `engineInstanceId` and `bootId`
+   it was issued to; it is a secret and is never logged.
+3. CP sends `auth.keys`, then `auth.sync` with a fresh `syncId`, both
+   unsequenced. The engine applies both (maximum merge, S1) and replies
+   `auth.applied { syncId, authCursor }`. Until that reply, the CP sends only
+   `sys.*` frames and the engine admits no new client sessions (direct or
+   relay). The `auth` channel is per-connection state, not a log: if the
+   connection drops first, the next connection sends a new `auth.sync` from
+   the engine's last applied `authCursor`.
+4. CP sends a fresh `auth.capability`. If `resumed: true`, both sides then
+   retransmit their unacked reliable frames; otherwise both resync (below).
+5. Normal traffic.
 
 Version rule: `realtime` supports protocol N and N−1 during a rollout; the
 engine sends its `min`/`max`; the CP picks the highest common version or
@@ -111,14 +128,24 @@ real engine offline and start receiving `relay.open` client sessions and
    is rejected without touching a live uplink.
 2. **Supersede requires the registered `bootId`.** A new uplink supersedes an
    existing one only if `sys.hello.bootId` equals the `bootId` recorded for
-   the current registration of that engine instance. A different `bootId` is
-   accepted only when the CP itself recorded a fresh registration carrying
-   it (the normal engine restart path). Otherwise the hello is rejected with
-   `4403 uplink_forbidden`.
-3. **Alert on bootId mismatch.** A hello that authenticates with a valid
-   credential but carries an unregistered `bootId` writes a security event
-   and pages: it means the credential is in use somewhere the CP did not
-   boot.
+   the current registration of that engine instance
+   (`cloud_workspace_engine_instances.runtime_boot_id`,
+   `apps/control-plane/migrations/0124_cloud_runtime_registry.sql:223`). A
+   different `bootId` is accepted only when the CP itself recorded a fresh
+   registration carrying it (the normal engine restart path). Otherwise the
+   hello is rejected with `4403 uplink_forbidden`. A fresh registration
+   requires the single-use setup grant (`zws_…`, consumed once at
+   registration, `apps/control-plane/src/cloud-workspaces/setup-materials.ts:1413`
+   → `apps/control-plane/src/cloud-workspaces/grants.ts:574`), never the
+   heartbeat credential, so holding `zwh_…` alone cannot register a new
+   `bootId`.
+3. **Alert on bootId mismatch and on supersede churn.** A hello that
+   authenticates with a valid credential but carries an unregistered `bootId`
+   writes a security event and pages: it means the credential is in use
+   somewhere the CP did not boot. More than 3 supersedes of one engine
+   instance within 10 min, or a supersede from a different source address
+   without an intervening `sys.drain`, also writes a security event: a
+   leaked credential plus a leaked `bootId` shows up as a tug-of-war.
 4. **The superseded engine re-verifies and reconnects.** On `4409
    uplink_superseded` the engine re-checks its registration authority (the
    existing registration read, then the track B authority cache) and
@@ -127,6 +154,19 @@ real engine offline and start receiving `relay.open` client sessions and
    2; a hijacker without a registered `bootId` cannot hold the uplink.
 5. `relay.open` and `auth.capability` are sent only on the uplink that
    passed rule 2 for the current registration.
+6. **One owner across `realtime` instances.** The uplink-connected
+   transition write records the owning `realtime` instance and a connection
+   ID for the engine instance. An instance that holds an older uplink for the
+   same engine instance learns of the new owner through a change
+   notification and closes its uplink with `4409`. Relay admissions and
+   pushes for a workspace are routed to the owning instance, never served
+   from a stale one.
+7. **Teardown on authority loss.** When the engine instance stops being
+   current (a `wa` bump that retires it, a generation change, deletion, or
+   credential revocation), `realtime` closes its uplink with `4403` and stops
+   sending `relay.open` and `auth.capability` at once, without waiting for
+   the engine to act on the pushed epochs. Each `auth.capability` is issued
+   from current authority, not from the state at connect time.
 
 `bootId` is not a secret (an on-VM agent can read it), so rule 2 primarily
 stops **off-VM** use of a leaked credential, which is the new exposure S2
@@ -143,7 +183,10 @@ bearer credential (S2-Q8).
 ## Channels and frames
 
 Direction: E = engine → CP, C = CP → engine. R = reliable (sequenced, acked,
-replayed on resume), U = unreliable.
+replayed on resume), U = unsequenced: delivered in order within one
+connection, never replayed on resume. The `auth` and `relay` channels are U
+by design: `auth` state is re-sent on every connection, and relay channels do
+not survive a reconnect.
 
 | Channel | Type | Dir | Rel | Payload (summary) | Replaces |
 | --- | --- | --- | --- | --- | --- |
@@ -152,10 +195,11 @@ replayed on resume), U = unreliable.
 | sys | `sys.ack` | both | U | `{ a }` standalone ack when no other frame is due (≤ 250 ms delay) | — |
 | sys | `sys.drain` | C | U | `{ reconnectAfterMs, deadlineMs }` (both durations in ms) | — (new: graceful deploys) |
 | sys | `sys.error` | both | U | `{ code, message, fatal }` | — |
-| auth | `auth.sync` | C | R | `{ epochs: { wa, wr, members: {userId: me}, accounts: {userId: ac}, devices: {deviceId: dk} }, revocations, authCursor, complete }`; `complete: true` marks a full snapshot | — |
-| auth | `auth.epochs` | C | R | Delta of the same shape + `authCursor` | Relay 5 s revalidation, client lease renewals |
-| auth | `auth.keys` | C | R | JWKS (`next`, `current`, `retiring`) | — |
-| auth | `auth.capability` | C | R | Engine capability (S1) for `zeros:api`, pushed at 60% lifetime | Actor-confirm renewal, `cloud-local-command-queue-boot.ts:380-396` |
+| auth | `auth.sync` | C | U | `{ syncId, epochs: { wa, wr, members: {userId: me}, accounts: {userId: ac}, devices: {deviceId: dk} }, revocations, authCursor, complete }` for the S1 snapshot scope; `complete: true` marks a full snapshot (sent when the engine's cursor is older than the CP's retention) | — |
+| auth | `auth.epochs` | C | U | Delta of the same shape + `authCursor` | Relay 5 s revalidation, client lease renewals |
+| auth | `auth.applied` | E | U | `{ syncId, authCursor }` after applying a snapshot (with its `syncId`) or an epochs delta (without); `realtime` records `capability_revocation_push_ms` from it | — |
+| auth | `auth.keys` | C | U | JWKS (`next`, `current`, `retiring`); replaces the engine's key set | — |
+| auth | `auth.capability` | C | U | Engine capability (S1) for `zeros:api`; on every connection after `auth.applied`, then at 60% lifetime | Actor-confirm renewal, `cloud-local-command-queue-boot.ts:380-396` |
 | status | `status.ready` | E | R | `{ ready, phase, reason? }` on change | Ready inference from heartbeat/registration |
 | status | `status.report` | E | R | Coalesced, latest-wins: `observedPorts`, runtime health, engine version | Heartbeat `observedPorts` field |
 | activity | `activity.report` | E | R | Every 60 s and on edge: `{ clients, runningTurns, liveTerminals, lastInputAtMs, windowMs }` | Idle timers (track D input) |
@@ -164,10 +208,10 @@ replayed on resume), U = unreliable.
 | checkpoint | `checkpoint.request` | C | R | `{ requestId, reason, deadlineAtMs }` (an absolute timestamp; durations use `…Ms`, timestamps use `…AtMs`) | Checkpoint-hint long-poll, `cloud-runtime-registration.ts:1129` |
 | turns | `turns.event` | E | R | `{ journalSeq, chatId, turnId, state: started \| completed \| failed \| needs_attention \| interrupted, atMs, actorUserId? }` | Notification and presence inference from history mirror |
 | turns | `turns.ack` | C | R | `{ journalSeq }` durable on the CP side | — |
-| relay | `relay.open` | C | R | `{ channel, clientSessionId, capability, proof }` (the client's S1 `auth` frame, forwarded; PoP signed with `route: relay`) | Separate relay socket pair, `runtime-bridge.ts` |
-| relay | `relay.accept` / `relay.reject` | E | R | `{ channel }` / `{ channel, code }` after S1 verification | — |
+| relay | `relay.open` | C | U | `{ channel, clientSessionId, capability, proof }` (the `engine` pair of the client's S3 `auth` frame, forwarded; PoP signed with `route: relay`) | Separate relay socket pair, `runtime-bridge.ts` |
+| relay | `relay.accept` / `relay.reject` | E | U | `{ channel }` / `{ channel, code }` after S1 verification | — |
 | relay | `relay.credit` | both | U | `{ channel, bytes }` | — |
-| relay | `relay.close` | both | R | `{ channel, code, reason }` | — |
+| relay | `relay.close` | both | U | `{ channel, code, reason }` | — |
 
 ### Relay channels and flow control
 
@@ -176,6 +220,24 @@ replayed on resume), U = unreliable.
   capability and proof (S1), then forwards the client's `zeros:engine`
   capability and its proof in `relay.open`. The engine verifies them
   locally (S1) and replies `relay.accept` or `relay.reject`.
+- **Routing by verified identity only.** `realtime` selects the uplink from
+  the verified `zeros:realtime` capability (`wsp`, `gen`, and `ein` when
+  present) and forwards only to an uplink whose authenticated workspace,
+  generation and engine instance match. It never routes by a workspace,
+  user or chat ID named in an engine payload (`turns.event`,
+  `activity.report`): those are data about the uplink's own workspace, and
+  notifications built from them go only to accounts with access to that
+  workspace.
+- **End to end after admission.** `realtime` terminates only the client's
+  first `auth` frame (S3), turning it into `relay.open`. After
+  `relay.accept`, the engine sends `auth.ok` inside the channel, and every
+  later frame, including `auth.renew` and `auth.renewed`, travels inside the
+  channel between client and engine, exactly as on the direct route.
+  `realtime` does not parse channel data and does not renew its own
+  `zeros:realtime` token in band: that token gates admission only. Afterwards
+  `realtime` closes the channel on a pushed revocation that affects the
+  session, and the engine closes it when its `zeros:engine` token expires
+  unrenewed.
 - Credit-based flow control per channel and direction: initial window
   1 MiB; the receiver grants more with `relay.credit` once half is consumed.
   A sender with no credit stops reading from its source socket. This keeps a
@@ -194,13 +256,17 @@ replayed on resume), U = unreliable.
 - `realtime` keeps the CP-side buffer for 120 s after a disconnect, keyed by
   `resumeToken`, in memory on the instance that owned the uplink. If the
   engine reconnects to another instance (deploy, failover) or after 120 s,
-  `sys.welcome.resumed = false` and both sides resync:
-  - CP sends `auth.sync`, current `auth.keys`, a fresh `auth.capability`,
-    current `cred.revision` values and any pending `checkpoint.request`.
+  `sys.welcome.resumed = false` and both sides resync after the `auth`
+  exchange of the [handshake](#handshake-and-version-negotiation), which
+  happens on every connection:
+  - CP sends current `cred.revision` values and any pending
+    `checkpoint.request`.
   - Engine re-sends `status.ready`, `status.report`, `activity.report`, and
     `turns.event` from the last `turns.ack` (`lastJournalSeq` in hello).
 - Every reliable frame type is idempotent by content (revisions, journal
-  sequence, request IDs), so duplicates after resume are harmless.
+  sequence, request IDs), so duplicates after resume are harmless. `auth.*`
+  and `relay.*` frames are never in a resume buffer, so a resume can neither
+  re-deliver a stale engine token nor replay a client's `relay.open` proof.
 
 ### Drain
 
@@ -252,7 +318,8 @@ the old (`4409`). Relay channels on the draining instance are closed with
 | 1000 | `normal` | Clean close | Reconnect only if still running |
 | 1001 | `going_away` | Process exit | Reconnect with backoff |
 | 4400 | `frame_invalid` | Schema or size violation | Report; reconnect with backoff |
-| 4401 | `uplink_unauthenticated` | Credential invalid or expired | Stop reconnecting; existing authority-loss path |
+| 4401 | `uplink_unauthenticated` | Credential definitively invalid or expired. Sent only when the durable read succeeded and rejected the credential; a verification that could not complete (database slow or down) closes with `1011` instead | Stop reconnecting; existing authority-loss path |
+| 1011 | `internal_error` | `realtime` could not complete verification | Reconnect with backoff |
 | 4403 | `uplink_forbidden` | Generation, engine instance or `bootId` not current | Existing authority-loss path; never retry with the same identity |
 | 4408 | `ping_timeout` | Missed pings | Reconnect |
 | 4409 | `uplink_superseded` | A newer uplink with the registered `bootId` took over | Re-verify registration authority, then reconnect with backoff; use the authority-loss path only if the registration is no longer current |
@@ -267,7 +334,8 @@ the old (`4409`). Relay channels on the draining instance are closed with
 
 | Failure | Behavior |
 | --- | --- |
-| Uplink down, `api` up | Engine keeps running; direct client sessions continue under S1 normal rules (5 min worst case); engine fetches credentials directly from `api` with its last engine token until it expires; then it waits |
+| Uplink down, `api` up | Engine keeps running; direct client sessions continue under S1 normal rules (5 min worst case, renewed in band from REST-issued tokens); after 30 s down the engine obtains engine tokens through the S1 REST fallback, so credential reads, history mirroring and checkpoints keep working; it refetches the JWKS at least every 5 min |
+| `realtime` up, database down | Hellos that cannot be verified close with `1011`, never `4401`/`4403`; established uplinks stay open |
 | `realtime` and `api` down (full CP outage) | S1 outage rule: pre-outage sessions up to 30 min; no new sessions; agents keep running until the lease deadline; turn events buffer in the journal |
 | `realtime` redeploy | Drain, reconnect, resume or resync; relay clients re-route |
 | Engine restart (same generation) | New `bootId`, recorded by a fresh registration; resume rejected (`resumed: false`); full resync |
@@ -295,17 +363,17 @@ obtain a registration document (`scripts/electron-local.mjs:54-82`).
 
 ## Open questions
 
-| # | Question | Recommendation |
-| --- | --- | --- |
-| S2-Q1 | JSON for everything, or a binary encoding for control frames? | JSON text for control (debuggable, schema-validated, low rate); binary only for relay data. |
-| S2-Q2 | One sequence space per direction, or per channel? | One per direction; channels are few and ordering across `auth` and other frames matters for recovery. |
-| S2-Q3 | Resume across `realtime` instances (shared buffer in Redis or the DB)? | No in v1: resync is cheap and fully idempotent. Revisit if resync load shows up in measurements. |
-| S2-Q4 | Keep the HTTP heartbeat as a fallback during rollout? | Yes, behind the per-org flag, for one release; the engine uses it only when `sys.welcome` was never received. Delete it at the end of the slice. |
-| S2-Q5 | Should repository credentials move from the heartbeat response to the uplink? | Revision over the uplink, secret fetched from `api` with the engine token; secrets never pass through `realtime`. |
-| S2-Q6 | Watermark write interval | 5 min; drift jobs already tolerate minutes. |
-| S2-Q7 | Permessage-deflate | Off in v1; measure relay CPU first. |
-| S2-Q8 | Bind the uplink to a VM-attested key instead of the bearer heartbeat credential? | Later. v1 keeps the existing credential plus the bootId rules; an attested key needs provider support work that is not on the critical path. |
-| S2-Q9 | Preview and PTY lanes on the uplink? | Not in v1; they keep their current relay paths ([warm-pool](../warm-pool.md) scopes them separately). |
+| # | Question | Recommendation | Answer (freeze review) |
+| --- | --- | --- | --- |
+| S2-Q1 | JSON for everything, or a binary encoding for control frames? | JSON text for control (debuggable, schema-validated, low rate); binary only for relay data. | Accepted. |
+| S2-Q2 | One sequence space per direction, or per channel? | One per direction; channels are few and ordering across `auth` and other frames matters for recovery. | Accepted, for the reliable channels only. `auth` and `relay` are unsequenced per-connection channels; `auth` ordering is enforced by the `auth.applied` gate, which a cumulative ack could not do across a resume gap. |
+| S2-Q3 | Resume across `realtime` instances (shared buffer in Redis or the DB)? | No in v1: resync is cheap and fully idempotent. Revisit if resync load shows up in measurements. | Accepted. |
+| S2-Q4 | Keep the HTTP heartbeat as a fallback during rollout? | Yes, behind the per-org flag, for one release; the engine uses it only when `sys.welcome` was never received. Delete it at the end of the slice. | Accepted. |
+| S2-Q5 | Should repository credentials move from the heartbeat response to the uplink? | Revision over the uplink, secret fetched from `api` with the engine token; secrets never pass through `realtime`. | Accepted. |
+| S2-Q6 | Watermark write interval | 5 min; drift jobs already tolerate minutes. | Accepted. |
+| S2-Q7 | Permessage-deflate | Off in v1; measure relay CPU first. | Accepted. |
+| S2-Q8 | Bind the uplink to a VM-attested key instead of the bearer heartbeat credential? | Later. v1 keeps the existing credential plus the bootId rules; an attested key needs provider support work that is not on the critical path. | Accepted, with the supersede-churn alert (rule 3) as the v1 detection for a leaked credential plus `bootId`. |
+| S2-Q9 | Preview and PTY lanes on the uplink? | Not in v1; they keep their current relay paths ([warm-pool](../warm-pool.md) scopes them separately). | Accepted. |
 
 ## Draft schema: uplink text frames
 
@@ -320,7 +388,7 @@ review aid until freeze; the frozen source of truth will be Zod in
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://zeros.dev/schemas/cloud-contracts/s2-uplink-frames.schema.json",
   "title": "Zeros VM uplink (S2) text frames",
-  "description": "DRAFT 1.0.0-draft.2. Review sketch of uplink JSON text frames. Binary relay chunks are specified in s2-uplink.md. Receivers ignore unknown payload fields; frame types outside this list are handled by the unknown-type rule in s2-uplink.md.",
+  "description": "FROZEN 1.0.0. Reference sketch of uplink JSON text frames. Binary relay chunks are specified in s2-uplink.md. Receivers ignore unknown payload fields; frame types outside this list are handled by the unknown-type rule in s2-uplink.md.",
   "oneOf": [
     { "$ref": "#/$defs/sys.hello" },
     { "$ref": "#/$defs/sys.welcome" },
@@ -331,6 +399,7 @@ review aid until freeze; the frozen source of truth will be Zod in
     { "$ref": "#/$defs/sys.error" },
     { "$ref": "#/$defs/auth.sync" },
     { "$ref": "#/$defs/auth.epochs" },
+    { "$ref": "#/$defs/auth.applied" },
     { "$ref": "#/$defs/auth.keys" },
     { "$ref": "#/$defs/auth.capability" },
     { "$ref": "#/$defs/status.ready" },
@@ -508,13 +577,14 @@ review aid until freeze; the frozen source of truth will be Zod in
       }
     },
     "auth.sync": {
-      "allOf": [{ "$ref": "#/$defs/reliable" }],
+      "allOf": [{ "$ref": "#/$defs/unreliable" }],
       "properties": {
         "t": { "const": "auth.sync" },
         "d": {
           "type": "object",
-          "required": ["epochs", "revocations", "authCursor", "complete"],
+          "required": ["syncId", "epochs", "revocations", "authCursor", "complete"],
           "properties": {
+            "syncId": { "$ref": "#/$defs/uuid" },
             "epochs": { "allOf": [{ "$ref": "#/$defs/epochSet" }], "required": ["wa", "wr"] },
             "revocations": { "$ref": "#/$defs/revocations" },
             "authCursor": { "$ref": "#/$defs/cursor" },
@@ -524,7 +594,7 @@ review aid until freeze; the frozen source of truth will be Zod in
       }
     },
     "auth.epochs": {
-      "allOf": [{ "$ref": "#/$defs/reliable" }],
+      "allOf": [{ "$ref": "#/$defs/unreliable" }],
       "properties": {
         "t": { "const": "auth.epochs" },
         "d": {
@@ -538,8 +608,22 @@ review aid until freeze; the frozen source of truth will be Zod in
         }
       }
     },
+    "auth.applied": {
+      "allOf": [{ "$ref": "#/$defs/unreliable" }],
+      "properties": {
+        "t": { "const": "auth.applied" },
+        "d": {
+          "type": "object",
+          "required": ["authCursor"],
+          "properties": {
+            "syncId": { "$ref": "#/$defs/uuid", "description": "Present when confirming an auth.sync; absent when confirming an auth.epochs delta." },
+            "authCursor": { "$ref": "#/$defs/cursor" }
+          }
+        }
+      }
+    },
     "auth.keys": {
-      "allOf": [{ "$ref": "#/$defs/reliable" }],
+      "allOf": [{ "$ref": "#/$defs/unreliable" }],
       "properties": {
         "t": { "const": "auth.keys" },
         "d": {
@@ -550,7 +634,7 @@ review aid until freeze; the frozen source of truth will be Zod in
       }
     },
     "auth.capability": {
-      "allOf": [{ "$ref": "#/$defs/reliable" }],
+      "allOf": [{ "$ref": "#/$defs/unreliable" }],
       "properties": {
         "t": { "const": "auth.capability" },
         "d": {
@@ -687,7 +771,7 @@ review aid until freeze; the frozen source of truth will be Zod in
       }
     },
     "relay.open": {
-      "allOf": [{ "$ref": "#/$defs/reliable" }],
+      "allOf": [{ "$ref": "#/$defs/unreliable" }],
       "properties": {
         "t": { "const": "relay.open" },
         "d": {
@@ -711,14 +795,14 @@ review aid until freeze; the frozen source of truth will be Zod in
       }
     },
     "relay.accept": {
-      "allOf": [{ "$ref": "#/$defs/reliable" }],
+      "allOf": [{ "$ref": "#/$defs/unreliable" }],
       "properties": {
         "t": { "const": "relay.accept" },
         "d": { "type": "object", "required": ["channel"], "properties": { "channel": { "$ref": "#/$defs/channel" } } }
       }
     },
     "relay.reject": {
-      "allOf": [{ "$ref": "#/$defs/reliable" }],
+      "allOf": [{ "$ref": "#/$defs/unreliable" }],
       "properties": {
         "t": { "const": "relay.reject" },
         "d": { "type": "object", "required": ["channel", "code"], "properties": { "channel": { "$ref": "#/$defs/channel" }, "code": { "$ref": "#/$defs/code" } } }
@@ -736,7 +820,7 @@ review aid until freeze; the frozen source of truth will be Zod in
       }
     },
     "relay.close": {
-      "allOf": [{ "$ref": "#/$defs/reliable" }],
+      "allOf": [{ "$ref": "#/$defs/unreliable" }],
       "properties": {
         "t": { "const": "relay.close" },
         "d": {
@@ -753,7 +837,8 @@ review aid until freeze; the frozen source of truth will be Zod in
   },
   "examples": [
     { "t": "sys.ping", "d": { "ts": 1792000000000 } },
-    { "t": "auth.epochs", "s": 9, "a": 4, "d": { "epochs": { "members": { "11111111-1111-4111-8111-111111111111": 6 } }, "revocations": [], "authCursor": "c-1042" } },
+    { "t": "auth.epochs", "a": 4, "d": { "epochs": { "members": { "11111111-1111-4111-8111-111111111111": 6 } }, "revocations": [], "authCursor": "c-1042" } },
+    { "t": "auth.applied", "d": { "syncId": "88888888-8888-4888-8888-888888888888", "authCursor": "c-1042" } },
     { "t": "cred.revision", "s": 10, "d": { "kind": "agent-controls", "revision": 31 } },
     { "t": "relay.credit", "d": { "channel": 3, "bytes": 524288 } }
   ]

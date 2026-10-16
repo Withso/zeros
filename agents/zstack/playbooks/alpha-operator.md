@@ -30,10 +30,18 @@ WorkOS. Never use Beta or Production credentials or data.
 - For latency, first confirm that the control plane and the database run in
   the same region, and measure one round trip. A cross-region hop is paid by
   every query.
-- Release (alpha) runs only on a push to main. Before assuming Alpha runs
-  main, compare the last Release (alpha) run's head SHA with `origin/main`
-  and check the workflow's state. Merges made while it was disabled ship only
-  with the next push.
+- Release (alpha) runs only on a push to main, and it is the only path that
+  deploys the Alpha control plane. Before assuming Alpha runs main, compare
+  the head SHA of the last *successful* Release (alpha) run with `origin/main`,
+  check the workflow's state, and scan `gh run list --workflow "Release
+  (alpha)"` for a failure streak. Merges made while it was disabled ship only
+  with the next push. A publication interrupted after the ledger upload (an
+  asset upload failing) leaves the rolling tag behind the ledger, and every
+  later run then fails its barrier while main CI stays green. Recovery is
+  owner-led: verify the retained signed artifact against the published
+  digests, upload only the missing asset, move the tag forward to the
+  ledger's last `sourceSha` after an ancestry check, run
+  `release-ledger-cli.ts --verify`, then fully rerun the latest release run.
 
 ## Pins and rebuilds
 
@@ -46,6 +54,10 @@ WorkOS. Never use Beta or Production credentials or data.
 
 ## Collisions and cleanup
 
+- An operator approval embeds the target's version snapshot, and a stopped
+  workspace's version still ticks, so a plan and an execute run as two
+  separate commands can fail closed with a plan mismatch. Run plan and
+  execute in one process, and retry the pair on that mismatch only.
 - Don't change Railway variables in a way that redeploys a service while a
   release workflow is running. Check for an in-flight release first.
 - Before deleting a scratch, worktree or `.context` folder, check that no

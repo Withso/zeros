@@ -18,8 +18,10 @@ The command line rebuilds the target database from migrations on every run, so
 point it at a disposable loopback database. The URL is validated before
 anything is dropped: query parameters are refused outright (pg would apply
 them over the URL host, so `?host=…` could redirect the rebuild), the host
-must be loopback (`localhost` only after it resolves to loopback addresses),
-and the database name must match `zeros_load_sim…`.
+must be a loopback IP literal in `127.0.0.0/8` or `::1` (a name such as
+`127.example.com` is refused; `localhost` is accepted only after it resolves to
+loopback addresses), and the database name must match `zeros_load_sim…`. The
+checks live in `apps/control-plane/src/load-sim/database-guard.ts`.
 
 ```sh
 LOAD_SIM_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/zeros_load_sim \
