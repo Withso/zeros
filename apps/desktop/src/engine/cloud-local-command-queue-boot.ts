@@ -57,6 +57,11 @@ type Options = {
   startsAllowed?(): boolean;
   /** Closed, content-free evidence only; never readiness or admission. */
   observeStartup?(observation: StartupObservation): void;
+  /** Credential-control poll cadence, read at every schedule. The engine
+   * wires 500 ms while the S2 uplink is down (today's behavior, the
+   * fallback) and a slow safety cadence once the uplink's cred push carries
+   * revisions (P0.10 C01). Defaults to 500 ms. */
+  controlsPollIntervalMs?(): number;
 };
 
 /** Registration establishes a candidate; only an exact activation response
@@ -353,7 +358,9 @@ export class CloudLocalAgentBootRuntime {
   private scheduleControls(): void {
     if (this.controlsTimer) clearTimeout(this.controlsTimer);
     if (!this.active) return;
-    this.controlsTimer = setTimeout(() => { this.controlsTimer = null; void this.pollCredentialControls().catch(() => {}); }, 500);
+    const intervalMs = this.options.controlsPollIntervalMs?.() ?? 500;
+    this.controlsTimer = setTimeout(() => { this.controlsTimer = null; void this.pollCredentialControls().catch(() => {}); },
+      Math.min(30_000, Math.max(100, intervalMs)));
     this.controlsTimer.unref?.();
   }
   async confirmAdmission(admission: CloudRuntimeClientAdmission): Promise<void> {

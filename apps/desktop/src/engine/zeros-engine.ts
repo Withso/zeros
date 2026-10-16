@@ -3678,6 +3678,22 @@ export class ZerosEngine {
       // (signature and epoch checks) to this state.
       auth: new EngineUplinkAuthState(),
       readiness: () => ({ ready: this.running, phase: this.running ? "ready" : "starting" }),
+      features: ["cred.v1"],
+      // Credential-control push (P0.10 C01): a pushed revision runs the same
+      // credential-controls exchange the 500 ms poll runs; the poll itself
+      // stays as the fallback (see controlsPollIntervalMs at the boot).
+      onCredentialRevision: async revision => {
+        if (revision.kind !== "agent-controls") return { result: "applied" as const }; // nothing consumes repository pushes yet
+        const boot = this.cloudAgentBoot;
+        if (!boot) return { result: "applied" as const }; // pre-boot: the activation exchange converges
+        try {
+          await boot.pollCredentialControls();
+          return { result: "applied" as const };
+        } catch (error) {
+          const code = error && typeof error === "object" && "code" in error ? String(error.code) : "cred_fetch_failed";
+          return { result: "failed" as const, code };
+        }
+      },
       onReverifyAuthority: () => registration.requestHeartbeatSoon(),
       onParked: reason =>
         console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`),
@@ -4443,6 +4459,10 @@ export class ZerosEngine {
         generation: config.execution.generation, engineInstanceId: config.engine.instanceId },
       supervisor: { onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss() },
       engineLive: () => this.running && !this.cloudRuntimeAuthorityStopping,
+      // While the uplink's gate is open, cred.revision pushes carry control
+      // changes and the poll drops to a 30 s safety net; any uplink loss
+      // returns it to the 500 ms fallback cadence.
+      controlsPollIntervalMs: () => (this.cloudEngineUplink?.established ? 30_000 : 500),
       startsAllowed: () => !this.cloudRuntimeHandoffFenced && !this.cloudRuntimeCheckpointQuiescing && !this.cloudLegacyResidentRequiresFreshView,
       isAdmittedCwd: cwd => {
         try {

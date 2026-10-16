@@ -73,7 +73,8 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
   const options = { file: path.join(directory, "queue.sqlite"), scope, runtimeBootId: f.scope.bootId, registration, observeStartup: startup,
     legacy: f.legacy, supervisor: { onRetirementFailure: vi.fn() }, engineLive: () => live,
     isAdmittedCwd: (cwd: string) => cwd === f.input.cwd, resolveConversation: () => ({ cwd: f.input.cwd, provider: f.input.provider, model: f.input.model }),
-    history: () => ({ recordSequence: 1, eventSequence: 1 }), beforeActivate, install, changed };
+    history: () => ({ recordSequence: 1, eventSequence: 1 }), beforeActivate, install, changed,
+    controlsPollIntervalMs: undefined as (() => number) | undefined };
   const boot = new CloudLocalAgentBootRuntime(options); cleanups.push(() => boot.dispose());
   const admission = { accountUserId: f.provenance.actor.userId, authorityEpoch: f.provenance.authorityEpoch,
     actor: { sessionId: f.provenance.actorSessionId, deviceId: f.provenance.actor.deviceId,
@@ -447,6 +448,30 @@ describe("engine boot-mode orchestration", () => {
     release(); await starting;
     await vi.advanceTimersByTimeAsync(500);
     expect(f.controls).toHaveBeenCalled();
+  });
+  it("backs the credential-control poll off to the wired fallback cadence and back", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    let controlsIntervalMs = 500;
+    const f = await fixture();
+    f.options.controlsPollIntervalMs = () => controlsIntervalMs;
+    await f.boot.initialize();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(1);
+    // Uplink established: the engine wires the slow fallback cadence. The
+    // already-armed 500 ms timer fires once more; the next schedule reads it.
+    controlsIntervalMs = 30_000;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(29_500);
+    expect(f.controls).toHaveBeenCalledTimes(3);
+    // Uplink lost: after the armed slow timer fires, the cadence is 500 ms again.
+    controlsIntervalMs = 500;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.controls).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(5);
   });
   it.each(["Local Personal", "organization-local"])("keeps %s off the cloud boot path", async _owner => {
     const registration = { localCommandsNegotiated: vi.fn(() => true) }, restore = vi.fn();
