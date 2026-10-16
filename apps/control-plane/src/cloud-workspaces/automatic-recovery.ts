@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { HttpError } from "../authz.js";
+import { audit } from "../audit.js";
 import { withSystemTx, type Tx } from "../db.js";
 import type { CloudWorkspaceBackendConfig, CloudWorkspaceProvisioningProfile } from "../config.js";
 import { authorizeCloudWorkspaceOperation } from "./authorization.js";
@@ -15,6 +16,7 @@ import { advanceCloudWorkspaceGenerationTransitionAfterDrain, cancelCloudWorkspa
 import { requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 import { copyGenerationPins, requireGenerationRuntime } from "./generation-pins.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
+import { pinCheckpointComputerSource, selectCheckpointComputerSource } from "./checkpoint-computer-source.js";
 
 export type QuotaRow = {
   max_workspaces: number;
@@ -116,30 +118,6 @@ export async function loadUsage(tx: Tx, orgId: string): Promise<UsageRow> {
   return result.rows[0]!;
 }
 
-export function assertGenerationReplacementQuota(
-  quota: QuotaRow,
-  usage: UsageRow,
-  resources: {
-    cpuMillicores: number;
-    memoryMiB: number;
-    storageMiB: number;
-  },
-): void {
-  const exceeded =
-    Number(usage.cpu_millicores) + resources.cpuMillicores >
-      quota.max_cpu_millicores ||
-    Number(usage.memory_mib) + resources.memoryMiB > quota.max_memory_mib ||
-    Number(usage.storage_mib) + resources.storageMiB > quota.max_storage_mib;
-  if (exceeded) {
-    throw new HttpError(
-      409,
-      "cloud_replacement_headroom_exceeded",
-      "Cloud workspace quota does not have safe replacement headroom",
-    );
-  }
-}
-
-
 type RecoveryScope = { workspaceId: string; organizationId: string; sourceGeneration: number; checkpointId: string };
 type RecoveryPoint = { id: string; integrity_sha256: Buffer; content_revision: string; record_revision: string; durable_at: Date; lossless: boolean };
 
@@ -176,7 +154,8 @@ export async function requireCloudRecoveryPoint(tx: Tx, input: RecoveryScope & {
           SELECT checkpoint.manifest_blob_id AS id UNION SELECT checkpoint.artifact_blob_id
           UNION SELECT entry.blob_id FROM workspace_checkpoint_entries entry WHERE entry.checkpoint_id=checkpoint.id
           UNION SELECT reference.blob_id FROM workspace_blob_references reference
-            WHERE reference.reference_id=checkpoint.id::text AND reference.workspace_id=checkpoint.workspace_id
+            WHERE reference.reference_id IN (checkpoint.id::text,checkpoint.id::text||':v2')
+              AND reference.workspace_id=checkpoint.workspace_id AND reference.org_id=checkpoint.org_id
         ) needed LEFT JOIN workspace_blobs blob ON blob.id=needed.id AND blob.org_id=checkpoint.org_id
         WHERE needed.id IS NOT NULL AND (blob.id IS NULL OR blob.state<>'available')
       ) FOR SHARE OF checkpoint`, [input.checkpointId,input.workspaceId,input.organizationId,input.sourceGeneration])).rows[0];
@@ -227,25 +206,31 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
      WHERE g.workspace_id=$1 AND g.generation=$2 AND g.org_id=$3`,[input.workspaceId,input.sourceGeneration,input.organizationId])).rows[0];
   if(!source)throw new HttpError(404,"cloud_generation_not_qualified","Source generation is unavailable");
   const qualificationMode=input.config.runtime?.qualificationMode??cloudRuntimeQualificationMode();
-  const pins=await requireGenerationRuntime(tx,{...input,generation:input.sourceGeneration},qualificationMode);
+  const missingCapture=(await tx.query(`SELECT 1 FROM cloud_workspace_restore_incidents incident
+    JOIN cloud_workspace_provider_bindings binding ON binding.workspace_id=incident.workspace_id AND binding.org_id=incident.org_id
+      AND binding.generation=incident.source_generation AND binding.provider='boat' AND binding.provider_resource_id=incident.provider_resource_id
+    WHERE incident.workspace_id=$1 AND incident.org_id=$2 AND incident.source_generation=$3
+      AND incident.evidence_code='provider_snapshot_missing'`,[input.workspaceId,input.organizationId,input.sourceGeneration])).rowCount;
+  const currentComputer=missingCapture ? await selectCheckpointComputerSource(tx,{...input,qualificationMode}) : null;
+  const pins=currentComputer ?? await requireGenerationRuntime(tx,{...input,generation:input.sourceGeneration},qualificationMode);
   const profile=pins.profile;
   const connection=await loadGenerationCloudProviderConnection(tx,{...input,generation:input.sourceGeneration});
   if(!connection||connection.provider!==profile.provider)throw new HttpError(409,"cloud_provider_connection_unavailable","The cloud provider connection is unavailable");
   if(!profile.sourceCommit)throw new HttpError(409,"recovery_image_unavailable","A qualified recovery image is unavailable");
-  const quota=await loadQuota(tx,input.organizationId),usage=await loadUsage(tx,input.organizationId);
-  if(workspace.desired_state!=="running"&&Number(usage.running)+1>quota.max_running_workspaces)
-    throw new HttpError(409,"cloud_quota_exceeded","Cloud workspace running quota would be exceeded");
-  assertGenerationReplacementQuota(quota,usage,profile);
+  // A provisioned quota record is still required; its numeric limits are not.
+  await loadQuota(tx,input.organizationId);
   const digest=typeof input.requestDigest==='function'?input.requestDigest(profile):input.requestDigest;
   const generation=(await tx.query<{generation:number}>("SELECT coalesce(max(generation),0)::integer+1 AS generation FROM cloud_workspace_generations WHERE workspace_id=$1",[input.workspaceId])).rows[0]!.generation;
   const transitionId=randomUUID(),intentId=input.drainIntentId??randomUUID();
-  await copyGenerationPins(tx,{...input,targetGeneration:generation,providerConnectionId:connection.id,
+  if(currentComputer) await pinCheckpointComputerSource(tx,{...input,targetGeneration:generation,providerConnectionId:connection.id,
+    providerConnectionVersion:connection.credentialVersion,checkpointId:point.id,selected:currentComputer});
+  else await copyGenerationPins(tx,{...input,targetGeneration:generation,providerConnectionId:connection.id,
     qualificationMode,recoveryCheckpointId:point.id});
   const resolved=await resolveDatabaseCloudWorkspaceSettings(tx,{organizationId:input.organizationId,repositoryId:workspace.repository_id,workspaceId:input.workspaceId,generation,actorUserId:input.actorUserId,
     isPersonal:authorization.isPersonal,secretEncryptionKeys:input.config.settingsSecretEncryptionKeys,currentSecretEncryptionKeyVersion:input.config.currentSettingsSecretEncryptionKeyVersion});
   const settings=await persistDatabaseCloudWorkspaceSettings(tx,{...input,generation,settings:resolved});
   await tx.query(`INSERT INTO cloud_workspace_setup_specs(workspace_id,generation,org_id,spec_version,repository_forge,repository_owner,repository_name,repository_revision,github_installation_id,settings_snapshot,settings_snapshot_sha256,workspace_settings_version_id)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,digest($10::jsonb::text,'sha256'),$11)`,[input.workspaceId,generation,input.organizationId,source.spec_version,source.repository_forge,source.repository_owner,source.repository_name,source.repository_revision,source.github_installation_id,settings.document,settings.id]);
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,digest($10::jsonb::text,'sha256'),$11)`,[input.workspaceId,generation,input.organizationId,source.spec_version,source.repository_forge,source.repository_owner,source.repository_name,source.repository_revision,currentComputer?.installationId ?? source.github_installation_id,settings.document,settings.id]);
   await persistCloudWorkspaceSetupSecrets(tx,{...input,generation,secrets:resolved.setupSecrets});
   await tx.query("INSERT INTO cloud_workspace_provider_bindings(workspace_id,generation,org_id,provider) VALUES($1,$2,$3,$4)",[input.workspaceId,generation,input.organizationId,profile.provider]);
   await retireCloudWorkspaceRuntimeAccess(tx,{...input,generation:input.sourceGeneration,reason:"generation_replacement_requested"});
@@ -351,6 +336,71 @@ export async function enqueueCloudAutomaticRecovery(tx: Tx, input: {workspaceId:
   return true;
 }
 
+/** Called only by the owner of a live wake claim after the Boat adapter
+ * confirms capture absence. The caller holds workspace -> intent locks;
+ * enqueue here, then let the ordinary org-first worker perform admission. */
+export async function enqueueCloudMissingSnapshotRecovery(tx: Tx, input: {
+  workspaceId: string; organizationId: string; generation: number; wakeIntentId: string;
+  providerResourceId: string; authorityEpoch: string;
+}): Promise<boolean> {
+  const incident=(await tx.query<{id:string;checkpoint_id:string|null}>(`INSERT INTO cloud_workspace_restore_incidents
+      (workspace_id,org_id,source_generation,wake_intent_id,provider_resource_id,owner_user_id,
+       authority_epoch,billing_epoch,account_revision,organization_revision,membership_revision,evidence_code)
+    SELECT workspace.id,workspace.org_id,workspace.current_generation,wake.id,binding.provider_resource_id,workspace.owner_user_id,
+      workspace.authority_epoch,workspace.current_billing_epoch,account.auth_revision,organization.authorization_revision,member.authorization_revision,
+      'provider_snapshot_missing'
+    FROM cloud_workspaces workspace
+    JOIN organizations organization ON organization.id=workspace.org_id AND NOT organization.is_personal
+    JOIN users account ON account.id=workspace.owner_user_id
+    JOIN organization_members member ON member.org_id=workspace.org_id AND member.user_id=workspace.owner_user_id
+    JOIN cloud_workspace_provider_bindings binding ON binding.workspace_id=workspace.id AND binding.org_id=workspace.org_id
+      AND binding.generation=workspace.current_generation AND binding.provider='boat' AND binding.provider_resource_id=$5
+    JOIN cloud_workspace_lifecycle_intents wake ON wake.id=$4 AND wake.workspace_id=workspace.id AND wake.org_id=workspace.org_id
+      AND wake.generation=workspace.current_generation AND wake.operation='wake' AND wake.affects_workspace
+      AND wake.generation_transition_id IS NULL AND wake.state='failed' AND wake.error_code='provider_snapshot_missing'
+    WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3 AND workspace.authority_epoch=$6
+      AND workspace.desired_state='running' AND workspace.deleted_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM cloud_workspace_generation_transitions transition WHERE transition.workspace_id=workspace.id
+        AND transition.state IN ('draining','provisioning','setting_up','rolling_back'))
+    ON CONFLICT(workspace_id,source_generation,wake_intent_id) DO NOTHING RETURNING id,checkpoint_id`,
+    [input.workspaceId,input.organizationId,input.generation,input.wakeIntentId,input.providerResourceId,input.authorityEpoch])).rows[0];
+  if(!incident)return false;
+  const head=(await tx.query<{current_checkpoint_id:string|null}>(
+    "SELECT current_checkpoint_id FROM workspace_content_heads WHERE workspace_id=$1 AND org_id=$2",[input.workspaceId,input.organizationId])).rows[0];
+  let point:RecoveryPoint|null=null;
+  if(head?.current_checkpoint_id) {
+    try { point=await requireCloudRecoveryPoint(tx,{...input,sourceGeneration:input.generation,checkpointId:head.current_checkpoint_id}); }
+    catch(error){if(!(error instanceof HttpError))throw error;}
+  }
+  const recent=(await tx.query(`SELECT 1 FROM cloud_workspace_restore_incidents
+    WHERE workspace_id=$1 AND automatic_started_at>now()-interval '1 hour' AND id<>$2`,[input.workspaceId,incident.id])).rowCount;
+  // The provider has confirmed there is no stopped disk to resume. Restore
+  // the latest available checkpoint even if its final zero-loss seal is absent.
+  // Other automatic recovery causes keep their original lossless requirement.
+  const automatic=point!==null&&!recent;
+  await retireCloudWorkspaceRuntimeAccess(tx,{...input,reason:"provider_operation_failed"});
+  await tx.query(`UPDATE cloud_workspaces SET status='failed',authority_epoch=authority_epoch+1,version=version+1,updated_at=now(),
+    last_error_code=$2,last_error_message=$3 WHERE id=$1`,[input.workspaceId,automatic?"recovery_restoring":"recovery_needed",
+    automatic?"Restoring workspace from saved checkpoint":"Recovery needs attention. The latest durable checkpoint is unavailable or automatic recovery is limited."]);
+  await tx.query(`UPDATE cloud_workspace_restore_incidents SET state=$2,reason=$3,checkpoint_id=$4,checkpoint_digest=$5,
+    content_revision=$6,record_revision=$7,checkpoint_at=$8,authority_epoch=(SELECT authority_epoch FROM cloud_workspaces WHERE id=$9),
+    automatic_started_at=CASE WHEN $2='queued' THEN now() ELSE NULL END,updated_at=now() WHERE id=$1`,
+    [incident.id,automatic?"queued":"recovery_needed",automatic?null:recent?"automatic_recovery_rate_limited":"checkpoint_unavailable",
+      point?.id??null,point?.integrity_sha256??null,point?.content_revision??null,point?.record_revision??null,point?.durable_at??null,input.workspaceId]);
+  if(point)await tx.query("UPDATE workspace_checkpoints SET retention_until=greatest(coalesce(retention_until,now()),now()+interval '7 days') WHERE id=$1",[point.id]);
+  if(automatic){
+    const drainId=randomUUID(),key=`system:recovery-drain:${incident.id}`;
+    await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256,affects_workspace)
+      VALUES($1,$2,$3,$4,'stop',$5,$6,false)`,[drainId,input.workspaceId,input.generation,input.organizationId,key,createHash("sha256").update(key).digest()]);
+    await tx.query("UPDATE cloud_workspace_restore_incidents SET drain_intent_id=$2 WHERE id=$1",[incident.id,drainId]);
+  }
+  await audit(tx,input.organizationId,null,"cloud_workspace.checkpoint_recovery_requested",{
+    workspaceId:input.workspaceId,generation:input.generation,wakeIntentId:input.wakeIntentId,checkpointId:point?.id??null,
+    reason:"provider_snapshot_missing",automatic,checkpointLossless:point?.lossless??false,
+  });
+  return true;
+}
+
 /** One short, serialized database step; provider I/O remains in the existing
  * fenced lifecycle reconciler. This job survives setup-worker restarts. */
 export async function advanceCloudAutomaticRecovery(pool: pg.Pool, config: CloudWorkspaceBackendConfig, workosEnabled: boolean): Promise<boolean> {
@@ -375,7 +425,7 @@ export async function advanceCloudAutomaticRecovery(pool: pg.Pool, config: Cloud
     const workspace=(await tx.query<{current_generation:number;desired_state:string;authority_epoch:string;current_billing_epoch:string;owner_user_id:string;deleted_at:Date|null}>(
       "SELECT current_generation,desired_state,authority_epoch,current_billing_epoch,owner_user_id,deleted_at FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE SKIP LOCKED",[scope.workspace_id,scope.org_id])).rows[0];
     if(!workspace)return false;
-    const job=(await tx.query<{id:string;source_generation:number;checkpoint_id:string;owner_user_id:string;authority_epoch:string;billing_epoch:string;state:string;transition_id:string|null;drain_intent_id:string|null;expired:boolean;eligible:boolean}>(
+    const job=(await tx.query<{id:string;source_generation:number;checkpoint_id:string;owner_user_id:string;authority_epoch:string;billing_epoch:string;state:string;evidence_code:string;transition_id:string|null;drain_intent_id:string|null;expired:boolean;eligible:boolean}>(
       `SELECT *,deadline_at<=now() AS expired,
          (account_revision=(SELECT auth_revision FROM users WHERE id=owner_user_id)
           AND organization_revision=(SELECT authorization_revision FROM organizations WHERE id=org_id)
@@ -439,7 +489,8 @@ export async function advanceCloudAutomaticRecovery(pool: pg.Pool, config: Cloud
     try{
       const result=await createCloudRecoveryTransition(tx,{workspaceId:scope.workspace_id,organizationId:scope.org_id,sourceGeneration:job.source_generation,
         checkpointId:job.checkpoint_id,actorUserId:job.owner_user_id,workosEnabled,config,idempotencyKey:`system:recovery:${job.id}`,
-        requestDigest:createHash("sha256").update(job.id).digest(),incidentId:job.id,...(job.drain_intent_id?{drainIntentId:job.drain_intent_id}:{})});
+        requestDigest:createHash("sha256").update(job.id).digest(),incidentId:job.id,
+        ...(job.evidence_code==='provider_snapshot_missing'?{allowDataLoss:true}:{}),...(job.drain_intent_id?{drainIntentId:job.drain_intent_id}:{})});
       await tx.query("UPDATE cloud_workspace_restore_incidents SET state='restoring',transition_id=$2,next_attempt_at=now()+interval '30 seconds',updated_at=now() WHERE id=$1",[job.id,result.transition.id]);
       await tx.query("RELEASE SAVEPOINT recovery_admission");
     }catch(error){
@@ -448,7 +499,7 @@ export async function advanceCloudAutomaticRecovery(pool: pg.Pool, config: Cloud
       const capacity=['cloud_replacement_headroom_exceeded','cloud_quota_not_configured','cloud_quota_exceeded'].includes(error.code);
       const funding=/^cloud_(?:compute|account_entitlement)/.test(error.code);
       const state=capacity?'waiting_for_capacity':funding?'waiting_for_funding':'recovery_needed';
-      const terminal=['cloud_runtime_revoked','cloud_workspace_v2_required'].includes(error.code);
+      const terminal=['cloud_runtime_revoked','cloud_workspace_v2_required','cloud_recovery_computer_unavailable','cloud_recovery_repository_unavailable'].includes(error.code);
       const code=capacity?'recovery_waiting_for_capacity':funding?'recovery_waiting_for_funding':terminal?error.code:'recovery_needed';
       await tx.query("UPDATE cloud_workspace_restore_incidents SET state=$2,reason=$3,next_attempt_at=now()+interval '30 seconds',updated_at=now() WHERE id=$1",[job.id,state,error.code]);
       await tx.query("UPDATE cloud_workspaces SET last_error_code=$2,last_error_message=$3,version=version+1,updated_at=now() WHERE id=$1",[scope.workspace_id,code,

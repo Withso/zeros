@@ -2,23 +2,11 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { prepareClaudeCloudWorkload } from "../adapters/claude-sdk/__tests__/helpers/legacy-execution";
+import { portableKernelProcess } from "../containment/__tests__/helpers/portable-cloud-custody";
 
-const fault = vi.hoisted(() => ({ remaining: 0, failures: 0 }));
-vi.mock("../containment/cloud-workload-cgroup.mjs", async original => {
-  const actual = await original<typeof import("../containment/cloud-workload-cgroup.mjs")>();
-  return { ...actual, nativeCloudWorkloadIO: Object.freeze({ ...actual.nativeCloudWorkloadIO,
-    process(pid: number) {
-      if (pid !== process.pid && fault.remaining !== 0) {
-        if (fault.remaining > 0) fault.remaining--;
-        fault.failures++;
-        throw new Error("Synthetic foreign proc observation is unavailable");
-      }
-      return actual.nativeCloudWorkloadIO.process(pid);
-    },
-  }) };
-});
+const fault = { remaining: 0, failures: 0 };
 
 let directory: string | undefined;
 let physical: Awaited<ReturnType<typeof prepareClaudeCloudWorkload>> | undefined;
@@ -33,7 +21,18 @@ afterEach(async () => {
 async function prepare() {
   directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "zeros-boot-census-cleanup-")));
   physical = await prepareClaudeCloudWorkload({ cwd: directory, dataRoot: directory,
-    executionId: randomUUID(), conversationId: "census-cleanup", provider: "claude" });
+    executionId: randomUUID(), conversationId: "census-cleanup", provider: "claude" }, {
+    observeProcess(pid) {
+      // The live test runner is a known foreign member of the /proc census.
+      // Inject at the portable observation seam, not an unused native reader.
+      if (pid === process.ppid && fault.remaining !== 0) {
+        if (fault.remaining > 0) fault.remaining--;
+        fault.failures++;
+        throw new Error("Synthetic foreign proc observation is unavailable");
+      }
+      return portableKernelProcess(pid);
+    },
+  });
   return physical;
 }
 

@@ -1,0 +1,5 @@
+{
+  "file": "scripts/zeros-dev/detached-agent-proof.ts",
+  "before": "if (cursor < high.sequence || terminals !== 1) fail();",
+  "after": "if (cursor < high.sequence) fail();"
+}

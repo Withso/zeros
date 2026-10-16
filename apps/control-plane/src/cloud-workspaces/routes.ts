@@ -1,4 +1,4 @@
-import { loadQuota, loadUsage, assertGenerationReplacementQuota, createCloudRecoveryTransition, requireCloudRecoveryPoint, cloudRecoveryPointLosslessSql, type QuotaRow, type UsageRow } from "./automatic-recovery.js";
+import { loadQuota, createCloudRecoveryTransition, requireCloudRecoveryPoint, cloudRecoveryPointLosslessSql } from "./automatic-recovery.js";
 import { CloudAgentPreviewTargetSchema } from "./preview-target.js";
 import { CloudAgentBootScopeSchema, CloudAgentInitialAdoptionsSchema } from "./agent-boot-contract.js";
 import { createCloudComputerRoutes } from "./computer-routes.js";
@@ -55,6 +55,7 @@ import {
   CloudWorkspaceEngineClientAdmissionError,
   type DatabaseCloudWorkspaceEngineClientAdmissionService,
 } from "./engine-client-admission.js";
+import { cloudRuntimeAdmissionResponse } from "./runtime-admission-errors.js";
 import {
   forkErrorToHttp,
   type DatabaseCloudWorkspaceForkService,
@@ -71,6 +72,7 @@ import type {
   CloudWorkspaceRepositoryResolver,
 } from "./github-repositories.js";
 import { createCloudWorkspaceManagementRoutes } from "./management-routes.js";
+import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import {DatabaseComputeUserFunding} from "./compute-funding.js";
 import {readProComputeUsage} from "./pro-allowance.js";
@@ -341,7 +343,7 @@ type WorkspaceRow = CloudRuntimePinRow & {
   last_error_code: string | null;
   last_error_message: string | null;
   diagnostic_incident: { id: string; reason: string; stopReason?: unknown } | null;
-  setup_failure: { code: string | null; hasLog: boolean } | null;
+  setup_run: { state: string; attempt: number; claimCount: number; code: string | null; hasLog: boolean } | null;
   last_observed_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -361,7 +363,9 @@ type WorkspaceRow = CloudRuntimePinRow & {
   observed_state: string;
   provider_target: string | null;
   provider_last_observed_at: Date | string | null;
-  recovery: { state: string | null; checkpointId: string | null; checkpointAt: string | null; sourceGeneration: number; needsAcknowledgement: boolean } | null;
+  history_recovery: import("./workspace-ui-contracts.js").CloudWorkspaceHistoryRecovery | null;
+  recovery: { state: string | null; checkpointId: string | null; checkpointAt: string | null; sourceGeneration: number; needsAcknowledgement: boolean;
+    restored: import("./workspace-ui-contracts.js").CloudWorkspaceCheckpointRestore | null } | null;
 };
 
 type IntentRow = {
@@ -434,6 +438,13 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
            WHERE binding.id=cw.agent_boot_id AND binding.workspace_id=cw.id AND binding.org_id=cw.org_id
              AND binding.credentials_initialized
          ) END AS agent_credentials,
+         (SELECT jsonb_build_object('recoveryId',recovery.id,'code','history_recovered_with_gap','coverage',recovery.coverage,
+           'generation',recovery.generation,'engineInstanceId',recovery.engine_instance_id,'bootId',recovery.boot_id,
+           'writerEpoch',recovery.successor_writer_epoch,'completedAt',recovery.activated_at)
+          FROM cloud_agent_history_recoveries recovery WHERE recovery.workspace_id=cw.id AND recovery.org_id=cw.org_id
+            AND recovery.activated_at IS NOT NULL AND recovery.generation<=cw.current_generation
+          ORDER BY recovery.activated_at DESC,recovery.id LIMIT 1) AS history_recovery,
+
          (SELECT left(creator.display_name,240) FROM users creator
           WHERE creator.id=cw.created_by AND creator.deleted_at IS NULL) AS created_by_display_name,
          (SELECT creator_user_id FROM cloud_computer_admin_workspaces admin
@@ -463,16 +474,26 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
                  AND transition.source_generation=cw.current_generation AND transition.operation='recover')
                THEN 'recovery_needed' ELSE NULL END),
            'checkpointId', checkpoint.id, 'checkpointAt', checkpoint.durable_at, 'sourceGeneration', cw.current_generation,
-           'needsAcknowledgement', coalesce(NOT ${cloudRecoveryPointLosslessSql("cw.current_generation")},true))
+           'needsAcknowledgement', coalesce(NOT ${cloudRecoveryPointLosslessSql("cw.current_generation")},true),
+           'restored', (SELECT json_build_object('checkpointId',restored.id,'checkpointAt',restored.durable_at,
+               'completedAt',transition.completed_at,'sourceGeneration',transition.source_generation,'generation',generation.generation)
+             FROM cloud_workspace_generation_transitions transition
+             JOIN cloud_workspace_generations generation ON generation.workspace_id=transition.workspace_id
+               AND generation.org_id=transition.org_id AND generation.generation=transition.candidate_generation
+             JOIN workspace_checkpoints restored ON restored.id=generation.recovery_checkpoint_id
+               AND restored.workspace_id=cw.id AND restored.org_id=cw.org_id AND restored.state='durable'
+             WHERE transition.workspace_id=cw.id AND transition.org_id=cw.org_id AND transition.operation='recover'
+               AND transition.state='succeeded' AND transition.candidate_generation=cw.current_generation
+             ORDER BY transition.completed_at DESC LIMIT 1))
            FROM (SELECT 1) recovery_scope LEFT JOIN workspace_content_heads head ON head.workspace_id=cw.id
            LEFT JOIN workspace_checkpoints checkpoint ON checkpoint.id=head.current_checkpoint_id AND checkpoint.state='durable') AS recovery,
          cw.repository_forge, cw.repository_owner, cw.repository_name,
          cw.repository_revision, cw.status, cw.desired_state,
          cw.current_generation, cw.version, cw.last_error_code,
-         (SELECT CASE WHEN setup.state='failed' THEN jsonb_build_object(
-           'code',setup.error_code,'hasLog',btrim(setup.log_excerpt)<>'') ELSE NULL END
+         (SELECT jsonb_build_object('state',setup.state,'attempt',setup.attempt,'claimCount',setup.claim_count,
+           'code',setup.error_code,'hasLog',btrim(setup.log_excerpt)<>'')
           FROM cloud_workspace_setup_runs setup WHERE setup.workspace_id=cw.id AND setup.org_id=cw.org_id
-            AND setup.generation=cw.current_generation ORDER BY setup.attempt DESC LIMIT 1) AS setup_failure,
+            AND setup.generation=cw.current_generation ORDER BY setup.attempt DESC LIMIT 1) AS setup_run,
          (SELECT jsonb_build_object('id',incident.id,'reason',incident.reason,'stopReason',incident.terminal_cause->>'stopReason')
           FROM cloud_workspace_diagnostic_incidents incident WHERE incident.workspace_id=cw.id AND incident.org_id=cw.org_id
             AND incident.generation=cw.current_generation AND incident.recovered_at IS NULL
@@ -499,7 +520,12 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
              AND base.base_image_id=g.runtime_base_image_id AND base.base_compatibility_id=g.runtime_base_compatibility_id
              AND build.state='succeeded' AND template.state='ready' AND template.stopped_at IS NOT NULL
              AND template.protected_contract_digest IS NOT NULL AND template.provider_resource_id ~ '^[A-Za-z0-9_-]{1,128}$'
-             AND g.image_ref='boat-template:'||template.provider_resource_id AND build.repository_manifest IS NOT NULL
+             AND (g.image_ref='boat-template:'||template.provider_resource_id OR EXISTS (
+               SELECT 1 FROM cloud_computer_template_snapshots snapshot WHERE snapshot.build_id=template.build_id
+                 AND snapshot.org_id=template.org_id AND snapshot.image_ref=g.image_ref AND snapshot.verified_at IS NOT NULL
+                 AND snapshot.source_sandbox_id=template.provider_resource_id AND snapshot.account_scope=template.account_scope
+                 AND snapshot.billing_org=template.billing_org AND snapshot.manifest_sha256=template.manifest_sha256))
+             AND build.repository_manifest IS NOT NULL
              AND coalesce((SELECT jsonb_agg(jsonb_build_object('id',repo.repository_id,'owner',repo.repository_owner,'name',repo.repository_name) ORDER BY repo.position)
                FROM cloud_computer_v2_config_repositories repo WHERE repo.config_id=source.config_id AND repo.org_id=source.org_id),'[]'::jsonb)
                =coalesce((SELECT jsonb_agg(item.value-'sha' ORDER BY item.position)
@@ -608,6 +634,7 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
     createdByDisplayName: cloudWorkspaceDisplayLabel(row.created_by_display_name),
     ownerUserId: row.owner_user_id,
     ...agentCredentialsDocument(row),
+    ...(row.history_recovery ? { historyRecovery: row.history_recovery } : {}),
     ...(row.admin_creator_user_id ? { adminWorkspace: { creatorUserId: row.admin_creator_user_id } } : {}),
     actorRole: row.actor_role,
     sharingMode: row.sharing_mode,
@@ -637,7 +664,7 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
       lastObservedAt: iso(row.provider_last_observed_at),
     },
     version: Number(row.version),
-    setupFailure: row.setup_failure ? { code: diagnosticCode(row.setup_failure.code), hasLog: row.setup_failure.hasLog } : null,
+    setupFailure: row.setup_run?.state === "failed" ? { code: diagnosticCode(row.setup_run.code), hasLog: row.setup_run.hasLog } : null,
     error:
       supported&&!row.supported_generation ? publicCloudError(CLOUD_WORKSPACE_V2_REQUIRED) : row.diagnostic_incident ? publicCloudIncident(row.diagnostic_incident) : row.last_error_code === null
         ? null
@@ -647,6 +674,13 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
     updatedAt: iso(row.updated_at),
     deletedAt: iso(row.deleted_at),
   };
+}
+
+function setupProgress(row: WorkspaceRow) {
+  const setup = row.setup_run;
+  if (!setup) return null;
+  return { generation: row.current_generation, attempt: setup.attempt, claimCount: setup.claimCount,
+    state: setup.state, errorCode: setup.code === null ? null : diagnosticCode(setup.code) };
 }
 
 function intentDocument(row: IntentRow) {
@@ -920,50 +954,15 @@ async function upsertCanonicalRepository(
   return result.rows[0]!.id;
 }
 
-function assertCreateQuota(
-  quota: QuotaRow,
-  usage: UsageRow,
-  config: Pick<
-    CloudWorkspaceProvisioningProfile,
-    "cpuMillicores" | "memoryMiB" | "storageMiB"
-  >,
-): void {
-  const exceeded =
-    Number(usage.workspaces) + 1 > quota.max_workspaces ||
-    Number(usage.running) + 1 > quota.max_running_workspaces ||
-    Number(usage.cpu_millicores) + config.cpuMillicores >
-      quota.max_cpu_millicores ||
-    Number(usage.memory_mib) + config.memoryMiB > quota.max_memory_mib ||
-    Number(usage.storage_mib) + config.storageMiB > quota.max_storage_mib;
-  if (exceeded) {
-    throw new HttpError(
-      409,
-      "cloud_quota_exceeded",
-      "Cloud workspace quota would be exceeded",
-    );
-  }
-}
-
 async function assertWakeQuota(
   tx: Tx,
   orgId: string,
   row: WorkspaceRow,
 ): Promise<void> {
+  // Cloud workspaces still require a provisioned quota record. Its numeric
+  // limits are not enforced: compute credits bound what running VMs can spend.
   if (row.desired_state === "running") return;
-  const quota = await loadQuota(tx, orgId);
-  const usage = await loadUsage(tx, orgId);
-  const exceeded =
-    Number(usage.running) + 1 > quota.max_running_workspaces ||
-    Number(usage.cpu_millicores) + row.cpu_millicores >
-      quota.max_cpu_millicores ||
-    Number(usage.memory_mib) + row.memory_mib > quota.max_memory_mib;
-  if (exceeded) {
-    throw new HttpError(
-      409,
-      "cloud_quota_exceeded",
-      "Cloud workspace running quota would be exceeded",
-    );
-  }
+  await loadQuota(tx, orgId);
 }
 
 function encodeCursor(row: WorkspaceRow): string {
@@ -1325,11 +1324,7 @@ export function createCloudWorkspaceGenerationReplacement(config: CloudWorkspace
     );
     const candidate = sourcePins.profile;
     const digest = requestDigest(normalize(candidate));
-    const quota = await loadQuota(tx, orgId), usage = await loadUsage(tx, orgId);
-    if (upgradeInput && workspace.desired_state !== "running" && Number(usage.running) + 1 > quota.max_running_workspaces) {
-      throw new HttpError(409, "cloud_quota_exceeded", "Cloud workspace running quota would be exceeded");
-    }
-    assertGenerationReplacementQuota(quota, usage, candidate);
+    await loadQuota(tx, orgId);
 
     const nextGeneration = await tx.query<{ generation: number }>(
       `SELECT coalesce(max(generation), 0)::integer + 1 AS generation
@@ -1530,6 +1525,233 @@ export function createCloudWorkspaceGenerationReplacement(config: CloudWorkspace
   };
 }
 
+async function requestCloudWorkspaceLifecycleIntent(
+  tx: Tx,
+  input: {
+    orgId: string; workspaceId: string; actorUserId: string; workspace: WorkspaceRow;
+    operation: LifecycleOperation; key: string; digest: Buffer; discardUncheckpointed: boolean;
+  },
+): Promise<{ workspace: WorkspaceRow; intent: IntentRow; replayed: boolean }> {
+  const { orgId, workspaceId, actorUserId, workspace, operation, key, digest, discardUncheckpointed } = input;
+  const finalProof = await loadCommittedFinalCheckpoint(tx, workspaceId, workspace.current_generation);
+  const drainBeforeWake = operation === "wake" && finalProof &&
+    ["queued", "observing", "dispatching", "failed", "superseded"].includes(finalProof.intent_state)
+    ? finalProof.lifecycle_intent_id : null;
+  if (drainBeforeWake) {
+    // Preserve the irrevocable drain independently of the newest desired
+    // state. The new wake cannot be claimed until provider stop is proven.
+    await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET affects_workspace=false,
+      state=CASE WHEN state IN ('failed','superseded') THEN 'queued'::cloud_workspace_intent_state ELSE state END,
+      completed_at=NULL,next_attempt_at=now(),error_code=NULL,error_message=NULL WHERE id=$1`, [drainBeforeWake]);
+    await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId, organizationId: orgId,
+      generation: workspace.current_generation, reason: "workspace_stop_requested" });
+  }
+  const alreadySatisfied =
+    (operation === "stop" && workspace.status === "stopped") ||
+    (operation === "wake" &&
+      !drainBeforeWake &&
+      workspace.desired_state === "running" &&
+      ["provisioning", "setting_up", "ready", "busy"].includes(
+        workspace.status,
+      )) ||
+    (operation === "archive" && workspace.status === "archived") ||
+    (operation === "delete" && workspace.status === "deleted");
+  const desiredState =
+    operation === "wake"
+      ? "running"
+      : operation === "stop"
+        ? "stopped"
+        : operation === "archive"
+          ? "archived"
+          : "deleted";
+  const transitionStatus =
+    operation === "wake"
+      ? "waking"
+      : operation === "stop"
+        ? "stopping"
+        : operation === "archive"
+          ? "archiving"
+          : "deleting";
+
+  await tx.query(
+    `UPDATE cloud_workspace_lifecycle_intents
+     SET state = 'superseded', completed_at = now(), updated_at = now(),
+         error_code = 'superseded_by_newer_intent',
+         error_message = 'A newer lifecycle intent replaced this request'
+     WHERE workspace_id = $1 AND affects_workspace
+       AND state IN ('queued', 'observing')`,
+    [workspaceId],
+  );
+  await tx.query(
+    `UPDATE workspace_checkpoint_requests request
+     SET state = 'cancelled', completed_at = now(),
+         error_code = 'superseded_by_newer_intent'
+     FROM cloud_workspace_lifecycle_intents intent
+     WHERE request.lifecycle_intent_id = intent.id
+       AND intent.workspace_id = $1
+       AND intent.state = 'superseded'
+       AND request.state IN ('queued', 'delivered')`,
+    [workspaceId],
+  );
+
+  const intentId = randomUUID();
+  const inserted = await tx.query<IntentRow>(
+    `INSERT INTO cloud_workspace_lifecycle_intents (
+       id, workspace_id, generation, org_id, requested_by, operation,
+       idempotency_key, request_sha256, state, completed_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7, $8,
+       $9::cloud_workspace_intent_state,
+       CASE WHEN $9 = 'succeeded' THEN now() ELSE NULL END
+     )
+     RETURNING id, workspace_id, operation, request_sha256, state,
+               attempt_count, created_at, updated_at`,
+    [
+      intentId,
+      workspaceId,
+      workspace.current_generation,
+      orgId,
+      actorUserId,
+      operation,
+      key,
+      digest,
+      alreadySatisfied ? "succeeded" : "queued",
+    ],
+  );
+  if (drainBeforeWake) await tx.query(
+    "UPDATE cloud_workspace_lifecycle_intents SET resume_after_intent_id=$2 WHERE id=$1", [intentId, drainBeforeWake]);
+  if (operation === "delete") {
+    await ensureWorkspaceDeletionJob(tx, {
+      workspaceId,
+      organizationId: orgId,
+      requestedBy: actorUserId,
+      lifecycleIntentId: intentId,
+      mode: "accepted",
+    });
+  }
+
+  const requiresFinalCheckpoint =
+    !alreadySatisfied &&
+    !finalProof &&
+    !discardUncheckpointed &&
+    operation !== "wake" &&
+    ["ready", "busy"].includes(workspace.status);
+  const checkpointRequest = requiresFinalCheckpoint
+    ? await enqueueWorkspaceCheckpointRequest(tx, {
+        workspaceId,
+        organizationId: orgId,
+        generation: workspace.current_generation,
+        requestedBy: actorUserId,
+        lifecycleIntentId: intentId,
+        reason:
+          operation === "stop"
+            ? "before_stop"
+            : operation === "archive"
+              ? "before_archive"
+              : "before_delete",
+        idempotencyKey: `lifecycle.${intentId}`,
+      })
+    : null;
+
+  let retired: RetiredCloudWorkspaceRuntimeAccess = {
+    revokedGrantCount: 0,
+    revocationPendingClientAccessCount: 0,
+    cancelledSetupRunCount: 0,
+    revokedEngineInstanceCount: 0,
+  };
+  if (operation !== "wake" && !requiresFinalCheckpoint) {
+    retired = await retireCloudWorkspaceRuntimeAccess(tx, {
+      workspaceId,
+      organizationId: orgId,
+      reason:
+        operation === "stop"
+          ? "workspace_stop_requested"
+          : operation === "archive"
+            ? "workspace_archive_requested"
+            : "workspace_delete_requested",
+    });
+  }
+
+  if (!alreadySatisfied && !requiresFinalCheckpoint) {
+    await tx.query(
+      `UPDATE cloud_workspaces
+       SET desired_state = $2, status = $3, version = version + 1,
+           authority_epoch = authority_epoch + 1,
+           updated_at = now(), last_error_code = NULL,
+           last_error_message = NULL
+       WHERE id = $1`,
+      [workspaceId, desiredState, transitionStatus],
+    );
+  }
+
+  await audit(
+    tx,
+    orgId,
+    actorUserId,
+    `cloud_workspace.${operation}_requested`,
+    {
+      workspaceId,
+      intentId,
+      alreadySatisfied,
+      ...(discardUncheckpointed ? { discardUncheckpointed: true } : {}),
+      checkpointRequestId: checkpointRequest?.id ?? null,
+      checkpointDeadlineAt:
+        checkpointRequest?.deadlineAt.toISOString() ?? null,
+      revokedGrantCount: retired.revokedGrantCount,
+      revocationPendingClientAccessCount:
+        retired.revocationPendingClientAccessCount,
+      cancelledSetupRunCount: retired.cancelledSetupRunCount,
+      revokedEngineInstanceCount: retired.revokedEngineInstanceCount,
+    },
+  );
+  return {
+    workspace: await loadWorkspaceRow(tx, orgId, workspaceId, false, actorUserId),
+    intent: inserted.rows[0]!,
+    replayed: false,
+  };
+}
+
+/** The HTTP DELETE and guarded operator share authorization, replay and the
+ * complete lifecycle transaction. Call inside a system-context transaction. */
+export async function requestCloudWorkspaceDeletion(
+  tx: Tx,
+  input: {
+    organizationId: string; workspaceId: string; actorUserId: string; idempotencyKey: string;
+    requestSha256?: Buffer; discardUncheckpointed?: boolean;
+  },
+): Promise<{ workspace: WorkspaceRow; intent: IntentRow; replayed: boolean }> {
+  const { organizationId: orgId, workspaceId, actorUserId, idempotencyKey: key } = input;
+  const discardUncheckpointed = input.discardUncheckpointed ?? false;
+  const digest = input.requestSha256 ?? requestDigest({
+    operation: "delete", organizationId: orgId, workspaceId,
+    ...(discardUncheckpointed ? { discardUncheckpointed: true } : {}),
+  });
+  await requireOrganizationMembership(tx, orgId, actorUserId);
+  await lockCloudOrganization(tx, orgId);
+  let workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, actorUserId);
+  await authorizeCloudWorkspaceCleanup(tx, { organizationId: orgId, workspaceId, actorUserId });
+  const connection = await loadGenerationCloudProviderConnection(tx, {
+    workspaceId, organizationId: orgId, generation: workspace.current_generation, requireActive: false,
+  });
+  if (!connection) throw new HttpError(409, "cloud_provider_unsupported", "This workspace uses unsupported compute authority");
+  const existing = await loadIntentByKey(tx, orgId, key);
+  if (existing) {
+    assertIdempotencyMatch(existing, workspaceId, digest, actorUserId);
+    await ensureWorkspaceDeletionJob(tx, {
+      workspaceId, organizationId: orgId, requestedBy: actorUserId, lifecycleIntentId: existing.id,
+      mode: "replayed",
+    });
+    return { workspace, intent: existing, replayed: true };
+  }
+  const restoredGeneration = await cancelCloudWorkspaceGenerationTransition(tx, {
+    workspaceId, organizationId: orgId, reason: "workspace_delete_requested",
+  });
+  if (restoredGeneration !== null) workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, actorUserId);
+  return requestCloudWorkspaceLifecycleIntent(tx, {
+    orgId, workspaceId, actorUserId, workspace, operation: "delete", key, digest, discardUncheckpointed,
+  });
+}
+
 export function createCloudWorkspaceRoutes(
   pool: pg.Pool,
   config: CloudWorkspaceBackendConfig | null,
@@ -1539,6 +1761,7 @@ export function createCloudWorkspaceRoutes(
     forkService?: DatabaseCloudWorkspaceForkService | null;
     replicaService?: DatabaseCloudWorkspaceReplicaService | null;
     engineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService | null;
+    providerResolver?: CloudWorkspaceProviderResolver | null;
     workosEnabled?: boolean;
     setupSecretKeyV1?: string | null;
   } = {},
@@ -1595,6 +1818,7 @@ export function createCloudWorkspaceRoutes(
       "/",
       createCloudWorkspaceManagementRoutes(pool, config, {
         workosEnabled: options.workosEnabled === true,
+        providerResolver: options.providerResolver ?? null,
       }),
     );
   }
@@ -1779,7 +2003,8 @@ export function createCloudWorkspaceRoutes(
       if(!scope)throw new HttpError(404,"not_found","Cloud workspace not found");
       const row=await loadWorkspace(tx,scope.org_id,workspaceId,userId);
       const live=(await tx.query<{role:string|null}>("SELECT cloud_workspace_actor_role($1,$2) AS role",[workspaceId,userId])).rows[0]!;
-      return {workspace:workspaceDocument(row,config),access:{role:live.role??"owner",computeEligible:live.role!==null},path:`/workspace/${workspaceId}`};
+      return {workspace:workspaceDocument(row,config),access:{role:live.role??"owner",computeEligible:live.role!==null},path:`/workspace/${workspaceId}`,
+        ...(c.req.query("setupProgress")==="true"?{setupProgress:setupProgress(row)}:{})};
     });
     return c.json(result);
   });
@@ -1792,7 +2017,8 @@ export function createCloudWorkspaceRoutes(
     const row = await withSystemTx(pool, (tx) =>
       loadWorkspace(tx, orgId, workspaceId, user.id),
     );
-    return c.json({ workspace: workspaceDocument(row,config) });
+    return c.json({ workspace: workspaceDocument(row,config),
+      ...(c.req.query("setupProgress")==="true"?{setupProgress:setupProgress(row)}:{}) });
   });
 
   app.get(`${base}/:workspace/detected-ports`, async (c) => {
@@ -1823,15 +2049,15 @@ export function createCloudWorkspaceRoutes(
   app.post(`${base}/:workspace/runtime/admission`, async (c) => {
     c.header("Cache-Control", "no-store");
     c.header("Pragma", "no-cache");
-    if (!engineClientAdmissionService) {
-      throw new HttpError(
-        503,
-        "cloud_workspace_runtime_not_configured",
-        "Cloud workspace runtime admission is not configured",
-      );
-    }
-    const body = parse(EngineClientAdmissionSchema, await c.req.json().catch(() => ({})));
     try {
+      if (!engineClientAdmissionService) {
+        throw new HttpError(
+          503,
+          "cloud_workspace_runtime_not_configured",
+          "Cloud workspace runtime admission is not configured",
+        );
+      }
+      const body = parse(EngineClientAdmissionSchema, await c.req.json().catch(() => ({})));
       const input={
           organizationId: uuidParam(c.req.param("organization")),
           workspaceId: uuidParam(c.req.param("workspace")),
@@ -1844,14 +2070,16 @@ export function createCloudWorkspaceRoutes(
         :await engineClientAdmissionService.issue(input);
       return c.json(admission,201);
     } catch (error) {
-      if (!(error instanceof CloudWorkspaceEngineClientAdmissionError)) {
-        throw error;
-      }
-      throw new HttpError(
+      const failure = error instanceof CloudWorkspaceEngineClientAdmissionError ? new HttpError(
         error.code === "engine_client_admission_invalid" ? 422 : 409,
         error.code,
         error.message,
-      );
+      ) : error;
+      const response = cloudRuntimeAdmissionResponse(failure);
+      if (response.retryAfterSeconds !== undefined) c.header("Retry-After", String(response.retryAfterSeconds));
+      if (response.diagnostic.code === "internal") console.error("[cloud-runtime] admission failed", response.diagnostic);
+      else console.warn("[cloud-runtime] admission failed", response.diagnostic);
+      return c.json({ error: response.error }, response.status);
     }
   });
 
@@ -2716,14 +2944,13 @@ export function createCloudWorkspaceRoutes(
         );
       }
 
-      const quota = await loadQuota(tx, orgId);
+      await loadQuota(tx, orgId);
       if (!resolvedRepository.resolvedRevision || !FullCommitPattern.test(resolvedRepository.resolvedRevision) ||
         !resolvedRepository.checkoutSource || resolvedRepository.checkoutSource.revision !== resolvedRepository.resolvedRevision ||
         (FullCommitPattern.test(body.repository.revision) && resolvedRepository.resolvedRevision !== body.repository.revision))
         throw new HttpError(409, "cloud_computer_repository_unavailable", "The requested repository revision could not be verified.");
       const normalized = normalize(profile);
       const digest = requestDigest(normalized);
-      assertCreateQuota(quota, await loadUsage(tx, orgId), profile);
 
       const repositoryId = await upsertCanonicalRepository(tx, {
         organizationId: orgId,
@@ -3134,6 +3361,10 @@ export function createCloudWorkspaceRoutes(
     });
 
     const result = await withSystemTx(pool, async (tx) => {
+      if (operation === "delete") return requestCloudWorkspaceDeletion(tx, {
+        organizationId: orgId, workspaceId, actorUserId: user.id, idempotencyKey: key,
+        requestSha256: digest, discardUncheckpointed,
+      });
       // A workspace guest has exact run authority, not tenant membership or
       // cleanup authority. Keep withdrawal/management on their existing path.
       if (operation !== "wake") await requireOrganizationMembership(tx, orgId, user.id);
@@ -3155,14 +3386,6 @@ export function createCloudWorkspaceRoutes(
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
         assertIdempotencyMatch(existing, workspaceId, digest,user.id);
-        if (operation === "delete") {
-          await ensureWorkspaceDeletionJob(tx, {
-            workspaceId,
-            organizationId: orgId,
-            requestedBy: user.id,
-            lifecycleIntentId: existing.id,
-          });
-        }
         return { workspace, intent: existing, replayed: true };
       }
       if (operation === "wake" && !config) {
@@ -3287,181 +3510,9 @@ export function createCloudWorkspaceRoutes(
         }
       }
 
-      const finalProof = await loadCommittedFinalCheckpoint(tx, workspaceId, workspace.current_generation);
-      const drainBeforeWake = operation === "wake" && finalProof &&
-        ["queued", "observing", "dispatching", "failed", "superseded"].includes(finalProof.intent_state)
-        ? finalProof.lifecycle_intent_id : null;
-      if (drainBeforeWake) {
-        // Preserve the irrevocable drain independently of the newest desired
-        // state. The new wake cannot be claimed until provider stop is proven.
-        await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET affects_workspace=false,
-          state=CASE WHEN state IN ('failed','superseded') THEN 'queued'::cloud_workspace_intent_state ELSE state END,
-          completed_at=NULL,next_attempt_at=now(),error_code=NULL,error_message=NULL WHERE id=$1`, [drainBeforeWake]);
-        await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId, organizationId: orgId,
-          generation: workspace.current_generation, reason: "workspace_stop_requested" });
-      }
-      const alreadySatisfied =
-        (operation === "stop" && workspace.status === "stopped") ||
-        (operation === "wake" &&
-          !drainBeforeWake &&
-          workspace.desired_state === "running" &&
-          ["provisioning", "setting_up", "ready", "busy"].includes(
-            workspace.status,
-          )) ||
-        (operation === "archive" && workspace.status === "archived") ||
-        (operation === "delete" && workspace.status === "deleted");
-      const desiredState =
-        operation === "wake"
-          ? "running"
-          : operation === "stop"
-            ? "stopped"
-            : operation === "archive"
-              ? "archived"
-              : "deleted";
-      const transitionStatus =
-        operation === "wake"
-          ? "waking"
-          : operation === "stop"
-            ? "stopping"
-            : operation === "archive"
-              ? "archiving"
-              : "deleting";
-
-      await tx.query(
-        `UPDATE cloud_workspace_lifecycle_intents
-         SET state = 'superseded', completed_at = now(), updated_at = now(),
-             error_code = 'superseded_by_newer_intent',
-             error_message = 'A newer lifecycle intent replaced this request'
-         WHERE workspace_id = $1 AND affects_workspace
-           AND state IN ('queued', 'observing')`,
-        [workspaceId],
-      );
-      await tx.query(
-        `UPDATE workspace_checkpoint_requests request
-         SET state = 'cancelled', completed_at = now(),
-             error_code = 'superseded_by_newer_intent'
-         FROM cloud_workspace_lifecycle_intents intent
-         WHERE request.lifecycle_intent_id = intent.id
-           AND intent.workspace_id = $1
-           AND intent.state = 'superseded'
-           AND request.state IN ('queued', 'delivered')`,
-        [workspaceId],
-      );
-
-      const intentId = randomUUID();
-      const inserted = await tx.query<IntentRow>(
-        `INSERT INTO cloud_workspace_lifecycle_intents (
-           id, workspace_id, generation, org_id, requested_by, operation,
-           idempotency_key, request_sha256, state, completed_at
-         ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8,
-           $9::cloud_workspace_intent_state,
-           CASE WHEN $9 = 'succeeded' THEN now() ELSE NULL END
-         )
-         RETURNING id, workspace_id, operation, request_sha256, state,
-                   attempt_count, created_at, updated_at`,
-        [
-          intentId,
-          workspaceId,
-          workspace.current_generation,
-          orgId,
-          user.id,
-          operation,
-          key,
-          digest,
-          alreadySatisfied ? "succeeded" : "queued",
-        ],
-      );
-      if (drainBeforeWake) await tx.query(
-        "UPDATE cloud_workspace_lifecycle_intents SET resume_after_intent_id=$2 WHERE id=$1", [intentId, drainBeforeWake]);
-      if (operation === "delete") {
-        await ensureWorkspaceDeletionJob(tx, {
-          workspaceId,
-          organizationId: orgId,
-          requestedBy: user.id,
-          lifecycleIntentId: intentId,
-        });
-      }
-
-      const requiresFinalCheckpoint =
-        !alreadySatisfied &&
-        !finalProof &&
-        !discardUncheckpointed &&
-        operation !== "wake" &&
-        ["ready", "busy"].includes(workspace.status);
-      const checkpointRequest = requiresFinalCheckpoint
-        ? await enqueueWorkspaceCheckpointRequest(tx, {
-            workspaceId,
-            organizationId: orgId,
-            generation: workspace.current_generation,
-            requestedBy: user.id,
-            lifecycleIntentId: intentId,
-            reason:
-              operation === "stop"
-                ? "before_stop"
-                : operation === "archive"
-                  ? "before_archive"
-                  : "before_delete",
-            idempotencyKey: `lifecycle.${intentId}`,
-          })
-        : null;
-
-      let retired: RetiredCloudWorkspaceRuntimeAccess = {
-        revokedGrantCount: 0,
-        revocationPendingClientAccessCount: 0,
-        cancelledSetupRunCount: 0,
-        revokedEngineInstanceCount: 0,
-      };
-      if (operation !== "wake" && !requiresFinalCheckpoint) {
-        retired = await retireCloudWorkspaceRuntimeAccess(tx, {
-          workspaceId,
-          organizationId: orgId,
-          reason:
-            operation === "stop"
-              ? "workspace_stop_requested"
-              : operation === "archive"
-                ? "workspace_archive_requested"
-                : "workspace_delete_requested",
-        });
-      }
-
-      if (!alreadySatisfied && !requiresFinalCheckpoint) {
-        await tx.query(
-          `UPDATE cloud_workspaces
-           SET desired_state = $2, status = $3, version = version + 1,
-               authority_epoch = authority_epoch + 1,
-               updated_at = now(), last_error_code = NULL,
-               last_error_message = NULL
-           WHERE id = $1`,
-          [workspaceId, desiredState, transitionStatus],
-        );
-      }
-
-      await audit(
-        tx,
-        orgId,
-        user.id,
-        `cloud_workspace.${operation}_requested`,
-        {
-          workspaceId,
-          intentId,
-          alreadySatisfied,
-          ...(discardUncheckpointed ? { discardUncheckpointed: true } : {}),
-          checkpointRequestId: checkpointRequest?.id ?? null,
-          checkpointDeadlineAt:
-            checkpointRequest?.deadlineAt.toISOString() ?? null,
-          revokedGrantCount: retired.revokedGrantCount,
-          revocationPendingClientAccessCount:
-            retired.revocationPendingClientAccessCount,
-          cancelledSetupRunCount: retired.cancelledSetupRunCount,
-          revokedEngineInstanceCount: retired.revokedEngineInstanceCount,
-        },
-      );
-      return {
-        workspace: await loadWorkspaceRow(tx, orgId, workspaceId, false, user.id),
-        intent: inserted.rows[0]!,
-        replayed: false,
-      };
+      return requestCloudWorkspaceLifecycleIntent(tx, {
+        orgId, workspaceId, actorUserId: user.id, workspace, operation, key, digest, discardUncheckpointed,
+      });
     });
 
     if (result.replayed) c.header("Idempotency-Replayed", "true");

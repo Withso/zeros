@@ -12,6 +12,7 @@ import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
 import { envForChat } from "./model-catalog";
 import type { ComposerAttachment } from "./composer-attachments";
 import { lastUserPrompt } from "./auth-prompt-recovery";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
 // Shared across retained surfaces/remounts; entries live only during a retry.
 const pending = new Set<string>();
@@ -125,7 +126,8 @@ export async function retryAgentTurn(
         (!request.newChat || !slot || !lastUserPrompt(slot.messages))
       );
     };
-    const preparation = deps.sessions.prepareForSend(destination.id);
+    const wakeIntent = isCloudWorkspace(destination.folder) ? { id: crypto.randomUUID() } : undefined;
+    const preparation = deps.sessions.prepareForSend(destination.id, ...(wakeIntent ? [wakeIntent] : []));
     if (preparation) await preparation;
     if (!ownsDestination() || !ownsSource()) return;
     const attachments: ComposerAttachment[] = [
@@ -210,7 +212,7 @@ export async function retryAgentTurn(
       continuing && !original.startsWith(continuation)
         ? `${continuation}${original}`
         : original;
-    await deps.sessions.sendPrompt(
+    const sendArgs: Parameters<SessionsActions["sendPrompt"]> = [
       destination.id,
       text,
       continuing ? "Continue" : prompt.text,
@@ -218,7 +220,9 @@ export async function retryAgentTurn(
       encoded.bubbleAttachments.length ? encoded.bubbleAttachments : undefined,
       continuing ? undefined : segments,
       prompt.autoAction,
-    );
+    ];
+    if (wakeIntent) sendArgs[9] = wakeIntent;
+    await deps.sessions.sendPrompt(...sendArgs);
   } finally {
     pending.delete(chatId);
   }

@@ -1,4 +1,5 @@
 import {resolveCloudRuntimeChild} from "../agents/containment/cloud-runtime-root.mjs";
+import {cloudRuntimeAssetEnvironment} from "../agents/containment/cloud-runtime-assets.mjs";
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
@@ -7,7 +8,15 @@ import { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const require = createRequire(import.meta.url);
+// This helper also runs inside the CommonJS engine bundle, where import.meta
+// is empty. Resolve its native modules only when a session needs them, from
+// this file's URL or else from the bundle that contains it.
+let moduleRequire;
+function requireModule(id) {
+  // eslint-disable-next-line no-undef -- CommonJS bundles define __filename; ESM has import.meta.url.
+  moduleRequire ??= createRequire(import.meta.url ?? (typeof __filename === 'string' ? __filename : undefined));
+  return moduleRequire(id);
+}
 const MAX_SESSIONS = 4;
 const MAX_COMMAND_BYTES = 64 * 1024;
 const MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
@@ -24,7 +33,7 @@ export function assertCloudSshEngineIdentity(identity) {
  * The parent owns the short Zeros access lease and closes stdin on revocation.
  * No provider credential or control-plane capability enters this process. */
 export function createCloudSshSession(stream, options) {
-  const { Server, utils } = require('ssh2');
+  const { Server, utils } = requireModule('ssh2');
   const keys = utils.generateKeyPairSync('ed25519');
   const parsed = utils.parseKey(keys.public);
   const fingerprint = createHash('sha256').update(parsed.getPublicSSH()).digest('base64').replace(/=+$/, '');
@@ -121,7 +130,7 @@ export function createCloudSshSession(stream, options) {
           };
           try {
             if (dimensions) {
-              const pty = options.spawnPty ?? require('node-pty').spawn;
+              const pty = options.spawnPty ?? requireModule('node-pty').spawn;
               terminal = await pty('/bin/bash', command === null ? ['-l'] : ['-lc', command], {
                 cwd: options.cwd, env: { ...options.env, TERM: dimensions.name }, ...dimensions,
               });
@@ -184,11 +193,12 @@ if (process.argv[1] && path.basename(process.argv[1]) === 'cloud-ssh-session.mjs
     assertCloudSshEngineIdentity({platform: process.platform, uid: process.geteuid(), gid: process.getegid()});
     const cwd = '/srv/zeros/workspace';
     if (realpathSync(cwd) !== cwd) throw new Error('SSH workspace is unavailable');
+    const runtime = resolveCloudRuntimeChild();
     const stream = Duplex.from({ readable: process.stdin, writable: process.stdout });
     const session = createCloudSshSession(stream, {
       cwd,
       sftpServer: '/usr/lib/openssh/sftp-server',
-      env: { HOME: '/srv/zeros/home/agent', PATH: `${resolveCloudRuntimeChild().binRoot}:/usr/local/bin:/usr/bin:/bin`,
+      env: { ...cloudRuntimeAssetEnvironment(runtime), HOME: '/srv/zeros/home/agent', PATH: `${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,
         LANG: 'C.UTF-8', USER: 'zeros-engine', LOGNAME: 'zeros-engine', SHELL: '/bin/bash' },
     });
     process.stdout.write(JSON.stringify({ version: 1, kind: 'ssh', publicKey: session.publicKey, hostKeySha256: session.hostKeySha256 }) + '\n', () => session.start());

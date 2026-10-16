@@ -3,6 +3,7 @@ const mocks = vi.hoisted(() => ({ enabled: true, epoch: 1, doc: { status: "ready
 vi.mock("../../../features/team/cloud-workspace-account-access", () => ({ hasCloudWorkspaceAccountAccess: () => mocks.enabled }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({
   cloudCatalogGeneration: () => mocks.epoch, cloudWorkspaceDocument: () => mocks.doc, cloudWorkspaceStopVersion: () => 0,
+  cloudWorkspaceOwnerGeneration: () => 1,
   refreshCloudWorkspace: mocks.refresh, acceptCloudEngineWorkspace: vi.fn(),
   manageCloudWorkspace: mocks.wake,
   canReadCloudWorkspace: (doc: { status: string }) => !["deleted", "deleting"].includes(doc.status),
@@ -31,6 +32,21 @@ beforeEach(() => {
 });
 afterEach(() => { mocks.listeners.clear(); });
 describe("cloud runtime admission fencing", () => {
+  it("submits one wake per send intent while revalidating every settled preparation's live root", async () => {
+    mocks.doc = { ...mocks.doc, status: "stopped" };
+    const wakeIntent = { id: crypto.randomUUID() };
+    const peer = await openCloudRuntime(target, { wake: true, wakeIntent });
+    try {
+      for (let attempt = 0; attempt < 7; attempt++)
+        expect(await peer.prepareForRun!(new AbortController().signal, undefined, wakeIntent)).toBe(true);
+      expect(mocks.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", false, undefined, wakeIntent.id);
+      expect(mocks.list).toHaveBeenCalledTimes(8);
+      mocks.list.mockResolvedValue([{ id: "local-main", path: "/workspace/foreign" }]);
+      await expect(peer.prepareForRun!(new AbortController().signal, undefined, wakeIntent)).rejects.toThrow(/root changed/);
+      expect(mocks.wake).toHaveBeenCalledOnce();
+    } finally { peer.release(); }
+  });
+
   it("waits for readiness before requesting its root or installing startup couriers", async () => {
     const readiness = deferred<void>(); mocks.ready.mockReturnValue(readiness.promise);
     const opening = openCloudRuntime(target);
@@ -64,42 +80,52 @@ describe("cloud runtime admission fencing", () => {
     peer.release();
     expect(mocks.publish).toHaveBeenLastCalledWith(replacement, false);
   });
-  it("marks interaction wakes on the existing lifecycle path for both new and connected admissions", async () => {
+  it("marks a genuine interaction wake but does not wake a ready connected runtime", async () => {
     const passive = await openCloudRuntime(target, { reason: "interaction" });
     expect(mocks.wake).not.toHaveBeenCalled(); passive.release();
+    mocks.doc = { ...mocks.doc, status: "stopped" };
     const peer = await openCloudRuntime(target, { wake: true, reason: "interaction" });
     expect(mocks.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", false, "interaction");
     mocks.wake.mockClear();
     await peer.prepareForRun!(new AbortController().signal, "interaction");
-    expect(mocks.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", false, "interaction");
+    expect(mocks.wake).not.toHaveBeenCalled();
     peer.release();
   });
-  it("serializes an explicit ready open with idle capture before acquiring admission", async () => {
+  it("waits for an observed final drain before waking and acquiring admission", async () => {
+    mocks.doc = { ...mocks.doc, status: "stopping" };
     const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
     const opening = openCloudRuntime(target, { wake: true });
+    await vi.waitFor(() => expect(mocks.listeners.size).toBe(1));
+    expect(mocks.wake).not.toHaveBeenCalled();
+    mocks.doc = { ...mocks.doc, status: "stopped" };
+    for (const listener of mocks.listeners) listener();
     await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
     expect(mocks.admission).not.toHaveBeenCalled();
+    mocks.doc = { ...mocks.doc, status: "ready" };
     capture.resolve(mocks.doc);
     const peer = await opening;
     expect(mocks.admission).toHaveBeenCalledOnce(); peer.release();
   });
-  it("revalidates a connected runtime after cancelling ready-state capture", async () => {
+  it("revalidates each ready preparation without a lifecycle mutation", async () => {
     const peer = await openCloudRuntime(target);
     mocks.list.mockClear();
-    const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
-    const preparing = peer.prepareForRun!(new AbortController().signal);
-    await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
-    expect(mocks.list).not.toHaveBeenCalled();
-    capture.resolve(mocks.doc);
-    expect(await preparing).toBe(true);
-    expect(mocks.list).toHaveBeenCalledOnce();
+    for (let navigation = 0; navigation < 3; navigation++)
+      expect(await peer.prepareForRun!(new AbortController().signal, undefined, { id: crypto.randomUUID() })).toBe(true);
+    expect(mocks.wake).not.toHaveBeenCalled();
+    expect(mocks.list).toHaveBeenCalledTimes(3);
     expect(mocks.admission).toHaveBeenCalledOnce(); peer.release();
   });
   it("requires replacement admission when committed capture retires a connected runtime", async () => {
     const peer = await openCloudRuntime(target);
     mocks.list.mockClear();
+    mocks.doc = { ...mocks.doc, status: "stopping" };
+    for (const listener of mocks.listeners) listener();
     const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
     const preparing = peer.prepareForRun!(new AbortController().signal);
+    await vi.waitFor(() => expect(mocks.listeners.size).toBe(1));
+    expect(mocks.wake).not.toHaveBeenCalled();
+    mocks.doc = { ...mocks.doc, status: "stopped" };
+    for (const listener of mocks.listeners) listener();
     await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
     mocks.doc = { ...mocks.doc, status: "waking" };
     for (const listener of mocks.listeners) listener();
@@ -141,9 +167,9 @@ describe("cloud runtime admission fencing", () => {
   });
   it("admits the replacement generation after wake and retires a reused older connection calmly", async () => {
     const peer = await openCloudRuntime(target);
-    const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
+    const capture = deferred<typeof mocks.doc>(); mocks.refresh.mockReturnValueOnce(capture.promise);
     const preparing = peer.prepareForRun!(new AbortController().signal);
-    await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(2));
     mocks.doc = { ...mocks.doc, generation: { number: 2 } };
     for (const listener of mocks.listeners) listener();
     capture.resolve(mocks.doc);
@@ -157,6 +183,19 @@ describe("cloud runtime admission fencing", () => {
     mocks.doc = { ...mocks.doc, status: "stopped" };
     await expect(opening).rejects.toThrow(/availability|changed/i);
     expect(mocks.admission).not.toHaveBeenCalled();
+  });
+  it("retires a late ready admission when final capture publishes stopping", async () => {
+    const admission = deferred<typeof descriptor>(); mocks.admission.mockReturnValue(admission.promise);
+    const opening = openCloudRuntime(target, { wake: true, wakeIntent: { id: crypto.randomUUID() } });
+    const refused = expect(opening).rejects.toThrow(/availability|changed/i);
+    await vi.waitFor(() => expect(mocks.admission).toHaveBeenCalledOnce());
+    expect(mocks.wake).not.toHaveBeenCalled();
+    mocks.doc = { ...mocks.doc, status: "stopping" };
+    admission.resolve(descriptor); await refused;
+    expect(mocks.close).toHaveBeenCalledExactlyOnceWith(descriptor.runtimeId);
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.list).not.toHaveBeenCalled();
+    expect(mocks.wake).not.toHaveBeenCalled();
   });
   it("disposes a connecting peer on cancellation before its connection promise settles", async () => {
     const connecting = deferred<void>(); mocks.connect.mockReturnValue(connecting.promise);

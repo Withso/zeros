@@ -16,6 +16,7 @@ import {
   bridgeDesignListDirectories,
   bridgeDesignSave,
   bridgeDesignSnapshot,
+  bridgeDesignStyleBuildPresence,
   bridgeAdoptDesignDirectory,
   bridgePreviewExistingDesignDirectory,
   type DesignWorkspaceSnapshotWire,
@@ -472,6 +473,16 @@ describe("cloud Design checkout round trips", () => {
     await expect(workspaceOp(prompter, "design.asset.upload", input)).rejects.toThrow(/actor/);
     await expect(new WorkspaceService(root).handle("design.asset.upload", { ...input, workspaceId: "local-main" }))
       .rejects.toThrow(/cloud/);
+  });
+
+  it("lets developers keep the person's style builds live and refuses prompters", async () => {
+    const developer = client("device-d", "developer").bridge;
+    await initialize(client("device-a").bridge);
+    // No builds are set up, so presence starts nothing; the route and role are what matter.
+    await expect(bridgeDesignStyleBuildPresence(developer, key, true)).resolves.toBeUndefined();
+    await expect(bridgeDesignStyleBuildPresence(developer, key, false)).resolves.toBeUndefined();
+    const prompter = client("device-c", "prompter").bridge;
+    await expect(bridgeDesignStyleBuildPresence(prompter, key, true)).rejects.toThrow(/actor/);
   });
 
   it("does not replay an edit after its acknowledgement is lost", async () => {

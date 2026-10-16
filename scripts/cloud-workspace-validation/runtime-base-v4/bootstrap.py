@@ -1,10 +1,13 @@
-#!/usr/bin/python3
-"""Base-owned v4 bootstrap. Python stdlib only; invoke with python3 -I.
+#!/usr/bin/python3 -IB
+"""Base-owned v4 bootstrap. Python stdlib only; invoke with python3 -I -B.
 
 No input, environment variable, archive member or runtime can select a command,
 installation root, base policy, or cgroup. The injectable root/host/clock are for
 rootless unit tests; the CLI always uses the physical host and root ownership.
 """
+import sys
+sys.dont_write_bytecode = True
+
 import base64
 from collections import deque
 import contextlib
@@ -25,7 +28,6 @@ import shutil
 import signal
 import stat
 import subprocess
-import sys
 import tarfile
 import time
 import urllib.parse
@@ -69,6 +71,11 @@ HOST_LIMITS = (("cpu.max", "100000 100000"), ("memory.max", str(512 * 1024**2)),
 ENTRYPOINTS = {"node": "bin/node", "setup": "lib/zeros/setup-cloud-workspace.mjs",
                "startEngine": "bin/start-engine.sh", "supervisor": "lib/zeros/cloud-worker-supervisor.mjs",
                "selfTest": "lib/zeros/runtime-self-test.mjs"}
+SYSTEM_ASSET_FILES = {"bin/git-lfs": "0555", "worker/gitconfig": "0444", "worker/design-fonts/fonts.conf": "0444",
+                      "worker/runtime-system-assets.json": "0444"}
+FONT_PACKAGES = frozenset(("fonts-noto-color-emoji", "fonts-unifont", "xfonts-cyrillic", "xfonts-scalable",
+                          "fonts-ipafont-gothic", "fonts-wqy-zenhei", "fonts-tlwg-loma-otf", "fonts-freefont-ttf"))
+SYSTEM_ASSET_PACKAGES = FONT_PACKAGES | {"git-lfs"}
 STAGES = ("validate_input", "lock", "check_space", "check_cache", "download", "verify_archive",
           "verify_manifest", "extract", "verify_tree", "publish_receipt", "switch_pointer",
           "start_host", "run_setup", "done")
@@ -765,7 +772,120 @@ class Bootstrap:
             seen.add(target)
             text_match(entry["sha256"], HEX, "base_compatibility")
             require(sha(self.read(target, 2 * 1024 * 1024, mode_number(entry["mode"]))) == entry["sha256"], "base_compatibility")
+        require({"/opt/zeros-bootstrap/stock-prerequisites.py", "/opt/zeros-bootstrap/stock-prerequisites.json"} <= seen,
+                "base_compatibility")
+        stock = strict_json(self.read("/opt/zeros-bootstrap/stock-prerequisites.json", 128 * 1024, 0o444), "base_compatibility")
+        shape(stock, ("schema", "packages", "binaries", "libraries", "apparmorCacheMode", "optionalSystemd"), check="base_compatibility")
+        require(stock["schema"] == "zeros.stock-prerequisites/v1" and stock["apparmorCacheMode"] == "skip-read-write", "base_compatibility")
+        self.optional_systemd_policy = stock["optionalSystemd"]
+        self.optional_systemd_absence(self.optional_systemd_policy)
         self.compat, self.compat_id = value, "bc1-" + sha(raw)
+
+    def qualify_optional_systemd(self, provider):
+        return {"schema": "zeros.optional-systemd-absence/v1", "provider": provider,
+                "snapshot": self.optional_systemd_snapshot(provider)}
+
+    def optional_systemd_absence(self, policy):
+        shape(policy, ("schema", "provider", "snapshot"), check="base_compatibility")
+        require(policy["schema"] == "zeros.optional-systemd-absence/v1", "base_compatibility")
+        observed = self.optional_systemd_snapshot(policy["provider"])
+        require(observed == policy["snapshot"], "base_compatibility")
+        return observed
+
+    def optional_systemd_snapshot(self, provider):
+        """Only an absent override may have qualified provider-owned parents.
+
+        Descriptors pin each component until the final identity/absence pass.
+        Inodes and mount IDs are checked within a pass, never sealed across a
+        restore. All actual protected files still use directory()/read().
+        """
+        shape(provider, ("uid", "gid"), check="base_compatibility")
+        for key, root_id in (("uid", self.uid), ("gid", self.gid)):
+            integer(provider[key], 1, 2**31 - 1, "base_compatibility")
+            require(provider[key] not in {root_id, 10001, 10002, 10003, 10004}, "base_compatibility")
+        surface = "/usr/local/lib/systemd/system"
+        result = {"ancestors": {}, "directories": {}, "absent": None, "protectedAbsent": True}
+        watches, missing = [], None
+        attributes = {"system.posix_acl_access", "system.posix_acl_default", "security.capability"}
+
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_mtime_ns, info.st_ctime_ns)
+
+        def metadata(fd, provider_owned):
+            info = os.fstat(fd)
+            allowed = {(self.uid, self.gid)} | ({(provider["uid"], provider["gid"])} if provider_owned else set())
+            require(stat.S_ISDIR(info.st_mode) and (info.st_uid, info.st_gid) in allowed and not info.st_mode & 0o7022,
+                    "base_compatibility")
+            acl = sorted(attributes & set(os.listxattr(fd)))
+            require(not acl, "base_compatibility")
+            return info, {"uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode), "acl": acl}
+
+        try:
+            with contextlib.ExitStack() as stack:
+                root = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                stack.callback(os.close, root)
+                root_mount = self.mounts.mount_id(root)
+
+                def opened(parent, name, path, provider_owned):
+                    before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    require(stat.S_ISDIR(before.st_mode) and len(watches) < 256, "base_compatibility")
+                    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                    stack.callback(os.close, fd)
+                    info, record = metadata(fd, provider_owned)
+                    require(identity(before) == identity(info) and self.mounts.mount_id(fd) == root_mount, "base_compatibility")
+                    watches.append((parent, name, fd, identity(info), provider_owned, record))
+                    return fd, record
+
+                info, record = metadata(root, False)
+                watches.append((None, self.root, root, identity(info), False, record))
+                result["ancestors"]["/"] = record
+                parent, path = root, ""
+                for index, name in enumerate(surface.strip("/").split("/")):
+                    path += "/" + name
+                    try:
+                        child, record = opened(parent, name, path, index >= 1)
+                    except FileNotFoundError:
+                        require(index >= 3, "base_compatibility")
+                        result["absent"], missing = path, (parent, name)
+                        break
+                    result["ancestors"][path] = record
+                    parent = child
+                else:
+                    pending, count = [(parent, surface, 0)], 0
+                    while pending:
+                        directory, path, depth = pending.pop()
+                        names = sorted(os.listdir(directory))
+                        count += len(names)
+                        require(count <= 4096 and depth <= 16, "base_compatibility")
+                        for name in names:
+                            require(not name.startswith("zeros-") and name != "service.d", "base_compatibility")
+                            entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                            require(not stat.S_ISLNK(entry.st_mode), "base_compatibility")
+                            if stat.S_ISDIR(entry.st_mode):
+                                child_path = path + "/" + name
+                                child, record = opened(directory, name, child_path, True)
+                                result["directories"][child_path] = record
+                                pending.append((child, child_path, depth + 1))
+                            else:
+                                require(stat.S_ISREG(entry.st_mode), "base_compatibility")
+                # Re-resolve every pinned component without following links.
+                # Also catches same-filesystem bind mounts and same-mode swaps.
+                for parent, name, fd, before, provider_owned, record in reversed(watches):
+                    info, current = metadata(fd, provider_owned)
+                    require(identity(info) == before and current == record and self.mounts.mount_id(fd) == root_mount and
+                            identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == before, "base_compatibility")
+                    reopened = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                    try:
+                        require(identity(os.fstat(reopened)) == before and self.mounts.mount_id(reopened) == root_mount,
+                                "base_compatibility")
+                    finally: os.close(reopened)
+                if missing:
+                    try: os.stat(missing[1], dir_fd=missing[0], follow_symlinks=False)
+                    except FileNotFoundError: pass
+                    else: raise Failure("base_compatibility")
+        except OSError:
+            raise Failure("base_compatibility") from None
+        return result
 
     def layout(self):
         for absolute, mode in (("/opt/zeros", 0o755), (INFRA, 0o755), (INFRA + "/.staging", 0o700),
@@ -822,6 +942,45 @@ class Bootstrap:
             self.atomic("/etc/machine-id", raw, 0o444)
         require(re.fullmatch(rb"[0-9a-f]{32}\n?", raw) is not None and raw.strip() != b"0" * 32, "base_compatibility")
         return sha(raw)
+
+    def require_empty_directory(self, directory):
+        """Sanitized snapshot entries may remain, but none may carry data.
+
+        Keep aliases, hard links, special files and nested mounts invalid.
+        This policy is for private/projection trees, never runtime admission.
+        """
+        mount_id = self.mounts.mount_id(directory)
+        count = 0
+
+        def identity(info):
+            return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink, info.st_size
+
+        def visit(parent, depth=0):
+            nonlocal count
+            require(depth <= 128, "base_compatibility")
+            names = sorted(os.listdir(parent))
+            for name in names:
+                count += 1
+                require(count <= 262_144, "base_compatibility")
+                before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                is_directory = stat.S_ISDIR(before.st_mode)
+                require(is_directory or stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size == 0,
+                        "base_compatibility")
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC |
+                             (os.O_DIRECTORY if is_directory else 0), dir_fd=parent)
+                try:
+                    require(identity(os.fstat(fd)) == identity(before) and self.mounts.mount_id(fd) == mount_id, "base_compatibility")
+                    if is_directory: visit(fd, depth + 1)
+                    require(identity(os.fstat(fd)) == identity(before) and
+                            identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity(before), "base_compatibility")
+                finally:
+                    os.close(fd)
+            require(sorted(os.listdir(parent)) == names, "base_compatibility")
+
+        try:
+            visit(directory)
+        except OSError as error:
+            raise Failure("base_compatibility") from error
 
     def clear_persistence_residue(self, target, root_fd):
         """Delete only uncovered capture residue; the backing tree is authority."""
@@ -956,12 +1115,12 @@ class Bootstrap:
                                 for point in ("state", "managed-settings", "home"):
                                     with self.data_directory(source_fd, point, self.uid, self.gid, 0o755, True) as view:
                                         if point == "home":
-                                            require(set(os.listdir(view)) <= {"agent", "capture"}, "base_compatibility")
+                                            self.require_empty_directory(view)
                                             for actor in ("agent", "capture"):
                                                 with self.data_directory(view, actor, self.uid, self.gid, 0o755, True) as empty:
-                                                    require(not os.listdir(empty), "base_compatibility")
+                                                    self.require_empty_directory(empty)
                                         else:
-                                            require(not os.listdir(view), "base_compatibility")
+                                            self.require_empty_directory(view)
                             for parent, child, account, child_mode in (("home", "agent", "agent", 0o755),
                                     ("home", "capture", "capture", 0o700), ("state", "workspaces", "engine", 0o700)):
                                 if name == parent:
@@ -1040,6 +1199,7 @@ class Bootstrap:
 
     def verify_tree(self, root, manifest, raw, full=True):
         expected = {e["path"]: e for e in manifest["files"]}
+        self.require_system_asset_files(expected)
         expected["manifest.json"] = {"type": "file", "mode": "0444", "size": len(raw), "sha256": sha(raw)}
         seen = set()
 
@@ -1066,12 +1226,48 @@ class Bootstrap:
                         require(not any(n in os.listxattr(fd) for n in ("security.capability", "system.posix_acl_access", "system.posix_acl_default")), "file_mode")
                         if entry["type"] == "dir":
                             pending.append(relative + "/")
-                        elif full or relative == "manifest.json" or relative.startswith(("bin/", "lib/zeros/", "worker/dist-engine/")):
+                        elif full or relative == "manifest.json" or relative in SYSTEM_ASSET_FILES or relative.startswith(("bin/", "lib/zeros/", "worker/dist-engine/")):
                             with os.fdopen(os.dup(fd), "rb") as stream:
                                 require(consume(stream, entry["size"]) == entry["sha256"], "file_digest")
                     finally:
                         os.close(fd)
         require(seen == expected.keys(), "file_inventory")
+        self.verify_system_assets(root, expected)
+
+    def require_system_asset_files(self, inventory):
+        required = {**SYSTEM_ASSET_FILES, **{"lib/runtime-system-assets/" + package + "/copyright": "0444"
+                                           for package in SYSTEM_ASSET_PACKAGES}}
+        for path, mode in required.items():
+            entry = inventory.get(path, {})
+            require(entry.get("type") == "file" and entry.get("size", 0) > 0, "file_inventory")
+            require(entry["mode"] == mode, "file_mode")
+
+    def verify_system_assets(self, root, inventory):
+        # Capability data is part of the ordinary immutable runtime inventory,
+        # not an environment flag or a replacement for full artifact hashing.
+        path = "worker/runtime-system-assets.json"
+        raw = self.read(root + "/" + path, 256 * 1024, 0o444)
+        require(sha(raw) == inventory[path]["sha256"], "file_digest")
+        value = strict_json(raw, "file_inventory")
+        shape(value, ("schema", "gitLfs", "gitConfig", "fontConfig", "fonts", "packages"), check="file_inventory")
+        require(value["schema"] == "zeros.runtime-system-assets/v1" and value["gitLfs"] == "bin/git-lfs" and
+                value["gitConfig"] == "worker/gitconfig" and value["fontConfig"] == "worker/design-fonts/fonts.conf", "file_inventory")
+        packages, fonts = value["packages"], value["fonts"]
+        require(type(packages) is list and len(packages) == len(SYSTEM_ASSET_PACKAGES) and
+                all(type(package) is dict and type(package.get("name")) is str for package in packages) and
+                {package["name"] for package in packages} == SYSTEM_ASSET_PACKAGES, "file_inventory")
+        require(type(fonts) is list and 1 <= len(fonts) <= 4096 and all(type(name) is str for name in fonts) and
+                len(set(fonts)) == len(fonts), "file_inventory")
+        covered = set()
+        for name in fonts:
+            require(name.startswith("worker/design-fonts/") and
+                    re.search(r"\.(?:ttf|ttc|otf|pfb|pfa|pcf(?:\.gz)?|bdf(?:\.gz)?)$", name, re.I), "file_inventory")
+            package = name[len("worker/design-fonts/"):].split("/", 1)[0]
+            entry = inventory.get(name, {})
+            require(package in FONT_PACKAGES and entry.get("type") == "file" and entry.get("size", 0) > 0 and
+                    entry.get("mode") == "0444", "file_inventory")
+            covered.add(package)
+        require(covered == FONT_PACKAGES, "file_inventory")
 
     def manifest_for(self, runtime_id, descriptor=None):
         text_match(runtime_id, RID, "cache_conflict")
@@ -1085,7 +1281,9 @@ class Bootstrap:
                               "engineProtocolVersion": value["protocols"]["engine"]}
             except (KeyError, TypeError):
                 raise Failure("manifest_schema") from None
-        return raw, validate_manifest(raw, descriptor, self.compat)
+        manifest = validate_manifest(raw, descriptor, self.compat)
+        self.require_system_asset_files({entry["path"]: entry for entry in manifest["files"]})
+        return raw, manifest
 
     def receipt(self, runtime_id, manifest, descriptor=None):
         raw = self.read(RECEIPTS + "/" + runtime_id + ".json", 4096, 0o600)
@@ -1137,6 +1335,7 @@ class Bootstrap:
                 "manifest_schema")
         raw = read_exact(stream, first.size)
         manifest = validate_manifest(raw, descriptor, self.compat)
+        self.require_system_asset_files({entry["path"]: entry for entry in manifest["files"]})
         for expected in manifest["files"]:
             try:
                 info, stream = next(iterator)
@@ -1360,6 +1559,7 @@ class Bootstrap:
             raw = self.read(FACADE + "/disk-epoch", 32, 0o600)
         except FileNotFoundError:
             return 0
+        if raw == b"": return 0
         require(re.fullmatch(rb"[0-9]{1,18}\n", raw) is not None, "pointer_publish")
         return int(raw)
 
@@ -1452,10 +1652,12 @@ class Bootstrap:
                 # Publish the epoch decision first. Re-running this boot after
                 # death at either subsequent write cannot advance it twice.
                 try:
-                    intent = strict_json(self.read(FACADE + "/sessions/boot.json", 256, 0o600), "pointer_publish")
-                    shape(intent, ("bootId", "epoch"), check="pointer_publish")
-                    text_match(intent["bootId"], UUID, "pointer_publish")
-                    integer(intent["epoch"], 1, 10**18 - 1, "pointer_publish")
+                    raw = self.read(FACADE + "/sessions/boot.json", 256, 0o600)
+                    intent = None if raw == b"" else strict_json(raw, "pointer_publish")
+                    if raw != b"":
+                        shape(intent, ("bootId", "epoch"), check="pointer_publish")
+                        text_match(intent["bootId"], UUID, "pointer_publish")
+                        integer(intent["epoch"], 1, 10**18 - 1, "pointer_publish")
                 except FileNotFoundError:
                     intent = None
                 if intent is None or intent["bootId"] != boot_id:
@@ -1518,7 +1720,7 @@ class Bootstrap:
 class SystemHost:
     def load_apparmor(self):
         try:
-            result = subprocess.run(["/usr/sbin/apparmor_parser", "-r", "-W", "/etc/apparmor.d/zeros-cloud-engine"],
+            result = subprocess.run(["/usr/sbin/apparmor_parser", "-r", "-K", "/etc/apparmor.d/zeros-cloud-engine"],
                                     env=ENV, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, timeout=30, check=False)
         except subprocess.TimeoutExpired:

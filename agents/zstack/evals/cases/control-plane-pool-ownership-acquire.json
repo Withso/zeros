@@ -1,0 +1,9 @@
+{
+  "id": "control-plane-pool-ownership-acquire",
+  "kind": "replay",
+  "area": "control-plane-workers",
+  "fixedBy": "pr:492",
+  "symptom": "API requests and durable workers shared query capacity, and scaling API replicas also started more queue workers; an exhausted pool held interactive requests for ten seconds.",
+  "rule": "The bug-fix playbook verifies boot ownership and nested DB dependencies, real-Postgres saturation, native acquire cancellation, and shutdown drainage.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/database-pools.integration.test.ts src/cloud-pool-boot.test.ts src/account-worker-boot.test.ts src/db.test.ts src/config.test.ts src/app.test.ts"
+}

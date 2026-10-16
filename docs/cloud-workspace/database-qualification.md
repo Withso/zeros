@@ -8,6 +8,68 @@ workspace identity, forced RLS and forward migrations remain authoritative.
 Same-region restore evidence cannot establish regional/object-store recovery
 or sustained production capacity. See [qualification status](qualification-status.md).
 
+## Query and pool evidence
+
+Application and operator advisory-lock statements carry a static SQLCommenter
+`lock_purpose` tag. The tag identifies a code-owned purpose, never an owner,
+workspace, provider identifier or advisory-lock key. The source regression checks
+every current call site, including session unlocks; applied SQL migrations remain
+immutable. PlanetScale Insights can group these statements by the tag.
+
+HTTP requests record bounded pool-acquire, transaction and tagged advisory-query
+spans, including fast requests. WorkOS's separate session-lock connection records
+its acquires and tagged queries too. `[database] timing` emits one histogram per
+active minute, keyed by static route template, method, span kind and lock purpose.
+It retains at most 64 spans per request and 128 series per window, reporting
+dropped spans when those bounds are reached. There is no reporting query or
+idle polling loop. No SQL, argument, lock key, raw path, user identity or driver
+error enters the report. Local Personal and organization-local engines do not
+enter this CP instrumentation; cloud and account API authority is unchanged.
+
+The histogram buckets are disjoint; derive a p99 upper bound by accumulating
+counts through 99%, rather than averaging per-window percentiles. The final
+unbounded bucket has a `null` upper bound. An advisory-query span includes driver,
+network and statement execution time; it is not a measurement of only server
+lock wait. Transaction spans measure connection hold time and may include an
+awaited external operation. Their outcome is unknown at the existing timing
+hook, so a completed span does not assert a commit. Direct pool queries,
+background workers, row locks inside SQL functions and long-lived WebSocket
+callbacks are outside this HTTP helper-span coverage. Use Insights and worker
+measurements alongside it, and do not claim whole-database coverage from it.
+
+Cloud engines additionally emit `[cloud-runtime] renewal-timing` for four
+registration-boundary operations: engine heartbeat, consumed client renewal,
+actor confirmation and warm-context requests. Durations use the engine's
+monotonic clock through response parsing and the registration's scope checks.
+Heartbeat duration includes its foreground listener scan and response handling;
+asynchronous record sync and checkpoint execution are outside the span. An
+actor/context `completed` outcome does not assert the caller's later cache or
+actor-registry acceptance. Client `refused` means a null result; `failed` means
+the boundary caught or propagated an exception, including an HTTP refusal.
+Neither outcome infers a new retry or stop policy.
+
+The reporter retains at most twelve series (four operations × three outcomes),
+with disjoint latency buckets, counts, duration sums and maxima. As with CP
+timing, the final `null` bucket cannot establish a finite p99. It flushes on
+existing work after one active minute, then once at retirement; no timer or
+request is added, and an otherwise quiet partial batch waits for work or
+shutdown. `invalidSpans` counts unavailable or backwards monotonic readings;
+`inFlight` counts observations not finished when the batch was emitted. A
+retired registration ignores late completions. No identity, endpoint, token,
+request body or error text is retained, and a logging failure cannot change a
+renewal result. Initial admission, private credential refresh, legacy agent
+lease requests and final actor/cache admission are outside this coverage.
+Local Personal and organization-local engines never create this registration.
+Runtime rollout is required to observe existing cloud VMs; CP deployment alone
+does not change their pinned runtime.
+
+Before changing pool limits, record a quiet hour and an active workspace-hour
+with exact UTC bounds and the deployed revision. Report Railway CP egress
+separately from request-query counts and latency; outbound database traffic,
+TLS connection setup and relayed workspace data are distinct contributors.
+Keep channel scope exact. A local synthetic sample cannot qualify hosted p99,
+an idle egress budget or the direct connection success rate.
+
 ## Environment boundaries
 
 - Keep Alpha, Beta and Production on separate clusters with separate credentials,
@@ -29,8 +91,73 @@ or sustained production capacity. See [qualification status](qualification-statu
 
 ## Connections and authority
 
-`DATABASE_URL` owns the bounded request pool. `DATABASE_LISTEN_URL` optionally
-gives the durable event listener a separate max-one pool with runtime privileges.
+`DATABASE_URL` owns separate bounded API and worker pools. API capacity defaults
+to six connections (`DATABASE_POOL_MAX`), with a one-second acquire deadline and
+five-second statement deadline. An expired acquire leaves the driver's queue
+and returns HTTP 503, `Retry-After: 1` and `Cache-Control: no-store`; SQL failures
+and unknown commit results are not automatically retried. Workers have two
+connections with the existing ten-second acquire and thirty-second statement
+deadlines. Operator pool callers keep their existing limits.
+
+These hosted defaults apply on the next release of every channel, including
+Beta and Production: API query capacity changes from ten to six, statement
+timeouts from thirty to five seconds, and acquire timeouts from ten to one
+second. An explicit `DATABASE_POOL_MAX` still controls API capacity, but does
+not restore the old timeouts. Review each channel's overrides before release.
+
+`CONTROL_PLANE_PROCESS_ROLE` selects `api`, `worker` or `combined` (the
+compatibility default). API replicas own HTTP/WebSocket requests, account
+security subscriptions and engine checkpoint waits. Worker replicas own
+WorkOS/account deletion, security publication, GitHub DB expiry and all enabled
+cloud queues, including retention, setup and runtime qualification. They expose
+only liveness and release readiness. The API's GitHub read-cache cleanup remains
+process-local. Nested provider operation stores, Computer services, blob
+services, setup admission and diagnostic writes use their owning worker pool;
+sharing the API-bound object would bypass isolation. API qualification enqueue
+uses API capacity, while qualification execution uses worker capacity.
+
+Separate worker ownership requires deploying at least one `worker` process and
+changing the serving processes to `api`. Merely scaling `combined` repeats its
+workers as before. Existing maintenance, migration, channel and cloud-worker
+enablement gates still apply. A worker owns no permanent leadership connection.
+WorkOS permits at most one session-lock holder in the two-slot worker query
+pool, leaving the other connection for callbacks and ordinary worker work.
+Historical Computer retirement has an independent max-one lock pool whenever
+Boat workers are enabled. Its provider waits and account session lock cannot
+consume query capacity; its callbacks use the worker query pool. A sweep whose
+initial account transaction lock is contended defers to the next sweep. This
+avoids pinning the remaining query connection behind another process's
+provider call. Both independent holders and short worker transactions must
+make progress together, not merely when the API pool is saturated.
+Shutdown stops consumers and drains their work before ending each distinct pool.
+
+Hosted boot always creates a
+separate notification pool with a maximum of two connections and runtime
+privileges. `DATABASE_LISTEN_URL` selects its direct-primary connection target;
+otherwise it uses `DATABASE_URL`, while keeping its capacity separate.
+Security events, worker hints, engine checkpoint hints and Computer retention
+share one checked-out LISTEN session per process. Adding or stopping one consumer does not
+acquire another connection or interrupt the other consumers. The remaining
+pool slot is budgeted headroom, not a second permanent listener.
+
+The shared session discards failed connections, retries with 1–30 second
+backoff, and retires after 23 hours, within PlanetScale's 24-hour limit. Its
+held connection has a different lifetime from short query-pool connections:
+reusing their ten-minute limit would disconnect all subscribers every ten
+minutes. TCP keepalive starts after 30 seconds of socket inactivity; it adds
+no SQL queries or transactions and does not defeat a server's SQL idle timeout.
+The listener emits one closed `ready` or `restored` info message after all
+current LISTEN acknowledgements and replay callbacks, plus a `rotating at
+lifetime limit` message for planned retirement. These messages confirm the
+subscription and replay request, not completion of asynchronous queue work.
+Each queue re-reads its durable state
+after LISTEN succeeds, including reconnects; payloads remain hints and never
+carry authority. Security streams wake and stay unhealthy after a lost session
+until a caller explicitly starts them again. A late LISTEN acknowledgement or
+connection acquisition cannot revive a stopped consumer. Account/security
+listening remains available when cloud is paused; no cloud consumers start on
+paused channels, and Local engine behavior is unchanged.
+
 `DATABASE_MIGRATION_URL` belongs to the one-shot migrator, with a max-one pool;
 it must not be supplied to a hosted API using verify-only boot. Transaction
 helpers use `SET LOCAL ROLE zeros_app` and transaction-local authorization.
@@ -70,8 +197,8 @@ Implemented connection controls and remaining hosted qualification:
   retries; a request already delivered remains uncertain. Retire broken
   checked-out clients, including listener initialization failures and shutdown
   races. Re-establish listening and replay durable records after reconnect.
-- Connections retire after ten minutes, including the continuously checked-out
-  listener. Configure bounded retry/backoff and connection deadlines without
+- Query-pool connections retire after ten minutes; the continuously checked-out
+  listener retires after 23 hours. Configure bounded retry/backoff and connection deadlines without
   blindly retrying writes whose commit result is unknown.
 - Budget connections across all processes, workers, rollout overlap, migration
   jobs and operator sessions. Read actual database limits; small-cluster defaults
@@ -88,13 +215,35 @@ driver pool eviction alone does not establish safe listener rotation.
 [Role management](https://planetscale.com/docs/postgres/connecting/roles),
 [connection resilience](https://planetscale.com/docs/postgres/connection-resilience)
 
-Start isolated qualification with one API replica, six request connections and one
-dedicated listener. Rolling overlap would consume fourteen direct connections,
-before an explicit migrator and operator headroom. Compare the complete budget
-with the target's usable slots and measured load. The minimum is three request
-slots with shared LISTEN, or two with dedicated LISTEN, because a provider lock
-holder needs another connection to checkpoint. These minima are deadlock guards,
-not performance sizing recommendations.
+Budget each live or overlapping process at its configured ceiling: `api` is
+`DATABASE_POOL_MAX + 2` (default 8), `worker` is 5, and `combined` is
+`DATABASE_POOL_MAX + 5` (default 11) with Boat retirement enabled. The worker
+ceiling comprises two query, one retirement-lock and two listener connections.
+Without Boat retirement, worker and combined ceilings are one lower.
+Include one connection for every active
+migrator, including compatibility boot migrations, plus operator headroom.
+The two listener slots are reserved even though one shared session normally
+uses only one. Separate processes each need their own listener; two query pools
+in one process share it.
+
+| Topology at default limits, verify-only service boot | Steady ceiling | With one API replacement | With replacement and one migrator |
+| --- | ---: | ---: | ---: |
+| One combined process | 11 | 22 (combined replacement) | 23 |
+| One API plus one worker process | 13 | 21 | 22 |
+
+On a 25-slot target, the combined rollout leaves two slots after the one
+migrator; the split rollout leaves three. Replacing only the worker in the
+split topology reserves 19 including the migrator. Do not overlap API and
+worker replacements: two API and two worker processes plus a migrator reserve
+27 slots, exceeding the target before any recovery headroom.
+Additional replicas, larger `DATABASE_POOL_MAX`, concurrent boot migrations or
+operator sessions require recalculating this budget against the actual target
+limit before rollout. This is a deployment budget, not a fleet-wide allocator;
+the application does not discover replica counts or change provider settings.
+Bring up the dedicated worker and confirm queue drainage before disabling the
+old process's workers. Keep API and worker rollouts sequential within the budget.
+The two-slot query minimum applies with or without `DATABASE_LISTEN_URL`, since
+LISTEN is always isolated. It is a deadlock guard, not a sizing recommendation.
 
 ## Verification order
 

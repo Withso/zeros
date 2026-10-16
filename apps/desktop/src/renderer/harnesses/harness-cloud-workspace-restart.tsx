@@ -30,9 +30,11 @@ import { useTerminalStore } from "../shell/terminal/terminal-store";
 import { defaultTabs } from "../shell/workbench/tab-model";
 import { CloudWorkspaceDetailsContent } from "../shell/conversation/cloud-workspace-details";
 import { CloudWorkspaceStatusRow } from "../shell/conversation/cloud-workspace-restart-controls";
+import { CloudHistoryRecoveryNotice } from "../shell/conversation/cloud-history-recovery-notice";
 
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const folder = cloudWorkspaceKey(target);
+const otherRecoveryTarget = { organizationId: "99999999-9999-4999-8999-999999999999", workspaceId: "88888888-8888-4888-8888-888888888888" };
 let document: CloudWorkspaceDocument = {
   id: target.workspaceId, organizationId: target.organizationId, teamId: target.organizationId, createdBy: target.organizationId,
   name: "Workspace UI", placement: "cloud", status: "ready", version: 1, error: null, deletedAt: null,
@@ -98,6 +100,10 @@ function publish(patch: Partial<CloudWorkspaceDocument>) {
 }
 Object.assign(window, { cloudRestartFixture: {
   get document() { return document; }, publish, bridge,
+  publishOtherRecovery() {
+    acceptCloudWorkspaceDocument({ ...document, id: otherRecoveryTarget.workspaceId, organizationId: otherRecoveryTarget.organizationId,
+      teamId: otherRecoveryTarget.organizationId, name: "Other history owner" });
+  },
   get restartPhase() { return cloudWorkspaceRestartPhase(folder); },
   work(kind: "idle" | "agent" | "queued" | "dispatching" | "script" | "terminal" | "preview") {
     useSessionsStore.getState().removeSession("restart-chat");
@@ -121,9 +127,11 @@ const setupTab = { id: "setup", type: "terminal" as const, title: "Setup", termi
 function Harness() {
   const [body, setBody] = useState<HTMLDivElement | null>(null);
   const [placement, setPlacement] = useState("cloud");
+  const [recoveryActive, setRecoveryActive] = useState(true);
+  const [otherRecovery, setOtherRecovery] = useState(false);
   const rows = useSyncExternalStore(subscribeCloudWorkspaces, getCloudWorkspaceRows);
   const cloud = placement === "cloud";
-  const workspace: Workspace = cloud ? rows[0] ?? initialRow : { ...initialRow, id: "/fixture/local", path: "/fixture/local", repoRoot: "/fixture/local",
+  const workspace: Workspace = cloud ? rows.find(row => row.path === folder) ?? initialRow : { ...initialRow, id: "/fixture/local", path: "/fixture/local", repoRoot: "/fixture/local",
     placement: "local", organizationId: placement === "personal" ? null : target.organizationId };
   return <TooltipProvider>
     <Toaster />
@@ -132,7 +140,12 @@ function Harness() {
         <Button onClick={() => setPlacement("cloud")}>Cloud fixture</Button>
         <Button onClick={() => setPlacement("personal")}>Local Personal fixture</Button>
         <Button onClick={() => setPlacement("organization")}>Local organization fixture</Button>
+        <Button onClick={() => setRecoveryActive(value => !value)}>{recoveryActive ? "Hide recovery surface" : "Show recovery surface"}</Button>
+        <Button onClick={() => setOtherRecovery(value => !value)}>{otherRecovery ? "Recovery owner A" : "Recovery owner B"}</Button>
       </div>
+      <section aria-label="Recovery notice surface" className="mb-4">
+        <CloudHistoryRecoveryNotice folder={cloud && otherRecovery ? cloudWorkspaceKey(otherRecoveryTarget) : workspace.path} active={recoveryActive} />
+      </section>
       <div className="flex h-[440px] gap-4">
         <Surface kind="sidebar" className="w-60 shrink-0 rounded-lg p-2">
           <SidebarWorkspaceRow workspace={workspace} active chatIds={["restart-chat"]} project={null} mixedRepositories={false} grouped={false}

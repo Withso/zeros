@@ -6,6 +6,7 @@
 //
 //   styles/zeros-tokens.css          ← styles/tokens/*.tokens.json + resolver
 //   apps/marketing/src/index.css     ← same values, marketing export groups
+//   Zeros - Design/tokens.css        ← same values, public tokens + scales
 //   docs/design-tokens.md            ← styles/zeros-tokens.css,
 //                                       styles/global/platform.css,
 //                                       styles/policy/contrast-contract.json
@@ -15,6 +16,8 @@
 //   .claude/skills/zeros-workspaces/SKILL.md  ┐
 //   .agents/skills/zeros-workspaces/SKILL.md  ├ ← the workspace brief in RULES.md
 //   .cursor/rules/zeros-workspaces.mdc        ┘   (between the workspace-brief markers)
+//   .claude|.agents/skills/zstack*/SKILL.md, .cursor/rules/zstack*.mdc
+//                                  ← agents/zstack/skills/*/SKILL.md (scripts/zstack/render.mjs)
 //
 //   pnpm design:docs           write them
 //   pnpm check:ui              fails if any is stale (checkGeneratedDocs)
@@ -23,7 +26,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildTokens, MARKETING_TOKENS_FILE, renderTokenCss } from "./build-tokens.mjs";
+import { buildTokens, DESIGN_TOKENS_FILE, MARKETING_TOKENS_FILE, renderTokenCss } from "./build-tokens.mjs";
+import { renderZstackFiles, ZSTACK_SKILLS_DIR } from "../zstack/render.mjs";
 import {
   evaluateContract,
   evaluateLadders,
@@ -245,7 +249,7 @@ export function agentBrief(root) {
 }
 
 const SKILL_DESCRIPTION =
-  "Zeros design system for renderer UI: use when building or changing UI under apps/desktop/src/renderer or styles/ — components, tokens, colors, spacing, typography, contrast, and the checks that gate them.";
+  "Zeros design system for renderer UI: use when building or changing UI under apps/desktop/src/renderer or styles/, or designing Zeros screens in Zeros - Design/ — components, tokens, colors, spacing, typography, contrast, and the checks that gate them.";
 
 export function renderAgentFiles(root) {
   const brief = agentBrief(root);
@@ -290,6 +294,7 @@ export function generatedFiles(root) {
     "docs/design-tokens.md": renderTokenReference(root),
     ...renderAgentFiles(root),
     ...renderWorkspaceAgentFiles(root),
+    ...renderZstackFiles(root),
   };
 }
 
@@ -302,7 +307,7 @@ export function checkGeneratedDocs(root) {
       violations.push({
         file: rel,
         line: 1,
-        message: `Generated design-system file is stale — run \`pnpm design:docs\` (source: ${rel === "docs/design-tokens.md" ? `styles/tokens/ + ${CONTRACT_FILE}` : rel.includes("zeros-workspaces") ? RULES_FILE : GUIDE_FILE}).`,
+        message: `Generated design-system file is stale — run \`pnpm design:docs\` (source: ${rel === "docs/design-tokens.md" ? `styles/tokens/ + ${CONTRACT_FILE}` : rel.includes("zstack") ? ZSTACK_SKILLS_DIR : rel.includes("zeros-workspaces") ? RULES_FILE : GUIDE_FILE}).`,
       });
     }
   }
@@ -314,6 +319,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   buildTokens(root);
   console.log(`wrote ${TOKENS_FILE}`);
   console.log(`wrote ${MARKETING_TOKENS_FILE}`);
+  console.log(`wrote ${DESIGN_TOKENS_FILE}`);
   for (const [rel, content] of Object.entries(generatedFiles(root))) {
     const path = join(root, rel);
     mkdirSync(dirname(path), { recursive: true });

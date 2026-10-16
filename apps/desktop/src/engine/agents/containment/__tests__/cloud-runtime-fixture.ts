@@ -2,6 +2,18 @@ import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+/** Restore write access only to disposable directories, never symlink targets. */
+export function removeRuntimeFixtureTree(directory: string, filesystem = fs) {
+  const metadata = filesystem.lstatSync(directory, { throwIfNoEntry: false });
+  if (!metadata) return;
+  if (metadata.isDirectory()) {
+    filesystem.chmodSync(directory, 0o700);
+    for (const name of filesystem.readdirSync(directory))
+      removeRuntimeFixtureTree(path.join(directory, name), filesystem);
+  }
+  filesystem.rmSync(directory, { recursive: true, force: true });
+}
+
 /** Real files behind a logical VM root; tests never write to /etc or /run. */
 export function cloudRuntimeFixture({ mapAbsoluteLinks = true } = {}) {
   const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "zeros-runtime-root-")));
@@ -71,6 +83,13 @@ export function cloudRuntimeFixture({ mapAbsoluteLinks = true } = {}) {
       "worker/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs",
       "lib/zeros/cloud-worker-supervisor.mjs", "lib/zeros/setup-cloud-workspace.mjs", "manifest.json"])
       write(`${root}/${file}`, "installed", 0o555);
+    const fonts = ["fonts-noto-color-emoji", "fonts-unifont", "xfonts-cyrillic", "xfonts-scalable",
+      "fonts-ipafont-gothic", "fonts-wqy-zenhei", "fonts-tlwg-loma-otf", "fonts-freefont-ttf"]
+      .map(name => `worker/design-fonts/${name}/fixture.ttf`);
+    for (const file of ["bin/git-lfs", "worker/gitconfig", "worker/design-fonts/fonts.conf", ...fonts])
+      write(`${root}/${file}`, "fixture", file === "bin/git-lfs" ? 0o555 : 0o444);
+    write(`${root}/worker/runtime-system-assets.json`, { schema: "zeros.runtime-system-assets/v1",
+      gitLfs: "bin/git-lfs", gitConfig: "worker/gitconfig", fontConfig: "worker/design-fonts/fonts.conf", fonts });
   };
   install();
   write("/etc/zeros/cloud-worker.json", marker);
@@ -83,5 +102,5 @@ export function cloudRuntimeFixture({ mapAbsoluteLinks = true } = {}) {
   link("/opt/zeros/state", "/srv/zeros/state");
   write("/opt/zeros/disk-epoch", "1\n", 0o600);
   return { directory, physical, filesystem, owners, descriptor, marker, mkdir, write, link, install,
-    dispose: () => fs.rmSync(directory, { recursive: true, force: true }) };
+    dispose: () => removeRuntimeFixtureTree(directory) };
 }

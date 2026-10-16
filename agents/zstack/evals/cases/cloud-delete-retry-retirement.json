@@ -1,0 +1,9 @@
+{
+  "id": "cloud-delete-retry-retirement",
+  "kind": "scenario",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:544",
+  "symptom": "A stopped workspace's fresh DELETE could not obtain retirement proof after an earlier final checkpoint failure, and replaying an old delete could reset a successor cleanup job.",
+  "rule": "Bind cleanup to a fresh accepted successor or its exact replay, including an unambiguous accepted pre-deploy successor of a failed intent. Preserve worker progress and immutable failure history, refuse ambiguous or current failed intents, and recheck every generation and authority after provider I/O.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/deletion-retry-retirement.integration.test.ts src/cloud-workspaces/deletion-retirement.integration.test.ts"
+}

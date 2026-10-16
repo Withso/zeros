@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
+import { COMPUTER_NAMED_REF, isComputerTemplateSnapshotName, type ComputerSnapshotChannel } from "./computer-template-name.js";
+import type { ComputerSnapshotIdentity } from "./computer-template-snapshot-boat.js";
 import { assertHostedDevAdmission } from "../development-environment.js";
 import { z } from "zod";
 import { BoatApiClient, BoatCreateRejectedError, type BoatApiClientOptions, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
+import { setBoatDisplayName, type BoatDisplayName } from "./boat-display-name.js";
 import { computeMicroUsd, type CloudProviderComputeUsage, type CloudWorkspaceComputeProvider } from "./provider-compute.js";
 import type {
   CloudProviderOperationRecord,
@@ -13,6 +16,7 @@ import {
   type CloudProviderIdentity,
   type CloudProviderObservedState,
   type CloudProviderResource,
+  type CloudProviderDeletionRetirement,
   type CloudProviderPreviewAccess,
   type CloudWorkspaceAccessProvider,
   type CloudWorkspaceProvider,
@@ -53,6 +57,13 @@ const DeletionSchema = z.object({
   // Unknown provider stages are not retained as arbitrary diagnostic strings.
   stage: z.unknown().optional(),
   completedAt: z.string().datetime({ offset: true }).nullable(),
+});
+const StorageDeletionSchema = DeletionSchema.extend({
+  status: z.literal("blocked"),
+  stage: z.enum(["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"]),
+  requestedAt: z.string().datetime({ offset: true }),
+  expectedBy: z.string().datetime({ offset: true }).nullable().optional(),
+  completedAt: z.null(),
 });
 const STATES: Record<
   z.infer<typeof SandboxSchema>["state"],
@@ -100,6 +111,11 @@ export type BoatWorkspaceProviderOptions = BoatApiClientOptions & {
   resolveSnapshot?: (input: CloudProviderCreateInput) => Promise<string>;
   /** Resolves the saved generation's C1 source pin, account and org wallet. */
   resolveTemplate?: (input: CloudProviderCreateInput) => Promise<string>;
+  /** Resolves a durable Computer artifact through its exact saved generation. */
+  resolveNamedTemplate?: (input: CloudProviderCreateInput) => Promise<ComputerSnapshotIdentity>;
+  snapshotChannel?: ComputerSnapshotChannel;
+  /** Mutable label only; resolved after a confirmed allocation, outside its journal. */
+  resolveDisplayName?: (input: CloudProviderCreateInput) => BoatDisplayName;
   now?: () => number;
 };
 
@@ -119,6 +135,7 @@ export class BoatWorkspaceProvider
   readonly name = "boat";
   private readonly snapshotName: string | null;
   private readonly templateSandboxId: string | null;
+  private readonly namedTemplate: boolean;
   private readonly client: BoatApiClient;
   private readonly now: () => number;
   constructor(private readonly options: BoatWorkspaceProviderOptions) {
@@ -126,8 +143,9 @@ export class BoatWorkspaceProvider
       options.imageRef,
     );
     const template = /^boat-template:([A-Za-z0-9_-]{1,128})$/.exec(options.imageRef);
+    const computer = COMPUTER_NAMED_REF.exec(options.imageRef);
     if (
-      !template && (!image ||
+      !template && !computer && (!image ||
       [
         "latest",
         "tree",
@@ -140,7 +158,8 @@ export class BoatWorkspaceProvider
       ].includes(image[1]!))
     )
       throw new Error("Invalid qualified Boat snapshot name");
-    this.snapshotName = image?.[1] ?? null;
+    this.snapshotName = computer?.[1] ?? image?.[1] ?? null;
+    this.namedTemplate = computer !== null;
     this.templateSandboxId = template?.[1] ?? null;
     if (
       !Number.isSafeInteger(options.qualifiedStorageMiB) ||
@@ -217,6 +236,12 @@ export class BoatWorkspaceProvider
         ...(sandbox.memoryGB ? { memoryGB: sandbox.memoryGB } : {}),
         snapshotAvailable: sandbox.snapshotAvailable ?? false,
         lastSnapshotStatus: sandbox.lastSnapshotStatus ?? null,
+        // Explicit absence on an owned, stopped sandbox is recoverable from
+        // a checkpoint. Omitted fields, failed captures and pending uploads
+        // do not establish loss; never infer expiry from a local age timer.
+        ...(sandbox.state === "archived" && sandbox.snapshotAvailable === false &&
+          (sandbox.lastSnapshotStatus === "completed" || sandbox.lastSnapshotStatus === null) &&
+          billingScope === "match" && !sourceMismatch ? { snapshotMissing: true } : {}),
       },
     };
   }
@@ -239,12 +264,19 @@ export class BoatWorkspaceProvider
   async create(
     input: CloudProviderCreateInput,
   ): Promise<CloudProviderResource> {
-    return this.createAllocation(input, this.options.ttlSeconds);
+    return this.namedAllocation(input, this.options.ttlSeconds);
   }
 
   async createWithComputeLease(input: CloudProviderCreateInput, ttlSeconds: number): Promise<CloudProviderResource> {
     this.assertFiniteLease(ttlSeconds);
-    return this.createAllocation(input, ttlSeconds);
+    return this.namedAllocation(input, ttlSeconds);
+  }
+
+  private async namedAllocation(input: CloudProviderCreateInput, ttlSeconds: number | null): Promise<CloudProviderResource> {
+    const resource = await this.createAllocation(input, ttlSeconds);
+    const resolve = this.options.resolveDisplayName;
+    if (resolve) void setBoatDisplayName(this.client, resource.resourceId, () => resolve(input));
+    return resource;
   }
 
   computeWeight(profile: Pick<CloudProviderCreateInput,"cpuMillicores" | "memoryMiB">): { numerator: number; denominator: number } {
@@ -272,13 +304,26 @@ export class BoatWorkspaceProvider
       input.storageMiB !== this.options.qualifiedStorageMiB
     )
       throw failure("provider_profile_unsupported");
-    if (this.templateSandboxId) {
+    if (this.templateSandboxId || this.namedTemplate) {
       if (ttlSeconds === null) throw failure("provider_compute_lease_invalid");
       this.assertFiniteLease(ttlSeconds);
+    }
+    if (this.templateSandboxId) {
       if (!this.options.resolveTemplate || await this.options.resolveTemplate(input) !== this.templateSandboxId)
         throw failure("provider_template_identity_mismatch");
     }
-    const resolvedName = this.templateSandboxId ? null : this.options.resolveSnapshot ? await this.options.resolveSnapshot(input) : this.snapshotName;
+    if (this.namedTemplate && (!this.options.snapshotChannel ||
+        !isComputerTemplateSnapshotName(this.snapshotName!, this.options.snapshotChannel)))
+      throw failure("provider_template_identity_mismatch");
+    // A captured allocation no longer needs its source name. Still validate
+    // the exact saved create digest below before returning the owned sandbox.
+    const alreadyBound = this.namedTemplate && (await this.options.operations.find(input))?.resourceId;
+    const namedSource = this.namedTemplate && !alreadyBound ? await this.options.resolveNamedTemplate?.(input) : null;
+    if (this.namedTemplate && !alreadyBound && (!namedSource || namedSource.name !== this.snapshotName ||
+        !BOAT_RESOURCE_ID_PATTERN.test(namedSource.sourceSandboxId) || !/^[A-Za-z0-9_-]{1,160}$/.test(namedSource.snapshotId)))
+      throw failure("provider_template_identity_mismatch");
+    const resolvedName = this.templateSandboxId ? null : namedSource?.name ??
+      (this.options.resolveSnapshot ? await this.options.resolveSnapshot(input) : this.snapshotName);
     if (resolvedName !== this.snapshotName || (this.snapshotName?.startsWith("zeros-org-") && !this.options.resolveSnapshot))
       throw failure("provider_snapshot_identity_mismatch");
     const unmonitored = {
@@ -324,6 +369,13 @@ export class BoatWorkspaceProvider
         source.data.snapshotAvailable !== true || source.data.lastSnapshotStatus !== "completed")
         throw failure("provider_template_identity_mismatch");
       if (this.billingScope(response.sandbox) !== "match") throw failure("provider_billing_scope_mismatch");
+    }
+    if (namedSource) {
+      const response = await this.client.request(`/named-snapshots/${namedSource.name}`);
+      const source = z.object({ name: z.literal(namedSource.name), status: z.literal("ready"),
+        snapshotId: z.literal(namedSource.snapshotId), sourceSandboxId: z.literal(namedSource.sourceSandboxId),
+      }).safeParse(response.snapshot);
+      if (!source.success) throw failure("provider_template_identity_mismatch");
     }
     // Persist every dispatch before I/O. A timeout remains unknown even when
     // another request using the same key receives a definite refusal later.
@@ -409,6 +461,53 @@ export class BoatWorkspaceProvider
     return resource;
   }
 
+  async observeDeletionRetirement(
+    resourceId: string, input: { signal: AbortSignal },
+  ): Promise<CloudProviderDeletionRetirement> {
+    const record = await this.owned(resourceId);
+    if (!record.deletionRequestedAt || !record.deletionOperationId || record.deletedAt || record.lostAt)
+      throw failure("provider_deletion_unconfirmed");
+    input.signal.throwIfAborted();
+    const response = await this.client.request(`/deletion-operations/${record.deletionOperationId}`, {
+      signal: input.signal, timeoutMs: Math.min(this.options.timeoutMs, 5_000),
+    });
+    const parsed = StorageDeletionSchema.safeParse(response.operation);
+    if (!parsed.success || parsed.data.id !== record.deletionOperationId || parsed.data.targetId !== resourceId)
+      throw failure("provider_deletion_unconfirmed");
+    const operation = parsed.data;
+    const requested = Date.parse(operation.requestedAt);
+    const expected = operation.expectedBy == null ? null : Date.parse(operation.expectedBy);
+    if (requested < record.deletionRequestedAt.getTime() - 5_000 || requested > this.now() + 5_000 ||
+        (operation.stage === "waiting_for_uploads" && expected === null) ||
+        (expected !== null && (expected < record.createdAt.getTime() || expected > this.now() + 6 * 3600_000 + 5_000)))
+      throw failure("provider_deletion_unconfirmed");
+    // A 404 alone is not evidence. It qualifies only after the authenticated
+    // journal-bound receipt above proves a documented storage-only stage.
+    let absent = false;
+    try {
+      await this.client.request(`/sandboxes/${resourceId}`, {
+        signal: input.signal, timeoutMs: Math.min(this.options.timeoutMs, 5_000),
+      });
+    } catch (error) {
+      if (error instanceof CloudProviderError && error.code === "provider_not_found" && error.httpStatus === 404) absent = true;
+      else throw error;
+    }
+    if (!absent) throw failure("provider_deletion_unconfirmed");
+    const current = await this.owned(resourceId);
+    if (current.workspaceId !== record.workspaceId || current.generation !== record.generation ||
+        current.deletionOperationId !== record.deletionOperationId ||
+        current.deletionRequestedAt?.getTime() !== record.deletionRequestedAt.getTime() || current.deletedAt || current.lostAt)
+      throw failure("provider_deletion_unconfirmed");
+    input.signal.throwIfAborted();
+    return {
+      workspaceId: record.workspaceId, generation: record.generation, resourceId,
+      deletionOperationId: record.deletionOperationId, stage: operation.stage,
+      requestedAt: new Date(requested).toISOString(),
+      expectedBy: expected === null ? null : new Date(expected).toISOString(),
+      observedAt: new Date(this.now()).toISOString(),
+    };
+  }
+
   async inspect(resourceId: string): Promise<CloudProviderResource | null> {
     const record = await this.owned(resourceId);
     // Loss is attested only for a bound allocation Zeros never began deleting.
@@ -486,7 +585,7 @@ export class BoatWorkspaceProvider
     if (current.state === "archiving")
       throw failure("provider_operation_pending", true);
     if (current.state === "failed")
-      throw failure("provider_snapshot_unavailable");
+      throw failure(current.metadata.snapshotMissing === true ? "provider_snapshot_missing" : "provider_snapshot_unavailable");
     await this.client.request(`/sandboxes/${resourceId}/resume`, {
       method: "POST",
       body: { ttlSeconds },

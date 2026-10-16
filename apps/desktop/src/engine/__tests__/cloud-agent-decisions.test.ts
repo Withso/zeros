@@ -54,6 +54,30 @@ function fixture(cloud = true) {
 }
 
 describe("cloud decisions across devices", () => {
+  it("routes a cloud catalog read to the exact conversation execution", async () => {
+    const { engine, client, dispatch } = fixture();
+    const initializeAgent = vi.fn(async () => ({ protocolVersion: 1 }));
+    Object.assign(engine, { conversationExecution: new Map([["chat", "execution"]]) });
+    Object.assign(engine.agents, { initializeAgent });
+    Object.assign(client, { authorized: () => true, cloudActor: { sessionId: "actor", deviceId: "device", fingerprint: "a".repeat(64), role: "viewer" } });
+    await dispatch({ type: "AGENT_INIT_AGENT", agentId: "claude", chatId: "chat" });
+    expect(initializeAgent).toHaveBeenCalledExactlyOnceWith("claude", "execution");
+    expect(client.send).toHaveBeenCalledWith(expect.objectContaining({ type: "AGENT_AGENT_INITIALIZED" }));
+  });
+  it.each(["binding", "authority"] as const)("withholds a catalog response after its %s changed", async cause => {
+    const { engine, client, dispatch } = fixture();
+    const bindings = new Map([["chat", "execution"]]);
+    let live = true;
+    Object.assign(engine, { conversationExecution: bindings });
+    Object.assign(engine.agents, { initializeAgent: vi.fn(async () => {
+      if (cause === "binding") bindings.set("chat", "replacement"); else live = false;
+      return { protocolVersion: 1, _meta: { models: [{ value: "stale-account-model", label: "Model" }] } };
+    }) });
+    Object.assign(client, { authorized: () => live, cloudActor: { sessionId: "actor", deviceId: "device", fingerprint: "a".repeat(64), role: "viewer" } });
+    await dispatch({ type: "AGENT_INIT_AGENT", agentId: "claude", chatId: "chat" });
+    expect((client.send as ReturnType<typeof vi.fn>).mock.calls.flat().some(message => message.type === "AGENT_AGENT_INITIALIZED")).toBe(false);
+    expect(JSON.stringify((client.send as ReturnType<typeof vi.fn>).mock.calls)).not.toContain("stale-account-model");
+  });
   it.each(["allowed", "foreign-user", "revoked", "stopped"])("authorizes an original boot control locally (%s)", async scenario => {
     const f = bootAuthorityFixture(scenario === "foreign-user");
     try {

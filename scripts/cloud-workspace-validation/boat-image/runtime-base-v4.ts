@@ -14,7 +14,10 @@ import {
 const PROFILE = "runtime-base-v4";
 const MAX_STARTS = 10;
 const HEX = /^[a-f0-9]{64}$/;
-const NAME = /^zeros-v2-test-[a-z0-9-]{1,49}$/;
+// Released bases are zeros-base-v<N>. Earlier zeros-v2-test- names stay valid
+// for registered bases, kit state and disposable test bases.
+const BASE_NAME = /^zeros-base-v[1-9][0-9]{0,3}$/;
+const NAME = /^(?:zeros-base-v[1-9][0-9]{0,3}|zeros-v2-test-[a-z0-9-]{1,49})$/;
 const STAGES = new Set(["validate_input", "create", "upload", "build", "verify", "sanitize", "snapshot", "cold_boot", "install", "resume", "cleanup", "done"]);
 const CHECKS = new Set(["input_schema", "source_commit", "provider_request", "provider_budget", "start_budget", "build_exit", "timeout",
   "process_signal", "diagnostic_missing", "base_compatibility", "uid_map", "apparmor", "cgroup_controllers", "cgroup_retired", "root_ownership",
@@ -192,7 +195,7 @@ export function basePayload(root: string, commit: string, attemptHex: string): P
   for (const name of ["bootstrap.py", "boot.sh", "dispatch.sh", "install-runtime.sh", "compatibility.json", "cloud-worker.json",
     "zeros-boot.service", "zeros-host.service", "zeros.conf", "zeros-cloud-engine.apparmor",
     // Cloud Computer build helpers, invoked by fixed builder commands.
-    "computer-build.py", "computer-git-askpass.py"]) {
+    "computer-build.py", "computer-git-askpass.py", "stock-prerequisites.py"]) {
     add(`base/${name}`, fs.readFileSync(path.join(base, name)));
   }
   const templates = path.join(root, "scripts/cloud-workspace-validation/boat-image/templates");
@@ -216,11 +219,11 @@ export async function remote(deps: KitDeps, id: string, program: string, timeout
 
 export function pythonProbe(program: string, stage: string): string {
   requireBase(STAGES.has(stage) && !program.includes("\nPYV4\n"), "validate_input", "input_schema");
-  return `/usr/bin/sudo -n /usr/bin/python3 -I - <<'PYV4'\n${program}\nPYV4`;
+  return `/usr/bin/sudo -n /usr/bin/python3 -I -B - <<'PYV4'\n${program}\nPYV4`;
 }
 
 function closedProgram(body: string, stage: string): string {
-  return pythonProbe(`import json,os,pathlib,sys\ncode=0\ntry:\n${body.split("\n").map(line => " " + line).join("\n")}\nexcept BaseException:\n code=1\nprint(json.dumps({'schema':'zeros.diagnostic/v1','component':'base','stage':'${stage}','ok':code==0,'exitCode':code,'timedOut':False,'failedChecks':[] if code==0 else ['build_exit']}),flush=True)\nsys.exit(code)`, stage);
+  return pythonProbe(`import sys\nsys.dont_write_bytecode=True\nimport json,os,pathlib\ncode=0\ntry:\n${body.split("\n").map(line => " " + line).join("\n")}\nexcept BaseException:\n code=1\nprint(json.dumps({'schema':'zeros.diagnostic/v1','component':'base','stage':'${stage}','ok':code==0,'exitCode':code,'timedOut':False,'failedChecks':[] if code==0 else ['build_exit']}),flush=True)\nsys.exit(code)`, stage);
 }
 
 async function uploadAndStart(deps: KitDeps, id: string, payload: Payload, commit: string) {
@@ -251,7 +254,7 @@ if not job.exists():
   target.chmod(0o500)
  (job/'attempt.json').write_text(json.dumps(expected))
  with open(os.devnull,'r+b') as null:
-  subprocess.Popen(['/usr/bin/python3','-I',str(job/'owned-runner.py'),str(job)],stdin=null,stdout=null,stderr=null,start_new_session=True)
+  subprocess.Popen(['/usr/bin/python3','-I','-B',str(job/'owned-runner.py'),str(job)],stdin=null,stdout=null,stderr=null,start_new_session=True)
 else:
  assert json.loads((job/'attempt.json').read_text())==expected
 print(json.dumps({'started':True}))`;
@@ -302,8 +305,34 @@ export async function waitSandbox(deps: KitDeps, id: string, desired: "ready" | 
   throw new BaseFailure("create", "timeout", 124);
 }
 
-export async function verifyBase(deps: KitDeps, id: string) {
-  const result = parseProbe(await remote(deps, id, pythonProbe(fillTemplate("v4/verify.py", {}), "verify"), 600), "verify");
+// The same credential paths verify.py checks in /root and /home/user.
+const PRIVATE_FILES = [".ssh/authorized_keys", ".git-credentials", ".netrc", ".npmrc", ".pypirc", ".bash_history", ".zsh_history",
+  ".claude/.credentials.json", ".codex/auth.json", ".cursor/auth.json", ".config/cursor/auth.json"];
+
+// Boat installs its own root key on every machine during boot, so a cold boot
+// cannot show that the captured disk is clean. Check the saved tree instead:
+// it must be the complete tree of this snapshot of this builder.
+async function requireCleanCapture(deps: KitDeps, snapshotId: string, sandboxId: string) {
+  const reply = await deps.boat("GET", `/snapshots/${encodeURIComponent(snapshotId)}/tree`, { timeoutMs: 60_000 });
+  const tree = reply.body;
+  requireBase(reply.status === 200 && tree?.ok === true && tree.type === "snapshot.tree" && tree.snapshotId === snapshotId &&
+    tree.sandboxId === sandboxId && tree.treeAvailable === true && tree.truncated === false && Array.isArray(tree.entries),
+    "snapshot", "private_state");
+  const entries = new Map<string, { kind: string; size?: number }>();
+  for (const entry of tree.entries) {
+    requireBase(typeof entry?.path === "string" && entry.path.length > 0 && typeof entry.kind === "string" &&
+      (entry.size === undefined || Number.isSafeInteger(entry.size) && entry.size >= 0) && !entries.has(entry.path),
+      "snapshot", "private_state");
+    entries.set(entry.path, entry);
+  }
+  for (const home of ["", "__system__/root/"]) for (const name of PRIVATE_FILES) {
+    const entry = entries.get(home + name);
+    requireBase(entry === undefined || (entry.kind === "file" && entry.size === 0), "snapshot", "private_state");
+  }
+}
+
+export async function verifyBase(deps: KitDeps, id: string, boot: "builder" | "cold" = "builder") {
+  const result = parseProbe(await remote(deps, id, pythonProbe(fillTemplate("v4/verify.py", { BOOT: boot }), "verify"), 600), "verify");
   requireBase(result?.schema === "zeros.base-verification/v1" && /^bc1-[a-f0-9]{64}$/.test(result.baseCompatibilityId) &&
     HEX.test(result.baseBuildSha256) && /^[a-f0-9]{40}$/.test(result.sourceCommit) && result.hostState === "waiting_for_runtime" &&
     /^[a-f0-9-]{36}$/.test(result.bootId), "verify", "base_compatibility");
@@ -373,7 +402,8 @@ async function createOwned(deps: KitDeps, target: KitDeps, from?: string) {
     requireBase(id, "create", "provider_request");
     await sandboxInWallet(target, id);
     const named = await deps.boat("PATCH", `/sandboxes/${id}`, {
-      body: { name: `zeros-v2-test-${from ? "verify" : "builder"}-${state.attemptHex.slice(0, 12)}` },
+      body: { name: BASE_NAME.test(state.name) ? `${state.name}-${from ? "verify" : "build"}`
+        : `zeros-v2-test-${from ? "verify" : "builder"}-${state.attemptHex.slice(0, 12)}` },
     });
     requireBase(named.status === 200, "create", "provider_request");
     return id;
@@ -579,12 +609,13 @@ export async function buildBase(options: Map<string, string>, deps: KitDeps, liv
         "snapshot", "snapshot_identity");
     }
     const snapshot = await waitSnapshot(deps, id, state);
+    await requireCleanCapture(deps, snapshot.id, id);
     state = updateState(deps, { phase: "saved", snapshot });
     checkpoint();
     stage = "cold_boot";
     const clone = await createOwned(deps, cloneDeps(deps), name);
     await waitSandbox(deps, clone);
-    const coldProof = await verifyBase(deps, clone);
+    const coldProof = await verifyBase(deps, clone, "cold");
     requireBase(coldProof.baseCompatibilityId === state.proof?.baseCompatibilityId && coldProof.baseBuildSha256 === state.proof?.baseBuildSha256 &&
       coldProof.bootId !== state.proof?.bootId, "cold_boot", "base_compatibility");
     state = updateState(deps, { phase: "verified", coldProof });

@@ -264,7 +264,7 @@ export async function qualifyCloudSetupProcess() {
   const marker = path.join(directory, "child.json");
   const counter = path.join(directory, "counter");
   const workerSource = `import pathlib,json,os,time\npathlib.Path(${JSON.stringify(marker)}).write_text(json.dumps({'uid':os.getuid(),'scope':pathlib.Path('/proc/self/cgroup').read_text(),'privileges':pathlib.Path('/proc/self/status').read_text()}))\ni=0\nwhile True:\n pathlib.Path(${JSON.stringify(counter)}).write_text(str(i));i+=1;time.sleep(0.02)\n`;
-  const command = `python3 - <<'ZEROS_SETUP_CANARY'\nimport subprocess,pathlib,time\nsubprocess.Popen(['/usr/bin/setsid','/usr/bin/python3','-c',${JSON.stringify(workerSource)}])\nfor _ in range(100):\n if pathlib.Path(${JSON.stringify(counter)}).exists(): break\n time.sleep(0.02)\nelse: raise RuntimeError('child missing')\nprint('ready')\nZEROS_SETUP_CANARY`;
+  const command = `python3 -B - <<'ZEROS_SETUP_CANARY'\nimport subprocess,pathlib,time\nsubprocess.Popen(['/usr/bin/setsid','/usr/bin/python3','-B','-c',${JSON.stringify(workerSource)}])\nfor _ in range(100):\n if pathlib.Path(${JSON.stringify(counter)}).exists(): break\n time.sleep(0.02)\nelse: raise RuntimeError('child missing')\nprint('ready')\nZEROS_SETUP_CANARY`;
   try {
     const result = await runScopedCloudSetup({
       version: 1,
@@ -285,7 +285,7 @@ export async function qualifyCloudSetupProcess() {
       /^CapEff:\s+0+$/m.test(identity.privileges);
     const timeout = await runScopedCloudSetup({
       version: 1,
-      command: "exec python3 -c 'import time; time.sleep(60)'",
+      command: "exec python3 -B -c 'import time; time.sleep(60)'",
       timeoutMs: 1000,
       environment: {},
     });

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { load } from "js-yaml";
+import { GATES } from "../agent-runtime/qualification.mjs";
 const workflow = (name: string) => readFileSync(`.github/workflows/${name}.yml`, "utf8");
 const publicationWorkflow = (name: string) => workflow(name === "release-alpha" ? "alpha-publication" : name);
 function job(text: string, name: string) {
@@ -261,16 +262,21 @@ describe("release dependency and authority contracts", () => {
     expect(promote).toContain("needs: [guard, services, worker]");
     expect(promote).toContain("cli.ts --finalize");
   });
-  it("passes the worker promotion switch to every stage that decides whether cloud needs a qualified worker", () => {
+  it("allows the worker promotion switch only on cloud-enabled release channels", () => {
     const text = workflow("hosted-promotion");
-    for (const name of ["services", "promote"]) expect(job(text, name)).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
-    for (const name of ["release-alpha", "release-beta", "release"]) expect(job(publicationWorkflow(name), "publish")).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
+    for (const name of ["services", "promote"]) {
+      expect(job(text, name)).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
+      expect(job(text, name)).toContain("node scripts/release/channel-policy.mjs --github-env");
+    }
+    expect(job(publicationWorkflow("release-alpha"), "publish")).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
+    for (const name of ["release-beta", "release"]) expect(job(publicationWorkflow(name), "publish")).toContain("node scripts/release/channel-policy.mjs --github-env");
     expect(job(workflow("controlled-cutover"), "cutover")).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
   });
   it("takes the worker decision from qualified input comparison rather than the switch alone", () => {
     const guard = job(workflow("hosted-promotion"), "guard");
     expect(guard).toContain("worker_enabled: ${{ steps.guard.outputs.worker_enabled }}");
     expect(guard).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
+    expect(guard.indexOf("node scripts/release/channel-policy.mjs --github-env")).toBeLessThan(guard.indexOf("Refuse retired v3 worker promotion"));
     expect(guard).not.toContain("if [ \"$WORKER_SWITCH\" = enabled ]");
   });
   it.each([["release-alpha", "alpha"], ["release-beta", "beta"], ["release", "production"]])("publishes and anonymously verifies the cumulative ledger in %s", (name, channel) => {
@@ -422,8 +428,14 @@ esac
   });
   it("inherits the exact-source Preflight coverage instead of repeating its secret-free quality checks", () => {
     const preflight = workflow("preflight");
-    for (const command of ["typecheck:app", "typecheck:electron", "typecheck:packages", "lint", "test:git", "models:verify --strict", "check:cursor-asar", "check:licenses", "check:audit", "check:packaging-paths", "check:vite-env", "check:codex-pin", "check:electron-hardening", "check:deep-link-schemes"])
+    for (const command of ["typecheck:app", "typecheck:electron", "typecheck:packages", "lint", "test:git", "check:audit", "check:vite-env", "check:electron-hardening", "check:deep-link-schemes"])
       expect(preflight).toContain(`pnpm ${command}`);
+    expect(job(preflight, "runtime-qualification")).toContain("uses: ./.github/workflows/agent-runtime-qualification.yml");
+    expect(job(preflight, "test")).toContain("- runtime-qualification");
+    expect(job(preflight, "test")).toContain('"$RUNTIME_RESULT" != "success"');
+    expect(workflow("agent-runtime-qualification")).toContain("node scripts/agent-runtime/cli.mjs qualify");
+    for (const command of ["models:verify", "check:cursor-asar", "check:licenses", "check:packaging-paths", "check:codex-pin"])
+      expect(GATES).toContain(command);
     expect(preflight).toContain("scripts/release/tsconfig.json");
     expect(preflight).toContain("scripts/release/vitest.config.ts");
   });

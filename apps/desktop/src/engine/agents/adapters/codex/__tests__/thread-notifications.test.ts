@@ -5,6 +5,45 @@ import { CodexThreadNotifications } from "../thread-notifications";
 import type { SessionNotification } from "@zeros/protocol/agent-events";
 
 describe("Codex notification ownership", () => {
+  it("retains resolved subagent metadata through bookends, follow-ups, and old lifecycle replay", () => {
+    const t = setup();
+    const activity = { type: "subAgentActivity", id: "spawn", kind: "started", agentThreadId: "child", agentPath: "/root/research" };
+    const feed = (method: string, item: Record<string, unknown>) => t.router.handle(method, { threadId: "parent", item });
+    feed("item/started", activity);
+    const group = t.messages().find((message) => message.kind === "tool")!;
+    // Resolved fields can arrive only on the completed snapshot of the same activity.
+    feed("item/completed", { ...activity, model: "gpt-6.1-sol", reasoningEffort: "max" });
+    expect(t.messages().find((message) => message.id === group.id)).toMatchObject({
+      status: "in_progress", rawInput: { description: "Research", model: "gpt-6.1-sol", reasoningEffort: "max" },
+    });
+    feed("item/completed", { ...activity, id: "done", kind: "completed", model: null, reasoningEffort: null });
+    t.root.startTurn();
+    feed("item/completed", { ...activity, id: "followup", kind: "interacted", model: "gpt-6.1-terra", reasoningEffort: "high" });
+    feed("item/completed", { ...activity, model: "gpt-6.1-sol", reasoningEffort: "max" });
+    feed("item/completed", { ...activity, id: "done", kind: "completed", model: "gpt-6.1-sol", reasoningEffort: "max" });
+    const resumed = t.messages().find((message) => message.id === group.id)!;
+    expect(resumed).toMatchObject({ status: "in_progress", rawInput: { model: "gpt-6.1-terra", reasoningEffort: "high" } });
+    feed("item/completed", { ...activity, id: "stop", kind: "interrupted" });
+    const saved = JSON.parse(JSON.stringify(t.messages()));
+    expect(saved).toEqual([
+      expect.objectContaining({ id: group.id, status: "failed", rawInput: expect.objectContaining({ model: "gpt-6.1-terra", reasoningEffort: "high" }) }),
+    ]);
+  });
+
+  it("does not let an older activity bookend overwrite a newer child's metadata or lifetime", () => {
+    const t = setup();
+    const activity = { type: "subAgentActivity", id: "spawn", kind: "started", agentThreadId: "child", agentPath: "/root/research", model: "gpt-6.1-sol", reasoningEffort: "max" };
+    t.router.handle("item/started", { threadId: "parent", item: activity });
+    t.router.handle("item/started", { threadId: "parent", item: { ...activity, id: "followup", kind: "interacted", model: "gpt-6.1-terra", reasoningEffort: "high" } });
+    t.router.handle("item/completed", { threadId: "parent", item: activity });
+    t.router.handle("turn/started", { threadId: "child", turn: { id: "child-turn" } });
+    t.router.handle("turn/completed", { threadId: "child", turn: { id: "child-turn", status: "completed" } });
+    t.router.handle("item/completed", { threadId: "parent", item: { ...activity, id: "followup", kind: "interacted", model: null, reasoningEffort: null } });
+    expect(t.messages().filter((message) => message.kind === "tool")).toEqual([
+      expect.objectContaining({ status: "completed", rawInput: expect.objectContaining({ model: "gpt-6.1-terra", reasoningEffort: "high" }) }),
+    ]);
+  });
+
   it("buffers review output until its acknowledgement while children keep streaming", () => {
     const t = setup();
     t.router.handle("turn/started", { threadId: "parent", turn: { id: "old" } });

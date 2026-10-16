@@ -1,4 +1,5 @@
 import {resolveCloudRuntime} from "../agents/containment/cloud-runtime-root.mjs";
+import {cloudRuntimeAssetEnvironment} from "../agents/containment/cloud-runtime-assets.mjs";
 import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
@@ -104,6 +105,7 @@ export class CloudRuntimeHumanServices {
   }
 
   private async openSsh(): Promise<CloudRuntimeServiceStream> {
+    const runtime = resolveCloudRuntime();
     const launch = cloudSshWorkerLaunch(this.worker);
     const info = lstatSync(launch.script);
     if (!info.isFile() || info.isSymbolicLink() || !isCloudDeploymentOwner(launch.script, info.uid) || (info.mode & 0o022) !== 0) throw new Error('Cloud SSH worker is unavailable');
@@ -113,7 +115,7 @@ export class CloudRuntimeHumanServices {
     const stream = Duplex.from({readable:outgoing,writable:incoming});
     const peer = Duplex.from({readable:incoming,writable:outgoing});
     const session = createCloudSshSession(peer, {cwd:'/srv/zeros/workspace',sftpServer:'/usr/lib/openssh/sftp-server',
-      env:{HOME:'/srv/zeros/home/agent',PATH:`${resolveCloudRuntime().binRoot}:/usr/local/bin:/usr/bin:/bin`,
+      env:{...cloudRuntimeAssetEnvironment(runtime),HOME:'/srv/zeros/home/agent',PATH:`${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,
         LANG:'C.UTF-8',USER:'zeros-engine',LOGNAME:'zeros-engine',SHELL:'/bin/bash'},
       spawnProcess:(command,args,options)=>owned.spawnProcess(command,args,options),
       spawnPty:(command,args,options)=>owned.spawnPty(command,args,options),

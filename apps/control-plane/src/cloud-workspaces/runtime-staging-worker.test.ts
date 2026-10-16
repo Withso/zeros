@@ -5,7 +5,7 @@ import type { RuntimeStagePlan } from "./runtime-staging-store.js";
 import type { RuntimeUpdateResult } from "./runtime-update-runner.js";
 
 afterEach(() => vi.useRealTimers());
-function fixture() {
+function fixture(intervalMs: number | null = 5_000) {
   vi.useFakeTimers();
   const workspaceId = randomUUID(), organizationId = randomUUID(), transitionId = randomUUID();
   const sourceEngineInstanceId = randomUUID();
@@ -43,12 +43,35 @@ function fixture() {
   const run = vi.fn(async (_resource: string, _input: unknown, _signal: AbortSignal) => result);
   const warn = vi.fn();
   const worker = new CloudRuntimeStagingWorker({ store, transitions, artifacts, run, workerId: claim.workerId,
-    logger: { warn }, intervalMs: 5_000, concurrency: 2 });
+    logger: { warn }, ...(intervalMs === null ? {} : { intervalMs }), concurrency: 2 });
   return { worker, store, transitions, artifacts, run, warn, claim, plan, result, scope };
 }
 async function drain() { await vi.advanceTimersByTimeAsync(0); }
 
 describe("qualification-driven runtime staging", () => {
+  it("uses a 30–60 second fallback while idle and still accepts immediate hints", async () => {
+    const f = fixture(null);
+    f.store.discover.mockResolvedValue({ items: [], cursor: null });
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    const stop = f.worker.start();
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(f.store.discover).toHaveBeenCalledTimes(3);
+      f.worker.notify(); await drain();
+      expect(f.store.discover).toHaveBeenCalledTimes(4);
+    } finally { await stop(); random.mockRestore(); }
+  });
+  it("retries a failed stage at its five-second deadline despite the quiet fallback", async () => {
+    const f = fixture(null);
+    f.run.mockRejectedValueOnce(new Error("transient fixture"));
+    f.store.pending.mockResolvedValue({ items: [f.scope], cursor: null });
+    const stop = f.worker.start();
+    try {
+      await drain(); expect(f.run).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(4_999); expect(f.run).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1); expect(f.run).toHaveBeenCalledTimes(2);
+    } finally { await stop(); }
+  });
   it("stages a busy source through the existing installer without activation, then releases the claim", async () => {
     const f = fixture(); const stop = f.worker.start(); await drain();
     expect(f.run).toHaveBeenCalledOnce();

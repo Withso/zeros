@@ -1,11 +1,15 @@
-#!/usr/bin/python3 -I
+#!/usr/bin/python3 -IB
 """Base-owned Cloud Computer helpers. No shell text or token enters an argv.
 
 Install recipes are trusted administrator root code (D3), not an adversarial
 root sandbox. Verification code and its hashes belong to the approved base;
 the control plane holds the baseline digest across the recipe execution.
 """
+import sys
+sys.dont_write_bytecode = True
+
 import codecs
+import contextlib
 import datetime
 import fcntl
 import hashlib
@@ -15,18 +19,15 @@ import os
 from pathlib import Path
 import re
 import selectors
-import shutil
 import signal
 import socket
 import stat
 import struct
 import subprocess
-import sys
 import threading
 import time
 import uuid
 
-sys.dont_write_bytecode = True
 MAX_INPUT = 262_144
 MAX_OUTPUT = 65_536
 # B7 bounds the last diagnostic line to 4096 bytes. Reserve it and both newlines
@@ -36,6 +37,9 @@ MAX_LOG = 1_048_576
 LINE_LIMIT = 8192
 REDACTED = "[redacted]"
 ENVIRONMENT = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
+PRIVATE_HOME_PATHS = (".ssh", ".aws", ".azure", ".docker", ".kube", ".cache", ".local/state", ".local/share/keyrings", ".npm/_logs",
+                      ".config/git/credentials", ".config/gh", ".config/gcloud", ".config/cursor", ".claude", ".codex", ".cursor",
+                      ".git-credentials", ".netrc", ".npmrc", ".pypirc", ".bash_history", ".zsh_history", ".python_history", ".gitconfig")
 
 
 class Failure(Exception):
@@ -305,7 +309,7 @@ class SystemHost:
                 "--property=ReadOnlyPaths=/opt/zeros-bootstrap", "--property=ProtectControlGroups=yes",
                 "--property=WorkingDirectory=/", "--setenv=LANG=C.UTF-8", "--setenv=PATH=" + ENVIRONMENT["PATH"],
                 "/usr/bin/unshare", "--mount", "--propagation", "private", "--",
-                "/usr/bin/python3", "-I", "/opt/zeros-bootstrap/computer-build.py", "install-shell"]
+                "/usr/bin/python3", "-I", "-B", "/opt/zeros-bootstrap/computer-build.py", "install-shell"]
 
     def drain_install(self, identity):
         unit = "zeros-computer-install-" + identity + ".service"
@@ -325,10 +329,10 @@ class SystemHost:
         code, _ = bounded_command(["/usr/bin/systemctl", "stop", "zeros-host.service"], timeout=30)
         require(code == 0, "sanitation_failed")
 
-    def clear_journal(self):
-        code, _ = bounded_command(["/usr/bin/journalctl", "--rotate"], timeout=15)
-        require(code == 0, "sanitation_failed")
-        code, _ = bounded_command(["/usr/bin/journalctl", "--vacuum-size=1"], timeout=15)
+    def sync_journal(self):
+        # Vacuum/rotation can hide ancestor entries before the overwrite walk.
+        # Keep every visible journal file available for in-place clearing.
+        code, _ = bounded_command(["/usr/bin/journalctl", "--sync"], timeout=15)
         require(code == 0, "sanitation_failed")
 
 
@@ -430,10 +434,15 @@ class ComputerBuild:
         for path in (target / ".git", target / ".git/config"):
             require(not path.is_symlink(), "repository_metadata")
         config = ("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n"
+                  "\thooksPath = /dev/null\n"
                   "[remote \"origin\"]\n\turl = https://github.com/" + repository["owner"] + "/" + repository["name"] + ".git\n"
                   "\tfetch = +refs/heads/*:refs/remotes/origin/*\n")
         atomic(target / ".git/config", config.encode(), 0o644)
-        self.remove(target / ".git/hooks")
+        # Persist replacements for visible hooks. The local config also
+        # disables inherited hook names already deleted before this live walk;
+        # helper-only -c flags cannot protect ordinary Git in a restored clone.
+        hooks = "/" + str((target / ".git/hooks").relative_to(self.root))
+        self.empty_path(hooks, kind="directory", create=True, mode=0o755)
 
     def repository_tree(self, target):
         require(target.is_dir() and not target.is_symlink(), "repository_metadata")
@@ -514,6 +523,27 @@ class ComputerBuild:
             manifest.append(self.verify_repository(target, expected))
         return {"schema": "zeros.computer-repositories/v1", "buildId": value["buildId"], "repositories": manifest}
 
+    def install_environment(self):
+        # The fixed base helper selects the installed physical tree; neither
+        # inherited environment nor the mutable current facade reaches bash.
+        spec = importlib.util.spec_from_file_location("zeros_bootstrap", self.path("/opt/zeros-bootstrap/bootstrap.py"))
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        app = bootstrap.Bootstrap(root=self.root, uid=self.uid, gid=self.gid)
+        try:
+            app.base()
+            with app.lock("runtime-publication.lock"):
+                runtime_id = app.current()
+                require(type(runtime_id) is str and re.fullmatch(r"r1-[a-f0-9]{64}", runtime_id), "tcb_modified")
+                app.verify_runtime(runtime_id, full=True)
+        except bootstrap.Failure:
+            raise Failure("tcb_modified") from None
+        runtime = self.path("/opt/zeros-infra/" + runtime_id)
+        return {**ENVIRONMENT, "PATH": str(runtime / "bin") + ":" + ENVIRONMENT["PATH"],
+                "GIT_CONFIG_SYSTEM": str(runtime / "worker/gitconfig"),
+                "FONTCONFIG_FILE": str(runtime / "worker/design-fonts/fonts.conf"),
+                "FONTCONFIG_PATH": str(runtime / "worker/design-fonts")}
+
     def install_shell(self):
         # Internal systemd entry, never an SSH command or a JSON-input helper.
         # unshare makes all propagation private before any bind is installed.
@@ -535,7 +565,7 @@ class ComputerBuild:
                                        "tmpfs", str(target)], timeout=10)
             require(code == 0, "install_namespace")
         os.chdir(target)
-        os.execve("/usr/bin/bash", ["/usr/bin/bash", "-euo", "pipefail"], ENVIRONMENT)
+        os.execve("/usr/bin/bash", ["/usr/bin/bash", "-euo", "pipefail"], self.install_environment())
 
     def run_install(self, value):
         shape(value, ("schema", "buildId", "workerFence", "action", "after"), ("script", "timeoutSeconds", "redactions"))
@@ -610,11 +640,14 @@ class ComputerBuild:
         else: raise Failure("tcb_modified")
         return result
 
-    def protected_snapshot(self, build_id):
+    def protected_snapshot(self, build_id, optional_systemd):
         paths = {"/opt/zeros-bootstrap", "/etc/zeros", "/etc/sudoers", "/etc/sudoers.d", "/etc/apparmor.d/zeros-cloud-engine",
                  "/etc/apparmor.d/local/zeros-cloud-engine", "/etc/tmpfiles.d/zeros.conf", "/usr/lib/tmpfiles.d/zeros.conf",
                  "/run/tmpfiles.d/zeros.conf", "/opt/zeros-runtime", "/etc/nsswitch.conf"}
-        for base in ("/etc/systemd/system", "/run/systemd/system", "/run/systemd/transient", "/usr/local/lib/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"):
+        # The base's descriptor walk already proved the qualified absence of
+        # zeros-* and service.d beneath this one optional stock surface.
+        # Every actual protected file still goes through strict snapshot().
+        for base in ("/etc/systemd/system", "/run/systemd/system", "/run/systemd/transient", "/usr/lib/systemd/system", "/lib/systemd/system"):
             paths.add(base + "/service.d")
             root = self.path(base)
             if root.is_dir():
@@ -629,8 +662,9 @@ class ComputerBuild:
         epoch = self.path("/opt/zeros/disk-epoch")
         if os.path.lexists(epoch):
             metadata = self.snapshot("/opt/zeros/disk-epoch")
+            raw = read_file(epoch, 32, owner=self.uid)
             require(metadata["mode"] == 0o600 and "sha256" in metadata
-                    and re.fullmatch(rb"[0-9]{1,18}\n", read_file(epoch, 32, owner=self.uid)), "tcb_modified")
+                    and (raw == b"" or re.fullmatch(rb"[0-9]{1,18}\n", raw)), "tcb_modified")
         # Epoch values and session payloads are generated on each boot and are
         # scrubbed before capture. Their protected parents/pointers still count.
         snapshot["/opt/zeros"] = {"directory": self.snapshot("/opt/zeros"),
@@ -675,6 +709,9 @@ class ComputerBuild:
                 dependencies.update(re.findall(r"/[^\s()]+", output.decode()))
             for path in sorted(dependencies):
                 snapshot[path] = self.snapshot(path)
+        # Revalidate after runtime/dependency hashing, immediately before the
+        # external digest. A cached observation from base() is not sufficient.
+        snapshot["/usr/local/lib/systemd/system"] = {"qualifiedAbsence": optional_systemd()}
         return snapshot
 
     def verify_tcb(self, value):
@@ -698,7 +735,8 @@ class ComputerBuild:
         bootstrap = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(bootstrap)
         app = bootstrap.Bootstrap(root=self.root, uid=self.uid, gid=self.gid)
-        app.base()
+        try: app.base()
+        except bootstrap.Failure: raise Failure("tcb_modified") from None
         require(app.current() == value["runtimeId"], "tcb_modified")
         app.verify_runtime(value["runtimeId"], full=True)
         runtime = self.path("/opt/zeros-infra/" + value["runtimeId"])
@@ -706,22 +744,135 @@ class ComputerBuild:
             for name in files:
                 path = Path(parent) / name
                 require("security.capability" not in os.listxattr(path, follow_symlinks=False), "tcb_modified")
-        digest = sha(packed({"baseCompatibilityId": value["baseCompatibilityId"], "runtimeId": value["runtimeId"], "protected": self.protected_snapshot(value["buildId"])}))
+        def optional_systemd():
+            try: return app.optional_systemd_absence(app.optional_systemd_policy)
+            except bootstrap.Failure: raise Failure("tcb_modified") from None
+        digest = sha(packed({"baseCompatibilityId": value["baseCompatibilityId"], "runtimeId": value["runtimeId"],
+                             "protected": self.protected_snapshot(value["buildId"], optional_systemd)}))
         if value["action"] == "verify": require(digest == value.get("protectedContractDigest"), "tcb_modified")
         return {"schema": "zeros.computer-tcb/v1", "buildId": value["buildId"], "runtimeId": value["runtimeId"],
                 "baseCompatibilityId": value["baseCompatibilityId"], "protectedContractDigest": digest}
 
-    def remove(self, target):
-        if target.is_symlink() or target.is_file(): target.unlink()
-        elif target.is_dir(): shutil.rmtree(target)
+    def empty_path(self, path, *, kind=None, create=False, mode=0o600, expected=None, keep=()):
+        """Persist an empty replacement; deletion may retain ancestor bytes.
+
+        Pin each component, refuse aliases/special files, and validate the
+        opened inode before ftruncate. No O_TRUNC, unlink or directory rename.
+        Existing directory/file ownership, modes and inode identity survive.
+        """
+        target = self.path(path)
+        require(target != self.root, "sanitation_failed")
+        watches, count = [], 0
+
+        def identity(info):
+            return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
+
+        def validate():
+            for parent, name, fd, before in watches:
+                require(identity(os.fstat(fd)) == before and
+                        identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == before, "sanitation_failed")
+
+        def watch(stack, parent, name, flags):
+            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+            stack.callback(os.close, fd)
+            require(identity(before) == identity(os.fstat(fd)), "sanitation_failed")
+            watches.append((parent, name, fd, identity(before)))
+            return fd
+
+        def clear(parent, name, depth=0, excluded=(), required=None):
+            nonlocal count
+            count += 1
+            require(count <= 262_144 and depth <= 128, "sanitation_failed")
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            directory = stat.S_ISDIR(info.st_mode)
+            require(directory or stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "sanitation_failed")
+            require(depth != 0 or kind is None or directory == (kind == "directory"), "sanitation_failed")
+            if required:
+                require((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == required, "sanitation_failed")
+            with contextlib.ExitStack() as stack:
+                fd = watch(stack, parent, name, os.O_RDONLY | os.O_DIRECTORY if directory else os.O_WRONLY)
+                try:
+                    opened = os.fstat(fd)
+                    require(identity(info) == identity(opened) and (directory or opened.st_nlink == 1), "sanitation_failed")
+                    validate()
+                    if directory:
+                        names = sorted(os.listdir(fd))
+                        for child in names:
+                            if child not in excluded: clear(fd, child, depth + 1)
+                        require(sorted(os.listdir(fd)) == names, "sanitation_failed")
+                    else:
+                        os.ftruncate(fd, 0)
+                        require(os.fstat(fd).st_size == 0 and os.fstat(fd).st_nlink == 1, "sanitation_failed")
+                    os.fsync(fd)
+                    validate()
+                finally:
+                    watches.pop()
+
+        try:
+            with contextlib.ExitStack() as stack:
+                parent = watch(stack, None, self.root, os.O_RDONLY | os.O_DIRECTORY)
+                parts = target.relative_to(self.root).parts
+                for name in parts[:-1]:
+                    try:
+                        os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    except FileNotFoundError:
+                        if not create: return
+                        os.mkdir(name, 0o755, dir_fd=parent)
+                        os.fsync(parent)
+                    parent = watch(stack, parent, name, os.O_RDONLY | os.O_DIRECTORY)
+                name = parts[-1]
+                try:
+                    os.stat(name, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    if not create: return
+                    validate()
+                    if kind == "directory":
+                        os.mkdir(name, mode, dir_fd=parent)
+                    else:
+                        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                                     mode, dir_fd=parent)
+                        try:
+                            info = os.fstat(fd)
+                            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == self.uid
+                                    and info.st_gid == self.gid, "sanitation_failed")
+                            os.fchmod(fd, mode)
+                            os.fsync(fd)
+                        finally: os.close(fd)
+                    os.fsync(parent)
+                clear(parent, name, excluded=keep, required=expected)
+                os.fsync(parent)
+                validate()
+        except OSError:
+            raise Failure("sanitation_failed") from None
 
     def clear_directory(self, path, keep=()):
-        target = self.path(path)
-        if not os.path.lexists(target): return
-        self.ancestry(target)
-        require(target.is_dir() and not target.is_symlink(), "sanitation_failed")
-        for child in target.iterdir():
-            if child.name not in keep: self.remove(child)
+        self.empty_path(path, kind="directory", keep=keep)
+
+    def empty_private_state(self):
+        # Check generated-file metadata before the general session-tree walk
+        # can touch those same bytes. Missing names still need replacements.
+        for path in ("/opt/zeros/disk-epoch", "/opt/zeros/sessions/boot.json", "/opt/zeros/sessions/reconciliation.json",
+                     "/run/zeros/active-runtime.json"):
+            self.empty_path(path, kind="file", create=True, expected=(self.uid, self.gid, 0o600))
+        # Logical paths are already bound to the qualified persistent sources.
+        # Repositories are the only content exception within the files tree.
+        self.clear_directory("/srv/zeros/state", ("workspaces",))
+        self.clear_directory("/srv/zeros/home", ("agent", "capture"))
+        self.clear_directory("/opt/zeros/sessions", ("boot.json", "reconciliation.json"))
+        for path in ("/srv/zeros/managed-settings", "/srv/zeros/setup",
+                     "/srv/zeros/state/workspaces", "/srv/zeros/home/agent", "/srv/zeros/home/capture",
+                     "/srv/zeros/log", "/var/log", "/run/log/journal"):
+            self.clear_directory(path)
+        self.clear_directory("/srv/zeros/files", ("repos",))
+        for home in ("/root", "/home/user"):
+            for name in PRIVATE_HOME_PATHS:
+                self.empty_path(home + "/" + name)
+            for target in self.path(home).glob(".env*"):
+                self.empty_path("/" + str(target.relative_to(self.root)))
+        self.empty_path("/run/zeros/computer-build", kind="directory", create=True, mode=0o700)
+        self.empty_path("/var/lib/systemd/random-seed", kind="file", create=True)
+        self.empty_path("/var/lib/systemd/timesync/clock", kind="file", create=True, mode=0o644)
 
     def sanitize(self, value):
         shape(value, ("schema", "buildId", "workerFence", "manifest", "manifestSha256"))
@@ -742,37 +893,8 @@ class ComputerBuild:
             self.repository_parent("/srv/zeros/files/repos/" + repository["owner"])
             require(self.verify_repository(target, repository) == repository, "repository_metadata")
         self.host.stop_host()
-        self.host.clear_journal()
-        # Keep B4's directory inodes, ownership and modes. Boat loses data on
-        # directory rename, and these private roots are used before setup.
-        self.clear_directory("/srv/zeros/state", ("workspaces",))
-        self.clear_directory("/srv/zeros/home", ("agent", "capture"))
-        self.clear_directory("/srv/zeros/files", ("repos",))
-        self.clear_directory("/srv/zeros/managed-settings", ("settings.managed.toml",))
-        managed = self.path("/srv/zeros/managed-settings/settings.managed.toml")
-        if os.path.lexists(managed):
-            metadata = managed.lstat()
-            require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1, "sanitation_failed")
-            fd = os.open(managed, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC)
-            try: os.fsync(fd)
-            finally: os.close(fd)
-        for path in ("/srv/zeros/setup", "/srv/zeros/log", "/srv/zeros/state/workspaces", "/srv/zeros/home/agent",
-                     "/srv/zeros/home/capture", "/opt/zeros/sessions", "/var/log", "/run/log/journal"):
-            self.clear_directory(path)
-        private = (".ssh", ".aws", ".azure", ".docker", ".kube", ".cache", ".local/state", ".local/share/keyrings", ".npm/_logs",
-                   ".config/git/credentials", ".config/gh", ".config/gcloud", ".config/cursor", ".claude", ".codex", ".cursor",
-                   ".git-credentials", ".netrc", ".npmrc", ".pypirc", ".bash_history", ".zsh_history", ".python_history", ".gitconfig")
-        for home in ("/root", "/home/user"):
-            for name in private:
-                target = self.path(home + "/" + name)
-                self.ancestry(target)
-                self.remove(target)
-            for target in self.path(home).glob(".env*"): self.remove(target)
-        for path in ("/opt/zeros/disk-epoch", "/run/zeros/active-runtime.json", "/run/zeros/computer-build",
-                     "/var/lib/systemd/random-seed", "/var/lib/systemd/timesync/clock"):
-            target = self.path(path)
-            self.ancestry(target)
-            self.remove(target)
+        self.host.sync_journal()
+        self.empty_private_state()
         machine = self.path("/etc/machine-id")
         if machine.exists():
             require(not machine.is_symlink(), "sanitation_failed")

@@ -1,11 +1,14 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type pg from "pg";
+import { postgresNotificationSubscription, type PostgresNotificationSubscription } from "./postgres-notifications.js";
 
 import type { AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
-import { DATABASE_CONNECTION_LIFETIME_SECONDS, withSystemTx, type Tx } from "./db.js";
+import { withSystemTx, type Tx } from "./db.js";
 import {publishCloudWorkspaceDirectoryChanges} from "./cloud-workspaces/directory-events.js";
+import { CloudWorkerScheduler } from "./cloud-workspaces/worker-scheduler.js";
+import { readCloudWorkerNextDelay } from "./cloud-workspaces/worker-deadlines.js";
 
 const EVENT_PAGE_SIZE = 100;
 const HEARTBEAT_MS = 25_000;
@@ -24,7 +27,7 @@ export function publishPendingSecurityEvents(pool:pg.Pool):Promise<number> {
 async function publishSecurityEvents(pool: pg.Pool): Promise<number> {
   await publishCloudWorkspaceDirectoryChanges(pool);
   return withSystemTx(pool, async (tx) => {
-    await tx.query("SELECT pg_advisory_xact_lock(1936024437, 1702258030)");
+    await tx.query("SELECT pg_advisory_xact_lock(1936024437, 1702258030) /*lock_purpose='security-event-publish'*/");
     await tx.query(`WITH expired AS (
       SELECT sequence FROM security_events WHERE expires_at <= now()
       ORDER BY expires_at, sequence LIMIT 1000 FOR UPDATE SKIP LOCKED
@@ -46,13 +49,25 @@ async function publishSecurityEvents(pool: pg.Pool): Promise<number> {
 /** Publication and erasure cleanup progress even with no connected clients.
  * One in-flight batch per process/pool; DB locks fence multiple API replicas. */
 export function startSecurityEventPublisher(pool:pg.Pool,logger:Pick<Console,"error">=console):()=>Promise<void> {
-  let stopped=false,active:Promise<void>|null=null,timer:NodeJS.Timeout|undefined;
-  const tick=()=>{
-    if(stopped)return;
-    active=publishPendingSecurityEvents(pool).then(()=>{}).catch(()=>logger.error("[security-events] publication failed"))
-      .finally(()=>{active=null;if(!stopped){timer=setTimeout(tick,1000);timer.unref();}});
-  };
-  tick();return async()=>{stopped=true;clearTimeout(timer);await active;};
+  return new SecurityEventPublisher(pool, logger).start();
+}
+
+export class SecurityEventPublisher {
+  private readonly scheduler: CloudWorkerScheduler;
+  private stopped = false;
+  constructor(pool: pg.Pool, logger: Pick<Console, "error"> = console, options: { intervalMs?: number } = {}) {
+    this.scheduler = new CloudWorkerScheduler(options.intervalMs ?? 60_000, async () => {
+      for (let batch = 0; batch < 20 && !this.stopped; batch++) if (!await publishPendingSecurityEvents(pool)) break;
+    }, () => logger.error("[security-events] publication failed"), () => readCloudWorkerNextDelay(pool, "security"),
+    { readBeforeRun: true, jitter: options.intervalMs === undefined });
+  }
+
+  notify(): void { this.scheduler.notify(); }
+
+  start(): () => Promise<void> {
+    this.scheduler.start();
+    return async () => { this.stopped = true; await this.scheduler.stop(); };
+  }
 }
 
 export type SecurityEventWire = {
@@ -284,67 +299,22 @@ type Wake = () => void;
 /** One dedicated Postgres LISTEN connection per control-plane process. The
  * notification is only a wake-up; every subscriber replays durable rows. */
 export class PostgresSecurityEventBroker {
-  private client: pg.PoolClient | null = null;
-  private starting: Promise<void> | null = null;
-  private disconnect: (() => void) | null = null;
+  private readonly listener: PostgresNotificationSubscription;
   private readonly subscribers = new Set<Wake>();
   private stopped = false;
   private wakeRevision = 0;
 
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(pool: pg.Pool) {
+    this.listener = postgresNotificationSubscription(pool, {
+      channels: ["zeros_security_event"],
+      reconnect: false,
+      onNotification: () => this.wakeSubscribers(),
+      onDisconnect: () => this.wakeSubscribers(),
+    });
+  }
 
   async start(): Promise<void> {
-    if (this.stopped || this.client) return;
-    if (this.starting) return this.starting;
-    this.starting = (async () => {
-      const client = await this.pool.connect();
-      if (this.stopped) {
-        client.release(true);
-        return;
-      }
-      let disposed = false;
-      let retirement: ReturnType<typeof setTimeout> | undefined;
-      const notify = () => this.wakeSubscribers();
-      const disconnect = () => {
-        if (disposed) return;
-        disposed = true;
-        clearTimeout(retirement);
-        client.removeListener("notification", notify);
-        if (this.client === client) {
-          this.client = null;
-          this.disconnect = null;
-        }
-        // Destroy instead of returning a session with LISTEN state to the
-        // request pool. Retain the idempotent error handler until pg closes it.
-        client.release(true);
-        this.wakeSubscribers();
-      };
-      client.on("notification", notify);
-      client.on("error", disconnect);
-      client.on("end", disconnect);
-      try {
-        await client.query("LISTEN zeros_security_event");
-        if (this.stopped || disposed) {
-          disconnect();
-          return;
-        }
-        this.client = client;
-        this.disconnect = disconnect;
-        // Pool lifetime eviction waits for release. LISTEN holds its checkout,
-        // so it needs its own retirement; clients reconnect and replay rows.
-        retirement = setTimeout(
-          disconnect,
-          DATABASE_CONNECTION_LIFETIME_SECONDS * 1_000,
-        );
-        retirement.unref();
-      } catch (error) {
-        disconnect();
-        throw error;
-      }
-    })().finally(() => {
-      this.starting = null;
-    });
-    return this.starting;
+    if (!this.stopped) await this.listener.start();
   }
 
   subscribe(wake: Wake): () => void {
@@ -353,7 +323,7 @@ export class PostgresSecurityEventBroker {
   }
 
   healthy(): boolean {
-    return this.client !== null;
+    return this.listener.healthy();
   }
 
   revision(): number {
@@ -372,10 +342,10 @@ export class PostgresSecurityEventBroker {
   }
 
   async stop(): Promise<void> {
+    if (this.stopped) return;
     this.stopped = true;
-    await this.starting?.catch(() => {});
-    if (this.disconnect) this.disconnect();
-    else this.wakeSubscribers();
+    await this.listener.stop();
+    this.wakeSubscribers();
   }
 }
 

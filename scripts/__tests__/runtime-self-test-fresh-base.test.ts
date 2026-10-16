@@ -319,11 +319,23 @@ it.skipIf(actualPlatform !== "linux").each(["fresh", "foreign-host", "changed-ho
       "worker/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs", "worker/dist-engine/cli.js",
       "worker/apps/desktop/src/engine/zeros-engine.ts", "worker/package.json"]) file(`${root}/${name}`, "fixture");
     for (const name of ["node", "start-engine.sh", "cloud-engine-namespace"]) actual.chmodSync(mapped(`${root}/bin/${name}`), 0o700);
+    const fonts = ["fonts-noto-color-emoji", "fonts-unifont", "xfonts-cyrillic", "xfonts-scalable",
+      "fonts-ipafont-gothic", "fonts-wqy-zenhei", "fonts-tlwg-loma-otf", "fonts-freefont-ttf"]
+      .map(name => `worker/design-fonts/${name}/fixture.ttf`);
+    for (const name of ["bin/git-lfs", "worker/gitconfig", "worker/design-fonts/fonts.conf", ...fonts]) file(`${root}/${name}`, "fixture");
+    actual.chmodSync(mapped(`${root}/bin/git-lfs`), 0o555);
+    file(`${root}/worker/runtime-system-assets.json`, JSON.stringify({ schema: "zeros.runtime-system-assets/v1",
+      gitLfs: "bin/git-lfs", gitConfig: "worker/gitconfig", fontConfig: "worker/design-fonts/fonts.conf", fonts }));
     const sandbox = path.resolve("scripts/cloud-workspace-validation/sandbox");
     // Runtime staging copies the helper bytes, including source-tree links.
     actual.cpSync(sandbox, mapped(`${root}/lib/zeros`), { recursive: true, dereference: true });
-    for (const entry of actual.readdirSync(mapped(`${root}/lib/zeros`)))
-      if (actual.lstatSync(mapped(`${root}/lib/zeros/${entry}`)).isFile()) actual.chmodSync(mapped(`${root}/lib/zeros/${entry}`), 0o555);
+    for (const entry of actual.readdirSync(mapped(`${root}/lib/zeros`))) {
+      const target = mapped(`${root}/lib/zeros/${entry}`);
+      if (actual.lstatSync(target).isSymbolicLink()) {
+        const bytes = actual.readFileSync(target);
+        actual.unlinkSync(target); actual.writeFileSync(target, bytes, { mode: 0o555 });
+      } else if (actual.lstatSync(target).isFile()) actual.chmodSync(target, 0o555);
+    }
     for (const name of ["better-sqlite3", "node-pty", "@anthropic-ai/claude-agent-sdk",
       "@anthropic-ai/claude-agent-sdk-linux-x64/claude", "@openai/codex/package.json", "@openai/codex-linux-x64/package.json",
       "@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex", "@cursor/sdk", "@cursor/sdk-linux-x64/package.json", "tsx/cjs"])

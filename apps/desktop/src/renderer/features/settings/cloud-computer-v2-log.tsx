@@ -112,7 +112,7 @@ export function CloudComputerV2Log({
         aria-label={`Build log for version ${version}`}
         aria-live="off"
         tabIndex={enabled ? 0 : -1}
-        className="bg-bg2 text-fg2 max-h-80 overflow-auto rounded-md p-3 font-mono text-xs break-words whitespace-pre-wrap"
+        className="bg-bg2 text-fg2 max-h-80 select-text overflow-auto rounded-md p-3 font-mono text-xs break-words whitespace-pre-wrap"
       >
         {text ||
           (log.loading

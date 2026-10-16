@@ -66,6 +66,7 @@ describe("Codex cloud native authority",()=>{
     expect(config["shell_environment_policy.inherit"]).toBe("all");
     expect(config["shell_environment_policy.include_only"]).toEqual(expect.arrayContaining([
       "HOME","CODEX_HOME","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_DATA_HOME","XDG_STATE_HOME",
+      "GIT_CONFIG_SYSTEM","GIT_EXEC_PATH","FONTCONFIG_FILE","FONTCONFIG_PATH",
     ]));
     expect(config["shell_environment_policy.include_only"]).not.toContain("OPENAI_API_KEY");
   });
@@ -110,16 +111,18 @@ describe("Codex cloud native authority",()=>{
     expect(cloudCodexRequest(execution,"env","skills/list",{...hostile,forceReload:true})).toEqual({cwds:[cwd],forceReload:true});
   });
   it("limits shell inheritance to admitted names and managed paths, including an empty org environment",()=>{
-    for(const values of [{},{ORG_SECRET:"synthetic-env-value",OPENAI_API_KEY:"synthetic-provider-value"}]){
+    for(const values of [{},{ORG_SECRET:"synthetic-env-value",OPENAI_API_KEY:"synthetic-provider-value",
+      FONTCONFIG_FILE:"/recipe/fontconfig-trap",FONTCONFIG_PATH:"/recipe/fonts-trap"}]){
       const execution=context();Object.assign(execution,{environment:{values}});
       const config=cloudCodexConfig(execution);
       expect(config).toMatchObject({"shell_environment_policy.inherit":"all","shell_environment_policy.ignore_default_excludes":true,
-        "shell_environment_policy.include_only":["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME","CODEX_HOME","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_DATA_HOME","XDG_STATE_HOME",...(values.ORG_SECRET?["ORG_SECRET"]:[])]});
+        "shell_environment_policy.include_only":["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME","CODEX_HOME","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_DATA_HOME","XDG_STATE_HOME","GIT_CONFIG_SYSTEM","GIT_EXEC_PATH","FONTCONFIG_FILE","FONTCONFIG_PATH",...(values.ORG_SECRET?["ORG_SECRET"]:[])]});
       for(const method of ["thread/start","thread/resume"]){
-        expect(cloudCodexRequest(execution,"env",method,{threadId:"native",config:{"shell_environment_policy.include_only":["*"],"shell_environment_policy.set":{OPENAI_API_KEY:"injected"}}}))
+        expect(cloudCodexRequest(execution,"env",method,{threadId:"native",config:{"shell_environment_policy.include_only":["*"],"shell_environment_policy.set":{OPENAI_API_KEY:"injected",GIT_CONFIG_SYSTEM:"/caller/gitconfig-trap",FONTCONFIG_FILE:"/caller/fontconfig-trap",FONTCONFIG_PATH:"/caller/fonts-trap"}}}))
           .toMatchObject({config});
       }
       expect(JSON.stringify(config)).not.toContain("synthetic-");
+      expect(JSON.stringify(config)).not.toContain("/recipe/");
       expect(config).not.toHaveProperty("shell_environment_policy.set");
     }
   });

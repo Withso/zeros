@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
+import { ClaudeStreamTranslator } from "../../../../engine/agents/adapters/claude/translator";
 import { partitionTurnSequence } from "../turn-partition";
-import { turnFailureForCard } from "../turn-failure";
+import { turnFailureForCard, turnFailureRecovered } from "../turn-failure";
+import { latestAuthenticationRecoveryTurn } from "../auth-prompt-recovery";
 
 const turnId = "prompt";
 const tool: AgentMessage = {
@@ -35,6 +37,55 @@ const displayed = (
   );
 
 describe("turn failure presentation", () => {
+  it("retires earlier retry failures when the same turn resumes real work", () => {
+    const retryFailure = { ...terminal, turnFailure: { turnId, kind: "session-expired" } };
+    const answer: AgentMessage = { id: "recovered-answer", kind: "text", role: "agent", phase: "final_answer", text: "Continued successfully.", createdAt: 4 };
+    const events = [retryFailure, { ...retryFailure, id: "second-attempt" }, { ...tool, createdAt: 3 }, answer];
+    expect(displayed(events, turnId, true).some(event => event.kind === "error_notice")).toBe(false);
+    // Persisted turn metadata can still describe the failed attempt while a
+    // background reply continues the same user turn.
+    expect(turnFailureForCard({ events, turnId, status: "failed" })).toBeNull();
+    expect(turnFailureForCard({ events: JSON.parse(JSON.stringify(events)), turnId })).toBeNull();
+  });
+
+  it("does not mistake child activity or provider telemetry for successful recovery", () => {
+    const feedback: AgentMessage = { id: "claude-feedback-usage", kind: "text", role: "agent", phase: "commentary", text: "Claude is nearing its usage limit.", createdAt: 3 };
+    const child = { ...tool, id: "child-work", parentToolId: "agent" };
+    expect(turnFailureForCard({ events: [terminal, feedback, child], turnId, status: "failed" })).toMatchObject({ message: terminal.message });
+  });
+
+  it.each(["/local/personal", "/local/organization", "cloud://organization/workspace"])(
+    "retains the failure and retry after a result-only tool arrives in %s",
+    sessionId => {
+      let events: AgentMessage[] = [];
+      const translator = new ClaudeStreamTranslator({ sessionId, emit: notification => {
+        events = applyUpdate(events, notification);
+      } });
+      translator.beginTurn();
+      translator.feed({ type: "result", subtype: "error_during_execution", is_error: true, errors: [terminal.message] });
+      events.push(terminal);
+      translator.feed({ type: "user", message: { content: [{
+        type: "tool_result", tool_use_id: "missed-start", content: "The already-running check has finished.",
+      }, {
+        type: "tool_result", tool_use_id: "missed-failed-start", is_error: true, content: "The earlier check failed.",
+      }] } });
+
+      for (const history of [events, JSON.parse(JSON.stringify(events)) as AgentMessage[]]) {
+        expect(turnFailureRecovered(history, turnId)).toBe(false);
+        expect(turnFailureForCard({ events: history, turnId, status: "failed" })).toMatchObject({ message: terminal.message });
+        expect(displayed(history, turnId, true)).toContainEqual(terminal);
+        expect(latestAuthenticationRecoveryTurn([{ events: history }])).toBe(-1);
+      }
+
+      // A real invocation, including a no-argument tool, does establish work.
+      translator.feed({ type: "assistant", message: { id: "recovered", content: [{
+        type: "tool_use", id: "new-call", name: "ListTools", input: {},
+      }] } });
+      expect(turnFailureRecovered(events, turnId)).toBe(true);
+      expect(turnFailureForCard({ events, turnId, status: "failed" })).toBeNull();
+    },
+  );
+
   it.each(["claude", "codex", "cursor"])(
     "renders a persisted %s failure only in the footer, retaining failed tools",
     (provider) => {

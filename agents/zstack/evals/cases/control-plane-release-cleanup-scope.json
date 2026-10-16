@@ -1,0 +1,9 @@
+{
+  "id": "control-plane-release-cleanup-scope",
+  "kind": "replay",
+  "area": "control-plane-operations",
+  "fixedBy": "pr:494",
+  "symptom": "Aggregate workspace or object cleanup failures closed CP release readiness, preventing a repair release even when the CP schema, posture and critical health remained eligible.",
+  "rule": "playbooks/ci-red.md: scope release eligibility to its artifact, preserve full operational alerts and exact qualification, and classify mixed lifecycle or rotation health under one consistent read with critical and unknown signals failing closed.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/health.integration.test.ts src/cloud-workspaces/retired-deletion-readiness.integration.test.ts src/release-identity.test.ts"
+}

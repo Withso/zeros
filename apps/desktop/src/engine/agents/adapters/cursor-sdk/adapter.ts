@@ -27,16 +27,16 @@ import {
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import type { AdvertisedModel } from "@zeros/protocol/agent-events";
 import { isDevRuntime } from "../../../runtime";
-import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 
 import { AgentFailureError } from "../../types";
-import { cloudProviderExecution, executionMcpServers, cloudBootTurnReservation,
+import { cloudProviderExecution, cloudExecutionLifetime, executionMcpServers, cloudBootTurnReservation,
   assertCloudBootNativeHandoff, markCloudBootNativeHandoff, type CloudProviderExecution } from "../../cloud-provider-execution";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
 import { scanCursorMcpServers } from "../../mcp-scan";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
 import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
+import { AccountModelDiscovery, ACCOUNT_MODEL_TTL_MS } from "../shared/account-model-discovery";
 import { requireExplicitModel, requiresExactModel } from "../shared/exact-model-selection";
 import {
   extractUnavailableModelId,
@@ -45,6 +45,7 @@ import {
 import type {
   AgentAdapter,
   AgentAdapterContext,
+  AgentFailureStage,
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
@@ -440,80 +441,20 @@ export interface CursorModelListItem {
   variants?: CursorModelVariant[];
 }
 
-type CuratedCursorModel = {
-  value: string;
-  effortLevels?: string[];
-  supportsFast?: boolean;
-};
-
 const CURSOR_EFFORT_PARAMETER_RX = /effort|reason|thinking/i;
 const CURSOR_FAST_PARAMETER_RX = /speed|fast/i;
 
-/** Parameter names verified against the SDK's models.list wire.
- * The capability values stay owned by catalogs/models-v1.json, so the cold
- * path cannot grow a second model menu or drift from renderer validation. */
-const CURSOR_CURATED_PARAMETER_WIRES: Readonly<
-  Record<string, { effort?: string; fast?: string }>
-> = {
-  "grok-4.7": { effort: "reasoning_effort", fast: "fast" },
-  "grok-4.6": { effort: "effort", fast: "fast" },
-};
+/** These registry models require account-owned parameter definitions/defaults.
+ * Display capabilities are not a native wire schema: the SDK validates only
+ * the ID and forwards incomplete params unchanged. Never guess that schema. */
+const CURSOR_REGISTRY_PARAMETER_MODELS = new Set(["grok-4.7", "grok-4.6"]);
 
-/** Build the native parameter record used only while asynchronous provider
- * discovery is absent. Once a live record exists—even one with explicit empty
- * values—it wins in full and this fallback is not consulted. */
-function curatedCursorModelWire(id: string): CursorModelListItem | undefined {
-  const wire = CURSOR_CURATED_PARAMETER_WIRES[id];
-  if (!wire) return undefined;
-  const curated = (
-    modelCatalogJson.families.cursor as CuratedCursorModel[]
-  ).find((candidate) => candidate.value === id);
-  if (!curated) return undefined;
-  const parameters: CursorModelParameter[] = [];
-  if (wire.effort && Array.isArray(curated.effortLevels)) {
-    parameters.push({
-      id: wire.effort,
-      values: curated.effortLevels.map((value) => ({ value })),
-    });
-  }
-  if (wire.fast && typeof curated.supportsFast === "boolean") {
-    parameters.push({
-      id: wire.fast,
-      values: [
-        { value: "false" },
-        ...(curated.supportsFast ? [{ value: "true" }] : []),
-      ],
-    });
-  }
-  return { id, parameters };
-}
-
-/** Merge only capabilities a live record did not answer. Parameter presence is
- * authoritative even when its values are empty/false-only; absence is unknown
- * and inherits the verified curated wire so asynchronous partial discovery
- * cannot discard a selection the renderer still exposes. */
-function cursorModelWireWithCuratedFallback(
-  id: string,
-  live: CursorModelListItem | undefined,
-): CursorModelListItem | undefined {
-  const fallback = curatedCursorModelWire(id);
-  if (!live || !fallback) return live ?? fallback;
-  const liveParameters = live.parameters ?? [];
-  const missingParameters = (fallback.parameters ?? []).filter((candidate) => {
-    if (CURSOR_EFFORT_PARAMETER_RX.test(candidate.id)) {
-      return !liveParameters.some((parameter) =>
-        CURSOR_EFFORT_PARAMETER_RX.test(parameter.id),
-      );
-    }
-    if (CURSOR_FAST_PARAMETER_RX.test(candidate.id)) {
-      return !liveParameters.some((parameter) =>
-        CURSOR_FAST_PARAMETER_RX.test(parameter.id),
-      );
-    }
-    return !liveParameters.some((parameter) => parameter.id === candidate.id);
+function unavailableCursorModelSettings(stage: AgentFailureStage): AgentFailureError {
+  return new AgentFailureError({
+    kind: "protocol-error", stage, agentId: AGENT_ID,
+    message: "Cursor model settings could not be verified for this account.",
+    advice: "Cursor model settings are unavailable. Open the model menu and choose another model before sending again.",
   });
-  if (missingParameters.length === 0) return live;
-  return { ...live, parameters: [...liveParameters, ...missingParameters] };
 }
 
 /** Parse ZEROS_ADDITIONAL_DIRS (the `/add-dir` JSON array of absolute paths)
@@ -649,6 +590,11 @@ export function cursorAdvertisedModel(
       },
     ];
   });
+  // Unlike an omitted schema, an explicit empty list is a negative capability
+  // answer and must suppress the renderer's curated configuration controls.
+  const emptyParameterSchema = Array.isArray(item.parameters) && item.parameters.length === 0;
+  const executableSchema = !CURSOR_REGISTRY_PARAMETER_MODELS.has(id) ||
+    Array.isArray(item.parameters) || Array.isArray(item.variants);
   const effortParameters = parameters.filter((parameter) =>
     CURSOR_EFFORT_PARAMETER_RX.test(parameter.id),
   );
@@ -708,14 +654,14 @@ export function cursorAdvertisedModel(
       : {}),
     ...(parameters.length > 0 ? { parameters } : {}),
     ...(variants.length > 0 ? { variants } : {}),
-    selectable:
+    selectable: executableSchema && (
       typeof item.selectable === "boolean"
         ? item.selectable
         : typeof item.supportsLocal === "boolean"
           ? item.supportsLocal
-          : true,
-    ...(effortParameters.length > 0 ? { effortLevels } : {}),
-    ...(supportsFast || hasSpeedMetadata ? { supportsFast } : {}),
+          : true),
+    ...(effortParameters.length > 0 || emptyParameterSchema ? { effortLevels } : {}),
+    ...(supportsFast || hasSpeedMetadata || emptyParameterSchema ? { supportsFast } : {}),
   };
 }
 
@@ -1056,21 +1002,36 @@ interface Session {
 
 interface CursorModelState {
   fingerprint: string | null;
+  authenticationContext: string;
   discoveredModelIds: Set<string> | null;
   discoveredModels: Map<string, CursorModelListItem>;
   discoveredModelAliases: Map<string, string>;
   deniedModels: Set<string>;
-  discovery: Promise<void> | null;
+  deniedUntil: number;
+  cache: AccountModelDiscovery<CursorModelCatalog>;
+  confirmed?: CursorModelCatalog;
 }
 
-function createCursorModelState(fingerprint: string | null): CursorModelState {
+interface CursorModelCatalog {
+  ids: Set<string>;
+  records: Map<string, CursorModelListItem>;
+  aliases: Map<string, string>;
+  models: AdvertisedModel[];
+}
+
+function createCursorModelState(fingerprint: string | null, authenticationContext = "default"): CursorModelState {
   return {
     fingerprint,
+    authenticationContext,
     discoveredModelIds: null,
     discoveredModels: new Map(),
     discoveredModelAliases: new Map(),
     deniedModels: new Set(),
-    discovery: null,
+    deniedUntil: 0,
+    cache: new AccountModelDiscovery(() => fingerprint ?? "undiscovered", {
+      ttlMs: ACCOUNT_MODEL_TTL_MS,
+      timeoutMs: 5_000,
+    }),
   };
 }
 
@@ -1160,11 +1121,19 @@ export class CursorSdkAdapter implements AgentAdapter {
    * admissions. Existing sessions retain the state object captured for their
    * own API key. */
   private modelState = createCursorModelState(null);
+  private readonly cloudModelStates = new WeakMap<CloudProviderExecution, CursorModelState>();
+  private modelActivationRevision = 0;
+  private appliedModelActivationRevision = 0;
   constructor(ctx: AgentAdapterContext) {
     this.ctx = ctx;
   }
 
   async initialize(): Promise<InitializeResponse> {
+    const authenticationContext = this.ctx.authenticationContext?.() ?? "default";
+    if (this.modelState.authenticationContext !== authenticationContext) {
+      this.modelState = createCursorModelState(null, authenticationContext);
+      this.clearPublishedModels();
+    }
     if (!this.cachedInitialize) {
       this.cachedInitialize = {
         protocolVersion: 1,
@@ -1201,25 +1170,64 @@ export class CursorSdkAdapter implements AgentAdapter {
         ],
       };
     }
+    this.publishModelState(this.modelState);
+    const session = [...this.sessions.values()].find(candidate => candidate.modelState === this.modelState && !candidate.disposing);
+    if (session) void this.discoverModels(session.apiKey, session.modelState, session.sdk);
     return advertiseAgentCapabilities(this, this.cachedInitialize);
   }
 
-  /** Pull the account's model catalog once and cache it: validates model
-   *  picks (resolveValidModelId) and feeds the picker via
-   *  cachedInitialize._meta.models. Best-effort — failures leave the bundled
-   *  catalog in place. */
+  async initializeSession(sessionId: string, options: { waitForModels?: boolean } = {}): Promise<InitializeResponse> {
+    const base = await this.initialize();
+    // Always strip the Local account snapshot for an unknown/retired route.
+    const { models: _models, modelsAccountScoped: _scope, ...meta } = base._meta ?? {};
+    const generic = { ...base, _meta: meta };
+    const session = this.sessions.get(sessionId);
+    if (!session || session.disposing) return generic;
+    if (!session.cloudExecution) return base;
+    try { cloudExecutionLifetime(session.cloudExecution).assertLive(); }
+    catch { return generic; }
+    const discovery = this.discoverModels(session.apiKey, session.modelState, session.sdk);
+    // Post-turn metadata reads join the bounded refresh; ID-only native startup
+    // stays nonblocking. No prompt is replayed or substituted by this read.
+    if (options.waitForModels !== false) await discovery;
+    if (this.sessions.get(sessionId) !== session || session.disposing) return generic;
+    try { cloudExecutionLifetime(session.cloudExecution).assertLive(); }
+    catch { return generic; }
+    const models = session.modelState.confirmed?.models;
+    return { ...base, _meta: { ...meta, ...(models !== undefined ? { models, modelsAccountScoped: true } : {}) } };
+  }
+
+  private clearPublishedModels(): void {
+    if (!this.cachedInitialize?._meta) return;
+    const { models: _models, modelsAccountScoped: _scope, ...meta } = this.cachedInitialize._meta;
+    this.cachedInitialize = { ...this.cachedInitialize, _meta: meta };
+  }
+
+  private publishModelState(state: CursorModelState): void {
+    if (this.modelState !== state || !this.cachedInitialize || !state.confirmed) return;
+    const models = state.confirmed.models;
+    if (this.cachedInitialize._meta?.models === models) return;
+    this.cachedInitialize = {
+      ...this.cachedInitialize,
+      _meta: { ...this.cachedInitialize._meta, models, modelsAccountScoped: true },
+    };
+  }
+
+  /** Credential-scoped discovery is independent of native admission. */
   private async activateModelState(apiKey: string): Promise<CursorModelState> {
+    const revision = ++this.modelActivationRevision;
+    const authenticationContext = this.ctx.authenticationContext?.() ?? "default";
     const fingerprint = await cursorModelStateFingerprint(
       apiKey,
       CURSOR_MODEL_STATE_FINGERPRINT_SALT,
     );
-    if (this.modelState.fingerprint === fingerprint) return this.modelState;
-    this.modelState = createCursorModelState(fingerprint);
-    if (this.cachedInitialize?._meta) {
-      const meta = { ...this.cachedInitialize._meta };
-      delete meta.models;
-      this.cachedInitialize = { ...this.cachedInitialize, _meta: meta };
-    }
+    if (authenticationContext !== (this.ctx.authenticationContext?.() ?? "default"))
+      return createCursorModelState(fingerprint, authenticationContext);
+    if (this.modelState.fingerprint === fingerprint && this.modelState.authenticationContext === authenticationContext) return this.modelState;
+    if (revision < this.appliedModelActivationRevision) return createCursorModelState(fingerprint, authenticationContext);
+    this.appliedModelActivationRevision = revision;
+    this.modelState = createCursorModelState(fingerprint, authenticationContext);
+    this.clearPublishedModels();
     return this.modelState;
   }
 
@@ -1228,20 +1236,27 @@ export class CursorSdkAdapter implements AgentAdapter {
     state: CursorModelState,
     sessionSdk?: CursorSdkModule,
   ): Promise<void> {
-    if (state.discovery) return state.discovery;
-    state.discovery = (async () => {
+    if (state.deniedUntil && Date.now() >= state.deniedUntil) {
+      state.deniedModels.clear();
+      state.deniedUntil = 0;
+    }
+    const snapshot = state.cache.current();
+    await state.cache.discover(snapshot, async () => {
       try {
         const sdk = sessionSdk ?? (await loadSdk());
-        if (!sdk.Cursor?.models?.list) return;
+        if (!sdk.Cursor?.models?.list) throw new Error("Cursor model discovery is unavailable");
         const list = await sdk.Cursor.models.list({ apiKey });
+        if (!Array.isArray(list) || list.length > 2_048) throw new Error("Cursor returned an invalid model catalog");
         const ids = new Set<string>();
         const records = new Map<string, CursorModelListItem>();
         const aliases = new Map<string, string>();
         const models: AdvertisedModel[] = [];
-        for (const m of list ?? []) {
+        for (const m of list) {
           const advertised = cursorAdvertisedModel(m);
-          if (!advertised) continue;
+          if (!advertised) throw new Error("Cursor returned an invalid model catalog");
           const id = advertised.value;
+          if (state.deniedModels.has(id) || advertised.aliases?.some(alias => state.deniedModels.has(alias)))
+            advertised.selectable = false;
           records.set(id, m);
           models.push(advertised);
           if (advertised.selectable) ids.add(id);
@@ -1250,47 +1265,37 @@ export class CursorSdkAdapter implements AgentAdapter {
             if (advertised.selectable) ids.add(alias);
           }
         }
-        if (models.length === 0) return;
-        state.discoveredModelIds = ids;
-        state.discoveredModels = records;
-        state.discoveredModelAliases = aliases;
         models.sort((a, b) => a.label.localeCompare(b.label));
-        if (this.modelState !== state) return;
-        // Direct adapter tests and one-shot consumers may call newSession
-        // before initialize. Materialize the base snapshot here so discovery
-        // is never lost merely because call order differed from the gateway's.
-        if (!this.cachedInitialize) await this.initialize();
-        const meta = this.cachedInitialize?._meta ?? {};
-        this.cachedInitialize = {
-          ...(this.cachedInitialize as InitializeResponse),
-          _meta: { ...meta, models },
-        };
+        return { ids, records, aliases, models };
       } catch (err) {
-        // Reset the guard so a later session can retry the catalog pull.
-        state.discovery = null;
         this.ctx.emit.onAgentStderr(
           AGENT_ID,
-          `[cursor-sdk] model discovery failed: ${String(err)}`,
+          "[cursor-sdk] Model discovery is unavailable; retaining the previous catalog.",
         );
+        throw err;
       }
-    })();
-    return state.discovery;
+    }, catalog => {
+      state.confirmed = catalog;
+      state.discoveredModelIds = catalog.ids;
+      state.discoveredModels = catalog.records;
+      state.discoveredModelAliases = catalog.aliases;
+      this.publishModelState(state);
+    });
   }
 
   private modelSelection(
     modelId: string,
     state: CursorModelState = this.modelState,
     env?: Record<string, string>,
+    stage: AgentFailureStage = "newSession",
   ): CursorModelSelection {
     const id = state.discoveredModelAliases.get(modelId) ?? modelId;
-    // Live presence is authoritative, including explicit empty parameters.
-    // The curated wire fills only cold/rejected or field-level unknowns,
-    // keeping the user's Grok effort/Fast choice on create/resume/send without
-    // a network wait while explicit live empty/false answers still win.
-    const model = cursorModelWireWithCuratedFallback(
-      id,
-      state.discoveredModels.get(id),
-    );
+    const model = state.discoveredModels.get(id);
+    // Preserve the full default variant, including provider parameters outside
+    // Zeros' effort/Fast controls. An explicit empty schema is authoritative.
+    if (CURSOR_REGISTRY_PARAMETER_MODELS.has(id) &&
+        (!model || !Array.isArray(model.parameters) && !Array.isArray(model.variants)))
+      throw unavailableCursorModelSettings(stage);
     const selection = cursorModelSelection(
       id,
       model,
@@ -1307,44 +1312,51 @@ export class CursorSdkAdapter implements AgentAdapter {
         (env?.ZEROS_FAST_MODE === "1" && !selection.params?.some(parameter =>
           CURSOR_FAST_PARAMETER_RX.test(parameter.id) && ["true", "fast", "on"].includes(parameter.value)))
       ) throw new AgentFailureError({
-        kind: "protocol-error", stage: "newSession", agentId: AGENT_ID,
+        kind: "protocol-error", stage, agentId: AGENT_ID,
         message: "The exact requested Cursor model settings are unavailable; substitution is disabled.",
       });
     }
     return selection;
   }
 
-  /** Start catalog discovery without putting it on the session critical path.
-   *
-   * Discovery is a real network round-trip; a session's first request also
-   * pays for its cold Node host and SDK import. It used to be awaited
-   * outright before `Agent.create`, bounded only by the host's 30 s control-request
-   * timeout: on a slow or wedged network that is 30 s of "Cursor is stuck" before
-   * a single byte of the user's prompt moves.
-   *
-   * The catalog is an OPTIMIZATION, not a correctness input: `resolveModel`
-   * validates against it when present and passes the user's pick through
-   * untouched when it is not (`resolveValidModelId(base, undefined)`), and a
-   * genuinely unavailable model still surfaces the provider's own "Cannot use
-   * this model" error. Let discovery finish in the background and let the next
-   * session (and the model picker, via `modelsDynamic`) enjoy the result. Even
-   * a bounded wait visibly serialized two independent provider requests for a
-   * cold account. */
+  /** Start one credential-scoped discovery flight. ID-only selections retain
+   * nonblocking startup. Parameterized registry selections join its existing
+   * bounded budget because required default parameters are a correctness input,
+   * not display metadata. The native call rechecks its original authority. */
   private async startModelDiscoveryForSession(
     apiKey: string,
     sessionSdk: CursorSdkModule,
+    cloud?: CloudProviderExecution | null,
+    env?: Record<string, string>,
   ): Promise<CursorModelState> {
-    const state = await this.activateModelState(apiKey);
+    let state: CursorModelState;
+    if (cloud) {
+      state = this.cloudModelStates.get(cloud) ?? createCursorModelState(cloud.executionId, "cloud");
+      this.cloudModelStates.set(cloud, state);
+    } else {
+      state = await this.activateModelState(apiKey);
+    }
     const discovery = this.discoverModels(apiKey, state, sessionSdk);
     // discoverModels classifies and reports failures itself. Keep a terminal
-    // sink anyway so future refactors cannot turn this deliberately detached
-    // optimization into an unhandled rejection.
+    // sink for ID-only selections, whose discovery remains detached.
     void discovery.catch(() => undefined);
-    // Yield one microtask only. A catalog already cached by the SDK can enrich
-    // this very session (aliases/default params included), while a real network
-    // request cannot serialize Agent.create even for one timer tick.
-    await Promise.resolve();
+    // A parameterized registry selection needs the complete account schema
+    // before native create/resume. Join the existing five-second discovery
+    // budget; a missing answer is refused by modelSelection, never guessed.
+    // ID-only models retain their nonblocking startup path.
+    if (CURSOR_REGISTRY_PARAMETER_MODELS.has(env?.CURSOR_MODEL?.trim() ?? "")) await discovery;
+    else await Promise.resolve();
     return state;
+  }
+
+  private assertModelAuthority(state: CursorModelState, cloud?: CloudProviderExecution | null,
+    stage: AgentFailureStage = "newSession"): void {
+    if (cloud) cloudExecutionLifetime(cloud).assertLive();
+    else if (state.authenticationContext !== (this.ctx.authenticationContext?.() ?? "default"))
+      throw new AgentFailureError({
+        kind: "lifecycle-superseded", stage, agentId: AGENT_ID,
+        message: "The Cursor account changed while its model settings were loading.",
+      });
   }
 
   /** Production gateway sessions never load @cursor/sdk in the trusted engine
@@ -1524,6 +1536,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     envModel: string | undefined,
     env?: Record<string, string>,
     state: CursorModelState = this.modelState,
+    stage: AgentFailureStage = "newSession",
   ): string {
     const exact = requireExplicitModel(env, "CURSOR_MODEL");
     if (exact !== null) {
@@ -1532,7 +1545,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         state.deniedModels.has(exact)
       ) {
         throw new AgentFailureError({
-          kind: "protocol-error", stage: "newSession", agentId: AGENT_ID,
+          kind: "protocol-error", stage, agentId: AGENT_ID,
           message: "The exact requested Cursor model is unavailable; model substitution is disabled.",
         });
       }
@@ -1545,6 +1558,9 @@ export class CursorSdkAdapter implements AgentAdapter {
     const effort = env?.ZEROS_THINKING_EFFORT;
     const fast = env?.ZEROS_FAST_MODE === "1";
     const requested = envModel?.trim();
+    if (requested && CURSOR_REGISTRY_PARAMETER_MODELS.has(requested) &&
+        (state.deniedModels.has(requested) || state.discoveredModelIds && !state.discoveredModelIds.has(requested)))
+      throw unavailableCursorModelSettings(stage);
     // Cursor SDK 1.0.31 exposes Auto as canonical `default` plus alias `auto`.
     // Discovery canonicalizes the alias, while a cold selection stays intact
     // for the SDK's own model-list validator to canonicalize. Only an absent
@@ -1602,10 +1618,9 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  a model rejection (caller re-resolves and retries once), false for any
    *  other failure (caller rethrows untouched).
    *
-   *  Why this exists: catalog discovery is deliberately detached from the
-   *  session critical path (see startModelDiscoveryForSession), so the FIRST
-   *  session in a process resolves against no catalog and passes the user's pick
-   *  through untouched. A pick that Cursor has since retired — a persisted chat
+   *  ID-only catalog discovery is detached from the session critical path
+   *  (see startModelDiscoveryForSession), so a first session can resolve against
+   *  no catalog and pass the user's pick through. A retired pick — a persisted chat
    *  on `grok-4.5` after the account moved to `grok-4.6`, observed 2026-09 — then
    *  throws on every reopen, and resolveModel never learns why. The rejection
    *  itself carries the live list, so it is the catalog we were missing. */
@@ -1618,8 +1633,19 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (native.category !== "model-unavailable") return false;
     const message = native.message;
     state.deniedModels.add(rejectedModelId);
+    state.deniedUntil = Date.now() + ACCOUNT_MODEL_TTL_MS;
+    state.cache.invalidate(state.cache.current());
     const named = extractUnavailableModelId(message);
     if (named) state.deniedModels.add(named);
+    // The registry may still list a model its execution endpoint rejected.
+    // Retain its identity for existing chats, but immediately remove selection
+    // eligibility for this account, including during a failed/late refresh.
+    if (state.confirmed) {
+      state.confirmed = { ...state.confirmed, models: state.confirmed.models.map(model =>
+        state.deniedModels.has(model.value) || model.aliases?.some(alias => state.deniedModels.has(alias))
+          ? { ...model, selectable: false } : model) };
+      this.publishModelState(state);
+    }
     const listed = parseAvailableModelsFromError(message);
     if (listed.length > 0) {
       // The provider's own list is authoritative — it just refused what the
@@ -1636,6 +1662,9 @@ export class CursorSdkAdapter implements AgentAdapter {
   private async withModelRecovery<T>(
     opts: {
       state: CursorModelState;
+      cloud?: CloudProviderExecution | null;
+      apiKey: string;
+      sdk: CursorSdkModule;
       envModel: string | undefined;
       env: Record<string, string> | undefined;
       modelId: string;
@@ -1644,17 +1673,20 @@ export class CursorSdkAdapter implements AgentAdapter {
     attempt: (modelId: string) => Promise<T>,
   ): Promise<{ result: T; modelId: string }> {
     try {
+      this.assertModelAuthority(opts.state, opts.cloud, opts.stage);
       return { result: await attempt(opts.modelId), modelId: opts.modelId };
     } catch (err) {
-      if (requiresExactModel(opts.env)) throw err;
       const message = normalizeProviderError("cursor", err).message;
       if (!this.absorbModelRejection(opts.state, opts.modelId, err)) {
         throw err;
       }
+      void this.discoverModels(opts.apiKey, opts.state, opts.sdk);
+      if (requiresExactModel(opts.env)) throw err;
       const retryModelId = this.resolveModel(
         opts.envModel,
         opts.env,
         opts.state,
+        opts.stage,
       );
       if (
         retryModelId === opts.modelId ||
@@ -1668,6 +1700,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           `on this account (${message.slice(0, 160)}); retrying with ` +
           `${retryModelId}.`,
       );
+      this.assertModelAuthority(opts.state, opts.cloud, opts.stage);
       return { result: await attempt(retryModelId), modelId: retryModelId };
     }
   }
@@ -1742,27 +1775,30 @@ export class CursorSdkAdapter implements AgentAdapter {
     // is to overlap the workspace/backend warm-up with model discovery and
     // `Agent.create` rather than serialize behind them.
     this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, mcpServers: catalog.servers, settingSources }, autoReviewFor(initialMode));
-    // Discover the account's catalog (cached, once per process) so the model
-    // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
-    // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
-    // model: <id>". resolveModel falls back to a known-good model when the
-    // selection isn't offered by this account.
+    // Start credential-scoped catalog discovery before model resolution.
+    // Local fallback stays within the configured account; cloud execution
+    // requires the exact admitted model. Refresh never replays a turn.
     const modelState = await this.startModelDiscoveryForSession(
       apiKey,
       runtime.sdk,
+      cloud,
+      opts.env,
     );
     let modelId: string;
     const sdk = runtime.sdk;
     let agent: SdkAgent;
     try {
+      this.assertModelAuthority(modelState, cloud);
       modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env, modelState);
       const sessionMcp = this.mcpServers(catalog.servers, opts.env, opts.cwd);
-      // Discovery above is detached, so a retired pick can reach the SDK here;
-      // withModelRecovery turns its "Cannot use this model" into one retry on
-      // a model the account lists instead of a failed chat.
+      // ID-only discovery is detached, so a retired pick can reach the SDK;
+      // withModelRecovery keeps the existing listed-model fallback. Explicit
+      // parameterized registry selections never silently switch models.
       const created = await this.withModelRecovery(
         {
           state: modelState,
+          cloud,
+          apiKey, sdk,
           envModel: opts.env?.CURSOR_MODEL,
           env: opts.env,
           modelId,
@@ -1831,7 +1867,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           availableModes: CURSOR_SDK_MODES,
         },
       } as never,
-      initialize: await this.initialize(),
+      initialize: await this.initializeSession(executionId, { waitForModels: false }),
     };
   }
 
@@ -1874,6 +1910,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     const modelState = await this.startModelDiscoveryForSession(
       apiKey,
       runtime.sdk,
+      cloud,
+      opts.env,
     );
     let modelId = "";
     const sdk = runtime.sdk;
@@ -1889,7 +1927,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     // prior transcript carrying it).
     let resumedFresh = false;
     try {
-      modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env, modelState);
+      this.assertModelAuthority(modelState, cloud, "loadSession");
+      modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env, modelState, "loadSession");
       sessionMcp = this.mcpServers(catalog.servers, opts.env, opts.cwd);
       // A reopened chat carries the model it was created on; if Cursor has
       // retired it since, `Agent.resume` throws "Cannot use this model" on
@@ -1897,6 +1936,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       const resumed = await this.withModelRecovery(
         {
           state: modelState,
+          cloud,
+          apiKey, sdk,
           envModel: opts.env?.CURSOR_MODEL,
           env: opts.env,
           modelId,
@@ -1913,7 +1954,7 @@ export class CursorSdkAdapter implements AgentAdapter {
             // `send()` throws "Local SDK agents require an explicit `model`" —
             // the exact error users hit on every reopened chat. `resume` takes a
             // Partial<AgentOptions>, which accepts `model`.
-            model: this.modelSelection(id, modelState, opts.env),
+            model: this.modelSelection(id, modelState, opts.env, "loadSession"),
             // Pin cwd here too — a resumed agent's executor roots at `local.cwd`,
             // and resuming a chat in a different worktree MUST retarget it (else
             // shells run wherever the agent was first created, or fall back to the
@@ -1960,6 +2001,8 @@ export class CursorSdkAdapter implements AgentAdapter {
         const created = await this.withModelRecovery(
           {
             state: modelState,
+            cloud,
+            apiKey, sdk,
             envModel: opts.env?.CURSOR_MODEL,
             env: opts.env,
             modelId,
@@ -1968,7 +2011,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           (id) =>
             sdk.Agent.create({
               apiKey,
-              model: this.modelSelection(id, modelState, opts.env),
+              model: this.modelSelection(id, modelState, opts.env, "loadSession"),
               // Same cwd pinning as the primary create — the fresh fallback agent
               // must also root at the worktree, never the host's process.cwd().
               cwd: opts.cwd,
@@ -2093,6 +2136,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     }
 
     const cloud = session.cloudExecution;
+    void this.discoverModels(session.apiKey, session.modelState, session.sdk);
     const reservation = cloud?.mode === "boot-owner-v1" ? cloudBootTurnReservation(cloud) : null;
     if (cloud?.mode === "boot-owner-v1" && !reservation)
       throw this.classify(new CloudCommandFailureError({ stage: "validation", category: "access_denied" }), "prompt");
@@ -2144,6 +2188,7 @@ export class CursorSdkAdapter implements AgentAdapter {
               session.env?.CURSOR_MODEL ?? session.modelId,
               session.env,
               session.modelState,
+              "prompt",
             )
           : (this.pickRetryModel(session.modelId, session.modelState) ??
             session.modelId);
@@ -2207,7 +2252,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           // Auto & Full access both run as sdk "agent"; they differ only by the
           // (create-time) autoReview already baked in via ensureSessionConfiguration().
           mode: sdkModeFor(session.modeId),
-          model: this.modelSelection(modelId, session.modelState, session.env),
+          model: this.modelSelection(modelId, session.modelState, session.env, "prompt"),
           local: { force: true },
           ...(cloud?.mode === "boot-owner-v1" ? { beforeNativeWrite: () => {
             if (!ownsUpdates() || !reservation)
@@ -2265,8 +2310,9 @@ export class CursorSdkAdapter implements AgentAdapter {
             response: { stopReason: "cancelled" },
           };
         }
-        if (!lastAttempt && !sawModelOutput && normalizeProviderError("cursor", err).category === "model-unavailable" && this.pickRetryModel(modelId, session.modelState)) {
-          session.modelState.deniedModels.add(modelId);
+        const modelRejected = this.absorbModelRejection(session.modelState, modelId, err);
+        if (modelRejected) void this.discoverModels(session.apiKey, session.modelState, session.sdk);
+        if (!lastAttempt && !sawModelOutput && modelRejected && this.pickRetryModel(modelId, session.modelState)) {
           continue;
         }
         throw this.classify(err, "prompt");
@@ -2433,6 +2479,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       const native = normalizeProviderError("cursor", recovered ?? {
         message: `Cursor run ended in "${runStatus ?? "error"}" without an error message.`,
       });
+      if (this.absorbModelRejection(session.modelState, modelId, recovered ?? { message: native.message }))
+        void this.discoverModels(session.apiKey, session.modelState, session.sdk);
 
       // Model gated for this account → denylist it and retry with a
       // confirmed-good model so the user's turn still completes.
@@ -2592,7 +2640,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     const model = opts.model.trim();
     if (!session || !model) return;
     session.env = { ...(session.env ?? {}), CURSOR_MODEL: model };
-    session.modelId = this.resolveModel(model, session.env, session.modelState);
+    session.modelId = this.resolveModel(model, session.env, session.modelState, "setMode");
   }
 
   /** Apply the renderer's complete composer snapshot. Effort and Fast become
@@ -2617,6 +2665,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       session.env.CURSOR_MODEL,
       session.env,
       session.modelState,
+      "setMode",
     );
   }
 
@@ -2638,7 +2687,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         const sessionMcp = this.mcpServers(catalog.servers, session.env, session.cwd);
         const agent = await session.sdk.Agent.resume(previous.agentId, {
           apiKey: session.apiKey,
-          model: this.modelSelection(session.modelId, session.modelState, session.env),
+          model: this.modelSelection(session.modelId, session.modelState, session.env, "loadSession"),
           cwd: session.cwd,
           local: this.buildLocalOpts(session.cwd, session.env, want, session.settingSources),
           ...(sessionMcp ? { mcpServers: sessionMcp } : {}),

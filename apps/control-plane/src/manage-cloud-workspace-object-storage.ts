@@ -340,7 +340,7 @@ export async function manageCloudWorkspaceObjectStorage(
     await client.query(
       `SELECT pg_advisory_xact_lock(
          hashtextextended('workspace-object-storage:' || $1::text, 0)
-       )`,
+       ) /*lock_purpose='object-storage'*/`,
       [request.organizationId],
     );
 

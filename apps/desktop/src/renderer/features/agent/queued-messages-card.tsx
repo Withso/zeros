@@ -64,7 +64,7 @@ export interface QueuedMessagesCardProps {
   onDelete: (id: string) => void;
   onSendNow: (id: string) => void;
   /** Whether the agent can steer a RUNNING turn (agentCapabilities.steering). */
-  steeringSupported: boolean;
+  steeringSupported: boolean | undefined;
   /** True while a turn is in flight — gates send-now on steering support.
    *  While idle, send-now is a plain flush and is always allowed. */
   streaming: boolean;
@@ -100,7 +100,9 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
   const editing = editingId != null;
   const sendBlocked = waiting || streaming && !steeringSupported;
   const sendLabel = waiting ? "Waiting for agent" : sendBlocked
-    ? `${agentName} doesn't support mid-turn steering`
+    ? steeringSupported === false
+      ? `${agentName} doesn't support mid-turn steering`
+      : "Checking steering support"
     : "Send now";
 
   return (
@@ -146,7 +148,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                     )}
                   >
                     <Tooltip label={m.text}>
-                      <span className="text-fg1 min-w-0 flex-1 truncate text-sm">
+                      <span className="text-fg1 min-w-0 flex-1 select-text truncate text-sm">
                         {m.text}
                       </span>
                     </Tooltip>

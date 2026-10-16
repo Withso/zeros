@@ -132,6 +132,7 @@ import {
   useShowHiddenWorkspaces,
 } from "./dashboard-settings";
 import { useInternalFeature, useIsInternalUser } from "./internal-features";
+import { FollowUpBehaviorSetting } from "./follow-up-behavior-setting";
 import {
   AGENT_CONTROL_FEATURE_ROWS,
   agentControlFeaturesAt,
@@ -199,6 +200,8 @@ import { useDefaultAgent, pickDefaultAgentId } from "./default-agent";
 import type { AgentMemorySettings } from "@zeros/protocol/agent-events";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
+import { isFeatureEnabled } from "../../config/release-channel";
+import { CloudWorkspacePausedNotice } from "../team/cloud-workspace-pause";
 type SectionId =
   | "general"
   | "appearance"
@@ -529,6 +532,7 @@ export function SettingsPage() {
 
 function ScopedSettingsPage({ owner }: { owner: string }) {
   const local = owner === "local";
+  const cloudEnabled = isFeatureEnabled("cloud-workspaces");
   const organization = useActiveOrganization();
   const { me } = useTeams();
   const pageSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -654,12 +658,13 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
           // ComputerUsePanel and SimulatorsPanel select device controls or
           // cloud guidance from the workspace placement.
           (local ? !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id) : ["providers", "integrations", "cloud-computer", "cloud-mcp", "cloud-skills", "browser-use", "computer-use", "simulators"].includes(s.id)) &&
+          (cloudEnabled || !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id)) &&
           (s.id !== "terminal-agents" || terminalAgentsEnabled) &&
           (s.id !== "computer-use" || computerUseActive) &&
           (s.id !== "simulators" || simulatorsActive) &&
           (s.id !== "internal" || internalUser),
       ),
-    [terminalAgentsEnabled, internalUser, local, computerUseActive, simulatorsActive],
+    [terminalAgentsEnabled, internalUser, local, cloudEnabled, computerUseActive, simulatorsActive],
   );
   const activeSection: SectionDef | null =
     selection.scope === "user"
@@ -856,6 +861,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     aria-hidden={!isActive}
                   >
                     <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
+                    {!local && !cloudEnabled && <CloudWorkspacePausedNotice />}
                     <Panel surfaceActive={pageActive && isActive} />
                   </div>
                 );
@@ -928,6 +934,7 @@ function GeneralPanel() {
   return (
     <div className="flex flex-col gap-6">
       <SettingsGroup>
+        <FollowUpBehaviorSetting />
         <SettingsRow
           label="Show hidden workspaces in dashboard"
           hint="Includes hidden workspaces in the Archived list."
@@ -1149,7 +1156,7 @@ function IntegrationsPanel({ surfaceActive = true }: { surfaceActive?: boolean }
   const { me } = useTeams();
   const organizationId = organization?.isPersonal ? null : organization?.id ?? getActiveOrganizationIdSnapshot();
   return <div className="flex flex-col gap-8">
-    {organizationId ? me && <CloudGithubSection key={`${me.user.id}:${organizationId}`} userId={me.user.id} organizationId={organizationId} surfaceActive={surfaceActive} />
+    {organizationId && isFeatureEnabled("cloud-workspaces") ? me && <CloudGithubSection key={`${me.user.id}:${organizationId}`} userId={me.user.id} organizationId={organizationId} surfaceActive={surfaceActive} />
       : <GitHubSection surfaceActive={surfaceActive} />}
   </div>;
 }

@@ -1,20 +1,21 @@
 // A delegated conversation is an unboxed nested feed. The group owns the
 // disclosure; each child tool retains its own bounded detail card.
-import { memo, useId, useMemo, useState } from "react";
+import { memo, useId, useMemo } from "react";
 import { Bot, ChevronDown, ChevronRight, MessageSquare } from "lucide-react";
 import { useTurnSequence } from "../use-turn-sequence";
+import { useTurnDisclosure } from "../turn-disclosures";
 import { MessageView } from "./message-view";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import type { Renderer } from "./types";
-import { matchSubagent } from "./subagent";
+import { agentReportText, matchSubagent } from "./subagent";
 import { EventStripe } from "./event-stripe";
 import { renderDetail } from "./event-row-renderer";
 import { renderMarkdown } from "../markdown";
-import { displayNameForModelValue, effortLabel } from "../model-catalog";
+import { displayNameForModelValue, effortLabel, familyForModelValue } from "../model-catalog";
 import type { ChatEffort } from "../../../state/store";
 import { cn } from "@/renderer/shared/ui/cn";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
-import { asDisplayString, toolCompletionUnreported } from "./raw-output";
+import { toolCompletionUnreported } from "./raw-output";
 import { toolRecord } from "./native-tool-presentation";
 import { toolPresentationReady } from "./tool-readiness";
 import { ToolDetailSurface } from "./tool-detail-surface";
@@ -38,7 +39,13 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
       model && model !== "inherit" ? agentModelLabel(model) : undefined;
     const subagentType = readString(info?.subagentType);
     // Resolved metadata survives native launch acknowledgements and resumes.
-    const effort = readString(output.effort) ?? readString(input.effort);
+    const nativeCodexEffort = readString(input.reasoningEffort);
+    const effort = nativeCodexEffort
+      ? nativeCodexEffort === "none" ? "None"
+        : nativeCodexEffort === "minimal" ? "Minimal"
+          : effortLabel("codex", (nativeCodexEffort === "ultra" ? "ultracode" : nativeCodexEffort) as ChatEffort)
+      : readString(output.effort) ?? readString(input.effort);
+    const effortText = effort && (nativeCodexEffort ? effort : effortLabel("claude", effort as ChatEffort));
     const label = ["Agent", subagentType, modelLabel].filter(Boolean).join(" · ");
     const prompt = readString(input.prompt) ?? readString(input.task);
     const children = ctx.subagentChildren.get(tool.toolCallId) ?? NO_CHILDREN;
@@ -70,8 +77,8 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
       () => ({ ...ctx, isStreaming: running, lastMessageId: tailId }),
       [ctx, running, tailId],
     );
-    const [open, setOpen] = useState(false);
-    const [promptOpen, setPromptOpen] = useState(false);
+    const [open, setOpen] = useTurnDisclosure<boolean>(tool.id, "agent", false);
+    const [promptOpen, setPromptOpen] = useTurnDisclosure<boolean>(tool.id, "prompt", false);
     const bodyId = useId();
     const promptId = useId();
     const Chevron = open ? ChevronDown : ChevronRight;
@@ -83,7 +90,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
           className="group/subagent-row min-w-0 transition-colors"
           onClick={() => setOpen((value) => !value)}
           aria-label={`Agent ${headerText}`}
-          aria-description={failed ? "Agent failed" : undefined}
+          aria-description={[failed ? "Agent failed" : undefined, modelLabel, effortText].filter(Boolean).join(" · ") || undefined}
           aria-expanded={open}
           aria-controls={bodyId}
         >
@@ -120,7 +127,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
             )}
           >
             {label}
-            {effort ? <span data-agent-effort="" className={cn("text-fg2 text-xs opacity-80", failed && "text-red-primary")}>{` ${effortLabel("claude", effort as ChatEffort)}`}</span> : null}
+            {effortText ? <span data-agent-effort="" className={cn("text-fg2 text-xs opacity-80", failed && "text-red-primary")}>{` ${effortText}`}</span> : null}
           </span>
           <span
             className={cn(
@@ -211,36 +218,10 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-export function agentReportText(tool: AgentToolMessage): string {
-  const output = toolRecord(tool.rawOutput);
-  // A native async acknowledgement is not the child's report. Retain it in
-  // history, but don't print internal launch instructions into the feed.
-  if (tool.status === "failed" && typeof output.message === "string")
-    return output.message;
-  if (output.status === "async_launched") return "";
-  const text = (tool.content ?? [])
-    .flatMap((block) =>
-      block.type === "content" && block.content.type === "text"
-        ? [block.content.text]
-        : [],
-    )
-    .join("");
-  // Compatibility with older Claude histories that only captured text.
-  if (/^Async agent launched successfully\./.test(text.trim())) return "";
-  if (text) return text;
-  if (typeof output.report === "string") return output.report;
-  if (["completed", "async_launched"].includes(String(output.status)))
-    return "";
-  if (typeof tool.rawOutput === "string") return tool.rawOutput;
-  return tool.status === "failed"
-    ? (asDisplayString(tool.rawOutput) ?? "")
-    : "";
-}
-
 /** Retired Claude model slugs still occur in saved transcripts. Format only
  * the version encoded in a native slug; custom model IDs stay verbatim. */
 function agentModelLabel(model: string): string {
-  const curated = displayNameForModelValue(null, model);
+  const curated = displayNameForModelValue(familyForModelValue(model) || null, model);
   if (curated !== model) return curated;
   const claude =
     /^claude-(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[1m\])?$/.exec(

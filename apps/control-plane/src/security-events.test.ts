@@ -84,7 +84,7 @@ describe("security event listener lifecycle", () => {
     const wake = vi.fn();
     broker.subscribe(wake);
     await broker.start();
-    await vi.advanceTimersByTimeAsync(3_600_000);
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60_000);
     expect(broker.healthy()).toBe(false);
     expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
     expect(wake).toHaveBeenCalledOnce();

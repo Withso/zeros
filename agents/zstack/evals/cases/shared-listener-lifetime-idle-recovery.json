@@ -1,0 +1,9 @@
+{
+  "id": "shared-listener-lifetime-idle-recovery",
+  "kind": "replay",
+  "area": "control-plane-workers",
+  "fixedBy": "pr:487",
+  "symptom": "A shared LISTEN session inherited the query pool's ten-minute retirement, disconnecting every consumer without a recovery log.",
+  "rule": "The bug-fix playbook checks client timers before attributing periodic loss to server idle limits; test a server-closed idle session, replay after LISTEN acknowledgement and bounded reconnect backoff.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/postgres-notifications.test.ts src/postgres-notifications.integration.test.ts src/db.test.ts src/channel-pause-boot.test.ts"
+}

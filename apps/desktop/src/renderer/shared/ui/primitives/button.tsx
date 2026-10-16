@@ -16,7 +16,7 @@ const buttonVariants = cva(
   // only the icon-only squares pin a 28px box.
   // :where keeps fallback SVG sizing below caller descendant selectors;
   // explicit size classes on an SVG still take precedence as well.
-  "inline-flex w-fit items-center justify-center gap-1 whitespace-nowrap rounded-md border border-transparent px-1.5 py-1 text-xs leading-4.5 font-medium transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 focus-visible:border-highlighted-bright disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_:where(svg:not([class*='size-']))]:size-3.5",
+  "inline-flex w-fit select-none items-center justify-center gap-1 whitespace-nowrap rounded-md border border-transparent px-1.5 py-1 text-xs leading-4.5 font-medium transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 focus-visible:border-highlighted-bright disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_:where(svg:not([class*='size-']))]:size-3.5",
   {
     variants: {
       // Canonical set: Primary (the rare main CTA) + Secondary (the everyday

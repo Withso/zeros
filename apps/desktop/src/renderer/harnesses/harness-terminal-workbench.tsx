@@ -30,6 +30,7 @@ import {
   useWorkspaceStore,
   workbenchScopeKey,
 } from "../state/workspace-store";
+import { useWorkspaceSetupSummary } from "../features/agent/use-workspace-setup-summary";
 import { useTerminalStore } from "../shell/terminal/terminal-store";
 import { WorkbenchTabStrip } from "../shell/workbench/tab-strip";
 import { TerminalPanel } from "../shell/workbench/tabs/terminal-tab";
@@ -43,12 +44,18 @@ import {
 } from "../state/cloud-workspace-catalog";
 
 const cloudFixture = new URLSearchParams(location.search).has("cloud");
+const organizationLocalFixture = new URLSearchParams(location.search).has(
+  "organization-local",
+);
 const cloudA = {
   organizationId: "11111111-1111-4111-8111-111111111111",
   workspaceId: "22222222-2222-4222-8222-222222222222",
 };
 const cloudB = {
   ...cloudA,
+  ...(new URLSearchParams(location.search).has("separate-owners")
+    ? { organizationId: "44444444-4444-4444-8444-444444444444" }
+    : {}),
   workspaceId: "33333333-3333-4333-8333-333333333333",
 };
 const repoA = cloudFixture
@@ -115,6 +122,9 @@ const workspaces: Workspace[] = cloudFixture
       { id: "ws_terminal_b", project: projectB, path: folderB },
     ].map(({ id, project, path }) => ({
       id,
+      organizationId: organizationLocalFixture
+        ? (id === "ws_terminal_a" ? cloudA : cloudB).organizationId
+        : null,
       repoRoot: project.repoRoot,
       repoSlug: project.repoSlug,
       path,
@@ -163,6 +173,11 @@ const setupStates = new Map<
 >();
 const setupRunCounts = new Map<string, number>();
 const pendingSetupRuns = new Map<
+  string,
+  { resolve(): void; reject(error: Error): void }
+>();
+const holdSetupReads = new Set<string>();
+const pendingSetupReads = new Map<
   string,
   { resolve(): void; reject(error: Error): void }
 >();
@@ -283,7 +298,7 @@ RuntimeClient.prototype.request = async function <
     };
   if (message.op === "file.tree")
     result = { files: ["scripts/setup.sh", "src/test.ts"] };
-  if (message.op === "workspace.setupInfo")
+  if (message.op === "workspace.setupInfo") {
     result = {
       ...(setupStates.get(String(params.workspaceId)) ?? {
         state: "passed",
@@ -293,6 +308,18 @@ RuntimeClient.prototype.request = async function <
       command: "pnpm install",
       truncated: false,
     };
+    const workspaceId = String(params.workspaceId);
+    if (!params.statusOnly && !params.omitLog && holdSetupReads.delete(workspaceId)) {
+      // Capture before waiting so a released old read really is stale.
+      try {
+        await new Promise<void>((resolve, reject) =>
+          pendingSetupReads.set(workspaceId, { resolve, reject }),
+        );
+      } finally {
+        pendingSetupReads.delete(workspaceId);
+      }
+    }
+  }
   if (message.op === "workspace.rerunSetup") {
     const workspaceId = String(params.workspaceId);
     try {
@@ -455,6 +482,28 @@ Object.assign(window, {
         ? pendingRuns.get(actionId)
         : pendingRuns.values().next().value)?.(),
     pendingRun: () => pendingRuns.size > 0,
+    setupSnapshot: (
+      workspaceId: string,
+      state: "running" | "passed" | "failed" | "stopped",
+      log: string,
+      notify = true,
+    ) => {
+      setupStates.set(workspaceId, { state, log });
+      if (notify)
+        emit("DB_CHANGED", {
+          kinds: ["setup", "workspaces"],
+          workspaceIds: [workspaceId],
+        });
+    },
+    holdSetupRead: (workspaceId: string) => {
+      holdSetupReads.add(workspaceId);
+    },
+    pendingSetupRead: (workspaceId: string) => pendingSetupReads.has(workspaceId),
+    finishSetupRead: (workspaceId: string, fail = false) => {
+      const pending = pendingSetupReads.get(workspaceId);
+      if (fail) pending?.reject(new Error("Setup read fixture failure"));
+      else pending?.resolve();
+    },
     finishSetupRequest: (workspaceId: string) =>
       pendingSetupRuns.get(workspaceId)?.resolve(),
     failSetupRequest: (workspaceId: string) =>
@@ -549,6 +598,18 @@ Object.assign(window, {
   },
 });
 
+function SetupSummaryProbe({ folder }: { folder: string }) {
+  const workspaceId = cloudFixture
+    ? folder
+    : (workspaces.find((row) => row.path === folder)?.id ?? null);
+  const summary = useWorkspaceSetupSummary(workspaceId);
+  return (
+    <output data-setup-summary>
+      {summary.hasCommand === null ? "unknown" : summary.state}
+    </output>
+  );
+}
+
 function Harness() {
   const { folderKey: folder, chatCwd } = useWorkbenchFolder();
   const workbench = useWorkspaceStore(selectWorkbench);
@@ -564,6 +625,9 @@ function Harness() {
   const [active, setActive] = useState(true);
   return (
     <div className="bg-bg1 text-fg1 flex h-screen flex-col">
+      {new URLSearchParams(location.search).has("setup-observation") && (
+        <SetupSummaryProbe folder={folder} />
+      )}
       <nav className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-4 px-4">
         <button
           onClick={() =>

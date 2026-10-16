@@ -9,6 +9,7 @@ export type TemplateAllocation = {
   state: string;
   build_state: string;
   base_image_id: string;
+  builder_source_image_id: string | null;
   builder_operation_key: string;
   builder_name: string;
   account_scope: string;
@@ -31,6 +32,27 @@ export class ComputerTemplateJournal {
     private readonly accountScope: string,
     private readonly billingOrg: string,
   ) {}
+
+  async readNextDelayMs(capacity: number): Promise<number | null> {
+    return withSystemTx(this.pool, async tx => {
+      const started = Date.now();
+      const row = (await tx.query<{ delay_ms: string | null }>(`SELECT extract(epoch FROM (min(due_at)-now()))*1000 AS delay_ms FROM (
+        SELECT now() AS due_at FROM cloud_computer_v2_builds build
+        WHERE build.state='queued' AND NOT EXISTS (SELECT 1 FROM cloud_computer_templates template WHERE template.org_id=build.org_id
+          AND template.builder_operation_key IS NOT NULL AND template.stopped_at IS NULL AND template.cleanup_confirmed_at IS NULL)
+          AND (SELECT count(*) FROM cloud_computer_v2_builds active LEFT JOIN cloud_computer_templates template ON template.build_id=active.id
+            WHERE active.state='running' OR (template.builder_operation_key IS NOT NULL AND template.stopped_at IS NULL
+              AND template.cleanup_confirmed_at IS NULL))<$3
+        UNION ALL SELECT CASE WHEN build.state='running' THEN
+            CASE WHEN build.cancel_requested_at IS NOT NULL THEN now() ELSE build.deadline_at END
+          ELSE greatest(coalesce(template.cleanup_retry_at,now()),template.cleanup_lease_until) END
+        FROM cloud_computer_v2_builds build JOIN cloud_computer_templates template ON template.build_id=build.id
+        WHERE template.account_scope=$1 AND template.billing_org=$2 AND template.builder_operation_key IS NOT NULL
+          AND (build.state='running' OR (build.state IN ('failed','cancelled','superseded') AND template.cleanup_confirmed_at IS NULL))
+      ) work`, [this.accountScope, this.billingOrg, capacity])).rows[0];
+      return row?.delay_ms == null ? null : Number(row.delay_ms) - (Date.now() - started);
+    }, { consistentRead: true });
+  }
 
   private async locked(tx: Tx, id: string): Promise<TemplateAllocation> {
     const scope = (

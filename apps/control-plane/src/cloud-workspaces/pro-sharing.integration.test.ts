@@ -191,7 +191,9 @@ d("Pro workspace sharing", () => {
       ).rowCount,
     ).toBe(0);
   });
-  it("lists more than 100 Read-only guests with bounded, complete pagination", async () => {
+  // The two-page boundary requires 101 sequential account/invite/accept flows
+  // against real Postgres. Give that fixture a bounded budget under CI load.
+  it("lists more than 100 Read-only guests with bounded, complete pagination", { timeout: 30_000 }, async () => {
     for (let n = 0; n < 101; n++) {
       const { user, email } = await account();
       const invitation = await service.invite({

@@ -29,6 +29,7 @@ import { deliverInvitationEmail } from "./invitation-delivery.js";
 import { rateLimit } from "./ratelimit.js";
 import type { CloudWorkspaceBackendConfig } from "./config.js";
 import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
+import type { CloudWorkspaceProviderResolver } from "./cloud-workspaces/provider-resolver.js";
 import {createCloudWorkspaceCollaborationRoutes} from "./cloud-workspaces/collaboration-routes.js";
 import {createCloudAgentCredentialRoutes} from "./cloud-workspaces/agent-credential-routes.js";
 import { createCloudCustomizationRoutes } from "./cloud-workspaces/mcp-routes.js";
@@ -418,6 +419,7 @@ export function createRoutes(
     cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService | null;
     cloudWorkspaceReplicaService?: DatabaseCloudWorkspaceReplicaService | null;
     cloudWorkspaceEngineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService | null;
+    cloudWorkspaceProviderResolver?: CloudWorkspaceProviderResolver | null;
     workosEnabled?: boolean;
     workosProvider?: WorkOSInvitationResolver;
     inviteLinkBase?: string;
@@ -480,6 +482,7 @@ export function createRoutes(
     createCloudWorkspaceRoutes(pool, cloudWorkspaces, {
       accessService: options.cloudWorkspaceAccessService ?? null,
       repositoryResolver: options.cloudWorkspaceRepositoryResolver ?? null,
+      providerResolver: options.cloudWorkspaceProviderResolver ?? null,
       forkService: options.cloudWorkspaceForkService ?? null,
       replicaService: options.cloudWorkspaceReplicaService ?? null,
       engineClientAdmissionService:

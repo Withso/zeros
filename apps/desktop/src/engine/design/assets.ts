@@ -25,6 +25,14 @@ export const DESIGN_ASSET_MIME_TYPES = Object.freeze<Record<string, string>>({
   ".png": "image/png",
   ".webp": "image/webp",
 });
+/** Font files CSS `url()` references can embed, as in @font-face `src`. They
+ * are not images: the Assets panel and uploads keep to the map above. */
+export const DESIGN_FONT_MIME_TYPES = Object.freeze<Record<string, string>>({
+  ".otf": "font/otf",
+  ".ttf": "font/ttf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+});
 
 export interface DesignAssetSummary {
   /** POSIX path relative to Zeros Design/. */

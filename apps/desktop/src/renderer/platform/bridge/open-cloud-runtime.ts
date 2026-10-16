@@ -20,11 +20,11 @@ import { cloudAgentGrant } from "../cloud-workspaces";
 import { CloudAgentConnection } from "./cloud-agent-connection";
 import { CloudEventReader } from "./cloud-event-reader";
 import { installCloudGithubNative } from "./cloud-github-native";
-import { wakeCloudWorkspace } from "../../state/cloud-workspace-wake";
+import { wakeCloudWorkspace, type CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake";
 
 export async function openCloudRuntime(
   target: CloudWorkspaceTarget,
-  options?: { signal?: AbortSignal; wake?: boolean; reason?: "interaction" },
+  options?: { signal?: AbortSignal; wake?: boolean; reason?: "interaction"; wakeIntent?: CloudWorkspaceWakeIntent },
 ): Promise<CloudPeer> {
   const generation = cloudCatalogGeneration();
   const assertAccount = () => {
@@ -35,7 +35,7 @@ export async function openCloudRuntime(
   let document = await refreshCloudWorkspace(target);
   assertAccount();
   if (options?.wake) {
-    document = await wakeCloudWorkspace(target, document, options.signal, options.reason);
+    document = await wakeCloudWorkspace(target, document, options.signal, options.reason, options.wakeIntent);
     assertAccount();
   }
   if (!canReadCloudWorkspace(document) || !["ready", "busy"].includes(document.status))
@@ -171,18 +171,18 @@ export async function openCloudRuntime(
       },
       runtimeId: descriptor.runtimeId,
       generation: descriptor.generation,
-      async prepareForRun(signal, reason) {
+      async prepareForRun(signal, reason, wakeIntent) {
         const current = await refreshCloudWorkspace(target);
         assertAccount();
-        await wakeCloudWorkspace(target, current, signal, reason);
+        await wakeCloudWorkspace(target, current, signal, reason, wakeIntent);
         if (signal.aborted) throw new Error("Cloud workspace open cancelled");
         // A committed capture retires this runtime while preparation waits.
-        // A replacement generation does too. Wake already revalidated the
+        // A replacement generation does too. Preparation revalidated the
         // account/access/Stop intent; the caller now needs fresh admission.
         if (released) return false;
         assertCurrent();
-        // Revalidate the still-live connection and root without disrupting an
-        // active turn. Reads do not prove the capture fence has cleared;
+        // Revalidate the still-live connection and root without a lifecycle
+        // wake on ready compute. Reads do not clear the capture fence;
         // CloudAgentConnection waits on explicit checkpointing rejections.
         const rows = await bridgeWorkspaceList(client, {});
         if (signal.aborted) throw new Error("Cloud workspace open cancelled");

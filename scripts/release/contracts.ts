@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { cloudWorkspaceChannelEnabled } from "../../apps/control-plane/src/cloud-workspaces/channel-policy";
 
 export const CHANNELS = {
   alpha: { api: "https://api-alpha.zeros.build", app: "https://app-alpha.zeros.build", ops: "https://ops-alpha.zeros.build", appProject: "zeros-web-alpha", opsProject: "zeros-ops-alpha" },
@@ -13,6 +14,16 @@ export type Surface = "app" | "ops";
 export class PromotionError extends Error {}
 export function requireCheck(value: unknown, message: string): asserts value {
   if (!value) throw new PromotionError(message);
+}
+/** Validate the deployed pause after repair deployment. Do not require this
+ * from the old API before migrations/deployment can fix its cloud state. */
+export function assertCloudChannelState(channel: Channel, identity: {
+  cloud: { enabled: boolean; state: string }; worker: unknown; workerQualified?: boolean;
+}) {
+  if (!cloudWorkspaceChannelEnabled(channel)) requireCheck(
+    !identity.cloud.enabled && identity.cloud.state === "disabled" && identity.worker === null && identity.workerQualified !== true,
+    "Cloud is paused on this channel; the deployed control plane must also be paused",
+  );
 }
 export function releaseSource(env: NodeJS.ProcessEnv) {
   const channel = env.RELEASE_CHANNEL as Channel;
@@ -42,7 +53,7 @@ export function promotionConfig(env: NodeJS.ProcessEnv, options: { migrations?: 
   // their existing manual Auth0 process, without copying auth secrets to CI.
   requireCheck(env.AUTH_PROVIDER === "workos", "Hosted promotion requires the WorkOS Pages facade");
   requireCheck([undefined, "", "false", "true"].includes(env.ZEROS_CLOUD_WORKSPACES_ENABLED), "Invalid desktop cloud capability");
-  const cloudRequired = env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true";
+  const cloudRequired = cloudWorkspaceChannelEnabled(source.channel) && env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true";
   requireCheck(!cloudRequired || env.CLOUD_WORKSPACE_PROVIDER === "boat", "Cloud releases require an explicit managed provider");
   requireCheck(/^\d+$/.test(env.GITHUB_RUN_ID ?? "") && /^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? ""), "Run identity is required");
   // With worker promotion off, a cloud-enabled desktop ships on the API's

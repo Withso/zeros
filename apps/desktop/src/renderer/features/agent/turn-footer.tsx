@@ -61,7 +61,7 @@ import { useCachedRead } from "@/renderer/state/use-cached-read";
 import { FileTypeIcon } from "./composer-editor/file-type-icon";
 import { partitionTurn } from "./turn-partition";
 import { TurnFailureCard } from "./turn-failure-card";
-import { turnFailureForCard } from "./turn-failure";
+import { turnFailureForCard, turnFailureRecovered } from "./turn-failure";
 import { useSessionsStore } from "./sessions-store";
 import { useAgentSessions } from "./sessions-hooks";
 import type { AgentFailure } from "../../platform/bridge/failure";
@@ -162,6 +162,7 @@ export function turnFooterStatusLabel(
   fallbackStopReason?: string | null,
   fallbackStatusLabel?: string | null,
   retrying?: boolean,
+  recovered?: boolean,
 ): string | null {
   if (isInterruptedTurn(turn, fallbackStopReason)) return "STOPPED BY USER";
   // A named stop reason beats the generic failure labels: these
@@ -170,6 +171,7 @@ export function turnFooterStatusLabel(
     STOP_REASON_LABELS[turn?.stopReason ?? ""] ??
     STOP_REASON_LABELS[fallbackStopReason ?? ""];
   if (named) return named;
+  if (recovered) return null;
   if (fallbackStatusLabel) return fallbackStatusLabel;
   // A turn whose recorded row settled "failed" with no live failure to show:
   // the crash was swallowed by a recovery path (most often the duplicate-turn
@@ -627,6 +629,7 @@ export const TurnFooter = memo(function TurnFooter({
     fallbackStopReason,
     fallbackStatusLabel,
     retrying,
+    turnFailureRecovered(events, turnId),
   );
   const cardFailure = turnFailureForCard({
     events,

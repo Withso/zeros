@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudBootCommandSnapshotSchema, type CloudBootCommandClaim } from "@zeros/protocol/cloud-commands";
 import { CloudAgentBootCredentialResponseSchema, CloudAgentBootSyncResponseSchema, CloudAgentBootActivateResponseSchema,
   CloudAgentBootRefreshResponseSchema, CloudAgentActorConfirmResponseSchema, CloudAgentWarmActorResponseSchema,
-  CloudAgentWarmActorRequestSchema } from "@zeros/protocol/cloud-agent-bootstrap";
+  CloudAgentWarmActorRequestSchema, CloudAgentHistoryRecoveryResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudCommandRuntimeError } from "../cloud-command-client";
 import type { EngineMessage } from "../types";
 import { CloudLocalAgentBootRuntime } from "../cloud-local-command-queue-boot";
@@ -28,6 +28,7 @@ const bootResponses: { [Operation in CloudAgentBootOperation]: { parse(value: un
   bootstrap: CloudAgentBootCredentialResponseSchema, sync: CloudAgentBootSyncResponseSchema,
   activate: CloudAgentBootActivateResponseSchema, refresh: CloudAgentBootRefreshResponseSchema,
   "actor-confirm": CloudAgentActorConfirmResponseSchema, "warm-context": CloudAgentWarmActorResponseSchema,
+  "recover-history": CloudAgentHistoryRecoveryResponseSchema,
 };
 
 const native = vi.hoisted(() => ({ prepare: vi.fn() }));
@@ -80,6 +81,7 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor") {
     agentId: provider, providerBinding: null, sessionId: null, permissionMode: "auto", lastModeId: null }]]);
   const registration = {
     localCommandsNegotiated: () => true,
+    agentBootAuthorityRemainingMs: () => 89_000,
     async agentBootRequest<Operation extends CloudAgentBootOperation>(operation: Operation,
       input: CloudAgentBootRequests[Operation]): Promise<CloudAgentBootResponses[Operation]> {
       return bootResponses[operation].parse(await request(operation, input));
@@ -87,7 +89,7 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor") {
     credentialControlsRequest: vi.fn(async () => CloudAgentCredentialControlExchangeResponseSchema.parse({
       version: 1, mode: "boot-owner-v1", controls: [],
     })),
-  } satisfies Pick<CloudRuntimeRegistration, "localCommandsNegotiated" | "agentBootRequest" | "credentialControlsRequest">;
+  } satisfies Pick<CloudRuntimeRegistration, "localCommandsNegotiated" | "agentBootAuthorityRemainingMs" | "agentBootRequest" | "credentialControlsRequest">;
   const boot = new CloudLocalAgentBootRuntime({ file: path.join(directory, "queue.sqlite"), scope,
     runtimeBootId: f.scope.bootId, registration,
     legacy: f.legacy, supervisor: { onRetirementFailure: vi.fn() }, engineLive: () => true,

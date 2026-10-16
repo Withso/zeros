@@ -20,6 +20,44 @@ beforeEach(() => {
     agentId: "codex", transcriptState: "resident", messages: [reply, bubble], hasTranscript: true });
 });
 describe("normalized cloud transcript restore fences", () => {
+  it("does not turn an incomplete restored control snapshot into a confirmed empty conversation", () => {
+    useSessionsStore.getState().applyCloudHistoryRestoreHead(chat, head);
+    useSessionsStore.getState().installCloudSnapshot(chat, {
+      version: 1, conversationId: chat, agentId: "codex", executionId: null, session: null, initialize: null,
+      messages: [], activeTurn: null, permissions: [], questions: [],
+      historyRestore: { projection: head.projection, historyHeads: [head.head!] },
+    });
+    expect(useSessionsStore.getState().sessions[chat]).toMatchObject({
+      messages: [bubble], transcriptState: "loading", hasTranscript: true,
+    });
+  });
+
+  it("does not use a provisional disk head as successor authority even for identical bytes", () => {
+    const before: CloudHistoryRestoreFence = { ...head, head: { ...head.head!, recordSequence: 3,
+      manifestSha256: "a".repeat(64), incompleteReason: null } };
+    useSessionsStore.getState().applyCloudHistoryRestoreHead(chat, before);
+    useSessionsStore.getState().patchSession(chat, { messages: [reply, bubble], transcriptState: "loading",
+      transcriptPresentation: { source: "cache", restoreHead: before } });
+    const disk = { ...before, projection: { ...projection, bootId: "88888888-8888-4888-8888-888888888888" } };
+    useSessionsStore.getState().applyCloudHistoryRestoreHead(chat, disk);
+    expect(useSessionsStore.getState().sessions[chat]).toMatchObject({ messages: [bubble], transcriptPresentation: null, transcriptState: "loading" });
+  });
+  it("retains only proven CP presentation across a new boot, with authority still loading", () => {
+    const before: CloudHistoryRestoreFence = { ...head, head: { ...head.head!, recordSequence: 3,
+      manifestSha256: "a".repeat(64), incompleteReason: null } };
+    useSessionsStore.getState().applyCloudHistoryRestoreHead(chat, before);
+    useSessionsStore.getState().patchSession(chat, { messages: [reply, bubble], transcriptState: "loading",
+      transcriptPresentation: { source: "cache", restoreHead: before } });
+    const saved = useSessionsStore.getState().sessions[chat]!.messages;
+    const next = { ...before, projection: { ...projection, generation: 3, bootId: "88888888-8888-4888-8888-888888888888",
+      writerEpoch: "99999999-9999-4999-8999-999999999999" } };
+    useSessionsStore.getState().applyCloudHistoryRestoreHead(chat, next, false, true);
+    const slot = useSessionsStore.getState().sessions[chat]!;
+    expect(slot.messages).toBe(saved);
+    expect(slot.transcriptState).toBe("loading");
+    expect(slot.transcriptPresentation?.restoreHead).toEqual(next);
+    expect(useSessionsStore.getState().cloudHistoryRestoreHeads[chat]).toEqual(next);
+  });
   it("fences visible history without completing the unknown transcript or losing queued intent and siblings", () => {
     const other = useSessionsStore.getState().sessions[sibling];
     useSessionsStore.getState().applyCloudHistoryRestoreHead(chat, head);

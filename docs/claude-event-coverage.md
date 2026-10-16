@@ -1,7 +1,7 @@
 # Claude SDK event coverage
 
-Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.293** and its
-bundled CLI **2.1.293**. The installed `sdk.d.ts` and wrapper are the contract;
+Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.296** and its
+bundled CLI **2.1.296**. The installed `sdk.d.ts` and wrapper are the contract;
 online documentation can describe a different version.
 
 The public `SDKMessage` union has 39 member aliases and 42 distinct type/subtype
@@ -27,7 +27,7 @@ the table and native fixtures whenever the pinned SDK changes.
 | `result/error_max_turns` | handled | Existing terminal reason and turn settlement; preserve provider explanation and usage. |
 | `result/error_max_budget_usd` | handled | Legacy/native budget termination remains readable even though Zeros no longer configures a spend cap. |
 | `result/error_max_structured_output_retries` | handled | Structured-output exhaustion settles the turn with its native failure and usage. |
-| `system/init` | handled | Adapter: native binding, commands/skills/plugins, capabilities and permission mode. Translator: current model and usage conversation identity. Ordinary init does not reset process-owned background work. |
+| `system/init` | handled | Adapter: provisional native ID, commands/skills/plugins, capabilities and permission mode. Persist/publish the resume binding only after accepted root model content or successful root result, because init can precede failed authentication without a saved conversation. Translator: current model and usage conversation identity. Ordinary init does not reset process-owned background work. |
 | `stream_event` | handled | Translator/transcript state: native message/block deltas, tool arguments, Thinking and final-answer boundaries; root client UUIDs acknowledge consumed steering. |
 | `system/compact_boundary` | handled | Existing compaction row settles only on confirmation; retain native trigger/pre-token metadata. Native UUID replay does not duplicate the row. History-preservation metadata is not a request to delete Zeros history. |
 | `system/status` | handled | Compaction start/success/failure, requesting/compacting liveness and confirmed live permission-mode changes. A status clears neither user work nor the result requirement. Stop/replay guards precede state changes. |
@@ -55,13 +55,40 @@ the table and native fixtures whenever the pinned SDK changes.
 | `system/files_persisted` | handled | Failure produces a generic session-file persistence explanation. Successful cloud file IDs, private filenames and diagnostics are not displayed or treated as local artifacts. |
 | `tool_use_summary` | intentionally ignored | Optional summary duplicates the existing native tool feed. It cannot settle or replace those tools. |
 | `system/memory_recall` | intentionally ignored | Internal personal/team/organization memory hydration, including private contents, is not transcript narration. No memory-inspection feature is implied. |
-| `rate_limit_event` | handled | Deduplicated limit/extra-usage/recovery advisory. Preserve included-usage versus extra-usage availability; never fail or authenticate a turn from this status alone. |
+| `rate_limit_event` | handled | Typed `claude-rate-limit:<budget>` limit/extra-usage/recovery notice, deduplicated across results and background replies. The renderer selects one current status at the provider turn's tail. Preserve included-usage versus extra-usage availability; never fail or authenticate a turn from this status alone. |
 | `system/elicitation_complete` | handled | Plain external-request completion feedback keyed by server/request identity. Does not answer an approval or settle a pending question automatically. |
 | `system/permission_denied` | handled | Preserve native explanation beside the exact owning tool/child feed. Unknown or ambiguous native tool ownership stays deferred. Native tool results still own tool success/failure. |
 | `prompt_suggestion` | unsupported | Optional predicted follow-up suggestions are not enabled and have no product surface; never auto-submit them. |
 | `system/mirror_error` | handled | Generic synchronization explanation without exposing private mirror paths/keys. Does not falsely mark an ordinary file tool failed. |
 | `system/informational` | handled | Plain bounded content as an inbetween message, tool-scoped where identified. `prevent_continuation` explains runtime behavior but is not itself a terminal result. |
-| `conversation_reset` | handled | Existing idempotent accounting reset at `/clear`. **Limitation:** the SDK's fresh-transcript/title remount is unsupported; this handler does not erase saved chat history or invent a new chat. Native session binding still follows init. |
+| `conversation_reset` | handled | Existing idempotent accounting reset at `/clear`. **Limitation:** the SDK's fresh-transcript/title remount is unsupported; this handler does not erase saved chat history or invent a new chat. Native session binding follows init plus confirmed root work/success. |
+
+## 0.3.296 field dispositions
+
+The public message inventory remains at 39 aliases and 42 discriminators.
+This upgrade keeps the existing usage-warning presentation and introduces no
+Claude screen, model-picker entry or Settings control.
+
+| Native field or surface | Disposition | Supported behavior / limitation |
+| --- | --- | --- |
+| `SDKRateLimitInfo.overageEnabled` and fuller overage warning metadata | intentionally ignored | Keep the existing usage-warning copy and behavior. The new enabled flag does not establish available credits or override policy; no new warning distinctions are adopted. |
+| `SDKControlInitializeResponse.claude_code_version` | verification-only | `claude:smoke` compares the actual control-handshake version with the pinned bundled CLI before accepting its auth rejection. Do not publish one query's version into a cache shared by other owners/custom binaries. The adapter's generic `agentInfo.version: "sdk"` remains unchanged. |
+| `AgentDefinition.autoCompactWindow` | SDK-owned | Native agent definitions may select a smaller compaction window. No host override or new preference; this is separate from idle compaction. |
+| Read `allow_large` | SDK-owned | Preserve native tool input and the ordinary Read presentation. Native execution owns read limits; no additional detail card. |
+| Hook `onFailure: "continue" \| "block"` | SDK-owned | Preserve user/admin hook policy. Existing hook failure feedback and native result handling remain authoritative; do not globally enable blocking or reinterpret cancellation. |
+| Inline `settings.sandbox` merge fixes | SDK-owned | Existing Local permissions and cloud VM isolation remain unchanged. No additional cloud agent sandbox is enabled. |
+| MCP reconnection, pagination, tool-description limits and bounded results | SDK-owned | Existing discovery/configuration and bounded supported-content handling remain. Missing optional metadata must not hide ordinary output or resource links. Native fixes do not imply a new MCP management surface. |
+| Streamed citation annotations | unsupported presentation | Retain assistant text; a citation-specific renderer is deferred. The SDK retaining annotations does not by itself give Zeros a citation UI. |
+| WebSearch result `snippet` | SDK-owned hook data | Available to PostToolUse, not `tool_use_result`; no new search-result UI follows from this field. |
+
+Restarted permission-answer validation, disabled-server handling, interrupted
+subagent shutdown, MCP recovery and native token/cost corrections arrive with
+the runtime. Existing permission, restart, replay, subagent, hook-feedback and
+usage suites run against the replacement wrapper. Those native-contract
+simulations do not claim a live account reproduced every upstream fix.
+The launch smoke additionally exercises the real 0.3.296 wrapper and bundled
+2.1.296 process without inference. See the prior-version dispositions below
+for behavior that remains part of the integration.
 
 ## 0.3.293 field dispositions
 
@@ -145,9 +172,15 @@ order are documented in [the harness capability boundary](agent-harness-capabili
 
 ## Feedback and lifecycle invariants
 
-New feedback uses existing `agent_message_chunk` commentary and parent-binding
-updates. Stable local message IDs permit keyed replacement; native UUIDs suppress
-replay across results/query replacement. Text is capped at 8,000 characters,
+Feedback uses existing `agent_message_chunk` commentary and parent-binding
+updates, with typed `error_notice` events for usage status. Stable native message
+IDs permit commentary replacement; native UUIDs suppress replay across
+results/query replacement. Usage notices are immutable: changed states receive
+new IDs, and their stable budget code selects the current display. Repeated
+identical states remain deduplicated across intermediate results until the next
+user turn. Older commentary is recognized by its persisted `messageId`, not the
+renderer row ID, and shares the one tail notice without a storage migration.
+Text is capped at 8,000 characters,
 active keyed notices at 256, deferred tool notices at 64 and replay IDs at 4,000.
 Unknown ownership cannot borrow a sibling row. Stop/disposal clears deferred
 feedback and prevents late publication. Ordinary turn results retain separately
@@ -216,6 +249,9 @@ Empty background acknowledgements retain activity and pending user/compaction
 ownership while cumulative usage advances exactly once. Explicit user UUIDs,
 including folded sends, still establish result ownership. Local commands that
 make no model calls remain valid completions.
+Nonempty autonomous results and results correlated to earlier turns also
+preserve a newer pending send's activity. The SDK adapter supplies that ownership
+decision before translation publishes activity; output and usage still advance.
 
 `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1` asks supporting runtimes to emit known
 startup errors before exit. Native reasons distinguish gateway sign-in from

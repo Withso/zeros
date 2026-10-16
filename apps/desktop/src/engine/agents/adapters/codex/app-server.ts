@@ -600,6 +600,27 @@ export async function bootCodexAppServerRuntime(
 ): Promise<CodexAppServerHandle> {
   const logTag = opts.logTag ?? "codex-app-server";
   const cloud=cloudProviderExecution(opts.executionBoundary);
+  const cloudAttempt = cloud ? randomUUID() : null;
+  const cloudStage = async <T>(
+    step: "initialize" | "executor_start" | "provider_login" | "environment_add" | "environment_info" | "environment_ready",
+    run: () => Promise<T>,
+  ): Promise<T> => {
+    if (!cloud) return run();
+    const started = performance.now();
+    const observe = (status: "started" | "succeeded" | "failed") => {
+      // Closed stage names and an ephemeral attempt ID only: no RPC bytes,
+      // URLs, paths, credentials, account IDs or provider error messages.
+      try {
+        opts.onStderr?.(`[codex-app-server] cloud_stage ${JSON.stringify({
+          attempt: cloudAttempt, step, status,
+          elapsedMs: Math.min(3_600_000, Math.max(0, Math.round(performance.now() - started))),
+        })}`);
+      } catch { /* diagnostic observers cannot alter provider admission */ }
+    };
+    observe("started");
+    try { const result = await run(); observe("succeeded"); return result; }
+    catch (error) { observe("failed"); throw error; }
+  };
   const cwd=cloud?.cwd??opts.cwd;
   const cloudLifetime=cloud?cloudExecutionLifetime(cloud):null;
   const cloudAuth=cloud&&cloudLifetime?new CloudCodexAuth({
@@ -729,7 +750,7 @@ export async function bootCodexAppServerRuntime(
   // ── Handshake: initialize ─────────────────────────────────
   let initResp: CodexInitializeResponse;
   try {
-    initResp = await client.request<CodexInitializeResponse>(
+    initResp = await cloudStage("initialize", () => client.request<CodexInitializeResponse>(
       "initialize",
       {
         clientInfo: {
@@ -744,7 +765,7 @@ export async function bootCodexAppServerRuntime(
         }),
       },
       { timeoutMs: INITIALIZE_TIMEOUT_MS },
-    );
+    ));
   } catch (err) {
     await teardown(proc, client);
     throw wrapBootError(
@@ -1016,15 +1037,20 @@ export async function bootCodexAppServerRuntime(
   if(cloud){
     let category: CloudCommandFailureCause["category"] = "executor_start_failed";
     try{
-      cloudEnvironment=await CloudCodexExecServer.start(cloud,binarySource.path);
+      cloudEnvironment=await cloudStage("executor_start", () => CloudCodexExecServer.start(cloud,binarySource.path));
       category="provider_login_failed";
-      const login=cloudAuth!.login();
-      if(login)await client.request("account/login/start",login,{timeoutMs:5000});
+      await cloudStage("provider_login", async () => {
+        const login=cloudAuth!.login();
+        if(login)await client.request("account/login/start",login,{timeoutMs:5000});
+      });
       category="environment_setup_failed";
-      await client.request("environment/add",{environmentId:cloudEnvironment.environmentId,execServerUrl:cloudEnvironment.url,connectTimeoutMs:5000},{timeoutMs:6000});
-      const info=await client.request<{cwd:string|null}>("environment/info",{environmentId:cloudEnvironment.environmentId},{timeoutMs:5000});
-      if(info.cwd!==pathToFileURL(cwd).href)throw new CloudCommandFailureError({stage:"provider_start",category:"environment_identity_mismatch"});
-      cloudLifetime!.assertLive();
+      const environment = cloudEnvironment;
+      await cloudStage("environment_add", () => client.request("environment/add",{environmentId:environment.environmentId,execServerUrl:environment.url,connectTimeoutMs:5000},{timeoutMs:6000}));
+      await cloudStage("environment_info", async () => {
+        const info=await client.request<{cwd:string|null}>("environment/info",{environmentId:environment.environmentId},{timeoutMs:5000});
+        if(info.cwd!==pathToFileURL(cwd).href)throw new CloudCommandFailureError({stage:"provider_start",category:"environment_identity_mismatch"});
+        cloudLifetime!.assertLive();
+      });
     }catch(error){void cloudLifetime!.close().catch(()=>{});throw cloudCodexFailure(error,{stage:"provider_start",category});}
   }
 
@@ -1187,8 +1213,11 @@ export async function bootCodexAppServerRuntime(
       cloudLifetime!.assertLive();
       if(["thread/start","thread/resume","turn/start"].includes(method)){
         try{
-          const status=await client.request<{status:string}>("environment/status",{environmentId:cloudEnvironment.environmentId},{timeoutMs:5000});
-          if(status.status!=="ready")throw new CloudCommandFailureError({stage,category:"environment_not_ready"});
+          const environment = cloudEnvironment;
+          await cloudStage("environment_ready", async () => {
+            const status=await client.request<{status:string}>("environment/status",{environmentId:environment.environmentId},{timeoutMs:5000});
+            if(status.status!=="ready")throw new CloudCommandFailureError({stage,category:"environment_not_ready"});
+          });
         }catch(error){void cloudLifetime!.close().catch(()=>{});throw cloudCodexFailure(error,{stage,category:"environment_not_ready"});}
       }
     }

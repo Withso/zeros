@@ -44,6 +44,45 @@ function fixture() {
   return { file, scope, queue, options, events, normal, lifecycle, lifecycleOptions, quiescent, enqueue, drain, acknowledgement };
 }
 describe("FULL writer drain and immutable seal", () => {
+  it("observes the real mirror, seal, freeze and ACK gates without changing their order", async () => {
+    const f = fixture(), order: string[] = [];
+    const ports = { mirror: { flush: async () => { order.push("mirror-work"); } },
+      retireNative: async () => {}, waitForWork: async () => {},
+      freezeNormal: () => { order.push("freeze-work"); },
+      request: async (seal: NonNullable<typeof f.lifecycle.seal>) => { order.push("ack-work"); return f.acknowledgement(seal); },
+      onStage: (stage: string) => { order.push(stage); } };
+    await f.lifecycle.drainAndSeal(ports);
+    expect(order).toEqual(["mirror_flush", "mirror-work", "seal_create", "normal_freeze", "freeze-work", "seal_ack", "ack-work"]);
+    expect(f.lifecycle.acknowledged).toBe(true);
+  });
+
+  it("reports its original finite seal deadline even while a native gate stays held", async () => {
+    vi.useFakeTimers();
+    const f = fixture(), onDeadline = vi.fn();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ports = { mirror: { flush: async () => {} }, retireNative: () => gate,
+      waitForWork: async () => {}, freezeNormal: vi.fn(), request: vi.fn(), timeoutMs: 30_000, onDeadline };
+    const flight = f.lifecycle.drainAndSeal(ports);
+    const result = expect(flight).rejects.toMatchObject({ code: "command_service_unavailable" });
+    try {
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(onDeadline).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await result;
+      expect(onDeadline).toHaveBeenCalledTimes(1);
+      expect(ports.request).not.toHaveBeenCalled();
+      expect(f.lifecycle.seal).toBeNull();
+    } finally { release(); await Promise.allSettled([flight]); vi.useRealTimers(); }
+  });
+
+  it("ignores an observer exception while preserving the actual acknowledged seal", async () => {
+    const f = fixture(), onStage = vi.fn(() => { throw new Error("private-observer-canary"); });
+    await f.lifecycle.drainAndSeal({ mirror: { flush: async () => {} }, retireNative: async () => {},
+      waitForWork: async () => {}, freezeNormal: () => {}, request: async seal => f.acknowledgement(seal), onStage });
+    expect(onStage).toHaveBeenCalledTimes(4); expect(f.lifecycle.acknowledged).toBe(true);
+  });
+
   it("does not acknowledge an old seal when NORMAL freeze failed and its head advanced", async () => {
     const f = fixture(), request = vi.fn(async (seal: NonNullable<typeof f.lifecycle.seal>) => f.acknowledgement(seal));
     const ports = { mirror: { flush: async () => {} }, retireNative: async () => {}, waitForWork: async () => {}, request };

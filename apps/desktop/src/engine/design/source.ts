@@ -221,6 +221,35 @@ export function insertDesignHeadMarkup(source: string, markup: string): string {
   return `${source.slice(0, insertAt)}${markup}${source.slice(insertAt)}`;
 }
 
+/** Theme names a frame can be shown in, as the canvas Themes control uses. */
+export const DESIGN_THEME_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
+
+/** Show a frame in a named theme the way the canvas Themes control does:
+ * `data-zd-theme` on the document element, replacing any authored value. */
+export function withDesignTheme(source: string, theme: string): string {
+  if (!DESIGN_THEME_NAME.test(theme)) throw new Error("Design theme is invalid.");
+  const attribute = `data-zd-theme="${theme}"`;
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const html = elementRecords(document).find(
+    ({ element }) => element.tagName === "html",
+  )?.element;
+  const location = html?.sourceCodeLocation;
+  const authored = location?.attrs?.["data-zd-theme"];
+  if (authored) {
+    return `${source.slice(0, authored.startOffset)}${attribute}${source.slice(authored.endOffset)}`;
+  }
+  if (location?.startTag) {
+    const at = location.startTag.startOffset + "<html".length;
+    return `${source.slice(0, at)} ${attribute}${source.slice(at)}`;
+  }
+  // Without an authored html tag, add one after the doctype so the document
+  // keeps its standards mode.
+  const at =
+    document.childNodes.find((node) => node.nodeName === "#documentType")
+      ?.sourceCodeLocation?.endOffset ?? 0;
+  return `${source.slice(0, at)}<html ${attribute}>${source.slice(at)}`;
+}
+
 export function escapeText(value: string): string {
   return value
     .replace(/&/g, "&amp;")

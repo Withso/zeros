@@ -1,0 +1,9 @@
+{
+  "id": "cloud-final-seal-control-quiescence",
+  "kind": "replay",
+  "area": "cloud-engine-stop",
+  "fixedBy": "pr:509",
+  "symptom": "A valid credential-control response or locally cancelled request crossing a checkpoint fence was treated as authority rejection, retiring registration before the final writer seal and its next heartbeat.",
+  "rule": "Separate admission quiescence and local cancellation from confirmed authority loss. Hold a real control exchange across the checkpoint fence, retain its immutable ACK, continue heartbeats to an acknowledged SQLite seal, and keep explicit revoke, wrong scope and retired registration terminal.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-local-command-queue-boot.test.ts apps/desktop/src/engine/__tests__/cloud-local-command-queue-control-client.test.ts apps/desktop/src/engine/__tests__/cloud-runtime-registration.test.ts"
+}

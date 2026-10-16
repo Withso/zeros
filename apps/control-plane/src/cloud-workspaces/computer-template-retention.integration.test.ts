@@ -11,6 +11,7 @@ import {
 } from "vitest";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { postgresNotificationSubscription } from "../postgres-notifications.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { forceDeletionRequestPurgeByStaff } from "../deletion-lifecycle.js";
 import { BoatApiClient } from "./boat-client.js";
@@ -46,7 +47,7 @@ type Template = {
 const key = (template: Template) => `computer-build:${template.id}`;
 
 describe("computer template keep-set", () => {
-  it("unions active, previous, references and exactly ten ready versions", () => {
+  it("keeps only active, previous and referenced templates, without a ready-history hold", () => {
     expect([
       ...computerTemplateKeepSet({
         active: "old-active",
@@ -57,12 +58,7 @@ describe("computer template keep-set", () => {
           (_, index) => `ready-${index + 1}`,
         ),
       }),
-    ]).toEqual([
-      "old-active",
-      "old-previous",
-      "old-source",
-      ...Array.from({ length: 10 }, (_, index) => `ready-${index + 1}`),
-    ]);
+    ]).toEqual(["old-active", "old-previous", "old-source"]);
   });
 });
 
@@ -295,7 +291,7 @@ d("Cloud Computer template retention", () => {
   }
 
   it("retires idempotently through B7's prepared and bound operation journal", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     const store = await realJournal(oldest!);
     journal = store;
     worker = makeWorker();
@@ -311,7 +307,7 @@ d("Cloud Computer template retention", () => {
   });
 
   it("retries an uncertain deletion from B7's durable journal after a restart", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     const store = await realJournal(oldest!);
     journal = store;
     worker = makeWorker();
@@ -357,18 +353,13 @@ d("Cloud Computer template retention", () => {
     ).rejects.toMatchObject({ code: "provider_operation_conflict" });
   });
 
-  it("retires the eleventh ready template and is idempotent", async () => {
-    const versions = await templates(11);
+  it("retires a non-held ready template and is idempotent", async () => {
+    const versions = await templates(1);
     expect(await tick()).toBe(1);
     expect(await state(versions[0]!)).toMatchObject({
       state: "retired",
       retired_at: expect.any(Date),
     });
-    for (const template of versions.slice(1))
-      expect(await state(template)).toMatchObject({
-        state: "ready",
-        retired_at: null,
-      });
     expect(requests).toEqual([
       {
         id: versions[0]!.resource,
@@ -391,8 +382,8 @@ d("Cloud Computer template retention", () => {
     expect(requests).toHaveLength(2);
   });
 
-  it("keeps older active/previous/referenced versions in addition to the newest ten", async () => {
-    const versions = await templates(14);
+  it("keeps active, previous and referenced versions while retiring the newest non-held template", async () => {
+    const versions = await templates(4);
     await pool.query(
       "UPDATE cloud_computer_v2_heads SET active_build_id=$2,previous_build_id=$3 WHERE org_id=$1",
       [fixture.organizationId, versions[0]!.id, versions[1]!.id],
@@ -415,7 +406,7 @@ d("Cloud Computer template retention", () => {
   });
 
   it("retains a deleting workspace's source until both workspace and data cleanup finish", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     await source(oldest!);
     await pool.query(
       "UPDATE cloud_workspaces SET status='deleted',desired_state='deleted',deleted_at=now() WHERE id=$1",
@@ -426,8 +417,21 @@ d("Cloud Computer template retention", () => {
     expect(await tick()).toBe(1);
   });
 
+  it("retains a source after data cleanup while its workspace is not yet deleted", async () => {
+    const [template] = await templates(1);
+    await source(template!);
+    await pool.query(
+      "UPDATE cloud_workspaces SET status='archived',desired_state='deleted',data_deleted_at=now() WHERE id=$1",
+      [fixture.workspaceId],
+    );
+    expect(await tick()).toBe(0);
+    expect(requests).toEqual([]);
+    await deletedWorkspace();
+    expect(await tick()).toBe(1);
+  });
+
   it("loses to an Activate that commits after candidate discovery", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     let activated = false;
     findHook = async (_key, tx) => {
       if (tx || activated) return;
@@ -445,7 +449,7 @@ d("Cloud Computer template retention", () => {
   });
 
   it("withdraws Activate admission as soon as a retirement claim wins", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     let checked = false;
     findHook = async (_key, tx) => {
       if (tx || checked || (await state(oldest!)).state !== "retiring") return;
@@ -457,14 +461,18 @@ d("Cloud Computer template retention", () => {
           oldest!.version,
           { expectedRevision: 1, operationId: randomUUID() },
         ),
-      ).rejects.toMatchObject({ code: "cloud_computer_not_built" });
+      ).rejects.toMatchObject({
+        status: 409,
+        code: "cloud_computer_not_built",
+        message: "This template is no longer retained. Rebuild this version before activating it.",
+      });
     };
     expect(await tick()).toBe(1);
     expect(checked).toBe(true);
   });
 
   it("loses to a fork source that commits after candidate discovery", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     let pinned = false;
     findHook = async (_key, tx) => {
       if (tx || pinned) return;
@@ -477,7 +485,7 @@ d("Cloud Computer template retention", () => {
   });
 
   it("rechecks a fork reference added after the retirement claim before dispatch", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     let pinned = false;
     findHook = async (_key, tx) => {
       if (tx || pinned || (await state(oldest!)).state !== "retiring") return;
@@ -492,7 +500,7 @@ d("Cloud Computer template retention", () => {
   });
 
   it("rechecks references in the final transaction before publishing retired", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     const persist = journal.state;
     journal.state = async (operationKey, value) => {
       await persist(operationKey, value);
@@ -509,7 +517,7 @@ d("Cloud Computer template retention", () => {
   });
 
   it("accepts Boat DELETE 404 as already gone", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     live.delete(oldest!.resource);
     expect(await tick()).toBe(1);
     expect(operations.get(key(oldest!))).toMatchObject({
@@ -520,7 +528,7 @@ d("Cloud Computer template retention", () => {
   });
 
   it("retains an uncertain delete and retries the same identity after a lost reply", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     deleteHook = async (id) => {
       live.delete(id);
       throw new Error("private provider failure");
@@ -545,7 +553,7 @@ d("Cloud Computer template retention", () => {
   });
 
   it("persists the deletion operation before rechecking a still-visible sandbox", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     deleteHook = async (id) =>
       Response.json({
         ok: true,
@@ -570,7 +578,7 @@ d("Cloud Computer template retention", () => {
   });
 
   it("does not accept a deletion receipt for another sandbox", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     deleteHook = async () =>
       Response.json({
         ok: true,
@@ -591,7 +599,7 @@ d("Cloud Computer template retention", () => {
   it.each(["account", "wallet", "resource", "purpose", "journal"])(
     "refuses mismatched %s identity",
     async (mismatch) => {
-      const [oldest] = await templates(11);
+      const [oldest] = await templates(1);
       if (mismatch === "account" || mismatch === "wallet")
         await pool.query(
           `UPDATE cloud_computer_templates SET ${mismatch === "account" ? "account_scope" : "billing_org"}=$2 WHERE build_id=$1`,
@@ -614,7 +622,7 @@ d("Cloud Computer template retention", () => {
   );
 
   it("fences an old claim when another process completes the same retirement", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     const other = makeWorker();
     let raced = false;
     findHook = async (_key, tx) => {
@@ -629,7 +637,7 @@ d("Cloud Computer template retention", () => {
   });
 
   it("finishes after a crash between journal confirmation and the retired CAS", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     const persist = journal.state;
     journal.state = async (operationKey, value) => {
       await persist(operationKey, value);
@@ -642,7 +650,7 @@ d("Cloud Computer template retention", () => {
     expect(requests.filter((row) => row.method === "DELETE")).toHaveLength(1);
   });
 
-  it("erasure releases active/previous/newest holds while preserving unfinished workspace cleanup", async () => {
+  it("erasure releases active/previous holds while preserving unfinished workspace cleanup", async () => {
     const versions = await templates(2);
     await source(versions[0]!);
     await pool.query(
@@ -713,11 +721,12 @@ d("Cloud Computer template retention", () => {
       expect((await state(template)).state).toBe("retired");
   });
 
-  it("scans past fifty uncertain deletions and retries them on later sweeps", async () => {
-    const versions = await templates(63);
-    const eligible = versions.slice(0, 53);
-    const blocked = eligible.slice(0, 50);
-    for (const template of eligible) journal = await realJournal(template);
+  // This exercises 53 real journals and 153 provider attempts across three
+  // sweeps. It is a pagination/retry contract, not a five-second latency SLA.
+  it("scans past fifty uncertain deletions and retries them on later sweeps", { timeout: 30_000 }, async () => {
+    const versions = await templates(53);
+    const blocked = versions.slice(0, 50);
+    for (const template of versions) journal = await realJournal(template);
     worker = makeWorker();
     const failures = new Set(blocked.map((template) => template.resource));
     deleteHook = async (id) => {
@@ -735,7 +744,7 @@ d("Cloud Computer template retention", () => {
     expect(await tick()).toBe(3);
     expect(
       requests.filter((row) => row.method === "DELETE").map((row) => row.id),
-    ).toEqual(eligible.map((template) => template.resource));
+    ).toEqual(versions.map((template) => template.resource));
     expect(
       (
         await Promise.all(
@@ -751,13 +760,78 @@ d("Cloud Computer template retention", () => {
     expect(requests.filter((row) => row.method === "DELETE")).toHaveLength(103);
     deleteHook = undefined;
     expect(await tick()).toBe(50);
-    for (const template of versions.slice(53))
-      expect((await state(template)).state).toBe("ready");
+    for (const template of versions)
+      expect((await state(template)).state).toBe("retired");
     expect(await tick()).toBe(0);
   });
 
+  it("coalesces startup, hints and listener reconnect during an in-flight sweep", async () => {
+    const [oldest, active] = await templates(2);
+    for (const template of [oldest!, active!]) journal = await realJournal(template);
+    await pool.query("UPDATE cloud_computer_v2_heads SET active_build_id=$2 WHERE org_id=$1",
+      [fixture.organizationId, active!.id]);
+    worker = makeWorker();
+    const listener = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1, connectionTimeoutMillis: 1_000 });
+    const clients: pg.PoolClient[] = [];
+    listener.on("acquire", connection => clients.push(connection));
+    let entered!: () => void, release!: () => void, notified!: () => void, reconnected!: () => void;
+    const deleting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const notice = new Promise<void>(resolve => { notified = resolve; });
+    const readyAgain = new Promise<void>(resolve => { reconnected = resolve; });
+    let ready = 0, deletingNow = 0, maximumDeleting = 0;
+    deleteHook = async id => {
+      deletingNow++;
+      maximumDeleting = Math.max(maximumDeleting, deletingNow);
+      try {
+        if (id === oldest!.resource) { entered(); await gate; }
+        live.delete(id);
+        return Response.json({ ok: true, operation: {
+          id: `bdop_${"a".repeat(32)}`, kind: "sandbox", targetId: id,
+        } });
+      } finally { deletingNow--; }
+    };
+    const observation = postgresNotificationSubscription(listener, {
+      channels: [COMPUTER_TEMPLATE_RETENTION_CHANNEL],
+      onReady: () => { if (++ready === 2) reconnected(); },
+      onNotification: () => notified(),
+    });
+    const observing = observation.start();
+    const sweeps = vi.spyOn(worker, "tick");
+    const stop = worker.start(listener);
+    try {
+      await Promise.all([observing, deleting]);
+      expect(clients).toHaveLength(1);
+      // Make another template eligible after discovery, while the first
+      // provider operation is held. Hints and reconnect must replay this work
+      // without starting a second sweep alongside the one still in flight.
+      await pool.query("UPDATE cloud_computer_v2_heads SET active_build_id=NULL WHERE org_id=$1", [fixture.organizationId]);
+      await pool.query("SELECT pg_notify($1,$2)", [COMPUTER_TEMPLATE_RETENTION_CHANNEL, fixture.organizationId]);
+      await notice;
+      clients[0]!.emit("error", new Error("synthetic listener gap"));
+      await readyAgain;
+      expect(clients).toHaveLength(2);
+      expect(listener.waitingCount).toBe(0);
+      expect(requests.filter(request => request.method === "DELETE").map(request => request.id)).toEqual([oldest!.resource]);
+      // Observe the original sweep; calling tick here would itself queue the
+      // missing work and could hide a broken notification/reconnect replay.
+      const drained = sweeps.mock.results[0]!.value as Promise<number>;
+      release();
+      expect(await drained).toBe(2);
+      expect(maximumDeleting).toBe(1);
+      expect(requests.filter(request => request.method === "DELETE").map(request => request.id)).toEqual([oldest!.resource, active!.resource]);
+      for (const template of [oldest!, active!]) expect((await state(template)).state).toBe("retired");
+    } finally {
+      release();
+      await stop();
+      await observation.stop();
+      await listener.end();
+      sweeps.mockRestore();
+    }
+  });
+
   it("preserves retired history for Rebuild and rejects Activate", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     expect(await tick()).toBe(1);
     expect(
       (
@@ -771,7 +845,11 @@ d("Cloud Computer template retention", () => {
         oldest!.version,
         { expectedRevision: 1, operationId: randomUUID() },
       ),
-    ).rejects.toMatchObject({ code: "cloud_computer_not_built" });
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "cloud_computer_not_built",
+      message: "This template is no longer retained. Rebuild this version before activating it.",
+    });
     expect(
       await service.rebuild(
         fixture.organizationId,
@@ -780,12 +858,12 @@ d("Cloud Computer template retention", () => {
         { expectedRevision: 1, operationId: randomUUID() },
       ),
     ).toMatchObject({
-      build: { version: 12, state: "queued", rebuiltFromBuildId: oldest!.id },
+      build: { version: 2, state: "queued", rebuiltFromBuildId: oldest!.id },
     });
   });
 
   it("notifies retention after explicit and automatic activation commit", async () => {
-    const [oldest] = await templates(11);
+    const [oldest] = await templates(1);
     const listener = await pool.connect();
     await listener.query(`LISTEN ${COMPUTER_TEMPLATE_RETENTION_CHANNEL}`);
     const notified = async (activate: () => Promise<unknown>) => {

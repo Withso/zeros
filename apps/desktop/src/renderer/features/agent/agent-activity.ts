@@ -3,6 +3,12 @@ import { agentFamily } from "./model-catalog";
 
 export type AgentActivity = "running" | "waiting" | null;
 
+function foregroundTurnRunning(slot: AgentSessionState | undefined): boolean {
+  return !!slot && (slot.status === "streaming" ||
+    (slot.status === "warming" || slot.status === "reconnecting") &&
+    slot.lastStopReason !== "cancelled" && slot.activeTurnStartedAt !== null);
+}
+
 /** Codex and Cursor retain their foreground-only chat-tab indicator. Their
  * native background process tracking still participates in workspace safety.
  * A send this renderer has in flight is foreground work for every agent, so a
@@ -15,7 +21,7 @@ export function chatAgentActivity(
   if (pendingLocalTurnId) return "running";
   return agentFamily(slot?.agentId ?? null) === "claude"
     ? agentActivity(slot, pendingLocalTurnId)
-    : slot?.status === "streaming"
+    : foregroundTurnRunning(slot)
       ? "running"
       : null;
 }
@@ -32,6 +38,11 @@ export function agentActivity(
   // Claude can hold the SDK Result while children finish. A native end_turn
   // parks only the parent presentation; the outstanding send stays cancellable.
   if (slot.status === "streaming") {
+    // Ambient watchers retain the native process, but an idle parent with no
+    // visible work must not keep the transcript or tabs working until Result.
+    if (claude && slot.backgroundActivity?.state === "idle" &&
+        slot.backgroundTasks.length === 0 &&
+        !slot.workflows.some((workflow) => workflow.status === "running")) return null;
     return claude &&
       slot.waitingForBackgroundTasks &&
       slot.backgroundTasks.length > 0 &&

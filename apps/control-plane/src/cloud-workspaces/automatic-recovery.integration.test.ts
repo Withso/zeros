@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
@@ -13,17 +13,21 @@ import { CloudWorkspaceReconciler } from "./reconciler.js";
 import type { CloudWorkspaceProvider, CloudProviderResource } from "./provider.js";
 import { CloudProviderError } from "./provider.js";
 import { withSystemTx, withUserTx } from "../db.js";
-import { deferCloudRecoveryResourceBlock } from "./automatic-recovery.js";
+import { advanceCloudAutomaticRecovery, deferCloudRecoveryResourceBlock } from "./automatic-recovery.js";
+import { computerTestAccount, computerTestWallet, seedComputerTemplate } from "./computer-workspace-test-fixtures.js";
+import { copyGenerationPins } from "./generation-pins.js";
 import { Hono } from "hono";
 import { HttpError } from "../authz.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
 import { cloudRuntimePinValues } from "./runtime-selection.js";
-import { runtimeWitness } from "./runtime-test-fixtures.js";
+import { runtimeWitness, seedRuntimeBundle } from "./runtime-test-fixtures.js";
 import { previousBackendRecoveryRollback } from "./lifecycle-compatibility-fixtures.js";
+import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const recoveryConfig = { provider: "boat", imageRef: "qualified-image", sourceCommit: "b".repeat(40), architecture: "linux/amd64",
-  cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480, settingsSecretEncryptionKeys: {}, currentSettingsSecretEncryptionKeyVersion: null } as CloudWorkspaceBackendConfig;
+  cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480, settingsSecretEncryptionKeys: {}, currentSettingsSecretEncryptionKeyVersion: null,
+  boat: { accountScope: computerTestAccount, billingOrg: computerTestWallet } } as CloudWorkspaceBackendConfig;
 suite("automatic Boat checkpoint recovery", () => {
   let pool: pg.Pool;
   let fixture: Awaited<ReturnType<typeof seedReadyCloudWorkspace>>;
@@ -97,6 +101,22 @@ suite("automatic Boat checkpoint recovery", () => {
     await subject.runOnce();
     return subject;
   }
+  it("schedules the existing recovery retry and retains terminal quarantine until provider deletion is proven", async () => {
+    await exhaust();
+    await pool.query(`UPDATE cloud_workspace_restore_incidents SET state='waiting_for_funding',
+      next_attempt_at=now()+interval '20 seconds',deadline_at=now()+interval '1 second' WHERE workspace_id=$1`, [fixture.workspaceId]);
+    const retry = await readCloudWorkerNextDelay(pool, "recovery");
+    expect(retry).toBeGreaterThan(19_000); expect(retry).toBeLessThanOrEqual(20_000);
+    await pool.query(`UPDATE cloud_workspace_restore_incidents SET state='cancelled',updated_at=now()-interval '31 days',
+      automatic_started_at=NULL WHERE workspace_id=$1`, [fixture.workspaceId]);
+    expect(await readCloudWorkerNextDelay(pool, "recovery")).toBeLessThanOrEqual(0);
+    await pool.query("UPDATE cloud_workspace_restore_incidents SET automatic_started_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
+    expect(await readCloudWorkerNextDelay(pool, "recovery")).toBeNull();
+    await pool.query("UPDATE cloud_workspace_generations SET retired_at=now() WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId]);
+    expect(await readCloudWorkerNextDelay(pool, "recovery")).toBeNull();
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='deleted',deletion_verified_at=now() WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId]);
+    expect(await readCloudWorkerNextDelay(pool, "recovery")).toBeLessThanOrEqual(0);
+  });
   function route(path = "", body?: unknown, key = randomUUID()) {
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", { id: fixture.userId }); await next(); });
@@ -135,6 +155,210 @@ suite("automatic Boat checkpoint recovery", () => {
       settings: { version: execution.settings.version, sha256: execution.settings.sha256 },
       engine: { instanceId: engineId, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, health: "ready", durableRecordConnected: true } } };
   }
+
+  async function currentComputer(version = 2, includeRepository = true, runtimeId?: string) {
+    return withSystemTx(pool, async tx => {
+      const installationId = randomUUID();
+      await tx.query(`INSERT INTO github_installations(id,github_installation_id,app_variant,owner_user_id,account_login,account_type,target_type)
+        VALUES($1,$2,'github.com',$3,'withso','Organization','Organization')`, [installationId, version, fixture.userId]);
+      const repository = (await tx.query(`SELECT repository.forge_repository_id FROM repositories repository
+        JOIN cloud_workspaces workspace ON workspace.repository_id=repository.id WHERE workspace.id=$1`, [fixture.workspaceId])).rows[0];
+      const computer = await seedComputerTemplate(tx, { organizationId: fixture.organizationId, ownerUserId: fixture.userId,
+        installationId, version, sourceSandboxId: `bx_2345678${version + 1}`, ...(runtimeId ? { runtimeId } : {}),
+        repositories: includeRepository ? [{ id: repository.forge_repository_id, owner: "withso", name: "zeros", sha: "1".repeat(40) }] : [] });
+      await tx.query("UPDATE cloud_computer_templates SET manifest_sha256=$2 WHERE build_id=$1", [computer.buildId, Buffer.alloc(32, version)]);
+      const captured = (await tx.query(`INSERT INTO cloud_computer_template_snapshots
+        (build_id,org_id,channel,account_scope,billing_org,source_sandbox_id,snapshot_name,manifest_sha256,
+         state,save_requested_at,snapshot_id,size_bytes,tree_sha256,verified_at,ready_at)
+        VALUES($1,$2,'alpha',$3,$4,$5,$6,$7,'ready',now(),'fixture_snapshot',4096,$7,now(),now()) RETURNING image_ref`,
+      [computer.buildId, fixture.organizationId, computerTestAccount, computerTestWallet, computer.sourceSandboxId,
+        `fixture-alpha-computer-v${version}`, Buffer.alloc(32, version)])).rows[0];
+      await tx.query("UPDATE cloud_computer_templates SET named_snapshot_required=true WHERE build_id=$1", [computer.buildId]);
+      return { ...computer, installationId, imageRef: captured.image_ref };
+    });
+  }
+
+  async function missingSnapshotWake(options: { missing?: boolean; failure?: string; duringInspect?: () => Promise<void> } = {}) {
+    await pool.query("UPDATE cloud_workspace_setup_runs SET state='cancelled',completed_at=now() WHERE id=$1", [setupRunId]);
+    await pool.query("UPDATE cloud_workspaces SET status='stopped',desired_state='stopped' WHERE id=$1", [fixture.workspaceId]);
+    const wake = await route("/wake");
+    expect(wake.status, JSON.stringify(await wake.clone().json())).toBe(202);
+    const wakeId = (await wake.json()).intent.id;
+    let resource: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1, resourceId: `sandbox-${fixture.workspaceId}`,
+      state: "failed", computeStopped: true, target: null, metadata: options.missing === false ? {} : { snapshotMissing: true } };
+    const start = vi.fn(async () => { throw new CloudProviderError(options.failure ?? "provider_snapshot_unavailable", "fixture error", options.failure === "provider_unavailable"); });
+    const stop = vi.fn(async () => resource);
+    const provider: CloudWorkspaceProvider = { name: "boat", async find(identity) { return resource.generation === identity.generation ? [resource] : []; },
+      async inspect(id) { await options.duringInspect?.(); return id === resource.resourceId ? resource : null; }, start, stop,
+      async create(input) { resource = { workspaceId: input.workspaceId, generation: input.generation, resourceId: `candidate-${fixture.workspaceId}`,
+        state: "running", target: null, metadata: {} }; return resource; },
+      async archive() { return resource; }, async delete() {}, async *listManaged() {} };
+    const reconciler = new CloudWorkspaceReconciler({ pool, provider, intervalMs: 1000, runtimeUpgradeConfig: recoveryConfig });
+    await reconciler.runOnce();
+    return { reconciler, provider, start, stop, wakeId };
+  }
+
+  it("recovers confirmed missing capture once, onto the CURRENT named Computer with immutable old pins", async () => {
+    const current = await currentComputer();
+    const original = (await pool.query("SELECT * FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];
+    const f = await missingSnapshotWake();
+    expect(f.start).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT state,evidence_code,setup_run_id FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows)
+      .toEqual([{ state: "queued", evidence_code: "provider_snapshot_missing", setup_run_id: null }]);
+    expect((await route("/wake")).status).toBe(409);
+    await f.reconciler.runOnce(); // confirmed access drain, even though compute already stopped
+    expect(f.stop).toHaveBeenCalledTimes(1);
+    await Promise.all([advanceCloudAutomaticRecovery(pool, recoveryConfig, false), advanceCloudAutomaticRecovery(pool, recoveryConfig, false)]);
+    const accepted = (await pool.query("SELECT image_ref,recovery_checkpoint_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0];
+    expect(accepted).toEqual({ image_ref: current.imageRef, recovery_checkpoint_id: checkpointId });
+    expect((await pool.query("SELECT build_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0])
+      .toEqual({ build_id: current.buildId, config_id: current.configId });
+    expect((await pool.query("SELECT github_installation_id FROM cloud_workspace_setup_specs WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0].github_installation_id).toBe(current.installationId);
+    expect((await pool.query("SELECT * FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0]).toEqual(original);
+    await currentComputer(3);
+    await advanceCloudAutomaticRecovery(pool, recoveryConfig, false);
+    expect((await pool.query("SELECT image_ref FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0].image_ref).toBe(current.imageRef);
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generation_transitions WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
+  });
+
+  it("automatically uses the latest available periodic checkpoint only after confirmed provider capture loss", async () => {
+    await currentComputer();
+    await pool.query("UPDATE workspace_checkpoint_requests SET reason='manual',idle_engine_instance_id=NULL WHERE workspace_id=$1", [fixture.workspaceId]);
+    const f = await missingSnapshotWake();
+    await f.reconciler.runOnce();
+    await advanceCloudAutomaticRecovery(pool, recoveryConfig, false);
+    expect((await pool.query("SELECT recovery_checkpoint_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0]?.recovery_checkpoint_id).toBe(checkpointId);
+  });
+
+  it("uses the Computer current at admission even when the original runtime was revoked after loss was confirmed", async () => {
+    await currentComputer();
+    const f = await missingSnapshotWake(); await f.reconciler.runOnce();
+    const successor = await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 }));
+    const current = await currentComputer(3, true, successor.pin.runtimeId);
+    await pool.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [runtimeWitness.runtimeId]);
+    await advanceCloudAutomaticRecovery(pool, recoveryConfig, false);
+    expect((await pool.query("SELECT image_ref,runtime_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0])
+      .toEqual({ image_ref: current.imageRef, runtime_id: successor.pin.runtimeId });
+    expect((await pool.query("SELECT runtime_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0].runtime_id).toBe(runtimeWitness.runtimeId);
+  });
+
+  it.each(["capacity", "stop", "archive", "delete", "account", "membership", "policy"])("retains %s admission fences after provider snapshot loss", async fence => {
+    await currentComputer();
+    const f = await missingSnapshotWake(); await f.reconciler.runOnce();
+    if (fence === "capacity") await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1", [fixture.organizationId]);
+    else if (fence === "account") await pool.query("UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1", [fixture.userId]);
+    else if (fence === "membership") await pool.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, fixture.userId]);
+    else if (fence === "policy") await pool.query("UPDATE organizations SET authorization_revision=authorization_revision+1 WHERE id=$1", [fixture.organizationId]);
+    else await pool.query("UPDATE cloud_workspaces SET desired_state=$2 WHERE id=$1", [fixture.workspaceId, { stop: "stopped", archive: "archived", delete: "deleted" }[fence]]);
+    await advanceCloudAutomaticRecovery(pool, recoveryConfig, false);
+    expect((await pool.query("SELECT state FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].state)
+      .toBe(fence === "capacity" ? "waiting_for_capacity" : "cancelled");
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
+  });
+
+  it("requires a durable named current Computer instead of recovering from its stopped builder", async () => {
+    const f = await missingSnapshotWake(); await f.reconciler.runOnce();
+    await advanceCloudAutomaticRecovery(pool, recoveryConfig, false);
+    expect((await pool.query("SELECT state,reason FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows[0])
+      .toEqual({ state: "recovery_needed", reason: "cloud_recovery_computer_unavailable" });
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
+  });
+
+  it("projects the exact restored checkpoint after qualified readiness, without leaving recovery active", async () => {
+    await currentComputer();
+    const f = await missingSnapshotWake(); await f.reconciler.runOnce();
+    await advanceCloudAutomaticRecovery(pool, recoveryConfig, false);
+    expect((await (await route()).json()).workspace.recovery.restored ?? null).toBeNull();
+    await f.reconciler.runOnce();
+    await new CloudWorkspaceSetupWorker({ pool, recoveryConfig, intervalMs: 1000, sanitizeLog: value => value, executor: { execute: ready } }).runOnce();
+    const document = (await (await route()).json()).workspace;
+    expect(document.status).toBe("ready");
+    expect(document.recovery.state).toBeNull();
+    expect(document.recovery.restored).toEqual({ checkpointId, checkpointAt: expect.any(String), completedAt: expect.any(String),
+      sourceGeneration: 1, generation: 2 });
+    expect((await withUserTx(pool, fixture.userId, tx => tx.query("SELECT 1 FROM cloud_workspace_restore_incidents"))).rowCount).toBe(0);
+    // A newer durable head changes the next recovery offer, not the record of
+    // which checkpoint this generation actually restored.
+    const scope = { ...admittedEngine, workspaceId: fixture.workspaceId, organizationId: fixture.organizationId };
+    await pool.query("UPDATE cloud_workspace_engine_instances SET created_at=now()-interval '11 minutes' WHERE id=$1", [scope.engineInstanceId]);
+    const manifest = await blobs.put({ ...scope, bytes: Buffer.from("{}") });
+    const changedFile = await blobs.put({ ...scope, bytes: Buffer.from("next") });
+    const changed = await content.append({ ...scope, expectedRevision: 1, idempotencyKey: randomUUID(), gitBaseCommit: "a".repeat(40), gitHeadRef: null,
+      mutations: [{ path: "file.txt", operation: "upsert", entryType: "file", mode: 33188, blobId: changedFile.id, contentSha256: changedFile.plaintextSha256, sizeBytes: 4 }] });
+    const directive = (await new DatabaseCloudIdleStop(pool, false).request(scope, randomUUID()))!;
+    const next = await content.commitCheckpoint({ ...scope, requestId: directive.id, idempotencyKey: randomUUID(), contentRevision: changed.revision,
+      reason: "before_stop", manifestBlobId: manifest.id, artifactBlobId: null, inclusionPolicy: {}, fileCount: 1, totalBytes: 4, integritySha256: manifest.plaintextSha256 });
+    const refreshed = (await (await route()).json()).workspace;
+    expect(refreshed.recovery.checkpointId).toBe(next.checkpointId);
+    expect(refreshed.recovery.restored).toEqual(document.recovery.restored);
+  });
+
+  it.each(["provider_unavailable", "provider_response_invalid", "provider_snapshot_unavailable", "provider_snapshot_failed"])("does not infer snapshot loss from %s", async failure => {
+    await missingSnapshotWake({ missing: false, failure });
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
+  });
+
+  it.each(["missing", "invalid"])("requires attention without replacing a source with a %s checkpoint", async condition => {
+    await currentComputer();
+    if (condition === "missing") await pool.query("UPDATE workspace_content_heads SET current_checkpoint_id=NULL WHERE workspace_id=$1", [fixture.workspaceId]);
+    else await pool.query("UPDATE workspace_checkpoints SET state='invalid',invalidated_at=now() WHERE id=$1", [checkpointId]);
+    await missingSnapshotWake();
+    expect((await pool.query("SELECT last_error_code,current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0])
+      .toEqual({ last_error_code: "recovery_needed", current_generation: 1 });
+    expect((await pool.query("SELECT state FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows[0]?.state).toBe("recovery_needed");
+  });
+
+  it("rejects a current Computer that no longer grants the workspace repository", async () => {
+    await currentComputer(2, false);
+    const f = await missingSnapshotWake(); await f.reconciler.runOnce();
+    await advanceCloudAutomaticRecovery(pool, recoveryConfig, false);
+    expect((await pool.query("SELECT state,reason FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows[0])
+      .toEqual({ state: "recovery_needed", reason: "cloud_recovery_repository_unavailable" });
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
+  });
+
+  it("does not enqueue a stale wake after the owner stops during provider inspection", async () => {
+    await currentComputer();
+    await missingSnapshotWake({ duringInspect: async () => {
+      await pool.query("UPDATE cloud_workspaces SET desired_state='stopped',status='stopping' WHERE id=$1", [fixture.workspaceId]);
+    } });
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(0);
+  });
+
+  it("leaves an expired wake claim for its next owner without recording recovery or failure", async () => {
+    const f = await missingSnapshotWake({ duringInspect: async () => {
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET lease_expires_at=now()-interval '1 second' WHERE workspace_id=$1 AND state='dispatching'", [fixture.workspaceId]);
+    } });
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [f.wakeId])).rows[0].state).toBe("dispatching");
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(0);
+  });
+
+  it("does not overwrite a later stop-and-wake authority epoch with missing-snapshot evidence", async () => {
+    const newerSetupId = randomUUID();
+    const f = await missingSnapshotWake({ duringInspect: async () => {
+      await pool.query("UPDATE cloud_workspaces SET authority_epoch=authority_epoch+1,status='waking' WHERE id=$1", [fixture.workspaceId]);
+      await pool.query(`INSERT INTO cloud_workspace_setup_runs(id,workspace_id,generation,org_id,attempt,state)
+        VALUES($1,$2,1,$3,3,'queued')`, [newerSetupId, fixture.workspaceId, fixture.organizationId]);
+    } });
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [f.wakeId])).rows[0].state).toBe("superseded");
+    expect((await pool.query("SELECT status FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].status).toBe("waking");
+    expect((await pool.query("SELECT state FROM cloud_workspace_setup_runs WHERE id=$1", [newerSetupId])).rows[0].state).toBe("queued");
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(0);
+  });
+
+  it("fences a predecessor recovery worker that would copy the expired Computer pin", async () => {
+    await currentComputer(); const f = await missingSnapshotWake(); await f.reconciler.runOnce();
+    const source = (await pool.query("SELECT provider_connection_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];
+    const incident = (await pool.query("SELECT drain_intent_id FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows[0];
+    await expect(withSystemTx(pool, async tx => {
+      await copyGenerationPins(tx, { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, sourceGeneration: 1,
+        targetGeneration: 2, actorUserId: fixture.userId, providerConnectionId: source.provider_connection_id, qualificationMode: "full", recoveryCheckpointId: checkpointId });
+      await tx.query(`INSERT INTO cloud_workspace_generation_transitions
+        (id,workspace_id,org_id,requested_by,operation,source_generation,template_generation,candidate_generation,state,drain_intent_id)
+        VALUES($1,$2,$3,$4,'recover',1,1,2,'draining',$5)`, [randomUUID(),fixture.workspaceId,fixture.organizationId,fixture.userId,incident.drain_intent_id]);
+    })).rejects.toThrow(/current durable Computer/);
+  });
   it.each(["setup_immutable_runtime_missing", "setup_immutable_inventory_invalid"])("enqueues exactly one durable recovery for repeated %s", async code => {
     const subject = await exhaust(code);
     expect((await pool.query("SELECT last_error_code FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].last_error_code).toBe("recovery_restoring");
@@ -152,7 +376,8 @@ suite("automatic Boat checkpoint recovery", () => {
       .toEqual({ status: "failed", last_error_code: "recovery_needed", current_generation: 1 });
   });
   it("waits durably for capacity without allocating a generation", async () => {
-    await pool.query("UPDATE cloud_workspace_quotas SET max_storage_mib=20480 WHERE org_id=$1", [fixture.organizationId]);
+    // Numeric limits are not enforced; a missing quota record still waits for capacity.
+    await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1", [fixture.organizationId]);
     const subject = await exhaust(); await drain(); await subject.runOnce();
     expect((await pool.query("SELECT last_error_code,current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0])
       .toEqual({ last_error_code: "recovery_waiting_for_capacity", current_generation: 1 });
@@ -183,8 +408,12 @@ suite("automatic Boat checkpoint recovery", () => {
   });
   it("bounds a capacity wait and keeps the source quarantined after its deadline", async () => {
     const subject = await exhaust(); await drain();
-    await pool.query("UPDATE cloud_workspace_quotas SET max_storage_mib=20480 WHERE org_id=$1", [fixture.organizationId]);
+    // Numeric limits are not enforced; a missing quota record still holds recovery for capacity.
+    await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1", [fixture.organizationId]);
     await subject.runOnce();
+    expect((await pool.query("SELECT last_error_code FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].last_error_code)
+      .toBe("recovery_waiting_for_capacity");
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
     await pool.query("UPDATE cloud_workspace_restore_incidents SET deadline_at=now()-interval '1 second',next_attempt_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
     await worker("setup_immutable_runtime_missing").runOnce();
     expect((await pool.query("SELECT last_error_code FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].last_error_code).toBe("recovery_needed");
@@ -299,9 +528,9 @@ suite("automatic Boat checkpoint recovery", () => {
     expect((await pool.query("SELECT state FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].state).toBe("recovery_needed");
     expect((await pool.query("SELECT current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].current_generation).toBe(3);
   });
-  it.each(["stopped", "archived"])("checks the running-workspace quota before manual recovery from %s", async state => {
+  it.each(["stopped", "archived"])("requires a quota record, not a running slot, before manual recovery from %s", async state => {
     await pool.query("UPDATE cloud_workspaces SET status=$2::text::cloud_workspace_status,desired_state=$2::text::cloud_workspace_desired_state WHERE id=$1", [fixture.workspaceId, state]);
-    await pool.query("UPDATE cloud_workspace_quotas SET max_running_workspaces=1 WHERE org_id=$1", [fixture.organizationId]);
+    await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1", [fixture.organizationId]);
     const otherId = randomUUID();
     await withSystemTx(pool, async tx => {
       await tx.query(`INSERT INTO cloud_workspaces(id,org_id,team_id,created_by,display_name,repository_forge,repository_owner,repository_name,repository_revision,repository_id,owner_user_id,assignee_user_id,status,desired_state)
@@ -314,7 +543,7 @@ suite("automatic Boat checkpoint recovery", () => {
     });
     const response = await route("/generations", { operation: "recover", sourceGeneration: 1, checkpointId });
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ code: "cloud_quota_exceeded" });
+    expect(await response.json()).toEqual({ code: "cloud_quota_not_configured" });
     expect((await pool.query("SELECT desired_state,current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0]).toEqual({ desired_state: state, current_generation: 1 });
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
   });

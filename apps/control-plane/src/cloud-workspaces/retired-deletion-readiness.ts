@@ -20,12 +20,11 @@ export function stalledProviderDeletionPredicate(waitingStagesParameter: "$1" | 
         AND NOT coalesce(operation.deletion_stage,'') = ANY(${waitingStagesParameter}::text[])))`;
 }
 
-/** Release readiness only. Once Boat accepts a deletion (a `bdop_` receipt),
- * the retired sandbox has left every list, restore and fork, and its erasure
- * is provider work Zeros cannot advance; health, alerts, capacity reservation
- * and deletion verification keep reporting it. Read-only: a missing receipt,
- * current generation, foreign binding, failed intent or any other stalled
- * resource keeps readiness closed. Provider completion is never fabricated. */
+/** Classifies the existing v1 retired-Boat deferral label. The CP release
+ * projection independently excludes cleanup alerts, without granting this
+ * label to a current live generation, missing receipt, foreign binding or
+ * failed intent. Health, capacity and deletion verification retain their
+ * full inventory; this read never completes or forgives deletion work. */
 export async function canDeferRetiredBoatDeletions(tx: Tx): Promise<boolean> {
   const result = await tx.query<{ eligible: boolean }>(`WITH stalled_deletions AS (
     SELECT intent.workspace_id,intent.generation,intent.org_id,operation.provider,operation.account_scope,
@@ -47,15 +46,19 @@ export async function canDeferRetiredBoatDeletions(tx: Tx): Promise<boolean> {
         AND operation.provider=stalled.provider AND operation.account_scope=stalled.account_scope
         AND operation.provider='boat'
         AND operation.deletion_requested_at IS NOT NULL AND operation.deletion_operation_id ~ '^bdop_[a-f0-9]{32}$'
-        AND operation.deleted_at IS NULL AND generation.provider='boat' AND generation.retired_at IS NOT NULL AND workspace.current_generation<>generation.generation
+        AND operation.deleted_at IS NULL AND generation.provider='boat'
+        AND ((generation.retired_at IS NOT NULL AND workspace.current_generation<>generation.generation)
+          OR workspace.status IN ('deleting','deleted'))
         AND binding.provider='boat' AND binding.provider_resource_id=operation.resource_id AND binding.observed_state='archived' AND binding.deletion_verified_at IS NULL
         AND binding.provider_connection_id=generation.provider_connection_id AND binding.provider_connection_version=generation.provider_connection_version
         AND (stalled.intent_state IS NULL OR (stalled.intent_state='observing'
-          AND (stalled.intent_error_code IS NULL OR stalled.intent_error_code IN ('provider_deletion_blocked','provider_deletion_pending'))))
+          AND (stalled.intent_error_code IN ('provider_deletion_blocked','provider_deletion_pending')
+            OR (stalled.intent_error_code IS NULL AND generation.retired_at IS NOT NULL AND workspace.current_generation<>generation.generation))))
         AND EXISTS(SELECT 1 FROM cloud_workspace_lifecycle_intents intent
           WHERE intent.workspace_id=operation.workspace_id AND intent.generation=operation.generation AND intent.org_id=operation.org_id
             AND intent.operation='delete' AND intent.state='observing'
-            AND (intent.error_code IS NULL OR intent.error_code IN ('provider_deletion_blocked','provider_deletion_pending')))
+            AND (intent.error_code IN ('provider_deletion_blocked','provider_deletion_pending')
+              OR (intent.error_code IS NULL AND generation.retired_at IS NOT NULL AND workspace.current_generation<>generation.generation)))
     )
   ) AS eligible`, [PROVIDER_DELETION_WAITING_STAGES]);
   return result.rows[0]?.eligible === true;

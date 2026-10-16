@@ -120,7 +120,7 @@ export const HighlightedCode = memo(function HighlightedCode({
     };
   }, [code, lang, sync, themeName]);
 
-  const cls = cn("[&_pre]:m-0 [&_pre]:!bg-transparent", className);
+  const cls = cn("select-text [&_pre]:m-0 [&_pre]:!bg-transparent", className);
 
   // Fully coloured: a small file synchronously, or the worker finished the big one.
   // A previous worker result is valid only for its exact source and theme.

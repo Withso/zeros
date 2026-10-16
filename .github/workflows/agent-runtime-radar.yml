@@ -1,0 +1,213 @@
+name: Agent runtime radar
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Dry-run, collect/publish, or explicitly initialize the tracking issue
+        type: choice
+        options: [dry-run, scan, bootstrap]
+        default: dry-run
+
+permissions:
+  contents: read
+
+# Shared by every issue-state publisher and the branch writer. A hold is
+# acknowledged only after any running writer leaves this critical section.
+concurrency:
+  group: agent-runtime-state
+  cancel-in-progress: false
+
+env:
+  ZEROS_AGENT_RUNTIME_MODE: ${{ vars.ZEROS_AGENT_RUNTIME_MODE || 'off' }}
+  ZEROS_AGENT_RUNTIME_TRACKING_ISSUE: ${{ vars.ZEROS_AGENT_RUNTIME_TRACKING_ISSUE }}
+  ZEROS_AGENT_RUNTIME_APP_SLUG: ${{ vars.ZEROS_AGENT_RUNTIME_APP_SLUG }}
+  ZEROS_AGENT_RUNTIME_MODELS: ${{ vars.ZEROS_AGENT_RUNTIME_MODELS }}
+  AGENT_RUNTIME_ACTION: ${{ inputs.action || 'scan' }}
+
+jobs:
+  scan:
+    if: github.repository == 'Withso/zeros' && github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (vars.ZEROS_AGENT_RUNTIME_MODE != '' && vars.ZEROS_AGENT_RUNTIME_MODE != 'off'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+      pull-requests: read
+    outputs:
+      tasks: ${{ steps.scan.outputs.tasks }}
+      has-tasks: ${{ steps.scan.outputs.has-tasks }}
+      writer-sha256: ${{ steps.tooling.outputs.writer-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Collect public evidence and reconcile proposals
+        id: scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$AGENT_RUNTIME_ACTION" = bootstrap ]; then
+            node scripts/agent-runtime/cli.mjs bootstrap --out "$RUNNER_TEMP/runtime-scan"
+          else
+            node scripts/agent-runtime/cli.mjs scan --out "$RUNNER_TEMP/runtime-scan"
+          fi
+      - name: Build trusted writer tooling
+        id: tooling
+        if: steps.scan.outputs.has-tasks == 'true'
+        run: node scripts/agent-runtime/cli.mjs bundle-writer --out "$RUNNER_TEMP/runtime-tooling"
+      - name: Save trusted writer tooling
+        if: steps.scan.outputs.has-tasks == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: agent-runtime-tooling-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-tooling/writer.mjs
+          retention-days: 2
+          if-no-files-found: error
+      - name: Save scan evidence
+        if: ${{ always() && (failure() || steps.scan.outputs.has-evidence == 'true') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: agent-runtime-scan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-scan/scan.json
+          retention-days: 3
+
+  prepare:
+    needs: scan
+    if: needs.scan.outputs.has-tasks == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.scan.outputs.tasks) }}
+    steps:
+      - name: Checkout trusted preparation tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: automation
+          persist-credentials: false
+      - name: Checkout the exact working head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.head }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: automation/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install trusted tooling without lifecycle scripts
+        working-directory: automation
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Prepare bounded mechanical changes without write credentials
+        env:
+          TASK_JSON: ${{ toJSON(matrix) }}
+        run: node automation/scripts/agent-runtime/cli.mjs prepare --root "$GITHUB_WORKSPACE/candidate" --out "$RUNNER_TEMP/runtime-prepared"
+      - name: Save prepared data
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: agent-runtime-prepared-${{ matrix.provider }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-prepared/prepared.json
+          retention-days: 2
+          if-no-files-found: error
+
+  write:
+    needs: [scan, prepare]
+    if: ${{ !cancelled() && needs.scan.result == 'success' && needs.scan.outputs.has-tasks == 'true' && vars.ZEROS_AGENT_RUNTIME_MODE == 'enabled' && inputs.action != 'dry-run' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.scan.outputs.tasks) }}
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Download trusted tooling from the scanner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agent-runtime-tooling-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-tooling
+      - name: Verify trusted tooling before minting a write token
+        env:
+          EXPECTED_WRITER_SHA256: ${{ needs.scan.outputs.writer-sha256 }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import assert from 'node:assert/strict';
+          const bytes = readFileSync(`${process.env.RUNNER_TEMP}/runtime-tooling/writer.mjs`);
+          assert(bytes.length < 2 * 1024 * 1024);
+          assert.match(process.env.EXPECTED_WRITER_SHA256, /^[a-f0-9]{64}$/);
+          assert.equal(createHash('sha256').update(bytes).digest('hex'), process.env.EXPECTED_WRITER_SHA256);
+          NODE
+      - name: Mint repository runtime updater token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.ZEROS_AGENT_RUNTIME_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ZEROS_AGENT_RUNTIME_APP_PRIVATE_KEY }}
+          owner: Withso
+          repositories: zeros
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Validate data and append a normal commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_WRITE_TOKEN: ${{ steps.app.outputs.token }}
+          RUNTIME_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          TASK_JSON: ${{ toJSON(matrix) }}
+          RESULT_PATH: ${{ runner.temp }}/result.json
+        run: node "$RUNNER_TEMP/runtime-tooling/writer.mjs"
+      - name: Save writer result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: agent-runtime-written-${{ matrix.provider }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/result.json
+          retention-days: 2
+
+  finalize:
+    needs: [scan, prepare, write]
+    if: ${{ always() && needs.scan.result == 'success' && needs.scan.outputs.has-tasks == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Confirm signed commits and update the maintained reports
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TASKS_JSON: ${{ needs.scan.outputs.tasks }}
+        run: node scripts/agent-runtime/cli.mjs finalize

@@ -1,6 +1,7 @@
 import { CloudTranscriptCache, CloudHistoryRestoreTracker, type CloudHistoryRestoreTicket } from "../state/cloud-transcript-cache";
 import { canReadCloudWorkspace, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, getCloudWorkspaceRows } from "../state/cloud-workspace-catalog";
 import { isElectron, nativeInvoke } from "./runtime";
+import { logEvent } from "./observability/logging/renderer-log";
 import { cloudScopedId, parseCloudScopedId, parseCloudWorkspaceKey, type CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 import { z } from "zod";
 import { CloudHistoryRestoreMetadataSchema, cloudHistoryFencesMatch, type CloudHistoryRestoreMetadata, type CloudHistoryRestoreFence,
@@ -67,10 +68,14 @@ export async function installCloudHistoryRestoreMetadata(target: CloudWorkspaceT
   historyRestore.assertResult(ticket, metadata, conversations);
   const ids = new Set([...metadata.historyHeads.map(head => head.conversationId), ...conversations, ...changed.map(head => head.conversationId)]);
   const changedIds = new Set(changed.map(head => head.conversationId));
+  const cacheFences: Promise<void>[] = [];
   for (const id of ids) {
     const fence = historyRestore.head(ticket.scope, id);
     if (!fence) continue;
     const chatId = cloudScopedId(ticket.scope, id), native = nativeHeads.get(chatId);
+    // Retire old tokens synchronously before notifying presentation. Only an
+    // authenticated identical-content successor can retain cached bytes.
+    cacheFences.push(cloudTranscriptCache.installRestoreHead({ ...ticket.scope, chatId: id }, fence));
     const confirmedNative = !!native && cloudHistoryFencesMatch(native, fence);
     if (origin === "native") {
       nativeHeads.delete(chatId); nativeHeads.set(chatId, fence);
@@ -82,10 +87,7 @@ export async function installCloudHistoryRestoreMetadata(target: CloudWorkspaceT
     if (changedIds.has(id) || origin === "native" && !confirmedNative)
       publishRestoreHead(chatId, fence, origin);
   }
-  await Promise.all([...ids].map(chatId => {
-    const fence = historyRestore.head(ticket.scope, chatId);
-    return fence ? cloudTranscriptCache.installRestoreHead({ ...ticket.scope, chatId }, fence) : undefined;
-  }));
+  await Promise.all(cacheFences);
 }
 function ownerForChat(chatId: string): CloudTranscriptOwner | null {
   if (!isElectron()) return null;
@@ -140,28 +142,63 @@ export async function readCloudTranscriptWithCachedPaint<T>(
 ): Promise<T> {
   let settled = false;
   let painted: CachedTranscriptWindow | null = null;
-  const unsubscribe = onCached ? onCloudHistoryRestoreHead((changedChat, fence) => {
-    if (changedChat !== chatId || settled || !painted) return;
-    painted = null;
-    onCached({ recordEpoch: null, revision: 0, cursor: null, messages: [], restoreHead: fence });
-  }, true) : undefined;
-  const paint = (window: CachedTranscriptWindow | null) => {
-    if (!settled && window && peekCloudTranscriptWindow(chatId) === window) { painted = window; onCached?.(window); }
+  const observe = (outcome: "hit" | "miss" | "continued" | "invalidated" | "denied", source: "memory" | "disk" | "control-plane" | "native",
+    fence?: CloudHistoryRestoreFence) => {
+    // Closed outcomes and coverage facts only: no account/workspace/chat IDs,
+    // source IDs, hashes, content, tokens or native paths enter diagnostics.
+    logEvent("cloud_transcript_cache", { outcome, source, authenticated: account !== null, catalog_ready: cloudWorkspaceCatalogConfirmed(),
+      head: !fence ? "unknown" : !fence.head ? "absent" : fence.head.deleted ? "deleted" : fence.head.incompleteReason ?? "complete",
+      ...(fence ? { generation: fence.projection.generation, restore_revision: fence.head?.restoreRevision ?? null } : {}) }, ["cloud", "history"]);
   };
+  const unsubscribe = onCached ? onCloudHistoryRestoreHead((changedChat, fence, origin) => {
+    if (changedChat !== chatId || settled || !painted) return;
+    const continued = peekCloudTranscriptWindow(chatId);
+    painted = continued?.restoreHead && cloudHistoryFencesMatch(continued.restoreHead, fence) ? continued : null;
+    observe(painted ? "continued" : "invalidated", origin, fence);
+    onCached(painted ?? { recordEpoch: null, revision: 0, cursor: null, messages: [], restoreHead: fence });
+  }, true) : undefined;
+  const paint = (window: CachedTranscriptWindow | null, source: "memory" | "disk") => {
+    if (settled) return;
+    if (window && peekCloudTranscriptWindow(chatId) === window) {
+      painted = window; observe("hit", source, window.restoreHead); onCached?.(window);
+    } else observe("miss", source, cloudHistoryRestoreHead(chatId));
+  };
+  let cachedPaint: Promise<void> | undefined;
   if (onCached) {
     const remembered = peekCloudTranscriptWindow(chatId);
-    if (remembered) queueMicrotask(() => paint(remembered));
-    else void readCachedCloudTranscriptWindow(chatId).then(paint);
+    cachedPaint = remembered
+      ? Promise.resolve().then(() => paint(remembered, "memory"))
+      : readCachedCloudTranscriptWindow(chatId).then(window => paint(window, "disk"));
   }
   try { return await authoritative(); }
   catch (error) {
     const status = (error as { status?: unknown } | null)?.status;
-    if (status === 401 || status === 403 || status === 404) {
+    // A newly created conversation may not have reached the passive projection
+    // yet. Its typed 404 is not a delete receipt; explicit heads/tombstones and
+    // account/workspace access still retire the exact cache independently.
+    const projectionPending = status === 404 &&
+      (error as { code?: unknown } | null)?.code === "cloud_conversation_not_found";
+    if (status === 401 || status === 403 || status === 404 && !projectionPending) {
+      if (onCached) observe("denied", "control-plane");
       // Denial/tombstone is authoritative absence, not an offline fallback.
       const target = parseCloudScopedId(chatId);
       if (status === 403 && target) forgetCloudTranscriptWorkspace({ organizationId: target.organizationId, workspaceId: target.workspaceId });
       else forgetCloudTranscriptChat(chatId);
       onCached?.({ recordEpoch: null, revision: 0, cursor: null, messages: [] });
+    } else {
+      // The network can reject before local disk I/O finishes. Give that
+      // already-started exact-owner read a short chance to paint before
+      // hydration releases its request identity. A hung native read must not
+      // hold the original error indefinitely; finally fences any late paint.
+      if (cachedPaint) {
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            cachedPaint.catch(() => {}),
+            new Promise<void>(resolve => { deadline = setTimeout(resolve, 250); }),
+          ]);
+        } finally { if (deadline !== undefined) clearTimeout(deadline); }
+      }
     }
     throw error;
   }

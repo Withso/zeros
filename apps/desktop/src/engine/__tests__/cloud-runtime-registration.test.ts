@@ -82,9 +82,207 @@ function registrationResponse() {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("cloud renewal timing", () => {
+  function fixture(options: { negotiated?: boolean } = {}) {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    let monotonic = 100;
+    vi.spyOn(performance, "now").mockImplementation(() => monotonic);
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const fetcher = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(Response.json(registrationResponse(), {
+      headers: options.negotiated ? { "x-zeros-cloud-local-commands": "1" } : {},
+    }));
+    const lost = vi.fn();
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, ...(options.negotiated ? { negotiateLocalCommands: true as const } : {}),
+      onAuthorityLost: lost, onDurableRecordSync: completedDurableRecordSync() });
+    const reports = () => log.mock.calls.filter(([line]) => typeof line === "string" && line.startsWith("[cloud-runtime] renewal-timing "))
+      .map(([line]) => JSON.parse(String(line).slice("[cloud-runtime] renewal-timing ".length)));
+    return { registration, runtime, fetcher, lost, log, reports, at: (value: number) => { monotonic = value; } };
+  }
+
+  it("times a complete heartbeat without adding requests or reporting timers", async () => {
+    const f = fixture();
+    f.fetcher.mockImplementationOnce(async () => {
+      f.at(137);
+      return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: f.runtime.engine.instanceId, leaseExpiresAtMs: NOW + 120_000 });
+    });
+    await f.registration.start();
+    expect(f.reports()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.registration.readiness()).not.toBeNull();
+    expect(vi.getTimerCount()).toBe(1);
+    await f.registration.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(f.reports()).toEqual([expect.objectContaining({ version: 1, scope: "cloud-runtime-renewal", invalidSpans: 0,
+      inFlight: 0, series: [expect.objectContaining({ operation: "engine-heartbeat", outcome: "completed", count: 1, sumMs: 37, maxMs: 37 })] })]);
+    await f.registration.stop();
+    expect(f.reports()).toHaveLength(1);
+  });
+
+  it("keeps concurrent renewal durations separate and excludes initial admission and private values", async () => {
+    const f = fixture();
+    await f.registration.start();
+    f.fetcher.mockResolvedValueOnce(Response.json(actorAdmissionResponse()));
+    await expect(f.registration.verifyClientAdmission(`zwa_${"I".repeat(43)}`)).resolves.not.toBeNull();
+    const finish: Array<(value: Response) => void> = [];
+    f.fetcher.mockImplementation(() => new Promise<Response>(resolve => { finish.push(resolve); }));
+    const first = f.registration.verifyClientAdmission(`zwa_${"A".repeat(43)}`, true);
+    f.at(150);
+    const second = f.registration.verifyClientAdmission(`zwa_${"B".repeat(43)}`, true);
+    expect(finish).toHaveLength(2);
+    f.at(200); finish[0](Response.json(actorAdmissionResponse())); await first;
+    f.at(450); finish[1](Response.json(actorAdmissionResponse())); await second;
+    await f.registration.stop();
+    const reports = f.reports();
+    expect(reports).toEqual([expect.objectContaining({ series: [expect.objectContaining({ operation: "client-renew",
+      outcome: "completed", count: 2, sumMs: 400, maxMs: 300 })] })]);
+    expect(reports[0].series[0].buckets.reduce((sum: number, count: number) => sum + count, 0)).toBe(2);
+    expect(JSON.stringify(reports)).not.toMatch(/zwa_|zwh_|zws_|control\.example|55555555|11111111|22222222|Bearer/);
+  });
+
+  it.each(["invalid", "503", "401"])("records %s completion without changing admission authority", async kind => {
+    const f = fixture(); await f.registration.start();
+    f.fetcher.mockImplementationOnce(async () => {
+      f.at(112);
+      return kind === "invalid" ? Response.json({ private: "rejected response" }) : new Response("private upstream text", { status: Number(kind) });
+    });
+    const request = f.registration.verifyClientAdmission(`zwa_${"A".repeat(43)}`, true);
+    if (kind === "503") await expect(request).rejects.toMatchObject({ code: "cloud_client_authority_transient" });
+    else await expect(request).resolves.toBeNull();
+    expect(f.lost).not.toHaveBeenCalled();
+    expect(f.registration.readiness()).not.toBeNull();
+    await f.registration.stop();
+    expect(f.reports()).toEqual([expect.objectContaining({ series: [expect.objectContaining({ operation: "client-renew",
+      outcome: kind === "invalid" ? "refused" : "failed", count: 1, sumMs: 12 })] })]);
+    expect(JSON.stringify(f.reports())).not.toMatch(/private|upstream|rejected response/);
+  });
+
+  it("records a rejected heartbeat before authority retirement", async () => {
+    const f = fixture(); await f.registration.start();
+    f.fetcher.mockImplementationOnce(async () => { f.at(123); return new Response("private refusal", { status: 401 }); });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.lost).toHaveBeenCalledOnce();
+    expect(f.registration.readiness()).toBeNull();
+    expect(f.reports()).toEqual([expect.objectContaining({ inFlight: 0, series: [expect.objectContaining({
+      operation: "engine-heartbeat", outcome: "failed", count: 1, sumMs: 23 })] })]);
+    await f.registration.stop();
+    expect(f.reports()).toHaveLength(1);
+  });
+
+  it("contains logging failures and flushes only on work or retirement", async () => {
+    const f = fixture(); await f.registration.start();
+    f.fetcher.mockImplementation(async () => Response.json(actorAdmissionResponse()));
+    await expect(f.registration.verifyClientAdmission(`zwa_${"A".repeat(43)}`, true)).resolves.not.toBeNull();
+    f.at(60_101);
+    f.log.mockImplementation(() => { throw new Error("private logger failure"); });
+    await expect(f.registration.verifyClientAdmission(`zwa_${"A".repeat(43)}`, true)).resolves.not.toBeNull();
+    expect(f.log).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(1);
+    await expect(f.registration.stop()).resolves.toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(f.log).toHaveBeenCalledOnce();
+  });
+
+  it("reports an unavailable monotonic clock without changing renewal or authority time", async () => {
+    const f = fixture(); await f.registration.start();
+    f.at(Number.NaN);
+    f.fetcher.mockResolvedValueOnce(Response.json(actorAdmissionResponse()));
+    await expect(f.registration.verifyClientAdmission(`zwa_${"A".repeat(43)}`, true)).resolves.not.toBeNull();
+    f.at(200);
+    await f.registration.stop();
+    expect(f.reports()).toEqual([expect.objectContaining({ invalidSpans: 1, inFlight: 0, series: [] })]);
+  });
+
+  it("retires pending timing with the old registration and ignores its late response", async () => {
+    const f = fixture(); await f.registration.start();
+    let finish!: (value: Response) => void;
+    f.fetcher.mockImplementationOnce(() => new Promise<Response>(resolve => { finish = resolve; }));
+    const pending = f.registration.verifyClientAdmission(`zwa_${"A".repeat(43)}`, true);
+    await f.registration.stop();
+    expect(f.reports()).toEqual([expect.objectContaining({ inFlight: 1, series: [] })]);
+    const stopped = JSON.stringify(f.reports());
+    f.at(950); finish(Response.json(actorAdmissionResponse()));
+    await expect(pending).resolves.toBeNull();
+    expect(JSON.stringify(f.reports())).toBe(stopped);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["actor-confirm", "warm-context"] as const)("times validated %s responses and exact-scope failures", async operation => {
+    const f = fixture({ negotiated: true }); await f.registration.start();
+    const reference = { organizationId: f.runtime.execution.organizationId, workspaceId: f.runtime.execution.workspaceId,
+      generation: f.runtime.execution.generation, engineInstanceId: f.runtime.engine.instanceId,
+      bootId: V4_ATTESTATION.bootId, writerEpoch: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
+    const scope = { ...reference, fundingOwnerUserId: ACCOUNT_USER_ID, fundingOwnerEpoch: 1 };
+    const actor = { scope, actorSessionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", authorityEpoch: 1, confirmedUntilMs: NOW + 10_000,
+      fundingConsentVersion: 1 as const, fundingGrant: { kind: "owner" as const }, actor: { userId: ACCOUNT_USER_ID,
+        deviceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", deviceKeyVersion: 1, role: "owner" as const, fingerprint: "a".repeat(64) } };
+    const confirm = { ...reference, version: 1 as const, mode: "boot-owner-v1" as const, actorSessionId: actor.actorSessionId };
+    const warm = { ...confirm, provider: "claude" as const, model: "synthetic-model", conversationId: "private-conversation",
+      cwd: "/srv/zeros/workspace/private-repository", repositoryServers: [] };
+    const confirmed = { version: 1, mode: "boot-owner-v1", provenance: actor };
+    const context = { ...scope, version: 1, mode: "boot-owner-v1", fundingScope: "workspace-roles-v1", authorityEpoch: 1,
+      contextId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", contextRevision: "b".repeat(64), actor, provider: "claude",
+      model: warm.model, conversationId: warm.conversationId, cwd: warm.cwd, gitAuthor: null, customization: null,
+      environment: { version: 1, revision: "d".repeat(64), values: {}, history: { owner: "c".repeat(64), currentKeyVersion: 1, keys: { 1: "a".repeat(43) } } },
+      nativeCapabilities: { version: 1, goals: false, nativeFork: false, transcriptFork: false, nativeReview: false, connectedApps: false, multiAgent: false } };
+    const result = operation === "actor-confirm" ? confirmed : context;
+    f.fetcher.mockImplementationOnce(async () => { f.at(130); return Response.json({ result }); });
+    await expect(f.registration.agentBootRequest(operation, operation === "actor-confirm" ? confirm : warm, new AbortController().signal)).resolves.toEqual(result);
+    f.fetcher.mockImplementationOnce(async () => {
+      f.at(145);
+      return Response.json({ result: operation === "actor-confirm" ? { ...confirmed, provenance: { ...actor, scope: { ...scope, writerEpoch: V4_ATTESTATION.bootId } } }
+        : { ...context, writerEpoch: V4_ATTESTATION.bootId } });
+    });
+    await expect(f.registration.agentBootRequest(operation, operation === "actor-confirm" ? confirm : warm, new AbortController().signal)).rejects.toThrow();
+    await f.registration.stop();
+    expect(f.reports()).toEqual([expect.objectContaining({ series: [
+      expect.objectContaining({ operation, outcome: "completed", count: 1, sumMs: 30 }),
+      expect.objectContaining({ operation, outcome: "failed", count: 1, sumMs: 15 }),
+    ] })]);
+    expect(JSON.stringify(f.reports())).not.toMatch(/private|synthetic-model|bbbbbbbb|dddddddd|fundingOwner|fingerprint/);
+  });
 });
 
 describe("cloud runtime registration", () => {
+  it.each(["current", "foreign-boot", "late"])("binds %s recovery authority without admitting controls or a local writer", async mode => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const target = { organizationId: runtime.execution.organizationId, workspaceId: runtime.execution.workspaceId,
+      generation: runtime.execution.generation, engineInstanceId: runtime.engine.instanceId,
+      bootId: mode === "foreign-boot" ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" : V4_ATTESTATION.bootId,
+      fundingOwnerUserId: ACCOUNT_USER_ID, fundingOwnerEpoch: 1 };
+    const result = { ...target, version: 1, mode: "boot-owner-v1", recoveryId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      code: "history_recovered_with_gap", coverage: "unknown", predecessorRetiredAt: new Date(NOW - 1_000).toISOString(),
+      predecessor: { ...target, engineInstanceId: "66666666-6666-4666-8666-666666666666", bootId: "77777777-7777-4777-8777-777777777777",
+        writerEpoch: "88888888-8888-4888-8888-888888888888" },
+      checkpoint: { writerEpoch: "99999999-9999-4999-8999-999999999999", sha256: "a".repeat(64) }, mirroredSequence: 0 };
+    let release!: (value: Response) => void;
+    const held = new Promise<Response>(resolve => { release = resolve; });
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json(registrationResponse(), { headers: { "x-zeros-cloud-local-commands": "1" } }))
+      .mockImplementationOnce(() => mode === "late" ? held : Promise.resolve(Response.json({ result })));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start();
+      const request = registration.agentBootRequest("recover-history", { version: 1, mode: "boot-owner-v1",
+        organizationId: target.organizationId, workspaceId: target.workspaceId, generation: target.generation,
+        engineInstanceId: target.engineInstanceId }, new AbortController().signal);
+      const settled = request.then(value => ({ value }), error => ({ error }));
+      if (mode === "late") { await registration.stop(); release(Response.json({ result })); }
+      if (mode === "current") expect(await settled).toEqual({ value: result });
+      else expect(await settled).toHaveProperty("error");
+      await expect(registration.credentialControlsRequest({ ...target, version: 1, mode: "boot-owner-v1", writerEpoch: result.predecessor.writerEpoch, acknowledgements: [] },
+        new AbortController().signal)).rejects.toThrow();
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally { release(Response.json({ result })); await registration.stop(); }
+  });
   it.each(["local", "legacy"])("passes the authenticated %s journal mode before the initial record restore", async agentJournalMode => {
     const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
     const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), {
@@ -146,13 +344,38 @@ describe("cloud runtime registration", () => {
       const starting = registration.start();
       await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
       expect(registration.localCommandsNegotiated()).toBe(false);
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(0);
       expect(fetcher.mock.calls[0]![1].headers["x-zeros-cloud-local-commands"]).toBe("1");
       expect(JSON.parse(fetcher.mock.calls[0]![1].body)).not.toHaveProperty("cloudLocalCommandsVersion");
       release(); await starting;
       expect(registration.localCommandsNegotiated()).toBe(acknowledged);
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(acknowledged ? 89_000 : 0);
       await registration.stop();
       expect(registration.localCommandsNegotiated()).toBe(false);
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(0);
     } finally { release(); await registration.stop(); }
+  });
+
+  it("bounds the boot budget by the existing authority margin and fences handoff without renewing", async () => {
+    let now = NOW;
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => now)!;
+    const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), {
+      headers: { "x-zeros-cloud-local-commands": "1" },
+    }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => now, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start(); now += 10_000;
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(79_000);
+      await registration.pauseRecordForRuntimeHandoff();
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(0);
+      registration.resumeRecordAfterRuntimeHandoff();
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(79_000);
+      now += 79_000;
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(0);
+      expect(registration.localCommandsNegotiated()).toBe(false);
+      expect(fetcher).toHaveBeenCalledOnce();
+    } finally { await registration.stop(); }
   });
 
   it("ignores an unsolicited new-mode header on a legacy registration", async () => {
@@ -983,6 +1206,132 @@ describe("cloud runtime registration", () => {
     await registration.stop();
   });
 
+  describe("checkpoint hints", () => {
+    const hintEndpoint = "https://control.example.test/internal/v1/cloud-workspaces/engine/checkpoint-hint";
+    const directive = { id: "55555555-5555-4555-8555-555555555555", reason: "before_stop", deadlineAtMs: NOW + 5 * 60_000 };
+    const hint = (pending: boolean) => Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-checkpoint-hint-v1", pending });
+    function harness(hints: Array<() => Response | Promise<Response>>, options: { enabled?: boolean; heartbeatDirective?: boolean } = {}) {
+      vi.useFakeTimers();
+      vi.setSystemTime(NOW);
+      const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+      const calls: string[] = [];
+      let heartbeatGate: Promise<void> | undefined;
+      const fetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const href = String(url);
+        calls.push(href === hintEndpoint ? "hint" : href === heartbeatEndpoint ? "heartbeat" : "register");
+        if (href === registrationEndpoint) return Response.json(registrationResponse());
+        if (href === hintEndpoint) {
+          const next = hints.shift();
+          if (next) return next();
+          // Hold like the control plane until the engine aborts it.
+          return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+        }
+        await heartbeatGate;
+        return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+          engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: Date.now() + 90_000,
+          ...(options.heartbeatDirective === false ? {} : { checkpointRequest: directive }) });
+      });
+      const onCheckpointRequested = vi.fn(async () => {});
+      const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION,
+        fetch: fetch as unknown as typeof globalThis.fetch, now: Date.now, onAuthorityLost: vi.fn(),
+        onDurableRecordSync: completedDurableRecordSync(), onCheckpointRequested,
+        ...(options.enabled === false ? {} : { checkpointHints: true as const }) });
+      return { registration, fetch, calls, onCheckpointRequested, gate: (value: Promise<void> | undefined) => { heartbeatGate = value; } };
+    }
+
+    it("heartbeats at once for a queued checkpoint instead of waiting for the next beat", async () => {
+      const t = harness([() => hint(true)]);
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.onCheckpointRequested).toHaveBeenCalledOnce();
+      expect(t.calls.slice(0, 3)).toEqual(["register", "hint", "heartbeat"]);
+      const body = JSON.parse(String(t.fetch.mock.calls[1]![1]?.body));
+      expect(body).toEqual({ workspaceId: "11111111-1111-4111-8111-111111111111", organizationId: "22222222-2222-4222-8222-222222222222",
+        generation: 3, engineInstanceId: "44444444-4444-4444-8444-444444444444" });
+      expect(t.fetch.mock.calls[1]![1]?.headers).toMatchObject({ authorization: `Bearer zwh_${"H".repeat(43)}` });
+      await t.registration.stop();
+    });
+
+    it("asks for one more beat when the hint arrives during a heartbeat", async () => {
+      let release!: () => void, answer!: (response: Response) => void;
+      const t = harness([() => new Promise<Response>(resolve => { answer = resolve; })], { heartbeatDirective: false });
+      t.gate(new Promise<void>(resolve => { release = resolve; }));
+      await t.registration.start();
+      // The regular beat is now in flight and held.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(t.calls.filter(call => call === "heartbeat")).toHaveLength(1);
+      answer(hint(true));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls.filter(call => call === "heartbeat")).toHaveLength(1);
+      t.gate(undefined);
+      release();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls.filter(call => call === "heartbeat")).toHaveLength(2);
+      await t.registration.stop();
+    });
+
+    it("never treats a hint as a checkpoint directive", async () => {
+      const t = harness([() => hint(true)], { heartbeatDirective: false });
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls).toContain("heartbeat");
+      expect(t.onCheckpointRequested).not.toHaveBeenCalled();
+      await t.registration.stop();
+    });
+
+    it.each([404, 401, 403])("ends the fast path on %s and keeps the regular heartbeat", async status => {
+      const t = harness([() => Response.json({ error: { code: "not_available" } }, { status })]);
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(t.calls.filter(call => call === "hint")).toHaveLength(1);
+      expect(t.calls.filter(call => call === "heartbeat")).toHaveLength(2);
+      await t.registration.stop();
+    });
+
+    it.each(["503", "429", "network", "malformed"])("backs off after a %s hint failure without spinning", async kind => {
+      const failure = () => kind === "network" ? Promise.reject(new Error("offline"))
+        : kind === "malformed" ? Response.json({ version: 1, pending: true })
+          : Response.json({ error: {} }, { status: Number(kind) });
+      const t = harness([failure, failure, failure, () => hint(false)], { heartbeatDirective: false });
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(t.calls.filter(call => call === "hint")).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(t.calls.filter(call => call === "hint")).toHaveLength(5);
+      expect(t.calls.filter(call => call === "heartbeat")).toHaveLength(0);
+      await t.registration.stop();
+    });
+
+    it("waits again at once after an idle hint and stops waiting on shutdown", async () => {
+      const t = harness([() => hint(false), () => hint(false)], { heartbeatDirective: false });
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls.filter(call => call === "hint")).toHaveLength(3);
+      await t.registration.stop();
+      const calls = t.fetch.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(t.fetch.mock.calls.length).toBe(calls);
+    });
+
+    it("leaves no retry timer behind when stopped during a held hint", async () => {
+      const t = harness([], { heartbeatDirective: false });
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls).toEqual(["register", "hint"]);
+      await t.registration.stop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("holds no hint without the explicit opt-in", async () => {
+      const t = harness([() => hint(true)], { enabled: false, heartbeatDirective: false });
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls).toEqual(["register"]);
+      await t.registration.stop();
+    });
+  });
+
   it("rejects a cross-origin heartbeat or mismatched durable identity", async () => {
     const runtime = consumeCloudRuntimeEnvironment(
       { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
@@ -1094,4 +1443,109 @@ describe("cloud runtime registration", () => {
     expect(registration.readiness()?.durableRecordConnected).toBe(true);
     await registration.stop();
   });
+});
+
+describe("final checkpoint delivery after record handoff", () => {
+  it("delivers the next final request after cancellation without reopening record writes", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+    const first = { id: "55555555-5555-4555-8555-555555555555", reason: "before_stop" as const,
+      deadlineAtMs: NOW + 5 * 60_000 };
+    const next = { ...first, id: "66666666-6666-4666-8666-666666666666", reason: "before_delete" as const };
+    let current = first as typeof first | typeof next;
+    const sync = completedDurableRecordSync(), lost = vi.fn(), cancelled: string[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      const route = new URL(String(url)).pathname;
+      if (route.endsWith("/register")) return Response.json(registrationResponse());
+      if (route.endsWith("/idle-stop")) {
+        cancelled.push(JSON.parse(String(init!.body)).request.requestId);
+        return Response.json({ cancelled: true });
+      }
+      if (!route.endsWith("/heartbeat")) throw new Error("Unexpected synthetic route");
+      return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: Date.now() + 90_000, checkpointRequest: current });
+    });
+    let release!: () => void;
+    const pendingCapture = new Promise<void>(resolve => { release = resolve; });
+    const onCheckpointRequested = vi.fn(async (request: { id: string }) => {
+      if (request.id !== first.id) return;
+      await registration.pauseRecordForRuntimeHandoff();
+      await pendingCapture;
+      await registration.idleStopRequest({ kind: "cancel", requestId: request.id });
+      throw new Error("Synthetic capture superseded after handoff");
+    });
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION,
+      fetch: fetcher, now: Date.now, onAuthorityLost: lost, onDurableRecordSync: sync, onCheckpointRequested });
+    try {
+      await registration.start();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(onCheckpointRequested).toHaveBeenCalledOnce();
+      const recordWrites = sync.mock.calls.length;
+      current = next;
+      await vi.advanceTimersByTimeAsync(30_000);
+      // A new authoritative directive cannot overlap the still-running capture.
+      expect(onCheckpointRequested).toHaveBeenCalledOnce();
+      release(); await vi.advanceTimersByTimeAsync(0);
+      expect(cancelled).toEqual([first.id]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(onCheckpointRequested).toHaveBeenCalledTimes(2);
+      expect(onCheckpointRequested).toHaveBeenLastCalledWith(next, expect.objectContaining({
+        engineInstanceId: runtime.engine.instanceId, generation: runtime.execution.generation,
+      }));
+      expect(sync).toHaveBeenCalledTimes(recordWrites);
+      expect(fetcher.mock.calls.filter(([url]) => String(url) === heartbeatEndpoint)).toHaveLength(3);
+      expect(registration.hasRuntimeHandoffAuthority()).toBe(true);
+      await expect(registration.commandRequest({ kind: "claim", conversationId: "chat", executionId: "execution" }))
+        .rejects.toMatchObject({ code: "command_durability_unavailable" });
+      expect(lost).not.toHaveBeenCalled();
+    } finally {
+      release(); await Promise.allSettled(onCheckpointRequested.mock.results.map(result => result.value));
+      await registration.stop();
+    }
+  });
+});
+
+describe("failed record handoff retry", () => {
+  it("retries a failed final flush explicitly while keeping ordinary record writes parked", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+    const sync = completedDurableRecordSync();
+    const fetcher = vi.fn<typeof fetch>(async url => new URL(String(url)).pathname.endsWith("/register")
+      ? Response.json(registrationResponse()) : Response.json({ version: 1,
+        audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: Date.now() + 90_000 }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION,
+      fetch: fetcher, now: Date.now, onAuthorityLost: vi.fn(), onDurableRecordSync: sync });
+    try {
+      await registration.start(); sync.mockRejectedValueOnce(new Error("Synthetic handoff flush failure"));
+      await expect(registration.pauseRecordForRuntimeHandoff()).rejects.toThrow("Synthetic");
+      await expect(registration.pauseRecordForRuntimeHandoff()).rejects.toThrow("record flush failed");
+      expect(sync).toHaveBeenCalledTimes(2);
+      await registration.pauseRecordForRuntimeHandoff({ retryFailedFlush: true });
+      expect(sync).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(sync).toHaveBeenCalledTimes(3);
+      await expect(registration.commandRequest({ kind: "claim", conversationId: "chat", executionId: "execution" }))
+        .rejects.toMatchObject({ code: "command_durability_unavailable" });
+    } finally { await registration.stop(); }
+  });
+});
+
+
+it.each(["manual", "before_fork"] as const)("keeps %s outside final-only control during record handoff", async reason => {
+  vi.useFakeTimers(); vi.setSystemTime(NOW);
+  const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+  const onCheckpointRequested = vi.fn(async () => {}), sync = completedDurableRecordSync();
+  const fetcher = vi.fn<typeof fetch>(async url => new URL(String(url)).pathname.endsWith("/register")
+    ? Response.json(registrationResponse()) : Response.json({ version: 1,
+      audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+      engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: Date.now() + 90_000,
+      checkpointRequest: { id: "55555555-5555-4555-8555-555555555555", reason, deadlineAtMs: NOW + 300_000 } }));
+  const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION,
+    fetch: fetcher, now: Date.now, onAuthorityLost: vi.fn(), onDurableRecordSync: sync, onCheckpointRequested });
+  try {
+    await registration.start(); await registration.pauseRecordForRuntimeHandoff();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(onCheckpointRequested).not.toHaveBeenCalled(); expect(sync).toHaveBeenCalledTimes(2);
+  } finally { await registration.stop(); }
 });

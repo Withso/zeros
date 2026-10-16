@@ -60,6 +60,19 @@ suite("durable credential removal and engine controls", () => {
   });
   const first = async () => (await exchange()).controls[0]!;
   const revoked = async () => Boolean((await pool.query("SELECT revoked_at FROM cloud_agent_credentials WHERE id=$1", [credentialId])).rows[0]?.revoked_at);
+  async function elapsedPublication(prepare:()=>Promise<unknown>) {
+    // Only the fixture defaults are aged; immutable rows and their guards stay intact.
+    await pool.query("ALTER TABLE cloud_agent_credential_mutations ALTER COLUMN created_at SET DEFAULT now()-interval '6 minutes', ALTER COLUMN expires_at SET DEFAULT now()-interval '1 minute'");
+    try { await expect(prepare()).rejects.toMatchObject({status:503,code:"cloud_agent_credential_busy"}); }
+    finally { await pool.query("ALTER TABLE cloud_agent_credential_mutations ALTER COLUMN created_at SET DEFAULT now(), ALTER COLUMN expires_at SET DEFAULT now()+interval '5 minutes'"); }
+  }
+  async function retirePublicationSource() {
+    const stopId=randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,org_id,generation,requested_by,operation,
+      idempotency_key,request_sha256,state,completed_at) VALUES($1,$2,$3,1,$4,'stop',$5,$6,'succeeded',now())`,
+      [stopId,workspace.workspaceId,workspace.organizationId,workspace.userId,randomUUID(),randomBytes(32)]);
+    await tx(client=>retireCloudAgentBootSources(client,scope,{kind:"provider-lifecycle",intentId:stopId}));
+  }
   it("fences before inventory and never infers idle from mirror absence", async () => {
     expect(await prepare()).toMatchObject({ state: "pending", phase: "preparing" });
     expect((await first()).operation).toBe("pause-starts");
@@ -256,6 +269,123 @@ suite("durable credential removal and engine controls", () => {
     expect(await credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",request)).toEqual({revision:2,replayed:false});
     expect(await credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",request)).toEqual({revision:2,replayed:true});
     expect((await exchange()).controls.find(value=>value.operation==="publish-desired")?.desiredCacheRevision).toBe(2);
+  });
+  it("allows a fresh selection after positive retirement of an expired publication without reviving its deadline",async()=>{
+    const added=await credentials.put({credentialId:randomUUID(),ownerUserId:workspace.userId,organizationId:workspace.organizationId,
+      operationId:randomUUID(),expectedRevision:0,displayName:"Replacement account",material:{kind:"codex-api-key",apiKey:"synthetic-expired-publication-key"}});
+    const request={expectedRevision:1,credentialId:added.credential.id,credentialRevision:1,models:["gpt-5.4"],consent:"zeros-managed"};
+    // Seed an elapsed original deadline without sleeps or changing an immutable
+    // mutation. Restore the production defaults before the fresh user request.
+    await pool.query("ALTER TABLE cloud_agent_credential_mutations ALTER COLUMN created_at SET DEFAULT now()-interval '6 minutes', ALTER COLUMN expires_at SET DEFAULT now()-interval '1 minute'");
+    try {
+      await expect(credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",request))
+        .rejects.toMatchObject({status:503,code:"cloud_agent_credential_busy"});
+    } finally {
+      await pool.query("ALTER TABLE cloud_agent_credential_mutations ALTER COLUMN created_at SET DEFAULT now(), ALTER COLUMN expires_at SET DEFAULT now()+interval '5 minutes'");
+    }
+    const original=(await pool.query<{id:string;expires_at:Date;created_at:Date}>(
+      "SELECT id,expires_at,created_at FROM cloud_agent_credential_mutations WHERE target->>'kind'='publish-connection' AND target->>'expectedRevision'='1'")).rows[0]!;
+    expect(original.expires_at.getTime()).toBeLessThan(Date.now());
+    const stopId=randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,org_id,generation,requested_by,operation,
+      idempotency_key,request_sha256,state,completed_at) VALUES($1,$2,$3,1,$4,'stop',$5,$6,'succeeded',now())`,
+      [stopId,workspace.workspaceId,workspace.organizationId,workspace.userId,randomUUID(),randomBytes(32)]);
+    await tx(client=>retireCloudAgentBootSources(client,scope,{kind:"provider-lifecycle",intentId:stopId}));
+    await expect(credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",request))
+      .resolves.toEqual({revision:2,replayed:false});
+    await expect(credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",request))
+      .resolves.toEqual({revision:2,replayed:true});
+    expect((await pool.query("SELECT state,decision,expires_at,created_at FROM cloud_agent_credential_mutations WHERE id=$1",[original.id])).rows[0])
+      .toEqual({state:"expired",decision:"expire",expires_at:original.expires_at,created_at:original.created_at});
+    expect((await pool.query("SELECT credential_id,revision::int FROM cloud_agent_organization_connections WHERE owner_user_id=$1 AND org_id=$2 AND provider='codex'",[workspace.userId,workspace.organizationId])).rows[0])
+      .toEqual({credential_id:added.credential.id,revision:2});
+  });
+  it("closes the expired fence before a new selection attempt and still requires its fresh native acknowledgement",async()=>{
+    const added=await credentials.put({credentialId:randomUUID(),ownerUserId:workspace.userId,organizationId:workspace.organizationId,
+      operationId:randomUUID(),expectedRevision:0,displayName:"Next account",material:{kind:"codex-api-key",apiKey:"synthetic-next-account-key"}});
+    const request={expectedRevision:1,credentialId:added.credential.id,credentialRevision:1,models:["gpt-5.4"],consent:"zeros-managed"};
+    const select=()=>credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",request);
+    await elapsedPublication(select);
+    const original=(await pool.query<{id:string;expires_at:Date}>("SELECT id,expires_at FROM cloud_agent_credential_mutations WHERE target->>'expectedRevision'='1'")).rows[0]!;
+    await expect(select()).rejects.toMatchObject({status:503,code:"cloud_agent_credential_busy"});
+    expect((await pool.query("SELECT state,decision,expires_at FROM cloud_agent_credential_mutations WHERE id=$1",[original.id])).rows[0])
+      .toEqual({state:"cancelling",decision:"expire",expires_at:original.expires_at});
+    const release=(await exchange()).controls.find(value=>value.operation==="release")!;
+    expect(release.mutationId).toBe(original.id);
+    await expect(exchange([{...ack(release,"released"),bootId:randomUUID()}])).rejects.toMatchObject({status:403});
+    await expect(select()).rejects.toMatchObject({status:503});
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_credential_mutations WHERE target->>'expectedRevision'='1'")).rows[0]!.count).toBe(1);
+    await exchange([ack(release,"released")]);
+    await expect(select()).rejects.toMatchObject({status:503});
+    const fresh=await first();
+    expect(fresh.operation).toBe("pause-starts");expect(fresh.mutationId).not.toBe(original.id);
+    expect(fresh.fenceEpoch).toBeGreaterThan(release.fenceEpoch);
+    const next=(await pool.query<{expires_at:Date}>("SELECT expires_at FROM cloud_agent_credential_mutations WHERE id=$1",[fresh.mutationId])).rows[0]!;
+    expect(next.expires_at.getTime()).toBeGreaterThan(Date.now());
+    await expect(select()).rejects.toMatchObject({status:503});
+    expect((await first()).mutationId).toBe(fresh.mutationId);
+    await exchange([ack(fresh,"fenced")]);
+    await expect(select()).resolves.toEqual({revision:2,replayed:false});
+    await expect(select()).resolves.toEqual({revision:2,replayed:true});
+    expect((await pool.query("SELECT state,decision,expires_at FROM cloud_agent_credential_mutations WHERE id=$1",[original.id])).rows[0])
+      .toEqual({state:"expired",decision:"expire",expires_at:original.expires_at});
+  });
+  it.each([2,17])("closes %i overlapping expired selection attempts with bounded durable progress",async count=>{
+    const added=await credentials.put({credentialId:randomUUID(),ownerUserId:workspace.userId,organizationId:workspace.organizationId,
+      operationId:randomUUID(),expectedRevision:0,displayName:"Replacement",material:{kind:"codex-api-key",apiKey:"synthetic-overlapping-selection-key"}});
+    const request={expectedRevision:1,credentialId:added.credential.id,credentialRevision:1,models:["gpt-5.4"],consent:"zeros-managed"};
+    await elapsedPublication(()=>credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",request));
+    // Represent overlapping attempts already saved by an older CP. Use its
+    // private preflight to retain valid immutable rows and real native controls;
+    // the corrected public selection is allowed to serialize new attempts.
+    const saved=(await pool.query("SELECT target FROM cloud_agent_credential_mutations WHERE target->>'expectedRevision'='1'")).rows[0]!;
+    await pool.query("ALTER TABLE cloud_agent_credential_mutations ALTER COLUMN created_at SET DEFAULT now()-interval '6 minutes', ALTER COLUMN expires_at SET DEFAULT now()-interval '1 minute'");
+    try {
+      for(let index=1;index<count;index++)
+        expect(await tx(client=>mutations.prepareCloudAgentCredentialPublication(client,workspace.userId,randomUUID(),saved.target))).toBe("pending");
+    } finally {
+      await pool.query("ALTER TABLE cloud_agent_credential_mutations ALTER COLUMN created_at SET DEFAULT now(), ALTER COLUMN expires_at SET DEFAULT now()+interval '5 minutes'");
+    }
+    await retirePublicationSource();
+    if(count>16){
+      await expect(credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",request))
+        .rejects.toMatchObject({status:503,code:"cloud_agent_credential_busy"});
+      const progress=(await pool.query("SELECT state FROM cloud_agent_credential_mutations WHERE target->>'kind'='publish-connection' AND target->>'expectedRevision'='1'")).rows;
+      expect(progress).toHaveLength(count);
+      expect(progress.filter(row=>row.state==="expired")).toHaveLength(16);
+      expect(progress.filter(row=>row.state==="preparing")).toHaveLength(1);
+      expect((await pool.query("SELECT revision::int FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2 AND provider='codex'",[workspace.organizationId,workspace.userId])).rows[0])
+        .toEqual({revision:1});
+    }
+    await expect(credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",request))
+      .resolves.toEqual({revision:2,replayed:false});
+    const expired=(await pool.query("SELECT state,decision FROM cloud_agent_credential_mutations WHERE target->>'kind'='publish-connection' AND target->>'expectedRevision'='1'")).rows;
+    expect(expired).toHaveLength(count);expect(expired.every(row=>row.state==="expired"&&row.decision==="expire")).toBe(true);
+  });
+  it("replays a committed selection while a different later request waits to release its expired fence",async()=>{
+    const added=await credentials.put({credentialId:randomUUID(),ownerUserId:workspace.userId,organizationId:workspace.organizationId,
+      operationId:randomUUID(),expectedRevision:0,displayName:"Selected account",material:{kind:"codex-api-key",apiKey:"synthetic-committed-selection-key"}});
+    const original={expectedRevision:1,credentialId:added.credential.id,credentialRevision:1,models:["gpt-5.4"],consent:"zeros-managed"};
+    await expect(credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",original)).rejects.toMatchObject({status:503});
+    await exchange([ack(await first(),"fenced")]);
+    await expect(credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",original)).resolves.toEqual({revision:2,replayed:false});
+    const later={...original,expectedRevision:2,credentialId};
+    await elapsedPublication(()=>credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",later));
+    await expect(credentials.setOrganizationConnection(workspace.userId,workspace.organizationId,"codex",original))
+      .resolves.toEqual({revision:2,replayed:true});
+    expect((await pool.query("SELECT state,decision FROM cloud_agent_credential_mutations WHERE target->>'expectedRevision'='2'")).rows[0])
+      .toEqual({state:"preparing",decision:null});
+  });
+  it("never renews an explicit key replacement operation after expiry even when its old source is retired",async()=>{
+    const replacement={credentialId,ownerUserId:workspace.userId,operationId:randomUUID(),expectedRevision:1,
+      displayName:"New key",material:{kind:"codex-api-key",apiKey:"synthetic-explicit-expired-key"}};
+    await elapsedPublication(()=>credentials.put(replacement));
+    const original=(await pool.query<{expires_at:Date}>("SELECT expires_at FROM cloud_agent_credential_mutations WHERE id=$1",[replacement.operationId])).rows[0]!;
+    await retirePublicationSource();
+    await expect(credentials.put(replacement)).rejects.toMatchObject({status:409,code:"agent_credential_conflict"});
+    expect((await pool.query("SELECT state,decision,expires_at FROM cloud_agent_credential_mutations WHERE id=$1",[replacement.operationId])).rows[0])
+      .toEqual({state:"expired",decision:"expire",expires_at:original.expires_at});
+    expect((await credentials.put({...replacement,operationId:randomUUID()})).credential.revision).toBe(2);
   });
   it("serializes a legacy revoke against the first access delivery before declaring that no engine holds it",async()=>{
     const nextId=randomUUID(); await credentials.put({credentialId:nextId,ownerUserId:workspace.userId,operationId:randomUUID(),

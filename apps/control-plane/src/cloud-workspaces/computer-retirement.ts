@@ -8,6 +8,7 @@ import { ensureWorkspaceDeletionJob } from "./workspace-deletion-job.js";
 import { CLOUD_WORKSPACE_V2_REQUIRED } from "./supported-generation.js";
 import { createComputerRetirementDriver } from "./computer-retirement-boat.js";
 import { cloudWorkspaceProvisioningProfile } from "./provisioning-profile.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest();
@@ -92,13 +93,18 @@ export class ComputerImageRetirementWorker {
     private readonly account: string,
     private readonly driver: ComputerRetirementDriver,
     private readonly protectedImageRefs: readonly string[] = [],
+    private readonly lockPool: pg.Pool = pool,
   ) {}
+  get accountScope(): string { return this.account; }
   async tick() {
-    await withSystemTx(this.pool, async (tx) => {
-      await tx.query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1,62172))",
+    const prepared = await withSystemTx(this.pool, async (tx) => {
+      // Another process can hold this account lock across provider I/O.
+      // Defer instead of pinning the remaining worker query connection.
+      const result = await tx.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1,62172)) AS acquired /*lock_purpose='computer-image-retirement'*/",
         [this.account],
       );
+      if (!result.rows[0]?.acquired) return false;
       for (const ref of this.protectedImageRefs) {
         const name = /^boat:([a-z0-9-]+)@sha256:[a-f0-9]{64}$/.exec(ref)?.[1];
         if (!name) throw new Error("Invalid protected Computer base");
@@ -108,7 +114,9 @@ export class ComputerImageRetirementWorker {
           [this.account, name, ref],
         );
       }
+      return true;
     });
+    if (!prepared) return;
     const ids = await withSystemTx(this.pool, (tx) =>
       tx.query<{ id: string }>(
         `WITH candidates AS (
@@ -148,12 +156,14 @@ export class ComputerImageRetirementWorker {
     );
   }
   private async retire(id: string) {
-    const lock = await this.pool.connect();
+    // Hosted workers isolate this session holder from query capacity: WorkOS
+    // can hold a query-pool session too, and both holders need DB callbacks.
+    const lock = await this.lockPool.connect();
     let locked = false;
     try {
       locked = (
         await lock.query<{ locked: boolean }>(
-          "SELECT pg_try_advisory_lock(hashtextextended($1,62173)) AS locked",
+          "SELECT pg_try_advisory_lock(hashtextextended($1,62173)) AS locked /*lock_purpose='computer-image-retirement'*/",
           [id],
         )
       ).rows[0]!.locked;
@@ -231,7 +241,7 @@ export class ComputerImageRetirementWorker {
         // This session lock serializes references/base promotion and deletion;
         // no database transaction remains open across a provider await.
         await lock.query(
-          "SELECT pg_advisory_lock(hashtextextended($1,62172))",
+          "SELECT pg_advisory_lock(hashtextextended($1,62172)) /*lock_purpose='computer-image-retirement'*/",
           [this.account],
         );
         try {
@@ -267,7 +277,7 @@ export class ComputerImageRetirementWorker {
           }
         } finally {
           await lock.query(
-            "SELECT pg_advisory_unlock(hashtextextended($1,62172))",
+            "SELECT pg_advisory_unlock(hashtextextended($1,62172)) /*lock_purpose='computer-image-retirement'*/",
             [this.account],
           );
         }
@@ -288,7 +298,7 @@ export class ComputerImageRetirementWorker {
     } finally {
       if (locked)
         await lock.query(
-          "SELECT pg_advisory_unlock(hashtextextended($1,62173))",
+          "SELECT pg_advisory_unlock(hashtextextended($1,62173)) /*lock_purpose='computer-image-retirement'*/",
           [id],
         );
       lock.release();
@@ -298,13 +308,28 @@ export class ComputerImageRetirementWorker {
 /** This worker only retires explicitly-created disposable build workspaces.
  * All provider deletion stays in the existing receipt-verified reconciler. */
 export class CloudComputerRetirementWorker {
+  private readonly scheduler: CloudWorkerScheduler;
   constructor(
     private readonly pool: pg.Pool,
     private readonly batchSize = 32,
     private readonly imageWorker?: ComputerImageRetirementWorker,
+    options: { intervalMs?: number } = {},
   ) {
     if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 32)
       throw new Error("Invalid Cloud Computer reconciliation batch size");
+    this.scheduler = new CloudWorkerScheduler(options.intervalMs ?? 60_000, () => this.tick(), () => {
+      console.warn("[cloud-computer] historical retirement pending");
+    }, () => withSystemTx(this.pool, async tx => {
+      const started = Date.now();
+      const result = await tx.query<{ delay_ms: string | null }>(`SELECT extract(epoch FROM (min(
+          CASE WHEN build.last_checked_at=build.created_at THEN now() ELSE build.last_checked_at+interval '5 seconds' END
+        )-now()))*1000 AS delay_ms
+        FROM cloud_computer_builds build LEFT JOIN cloud_computer_images image USING(id)
+        WHERE (image.id IS NULL AND (build.state='building' OR build.cleanup_state<>'complete'))
+          OR (image.account_scope=$1 AND (image.state<>'retired' OR build.cleanup_state<>'complete'))`, [this.imageWorker?.accountScope ?? null]);
+      const delay = result.rows[0]?.delay_ms;
+      return delay == null ? null : Number(delay) - (Date.now() - started);
+    }, { consistentRead: true }), { readBeforeRun: true, jitter: options.intervalMs === undefined });
   }
   async tick(): Promise<void> {
     await this.imageWorker?.tick();
@@ -397,6 +422,7 @@ export class CloudComputerRetirementWorker {
             organizationId: candidate.org_id,
             requestedBy: workspace.owner_user_id,
             lifecycleIntentId: intentId,
+            mode: "accepted",
           });
           await tx.query(
             "UPDATE cloud_workspaces SET status='deleting',desired_state='deleted',version=version+1,authority_epoch=authority_epoch+1,updated_at=now() WHERE id=$1",
@@ -415,32 +441,16 @@ export class CloudComputerRetirementWorker {
     }
   }
   start(): () => Promise<void> {
-    let stopping = false,
-      pending: Promise<void> | null = null;
-    const tick = () => {
-      if (stopping || pending) return;
-      pending = this.tick()
-        .catch(() => {
-          console.warn("[cloud-computer] historical retirement pending");
-        })
-        .finally(() => {
-          pending = null;
-        });
-    };
-    const timer = setInterval(tick, 5000);
-    timer.unref();
-    tick();
-    return async () => {
-      stopping = true;
-      clearInterval(timer);
-      await pending;
-    };
+    this.scheduler.start();
+    return () => this.scheduler.stop();
   }
+  notify(): void { this.scheduler.notify(); }
 }
 
 export function createCloudComputerRetirementWorker(
   pool: pg.Pool,
   config: CloudWorkspaceBackendConfig,
+  options: { intervalMs?: number; lockPool?: pg.Pool } = {},
 ) {
   return new CloudComputerRetirementWorker(
     pool,
@@ -451,7 +461,9 @@ export function createCloudComputerRetirementWorker(
           config.boat.accountScope,
           createComputerRetirementDriver(config),
           [cloudWorkspaceProvisioningProfile(config, "boat").imageRef],
+          options.lockPool,
         )
       : undefined,
+    options,
   );
 }

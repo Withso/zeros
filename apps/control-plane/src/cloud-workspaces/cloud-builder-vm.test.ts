@@ -1,9 +1,84 @@
+import { createHash } from "node:crypto";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
 import { builderFixedCommand, parseBuilderDiagnostic } from "./cloud-builder-commands.js";
-import { BuilderVmError } from "./cloud-builder-vm.js";
-import { builderFixture, builderIntent, BUILDER_SANDBOX, BUILDER_WALLET, diagnostic, encodeInstaller, installerInput } from "./cloud-builder-vm-test-fixtures.js";
+import { BoatCloudBuilderVms, BuilderVmError, prepareBuilderVmOperation } from "./cloud-builder-vm.js";
+import { builderFixture, builderIntent, BUILDER_IMAGE_ID, BUILDER_IMAGE_NAME, BUILDER_SANDBOX, BUILDER_WALLET, diagnostic, encodeInstaller,
+  installerInput } from "./cloud-builder-vm-test-fixtures.js";
 
 describe("short-lived Boat builder VMs", () => {
+  describe.each(["base", "template"] as const)("background naming for a %s create", source => {
+    it.each(["lookup", "PATCH"] as const)("returns before a hung %s and catches its later rejection", async stage => {
+      const f = builderFixture();
+      let rejectLabel!: (error: Error) => void;
+      const pending = new Promise<never>((_resolve, reject) => { rejectLabel = reject; });
+      const send = f.client.request.bind(f.client);
+      const request = vi.spyOn(f.client, "request").mockImplementation((path, options) =>
+        stage === "PATCH" && options?.method === "PATCH" ? pending : send(path, options));
+      const resolveDisplayName = vi.fn(() => stage === "lookup" ? pending : "zeros-alpha-runtime-build");
+      const vms = new BoatCloudBuilderVms({ client: f.client, billingOrg: BUILDER_WALLET, operations: f.operations,
+        resolveSource: async () => source === "base" ? "zeros-v2-test-base" : "bx_3456789a", resolveDisplayName });
+      const intent = { ...builderIntent, source: source === "base" ? builderIntent.source
+        : { kind: "template" as const, templateId: "zeros-v2-test-template" } };
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      const created = vms.create(intent);
+      try {
+        expect(await Promise.race([created, nextTurn().then(() => null)])).toMatchObject({ sandboxId: BUILDER_SANDBOX });
+        expect(await f.operations.find(intent.operationKey)).toMatchObject({ sandbox_id: BUILDER_SANDBOX, state: "ready" });
+        expect(resolveDisplayName).toHaveBeenCalledExactlyOnceWith(intent);
+        expect(request.mock.calls.some(([, options]) => options?.method === "PATCH")).toBe(stage === "PATCH");
+        rejectLabel(new Error("late naming failure"));
+        await nextTurn();
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        rejectLabel(new Error("release pending label"));
+        await created;
+        await nextTurn();
+        process.off("unhandledRejection", unhandled);
+      }
+    });
+  });
+
+  it.each(["base", "template"] as const)("labels a %s create without changing a saved intent, body or digest", async source => {
+    const f = builderFixture();
+    const intent = { ...builderIntent, source: source === "base" ? builderIntent.source
+      : { kind: "template" as const, templateId: "zeros-v2-test-template" } };
+    const resolveSource = async () => source === "base" ? "zeros-v2-test-base" : "bx_3456789a";
+    const row = await prepareBuilderVmOperation(f.operations, intent, resolveSource);
+    // This saved request predates the new labels. Recovery dispatches exactly it.
+    const original = JSON.stringify(row.provider_request.body), digest = row.request_sha256;
+    const resolveDisplayName = vi.fn(async () => "zeros-beta-runtime-qualify");
+    const vms = new BoatCloudBuilderVms({ client: f.client, billingOrg: BUILDER_WALLET, operations: f.operations,
+      resolveSource, resolveDisplayName });
+    await vms.create(intent);
+    expect(resolveDisplayName).toHaveBeenCalledExactlyOnceWith(intent);
+    expect(f.fetcher.mock.calls[0]?.[1]?.body).toBe(original);
+    expect((await f.operations.find(intent.operationKey))?.request_sha256).toBe(digest);
+    expect((await f.operations.find(intent.operationKey))?.provider_request.body).toEqual(JSON.parse(original));
+    const patch = f.fetcher.mock.calls.at(-1)!;
+    expect(patch[0]).toBe(`https://boat.dev/api/v1/sandboxes/${BUILDER_SANDBOX}`);
+    expect(patch[1]?.method).toBe("PATCH");
+    expect(patch[1]?.body).toBe(JSON.stringify({ name: "zeros-beta-runtime-qualify" }));
+  });
+
+  it("keeps a ready builder and its cleanup identity when the display-name PATCH fails", async () => {
+    const f = builderFixture();
+    const send = f.client.request.bind(f.client);
+    const request = vi.spyOn(f.client, "request");
+    request.mockImplementation(async (path, options) => {
+      if (options?.method === "PATCH") throw new Error("label unavailable");
+      return send(path, options);
+    });
+    const vms = new BoatCloudBuilderVms({ client: f.client, billingOrg: BUILDER_WALLET, operations: f.operations,
+      resolveSource: async () => "zeros-v2-test-base", resolveDisplayName: async () => "zeros-alpha-runtime-build" });
+    const vm = await vms.create(builderIntent);
+    expect(await f.operations.find(vm.operationKey)).toMatchObject({ sandbox_id: BUILDER_SANDBOX, state: "ready" });
+    expect(request.mock.calls.some(([, options]) => options?.method === "PATCH")).toBe(true);
+    await vms.delete(vm);
+    expect((await f.operations.find(vm.operationKey))?.state).toBe("deleted");
+  });
+
   it("does not close a builder deletion on two 404s without a deletion receipt", async () => {
     const f = builderFixture();
     const vm = await f.vms.create(builderIntent);
@@ -33,13 +108,55 @@ describe("short-lived Boat builder VMs", () => {
 
   it.each([
     ["runtime-qualification", "base"], ["runtime-qualification", "template"],
-    ["computer-build", "base"], ["computer-build", "template"],
+    ["computer-build", "base"], ["computer-build", "template"], ["computer-build", "image"],
+    ["runtime-image", "base"], ["runtime-image", "image"],
   ] as const)("disables process monitoring for a new %s VM from %s", async (purpose, source) => {
     const f = builderFixture();
-    await f.vms.create({ ...builderIntent, purpose, source: source === "base" ? builderIntent.source :
-      { kind: "template", templateId: "zeros-v2-test-template" } });
+    await f.vms.create({ ...builderIntent, purpose, source: source === "base" ? builderIntent.source : source === "image"
+      ? { kind: "image", imageId: BUILDER_IMAGE_ID } : { kind: "template", templateId: "zeros-v2-test-template" } });
     const request = f.fetcher.mock.calls.find(([, init]) => init?.method === "POST");
     expect(JSON.parse(String(request?.[1]?.body)).monitoring).toBe(false);
+  });
+
+  it.each(["computer-build", "runtime-image"] as const)("creates a %s VM from a runtime image name with provider snapshots on", async purpose => {
+    const f = builderFixture();
+    await f.vms.create({ ...builderIntent, purpose, source: { kind: "image", imageId: BUILDER_IMAGE_ID } });
+    const [url, init] = f.fetcher.mock.calls[0]!;
+    expect(new URL(String(url)).pathname).toBe("/api/v1/sandboxes");
+    expect(JSON.parse(String(init?.body))).toEqual({ from: BUILDER_IMAGE_NAME, name: builderIntent.name,
+      type: "default", ttlSeconds: 1800, noEnv: true, env: {}, snapshots: true, monitoring: false });
+  });
+
+  it("keeps existing base intents and their digest byte-for-byte", async () => {
+    const f = builderFixture();
+    const intent = { ...builderIntent, purpose: "computer-build" as const };
+    await f.vms.create(intent);
+    const row = await f.operations.find(intent.operationKey);
+    expect(row?.request_sha256).toBe(createHash("sha256").update(JSON.stringify({ purpose: "computer-build",
+      source: { kind: "base", baseImageId: builderIntent.source.kind === "base" ? builderIntent.source.baseImageId : "" },
+      name: builderIntent.name, operationKey: builderIntent.operationKey, ttlSeconds: 1800 })).digest("hex"));
+    expect(row?.provider_request).toEqual({ path: "/sandboxes", body: { from: "zeros-v2-test-base", name: builderIntent.name,
+      type: "default", ttlSeconds: 1800, noEnv: true, env: {}, snapshots: true, monitoring: false } });
+  });
+
+  it.each([{ kind: "image", imageId: "not-a-uuid" }, { kind: "image", imageId: BUILDER_IMAGE_ID.toUpperCase() },
+    { kind: "image", imageId: BUILDER_IMAGE_ID, extra: true }])("rejects a malformed image source %#", async source => {
+    const f = builderFixture();
+    await expect(f.vms.create({ ...builderIntent, purpose: "runtime-image", source } as never)).rejects.toMatchObject({ check: "input_schema" });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+
+  it("admits only the read-only TCB helper and build installs on runtime image VMs", async () => {
+    const f = builderFixture();
+    const vm = await f.vms.create({ ...builderIntent, purpose: "runtime-image" });
+    for (const command of ["computer:clone-repos", "computer:run-install", "computer:sanitize"] as const)
+      await expect(f.vms.runFixed(vm, command, Buffer.from("{}"))).rejects.toMatchObject({ check: "command_invalid" });
+    await expect(f.vms.runFixed(vm, "install-runtime", encodeInstaller())).rejects.toMatchObject({ check: "command_invalid" });
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    await f.vms.runFixed(vm, "install-runtime", encodeInstaller({ ...installerInput(), purpose: "build" }));
+    await f.vms.runFixed(vm, "computer:verify-tcb", Buffer.from("{}"));
+    expect(f.channel.execute.mock.calls.map(([input]) => input.command)).toEqual([
+      expect.stringContaining("install-runtime.sh"), expect.stringContaining("computer-build.py verify-tcb")]);
   });
 
   it.each(["ready", "idle", "running"])("journals before creating, verifies the wallet and accepts %s", async ready => {

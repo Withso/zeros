@@ -21,6 +21,8 @@ import { computerTemplateBuilderName } from "./computer-template-name.js";
 import { computerTemplateBuilderIntent } from "./computer-template-boat.js";
 import { builderVmBaseSnapshot, prepareBuilderVmOperation } from "./cloud-builder-vm.js";
 import type { BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
+import { lockReadyRuntimeImage, type RuntimeImageChannel } from "./runtime-images.js";
+import { observeCloudRuntimeSelection } from "./runtime-selection.js";
 import { COMPUTER_TEMPLATE_RETENTION_CHANNEL } from "./computer-template-retention.js";
 import { updateRepositorySetupScript } from "./computer-repository-setup.js";
 import {
@@ -41,6 +43,7 @@ import {
   type CloudComputerV2BuildStage,
   type CloudComputerV2BuildState,
   type CloudComputerV2BuildSummary,
+  type CloudComputerV2BuildRuntime,
   type CloudComputerV2CancelResult,
   type CloudComputerV2DraftInput,
   type CloudComputerV2DraftResult,
@@ -1186,14 +1189,18 @@ export class DatabaseCloudComputerV2Service {
         throw new HttpError(
           409,
           "cloud_computer_not_built",
-          "Activate requires a successful version with a ready template.",
+          build?.template_state === "retiring" || build?.template_state === "retired"
+            ? "This template is no longer retained. Rebuild this version before activating it."
+            : "Activate requires a successful version with a ready template.",
         );
       // C3 supplies registry/qualification checks before publishing ready;
       // later retention/revocation workers withdraw that readiness.
       if (
         !(
           await tx.query(
-            "SELECT build_id FROM cloud_computer_templates WHERE build_id=$1 AND org_id=$2 AND state='ready' FOR UPDATE",
+            `SELECT build_id FROM cloud_computer_templates template WHERE build_id=$1 AND org_id=$2 AND state='ready'
+              AND (NOT named_snapshot_required OR EXISTS (SELECT 1 FROM cloud_computer_template_snapshots snapshot
+                WHERE snapshot.build_id=template.build_id AND snapshot.org_id=template.org_id AND snapshot.state='ready')) FOR UPDATE`,
             [build.id, org],
           )
         ).rowCount
@@ -1201,7 +1208,7 @@ export class DatabaseCloudComputerV2Service {
         throw new HttpError(
           409,
           "cloud_computer_not_built",
-          "This template is no longer ready.",
+          "This template is no longer ready. Rebuild this version before activating it.",
         );
       requireEnvironment(await configuration(tx, org, build.config_id));
       const revision = Number(head.revision) + 1;
@@ -1253,6 +1260,18 @@ export class DatabaseCloudComputerV2Service {
         return summary(await buildRow(tx, org, id));
       },
     );
+  }
+  async getBuildRuntime(organizationId: string, userId: string, buildId: string): Promise<CloudComputerV2BuildRuntime> {
+    const org = uuid(organizationId), user = uuid(userId), id = uuid(buildId);
+    return this.readTransaction(undefined, async tx => {
+      await authority(tx, org, user, false, false);
+      const build = await buildRow(tx, org, id);
+      const mode = this.config.runtime?.qualificationMode ?? "full";
+      const selected = await observeCloudRuntimeSelection(tx, mode);
+      return { buildId: build.id, version: integer(build.version), runtimeId: build.runtime_id, baseImageId: build.base_image_id,
+        selected: selected ? { runtimeId: selected.pin.runtimeId, baseImageId: selected.pin.baseImageId,
+          sourceCommit: selected.descriptor.sourceCommit, qualificationMode: mode } : null };
+    });
   }
   async cancel(
     organizationId: string,
@@ -1389,10 +1408,11 @@ export class DatabaseCloudComputerV2Service {
     selectRuntime: (tx: Tx) => Promise<{ baseImageId: string; runtimeId: string } | null>;
     operations: BuilderVmOperationStore;
     accountScope: string; billingOrg: string; namePrefix?: string;
+    runtimeImageChannel?: RuntimeImageChannel;
   }): Promise<CloudComputerV2Claim | null> {
     const workerFence = parse(positive, fence);
     return withSystemTx(this.pool, async (tx) => {
-      await tx.query("SELECT pg_advisory_xact_lock(62173)");
+      await tx.query("SELECT pg_advisory_xact_lock(62173) /*lock_purpose='computer-gc'*/");
       const running = (
         await tx.query<{ count: string }>(
           `SELECT count(*) FROM cloud_computer_v2_builds build LEFT JOIN cloud_computer_templates template ON template.build_id=build.id
@@ -1425,23 +1445,27 @@ export class DatabaseCloudComputerV2Service {
         [build.id, workerFence, runtimePin?.baseImageId ?? null, runtimePin?.runtimeId ?? null],
       );
       if (builder) {
+        const base = (await tx.query<{ image_ref: string; base_compatibility_id: string }>(`SELECT base.image_ref,base.base_compatibility_id
+          FROM cloud_runtime_base_images base JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
+          WHERE base.base_image_id=$1 AND base.provider='boat' AND base.approved_at<=clock_timestamp()
+            AND base.revoked_at IS NULL AND contract.revoked_at IS NULL FOR SHARE OF base,contract`,
+        [runtimePin!.baseImageId])).rows[0];
+        const image = builder.runtimeImageChannel && base ? await lockReadyRuntimeImage(tx, {
+          channel: builder.runtimeImageChannel, runtimeId: runtimePin!.runtimeId, baseImageId: runtimePin!.baseImageId,
+          baseCompatibilityId: base.base_compatibility_id, accountScope: builder.accountScope, billingOrg: builder.billingOrg,
+        }) : null;
         const name = computerTemplateBuilderName(build.id, builder.namePrefix);
         const intent = computerTemplateBuilderIntent({
-          baseImageId: runtimePin!.baseImageId!, name, operationKey: `computer-build:${build.id}`,
+          baseImageId: runtimePin!.baseImageId!, imageId: image?.imageId ?? null, name, operationKey: `computer-build:${build.id}`,
         });
         // Commit the capacity hold and closable intent together. Resolve the
-        // pinned base through this transaction; preparation has no provider I/O.
-        await prepareBuilderVmOperation(builder.operations, intent, async () => {
-          const base = (await tx.query<{ image_ref: string }>(`SELECT base.image_ref FROM cloud_runtime_base_images base
-            JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
-            WHERE base.base_image_id=$1 AND base.provider='boat' AND base.approved_at<=clock_timestamp()
-              AND base.revoked_at IS NULL AND contract.revoked_at IS NULL FOR SHARE OF base,contract`,
-          [runtimePin!.baseImageId])).rows[0];
-          return builderVmBaseSnapshot(base?.image_ref ?? "");
-        }, tx);
-        await tx.query(`INSERT INTO cloud_computer_templates(build_id,org_id,account_scope,billing_org,builder_operation_key,builder_name,allocation_requested_at)
-          VALUES($1,$2,$3,$4,$5,$6,clock_timestamp())`,
-        [build.id, build.org_id, parse(identifier, builder.accountScope), parse(identifier, builder.billingOrg), intent.operationKey, intent.name]);
+        // locked image or base here; preparation has no provider I/O.
+        await prepareBuilderVmOperation(builder.operations, intent,
+          async () => image?.snapshotName ?? builderVmBaseSnapshot(base?.image_ref ?? ""), tx);
+        await tx.query(`INSERT INTO cloud_computer_templates(build_id,org_id,account_scope,billing_org,builder_operation_key,builder_name,
+          builder_source_image_id,allocation_requested_at,named_snapshot_required) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp(),true)`,
+        [build.id, build.org_id, parse(identifier, builder.accountScope), parse(identifier, builder.billingOrg), intent.operationKey, intent.name,
+          image?.imageId ?? null]);
       }
       const claimed = await buildRow(tx, build.org_id, build.id);
       return {

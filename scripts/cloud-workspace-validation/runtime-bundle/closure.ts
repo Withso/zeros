@@ -38,6 +38,7 @@ export const RUNTIME_HELPERS = [
     "cloud-setup-timings.mjs",
     "cloud-computer-checkout.mjs",
     "prepare-cloud-image-files.mjs",
+    "prepare-cloud-git.mjs",
     "cloud-engine-view.mjs",
     "cloud-engine-launcher.mjs",
     "publish-cloud-workload-custody.mjs",
@@ -65,6 +66,11 @@ export const RUNTIME_HELPERS = [
     optional: false,
   },
   {
+    source: "apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs",
+    target: "lib/zeros/cloud-runtime-assets.mjs",
+    optional: false,
+  },
+  {
     source: "apps/control-plane/src/cloud-workspaces/runtime-update-adapter.py",
     target: "lib/zeros/runtime-update-adapter.py",
     optional: false,
@@ -79,10 +85,19 @@ export const SOURCE_SLICES = [
   // Workspace packages (protocol/design-core/design-web) are copied in full by
   // the dependency walk, which also restores their own node_modules links.
   "apps/desktop/src",
+  // The Zeros Design skill that agent context names (engine/design/design-skill.ts).
+  "apps/desktop/resources/zeros-design-skill",
   "catalogs",
   `${SANDBOX}`,
   "scripts/cloud-workspace-validation/lib",
   "third_party",
+];
+// The unbundled engine smoke imports the same public channel policy as the
+// bundled CLI. These are source dependencies outside apps/desktop/src, not a
+// reason to copy the control plane's entire source tree into the runtime.
+export const SOURCE_FILES = [
+  "apps/desktop/shared/cloud-workspace-channel.ts",
+  "apps/control-plane/src/cloud-workspace-channels.json",
 ];
 const CLOUD_HOST_MODULES = [
   "host-process-supervisor.mjs",
@@ -419,7 +434,7 @@ export async function stageSources(
   for (const relative of CLOUD_HOST_MODULES)
     check((await lstat(path.join(source, relative))).isFile(), "host_assets");
   const worker = path.join(runtime, "worker");
-  for (const relative of SOURCE_SLICES) {
+  for (const relative of [...SOURCE_SLICES, ...SOURCE_FILES]) {
     await copyPayload(
       path.join(source, relative),
       path.join(worker, relative),

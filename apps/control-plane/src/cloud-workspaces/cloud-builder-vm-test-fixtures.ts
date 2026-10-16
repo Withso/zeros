@@ -7,6 +7,8 @@ import { runtimeBase } from "./runtime-test-fixtures.js";
 
 export const BUILDER_SANDBOX = "bx_23456789";
 export const BUILDER_WALLET = "team_11111111-1111-4111-8111-111111111111";
+export const BUILDER_IMAGE_ID = "3f3a3333-3333-4333-8333-3333333333ab";
+export const BUILDER_IMAGE_NAME = `zeros-rtimg-alpha-${"a".repeat(12)}-0000aaaa`;
 export const builderIntent: BuilderVmIntent = { purpose: "runtime-qualification", source: { kind: "base", baseImageId: runtimeBase.id },
   name: "zeros-v2-test-builder", operationKey: "zeros-v2-test-operation", ttlSeconds: 1800 };
 export const installerInput = () => ({ schema: "zeros.runtime-install/v1", purpose: "qualification",
@@ -145,7 +147,8 @@ export function builderFixture(operations: BuilderVmOperationStore = memoryBuild
   };
   const waits: number[] = [];
   const vms = new BoatCloudBuilderVms({ client, billingOrg: BUILDER_WALLET, operations,
-    resolveSource: async source => source.kind === "base" ? "zeros-v2-test-base" : "bx_bcdefghj",
+    resolveSource: async source => source.kind === "base" ? "zeros-v2-test-base"
+      : source.kind === "image" ? BUILDER_IMAGE_NAME : "bx_bcdefghj",
     openChannel: async () => channel, now: () => now, wait: async ms => { waits.push(ms); now += ms; },
     lifecycleTimeoutMs: 3000, baseReadinessTimeoutMs: 18_000 });
   return { vms, client, channel, fetcher, operations, state, waits, advance: (ms: number) => { now += ms; } };

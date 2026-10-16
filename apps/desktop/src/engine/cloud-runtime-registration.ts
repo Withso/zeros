@@ -4,7 +4,7 @@ import { configureNativeGithubTransport } from "./git/github-native-client";
 import { requestCloudGithubWrite, type CloudGithubWriteRequest } from "./cloud-github-write-client";
 import { requestCloudGithubRead } from "./cloud-github-read-client";
 import type { CloudCommandEngineRequest } from "@zeros/protocol/cloud-commands";
-import { CloudAgentBootScopeSchema } from "@zeros/protocol/cloud-agent-bootstrap";
+import { CloudAgentBootScopeSchema, CloudAgentHistoryRecoveryResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudActorAdmissionResponseSchema, type CloudActorContext } from "@zeros/protocol/cloud-actors";
 import type { CloudEventEngineRequest } from "@zeros/protocol/cloud-events";
 import type { CloudActionEngineRequest } from "@zeros/protocol/cloud-actions";
@@ -31,6 +31,10 @@ const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
 const MAX_RUNTIME_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
+const CHECKPOINT_HINT_PATH = "/internal/v1/cloud-workspaces/engine/checkpoint-hint";
+const CHECKPOINT_HINT_AUDIENCE = "zeros-cloud-workspace-engine-checkpoint-hint-v1" as const;
+// Outlives the control plane's 25-second hint wait.
+const CHECKPOINT_HINT_TIMEOUT_MS = 35_000;
 
 // This module is also imported by server-side setup contracts. Keep the wire
 // check pure; only the engine's attester may read the installed runtime.
@@ -128,6 +132,9 @@ export type CloudRuntimeRegistrationDependencies = {
   agentRuntime: CloudAgentRuntimeAttestation;
   /** Explicit supported wire opt-in; a committed CP ACK is still required. */
   negotiateLocalCommands?: true;
+  /** Hold the optional checkpoint hint wait so a queued Stop, Restart or
+   * Archive is fetched by an immediate heartbeat instead of the next beat. */
+  checkpointHints?: true;
   fetch?: FetchLike;
   now?: () => number;
   onAuthorityLost: () => void;
@@ -180,6 +187,72 @@ class CloudRuntimeRequestError extends Error {
 export class CloudClientAuthorityTransientError extends Error {
   readonly code = "cloud_client_authority_transient";
   constructor() { super("Cloud client authority is temporarily unavailable"); this.name = "CloudClientAuthorityTransientError"; }
+}
+
+type RenewalOperation = "engine-heartbeat" | "client-renew" | "actor-confirm" | "warm-context";
+type RenewalOutcome = "completed" | "refused" | "failed";
+const RENEWAL_BUCKETS_MS = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000, 10_000, 30_000, null] as const;
+type RenewalSeries = { operation: RenewalOperation; outcome: RenewalOutcome; count: number;
+  sumMs: number; maxMs: number; buckets: number[] };
+
+/** Registration-boundary observations, not authority. Four code-owned labels
+ * and three outcomes bound storage to twelve series. Flush on existing work
+ * after an active minute, or once on retirement; never start a reporting timer.
+ * This module is in the standalone CP test import closure: keep the helper
+ * dependency-free and never retain a request, response, identity or error. */
+class CloudRuntimeRenewalTimings {
+  private readonly series = new Map<string, RenewalSeries>();
+  private started: number | null = null;
+  private inFlight = 0;
+  private invalidSpans = 0;
+  private closed = false;
+
+  private time(): number | null {
+    try { const value = performance.now(); return Number.isFinite(value) && value >= 0 ? value : null; }
+    catch { return null; }
+  }
+
+  begin(operation: RenewalOperation): (outcome: RenewalOutcome) => void {
+    if (this.closed) return () => {};
+    const started = this.time();
+    this.started ??= started;
+    this.inFlight++;
+    let ended = false;
+    return outcome => {
+      if (ended || this.closed) return;
+      ended = true; this.inFlight--;
+      const now = this.time(), duration = started === null || now === null ? null : now - started;
+      if (duration === null || !Number.isFinite(duration) || duration < 0) this.invalidSpans++;
+      else {
+        const key = `${operation}:${outcome}`;
+        let series = this.series.get(key);
+        if (!series) {
+          series = { operation, outcome, count: 0, sumMs: 0, maxMs: 0, buckets: RENEWAL_BUCKETS_MS.map(() => 0) };
+          this.series.set(key, series);
+        }
+        series.count++; series.sumMs += duration; series.maxMs = Math.max(series.maxMs, duration);
+        const bucket = RENEWAL_BUCKETS_MS.findIndex(bound => bound === null || duration <= bound);
+        series.buckets[bucket] = series.buckets[bucket]! + 1;
+      }
+      this.started ??= now;
+      if (this.started !== null && now !== null && now - this.started >= 60_000) this.flush(now);
+    };
+  }
+
+  private flush(now: number | null): void {
+    if (!this.series.size && !this.invalidSpans && !this.inFlight) return;
+    const report = { version: 1, scope: "cloud-runtime-renewal", windowMs: now === null || this.started === null || now < this.started
+      ? null : now - this.started, bucketUpperBoundsMs: RENEWAL_BUCKETS_MS, series: [...this.series.values()],
+    invalidSpans: this.invalidSpans, inFlight: this.inFlight };
+    this.series.clear(); this.invalidSpans = 0; this.started = now;
+    try { console.info(`[cloud-runtime] renewal-timing ${JSON.stringify(report)}`); }
+    catch { /* Observation must not alter a renewal or authority retirement. */ }
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true; this.flush(this.time());
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -375,6 +448,7 @@ async function boundedResponseJson(response: Response): Promise<unknown> {
 }
 
 export class CloudRuntimeRegistration {
+  private readonly renewalTimings = new CloudRuntimeRenewalTimings();
   private readonly fetch: FetchLike;
   private readonly now: () => number;
   private readonly onAuthorityLost: () => void;
@@ -416,6 +490,10 @@ export class CloudRuntimeRegistration {
   private recordHandoffFlight: Promise<void> | null = null;
   private checkpointInFlight: string | null = null;
   private readonly negotiateLocalCommands: boolean;
+  private readonly checkpointHints: boolean;
+  private heartbeatInFlight = false;
+  private heartbeatAgain = false;
+  private checkpointHintsStarted = false;
   private localCommandsAcknowledged = false;
   private agentJournalMode: "local" | "legacy" | undefined;
   private sourceWriterEpoch: string | null = null;
@@ -430,6 +508,7 @@ export class CloudRuntimeRegistration {
     }
     this.agentRuntime = Object.freeze({ ...dependencies.agentRuntime });
     this.negotiateLocalCommands = dependencies.negotiateLocalCommands === true;
+    this.checkpointHints = dependencies.checkpointHints === true;
     this.fetch = dependencies.fetch ?? globalThis.fetch;
     this.now = dependencies.now ?? Date.now;
     this.onAuthorityLost = dependencies.onAuthorityLost;
@@ -497,6 +576,7 @@ export class CloudRuntimeRegistration {
     const document = this.parseRegistration(raw);
     this.document = document;
     this.scheduleHeartbeat(document.heartbeat.intervalMs);
+    if (this.checkpointHints) this.startCheckpointHints(document);
     try {
       await this.synchronizeDurableRecord(document, { initial: true });
       this.initialRecordConnected = this.document === document && !this.authorityLost && !this.stopped;
@@ -515,6 +595,12 @@ export class CloudRuntimeRegistration {
     return this.localCommandsAcknowledged && this.document !== null &&
       this.initialRecordConnected && !this.recordHandoffPaused && this.hasControlAuthority(this.document);
   }
+  /** A retry may consume only already-confirmed authority. This read neither
+   * renews the heartbeat nor relaxes its one-second dispatch safety margin. */
+  agentBootAuthorityRemainingMs(): number {
+    if (!this.document || !this.localCommandsNegotiated()) return 0;
+    return Math.max(0, this.document.leaseExpiresAtMs - this.now() - 1000);
+  }
   get runtimeBootId(): string { return this.agentRuntime.bootId; }
   /** Authenticated history provenance, never execution or retirement authority. */
   get agentSourceWriterEpoch(): string | null { return this.sourceWriterEpoch; }
@@ -525,21 +611,34 @@ export class CloudRuntimeRegistration {
     const document = this.document;
     if (!document || !this.localCommandsNegotiated())
       throw new CloudCommandRuntimeError("cloud_workspace_client_update_required");
-    const result = await requestCloudAgentBoot(this.authority(document), operation, request,
-      AbortSignal.any([signal, this.abortController.signal]), this.fetch);
-    if (document !== this.document || !this.localCommandsNegotiated()) throw new CloudAgentExecutionError();
-    const rawIdentity = "provenance" in result ? result.provenance.scope : result;
-    const identity = CloudAgentBootScopeSchema.parse(Object.fromEntries(Object.entries(rawIdentity)
-      .filter(([key]) => key in CloudAgentBootScopeSchema.shape)));
-    const bootId = identity.bootId;
-    if (bootId !== this.agentRuntime.bootId) throw new CloudAgentExecutionError("authority_response_invalid");
-    if (this.activatedLocalWriter && (identity.bootId !== this.activatedLocalWriter.bootId || identity.writerEpoch !== this.activatedLocalWriter.writerEpoch))
-      throw new CloudAgentExecutionError("authority_response_invalid");
-    if (operation === "activate") {
-      this.activatedLocalWriter = Object.freeze({ bootId, writerEpoch: identity.writerEpoch });
-      this.agentJournalMode = "local";
-    }
-    return result;
+    const finish = operation === "actor-confirm" || operation === "warm-context" ? this.renewalTimings.begin(operation) : undefined;
+    let outcome: RenewalOutcome = "failed";
+    try {
+      const result = await requestCloudAgentBoot(this.authority(document), operation, request,
+        AbortSignal.any([signal, this.abortController.signal]), this.fetch);
+      if (document !== this.document || !this.localCommandsNegotiated()) throw new CloudAgentExecutionError();
+      if (operation === "recover-history") {
+        const recovery = CloudAgentHistoryRecoveryResponseSchema.parse(result);
+        if (recovery.bootId !== this.agentRuntime.bootId || this.activatedLocalWriter)
+          throw new CloudAgentExecutionError("authority_response_invalid", "validation");
+        // A gap authorization is only custody for the exact future boot. It
+        // neither activates a writer nor admits controls/mirroring/execution.
+        return result;
+      }
+      const rawIdentity = "provenance" in result ? result.provenance.scope : result;
+      const identity = CloudAgentBootScopeSchema.parse(Object.fromEntries(Object.entries(rawIdentity)
+        .filter(([key]) => key in CloudAgentBootScopeSchema.shape)));
+      const bootId = identity.bootId;
+      if (bootId !== this.agentRuntime.bootId) throw new CloudAgentExecutionError("authority_response_invalid");
+      if (this.activatedLocalWriter && (identity.bootId !== this.activatedLocalWriter.bootId || identity.writerEpoch !== this.activatedLocalWriter.writerEpoch))
+        throw new CloudAgentExecutionError("authority_response_invalid");
+      if (operation === "activate") {
+        this.activatedLocalWriter = Object.freeze({ bootId, writerEpoch: identity.writerEpoch });
+        this.agentJournalMode = "local";
+      }
+      outcome = "completed";
+      return result;
+    } finally { finish?.(outcome); }
   }
 
   private localWriterCurrent(bootId: string, writerEpoch: string, allowRecordPause = false): boolean {
@@ -683,18 +782,22 @@ export class CloudRuntimeRegistration {
     this.timer = null;
     this.abortController.abort();
     this.document = null;
+    this.renewalTimings.close();
     await this.durableRecordSyncInFlight?.catch(() => undefined);
   }
 
   /** Admission is already fenced by the engine. Retain heartbeat authority
    * while draining any older projection and then flushing a fresh one. */
-  pauseRecordForRuntimeHandoff(): Promise<void> {
+  pauseRecordForRuntimeHandoff(options?: { retryFailedFlush?: true }): Promise<void> {
     if (this.recordHandoffFlight) return this.recordHandoffFlight;
     const document = this.document;
     if (!document || !this.hasControlAuthority(document))
       return Promise.reject(new Error("Cloud runtime handoff authority is unavailable"));
-    if (this.recordHandoffPaused) return this.recordHandoffFlushed ? Promise.resolve()
-      : Promise.reject(new Error("Cloud runtime handoff record flush failed"));
+    if (this.recordHandoffPaused && this.recordHandoffFlushed) return Promise.resolve();
+    // A later authorized final capture may retry a failed flush while ordinary
+    // record synchronization and command admission remain parked.
+    if (this.recordHandoffPaused && !options?.retryFailedFlush)
+      return Promise.reject(new Error("Cloud runtime handoff record flush failed"));
     this.recordHandoffPaused = true;
     this.recordHandoffFlushed = false;
     const task = Promise.resolve().then(async () => {
@@ -738,6 +841,8 @@ export class CloudRuntimeRegistration {
       "/internal/v2/cloud-workspaces/engine/client-admission",
       document.heartbeat.endpoint,
     ).toString();
+    const finish = renew ? this.renewalTimings.begin("client-renew") : undefined;
+    let outcome: RenewalOutcome = "refused";
     try {
       const raw = await this.post(endpoint, document.heartbeat.token, {
         workspaceId: this.config.execution.workspaceId,
@@ -757,14 +862,16 @@ export class CloudRuntimeRegistration {
       const parsed = CloudActorAdmissionResponseSchema.safeParse(raw);
       if (!parsed.success) return null;
       const admitted = parsed.data;
+      outcome = "completed";
       return {accountUserId:admitted.accountUserId,authorityEpoch:admitted.authorityEpoch,
         actor:{sessionId:admitted.actorSessionId,deviceId:admitted.deviceId,role:admitted.role,fingerprint:admitted.fingerprint}};
     } catch (error) {
+      outcome = "failed";
       if (renew && this.document === document && this.hasControlAuthority(document) && error instanceof CloudRuntimeRequestError &&
           (!error.terminal || error.status === 408 || error.status === 429))
         throw new CloudClientAuthorityTransientError();
       return null;
-    }
+    } finally { finish?.(outcome); }
   }
 
   async verifyServiceAccess(
@@ -909,6 +1016,9 @@ export class CloudRuntimeRegistration {
     this.timer = null;
     const document = this.document;
     if (!document || this.stopped || this.authorityLost) return;
+    this.heartbeatInFlight = true;
+    this.heartbeatAgain = false;
+    const finish = this.renewalTimings.begin("engine-heartbeat");
     try {
       const credentialRefresh = this.readCredentialRefresh();
       const observedPorts = await this.observedPorts();
@@ -965,14 +1075,19 @@ export class CloudRuntimeRegistration {
         now,
       );
       document.leaseExpiresAtMs = Number(raw.leaseExpiresAtMs);
-      this.scheduleHeartbeat(document.heartbeat.intervalMs);
+      // A checkpoint hint that arrived during this beat asks for one more now.
+      this.scheduleHeartbeat(this.heartbeatAgain ? 0 : document.heartbeat.intervalMs);
       if (!this.recordHandoffPaused) void this.synchronizeDurableRecord(document, { initial: false }).catch(
         () => undefined,
       );
-      if (checkpointRequest && !this.recordHandoffPaused) {
+      // Record handoff fences writes, not authenticated checkpoint control.
+      // A cancelled/superseded final capture must not starve its replacement.
+      if (checkpointRequest && (!this.recordHandoffPaused ||
+          ["before_stop", "before_archive", "before_delete", "before_rebuild"].includes(checkpointRequest.reason)))
         this.dispatchCheckpointRequest(checkpointRequest, document);
-      }
+      finish("completed");
     } catch (error) {
+      finish("failed");
       const terminal =
         error instanceof CloudRuntimeRequestError && error.terminal;
       if (terminal || this.now() >= document.leaseExpiresAtMs - 1_000) {
@@ -985,7 +1100,97 @@ export class CloudRuntimeRegistration {
           Math.max(250, document.leaseExpiresAtMs - this.now() - 1_000),
         ),
       );
+    } finally {
+      this.heartbeatInFlight = false;
     }
+  }
+
+  /** Timing only: the next beat fetches any durable checkpoint directive
+   * through the same fenced heartbeat as the regular cadence. */
+  private heartbeatSoon(): void {
+    if (!this.document || this.stopped || this.authorityLost) return;
+    if (this.heartbeatInFlight) {
+      this.heartbeatAgain = true;
+      return;
+    }
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.scheduleHeartbeat(0);
+  }
+
+  private startCheckpointHints(document: RegistrationDocument): void {
+    if (this.checkpointHintsStarted) return;
+    this.checkpointHintsStarted = true;
+    void this.checkpointHintLoop(document).catch(() => undefined);
+  }
+
+  /** Optional fast path. An older control plane answers 404 and a refused
+   * hint ends it; the heartbeat alone keeps authority and the cadence. */
+  private async checkpointHintLoop(document: RegistrationDocument): Promise<void> {
+    let failures = 0;
+    while (this.document === document && !this.stopped && !this.authorityLost) {
+      let pending = false;
+      try {
+        const raw = await this.post(
+          new URL(CHECKPOINT_HINT_PATH, document.heartbeat.endpoint).href,
+          document.heartbeat.token,
+          {
+            workspaceId: this.config.execution.workspaceId,
+            organizationId: this.config.execution.organizationId,
+            generation: this.config.execution.generation,
+            engineInstanceId: this.config.engine.instanceId,
+          },
+          undefined,
+          CHECKPOINT_HINT_TIMEOUT_MS,
+        );
+        if (
+          !isRecord(raw) ||
+          !exactKeys(raw, ["audience", "pending", "version"]) ||
+          raw.version !== 1 ||
+          raw.audience !== CHECKPOINT_HINT_AUDIENCE ||
+          typeof raw.pending !== "boolean"
+        ) {
+          throw new CloudRuntimeRequestError(
+            "cloud engine checkpoint hint response is invalid",
+            false,
+          );
+        }
+        failures = 0;
+        pending = raw.pending;
+      } catch (error) {
+        if (
+          error instanceof CloudRuntimeRequestError &&
+          error.status !== undefined &&
+          error.status !== 408 &&
+          error.status !== 429 &&
+          error.status < 500
+        )
+          return;
+        failures += 1;
+      }
+      if (pending) this.heartbeatSoon();
+      // Never spin: a delivered directive leaves the queued state, and
+      // failures back off up to half a minute.
+      await this.pauseCheckpointHints(
+        pending ? 2_000 : failures ? Math.min(30_000, 1_000 * 2 ** Math.min(failures - 1, 5)) : 0,
+      );
+    }
+  }
+
+  private pauseCheckpointHints(delayMs: number): Promise<void> {
+    const signal = this.abortController.signal;
+    if (delayMs <= 0 || signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", done);
+        resolve();
+      };
+      timer = setTimeout(done, delayMs);
+      timer.unref?.();
+      signal.addEventListener("abort", done, { once: true });
+    });
   }
 
   private async observedPorts(): Promise<
@@ -1164,6 +1369,7 @@ export class CloudRuntimeRegistration {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.document = null;
+    this.renewalTimings.close();
     this.onAuthorityLost();
   }
 
@@ -1221,6 +1427,7 @@ export class CloudRuntimeRegistration {
     token: string,
     body: Record<string, unknown>,
     negotiation?: { localCommandsVersion: 1; acknowledgement(acknowledged: boolean, journalMode?: "local" | "legacy", sourceWriterEpoch?: string): void },
+    timeoutMs = REQUEST_TIMEOUT_MS,
   ): Promise<unknown> {
     let response: Response;
     try {
@@ -1229,7 +1436,7 @@ export class CloudRuntimeRegistration {
         redirect: "error",
         signal: AbortSignal.any([
           this.abortController.signal,
-          AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          AbortSignal.timeout(timeoutMs),
         ]),
         headers: {
           accept: "application/json",

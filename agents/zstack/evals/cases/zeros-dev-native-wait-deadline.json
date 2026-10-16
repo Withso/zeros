@@ -1,0 +1,9 @@
+{
+  "id": "zeros-dev-native-wait-deadline",
+  "kind": "replay",
+  "area": "release-dev-environment",
+  "fixedBy": "pr:498",
+  "symptom": "A resume wait timed out during token I/O and reported internal without its previously observed queued setup attempt and claim count.",
+  "rule": "Exercise deadline expiry before HTTP dispatch as well as during I/O. Normalize native aborts at that boundary and preserve the last validated setup observation. See changes/zeros-dev-closed-connect-and-deadline.md.",
+  "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-transport.test.ts scripts/__tests__/zeros-dev-product.test.ts scripts/__tests__/zeros-dev-cli.test.ts"
+}

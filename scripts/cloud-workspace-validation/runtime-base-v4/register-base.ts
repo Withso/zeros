@@ -18,7 +18,7 @@ const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const receiptSchema = z.object({
   schema: z.literal("zeros.runtime-base-receipt/v1"),
   profile: z.literal("zeros-cloud-worker-v4"),
-  snapshotName: z.string().regex(/^zeros-v2-test-[a-z0-9-]{1,49}$/),
+  snapshotName: z.string().regex(/^(?:zeros-base-v[1-9][0-9]{0,3}|zeros-v2-test-[a-z0-9-]{1,49})$/),
   sourceCommit: z.string().regex(/^[a-f0-9]{40}$/),
   baseBuildSha256: sha256,
   baseCompatibilityId: z.string().regex(/^bc1-[a-f0-9]{64}$/),

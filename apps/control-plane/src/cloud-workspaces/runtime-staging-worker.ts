@@ -38,7 +38,10 @@ export class CloudRuntimeStagingWorker {
   }) {
     this.workerId = options.workerId ?? `runtime-stage:${randomUUID()}`;
     this.concurrency = Math.max(1, Math.min(4, Math.floor(options.concurrency ?? 2)));
-    this.scheduler = new CloudWorkerScheduler(options.intervalMs ?? 15_000, () => this.tick(), () => this.warn());
+    this.scheduler = new CloudWorkerScheduler(options.intervalMs ?? 60_000, () => this.tick(), () => this.warn(), async () => {
+      const retries = [...this.retries.values()].map(retry => retry.after - Date.now()).filter(delay => delay > 0);
+      return retries.length ? Math.min(...retries) : null;
+    }, { jitter: options.intervalMs === undefined });
   }
 
   start(): () => Promise<void> { this.scheduler.start(); return () => this.stop(); }
@@ -81,7 +84,9 @@ export class CloudRuntimeStagingWorker {
     const abort = new AbortController();
     const promise = this.stage(scope, abort).catch(() => this.warn()).finally(() => {
       this.flights.delete(scope.transitionId);
-      if (this.rescan && !this.stopped) { this.rescan = false; this.scheduler.notify(); }
+      if (!this.stopped && (this.rescan || (this.retries.get(scope.transitionId)?.after ?? 0) > Date.now())) {
+        this.rescan = false; this.scheduler.notify();
+      }
     });
     this.flights.set(scope.transitionId, { promise, abort });
   }

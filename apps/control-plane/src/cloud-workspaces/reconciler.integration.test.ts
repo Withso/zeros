@@ -14,6 +14,7 @@ import {
 } from "./provider.js";
 import { runtimeWitness } from "./runtime-test-fixtures.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
+import { readLifecycleDeadlines } from "./lifecycle-deadlines.js";
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
 import { CloudWorkspaceCheckpointRequestWorker, enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
@@ -390,6 +391,12 @@ d("cloud workspace reconciliation", () => {
     });
     const writer=()=>pool.query("SELECT state,sealed_sequence FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1",[boot.writerEpoch]);
     expect((await writer()).rows[0]).toEqual({state:"active",sealed_sequence:null});
+    const stop = provider.stop.bind(provider);
+    provider.stop = async resourceId => {
+      expect((await pool.query("SELECT subject FROM audit_log WHERE action='cloud_workspace.stop_unsealed' AND subject->>'workspaceId'=$1", [fixture.workspaceId])).rows)
+        .toEqual([{ subject: expect.objectContaining({ outcome: "stop_unsealed", generation: 1, writerEpoch: boot.writerEpoch }) }]);
+      return stop(resourceId);
+    };
     await new CloudWorkspaceReconciler({pool,provider,intervalMs:1000}).runOnce();
     expect(provider.stopCount).toBe(1);
     expect((await writer()).rows[0]).toEqual({state:failure?"active":"retired",sealed_sequence:null});
@@ -795,23 +802,22 @@ d("cloud workspace reconciliation", () => {
     });
 
   describe("durable retry deadlines", () => {
-    const nextDelay = (value: CloudWorkspaceReconciler) =>
-      (value as unknown as { readNextDelayMs(): Promise<number | null> }).readNextDelayMs();
+    const nextDelay = async () => (await readLifecycleDeadlines(pool, "boat", 1_000)).lifecycle ?? null;
 
     it.each(["queued", "observing"])("reads future %s work before the periodic interval", async intentState => {
       const seeded = await seedWorkspace({ intentState });
       await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+interval '2 seconds' WHERE id=$1", [seeded.intentId]);
-      const delay = await nextDelay(reconciler(new FakeProvider()));
+      const delay = await nextDelay();
       expect(delay).toBeGreaterThan(0); expect(delay).toBeLessThanOrEqual(2_000);
       await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [seeded.intentId]);
-      expect(await nextDelay(reconciler(new FakeProvider()))).toBeNull();
+      expect(await nextDelay()).toBeNull();
     });
 
     it("waits for a live dispatch lease even when its retry date is already due", async () => {
       const seeded = await seedWorkspace({ intentState: "dispatching" });
       await pool.query(`UPDATE cloud_workspace_lifecycle_intents SET lease_owner='other-worker',
         lease_expires_at=now()+interval '3 seconds',next_attempt_at=now() WHERE id=$1`, [seeded.intentId]);
-      const delay = await nextDelay(reconciler(new FakeProvider()));
+      const delay = await nextDelay();
       expect(delay).toBeGreaterThan(2_000); expect(delay).toBeLessThanOrEqual(3_000);
     });
 
@@ -820,7 +826,104 @@ d("cloud workspace reconciliation", () => {
       await withSystemTx(pool, tx => enqueueWorkspaceCheckpointRequest(tx, { workspaceId: seeded.workspaceId,
         organizationId: orgId, generation: 1, requestedBy: ownerId, lifecycleIntentId: seeded.intentId,
         reason: "before_stop", idempotencyKey: `deadline.${seeded.intentId}` }));
-      expect(await nextDelay(reconciler(new FakeProvider()))).toBeNull();
+      expect(await nextDelay()).toBeNull();
+    });
+  });
+
+  describe("healthy lifecycle observation", () => {
+    const schedule = async (intentId: string) => (await pool.query(
+      `SELECT state, attempt_count, dispatched_at, next_attempt_at,
+              lease_owner, lease_expires_at, error_code,
+              round(extract(epoch FROM (next_attempt_at - updated_at)) * 1000)::integer AS delay_ms
+       FROM cloud_workspace_lifecycle_intents WHERE id = $1`,
+      [intentId],
+    )).rows[0];
+
+    const stopping = async () => {
+      const resourceId = "observed-resource";
+      const seeded = await seedWorkspace({ operation: "stop", desiredState: "stopped",
+        status: "stopping", providerResourceId: resourceId, observedState: "stopping" });
+      const provider = new FakeProvider();
+      provider.resources.set(resourceId, provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, "stopping", resourceId));
+      return { ...seeded, provider, resourceId };
+    };
+
+    it("persists a short capped cadence across replicas without bypassing due dates", async () => {
+      const { intentId, provider, resourceId } = await stopping();
+      provider.resources.set(resourceId, { ...provider.resources.get(resourceId)!, state: "running" });
+      const stop = vi.spyOn(provider, "stop").mockImplementation(async id => {
+        const next = { ...provider.resources.get(id)!, state: "stopping" as const };
+        provider.resources.set(id, next);
+        return next;
+      });
+      let dispatchedAt: Date | undefined;
+      for (const [index, delayMs] of [500, 1_000, 2_000, 2_000].entries()) {
+        expect(await reconciler(provider).runOnce()).toBe(true);
+        const row = await schedule(intentId);
+        dispatchedAt ??= row.dispatched_at;
+        expect(row).toMatchObject({ state: "observing", attempt_count: index + 1,
+          delay_ms: delayMs, dispatched_at: dispatchedAt, lease_owner: null, lease_expires_at: null, error_code: null });
+        await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1", [intentId]);
+        expect(await reconciler(provider).runOnce()).toBe(false);
+        await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE id=$1", [intentId]);
+      }
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      { ageSeconds: 45, attempts: 16, delayMs: 32_000 },
+      { ageSeconds: 45, attempts: 1, delayMs: 2_000 },
+      { ageSeconds: 3_600, attempts: 16, delayMs: 256_000 },
+    ])("returns a $ageSeconds-second-old transition to exponential observation after $attempts attempts", async ({ ageSeconds, attempts, delayMs }) => {
+      const { intentId, provider } = await stopping();
+      await pool.query(`UPDATE cloud_workspace_lifecycle_intents
+        SET state='dispatching',attempt_count=$3,dispatched_at=now()-($2::integer * interval '1 second'),
+            lease_owner='previous-replica',lease_expires_at=now()-interval '1 second' WHERE id=$1`, [intentId, ageSeconds, attempts]);
+      const before = await schedule(intentId);
+      expect(await reconciler(provider).runOnce()).toBe(true);
+      expect(await schedule(intentId)).toMatchObject({ state: "observing", attempt_count: attempts + 1,
+        delay_ms: delayMs, dispatched_at: before.dispatched_at, lease_owner: null, lease_expires_at: null });
+    });
+
+    it.each([
+      { retryAfterMs: undefined, delayMs: 8_000 },
+      { retryAfterMs: 60_000, delayMs: 60_000 },
+    ])("keeps failure backoff and Retry-After during the fast window ($delayMs ms)", async ({ retryAfterMs, delayMs }) => {
+      const { intentId, provider } = await stopping();
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET attempt_count=3,dispatched_at=now() WHERE id=$1", [intentId]);
+      vi.spyOn(provider, "inspect").mockRejectedValueOnce(new CloudProviderError(
+        "provider_temporarily_unavailable", "temporarily unavailable", true,
+        retryAfterMs === undefined ? {} : { retryAfterMs },
+      ));
+      expect(await reconciler(provider).runOnce()).toBe(true);
+      expect(await schedule(intentId)).toMatchObject({ state: "observing", attempt_count: 4,
+        delay_ms: delayMs, error_code: "provider_temporarily_unavailable" });
+      expect(await reconciler(provider).runOnce()).toBe(false);
+    });
+
+    it("does not let a stale replica replace the current observation deadline", async () => {
+      const { intentId, provider, resourceId } = await stopping();
+      const entered = new Deferred(), release = new Deferred();
+      vi.spyOn(provider, "inspect").mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        return provider.resources.get(resourceId)!;
+      });
+      const first = reconciler(provider).runOnce();
+      try {
+        await entered.promise;
+        expect(await reconciler(provider).runOnce()).toBe(false);
+        await pool.query("UPDATE cloud_workspace_lifecycle_intents SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [intentId]);
+        expect(await reconciler(provider).runOnce()).toBe(true);
+        const current = await schedule(intentId);
+        expect(current).toMatchObject({ state: "observing", attempt_count: 2, delay_ms: 1_000 });
+        release.resolve();
+        await first;
+        expect(await schedule(intentId)).toEqual(current);
+      } finally {
+        release.resolve();
+        await first;
+      }
     });
   });
 
@@ -864,7 +967,9 @@ d("cloud workspace reconciliation", () => {
       } finally { await writer.query("ROLLBACK"); writer.release(); }
       await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+interval '1 hour' WHERE id=$1", [seeded.intentId]);
       await barrier();
-      expect(notices).toEqual([]);
+      expect(notices.splice(0)).toEqual(["zeros_cloud_lifecycle_work"]);
+      expect((await readLifecycleDeadlines(pool, "boat", 1_000)).lifecycle).toBeGreaterThan(3_500_000);
+      expect(await reconciler(new FakeProvider()).runOnce()).toBe(false);
       await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE id=$1", [seeded.intentId]);
       await barrier();
       expect(notices.splice(0)).toEqual(["zeros_cloud_lifecycle_work"]);
@@ -873,14 +978,14 @@ d("cloud workspace reconciliation", () => {
       expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
       await pool.query("UPDATE cloud_workspaces SET status='setting_up' WHERE id=$1", [seeded.workspaceId]);
       await barrier();
-      expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
+      expect(notices.splice(0).sort()).toEqual(["zeros_cloud_lifecycle_work", "zeros_cloud_setup_work"]);
       await pool.query(`INSERT INTO cloud_workspace_setup_runs (workspace_id,generation,org_id,attempt)
         VALUES ($1,1,$2,1)`, [seeded.workspaceId, orgId]);
       await barrier();
       expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
       await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now()+interval '1 hour' WHERE workspace_id=$1", [seeded.workspaceId]);
       await barrier();
-      expect(notices).toEqual([]);
+      expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
     } finally {
       listener.removeListener("notification", onNotice);
       listener.release(true);

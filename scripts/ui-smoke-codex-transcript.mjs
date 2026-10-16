@@ -7,6 +7,45 @@ import { runToolPresentationSmoke } from "./ui-smoke-tool-presentation.mjs";
 import { runAgentNoticesSmoke } from "./ui-smoke-agent-notices.mjs";
 import { expect } from "@playwright/test";
 
+export async function runBackgroundClockSmoke({ page, check }) {
+  const elapsed = page.locator("#background-transcript .tabular-nums").last();
+  await expect(elapsed).toContainText(/\d+m/);
+  // Keep real React scheduling. Advance only wall time inside one browser task,
+  // so no polling tick can accidentally make the reveal assertion pass.
+  const labels = await elapsed.evaluate(async (element) => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    const originalNow = Date.now;
+    const before = element.textContent;
+    const setVisibility = (value) => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value });
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+    try {
+      setVisibility("hidden");
+      Date.now = () => originalNow() + 60_000;
+      await Promise.resolve();
+      const hidden = element.textContent;
+      setVisibility("visible");
+      await Promise.resolve();
+      await Promise.resolve();
+      return { before, hidden, revealed: element.textContent };
+    } finally {
+      Date.now = originalNow;
+      if (descriptor) Object.defineProperty(document, "visibilityState", descriptor);
+      else delete document.visibilityState;
+      document.dispatchEvent(new Event("visibilitychange"));
+    }
+  });
+  const seconds = (label) => {
+    const match = /^(\d+)m (\d+)s$/.exec(label ?? "");
+    expect(match).not.toBeNull();
+    return Number(match[1]) * 60 + Number(match[2]);
+  };
+  expect(labels.hidden).toBe(labels.before);
+  expect(seconds(labels.revealed) - seconds(labels.before)).toBeGreaterThanOrEqual(60);
+  check("Background elapsed time catches up on reveal before a polling tick", true);
+}
+
 export async function runCodexTranscriptSmoke({ page, check }) {
   await page.goto(
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-codex-transcript.html`,
@@ -170,6 +209,7 @@ export async function runCodexTranscriptSmoke({ page, check }) {
   check("Claude waiting activity is below the settled output footer", !!footerBox && !!waitingBox && waitingBox.y >= footerBox.y + footerBox.height);
   const elapsed = () => backgroundTranscript.locator(".tabular-nums").last();
   await expect(elapsed()).toContainText(/\d+m/);
+  await runBackgroundClockSmoke({ page, check });
   await background
     .getByRole("button", { name: "Run two children", exact: true })
     .click();

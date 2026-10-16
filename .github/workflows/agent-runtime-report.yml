@@ -1,0 +1,34 @@
+name: Agent runtime PR report
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: read
+concurrency:
+  group: agent-runtime-state
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'Withso/zeros' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name == 'Withso/zeros' && (vars.ZEROS_AGENT_RUNTIME_MODE == 'notify' || vars.ZEROS_AGENT_RUNTIME_MODE == 'enabled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # workflow_run uses trusted main. Never check out the triggering PR here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Validate run and artifact provenance before reporting
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZEROS_AGENT_RUNTIME_MODE: ${{ vars.ZEROS_AGENT_RUNTIME_MODE }}
+          ZEROS_AGENT_RUNTIME_TRACKING_ISSUE: ${{ vars.ZEROS_AGENT_RUNTIME_TRACKING_ISSUE }}
+          ZEROS_AGENT_RUNTIME_APP_SLUG: ${{ vars.ZEROS_AGENT_RUNTIME_APP_SLUG }}
+        run: node scripts/agent-runtime/cli.mjs report

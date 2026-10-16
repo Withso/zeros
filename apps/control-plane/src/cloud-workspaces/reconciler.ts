@@ -6,7 +6,7 @@ import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { CLOUD_WORKSPACE_V2_REQUIRED, requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 import { withSystemTx } from "../db.js";
-import { deferCloudRecoveryResourceBlock } from "./automatic-recovery.js";
+import { deferCloudRecoveryResourceBlock, enqueueCloudMissingSnapshotRecovery } from "./automatic-recovery.js";
 import { requireGenerationRuntime } from "./generation-pins.js";
 import { CloudRuntimeError } from "./runtime-selection.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
@@ -22,6 +22,9 @@ import {
 import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
+import { readLifecycleDeadlines, type LifecycleWork } from "./lifecycle-deadlines.js";
+import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
+import { runCloudDiagnosticCleanup } from "./cloud-diagnostic-store.js";
 import {
   advanceCloudWorkspaceGenerationTransitionAfterDrain,
   failCloudWorkspaceGenerationRollback,
@@ -58,6 +61,7 @@ type ClaimedIntent = {
   affectsWorkspace: boolean;
   generationWasCurrent: boolean;
   generationTransitionId: string | null;
+  authorityEpoch: string;
 };
 
 type DriftCandidate = {
@@ -79,7 +83,7 @@ export type CloudWorkspaceReconcilerOptions = {
   provider: CloudWorkspaceProvider;
   providerResolver?: CloudWorkspaceProviderResolver;
   computePolicy?: ManagedComputePolicy;
-  intervalMs: number;
+  intervalMs?: number;
   leaseMs?: number;
   orphanGraceMs?: number;
   maxManagedResourcesPerSweep?: number;
@@ -226,6 +230,17 @@ function retryDelayMs(attempt: number, providerDelayMs?: number): number {
   return Math.max(exponential, requested);
 }
 
+function observationDelayMs(attempt: number, elapsedMs: number): number {
+  if (elapsedMs < 30_000) {
+    return Math.min(2_000, 500 * 2 ** Math.min(Math.max(attempt - 1, 0), 2));
+  }
+  // Resume the original exponential schedule by dispatch age. Extra healthy
+  // polls must not turn a thirty-second transition into a four-minute wait;
+  // slow provider replies must also retain their shorter existing delay.
+  const elapsedAttempt = 1 + Math.floor(Math.log2(1 + elapsedMs / 1_000));
+  return retryDelayMs(Math.min(attempt, elapsedAttempt));
+}
+
 function safeFailure(error: unknown): {
   code: string;
   message: string;
@@ -269,7 +284,8 @@ export class CloudWorkspaceReconciler {
   private readonly scheduler: CloudWorkerScheduler;
   private stopped = false;
   private ticking = false;
-  private tickCount = 0;
+  private due = new Set<LifecycleWork>();
+  private orphanSweepAt = Date.now() + 60_000;
 
   constructor(options: CloudWorkspaceReconcilerOptions) {
     this.pool = options.pool;
@@ -280,7 +296,7 @@ export class CloudWorkspaceReconciler {
     this.computeLeases = new CloudWorkspaceComputeLeaseCoordinator({pool:options.pool,provider:options.provider,
       ...(options.providerResolver?{providerResolver:options.providerResolver}:{}),workosEnabled:options.workosEnabled===true,
       ...(options.computePolicy?{policy:options.computePolicy}:{}),logger:options.logger??console});
-    this.intervalMs = options.intervalMs;
+    this.intervalMs = options.intervalMs ?? 60_000;
     this.leaseMs = options.leaseMs ?? 10 * 60_000;
     this.orphanGraceMs = options.orphanGraceMs ?? 60 * 60_000;
     this.maxManagedResourcesPerSweep =
@@ -317,9 +333,9 @@ export class CloudWorkspaceReconciler {
       throw new Error("Cloud workspace reconciler worker identity is invalid");
     }
     this.logger = options.logger ?? console;
-    this.scheduler = new CloudWorkerScheduler(this.intervalMs, periodic => this.tick(periodic), () => {
+    this.scheduler = new CloudWorkerScheduler(this.intervalMs, () => this.tick(), () => {
       this.logger.error("[cloud-workspace] reconcile tick failed; will retry");
-    }, () => this.readNextDelayMs());
+    }, () => this.readNextDelayMs(), { readBeforeRun: true, jitter: options.intervalMs === undefined });
   }
 
   start(): () => Promise<void> {
@@ -334,13 +350,13 @@ export class CloudWorkspaceReconciler {
     await this.scheduler.stop();
   }
 
-  private async tick(periodic = true): Promise<void> {
+  private async tick(): Promise<void> {
     if (this.ticking || this.stopped) return;
     this.ticking = true;
     try {
       let authorityProcessed = 0;
       while (
-        periodic && !this.stopped &&
+        this.due.has("paidAuthority") && !this.stopped &&
         authorityProcessed < 20 &&
         (await this.paidAuthority.runOnce()) !== null
       ) {
@@ -348,18 +364,23 @@ export class CloudWorkspaceReconciler {
       }
       let processed = 0;
       let unavailableEngines = 0;
-      while (periodic && !this.stopped && unavailableEngines < 20 && await stopUnavailableCloudEngine(this.pool, this.providerResolver ? null : this.provider.name)) {
+      while (this.due.has("engineHealth") && !this.stopped && unavailableEngines < 20 && await stopUnavailableCloudEngine(this.pool, this.providerResolver ? null : this.provider.name)) {
         unavailableEngines += 1;
       }
       let computeProcessed = 0;
-      while (periodic && !this.stopped && computeProcessed < 20 && await this.computeLeases.runOnce()) computeProcessed += 1;
-      while (!this.stopped && processed < 20 && (await this.runOnce())) {
+      while (this.due.has("compute") && !this.stopped && computeProcessed < 20 && await this.computeLeases.runOnce()) computeProcessed += 1;
+      if (this.due.has("diagnostics") && !this.due.has("compute") && !this.stopped) await runCloudDiagnosticCleanup(this.pool);
+      // Maintenance can enqueue a stop after the preflight read. Drain that
+      // work in this pass, preserving immediate convergence at the deadline.
+      const lifecycleDue = this.due.has("lifecycle") || authorityProcessed > 0 ||
+        unavailableEngines > 0 || computeProcessed > 0;
+      while (lifecycleDue && !this.stopped && processed < 20 && (await this.runOnce())) {
         processed += 1;
       }
-      if (periodic && !this.stopped && processed === 0) await this.reconcileDriftOnce();
-      if (periodic) this.tickCount += 1;
-      if (periodic && !this.stopped && this.tickCount % 12 === 0) {
-        await this.reconcileOrphansOnce();
+      if (this.due.has("drift") && !this.stopped && processed === 0) await this.reconcileDriftOnce();
+      if (!this.stopped && Date.now() >= this.orphanSweepAt) {
+        try { await this.reconcileOrphansOnce(); }
+        finally { this.orphanSweepAt = Date.now() + 60_000; }
       }
     } finally {
       this.ticking = false;
@@ -367,39 +388,9 @@ export class CloudWorkspaceReconciler {
   }
 
   private async readNextDelayMs(): Promise<number | null> {
-    return withSystemTx(this.pool, async tx => {
-      const started = Date.now();
-      const result = await tx.query<{ delay_ms: string | null }>(
-        `SELECT extract(epoch FROM (min(greatest(
-           i.next_attempt_at,
-           CASE WHEN i.state = 'dispatching' THEN i.lease_expires_at ELSE i.next_attempt_at END,
-           (SELECT max(active.lease_expires_at) FROM cloud_workspace_lifecycle_intents active
-            WHERE active.workspace_id = i.workspace_id AND active.id <> i.id
-              AND active.state = 'dispatching')
-         )) - now())) * 1000 AS delay_ms
-         FROM cloud_workspace_lifecycle_intents i
-         JOIN cloud_workspaces cw ON cw.id = i.workspace_id
-         JOIN cloud_workspace_generations g
-           ON g.workspace_id = i.workspace_id AND g.generation = i.generation AND g.org_id = i.org_id
-         JOIN cloud_workspace_provider_bindings pb
-           ON pb.workspace_id = g.workspace_id AND pb.generation = g.generation
-         LEFT JOIN workspace_checkpoint_requests checkpoint_request ON checkpoint_request.lifecycle_intent_id = i.id
-         WHERE i.state IN ('queued', 'observing', 'dispatching')
-           AND (i.state <> 'dispatching' OR i.lease_expires_at IS NOT NULL)
-           AND (i.resume_after_intent_id IS NULL OR EXISTS (
-             SELECT 1 FROM cloud_workspace_lifecycle_intents prerequisite
-             WHERE prerequisite.id = i.resume_after_intent_id AND prerequisite.state = 'succeeded'
-           ))
-           AND (checkpoint_request.id IS NULL OR checkpoint_request.state = 'succeeded')
-           AND (i.operation <> 'create' OR NOT EXISTS (
-             SELECT 1 FROM workspace_fork_intents fork
-             WHERE fork.target_cloud_workspace_id = i.workspace_id AND fork.org_id = i.org_id
-               AND fork.operation = 'local_to_cloud' AND fork.state <> 'succeeded'
-           ))`,
-      );
-      const delay = result.rows[0]?.delay_ms;
-      return delay == null ? null : Number(delay) - (Date.now() - started);
-    }, { consistentRead: true });
+    const deadlines = await readLifecycleDeadlines(this.pool, this.providerResolver ? null : this.provider.name, this.intervalMs);
+    this.due = new Set((Object.entries(deadlines) as [LifecycleWork, number][]).filter(([, delay]) => delay <= 0).map(([kind]) => kind));
+    return Math.min(this.orphanSweepAt - Date.now(), ...Object.values(deadlines));
   }
 
   private async claimIntent(): Promise<ClaimedIntent | null> {
@@ -424,9 +415,10 @@ export class CloudWorkspaceReconciler {
         generation_transition_id: string | null;
         checkpoint_request_id: string | null;
         checkpoint_request_state: string | null;
+        authority_epoch: string;
       }>(
         `SELECT i.id, i.workspace_id, i.org_id, i.operation,
-                cw.desired_state, cw.current_generation, i.generation,
+                cw.desired_state, cw.current_generation, cw.authority_epoch, i.generation,
                 i.affects_workspace, i.generation_transition_id, g.provider,
                 g.image_ref, g.architecture, g.cpu_millicores,
                 g.memory_mib, g.storage_mib, pb.provider_resource_id,
@@ -460,6 +452,7 @@ export class CloudWorkspaceReconciler {
            AND (
              checkpoint_request.id IS NULL
              OR checkpoint_request.state = 'succeeded'
+             OR (checkpoint_request.state = 'cancelled' AND checkpoint_request.error_code = 'stop_unsealed')
            )
            AND (
              i.operation <> 'create'
@@ -478,11 +471,17 @@ export class CloudWorkspaceReconciler {
       const row = result.rows[0];
       if (!row) return null;
 
+      if ((row.operation === "stop" || row.operation === "archive" || row.operation === "delete") &&
+          !await prepareCloudWorkspaceStopSeal(tx, {
+            workspaceId: row.workspace_id, organizationId: row.org_id, generation: row.generation,
+            intentId: row.id, operation: row.operation,
+          })) return null;
+
       let desiredState = row.desired_state;
       if (
         row.affects_workspace &&
         row.checkpoint_request_id !== null &&
-        row.checkpoint_request_state === "succeeded" &&
+        ["succeeded", "cancelled"].includes(row.checkpoint_request_state ?? "") &&
         row.current_generation === row.generation &&
         row.desired_state === "running" &&
         ["stop", "archive", "delete"].includes(row.operation)
@@ -543,6 +542,7 @@ export class CloudWorkspaceReconciler {
         affectsWorkspace: row.affects_workspace,
         generationWasCurrent: row.generation === row.current_generation,
         generationTransitionId: row.generation_transition_id,
+        authorityEpoch: row.authority_epoch,
       };
     });
   }
@@ -612,6 +612,10 @@ export class CloudWorkspaceReconciler {
         return true;
       }
 
+      if (intent.operation === "wake" && intent.affectsWorkspace && !intent.generationTransitionId &&
+          provider.name === "boat" && current?.state === "failed" && current.computeStopped === true &&
+          current.metadata.snapshotMissing === true)
+        throw new CloudProviderError("provider_snapshot_missing", "The stopped snapshot is no longer available", false);
       if (mayUpgradeOnWake && current && ["stopped", "archived"].includes(current.state) &&
           await upgradeCloudRuntimeOnWake(this.pool, this.runtimeUpgradeConfig!, {
             workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
@@ -786,8 +790,10 @@ export class CloudWorkspaceReconciler {
         state: string;
         affects_workspace: boolean;
         lease_owner: string | null;
+        dispatched_age_ms: string;
       }>(
-        `SELECT state, affects_workspace, lease_owner
+        `SELECT state, affects_workspace, lease_owner,
+                extract(epoch FROM (now() - dispatched_at)) * 1000 AS dispatched_age_ms
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
         [intent.id],
@@ -943,7 +949,7 @@ export class CloudWorkspaceReconciler {
                next_attempt_at = now() + ($2::bigint * interval '1 millisecond'),
                error_code = NULL, error_message = NULL, updated_at = now()
            WHERE id = $1`,
-          [intent.id, retryDelayMs(intent.attemptCount)],
+          [intent.id, observationDelayMs(intent.attemptCount, Number(row.dispatched_age_ms))],
         );
       } else {
         await tx.query(
@@ -985,8 +991,9 @@ export class CloudWorkspaceReconciler {
       const current = await tx.query<{
         desired_state: DesiredState;
         current_generation: number;
+        authority_epoch: string;
       }>(
-        `SELECT desired_state, current_generation
+        `SELECT desired_state, current_generation, authority_epoch
          FROM cloud_workspaces WHERE id = $1 FOR UPDATE`,
         [intent.workspaceId],
       );
@@ -996,22 +1003,29 @@ export class CloudWorkspaceReconciler {
         state: string;
         affects_workspace: boolean;
         lease_owner: string | null;
+        lease_current: boolean;
       }>(
-        `SELECT state, affects_workspace, lease_owner
+        `SELECT state, affects_workspace, lease_owner, lease_expires_at>clock_timestamp() AS lease_current
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
         [intent.id],
       );
       const row = owned.rows[0];
       if (!row || row.lease_owner !== this.workerId) return;
+      if (failure.code === "provider_snapshot_missing" && (!row.lease_current || row.state !== "dispatching")) return;
 
+      const newerCaptureAuthority = failure.code === "provider_snapshot_missing" &&
+        workspace?.current_generation === intent.generation && workspace.authority_epoch !== intent.authorityEpoch;
       const superseded =
         !workspace ||
         (row.affects_workspace &&
           (workspace.current_generation !== intent.generation ||
-            workspace.desired_state !== desiredForOperation(intent.operation)));
+            workspace.desired_state !== desiredForOperation(intent.operation) ||
+            newerCaptureAuthority));
       if (superseded) {
-        await retireCloudWorkspaceRuntimeAccess(tx, {
+        // A later wake can admit new setup/access in the same generation.
+        // This old provider observation cannot retire the newer authority.
+        if (!newerCaptureAuthority) await retireCloudWorkspaceRuntimeAccess(tx, {
           workspaceId: intent.workspaceId,
           organizationId: intent.orgId,
           generation: intent.generation,
@@ -1133,6 +1147,12 @@ export class CloudWorkspaceReconciler {
           generation: intent.generation,
           reason: "provider_operation_failed",
         });
+        if (failure.code === "provider_snapshot_missing" && intent.provider === "boat" && intent.operation === "wake" &&
+            row.affects_workspace && row.lease_current && row.state === "dispatching" && this.runtimeUpgradeConfig &&
+            !intent.generationTransitionId && intent.providerResourceId)
+          await enqueueCloudMissingSnapshotRecovery(tx, { workspaceId: intent.workspaceId, organizationId: intent.orgId,
+            generation: intent.generation, wakeIntentId: intent.id, providerResourceId: intent.providerResourceId,
+            authorityEpoch: intent.authorityEpoch });
       }
       await audit(
         tx,

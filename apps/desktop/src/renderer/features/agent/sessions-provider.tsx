@@ -65,7 +65,10 @@ import type {
   AgentSteeredMessage,
 } from "../../platform/bridge/messages";
 import { useBridge } from "../../platform/bridge/use-bridge";
+import { getActiveBridge } from "../../platform/bridge/active-bridge";
+import { refreshAgentModelCatalog } from "./refresh-agent-model-catalog";
 import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
+import { NativeTranscriptSnapshots } from "./transcript-retention";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudReplyOwnership } from "../../platform/bridge/cloud-runtime-wire";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
@@ -73,12 +76,12 @@ import { cloudHistoryRestoreHead, onCloudHistoryRestoreHead, type CloudHistoryRe
 import { cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, type CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
 import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, cloudWorkspaceStopVersion, canBackgroundSyncCloudWorkspace, canReadCloudWorkspace, isCloudWorkspaceLifecyclePending, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
-import { CloudWorkspaceWakeEndedError } from "../../state/cloud-workspace-wake";
+import { CloudWorkspaceWakeEndedError, type CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake";
 import { CloudSendPreparation } from "./cloud-send-preparation";
 import { CloudSendWait, CloudSendWaitError, type CloudSendWaitBudget } from "./cloud-send-wait";
 import { ControlPlaneError } from "../team/control-plane";
 import { chatChangeTargets } from "../../state/chat-change-targets";
-import { BackgroundTaskSnapshots, loadedBackgroundTaskState } from "./background-task-state";
+import { BackgroundTaskSnapshots, hasBackgroundAgentWork, loadedBackgroundTaskState } from "./background-task-state";
 import { cloudSessionMetadata } from "./cloud-session-metadata";
 import {
   deriveProviderEnv,
@@ -102,6 +105,7 @@ import {
   appendMessages as persistAppendMessages,
   clearChat as persistClearChat,
   windowMessages as persistWindowMessages,
+  windowMessagesSnapshot as persistMessageWindow,
   persistAuthenticationPrompt,
 } from "./agent-history-client";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
@@ -559,6 +563,7 @@ export function AgentSessionsProvider({
   const persistedMessageRefsRef = useRef(
     new Map<string, Map<string, AgentMessage>>(),
   );
+  const nativeTranscriptSnapshotsRef = useRef(new NativeTranscriptSnapshots());
   // Exact chat ids owned by the committed 12-view renderer deck. This is
   // intentionally published by a passive effect in ChatDeck, never by
   // an abandoned concurrent render.
@@ -568,9 +573,12 @@ export function AgentSessionsProvider({
     if (!before) return;
     const replacement = origin === "native" && fence.head?.source.kind === "mutation" &&
       ["delete", "prune", "repair"].includes(fence.head.source.operation);
-    store.applyCloudHistoryRestoreHead(chatId, fence, !replacement && cloudHasNativeTranscript(bridge, chatId, before.executionId));
+    store.applyCloudHistoryRestoreHead(chatId, fence, !replacement && cloudHasNativeTranscript(bridge, chatId, before.executionId), origin !== "disk");
     const after = getStore().sessions[chatId];
-    if (after?.messages !== before.messages) persistedMessageRefsRef.current.delete(chatId);
+    if (after?.messages !== before.messages) {
+      persistedMessageRefsRef.current.delete(chatId);
+      nativeTranscriptSnapshotsRef.current.delete(chatId);
+    }
     if (after?.transcriptState === "loading") pendingHydratesRef.current.add(chatId);
     else if (fence.head?.deleted) pendingHydratesRef.current.delete(chatId);
   }, [bridge, getStore]);
@@ -785,17 +793,19 @@ export function AgentSessionsProvider({
       startTransition(() => {
         const s = useSessionsStore.getState();
         for (const n of updates) {
-          const terminalTurn =
-            n.update.sessionUpdate === "turn_state"
-              ? n.update.state !== "running"
-              : false;
+          const before = useSessionsStore.getState();
+          const terminalTurn = n.update.sessionUpdate === "turn_state" && n.update.state !== "running" ? n.update : null;
           const chatId =
             (n as { chatId?: string }).chatId ??
-            s.executionToChatId[n.sessionId];
+            before.executionToChatId[n.sessionId];
           const exactSession =
-            !!chatId && s.sessions[chatId]?.sessionId === n.sessionId;
+            !!chatId && (before.sessions[chatId]?.executionId ?? before.sessions[chatId]?.sessionId) === (n.executionId ?? n.sessionId);
           s.applyBridgeUpdate(n);
-          if (terminalTurn && exactSession && chatId) {
+          const after = useSessionsStore.getState();
+          // The reducer may reject an older turn on this same route. Its
+          // completion cannot clear the current review or release its queue.
+          if (terminalTurn && exactSession && chatId && before.sessions[chatId] !== after.sessions[chatId] &&
+              after.sessions[chatId]?.foregroundTurnId === terminalTurn.turnId) {
             s.clearStrandedPlanReview(chatId);
             // Release, not just drain: for a turn this renderer did not issue
             // there is no sendPrompt finally to resolve a queue parked behind
@@ -805,18 +815,13 @@ export function AgentSessionsProvider({
             // Adopted turns (renderer reloaded mid-prompt) have no sendPrompt
             // finally. Emit finish from the engine's durable turn_state push;
             // idempotent with the local-send path when both observe the same id.
-            const turnUpdate = n.update as {
-              sessionUpdate: "turn_state";
-              state: "running" | "completed" | "failed" | "cancelled";
-              startedAt: number;
-              stopReason?: string | null;
-            };
+            const turnUpdate = terminalTurn;
             // Prefer sendPrompt's finally when this renderer still owns the
             // in-flight RPC — it has usage/effectiveModel/retry metadata.
             // Adopted turns have no local send lock, so finish from turn_state.
             const promptId = peekAgentPromptId(chatId);
             if (promptId && !sendingChatsRef.current.has(chatId)) {
-              const slot = s.sessions[chatId];
+              const slot = after.sessions[chatId];
               trackAgentPromptFinished({
                 promptId,
                 chatId,
@@ -979,6 +984,21 @@ export function AgentSessionsProvider({
         ((state.sessions[chatId]?.executionId ?? state.sessions[chatId]?.sessionId) !== sourceExecution || ensureInFlightRef.current.has(chatId))
       ) {
         prebindBackgroundTasksRef.current.remember(chatId, sourceExecution, msg.notification.update);
+      }
+      if (msg.notification.update.sessionUpdate === "background_tasks_update" ||
+          msg.notification.update.sessionUpdate === "workflow_progress_update") {
+        // Queue ownership is control state. Publish before the foreground RPC
+        // can settle and drain; animation-frame buffering would race that drain.
+        state.applyBridgeUpdate({ ...msg.notification, ...(chatId ? { chatId } : {}) } as SessionNotification);
+        if (chatId) promptActivityRef.current.get(chatId)?.();
+        if (chatId) queueMicrotask(() => {
+          const slot = useSessionsStore.getState().sessions[chatId];
+          if ((slot?.executionId ?? slot?.sessionId) === sourceExecution &&
+              slot?.status === "ready" && !hasBackgroundAgentWork(slot)) {
+            releaseQueueRef.current(chatId);
+          }
+        });
+        return;
       }
       if (
         chatId &&
@@ -1347,6 +1367,8 @@ export function AgentSessionsProvider({
       waitStartedAt?: number;
       waitBudget?: CloudSendWaitBudget;
       waitStopVersion?: number;
+      /** One user attempt, retained through readiness retries, never admission. */
+      wakeIntent?: CloudWorkspaceWakeIntent;
       retryAdmission?: boolean;
       /** Toast identity survives explicit renewal of a refused delivery ID. */
       queueEntryId?: string;
@@ -1378,7 +1400,7 @@ export function AgentSessionsProvider({
     folder: string | null | undefined) => {
     if (!entry.cloud || account !== cloudCatalogGeneration() || getStore().sessions[chatId]?.cwd !== folder ||
         !sendQueueRef.current.get(chatId)?.includes(entry)) return;
-    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; }
+    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; }
     resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
   }, [getStore, resumeQueue]);
   const markQueuedDelivery = useCallback(
@@ -1389,12 +1411,21 @@ export function AgentSessionsProvider({
     ) => {
       const slot = getStore().sessions[chatId];
       if (!slot) return;
+      const message = slot.messages.find((m): m is AgentTextMessage => m.id === messageId && m.kind === "text" && !!m.queued);
+      if (!message) return;
+      // A lost receipt retries its original turn and visible position, even
+      // after another execution starts. Only a new attempt owns the live tail.
+      const receipt = sendQueueRef.current.get(chatId)?.find(entry => entry.bubbleId === messageId)?.steerRequest;
+      const turnId = queuedDelivery === "sending" && !receipt && slot.status === "streaming"
+        ? activeProviderTurnId(slot.messages, messageId) : undefined;
+      const pending = { ...message, queuedDelivery, ...(turnId ? { steeredTurnId: turnId } : {}) };
       getStore().patchSession(chatId, {
-        messages: slot.messages.map((m) =>
-          m.id === messageId && m.kind === "text" && m.queued
-            ? { ...m, queuedDelivery }
-            : m,
-        ),
+        // Show Send now at the current tail before awaiting consumption. Its
+        // provider-turn owner keeps the working timer continuous. Later ACKs
+        // replace this row in place instead of moving it past streamed output.
+        messages: turnId && message.steeredTurnId !== turnId
+          ? promoteToEnd(slot.messages, messageId, pending, slot.historyExpanded)
+          : slot.messages.map(m => m === message ? pending : m),
       });
     },
     [getStore],
@@ -1426,7 +1457,7 @@ export function AgentSessionsProvider({
     if (cloudComputerV2) return registerAttachmentSourceOwner(() =>
       [...sendQueueRef.current.values()].flatMap(entries => entries.flatMap(entry => entry.cloudQueue?.draft.attachments ?? [])));
   }, [cloudComputerV2]);
-  const prepareForSend = useCallback<SessionsActions["prepareForSend"]>((chatId) => {
+  const prepareForSend = useCallback<SessionsActions["prepareForSend"]>((chatId, wakeIntent) => {
     if (!cloudComputerV2) return null;
     const current = () => {
       // Never fall back to the active folder: a hidden chat can own an
@@ -1448,7 +1479,7 @@ export function AgentSessionsProvider({
     if (!(bridge instanceof WorkspaceRuntimeClient)) return Promise.reject(new Error("Cloud workspace connection is unavailable"));
     const target = parseCloudWorkspaceKey(owner.folder)!;
     return cloudSendPreparationRef.current.prepare(chatId, owner,
-      signal => bridge.openWorkspace(target, { signal }), current, subscribeCloudWorkspaces);
+      signal => bridge.openWorkspace(target, { signal, wakeIntent }), current, subscribeCloudWorkspaces);
   }, [bridge, cloudComputerV2, getStore]);
 
   /** Dispose only the exact route returned by a create/load that completed
@@ -1505,6 +1536,7 @@ export function AgentSessionsProvider({
         invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
         invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
         persistedMessageRefsRef.current.delete(chatId);
+        nativeTranscriptSnapshotsRef.current.delete(chatId);
         store.detachSession(chatId);
         continue;
       }
@@ -1529,6 +1561,7 @@ export function AgentSessionsProvider({
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
       persistedMessageRefsRef.current.delete(chatId);
+      nativeTranscriptSnapshotsRef.current.delete(chatId);
 
       if (
         slot.transcriptState === "cold" &&
@@ -1622,6 +1655,7 @@ export function AgentSessionsProvider({
         waitStartedAt?: number;
         retryAdmission?: boolean;
       },
+      allowBackgroundWork = false,
     ): Promise<boolean> => {
       if (!sendQueueRef.current.claim(chatId, entry.bubbleId)) return false;
       const generation = cancelGeneration(cancelGenerationsRef.current, chatId);
@@ -1634,7 +1668,8 @@ export function AgentSessionsProvider({
         }
         // Cloud readiness and file refresh finish before claiming the row, so
         // it stays editable/removable throughout the expected wait.
-        const status = getStore().sessions[chatId]?.status;
+        const slot = getStore().sessions[chatId];
+        const status = slot?.status;
         if (
           !ownsEntry() ||
           cancelledSince(cancelGenerationsRef.current, chatId, generation) ||
@@ -1643,7 +1678,8 @@ export function AgentSessionsProvider({
           sendingChatsRef.current.has(chatId) ||
           !status ||
           status === "warming" ||
-          status === "streaming"
+          status === "streaming" ||
+          !allowBackgroundWork && hasBackgroundAgentWork(slot)
         )
           return false;
         const remaining = sendQueueRef.current
@@ -1687,6 +1723,7 @@ export function AgentSessionsProvider({
       if (queueHeldRef.current.has(chatId)) return;
       if (!sendQueueRef.current.canDrain(chatId)) return;
       if (sendingChatsRef.current.has(chatId)) return;
+      if (hasBackgroundAgentWork(getStore().sessions[chatId])) return;
       const q = sendQueueRef.current.get(chatId);
       if (!q || q.length === 0) return;
       if (q[0]?.cloud && !q[0].prepared) {
@@ -1719,6 +1756,7 @@ export function AgentSessionsProvider({
       const queued = sendQueueRef.current.get(chatId);
       if (!queued || queued.length === 0 || !sendQueueRef.current.canDrain(chatId)) return;
       const settled = getStore().sessions[chatId];
+      if (settled?.status === "ready" && hasBackgroundAgentWork(settled)) return;
       // An admitted cloud send waits in the editable FIFO. Readiness failures
       // belong to its bounded editable wait, never the Local drop path.
       if (queued.some(entry => entry.cloud)) {
@@ -1728,6 +1766,7 @@ export function AgentSessionsProvider({
       const action = queueReleaseAction({
         status: settled?.status ?? "idle",
         queueHeld: queueHeldRef.current.has(chatId),
+        hasBackgroundWork: hasBackgroundAgentWork(settled),
       });
       if (action === "hold") return;
       if (action === "drain") {
@@ -2035,6 +2074,7 @@ export function AgentSessionsProvider({
           cwd: resolvedCwd,
           status: "warming",
           transcriptState: existing?.transcriptState ?? BLANK.transcriptState,
+          transcriptPresentation: existing?.transcriptPresentation ?? null,
           transcriptDirty: existing?.transcriptDirty ?? false,
           hasTranscript: existing?.hasTranscript ?? false,
           messages: existing?.messages ?? [],
@@ -2329,6 +2369,28 @@ export function AgentSessionsProvider({
     ensureSessionRef.current = ensureSession;
   }, [ensureSession]);
 
+  const refreshModelCatalog = useCallback((chatId: string) => {
+    const slot = getStore().sessions[chatId];
+    if (!bridge || !slot?.agentId) return;
+    const agentId = slot.agentId;
+    void refreshAgentModelCatalog({
+      current: () => {
+        const current = getStore().sessions[chatId];
+        if (getActiveBridge() !== bridge || !current || current.agentId !== agentId) return null;
+        return { bridge, key: JSON.stringify([chatId, current.cwd, current.agentId,
+          current.executionId, current.sessionId, current.appliedChatEnvKey, cloudCatalogGeneration()]),
+          initialize: current.initialize };
+      },
+      request: async () => {
+        const response = await bridge.request<AgentAgentInitializedMessage | AgentErrorMessage>({
+          type: "AGENT_INIT_AGENT", agentId, ...(isCloudWorkspace(slot.cwd) ? { chatId } : {}),
+        }, 10_000);
+        return response.type === "AGENT_AGENT_INITIALIZED" ? response.initialize : null;
+      },
+      publish: initialize => getStore().patchSession(chatId, { initialize }),
+    });
+  }, [bridge, getStore]);
+
   const sendPrompt = useCallback<SessionsActions["sendPrompt"]>(
     async (
       chatId,
@@ -2340,8 +2402,19 @@ export function AgentSessionsProvider({
       autoAction,
       onAccepted,
       cloudQueue,
+      wakeIntent,
+      followUpBehavior = "queue",
     ) => {
       const original = getStore().sessions[chatId];
+      const steerSubmission = (messageId: string) => {
+        const generation = cancelGeneration(cancelGenerationsRef.current, chatId);
+        void steerQueuedRef.current?.(chatId, messageId).then(delivered => {
+          if (delivered === false && !cancelledSince(cancelGenerationsRef.current, chatId, generation) &&
+              sendQueueRef.current.get(chatId)?.some(entry => entry.bubbleId === messageId)) {
+            toast.error("Couldn't send now", { description: "The message stays queued. Choose Send now to retry delivery." });
+          }
+        });
+      };
       const chat = useWorkspaceStore.getState().chats.find(candidate => candidate.id === chatId);
       const cloudTarget = parseCloudWorkspaceKey(chat?.folder ?? original?.cwd);
       if (cloudTarget && !hasCloudWorkspaceAccountAccess(cloudTarget.organizationId))
@@ -2364,17 +2437,21 @@ export function AgentSessionsProvider({
           ...(segments?.length ? { segments } : {}), ...(autoAction ? { autoAction } : {}),
         };
         const q = sendQueueRef.current.get(chatId) ?? [];
-        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) { entry.waitStartedAt = undefined; entry.waitBudget = undefined; entry.waitStopVersion = undefined; }
-        q.push({ cloud: true, bubbleId, queueEntryId: bubbleId, cloudQueue, args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction] });
+        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) { entry.waitStartedAt = undefined; entry.waitBudget = undefined; entry.waitStopVersion = undefined; entry.wakeIntent = undefined; }
+        q.push({ cloud: true, bubbleId, queueEntryId: bubbleId, cloudQueue, wakeIntent, args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction] });
         sendQueueRef.current.set(chatId, q);
         getStore().patchSession(chatId, { messages: capUserAppend(slot.messages, queuedMsg, slot.historyExpanded) });
         resumeQueue(chatId);
         onAccepted?.();
-        if (slot.status !== "streaming" && !sendingChatsRef.current.has(chatId)) beginCloudSendWaitRef.current?.(chatId);
+        if (followUpBehavior === "steer" && (slot.status === "streaming" || hasBackgroundAgentWork(slot))) {
+          steerSubmission(bubbleId);
+        } else if (slot.status !== "streaming" && !hasBackgroundAgentWork(slot) && !sendingChatsRef.current.has(chatId)) {
+          beginCloudSendWaitRef.current?.(chatId);
+        }
         return;
       }
       if (!bridge) return;
-      const preparation = cloudSend && flushBubbleRef.current.has(chatId) ? null : prepareForSend(chatId);
+      const preparation = cloudSend && flushBubbleRef.current.has(chatId) ? null : prepareForSend(chatId, wakeIntent);
       if (preparation) await preparation;
       // Atomic lock — fix #8. Two synchronous Enter presses both
       // observed `status !== "streaming"` before either could flip
@@ -2475,6 +2552,7 @@ export function AgentSessionsProvider({
       if (
         shouldQueuePrompt({
           status: entryStatus,
+          hasBackgroundWork: hasBackgroundAgentWork(getStore().sessions[chatId]),
           ...queueFacts,
         })
       ) {
@@ -2542,7 +2620,9 @@ export function AgentSessionsProvider({
         // The queue may be parked in an IDLE chat (nothing in flight to
         // trigger the turn-completion drain) — kick it so this send isn't
         // stranded. No-op while held/in-flight/non-ready.
-        drainNextQueued(chatId);
+        if (followUpBehavior === "steer" && (slot?.status === "streaming" || hasBackgroundAgentWork(slot))) {
+          steerSubmission(bubbleId);
+        } else drainNextQueued(chatId);
         return;
       }
       // The send needs an admission before it can dispatch: either no session
@@ -2687,6 +2767,19 @@ export function AgentSessionsProvider({
         getStore().sessions[chatId]?.agentId === cloudSendOwner.agentId &&
         getStore().sessions[chatId]?.sessionId === cloudSendOwner.sessionId
       );
+      let promptOwner: { cwd: string | null; agentId: string | null } | null = null;
+      let requestExecutionId: string | null = null;
+      const ownsPromptConversation = () => {
+        const slot = getStore().sessions[chatId];
+        return ownsCloudSend() && (!promptOwner || !!slot && slot.cwd === promptOwner.cwd && slot.agentId === promptOwner.agentId);
+      };
+      const ownsPromptIdentity = () => {
+        const slot = getStore().sessions[chatId];
+        return ownsPromptConversation() && (!sentUserMessageId || !!slot &&
+          (!slot.foregroundTurnId || slot.foregroundTurnId === sentUserMessageId));
+      };
+      const ownsPromptTurn = () => ownsPromptIdentity() && (!requestExecutionId ||
+        (getStore().sessions[chatId]?.executionId ?? getStore().sessions[chatId]?.sessionId) === requestExecutionId);
       let promptInterruptedAfterOutput:
         | (Pick<AgentFailure, "kind" | "stage"> &
             Partial<Pick<AgentFailure, "message">>)
@@ -2850,6 +2943,7 @@ export function AgentSessionsProvider({
           flushedCloud.retryAdmission = false; flushedCloud.bubbleId = userMessage.id;
         }
         sentUserMessageId = userMessage.id;
+        promptOwner = { cwd: current.cwd, agentId: current.agentId };
         authPromptsRef.current.remember(
           chatId,
           current.agentId!,
@@ -2928,6 +3022,7 @@ export function AgentSessionsProvider({
           error: null,
           failure: null,
           lastStopReason: null,
+          foregroundTurnId: userMessage.id,
           activeTurnStartedAt: userMessage.createdAt,
           // On a queued-send flush, PROMOTE the placeholder. A follow-up's
           // array slot is mid-previous-turn and must move to the end; an active
@@ -2960,7 +3055,7 @@ export function AgentSessionsProvider({
         const submittedModel = isCloudWorkspace(current.cwd) ? useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.model ?? null : null;
         if (isCloudWorkspace(current.cwd)) cloudSendOwner = { cwd: current.cwd, agentId: current.agentId, sessionId: current.sessionId };
         const settleCloudAdmission = (error: unknown) => {
-          if (isCloudWorkspace(current.cwd) && (!ownsCloudSend() || stoppedByUser())) return true;
+          if (isCloudWorkspace(current.cwd) && (!ownsPromptTurn() || stoppedByUser())) return true;
           const admission = flushedCloud && classifyCloudAdmissionFailure({ folder: current.cwd, error,
             agentId: current.agentId, model: submittedModel });
           // These closed causes prove provider execution did not begin. Keep
@@ -3007,7 +3102,7 @@ export function AgentSessionsProvider({
         };
         const settleCloudPromptFailure = (failure: AgentFailure) => {
           if (!isCloudWorkspace(current.cwd)) return false;
-          if (!ownsCloudSend()) return true;
+          if (!ownsPromptTurn()) return true;
           // Once a cloud command is accepted, observation loss is never
           // permission to rebuild its provider and dispatch that prompt again.
           cloudTerminalFailure = failure;
@@ -3084,6 +3179,7 @@ export function AgentSessionsProvider({
           promptToSend: ContentBlock[],
         ): Promise<AgentPromptCompleteMessage | AgentPromptFailedMessage> =>
           new Promise((resolve, reject) => {
+            requestExecutionId = sessionId;
             const pendingIds = new Set(pendingAuth.map((message) => message.id));
             const replay = getStore().sessions[chatId]?.needsConversationReplay
               ? synthesizeReplayPrompt(current.messages.filter((message) =>
@@ -3117,7 +3213,7 @@ export function AgentSessionsProvider({
             ) => {
               if (settled) return;
               if (value.type === "AGENT_PROMPT_COMPLETE" &&
-                  getStore().sessions[chatId]?.sessionId === sessionId) {
+                  ownsPromptTurn() && getStore().sessions[chatId]?.sessionId === sessionId) {
                 getStore().patchSession(chatId, { needsConversationReplay: false });
               }
               cleanup();
@@ -3153,6 +3249,9 @@ export function AgentSessionsProvider({
             const selectionRevision = getStore().sessions[chatId]?.modelSelectionRevision ?? 0;
             getStore().patchSession(chatId, { modelSelectionRevisionAtRequest: selectionRevision });
             const send = () => {
+              // Mode application can await while another client starts work.
+              // The original send must not dispatch over that successor.
+              if (!ownsPromptTurn() || stoppedByUser()) return Promise.reject(new DOMException("Prompt turn superseded", "AbortError"));
               const request = {
                 type: "AGENT_PROMPT" as const,
                 agentId: current.agentId!,
@@ -3176,7 +3275,7 @@ export function AgentSessionsProvider({
                 : requestLocalPrompt(bridge, request, {
                     chatId,
                     signal: controller.signal,
-                    isCurrent: () => !stoppedByUser() &&
+                    isCurrent: () => ownsPromptTurn() && !stoppedByUser() &&
                       getStore().sessions[chatId]?.sessionId === sessionId,
                     onRecovery: () => {
                       recoveredLocalExecution = sessionId;
@@ -3253,6 +3352,7 @@ export function AgentSessionsProvider({
               bridge,
               current.cwd ?? null,
             );
+            if (!ownsPromptIdentity()) return "superseded";
             const loaded = await bridge.request<
               AgentSessionLoadedMessage | AgentErrorMessage
             >(
@@ -3268,6 +3368,7 @@ export function AgentSessionsProvider({
               },
               60_000,
             );
+            if (!ownsPromptIdentity()) return "superseded";
             if (loaded.type !== "AGENT_SESSION_LOADED") {
               const failure = failureFromAgentError(loaded, "loadSession");
               return bindFailureWasSuperseded(failure) ? "superseded" : null;
@@ -3287,6 +3388,7 @@ export function AgentSessionsProvider({
             // no longer receive prompts, cancellation, or lifecycle events.
             getStore().patchSession(chatId, {
               ...recovered,
+              foregroundTurnId: userMessage.id,
               ...loadedBackgroundTaskState(prebindBackgroundTasksRef.current.take(chatId, recovered.executionId) ?? loaded.response.backgroundTasks),
               needsConversationReplay: loaded.response.resumedFresh === true,
               ...(prebindGoal !== undefined ? { goal: prebindGoal } : {}),
@@ -3318,6 +3420,7 @@ export function AgentSessionsProvider({
         }): Promise<
           AgentPromptCompleteMessage | AgentPromptFailedMessage | null
         > => {
+          if (!ownsPromptIdentity()) return null;
           // A recovery is a RE-SEND of the user's prompt. After a Stop there is
           // nothing to recover: retrying would restart the very turn the user
           // just ended (the "I stopped it and it kept going" report).
@@ -3345,6 +3448,7 @@ export function AgentSessionsProvider({
                 failure: null,
               });
               const resumed = await tryResumeSameSession();
+              if (!ownsPromptIdentity()) return null;
               if (stoppedByUser()) {
                 settleStoppedSend();
                 return null;
@@ -3357,6 +3461,7 @@ export function AgentSessionsProvider({
                 if (replacementFlight) {
                   await replacementFlight.catch(() => {});
                 }
+                if (!ownsPromptIdentity()) return null;
                 if (stoppedByUser()) {
                   settleStoppedSend();
                   return null;
@@ -3444,6 +3549,7 @@ export function AgentSessionsProvider({
           } catch {
             /* surfaces via store below */
           }
+          if (!ownsPromptIdentity()) return null;
           if (stoppedByUser()) {
             settleStoppedSend();
             return null;
@@ -3483,6 +3589,7 @@ export function AgentSessionsProvider({
             error: null,
             failure: null,
             lastStopReason: null,
+            foregroundTurnId: userMessage.id,
             messages: messagesAfterRebuild,
             needsConversationReplay: rebuilt.needsConversationReplay || !!(opts?.replayHistory && hasPriorContext),
           });
@@ -3557,6 +3664,7 @@ export function AgentSessionsProvider({
               prompt,
             );
           } catch (firstErr) {
+            if (!ownsPromptTurn()) return;
             // A Stop is the most common reason this rejects: killing the
             // provider tears the stream down, which classifies as the
             // RECOVERABLE transport-closed — and this path then rebuilt the
@@ -3629,6 +3737,7 @@ export function AgentSessionsProvider({
             if (!resp) return;
           }
 
+          if (!ownsPromptTurn()) return;
           if (resp.type === "AGENT_PROMPT_FAILED") {
             // If the user just clicked Cancel, this PROMPT_FAILED is the
             // expected exit of the SIGTERM'd subprocess — not a real
@@ -3671,7 +3780,7 @@ export function AgentSessionsProvider({
               const retried = await rebuildAndRetry({
                 replayHistory: promptFailureShouldResumeProvider(failure),
               });
-              if (!retried) return;
+              if (!retried || !ownsPromptTurn()) return;
               if (retried.type === "AGENT_PROMPT_FAILED") {
                 if (settleCloudAdmission(retried.error)) return;
                 // The retry itself failed — surface the second failure
@@ -3706,7 +3815,7 @@ export function AgentSessionsProvider({
             // the engine's persisted tail before publishing final completion;
             // native empty/tool-only turns are valid and require no text test.
             const windowed = reconcileHistoryMessages(await persistWindowMessages(chatId, HYDRATE_WINDOW));
-            if (!ownsCloudSend() || stoppedByUser()) return;
+            if (!ownsPromptTurn() || stoppedByUser()) return;
             const fresh = getStore().sessions[chatId];
             if (windowed.length) getStore().patchSession(chatId, { messages: mergeWindowedTail(fresh.messages, windowed) });
           }
@@ -3771,48 +3880,6 @@ export function AgentSessionsProvider({
             activeTurnStartedAt: null,
             usage: nextUsage,
           });
-          // Live model-list refresh. Some agents (Claude) only learn their real
-          // model list AFTER the first prompt — query.supportedModels() needs a
-          // live query — so the initialize captured at newSession is the
-          // cold-start floor (`_meta.modelsDynamic` set, no `_meta.models`). Once
-          // discovery lands, the agent-level initialize re-poll carries the live
-          // list; re-fetch it here and patch THIS already-open chat so its picker
-          // stops showing the floor. Fire-and-forget + self-limiting: the guard is
-          // false once models are present (or for static / already-populated
-          // agents like Codex, whose session initialize has models at
-          // newSession), so it stops firing after at most a turn or two.
-          void (async () => {
-            const refreshAgentId = current.agentId;
-            if (!refreshAgentId || !bridge) return;
-            const stale = getStore().sessions[chatId]?.initialize?._meta;
-            const stillFloored =
-              !!stale?.modelsDynamic &&
-              !(Array.isArray(stale.models) && stale.models.length > 0);
-            if (!stillFloored) return;
-            try {
-              const initResp = await bridge.request<
-                AgentAgentInitializedMessage | AgentErrorMessage
-              >({ type: "AGENT_INIT_AGENT", agentId: refreshAgentId, ...(isCloudWorkspace(current.cwd) ? { chatId } : {}) }, 30_000);
-              if (initResp.type === "AGENT_ERROR") return;
-              const freshMeta = initResp.initialize?._meta;
-              if (
-                !Array.isArray(freshMeta?.models) ||
-                freshMeta.models.length === 0
-              ) {
-                return; // discovery not done yet — a later turn retries
-              }
-              // Re-check the chat is still floored before patching (don't clobber
-              // a concurrent update / a live model the user just picked).
-              const cur = getStore().sessions[chatId]?.initialize?._meta;
-              if (!(Array.isArray(cur?.models) && cur.models.length > 0)) {
-                getStore().patchSession(chatId, {
-                  initialize: initResp.initialize,
-                });
-              }
-            } catch {
-              /* best-effort — the picker keeps the cold-start floor */
-            }
-          })();
           // Analytics: a prompt turn completed. Metadata only — model NAME,
           // token counts, cost (best-effort per agent). No content.
           // Read usage with the CANONICAL TurnUsage field names the engine
@@ -3882,6 +3949,7 @@ export function AgentSessionsProvider({
             costKind: tu?.costKind,
           });
         } catch (err) {
+          if (!ownsPromptTurn()) return;
           // Same cancel-suppression as the AGENT_PROMPT_FAILED branch
           // above: the await chain may reject (timeout, transport-closed)
           // because the subprocess died from our SIGTERM, not from a
@@ -3906,7 +3974,10 @@ export function AgentSessionsProvider({
       } finally {
         cancelLatency?.();
         const terminalSlot = getStore().sessions[chatId];
-        const ownsTerminalSlot = ownsCloudSend();
+        let ownsTerminalSlot = ownsPromptTurn();
+        // Includes model refusals. Refresh only metadata; queued sends and the
+        // saved model stay under their existing admission and user-intent gates.
+        if (ownsTerminalSlot && !stoppedByUser()) refreshModelCatalog(chatId);
         const terminalPrompt =
           terminalSlot && lastUserPrompt(terminalSlot.messages);
         if (
@@ -3951,17 +4022,18 @@ export function AgentSessionsProvider({
           }
         }
         const lifecycleCancelled = stoppedByUser();
-        // This turn is no longer in flight, however it ended (sent, aborted by a
-        // stop, bailed before dispatch). Unconditional and first: leaving it set
-        // would strand the tail shimmer on a settled turn — the inverse of the
-        // bug this fact exists to fix.
-        if (ownsTerminalSlot) getStore().setPendingLocalTurn(chatId, null);
+        // Release only this send's presentation owner. A newer native turn can
+        // already be running (or settled) while this RPC is still retiring.
+        const pendingOwner = sentUserMessageId ?? flushBubbleId;
+        if (pendingOwner && getStore().pendingLocalTurns[chatId] === pendingOwner)
+          getStore().setPendingLocalTurn(chatId, null);
         if (promptDiagnostics) {
           const terminal = getStore().sessions[chatId];
           const stopReason =
             promptResult?.stopReason ?? (ownsTerminalSlot ? terminal?.lastStopReason : undefined) ?? undefined;
           const cancelled = stopReason === "cancelled" || (!!cloudSendOwner && lifecycleCancelled);
           const healthy =
+            ownsTerminalSlot &&
             !promptInterruptedAfterOutput &&
             (!cloudSendOwner || promptResult !== null) &&
             terminal?.status === "ready" &&
@@ -3992,28 +4064,36 @@ export function AgentSessionsProvider({
               (healthy ? null : cloudTerminalFailure ?? (ownsTerminalSlot ? terminal?.failure : null)),
           });
         }
-        if (!ownsTerminalSlot) sendingChatsRef.current.delete(chatId);
-        if (ownsTerminalSlot) {
-          if (getStore().sessions[chatId]?.status === "ready")
-            authPromptsRef.current.delete(chatId);
-          if (recoveredLocalExecution && bridge &&
+        if (ownsTerminalSlot && getStore().sessions[chatId]?.status === "ready")
+          authPromptsRef.current.delete(chatId);
+        if (ownsTerminalSlot && recoveredLocalExecution && bridge &&
             getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
             getStore().sessions[chatId]?.status !== "streaming") {
-            // Fill any stream gap from the engine's saved transcript before a
-            // queued successor can make history reads ineligible again, including
-            // another disconnect between terminal delivery and this finalizer.
-            const ownsRecovery = () => !stoppedByUser() &&
-              getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
-              getStore().sessions[chatId]?.status !== "streaming";
-            const applied = await backfillLocalPromptTranscript(bridge, {
-              isCurrent: ownsRecovery,
-              reconcile: async () => {
-                await reconcileChatMessagesRef.current(chatId);
-                return getStore().sessions[chatId]?.transcriptDirty === false;
-              },
-            });
-            if (!applied && ownsRecovery()) pauseQueue(chatId);
-          }
+          // Fill a recovered stream gap before releasing the RPC lock, and
+          // recheck ownership if a native successor arrives during the read.
+          const ownsRecovery = () => ownsPromptTurn() && !stoppedByUser() &&
+            getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
+            getStore().sessions[chatId]?.status !== "streaming";
+          const applied = await backfillLocalPromptTranscript(bridge, {
+            isCurrent: ownsRecovery,
+            reconcile: async () => {
+              await reconcileChatMessagesRef.current(chatId);
+              return getStore().sessions[chatId]?.transcriptDirty === false;
+            },
+          });
+          if (!applied && ownsRecovery()) pauseQueue(chatId);
+          ownsTerminalSlot = ownsPromptTurn();
+        }
+        if (!ownsTerminalSlot) {
+          sendingChatsRef.current.delete(chatId);
+          // B may have finished while A still held the RPC lock. Its terminal
+          // event could not drain C then; retry only the normal healthy drain,
+          // never A's plan/failure/drop cleanup on B's state.
+          const settled = getStore().sessions[chatId];
+          if (ownsPromptConversation() && (settled?.executionId ?? settled?.sessionId) === requestExecutionId &&
+              settled?.status === "ready") drainNextQueued(chatId);
+        }
+        if (ownsTerminalSlot) {
           sendingChatsRef.current.delete(chatId);
           // Drop a STRANDED plan-review card. A plan gate BLOCKS its turn, so in
           // the happy path Approve / a typed follow-up cleared pendingPermission
@@ -4092,6 +4172,7 @@ export function AgentSessionsProvider({
       prepareForSend,
       cloudComputerV2,
       retryCloudQueuedPrompt,
+      refreshModelCatalog,
     ],
   );
   sendPromptRef.current = sendPrompt;
@@ -4101,6 +4182,15 @@ export function AgentSessionsProvider({
     const slot = getStore().sessions[chatId], target = parseCloudWorkspaceKey(slot?.cwd);
     const first = sendQueueRef.current.get(chatId)?.[0];
     if (!slot || !target || !first?.cloud) return;
+    const opening = slot.messages.find((m): m is AgentTextMessage => m.id === first.bubbleId && m.kind === "text" && !!m.queued);
+    if (opening && opening.queuedPresentation !== "active-turn" && slot.status !== "streaming" &&
+        !hasBackgroundAgentWork(slot) && !sendingChatsRef.current.has(chatId)) {
+      getStore().patchSession(chatId, {
+        messages: slot.messages.map(m => m === opening ? { ...opening, queuedPresentation: "active-turn" } : m),
+        activeTurnStartedAt: opening.createdAt,
+      });
+      getStore().setPendingLocalTurn(chatId, opening.id);
+    }
     const startedAt = first.waitStartedAt ??= performance.now();
     const stopVersion = first.waitStopVersion ??= cloudWorkspaceStopVersion(target);
     const folder = slot.cwd, account = cloudCatalogGeneration();
@@ -4121,9 +4211,17 @@ export function AgentSessionsProvider({
       if (doc && !doc.capabilities.canWrite) throw new CloudSendWaitError("You do not have permission to run agents in this workspace.", "workspace_unavailable");
       // Replacement and rollback progress belong to this undispatched row.
       generation = doc?.generation.number ?? generation;
-      return doc?.status === "ready" || doc?.status === "busy";
+      const ready = doc?.status === "ready" || doc?.status === "busy";
+      const fresh = getStore().sessions[chatId];
+      // An admitted follow-up still crosses the same admission/checkpoint
+      // guards, but it is not a first-session readiness wait.
+      const waiting = !ready || !fresh?.sessionId;
+      if (waiting && fresh?.cloudSendWait?.state !== "waiting")
+        getStore().patchSession(chatId, { cloudSendWait: { state: "waiting" } });
+      else if (!waiting && fresh?.cloudSendWait)
+        getStore().patchSession(chatId, { cloudSendWait: undefined });
+      return ready;
     };
-    if (slot.cloudSendWait?.state !== "waiting") getStore().patchSession(chatId, { cloudSendWait: { state: "waiting" } });
     cloudSendWaitRef.current.start(chatId, {
       current,
       readiness,
@@ -4132,7 +4230,9 @@ export function AgentSessionsProvider({
       safetyTimeoutMs: 15 * 60_000 - (performance.now() - startedAt),
       attempt: async signal => {
         readiness();
-        await prepareForSend(chatId);
+        const preparing = sendQueueRef.current.get(chatId)?.[0];
+        if (!preparing?.cloud) return false;
+        await prepareForSend(chatId, preparing.wakeIntent ??= { id: crypto.randomUUID() });
         if (signal.aborted || !current()) return false;
         if (getStore().sessions[chatId]?.transcriptState !== "resident") await hydrateCloudSendRef.current?.(chatId);
         if (signal.aborted || !current()) return false;
@@ -4169,9 +4269,11 @@ export function AgentSessionsProvider({
             message.id === head.bubbleId && message.kind === "text" ? { ...message, attachments: payload.bubbleAttachments, segments: payload.segments } : message) });
         }
         if (hasPromptAttachmentReferences({ bubbleAttachments: head.args[4] }) && !(await refreshQueuedAttachments(chatId, head))) return false;
-        // Admission/session/file work may outlive the first wake. Serialize the
-        // final boundary while the row is still removable, then claim it once.
-        await prepareForSend(chatId);
+        // Admission/session/file work may outlive the first preparation. Check
+        // the live peer/root again without creating another lifecycle intent.
+        // A different queue head owns a new wake; the native checkpoint fence
+        // still guards command submission even after this preparation returns.
+        await prepareForSend(chatId, head.wakeIntent ??= { id: crypto.randomUUID() });
         return !signal.aborted && current() && sendQueueRef.current.get(chatId)?.[0] === head;
       },
       terminal: error => {
@@ -4193,6 +4295,13 @@ export function AgentSessionsProvider({
         const model = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.model ?? null;
         const admission = classifyCloudAdmissionFailure({ folder, error, agentId, model });
         const head = sendQueueRef.current.get(chatId)?.[0];
+        if (head && getStore().pendingLocalTurns[chatId] === head.bubbleId) {
+          getStore().setPendingLocalTurn(chatId, null);
+          const failed = getStore().sessions[chatId];
+          if (failed) getStore().patchSession(chatId, { activeTurnStartedAt: null,
+            messages: failed.messages.map(m => m.kind === "text" && m.id === head.bubbleId
+              ? { ...m, queuedPresentation: undefined } : m) });
+        }
         if (admission && admission.kind !== "waiting" && agentId && head) {
           if (admission.kind === "runtime-upgrade-required") reportCloudAgentRuntimeUpgrade(folder!, agentId);
           else invalidateCloudAgentRegistry(folder!);
@@ -4203,7 +4312,7 @@ export function AgentSessionsProvider({
           cloudAdmissionFailure: { ...admission, code: String(cloudAdmissionFailureCode(error)), turnId: head.bubbleId, agentId, model },
         } : {}) });
         if (head) notifyAgentSendFailure({ folder, chatId, attemptId: head.queueEntryId ??= head.bubbleId, agentId, model, error,
-          reason: error instanceof CloudWorkspaceWakeEndedError ? "workspace_stopped" : error instanceof CloudSendWaitError ? error.reason : undefined,
+          reason: error instanceof CloudWorkspaceWakeEndedError || error instanceof CloudSendWaitError ? error.reason : undefined,
           onRetry: () => retryCloudQueuedPrompt(chatId, head, account, folder) });
       },
     });
@@ -4221,8 +4330,11 @@ export function AgentSessionsProvider({
       // bridge is needed to make the in-flight send read it.
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
       cloudSendPreparationRef.current.cancel(chatId);
+      // Ready follow-ups prepare silently, without cloudSendWait presentation.
+      // Their readiness flight is still cancelled by Stop.
+      cloudSendWaitRef.current.cancel(chatId);
       if (getStore().sessions[chatId]?.cloudSendWait) {
-        cloudSendWaitRef.current.cancel(chatId); getStore().patchSession(chatId, { cloudSendWait: undefined });
+        getStore().patchSession(chatId, { cloudSendWait: undefined });
       }
       getStore().setPendingLocalTurn(chatId, null);
       // Stop pauses follow-ups, including messages whose steering receipt is
@@ -4997,10 +5109,10 @@ export function AgentSessionsProvider({
       const q = sendQueueRef.current.get(chatId);
       const entry = q?.find((e) => e.bubbleId === messageId);
       if (!entry) return false;
-      const slot = getStore().sessions[chatId];
+      let slot = getStore().sessions[chatId];
       if (entry.cloud && slot?.cloudSendWait) {
         if (slot.cloudSendWait.state === "failed") {
-          for (const queued of q ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; }
+          for (const queued of q ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; }
           resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
         }
         return true;
@@ -5008,6 +5120,53 @@ export function AgentSessionsProvider({
       if (!slot?.agentId) return false;
 
       if (sendQueueRef.current.isSending(chatId, messageId)) return true;
+      if (entry.cloud && !entry.prepared && !entry.steerRequest) {
+        // A cloud draft normally encodes at FIFO dispatch. Send now must run
+        // that same preparation for this exact row before native steering.
+        const generation = cancelGeneration(cancelGenerationsRef.current, chatId);
+        const executionId = slot.executionId ?? slot.sessionId;
+        const cwd = slot.cwd;
+        const agentId = slot.agentId;
+        const account = cloudCatalogGeneration();
+        const ownsPreparation = () => {
+          const current = getStore().sessions[chatId];
+          return sendQueueRef.current.get(chatId)?.includes(entry) === true &&
+            !cancelledSince(cancelGenerationsRef.current, chatId, generation) &&
+            cloudCatalogGeneration() === account && current?.agentId === agentId &&
+            current?.cwd === cwd && (current?.executionId ?? current?.sessionId) === executionId;
+        };
+        sendQueueRef.current.claim(chatId, messageId);
+        markQueuedDelivery(chatId, messageId, "sending");
+        try {
+          await prepareForSend(chatId, entry.wakeIntent ??= { id: crypto.randomUUID() });
+          if (!ownsPreparation()) return false;
+          if (entry.cloudQueue) {
+            const args = entry.args;
+            const payload = await entry.cloudQueue.prepare(slot.initialize?.agentCapabilities?.promptCapabilities?.image !== false);
+            if (!ownsPreparation() || entry.args !== args) return false;
+            entry.args = [chatId, payload.text, payload.displayText, payload.attachments, payload.bubbleAttachments, payload.segments, args[6]];
+          }
+          if (hasPromptAttachmentReferences({ bubbleAttachments: entry.args[4] }) &&
+              !(await refreshQueuedAttachments(chatId, entry))) return false;
+          // Files may have outlived the initial admission. Reuse its wake
+          // identity while rechecking the account, owner and live connection.
+          await prepareForSend(chatId, entry.wakeIntent);
+          if (!ownsPreparation()) return false;
+          entry.prepared = true;
+          slot = getStore().sessions[chatId]!;
+          getStore().patchSession(chatId, { messages: slot.messages.map(message =>
+            message.kind === "text" && message.id === messageId
+              ? { ...message, attachments: entry.args[4], segments: entry.args[5] }
+              : message) });
+        } catch {
+          if (ownsPreparation()) pauseQueue(chatId);
+          return false;
+        } finally {
+          sendQueueRef.current.release(chatId, messageId);
+          if (sendQueueRef.current.get(chatId)?.includes(entry)) markQueuedDelivery(chatId, messageId, undefined);
+        }
+      }
+      if (!slot.agentId) return false;
       const sendNowAction = queuedSendNowAction({
         status: slot.status,
         hasLocalSend: sendingChatsRef.current.has(chatId),
@@ -5028,7 +5187,7 @@ export function AgentSessionsProvider({
           sendQueueRef.current.canDrain(chatId) &&
           slot.status !== "warming"
         ) {
-          return flushQueuedPrompt(chatId, entry);
+          return flushQueuedPrompt(chatId, entry, true);
         } else drainNextQueued(chatId);
         return true;
       }
@@ -5192,27 +5351,20 @@ export function AgentSessionsProvider({
         .get(chatId)
         ?.filter((e) => e !== entry);
       if (remaining) sendQueueRef.current.set(chatId, remaining);
-      // Delivered into the running turn. Promote the placeholder to a live
-      // user bubble at the transcript END. It remains a distinct visual
-      // segment, but shares the running provider turn's footer/reset owner.
+      // The optimistic bubble is already visible. Confirm it in place so an
+      // ACK cannot move it past output received during native consumption.
       const fresh = getStore().sessions[chatId];
       const ph = fresh?.messages.find((m) => m.id === messageId);
       if (fresh && ph && ph.kind === "text") {
         getStore().patchSession(chatId, {
-          messages: promoteToEnd(
-            fresh.messages,
-            messageId,
-            {
+          messages: fresh.messages.map(message => message === ph ? {
               ...ph,
               queued: false,
               queuedDelivery: undefined,
               queuedPresentation: undefined,
               queuedEditable: undefined,
-              createdAt: Date.now(),
               ...(steeredTurnId ? { steeredTurnId } : {}),
-            },
-            fresh.historyExpanded,
-          ),
+            } : message),
         });
       }
       return true;
@@ -5226,6 +5378,7 @@ export function AgentSessionsProvider({
       markQueuedDelivery,
       refreshQueuedAttachments,
       flushQueuedPrompt,
+      prepareForSend,
     ],
   );
 
@@ -5240,6 +5393,7 @@ export function AgentSessionsProvider({
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
       persistedMessageRefsRef.current.delete(chatId);
+      nativeTranscriptSnapshotsRef.current.delete(chatId);
       sendQueueRef.current.delete(chatId);
       queueHeldRef.current.delete(chatId);
       flushBubbleRef.current.delete(chatId);
@@ -5279,7 +5433,6 @@ export function AgentSessionsProvider({
       request = (async () => {
         const store = getStore();
         const slot = store.sessions[chatId];
-        const restoreBefore = cloud ? cloudHistoryRestoreHead(chatId) : undefined;
         if (!slot) return; // not open here → hydrates fresh when opened
         if (slot.transcriptState !== "resident") {
           // A DB_CHANGED nudge for an evicted chat must not pull its payload
@@ -5296,9 +5449,8 @@ export function AgentSessionsProvider({
         }
         if (slot.status === "streaming") return; // live turn here is canonical
         try {
-          const windowed = reconcileHistoryMessages(
-            await persistWindowMessages(chatId, HYDRATE_WINDOW),
-          );
+          const page = await persistMessageWindow(chatId, HYDRATE_WINDOW);
+          const windowed = reconcileHistoryMessages(page.messages);
           // The committed deck may have evicted this chat while the DB request
           // was in flight. Eviction deletes the exact request identity; never
           // let a late result resurrect the payload.
@@ -5311,11 +5463,35 @@ export function AgentSessionsProvider({
           ) {
             return;
           }
+          if (page.isCurrent?.() === false) { retryAfterRestore = true; return; }
           const fresh = getStore().sessions[chatId];
           const head = cloud ? cloudHistoryRestoreHead(chatId) : undefined;
-          const native = cloud && cloudHasNativeTranscript(bridge, chatId, fresh?.executionId);
-          if (head && !native && !cloudHistoryFenceHasTranscript(head)) return;
-          if (head && (!restoreBefore || !cloudHistoryFencesMatch(restoreBefore, head))) {
+          const native = page.source === "native" && page.messages.length > 0 && cloudHasNativeTranscript(bridge, chatId, fresh?.executionId);
+          if (head && !native && !cloudHistoryFenceHasTranscript(head)) {
+            const sameNativeAuthority = page.source === "native" && !!page.restoreHead &&
+              cloudHistoryFencesMatch(page.restoreHead, head) && !!fresh &&
+              cloudHasNativeTranscript(bridge, chatId, fresh.executionId);
+            // Check freshness before an incomplete read can strip rows. A
+            // turn may start and settle, or replace its execution, during the
+            // await. That older read cannot revoke newer native state under
+            // the same authority. A new head or first native read still fences
+            // unconfirmed CP/cache rows below.
+            if (sameNativeAuthority && !canApplyTranscriptRead(slot, fresh) &&
+                (nativeTranscriptSnapshotsRef.current.matches(chatId, slot, head) ||
+                 nativeTranscriptSnapshotsRef.current.matches(chatId, fresh, head))) {
+              retryAfterChange = fresh.transcriptState === "resident" && fresh.status !== "streaming";
+              return;
+            }
+            // An empty incomplete page cannot revoke a positive native read
+            // under the same authority. Equal heads alone are insufficient:
+            // first-native confirmation must still fence CP/cache rows.
+            const retainNative = sameNativeAuthority && canApplyTranscriptRead(slot, fresh) &&
+              nativeTranscriptSnapshotsRef.current.matches(chatId, fresh, head);
+            getStore().applyCloudHistoryRestoreHead(chatId, head, retainNative);
+            if (!head.head?.deleted) pendingHydratesRef.current.add(chatId);
+            return;
+          }
+          if (head && (!page.restoreHead || !cloudHistoryFencesMatch(page.restoreHead, head))) {
             retryAfterRestore = true;
             getStore().applyCloudHistoryRestoreHead(chatId, head);
             return;
@@ -5338,10 +5514,13 @@ export function AgentSessionsProvider({
           // scrolled-up history, drop a remotely-truncated tail, and don't let a
           // transient empty read wipe the slot. See mergeWindowedTail.
           const next: AgentMessage[] = mergeWindowedTail(cur, windowed);
+          const presentation = page.source === "control-plane" && page.restoreHead && cloudHistoryFenceHasTranscript(page.restoreHead)
+            ? { source: "control-plane" as const, restoreHead: page.restoreHead } : null;
           if (messageSnapshotsEqual(cur, next)) {
-            if (fresh.transcriptDirty) {
-              getStore().patchSession(chatId, { transcriptDirty: false });
+            if (fresh.transcriptDirty || restoring) {
+              getStore().patchSession(chatId, { transcriptDirty: false, transcriptState: "resident", transcriptPresentation: presentation });
             }
+            if (native && head) nativeTranscriptSnapshotsRef.current.confirm(chatId, getStore().sessions[chatId], head, page.isCurrent);
             return;
           }
           let refs = persistedMessageRefsRef.current.get(chatId);
@@ -5354,8 +5533,10 @@ export function AgentSessionsProvider({
             ...fresh,
             messages: next,
             transcriptState: "resident",
+            transcriptPresentation: presentation,
             transcriptDirty: false,
           });
+          if (native && head) nativeTranscriptSnapshotsRef.current.confirm(chatId, getStore().sessions[chatId], head, page.isCurrent);
         } catch (err) {
           console.warn("[Zeros agent-history] message reconcile failed:", err);
         }
@@ -5384,7 +5565,6 @@ export function AgentSessionsProvider({
       let retryAfterRestore = false;
       // eslint-disable-next-line prefer-const
       request = (async () => {
-        const restoreBefore = parseCloudScopedId(chatId) ? cloudHistoryRestoreHead(chatId) : undefined;
         // Fix #2 — refresh the device-local policy slice alongside message
         // hydration. The store mutator preserves its reference when unchanged.
         void getStore().hydrateChatPolicies(chatId);
@@ -5422,19 +5602,22 @@ export function AgentSessionsProvider({
           return;
         }
         try {
-          const messages = await persistWindowMessages(chatId, HYDRATE_WINDOW, undefined,
+          const page = await persistMessageWindow(chatId, HYDRATE_WINDOW, undefined,
             parseCloudScopedId(chatId) ? cached => {
               if (!isCurrentTranscriptRequest(hydrateInFlightRef.current, chatId, request)) return;
               const head = cloudHistoryRestoreHead(chatId);
-              if (cached.length && head && !cloudHistoryFenceHasTranscript(head)) return;
+              if (cached.messages.length && head && (!cloudHistoryFenceHasTranscript(head) ||
+                  !cached.restoreHead || !cloudHistoryFencesMatch(cached.restoreHead, head))) return;
               const fresh = getStore().sessions[chatId];
               if (!fresh || fresh.transcriptState !== "loading" || fresh.status === "streaming" || fresh.transcriptDirty) return;
-              const deduped = reconcileHistoryMessages(cached);
+              const deduped = reconcileHistoryMessages(cached.messages);
+              const next = [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))];
               getStore().patchSession(chatId, {
                 // Provisional data never satisfies admission/send/completion.
                 // Queued bubbles remain owned by the existing send path.
-                messages: [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))],
+                messages: messageSnapshotsEqual(fresh.messages, next) ? fresh.messages : next,
                 transcriptState: "loading",
+                transcriptPresentation: deduped.length ? { source: "cache", restoreHead: cached.restoreHead } : null,
                 transcriptDirty: false,
                 hasTranscript: head && !cloudHistoryFenceHasTranscript(head) ? head.head?.deleted !== true : deduped.length > 0,
               });
@@ -5448,19 +5631,32 @@ export function AgentSessionsProvider({
           ) {
             return;
           }
+          if (page.isCurrent?.() === false) { retryAfterRestore = true; return; }
           const head = parseCloudScopedId(chatId) ? cloudHistoryRestoreHead(chatId) : undefined;
           const currentSlot = getStore().sessions[chatId];
-          if (head && !cloudHistoryFenceHasTranscript(head) && !cloudHasNativeTranscript(bridge, chatId, currentSlot?.executionId)) {
+          if (head && !cloudHistoryFenceHasTranscript(head) &&
+              !(page.source === "native" && page.messages.length > 0 && cloudHasNativeTranscript(bridge, chatId, currentSlot?.executionId))) {
             getStore().applyCloudHistoryRestoreHead(chatId, head);
             if (head.head?.deleted) pendingHydratesRef.current.delete(chatId);
             else pendingHydratesRef.current.add(chatId);
             return;
           }
-          if (head && (!restoreBefore || !cloudHistoryFencesMatch(restoreBefore, head))) {
-            // Message[] no longer carries the bridge response's source. Retire
-            // this exact outer read rather than label A's rows with new head B.
+          if (head && (!page.restoreHead || !cloudHistoryFencesMatch(page.restoreHead, head))) {
+            // Validate the head supplied with this page, never whichever head
+            // happens to be current after its outer await. This observation
+            // can fence paint, but only the authenticated head subscriber can
+            // prove continuity to a successor the page did not verify.
             getStore().applyCloudHistoryRestoreHead(chatId, head);
             retryAfterRestore = true;
+            return;
+          }
+          // A legacy projection can briefly contain no rows after resume. It
+          // has no restore head proving that an already painted transcript was
+          // cleared. Keep that exact-chat presentation while native history or
+          // a confirmed projection catches up.
+          if (page.source === "control-plane" && !page.restoreHead && page.messages.length === 0 &&
+              currentSlot?.transcriptPresentation && currentSlot.messages.length > 0) {
+            pendingHydratesRef.current.add(chatId);
             return;
           }
           pendingHydratesRef.current.delete(chatId);
@@ -5471,7 +5667,7 @@ export function AgentSessionsProvider({
           // current adapter replays its transcript on resume — so this is
           // purely cleanup of pre-existing disk content + the safety net
           // should a future adapter ever start replaying.
-          const deduped = reconcileHistoryMessages(messages);
+          const deduped = reconcileHistoryMessages(page.messages);
           // Re-read the slot after the await — the user may have started
           // typing while we were fetching, in which case live state wins.
           const fresh = getStore().sessions[chatId];
@@ -5489,21 +5685,28 @@ export function AgentSessionsProvider({
             refs = new Map();
             persistedMessageRefsRef.current.set(chatId, refs);
           }
-          seedPersistedMessageRefs(refs, deduped);
+          const next = cloudComputerV2 && isCloudWorkspace(fresh.cwd)
+            ? [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))]
+            : deduped;
+          const confirmed = messageSnapshotsEqual(fresh.messages, next) ? fresh.messages : next;
+          seedPersistedMessageRefs(refs, confirmed);
           getStore().setSession(chatId, {
             ...BLANK,
             ...fresh,
-            messages: cloudComputerV2 && isCloudWorkspace(fresh.cwd)
-              ? [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))]
-              : deduped,
+            messages: confirmed,
             transcriptState: "resident",
             transcriptDirty: false,
+            transcriptPresentation: page.source === "control-plane" && page.restoreHead && cloudHistoryFenceHasTranscript(page.restoreHead)
+              ? { source: "control-plane", restoreHead: page.restoreHead } : null,
             // A connected authoritative empty read is the one place allowed
             // to clear the conservative hint retained across eviction.
             hasTranscript: deduped.some(
               (message) => message.kind !== "text" || !message.queued,
             ),
           });
+          if (page.source === "native" && head && deduped.length > 0) {
+            nativeTranscriptSnapshotsRef.current.confirm(chatId, getStore().sessions[chatId], head, page.isCurrent);
+          }
           // A live chunk/DB nudge may have landed after the window read began.
           // Re-window once more rather than trying to merge raw deltas into a
           // partial transcript. The in-flight reconcile map dedupes nudges.
@@ -5729,6 +5932,7 @@ export function AgentSessionsProvider({
         cwd: resolvedCwd,
         status: "warming",
         transcriptState: existing?.transcriptState ?? BLANK.transcriptState,
+        transcriptPresentation: existing?.transcriptPresentation ?? null,
         transcriptDirty: existing?.transcriptDirty ?? false,
         hasTranscript: existing?.hasTranscript ?? false,
         messages: existing?.messages ?? [],
@@ -5956,6 +6160,7 @@ export function AgentSessionsProvider({
         getStore().patchSession(chatId, {
           status: loadedSessionStatus(resp.promptActive === true),
         });
+        refreshModelCatalog(chatId);
         // Recovery drain (same reasoning as ensureSession): a send parked while
         // this chat was reconnecting flushes now that loadSession restored it to
         // ready. Self-gated + lock-guarded inside drainNextQueued.
@@ -6050,6 +6255,7 @@ export function AgentSessionsProvider({
       cancelStalledAdmission,
       reconcileChatMessages,
       evictUnretainedTranscripts,
+      refreshModelCatalog,
     ],
   );
 
@@ -6231,6 +6437,7 @@ export function AgentSessionsProvider({
     capabilityRefreshInFlightRef.current.clear();
     loadFlightAdoptOnlyRef.current.clear();
     persistedMessageRefsRef.current.clear();
+    nativeTranscriptSnapshotsRef.current.clear();
     authPromptsRef.current.clear();
     // Note: we deliberately do NOT clear the disk transcript here.
     // disposeAll is called on engine respawn (in-place project swap),
@@ -6255,6 +6462,7 @@ export function AgentSessionsProvider({
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
       persistedMessageRefsRef.current.delete(chatId);
+      nativeTranscriptSnapshotsRef.current.delete(chatId);
       // Release the dedupe owner immediately. Its promise still settles behind
       // identity checks, while a fast History reopen may start a fresh bind.
       ensureInFlightRef.current.delete(chatId);
@@ -6413,6 +6621,7 @@ export function AgentSessionsProvider({
           // Eviction must release the second, less-visible owner of historical
           // message objects too. The next disk hydrate seeds its exact refs.
           persistedMessageRefsRef.current.delete(chatId);
+          nativeTranscriptSnapshotsRef.current.delete(chatId);
           continue;
         }
         let chatMap = persistedMessageRefsRef.current.get(chatId);
@@ -6442,6 +6651,7 @@ export function AgentSessionsProvider({
       for (const chatId of persistedMessageRefsRef.current.keys()) {
         if (!(chatId in nextSessions)) {
           persistedMessageRefsRef.current.delete(chatId);
+          nativeTranscriptSnapshotsRef.current.delete(chatId);
         }
       }
 

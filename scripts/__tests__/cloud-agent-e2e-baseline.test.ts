@@ -3,9 +3,11 @@
 import { randomUUID } from "node:crypto";
 import { request } from "node:https";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createFixtureControlPlane, type FixtureControlPlane } from "../cloud-workspace-validation/cloud-agent-e2e/fixture-control-plane/server";
+import { FixtureRequestObservations } from "../cloud-workspace-validation/cloud-agent-e2e/fixture-control-plane/request-observations";
 import { createFixtureTls } from "../cloud-workspace-validation/cloud-agent-e2e/runtime";
 import { driveRendererTurn } from "../cloud-workspace-validation/cloud-agent-e2e/renderer-turn";
 import { measureCurrentTurn, measureBootOwnerTurn } from "../cloud-workspace-validation/cloud-agent-e2e/baseline";
@@ -23,7 +25,7 @@ beforeAll(async () => {
   root = await mkdtemp(path.join(parent, "baseline-tls-"));
   tls = await createFixtureTls(root); ca = await readFile(tls.ca);
 });
-afterEach(async () => { vi.resetAllMocks(); await Promise.all(fixtures.splice(0).map(cp => cp.close())); });
+afterEach(async () => { await Promise.all(fixtures.splice(0).map(cp => cp.close())); vi.restoreAllMocks(); vi.resetAllMocks(); });
 afterAll(async () => { if (root) await rm(root, { recursive: true, force: true }); });
 
 function post(url: string, body: unknown, bearerToken = "fixture-absent-authority"): Promise<number> {
@@ -34,7 +36,14 @@ function post(url: string, body: unknown, bearerToken = "fixture-absent-authorit
     outgoing.on("error", reject); outgoing.end(JSON.stringify(body));
   });
 }
-async function setup() {
+async function setup(calibrationSpanMs = 0) {
+  // HTTP preparation and counters are real; only this controlled turn's
+  // timeline is synthetic. Advance at events, not clock reads or sleeps, so
+  // scheduler load cannot put a request inside a boundary's uncertainty band.
+  let nowMs = 1000;
+  const advance = (ms = 1000) => nowMs += ms;
+  vi.spyOn(performance, "now").mockImplementation(() => nowMs);
+  vi.spyOn(FixtureRequestObservations.prototype, "nowUs").mockImplementation(() => nowMs * 1000);
   const cp = createFixtureControlPlane({ tls, allowedModels: { codex: ["fixture-model"] } }); fixtures.push(cp);
   const runtime = { profile: "zeros-cloud-worker-v4" as const, manifestSha256: "a".repeat(64), runtimeId: `r1-${"a".repeat(64)}`,
     baseCompatibilityId: `bc1-${"b".repeat(64)}`, installerReceiptSha256: "c".repeat(64), bootId: randomUUID(), supervisorSessionId: randomUUID() };
@@ -42,7 +51,16 @@ async function setup() {
   expect(await post(baseUrl + "/internal/v1/cloud-workspaces/engine/register", { ...cp.identity,
     actorProtocolVersion: 2, agentCustomizationVersion: 3, agentRuntime: runtime }, cp.runtimeTokens.registrationToken)).toBe(200);
   const verify = vi.fn(async (_id: string) => {});
-  const fixture = { identity: cp.identity, rendererAuthority: () => cp.rendererAuthority(), measurementCheckpoint: () => cp.measurementCheckpoint(),
+  let calibrated = false;
+  const measurementCheckpoint = () => {
+    if (calibrated) { advance(); return cp.measurementCheckpoint(); }
+    calibrated = true;
+    advance(calibrationSpanMs / 2);
+    const sample = cp.measurementCheckpoint();
+    advance(calibrationSpanMs / 2);
+    return sample;
+  };
+  const fixture = { identity: cp.identity, rendererAuthority: () => cp.rendererAuthority(), measurementCheckpoint,
     measurementWindow: (...args: Parameters<typeof cp.measurementWindow>) => cp.measurementWindow(...args),
     assertTerminalConsistency: verify, readEvents: () => [] };
   const bridge = {} as Parameters<typeof driveRendererTurn>[0];
@@ -54,20 +72,21 @@ async function setup() {
     resultCode: "cloud_provider_prompt_auth_required", createdAt: "2026-10-08T00:00:00Z", updatedAt: "2026-10-08T00:00:00Z" };
   const settings = { stage: "typed_auth_failure", invalidTiming: false, missingEngine: false, inspectTraffic: true };
   vi.mocked(driveRendererTurn).mockImplementation(async (_bridge, turn) => {
-    turn.onSend?.(); const sentAtMs = performance.now();
+    turn.onSend?.(); const sentAtMs = advance();
     if (turn.mode !== "boot-owner-v1") {
+      advance();
       const grant = await turn.grant("codex", "fixture-model");
       expect(grant).toBe(cp.delegationId("codex"));
     }
-    const receivedAtMs = performance.now();
+    const receivedAtMs = advance();
+    advance();
     await post(baseUrl + "/unrelated-fixture-request", {});
-    const observedAtMs = performance.now();
-    await new Promise(resolve => setTimeout(resolve, 5));
-    const settledAtMs = performance.now(); turn.onRendererSettled?.();
+    const observedAtMs = advance();
+    const settledAtMs = advance(); turn.onRendererSettled?.();
     if (turn.mode === "boot-owner-v1") await turn.verifyTerminal(commandId, { ...entry, conversationId: turn.conversationId }, new AbortController().signal);
     else await turn.verifyTerminal(commandId);
-    if (settings.inspectTraffic) await post(baseUrl + "/post-result-fixture-verification", {});
-    const clockId = randomUUID(), sampledAtMs = performance.now();
+    if (settings.inspectTraffic) { advance(); await post(baseUrl + "/post-result-fixture-verification", {}); }
+    const clockId = randomUUID(), sampledAtMs = advance();
     const owned = { commandId, conversationId: turn.conversationId, turnId: turn.userMessageId, executionId, provider: turn.provider };
     const { organizationId, workspaceId, generation, engineInstanceId } = cp.identity;
     const boot = turn.mode === "boot-owner-v1" ? CloudAgentBootConversationSchema.parse(turn.bootBinding) : undefined;
@@ -89,6 +108,15 @@ async function setup() {
 }
 
 describe("CURRENT baseline orchestration", () => {
+  it.each([0, 250])("keeps exact request counts with a controlled %i ms calibration span", async span => {
+    const f = await setup(span);
+    const result = await measureCurrentTurn(f.bridge, f.input);
+    expect(result.sendWindow.operationArrivalCounts["renderer.prepare"]).toBe(1);
+    expect(result.sendWindow.ingressCount).toBe(2);
+    expect(result.ingress.interval.arrivalCount).toEqual({ min: 1, max: 1 });
+    expect(result.ingress.calibrationUncertaintyMs).toBeCloseTo(span + 0.001, 6);
+    expect(result.ingress.fullWindow.ingressCount).toBe(3);
+  });
   it("performs real public prepare inside Send and binds the actual turn identities", async () => {
     const f = await setup(); const result = await measureCurrentTurn(f.bridge, f.input);
     expect(result.turn).toMatchObject({ commandId: f.commandId, turnId: f.input.userMessageId, outcome: "pre_auth_only" });
@@ -185,7 +213,7 @@ async function bootSetup() {
   const audit = { restoreRevision: 1, recordSequence: 1, eventSequence: 2, incompleteReason: "capture_unavailable" };
   const head = { originWriterEpoch: scope.writerEpoch, source: { kind: "command", commandId: f.commandId, executionId: f.entry.executionId,
     intent: { agentId: "codex", userMessageId: f.input.userMessageId }, nativeResultSha256: null }, deleted: false, history: audit };
-  const privateFixture = { identity: f.cp.identity, measurementCheckpoint: () => f.cp.measurementCheckpoint(),
+  const privateFixture = { identity: f.cp.identity, measurementCheckpoint: f.fixture.measurementCheckpoint,
     measurementWindow: (...args: Parameters<typeof f.cp.measurementWindow>) => f.cp.measurementWindow(...args),
     activeBootScope: () => scope, inspect: () => ({ boot: { negotiated: true, activated: true } }),
     readMirrorCommand: vi.fn(() => ({ conversationId: f.input.conversationId, entry: f.entry, history: audit })),

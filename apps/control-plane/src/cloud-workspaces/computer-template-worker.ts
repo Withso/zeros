@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
 import type { Tx } from "../db.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import {
   DatabaseCloudComputerV2Service,
   type CloudComputerV2Claim,
@@ -17,6 +18,8 @@ import {
 } from "./computer-template-capacity.js";
 import { ComputerTemplateLogRedactor } from "./computer-template-logs.js";
 import { BuilderVmError, computerTemplateBuilderIntent } from "./computer-template-boat.js";
+import { quarantineRuntimeImage, type RuntimeImageChannel } from "./runtime-images.js";
+import type { ComputerTemplateSnapshotLifecycle } from "./computer-template-snapshots.js";
 import type {
   BuilderFixedCommand,
   BuilderVm,
@@ -29,6 +32,7 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/);
 // Recording the capture and completing the build must finish before the
 // build deadline, so the template stop leaves this much of it unused.
 const CAPTURE_COMPLETION_MS = 60_000;
+const NAMED_CAPTURE_MS = 5 * 60_000;
 const TcbResult = z
   .object({
     schema: z.literal("zeros.computer-tcb/v1"),
@@ -89,6 +93,7 @@ export type ComputerTemplateWorkerDependencies = {
   service: DatabaseCloudComputerV2Service;
   vms: CloudBuilderVms;
   operations: BuilderVmOperations;
+  snapshots: ComputerTemplateSnapshotLifecycle;
   github: {
     mintContentsRead(input: {
       installationId: number;
@@ -108,8 +113,10 @@ export type ComputerTemplateWorkerDependencies = {
   };
   accountScope: string;
   billingOrg: string;
+  runtimeImageChannel?: RuntimeImageChannel;
   maxConcurrentBuilds?: number;
   pollMs?: number;
+  intervalMs?: number;
   namePrefix?: string;
 };
 
@@ -148,9 +155,11 @@ export class ComputerTemplateWorker {
   private readonly journal: ComputerTemplateJournal;
   private readonly concurrency: number;
   private readonly pollMs: number;
+  private readonly scheduler: CloudWorkerScheduler;
   private fence = Date.now();
   private ticking: Promise<void> | null = null;
   private stopping = false;
+  private snapshotSweepAt = 0;
   constructor(private readonly deps: ComputerTemplateWorkerDependencies) {
     this.journal = new ComputerTemplateJournal(
       deps.pool,
@@ -169,29 +178,21 @@ export class ComputerTemplateWorker {
       .min(0)
       .max(10_000)
       .parse(deps.pollMs ?? 1000);
+    const intervalMs = z.number().int().min(100).max(300_000).parse(deps.intervalMs ?? 60_000);
+    this.scheduler = new CloudWorkerScheduler(intervalMs, () => this.tick(), () => {
+      // No provider exception, script output or stdin in infrastructure logs.
+      console.error("[computer-template-worker] reconciliation_failed");
+    }, () => this.journal.readNextDelayMs(this.concurrency), { readBeforeRun: true, jitter: deps.intervalMs === undefined });
   }
   start(): () => Promise<void> {
-    this.stopping = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const schedule = () => {
-      if (this.stopping) return;
-      timer = setTimeout(() => {
-        void this.tick()
-          .catch(() => {
-            // No provider exception, script output or stdin in infrastructure logs.
-            console.error("[computer-template-worker] reconciliation_failed");
-          })
-          .finally(schedule);
-      }, 1000);
-      timer.unref();
-    };
-    schedule();
+    this.scheduler.start();
     return async () => {
       this.stopping = true;
-      clearTimeout(timer);
+      await this.scheduler.stop();
       await this.ticking;
     };
   }
+  notify(): void { this.scheduler.notify(); }
   async tick(): Promise<void> {
     if (this.ticking) return this.ticking;
     this.ticking = this.work();
@@ -202,6 +203,10 @@ export class ComputerTemplateWorker {
     }
   }
   private async work() {
+    if (Date.now() - this.snapshotSweepAt >= 60_000) {
+      await this.deps.snapshots.reconcile();
+      this.snapshotSweepAt = Date.now();
+    }
     await this.journal.fenceExpired();
     for (let index = 0; index < this.concurrency; index++) {
       const row = await this.journal.claimCleanup();
@@ -215,6 +220,7 @@ export class ComputerTemplateWorker {
         operations: this.deps.operations,
         accountScope: this.deps.accountScope,
         billingOrg: this.deps.billingOrg,
+        ...(this.deps.runtimeImageChannel ? { runtimeImageChannel: this.deps.runtimeImageChannel } : {}),
         ...(this.deps.namePrefix ? { namePrefix: this.deps.namePrefix } : {}),
         selectRuntime: async (tx) => {
           runtime = await this.deps.runtime.select(tx);
@@ -310,6 +316,7 @@ export class ComputerTemplateWorker {
       throw new BuildFailure("allocation_failed");
     return this.deps.vms.create(computerTemplateBuilderIntent({
       baseImageId: row.base_image_id,
+      imageId: row.builder_source_image_id,
       name: row.builder_name,
       operationKey: row.builder_operation_key,
     }));
@@ -339,30 +346,33 @@ export class ComputerTemplateWorker {
       await this.stage(claim, "runtime");
       failure = "runtime_install_failed";
       const status = await this.deps.vms.waitForBase(vm);
-      if (
-        status.baseCompatibilityId !== runtime.baseCompatibilityId ||
-        status.currentRuntimeId !== null ||
-        !["idle", "waiting_for_runtime"].includes(status.hostState)
-      )
+      const imageId = allocation.builder_source_image_id;
+      const literals: string[] = [];
+      if (status.baseCompatibilityId !== runtime.baseCompatibilityId) {
+        if (imageId) await quarantineRuntimeImage(this.deps.pool, imageId, "base_compatibility");
         throw new BuildFailure(failure);
-      const artifact = await this.deps.artifacts.presignGet(
-        runtime.objectKey,
-        900,
-      );
-      await this.fixed(
-        vm,
-        "install-runtime",
-        {
-          schema: "zeros.runtime-install/v1",
-          purpose: "build",
-          runtime: runtime.descriptor,
-          artifact,
-        },
-        failure,
-        this.timeout(claim, 600_000),
-        "installer",
-        "done",
-      );
+      }
+      if (imageId) {
+        if (status.currentRuntimeId !== pin.runtimeId) {
+          await quarantineRuntimeImage(this.deps.pool, imageId, "runtime_identity");
+          throw new BuildFailure(failure);
+        }
+        if (status.hostState !== "idle") throw new BuildFailure(failure);
+      } else {
+        if (status.currentRuntimeId !== null || !["idle", "waiting_for_runtime"].includes(status.hostState))
+          throw new BuildFailure(failure);
+        const artifact = await this.deps.artifacts.presignGet(runtime.objectKey, 900);
+        literals.push(artifact.url);
+        await this.fixed(
+          vm,
+          "install-runtime",
+          { schema: "zeros.runtime-install/v1", purpose: "build", runtime: runtime.descriptor, artifact },
+          failure,
+          this.timeout(claim, 600_000),
+          "installer",
+          "done",
+        );
+      }
       await this.guard(claim);
       const tcbInput = {
         schema: "zeros.computer-tcb-input/v1",
@@ -370,6 +380,8 @@ export class ComputerTemplateWorker {
         baseCompatibilityId: runtime.baseCompatibilityId,
         runtimeId: pin.runtimeId,
       };
+      // The frozen helper also reports internal timeouts and OS errors as
+      // tcb_modified; this diagnostic cannot establish shared-image corruption.
       const baseline = result(
         TcbResult,
         await this.fixed(
@@ -397,7 +409,6 @@ export class ComputerTemplateWorker {
       );
       await this.stage(claim, "repositories");
       failure = "repository_access_denied";
-      const literals: string[] = [artifact.url];
       const repositories = await this.clone(claim, vm, literals);
       if (
         !(
@@ -480,10 +491,10 @@ export class ComputerTemplateWorker {
       await this.stage(claim, "stopping");
       failure = "template_stop_failed";
       // Archiving saves the whole disk, and Boat can take well over ten
-      // minutes to do it. Wait for the build's own deadline, keeping a minute
-      // to record the capture and complete the build before it.
+      // minutes to do it. Reserve five minutes for the named capture/proof
+      // and one minute for the final completion CAS.
       const stopped = await this.deps.vms
-        .stop(vm, { timeoutMs: this.timeout(claim, 30 * 60_000, CAPTURE_COMPLETION_MS), requireSnapshot: true })
+        .stop(vm, { timeoutMs: this.timeout(claim, 30 * 60_000, CAPTURE_COMPLETION_MS + NAMED_CAPTURE_MS), requireSnapshot: true })
         .catch((error: unknown) => {
           if (error instanceof BuilderVmError && error.check === "stop_snapshot_failed")
             throw new BuildFailure("template_capture_failed");
@@ -492,6 +503,12 @@ export class ComputerTemplateWorker {
       if (stopped.archived !== true)
         throw new BuildFailure("template_capture_failed");
       const stoppedAt = await this.journal.recordStopped(id);
+      failure = "template_capture_failed";
+      // The saved artifact, rather than the expiring stopped sandbox, becomes
+      // the creation source. A name/save without its exact proof is not ready.
+      await this.deps.snapshots.capture({ buildId: id, workerFence: fence,
+        deadlineAt: new Date(Date.parse(claim.deadlineAt) - CAPTURE_COMPLETION_MS).toISOString(),
+        guard: () => this.guard(claim) });
       await this.stage(claim, "capture_confirmed");
       await this.deps.service.completeBuild(
         id,

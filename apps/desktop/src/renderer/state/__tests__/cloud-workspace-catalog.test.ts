@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControlPlaneError } from "../../features/team/control-plane";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), recover: vi.fn(), projects: vi.fn(() => [] as unknown[]) }));
@@ -21,6 +21,7 @@ import {
   getCloudProjects,
   cloudProjectForFolder,
   manageCloudWorkspace,
+  waitForCloudWorkspaceLifecycle,
   cloudWorkspaceStopVersion,
   cloudWorkspaceOperation,
   refreshCloudWorkspaceCatalog,
@@ -73,6 +74,151 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.projects.mockReturnValue([]);
 });
+describe("cloud lifecycle observation", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    api.read.mockReset();
+    acceptCloudWorkspaceDocument(doc(2, "stopping"));
+  });
+  afterEach(() => {
+    clearCloudWorkspaceCatalog();
+    vi.useRealTimers();
+  });
+
+  it("settles a Stop event published before the older operation receipt", async () => {
+    const stopped = doc(3, "stopped");
+    acceptCloudWorkspaceDocument(stopped);
+    const settled = vi.fn();
+    const pending = waitForCloudWorkspaceLifecycle(target, "stop", doc(2, "stopping")).then(settled, () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledWith(stopped);
+    await pending;
+    expect(api.read).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["resolve", "reject"])("settles Stop during a hung refresh and ignores its late %s", async outcome => {
+    let finish!: (value: CloudWorkspaceDocument) => void, fail!: (error: Error) => void;
+    api.read.mockReturnValue(new Promise<CloudWorkspaceDocument>((resolve, reject) => { finish = resolve; fail = reject; }));
+    const settled = vi.fn(), failed = vi.fn();
+    const pending = waitForCloudWorkspaceLifecycle(target, "stop", doc(2, "stopping")).then(settled, failed);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(api.read).toHaveBeenCalledExactlyOnceWith(target);
+    const stopped = doc(4, "stopped");
+    acceptCloudWorkspaceDocument(stopped);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledWith(stopped);
+    await pending;
+    if (outcome === "resolve") finish(doc(3, "stopping"));
+    else fail(new Error("Late transport failure"));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(settled).toHaveBeenCalledOnce();
+    expect(failed).not.toHaveBeenCalled();
+    expect(api.read).toHaveBeenCalledOnce();
+    expect(cloudWorkspaceDocument(target)?.status).toBe("stopped");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps the one-second poll fallback despite other workspace and owner events", async () => {
+    api.read.mockResolvedValueOnce(doc(3, "stopping")).mockResolvedValueOnce(doc(4, "stopped"));
+    const settled = vi.fn(), failed = vi.fn();
+    const pending = waitForCloudWorkspaceLifecycle(target, "stop", doc(2, "stopping")).then(settled, failed);
+    await vi.advanceTimersByTimeAsync(900);
+    acceptCloudWorkspaceDocument({ ...doc(3, "stopped"), id: "33333333-3333-4333-8333-333333333333" });
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(api.read).toHaveBeenCalledExactlyOnceWith(target);
+    await vi.advanceTimersByTimeAsync(900);
+    acceptCloudWorkspaceDocument({ ...doc(3, "stopped"), id: "44444444-4444-4444-8444-444444444444",
+      organizationId: "55555555-5555-4555-8555-555555555555" });
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(100);
+    await pending;
+    expect(settled).toHaveBeenCalledWith(doc(4, "stopped"));
+    expect(api.read).toHaveBeenCalledTimes(2);
+    expect(failed).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["account", "workspace", "organization"])("ends the wait immediately when its %s is retired during a hung refresh", async removed => {
+    api.read.mockReturnValue(new Promise(() => {}));
+    const settled = vi.fn(), failed = vi.fn();
+    const pending = waitForCloudWorkspaceLifecycle(target, "stop", doc(2, "stopping")).then(settled, failed);
+    await vi.advanceTimersByTimeAsync(1_000);
+    if (removed === "account") clearCloudWorkspaceCatalog();
+    else {
+      api.list.mockResolvedValue(removed === "workspace" ? [] : [{ ...doc(3, "stopped"),
+        organizationId: "55555555-5555-4555-8555-555555555555" }]);
+      await refreshCloudWorkspaceCatalog();
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failed).toHaveBeenCalledWith(expect.objectContaining({ message: removed === "account"
+      ? "Cloud account changed" : "Cloud workspace access changed" }));
+    await pending;
+    expect(settled).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rejects an exact-workspace failure event before polling", async () => {
+    const failed = vi.fn();
+    const pending = waitForCloudWorkspaceLifecycle(target, "stop", doc(2, "stopping")).catch(failed);
+    acceptCloudWorkspaceDocument({ ...doc(3, "failed"), error: { code: "checkpoint_failed", message: "Checkpoint failed" } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failed).toHaveBeenCalledWith(expect.objectContaining({ message: "Checkpoint failed" }));
+    await pending;
+    expect(api.read).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["archive", "stop", "wake"] as const)("keeps waiting for %s through an error that predates the request", async operation => {
+    const earlier = { code: "setup_failed", message: "Setup failed" };
+    const accepted = { ...doc(2, operation === "archive" ? "archiving" : operation === "stop" ? "stopping" : "waking"), error: earlier };
+    const done = { ...doc(3, operation === "archive" ? "archived" : operation === "stop" ? "stopped" : "ready"), error: earlier };
+    api.read.mockResolvedValueOnce(accepted).mockResolvedValueOnce(done);
+    const settled = vi.fn(), failed = vi.fn();
+    const pending = waitForCloudWorkspaceLifecycle(target, operation, accepted).then(settled, failed);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await pending;
+    expect(failed).not.toHaveBeenCalled();
+    expect(settled).toHaveBeenCalledWith(done);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rejects a new error or a failed status that replaces an earlier error", async () => {
+    const earlier = { code: "setup_failed", message: "Setup failed" };
+    const failed = vi.fn();
+    const pending = waitForCloudWorkspaceLifecycle(target, "archive", { ...doc(2, "archiving"), error: earlier }).catch(failed);
+    acceptCloudWorkspaceDocument({ ...doc(3, "archiving"), error: { code: "archive_failed", message: "Archive failed" } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failed).toHaveBeenCalledWith(expect.objectContaining({ message: "Archive failed" }));
+    await pending;
+    const unchanged = vi.fn(), retried = { ...doc(4, "archiving"), error: earlier };
+    acceptCloudWorkspaceDocument(retried);
+    const second = waitForCloudWorkspaceLifecycle(target, "archive", retried).catch(unchanged);
+    acceptCloudWorkspaceDocument({ ...doc(5, "failed"), error: earlier });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(unchanged).toHaveBeenCalledWith(expect.objectContaining({ message: "Setup failed" }));
+    await second;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds a hung refresh to the original elapsed deadline", async () => {
+    api.read.mockReturnValue(new Promise(() => {}));
+    const failed = vi.fn();
+    const pending = waitForCloudWorkspaceLifecycle(target, "stop", doc(2, "stopping")).catch(failed);
+    await vi.advanceTimersByTimeAsync(1_000);
+    vi.setSystemTime(Date.now() - 3_600_000);
+    await vi.advanceTimersByTimeAsync(58_999);
+    expect(failed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(failed).toHaveBeenCalledWith(expect.objectContaining({ message:
+      "The cloud workspace operation is still running. Its status will update when it finishes." }));
+    await pending;
+    expect(api.read).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe("cloud workspace catalog ownership", () => {
   it("preserves waiting wake readiness across an accepted generation replacement", async () => {
     vi.useFakeTimers();
@@ -114,9 +260,12 @@ describe("cloud workspace catalog ownership", () => {
       await first;
       expect(settled).toBe(false);
       acceptCloudWorkspaceDocument(doc(3, "stopped"));
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(true);
       expect((await joined).status).toBe("stopped");
       expect(api.lifecycle).toHaveBeenCalledExactlyOnceWith(target, "stop", expect.any(String));
+      expect(api.read).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
   it.each(["stopped", "archived", "stopping", "failed", "error"])("does not schedule background reads or mirrors for %s workspaces", status => {
@@ -152,6 +301,22 @@ describe("cloud workspace catalog ownership", () => {
     acceptCloudWorkspaceDocument(doc(1, "stopped"));
     await manageCloudWorkspace(target, "wake");
     expect(api.lifecycle.mock.calls[1][2]).toBe(api.lifecycle.mock.calls[0][2]);
+  });
+  it("does not clear a newer explicit wake flight when an older ready receipt arrives", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    let finishFirst!: (value: CloudWorkspaceDocument) => void, finishSecond!: (value: CloudWorkspaceDocument) => void;
+    const secondReceipt = new Promise<CloudWorkspaceDocument>(resolve => { finishSecond = resolve; });
+    api.lifecycle.mockReturnValueOnce(new Promise<CloudWorkspaceDocument>(resolve => { finishFirst = resolve; }))
+      .mockReturnValue(secondReceipt);
+    const first = manageCloudWorkspace(target, "wake", false, undefined, crypto.randomUUID());
+    acceptCloudWorkspaceDocument(doc(2, "ready"));
+    const id = crypto.randomUUID();
+    const second = manageCloudWorkspace(target, "wake", false, undefined, id);
+    finishFirst(doc(1, "ready")); await first;
+    const joined = manageCloudWorkspace(target, "wake", false, undefined, id);
+    const calls = api.lifecycle.mock.calls.length;
+    finishSecond(doc(3, "ready")); await Promise.all([second, joined]);
+    expect(calls).toBe(2);
   });
   it("retains an interaction reason with an uncertain wake intent when a send retries it", async () => {
     acceptCloudWorkspaceDocument(doc(1, "stopped"));

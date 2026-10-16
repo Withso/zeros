@@ -116,7 +116,35 @@ export type CloudAgentBootSyncResponse = z.infer<typeof CloudAgentBootSyncRespon
 
 /** The engine activates only after its real local ledger/cache/domain checks.
  * CP atomically commits the exact writer; this request selects no account. */
-export const CloudAgentBootActivateRequestSchema = CloudAgentBootSyncRequestSchema;
+/** CP selects the exact retired/unsealed predecessor and acknowledged ancestor.
+ * The engine cannot select an older writer or turn a gap into complete history. */
+export const CloudAgentHistoryRecoveryCustodyHintSchema = z.object({ writerEpoch: z.string().uuid(), recoveryId: z.string().uuid() }).strict();
+export const CloudAgentHistoryRecoveryPreparedCustodySchema = z.object({
+  scope: CloudAgentBootScopeSchema, recoveryId: z.string().uuid(), retiredAt: z.string().datetime(),
+}).strict();
+export const CloudAgentHistoryRecoveryCommittedCustodySchema = z.object({
+  recoveryId: z.string().uuid(), custodySha256: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+export const CloudAgentHistoryRecoveryRequestSchema = CloudAgentBootCredentialRequestSchema.extend({
+  // These are exact local namespace observations, never source selectors.
+  preparedCustody: z.array(CloudAgentHistoryRecoveryCustodyHintSchema).max(2)
+    .refine(values => new Set(values.map(value => value.writerEpoch)).size === values.length).optional(),
+}).strict();
+export type CloudAgentHistoryRecoveryRequest = z.infer<typeof CloudAgentHistoryRecoveryRequestSchema>;
+export const CloudAgentHistoryRecoveryResponseSchema = CloudAgentBootCredentialRequestSchema.extend({
+  bootId: z.string().uuid(), fundingOwnerUserId: z.string().uuid(), fundingOwnerEpoch: revision,
+  recoveryId: z.string().uuid(), code: z.literal("history_recovered_with_gap"), coverage: z.literal("unknown"),
+  predecessor: CloudAgentBootScopeSchema, predecessorRetiredAt: z.string().datetime(),
+  checkpoint: z.object({ writerEpoch: z.string().uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  mirroredSequence: z.number().int().nonnegative().safe(),
+  predecessorRecovery: CloudAgentHistoryRecoveryCommittedCustodySchema.optional(),
+  preparedCustody: z.array(CloudAgentHistoryRecoveryPreparedCustodySchema).max(2)
+    .refine(values => new Set(values.map(value => value.scope.writerEpoch)).size === values.length).optional(),
+}).strict();
+export type CloudAgentHistoryRecoveryResponse = z.infer<typeof CloudAgentHistoryRecoveryResponseSchema>;
+export const CloudAgentBootActivateRequestSchema = CloudAgentBootSyncRequestSchema.extend({ historyRecoveryId: z.string().uuid().optional(),
+  historyRecoveryCustodySha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+}).strict().refine(value => (value.historyRecoveryId === undefined) === (value.historyRecoveryCustodySha256 === undefined));
 export type CloudAgentBootActivateRequest = z.infer<typeof CloudAgentBootActivateRequestSchema>;
 export const CloudAgentBootActivateResponseSchema = CloudAgentBootIdentitySchema.extend({
   cacheRevision: revision, activated: z.literal(true),

@@ -72,11 +72,13 @@ describe("same-user cloud Host lifecycle", () => {
     expect(inventory.workloadPids).toContain(siblingChild.pid);
     expect(inventory.workloadPids).not.toContain(process.pid);
     await first.stopAndProve();
-    expect((await workloads.inspect()).workloadPids).toContain(siblingChild.pid);
+    // A census spanning real process exit can be incomplete; require its
+    // existing positive complete witness before asserting sibling survival.
+    expect((await completeInspection(workloads)).workloadPids).toContain(siblingChild.pid);
     const fence = workloads.fence();
     expect(() => sibling.wrapSpawn(launch())).toThrow();
     await workloads.drain(fence);
-    expect(await workloads.inspect()).toMatchObject({ complete: true, workloadPids: [] });
+    expect(await completeInspection(workloads)).toMatchObject({ complete: true, workloadPids: [] });
   });
   it("executes as the actual engine uid/gid in the real checkout with the selected env", async () => {
     const { boundary } = setup(), prepared = await boundary.prepare(request());

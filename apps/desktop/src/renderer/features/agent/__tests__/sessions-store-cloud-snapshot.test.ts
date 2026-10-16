@@ -17,6 +17,30 @@ function snapshot(active = false) {
     permissions: active ? [{ agentId: "codex", permissionId: "new", request: { sessionId: route, executionId: cloudScopedId(target, "native"), toolCall: { toolCallId: "tool", kind: "execute" as const, title: "Shell" }, options: [] } }] : [], questions: [] };
 }
 describe("atomic cloud snapshot installation", () => {
+  it("does not grant history authority to cached rows when only an empty control snapshot arrives", () => {
+    const messages = [{ id: "cached", kind: "text" as const, role: "agent" as const, text: "Cached prior work", createdAt: 1 }];
+    const presentation = { source: "cache" as const };
+    useSessionsStore.getState().setSession(chat, { ...BLANK, cwd: cloudWorkspaceKey(target), agentId: "codex", sessionId: route,
+      transcriptState: "loading", transcriptPresentation: presentation, hasTranscript: true, messages });
+    useSessionsStore.getState().installCloudSnapshot(chat, { ...snapshot(), messages: [], latestTurn: null });
+    const restored = useSessionsStore.getState().sessions[chat]!;
+    expect(restored.messages).toBe(messages);
+    expect(restored.transcriptState).toBe("loading");
+    expect(restored.transcriptPresentation).toBe(presentation);
+  });
+
+  it.each(["claude", "codex", "cursor"])("keeps the confirmed %s transcript when a resumed control snapshot omits its history", agentId => {
+    const messages = [{ id: "prior-prompt", kind: "text" as const, role: "user" as const, text: "Research the project", createdAt: 1 },
+      { id: "prior-answer", kind: "text" as const, role: "agent" as const, text: "Earlier work", createdAt: 2 }];
+    useSessionsStore.getState().setSession(chat, { ...BLANK, cwd: cloudWorkspaceKey(target), agentId, sessionId: route,
+      transcriptState: "resident", hasTranscript: true, messages, status: "reconnecting" });
+    useSessionsStore.getState().installCloudSnapshot(chat, { ...snapshot(), agentId, messages: [], latestTurn: null });
+    const resumed = useSessionsStore.getState().sessions[chat]!;
+    expect(resumed.messages).toBe(messages);
+    expect(resumed.hasTranscript).toBe(true);
+    expect(resumed.status).toBe("ready");
+  });
+
   it.each([
     ["Personal Local", "/personal/local", "local"],
     ["organization-local", "/organization/local", "local"],

@@ -46,6 +46,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { readClaudeCodeVersion } from "./stage-claude-cli.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP_DIR = path.join(ROOT, ".zeros", "claude-smoke");
@@ -158,6 +159,9 @@ process.env.CLAUDE_CODE_MAX_RETRIES = "0";
 console.log(`▸ home:     ${fakeHome} (empty — no ambient credentials)\n`);
 
 const { query } = await import("@anthropic-ai/claude-agent-sdk");
+const expectedCliVersion = readClaudeCodeVersion(
+  createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk"),
+);
 
 const abort = new AbortController();
 let timedOut = false;
@@ -176,6 +180,7 @@ let realInference = false;
 let spend = { cost: 0, outputTokens: 0 };
 let failure = null;
 let authRetry = null;
+let initializedCliVersion = null;
 try {
   const q = query({
     prompt: "reply with the single word OK",
@@ -186,6 +191,11 @@ try {
       pathToClaudeCodeExecutable: cli.path,
     },
   });
+  // 0.3.296 identifies the executing CLI during the control handshake, before
+  // system/init. Compare the real process with the bundled artifact's manifest.
+  // Keep this query-scoped: another owner/custom CLI must not share its version.
+  const initialized = await q.initializationResult();
+  initializedCliVersion = initialized.claude_code_version;
   for await (const msg of q) {
     // Belt and braces for CLAUDE_CODE_MAX_RETRIES: if a future CLI stops
     // honouring it, the retry stream still carries everything this gate asserts —
@@ -240,6 +250,9 @@ if (realInference) {
     `cost=$${spend.cost} output_tokens=${spend.outputTokens}`,
   );
 }
+if (!expectedCliVersion || initializedCliVersion !== expectedCliVersion) {
+  die("the SDK initialize response does not identify the pinned Claude CLI");
+}
 if (!failure) {
   die(
     "the query produced neither an error nor assistant output — the SDK↔CLI handshake did not complete.",
@@ -272,6 +285,7 @@ if (!AUTH_ERR_RX.test(oneLine)) {
 }
 
 console.log(`▸ rejected: ${oneLine.slice(0, 160)}`);
+console.log(`▸ handshake version: ${initializedCliVersion}`);
 console.log(`▸ spend:    $${spend.cost} / ${spend.outputTokens} output tokens`);
 console.log(
   `\n✓ PASS — the Agent SDK launched the pinned claude (${cli.source} tier),`,

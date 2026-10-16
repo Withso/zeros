@@ -14,7 +14,11 @@ import { PTY_AGENT_AUTH_CWD } from "@zeros/protocol/messages";
 import { ZerosEngine } from "../index";
 import type { TransportClient } from "../transport/types";
 import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
-import { testCloudWorker } from "../agents/__tests__/helpers/test-cloud-runtime";
+import { testCloudRuntime, testCloudWorker } from "../agents/__tests__/helpers/test-cloud-runtime";
+vi.mock("../agents/containment/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../agents/containment/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: () => testCloudRuntime(),
+}));
 import type { CloudReplicaHostSession } from "../cloud-replica-host-control";
 import { NODE_DESIGN_WATCH_GUARD_FILENAME } from "../agents/containment/design-watch-isolation";
 import type { CloudGitAuthor } from "@zeros/protocol/cloud-agent-execution";
@@ -1102,6 +1106,8 @@ describe("workspace terminal start barrier", () => {
     expect(env.env?.ZEROS_CLOUD_TOKEN).toBeUndefined();
     expect(env.env?.ANTHROPIC_API_KEY).toBeUndefined();
     expect(env.env?.CLOUD_NORMAL_VAR).toBeUndefined();
+    expect(env.env?.FONTCONFIG_FILE).toBe(`${testCloudRuntime().workerRoot}/design-fonts/fonts.conf`);
+    expect(env.env?.GIT_CONFIG_SYSTEM).toBe(`${testCloudRuntime().workerRoot}/gitconfig`);
     expect(env.env?.GIT_AUTHOR_NAME).toBe("");
     expect(env.env?.GIT_AUTHOR_EMAIL).toBe("");
   });

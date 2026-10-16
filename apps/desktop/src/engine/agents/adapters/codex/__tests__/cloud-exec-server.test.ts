@@ -13,6 +13,7 @@ import {CloudCodexExecServer} from "../cloud-exec-server";
 import {CLOUD_CODEX_CONFIG,cloudCodexConfig} from "../cloud-policy";
 import {codexAppServerFeatureArgs} from "../app-server";
 import {createInterface} from "node:readline";
+import {JsonRpcStdioClient} from "../../shared/jsonrpc";
 import type {CloudLegacyProviderExecution as CloudProviderExecution} from "../../../cloud-provider-execution";
 import type {BoundaryProcess,BoundarySpawnRequest} from "../../../containment/types";
 import {createCloudNativeHome} from "../../../containment/cloud-native-home";
@@ -23,6 +24,64 @@ vi.mock("../../../containment/cloud-runtime-root.mjs", async original => ({
 const importedRuntime = (await import("../../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime();
 
 describe.skipIf(process.platform!=="linux")("cloud native executor wire (no model or credential)",()=>{
+  it("connects the pinned app-server to the native executor through environment/add", async () => {
+    const binary = await resolveCodexBinary({});
+    const nativeBinary = path.join(binary.sandboxRuntimeRoot!, "bin/codex");
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-codex-environment-"));
+    const nativeHome = await createCloudNativeHome({ dataRoot: root, conversationId: "environment", provider: "codex", executionId: "startup" });
+    const abort = new AbortController();
+    const domains = new Set<{ stopAndProve(): Promise<void> }>();
+    let closing: Promise<void> | undefined;
+    const close = () => {
+      abort.abort();
+      return closing ??= Promise.all([...domains].map(domain => domain.stopAndProve())).then(() => {});
+    };
+    const lifetime = {
+      signal: abort.signal,
+      assertLive() { if (abort.signal.aborted) throw new Error("retired"); },
+      attach: (domain: { stopAndProve(): Promise<void> }) => { domains.add(domain); },
+      launch: (launch: () => Promise<BoundaryProcess>) => launch(),
+      close,
+    };
+    const execution = { cwd: root, lease: lifetime, lifetime, environment: null, coordinator: {
+      nativeHome,
+      workload: { spawn: async () => {
+        // The helper's environment propagation has its own real-native test
+        // below. This probe isolates the complete app-server/bridge handshake.
+        const child = spawn(nativeBinary, ["exec-server", "--listen", "stdio"], {
+          cwd: root, env: { ...nativeHome.environment(), PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, stdio: ["pipe", "pipe", "pipe"],
+        });
+        const exited = new Promise<{ code: number | null; signal: string | null }>(resolve => child.once("close", (code, signal) => resolve({ code, signal })));
+        const domain = { pid: child.pid!, child, stdin: child.stdin, stdout: child.stdout, stderr: child.stderr,
+          wait: () => exited, signal: async (signal: NodeJS.Signals) => { child.kill(signal); },
+          stopAndProve: async () => { child.kill("SIGKILL"); await exited; } } as BoundaryProcess;
+        domains.add(domain);
+        return domain;
+      } },
+    } } as unknown as CloudProviderExecution;
+    const app = spawn(nativeBinary, ["app-server", ...codexAppServerFeatureArgs(true),
+      ...Object.entries({ ...CLOUD_CODEX_CONFIG, sqlite_home: path.join(nativeHome.paths.codexHome, "sessions/.zeros-state") })
+        .flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])], {
+      cwd: root, env: { ...nativeHome.environment(), PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, stdio: ["pipe", "pipe", "pipe"],
+    });
+    const exited = new Promise<void>(resolve => app.once("close", () => resolve()));
+    app.stderr.resume();
+    const client = new JsonRpcStdioClient(app, { logTag: "offline-environment", defaultTimeoutMs: 6_000 });
+    try {
+      await client.request("initialize", { clientInfo: { name: "qualification", version: "1" }, capabilities: { experimentalApi: true } });
+      client.notify("initialized", {});
+      const bridge = await CloudCodexExecServer.start(execution, nativeBinary);
+      await client.request("environment/add", { environmentId: bridge.environmentId, execServerUrl: bridge.url, connectTimeoutMs: 5_000 });
+      expect(await client.request("environment/info", { environmentId: bridge.environmentId })).toMatchObject({ cwd: `file://${root}` });
+      expect(await client.request("environment/status", { environmentId: bridge.environmentId })).toMatchObject({ status: "ready" });
+    } finally {
+      client.close();
+      app.kill("SIGKILL");
+      await exited;
+      await close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
   it("initializes the real app-server with the complete cloud configuration in an empty physical HOME",async()=>{
     const binary=await resolveCodexBinary({}),root=await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-codex-config-"));
     await mkdir(path.join(root,".codex"));
@@ -66,11 +125,13 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     const nativeHome=await createCloudNativeHome({dataRoot:root,conversationId:actor,provider:"codex",executionId:"executor"});
     const helper=path.join(root,"cloud-codex-executor.mjs");
     await copyFile(path.resolve("apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs"),helper);
+    await copyFile(path.resolve("apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs"),path.join(root,"cloud-runtime-assets.mjs"));
     // Only the runtime's absolute deployment paths differ in this offline fixture.
     // The module is static source; fixture values are data it reads at load.
     await writeFile(path.join(root,"cloud-runtime-root.json"),JSON.stringify({runtime:{...importedRuntime,workerRoot:process.cwd(),binRoot:path.dirname(process.execPath)},nativeBinary}));
     await writeFile(path.join(root,"cloud-runtime-root.mjs"),"import {readFileSync} from 'node:fs';const fixture=JSON.parse(readFileSync(new URL('./cloud-runtime-root.json',import.meta.url),'utf8'));export const resolveCloudRuntimeChild=()=>structuredClone(fixture.runtime);export const assertCloudRuntimeChildPath=file=>{if(file!==fixture.nativeBinary)throw new Error('unadmitted fixture executable');};");
     const values={ORG_VALUE:"synthetic-org-value",REPO_VALUE:"synthetic-repository-value",PERSONAL_VALUE:actor,ORG_SECRET:"synthetic-org-secret",EMPTY_VALUE:"",LANG:"C",
+      FONTCONFIG_FILE:"/recipe/fontconfig-trap",FONTCONFIG_PATH:"/recipe/fonts-trap",
       OPENAI_API_KEY:"synthetic-provider-value",ANTHROPIC_API_KEY:"synthetic-provider-value",CURSOR_API_KEY:"synthetic-provider-value",CODEX_API_KEY:"synthetic-provider-value"};
     const abort=new AbortController(),domains=new Set<{stopAndProve():Promise<void>}>();let closing:Promise<void>|undefined;
     const close=vi.fn(()=>{
@@ -115,7 +176,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       });
       const config=cloudCodexConfig(execution);
       // Force distinct output reads with an empty poll between them so a cursor bug cannot hide an admitted layer.
-      await rpc(3,"process/start",{processId:"env-check",argv:["/bin/bash","--noprofile","--norc","-c",'printf "%s\\n" "$ORG_VALUE"; while [ ! -f environment-release ]; do sleep 0.01; done; printf "%s\\n" "$REPO_VALUE" "$PERSONAL_VALUE" "$ORG_SECRET" "${EMPTY_VALUE-unset}" "${OPENAI_API_KEY-unset}" "${ANTHROPIC_API_KEY-unset}" "${CURSOR_API_KEY-unset}" "${CODEX_API_KEY-unset}" "$HOME" "$CODEX_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$LANG"'],cwd:`file://${root}`,env:{},tty:false,
+      await rpc(3,"process/start",{processId:"env-check",argv:["/bin/bash","--noprofile","--norc","-c",'printf "%s\\n" "$ORG_VALUE"; while [ ! -f environment-release ]; do sleep 0.01; done; printf "%s\\n" "$REPO_VALUE" "$PERSONAL_VALUE" "$ORG_SECRET" "${EMPTY_VALUE-unset}" "${OPENAI_API_KEY-unset}" "${ANTHROPIC_API_KEY-unset}" "${CURSOR_API_KEY-unset}" "${CODEX_API_KEY-unset}" "$HOME" "$CODEX_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$LANG" "${GIT_CONFIG_SYSTEM-unset}" "${GIT_EXEC_PATH-unset}" "${FONTCONFIG_FILE-unset}" "${FONTCONFIG_PATH-unset}"'],cwd:`file://${root}`,env:{},tty:false,
         envPolicy:{inherit:config["shell_environment_policy.inherit"],ignoreDefaultExcludes:config["shell_environment_policy.ignore_default_excludes"]??false,
           includeOnly:config["shell_environment_policy.include_only"]??[],exclude:[],set:{}}});
       let output="",afterSeq:number|null=null,closed=false,released=false;
@@ -140,6 +201,8 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       expect(lines[9]).toBe(nativeHome.paths.home);
       expect(lines.slice(10,15)).toEqual([nativeHome.paths.codexHome,nativeHome.paths.xdgConfigHome,nativeHome.paths.xdgCacheHome,nativeHome.paths.xdgDataHome,nativeHome.paths.xdgStateHome]);
       expect(lines[15]).toBe("C");
+      expect(lines.slice(16,20)).toEqual([path.join(process.cwd(),"gitconfig"),`/opt/zeros-infra/.git-exec/${importedRuntime.runtimeId}`,
+        path.join(process.cwd(),"design-fonts/fonts.conf"),path.join(process.cwd(),"design-fonts")]);
       for(const [request] of workloadSpawn.mock.calls){
         for(const value of Object.values(values).filter(value=>value.length>1)){
           expect(request.args.join("\0").includes(value)).toBe(false);expect(JSON.stringify(config).includes(value)).toBe(false);

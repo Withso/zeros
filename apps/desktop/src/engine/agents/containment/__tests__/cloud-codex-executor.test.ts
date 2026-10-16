@@ -12,6 +12,7 @@ describe("same-user Codex workspace executor", () => {
       const nativeHome = await createCloudNativeHome({ dataRoot: root, provider: "codex", conversationId: "executor", executionId: "native-run" });
       const helper = path.join(root, "cloud-codex-executor.mjs"), binary = path.join(root, "native-executor.cjs");
       await copyFile(path.resolve("apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs"), helper);
+      await copyFile(path.resolve("apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs"), path.join(root, "cloud-runtime-assets.mjs"));
       await writeFile(path.join(root, "cloud-runtime-root.mjs"),
         "export const resolveCloudRuntimeChild=()=>({workerRoot:new URL('.',import.meta.url).pathname.replace(/\\/$/,''),binRoot:" + JSON.stringify(path.dirname(process.execPath)) + ",profile:'v4'});export const assertCloudRuntimeChildPath=file=>{if(file!==new URL('./native-executor.cjs',import.meta.url).pathname)throw new Error('foreign binary');};");
       await writeFile(binary, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({args:process.argv.slice(2),home:process.env.HOME,codexHome:process.env.CODEX_HOME,config:process.env.XDG_CONFIG_HOME,cache:process.env.XDG_CACHE_HOME,data:process.env.XDG_DATA_HOME,state:process.env.XDG_STATE_HOME,actor:process.env.TEST_ACTOR,providerCredentialsPresent:['OPENAI_API_KEY','CODEX_API_KEY','ANTHROPIC_API_KEY','CURSOR_API_KEY'].some(key=>Boolean(process.env[key]))}));", { mode: 0o700 });

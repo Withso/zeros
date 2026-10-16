@@ -17,6 +17,36 @@ function fixture() {
 afterEach(() => { vi.useRealTimers(); });
 
 describe("cloud worker notifications", () => {
+  it("wakes every registered idle worker after LISTEN, on commit hints, and after a lost connection", async () => {
+    vi.useFakeTimers();
+    const first = client(), second = client();
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValue(second);
+    const workers = { outbox: vi.fn(), access: vi.fn(), invitations: vi.fn(), security: vi.fn(),
+      recovery: vi.fn(), forks: vi.fn(), checkpoints: vi.fn(), operations: vi.fn(), retirement: vi.fn(), templates: vi.fn() };
+    const channels = { outbox: "zeros_cloud_outbox_work", access: "zeros_cloud_access_work",
+      invitations: "zeros_cloud_invitation_work", security: "zeros_security_publication_work",
+      recovery: "zeros_cloud_recovery_work", forks: "zeros_cloud_fork_work", checkpoints: "zeros_cloud_checkpoint_work",
+      operations: "zeros_cloud_operations_work", retirement: "zeros_cloud_retirement_work", templates: "zeros_cloud_template_work" };
+    const stop = startCloudWorkerNotifications({ connect } as unknown as pg.Pool, workers);
+    await vi.advanceTimersByTimeAsync(0);
+    for (const name of Object.keys(workers) as Array<keyof typeof workers>) {
+      expect(first.query).toHaveBeenCalledWith(expect.stringContaining(`LISTEN ${channels[name]}`));
+      expect(workers[name]).toHaveBeenCalledOnce();
+      first.emit("notification", { channel: channels[name], payload: "private payload" });
+      expect(workers[name]).toHaveBeenCalledOnce();
+      first.emit("notification", { channel: channels[name], payload: "" });
+      expect(workers[name]).toHaveBeenCalledTimes(2);
+    }
+    first.emit("error", new Error("connection interrupted"));
+    // Hints while disconnected are deliberately lost; reconnect scans each queue.
+    await vi.advanceTimersByTimeAsync(1_000);
+    for (const wake of Object.values(workers)) expect(wake).toHaveBeenCalledTimes(3);
+    await stop();
+    second.emit("notification", { channel: channels.outbox, payload: "" });
+    expect(workers.outbox).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("wakes staging on committed qualification/release hints and after reconnect", async () => {
     vi.useFakeTimers();
     const connection = client(), runtimeStaging = vi.fn();
@@ -81,7 +111,7 @@ describe("cloud worker notifications", () => {
 
   it("retires long-held connections and suppresses late acquisition after stop", async () => {
     const { first, second, stop } = fixture();
-    await vi.advanceTimersByTimeAsync(600_000 + 1_000);
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60_000 + 1_000);
     expect(first.release).toHaveBeenCalledExactlyOnceWith(true);
     expect(second.query).toHaveBeenCalledOnce();
     await stop();
@@ -97,6 +127,57 @@ describe("cloud worker notifications", () => {
     expect(late.release).toHaveBeenCalledExactlyOnceWith(true);
     expect(late.query).not.toHaveBeenCalled();
     expect(wake).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("shared account queue wakes", () => {
+  it("listens and reconnects with only WorkOS registered, without any cloud worker", async () => {
+    vi.useFakeTimers();
+    const first = Object.assign(new EventEmitter(), {
+      query: vi.fn(async () => ({})),
+      release: vi.fn(),
+    });
+    const second = Object.assign(new EventEmitter(), {
+      query: vi.fn(async () => ({})),
+      release: vi.fn(),
+    });
+    const connect = vi
+        .fn()
+        .mockResolvedValueOnce(first)
+        .mockResolvedValue(second),
+      workos = vi.fn();
+    const stop = startCloudWorkerNotifications(
+      { connect } as unknown as pg.Pool,
+      { workos },
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(first.query).toHaveBeenCalledExactlyOnceWith(
+        "LISTEN zeros_account_maintenance_work",
+      );
+      expect(workos).toHaveBeenCalledOnce();
+      first.emit("notification", {
+        channel: "zeros_account_maintenance_work",
+        payload: "private",
+      });
+      expect(workos).toHaveBeenCalledOnce();
+      first.emit("notification", {
+        channel: "zeros_account_maintenance_work",
+        payload: "",
+      });
+      expect(workos).toHaveBeenCalledTimes(2);
+      first.emit("error", new Error("disconnected"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(workos).toHaveBeenCalledTimes(3);
+    } finally {
+      await stop();
+    }
+    second.emit("notification", {
+      channel: "zeros_account_maintenance_work",
+      payload: "",
+    });
+    expect(workos).toHaveBeenCalledTimes(3);
     expect(vi.getTimerCount()).toBe(0);
   });
 });

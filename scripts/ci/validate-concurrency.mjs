@@ -14,6 +14,13 @@ const QUEUED_JOBS = new Map([
   [".github/workflows/concurrency-canary.yml", new Set(["queue-canary"])],
 ]);
 
+const RUNTIME_PUBLISHERS = new Set([
+  "agent-runtime-radar.yml",
+  "agent-runtime-models.yml",
+  "agent-runtime-health.yml",
+  "agent-runtime-report.yml",
+]);
+
 /** Validate queue uses without changing the policy for ordinary concurrency. */
 export function validateQueuedConcurrency(workflow, file) {
   const errors = [];
@@ -74,6 +81,15 @@ export function validateConcurrency(root = process.cwd()) {
       continue;
     }
     errors.push(...validateQueuedConcurrency(workflow, file));
+    if (
+      RUNTIME_PUBLISHERS.has(name) &&
+      (workflow.concurrency?.group !== "agent-runtime-state" ||
+        workflow.concurrency?.["cancel-in-progress"] !== false)
+    ) {
+      errors.push(
+        `${file}: runtime state/writer publication must share the non-cancelling agent-runtime-state group`,
+      );
+    }
   }
   return errors;
 }

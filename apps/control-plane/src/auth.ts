@@ -669,7 +669,7 @@ async function withWorkOSAuthenticationTx<T>(
       const locks = await tx.query<{ acquired: boolean }>(
         `SELECT pg_try_advisory_xact_lock(hashtextextended(lock_key, 0)) AS acquired
          FROM unnest($1::text[]) WITH ORDINALITY AS locks(lock_key, position)
-         ORDER BY position`,
+         ORDER BY position /*lock_purpose='workos-authentication'*/`,
         [keys],
       );
       if (locks.rows.length !== keys.length || locks.rows.some(row => !row.acquired)) {
@@ -908,7 +908,7 @@ async function ensureUserWithoutProviderLock(
       // but without this lock the losing transaction surfaces an opaque 500
       // instead of reusing the row the winner just provisioned. Hash collisions
       // cause harmless extra serialization.
-      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0)) /*lock_purpose='auth-identity'*/`, [
         `identity:${input.provider.length}:${input.provider}:${input.providerSubject}`,
       ]);
       linked = await tx.query<{
@@ -993,7 +993,7 @@ async function ensureUserWithoutProviderLock(
       // Different provider identities can race with the same case-insensitive
       // email. Serialize that narrower signup branch so the loser observes the
       // committed owner below and receives the deliberate account_exists 409.
-      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`, [
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 1)) /*lock_purpose='auth-email'*/`, [
         `email:${input.email.toLowerCase()}`,
       ]);
       // No identity link yet for this (provider, sub). If a DIFFERENT identity

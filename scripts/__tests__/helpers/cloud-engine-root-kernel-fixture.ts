@@ -66,7 +66,7 @@ export async function runCloudEngineRootKernelFixture() {
       tree.write(`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/${filename}`,
         fs.readFileSync(`apps/desktop/src/engine/agents/containment/${filename}`, "utf8"));
     for (const directory of ["/srv/zeros/files/workspace", "/srv/zeros/state", CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome, CLOUD_ENGINE_MUTABLE_LAYOUT.captureHome,
-      "/run/zeros/engine", "/run/zeros/view/settings", "/run/zeros/workload-custody", `${view}/facade/sessions`, `${view}/etc`]) tree.mkdir(directory);
+      "/run/zeros/engine", "/opt/zeros-infra/.git-exec", "/run/zeros/view/settings", "/run/zeros/workload-custody", `${view}/facade/sessions`, `${view}/etc`]) tree.mkdir(directory);
     fs.chmodSync(tree.physical("/run/zeros/workload-custody"), 0o700);
     tree.write(`${view}/etc/cloud-worker.json`, { ...tree.marker, uid: 10003, gid: 10003,
       toolchain: { node: runtime.node, supervisor: `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs` } });
@@ -138,7 +138,7 @@ export async function runCloudEngineRootKernelFixture() {
     const args = cloudEngineViewArguments("serve", 4, runtime, view, undefined, undefined, placement);
     for (let index = 0; index < args.length; index++) if (["--bind", "--ro-bind"].includes(args[index])) {
       const source = args[index + 1];
-      if (source.startsWith("/srv/zeros") || source.startsWith("/run/zeros") || source === runtime.root) args[index + 1] = tree.physical(source);
+      if (source.startsWith("/srv/zeros") || source.startsWith("/run/zeros") || source === "/opt/zeros-infra/.git-exec" || source === runtime.root) args[index + 1] = tree.physical(source);
     }
     const monitorFile = path.join(tree.directory, "root-monitor.cjs");
     fs.writeFileSync(monitorFile, `const fs=require('node:fs'),{spawn}=require('node:child_process');

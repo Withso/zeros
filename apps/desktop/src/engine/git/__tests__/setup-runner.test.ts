@@ -140,6 +140,25 @@ describe("SetupManager", () => {
     expect(getWorkspaceById(wsId)?.setupState).toBe("passed");
   });
 
+  it("lets work that needs installed dependencies wait for a running setup", async () => {
+    const wsId = "ws_ddd444-lily";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    const mgr = new SetupManager(svc, () => {}, undefined, testBoundaryFactory);
+    expect(mgr.whenSettled(wsId)).toBeNull();
+    await mgr.start({ workspaceId: wsId, command: "true" });
+    let settled = false;
+    const waiting = mgr.whenSettled(wsId)!.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    mgr.handleExit(setupSessionId(wsId, 1), 1);
+    await waiting;
+    expect(settled).toBe(true);
+    expect(mgr.whenSettled(wsId)).toBeNull();
+  });
+
   it("maps exit code to passed/failed for the current run", async () => {
     const wsId = "ws_bbb222-iris";
     insertWorkspace(sampleWorkspace(wsId));

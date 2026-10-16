@@ -172,6 +172,8 @@ describe("Code Design target admission", () => {
       expect(instruction).not.toContain("Use your normal Read, Write, Edit");
       expect(instruction).toContain("Native frame verification is available through ordinary shell commands");
       expect(instruction).toContain("<list|validate|capture|preview>");
+      expect(instruction).toContain("add --theme <name> for another theme the canvas Themes menu offers");
+      expect(instruction).toMatch(/Read the Zeros Design skill before Design work: '[^']*zeros-design-skill\/skills\/zeros-design\/SKILL\.md'/);
     } finally {
       await tools?.dispose();
     }
@@ -187,6 +189,7 @@ describe("Code Design target admission", () => {
       expect(instruction).toContain("Use your normal Read, Write, Edit");
       expect(instruction).toContain("Native frame verification is available through ordinary shell commands");
       expect(instruction).not.toContain("Native file writes to Design are unavailable");
+      expect(instruction).toMatch(/Read the Zeros Design skill before Design work: '[^']*zeros-design-skill\/skills\/zeros-design\/SKILL\.md'/);
     } finally { await tools?.dispose(); }
   });
 

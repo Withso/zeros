@@ -50,7 +50,9 @@ describe("original cloud workload kernel inventory", () => {
     const prepared = await boundary.prepareOwned(request(), { kind: "terminal", role: "workload", terminalIdle: () => true });
     const child = await prepared.spawn({ ...launch(), args: ["-e", "console.log('ready');setInterval(()=>{},1000)"] });
     await new Promise<void>((resolve) => child.stdout!.once("data", () => resolve()));
-    expect(await workloads.inspect()).toMatchObject({ complete: true, workloadPids: [], pendingLaunches: 0 });
+    // Output proves startup, not that the real task has entered its idle wait.
+    await expect.poll(() => workloads.inspect(), { timeout: 3000 })
+      .toMatchObject({ complete: true, workloadPids: [], pendingLaunches: 0 });
     await prepared.stopAndProve();
   });
   it.each(["recent-input", "no-tty", "not-foreground", "async-result"] as const)("counts a terminal as work when %s prevents its idle proof", async (condition) => {

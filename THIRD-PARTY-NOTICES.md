@@ -219,6 +219,17 @@ tsx/TypeScript qualification tools. Package license and NOTICE files remain
 beside the packages. This inventory supplements the desktop license bundle;
 it does not reinterpret the vendor terms governing Claude or Cursor.
 
+The runtime also includes pinned Ubuntu resolute Git LFS 3.7.1 and Ubuntu noble's
+Noto Color Emoji, Unifont, Cyrillic X fonts, scalable Bitstream fonts, IPA Gothic,
+WenQuanYi Zen Hei, Loma and GNU FreeFont packages. Their exact versions, archive
+and copyright hashes, licenses and signed archive provenance are recorded in
+[`third_party/runtime-assets/lock.json`](third_party/runtime-assets/lock.json).
+The generated license bundle includes their notices and Git LFS's linked Go
+dependency notices (MIT/BSD/Apache/MPL terms). Unmodified font packages retain
+their OFL, IPA, Bitstream, M+ and applicable GPL/font-exception notices. Required
+GPL font and MPL go-uuid source archives/build recipes accompany the runtime.
+See the [provenance and update guide](third_party/runtime-assets/README.md).
+
 ## Maintenance policy
 
 Any change that adds, removes, upgrades, vendors, generates, or packages a

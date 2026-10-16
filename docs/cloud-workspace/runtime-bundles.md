@@ -45,7 +45,24 @@ Forks are refused. Each channel has its own non-cancelling publication lock.
 
 The reusable build retains the contained user-namespace runner setup, verifies
 the exact event SHA, and uploads the tarball, descriptor, manifest and build
-receipt. The publisher downloads that same run's immutable artifact ID. Its
+receipt. Before writing the archive, its `engine_startup` stage runs the staged
+Node binary against `worker/dist-engine/cli.js serve` on a free loopback port
+with temporary workspace, HOME, settings and data directories. It requires
+`Engine ready` for that port and rejects early exit (including exit 0), logged
+unhandled rejections or exceptions, and a 60-second startup timeout. The check
+reaps its process group and removes temporary state. This loads the actual
+bundled module graph; `--help` and syntax checks do not. It uses no credentials
+and complements the separate cloud containment and functional qualification.
+
+The Linux `cloud-runtime-bundle-build.yml` lane already invokes this builder,
+so both standalone and desktop-triggered runtime publication inherit the gate.
+For a local Node build, run `pnpm build:engine` then
+`node scripts/smoke-engine-bundle.mjs`; use `--dist-engine <directory>` to
+check another built output under the Node binary running the smoke script.
+The macOS packaged-binary gate remains
+`pnpm smoke:engine`.
+
+The publisher downloads that same run's immutable artifact ID. Its
 job names the selected GitHub environment, so that environment's branch rules
 and configured reviewer protections apply before OIDC access. It verifies the
 current checkout and branch plus the latest exact-SHA Preflight and CodeQL
@@ -210,9 +227,33 @@ and `cgroup_retired`. The installer reports a nested setup failure as stage
 installer diagnostic cannot forward a setup check such as `generation_pin`.
 Diagnostics cannot include free text, paths, URLs, stderr or exception fields.
 
+Setup failures also preserve the closed engine startup class and substage,
+including credential-control rejection at `boot_durability`. Each failed owned
+claim records `cloud_workspace.setup_claim_failed` in the append-only audit log,
+keyed by setup run and execution fence. The receipt commits before retirement;
+current-claim timings can then reset on retry without losing earlier evidence.
+Admission cleanup or a later heartbeat cannot replace the first error. A
+reclaimed crash lease records `setup_lease_lost` at the worker's `runtime` phase
+unless an earlier exact-claim receipt exists; it cannot infer an engine stage
+that was never received. Slow-request logs alone cannot prove a boot call was
+skipped. Known credential-control integrity/storage failures are terminal;
+existing classified transient retries retain their original deadlines.
+
+For a resume correction, qualify the new immutable runtime on its exact base,
+then use the product Computer build and verify the persisted `build.runtime_id`
+before creating the test workspace. A restart keeps the generation's runtime
+pin; deploying the CP alone cannot repair an older pinned engine. Qualification
+must cover create, terminal, stop and resume with both fresh and retained
+credential controls, plus 20 consecutive usable wakes with zero setup retries.
+Retain the per-claim diagnostic and timing receipts for any failed attempt.
+Source rollback can stop new selection and revert CP diagnostics without
+altering data. Keep a migrated SQLite ledger on a writer-aware qualified runtime;
+do not downgrade it in place to an older writer-unaware engine or clear its
+fences. Existing generation pins and product recovery checks stay authoritative.
+
 ## Registry, pins and authority
 
-The registry has five tables: base compatibility contracts, approved Boat base
+The runtime authority has five registry tables: base compatibility contracts, approved Boat base
 images, runtime bundles, ordered channel releases, and per-runtime/base/
 credential-kind v4 qualifications. Every new channel release uses the
 OIDC-verified GitHub run ID as its order, shared across the Alpha and standalone
@@ -230,7 +271,7 @@ bounded to 16 KiB. There are no per-provider real-turn case or continuation
 tables. Smoke scheduling uses the separate run and provider journals below.
 
 For internal Alpha, the control plane inserts qualification evidence itself
-(AB-2, for example `{mode:"smoke",checks:[...]}`). All registry tables have enabled
+(AB-2, for example `{mode:"smoke",checks:[...]}`). These five registry tables have enabled
 and forced RLS with only `app_is_system()` policies. The broad `zeros_app` DML
 grants inherited from migration 0004 remain; **restrictions are enforced by RLS
 and triggers, not column grants**. Tenant contexts cannot read or write these
@@ -241,6 +282,14 @@ Qualification `enabled`/`mcp_qualified` can only move to false while revoked;
 revoked qualifications must have both false. Native capabilities are immutable.
 Historical qualification rows remain immutable audit data; current executable
 admission joins only exact v4 qualification records.
+
+The separate `cloud_runtime_images` registry (migration 0141) records derived
+Boat named snapshots containing an approved base and its qualified current
+runtime. Image identity and provider observations are immutable; lifecycle moves
+from building to ready or failed, and ready to retiring to retired. Images do not
+grant qualification or replace runtime/base admission. Cloud Computer claims
+optionally pin a ready image alongside their builder intent to avoid installing
+the runtime on each builder. See [runtime images](runtime-images.md).
 
 Generations carry the nullable six-column group `runtime_id`,
 `runtime_manifest_sha256`, `runtime_base_image_id`, `runtime_base_compatibility_id`,
@@ -522,8 +571,18 @@ identity under the immutable registry contract; rerunning today's smoke worker
 cannot upgrade existing evidence. Keep full-mode deployments closed until that
 evidence exists.
 
-Failures retain only a closed diagnostic and insert no qualifications. A
-crashed run is reconciled after its deadline: recover the sandbox identity from
+The first closed failure is committed before cleanup and retained through
+pending deletion, worker restart and reconciliation. If that write fails,
+cleanup still proceeds and the worker retries recording the original failure
+when it records pending cleanup or finishes. Cleanup status is tracked by the
+run state, cleanup lease, provider journal and confirmation timestamp; it must
+not replace an earlier self-test or install failure. A successful smoke with
+unconfirmed cleanup records `cleanup/cleanup_unconfirmed` and grants no
+qualification. `reconcile/timeout` is a fallback only when no earlier failure
+was stored; cleanup may shorten the run deadline, so this code alone does not
+prove the smoke exceeded its original deadline.
+
+A crashed run is reconciled after its deadline: recover the sandbox identity from
 the provider journal, delete it, verify the deletion receipt and a subsequent
 404, then mark the run failed. A receipt may be `completed`, or `blocked` at
 `waiting_for_uploads`, `kept_for_newer_snapshots` or `waiting_for_restore` with
@@ -545,7 +604,14 @@ tracks attempts from the start. Deleting a bound sandbox remains possible after
 the qualification run becomes terminal; cleanup evidence is recorded only
 after confirmed absence.
 
-The shared `CloudBuilderVms` module also supports authorized template sources
+Publication alone does not make a runtime selectable. Diagnose its exact
+runtime/base compatibility pair and retained failure before retrying. A missing
+packaged source dependency requires a new immutable runtime publication; a
+retry cannot repair the old archive. After the corrected descendant qualifies,
+verify the new Computer build's persisted `runtime_id` before using it for
+workspace setup. Existing Computers and workspace generations keep their pins.
+
+The shared `CloudBuilderVms` module also supports authorized template and runtime-image sources
 and graceful stop-to-archived for Cloud Computer builds. Its system-only
 `cloud_builder_vm_operations` journal preserves intent before provider I/O
 and the sandbox ID before readiness or wallet validation. Workspace journals
@@ -553,6 +619,11 @@ require an organization/generation owner and cannot represent these
 infrastructure VMs. The extracted pinned-SSH transport is shared with workspace
 setup; fixed commands live in `cloud-builder-commands.ts`, where computer
 builds add their closed command entries.
+
+The `runtime-image` purpose enables snapshots and admits only the TCB helper
+among those Computer commands. Image preparation and its cold probe retain the
+same durable allocation journal; the Computer consumer preserves legacy base
+intent digests and replays its saved image source after disablement or retirement.
 
 ## Alpha live verification runbook
 
@@ -607,6 +678,7 @@ directly. The control-plane worker owns VM cleanup.
 | --- | --- | --- |
 | `CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE` | `v4` | Only `v4` is accepted; new cloud workspaces require a saved v2 Computer source and qualified pin. |
 | `CLOUD_RUNTIME_QUALIFICATION_MODE` | `full` | `full` requires full evidence; `smoke` accepts smoke or full evidence for selection and credential admission. |
+| `CLOUD_RUNTIME_IMAGES_ENABLED` | `false` | Permits new derived runtime images and Computer image choices. Saved creates and cleanup keep their original source when disabled. |
 
 The configured base is the newest approved, non-revoked base image. A revoked
 compatibility contract on that base closes admission rather than selecting an
@@ -736,7 +808,15 @@ the disposable automatic-wake exercise, cleanup and owner Mac acceptance. Local
 PostgreSQL and mocked tests do not constitute live Alpha acceptance.
 
 V4 setup checks the base status and compatibility ID, requiring `idle` or
-`waiting_for_runtime`. The existing pinned SSH transport delivers a maximum
+`waiting_for_runtime`. The status command waits inside the base while the
+provider restore is incomplete. Before minting the one-use admission or the
+artifact capability, setup therefore waits out a timed-out status in the same
+claim, polling at most every two seconds, up to the base's own restore
+ceiling plus a minute (540 seconds). That wait is secret-free and never
+reports readiness. Provider errors keep their 120-second bound unless the
+base has already reported that it is restoring. The readiness check after
+minting is unchanged, so the admission and capability keep their full
+lifetime for installation. The existing pinned SSH transport delivers a maximum
 64 KiB encoded installer input containing the descriptor, a 15-minute artifact
 GET capability and the unchanged nested setup payload. Artifact URLs never enter workspace responses, persisted
 setup logs, grants or errors. The helper result uses the existing parser and the

@@ -33,6 +33,19 @@ function gatewayWith(adapter: AgentAdapter): AgentGateway {
   return gateway;
 }
 
+it("publishes a refreshed empty account catalog without another adapter or authority path", async () => {
+  let models: Array<{ value: string; label: string }> = [{ value: "gpt-6-astra", label: "Astra" }];
+  const initialize = vi.fn(async () => ({ protocolVersion: 1, _meta: { modelsDynamic: true, modelsAccountScoped: true, models } }));
+  const gateway = gatewayWith({ agentId: "contained", initialize, dispose: async () => {} } as unknown as AgentAdapter);
+  gateways.push(gateway);
+  await gateway.initializeAgent("contained");
+  models = [];
+  const [first, second] = await Promise.all([gateway.initializeAgent("contained"), gateway.initializeAgent("contained")]);
+  expect(first).toBe(second);
+  expect(first._meta?.models).toEqual([]);
+  expect(initialize).toHaveBeenCalledTimes(2);
+});
+
 const gateways: AgentGateway[] = [];
 
 afterEach(async () => {
@@ -41,6 +54,17 @@ afterEach(async () => {
 });
 
 describe("gateway agent initialization single-flight", () => {
+  it("reads a session catalog without publishing it as the provider-wide account snapshot", async () => {
+    const initialize = vi.fn(async () => ({ protocolVersion: 1 }));
+    const scoped = { protocolVersion: 1, _meta: { modelsAccountScoped: true, models: [{ value: "account-model", label: "Model" }] } };
+    const initializeSession = vi.fn(async (id: string) => id === "owned" ? scoped : { protocolVersion: 1 });
+    const gateway = gatewayWith({ agentId: "contained", initialize, initializeSession, dispose: async () => {} } as unknown as AgentAdapter);
+    gateways.push(gateway);
+    expect(await gateway.initializeAgent("contained", "owned")).toMatchObject(scoped);
+    expect(initializeSession).toHaveBeenCalledExactlyOnceWith("owned");
+    expect(gateway.agentInitializeSnapshot("contained")).toBeNull();
+    expect((await gateway.initializeAgent("contained"))._meta?.models).toBeUndefined();
+  });
   it("reads confirmed capabilities without starting an adapter or returning another auth snapshot", async () => {
     const config = vi.spyOn(providerEnv, "applyUserProviderConfig").mockReturnValue({ env: { OPENAI_API_KEY: "fixture-a" } });
     const initialize = vi.fn(async () => ({ protocolVersion: 1 }));

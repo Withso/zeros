@@ -11,6 +11,7 @@ import { zerosDataDir } from "../../db/paths";
 import { CLOUD_CODEX_STATE_DIRECTORIES, CLOUD_NATIVE_SKILL_HOMES, createCloudNativeHome, type CloudNativeHome } from "./cloud-native-home";
 import { assertCloudPreparedBoundaryLive, cloudPreparedBoundaryRequest } from "./cloud-execution-boundary";
 import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
+import { cloudRuntimeAssetEnvironment } from "./cloud-runtime-assets.mjs";
 import { acquireCloudNativeHistory, CLOUD_NATIVE_HISTORY_ROOT } from "./cloud-native-history";
 import { loadCloudWorkerConfiguration } from "./cloud-worker-config";
 import type { BoundaryLaunchSpec, BoundaryProcess, BoundarySpawnRequest, PortRequest, PreparedBoundary } from "./types";
@@ -51,7 +52,8 @@ export function cloudNativeProviderEnvironment(material: CloudAgentAccessMateria
     throw new Error("Invalid cloud provider model");
   const runtime = resolveCloudRuntime();
   const env: Record<string,string> = { PATH: `${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,
-    LANG: "C.UTF-8", SHELL: "/bin/bash", ZEROS_REQUIRE_EXACT_MODEL: "1", ...nativeHome.environment() };
+    LANG: "C.UTF-8", SHELL: "/bin/bash", ZEROS_REQUIRE_EXACT_MODEL: "1", ...nativeHome.environment(),
+    ...cloudRuntimeAssetEnvironment(runtime) };
   if (["low","medium","high","xhigh","max","ultracode"].includes(settings?.ZEROS_THINKING_EFFORT ?? "")) env.ZEROS_THINKING_EFFORT = settings!.ZEROS_THINKING_EFFORT!;
   if (["auto","auto-edit","ask","default","accept-edits","plan","bypass","agent","full-access","read-only"].includes(settings?.ZEROS_PERMISSION_MODE ?? "")) env.ZEROS_PERMISSION_MODE = settings!.ZEROS_PERMISSION_MODE!;
   if (settings?.ZEROS_FAST_MODE === "1" || settings?.ZEROS_FAST_MODE === "0") env.ZEROS_FAST_MODE = settings.ZEROS_FAST_MODE;

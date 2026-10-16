@@ -20,7 +20,8 @@ import type {
 
 import type { RuntimeClient } from "./ws-client";
 import type { CloudResourceUsageConnection } from "./workspace-runtime-client";
-import type { CloudWorkspaceTarget } from "./cloud-workspace-key";
+import { parseCloudScopedId, type CloudWorkspaceTarget } from "./cloud-workspace-key";
+import { CloudHistoryRestoreMetadataSchema, cloudHistoryFenceHasTranscript, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
 import { WorkspaceResourceUsageSchema, type WorkspaceResourceUsage } from "@zeros/protocol/workspace-resource-usage";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type { BridgeMessage } from "./messages";
@@ -782,6 +783,51 @@ export async function bridgeMessageWindow(
   before?: number,
   timeoutMs = CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
 ): Promise<PersistedMessageWire[]> {
+  return readableMessageRows(await bridgeMessageWindowSnapshot(bridge, chatId, limit, before, timeoutMs));
+}
+
+export type MessageWindowSnapshot = {
+  messages: PersistedMessageWire[];
+  source: "local" | "native" | "control-plane" | "unknown";
+  restoreHead?: CloudHistoryRestoreFence;
+  isCurrent?: () => boolean;
+};
+
+type MessageWindowResponse = { messages?: PersistedMessageWire[]; projection?: unknown; historyHeads?: unknown } | undefined;
+
+/** Bare row consumers (copy, attachments and paging) cannot distinguish a
+ * missing projection from an empty conversation once its receipt is dropped. */
+function readableMessageRows(page: MessageWindowSnapshot): PersistedMessageWire[] {
+  if (page.isCurrent?.() === false)
+    throw Object.assign(new Error("Cloud history changed while loading"), { code: "cloud_history_changed" });
+  if (page.restoreHead && !page.restoreHead.head?.deleted && !cloudHistoryFenceHasTranscript(page.restoreHead) &&
+      (page.source !== "native" || page.messages.length === 0))
+    throw Object.assign(new Error("Cloud transcript is catching up"), { code: "cloud_history_incomplete" });
+  return page.messages;
+}
+
+function messageWindowSnapshot(bridge: RuntimeClient, chatId: string, r: MessageWindowResponse): MessageWindowSnapshot {
+  const target = parseCloudScopedId(chatId);
+  const receipt = target && r && bridge instanceof WorkspaceRuntimeClient ? bridge.cloudHistoryReadReceipt(r) : undefined;
+  let restoreHead: CloudHistoryRestoreFence | undefined;
+  if (target && receipt && (r?.projection !== undefined || r?.historyHeads !== undefined)) {
+    const metadata = CloudHistoryRestoreMetadataSchema.parse({ projection: r?.projection, historyHeads: r?.historyHeads });
+    if (metadata.projection.organizationId !== target.organizationId || metadata.projection.workspaceId !== target.workspaceId)
+      throw new Error("Cloud transcript page belongs to another workspace.");
+    restoreHead = { projection: metadata.projection, conversationId: target.id,
+      head: metadata.historyHeads.find(head => head.conversationId === target.id) ?? null };
+  }
+  return { messages: r?.messages ?? [], source: receipt?.source ?? (target ? "unknown" : "local"),
+    ...(restoreHead ? { restoreHead } : {}), ...(receipt ? { isCurrent: receipt.isCurrent } : {}) };
+}
+
+export async function bridgeMessageWindowSnapshot(
+  bridge: RuntimeClient,
+  chatId: string,
+  limit: number,
+  before?: number,
+  timeoutMs = CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
+): Promise<MessageWindowSnapshot> {
   const r = (await workspaceOp(
     bridge,
     "messages.window",
@@ -791,8 +837,8 @@ export async function bridgeMessageWindow(
       ...(before !== undefined ? { before } : {}),
     },
     timeoutMs,
-  )) as { messages?: PersistedMessageWire[] } | undefined;
-  return r?.messages ?? [];
+  )) as MessageWindowResponse;
+  return messageWindowSnapshot(bridge, chatId, r);
 }
 
 export async function bridgeMessageWindowOlder(
@@ -811,8 +857,8 @@ export async function bridgeMessageWindowOlder(
       beforeMsgId,
     },
     timeoutMs,
-  )) as { messages?: PersistedMessageWire[] } | undefined;
-  return r?.messages ?? [];
+  )) as MessageWindowResponse;
+  return readableMessageRows(messageWindowSnapshot(bridge, chatId, r));
 }
 
 /** Wipe a chat's transcript in the engine (reset). */

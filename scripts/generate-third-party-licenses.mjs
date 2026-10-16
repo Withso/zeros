@@ -474,7 +474,44 @@ function packageDocuments(record) {
       text: normalizeText(readFileSync(join(record.packagePath, name), "utf8")),
     })),
     ...nested,
+    ...(record.additionalDocuments ?? []),
   ];
+}
+
+function runtimeSystemAssetRecords() {
+  const directory = join(ROOT, "third_party/runtime-assets");
+  const lock = JSON.parse(readFileSync(join(directory, "lock.json"), "utf8"));
+  const verified = (file, digest) => {
+    const bytes = readFileSync(file);
+    if (createHash("sha256").update(bytes).digest("hex") !== digest)
+      throw new Error("Runtime asset license does not match the authenticated package pin");
+    return normalizeText(bytes.toString("utf8"));
+  };
+  const common = lock.commonLicenses.files.map(file => ({
+    label: `Ubuntu base-files@${lock.commonLicenses.version} — ${file.file}`,
+    text: verified(join(directory, file.file), file.sha256),
+  }));
+  const notices = lock.gitLfsNotices;
+  const lfs = lock.packages.find(pin => pin.name === "git-lfs");
+  if (lfs.builtUsingField !== notices.builtUsingField || lfs.builtUsing !== notices.builtUsing)
+    throw new Error("Git LFS notices do not match the authenticated static dependency pin");
+  for (const file of [notices.upstream, ...notices.sources, ...notices.retainedSource])
+    verified(join(directory, file.file), file.sha256);
+  const builtUsing = notices.builtUsing.split(/,\s*/).map(value => {
+    const match = /^([^ ]+) \(= ([^)]+)\)$/.exec(value);
+    if (!match) throw new Error("Invalid Git LFS Built-Using notice pin");
+    return `${match[1]}@${match[2]}`;
+  }).sort();
+  if (JSON.stringify(builtUsing) !== JSON.stringify(notices.sources.map(pin => `${pin.name}@${pin.version}`).sort()))
+    throw new Error("Incomplete Git LFS Built-Using notices");
+  return lock.packages.map(pin => {
+    const packagePath = join(directory, pin.name);
+    verified(join(packagePath, "copyright"), pin.copyrightSha256);
+    const repository = `https://packages.ubuntu.com/${pin.suite ?? lock.release.suite}/${pin.name}`;
+    return { name: `ubuntu:${pin.name}`, version: pin.version, license: pin.license,
+      author: "", homepage: repository, repository, repositoryKey: repository,
+      packagePath, surfaces: new Set(["cloud Linux runtime (amd64)"]), documentIds: [], additionalDocuments: common };
+  });
 }
 
 const mitTerms = (holder) => `MIT License
@@ -619,6 +656,7 @@ for (const record of [
   ...webRecords,
   electronRuntimeRecord(),
   ...stagedReleaseRecords(),
+  ...runtimeSystemAssetRecords(),
 ]) {
   const key = `${record.name}@${record.version}`;
   const previous = recordsByKey.get(key);

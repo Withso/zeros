@@ -1,0 +1,9 @@
+{
+  "id": "cloud-writer-history-republication",
+  "kind": "replay",
+  "area": "cloud-engine-resume",
+  "fixedBy": "pr:528",
+  "symptom": "A successor reset its mirror cursor but did not publish inherited current history, leaving the current CP projection absent after resume.",
+  "rule": "The bug-fix loop follows retained state through its consumer. A writer handoff must publish exact terminal prerequisites and latest heads into its new projection, preserve immutable retries, and never redispatch inherited requests or replay historical controls as new events. Intrinsically oversized staging must advance with an honest incomplete fence instead of permanently blocking mirror drain and seal.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-local-command-queue-mirror.test.ts apps/desktop/src/engine/__tests__/cloud-local-command-history-sealed.test.ts"
+}

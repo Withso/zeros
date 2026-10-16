@@ -37,7 +37,7 @@ the compatibility manifest. A regenerated method cannot silently appear or
 disappear without review.
 
 The control-plane authentication keeper is independently qualified at 0.154.0
-while the interactive runtime is 0.161.0. Its version participates in encrypted
+while the interactive runtime is 0.162.1. Its version participates in encrypted
 cache authentication and a database constraint. `check:codex-pin` checks that
 package against `CODEX_AUTH_RUNTIME_VERSION`, not the desktop protocol version;
 Renovate excludes it from routine agent upgrades. A keeper upgrade requires an
@@ -68,7 +68,7 @@ every classified method has a behavioral implementation or test.
 - Notification `forwarded`: generated typed subscription is available, but no
   canonical or product behavior is claimed.
 
-At the 0.161.0 pin this covers 267 methods: 170 client requests, 11 server
+At the 0.162.1 pin this covers 268 methods: 171 client requests, 11 server
 requests, and 86 server notifications. The five `userVerification/*` client
 methods are generated-only: Zeros does not expose native identity verification.
 Relative to 0.154.0, `userVerification/cancel`, the three `thread/attachment/*`
@@ -87,6 +87,63 @@ the same validated, fail-closed form path as `openai/form`. Run
 `pnpm check:codex-coverage` for the offline drift check.
 
 ## Transcript fidelity
+
+### 0.162.1 compatibility
+
+`MessagePhase.partial_answer` is durable assistant output in its original
+position: work → partial answer → more work → final answer. A late phase on
+`item/completed` updates its exact message without duplicating it. Neither
+partial nor final message phase settles the provider turn; the existing working
+indicator and elapsed clock continue until terminal lifecycle evidence. The
+same rules apply inside Agent groups, to loaded history, and over the cloud
+wire. Phase-less older records keep their previous presentation.
+The bounded desktop cloud cache accepts partial-answer phases and retains only
+sanitized Agent display labels; private tool bodies remain excluded.
+
+The Zeros bridge remains protocol 20. This is an additive value on the existing
+optional `phase` field, with subagent metadata inside the existing `rawInput`
+record. The prior bridge parser and message reducer preserve both; an older
+renderer can still read the prose using its existing working-feed presentation.
+No wire field, message discriminator or persistence migration is required.
+`check:protocol` reports its advisory file-change reminder for this compatible
+union expansion; it is not a reason to reject otherwise compatible peers.
+
+Native `subAgentActivity.model` and `reasoningEffort` enrich the existing Agent
+row. Metadata from a completed activity item can fill in its start, without
+confusing item delivery with child completion. Missing/null values retain the
+last confirmed metadata. New interactions may update it; replay of an older
+activity cannot replace the newer interaction's metadata or lifetime. Known
+models use catalog labels; native `ultra`, `none`, and `minimal` keep their own
+meaning. Missing metadata in older records produces no invented label.
+
+The remaining additions have explicit boundaries:
+
+| Surface | Disposition |
+| --- | --- |
+| `thread/attachmentOwner/list` | Generated-only reverse attachment lookup; no product caller. It is the only added RPC. |
+| `Turn.rootTurnId`; `turn/start.parentTurnId` / `rootTurnId` | Generated-only for future host-started delegated turns. Current Zeros sends do not establish that native parentage; direct user turns omit it. Cloud admission does not grant callers a new lineage override. Codex owns its internal delegation. |
+| `EnvironmentAddParams.skills.required` | Native optional environment admission. Existing remote environments omit it; no new required skill or startup policy. |
+| `supportsIndependentSpeedModes`, browser extension header requirements, misalignment `reviewTarget` | Generated-only policy metadata. No automatic speed expansion, browser header forwarding, or target-based continuation. |
+| `SkillMetadata.path` / `SkillSummary.path` | `LegacyAppPathString` still serializes as a string. Preserve provider paths as inventory identity/metadata; do not reinterpret an environment path as a device filesystem grant. |
+| `ResponseItem.additional_tools` | Native incremental tool-catalog metadata; no fabricated tool row. |
+| Removed `namespaceTools` capability | No Zeros consumer; removed by generation. |
+
+The V2 command contract still uses `aggregatedOutput`. Native persistence now
+caps command output at 64 KiB. Completed-item replay must not replace a richer
+already retained result; existing bounded output/truncation presentation
+remains in use. Zeros does not depend on the retired raw stdout/stderr fields.
+The 0.162.1 multiline-question and background-server compatibility fixes are
+runtime-owned; they require no new Zeros controls or screen.
+
+Regression entry points are `thread-notifications.test.ts`,
+`app-server-translator.test.ts`, `codex-upgrade-transcript.test.ts`,
+`turn-partition.test.ts`, `tool-presentation.test.ts`, and the
+`codex-runtime-ui` browser scenario. They cover native bookends, late phases,
+replay, history, parent/child lifetime, Personal local, organization-local,
+organization-cloud and owner switching. Browser fixtures exercise both themes.
+These simulations and the Linux native launch smoke do not establish packaged
+macOS or deployed cloud-runtime qualification. Cloud generations retain their
+runtime pin until explicitly upgraded; waking/restarting does not upgrade them.
 
 ### 0.161.0 compatibility
 

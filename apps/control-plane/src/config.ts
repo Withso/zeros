@@ -25,8 +25,11 @@ import { developmentIdentity, type DevelopmentIdentity } from "./development-env
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
 import { loadCloudRuntimeConfig, type CloudRuntimeConfig } from "./cloud-workspaces/runtime-config.js";
+import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
+import { loadZerosDevAuthConfig, type ZerosDevAuthConfig } from "./zeros-dev-auth-config.js";
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
+import { loadWorkerPollIntervals, type WorkerPollIntervals } from "./worker-polling-config.js";
 import { validateReleaseLedgerUrl } from "./client-compatibility.js";
 import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
@@ -54,7 +57,8 @@ const EnvSchema = z.object({
   DATABASE_MIGRATION_ROLE: z.string().min(1).optional(),
   DATABASE_MIGRATIONS_ON_BOOT: z.enum(["true", "false"]).default("true"),
   DATABASE_MAINTENANCE_MODE: z.enum(["true", "false"]).default("false"),
-  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(6),
+  CONTROL_PLANE_PROCESS_ROLE: z.enum(["api", "worker", "combined"]).default("combined"),
   SLOW_REQUEST_LOG_MS: z.coerce.number().int().min(50).max(60_000).default(DEFAULT_SLOW_REQUEST_LOG_MS),
   DESKTOP_RELEASE_LEDGER_URL: z.string().optional(),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
@@ -312,6 +316,9 @@ export type Config = {
   databaseMigrationRole?: string;
   databaseMigrationsOnBoot?: boolean;
   databasePoolMax?: number;
+  /** Combined preserves existing deployments; dedicated workers scale independently. */
+  processRole?: "api" | "worker" | "combined";
+  workerPollIntervalsMs?: WorkerPollIntervals;
   /** Requests at least this slow are logged once by route template. */
   slowRequestLogMs?: number;
   /** Receives aggregate cloud health alerts; null disables them. */
@@ -321,6 +328,8 @@ export type Config = {
   auth: AuthBackendConfig;
   /** Null in legacy Auth0 mode. WorkOS secrets live only on Railway. */
   workos: WorkOSBackendConfig | null;
+  /** Fixed Alpha test identity; omitted/disabled everywhere else. No password. */
+  zerosDevAuth?: ZerosDevAuthConfig | null;
   /** Exact, environment-bound invitation landing page (without a query). */
   inviteLinkBase: string;
   port: number;
@@ -338,7 +347,7 @@ export type Config = {
   /** Null unless the explicit paid-resource gate and complete provider block
    * are present. Merely setting a Boat API key never enables creation. */
   cloudWorkspaces: CloudWorkspaceBackendConfig | null;
-  cloudAgentCredentials?: CloudAgentCredentialConfig;
+  cloudAgentCredentials?: CloudAgentCredentialConfig | null;
   selectedCloudWorker?: SelectedCloudWorker | null;
   cloudRuntimePublication?: CloudRuntimePublicationConfig;
   /** Metadata for release identity; workspace selection is owned separately. */
@@ -1517,6 +1526,11 @@ const CloudRuntimePublicationEnvSchema = z.object({
 function loadCloudRuntimePublicationConfig(env: NodeJS.ProcessEnv, channel: Config["deploymentChannel"]): {
   publication: CloudRuntimePublicationConfig; newWorkspaceProfile: "v4";
 } {
+  if (!cloudWorkspaceChannelEnabled(channel)) return {
+    publication: { enabled: false, audience: `zeros-control-plane-${channel}`, repository: "Withso/zeros",
+      environment: channel === "production" ? "production" : "beta", s3: null },
+    newWorkspaceProfile: "v4",
+  };
   const parsed = CloudRuntimePublicationEnvSchema.safeParse(env);
   if (!parsed.success) {
     // Enum/url validators can quote their input in issue messages. Diagnostics
@@ -1580,7 +1594,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   const e = parsed.data;
   const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development").trim().toLowerCase();
   const deploymentChannel = channel === "alpha" || channel === "beta" || channel === "production" ? channel : "development";
-  const resumeFlag = env.CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED ?? (deploymentChannel === "alpha" ? "true" : "false");
+  const cloudChannel = cloudWorkspaceChannelEnabled(deploymentChannel);
+  const resumeFlag = cloudChannel
+    ? env.CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED ?? (deploymentChannel === "alpha" ? "true" : "false") : "false";
   if (!["true", "false"].includes(resumeFlag)) throw new Error("Invalid cloud workspace resume configuration");
   if (resumeFlag === "true" && deploymentChannel !== "alpha") throw new Error("Cloud workspace resume is available only on Alpha");
   const runtime = loadCloudRuntimePublicationConfig(env, deploymentChannel);
@@ -1630,6 +1646,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     }
   }
 
+  const cloudWorkspaces = cloudChannel ? loadCloudWorkspaceConfig(env, github) : null;
   return {
     databaseUrl: parseDatabaseTarget(e.DATABASE_URL).toString(),
     ...(e.DATABASE_LISTEN_URL ? {databaseListenUrl: parseDatabaseTarget(e.DATABASE_LISTEN_URL).toString()} : {}),
@@ -1637,11 +1654,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     ...(migrationRole ? {databaseMigrationRole: migrationRole} : {}),
     databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
     databasePoolMax: e.DATABASE_POOL_MAX,
+    processRole: e.CONTROL_PLANE_PROCESS_ROLE,
+    workerPollIntervalsMs: loadWorkerPollIntervals(env, cloudWorkspaces !== null),
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
     operationsAlertEmail: loadOperationsAlertEmail(env, diagnostics),
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,
+    zerosDevAuth: loadZerosDevAuthConfig(env, deploymentChannel, auth),
     inviteLinkBase,
     port: e.PORT,
     ...(e.HOST ? { host: e.HOST } : {}),
@@ -1652,9 +1672,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     github,
     feedback: loadFeedbackConfig(env, diagnostics),
     chatTitleApiKey: e.CHAT_TITLE_OPENAI_API_KEY || null,
-    cloudWorkspaces: loadCloudWorkspaceConfig(env, github),
-    cloudAgentCredentials: loadCloudAgentCredentialConfig(env),
-    selectedCloudWorker: loadSelectedCloudWorker(env),
+    cloudWorkspaces,
+    cloudAgentCredentials: cloudChannel ? loadCloudAgentCredentialConfig(env) : null,
+    selectedCloudWorker: cloudChannel ? loadSelectedCloudWorker(env) : null,
     cloudRuntimePublication: runtime.publication,
     cloudWorkspaceNewRuntimeProfile: runtime.newWorkspaceProfile,
     cloudWorkspaceResumeExistingEnabled: resumeFlag === "true",

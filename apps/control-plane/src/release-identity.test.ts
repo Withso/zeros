@@ -17,6 +17,25 @@ function harness(overrides: Partial<Config> = {}, ledger: Array<{ name: string; 
   return { app, readLedger };
 }
 describe("public release readiness", () => {
+  it.each(["beta", "production"] as const)("does not read cloud health, registry or qualification on %s", async channel => {
+    const readWorkerQualified = vi.fn(async () => { throw new Error("cloud qualification unavailable"); });
+    const readRuntimeIdentity = vi.fn(async () => { throw new Error("cloud registry unavailable"); });
+    const readHealth = vi.fn(async () => { throw new Error("cloud health unavailable"); });
+    const app = createReleaseIdentityRoutes({ ...config, deploymentChannel: channel, selectedCloudWorker: {
+      provider: "boat", imageRef: `boat:fixture@sha256:${"c".repeat(64)}`, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096,
+    }, cloudRuntimePublication: { enabled: false, audience: "fixture", repository: "example/zeros", environment: channel, s3: null } }, {} as pg.Pool, {
+      sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest,
+      readWorkerQualified, readRuntimeIdentity, cloudWorkspaceHealthService: { read: readHealth },
+    });
+    const response = await app.request("/v1/release-identity");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ready: true, cloud: { enabled: false, ready: true, state: "disabled" },
+      worker: null, workerQualified: false, migrations: { state: "current" } });
+    expect(readHealth).not.toHaveBeenCalled();
+    expect(readWorkerQualified).not.toHaveBeenCalled();
+    expect(readRuntimeIdentity).not.toHaveBeenCalled();
+  });
+
   it("adds optional v4 metadata without changing any v1 readiness field", async () => {
     const legacy = await (await harness().app.request("/v1/release-identity")).json();
     const runtimeV4 = { newWorkspaceProfile: "v4" as const,
@@ -251,9 +270,11 @@ describe("readiness with deferred retired Boat deletions", () => {
   const health = { enabled: true as const, backgroundWorkers: "enabled" as const, setupExecution: "enabled" as const,
     durability: "enabled" as const, outboxDelivery: "retained" as const, operationalState: "degraded" as const,
     reasons: ["deletion_intent_stalled"] };
-  function deferred(overrides: Partial<Config> = {}, measured: CloudWorkspaceHealth = health, eligible = true, qualified = true) {
+  function deferred(overrides: Partial<Config> = {}, measured: CloudWorkspaceHealth = health, eligible = true, qualified = true,
+    controlPlaneReady?: boolean) {
     const read = vi.fn(async () => measured);
-    const readForRelease = vi.fn(async () => ({ health: measured, stalledDeletionsDeferred: eligible }));
+    const readForRelease = vi.fn(async () => ({ health: measured, stalledDeletionsDeferred: eligible,
+      ...(controlPlaneReady === undefined ? {} : { controlPlaneReady }) }));
     const readWorkerQualified = vi.fn(async () => qualified);
     const app = createReleaseIdentityRoutes({ ...config, cloudWorkspaces: {
       provider: "boat", imageRef: `boat:zeros-fixture@sha256:${"c".repeat(64)}`, sourceCommit: sha,
@@ -266,7 +287,60 @@ describe("readiness with deferred retired Boat deletions", () => {
   }
   afterEach(() => vi.useRealTimers());
 
-  it.each(["alpha", "beta", "production"] as const)(
+  it.each(["deletion_jobs_failed", "deletion_provider_stalled", "deletion_intent_stalled", "object_deletion_stalled",
+    "provider_orphans_stalled", "lifecycle_stalled", "object_rotation_failed"])(
+    "admits a CP repair release when %s was classified as unrelated cleanup", async reason => {
+      const measured = { ...health, reasons: [reason] };
+      const test = deferred({}, measured, false, true, true);
+      const response = await test.app.request("/v1/release-identity");
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({ ready: true, workerQualified: true });
+      expect(body.cloud).toEqual({ enabled: true, ready: true, state: "healthy" });
+      expect(body).not.toHaveProperty("deferredReadiness");
+      expect(body).not.toHaveProperty("controlPlaneReady");
+      expect(JSON.stringify(body)).not.toContain(reason);
+      expect(measured).toEqual({ ...health, reasons: [reason] });
+      expect(test.readWorkerQualified).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["setup_lease_expired", "engine_lease_expired", "access_revocation_stalled", "outbox_stalled",
+    "idle_stop_blocked", "durability_stalled", "compute_settlement_stalled", "compute_lease_expired",
+    "compute_platform_exposure", "unknown_health_signal"])(
+    "keeps %s blocking alongside cleanup even if a reader claims eligibility", async reason => {
+      const test = deferred({}, { ...health, reasons: ["deletion_jobs_failed", reason] }, false, true, true);
+      expect((await test.app.request("/v1/release-identity")).status).toBe(503);
+      expect(test.readWorkerQualified).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["lifecycle_stalled", "object_rotation_failed"])("requires SQL to classify %s as cleanup", async reason => {
+    const test = deferred({}, { ...health, reasons: [reason] }, false, true, false);
+    expect((await test.app.request("/v1/release-identity")).status).toBe(503);
+  });
+
+  it("honors a negative CP projection even with an eligible legacy deletion deferral", async () => {
+    const test = deferred({}, health, true, true, false);
+    expect((await test.app.request("/v1/release-identity")).status).toBe(503);
+  });
+
+  it.each([{ backgroundWorkers: "paused" as const }, { setupExecution: "paused" as const }, { durability: "disabled" as const }])(
+    "keeps posture requirements on cleanup-only releases: %j", async posture => {
+      const test = deferred({}, { ...health, ...posture, reasons: ["object_deletion_stalled"] }, false, true, true);
+      expect((await test.app.request("/v1/release-identity")).status).toBe(503);
+    },
+  );
+
+  it("keeps missing worker qualification false on a cleanup-only release", async () => {
+    const test = deferred({}, { ...health, reasons: ["object_deletion_stalled"] }, false, false, true);
+    const response = await test.app.request("/v1/release-identity");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ workerQualified: false });
+    expect(test.readWorkerQualified).toHaveBeenCalledOnce();
+  });
+
+  it.each(["alpha"] as const)(
     "stays ready on %s with degraded operational health and real qualification", async deploymentChannel => {
       const test = deferred({ deploymentChannel });
       const response = await test.app.request("/v1/release-identity");
@@ -281,6 +355,17 @@ describe("readiness with deferred retired Boat deletions", () => {
       expect(test.readWorkerQualified).toHaveBeenCalledOnce();
     },
   );
+
+  it.each(["beta", "production"] as const)("keeps %s independent of cloud health and qualification", async deploymentChannel => {
+    const test = deferred({ deploymentChannel });
+    const response = await test.app.request("/v1/release-identity");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ready: true, channel: deploymentChannel,
+      worker: null, workerQualified: false, cloud: { enabled: false, ready: true, state: "disabled" } });
+    expect(test.read).not.toHaveBeenCalled();
+    expect(test.readForRelease).not.toHaveBeenCalled();
+    expect(test.readWorkerQualified).not.toHaveBeenCalled();
+  });
 
   it("never expires while the deletion remains provider-owned", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });

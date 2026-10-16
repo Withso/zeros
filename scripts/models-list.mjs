@@ -23,6 +23,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { discoverModels } from "./agent-runtime/models.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CATALOG_PATH = join(HERE, "..", "catalogs", "models-v1.json");
@@ -77,10 +78,23 @@ function printLive(family) {
   }
 }
 
-function main() {
+async function main() {
   const catalog = JSON.parse(readFileSync(CATALOG_PATH, "utf8"));
-  const arg = process.argv[2];
+  const arg = process.argv.slice(2).find((value) => !value.startsWith("--"));
   const families = arg ? [familyOf(arg)] : Object.keys(catalog.families);
+  if (process.argv.includes("--bundled") || process.argv.includes("--json") || process.argv.includes("--require-complete")) {
+    const root = join(HERE, "..");
+    const publicIds = JSON.parse(readFileSync(join(root, "scripts/agent-runtime/public-model-ids.json"), "utf8"));
+    const results = await Promise.all(families.map((provider) => discoverModels(provider, { root, additionalPublicIds: publicIds })));
+    if (process.argv.includes("--json")) console.log(JSON.stringify({ schema: 1, discovery: results }));
+    else for (const result of results) {
+      console.log(`\n${result.provider}: ${result.status}`);
+      if (result.status === "complete") for (const model of result.data.items) console.log(`  ${model.id}${model.public ? "" : " (account identifier withheld pending public disposition)"}`);
+      else console.log(`  ${result.reason}`);
+    }
+    if (process.argv.includes("--require-complete") && results.some((result) => result.status !== "complete")) process.exitCode = 1;
+    return;
+  }
   for (const family of families) {
     if (!catalog.families[family]) {
       console.error(`Unknown family "${family}". Known: ${Object.keys(catalog.families).join(", ")}`);
@@ -94,4 +108,4 @@ function main() {
   console.log("\nTip: copy a LIVE id into catalogs/models-v1.json, then `pnpm models:verify`.");
 }
 
-main();
+await main();

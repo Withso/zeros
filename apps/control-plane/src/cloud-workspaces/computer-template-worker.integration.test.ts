@@ -14,16 +14,18 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx } from "../db.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
-import { ComputerTemplateWorker } from "./computer-template-worker.js";
+import { ComputerTemplateWorker, type ComputerTemplateWorkerDependencies } from "./computer-template-worker.js";
 import { sanitizeComputerTemplateLog } from "./computer-template-logs.js";
 import type {
   CloudBuilderVms,
   BuilderVm,
   ComputerTemplateRuntime,
 } from "./computer-template-boat.js";
-import { seedComputerTemplateRuntime } from "./computer-template-test-fixtures.js";
+import { seedComputerTemplateRuntime, seedComputerTemplateRuntimeImage } from "./computer-template-test-fixtures.js";
 import { builderFixture, memoryBuilderOperations } from "./cloud-builder-vm-test-fixtures.js";
 import { BuilderVmError } from "./cloud-builder-vm.js";
+import { ComputerTemplateSnapshots } from "./computer-template-snapshots.js";
+import type { ComputerNamedSnapshot } from "./computer-template-snapshot-boat.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const runtime: ComputerTemplateRuntime = {
@@ -62,6 +64,8 @@ database("Cloud Computer template worker", () => {
       revoke: ReturnType<typeof vi.fn>;
     };
   let worker: ComputerTemplateWorker;
+  let workerOptions: ComputerTemplateWorkerDependencies;
+  let presignGet: ReturnType<typeof vi.fn>;
   let create: ReturnType<typeof vi.fn>,
     runFixed: ReturnType<typeof vi.fn>,
     remove: ReturnType<typeof vi.fn>;
@@ -120,9 +124,9 @@ database("Cloud Computer template worker", () => {
         base_image_id: runtime.baseImageId,
         runtime_id: runtime.descriptor.runtimeId,
       });
-      await recordOperation(input, "zeros-v2-test-builder");
+      await recordOperation(input, "bx_23456789");
       return {
-        sandboxId: "zeros-v2-test-builder",
+        sandboxId: "bx_23456789",
         purpose: input.purpose,
         operationKey: input.operationKey,
       } as BuilderVm;
@@ -234,7 +238,11 @@ database("Cloud Computer template worker", () => {
       })),
       revoke: vi.fn(async () => {}),
     };
-    worker = new ComputerTemplateWorker({
+    presignGet = vi.fn(async () => ({
+      url: "https://artifacts.example.test/runtime?signature=fixture",
+      expiresAt: new Date(Date.now() + 900_000).toISOString(),
+    }));
+    workerOptions = {
       pool,
       service,
       vms: vm,
@@ -243,15 +251,25 @@ database("Cloud Computer template worker", () => {
       accountScope: "fixture-account",
       billingOrg: "fixture-wallet",
       runtime: { select: selectRuntime, validate: validateRuntime },
-      artifacts: {
-        presignGet: vi.fn(async () => ({
-          url: "https://artifacts.example.test/runtime?signature=fixture",
-          expiresAt: new Date(Date.now() + 900_000).toISOString(),
-        })),
-      },
+      artifacts: { presignGet },
+      snapshots: new ComputerTemplateSnapshots(pool, { channel: "alpha", accountScope: "fixture-account", billingOrg: "fixture-wallet", pollMs: 0,
+        provider: (() => {
+          const names = new Map<string, ComputerNamedSnapshot>();
+          return {
+            assertStopped: vi.fn(async () => {}),
+            get: vi.fn(async (name: string) => names.get(name) ?? null),
+            save: vi.fn(async (sourceSandboxId: string, name: string) => { names.set(name, { name, sourceSandboxId,
+              status: "ready", snapshotId: `capture_${name}`, sizeBytes: 4096 }); }),
+            prove: vi.fn(async (value) => ({ schema: "zeros.computer-saved-tree/v1" as const, snapshotId: value.snapshotId,
+              sourceSandboxId: value.sourceSandboxId, treeSha256: "a".repeat(64), entryCount: 1 })),
+            remove: vi.fn(async (value) => { names.delete(value.name); return true; }),
+          };
+        })(),
+      }),
       pollMs: 0,
       namePrefix: "zeros-v2-test-computer",
-    });
+    };
+    worker = new ComputerTemplateWorker(workerOptions);
   });
   const request = (
     draft = { repositories: [], installScript: "true", timeoutSeconds: 900 },
@@ -262,6 +280,17 @@ database("Cloud Computer template worker", () => {
       draft,
     });
   const read = () => service.read(fixture.organizationId, fixture.userId);
+  const imageRow = async (imageId: string) => withSystemTx(pool, async tx => (await tx.query(
+    "SELECT state,diagnostic FROM cloud_runtime_images WHERE image_id=$1", [imageId],
+  )).rows[0]);
+  async function enableImage() {
+    workerOptions.runtimeImageChannel = "alpha";
+    vi.mocked(vm.baseStatus).mockImplementation(async () => ({
+      schema: "zeros.base-status/v1", baseCompatibilityId: runtime.baseCompatibilityId,
+      currentRuntimeId: runtime.descriptor.runtimeId, bootId: randomUUID(), hostState: "idle",
+    }));
+    return seedComputerTemplateRuntimeImage(pool);
+  }
   async function repository() {
     const installationId = randomUUID();
     await withSystemTx(pool, async (tx) => {
@@ -293,6 +322,19 @@ database("Cloud Computer template worker", () => {
     };
   }
 
+  it("does not publish or activate when the named saved-artifact proof fails", async () => {
+    const capture = vi.fn(async () => { throw new Error("synthetic named proof failure"); });
+    Object.assign(workerOptions, { snapshots: { capture, reconcile: vi.fn(async () => 0) } });
+    const complete = vi.spyOn(service, "completeBuild");
+    await request();
+    await worker.tick();
+    expect(capture).toHaveBeenCalledOnce();
+    expect(complete).not.toHaveBeenCalled();
+    expect((await read()).active).toBeNull();
+    expect((await read()).latestBuild).toMatchObject({ state: "failed", errorCode: "template_capture_failed" });
+    expect(vm.stop).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ requireSnapshot: true }));
+  });
+
   it("pins before allocation, installs with build purpose, publishes an archived template and auto-activates", async () => {
     const build = await request();
     await worker.tick();
@@ -312,7 +354,7 @@ database("Cloud Computer template worker", () => {
       ).rows[0],
     ).toMatchObject({
       state: "ready",
-      image_ref: "boat-template:zeros-v2-test-builder",
+      image_ref: "boat-template:bx_23456789",
       protected_contract_digest: Buffer.from(tcb, "hex"),
     });
     expect(vm.stop).toHaveBeenCalledTimes(1);
@@ -337,6 +379,98 @@ database("Cloud Computer template worker", () => {
         .map((entry) => entry.text)
         .join(""),
     ).toContain("package installed");
+  });
+
+  it("builds from a pinned runtime image without an artifact or install while retaining the full verification pipeline", async () => {
+    const image = await enableImage();
+    const requested = await request();
+    await worker.tick();
+    expect((await read()).active?.id).toBe(requested.build.id);
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ source: { kind: "image", imageId: image.imageId } }));
+    expect(presignGet).not.toHaveBeenCalled();
+    expect(inputs.map(input => input.command)).toEqual([
+      "computer:verify-tcb", "computer:clone-repos", "computer:run-install", "computer:run-install",
+      "computer:verify-tcb", "runtime-self-test", "computer:sanitize",
+    ]);
+    expect(inputs[0]!.value.action).toBe("baseline");
+    expect(vm.stop).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ requireSnapshot: true }));
+    expect(validateRuntime).toHaveBeenCalled();
+    expect(await imageRow(image.imageId)).toMatchObject({ state: "ready", diagnostic: null });
+  });
+
+  it.each(["runtime", "missing runtime", "base"])("withdraws a runtime image after an initial %s identity mismatch", async mismatch => {
+    const image = await enableImage();
+    vi.mocked(vm.baseStatus).mockResolvedValue({
+      schema: "zeros.base-status/v1", bootId: randomUUID(), hostState: "idle",
+      baseCompatibilityId: mismatch === "base" ? `bc1-${"c".repeat(64)}` : runtime.baseCompatibilityId,
+      currentRuntimeId: mismatch === "runtime" ? `r1-${"f".repeat(64)}` : mismatch === "missing runtime" ? null : runtime.descriptor.runtimeId,
+    });
+    await request();
+    await worker.tick();
+    expect(await read()).toMatchObject({ active: null, latestBuild: { state: "failed", errorCode: "runtime_install_failed" } });
+    expect(await imageRow(image.imageId)).toMatchObject({ state: "retiring",
+      diagnostic: { failedChecks: [mismatch === "base" ? "base_compatibility" : "runtime_identity"] } });
+    expect(presignGet).not.toHaveBeenCalled();
+    expect(runFixed).not.toHaveBeenCalled();
+    expect(remove).toHaveBeenCalledOnce();
+  });
+
+  it.each(["timeout", "transport", "malformed status"])("does not withdraw an image after a base-status %s failure", async failure => {
+    const image = await enableImage();
+    vi.mocked(vm.waitForBase).mockRejectedValueOnce(failure === "transport" ? new Error("fixture transport failure") :
+      new BuilderVmError(failure === "timeout" ? "timeout" : "provider_response"));
+    await request();
+    await worker.tick();
+    expect(await read()).toMatchObject({ active: null, latestBuild: { state: "failed", errorCode: "runtime_install_failed" } });
+    expect(await imageRow(image.imageId)).toMatchObject({ state: "ready", diagnostic: null });
+    expect(runFixed).not.toHaveBeenCalled();
+  });
+
+  it("keeps an image ready when the frozen TCB helper reports an internal failure", async () => {
+    const image = await enableImage();
+    // The frozen helper emits this same diagnostic for internal command
+    // timeouts and OS errors, so it cannot prove shared-image corruption.
+    const proof = { schema: "zeros.diagnostic/v1", component: "build", stage: "integrity", ok: false,
+      exitCode: 1, timedOut: false, failedChecks: ["tcb_modified"] };
+    runFixed.mockResolvedValueOnce({ exitCode: 1, stdout: `${JSON.stringify(proof)}\n`, diagnostic: proof });
+    await request();
+    await worker.tick();
+    expect(await read()).toMatchObject({ active: null, latestBuild: { state: "failed", errorCode: "tcb_modified" } });
+    expect(await imageRow(image.imageId)).toMatchObject({ state: "ready", diagnostic: null });
+    expect(runFixed).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledOnce();
+  });
+
+  it.each(["timeout", "transport", "malformed result", "missing diagnostic", "exit mismatch", "unrelated diagnostic"])(
+    "does not withdraw an image after an unconfirmed baseline %s", async failure => {
+      const image = await enableImage();
+      if (failure === "transport") runFixed.mockRejectedValueOnce(new Error("fixture transport failure"));
+      else {
+        const proof = diagnostic("integrity", "build", failure === "malformed result");
+        if (failure === "timeout") proof.timedOut = true;
+        if (failure === "exit mismatch") proof.exitCode = 2;
+        if (failure === "unrelated diagnostic") proof.component = "installer";
+        runFixed.mockResolvedValueOnce({ exitCode: failure === "malformed result" ? 0 : 1, stdout: "unparseable fixture result",
+          diagnostic: failure === "missing diagnostic" ? undefined : proof });
+      }
+      await request();
+      await worker.tick();
+      expect(await read()).toMatchObject({ active: null, latestBuild: { state: "failed", errorCode: "tcb_modified" } });
+      expect(await imageRow(image.imageId)).toMatchObject({ state: "ready", diagnostic: null });
+      expect(runFixed).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["install", "integrity"])("does not withdraw an image after a later %s failure", async stage => {
+    const image = await enableImage();
+    if (stage === "install") installCode = 17;
+    else modified = true;
+    await request();
+    await worker.tick();
+    expect(await read()).toMatchObject({ active: null, latestBuild: { state: "failed",
+      errorCode: stage === "install" ? "install_failed" : "tcb_modified" } });
+    expect(inputs.some(({ command }) => command === "computer:run-install")).toBe(true);
+    expect(await imageRow(image.imageId)).toMatchObject({ state: "ready", diagnostic: null });
   });
 
   it.each(["ready", "stopped", "failed"])("waits for the base before installing when bootstrap becomes %s", async state => {
@@ -482,7 +616,7 @@ database("Cloud Computer template worker", () => {
     async (failure) => {
       const build = await request();
       create.mockImplementation(async (input) => {
-        await recordOperation(input, "zeros-v2-test-builder");
+        await recordOperation(input, "bx_23456789");
         throw new Error(failure);
       });
       await worker.tick();
@@ -492,7 +626,7 @@ database("Cloud Computer template worker", () => {
       });
       expect(create).toHaveBeenCalledTimes(1);
       expect(remove).toHaveBeenCalledWith({
-        sandboxId: "zeros-v2-test-builder",
+        sandboxId: "bx_23456789",
         purpose: "computer-build",
         operationKey: `computer-build:${build.build.id}`,
       });
@@ -505,7 +639,7 @@ database("Cloud Computer template worker", () => {
           )
         ).rows[0],
       ).toEqual({
-        provider_resource_id: "zeros-v2-test-builder",
+        provider_resource_id: "bx_23456789",
         cleanup_confirmed_at: expect.any(Date),
       });
     },
@@ -603,7 +737,7 @@ database("Cloud Computer template worker", () => {
       [claim!.build.id],
     );
     create.mockImplementation(async (input) => {
-      await recordOperation(input, "zeros-v2-test-builder");
+      await recordOperation(input, "bx_23456789");
       // Replayed allocation can bind the ID and still fail readiness because
       // the expired VM is already archived. Deletion must bypass readiness.
       throw new Error("builder_stopped");
@@ -682,6 +816,7 @@ database("Cloud Computer template worker", () => {
       service,
       vms: vm,
       operations,
+      snapshots: workerOptions.snapshots,
       github,
       accountScope: "fixture-account",
       billingOrg: "fixture-wallet",

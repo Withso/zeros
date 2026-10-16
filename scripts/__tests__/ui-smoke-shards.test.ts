@@ -16,6 +16,7 @@ import { cloudComputerV2ReviewRegressions } from "../ui-smoke-cloud-computer-v2.
 // Frozen from the serial runner, including the design-workspace dispatcher's
 // children. Core's later phases stay after file-prefetch in the execution plan.
 const originalOrder = [
+  "text-selection",
   "git-review-actions",
   "code-review",
   "code-review-retention",
@@ -97,6 +98,8 @@ const originalOrder = [
   "pr-actions",
   "activity-disclosure",
   "sticky-bottom",
+  "scroll-area-cleanup",
+  "scroll-area-drag",
   "subscription",
 ];
 

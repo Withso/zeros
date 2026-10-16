@@ -11,6 +11,7 @@ import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/brid
 import { BLANK, useSessionsStore } from "../sessions-store";
 import { AuthPromptRecovery } from "../auth-prompt-recovery";
 import * as lifecycle from "../session-reload-lifecycle";
+import { hasBackgroundAgentWork } from "../background-task-state";
 import { SendQueue } from "../send-queue";
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode, cloudAdmissionForTurn } from "../cloud-admission-failure";
 import { reportCloudAgentRuntimeUpgrade, invalidateCloudAgentRegistry } from "../workspace-agent-registry";
@@ -98,12 +99,12 @@ function expectOneAdmissionBanner() {
 }
 
 function harness(folder: string, cause = "cloud_runtime_upgrade_required", duringRequest?: () => void, queued = false,
-  options: { success?: boolean; history?: () => Promise<AgentMessage[]>; failureKind?: AgentFailure["kind"] } = {}) {
+  options: { success?: boolean; history?: () => Promise<AgentMessage[]>; failureKind?: AgentFailure["kind"]; reject?: boolean; recovering?: boolean; backfill?: () => Promise<boolean>; beforeDispatch?: () => Promise<void>; rebuild?: () => Promise<void> } = {}) {
   vi.clearAllMocks();
   const draft = { text: "Preserve my prompt", json: { type: "doc" }, attachments: [] };
   setLiveChatDraft("chat", draft);
   useSessionsStore.setState({ sessions: { chat: { ...BLANK, cwd: folder, agentId: "codex", sessionId: "session", status: "ready", messages: [] } } });
-  const request = vi.fn(async (_message: unknown) => { duringRequest?.(); return options.success
+  const request = vi.fn(async (_message: unknown) => { duringRequest?.(); if (options.reject) throw new Error(cause); return options.success
     ? { type: "AGENT_PROMPT_COMPLETE", sessionId: "session", executionId: "session", stopReason: "end_turn", response: {} }
     : { type: "AGENT_PROMPT_FAILED", error: cause }; });
   const sending = new Set<string>(), pauseQueue = vi.fn(), drainOrDropQueue = vi.fn(), failureNotice = vi.fn(notifyAgentSendFailure);
@@ -113,18 +114,18 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
   const finished = vi.fn(), persist = vi.fn(), output = new Map<string, boolean>();
   const history = vi.fn(options.history ?? (async () => useSessionsStore.getState().sessions.chat.messages));
   const context: Record<string, unknown> = {
-    ...lifecycle, Error, DOMException, AbortController, setTimeout, clearTimeout, crypto: { randomUUID },
+    ...lifecycle, hasBackgroundAgentWork, Error, DOMException, AbortController, setTimeout, clearTimeout, crypto: { randomUUID },
     parseCloudWorkspaceKey, hasCloudWorkspaceAccountAccess: () => true,
     bridge: { request }, cloudComputerV2: !isCloudWorkspace(folder) || queued, prepareForSend: () => null, getStore: useSessionsStore.getState,
     // Exercise post-readiness dispatch; cloud FIFO preparation has its own
     // integration suite and hands off the already-claimed stable bubble id.
     flushBubbleRef: { current: new Map(queued ? [["chat", "accepted-prompt"]] : []) },
-    cloudFlushRef: { current: new Map(queued ? [["chat", entry]] : []) }, cloudCatalogGeneration: () => 1,
+    cloudFlushRef: { current: new Map(queued ? [["chat", entry]] : []) }, refreshModelCatalog: vi.fn(), cloudCatalogGeneration: () => 1,
     beginCloudSendWaitRef: { current: readiness }, classifyCloudAdmissionFailure, cloudAdmissionFailureCode,
     reportCloudAgentRuntimeUpgrade, invalidateCloudAgentRegistry, notifyAgentSendFailure: failureNotice,
     getAgentsSnapshot: () => [], isCloudWorkspace,
     resumeQueue: () => false, sendingChatsRef: { current: sending }, sendQueueRef: { current: queue },
-    queueHeldRef: { current: new Set() }, ensureSessionRef: { current: null }, chatComposerEnv: () => null,
+    queueHeldRef: { current: new Set() }, ensureSessionRef: { current: options.rebuild ?? null }, chatComposerEnv: () => null,
     startCloudSubmitSpan: () => undefined, cancelGenerationsRef: { current: new Map() },
     capUserAppend: (messages: unknown[], message: unknown) => [...messages, message],
     useWorkspaceStore: { getState: () => mocks.workspace }, announcedDirsRef: { current: new Map() },
@@ -132,7 +133,12 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
     turnProducedOutputRef: { current: output }, getLiveChatDraft, recoverCloudAdmissionFailure, pauseQueue,
     newPromptDiagnosticId: () => "diagnostic", promptActivityRef: { current: new Map() },
     PROMPT_INACTIVITY_TIMEOUT_MS: 10_000, PROMPT_ABSOLUTE_TIMEOUT_MS: 10_000,
-    awaitComposerMode: () => null, requestLocalPrompt: request,
+    awaitComposerMode: () => options.beforeDispatch?.() ?? null,
+    requestLocalPrompt: async (_bridge: unknown, message: unknown, callbacks: { onRecovery: () => void }) => {
+      if (options.recovering) callbacks.onRecovery();
+      return request(message);
+    },
+    backfillLocalPromptTranscript: async () => options.backfill ? options.backfill() : true,
     countPromptAttachments: () => ({ image: 0, text: 0 }), trackAgentPromptStarted: vi.fn(), trackAgentTurnStarted: vi.fn(),
     trackAgentPromptFinished: finished, trackAgentPromptCompleted: vi.fn(), trackAiGeneration: vi.fn(),
     failureFromAgentError: () => failure, classifyRpcError: () => failure,
@@ -145,7 +151,7 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
   vm.runInNewContext(code, context);
   const send = () => (context.send as (...args: unknown[]) => Promise<void>)("chat", draft.text, draft.text, undefined, undefined, undefined, undefined,
     () => setLiveChatDraft("chat", null));
-  return { request, pauseQueue, drainOrDropQueue, sending, draft, queue, readiness, send, failureNotice, finished, persist, history,
+  return { request, pauseQueue, drainOrDropQueue, drainNextQueued: context.drainNextQueued, sending, draft, queue, readiness, send, failureNotice, finished, persist, history,
     markOutput: () => output.set("chat", true),
     retry: () => {
       const next = queue.get("chat")![0]; queue.delete("chat");
@@ -157,6 +163,114 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
 }
 
 describe("production send callback on runtime rejection", () => {
+  const successorCases = ["claude", "codex", "cursor"].flatMap(agentId =>
+    ["/personal/project", "/organization/project", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"].flatMap(folder =>
+      ["complete", "failed", "rejected"].flatMap(receipt => [false, true].map(settled => ({ agentId, folder, receipt, settled })))));
+
+  function adoptSuccessor(settled: boolean) {
+    const previous = useSessionsStore.getState().pendingLocalTurns.chat;
+    useSessionsStore.getState().applyBridgeUpdate({ sessionId: "session", update: { sessionUpdate: "turn_state",
+      turnId: previous, state: "completed", startedAt: 1_000 } } as never);
+    const slot = useSessionsStore.getState().sessions.chat;
+    useSessionsStore.getState().patchSession("chat", { messages: [...slot.messages,
+      { id: "successor", kind: "text", role: "user", text: "Next task", createdAt: 2_000 }] });
+    useSessionsStore.getState().applyBridgeUpdate({ sessionId: "session", update: { sessionUpdate: "turn_state",
+      turnId: "successor", state: "running", startedAt: 2_000 } });
+    if (settled) useSessionsStore.getState().applyBridgeUpdate({ sessionId: "session", update: { sessionUpdate: "turn_state",
+      turnId: "successor", state: "completed", startedAt: 2_000, stopReason: "max_tokens" } });
+    return useSessionsStore.getState().sessions.chat;
+  }
+
+  it.each(successorCases)(
+    "an old $receipt receipt cannot change $agentId's successor (settled=$settled) in $folder", async ({ agentId, folder, receipt, settled }) => {
+      let successor: ReturnType<typeof adoptSuccessor> | undefined;
+      const h = harness(folder, "command_dispatch_rejected", () => { successor = adoptSuccessor(settled); }, false,
+        { success: receipt === "complete", reject: receipt === "rejected" });
+      useSessionsStore.getState().patchSession("chat", { agentId });
+      await h.send();
+      expect(useSessionsStore.getState().sessions.chat).toBe(successor);
+      expect(successor).toMatchObject({ status: settled ? "ready" : "streaming", foregroundTurnId: "successor",
+        activeTurnStartedAt: settled ? null : 2_000, error: null, failure: null, lastStopReason: settled ? "max_tokens" : null });
+      expect(h.pauseQueue).not.toHaveBeenCalled();
+      expect(h.drainOrDropQueue).not.toHaveBeenCalled();
+      // Releasing A's RPC lock can enable C after B already settled; do not
+      // strand that queue just because A no longer owns the visible turn.
+      if (settled) expect(h.drainNextQueued).toHaveBeenCalledExactlyOnceWith("chat");
+      else expect(h.drainNextQueued).not.toHaveBeenCalled();
+      expect(h.sending.size).toBe(0);
+      expect(h.request).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["claude", "codex", "cursor"].flatMap(agentId => [false, true].map(settled => ({ agentId, settled }))))(
+    "a cloud tail read cannot replace a $agentId successor adopted during its await (settled=$settled)", async ({ agentId, settled }) => {
+      let successor: ReturnType<typeof adoptSuccessor> | undefined;
+      const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "", undefined, false,
+        { success: true, history: async () => { successor = adoptSuccessor(settled); return [
+          { id: "stale-tail", kind: "text", role: "agent", text: "Old history", createdAt: 500 },
+        ]; } });
+      useSessionsStore.getState().patchSession("chat", { agentId });
+      await h.send();
+      expect(h.history).toHaveBeenCalledOnce();
+      expect(useSessionsStore.getState().sessions.chat).toBe(successor);
+      expect(h.pauseQueue).not.toHaveBeenCalled();
+      expect(h.drainOrDropQueue).not.toHaveBeenCalled();
+      expect(h.sending.size).toBe(0);
+    },
+  );
+
+  it.each(["/personal/project", "/organization/project"].flatMap(folder => [false, true].map(settled => ({ folder, settled })) ))(
+    "recovery backfill cannot clean up a successor in $folder (settled=$settled)", async ({ folder, settled }) => {
+      let successor: ReturnType<typeof adoptSuccessor> | undefined;
+      const h = harness(folder, "", undefined, false, { success: true, recovering: true, backfill: async () => {
+        successor = adoptSuccessor(settled);
+        if (!settled) {
+          useSessionsStore.getState().applyBridgePermissionRequest("codex", "successor-plan", { sessionId: "session",
+            toolCall: { toolCallId: "successor-plan", title: "ExitPlanMode", kind: "other", status: "pending" }, options: [] });
+          successor = useSessionsStore.getState().sessions.chat;
+        }
+        return false;
+      } });
+      await h.send();
+      expect(successor).toBeDefined();
+      expect(useSessionsStore.getState().sessions.chat).toBe(successor);
+      expect(h.pauseQueue).not.toHaveBeenCalled();
+      expect(h.drainOrDropQueue).not.toHaveBeenCalled();
+      if (settled) expect(h.drainNextQueued).toHaveBeenCalledExactlyOnceWith("chat");
+      expect(h.sending.size).toBe(0);
+    },
+  );
+
+  it.each(["/personal/project", "/organization/project"].flatMap(folder => [false, true].map(settled => ({ folder, settled })) ))(
+    "a local rebuild cannot resend over a successor in $folder (settled=$settled)", async ({ folder, settled }) => {
+      let successor: ReturnType<typeof adoptSuccessor> | undefined;
+      const h = harness(folder, "Session expired", undefined, false, { failureKind: "session-expired", rebuild: async () => {
+        successor = adoptSuccessor(settled);
+      } });
+      await h.send();
+      expect(successor).toBeDefined();
+      expect(useSessionsStore.getState().sessions.chat).toBe(successor);
+      expect(h.request).toHaveBeenCalledOnce();
+      expect(h.pauseQueue).not.toHaveBeenCalled();
+      expect(h.drainOrDropQueue).not.toHaveBeenCalled();
+      expect(h.sending.size).toBe(0);
+    },
+  );
+
+  it.each(["/personal/project", "/organization/project", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"])(
+    "a mode wait cannot dispatch an old prompt over a newly adopted turn in %s", async folder => {
+      let successor: ReturnType<typeof adoptSuccessor> | undefined;
+      const h = harness(folder, "", undefined, false, { success: true, beforeDispatch: async () => { successor = adoptSuccessor(false); } });
+      await h.send();
+      expect(successor).toBeDefined();
+      expect(useSessionsStore.getState().sessions.chat).toBe(successor);
+      expect(h.request).not.toHaveBeenCalled();
+      expect(h.pauseQueue).not.toHaveBeenCalled();
+      expect(h.drainOrDropQueue).not.toHaveBeenCalled();
+      expect(h.sending.size).toBe(0);
+    },
+  );
+
   it("accepts a successful empty native turn when the durable transcript tail is empty", async () => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "", undefined, false,
       { success: true, history: async () => [] });

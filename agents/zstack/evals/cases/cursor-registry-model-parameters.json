@@ -1,0 +1,9 @@
+{
+  "id": "cursor-registry-model-parameters",
+  "kind": "replay",
+  "area": "vm-engine-agents",
+  "fixedBy": "pr:529",
+  "symptom": "Cursor sends guessed registry parameters before the account's full model variant arrives, and advertises an execution-rejected model as selectable again.",
+  "rule": "Join bounded discovery for parameterized registry models, preserve the full verified variant and empty schemas, recheck original authority, and retain account-specific denial during refresh. See docs/agent-tool-presentation.md and the cursor-registry-model-parameters change fragment.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/model-passing.test.ts apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/boot-native-handoff.test.ts"
+}

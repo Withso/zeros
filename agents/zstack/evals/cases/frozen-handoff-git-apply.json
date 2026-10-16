@@ -1,0 +1,9 @@
+{
+  "id": "frozen-handoff-git-apply",
+  "kind": "scenario",
+  "area": "11: engineering workflow",
+  "fixedBy": "pr:495",
+  "symptom": "A frozen patch applied with GNU patch but Git rejected its new files because the new file mode headers were absent.",
+  "rule": "The integrate-pr playbook requires git diff --binary from an index, intent-to-add new files, and Git application plus source-hash verification before READY. Set ZEROS_REVIEW_PATCH to the frozen patch and run the check on its exact base.",
+  "check": "git apply --check --whitespace=error \"$ZEROS_REVIEW_PATCH\""
+}

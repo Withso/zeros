@@ -15,6 +15,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { createContext } from "react";
+import type { CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake";
 import type {
   AgentConfigurationProvenance,
   ContentBlock,
@@ -96,7 +97,7 @@ export interface SessionsActions {
   getSendGeneration(chatId: string): number;
   /** Explicit send only: obtain fresh cloud admission before session work.
    * Local and gated-off callers need no preparation. Stop/close cancels it. */
-  prepareForSend(chatId: string): Promise<void> | null;
+  prepareForSend(chatId: string, wakeIntent?: CloudWorkspaceWakeIntent): Promise<void> | null;
   /** Fresh close-boundary work snapshot. Includes local sends still awaiting a
    * route, adopted provider turns, active background work, and queued prompts. */
   getCloseActivity(chatId: string): {
@@ -129,6 +130,10 @@ export interface SessionsActions {
     /** The provider now owns a pending message/queue entry; not turn completion. */
     onAccepted?: () => void,
     cloudQueue?: CloudQueuedPrompt,
+    /** Retains lifecycle identity when a cloud action prepared before enqueueing. */
+    wakeIntent?: CloudWorkspaceWakeIntent,
+    /** Explicit composer intent; queued flushes retain Queue semantics. */
+    followUpBehavior?: import("../settings/follow-up-behavior").FollowUpBehavior,
   ): Promise<void>;
   cancel(chatId: string): Promise<void>;
   /** Revoke only the active native Browser lease. If the official Browser

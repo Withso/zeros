@@ -17,6 +17,18 @@ function fixture() {
   };
 }
 describe("Boat API boundary", () => {
+  it("permits a bounded saved-tree response above the ordinary API limit", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ ok: true, type: "snapshot.tree", padding: "x".repeat(1_100_000) }));
+    await expect(f.client.request("/snapshots/snapshot_fixture/tree", { maxResponseBytes: 64 * 1024 * 1024 }))
+      .resolves.toMatchObject({ type: "snapshot.tree" });
+  });
+  it("cannot widen non-tree responses or exceed the saved-tree ceiling", async () => {
+    const f = fixture();
+    await expect(f.client.request("/sandboxes", { maxResponseBytes: 2 * 1024 * 1024 })).rejects.toThrow();
+    await expect(f.client.request("/snapshots/snapshot_fixture/tree", { maxResponseBytes: 65 * 1024 * 1024 })).rejects.toThrow();
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
   it.each(["boat_starting", "boat_restoring"])("retains only the closed boot classification for %s", async code => {
     const f = fixture();
     f.fetcher.mockResolvedValue(Response.json({ ok: false, code, message: "private-canary" }, { status: 409 }));

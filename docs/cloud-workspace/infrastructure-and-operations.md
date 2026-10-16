@@ -267,23 +267,99 @@ target-bound approval, and change nothing until rerun unchanged with
 | `engine_lease_expired` | A ready engine missed its 90-second heartbeat lease. | Check the sandbox at the provider and the engine log. A healthy engine that cannot reach the control plane (network, TLS or a 429 on registration or heartbeat) stops itself when its lease runs out. |
 | `access_revocation_stalled` | A client access grant failed or waited more than 15 minutes for revocation. | Check the provider's revoke API and credential. The worker retries; a failed grant needs the provider cause fixed first. |
 | `outbox_stalled` | A cloud outbox entry is dead, or queued or processing for 15 minutes. | Check the configured outbox sink's reachability and signing secret. |
-| `deletion_jobs_failed` | A workspace deletion job failed. | Read the job error and resolve it through the staff deletion operations; never purge around a provider that has not confirmed deletion. |
+| `deletion_jobs_failed` | A workspace deletion job failed. | Fix the cause first. A record purge with completed provider/object evidence can use the owner-approved `cloud-workspace-deletion:manage --retry-records` plan below; never purge around unconfirmed deletion. |
 | `deletion_intent_stalled` | A delete intent failed, made no deletion-stage progress for an hour, or is 24 hours old. Boat's `waiting_for_uploads`, `kept_for_newer_snapshots` and `waiting_for_restore` stages count as progress until the 24-hour limit. | Read the intent `error_code` and the provider deletion receipt (Boat `bdop_*`). A receipt in a waiting stage needs no action before 24 hours; a generic `blocked` receipt or a missing receipt needs the provider cause fixed. Never mark a generation deleted before the provider confirms it. |
 | `deletion_provider_stalled` | A deletion waited more than 24 hours for the provider. | Look up the provider deletion receipt (Boat `bdop_*`). Boat reports `blocked` while it retries; receipts have completed up to about 20 hours later, so keep the job waiting. Once every receipt has completed, the job also needs each generation's binding verified deleted (`deletion_verified_at`). |
 | `object_rotation_failed` | A blob rotation failed, or cleanup is stuck for 15 minutes or three attempts. | Fix the object-store or key cause, then queue a fresh target with `cloud-object-rotation:retry`. |
 | `object_deletion_stalled` | An unfenced blob deletion is 15 minutes old or failed three times. | Check object-store credentials, reachability and the bucket's retention settings. |
 | `provider_orphans_stalled` | A provider orphan has been unverified for an hour. | Compare the provider inventory for the account scope with the bindings and remove the orphan through the provider after confirming it is not bound. |
 | `durability_stalled` | A ready or busy workspace has had non-durable content or record state for 15 minutes. | Check the engine's checkpoint uploads, object-store health and the byte limits (`cloud-object-storage:manage`). |
-| `compute_settlement_stalled` | An unsettled compute lease has had an error for 5 minutes, or its next check is 5 minutes overdue. | Read the lease `last_error_code`; failing leases retry with backoff up to five minutes. Meter or provider errors need provider access fixed; `compute_absence_unconfirmed` means the create journal cannot close until absence is proven with `cloud-provider-absence:manage`. `provider_not_found` or `compute_final_meter_unavailable` on a bound allocation the provider lost needs `cloud-provider-loss:manage`. |
+| `compute_settlement_stalled` | An unsettled compute lease has had an error for 5 minutes, or its next check is 5 minutes overdue. | Read the lease `last_error_code`; failing leases retry with backoff up to five minutes. Meter or provider errors need provider access fixed. A stopped allocation whose provider reading fell below its confirmed meter (`compute_credit_meter_rejected`) settles at that meter without action once its stop was first observed 15 minutes earlier. `compute_absence_unconfirmed` means the create journal cannot close until absence is proven with `cloud-provider-absence:manage`. `provider_not_found` or `compute_final_meter_unavailable` on a bound allocation the provider lost needs `cloud-provider-loss:manage`. |
 | `compute_lease_expired` | An active or draining lease is 5 minutes past its provider expiry. | Check renewal, the Organization's credit (`cloud-compute:grant`) and the provider's TTL. A sandbox may be running unfunded. |
 | `compute_platform_exposure` | Provider overrun was recorded as platform exposure in the last 24 hours. | Reconcile the provider meter against the ledger and review the affected credit period. |
 | `health_query_failed` | The aggregate health query itself failed. | Check database connectivity, pool saturation and whether a migration is pending. |
 
 [Retired Boat deletions do not block release readiness](../deployment-environments.md#retired-boat-deletions-do-not-block-release-readiness)
-while Boat finishes erasing accepted receipts. That changes publication
-admission only: this health reason, operator alerts, reserved storage and
-deletion verification remain active. A sandbox lookup returning 404 is not a
-physical-deletion receipt.
+describes the separate CP release projection: deletion and orphan cleanup stay
+as alerts while a CP repair can ship. Lifecycle stalls qualify only when all
+stalled intents are deletes; rotation cleanup qualifies only without a failed
+rotation. Every other health reason remains a release blocker. The existing
+v1 retired-Boat label still requires its original accepted-receipt inventory.
+Operational health, alerts, reserved storage, cleanup workers and deletion
+verification remain active for every case. A ready release receipt does not
+claim these resources are healthy or deleted; a sandbox lookup returning 404
+is not a physical-deletion receipt.
+
+## Fixture compute retirement while storage deletion is pending
+
+The authenticated product read
+`POST /v1/organizations/:organization/cloud-workspaces/:workspace/deletion-retirement`
+accepts only the exact current `generation` and original accepted
+`deleteIdempotencyKey`. Its version 1 response repeats the retained creation,
+owner, repository, workspace and delete identity, the original delete request
+time, and a fresh observation time. It includes every persisted generation in
+sorted order, including candidates above the current generation. More than 64
+rows, missing bindings, unsupported identities or incomplete proof refuse the
+whole observation with `409/cloud_workspace_retirement_unconfirmed`.
+Missing or foreign authority returns 404. The response is never cached.
+
+After a failed delete, an explicitly accepted fresh DELETE binds the existing
+workspace deletion job to its own intent. Replaying an older key returns that
+intent's retained result and cannot rebind or reset the successor's job. The
+selected intent must still be accepted, match the job and current generation,
+and pass every retirement check. Earlier failed intents remain unchanged audit
+history; they do not independently veto positive proof for a later accepted
+delete. This does not transfer a signed harness receipt to the new request.
+
+If a successor was already accepted before this linkage correction deployed,
+deployment alone does not update the job. Replay its same idempotency key after
+deployment. The compatibility path adopts only a current-generation accepted
+successor whose bound predecessor had already failed before that request began,
+with no third DELETE in that generation. It preserves worker progress and leases.
+Ambiguous history remains unconfirmed; timestamps alone never choose among
+competing requests. Keep the original failed request and every signed failure.
+The guarded operator can reconcile this linkage on replay even if the target
+has since become deleted. That branch changes only the existing job binding;
+it creates no intent or job and never restarts a failed record purge. Record
+purge retry still requires the separate explicit operator mode below.
+
+`compute_retired_storage_pending` requires desired deleted, retired engine and
+runtime access, settled compute leases and reservations, and no pending setup or
+generation transition. Every pending Boat allocation must have its exact
+accepted deletion operation freshly report a documented storage-only blocked
+stage: `waiting_for_uploads`, `kept_for_newer_snapshots` or
+`waiting_for_restore`. The same authenticated account must then observe that
+exact sandbox as absent. A sandbox 404 or stopped binding alone cannot qualify.
+Upload advice must be valid and within the documented six-hour bound; passing
+`expectedBy` remains pending. Never-allocated generations require a tracked,
+closed create journal with no uncertain dispatch and positively verified
+absence. A transferred or historical identity that cannot meet every predicate
+remains outside this optional proof; normal physical cleanup continues.
+
+Provider reads use a shared ten-second observation budget and hold no database
+client. The service rechecks the exact workspace, actor authority, delete,
+generation, journal and settlement snapshot after the provider reads. It issues
+only GETs to the provider and never replays DELETE, updates a deletion journal,
+changes lifecycle or D1 state, or releases capacity. `receiptSha256` binds each
+generation's private allocation/deletion identity without exposing provider IDs.
+
+The pending response keeps `deletionConfirmed=false`, reports zero reserved CPU
+and memory, and retains each pending generation's disk reservation. Disk is
+reserved capacity, not measured physical bytes or a claim about snapshot size.
+`physically_deleted` additionally requires every positive provider/binding
+completion, the succeeded deletion intent and D1 job, and `data_deleted_at`.
+Existing workspace, generation, binding, journal and job tombstones retain this
+proof and original creation/delete identity after source records are purged.
+
+The fixture harness signs the complete response with its original run receipt
+and rereads it before using its explicit deferred-storage mode. It owns the
+fixture identity and backlog count, disk and age limits; a refreshed observation
+never resets age. This endpoint does not authorize allocation or native writer
+custody. Ordinary user deletion, quotas, storage retention and Local workspaces
+keep their existing behavior. Deploy the CP endpoint before its harness
+consumer; an older CP or unavailable proof leaves that consumer closed. Rollback
+can disable deferred admission while preserving all signed cleanup records and
+the original physical deletion workflow. No migration is required.
 
 ## Recovery drills and measured limits
 
@@ -393,7 +469,10 @@ neither plaintext object bytes nor account identifiers and must remain in
 backups and restores.
 
 Organization compute quotas are operator-approved admission records, not
-Organization-admin settings. Provision or change them only through
+Organization-admin settings. A cloud workspace still needs its Organization's
+quota record, but no numeric limit is enforced: workspace count, running
+workspaces, CPU, memory and storage are recorded and reported only. Compute
+credits bound what running workspaces can spend. Provision or change them only through
 `pnpm --dir apps/control-plane cloud-quota:manage` from a source checkout, or
 the supported `node dist/manage-cloud-workspace-quota.js` entrypoint in the
 production image. First generate a read-only target-bound plan, then execute
@@ -403,6 +482,75 @@ attribution, stale plans, and limits below current usage; the same transaction
 writes append-only owner evidence. Quota provisioning is independent of
 `CLOUD_WORKSPACES_ENABLED` and
 `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED`.
+
+### Operator-requested workspace deletion
+
+In development, Alpha or Beta, use
+`pnpm --dir apps/control-plane cloud-workspace-deletion:manage` (deployed image:
+`node dist/manage-cloud-workspace-deletion.js`) from a controlled database-owner
+shell with that deployment's `DATABASE_URL`. Production is refused. The command
+requests the server's normal deletion lifecycle by default; workers retire provider
+resources and finish durable-data deletion. Never delete the provider sandbox
+directly while its workspace row still references it.
+
+Set `CONTROL_PLANE_CLOUD_DELETION_CHANNEL`, `ORGANIZATION_ID`,
+`EXPECTED_ORGANIZATION_SLUG`, `ACTOR_USER_ID`, `WORKSPACE_IDS`, `APPROVAL_ID` and
+`REASON` (all names use the `CONTROL_PLANE_CLOUD_DELETION_` prefix). Use an active
+organization owner/admin who passes the workspace's normal cleanup check; admin
+membership alone cannot delete someone else's private workspace. `WORKSPACE_IDS`
+is an explicit comma-separated list of 1–100 cloud UUIDs. `APPROVAL_ID` is one new
+operator-chosen UUID per batch, and `REASON` is a non-secret audit explanation of
+16–512 characters. No wildcard or automatic organization-wide selection exists.
+
+Run without flags to print a read-only plan. Review the database fingerprint,
+channel, organization/actor IDs and each workspace's status/version. Put the
+exact printed approval into `CONTROL_PLANE_CLOUD_DELETION_APPROVAL`, then rerun
+with `--execute`. The entire batch checks its locked current state before any
+mutation; a stale plan requires another review. Preserve the same approval ID,
+approval and inputs on retries: they replay the original intents, including
+repairing failed deletion jobs, without another deletion audit. The separate
+operator receipt records the reason and original plan in `audit_log`. Replays
+still check current cleanup authority and the running-workspace guard.
+
+Only stopped, archived and failed workspaces are accepted by default; deleted
+rows are skipped. To include ready/busy workspaces, use `--allow-running` for
+both planning and execution. This queues the same final checkpoint as HTTP
+DELETE and keeps runtime authority until that checkpoint completes; it never
+opts into discarding uncheckpointed work. A requested deletion is asynchronous,
+so confirm worker completion before treating its resources as removed. Personal
+Local and organization-local workspaces are outside this command's scope.
+
+After fixing a failed **record purge**, use the same identity, channel and
+workspace inputs with `--retry-records`. This separate mode refuses Production,
+running workspaces and `--allow-running`; it accepts only an already-deleted
+workspace with an unerased, failed `workspace_deletion_unknown_failure` job,
+no lease or legal hold, no remaining blob references, all blob targets complete,
+and verified provider deletion for every generation. It does not call a
+provider or recreate deletion intents.
+
+Run `pnpm --dir apps/control-plane cloud-workspace-deletion:manage --retry-records`
+to print the dry-run plan. Review its exact job/workspace IDs and approval;
+then set `CONTROL_PLANE_CLOUD_DELETION_APPROVAL` and rerun with both
+`--retry-records --execute` after owner approval. The approval binds the target,
+actor, reason, workspace version, job identity, failed attempt, update time and
+completed target counts. The transaction resets that job to `deleting_records`
+with a fresh attempt budget and writes
+`cloud_workspace.operator_deletion_records_retried` to `audit_log`. Completed
+blob targets, provider journals, job identity and original requester are kept.
+An identical replay reports the audit receipt; it never rearms a later failure.
+A later failure needs a fresh approval ID and plan.
+
+Data erasure runs under the worker's live, tenant-scoped deletion lease in one
+transaction. The purge clears the boot pointer without reverting command mode,
+removes local history heads before writer cascades, releases checkpoint
+references, and removes setup attestations and runtime transitions before setup
+runs cascade into engines. Runtime enrollments and their credentials disappear;
+generation, allocation-transfer, billing and audit tombstones remain. Migration
+0142 is an expand migration compatible with the previous application: the
+allocation audit keeps its unchanged identity and requires a live runtime
+transition on insertion, while its foreign key anchors it to the retained
+generation-transition tombstone. Only the scoped erasure capability permits
+clearing an activated boot pointer or deleting runtime transitions.
 
 A Boat create journal whose outcome can never be certified (a pre-0093
 untracked journal, or dispatches whose refusal was not recognized) keeps its
@@ -726,3 +874,36 @@ matrix on an adopted qualified v4 pin before release claims.
 - Provider-validation scripts stay outside shipping application graphs.
 - Add a separate execution-coordinator app only if it becomes independently
   built, deployed, scaled, and operated.
+
+### Temporary control-plane unavailability and finite compute
+
+A running managed allocation retains its already funded provider deadline when
+known transient database failures interrupt reconciliation. Connection loss,
+acquisition exhaustion, PostgreSQL transaction rollback exhaustion and bounded
+lock/statement timeouts classify as `control_plane_unavailable`. This is not
+permission to renew compute, accept new work or retry an ambiguous transaction.
+Only confirmed rollback outcomes (`40001`/`40P01`) receive the existing DB-only
+transaction retry; connection loss may have followed a committed write.
+
+Each new reconciliation observes the same allocation, reservation, generation
+and worker claim before writing. Existing cumulative meter/reservation keys
+make a committed result observable without double charging or replaying a
+provider create, start or renewal. An unavailable authority re-read is unknown;
+a positive revocation or permanent ledger failure still closes authority.
+
+Retry delay remains bounded by the earlier of `funded_until` and
+`provider_expires_at`, reserving the existing five-minute checkpoint window and
+15-second stop margin. A missing DB clock uses the claim's observed server time
+plus monotonic elapsed time, conservatively including the claim round trip.
+A total DB outage cannot commit a new schedule or checkpoint request; the
+provider's original finite deadline remains the final limit, and no funds or
+provider TTL are extended. Once the checkpoint margin is reached, an exact
+claim/generation stop reports control-plane unavailability rather than an
+unspecified safety failure. The stored reason enum stays compatible; the closed
+stop class and compute throw site are additive diagnostic JSON, without raw
+exception text, queries, paths or customer content.
+
+This applies to CP-managed cloud allocations only. Local Personal and
+organization-local engines do not call these services; their offline lifecycle
+and owner switching remain unchanged. It does not change authority tokens,
+WorkOS sessions, idle policy, provider pricing or the native process model.

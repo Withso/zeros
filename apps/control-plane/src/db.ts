@@ -26,6 +26,62 @@ export type Tx = pg.PoolClient;
 const ENTER_APP_ROLE = "SET LOCAL ROLE zeros_app";
 export const DATABASE_CONNECTION_LIFETIME_SECONDS = 600;
 
+export class DatabaseAcquireTimeoutError extends Error {
+  readonly code = "database_acquire_timeout";
+  constructor() {
+    super("Database capacity is temporarily unavailable");
+    this.name = "DatabaseAcquireTimeoutError";
+  }
+}
+
+export class DatabaseAcquireUnavailableError extends Error {
+  readonly code = "database_acquire_unavailable";
+  constructor() {
+    super("Database connection is temporarily unavailable");
+    this.name = "DatabaseAcquireUnavailableError";
+  }
+}
+
+function acquireError(error: unknown): unknown {
+  // These are pg-pool's queue and new-connection deadlines. Do not turn SQL,
+  // authentication, or uncertain transaction failures into retryable acquires.
+  if (error instanceof Error && (error.message === "timeout exceeded when trying to connect" ||
+    error.message === "Connection terminated due to connection timeout")
+  ) return new DatabaseAcquireTimeoutError();
+  // Normalize transport errors only at acquisition, before a transaction
+  // exists. An arbitrary application/provider error with an errno is not DB proof.
+  if (error && typeof error === "object" && "code" in error && typeof error.code === "string" &&
+      ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"].includes(error.code))
+    return new DatabaseAcquireUnavailableError();
+  return error;
+}
+
+/** Availability is not transaction retry permission. In particular, connection
+ * loss may follow COMMIT: callers must re-observe durable state before writing. */
+export function isDatabaseUnavailable(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  return typeof error.code === "string" && [
+    "database_acquire_timeout", "database_acquire_unavailable", "database_connection_lost",
+    "40001", "40P01", "55P03", "57014", "53300", "57P01", "57P02", "57P03",
+    "08000", "08001", "08003", "08006", "08007",
+  ].includes(error.code);
+}
+
+type ConnectCallback = Parameters<pg.Pool["connect"]>[0];
+class DeadlinePool extends pg.Pool {
+  override connect(): Promise<pg.PoolClient>;
+  override connect(callback: ConnectCallback): void;
+  override connect(callback?: ConnectCallback): Promise<pg.PoolClient> | void {
+    // Use pg-pool's own cancellation: it removes timed-out waiters and owns
+    // late sockets. A Promise.race would leave work queued after the 503.
+    if (callback) {
+      super.connect((error, client, release) => callback(acquireError(error) as Error | undefined, client, release));
+      return;
+    }
+    return super.connect().catch(error => { throw acquireError(error); });
+  }
+}
+
 export class DatabaseConnectionLostError extends Error {
   readonly code = "database_connection_lost";
   constructor() {
@@ -61,26 +117,30 @@ function observeOwnedConnection(client: Tx) {
 
 export function createPool(
   databaseUrl: string,
-  options: { maxConnections?: number; applicationName?: string } = {},
+  options: { maxConnections?: number; applicationName?: string; keepAlive?: boolean;
+    workload?: "api" | "worker" | "listener" | "retirement-lock" } = {},
 ): pg.Pool {
-  const pool = new pg.Pool({
+  const interactive = options.workload === "api";
+  const Pool = interactive ? DeadlinePool : pg.Pool;
+  const pool = new Pool({
     connectionString: parseDatabaseTarget(databaseUrl).toString(),
     // pg treats an empty string as absent and falls back to PGOPTIONS.
     // Explicit NONE retains the login's authority without ambient role choice.
     options: "-c role=none",
-    max: options.maxConnections ?? 10,
+    max: options.maxConnections ?? (interactive ? 6 : options.workload === "retirement-lock" ? 1 : options.workload ? 2 : 10),
     // Hosted PlanetScale connections require sslmode=verify-full. Honor the
     // validated URL so local PostgreSQL development remains supported.
     //
-    // A hung query (full scan, lock wait) otherwise pins one of the 10 pool
-    // slots indefinitely; 11 such queries wedge the whole backend. Cap every
-    // statement at 30s and every new-connection wait at 10s so a slow DB
-    // surfaces as errors instead of a silent hang.
-    statement_timeout: 30_000,
-    connectionTimeoutMillis: 10_000,
+    // API requests fail fast. Workers and operator callers retain their
+    // existing deadlines; their independent capacity cannot consume API slots.
+    statement_timeout: interactive ? 5_000 : 30_000,
+    connectionTimeoutMillis: interactive ? 1_000 : 10_000,
     idle_in_transaction_session_timeout: 30_000,
     maxLifetimeSeconds: DATABASE_CONNECTION_LIFETIME_SECONDS,
     application_name: options.applicationName ?? "zeros-control-plane",
+    // Transport probes keep an idle LISTEN socket observable without issuing
+    // SQL or adding transactions to the shared database/egress budget.
+    ...(options.keepAlive ? { keepAlive: true, keepAliveInitialDelayMillis: 30_000 } : {}),
   });
   // pg evicts failed idle clients itself, but an unhandled pool error is a
   // process-level crash. Never log the driver error: it may contain SQL/data.
@@ -125,7 +185,7 @@ export async function withUserTx<T>(
     client = await pool.connect();
   } catch (error) {
     recordPoolWait(performance.now() - started);
-    throw error;
+    throw acquireError(error);
   }
   const acquired = performance.now();
   const connection = observeOwnedConnection(client);
@@ -162,7 +222,7 @@ export async function withUserTx<T>(
 export async function withSystemTx<T>(
   pool: pg.Pool,
   fn: (tx: Tx) => Promise<T>,
-  options: { consistentRead?: boolean } = {},
+  options: { consistentRead?: boolean; serializable?: boolean } = {},
 ): Promise<T> {
   assertWorkOSProviderLockHeld();
   const started = performance.now();
@@ -171,7 +231,7 @@ export async function withSystemTx<T>(
     client = await pool.connect();
   } catch (error) {
     recordPoolWait(performance.now() - started);
-    throw error;
+    throw acquireError(error);
   }
   const acquired = performance.now();
   const connection = observeOwnedConnection(client);
@@ -179,8 +239,9 @@ export async function withSystemTx<T>(
   let discard = false;
   try {
     connection.assert();
-    await client.query(`${options.consistentRead
-      ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+    await client.query(`${options.serializable
+      ? `BEGIN ISOLATION LEVEL SERIALIZABLE${options.consistentRead ? " READ ONLY" : ""}`
+      : options.consistentRead ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
       : "BEGIN"}; ${ENTER_APP_ROLE}; SELECT set_config('app.system', 'on', true)`);
     connection.assert();
     const result = await fn(client);

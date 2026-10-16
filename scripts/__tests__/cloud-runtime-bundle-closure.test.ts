@@ -31,6 +31,7 @@ import {
   RUNTIME_HELPERS,
   ROOT_METADATA,
   SOURCE_SLICES,
+  SOURCE_FILES,
 } from "../cloud-workspace-validation/runtime-bundle/closure";
 import {
   canonicalJson,
@@ -112,6 +113,34 @@ describe("cloud Host staged entry closure (portable syntax/existence only)", () 
   });
 });
 
+it.each(["loaded", "missing_dependency", "missing_export"])("probes full source engine import before publication: %s", async outcome => {
+  const root = await directory();
+  await json(path.join(root, "manifest.json"), {});
+  const source = await readFile("scripts/cloud-workspace-validation/runtime-bundle/probe.cjs", "utf8");
+  const module = { exports: undefined as unknown }, require = createRequire(import.meta.url);
+  const output: string[] = [];
+  let exitCode: number | undefined;
+  const imports: string[] = [];
+  const fromWorker = (name: string) => {
+    imports.push(name);
+    if (!name.endsWith("/zeros-engine.ts")) return {};
+    if (outcome === "missing_dependency") throw new Error("PRIVATE_ENGINE_IMPORT_DETAIL");
+    return outcome === "loaded" ? { ZerosEngine: class {} } : {};
+  };
+  // Real probe and diagnostic loop, with only module loading replaced. The
+  // separate staged-source test exercises the actual transitive imports.
+  runInNewContext(source.replace("Object.entries(checks)", "Object.entries({ qualification_imports: checks.qualification_imports })") +
+    "\nmodule.exports = main;", { module, require: (name: string) => name === "node:module" ? { createRequire: () => fromWorker } : require(name),
+    process: { argv: ["node", "probe.cjs", root, "engine"], env: { HOME: path.join(root, "home") },
+      stdout: { write: (line: string) => output.push(line) }, exit: (code: number) => { exitCode = code; } } });
+  await (module.exports as () => Promise<void>)();
+  expect({ exitCode, diagnostic: JSON.parse(output.at(-1)!) }).toMatchObject(outcome === "loaded"
+    ? { exitCode: 0, diagnostic: { ok: true, failedChecks: [] } }
+    : { exitCode: 1, diagnostic: { ok: false, failedChecks: ["qualification_imports"] } });
+  expect(imports).toContain(path.join(root, "worker/apps/desktop/src/engine/zeros-engine.ts"));
+  expect(output.join("")).not.toContain("PRIVATE_ENGINE_IMPORT_DETAIL");
+});
+
 it("binds both offline phases to engine10003 and the exact pinned Host marker without nesting Cursor userns", async () => {
   const root = await directory();
   for (const relative of ["bin/node", "bin/start-engine.sh", "lib/zeros/setup-cloud-workspace.mjs", "lib/zeros/cloud-worker-supervisor.mjs"]) {
@@ -145,6 +174,8 @@ it("binds both offline phases to engine10003 and the exact pinned Host marker wi
 describe("pnpm runtime closure", () => {
   it("stages the neutral provider closure without deleted ZSR qualification sources", async () => {
     expect(SOURCE_SLICES).not.toContain("scripts/zsr-qualification");
+    // Cloud agent context names this skill; the engine finds it under worker/.
+    expect(SOURCE_SLICES).toContain("apps/desktop/resources/zeros-design-skill");
     const probe = await readFile("scripts/cloud-workspace-validation/runtime-bundle/probe.cjs", "utf8");
     expect(probe).not.toContain("@anthropic-ai/sandbox-runtime");
     expect(probe).not.toContain("zsr-supervisor.mjs");
@@ -432,7 +463,7 @@ describe("pnpm runtime closure", () => {
         .map((entry) => path.basename(entry.target))
         .sort(),
     ).toEqual([...names, "runtime-update-adapter.py", "cloud-resident-workload.mjs",
-      "prepare-cloud-image-files.mjs", "publish-cloud-workload-custody.mjs", "cloud-resource-budget.mjs",
+      "prepare-cloud-image-files.mjs", "prepare-cloud-git.mjs", "publish-cloud-workload-custody.mjs", "cloud-resource-budget.mjs",
       "cloud-resident-control.mjs"].sort());
     expect(RUNTIME_HELPERS).toContainEqual({
       source: "scripts/cloud-workspace-validation/sandbox/cloud-resource-budget.mjs",
@@ -463,6 +494,7 @@ describe("pnpm runtime closure", () => {
       await mkdir(path.join(source, relative), { recursive: true });
     for (const relative of [
       ...ROOT_METADATA,
+      ...SOURCE_FILES,
       ...RUNTIME_HELPERS.filter((entry) => !entry.optional).map(
         (entry) => entry.source,
       ),
@@ -477,6 +509,8 @@ describe("pnpm runtime closure", () => {
       recursive: true,
     });
     await writeFile(path.join(source, resolverSource), contents);
+    const assetSource = "apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs";
+    await writeFile(path.join(source, assetSource), await readFile(assetSource));
     await link(
       path.join(source, resolverSource),
       path.join(
@@ -523,12 +557,49 @@ describe("pnpm runtime closure", () => {
     ).toBe("5");
   });
 
+  it("loads the actual staged engine capability and its public channel-policy imports outside src", async () => {
+    const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
+    const imports = [
+      "apps/desktop/src/engine/cloud-workspace-capability.ts",
+      "apps/desktop/src/engine/runtime.ts",
+      "apps/desktop/shared/cloud-workspace-channel.ts",
+      "apps/control-plane/src/cloud-workspace-channels.json",
+    ];
+    for (const slice of SOURCE_SLICES) await mkdir(path.join(source, slice), { recursive: true });
+    for (const relative of new Set([...ROOT_METADATA, ...SOURCE_FILES, ...RUNTIME_HELPERS.filter(helper => !helper.optional).map(helper => helper.source),
+      ...hostSources, ...imports, "scripts/cloud-workspace-validation/sandbox/start-engine.sh"])) {
+      const filename = path.join(source, relative);
+      await mkdir(path.dirname(filename), { recursive: true });
+      await writeFile(filename, imports.includes(relative) ? await readFile(relative) : "fixture");
+    }
+    await writeFile(path.join(source, "package.json"), "{}");
+    await stageSources(source, runtime);
+    const require = createRequire(import.meta.url);
+    const entry = path.join(runtime, "worker", imports[0]);
+    const observed = execFileSync(process.execPath, ["--require", require.resolve("tsx/cjs"), "--eval",
+      `try { const m=require(${JSON.stringify(entry)}); const result=m.createCloudWorkspaceDesktopPipelines({cloudWorker:true, ` +
+      "capabilityEnabled(){throw new Error('VM must not evaluate desktop capability');}}); " +
+      "process.stdout.write(JSON.stringify({loaded:true,result})); } catch(error) { " +
+      "process.stdout.write(JSON.stringify({loaded:false,code:error.code})); }"], {
+      cwd: temp, env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    expect(JSON.parse(observed)).toEqual({ loaded: true, result: { replica: null, fork: null } });
+    for (const relative of imports.slice(2)) {
+      const staged = path.join(runtime, "worker", relative);
+      expect(await readFile(staged)).toEqual(await readFile(relative));
+      expect((await lstat(staged)).isFile()).toBe(true);
+      await rm(path.join(source, relative));
+      await expect(stageSources(source, path.join(temp, path.basename(relative)))).rejects.toMatchObject({ code: "ENOENT" });
+      await writeFile(path.join(source, relative), await readFile(relative));
+    }
+  });
+
   it.each(hostSources.flatMap(relative => [
     { relative, kind: "missing" }, { relative, kind: "aliased" },
   ]))("refuses $kind required Host source $relative before staging", async ({ relative, kind }) => {
     const temp = await directory(), source = path.join(temp, "source");
     for (const slice of SOURCE_SLICES) await mkdir(path.join(source, slice), { recursive: true });
-    for (const filename of [...ROOT_METADATA, ...RUNTIME_HELPERS.map(helper => helper.source),
+    for (const filename of [...ROOT_METADATA, ...SOURCE_FILES, ...RUNTIME_HELPERS.map(helper => helper.source),
       ...hostSources, "scripts/cloud-workspace-validation/sandbox/start-engine.sh"]) {
       await mkdir(path.dirname(path.join(source, filename)), { recursive: true });
       await writeFile(path.join(source, filename), "fixture");
@@ -545,8 +616,8 @@ describe("pnpm runtime closure", () => {
   it("imports the actual resource-budget helper from its copied lib/zeros deployment path", async () => {
     const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
     for (const slice of SOURCE_SLICES) await mkdir(path.join(source, slice), { recursive: true });
-    const actualHelpers = new Set(["cloud-resource-budget.mjs", "cloud-resource-admission.mjs", "cgroup-resources.mjs", "cloud-runtime-root.mjs"]);
-    for (const relative of [...ROOT_METADATA, ...RUNTIME_HELPERS.map(helper => helper.source),
+    const actualHelpers = new Set(["cloud-resource-budget.mjs", "cloud-resource-admission.mjs", "cgroup-resources.mjs", "cloud-runtime-root.mjs", "cloud-runtime-assets.mjs"]);
+    for (const relative of [...ROOT_METADATA, ...SOURCE_FILES, ...RUNTIME_HELPERS.map(helper => helper.source),
       ...hostSources, "scripts/cloud-workspace-validation/sandbox/start-engine.sh"]) {
       const filename = path.join(source, relative);
       await mkdir(path.dirname(filename), { recursive: true });
@@ -566,7 +637,7 @@ describe("pnpm runtime closure", () => {
     const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
     const residentSource = "scripts/cloud-workspace-validation/sandbox/cloud-resident-control.mjs";
     for (const slice of SOURCE_SLICES) await mkdir(path.join(source, slice), { recursive: true });
-    for (const relative of new Set([...ROOT_METADATA, ...RUNTIME_HELPERS.filter(helper => !helper.optional).map(helper => helper.source),
+    for (const relative of new Set([...ROOT_METADATA, ...SOURCE_FILES, ...RUNTIME_HELPERS.filter(helper => !helper.optional).map(helper => helper.source),
       ...hostSources, residentSource, "scripts/cloud-workspace-validation/sandbox/start-engine.sh"])) {
       const filename = path.join(source, relative);
       await mkdir(path.dirname(filename), { recursive: true });

@@ -1,4 +1,5 @@
 import { type DesignAssetSummary } from "./assets";
+import type { DesignStyleSourceStatus } from "./style-sources";
 // ──────────────────────────────────────────────────────────
 // Design document — authored HTML/CSS frames and canvas metadata
 // ──────────────────────────────────────────────────────────
@@ -195,6 +196,10 @@ export interface DesignWorkspaceSnapshot {
   frames: DesignCanvasFrame[];
   tokens: DesignTokenSummary[];
   tokenSourceVersion: string;
+  /** Imported style sources declared in meta/canvas.json, with their status. */
+  styleSources: DesignStyleSourceStatus[];
+  /** Problems with the declared list itself. */
+  styleSourceErrors: string[];
   assets: DesignAssetSummary[];
   lint: DesignLintReport;
 }

@@ -152,6 +152,7 @@ const MAX_CONTROL_HANDLER_PEER_QUEUED_BYTES = 4 * 1024 * 1024;
 const MAX_HANDLER_RETAINED_BYTES = 64 * 1024 * 1024;
 const FORCE_CLOSE_TIMEOUT_MS = 1_000;
 const MAX_CLIENT_AUTHORITY_LEASE_MS = 10_000;
+const MAX_CLIENT_AUTHORITY_RENEWAL_ATTEMPTS = 3;
 const INTERNAL_READINESS_PATH = "/internal/readiness";
 const INTERNAL_QUIET_PATH = "/internal/runtime-quiet";
 const INTERNAL_HANDOFF_PATH = "/internal/runtime-handoff";
@@ -523,7 +524,9 @@ export class CloudTransport implements Transport {
       let authorityExpiresAtMs = admission.expiresAtMs;
       let finalized = false;
       let renewalInFlight = false;
+      let renewalFailures = 0;
       let renewalTimer: ReturnType<typeof setInterval> | undefined;
+      let renewalRetryTimer: ReturnType<typeof setTimeout> | undefined;
       let expiryTimer: ReturnType<typeof setTimeout> | undefined;
       const client = new CloudClient(
         randomUUID(),
@@ -548,9 +551,10 @@ export class CloudTransport implements Transport {
       };
       if (admission.grantToken) {
         armExpiry();
-        renewalTimer = setInterval(
-          () => {
-            if (finalized || renewalInFlight || !client.authorized()) return;
+        const renewAuthority = () => {
+            if (finalized || renewalInFlight || !client.authorized() || renewalFailures >= MAX_CLIENT_AUTHORITY_RENEWAL_ATTEMPTS) return;
+            if (renewalRetryTimer) clearTimeout(renewalRetryTimer);
+            renewalRetryTimer = undefined;
             renewalInFlight = true;
             // Start time bounds the lease even if verification stalls. A late
             // reply cannot resurrect a closed or expired connection.
@@ -571,25 +575,35 @@ export class CloudTransport implements Transport {
                   }
                   authorityExpiresAtMs =
                     startedAt + this.clientAuthorityLeaseMs;
+                  renewalFailures = 0;
                   armExpiry();
                 },
                 (error: unknown) => {
                   if (finalized || !client.authorized()) return;
                   const failure = error && typeof error === "object" ? error as { code?: unknown; status?: unknown } : {};
+                  const denied = typeof failure.status === "number" && failure.status >= 400 && failure.status < 500 &&
+                    failure.status !== 408 && failure.status !== 429;
                   // Only a typed transient may use the remaining confirmed
                   // lease. It never renews the deadline; expiry still fences
                   // incoming/outgoing handlers even if this request stalls.
-                  if (failure.code === "cloud_client_authority_transient") return;
-                  client.close(1008, typeof failure.status === "number" && failure.status >= 400 && failure.status < 500
+                  if (!denied && failure.code === "cloud_client_authority_transient") {
+                    renewalFailures++;
+                    const delay = Math.max(1, Math.min(250, Math.floor(this.clientAuthorityLeaseMs / 8))) * 2 ** (renewalFailures - 1);
+                    if (renewalFailures < MAX_CLIENT_AUTHORITY_RENEWAL_ATTEMPTS && Date.now() + delay < authorityExpiresAtMs) {
+                      renewalRetryTimer = setTimeout(() => { renewalRetryTimer = undefined; renewAuthority(); }, delay);
+                      renewalRetryTimer.unref?.();
+                    }
+                    return;
+                  }
+                  client.close(1008, denied
                     ? "client authority revoked" : "client authority unavailable");
                 },
               )
               .finally(() => {
                 renewalInFlight = false;
               });
-          },
-          Math.floor(this.clientAuthorityLeaseMs / 2),
-        );
+          };
+        renewalTimer = setInterval(renewAuthority, Math.floor(this.clientAuthorityLeaseMs / 2));
         renewalTimer.unref?.();
       }
       this.clients.set(ws, client);
@@ -606,6 +620,7 @@ export class CloudTransport implements Transport {
         finalized = true;
         if (expiryTimer) clearTimeout(expiryTimer);
         if (renewalTimer) clearInterval(renewalTimer);
+        if (renewalRetryTimer) clearTimeout(renewalRetryTimer);
         clearTimeout(handshakeTimer);
         preauthMessages.length = 0;
         preauthQueuedBytes = 0;

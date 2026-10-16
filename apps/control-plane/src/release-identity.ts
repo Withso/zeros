@@ -6,9 +6,10 @@ import type { Config } from "./config.js";
 import { withSystemTx } from "./db.js";
 import type { MigrationStatus } from "./migrate.js";
 import { isNewerExpandMigration } from "./migration-phase.js";
-import type { CloudWorkspaceReleaseHealthReader } from "./cloud-workspaces/health.js";
+import { hasOnlyCloudWorkspaceCleanupReasons, type CloudWorkspaceReleaseHealthReader } from "./cloud-workspaces/health.js";
 import { readRuntimeReleaseIdentity } from "./cloud-workspaces/runtime-publication-routes.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./cloud-workspaces/engine-protocol-version.js";
+import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
 
 type LedgerRow = { name: string; checksum: string | null; phase?: string | null };
 type Dependencies = {
@@ -74,7 +75,8 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
         manifestSha256: digest(JSON.stringify(expected)),
       };
     } catch { /* Fail closed without exposing database errors. */ }
-    const configured = config.cloudWorkspaces;
+    const cloudChannel = cloudWorkspaceChannelEnabled(config.deploymentChannel);
+    const configured = cloudChannel ? config.cloudWorkspaces : null;
     let cloud: { enabled: boolean; ready: boolean; state: string; operationalState?: "degraded" } =
       { enabled: !!configured, ready: !configured, state: configured ? "unknown" : "disabled" };
     let deferredReadiness: { kind: "retired-boat-deletions" } | undefined;
@@ -83,13 +85,19 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
         const service = deps.cloudWorkspaceHealthService;
         const measured = service?.readForRelease
           ? await service.readForRelease()
-          : { health: await service?.read(), stalledDeletionsDeferred: false };
+          : { health: await service?.read(), stalledDeletionsDeferred: false, controlPlaneReady: undefined };
         const health = measured.health;
-        // Provider-owned erasure of retired Boat allocations stays visible as
-        // degraded operational health; it never closes release readiness.
+        // Preserve the existing v1 retired-Boat label only for its original
+        // proven inventory. Other cleanup alerts remain on /healthz; the
+        // identity's cloud.state measures CP release eligibility.
         const deferred = measured.stalledDeletionsDeferred && health?.operationalState === "degraded" &&
           health.reasons.length === 1 && health.reasons[0] === "deletion_intent_stalled";
-        const ready = (health?.operationalState === "healthy" || deferred) && health?.backgroundWorkers === "enabled" &&
+        const eligible = measured.controlPlaneReady === undefined
+          ? health?.operationalState === "healthy" || deferred
+          : measured.controlPlaneReady === true && health !== undefined &&
+            (health.operationalState === "healthy" ? health.reasons.length === 0
+              : health.operationalState === "degraded" && hasOnlyCloudWorkspaceCleanupReasons(health.reasons));
+        const ready = eligible && health?.backgroundWorkers === "enabled" &&
           health.setupExecution === "enabled" && health.durability === "enabled";
         cloud = { enabled: true, ready, state: ready ? "healthy" : "unready",
           ...(deferred && ready ? { operationalState: "degraded" as const } : {}) };
@@ -98,7 +106,7 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
     }
     // Image references are immutable public artifact identities, never URLs.
     const selected = configured ? { provider: configured.provider, imageRef: configured.imageRef, sourceSha: configured.sourceCommit,
-      architecture: configured.architecture, storageMiB: configured.storageMiB } : config.selectedCloudWorker;
+      architecture: configured.architecture, storageMiB: configured.storageMiB } : cloudChannel ? config.selectedCloudWorker : null;
     const imageRef = selected?.imageRef;
     const validImage = selected?.provider === "boat" && /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(imageRef ?? "");
     const worker = selected && typeof imageRef === "string" && validImage && sha(selected.sourceSha) &&
@@ -133,7 +141,7 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
       } catch { /* Missing/unreadable approval must not authorize publication. */ }
     }
     let runtimeV4: Awaited<ReturnType<typeof readRuntimeReleaseIdentity>> | undefined;
-    if (config.cloudRuntimePublication && !maintenance && migrations.state === "current") {
+    if (cloudChannel && config.cloudRuntimePublication && !maintenance && migrations.state === "current") {
       try {
         runtimeV4 = await (deps.readRuntimeIdentity ? deps.readRuntimeIdentity() :
           readRuntimeReleaseIdentity(pool, config.cloudWorkspaceNewRuntimeProfile ?? "v4"));

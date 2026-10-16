@@ -1,0 +1,66 @@
+import { SetupObservationSchema, type SetupObservation } from "./setup-observation";
+import { RuntimeObservationSchema, type RuntimeObservation } from "./runtime-observation";
+import { AdmissionObservationSchema, type AdmissionObservation } from "./admission-observation";
+import { TransportObservationSchema, type TransportObservation } from "./gate0-contract";
+import { NativeProofObservationSchema, type NativeProofObservation } from "./native-proof-observation";
+
+/** Only these codes may leave the CLI. Provider errors, bodies and stack traces
+ * are never evidence; neither are arbitrary error.code/name/message values. */
+export const ERROR_CODES = [
+  "invalid_request", "fixture_invalid", "identity_changed", "login_required",
+  "auth_contract", "auth_denied", "auth_unavailable", "auth_unknown_issuance", "service_unavailable",
+  "rate_limited", "not_found", "forbidden", "bad_response", "deadline",
+  "credentials_unsafe", "credentials_missing", "credentials_invalid", "credentials_changed", "credentials_busy",
+  "receipt_invalid", "receipt_busy", "receipt_missing", "operation_conflict",
+  "computer_required", "computer_failed", "repository_required", "workspace_failed", "workspace_not_running",
+  "agent_credential_required", "agent_failed", "permission_required", "command_uncertain", "release_checks_unavailable",
+  "runtime_unavailable", "runtime_changed", "runtime_pin_unconfirmed", "runtime_selection_unavailable", "runtime_selection_changed",
+  "terminal_failed", "cleanup_pending", "cleanup_backlog_exceeded", "database_unavailable",
+  "database_readonly_required", "input_contains_credentials", "cancelled", "internal", "history_changed", "actions_required", "artifact_invalid",
+  "model_eligibility_unconfirmed", "workload_incomplete", "detached_auth_window", "detached_task_not_active", "detached_proof_incomplete", "transport_interrupted",
+  "setup_retried", "setup_observation_unavailable",
+] as const;
+export type ErrorCode = typeof ERROR_CODES[number];
+export class ZerosDevError extends Error {
+  readonly setup?: SetupObservation;
+  readonly runtime?: RuntimeObservation;
+  readonly admission?: AdmissionObservation;
+  readonly transport?: TransportObservation;
+  readonly nativeProof?: NativeProofObservation;
+  constructor(readonly code: ErrorCode, readonly status?: number, readonly retryAfterMs?: number, setup?: SetupObservation,
+    runtime?: RuntimeObservation, admission?: AdmissionObservation, transport?: TransportObservation, nativeProof?: NativeProofObservation) {
+    super(`zeros_dev_${code}`);
+    const parsed = SetupObservationSchema.safeParse(setup);
+    if (parsed.success) this.setup = parsed.data;
+    const connection = RuntimeObservationSchema.safeParse(runtime);
+    if (connection.success) this.runtime = connection.data;
+    const retry = AdmissionObservationSchema.safeParse(admission);
+    if (retry.success) this.admission = retry.data;
+    const observed = TransportObservationSchema.safeParse(transport);
+    if (observed.success) this.transport = observed.data;
+    const native = NativeProofObservationSchema.safeParse(nativeProof);
+    if (code === "detached_proof_incomplete" && native.success) this.nativeProof = native.data;
+  }
+}
+export function diagnosticEvidence(error: unknown): { setup?: SetupObservation; runtime?: RuntimeObservation; admission?: AdmissionObservation; transport?: TransportObservation; nativeProof?: NativeProofObservation } {
+  if (!(error instanceof ZerosDevError)) return {};
+  const runtime = RuntimeObservationSchema.safeParse(error.runtime);
+  const admission = AdmissionObservationSchema.safeParse(error.admission);
+  const transport = TransportObservationSchema.safeParse(error.transport);
+  const native = NativeProofObservationSchema.safeParse(error.nativeProof);
+  return { ...setupEvidence(error), ...(runtime.success ? { runtime: runtime.data } : {}),
+    ...(admission.success ? { admission: admission.data } : {}), ...(transport.success ? { transport: transport.data } : {}),
+    ...(error.code === "detached_proof_incomplete" && native.success ? { nativeProof: native.data } : {}) };
+}
+export function setupEvidence(error: unknown): { setup?: SetupObservation } {
+  if (!(error instanceof ZerosDevError)) return {};
+  const parsed = SetupObservationSchema.safeParse(error.setup);
+  return parsed.success ? { setup: parsed.data } : {};
+}
+export function closedError(error: unknown): ErrorCode {
+  if (error instanceof ZerosDevError) return error.code;
+  // The storage module runs without TS. Recognize only its exact fixed codes.
+  if (error instanceof Error && /^zeros_dev_credentials_(?:unsafe|missing|invalid|changed|busy)$/.test(error.message))
+    return error.message.slice("zeros_dev_".length) as ErrorCode;
+  return "internal";
+}

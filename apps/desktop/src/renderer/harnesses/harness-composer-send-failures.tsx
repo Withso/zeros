@@ -21,6 +21,8 @@ import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
 import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
 import { useWorkspaceStore } from "../state/workspace-store";
+import { FollowUpBehaviorSetting } from "../features/settings/follow-up-behavior-setting";
+import { SettingsGroup } from "../features/settings/settings-ui";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -31,6 +33,8 @@ let runtimeRequired = new URLSearchParams(location.search).has("blocked");
 let error = "cloud_agent_model_not_authorized";
 let sends = 0;
 let reconnects = 0;
+const followUpFixture = new URLSearchParams(location.search).has("follow-up");
+const followUps: Array<{ chatId: string; behavior: string | undefined }> = [];
 
 window.__ZEROS_NATIVE__ = { on: () => () => {}, async invoke<T>(command: string): Promise<T> {
   if (command === "auth_get_access_token") return { access_token: "fixture-session" } as T;
@@ -76,14 +80,16 @@ const actions = {
   ensureSession: async () => {},
   updateConfig: () => {},
   holdQueue: () => {}, releaseQueue: () => {},
-  sendPrompt: async (chatId, text, displayText, _attachments, bubbleAttachments, segments, _autoAction, onAccepted, cloudQueue) => {
+  sendPrompt: async (chatId, text, displayText, _attachments, bubbleAttachments, segments, _autoAction, onAccepted, cloudQueue, _wakeIntent, followUpBehavior) => {
     sends++;
+    followUps.push({ chatId, behavior: followUpBehavior });
     const draft = getLiveChatDraft(chatId);
     const message = { id: crypto.randomUUID(), kind: "text" as const, role: "user" as const, text: displayText ?? text,
       createdAt: Date.now(), attachments: bubbleAttachments, segments };
     const store = useSessionsStore.getState(), slot = store.sessions[chatId];
     store.patchSession(chatId, { messages: [...slot.messages, message], status: "streaming" });
     onAccepted?.();
+    if (followUpFixture) return;
     if (isCloudWorkspace(slot.cwd)) {
       const refuse = () => recoverCloudAdmissionFailure({ folder: slot.cwd, chatId, error, message, draft,
         model: "gpt-6.1-sol", store: useSessionsStore.getState(), pauseQueue: () => {} });
@@ -97,6 +103,7 @@ const actions = {
 Object.assign(window, { composerSendFailureFixture: {
   get runtimeRequired() { return runtimeRequired; },
   get sends() { return sends; },
+  get followUps() { return followUps; },
   get reconnects() { return reconnects; },
   get document() { return document; },
   get runtimeAvailability() {
@@ -131,6 +138,7 @@ function Harness() {
     <TooltipProvider delayDuration={100}>
       <Toaster />
       <main className="bg-bg1 text-fg1 flex h-screen flex-col">
+        {followUpFixture && <div data-follow-up-setting className="p-4"><SettingsGroup><FollowUpBehaviorSetting /></SettingsGroup></div>}
         <nav className="flex gap-2 p-4">
           {["Cloud", "Local", "Organization local"].map((label, index) => <Button key={label} onClick={() => {
             useWorkspaceStore.setState({ activeChatId: chats[index].id });

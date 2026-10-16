@@ -498,7 +498,7 @@ export class DatabaseCloudWorkspaceReplicaService {
     try {
       return await withSystemTx(this.pool, async (tx) => {
         await tx.query(
-          `SELECT pg_advisory_xact_lock(hashtextextended($1, 30))`,
+          `SELECT pg_advisory_xact_lock(hashtextextended($1, 30)) /*lock_purpose='device-key-rotation'*/`,
           [
             `device-key-rotation:${input.proof.deviceId}:${input.idempotencyKey}`,
           ],
@@ -1005,7 +1005,7 @@ export class DatabaseCloudWorkspaceReplicaService {
     };
     const digest = requestDigest(payload);
     return withSystemTx(this.pool, async (tx) => {
-      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 29))`, [
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 29)) /*lock_purpose='replica-command'*/`, [
         `workspace-replica-command:${input.replicaId}:${input.idempotencyKey}`,
       ]);
       const { replica, device } = await this.lockReplicaForDevice(tx, {
@@ -1853,7 +1853,7 @@ export class DatabaseCloudWorkspaceReplicaService {
       // replica/key pair so concurrent retries cannot both cross the cursor
       // check, and so a lost response after a diverged receipt can still be
       // replayed after its original grant was intentionally revoked.
-      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 31))`, [
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 31)) /*lock_purpose='replica-receipt'*/`, [
         `workspace-replica-receipt:${input.replicaId}:${input.idempotencyKey}`,
       ]);
       const replay = await tx.query<{

@@ -12,6 +12,7 @@ import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
 import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
+import { configureDesignStyleBuilds, hasRunningDesignStyleBuilds, stopDesignStyleBuilds } from "./design/style-builds";
 import type { DesignCaptureService } from "./design/capture-service";
 // ──────────────────────────────────────────────────────────
 // ZerosEngine — The heart of Zeros V2
@@ -72,6 +73,7 @@ import { readObservedCloudWorkspacePorts } from "./cloud-observed-ports";
 import { CloudPreviewGatewayFactory } from "./agents/containment/cloud-preview-links";
 import { CloudNativePreviewGatewayFactory } from "./agents/containment/cloud-native-preview-gateway";
 import { resolveCloudRuntime } from "./agents/containment/cloud-runtime-root.mjs";
+import { cloudRuntimeAssetEnvironment } from "./agents/containment/cloud-runtime-assets.mjs";
 import type { Transport, TransportClient } from "./transport/types";
 import {
   channel,
@@ -174,7 +176,7 @@ import {
   type CreatedWorkspace,
 } from "./git";
 import { RunManager } from "./run/run-manager";
-import { getWorkspaceById, listWorkspaces } from "./git/state";
+import { getWorkspaceById, getWorkspaceByPath, listWorkspaces } from "./git/state";
 import { CloudCommandRuntime, type CloudCommandSettlementObservation } from "./cloud-command-runtime";
 import { CloudAgentTurnTimings } from "./cloud-local-command-queue-timings";
 import { CloudGoalRecorder } from "./cloud-goal-recorder";
@@ -187,7 +189,9 @@ import { CloudLocalCommandEventStore } from "./cloud-local-command-queue-events"
 import { CloudLocalCommandActionStore } from "./cloud-local-command-queue-actions";
 import { CloudLocalCommandWriterLifecycle } from "./cloud-local-command-queue-lifecycle";
 import type { CloudLocalCommandQueue, CloudLocalCommandHistoryMutation } from "./cloud-local-command-queue";
-import { cloudLocalCommandCheckpointRoot, restoreCloudLocalCommandCheckpointLedger } from "./cloud-local-command-queue-checkpoint";
+import { cloudLocalCommandCheckpointRoot, restoreCloudLocalCommandCheckpointLedger, recoverCloudLocalCommandCheckpointLedger,
+  cloudLocalCommandHistoryRecoveryCustody,
+  type CloudLocalCommandPredecessor } from "./cloud-local-command-queue-checkpoint";
 import { rebuildCloudLocalCommandHistory } from "./cloud-local-command-queue-history-rebuild";
 import { openSqlite } from "./db/sqlite";
 import { CloudLocalCommandMirrorDriver } from "./cloud-local-command-mirror";
@@ -207,7 +211,7 @@ import { cloudClaudePreferencesEnv } from "./cloud-claude-preferences";
 import { CloudConversationCreateSchema, CloudConversationReadSchema, CloudConversationModeSchema, CloudCommandSnapshotSchema,
   CloudCommandClientRequestSchema, CloudBootCommandClientRequestSchema, CloudBootCommandSnapshotSchema, CloudBootCommandClaimSchema } from "@zeros/protocol/cloud-commands";
 import { cloudCommandFailureCode, decodeCloudCommandFailure, cloudCommandFailureFromCode, CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
-import { CloudAgentAdmissionError } from "./cloud-agent-execution-client";
+import { CloudAgentAdmissionError, isTransientCloudAgentAuthorityError } from "./cloud-agent-execution-client";
 import { listKnownRepoRoots } from "./db/projects";
 import { resolveRunActions } from "./settings/repo-scripts";
 import {
@@ -312,6 +316,7 @@ import {
 } from "@zeros/protocol/version";
 import {
   CloudRuntimeRegistration,
+  CloudClientAuthorityTransientError,
   consumeCloudRuntimeEnvironment,
   type CloudCheckpointDirective,
   type CloudRuntimeConfig,
@@ -321,6 +326,7 @@ import {
   type CloudDurabilityAuthority,
 } from "./cloud-durability-runtime";
 import { CloudCheckpointScheduler } from "./cloud-checkpoint-scheduler";
+import { CloudCheckpointProgressReporter } from "./cloud-checkpoint-progress";
 import { CloudWorkspaceRecordRuntime } from "./cloud-record-runtime";
 import type {
   SessionNotification,
@@ -1152,7 +1158,14 @@ export class ZerosEngine {
     boot: CloudLocalAgentBootRuntime | null; completion: Omit<CloudEngineFinalCompletion, "challenge">;
   } | null = null;
   private cloudLocalSealFlight: Promise<void> | null = null;
+  /** Once final sealing starts, cancellation can retry control but never
+   * reopen ordinary admission, even before the immutable seal is written. */
+  private cloudFinalCheckpointSealSource: {
+    lifecycle: CloudLocalCommandWriterLifecycle; boot: CloudLocalAgentBootRuntime;
+    registration: CloudRuntimeRegistration; scope: CloudLocalAgentBootRuntime["scope"];
+  } | null = null;
   private cloudLocalHistoryRestored = false;
+  private cloudLocalCommandPredecessor: CloudLocalCommandPredecessor | null = null;
   private cloudLocalHistoryRestoreHeads = new Map<string, CloudLocalCommandHistoryHead>();
   private cloudLocalMirror: CloudLocalCommandMirrorDriver | null = null;
   private cloudLocalMirrorTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1186,7 +1199,9 @@ export class ZerosEngine {
   private cloudHandoffRequests = 0;
   private cloudHandoffWatchersDirty = false;
   private cloudIdleReservation: (() => boolean) | null = null;
-  private cloudIdleCheckpoint: { id: string; promise: Promise<void> } | null = null;
+  private cloudIdleCheckpoint: { id: string; promise: Promise<void>; pending: boolean } | null = null;
+  private cloudCheckpointProgress: { id: string; reporter: CloudCheckpointProgressReporter } | null = null;
+  private cloudCheckpointProgressUnsupported = false;
   private cloudIdleCaptureId: string | null = null;
   private readonly cloudUserPresence = new CloudUserPresence({ activity: () => {
     this.cloudLegacyResidentUserActivity = { at: performance.now() };
@@ -1410,6 +1425,34 @@ export class ZerosEngine {
         } finally {
           await prepared.stopAndProve();
         }
+      },
+    });
+
+    // The person's Design style builds run like setup scripts while a Design
+    // tab is open. Their outputs are usually ignored by Git, so a finished
+    // build announces itself.
+    configureDesignStyleBuilds({
+      boundaryFactory: repoTaskBoundaryFactory,
+      // Archive, deletion and Design authority transitions block new
+      // repository code, exactly as they block Setup and Run starts.
+      assertStartAllowed: (workspacePath) =>
+        this.assertWorkspaceProcessStartAllowed(getWorkspaceByPath(workspacePath)?.id ?? null),
+      // A new worktree builds once its setup has installed what the build needs.
+      whenReady: (workspacePath) => {
+        const workspaceId = getWorkspaceByPath(workspacePath)?.id;
+        return workspaceId ? this.setup.whenSettled(workspaceId) : null;
+      },
+      // Only Design re-reads; Files and Changes ignore a rebuilt output.
+      changed: (workspacePath) => {
+        const workspaceId = getWorkspaceByPath(workspacePath)?.id;
+        this.broadcast(
+          createMessage({
+            type: "DB_CHANGED",
+            source: "engine",
+            kinds: ["designStyles"],
+            ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
+          }),
+        );
       },
     });
 
@@ -1812,6 +1855,10 @@ export class ZerosEngine {
         }
         this.setup.stop(workspaceId);
         this.runs.stopAllForWorkspace(workspaceId);
+        // Approved Design style builds are repository tasks in this checkout too.
+        // Observed now so a rejection before the proof below is never unhandled.
+        const designBuildsStopped = stopDesignStyleBuilds(belongsToWorkspace);
+        designBuildsStopped.catch(() => undefined);
         const terminalIds = new Set(
           this.terminals.sessionIds().filter((sessionId) => {
             const terminal = this.terminals.get(sessionId);
@@ -1865,6 +1912,7 @@ export class ZerosEngine {
           await Promise.all([
             this.setup.proveWorkspaceBoundaryStopped(workspaceId),
             this.runs.proveWorkspaceBoundariesStopped(workspaceId),
+            designBuildsStopped,
           ]);
         } catch (error) {
           throw new GitError({
@@ -2016,6 +2064,7 @@ export class ZerosEngine {
       ? new CloudRuntimeRegistration(this.cloudRuntimeConfig, {
           agentRuntime: readCloudAgentRuntimeAttestation(this.cloudWorker),
           negotiateLocalCommands: true,
+          checkpointHints: true,
           onAuthorityLost: () => this.handleCloudRuntimeAuthorityLoss(),
           onDurableRecordSync: (authority, context) => {
             this.cloudIdleStop.recordSync("pending");
@@ -3398,6 +3447,7 @@ export class ZerosEngine {
    * Stop the engine gracefully.
    */
   async stop(): Promise<void> {
+    this.cloudCheckpointProgress?.reporter.dispose();
     const failures: unknown[] = [];
     if (this.cloudLegacyResidentRetryTimer) clearTimeout(this.cloudLegacyResidentRetryTimer);
     this.cloudLegacyResidentRetryTimer = null;
@@ -3460,6 +3510,7 @@ export class ZerosEngine {
     await settle(() => this.cloudLocalActions?.close());
     await settle(() => this.cloudLocalWriterLifecycle?.close());
     await settle(() => stopDesignVerification());
+    configureDesignStyleBuilds(null);
     const captureService = this.designCaptureService;
     this.designCaptureService = undefined;
     if (captureService) {
@@ -3563,6 +3614,7 @@ export class ZerosEngine {
   private handleCloudRuntimeAuthorityLoss(): void {
     if (this.cloudRuntimeAuthorityStopping) return;
     this.cloudRuntimeAuthorityStopping = true;
+    this.cloudCheckpointProgress?.reporter.dispose();
     this.cloudAgentTurnTimings?.retire();
     void this.cloudCheckpointScheduler?.close();
     this.cloudCommands?.close();
@@ -3587,7 +3639,7 @@ export class ZerosEngine {
       this.pendingPermissionRequests.size > 0 || this.pendingQuestionRequests.size > 0 ||
       this.cloudWorkspaceMutations.size > 0 || this.globalDesignAuthorityStarts.size > 0 ||
       [...this.workspaceProcessStarts.values()].some(starts => starts.size > 0) ||
-      this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() ||
+      this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() || hasRunningDesignStyleBuilds() ||
       this.cloudCommands?.handoffDrained() !== true || this.cloudActions?.hasActiveWork() === true ||
       this.cloudGoals.active() || this.activeAgentExecutionCount() > 0 || this.pty.list().length > 0 ||
       this.cloud?.handoffBusy() === true || [...this.residentGithubBrokers.values()].some(broker => broker.busy());
@@ -3830,7 +3882,7 @@ export class ZerosEngine {
       this.pendingPermissionRequests.size > 0 || this.pendingQuestionRequests.size > 0 ||
       this.cloudWorkspaceMutations.size > this.cloudWorkspaceIdleMaintenance.size || this.globalDesignAuthorityStarts.size > 0 ||
       [...this.workspaceProcessStarts.values()].some(starts => starts.size > 0) ||
-      this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() ||
+      this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() || hasRunningDesignStyleBuilds() ||
       this.cloudCommands?.hasActiveWork() === true || this.cloudGoals.active() || this.activeAgentExecutionCount() > 0 ||
       this.pty.hasRecentInput() || this.residentTerminals?.hasRecentInput() === true || this.residentTerminals?.busy() === true ||
       humanServices || (includePresence && this.cloudUserPresence.active());
@@ -3881,15 +3933,41 @@ export class ZerosEngine {
     // Explicit final requests can also be redelivered after an ambiguous
     // response. Share their reconciliation just like an idle capture.
     if (this.cloudIdleCheckpoint?.id === directive.id) return this.cloudIdleCheckpoint.promise;
-    const promise = this.performCloudCheckpointRequest(directive, authority);
-    this.cloudIdleCheckpoint = { id: directive.id, promise };
-    void promise.catch(() => { if (this.cloudIdleCheckpoint?.id === directive.id) this.cloudIdleCheckpoint = null; });
+    if (this.cloudIdleCheckpoint?.pending) return Promise.reject(new Error("cloud checkpoint is already in progress"));
+    const progress = this.checkpointProgressReporter(directive, authority);
+    progress?.stage("checkpoint_received");
+    const promise = this.performCloudCheckpointRequest(directive, authority, progress);
+    const checkpoint = { id: directive.id, promise, pending: true };
+    this.cloudIdleCheckpoint = checkpoint;
+    void promise.then(() => { checkpoint.pending = false; }, error => {
+      checkpoint.pending = false;
+      progress?.fail(error);
+      if (this.cloudIdleCheckpoint === checkpoint) this.cloudIdleCheckpoint = null;
+    });
     return promise;
+  }
+
+  private checkpointProgressReporter(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): CloudCheckpointProgressReporter | undefined {
+    const config = this.cloudRuntimeConfig, registration = this.cloudRuntimeRegistration;
+    if (!this.cloudWorker || !config || !registration || this.cloudCheckpointProgressUnsupported) return;
+    if (this.cloudCheckpointProgress?.id === directive.id) return this.cloudCheckpointProgress.reporter;
+    this.cloudCheckpointProgress?.reporter.dispose();
+    const reporter: CloudCheckpointProgressReporter = new CloudCheckpointProgressReporter({ authority, directive, registrationEndpoint: config.registration.endpoint,
+      current: () => this.running && !this.cloudRuntimeAuthorityStopping && this.cloudRuntimeConfig === config &&
+        this.cloudRuntimeRegistration === registration && this.cloudCheckpointProgress?.reporter === reporter &&
+        registration.hasRuntimeHandoffAuthority() && authority.organizationId === config.execution.organizationId &&
+        authority.workspaceId === config.execution.workspaceId && authority.generation === config.execution.generation &&
+        authority.engineInstanceId === config.engine.instanceId,
+      unsupported: () => { this.cloudCheckpointProgressUnsupported = true; },
+    });
+    this.cloudCheckpointProgress = { id: directive.id, reporter };
+    return reporter;
   }
 
   private async performCloudCheckpointRequest(
     directive: CloudCheckpointDirective,
     authority: CloudDurabilityAuthority,
+    progress?: CloudCheckpointProgressReporter,
   ): Promise<void> {
     this.cloudFinalCompletion = null;
     const unresolved = this.cloudUnresolvedFinalCheckpoint;
@@ -3914,13 +3992,38 @@ export class ZerosEngine {
     const idleReserved = directive.idleStop && this.cloudIdleReservation !== null;
     const stillIdle = directive.idleStop ? this.cloudIdleReservation : null;
     if (directive.idleStop && (!this.cloudIdleReservation?.() || await this.cloudIdleUserProcesses() || !this.cloudIdleReservation?.())) {
+      const error = new Error("Cloud workspace is no longer idle");
+      progress?.fail(error, "pending_work");
       await this.cloudRuntimeRegistration?.idleStopRequest({ kind: "cancel", requestId: directive.id }).catch(() => undefined);
-      throw new Error("Cloud workspace is no longer idle");
+      throw error;
     }
+    const retainQuiescence = ["before_stop", "before_archive", "before_delete", "before_rebuild"].includes(directive.reason);
+    const source = this.cloudFinalCheckpointSealSource;
+    const retryFinal = this.cloudRuntimeCheckpointQuiescing && source !== null && source !== undefined &&
+      retainQuiescence && !directive.idleStop;
+    const seal = this.cloudLocalWriterLifecycle?.seal;
+    const assertFinalRetry = () => {
+      if (!retryFinal) return;
+      const config = this.cloudRuntimeConfig, boot = this.cloudAgentBoot, scope = boot?.scope;
+      // The same current engine may finish final capture using its frozen
+      // writer. Neither a manual/idle request nor stale scope can reopen it.
+      if (!this.running || !this.cloudWorker || this.cloudRuntimeAuthorityStopping || !config || !scope ||
+          !boot?.authorityActive || this.cloudLocalWriterLifecycle !== source.lifecycle || boot !== source.boot ||
+          this.cloudRuntimeRegistration !== source.registration || !source.registration.hasRuntimeHandoffAuthority() ||
+          Object.entries(source.scope).some(([key, value]) => scope[key as keyof typeof scope] !== value) ||
+          directive.deadlineAtMs <= Date.now() ||
+          scope.organizationId !== authority.organizationId || scope.workspaceId !== authority.workspaceId ||
+          scope.generation !== authority.generation || scope.engineInstanceId !== authority.engineInstanceId ||
+          config.execution.organizationId !== scope.organizationId || config.execution.workspaceId !== scope.workspaceId ||
+          config.execution.generation !== scope.generation || config.engine.instanceId !== scope.engineInstanceId ||
+          (seal && Object.entries(seal.scope).some(([key, value]) => scope[key as keyof typeof scope] !== value)))
+        throw new CloudCommandRuntimeError("engine_authority_rejected");
+    };
+    assertFinalRetry();
     if (
       this.cloudRuntimeHandoffFenced || !this.cloudDurabilityRuntime ||
       !this.cloudRecordRuntime ||
-      (this.cloudRuntimeCheckpointQuiescing && !idleReserved)
+      (this.cloudRuntimeCheckpointQuiescing && !idleReserved && !retryFinal)
     ) {
       throw new Error("cloud checkpoint runtime is unavailable");
     }
@@ -3928,42 +4031,65 @@ export class ZerosEngine {
     this.cloudIdleReservation = null;
     this.cloudIdleCaptureId = directive.idleStop ? directive.id : null;
     this.cloud?.setHumanServicesPaused(true);
-    const retainQuiescence = [
-      "before_stop",
-      "before_archive",
-      "before_delete",
-      "before_rebuild",
-    ].includes(directive.reason);
     try {
+      progress?.stage("service_pause");
       if (this.cloudWorkloads && !this.cloudWorkloadCheckpointFence) {
         this.cloudWorkloadCheckpointFence = this.cloudWorkloads.fence({ preserveActive: directive.idleStop === true });
         this.cloudWorkloadCheckpointPreserved = directive.idleStop === true;
       }
       this.cloudResidentCheckpointFence ??= this.fenceCloudResidentWorkloads(directive.idleStop ? "preserve" : "drain");
-      try { await Promise.all([this.cloudHumanServices?.pause(),this.cloudLanguageServices?.pause()]); }
-      catch (error) { this.handleCloudRuntimeAuthorityLoss(); throw error; }
-      await this.cloudCheckpointScheduler?.pause();
-      await this.waitForWorkspaceProcessStartSnapshot(
-        "cloud-final-checkpoint",
-        [...new Set([
-          ...this.globalDesignAuthorityStarts,
-          ...this.cloudWorkspaceMutations,
-          ...[...this.workspaceProcessStarts.values()].flatMap(starts => [...starts]),
-        ])],
-      );
-      await this.setup.stopAllAndProve();
-      await this.runs.stopAllAndProve();
-      await this.retireAllCodeAgentSessionsForTerritoryChange();
+      // A sealed NORMAL database is read-only custody. Skip work that may
+      // publish mutable state; the original workload tickets still drain below.
+      if (!seal) {
+        try { await Promise.all([this.cloudHumanServices?.pause(),this.cloudLanguageServices?.pause()]); }
+        catch (error) { progress?.fail(error); this.handleCloudRuntimeAuthorityLoss(); throw error; }
+        await this.cloudCheckpointScheduler?.pause();
+        progress?.stage("process_starts");
+        await this.waitForWorkspaceProcessStartSnapshot(
+          "cloud-final-checkpoint",
+          [...new Set([
+            ...this.globalDesignAuthorityStarts,
+            ...this.cloudWorkspaceMutations,
+            ...[...this.workspaceProcessStarts.values()].flatMap(starts => [...starts]),
+          ])],
+        );
+        progress?.stage("setup_stop");
+        await this.setup.stopAllAndProve();
+        progress?.stage("run_stop");
+        await this.runs.stopAllAndProve();
+        progress?.stage("agent_retirement");
+        await this.retireAllCodeAgentSessionsForTerritoryChange();
+      }
+      progress?.stage("workload_drain");
       if (this.cloudWorkloads && this.cloudWorkloadCheckpointFence) {
         if (directive.idleStop) {
           await this.joinCloudPreservedWorkloads(this.cloudWorkloadCheckpointFence, this.cloudResidentCheckpointFence);
           if (!stillIdle?.() || await this.cloudIdleUserProcesses() || !stillIdle?.())
             throw new Error("Cloud workspace is no longer idle");
-        } else await this.drainCloudWorkloads(this.cloudWorkloadCheckpointFence, this.cloudResidentCheckpointFence);
+        } else {
+          // An earlier idle seal retained original shells under a preserve
+          // ticket. Explicit final control needs a distinct immutable drain.
+          const resident = this.cloudWorkloadCheckpointPreserved
+            ? this.cloudResidentCheckpointDrainFence ??= this.fenceCloudResidentWorkloads("drain")
+            : this.cloudResidentCheckpointFence;
+          await this.drainCloudWorkloads(this.cloudWorkloadCheckpointFence, resident);
+        }
       }
+      progress?.stage("terminal_drain");
       if (!directive.idleStop) await this.terminals.clear();
-      await this.cloudRecordRuntime.flush(authority);
-      if (retainQuiescence && this.cloudLocalWriterLifecycle) await this.sealCloudLocalWriter();
+      if (!seal) {
+        progress?.stage("record_flush");
+        await this.cloudRecordRuntime.flush(authority);
+      }
+      assertFinalRetry();
+      if (retainQuiescence && this.cloudLocalWriterLifecycle) {
+        if (!this.cloudAgentBoot || !this.cloudRuntimeRegistration) throw new CloudCommandRuntimeError("engine_authority_rejected");
+        this.cloudFinalCheckpointSealSource ??= { lifecycle: this.cloudLocalWriterLifecycle, boot: this.cloudAgentBoot,
+          registration: this.cloudRuntimeRegistration, scope: { ...this.cloudAgentBoot.scope } };
+        await this.sealCloudLocalWriter(progress);
+      }
+      assertFinalRetry();
+      progress?.stage("durability_capture");
       await this.cloudDurabilityRuntime.checkpoint(directive, authority, stillIdle ?? undefined);
       // A cancelled idle capture must leave terminal access intact. Clear the
       // shared registrations only after its final checkpoint was committed.
@@ -3976,11 +4102,14 @@ export class ZerosEngine {
         }
         await this.terminals.clear();
       }
+      progress?.stage("final_completion");
       if (retainQuiescence) this.captureCloudFinalCompletion(authority);
       if (!retainQuiescence) {
         await this.resumeCloudCheckpointAdmission();
       }
+      progress?.complete();
     } catch (error) {
+      progress?.fail(error);
       if (retainQuiescence) {
         // A lost checkpoint response can conceal a committed final snapshot.
         // Only acknowledged cancellation permits this engine to admit writes.
@@ -4020,7 +4149,7 @@ export class ZerosEngine {
     this.cloudFinalCheckpointReconciliationTimer = null;
     // A durable frozen writer cannot be reopened by checkpoint cancellation.
     // Only source retirement/replacement can install a fresh writer epoch.
-    if (this.cloudLocalWriterLifecycle?.seal || this.cloudUnresolvedFinalCheckpoint) return;
+    if (this.cloudFinalCheckpointSealSource || this.cloudLocalWriterLifecycle?.seal || this.cloudUnresolvedFinalCheckpoint) return;
     const workloads = this.cloudWorkloads;
     const checkpointFence = this.cloudWorkloadCheckpointFence;
     const idleFence = this.cloudWorkloadIdleFence;
@@ -4226,7 +4355,12 @@ export class ZerosEngine {
     this.cloudStartupPhase = "boot_owner";
     this.cloudAgentBoot ??= new CloudLocalAgentBootRuntime({
       file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
+      predecessor: this.cloudLocalCommandPredecessor,
       runtimeBootId: registration.runtimeBootId, registration, legacy,
+      observeStartup: observation => {
+        this.cloudStartupPhase = observation.phase;
+        console.info("[Zeros cloud boot]", JSON.stringify(observation));
+      },
       scope: { organizationId: config.execution.organizationId, workspaceId: config.execution.workspaceId,
         generation: config.execution.generation, engineInstanceId: config.engine.instanceId },
       supervisor: { onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss() },
@@ -4329,28 +4463,58 @@ export class ZerosEngine {
       return;
     }
     const config = this.cloudRuntimeConfig;
-    const expectedWriterEpoch = this.cloudRuntimeRegistration?.agentSourceWriterEpoch;
+    const registration = this.cloudRuntimeRegistration, expectedWriterEpoch = registration?.agentSourceWriterEpoch;
     if (!config || !this.cloudWorker || !expectedWriterEpoch) throw new CloudCommandRuntimeError("engine_authority_rejected");
-    const verified = await restoreCloudLocalCommandCheckpointLedger({
+    const input = {
       root: cloudLocalCommandCheckpointRoot(zerosDataDir(), this.root),
       file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
       scope: { organizationId: config.execution.organizationId, workspaceId: config.execution.workspaceId },
       expectedWriterEpoch,
-    });
-    const ledger = openSqlite(verified.ledgerFile, { readonly: true, fileMustExist: true });
+    };
+    let verified: Awaited<ReturnType<typeof restoreCloudLocalCommandCheckpointLedger>>, recovering = false;
+    const recoveryCurrent = () => {
+      if (!registration || registration !== this.cloudRuntimeRegistration || !registration.localCommandsNegotiated() ||
+          registration.agentSourceWriterEpoch !== expectedWriterEpoch || this.cloudRuntimeAuthorityStopping)
+        throw new CloudCommandRuntimeError("engine_authority_rejected");
+    };
+    try { verified = await restoreCloudLocalCommandCheckpointLedger(input); }
+    catch (error) {
+      // Integrity failures never select an older artifact. Only explicit
+      // incomplete predecessor custody can ask CP for an authenticated gap.
+      if (!(error instanceof CloudCommandRuntimeError) || !["checkpoint_expected_writer_mismatch", "checkpoint_writer_unsealed"].includes(error.code)) throw error;
+      recoveryCurrent();
+      const preparedCustody = await cloudLocalCommandHistoryRecoveryCustody(input.file, expectedWriterEpoch);
+      recoveryCurrent();
+      const remaining = registration!.agentBootAuthorityRemainingMs();
+      if (remaining <= 0) throw new CloudCommandRuntimeError("engine_authority_rejected");
+      const authorization = await registration!.agentBootRequest("recover-history", {
+        version: 1, mode: "boot-owner-v1", ...input.scope, generation: config.execution.generation,
+        engineInstanceId: config.engine.instanceId, ...(preparedCustody.length ? { preparedCustody } : {}),
+      }, AbortSignal.timeout(Math.min(10_000, remaining)));
+      recoveryCurrent();
+      verified = await recoverCloudLocalCommandCheckpointLedger({ ...input, authorization,
+        scope: { ...input.scope, generation: config.execution.generation, engineInstanceId: config.engine.instanceId,
+          bootId: registration!.runtimeBootId } });
+      recovering = true;
+    }
+    let ledger: ReturnType<typeof openSqlite> | undefined;
     try {
+      ledger = openSqlite(verified.ledgerFile, { readonly: true, fileMustExist: true });
+      if (recovering) recoveryCurrent();
       const rows = ledger.prepare("SELECT conversation_id FROM local_command_history_heads ORDER BY conversation_id").all() as { conversation_id: string }[];
       const db = openZerosDb(), sourceSeal = verified.manifest.seal;
       const restoredHeads = new Map<string, CloudLocalCommandHistoryHead>();
       for (const row of rows) {
+        const custody = recovering ? { scope: verified.predecessor!.scope, sourceRecovery: verified.predecessor! } : { scope: sourceSeal.scope, sourceSeal };
         const restored = rebuildCloudLocalCommandHistory({ db, ledger, repositoryRoot: fs.realpathSync(this.root),
-          scope: sourceSeal.scope, sourceSeal, conversationId: row.conversation_id });
+          ...custody, ...(!recovering ? { sealedCheckpoint: verified } : {}), conversationId: row.conversation_id });
         restoredHeads.set(restored.conversationId, restored.historyHead);
       }
       // No partial lineage is publishable if any conversation fails custody.
       this.cloudLocalHistoryRestoreHeads = restoredHeads;
+      this.cloudLocalCommandPredecessor = verified.predecessor;
       this.cloudLocalHistoryRestored = true;
-    } finally { ledger.close(); await verified.cleanup(); }
+    } finally { ledger?.close(); await verified.cleanup(); }
   }
 
   private cloudHistoryRestoreMetadata(conversations: readonly string[]): CloudAgentHistoryRestoreMetadata | undefined {
@@ -4464,7 +4628,7 @@ export class ZerosEngine {
     }
   }
 
-  private sealCloudLocalWriter(): Promise<void> {
+  private sealCloudLocalWriter(progress?: CloudCheckpointProgressReporter): Promise<void> {
     if (this.cloudLocalSealFlight) return this.cloudLocalSealFlight;
     const lifecycle = this.cloudLocalWriterLifecycle,boot = this.cloudAgentBoot,mirror = this.cloudLocalMirror,registration = this.cloudRuntimeRegistration;
     if (!lifecycle || !boot?.authorityActive || !mirror || !registration) return Promise.reject(new CloudCommandRuntimeError("engine_authority_rejected"));
@@ -4473,9 +4637,13 @@ export class ZerosEngine {
     const preserve = this.cloudRuntimeHandoffFenced === true || this.cloudIdleCaptureId != null;
     if (this.cloudWorkloads) this.cloudWorkloadSealFence ??= this.cloudWorkloads.fence({ preserveActive: preserve });
     this.cloudResidentSealFence ??= this.fenceCloudResidentWorkloads(preserve ? "preserve" : "drain");
+    progress?.stage("boot_quiesce");
     const flight = lifecycle.drainAndSeal({ mirror,
       retireNative: async () => {
-        await boot.quiesceForSeal(); await this.cloudLocalNativePump!.dispose(); await factory.disposeBoot();
+        await boot.quiesceForSeal();
+        progress?.stage("native_pump");
+        await this.cloudLocalNativePump!.dispose(); await factory.disposeBoot();
+        progress?.stage("workload_drain");
         if (this.cloudWorkloads && this.cloudWorkloadSealFence) {
           if (preserve) {
             await this.joinCloudPreservedWorkloads(this.cloudWorkloadSealFence, this.cloudResidentSealFence);
@@ -4484,16 +4652,25 @@ export class ZerosEngine {
         }
       },
       waitForWork: async () => {
+        progress?.stage("command_drain");
         const deadline = performance.now() + 25_000;
         while (!this.cloudCommands!.lifecycleDrained() || this.cloudActions!.hasActiveWork()) {
           if (performance.now() >= deadline) throw new CloudCommandRuntimeError("command_conflict");
           await new Promise<void>(resolve => setTimeout(resolve,25));
         }
-        await this.cloudEvents!.flush(); await registration.pauseRecordForRuntimeHandoff();
+        progress?.stage("event_flush");
+        await this.cloudEvents!.flush();
+        progress?.stage("record_handoff");
+        await registration.pauseRecordForRuntimeHandoff({ retryFailedFlush: true });
       },
       freezeNormal: sealZerosDbForRuntimeHandoff,
       request: (seal,signal) => registration.localCommandSealRequest(seal,signal),
-    }).then(async () => { await lifecycle.captureCheckpoint(cloudLocalCommandCheckpointRoot(zerosDataDir(), this.root)); })
+      onStage: stage => progress?.stage(stage),
+      onDeadline: () => progress?.fail(undefined, "deadline"),
+    }).then(async () => {
+      progress?.stage("checkpoint_capture");
+      await lifecycle.captureCheckpoint(cloudLocalCommandCheckpointRoot(zerosDataDir(), this.root));
+    })
       .finally(() => { if (this.cloudLocalSealFlight === flight) this.cloudLocalSealFlight = null; });
     this.cloudLocalSealFlight = flight; return flight;
   }
@@ -4601,7 +4778,13 @@ export class ZerosEngine {
     if (!admission || registration !== this.cloudRuntimeRegistration) return null;
     if (registration.localCommandsNegotiated()) {
       if (!boot || boot !== this.cloudAgentBoot || !boot.active || this.cloudRuntimeAuthorityStopping) return null;
-      await boot.confirmAdmission(admission);
+      try { await boot.confirmAdmission(admission); }
+      catch (error) {
+        if (renew && registration === this.cloudRuntimeRegistration && boot === this.cloudAgentBoot && boot.active &&
+            !this.cloudRuntimeAuthorityStopping && isTransientCloudAgentAuthorityError(error))
+          throw new CloudClientAuthorityTransientError();
+        throw error;
+      }
       if (registration !== this.cloudRuntimeRegistration || boot !== this.cloudAgentBoot || !boot.active ||
           this.cloudRuntimeAuthorityStopping) return null;
     }
@@ -5850,7 +6033,8 @@ export class ZerosEngine {
         const repositoryTasksActive =
           Boolean(this.cloudWorker) &&
           (this.setup.hasRepositoryCodeAuthority() ||
-            this.runs.hasRepositoryCodeAuthority());
+            this.runs.hasRepositoryCodeAuthority() ||
+            hasRunningDesignStyleBuilds());
         const pooledUtilityAuthorityActive =
           Boolean(this.cloudWorker) &&
           this.agents.hasPooledUtilityCodeAuthority();
@@ -7235,11 +7419,21 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_INIT_AGENT": {
-          // Spawns the subprocess with empty env (if not already running)
-          // so the auth screen can read the agent's advertised auth methods.
-          // Providing a real env later (via AGENT_NEW_SESSION) will transparently
-          // respawn the subprocess when needed.
-          const initialize = await this.agents.initializeAgent(msg.agentId);
+          const actor = this.cloudWorker ? client.cloudActor : undefined;
+          if (this.cloudWorker && (!actor || client.authorized?.() !== true))
+            throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+          const bound = this.cloudWorker && msg.chatId ? this.conversationExecution.get(msg.chatId) : undefined;
+          const executionId = bound && this.sessionAgent.get(bound) === msg.agentId ? bound : undefined;
+          // Only an admitted execution may expose a cloud account catalog.
+          // A cold or unknown route gets generic metadata, never a new boot.
+          const initialize = executionId
+            ? await this.agents.initializeAgent(msg.agentId, executionId)
+            : await this.agents.initializeAgent(msg.agentId);
+          if (this.cloudWorker && (client.cloudActor !== actor || client.authorized?.() !== true))
+            throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+          if (this.cloudWorker && msg.chatId && (this.conversationExecution.get(msg.chatId) !== bound ||
+            (executionId && this.sessionAgent.get(executionId) !== msg.agentId)))
+            throw new Error("The conversation execution changed during the model catalog read.");
           client.send(
             createMessage({
               type: "AGENT_AGENT_INITIALIZED",
@@ -11825,6 +12019,7 @@ export class ZerosEngine {
       );
       env = credentialEnv ? { ...baseEnv, ...credentialEnv.env } : baseEnv;
       if (this.cloudWorker) {
+        if (this.cloudWorker.version === 4) Object.assign(env, cloudRuntimeAssetEnvironment(resolveCloudRuntime()));
         // Isolated image/login probes have no account actor. Keep their
         // existing terminal admission and give them no default Git identity.
         if (client.cloudActor && !this.cloudRuntimeRegistration) { ptyExit(); return; }

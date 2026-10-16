@@ -54,6 +54,64 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
     await expect(errors).toHaveCount(0);
     await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
   };
+  const recoveryNotice = page.locator("[data-history-recovery-notice]");
+  const beforeRecovery = writes.length;
+  await page.evaluate(() => {
+    const current = window.cloudRestartFixture.document;
+    const binding = { generation: current.generation.number, engineInstanceId: "33333333-3333-4333-8333-333333333333",
+      bootId: "44444444-4444-4444-8444-444444444444", writerEpoch: "55555555-5555-4555-8555-555555555555" };
+    window.cloudRestartFixture.publish({ status: "waking", agentCredentials: { ...binding, mode: "boot-owner-v1", status: "current",
+      fundingScope: "workspace-roles-v1", fundingOwnerUserId: current.createdBy, fundingOwnerEpoch: 1 },
+    historyRecovery: { ...binding, recoveryId: "66666666-6666-4666-8666-666666666666", completedAt: "2026-10-14T12:00:00Z",
+      code: "history_recovered_with_gap", coverage: "unknown" } });
+    window.cloudRestartFixture.bridge.setConnection("connecting");
+  });
+  await expect(recoveryNotice).toHaveCount(0);
+  await page.evaluate(() => window.cloudRestartFixture.publish({ status: "ready" }));
+  await expect(recoveryNotice).toHaveCount(0);
+  await page.evaluate(() => window.cloudRestartFixture.bridge.setConnection("connected"));
+  await expect(recoveryNotice).toContainText("Recent history may be incomplete");
+  await expect(recoveryNotice).toContainText("The workspace recovered after an interrupted stop. Check recent messages and work before retrying a request.");
+  await expect(recoveryNotice.getByRole("status")).toHaveAttribute("aria-live", "polite");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+    await screenshot("history-recovery", theme);
+  }
+  await page.getByRole("button", { name: "Hide recovery surface", exact: true }).click();
+  await expect(recoveryNotice).toHaveCount(0);
+  await page.getByRole("button", { name: "Show recovery surface", exact: true }).click();
+  await expect(recoveryNotice).toBeVisible();
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(recoveryNotice).toHaveCount(0);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(recoveryNotice).toBeVisible();
+  const dismissRecovery = page.getByRole("button", { name: "Dismiss history recovery warning", exact: true });
+  await dismissRecovery.focus(); await page.keyboard.press("Enter");
+  await expect(recoveryNotice).toHaveCount(0);
+  await page.evaluate(() => window.cloudRestartFixture.publishOtherRecovery());
+  await page.getByRole("button", { name: "Recovery owner B", exact: true }).click();
+  await expect(recoveryNotice).toBeVisible();
+  await dismissRecovery.click(); await expect(recoveryNotice).toHaveCount(0);
+  await page.getByRole("button", { name: "Recovery owner A", exact: true }).click();
+  await expect(recoveryNotice).toHaveCount(0);
+  await page.evaluate(() => window.cloudRestartFixture.publish({ historyRecovery: { ...window.cloudRestartFixture.document.historyRecovery,
+    recoveryId: "77777777-7777-4777-8777-777777777777" } }));
+  await expect(recoveryNotice).toBeVisible();
+  for (const owner of ["Personal", "organization"]) {
+    await page.getByRole("button", { name: `Local ${owner} fixture`, exact: true }).click();
+    await expect(recoveryNotice).toHaveCount(0);
+  }
+  await page.getByRole("button", { name: "Cloud fixture", exact: true }).click();
+  await expect(recoveryNotice).toBeVisible(); await dismissRecovery.click();
+  expect(writes.length).toBe(beforeRecovery);
+  check("History recovery shows the approved nonblocking warning only when usable; hidden/Local surfaces stay inert and A-B-A dismissals are exact workspace + receipt with no writes", true);
   await page.evaluate(() => {
     window.cloudRestartFixture.menuOverlayActive = false;
     document.addEventListener(
@@ -120,6 +178,18 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
     await expect(status.getByRole("status")).toHaveText("Running");
     await expect(restart).toBeEnabled();
     await screenshot("running", theme);
+    const beforeTransportGap = writes.length;
+    await page.evaluate(() => window.cloudRestartFixture.bridge.setConnection("disconnected"));
+    await page.clock.runFor(3_000);
+    await expect(status.getByRole("status")).toHaveText("Running");
+    await page.clock.runFor(8_000);
+    await expect(status.getByRole("status")).toHaveText("Reconnecting…");
+    expect(await page.evaluate(() => window.cloudRestartFixture.document.status)).toBe("ready");
+    expect(writes.length).toBe(beforeTransportGap);
+    await screenshot("reconnecting", theme);
+    await page.evaluate(() => window.cloudRestartFixture.bridge.setConnection("connected"));
+    await expect(status.getByRole("status")).toHaveText("Running");
+    check(`Cloud transport loss retains the ready lifecycle without Starting or a wake (${theme})`, true);
     await page.evaluate(() => { window.cloudRestartFixture.bridge.holdConnect = true; });
     const before = writes.length;
     const stopReceipt = page.waitForResponse(response =>

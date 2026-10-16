@@ -6,14 +6,14 @@
 // The three bundled agent runtimes are shipped artifacts, not ordinary
 // libraries: @anthropic-ai/claude-agent-sdk carries the actual claude-code
 // executable, @openai/codex the codex one, @cursor/sdk the entire Cursor
-// backend. Renovate's weekly "agent CLIs" PR is the only thing that moves
-// them, and it only ever moves them FORWARD.
+// backend. The runtime updater appends forward upgrades to one working PR per
+// provider; maintainers qualify and merge them (see agent-runtime-notifications.md).
 //
 // WHY THIS EXISTS: every pre-existing gate is blind in exactly that direction.
 //   • `models:verify --strict` fails only when the bundled CLI is OLDER than a
 //     curated model needs (models-verify.mjs `checkCliVersionGate`). A bump
 //     RAISES the version, so `versionGte` is trivially satisfied and the check
-//     is green by construction — for the one direction Renovate ever moves.
+//     is green by construction for a forward update.
 //   • `test:adapters` replays committed fixtures through unchanged translator
 //     source, so its output is identical before and after any version bump.
 //   • `check:codex-pin` genuinely does gate Codex. Nothing gated Claude or
@@ -31,8 +31,8 @@
 //   2. DECLARED === INSTALLED for all three.
 //   3. THE REAL ARTIFACT. Resolve Claude's platform binary and exec its own
 //      `--version`, then assert it equals the SDK's declared claudeCodeVersion.
-//      This is the only check in the repo that touches the shipped executable;
-//      it catches a renamed/dropped/corrupt platform package at PR time.
+//      It catches a renamed/dropped/corrupt platform package at PR time;
+//      separate startup smokes also exercise the SDK/native protocol seam.
 //   4. SELF-AGREEMENT. claudeCodeVersion === manifest.json `version`. Four call
 //      sites read these two fields in two different precedence orders
 //      (registry.ts and sidecar.ts check manifest first, models-verify.mjs
@@ -61,6 +61,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { driftSummary } from "./agent-runtime/sources.mjs";
 
 import {
   readClaudeCodeVersion,
@@ -151,7 +152,7 @@ function checkPins() {
           `lets a lockfile refresh swap the binary with no reviewed diff, and ` +
           `for ${CODEX} it silently breaks check:codex-pin, which compares the ` +
           `installed version to package.json#codexProtocolVersion by equality. ` +
-          `Renovate bumps exact pins exactly as well as ranges.`,
+          `The runtime updater requires exact reviewed pins.`,
       );
     }
 
@@ -351,8 +352,8 @@ function checkCodexTriple(installedCodexVersion) {
   // check:codex-pin already compares installed/pin/bindings and prints the fix.
   // Repeating that would double the failure output for one cause. What it does
   // NOT cover is the dependency-declaration side, which is this gate's job:
-  // `codexProtocolVersion` is a bare string with no Renovate customManager, so
-  // it can only ever be moved by hand.
+  // The runtime updater coordinates the protocol pin and generation, while this
+  // gate still independently proves the dependency declaration matches them.
   if (installedCodexVersion && installedCodexVersion !== pinned) {
     notes.push(
       `codex ${installedCodexVersion} vs protocol pin ${pinned} — ` +
@@ -391,7 +392,7 @@ async function reportDrift(resolved) {
         continue;
       }
       const behind = compareVersions(current, latest) < 0;
-      rows.push([name, current, latest, behind ? "BEHIND" : "up to date"]);
+      rows.push([name, current, latest, behind ? "BEHIND" : compareVersions(current, latest) > 0 ? "AHEAD" : "up to date"]);
     } catch (e) {
       rows.push([name, current, `? (${e.name})`, ""]);
     }
@@ -404,13 +405,9 @@ async function reportDrift(resolved) {
       `  ${name.padEnd(w)}  ${cur.padEnd(12)} → ${String(latest).padEnd(12)} ${state}`,
     );
   }
-  const behind = rows.filter((r) => r[3] === "BEHIND");
-  console.log(
-    behind.length
-      ? `\n  ${behind.length} of ${rows.length} runtime pins are behind latest. ` +
-          `Renovate opens the "agent CLIs" PR before 6am Monday; this is only a report.`
-      : `\n  All ${rows.length} runtime pins are at latest.`,
-  );
+  console.log(`\n  ${driftSummary(rows.map((row) => ({
+    status: row[3] === "BEHIND" ? "behind" : row[3] === "up to date" ? "current" : row[3] === "AHEAD" ? "ahead" : "unavailable",
+  })))}`);
 }
 
 // ── main ──────────────────────────────────────────────────

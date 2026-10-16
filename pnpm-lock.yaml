@@ -19,6 +19,9 @@ overrides:
   source-map-js: 1.2.2
 
 patchedDependencies:
+  '@radix-ui/react-scroll-area@1.2.10':
+    hash: 48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630
+    path: patches/@radix-ui__react-scroll-area@1.2.10.patch
   app-builder-lib@26.8.1:
     hash: c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd
     path: patches/app-builder-lib@26.8.1.patch
@@ -31,8 +34,8 @@ importers:
   .:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
-        specifier: 0.3.293
-        version: 0.3.293(@anthropic-ai/sdk@0.100.1(zod@4.3.6))(@modelcontextprotocol/sdk@1.31.0(zod@4.3.6))(zod@4.3.6)
+        specifier: 0.3.296
+        version: 0.3.296(@anthropic-ai/sdk@0.100.1(zod@4.3.6))(@modelcontextprotocol/sdk@1.31.0(zod@4.3.6))(zod@4.3.6)
       '@codemirror/autocomplete':
         specifier: ^6.20.3
         version: 6.20.3
@@ -76,8 +79,8 @@ importers:
         specifier: ^22.0.0
         version: 22.0.1
       '@openai/codex':
-        specifier: 0.161.0
-        version: 0.161.0
+        specifier: 0.162.1
+        version: 0.162.1
       '@pierre/diffs':
         specifier: 1.4.1
         version: 1.4.1(@shikijs/themes@4.0.2)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -107,7 +110,7 @@ importers:
         version: 1.1.15(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-scroll-area':
         specifier: ^1.2.0
-        version: 1.2.10(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+        version: 1.2.10(patch_hash=48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-separator':
         specifier: ^1.1.8
         version: 1.1.8(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -129,6 +132,9 @@ importers:
       '@replit/codemirror-indentation-markers':
         specifier: ^6.5.3
         version: 6.5.3(@codemirror/language@6.12.3)(@codemirror/state@6.6.0)(@codemirror/view@6.43.1)
+      '@tanstack/react-virtual':
+        specifier: 3.14.20
+        version: 3.14.20(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@tiptap/core':
         specifier: 3.31.2
         version: 3.31.2(@tiptap/pm@3.31.2)
@@ -276,6 +282,9 @@ importers:
       tailwind-merge:
         specifier: ^3.0.0
         version: 3.5.0
+      tailwindcss:
+        specifier: ^4.0.0
+        version: 4.2.1
       tinyglobby:
         specifier: ^0.2.17
         version: 0.2.17
@@ -373,9 +382,6 @@ importers:
       prettier-plugin-tailwindcss:
         specifier: ^0.8.0
         version: 0.8.0(prettier@3.8.3)
-      tailwindcss:
-        specifier: ^4.0.0
-        version: 4.2.1
       tsup:
         specifier: ^8.0.0
         version: 8.5.1(@swc/core@1.15.33)(jiti@2.6.1)(postcss@8.5.25)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
@@ -503,48 +509,48 @@ packages:
   7zip-bin@5.2.0:
     resolution: {integrity: sha512-ukTPVhqG4jNzMro2qA9HSCSSVJN3aN7tlb+hfqYCt3ER0yWroeA2VR38MNrOHLQ/cVj+DaIMad0kFCtWWowh/A==}
 
-  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.293':
-    resolution: {integrity: sha512-E2rwiiHr3LwYzBuTROVDpJkts4QmYCrW39ZIN1qixVSNQhSEiz5LjaKxzrwq0xgPgQDU0vd2fLMG1k72BgD24w==}
+  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.296':
+    resolution: {integrity: sha512-Wrhy7rxQVUNowQRDpSZD+3MFSBAlN4TINZSpKD8PKpEValCG6x05N855MuITvwgkH0EeoyNLRCsowJaIHa8V9Q==}
     cpu: [arm64]
     os: [darwin]
 
-  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.293':
-    resolution: {integrity: sha512-UJD8kX1XDhMqs/0LLxD012h+S9U3Q8XPbRSNcnPQEMNAoEF+lh898xPbVnkUgPKl3jUOUyqYRwFRwDiUJD+GJg==}
+  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.296':
+    resolution: {integrity: sha512-klMOQ1TdA7u6sWZJYw9l5byWYxMiWzbuPhzCgVVY+LJOs4FlhsS3qLXn2RZmIFhQv1u65zwX+2CRSWEJddqfVQ==}
     cpu: [x64]
     os: [darwin]
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.293':
-    resolution: {integrity: sha512-l5Nfwox69bBMEccSQfPQFOq9hbSqQIMsi4H/UXaMSsqgnxunXuKEBXb5klXZJwk4vUt/NzeqAjB/UFbKqW29HQ==}
+  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.296':
+    resolution: {integrity: sha512-8DEazoBU4I8HsPrXgSJ1Vq30nCBF7PaKjHz1o/igCz+HZu3qepHztWpoKJKQee5Mt4XsvZLwtKuxQo1F+SC6yQ==}
     cpu: [arm64]
     os: [linux]
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.293':
-    resolution: {integrity: sha512-B3M5gw6pPH/ckMtrLtGg4ZY1adLVnPoXkEV+Ruu0j/gdFzwuLWR64Spa0RCsbo7BXVN6w5NTqkuZk+HBfsPUZA==}
+  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.296':
+    resolution: {integrity: sha512-+tC1KlUlp/3BQS+EfG8RBrmru4xKwF6hNEm15gNct8k9tNVRLYOftbkNCGJPTKkoBoq0sQ+Omojzwr/W2Dg60A==}
     cpu: [arm64]
     os: [linux]
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.293':
-    resolution: {integrity: sha512-5N30l2Y17ZV9q0TGCMXtrkTleX+RVtUMoOL+48qQ7ZrKWGYYBtVDS59cIXDv+TAGqoyYVmklw0W2Sy4dA40BwQ==}
+  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.296':
+    resolution: {integrity: sha512-lMquemenM5CDNZv6g1+xBSfQpat2xiwOQUnY2mwSQKjT+IfE5/F8CgRd38ZBljwGnedPIuKs/DAZMt4YslLF5w==}
     cpu: [x64]
     os: [linux]
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.293':
-    resolution: {integrity: sha512-MtqXROSQiuqOCNXfC4k3/3DVfgTNLEdaT5jp/omaZeiPtnRtfCz2KTtBTVG4IwbEDFaKsqfzPsPFzN7X6avwkg==}
+  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.296':
+    resolution: {integrity: sha512-TStCnbg2iBtWJBQeMdO7Xwpx5IYWICmdcf7J9eXhIi4JbahWD+VLRaH5sxB+LLZjdBXekp8piKv6Ne2+arag0w==}
     cpu: [x64]
     os: [linux]
 
-  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.293':
-    resolution: {integrity: sha512-WvPf8cXna446bTx2U4WVQc5+iUgDn94ve8aauvWwcG8n9oa+1wNCKNGFxk8HvS7DQJhF8dfrCbcF068uNFqYNw==}
+  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.296':
+    resolution: {integrity: sha512-/epluPyoLm1NQAcHV0LUierKog7c9yyU8BgpZOtGWiM54nqTZKKBuCwANraV3ROfXYFfJdMV4Vehk/8fqxoOqQ==}
     cpu: [arm64]
     os: [win32]
 
-  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.293':
-    resolution: {integrity: sha512-SVaIDHtpCwM0r0m9jzue1U7yktIZ1eJhR1O3e0UCHYTJluaIXty5m6DzqhG4rjnEoNlEAl9rQLqPigS/R5+IiQ==}
+  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.296':
+    resolution: {integrity: sha512-T71Y/hp0v7VtRzTOoxAsIkPa68JpB1d/VvCKTTE9GzTkbjQZHjs3S1DM06LDxSpwjITF7OCVJq14+XjN8M9t/g==}
     cpu: [x64]
     os: [win32]
 
-  '@anthropic-ai/claude-agent-sdk@0.3.293':
-    resolution: {integrity: sha512-DVfn46SmpfB7xaKuUHsAC+qwY27hOLHNbvF7FoNOAXLZPRTeCr68SjhBjlFOtk+jz5Nf7pfUwnIUDFcdVih6Dg==}
+  '@anthropic-ai/claude-agent-sdk@0.3.296':
+    resolution: {integrity: sha512-Y+cZ2BT8X94mQ9GJOVyIqhjC/nWGvwozUVLjdkzX7aSt+zuo5tgk7Hdv9V7tEUQ9fKnEuiL6moYNWDeHqCD4Lw==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
       '@anthropic-ai/sdk': '>=0.93.0'
@@ -1569,43 +1575,43 @@ packages:
   '@octokit/types@16.0.0':
     resolution: {integrity: sha512-sKq+9r1Mm4efXW1FCk7hFSeJo4QKreL/tTbR0rz/qx/r1Oa2VV83LTA/H/MuCOX7uCIJmQVRKBcbmWoySjAnSg==}
 
-  '@openai/codex@0.161.0':
-    resolution: {integrity: sha512-+ZnJFGBbQBwYnjUTs+PoacgYVxmNyxMLiadIz6eSJ0AzQW0mRVxuuOQizSbz2qeNAJia9Syxag6j2uGf7guD2Q==}
+  '@openai/codex@0.162.1':
+    resolution: {integrity: sha512-NWZdi/kxyjv/8EUGFupziGU38YyleugZRM4JXgY5XFH7FUmaFA33NZS2Bmq0HPazf7S3jJQQWsZ/jAK9jsrV3Q==}
     engines: {node: '>=16'}
     hasBin: true
 
-  '@openai/codex@0.161.0-darwin-arm64':
-    resolution: {integrity: sha512-arxKLYB3uKjewwOpGFo5/MGe8+4JzNB17KIYBmGfF4k3QU+QC4ieXVUwqHmQX2nXrB1BzNMN0gtAgm1AGBTg8w==}
+  '@openai/codex@0.162.1-darwin-arm64':
+    resolution: {integrity: sha512-YVXpg57itBuQxjofay3KDF5UbnZF4Y1ZmNFzUCz0ZQiQN+DndxOjN5V87rnXvPaC4qCPO2El74DzewoBP8JyPQ==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [darwin]
 
-  '@openai/codex@0.161.0-darwin-x64':
-    resolution: {integrity: sha512-svVXwOisMkf/e9BD8Qyp0BQYOTsRnrYErfLq+o7aNMts8Evg06rRsHUfxH6HAiJ99dUgC/4CLr3Rpwh3833TfQ==}
+  '@openai/codex@0.162.1-darwin-x64':
+    resolution: {integrity: sha512-0/WHRhbUnM1wAjfyCO54Q8s4vQRxLVBbqW6XuQf7rZTEMTYPKRIQU9aPeRgjG653ZCSjtBrslWQ+G9urY9CksQ==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [darwin]
 
-  '@openai/codex@0.161.0-linux-arm64':
-    resolution: {integrity: sha512-SBu0n4C1Pby9rGKUNA02yHEg/ScbECgiTIiKiKhbYWiUWqGPV1hY0Br7joEntbz0dyNzSWqNPD8uOqxcOry/Fg==}
+  '@openai/codex@0.162.1-linux-arm64':
+    resolution: {integrity: sha512-Ss7W/SrKtQFNaMtSojNoiykJgX+iDC8daM+YrcvgmJADtQPk0cd3w6Dna4CYH2CYvf9nQranj69fpcTzZ3sQIQ==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [linux]
 
-  '@openai/codex@0.161.0-linux-x64':
-    resolution: {integrity: sha512-AVkNzeJWyCHHPyg5vxD8UE6aFsYaOwq0/x6mtmkOKy6LdjvsyxLr7Q7UULlk+Ma3+PnrN8uIxG2/XGPQ936hgA==}
+  '@openai/codex@0.162.1-linux-x64':
+    resolution: {integrity: sha512-cjK2mdHIfEepZ1lQ1MX3aTQC+8ncIsvnacl/6vI2dIIcfP8/MrhTQ2+qRlkXFNDzJSj1d36quIszP+3/4CUJWQ==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [linux]
 
-  '@openai/codex@0.161.0-win32-arm64':
-    resolution: {integrity: sha512-tgo++ui5X5pXkaz113Q4/PNVviWXlvUdHH4zY+SoGwHm4720JsRPjuUJcUNZ9WtryEiw3Xpj5nKp8pgCXJUjYA==}
+  '@openai/codex@0.162.1-win32-arm64':
+    resolution: {integrity: sha512-teVVACnEcupkR6XSmUQKwlGg/oA15d1DQDPVSoAfilHgctPEpTi5y11jYS6JhJO+AFnYM84gyo5SOS5vlnCQSg==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [win32]
 
-  '@openai/codex@0.161.0-win32-x64':
-    resolution: {integrity: sha512-VdNnttGOG3nbwoREvVurVBXci/EJD/kncVJnvtXjpEE+YhC1twvvrVNmtlZcZGEEVi06xLN/ov0d6nxjZ1XLSg==}
+  '@openai/codex@0.162.1-win32-x64':
+    resolution: {integrity: sha512-dfl4MhHuEi0ARKyNmrTxk+RQmsWNCQAoVLUtrYq+yrW1C8P2sg5ziwgHUUACHjYLKuACV7ARH5Nq5pnCz3GlaQ==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [win32]
@@ -3061,6 +3067,15 @@ packages:
     resolution: {integrity: sha512-mEiF5HO1QqCLXoNEfXVA1Tzo+cYsrqV7w9Juj2wdUFyW07JRenqMG225MvPwr3ZD9N1bFQj46X7r33iHxLUW0w==}
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
+
+  '@tanstack/react-virtual@3.14.20':
+    resolution: {integrity: sha512-9hbhFlc0lznjXmWYDB/KEl7PJxEPz0Qnj2FzJFse98miGvXtx7jzjE5jlasmtczmZ6TxXsyI4v7PuyGQm2q1nQ==}
+    peerDependencies:
+      react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+      react-dom: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+
+  '@tanstack/virtual-core@3.19.5':
+    resolution: {integrity: sha512-X/wq6DtSK/XClznMM+I4JE63yyIwmyPk4Ts83bD0VKaIbwHNdRsO5QipCPX+3OovqYyr0puQNpbmp8+SPhspNg==}
 
   '@tiptap/core@3.31.2':
     resolution: {integrity: sha512-TB+8pLk1k+fCpuPQ6vGNNhSRlvIiOks79oWGykCVut2nbRpQ8GsORP9VK6Eahj2fzdQA96UQMIcK7AxoOZG/2w==}
@@ -6598,44 +6613,44 @@ snapshots:
 
   7zip-bin@5.2.0: {}
 
-  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.293':
+  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.296':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.293':
+  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.296':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.293':
+  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.296':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.293':
+  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.296':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.293':
+  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.296':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.293':
+  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.296':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.293':
+  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.296':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.293':
+  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.296':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk@0.3.293(@anthropic-ai/sdk@0.100.1(zod@4.3.6))(@modelcontextprotocol/sdk@1.31.0(zod@4.3.6))(zod@4.3.6)':
+  '@anthropic-ai/claude-agent-sdk@0.3.296(@anthropic-ai/sdk@0.100.1(zod@4.3.6))(@modelcontextprotocol/sdk@1.31.0(zod@4.3.6))(zod@4.3.6)':
     dependencies:
       '@anthropic-ai/sdk': 0.100.1(zod@4.3.6)
       '@modelcontextprotocol/sdk': 1.31.0(zod@4.3.6)
       zod: 4.3.6
     optionalDependencies:
-      '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.293
-      '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.293
-      '@anthropic-ai/claude-agent-sdk-linux-arm64': 0.3.293
-      '@anthropic-ai/claude-agent-sdk-linux-arm64-musl': 0.3.293
-      '@anthropic-ai/claude-agent-sdk-linux-x64': 0.3.293
-      '@anthropic-ai/claude-agent-sdk-linux-x64-musl': 0.3.293
-      '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.293
-      '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.293
+      '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.296
+      '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.296
+      '@anthropic-ai/claude-agent-sdk-linux-arm64': 0.3.296
+      '@anthropic-ai/claude-agent-sdk-linux-arm64-musl': 0.3.296
+      '@anthropic-ai/claude-agent-sdk-linux-x64': 0.3.296
+      '@anthropic-ai/claude-agent-sdk-linux-x64-musl': 0.3.296
+      '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.296
+      '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.296
 
   '@anthropic-ai/sdk@0.100.1(zod@4.3.6)':
     dependencies:
@@ -7719,31 +7734,31 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 27.0.0
 
-  '@openai/codex@0.161.0':
+  '@openai/codex@0.162.1':
     optionalDependencies:
-      '@openai/codex-darwin-arm64': '@openai/codex@0.161.0-darwin-arm64'
-      '@openai/codex-darwin-x64': '@openai/codex@0.161.0-darwin-x64'
-      '@openai/codex-linux-arm64': '@openai/codex@0.161.0-linux-arm64'
-      '@openai/codex-linux-x64': '@openai/codex@0.161.0-linux-x64'
-      '@openai/codex-win32-arm64': '@openai/codex@0.161.0-win32-arm64'
-      '@openai/codex-win32-x64': '@openai/codex@0.161.0-win32-x64'
+      '@openai/codex-darwin-arm64': '@openai/codex@0.162.1-darwin-arm64'
+      '@openai/codex-darwin-x64': '@openai/codex@0.162.1-darwin-x64'
+      '@openai/codex-linux-arm64': '@openai/codex@0.162.1-linux-arm64'
+      '@openai/codex-linux-x64': '@openai/codex@0.162.1-linux-x64'
+      '@openai/codex-win32-arm64': '@openai/codex@0.162.1-win32-arm64'
+      '@openai/codex-win32-x64': '@openai/codex@0.162.1-win32-x64'
 
-  '@openai/codex@0.161.0-darwin-arm64':
+  '@openai/codex@0.162.1-darwin-arm64':
     optional: true
 
-  '@openai/codex@0.161.0-darwin-x64':
+  '@openai/codex@0.162.1-darwin-x64':
     optional: true
 
-  '@openai/codex@0.161.0-linux-arm64':
+  '@openai/codex@0.162.1-linux-arm64':
     optional: true
 
-  '@openai/codex@0.161.0-linux-x64':
+  '@openai/codex@0.162.1-linux-x64':
     optional: true
 
-  '@openai/codex@0.161.0-win32-arm64':
+  '@openai/codex@0.162.1-win32-arm64':
     optional: true
 
-  '@openai/codex@0.161.0-win32-x64':
+  '@openai/codex@0.162.1-win32-x64':
     optional: true
 
   '@opentelemetry/api@1.9.1':
@@ -8370,7 +8385,7 @@ snapshots:
       '@types/react': 18.3.28
       '@types/react-dom': 18.3.7(@types/react@18.3.28)
 
-  '@radix-ui/react-scroll-area@1.2.10(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
+  '@radix-ui/react-scroll-area@1.2.10(patch_hash=48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:
       '@radix-ui/number': 1.1.1
       '@radix-ui/primitive': 1.1.3
@@ -9081,6 +9096,14 @@ snapshots:
       '@tailwindcss/oxide': 4.2.2
       tailwindcss: 4.2.2
       vite: 7.3.6(@types/node@20.19.39)(jiti@2.6.1)(lightningcss@1.32.0)(tsx@4.22.4)(yaml@2.9.0)
+
+  '@tanstack/react-virtual@3.14.20(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
+    dependencies:
+      '@tanstack/virtual-core': 3.19.5
+      react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
+
+  '@tanstack/virtual-core@3.19.5': {}
 
   '@tiptap/core@3.31.2(@tiptap/pm@3.31.2)':
     dependencies:
@@ -12066,7 +12089,7 @@ snapshots:
       '@radix-ui/react-progress': 1.1.7(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-radio-group': 1.3.8(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-roving-focus': 1.1.11(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      '@radix-ui/react-scroll-area': 1.2.10(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@radix-ui/react-scroll-area': 1.2.10(patch_hash=48d99fdb96b652357eae1f609f710a755894573f94af7bd4ce57e86a3c723630)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-select': 2.2.6(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-separator': 1.1.7(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@radix-ui/react-slider': 1.3.6(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)

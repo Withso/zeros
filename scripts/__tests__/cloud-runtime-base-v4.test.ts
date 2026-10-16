@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sshBoundary from "../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
 import { builderCommand, KitError, main, parseArgs, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
-import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, resumeOwned, v4Command, verifyBase, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
+import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, pythonProbe, resumeOwned, v4Command, verifyBase, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
 import { cleanupLiveObjects, installOverSsh, presignGet, probePersistence, probeRuntime, runInstallerStep, runLiveStep, signedHeaders, syntheticArchives, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
 
 const scratch: string[] = [];
@@ -38,6 +38,8 @@ function deps(): KitDeps & { calls: { method: string; route: string; body: unkno
   };
 }
 
+const envelope = { ok: true, type: "snapshot.tree", snapshotId: "snapshot_fixture", sandboxId: "bx_v4test1", treeAvailable: true, truncated: false };
+
 function fullKit(failColdBoot = false) {
   const d = deps(), root = temp();
   const relative = "scripts/cloud-workspace-validation";
@@ -52,6 +54,8 @@ function fullKit(failColdBoot = false) {
   d.repoRoot = root;
   const machines = new Set<string>();
   let sequence = 0, snapshot: any;
+  let tree: any = { ok: true, type: "snapshot.tree", snapshotId: "snapshot_fixture", sandboxId: "bx_v4test1", treeAvailable: true,
+    truncated: false, entries: [{ path: "__system__/root", kind: "dir" }, { path: "__system__/opt/zeros-bootstrap/bootstrap.py", kind: "file", size: 1 }] };
   const requests: { method: string; route: string; body: any }[] = [];
   d.boat = async (method, route, options = {}) => {
     const body: any = options.body;
@@ -81,6 +85,7 @@ function fullKit(failColdBoot = false) {
       if (method === "DELETE") snapshot = undefined;
       return { status: snapshot ? 200 : 404, body: { snapshot } };
     }
+    if (method === "GET" && route === "/snapshots/snapshot_fixture/tree") return { status: 200, body: tree };
     if (route.endsWith("/commands")) {
       const command: string = body.command;
       if (command.includes("zeros.base-private-evidence/v1")) {
@@ -101,7 +106,7 @@ function fullKit(failColdBoot = false) {
     }
     throw new Error("unexpected fixture operation");
   };
-  return { d, requests, machines, getSnapshot: () => snapshot };
+  return { d, requests, machines, getSnapshot: () => snapshot, setTree: (value: any) => { tree = value; } };
 }
 
 function seedState(d: KitDeps, overrides = {}) {
@@ -116,6 +121,21 @@ function seedState(d: KitDeps, overrides = {}) {
 }
 
 describe("runtime-base-v4 profile", () => {
+  it("starts the actual remote probe with bytecode disabled before any imports", () => {
+    const work = temp();
+    const program = "import hashlib, pathlib, sys\nassert sys.dont_write_bytecode\n";
+    const command = pythonProbe(program, "verify");
+    const [prefix, payload] = command.split("<<'PYV4'\n");
+    const argv = prefix.trim().split(" ").slice(3);
+    expect(argv).toEqual(["-I", "-B", "-"]);
+    const result = spawnSync("python3", [...argv.slice(0, -1), "-X", `pycache_prefix=${work}`, "-"], {
+      input: payload.replace(/\nPYV4$/, ""), encoding: "utf8", timeout: 5000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(fs.readdirSync(work)).toEqual([]);
+  });
+
   it("retains the exception identity and exact probe line from the real runtime probe", async () => {
     const d = deps(), directory = temp(), bootstrap = path.join(directory, "bootstrap.py"), evidence = path.join(directory, "logged");
     fs.writeFileSync(bootstrap, `from pathlib import Path
@@ -453,6 +473,8 @@ class Bootstrap:
     const verification = f.requests.filter(request => request.route.endsWith("/commands") && request.body.command.includes("def verify()"));
     expect(verification).toHaveLength(3);
     expect(verification.every(request => request.body.timeoutSeconds === 600)).toBe(true);
+    expect(verification.map(request => request.body.command.includes("COLD_BOOT = 'cold' == 'cold'"))).toEqual([false, false, true]);
+    expect(f.requests.some(request => request.method === "GET" && request.route === "/snapshots/snapshot_fixture/tree")).toBe(true);
     expect(result.cleanup.sandboxes).toEqual(["bx_v4test2", "bx_v4test1"]);
     expect(result.compatibilityRawB64).toBe(compatibilityRawB64);
     expect(result.baseCompatibilityId).toBe(baseCompatibilityId);
@@ -466,6 +488,56 @@ class Bootstrap:
       "zeros-v2-test-builder-111111111111", "zeros-v2-test-verify-111111111111",
     ]);
   }, 30_000);
+
+  it.each([
+    { path: "__system__/root/.ssh/authorized_keys", kind: "file", size: 90 },
+    { path: ".codex/auth.json", kind: "file", size: 12 },
+    { path: "__system__/root/.netrc", kind: "symlink" },
+  ])("refuses a saved base whose captured tree holds $path before any cold boot", async entry => {
+    const f = fullKit();
+    f.setTree({ ...envelope, entries: [{ path: "__system__/root", kind: "dir" }, entry] });
+    await expect(v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d))
+      .rejects.toMatchObject({ diagnostic: { stage: "snapshot", failedChecks: ["private_state"] } });
+    expect(f.requests.filter(request => request.route === "/sandboxes" && request.method === "POST")).toHaveLength(1);
+  }, 30_000);
+
+  it.each([{ treeAvailable: false }, { truncated: true }, { entries: undefined }, { ok: false }, { type: "snapshot.files" },
+    { snapshotId: "another_snapshot" }, { sandboxId: "bx_v4test9" }, { entries: [null] },
+    { entries: [{ path: "__system__/root/.ssh/authorized_keys", kind: "file", size: 90 },
+      { path: "__system__/root/.ssh/authorized_keys", kind: "file", size: 0 }] },
+    { entries: [{ path: ".codex/auth.json", kind: "file", size: -1 }] }])(
+    "refuses a saved base whose captured tree is incomplete, foreign or malformed (%j)", async change => {
+      const f = fullKit();
+      f.setTree({ ...envelope, entries: [], ...change });
+      await expect(v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d))
+        .rejects.toMatchObject({ diagnostic: { stage: "snapshot", failedChecks: ["private_state"] } });
+      expect(f.requests.filter(request => request.route === "/sandboxes" && request.method === "POST")).toHaveLength(1);
+    }, 30_000);
+
+  it("accepts an empty private placeholder in the captured tree", async () => {
+    const f = fullKit();
+    f.setTree({ ...envelope, entries: [{ path: ".bash_history", kind: "file", size: 0 }] });
+    await expect(v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d))
+      .resolves.toMatchObject({ snapshotName: "zeros-base-v1" });
+  }, 30_000);
+
+  it("names a released base's builder and verification VMs after the base", async () => {
+    const f = fullKit();
+    const result: any = await v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d);
+    expect(result).toMatchObject({ snapshotName: "zeros-base-v1", cleanup: { confirmed: true, snapshot: "retained" } });
+    const creates = f.requests.filter(request => request.route === "/sandboxes" && request.method === "POST");
+    expect(creates.map(request => request.body.from)).toEqual([undefined, "zeros-base-v1"]);
+    expect(f.requests.filter(request => request.method === "PATCH").map(request => request.body.name))
+      .toEqual(["zeros-base-v1-build", "zeros-base-v1-verify"]);
+  }, 30_000);
+
+  it.each(["zeros-base-v0", "zeros-base-1", "zeros-base-v1-", "zeros-base-v12345", "zeros-alpha-runtime", "Zeros-base-v1"])(
+    "rejects the base name %s before contacting the provider", async name => {
+      const f = fullKit();
+      await expect(v4Command("build", new Map([["--name", name], ["--max-used-hours", "2"]]), [], f.d))
+        .rejects.toMatchObject({ diagnostic: { stage: "validate_input", failedChecks: ["input_schema"] } });
+      expect(f.requests).toHaveLength(0);
+    });
 
   it.each([undefined, "", "not base64", compatibilityRawB64 + "\n", Buffer.from("{}").toString("base64")])(
     "rejects missing, malformed or substituted compatibility bytes from verification (%#)", async raw => {
@@ -882,10 +954,23 @@ sys.stdout.buffer.write(out.getvalue())`]);
       expect(installed).toContain(name);
       expect(protectedBlock).toContain(`'${name}'`);
     }
-    // computer-build.py protects /usr/local/lib/systemd/system; Boat stock owns its ancestors.
-    expect(build).toMatch(/^chown root:root \/usr\/local \/usr\/local\/lib$/m);
-    expect(build).toMatch(/^chmod 0755 \/usr\/local \/usr\/local\/lib$/m);
-    expect(build.indexOf("chown root:root /usr/local")).toBeLessThan(build.indexOf("compat['protectedFiles']"));
+    // Stock metadata is sealed before recipes; no broad /usr/local hardening.
+    expect(build).not.toMatch(/(?:chown|chmod)[^\n]*\/usr\/local/);
+    expect(payload.files.map(file => file.name)).toContain("base/stock-prerequisites.py");
+    expect(protectedBlock).toContain("'stock-prerequisites.py'");
+    expect(build).toContain("/opt/zeros-bootstrap/stock-prerequisites.json");
+  });
+
+  it("qualifies stock prerequisites without package or system-directory mutations", () => {
+    const payload = basePayload(ROOT, "1".repeat(40), "2".repeat(32));
+    const build = payload.files.find(file => file.name === "build.sh")!.data.toString();
+    expect(build).not.toMatch(/apt-get|\bdpkg\s+-i|\/var\/lib\/apt|DEBIAN_FRONTEND/);
+    expect(build).not.toMatch(/\b(?:podman|crun|slirp4netns|uidmap|inotify-tools|xvfb)\b/);
+    expect(build).toContain("python3 -I -B base/stock-prerequisites.py");
+    expect(build.indexOf("python3 -I -B base/stock-prerequisites.py")).toBeLessThan(build.indexOf("chown root:root /opt"));
+    expect(build).toMatch(/apparmor_parser -r -K /);
+    expect(build.match(/^useradd .*--no-log-init.*$/gm)).toHaveLength(4);
+    expect(build).toContain("usermod --add-subuids 100000-165535 --add-subgids 100000-165535 zeros-agent");
   });
 
   it("accepts only bounded closed diagnostic output from remote commands", () => {
@@ -913,7 +998,7 @@ sys.stdout.buffer.write(out.getvalue())`]);
       expect(result.stderr).toBe("");
       expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, failedChecks: ["input_schema"] });
       expect(fs.readFileSync(file, "utf8")).toContain("/usr/bin/env -i");
-      expect(fs.readFileSync(file, "utf8")).toContain("/usr/bin/python3 -I");
+      expect(fs.readFileSync(file, "utf8")).toContain("/usr/bin/python3 -I -B");
     }
     const work = temp();
     for (const name of ["zeros-boot.service", "zeros-host.service"]) fs.copyFileSync(path.join(BASE, name), path.join(work, name));

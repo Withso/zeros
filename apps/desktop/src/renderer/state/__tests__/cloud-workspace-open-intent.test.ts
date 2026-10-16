@@ -1,3 +1,5 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 const harness = vi.hoisted(() => ({
@@ -17,9 +19,10 @@ vi.mock("../store", async original => {
 vi.mock("../../shared/ui/primitives/elements", () => ({ toast: { error: harness.error } }));
 vi.mock("../workbench-availability", async original => ({ ...await original<typeof import("../workbench-availability")>(), recordWorkbenchConnectionFailure: harness.failure }));
 import { CloudWorkspaceLifecycle } from "../cloud-workspace-lifecycle";
-import { requestCloudWorkspaceOpen } from "../cloud-workspace-open-intent";
-import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudCatalogGeneration, cloudWorkspaceDocument, manageCloudWorkspace } from "../cloud-workspace-catalog";
-import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
+import { requestCloudWorkspaceOpen, subscribeCloudWorkspaceOpens } from "../cloud-workspace-open-intent";
+import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudCatalogGeneration, cloudWorkspaceDocument, cloudWorkspaceStopVersion, manageCloudWorkspace } from "../cloud-workspace-catalog";
+import { wakeCloudWorkspace } from "../cloud-workspace-wake";
+import { WorkspaceRuntimeClient, type WorkspaceRuntimeOptions } from "../../platform/bridge/workspace-runtime-client";
 import { setActiveBridge } from "../../platform/bridge/active-bridge";
 import { useWorkspaceStore } from "../workspace-store";
 
@@ -47,6 +50,21 @@ beforeEach(() => {
 afterEach(() => { cleanup?.(); cleanup = undefined; client.dispose(); setActiveBridge(null); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("explicit cloud navigation intent", () => {
+  it("publishes one wake identity to all consumers of an explicit navigation", () => {
+    const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
+    const seen = vi.fn(), second = vi.fn();
+    const off = subscribeCloudWorkspaceOpens(seen), offSecond = subscribeCloudWorkspaceOpens(second);
+    renderToStaticMarkup(createElement(CloudWorkspaceLifecycle)); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!();
+    try {
+      requestCloudWorkspaceOpen(folder);
+      const intent = seen.mock.calls[0]?.[1];
+      expect(intent?.id).toEqual(expect.any(String));
+      expect(second.mock.calls[0]?.[1]).toBe(intent);
+      expect(open.mock.calls[0][1]?.wakeIntent).toBe(intent);
+      requestCloudWorkspaceOpen("/local");
+      expect(seen).toHaveBeenCalledOnce();
+    } finally { off(); offSecond(); }
+  });
   it.each(["navigation", "interaction"].flatMap(intent => [false, true].map(rollback => ({ intent, rollback }))))("silently follows generation changes during a pending $intent wake (rollback=$rollback)", async ({ intent, rollback }) => {
     client.dispose(); let finish!: () => void;
     const ready = new Promise<void>(resolve => { finish = resolve; });
@@ -61,7 +79,7 @@ describe("explicit cloud navigation intent", () => {
       wakeOwner: () => ({ account: String(cloudCatalogGeneration()), generation: cloudWorkspaceDocument(target)!.generation.number, stopVersion: 0,
         lifecyclePending: ["stopping", "waking", "provisioning", "setting_up"].includes(cloudWorkspaceDocument(target)!.status) }) });
     setActiveBridge(client);
-    if (intent === "navigation") { CloudWorkspaceLifecycle(); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!(); requestCloudWorkspaceOpen(folder); }
+    if (intent === "navigation") { renderToStaticMarkup(createElement(CloudWorkspaceLifecycle)); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!(); requestCloudWorkspaceOpen(folder); }
     else interactions().input("pointerdown");
     const pending = client.openWorkspace(target);
     const stages = rollback ? [[2, "provisioning"], [2, "setting_up"], [1, "waking"], [1, "ready"]] as const
@@ -77,7 +95,7 @@ describe("explicit cloud navigation intent", () => {
   it.each(["navigation", "interaction"])("keeps an in-progress %s calm when its client safety wait ends", async intent => {
     acceptCloudWorkspaceDocument({ ...doc, version: 2, status: "setting_up" });
     vi.spyOn(client, "openWorkspace").mockRejectedValue(new Error("The workspace is still starting after fifteen minutes"));
-    if (intent === "navigation") { CloudWorkspaceLifecycle(); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!(); requestCloudWorkspaceOpen(folder); }
+    if (intent === "navigation") { renderToStaticMarkup(createElement(CloudWorkspaceLifecycle)); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!(); requestCloudWorkspaceOpen(folder); }
     else interactions().input("keydown");
     await Promise.resolve(); await Promise.resolve();
     expect(harness.failure).not.toHaveBeenCalled(); expect(harness.error).not.toHaveBeenCalled();
@@ -93,11 +111,98 @@ describe("explicit cloud navigation intent", () => {
       getAttribute() { return typeof this.row === "string" ? this.row : null; } }
     vi.stubGlobal("Element", InputElement);
     Object.assign(document, { hasFocus: () => true });
-    CloudWorkspaceLifecycle(); cleanup = harness.effects.find(effect => effect.toString().includes("CloudWorkspaceInteraction"))!();
+    renderToStaticMarkup(createElement(CloudWorkspaceLifecycle)); cleanup = harness.effects.find(effect => effect.toString().includes("CloudWorkspaceInteraction"))!();
     return { listeners, invoke, input: (type: string, row: boolean | string = false, trusted = true) => listeners.get(type)?.({
       isTrusted: trusted, target: new InputElement(row),
     } as unknown as Event) };
   }
+
+  it.each(["different sidebar row", "programmatic open"].flatMap(source => [false, true].map(native => ({ source, native }))))("retains a $source intent while its ready admission loses to committed idle capture (native=$native)", async ({ source, native }) => {
+    client.dispose();
+    acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 2 });
+    useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder: "/previous", repoRoot: "/previous", chatId: null });
+    const api = await import("../../platform/cloud-workspaces");
+    const wake = vi.spyOn(api, "changeCloudWorkspaceLifecycle").mockResolvedValue({ ...doc, status: "waking", version: 5 });
+    let entered!: () => void, finishAdmission!: () => void;
+    const admissionEntered = new Promise<void>(resolve => { entered = resolve; });
+    const admission = new Promise<void>(resolve => { finishAdmission = resolve; });
+    let calls = 0;
+    const open = vi.fn<WorkspaceRuntimeOptions["open"]>(async (_target, options) => {
+      if (options?.wake) await wakeCloudWorkspace(target, cloudWorkspaceDocument(target)!, options.signal, options.reason, options.wakeIntent);
+      if (++calls === 1) {
+        entered(); await admission;
+        throw new Error("Cloud workspace generation or availability changed while connecting");
+      }
+      return { client: { status: "connected", onStatusChange: () => () => {}, on: () => () => {},
+        request: async () => ({ type: "WORKSPACE_RESPONSE", result: { chats: [], chatDeletions: [] } }) },
+        scope: { ...target, root: "/workspace/repo", engineWorkspaceId: "local-main" }, release: () => {} } as never;
+    });
+    client = new WorkspaceRuntimeClient({ open, workspaces: () => [],
+      identity: () => `${cloudCatalogGeneration()}:${cloudWorkspaceDocument(target)?.generation.number}`,
+      wakeOwner: () => ({ account: String(cloudCatalogGeneration()), generation: cloudWorkspaceDocument(target)!.generation.number,
+        stopVersion: cloudWorkspaceStopVersion(target), lifecyclePending: ["stopping", "waking"].includes(cloudWorkspaceDocument(target)!.status) }) });
+    setActiveBridge(client);
+    const h = interactions(native), interactionCleanup = cleanup;
+    const openCleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!();
+    cleanup = () => { openCleanup?.(); interactionCleanup?.(); };
+    if (source === "different sidebar row") h.input("pointerdown", folder);
+    // useOpenWorkspace publishes selection before the explicit destination
+    // event. A restored tab/hover has no event and must never gain this intent.
+    useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder, repoRoot: folder, chatId: null });
+    requestCloudWorkspaceOpen(folder);
+    try {
+      await admissionEntered;
+      expect(wake).not.toHaveBeenCalled();
+      acceptCloudWorkspaceDocument({ ...doc, status: "stopping", version: 3 });
+      expect(wake).not.toHaveBeenCalled();
+      acceptCloudWorkspaceDocument({ ...doc, status: "stopped", version: 4 });
+      // The first admission is still in flight after stop. A replacement
+      // consumer must not join that doomed flight and lose the user intent.
+      finishAdmission();
+      await vi.waitFor(() => expect(wake).toHaveBeenCalledOnce());
+      expect(wake).toHaveBeenCalledWith(target, "wake", expect.any(String), "interaction");
+      acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 6 });
+      await vi.waitFor(() => expect(client.statusForWorkspace(folder)).toBe("connected"));
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(harness.failure).not.toHaveBeenCalled();
+    } finally { finishAdmission(); }
+  });
+
+  it.each(["later Stop", "selection A-B-A", "account A-B-A", "write access A-B-A", "hidden", "unfocused", "expired"])("cannot revive a destination-open gesture after %s", async reason => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 2 });
+    const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
+    const h = interactions(), interactionCleanup = cleanup;
+    const openCleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!();
+    cleanup = () => { openCleanup?.(); interactionCleanup?.(); };
+    requestCloudWorkspaceOpen(folder);
+    await Promise.resolve();
+    expect(open).toHaveBeenCalledOnce();
+    if (reason === "later Stop") {
+      const api = await import("../../platform/cloud-workspaces");
+      vi.spyOn(api, "changeCloudWorkspaceLifecycle").mockResolvedValue({ ...doc, status: "stopping", version: 3 });
+      await manageCloudWorkspace(target, "stop");
+    } else if (reason === "selection A-B-A") {
+      useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder: "/other", repoRoot: "/other", chatId: null });
+      useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder, repoRoot: folder, chatId: null });
+    } else if (reason === "account A-B-A") {
+      clearCloudWorkspaceCatalog(); acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 3 });
+    } else if (reason === "write access A-B-A") {
+      acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 3, capabilities: { ...doc.capabilities, canWrite: false } });
+      acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 4 });
+    } else if (reason === "hidden") {
+      Object.assign(document, { visibilityState: "hidden" });
+      for (const [event, listener] of vi.mocked(document.addEventListener).mock.calls)
+        if (event === "visibilitychange") (listener as () => void)();
+      Object.assign(document, { visibilityState: "visible" });
+    } else if (reason === "unfocused") {
+      Object.assign(document, { hasFocus: () => false }); h.listeners.get("blur")!({} as Event);
+      Object.assign(document, { hasFocus: () => true });
+    } else now = 120_000;
+    acceptCloudWorkspaceDocument({ ...doc, status: "stopped", version: 5 });
+    expect(open).toHaveBeenCalledOnce();
+  });
 
   it("keeps local app interactions free of cloud presence, wake and native presence queries", () => {
     useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder: "/local", repoRoot: "/local", chatId: null });
@@ -185,20 +290,20 @@ describe("explicit cloud navigation intent", () => {
 
   it("keeps selection restore, catalog refresh and visibility inert; only a click opens compute", async () => {
     const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
-    CloudWorkspaceLifecycle(); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!();
+    renderToStaticMarkup(createElement(CloudWorkspaceLifecycle)); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!();
     acceptCloudWorkspaceDocument({ ...doc, version: 2 });
     const visibility = vi.mocked(document.addEventListener).mock.calls[0][1] as () => void;
     visibility();
     expect(open).not.toHaveBeenCalled();
     requestCloudWorkspaceOpen(folder); requestCloudWorkspaceOpen(folder);
-    expect(open).toHaveBeenCalledExactlyOnceWith(target, { signal: expect.any(AbortSignal) });
+    expect(open).toHaveBeenCalledExactlyOnceWith(target, { signal: expect.any(AbortSignal), wakeIntent: { id: expect.any(String) } });
     await Promise.resolve();
   });
 
   it.each(["navigation", "hidden"])("cancels the pending open on %s without a stale error or another wake", async reason => {
     const open = vi.spyOn(client, "openWorkspace").mockImplementation((_target, options) =>
       new Promise((_resolve, reject) => options?.signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true })));
-    CloudWorkspaceLifecycle(); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!();
+    renderToStaticMarkup(createElement(CloudWorkspaceLifecycle)); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!();
     requestCloudWorkspaceOpen(folder);
     if (reason === "navigation") useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder: "/local", repoRoot: "/local", chatId: null });
     else {
@@ -216,7 +321,7 @@ describe("explicit cloud navigation intent", () => {
     harness.enabled = reason !== "signed-out";
     if (reason === "viewer") acceptCloudWorkspaceDocument({ ...doc, version: 2, capabilities: { ...doc.capabilities, canWrite: false } });
     const open = vi.spyOn(client, "openWorkspace");
-    CloudWorkspaceLifecycle(); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!();
+    renderToStaticMarkup(createElement(CloudWorkspaceLifecycle)); cleanup = harness.effects.find(effect => effect.toString().includes("subscribeCloudWorkspaceOpens"))!();
     requestCloudWorkspaceOpen(reason === "other organization" ? folder.replace(target.organizationId, "33333333-3333-4333-8333-333333333333") : folder);
     expect(open).not.toHaveBeenCalled();
   });

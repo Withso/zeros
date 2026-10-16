@@ -1,4 +1,5 @@
 import { clearCloudComputersV2 } from "../features/settings/cloud-computer-v2-client";
+import { isFeatureEnabled } from "../config/release-channel";
 import { cloudServiceAccessCache, cloudServiceContextCache } from "./read-caches";
 import { clearCloudGithub } from "../platform/cloud-github";
 import { useEffect } from "react";
@@ -62,6 +63,12 @@ function recordCloudOpenFailure(key: string, error: unknown): void {
 /** Account/catalog lifecycle, mounted once beside the existing persistence
  * controller. It never replaces the conversation or workbench renderers. */
 export function CloudWorkspaceLifecycle() {
+  // A release pause leaves durable caches and provider data untouched. Do not
+  // install cloud subscriptions, timers, or restoration while it is paused.
+  return isFeatureEnabled("cloud-workspaces") ? <ActiveCloudWorkspaceLifecycle /> : null;
+}
+
+function ActiveCloudWorkspaceLifecycle() {
   const folder = useWorkspaceStore(selectActiveFolder);
   const cloudComputerV2 = useCloudWorkspaceAccountAccess();
   useEffect(() => {
@@ -80,7 +87,9 @@ export function CloudWorkspaceLifecycle() {
     if (isLocalDevelopment()) return;
     let alive = true;
     let enabled = false;
-    let lastRefresh = 0;
+    let lastRefresh: number | undefined;
+    let refreshTimer: number | undefined;
+    let refreshFlight: object | undefined;
     let account: string | null = null;
     let authVersion = 0;
     let installed = false;
@@ -106,19 +115,38 @@ export function CloudWorkspaceLifecycle() {
         folders,
       });
     };
+    const cancelRefreshTimer = () => {
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      refreshTimer = undefined;
+    };
+    const canRefresh = () => alive && enabled && !!account &&
+      document.visibilityState !== "hidden";
+    const refreshDelay = () => lastRefresh === undefined ? 0 : Math.max(0,
+      lastRefresh + (cloudCatalogNeedsFastRefresh() ? 2_000 : 30_000) - performance.now());
+    const scheduleRefresh = () => {
+      cancelRefreshTimer();
+      if (!canRefresh() || refreshFlight) return;
+      refreshTimer = window.setTimeout(refresh, Math.ceil(refreshDelay()));
+    };
     const refresh = () => {
-      if (
-        !alive ||
-        !enabled ||
-        !account ||
-        document.visibilityState === "hidden"
-      )
+      cancelRefreshTimer();
+      if (!canRefresh() || refreshFlight) return;
+      if (refreshDelay() > 0) {
+        scheduleRefresh();
         return;
-      const pending = cloudCatalogNeedsFastRefresh();
-      if (Date.now() - lastRefresh < (pending ? 2_000 : 30_000)) return;
-      lastRefresh = Date.now();
+      }
+      lastRefresh = performance.now();
+      const flight = {};
+      refreshFlight = flight;
       const version = authVersion;
       void refreshCloudWorkspaceCatalog()
+        .finally(() => {
+          // Network observation owns this flight, not slower cache restoration.
+          // A retired A1 request cannot clear A2's flight or arm its timer.
+          if (refreshFlight !== flight) return;
+          refreshFlight = undefined;
+          scheduleRefresh();
+        })
         .then(async () => {
           if (!alive || version !== authVersion) return;
           retainAuthorizedCloudTranscriptWorkspaces();
@@ -137,16 +165,24 @@ export function CloudWorkspaceLifecycle() {
           const activeChatId = useWorkspaceStore.getState().activeChatId;
           if (activeChatId && authorized.some(chat => chat.id === activeChatId)) await readCachedCloudTranscriptWindow(activeChatId);
           if (!alive || version !== authVersion) return;
-          if (authorized.length)
+          // The catalog may remove access while the native cache is loading.
+          const stillAuthorized = authorized.filter((row) => {
+            const target = parseCloudWorkspaceKey(row.folder);
+            return target && canReadCloudWorkspace(cloudWorkspaceDocument(target));
+          });
+          if (stillAuthorized.length)
             useWorkspaceStore
               .getState()
-              .dispatch({ type: "MERGE_CHATS", chats: authorized });
+              .dispatch({ type: "MERGE_CHATS", chats: stillAuthorized });
           completeCloudChatCacheRestore(account!);
           persistWorkspaceChatCache(CHATS_STORAGE_KEY, useWorkspaceStore.getState().chats);
           cached = [];
         })
         .catch(() => {});
     };
+    // Local create/lifecycle receipts can change the cadence before the next
+    // fallback. Anchor it to the read start so unrelated events cannot defer it.
+    const offRefreshSchedule = subscribeCloudWorkspaces(scheduleRefresh);
     const offCatalog = subscribeCloudWorkspaceRows((change) => {
       pruneCloudLatencySpans();
       forgetRemovedCloudTranscriptWorkspaces(change.removedWorkspaceIds);
@@ -186,13 +222,15 @@ export function CloudWorkspaceLifecycle() {
       if (!alive) return;
       const next = session?.user.accountId ?? session?.user.sub ?? null;
       if (installed && next === account) return;
+      cancelRefreshTimer();
+      refreshFlight = undefined;
+      lastRefresh = undefined;
       // The first authenticated snapshot validates the saved identity below.
       // Account changes/sign-out discard it; initial auth must not discard it
       // just because no cloud chat has been released into the store yet.
       clear(!installed && next !== null);
       installed = true;
       account = next;
-      lastRefresh = 0;
       restored = false;
       setCloudChatCacheOwner(next);
       setCloudTranscriptCacheOwner(next);
@@ -209,7 +247,8 @@ export function CloudWorkspaceLifecycle() {
         const bridge = getActiveBridge();
         if (bridge instanceof WorkspaceRuntimeClient) bridge.cancelSpeculativeWarmups();
         clearCloudLatencySpans();
-      } else refresh();
+      }
+      refresh();
     };
     const initialVersion = authVersion;
     void getSession()
@@ -224,14 +263,14 @@ export function CloudWorkspaceLifecycle() {
         refresh();
       })
       .catch(() => {});
-    const timer = window.setInterval(refresh, 2_000);
     document.addEventListener("visibilitychange", visibility);
     window.addEventListener("focus", refresh);
     return () => {
       alive = false;
       offCatalog();
+      offRefreshSchedule();
       offAuth();
-      window.clearInterval(timer);
+      cancelRefreshTimer();
       document.removeEventListener("visibilitychange", visibility);
       window.removeEventListener("focus", refresh);
       setCloudChatCacheOwner(null);
@@ -356,7 +395,7 @@ export function CloudWorkspaceLifecycle() {
       const state = useWorkspaceStore.getState();
       return document.visibilityState !== "hidden" && state.activePage === "workspace" && selectActiveFolder(state) === key;
     };
-    const off = subscribeCloudWorkspaceOpens(target => {
+    const off = subscribeCloudWorkspaceOpens((target, wakeIntent) => {
       const key = cloudWorkspaceKey(target);
       if (!ownsView(key) || pending?.key === key || !hasCloudWorkspaceAccountAccess(target.organizationId) ||
           !cloudWorkspaceDocument(target)?.capabilities.canWrite) return;
@@ -365,7 +404,7 @@ export function CloudWorkspaceLifecycle() {
       cancel();
       const intent = { key, controller: new AbortController() };
       pending = intent;
-      void bridge.openWorkspace(target, { signal: intent.controller.signal })
+      void bridge.openWorkspace(target, { signal: intent.controller.signal, wakeIntent })
         .then(() => {
           if (!intent.controller.signal.aborted && ownsView(key)) clearWorkbenchConnectionFailure(key);
         })
@@ -387,7 +426,8 @@ export function CloudWorkspaceLifecycle() {
   }, [cloudComputerV2]);
   useEffect(() => {
     if (!cloudComputerV2) return;
-    let available = !isElectron(), closed = false, nativeVersion = 0, nativeQueried = false;
+    let available: boolean | undefined = isElectron() ? undefined : true;
+    let closed = false, nativeVersion = 0, nativeQueried = false;
     const current = () => {
       const state = useWorkspaceStore.getState(), key = selectActiveFolder(state);
       const target = parseCloudWorkspaceKey(key);
@@ -400,6 +440,13 @@ export function CloudWorkspaceLifecycle() {
     };
     const controller = new CloudWorkspaceInteraction({
       current, visible: () => document.visibilityState === "visible", focused: () => document.hasFocus(), available: () => available,
+      // A ready admission can still be in flight when idle capture commits.
+      // Keep the gesture until that flight settles; joining its retiring
+      // admission would consume the gesture without ever waking the VM.
+      opening: key => {
+        const bridge = getActiveBridge();
+        return bridge instanceof WorkspaceRuntimeClient && bridge.statusForWorkspace(key) === "connecting";
+      },
       presence: (key, present) => {
         const target = parseCloudWorkspaceKey(key), bridge = getActiveBridge();
         return !!target && bridge instanceof WorkspaceRuntimeClient && bridge.sendWorkspacePresence(target, present);
@@ -411,6 +458,15 @@ export function CloudWorkspaceLifecycle() {
         if (!signal.aborted && current()?.key === key) clearWorkbenchConnectionFailure(key);
       },
       failed: recordCloudOpenFailure,
+    });
+    const offOpen = subscribeCloudWorkspaceOpens(target => {
+      const selected = current();
+      // Selection is published before this event. A different sidebar row's
+      // pointerdown deliberately did not arm the previous workspace; now arm
+      // the destination, including keyboard and programmatic explicit opens.
+      // Restored tabs, hover, catalog reads and reconnects never emit this.
+      if (useWorkspaceStore.getState().activePage === "workspace" && selected?.key === cloudWorkspaceKey(target) &&
+          selected.document.capabilities.canWrite) controller.interact();
     });
     const input = (event: Event) => {
       if (!event.isTrusted) return;
@@ -455,7 +511,7 @@ export function CloudWorkspaceLifecycle() {
     window.addEventListener("focus", refresh); window.addEventListener("blur", refresh);
     const timer = window.setInterval(refresh, 15_000);
     return () => {
-      closed = true; controller.close(); offSelection(); offCatalog(); offBridge(); offStatus(); void offNative.then(off => off());
+      closed = true; controller.close(); offOpen(); offSelection(); offCatalog(); offBridge(); offStatus(); void offNative.then(off => off());
       window.clearInterval(timer);
       for (const event of events) window.removeEventListener(event, input, true);
       document.removeEventListener("visibilitychange", refresh);

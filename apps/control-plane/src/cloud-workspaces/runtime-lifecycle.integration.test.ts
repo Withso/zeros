@@ -463,17 +463,16 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect((await pin(2)).runtime).toEqual(next.pin);
     expect(calls).not.toContain("resume:1");
   });
-  it.each(["checkpoint","quota"])("keeps a plain resume available when automatic admission is blocked by %s",async blocker=>{
+  it("keeps a plain resume available when automatic admission has no recovery checkpoint",async()=>{
     await finalCheckpoint(); await advanceHead();
-    if(blocker==="checkpoint") await pool.query("UPDATE workspace_content_heads SET current_checkpoint_id=NULL WHERE workspace_id=$1",[fixture.workspaceId]);
-    else await pool.query("UPDATE cloud_workspace_quotas SET max_storage_mib=20480 WHERE org_id=$1",[fixture.organizationId]);
+    await pool.query("UPDATE workspace_content_heads SET current_checkpoint_id=NULL WHERE workspace_id=$1",[fixture.workspaceId]);
     expect((await route("/wake")).status).toBe(202);
     const {provider,calls}=stoppedProvider();
     await new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000}).runOnce();
     expect(calls).toEqual(["resume:1"]);
     expect((await pool.query("SELECT count(*)::int AS count FROM cloud_workspace_generations WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].count).toBe(1);
     expect((await pool.query("SELECT subject->>'code' AS code FROM audit_log WHERE action='cloud_workspace.runtime_auto_upgrade_deferred' AND subject->>'workspaceId'=$1",[fixture.workspaceId])).rows)
-      .toEqual([{code:blocker==="checkpoint"?"cloud_recovery_checkpoint_unavailable":"cloud_replacement_headroom_exceeded"}]);
+      .toEqual([{code:"cloud_recovery_checkpoint_unavailable"}]);
   });
   it.each(["full","smoke"] as const)("uses %s qualification mode for the automatic wake decision",async qualificationMode=>{
     await finalCheckpoint();const next=await advanceHead("smoke");
@@ -906,7 +905,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     await pool.query("UPDATE cloud_agent_execution_leases SET released_at=now() WHERE id=$1", [leaseId]);
     expect((await upgrade()).status).toBe(202);
   });
-  it("applies running quota to an upgrade that wakes a stopped source", async () => {
+  it("admits an upgrade that wakes a stopped source beyond the stored running limit", async () => {
     await finalCheckpoint(); await advanceHead();
     await withSystemTx(pool, async tx => {
       const sibling = randomUUID();
@@ -922,8 +921,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
       await tx.query("UPDATE cloud_workspace_quotas SET max_running_workspaces=1 WHERE org_id=$1", [fixture.organizationId]);
     });
     const response = await upgrade();
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: { code: "cloud_quota_exceeded" } });
+    expect(response.status).toBe(202);
   });
   it.each(["stop", "archive", "delete"])("keeps historical %s cleanup available while refusing execution", async operation => {
     fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });

@@ -735,28 +735,32 @@ export class CloudRuntimeBridgeRelay {
               ),
             );
             let authorityExpiresAt = 0;
-            const renew = () => {
+            const renew = (observedAt: number) => {
               clearTimeout(authorityDeadline);
-              const leaseMs = Math.max(100, this.authorityCheckMs * 2);
-              authorityExpiresAt = performance.now() + leaseMs;
+              // A delayed snapshot response cannot buy another full lease.
+              authorityExpiresAt = observedAt + Math.max(100, this.authorityCheckMs * 2);
+              const leaseMs = authorityExpiresAt - performance.now();
+              if (leaseMs <= 0) { pair.retire("authority"); return false; }
               authorityDeadline = setTimeout(
                 () => pair.retire("authority"),
                 leaseMs,
               );
               authorityDeadline.unref();
+              return true;
             };
-            renew();
+            if (!renew(startedAt)) return;
             let checking = false;
             authorityTimer = setInterval(() => {
               if (checking || retired) return;
               checking = true;
+              const observedAt = performance.now();
               void Promise.resolve()
                 .then(() => this.options.revalidate(token, destination))
                 .then(
                   (valid) => {
                     if (retired) return;
                     if (valid && performance.now() < authorityExpiresAt)
-                      renew();
+                      renew(observedAt);
                     else pair.retire("authority");
                   },
                   () => pair.retire("authority"),

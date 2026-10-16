@@ -1,10 +1,13 @@
 /** Customer errors never reuse infrastructure diagnostic text. Internal
  * records retain the original code/message for the operator's investigation. */
 const messages: Record<string, string> = {
+  cloud_recovery_computer_unavailable: "Build the current Cloud Computer before restoring this workspace.",
+  cloud_recovery_repository_unavailable: "The current Cloud Computer must include this workspace's repository before it can be restored.",
   cloud_workspace_v2_required: "This workspace uses a retired cloud runtime — create a new workspace.",
   cloud_workspace_client_update_required: "Update Zeros to connect to cloud workspaces.",
   cloud_runtime_revoked: "This workspace runtime was revoked. Request an explicit runtime upgrade to continue.",
   cloud_runtime_unavailable: "The pinned cloud runtime is unavailable. Request an explicit runtime upgrade to continue.",
+  cloud_runtime_temporarily_unavailable: "The cloud runtime is temporarily unavailable",
   cloud_computer_capacity_reached: "Image capacity reached. Retire an unreferenced custom or Dev image, or try again when another build finishes.",
   not_found: "Cloud workspace not found",
   cloud_conversation_not_found: "Cloud conversation not found",
@@ -37,6 +40,7 @@ const messages: Record<string, string> = {
     "Enable workspace sharing before inviting collaborators",
   cloud_compute_allowance_exhausted:
     "This workspace's monthly compute allowance is exhausted",
+  cloud_quota_exceeded: "Cloud workspace capacity is unavailable right now",
   cloud_compute_allowance_unavailable:
     "This workspace's compute allowance is unavailable",
   compute_usage_unavailable: "Compute usage is temporarily unavailable",

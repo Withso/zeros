@@ -18,6 +18,7 @@ import { cursorSearchOutput } from "./search-output";
 // ──────────────────────────────────────────────────────────
 
 import { memo, useState } from "react";
+import { useTurnDisclosure } from "../turn-disclosures";
 import {
   FileText,
   Globe2,
@@ -55,7 +56,7 @@ import {
 import { nativeAgentWait, toolRecord } from "./native-tool-presentation";
 import { pendingChecksMessage } from "./tool-pending-checks";
 import { toolPresentationReady } from "./tool-readiness";
-import { AgentNotice, AGENT_NOTICE_ACTION } from "../agent-notice";
+import { AgentNotice, AgentNoticeText, AGENT_NOTICE_ACTION } from "../agent-notice";
 import { getLang } from "./syntax";
 import type { Renderer, RendererContext } from "./types";
 
@@ -132,6 +133,10 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
       );
     }
     if (message.kind === "error_notice" && message.code !== "api_retry") {
+      if (message.code?.startsWith("claude-rate-limit:"))
+        return <div role="status" className="text-fg2 py-1 text-sm" data-provider-usage-notice="">
+          <AgentNoticeText message={message.message} />
+        </div>;
       if (message.code === "claude-chrome-setup") return (
         <AgentNotice message={message.message} data-chrome-setup-notice="">
           {ctx.openBrowserSettings ? <Button type="button" variant="ghost" size="sm" className={cn(AGENT_NOTICE_ACTION, "mt-1")} onClick={ctx.openBrowserSettings}>
@@ -183,7 +188,7 @@ function CommandReadRows({ tool, reads, ctx }: {
   reads: CommandReadAction[];
   ctx: RendererContext;
 }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [expanded, setExpanded] = useTurnDisclosure<string | null>(tool.id, "command-read", null);
   const label = readLabel(readLineCount(tool), true);
   const detail = (
     <>
@@ -200,7 +205,7 @@ function CommandReadRows({ tool, reads, ctx }: {
           key={read.key}
           message={tool}
           ctx={ctx}
-          meta={{ Icon: FileText, label, target: read.path, targetFile: true, targetKind: "file", expandable: true }}
+          meta={{ Icon: FileText, label, target: read.path, filePath: read.path, targetFile: true, targetKind: "file", expandable: true }}
           open={expanded === read.key}
           onOpenChange={(open) => setExpanded(open ? read.key : null)}
           detail={detail}
@@ -365,7 +370,7 @@ export function renderDetail(
       .filter((paragraph) => paragraph.trim());
     if (paragraphs.length === 0) return null;
     return (
-      <div className="text-fg2 flex flex-col gap-2 px-3 text-sm leading-normal">
+      <div className="text-fg2 flex select-text flex-col gap-2 px-3 text-sm leading-normal">
         {paragraphs.map((paragraph, index) => (
           <p key={index} className="m-0 wrap-anywhere whitespace-pre-wrap">
             {paragraph}

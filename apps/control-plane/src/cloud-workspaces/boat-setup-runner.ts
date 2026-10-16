@@ -15,7 +15,11 @@ import {
 const SETUP_ENV = "ZEROS_CLOUD_WORKSPACE_SETUP_B64";
 const ENSURE_SUPERVISOR_COMMAND =
   "/usr/bin/sudo -n /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs";
-const BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
+const BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/bootstrap.py status";
+const BASE_STATUS_TIMEOUT_SECONDS = 20;
+// The v4 base waits up to 480 seconds for the provider restore (bootstrap.py
+// HYDRATION_TIMEOUT) before reporting failure; allow a further minute.
+const BASE_RESTORE_GATE_MS = 540_000;
 // A fixed list, no path/argv disclosure and no dependency on the restored Node.
 const BOOTSTRAP_FILE_PROBE_COMMAND = "/bin/sh -c 'for f in /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs /opt/zeros/dist-engine/cli.js; do if test -f \"$f\"; then printf 1; else printf 0; fi; done'";
 type CommandResult = Awaited<ReturnType<CloudWorkspaceCommandRunner["execute"]>>;
@@ -32,43 +36,65 @@ function baseHostStopped(response: Record<string, unknown>, expectedBase: string
 /** Before any admission or SSH key is sent, poll only the fixed read-only v4
  * status command. A provider-running VM can still be restoring its overlay.
  * All setup/installer/SSH failures retain the worker's ordinary retry policy.
+ * A nonzero restoreCeilingMs is used only before setup authority exists.
  */
-async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, resourceId: string, expectedBase: string, signal: AbortSignal, timeoutSeconds: number) {
-  const deadline = new AbortController();
-  const timer = setTimeout(() => deadline.abort(), Math.min(120_000, timeoutSeconds * 1000));
-  timer.unref();
-  const readinessSignal = AbortSignal.any([signal, deadline.signal]);
+async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, resourceId: string, expectedBase: string, signal: AbortSignal,
+  timeoutSeconds: number, restoreCeilingMs = 0) {
+  const started = Date.now();
+  const boot = new AbortController(), restore = new AbortController();
+  const restoreMs = Math.min(restoreCeilingMs, timeoutSeconds * 1000);
+  const timers = [setTimeout(() => boot.abort(), Math.min(120_000, timeoutSeconds * 1000)),
+    ...(restoreMs > 0 ? [setTimeout(() => restore.abort(), restoreMs)] : [])];
+  for (const timer of timers) timer.unref();
+  // The status command itself waits while the base gates on the provider
+  // restore, so a timed-out status means the base is restoring, not broken.
+  // Before authority exists, that evidence extends the wait instead of failing
+  // the claim into a backed-off retry that would wait for the same restore.
+  let restoring = false;
+  const deadline = () => restoring ? restore.signal : boot.signal;
+  const pause = (ms: number, error: unknown) => new Promise<void>((resolve, reject) => {
+    const readinessSignal = AbortSignal.any([signal, deadline()]);
+    const abort = () => { clearTimeout(wait); reject(error); };
+    const wait = setTimeout(() => { readinessSignal.removeEventListener("abort", abort); resolve(); }, ms);
+    readinessSignal.addEventListener("abort", abort, { once: true });
+    if (readinessSignal.aborted) abort();
+  });
   const hostPending = Object.assign(new CloudProviderError("provider_bootstrap_unavailable", "Boat runtime broker is not ready", true),
     { diagnostic: { version: 1, phase: "bootstrap", exit: "unknown" } });
   let previousError: unknown;
   try {
     for (;;) {
       signal.throwIfAborted();
+      const polled = Date.now();
       try {
         const response = await client.request(`/sandboxes/${resourceId}/commands`, {
-          method: "POST", body: { command: BASE_STATUS_COMMAND, timeoutSeconds: 20 }, signal: readinessSignal,
+          method: "POST", body: { command: BASE_STATUS_COMMAND, timeoutSeconds: BASE_STATUS_TIMEOUT_SECONDS },
+          signal: AbortSignal.any([signal, deadline()]),
         });
         // Commands may work before the enabled host unit starts after overlay
         // restoration. Observe only; never restart the host or accept a failed,
         // malformed or foreign base as transient readiness.
         if (baseHostStopped(response, expectedBase)) throw hostPending;
+        if (response.timedOut === true && response.stdoutTruncated !== true &&
+            restoreMs - (Date.now() - started) >= (BASE_STATUS_TIMEOUT_SECONDS + 2) * 1000) {
+          restoring = true;
+          // An early timeout report must not turn polling into a busy loop.
+          const early = 2000 - (Date.now() - polled);
+          if (early > 0) await pause(early, hostPending);
+          continue;
+        }
         return response;
       } catch (error) {
         signal.throwIfAborted();
-        if (deadline.signal.aborted) throw previousError ?? error;
+        if (deadline().aborted) throw previousError ?? error;
         const bootPending = error === hostPending || error instanceof BoatBootPendingError || (error instanceof CloudProviderError &&
           error.retryable && error.httpStatus !== undefined && error.httpStatus >= 500);
         if (!bootPending || (error instanceof CloudProviderError && (error.retryAfterMs ?? 0) > 2000)) throw error;
         previousError = error;
-        await new Promise<void>((resolve, reject) => {
-          const abort = () => { clearTimeout(wait); reject(error); };
-          const wait = setTimeout(() => { readinessSignal.removeEventListener("abort", abort); resolve(); }, 2000);
-          readinessSignal.addEventListener("abort", abort, { once: true });
-          if (readinessSignal.aborted) abort();
-        });
+        await pause(2000, error);
       }
     }
-  } finally { clearTimeout(timer); }
+  } finally { for (const timer of timers) clearTimeout(timer); }
 }
 
 /** Boat commands do not have a separate stdin/environment carrier. Use its
@@ -94,6 +120,22 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
     ) {
       throw new Error("Invalid Boat bootstrap bounds");
     }
+  }
+
+  /** Wait out a restoring base before the coordinator mints setup authority.
+   * Any definitive status, ready or not, is left to the readiness check that
+   * runs after admission; provider errors keep their ordinary bound. */
+  async awaitReadiness(
+    input: Parameters<NonNullable<CloudWorkspaceCommandRunner["awaitReadiness"]>>[0],
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!BOAT_RESOURCE_ID_PATTERN.test(input.resourceId) || !/^bc1-[a-f0-9]{64}$/.test(input.runtimeBaseCompatibilityId) ||
+      !Number.isSafeInteger(input.timeoutSeconds) || input.timeoutSeconds < 1 || input.timeoutSeconds > this.options.maxTimeoutSeconds)
+      throw new CloudProviderError("provider_command_invalid", "Boat accepts only the fixed setup admission", false);
+    signal.throwIfAborted();
+    await this.options.assertOwned(input.resourceId);
+    await waitForBoatBaseStatus(this.options.client, input.resourceId, input.runtimeBaseCompatibilityId, signal, input.timeoutSeconds,
+      BASE_RESTORE_GATE_MS);
   }
 
   async execute(

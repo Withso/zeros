@@ -27,11 +27,16 @@ import type { AgentMessage } from "./use-agent-session";
 import type { BackgroundTask, WorkflowProgress } from "../../platform/bridge/agent-events";
 import { BackgroundTasksWaitingLine } from "./background-task-activity";
 import { useTurnSequence } from "./use-turn-sequence";
+import { TurnDisclosureProvider } from "./turn-disclosures";
 import { tailIndicators } from "./tail-indicators";
 import { WorkflowActivity } from "./workflow-activity";
+import { turnUsageNotice } from "./transcript-notices";
 
 interface TurnEventListProps {
   events: AgentMessage[];
+  /** All provider-turn events for the one tail usage notice. Earlier steer
+   * segments pass null; standalone feeds default to their own events. */
+  usageEvents?: AgentMessage[] | null;
   /** The provider turn whose footer owns terminal failures, including across
    * steer segments. Omit when no turn footer is available. */
   failureTurnId?: string;
@@ -70,6 +75,7 @@ interface TurnEventListProps {
 
 export const TurnEventList = memo(function TurnEventList({
   events,
+  usageEvents,
   failureTurnId,
   isActive,
   isStreaming,
@@ -92,6 +98,7 @@ export const TurnEventList = memo(function TurnEventList({
   // Phase-less prose stays in the working feed while live. Explicit final
   // answers keep their output position even if bookkeeping arrives later.
   const sequence = useTurnSequence(events, live, ctx.chatId, failureTurnId);
+  const usageNotice = useMemo(() => usageEvents === null ? null : turnUsageNotice(usageEvents ?? events), [usageEvents, events]);
   const tailId = sequence.at(-1)?.events.at(-1)?.id ?? null;
   const turnCtx = useMemo(() => ({ ...ctx, isStreaming: live, lastMessageId: tailId }), [ctx, live, tailId]);
 
@@ -139,42 +146,50 @@ export const TurnEventList = memo(function TurnEventList({
     !showShimmer &&
     !showBackgroundWaiting &&
     !workflowRow &&
+    !usageNotice &&
     !footer
   ) {
     return null;
   }
 
   return (
-    <div className="flex w-full max-w-[800px] min-w-0 flex-col self-start">
-      {sequence.map((segment, index) => segment.kind === "working" ? (
-        <EventStripe key={JSON.stringify([ctx.chatId, segment.kind, segment.key])} events={segment.events} ctx={turnCtx} live={live}
-          browserTailClosed={index < sequence.length - 1} />
-      ) : (
-        <MessageView key={JSON.stringify([ctx.chatId, segment.kind, segment.key])} message={segment.events[0]} ctx={turnCtx} />
-      ))}
-      {workflowRow ? <WorkflowActivity {...workflowRow} /> : null}
-      {/* Shimmer + live timer at the tail of the active turn while streaming.
-          pickStartedAt anchors it to the turn's own start, so it counts
-          monotonically for the whole turn; per-tool elapsed belongs to each
-          tool row's own DurationChip, not to this one. Under earlier rows it
-          sits a little lower, so it reads as the turn's rail, not one more
-          row. */}
-      {showShimmer && (
-        <ActivityShimmer
-          startedAt={pickStartedAt(activityEvents ?? events, activityStartedAt)}
-          className={sequence.length > 0 || workflowRow ? "mt-2" : undefined}
-          gibberish={gibberish}
-        />
-      )}
-      {/* Per-turn footer, in-lane so it hugs the answer (see prop doc). */}
-      {footer}
-      {showBackgroundWaiting && (
-        <BackgroundTasksWaitingLine
-          tasks={backgroundTasks!}
-          startedAt={pickStartedAt(activityEvents ?? events, activityStartedAt)}
-          active={surfaceActive}
-        />
-      )}
-    </div>
+    <TurnDisclosureProvider
+      key={JSON.stringify([ctx.attachmentCwd ?? null, ctx.chatId])}
+      events={events}
+      subagentChildren={ctx.subagentChildren}
+    >
+      <div className="flex w-full max-w-[800px] min-w-0 flex-col self-start">
+        {sequence.map((segment, index) => segment.kind === "working" ? (
+          <EventStripe key={JSON.stringify([ctx.chatId, segment.kind, segment.key])} events={segment.events} ctx={turnCtx} live={live}
+            browserTailClosed={index < sequence.length - 1} />
+        ) : (
+          <MessageView key={JSON.stringify([ctx.chatId, segment.kind, segment.key])} message={segment.events[0]} ctx={turnCtx} />
+        ))}
+        {usageNotice ? <MessageView message={usageNotice} ctx={turnCtx} /> : null}
+        {workflowRow ? <WorkflowActivity {...workflowRow} /> : null}
+        {/* Shimmer + live timer at the tail of the active turn while streaming.
+            pickStartedAt anchors it to the turn's own start, so it counts
+            monotonically for the whole turn; per-tool elapsed belongs to each
+            tool row's own DurationChip, not to this one. Under earlier rows it
+            sits a little lower, so it reads as the turn's rail, not one more
+            row. */}
+        {showShimmer && (
+          <ActivityShimmer
+            startedAt={pickStartedAt(activityEvents ?? events, activityStartedAt)}
+            className={sequence.length > 0 || workflowRow ? "mt-2" : undefined}
+            gibberish={gibberish}
+          />
+        )}
+        {/* Per-turn footer, in-lane so it hugs the answer (see prop doc). */}
+        {footer}
+        {showBackgroundWaiting && (
+          <BackgroundTasksWaitingLine
+            tasks={backgroundTasks!}
+            startedAt={pickStartedAt(activityEvents ?? events, activityStartedAt)}
+            active={surfaceActive}
+          />
+        )}
+      </div>
+    </TurnDisclosureProvider>
   );
 });

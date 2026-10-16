@@ -60,6 +60,10 @@ import { Badge } from "../../../shared/ui/primitives";
 import { toast } from "../../../shared/ui/primitives/elements";
 import { useWorkspaceDispatch } from "../../../state/store";
 import { useActiveWorkspace } from "../../../state/use-active-workspace";
+import {
+  documentIsVisible,
+  useDocumentActive,
+} from "../../../state/use-document-active";
 import { isLocalMainWorkspace } from "../../../state/local-main-workspace";
 import { useProjects } from "../../../state/use-projects";
 import { useBridge } from "../../../platform/bridge/use-bridge";
@@ -125,10 +129,11 @@ export const SetupView = forwardRef<
   }
 >(function SetupView({ workspace, visible, onBusyChange }, ref) {
   const openScripts = useOpenScriptsSettings();
+  const active = useDocumentActive(visible);
   const target = parseCloudWorkspaceKey(workspace?.id ?? "");
   const cloud = target !== null;
   const subscribe = useCallback((listener: () => void) =>
-    visible && cloud ? subscribeCloudWorkspaces(listener) : () => {}, [visible, cloud]);
+    active && cloud ? subscribeCloudWorkspaces(listener) : () => {}, [active, cloud]);
   const snapshot = () => (target ? cloudWorkspaceDocument(target) : undefined);
   const failure = useSyncExternalStore(subscribe, snapshot, snapshot)?.setupFailure;
   const managed = useWorkbenchStatusSource(
@@ -155,7 +160,7 @@ export const SetupView = forwardRef<
       repoRoot={
         isLocalMainWorkspace(workspace) ? workspace.repoRoot : undefined
       }
-      visible={visible}
+      visible={active}
       onAddSetupScript={openScripts}
       controlRef={ref}
       onBusyChange={onBusyChange}
@@ -209,6 +214,7 @@ function WorkspaceSetup({
   onBusyChange(workspaceId: string, busy: boolean): void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const mountedRef = useRef(false);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const xtermRef = useRef<XTerm | null>(null);
@@ -220,8 +226,16 @@ function WorkspaceSetup({
   // one trailing exact-key read. Plain concurrent readers still share the
   // current request; only a real invalidation queues another generation.
   const refetchQueuedRef = useRef(false);
-  // How many chars of the engine buffer we've already written to the xterm.
-  const writtenRef = useRef(0);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      refetchQueuedRef.current = false;
+    };
+  }, []);
+  // Keep the exact rendered prefix: a hidden rerun can replace the full buffer
+  // without this observer ever seeing the intermediate empty snapshot.
+  const renderedLogRef = useRef("");
   const [info, setInfo] = useState<WorkspaceSetupInfo | null>(null);
   const [readFailure, setReadFailure] = useState<unknown>(null);
   const [readPending, setReadPending] = useState(false);
@@ -237,11 +251,13 @@ function WorkspaceSetup({
   );
   const bridge = useBridge();
 
-  // Pull the buffer + state and delta-append any new bytes into the xterm. A
-  // shrinking buffer (a fresh run reset it) → reset the grid + cursor.
+  // Pull the buffer + state and append only an exact extension. A replacement
+  // (even one of equal or greater length) resets the grid + cursor.
   const refetch = useCallback(
     (ensureLatest = false): Promise<void> => {
-      if (!visibleRef.current) return Promise.resolve();
+      const active = () =>
+        mountedRef.current && visibleRef.current && documentIsVisible();
+      if (!active()) return Promise.resolve();
       const existing = refetchRequestRef.current;
       if (existing) {
         if (ensureLatest) refetchQueuedRef.current = true;
@@ -250,34 +266,42 @@ function WorkspaceSetup({
       const request = (async () => {
         setReadPending(true);
         do {
+          if (!active()) return;
           refetchQueuedRef.current = false;
           let next: WorkspaceSetupInfo;
           try {
             next = await workspaceSetupInfo({ workspaceId, repoRoot });
           } catch (error) {
-            setReadFailure(error);
+            if (!active()) return;
             // Bridge not ready / transient — keep showing what we have. A real
             // invalidation that arrived during the failed read still gets its
             // trailing attempt; otherwise the first-snapshot retry handles it.
             if (refetchQueuedRef.current) continue;
+            setReadFailure(error);
             return;
           }
+          // A hidden/retired surface neither paints this response nor starts a
+          // trailing invalidation. Reveal requests a fresh exact-key snapshot.
+          if (!active()) return;
+          // An invalidation or reveal supersedes this snapshot. Preserve the
+          // confirmed buffer until the trailing exact-key read completes.
+          if (refetchQueuedRef.current) continue;
           const term = xtermRef.current;
           if (term) {
-            if (next.log.length < writtenRef.current) {
+            if (!next.log.startsWith(renderedLogRef.current)) {
               term.reset();
-              writtenRef.current = 0;
+              renderedLogRef.current = "";
             }
-            if (next.log.length > writtenRef.current) {
-              term.write(next.log.slice(writtenRef.current));
-              writtenRef.current = next.log.length;
+            if (next.log.length > renderedLogRef.current.length) {
+              term.write(next.log.slice(renderedLogRef.current.length));
+              renderedLogRef.current = next.log;
             }
           }
           setInfo(next);
           setReadFailure(null);
         } while (refetchQueuedRef.current);
       })().finally(() => {
-        setReadPending(false);
+        if (mountedRef.current) setReadPending(false);
         if (refetchRequestRef.current === request) {
           refetchRequestRef.current = null;
         }
@@ -329,7 +353,7 @@ function WorkspaceSetup({
     return () => off?.();
   }, [bridge, refetch, visible, workspaceId]);
 
-  // Mount the xterm once, then do the initial fetch.
+  // Mount the xterm once. The visible effect below owns the initial read too.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -382,7 +406,6 @@ function WorkspaceSetup({
       if (visibleRef.current) scheduler.request();
     });
     ro.observe(host);
-    void refetch();
     return () => {
       ro.disconnect();
       scheduler.dispose();
@@ -391,7 +414,7 @@ function WorkspaceSetup({
       }
       term.dispose();
       xtermRef.current = null;
-      writtenRef.current = 0;
+      renderedLogRef.current = "";
     };
   }, [refetch]);
 
@@ -416,7 +439,9 @@ function WorkspaceSetup({
   // log/state once and fit the already-mounted grid to its real bounds.
   useEffect(() => {
     if (!visible) return;
-    void refetch();
+    // A pre-hide read may still be pending. Sharing it alone would miss setup
+    // invalidations received while unsubscribed, so coalesce one trailing read.
+    void refetch(true);
     // This also marks the scheduler dirty when dragging the collapsed row
     // open, guaranteeing one exact release-time fit even if ResizeObserver
     // coalesces away the visibility geometry change.
@@ -459,7 +484,7 @@ function WorkspaceSetup({
       }
       // Reset the grid for the fresh run, then start tracking it.
       xtermRef.current?.reset();
-      writtenRef.current = 0;
+      renderedLogRef.current = "";
       await refetch(true);
     } catch (err) {
       toast.error(

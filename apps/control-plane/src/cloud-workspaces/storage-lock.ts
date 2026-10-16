@@ -6,5 +6,5 @@ import type {Tx} from "../db.js";
 export async function lockWorkspaceObjectStorage(tx: Tx, organizationId: string): Promise<void> {
   await tx.query(`SELECT pg_advisory_xact_lock(
     hashtextextended('workspace-object-storage:' || $1::uuid::text, 0)
-  )`, [organizationId]);
+  ) /*lock_purpose='object-storage'*/`, [organizationId]);
 }

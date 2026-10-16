@@ -22,8 +22,9 @@ import { createDesignContextReference, inspectDesignContext } from "./context";
 import { assertDesignCheckoutReadable } from "./checkout-status";
 import { withDesignDirectoryNameLease, withoutDesignDirectoryNameLease } from "./directory-registry";
 import { readDirectoryDesignManifest } from "./metadata";
-import { lintDesignDocument, listDesignFrames, readDesignWebDocumentState } from "./document";
+import { lintDesignDocument, listDesignFrames, readDesignThemeNames, readDesignWebDocumentState } from "./document";
 import { prepareFrameRenderSource } from "./render-preparation";
+import { DESIGN_THEME_NAME, insertDesignHeadMarkup, withDesignTheme } from "./source";
 
 const LEASE_MS = 30 * 60_000;
 const MAX_LEASES = 32;
@@ -54,6 +55,7 @@ const PREVIEW_SCRIPT = `
 const frame = document.querySelector('iframe');
 const status = document.querySelector('output');
 const expectedId = new URL(location.href).searchParams.get('frameId');
+const theme = new URL(location.href).searchParams.get('theme');
 let version = '', stopped = false, initialized = false, readyDocument = null;
 window.__ZEROS_FRAME_PREVIEW__ = { ready: false };
 function invalidateDocument() {
@@ -72,7 +74,11 @@ async function refresh() {
   // once; only subsequent refresh work requires a visible page.
   if (!document.hidden || !initialized) try {
     initialized = true;
-    const response = await fetch('./state' + (expectedId ? '?frameId=' + encodeURIComponent(expectedId) : ''), { cache: 'no-store', signal: AbortSignal.timeout(${DESIGN_CAPTURE_TIMEOUT_MS + 2000}) });
+    const query = new URLSearchParams();
+    if (expectedId) query.set('frameId', expectedId);
+    if (theme) query.set('theme', theme);
+    const search = query.toString();
+    const response = await fetch('./state' + (search ? '?' + search : ''), { cache: 'no-store', signal: AbortSignal.timeout(${DESIGN_CAPTURE_TIMEOUT_MS + 2000}) });
     const state = await response.json();
     if (!response.ok) throw new Error(state.error || 'Preview unavailable');
     if (state.reference.revision !== version || !window.__ZEROS_FRAME_PREVIEW__.ready) {
@@ -108,11 +114,11 @@ async function refresh() {
             if (doc !== frame.contentDocument) throw new Error('Preview replaced');
             readyDocument = doc;
             window.__ZEROS_FRAME_PREVIEW__ = { ...state, ready: true };
-            status.textContent = state.width + ' × ' + state.height + ' · ' + version;
+            status.textContent = state.width + ' × ' + state.height + ' · ' + version + (theme ? ' · ' + theme : '');
             finish();
           } catch (error) { finish(error); }
         };
-        frame.src = './document?revision=' + version + '&frameId=' + encodeURIComponent(state.reference.frameId || '');
+        frame.src = './document?revision=' + version + '&frameId=' + encodeURIComponent(state.reference.frameId || '') + (theme ? '&theme=' + encodeURIComponent(theme) : '');
       });
     }
   } catch (error) {
@@ -169,6 +175,8 @@ async function startVerificationServer(options: DesignVerificationOptions) {
     }
     if (active >= 4) { fail(429, "Design verification is busy. Retry when the current request finishes."); return; }
     if (file !== "frames" && !isDesignFrameFile(file)) { fail(404, "Unknown Design frame."); return; }
+    const theme = url.searchParams.get("theme");
+    if (theme !== null && !DESIGN_THEME_NAME.test(theme)) { fail(400, "Theme names use lowercase letters, digits, - and _, starting with a letter."); return; }
     active++;
     const controller = new AbortController();
     controllers.add(controller);
@@ -201,6 +209,13 @@ async function startVerificationServer(options: DesignVerificationOptions) {
       const inspection = await inspectDesignContext(lease.workspacePath, reference);
       if (inspection.status !== "ready") { fail(409, "The frame changed while reading. Retry verification."); return; }
       const state = { reference, title: inspection.title, width: inspection.width, height: inspection.height };
+      if (theme !== null) {
+        // The same themes the canvas Themes control offers for this directory.
+        const themes = await readDesignThemeNames(lease.workspacePath);
+        if (!themes.includes(theme)) {
+          fail(400, themes.length ? `Unknown theme ${JSON.stringify(theme)}. Choose one of: ${themes.join(", ")}.` : `Unknown theme ${JSON.stringify(theme)}. This Design directory declares no themes.`); return;
+        }
+      }
       const assertRevision = async () => {
         assertOwner();
         if ((await inspectDesignContext(lease.workspacePath, reference)).status !== "ready")
@@ -222,8 +237,7 @@ async function startVerificationServer(options: DesignVerificationOptions) {
       if (action === "document") {
         await assertRevision();
         // Marker is added in the head by the parser-safe existing helper.
-        const { insertDesignHeadMarkup } = await import("./source");
-        const html = insertDesignHeadMarkup(composed.sanitized, `<meta name="zeros-frame-revision" content="${reference.revision}"><style>${DESIGN_STATIC_RENDER_CSS}html{color-scheme:light}</style>`);
+        const html = insertDesignHeadMarkup(theme === null ? composed.sanitized : withDesignTheme(composed.sanitized, theme), `<meta name="zeros-frame-revision" content="${reference.revision}"><style>${DESIGN_STATIC_RENDER_CSS}html{color-scheme:light}</style>`);
         send(html, "text/html; charset=utf-8", { "Content-Security-Policy": PASSIVE_CSP }); return;
       }
       if (action === "capture") {
@@ -236,13 +250,15 @@ async function startVerificationServer(options: DesignVerificationOptions) {
         const rasterSize = designCaptureRasterSize(viewport);
         const artifact = await renderer.renderComposed({
           state: document, viewport, rasterSize,
-          html: composed.sanitized, sourceVersion: reference.revision, signal: controller.signal,
+          html: theme === null ? composed.sanitized : withDesignTheme(composed.sanitized, theme),
+          sourceVersion: reference.revision, signal: controller.signal,
         });
         assertDesignCapturePng(artifact.bytes, rasterSize.width, rasterSize.height);
         await assertRevision();
         send(artifact.bytes, "image/png", {
           "X-Design-Revision": reference.revision, "X-Design-Width": String(rasterSize.width), "X-Design-Height": String(rasterSize.height),
           "X-Design-Captured-At": String(capturedAt), "X-Design-Motion": "reduced",
+          ...(theme === null ? {} : { "X-Design-Theme": theme }),
         }); return;
       }
       fail(404, "Unknown Design verification operation.");

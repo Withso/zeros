@@ -15,6 +15,7 @@ export class CloudWorkerScheduler {
     private readonly run: (periodic: boolean) => Promise<void>,
     private readonly onError: () => void,
     private readonly readNextDelayMs?: () => Promise<number | null>,
+    private readonly options: { readBeforeRun?: boolean; jitter?: boolean } = {},
   ) {}
 
   start(): void {
@@ -41,8 +42,22 @@ export class CloudWorkerScheduler {
     this.workAt = Infinity;
     const periodic = Date.now() >= this.pollAt;
     this.active = Promise.resolve().then(async () => {
-      try { await this.run(periodic); }
-      finally { if (periodic) this.pollAt = Date.now() + this.intervalMs; }
+      try {
+        if (this.options.readBeforeRun && this.readNextDelayMs) {
+          const delay = await this.readNextDelayMs();
+          if (this.stopped) return;
+          // An empty queue only needs this read. Do not open a claim/write
+          // transaction until the durable deadline says work can be due.
+          if (delay === null || !Number.isFinite(delay) || delay > 0) {
+            if (delay !== null && Number.isFinite(delay)) this.workAt = Date.now() + Math.max(100, delay);
+            return;
+          }
+        }
+        await this.run(periodic);
+      } finally {
+        if (periodic) this.pollAt = Date.now() + (this.options.jitter
+          ? this.intervalMs * (0.5 + Math.random() * 0.5) : this.intervalMs);
+      }
       if (this.stopped || !this.readNextDelayMs) return;
       const delay = await this.readNextDelayMs();
       // Another replica may hold an already-due claim. Debounce that case;

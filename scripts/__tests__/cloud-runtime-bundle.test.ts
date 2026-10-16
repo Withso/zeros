@@ -79,7 +79,10 @@ describe("Cursor platform payload closure", () => {
     // Import the actual self-test with its shipped helper graph. The identity
     // probe still runs only the original Cursor payload check; no VM custody,
     // engine role or provider success is fabricated by this fixture.
-    for (const helper of RUNTIME_HELPERS) await copyFile(helper.source, path.join(root, helper.target));
+    for (const helper of RUNTIME_HELPERS) {
+      await copyFile(helper.source, path.join(root, helper.target));
+      await chmod(path.join(root, helper.target), 0o644);
+    }
     for (const file of ["bin/start-engine.sh", "lib/zeros/setup-cloud-workspace.mjs", "lib/zeros/cloud-worker-supervisor.mjs"])
       await writeFile(path.join(root, file), "", { mode: 0o555 });
     await writeFile(path.join(root, "manifest.json"), canonicalJson(createManifest({
@@ -99,6 +102,7 @@ describe("Cursor platform payload closure", () => {
     const runTool = toolchain.runTool;
     const identities: string[] = [];
     const spy = vi.spyOn(toolchain, "runTool").mockImplementation((command, args, options, failure) => {
+      if (command !== "setpriv") return runTool(command, args, options, failure);
       expect(args.slice(args.indexOf("/proc") - 1, args.indexOf("/proc") + 2)).toEqual(["--ro-bind", "/proc", "/proc"]);
       expect(args).toContain("--unshare-net"); expect(args).toContain("--clearenv");
       expect(options.env).toEqual({ PATH: "/usr/bin:/bin", HOME: options.cwd });

@@ -1,11 +1,17 @@
 import { createPrivateKey, generateKeyPairSync, randomBytes } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../../apps/control-plane/src/config";
 import { releaseCanaryConfiguration } from "../../apps/control-plane/src/cloud-workspaces/release-canaries";
 import { CHANNELS, type Channel } from "./contracts";
 import { cloudProvisionConfig, cloudProvisionMain } from "./cloud-provision-cli";
 import { CLOUD_CANARY_INPUTS, CLOUD_ENABLE_FLAGS, CLOUD_KEYRINGS, CLOUD_OWNER_SECRETS, CLOUD_WORKER_VARIABLES,
   cloudProvisionSummary, planCloudProvision } from "./cloud-provision";
+
+// Preserve every provisioning/credential validation contract for the next
+// unpaused release. The paused cases below exercise the same shared switch.
+const channelPolicy = vi.hoisted(() => ({ development: true, alpha: true, beta: true, production: true }));
+vi.mock("../../apps/control-plane/src/cloud-workspace-channels.json", () => ({ default: channelPolicy }));
+beforeEach(() => { channelPolicy.beta = true; channelPolicy.production = true; });
 
 const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 const projectId = "11111111-1111-4111-8111-111111111111", environmentId = "22222222-2222-4222-8222-222222222222";
@@ -361,6 +367,23 @@ function railwayHarness(channel: Channel = "beta") {
 }
 
 describe("guarded cloud backend CLI", () => {
+  it.each(["beta", "production"] as const)("refuses paused %s planning and apply before network access or key generation", async channel => {
+    channelPolicy[channel] = false;
+    const harness = railwayHarness(channel), fetch = vi.fn();
+    for (const mode of ["plan", "apply"]) {
+      await expect(cloudProvisionMain({ ...harness.inputs, CLOUD_PROVISION_MODE: mode }, { ...harness.dependencies, fetch }))
+        .rejects.toThrow("CLOUD_WORKSPACE_CHANNEL fail");
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    expect(harness.createKeyring).not.toHaveBeenCalled();
+    expect(harness.writes).toEqual([]);
+    const plan = planCloudProvision({ ...fixture(channel), enableCloud: true, qualificationRequired: false,
+      adoptWorker: alphaBaseIdentity().worker as never });
+    expect(plan.validation).toMatchObject({ ok: false, names: expect.arrayContaining(["CLOUD_WORKSPACE_CHANNEL"]) });
+    expect(plan.enableGate.ok).toBe(false);
+    expect(CLOUD_ENABLE_FLAGS.every(name => plan.desired[name] === "false")).toBe(true);
+  });
+
   it("leaves plans read-only, including Alpha, and never generates plan keys", async () => {
     for (const channel of ["alpha", "beta", "production"] as const) {
       const harness = railwayHarness(channel); harness.inputs.CLOUD_PROVISION_MODE = "plan";

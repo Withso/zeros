@@ -1,6 +1,7 @@
 import { CloudAgentCredentialCards } from "./cloud-agent-credential-cards";
 import { cloudAdmissionForTurn } from "./cloud-admission-failure";
 import { TurnFailureCard } from "./turn-failure-card";
+import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
 import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-send-failure-toast";
 // ──────────────────────────────────────────────────────────
 // AgentChat — messages + tool cards + permission modal + composer
@@ -15,7 +16,10 @@ import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-s
 
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import { transcriptParentId } from "./transcript-parent";
-import { useCloudTranscriptLatency } from "./use-cloud-transcript-latency";
+import { useCloudTranscriptLatency, useCloudTranscriptLoading } from "./use-cloud-transcript-latency";
+import { useTranscriptHistoryStatus } from "./use-transcript-history-status";
+import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
+import { hasTranscriptPresentation } from "./transcript-retention";
 import { startCloudSubmitSpan } from "../../state/cloud-workspace-latency";
 import React, {
   useCallback,
@@ -76,7 +80,7 @@ import {
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
 import { cloudQueuedPrompt } from "./cloud-queued-prompt";
-import { agentActivity } from "./agent-activity";
+import { agentActivity, chatAgentActivity } from "./agent-activity";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
 import { PermissionCard } from "./permission-card";
@@ -248,9 +252,9 @@ import {
   loadAgents,
   refreshAgents,
 } from "./agents-cache";
-import { useWorkspaceAgents } from "./workspace-agent-registry";
-import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import { cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { invalidateCloudAgentRegistry, useWorkspaceAgents } from "./workspace-agent-registry";
+import { isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
+import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings, requestUserSettingsSection } from "../settings/settings-navigation";
 import { isSubscriptionProvider } from "../settings/subscription-connection";
@@ -259,6 +263,7 @@ import {
   authenticationTurnState,
   authenticationTurnOutput,
   authenticationFailureMessage,
+  latestAuthenticationRecoveryTurn,
 } from "./auth-prompt-recovery";
 import { useAgentSessions } from "./sessions-hooks";
 import { useStickyBottom, nextTextMessageTarget } from "./use-sticky-bottom";
@@ -398,6 +403,9 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
+  const provisionalTranscript = (isCloudWorkspace(chatThread?.folder ?? session.cwd) || !!parseCloudScopedId(chatId)) &&
+    session.transcriptState === "loading" && !!session.transcriptPresentation;
+  const transcriptReadOnly = readOnly || provisionalTranscript;
   const cloudNativeCapabilities=session.boundary?.cloudExecution?.capabilities??session.session?.nativeCapabilities;
   const goalsAvailable=!isCloudWorkspace(chatThread?.folder)||cloudNativeCapabilities?.goals===true;
   const browserConfirmation = useBrowserConfirmation(chatId);
@@ -486,10 +494,9 @@ export function AgentChat({
         string,
         import("./use-agent-session").AgentMessage[]
       >();
-      // Follow-ups render in the QueuedMessagesCard, not as transcript
-      // bubbles. The first send waiting only for session admission is the one
-      // exception: it is already the active turn, so it stays in the timeline
-      // with the live timer while the provider session becomes ready.
+      // Deliberately parked follow-ups render in the queue card. An accepted
+      // opening prompt and a send awaiting native consumption are already
+      // visible bubbles; delivery bookkeeping must not hide the user's send.
       const queuedMessages: AgentTextMessage[] = [];
       // Tool calls present in THIS window. A child is only shadowed when its
       // parent SubagentCard is here to render it — the hydrate window (or a
@@ -507,7 +514,8 @@ export function AgentChat({
         if (
           m.kind === "text" &&
           m.queued &&
-          m.queuedPresentation !== "active-turn"
+          m.queuedPresentation !== "active-turn" &&
+          m.queuedDelivery !== "sending"
         ) {
           queuedMessages.push(m);
           shadowed.add(m.id);
@@ -583,18 +591,18 @@ export function AgentChat({
     !readOnly &&
     (agentFamily(session.agentId) === "claude"
       ? activity === "running"
-      : session.status === "streaming");
+      : chatAgentActivity(session) === "running");
   // QuestionCard's submit hook routes through session.sendPrompt (see the
   // RendererContext contract).
   const respondToQuestion = useCallback(
     (text: string) => {
-      if (readOnly) return;
+      if (transcriptReadOnly) return;
       if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
       session.sendPrompt(text, text).catch(() => {
         /* error surfaces via session.error */
       });
     },
-    [chatThread?.folder, session, readOnly],
+    [chatThread?.folder, session, transcriptReadOnly],
   );
   // pendingPermission is threaded into ctx so the matching
   // tool card can render its inline Allow/Deny cluster. respondToPermission
@@ -603,11 +611,11 @@ export function AgentChat({
     (
       response: import("../../platform/bridge/agent-events").RequestPermissionResponse,
     ) => {
-      if (readOnly) return;
+      if (transcriptReadOnly) return;
       if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
       session.respondToPermission(response);
     },
-    [chatThread?.folder, session, readOnly],
+    [chatThread?.folder, session, transcriptReadOnly],
   );
   // Sticky-policy mutators are bound to the active chatId so
   // the InlinePermissionCluster can fire-and-forget without knowing
@@ -615,10 +623,10 @@ export function AgentChat({
   const policyChatId = chatId;
   const recordPolicy = useCallback(
     (rule: import("./policies").PolicyRule) => {
-      if (readOnly || !policyChatId) return;
+      if (transcriptReadOnly || !policyChatId) return;
       useSessionsStore.getState().addPolicy(policyChatId, rule);
     },
-    [policyChatId, readOnly],
+    [policyChatId, transcriptReadOnly],
   );
   // Surface the session's setMode through ctx so the
   // ExitPlanModeCard can apply the user's "approve and continue in
@@ -626,12 +634,12 @@ export function AgentChat({
   // wrap it so consumers don't have to handle the maybe-undefined.
   const setModeForCtx = useMemo(
     () =>
-      !readOnly && session.setMode
+      !transcriptReadOnly && session.setMode
         ? (modeId: string) => {
             void session.setMode!(modeId);
           }
         : null,
-    [session, readOnly],
+    [session, transcriptReadOnly],
   );
   // Mount-flicker fix (2026-07-16): the rail publishes its scroll-spy
   // pass here so the scroll-restore layout effect below can light the
@@ -664,7 +672,7 @@ export function AgentChat({
       segments?: ComposerSegment[],
     ) => {
       const trimmed = editedText.trim();
-      if (readOnly || !chatId) return;
+      if (transcriptReadOnly || !chatId) return;
       if (trimmed.length === 0 && attachments.length === 0) {
         return;
       }
@@ -746,7 +754,7 @@ export function AgentChat({
           /* error surfaces via session.error */
         });
     },
-    [chatId, chatThread?.folder, session, readOnly],
+    [chatId, chatThread?.folder, session, transcriptReadOnly],
   );
 
   // Forward-ref to the composer hook's
@@ -808,12 +816,12 @@ export function AgentChat({
   const retrySafetyReviewRef = useRef(session.retrySafetyReview);
   retrySafetyReviewRef.current = session.retrySafetyReview;
   const retrySafetyReviewThroughRef = useCallback((retryId: string) => {
-    if (readOnly) return Promise.resolve();
+    if (transcriptReadOnly) return Promise.resolve();
     const retry = retrySafetyReviewRef.current;
     return retry
       ? retry(retryId)
       : Promise.reject(new Error("Safety retry is unavailable."));
-  }, [readOnly]);
+  }, [transcriptReadOnly]);
   const openBrowserSettings = useCallback(() => {
     if (!interactive) return;
     requestUserSettingsSection("browser-use");
@@ -821,20 +829,21 @@ export function AgentChat({
   }, [dispatch, interactive]);
   const messageCtx: RendererContext = useMemo(
     () => ({
+      transcriptReadOnly,
       isStreaming,
       lastMessageId,
       activeTurnStartedAt,
       subagentChildren,
       editBaselines,
       respondToQuestion,
-      pendingQuestionToolCallIds: readOnly
+      pendingQuestionToolCallIds: transcriptReadOnly
         ? new Set<string>()
         : pendingQuestionToolCallIds,
-      hasBlockingQuestion: !readOnly && hasBlockingQuestion,
-      pendingPermission: readOnly ? null : session.pendingPermission,
+      hasBlockingQuestion: !transcriptReadOnly && hasBlockingQuestion,
+      pendingPermission: transcriptReadOnly ? null : session.pendingPermission,
       respondToPermission,
       retrySafetyReview: retrySafetyReviewThroughRef,
-      safetyReviewRetries: readOnly ? undefined : session.safetyReviewRetries,
+      safetyReviewRetries: transcriptReadOnly ? undefined : session.safetyReviewRetries,
       recordPolicy,
       chatId: chatId ?? null,
       setMode: setModeForCtx,
@@ -872,6 +881,7 @@ export function AgentChat({
       session.cwd,
       surfaceActive,
       readOnly,
+      transcriptReadOnly,
       openFileThroughRef,
       warmFileThroughRef,
       openPrUrlThroughRef,
@@ -1281,8 +1291,15 @@ export function AgentChat({
       : true,
   );
   const transcriptPaintReady = useSessionsStore((s) =>
-    !!chatId && s.sessions[chatId]?.transcriptState === "resident",
+    !!chatId && hasTranscriptPresentation(s.sessions[chatId]),
   );
+  const transcriptCatchingUp = useSessionsStore((s) => {
+    const head = chatId ? s.cloudHistoryRestoreHeads[chatId] : undefined;
+    // Native rows can be resident while the current FULL head is incomplete.
+    // Residency describes paintable rows, not confirmed history coverage.
+    return !!chatId && !!s.sessions[chatId] &&
+      !!head && !head.head?.deleted && !cloudHistoryFenceHasTranscript(head);
+  });
   useCloudTranscriptLatency(chatThread?.folder ?? session.cwd, chatId, surfaceActive,
     transcriptPaintReady, hasSessionMessages);
   // Which turn (if any) this renderer has an unsettled prompt for. The tail's
@@ -1942,22 +1959,20 @@ export function AgentChat({
   // locally stateful and the dialog still opens from the exact-key cache.
   const transcriptRowLive =
     session.transcriptState === "resident" &&
+    !transcriptCatchingUp &&
     session.messages.length === 0 &&
     !session.error &&
     !!chatThread?.folder;
-  const [showTranscriptLoading, setShowTranscriptLoading] = useState(false);
-  useEffect(() => {
-    if (session.transcriptState === "resident") {
-      setShowTranscriptLoading(false);
-      return;
-    }
-    // Genuine cold DB load. Delay the indicator so normal local reads do not
-    // flash; this is not masking a waterfall—the retained deck already warms
-    // likely destinations and the composer stays intact while the exact read
-    // completes.
-    const timer = window.setTimeout(() => setShowTranscriptLoading(true), 180);
-    return () => window.clearTimeout(timer);
-  }, [session.transcriptState]);
+  const transcriptHistoryStatus = useTranscriptHistoryStatus({
+    identity: JSON.stringify([chatThread?.folder ?? session.cwd, chatId]),
+    active: surfaceActive,
+    hasMessages: session.messages.length > 0,
+    hasTranscript: session.hasTranscript,
+    resident: session.transcriptState === "resident",
+    incomplete: transcriptCatchingUp,
+  });
+  const transcriptLoadingVisible = transcriptHistoryStatus === "loading";
+  useCloudTranscriptLoading(chatThread?.folder ?? session.cwd, chatId, transcriptLoadingVisible);
   const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
     useChatTranscriptSummaries(
       chatThread?.folder,
@@ -2917,11 +2932,19 @@ export function AgentChat({
       ),
     [visibleMessages],
   );
+  const authenticationRecoveredAt = useMemo(() => latestAuthenticationRecoveryTurn(turns), [turns]);
   // Only a committed render becomes the baseline. Mutating this ref inside
   // useMemo lets an abandoned concurrent render influence the next pass.
   useLayoutEffect(() => {
     stableTurnsRef.current = turns;
   }, [turns]);
+  const initialCachedTurnIndex = useMemo(() => {
+    if (!provisionalTranscript || !chatId) return -1;
+    const saved = useSessionsStore.getState().scrollPositions[chatId];
+    return saved && !saved.atBottom
+      ? turns.findIndex(turn => turn.userPrompt?.id === saved.anchorId)
+      : -1;
+  }, [chatId, provisionalTranscript, turns]);
 
   // Checkpoint list for the left-edge rail — one entry per user prompt,
   // transcript order. Ids match the data-checkpoint-id TurnContainer
@@ -3167,26 +3190,27 @@ export function AgentChat({
     (session.status === "failed" || session.status === "auth-required") &&
     !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait?.state === "waiting");
 
-  // 01u (2026-05-20): error feedback moved to the toast surface.
-  // 01w (2026-05-20): toast now leads with the agent name so the
-  // user sees "Claude Code: …" instead of "Error: …". Also fires the
-  // session.failure.message as the description for context (e.g.
-  // "CLI exited with code 143 signal=null"). Inline error banners are gone;
-  // reset is a settings/menu affordance.
-  const lastErrorLabelRef = useRef<string | null>(null);
+  // Toasts describe a new failure observed by this active chat, never a
+  // historical snapshot on mount/reveal. Seed from the current state and
+  // advance while hidden too; the transcript/auth notice retains old errors.
+  const lastErrorObservationRef = useRef({ chatId, folder: chatThread?.folder,
+    account: cloudCatalogGeneration(), agentId: session.agentId, failure: session.failure,
+    error: session.error, status: session.status });
   useEffect(() => {
-    if (!interactive) {
-      lastErrorLabelRef.current = null;
-      return;
-    }
+    const previous = lastErrorObservationRef.current;
+    const current = { chatId, folder: chatThread?.folder, account: cloudCatalogGeneration(),
+      agentId: session.agentId, failure: session.failure, error: session.error, status: session.status };
+    lastErrorObservationRef.current = current;
+    if (!interactive || !isErrorState || previous.chatId !== current.chatId || previous.folder !== current.folder ||
+        previous.account !== current.account || previous.agentId !== current.agentId) return;
+    const sameFailure = previous.failure === current.failure || !!previous.failure && !!current.failure &&
+      (["kind", "message", "stage", "agentId", "advice"] as const).every(key => previous.failure![key] === current.failure![key]) &&
+      previous.failure.exit?.code === current.failure.exit?.code && previous.failure.exit?.signal === current.failure.exit?.signal &&
+      previous.failure.exit?.stderrTail === current.failure.exit?.stderrTail;
+    if (sameFailure && previous.error === current.error && previous.status === current.status) return;
     if (cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) return;
-    if (!isErrorState) {
-      lastErrorLabelRef.current = null;
-      return;
-    }
+    if (session.failure?.kind === "lifecycle-superseded" || session.failure?.kind === "transport-closed") return;
     const label = labelForFailure(session.failure, session.status);
-    if (lastErrorLabelRef.current === label) return;
-    lastErrorLabelRef.current = label;
     const agentLabel = session.agentName ?? session.agentId ?? "Agent";
     const detail = session.failure?.message ?? session.error ?? undefined;
     // Defense in depth — even if a future code path forgets to route a
@@ -3197,12 +3221,8 @@ export function AgentChat({
     if (isTransportShaped(detail)) {
       return;
     }
-    // The technical detail is for logs, never for the toast (UI-indication
-    // consolidation, 2026-07-10): the user can't act on "cursor-sdk
-    // newSession failed: …exited unexpectedly…" — they only need to know
-    // WHICH agent errored. Full detail stays greppable here + in the engine
-    // log for support/diagnosis.
-    if (detail) console.warn(`[agent] ${agentLabel} failure: ${detail}`);
+    // Technical provider text stays in the failure/transcript boundary. Do not
+    // copy arbitrary messages into console output on navigation or revalidation.
     // Authentication uses the product notice. Other prompt failures have a
     // turn footer; initialization failures and actionable advice use a toast.
     const isAuth =
@@ -3227,12 +3247,14 @@ export function AgentChat({
     // protocol, transport, or Design-protection failure is not authentication
     // evidence and must not fan out utility probes across every provider.
     if (isAuth) {
-      invalidateAgentsCache();
-      void refreshAgents((force) => agentSessions.listAgents(force)).catch(
-        () => {
-          /* surfaced by the cache via toast */
-        },
-      );
+      if (current.folder && isCloudWorkspace(current.folder)) {
+        invalidateCloudAgentRegistry(current.folder);
+      } else {
+        invalidateAgentsCache();
+        void refreshAgents((force) => agentSessions.listAgents(force)).catch(() => {
+          /* Retain the last confirmed Local registry until it can refresh. */
+        });
+      }
     }
   }, [
     isErrorState,
@@ -3305,7 +3327,7 @@ export function AgentChat({
   // the adapter at session creation. Claude, Codex and Cursor support it; an unavailable
   // harness disables its arrow with a tooltip while a turn is in flight.
   const steeringSupported =
-    session.initialize?.agentCapabilities?.steering === true;
+    session.initialize?.agentCapabilities?.steering;
   const steeringAgentName =
     session.agentName ??
     chatThread?.agentName ??
@@ -3635,6 +3657,7 @@ export function AgentChat({
   const runSend = async (
     override?: string,
     extras?: {
+      followUpBehavior?: FollowUpBehavior;
       /** Inline summary imports from prior chats. Serialized
        *  into <from_previous_chat> text blocks and prepended to the
        *  prompt so the agent reads them as opening context. Used by
@@ -3794,8 +3817,9 @@ export function AgentChat({
     if (cloudSubmission && chatId) {
       if (!cloudTarget) throw new Error("The cloud workspace identity is unavailable. Reopen this workspace to send.");
       if (recordActivity && chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
+      const wakeIntent = bareCommand && !commandHasAttachments ? { id: crypto.randomUUID() } : undefined;
       if (bareCommand && !commandHasAttachments) {
-        await agentSessions.prepareForSend(chatId);
+        await agentSessions.prepareForSend(chatId, wakeIntent);
         if (agentSessions.getSendGeneration(chatId) !== sendGeneration) return;
         if (openTerminalCommand(bareCommand[1])) {
           if (override === undefined) {
@@ -3813,7 +3837,7 @@ export function AgentChat({
           if (!capabilitiesBridge) throw new Error("The frame context connection is unavailable.");
           return prepareDesignFrameAttachments(capabilitiesBridge, submittedDesignFrame);
         } : undefined });
-      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue);
+      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent, extras?.followUpBehavior ?? getFollowUpBehavior());
       const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
       if (unchanged) {
         clearComposer(); designFrameContext.pin(undefined);
@@ -4052,6 +4076,9 @@ export function AgentChat({
       bubbleAttachments.length > 0 ? bubbleAttachments : undefined,
       messageSegments && messageSegments.length > 0 ? messageSegments : undefined,
       onAccepted,
+      undefined,
+      undefined,
+      extras?.followUpBehavior ?? getFollowUpBehavior(),
     );
     const submittedDraftUnchanged = override === undefined && snapshot &&
       isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
@@ -4346,8 +4373,10 @@ export function AgentChat({
     modEnter: () => {
       if (editingQueuedRef.current) return false;
       const selected = queueSelectedRef.current;
-      if (selected == null) return false;
-      void sendNowQueued(selected);
+      if (selected != null) void sendNowQueued(selected);
+      else void handleSend(undefined, {
+        followUpBehavior: getFollowUpBehavior() === "queue" ? "steer" : "queue",
+      });
       return true;
     },
     escape: () => {
@@ -4758,7 +4787,7 @@ export function AgentChat({
           >
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
-            {showTranscriptLoading && (
+            {transcriptLoadingVisible && (
               <div className="text-muted-fg flex items-center gap-2 py-2 text-xs">
                 <ZerosSpinner
                   size={14}
@@ -4766,6 +4795,14 @@ export function AgentChat({
                   className="shrink-0"
                 />
                 <span aria-hidden="true">Loading conversation…</span>
+              </div>
+            )}
+            {transcriptHistoryStatus === "unavailable" && (
+              <div role="status" aria-label="Chat history unavailable" className="text-fg3 flex items-center gap-2 py-2 text-xs">
+                <span>Chat history isn’t available yet.</span>
+                <Button variant="ghost" size="sm" onClick={() => { void session.hydrateChat().catch(() => {}); }}>
+                  Retry
+                </Button>
               </div>
             )}
             {/* Empty transcript → state what this workspace IS (created /
@@ -4779,11 +4816,13 @@ export function AgentChat({
               session shows its own failure UI and provenance would read as
               reassurance the user shouldn't take. */}
             {readOnly &&
+              !transcriptCatchingUp &&
               session.transcriptState === "resident" &&
               session.messages.length === 0 && (
                 <p className="text-fg2 text-sm">No chat history.</p>
               )}
             {!readOnly &&
+              !transcriptCatchingUp &&
               session.transcriptState === "resident" &&
               session.messages.length === 0 &&
               !session.error && (
@@ -4842,15 +4881,20 @@ export function AgentChat({
                 failureKind: session.failure?.kind,
                 isTail: isVisualTail,
                 inFlight: turnInFlight,
+                recovered: authenticationRecoveredAt > i,
+                readOnly: transcriptReadOnly,
               });
-              const authRequired = !readOnly && authState === "sign-in";
-              const authStopped = authState === "stopped";
+              const authRequired = !transcriptReadOnly && authState === "sign-in";
+              const authStopped = authState === "stopped" || authState === "signed-in";
               const visibleEvents = cloudAdmission ? [] : authState
                 ? authenticationTurnOutput(turn.events)
                 : turn.events;
               return (
                 <React.Fragment key={turnKey(turn)}>
-                  <TurnContainer turn={turn} isActive={isVisualTail}>
+                  <TurnContainer turn={turn} isActive={isVisualTail}
+                    deferContent={provisionalTranscript} surfaceActive={surfaceActive} scrollRoot={scrollEl}
+                    initialContent={initialCachedTurnIndex >= 0 ? Math.abs(i - initialCachedTurnIndex) <= 4 : i >= turns.length - 6}>
+                    {() => <>
                     {/* Follow-up queue rows do not render here. A first prompt
                         awaiting only provider admission does: it is already
                         presented as this active turn, before wire dispatch. */}
@@ -4885,7 +4929,7 @@ export function AgentChat({
                         // copy-only: their reset boundary is the opening
                         // provider prompt, not the steer message id.
                         onEdit={
-                          readOnly ||
+                          transcriptReadOnly ||
                           turn.userPrompt.autoAction ||
                           turn.userPrompt.queued ||
                           turn.isSteer
@@ -4951,6 +4995,7 @@ export function AgentChat({
                     {(!authRequired || visibleEvents.length > 0) && (
                       <TurnEventList
                         events={visibleEvents}
+                        usageEvents={ownsProviderFooter ? turn.providerEvents : null}
                         failureTurnId={!cloudAdmission && !authRequired && chatId ? turn.recordedTurnId ?? undefined : undefined}
                         isActive={isActiveProviderSegment}
                         isStreaming={turnInFlight && !authStopped}
@@ -4968,11 +5013,15 @@ export function AgentChat({
                         )}
                         workflow={activeWorkflow}
                         onStopWorkflow={
-                          readOnly ? undefined : session.stopBackgroundTask
+                          transcriptReadOnly ? undefined : session.stopBackgroundTask
                         }
                         ctx={messageCtx}
                         footer={
-                          !authRequired &&
+                          // Cached rows have no native turn/usage authority.
+                          // Do not mount turn metadata reads or reset/fork
+                          // controls until the transcript has validated.
+                          !provisionalTranscript &&
+                          !authState &&
                           turn.userPrompt &&
                           chatId &&
                           ownsProviderFooter ? (
@@ -5000,11 +5049,7 @@ export function AgentChat({
                                   ? () => retryTurn(turn.userPrompt!, turn.providerEvents, true)
                                   : undefined
                               }
-                              events={
-                                authStopped
-                                  ? visibleEvents
-                                  : turn.providerEvents
-                              }
+                              events={turn.providerEvents}
                               startedAt={turn.recordedStartedAt}
                               live={isVisualTail && turnInFlight}
                               fallbackStopReason={
@@ -5013,12 +5058,9 @@ export function AgentChat({
                                   : null
                               }
                               fallbackStatusLabel={
-                                authStopped
-                                  ? "AGENT STOPPED"
-                                  : isVisualTail &&
-                                      session.status !== "streaming"
-                                    ? turnFooterFailureLabel(session.failure)
-                                    : null
+                                isVisualTail && session.status !== "streaming"
+                                  ? turnFooterFailureLabel(session.failure)
+                                  : null
                               }
                               // "An auto-rebuild is re-running THIS turn" — which
                               // only happens while this renderer's own send owns
@@ -5052,8 +5094,10 @@ export function AgentChat({
                         }
                       />
                     )}
-                    {authRequired && (
+                    {(authRequired || authStopped) && (
                       <AuthenticationNotice
+                        historical={authStopped}
+                        resolved={authState === "signed-in"}
                         message={authenticationFailureMessage(turn.events, isVisualTail ? session.failure : null)}
                         name={
                           session.agentName ??
@@ -5064,6 +5108,7 @@ export function AgentChat({
                         onSignIn={handleSignIn}
                       />
                     )}
+                    </>}
                   </TurnContainer>
                 </React.Fragment>
               );

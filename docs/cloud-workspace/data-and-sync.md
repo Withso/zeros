@@ -83,26 +83,165 @@ local replay prefix requires a current snapshot, never resending the prompt.
 The VM record head and sparse live-event cursor are separate from CP's mirror
 sequence and compact row count.
 
+An inherited compact control retains its original writer, native stream and
+event identity. The CP validates its stored outbox position against that retired
+writer's committed mirror cursor. A successor starts its own outbox at zero, so
+its publication ordinal cannot bound an older writer's position. Controls from
+the current writer remain bounded by the current mirror transaction; reprojecting
+history neither moves an original control row nor creates a live event.
+
 Capture reads a stable NORMAL source head, applies the original run's redactor,
 and produces immutable canonical records, a manifest and 128 KiB parts. The
 FULL queue publishes their CAS bytes, terminal, current restore head and outbox
 atomically; the mirror verifies all bytes/references before complete visibility.
-The limit is 16 MiB for the entire conversation, not each message. Capture or
-capacity failure preserves the known native outcome with an explicit incomplete
-head, without truncation or substituting an older complete transcript.
+The current canonical capture transport has a 16 MiB / 16,384-record bundle
+bound. This is a capture defect to replace with segmented history, not a
+supported chat-size limit. Capture or capacity failure preserves the known
+native outcome and local rows with an explicit incomplete head, without
+truncation or substituting an older complete transcript.
 The original native receipt/history audit stays immutable; a remote quota failure
 publishes a separate incomplete current head. Stable mirror batches retry the
 same body after lost ACK. Exact ACK and quota feedback commit before local
 pruning, so a crash cannot drop the restore fence or repeat native work.
 
 Clean-drain checkpoint recovery verifies the original FULL/NORMAL file pair,
-writer seal and authenticated ACK before rebuilding transcript data. The rebuild
-reads only each conversation's latest FULL head and verified immutable canonical
-bytes; it preserves original provenance and clears native session bindings.
-A newer incomplete or deleted head removes stale NORMAL messages and turns.
-Missing seal, lineage or bytes refuses restore, without selecting an older
-complete snapshot. Replacement is transactional and idempotent; it never
-recreates a native session, command claim or permission resolver.
+writer seal and authenticated ACK before rebuilding transcript data. Complete
+latest FULL heads use their verified canonical bytes. If the latest head is
+incomplete, an authenticated private receipt can instead restore supported
+transcript rows from the exact NORMAL file paired with that seal. A metadata
+edit must not erase an existing transcript; an actual prune or chat tombstone
+still takes effect. The reader pins the verified file, checks exact root and
+revision bounds, and copies one supported row at a time using indexed cursors.
+There is no total row or byte cap on this sealed local preservation; retained
+memory is proportional to the largest row, not the conversation. Oversized chats
+remain present with completeness unknown and cannot prevent sibling restoration
+or workspace resume merely because capture reached `history_limit`. Invalid
+custody or a bad row rolls back the entire destination transaction, including
+all previously copied rows and the final source-descriptor checks.
+
+This local preservation keeps the latest FULL head unchanged and incomplete.
+It does not publish unredacted NORMAL bytes, select an older complete manifest,
+or restore native/provider/session bindings. An unsealed recovery cannot borrow
+its ancestor's NORMAL snapshot; it retains the existing latest-FULL recovery
+rules. Both same-generation wake and generation replacement use this boundary.
+Missing seal, lineage or bytes refuses restore. Replacement is transactional
+and idempotent; it never recreates a native session, command claim or permission
+resolver.
+
+A new writer also republishes inherited terminal receipts and exact latest heads
+into its own CP projection. Command prerequisites are ordered before heads;
+immutable artifacts already acknowledged by a sealed predecessor need no new
+upload. An unsealed handoff restages retained artifact parts. A persistent,
+bounded conversation cursor and stable mirror flights survive lost ACKs and
+restarts. A bundle that intrinsically cannot fit reduced bulk staging limits
+publishes a bounded `history_limit` fence and advances its cursor; it does not
+loop on `command_limit` or rewrite native audit/CAS. Temporary backlog pressure
+still waits for ACKs. Pending publication prevents a final seal. Inherited requests remain
+quarantined or terminal, and historical controls keep their original stream and
+sequence rather than becoming new live events.
+
+Checkpoint refusal retains a closed failure site in `engineStartup.code`,
+including `checkpoint_expected_writer_mismatch`, `checkpoint_seal_missing` and
+`checkpoint_part_hash`. The setup parser preserves that first failure through
+cleanup and the per-claim receipt. Missing coverage or an unsealed predecessor
+is `setup_checkpoint_incomplete`; invalid bytes or identity is
+`setup_checkpoint_restore_invalid`. Both end the claim without repeating an
+integrity failure. Only the bounded inventory timeout remains retryable as
+`setup_checkpoint_restore_unavailable`. No error contains paths or artifact
+contents, and no refusal authorizes fallback to an older writer. Deploy the CP
+parser before publishing a runtime with the added closed codes; the diagnostic
+wire shape is unchanged. An authenticated recovery handoff is a separate
+contract, not a side effect of this classification.
+
+### Recovery after an unsealed stop
+
+An interrupted stop can positively retire the last writer before it publishes
+a sealed checkpoint. The authenticated `recover-history` boot operation is an
+explicit exception to sealed custody, selected only after strict restore reports
+an expected-writer mismatch or an unsealed writer. The control plane selects
+the persisted source and its acknowledged sealed ancestor; the engine cannot
+request an arbitrary older writer. Authorization requires positive source
+retirement, an exact current target engine/boot, enrollment order and current
+funding owner/epoch. Expiry or revocation alone does not prove retirement.
+
+The surviving FULL ledger, including its WAL, stays in place. The older sealed
+checkpoint proves a floor; it never overwrites newer accepted IDs, credential
+ACKs and tombstones, or edit/delete/incomplete history heads. The verifier checks
+the ancestor, exact file identity, immutable inventory, source journal and CP
+mirror floor. History heads must also be at least as new as retained immutable
+mutation and terminal-command receipts. Missing or corrupt custody still refuses
+restore. This recovery cannot reconstruct a missing FULL ledger or claim that
+unmirrored work was preserved.
+
+Boot rebuilds NORMAL from the latest verified FULL heads, then commits the
+credential namespace and its prepare record together, then opens the queue,
+then asks CP to activate. A crash between these steps may leave at most two
+prepared namespaces. Fresh CP authorization must name those exact local
+observations, positively retired bindings and their immutable original
+source/ancestor/funding tuple. Prepared writers remain reserved and never gain
+a fabricated activation timestamp. Local prepare records are evidence, not
+authority. Every retry rechecks private custody; inherited queued or dispatching
+requests are quarantined and never rerun. ACK/operation quotas and retirement
+floors remain in force across all retained namespaces.
+
+Successor activation, the immutable gap receipt and its audit commit in one CP
+transaction. Lost responses replay that exact receipt. Its closed code is
+`history_recovered_with_gap` and coverage is always `unknown`, never `empty`.
+Activation also pins the canonical prepare record's SHA-256. A later unsealed
+recovery receives that prior committed ID/hash only from its exact source writer;
+the engine follows bounded hash links through the retained records. A local row
+alone never proves activation. Subsequent seals include every nonempty prepare
+row in their inventory, preserving legacy hashes for absent/empty tables. This
+lets later clean restores retain original edit/delete provenance without
+inventing a seal for an unsealed writer. Missing, changed, foreign or cyclic
+lineage refuses before history projection; verification remains bounded to
+4,096 records and the existing inventory time budget.
+The optional workspace `historyRecovery` field is separate from file-checkpoint
+`recovery`. It exposes only a committed receipt and survives later successful
+boots so the user can still see it. Workspace purge cascades both prepared and
+activated recovery rows; the audit remains under normal audit retention.
+
+After the authorized successor is ready or busy and its connection is usable,
+the visible cloud conversation shows this non-blocking warning:
+
+> **Recent history may be incomplete**
+>
+> The workspace recovered after an interrupted stop. Check recent messages and
+> work before retrying a request.
+
+Dismissal is keyed to the exact cloud workspace and recovery receipt, is bounded
+locally, and is pruned on confirmed workspace deletion. Hidden surfaces and Local
+Personal/organization-local placements do not show or poll for this warning.
+The notice grants no send or execution permission.
+
+Roll out migration and CP support before publishing a recovery-capable runtime;
+then qualify the exact base/runtime and rebuild the test Computer through product
+paths. Rehearse a slow stop plus a lease tick, explicit `stop_unsealed`, resume,
+one committed gap audit, no inherited execution and the warning/dismissal flow.
+Also crash after each local prepare step, repeat at least four activated unsealed
+handoffs, and complete the next sealed stop/restore with edit/delete and ACK
+fences intact. Keep prior workspace pins authoritative. Rollback disables new recovery
+admissions by reverting runtime selection; retain the additive table and receipts.
+An older binary may safely refuse an unsealed/prepared ledger, so it is not an
+availability rollback for a workspace already recovered by this protocol.
+
+Credential-control state in that FULL ledger also survives a stopped VM. A
+fresh CP engine/boot/writer identity alone cannot adopt it. Authenticated
+checkpoint restoration supplies an in-process receipt tied to the exact
+restored file, inode, source writer, organization and workspace. After all
+conversation rebuilds succeed, boot rechecks the original seal and ACK in the
+same SQLite transaction that retires the predecessor control scope and
+publishes the new one. CP bootstrap/activation and native retirement checks
+still gate execution; the receipt grants no permission to send or run.
+
+The additive SQLite migration assigns legacy control rows to their **stored
+predecessor** writer, retaining every original request, ACK, fence and retirement
+floor. Active reads and mutations use the current writer namespace; conflicting
+old IDs, stale handles, partial migration and reuse of a retired writer refuse.
+Old rows still count toward the existing total operation, mutation and ACK-byte
+budgets. At most 4,096 control scopes are retained; exhaustion fails closed
+without pruning tombstones. Reopening the same current scope preserves ACKs.
+Local Personal and organization-local engines do not enter this cloud boot path.
 
 Stopped reads are passive and read-authorized. They select the exact persisted
 boot/writer binding and monotonic current restore head, including source identity,

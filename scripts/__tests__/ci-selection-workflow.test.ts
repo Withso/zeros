@@ -30,6 +30,8 @@ type Job = {
   outputs?: Record<string, string>;
   permissions?: Record<string, string>;
   steps: Step[];
+  uses?: string;
+  with?: Record<string, string>;
 };
 type Workflow = {
   on: Record<string, { types?: string[] }>;
@@ -57,6 +59,7 @@ const JOBS = [
 const PRODUCERS: Record<string, (typeof JOBS)[number]> = {
   "quality-workload": "quality",
   "test-shard": "vitest",
+  "runtime-qualification": "vitest",
   build: "build",
   "source-sync-workload": "macos",
   "control-plane-scope": "control-plane-static",
@@ -225,9 +228,11 @@ describe("selective pull-request CI", () => {
       group: "ci-${{ github.event.pull_request.number }}",
       "cancel-in-progress": true,
     });
-    for (const job of Object.values(ci.jobs)) {
+    for (const [id, job] of Object.entries(ci.jobs)) {
       if (job.permissions)
-        expect(job.permissions).toEqual({ contents: "read" });
+        expect(job.permissions).toEqual(id === "ci-gate"
+          ? { contents: "read", actions: "read", "pull-requests": "read" }
+          : { contents: "read" });
       for (const step of job.steps ?? [])
         expect(step.run ?? "").not.toContain("${{");
     }
@@ -489,9 +494,28 @@ describe("selective pull-request CI", () => {
           ? "${{ !cancelled() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.job-control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true') }}"
           : `\${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-${lane} == 'true') }}`,
       );
-      const guard = job.steps[0]!;
+      const reusable = load(
+        readFileSync(
+          path.join(ROOT, ".github/workflows/agent-runtime-qualification.yml"),
+          "utf8",
+        ),
+      ) as Workflow;
+      if (id === "runtime-qualification") {
+        expect(job.uses).toBe(
+          "./.github/workflows/agent-runtime-qualification.yml",
+        );
+        expect(job.with?.["scope-result"]).toBe("${{ needs.scope.result }}");
+      }
+      const guard =
+        id === "runtime-qualification"
+          ? reusable.jobs.qualification.steps[0]!
+          : job.steps[0]!;
       expect(guard.name).toBe("Verify scope result");
-      expect(guard.env?.SCOPE_RESULT).toBe("${{ needs.scope.result }}");
+      expect(guard.env?.SCOPE_RESULT).toBe(
+        id === "runtime-qualification"
+          ? "${{ inputs.scope-result }}"
+          : "${{ needs.scope.result }}",
+      );
       for (const scopeResult of RESULTS) {
         const result = runStep(guard, {
           SCOPE_RESULT: scopeResult,
@@ -784,6 +808,7 @@ describe("the CI gate's executable ledger validation", () => {
   it.each([
     "quality-workload",
     "test-shard",
+    "runtime-qualification",
     "build",
     "source-sync-workload",
     "control-plane-database",
@@ -798,6 +823,10 @@ describe("the CI gate's executable ledger validation", () => {
         if (id === "control-plane-database")
           state.needs["control-plane-scope"]!.outputs.database =
             String(selected);
+        for (const [peer, lane] of Object.entries(PRODUCERS)) {
+          if (peer !== id && lane === job)
+            state.needs[peer]!.result = selected ? "success" : "skipped";
+        }
         state.needs[id]!.result = result;
         const execution = verdict(state);
         expect(execution.status === 0, `${selected}:${result}`).toBe(

@@ -3,16 +3,17 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createRequire } from "node:module";
+import { DevEnvironmentError, devEnvironmentDiagnostic, loadControlPlaneDependency } from "./dependency-preflight.mjs";
 import { ensureWorkspace, systemEnvironment } from "./state.mjs";
 import { startPostgres, pickServicePorts, migratePostgres } from "./postgres.mjs";
 import { run } from "./processes.mjs";
 
-const root = process.cwd(), require = createRequire(path.join(root, "apps/control-plane/package.json"));
-const { Client } = require("pg");
-const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-dev-postgres-check-"));
+const root = process.cwd();
+let directory;
 const clusters = [];
 try {
+  const { Client } = loadControlPlaneDependency("pg", root);
+  directory = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-dev-postgres-check-"));
   await run("pnpm", ["--dir", "apps/control-plane", "build"], { cwd: root, env: systemEnvironment(), label: "Control-plane build", timeout: 180_000 });
   for (const name of ["first", "second"]) {
     const repositoryRoot = path.join(directory, name); fs.mkdirSync(repositoryRoot);
@@ -37,12 +38,13 @@ try {
     } finally { await c.end(); }
   }
   console.log("Dev PostgreSQL smoke passed: release migrations, limited runtime role, restart persistence, and independent checkouts.");
-} catch {
-  console.error("Dev PostgreSQL smoke failed. Private diagnostic state retained at the temporary test directory.");
+} catch (error) {
+  console.error(error instanceof DevEnvironmentError ? JSON.stringify(devEnvironmentDiagnostic(error))
+    : "Dev PostgreSQL smoke failed. Private diagnostic state retained at the temporary test directory.");
   process.exitCode = 1;
 } finally {
   let stopped = true;
   for (const { postgres } of clusters) if (postgres) await postgres.stop().catch(() => { stopped = false; });
-  if (stopped && !process.exitCode) fs.rmSync(directory, { recursive: true, force: true });
-  else console.error(`Inspect local state at ${directory}`);
+  if (directory && stopped && !process.exitCode) fs.rmSync(directory, { recursive: true, force: true });
+  else if (directory) console.error(`Inspect local state at ${directory}`);
 }

@@ -13,7 +13,7 @@ const agentText = (id: string): AgentMessage =>
   ({ kind: "text", role: "agent", id }) as unknown as AgentMessage;
 const phasedAgentText = (
   id: string,
-  phase: "commentary" | "final_answer",
+  phase: "commentary" | "partial_answer" | "final_answer",
 ): AgentMessage =>
   ({ kind: "text", role: "agent", id, phase }) as unknown as AgentMessage;
 const systemText = (id: string): AgentMessage =>
@@ -52,6 +52,38 @@ const liveTool = (
 const ids = (xs: AgentMessage[]) => xs.map((m) => (m as { id: string }).id);
 
 describe("partitionTurn", () => {
+  it.each([true, false])("keeps partial answers visible between working segments, including reloaded history (live=%s)", (live) => {
+    const events = [
+      phasedAgentText("progress", "commentary"),
+      phasedAgentText("first-finding", "partial_answer"),
+      tool("more-work"),
+      phasedAgentText("second-finding", "partial_answer"),
+      phasedAgentText("checking", "commentary"),
+      phasedAgentText("answer", "final_answer"),
+    ];
+    for (const messages of [events, JSON.parse(JSON.stringify(events)) as AgentMessage[]]) {
+      expect(partitionTurnSequence(messages, { live }).map((segment) => [segment.kind, ids(segment.events)])).toEqual([
+        ["working", ["progress"]], ["output", ["first-finding"]],
+        ["working", ["more-work"]], ["output", ["second-finding"]],
+        ["working", ["checking"]], ["output", ["answer"]],
+      ]);
+    }
+  });
+
+  it("promotes a late partial-answer phase while preserving subsequent event references", () => {
+    const events = [tool("before"), phasedAgentText("report", "commentary"), tool("after")];
+    const previous = partitionTurnSequence(events, { live: true });
+    const corrected = [events[0], phasedAgentText("report", "partial_answer"), events[2]];
+    const next = partitionTurnSequence(corrected, { live: true }, previous);
+    expect(next.map((segment) => [segment.kind, ids(segment.events)])).toEqual([
+      ["working", ["before"]], ["output", ["report"]], ["working", ["after"]],
+    ]);
+    expect(next[0].key).toBe(previous[0].key);
+    expect(next[2].events[0]).toBe(events[2]);
+    // Stop/failure can end work without a final message. The report is durable.
+    expect(partitionTurn(corrected).finalOutput).toEqual([corrected[1]]);
+  });
+
   it("keeps a working subtree's key when older history extends the same group", () => {
     const retained = [tool("retained"), tool("last")];
     const previous = partitionTurnSequence(retained);

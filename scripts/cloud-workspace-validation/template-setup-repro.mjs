@@ -125,7 +125,7 @@ const requireCheck = (pass, code) => {
 };
 const key = (journal) => `zeros-v2-test-s1-${journal.id}`;
 const STATUS_COMMAND =
-  "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
+  "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/bootstrap.py status";
 
 /** Error messages, stacks, arbitrary names/codes and provider bodies are never
  * diagnostics. Local check messages are admitted only by exact closed identity. */

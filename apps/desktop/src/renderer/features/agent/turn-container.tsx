@@ -81,7 +81,13 @@ interface TurnContainerProps {
    *  Only one turn is active at a time; older turns scroll
    *  naturally with the rest of the transcript. */
   isActive: boolean;
-  children: React.ReactNode;
+  children: React.ReactNode | (() => React.ReactNode);
+  /** Only provisional cloud windows defer rich offscreen trees. The retained
+   * cache is already bounded; a revealed turn stays mounted for scroll-back. */
+  deferContent?: boolean;
+  initialContent?: boolean;
+  surfaceActive?: boolean;
+  scrollRoot?: HTMLElement | null;
 }
 
 /**
@@ -97,7 +103,24 @@ export const TurnContainer = memo(function TurnContainer({
   turn,
   isActive,
   children,
+  deferContent = false,
+  initialContent = false,
+  surfaceActive = true,
+  scrollRoot,
 }: TurnContainerProps) {
+  const element = useRef<HTMLDivElement>(null);
+  const [revealed, setRevealed] = useState(!deferContent || initialContent);
+  const showContent = !deferContent || initialContent || revealed;
+  useEffect(() => {
+    if (showContent) { setRevealed(true); return; }
+    if (!surfaceActive) return;
+    if (typeof IntersectionObserver === "undefined") { setRevealed(true); return; }
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) setRevealed(true);
+    }, { root: scrollRoot, rootMargin: "300px 0px" });
+    if (element.current) observer.observe(element.current);
+    return () => observer.disconnect();
+  }, [showContent, surfaceActive, scrollRoot]);
   // The .zeros-agent-turn / -turn-active class names are retained for
   // any external DOM selectors (e.g. future jump-by-turn navigation);
   // visual styling now lives on the inline utilities below. content-
@@ -128,14 +151,20 @@ export const TurnContainer = memo(function TurnContainer({
   // prompt is the first child), so the rail's math is exact.
   return (
     <div
+      ref={element}
       className={className}
+      // Keep the existing intrinsic-size/anchor geometry while the rich tree
+      // is deferred. The visible tail and saved reading anchor mount in the
+      // first commit; scrolling reveals the rest before they enter the view.
+      style={showContent ? undefined : { contentVisibility: "hidden" }}
+      data-transcript-deferred={showContent ? undefined : ""}
       data-checkpoint-id={turn.userPrompt?.id}
       // Pane-host reparenting snapshots this content-visibility boundary's
       // live block size before detach. Chromium otherwise forgets the `auto`
       // remembered size and paints one frame of 240px fallback geometry.
       data-scroll-intrinsic-size=""
     >
-      {children}
+      {showContent ? typeof children === "function" ? children() : children : null}
     </div>
   );
 });

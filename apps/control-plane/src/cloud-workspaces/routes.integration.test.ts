@@ -952,6 +952,36 @@ d("cloud workspace API contracts", () => {
     return { response, body, key };
   };
 
+  it("adds closed current-generation setup progress only on an authorized opt-in status read",async()=>{
+    await seedV4();await seedTemplate();
+    const created=await createWorkspace();expect(created.response.status).toBe(202);
+    const id=created.body.workspace.id;
+    await withSystemTx(pool,async tx=>{
+      await tx.query("UPDATE cloud_workspaces SET status='setting_up' WHERE id=$1",[id]);
+      await tx.query(`INSERT INTO cloud_workspace_setup_runs(workspace_id,generation,org_id,attempt,state,claim_count,execution_fence,
+        lease_owner,lease_expires_at,last_heartbeat_at,started_at,error_code,log_excerpt)
+        VALUES($1,1,$2,2,'running',3,3,'fixture',now()+interval '5 minutes',now(),now(),'setup_engine_readiness_failed','synthetic-private-log')`,[id,orgId]);
+    });
+    const legacy=await (await request(`/v1/cloud-workspaces/${id}`)).json();
+    expect(legacy.setupProgress).toBeUndefined();expect(legacy.workspace.setupFailure).toBeNull();
+    const response=await request(`/v1/cloud-workspaces/${id}?setupProgress=true`);
+    expect(response.status).toBe(200);expect(response.headers.get("cache-control")).toBe("no-store");
+    const body=await response.json();
+    expect(body.setupProgress).toEqual({generation:1,attempt:2,claimCount:3,state:"running",errorCode:"setup_engine_readiness_failed"});
+    expect((await (await request(`/v1/organizations/${orgId}/cloud-workspaces/${id}?setupProgress=true`)).json()).setupProgress).toEqual(body.setupProgress);
+    expect(JSON.stringify(body)).not.toContain("synthetic-private-log");
+    await withSystemTx(pool,tx=>tx.query("UPDATE cloud_workspace_setup_runs SET error_code='synthetic-private-error' WHERE workspace_id=$1",[id]));
+    expect((await (await request(`/v1/cloud-workspaces/${id}?setupProgress=true`)).json()).setupProgress.errorCode).toBe("compute_reconciliation_failed");
+    await withSystemTx(pool,tx=>tx.query(`UPDATE cloud_workspace_setup_runs SET state='failed',completed_at=now(),
+      lease_owner=NULL,lease_expires_at=NULL WHERE workspace_id=$1`,[id]));
+    const failedLegacy=await (await request(`/v1/cloud-workspaces/${id}`)).json();
+    expect(failedLegacy.workspace.setupFailure).toEqual({code:"compute_reconciliation_failed",hasLog:true});
+    expect(failedLegacy.setupProgress).toBeUndefined();
+    actor=outsider;
+    expect((await request(`/v1/cloud-workspaces/${id}?setupProgress=true`)).status).toBe(404);
+    expect((await request(`/v1/organizations/${randomUUID()}/cloud-workspaces/${id}?setupProgress=true`)).status).toBe(404);
+  });
+
   it("uses the qualified organization grant without a personal repository access proof", async () => {
     await seedV4(); await seedTemplate();
     await pool.query("DELETE FROM cloud_github_source_access WHERE owner_user_id=$1", [owner.id]);
@@ -1935,7 +1965,7 @@ d("cloud workspace API contracts", () => {
     expect(count.rows[0]).toEqual({ workspaces: 1, intents: 1 });
   });
 
-  it("fails closed on Personal ownership, missing quota, foreign repository grants, and exhausted quota", async () => {
+  it("fails closed on Personal ownership, missing quota and foreign repository grants, with no numeric limit", async () => {
     const personal = await pool.query<{ id: string }>(
       `SELECT id FROM organizations
        WHERE created_by = $1 AND is_personal AND deleted_at IS NULL`,
@@ -2002,12 +2032,9 @@ d("cloud workspace API contracts", () => {
     );
     expect(foreignGrant.status).toBe(409);
 
+    // The stored limits are 1 of everything; neither create is refused for them.
     expect((await createWorkspace()).response.status).toBe(202);
-    const exhausted = await createWorkspace();
-    expect(exhausted.response.status).toBe(409);
-    expect(exhausted.body).toMatchObject({
-      error: { code: "cloud_quota_exceeded" },
-    });
+    expect((await createWorkspace()).response.status).toBe(202);
   });
 
   it("requires an explicit discard to delete when a final checkpoint cannot complete", async () => {
@@ -2345,7 +2372,7 @@ d("cloud workspace API contracts", () => {
       await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [owner.id]);
       await pool.query("UPDATE account_entitlements SET status='expired',revision=revision+1 WHERE user_id=$1", [owner.id]);
     } else {
-      await pool.query("UPDATE cloud_workspace_quotas SET max_running_workspaces=1,max_cpu_millicores=1 WHERE org_id=$1", [orgId]);
+      await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1", [orgId]);
     }
     const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/wake`, { method: "POST", key: randomUUID() });
     expect(response.status).toBe(restriction === "sponsor" ? 403 : 409);
@@ -2604,7 +2631,7 @@ d("cloud workspace API contracts", () => {
     },
   );
 
-  it("reserves replacement headroom against later replacements and creates", async () => {
+  it("admits concurrent replacements and creates without numeric headroom", async () => {
     const first = await createWorkspace();
     const second = await createWorkspace();
     const workspaceIds = [first.body.workspace.id, second.body.workspace.id];
@@ -2629,7 +2656,7 @@ d("cloud workspace API contracts", () => {
          WHERE workspace_id = ANY($1::uuid[]) AND operation = 'create'`,
         [workspaceIds],
       );
-      // Two live generations plus exactly one replacement generation fit.
+      // The stored limits fit only one replacement; they are not enforced.
       await tx.query(
         `UPDATE cloud_workspace_quotas
          SET max_cpu_millicores = 6000, max_memory_mib = 12288,
@@ -2649,8 +2676,6 @@ d("cloud workspace API contracts", () => {
     );
     expect(replacement.status).toBe(202);
 
-    // The first transaction durably reserved its immutable candidate inputs.
-    // A different workspace cannot reuse that same Organization headroom.
     const secondReplacement = await request(
       `/v1/organizations/${orgId}/cloud-workspaces/${workspaceIds[1]}/generations`,
       {
@@ -2664,14 +2689,8 @@ d("cloud workspace API contracts", () => {
       { method: "POST", key: randomUUID(), body: createBody() },
     );
 
-    expect(secondReplacement.status).toBe(409);
-    await expect(secondReplacement.json()).resolves.toMatchObject({
-      error: { code: "cloud_replacement_headroom_exceeded" },
-    });
-    expect(create.status).toBe(409);
-    await expect(create.json()).resolves.toMatchObject({
-      error: { code: "cloud_quota_exceeded" },
-    });
+    expect(secondReplacement.status).toBe(202);
+    expect(create.status).toBe(202);
     await expect(
       pool.query(
         `SELECT count(*)::integer AS count
@@ -2679,10 +2698,10 @@ d("cloud workspace API contracts", () => {
          WHERE workspace_id = ANY($1::uuid[]) AND generation = 2`,
         [workspaceIds],
       ),
-    ).resolves.toMatchObject({ rows: [{ count: 1 }] });
+    ).resolves.toMatchObject({ rows: [{ count: 2 }] });
   });
 
-  it("retains retired provider storage in create admission until deletion is verified", async () => {
+  it("does not hold creates on retained provider storage", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
     await withSystemTx(pool, async (tx) => {
@@ -2729,8 +2748,8 @@ d("cloud workspace API contracts", () => {
          WHERE workspace_id = $1 AND operation = 'create'`,
         [workspaceId],
       );
-      // Current + one new workspace fit exactly, but the retired provider disk
-      // still makes that allocation unsafe until deletion is observed.
+      // Current + one new workspace fit exactly in compute. Retained disks,
+      // including a retired one still being deleted, never block a create.
       await tx.query(
         `UPDATE cloud_workspace_quotas
          SET max_cpu_millicores = 4000, max_memory_mib = 8192,
@@ -2744,25 +2763,33 @@ d("cloud workspace API contracts", () => {
       `/v1/organizations/${orgId}/cloud-workspaces`,
       { method: "POST", key: randomUUID(), body: createBody() },
     );
-    expect(beforeDeletion.status).toBe(409);
-    await expect(beforeDeletion.json()).resolves.toMatchObject({
-      error: { code: "cloud_quota_exceeded" },
-    });
+    expect(beforeDeletion.status).toBe(202);
+  });
 
-    await withSystemTx(pool, (tx) =>
-      tx.query(
-        `UPDATE cloud_workspace_provider_bindings
-         SET observed_state = 'deleted', deletion_verified_at = now(),
-             last_observed_at = now(), updated_at = now()
-         WHERE workspace_id = $1 AND generation = 1`,
-        [workspaceId],
-      ),
+  it("admits creates beyond every stored workspace limit", async () => {
+    await pool.query(
+      `UPDATE cloud_workspace_quotas SET max_workspaces = 1, max_running_workspaces = 1 WHERE org_id = $1`,
+      [orgId],
     );
-    const afterDeletion = await request(
-      `/v1/organizations/${orgId}/cloud-workspaces`,
-      { method: "POST", key: randomUUID(), body: createBody() },
-    );
-    expect(afterDeletion.status).toBe(202);
+    const first = await createWorkspace();
+    expect(first.response.status).toBe(202);
+    // Two running workspaces exceed the stored running limit of one.
+    const running = await createWorkspace();
+    expect(running.response.status).toBe(202);
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `UPDATE cloud_workspaces SET status = 'stopped', desired_state = 'stopped', updated_at = now() WHERE id = $1`,
+        [first.body.workspace.id],
+      );
+      await tx.query(
+        `UPDATE cloud_workspace_lifecycle_intents SET state = 'succeeded', completed_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND operation = 'create'`,
+        [first.body.workspace.id],
+      );
+    });
+    // Stopped and archived workspaces are not limited either.
+    const third = await createWorkspace();
+    expect(third.response.status).toBe(202);
   });
 
   it("cancels a generation replacement before stopping the restored source", async () => {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RuntimeClient, type ConnectionStatus } from "../ws-client";
+import { classifyRpcError, isRecoverable } from "../failure";
 import { CloudAgentConnection } from "../cloud-agent-connection";
 import {
   WorkspaceRuntimeClient,
@@ -94,6 +95,26 @@ function fakePeer(target: CloudWorkspaceTarget) {
 }
 afterEach(() => vi.restoreAllMocks());
 
+describe("file reference ownership", () => {
+  it("uses only admitted native roots and never wakes another owner to resolve a hover", async () => {
+    const peer = fakePeer(a), open = vi.fn(async () => peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    try {
+      expect(client.fileReferencePath(cloudWorkspaceKey(a), "/workspace/repo/a.png")).toBeNull();
+      expect(client.fileReferencePath(cloudWorkspaceKey(a), "art/a.png")).toBe("art/a.png");
+      expect(open).not.toHaveBeenCalled();
+      await client.warmWorkspace(a);
+      expect(client.fileReferencePath(cloudWorkspaceKey(a), "/workspace/repo/a.png")).toBe("a.png");
+      expect(client.fileReferencePath(cloudWorkspaceKey(b), "/workspace/repo/a.png")).toBeNull();
+      expect(client.fileReferencePath(cloudWorkspaceKey(a), "/other/a.png")).toBeNull();
+      expect(client.fileReferencePath("/local/repo", "/local/repo/a.png")).toBe("a.png");
+      expect(open).toHaveBeenCalledTimes(1);
+      client.clearCloudConnections();
+      expect(client.fileReferencePath(cloudWorkspaceKey(a), "/workspace/repo/a.png")).toBeNull();
+    } finally { client.dispose(); }
+  });
+});
+
 describe("cached activated cloud binding", () => {
   const binding = { version: 1 as const, mode: "boot-owner-v1" as const, fundingScope: "workspace-roles-v1" as const,
     ...a, generation: 7, engineInstanceId: "44444444-4444-4444-8444-444444444444", authorityEpoch: 2,
@@ -147,6 +168,63 @@ function providerRouting(open: WorkspaceRuntimeOptions["open"]) {
 }
 
 describe("workspace runtime routing", () => {
+  it.each(["/personal/local", "/organization/local", cloudWorkspaceKey(a)])(
+    "classifies an account-retired %s list as cancelled ownership without replay or a provider failure",
+    async folder => {
+      const waiting = deferred<BridgeMessage>();
+      const local = vi.spyOn(RuntimeClient.prototype, "request").mockReturnValue(waiting.promise);
+      const peer = fakePeer(a), cloud = folder.startsWith("cloud://");
+      const open = vi.fn(async () => peer.peer);
+      const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+      try {
+        if (cloud) await client.warmWorkspace(a);
+        const request = client.chatSnapshot("all");
+        const classified = request.catch(error => classifyRpcError({ agentId: "codex", stage: "loadSession", error }));
+        client.clearCloudConnections();
+        waiting.resolve({ type: "WORKSPACE_RESPONSE", op: "chats.list", result: { chats: [{ id: "old", folder }], chatDeletions: [] } } as BridgeMessage);
+        const failure = await classified;
+        expect(failure).toMatchObject({ kind: "lifecycle-superseded", stage: "loadSession" });
+        expect(isRecoverable(failure as ReturnType<typeof classifyRpcError>)).toBe(false);
+        expect(open).toHaveBeenCalledTimes(cloud ? 1 : 0);
+        expect(local).toHaveBeenCalledOnce();
+      } finally { client.dispose(); }
+    },
+  );
+  it("carries one supplied intent through settled opens, including preparation of a connected peer", async () => {
+    const peer = fakePeer(a), prepare = vi.fn<NonNullable<CloudPeer["prepareForRun"]>>(async () => true);
+    peer.peer.prepareForRun = prepare;
+    const open = vi.fn<WorkspaceRuntimeOptions["open"]>(async () => peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    const wakeIntent = { id: crypto.randomUUID() };
+    try {
+      for (let attempt = 0; attempt < 7; attempt++) await client.openWorkspace(a, { wakeIntent });
+      expect(open).toHaveBeenCalledExactlyOnceWith(a, expect.objectContaining({ wake: true, wakeIntent }));
+      expect(prepare).toHaveBeenCalledTimes(6);
+      for (const call of prepare.mock.calls) expect(call).toEqual([expect.any(AbortSignal), undefined, wakeIntent]);
+    } finally { client.dispose(); }
+  });
+
+  it("keeps the auto-created wake intent through admission retargeting and gives a later explicit use a new one", async () => {
+    let generation = 7, fail!: (error: Error) => void;
+    const peer = fakePeer(a), prepare = vi.fn<NonNullable<CloudPeer["prepareForRun"]>>(async () => true);
+    peer.peer.prepareForRun = prepare;
+    const first = new Promise<CloudPeer>((_resolve, reject) => { fail = reject; });
+    const open = vi.fn<WorkspaceRuntimeOptions["open"]>().mockReturnValueOnce(first).mockResolvedValue(peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [], identity: () => `account:${generation}`,
+      wakeOwner: () => ({ account: "account", generation, stopVersion: 0 }) });
+    try {
+      const pending = client.openWorkspace(a);
+      generation++; client.pruneCloudConnections(); fail(new Error("Cloud workspace generation changed during admission"));
+      await pending;
+      const intent = open.mock.calls[0][1]?.wakeIntent;
+      expect(intent?.id).toEqual(expect.any(String));
+      expect(open.mock.calls[1][1]?.wakeIntent).toBe(intent);
+      await client.openWorkspace(a);
+      expect(prepare).toHaveBeenCalledWith(expect.any(AbortSignal), undefined, expect.objectContaining({ id: expect.any(String) }));
+      expect(prepare.mock.calls[0]?.[2]).not.toBe(intent);
+    } finally { client.dispose(); }
+  });
+
   it("releases a terminally rejected peer while retaining its last confirmed cloud history", async () => {
     const pa = fakePeer(a), replacement = fakePeer(a); let status!: (value: ConnectionStatus) => void;
     pa.peer.client.onStatusChange = (listener) => { status = listener; return () => {}; };
@@ -558,7 +636,7 @@ describe("workspace runtime routing", () => {
         const automaticWake = client.openWorkspace(a, { reason: "interaction" });
         const preparingSend = client.openWorkspace(a);
         await vi.waitFor(() => expect(old.peer.prepareForRun).toHaveBeenCalledOnce());
-        expect(old.peer.prepareForRun).toHaveBeenCalledWith(expect.any(AbortSignal), "interaction");
+        expect(old.peer.prepareForRun).toHaveBeenCalledWith(expect.any(AbortSignal), "interaction", expect.objectContaining({ id: expect.any(String) }));
         generation++; client.pruneCloudConnections();
         if (cause === "rolled-back-on-wake") { generation--; client.pruneCloudConnections(); }
         upgraded.resolve(false); await Promise.all([automaticWake, preparingSend]);

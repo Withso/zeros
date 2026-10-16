@@ -172,7 +172,7 @@ export class DatabaseReleaseCanaryService extends DatabaseReleaseCanaryDesignati
     const input = ReleaseCanaryRetirementSchema.safeParse(value);
     if (!input.success) unavailable("Release canary retirement request is invalid");
     const locked = <Result>(callback: (tx: Tx, last: Audit) => Promise<Result>) => withSystemTx(this.pool, async tx => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,93147))", [`release-canary:${input.data.operationId}`]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,93147)) /*lock_purpose='release-canary'*/", [`release-canary:${input.data.operationId}`]);
       await this.owner(tx, this.config.ownerUserId);
       const last = (await tx.query<Audit>(`SELECT id::text,action,subject FROM audit_log WHERE org_id=$1 AND actor_id=$2 AND action=ANY($3::text[])
         AND subject->>'operationId'=$4 ORDER BY id DESC LIMIT 1`, [this.config.organizationId, this.config.ownerUserId,

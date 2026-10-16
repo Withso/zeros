@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudProviderCredential, readCloudOrganizationConnections } from "../cloud-provider-connection";
 import type { connectCloudProviderSignIn } from "../cloud-provider-sign-in";
 import type { ConnectionMethod } from "../connection-methods";
+import type { CloudAgentConnectionHealth } from "@zeros/protocol";
 
 type Connections = Awaited<ReturnType<typeof readCloudOrganizationConnections>>;
 const f = vi.hoisted(() => ({
@@ -13,6 +14,7 @@ const f = vi.hoisted(() => ({
   provider: "claude",
   active: true,
   current: true,
+  epoch: 1,
   pending: false,
   scope: "",
   cursor: 0,
@@ -59,10 +61,11 @@ vi.mock("../settings-scope", async original => ({
   readScopedSettingsSelection: () => f.provider,
 }));
 vi.mock("../../../state/use-cached-read", () => ({ useCachedRead: () => f.snapshot }));
-vi.mock("../use-cloud-credential-removal", () => ({ useCloudCredentialRemoval: () => ({
-  pending: f.pending, busy: false, current: () => f.current, isPending: () => f.pending,
-  start: vi.fn(), decide: vi.fn(),
-}) }));
+vi.mock("../use-cloud-credential-removal", () => ({ useCloudCredentialRemoval: () => {
+  const epoch = f.epoch;
+  return { pending: f.pending, busy: false, current: () => f.current && epoch === f.epoch,
+    isPending: () => f.pending, start: vi.fn(), decide: vi.fn() };
+} }));
 vi.mock("../../agent/model-catalog", () => ({ modelsForAgent: () => [
   { value: "supported-first", label: "First model" },
   { value: "supported-second", label: "Second model" },
@@ -151,6 +154,7 @@ beforeEach(() => {
   f.provider = "claude";
   f.active = true;
   f.current = true;
+  f.epoch = 1;
   f.pending = false;
   f.snapshot.data = {
     credentials: [{ ...credential(), id: f.savedId, displayName: "Saved account", revision: 7 }],
@@ -161,6 +165,181 @@ beforeEach(() => {
     path.startsWith("/v1/cloud-agent-credentials/") ? { credential: credential() } : { revision: 13 },
   ));
   f.signIn.mockReset().mockResolvedValue(credential());
+  f.snapshot.refresh.mockReset().mockResolvedValue();
+});
+
+function selectedHealth(status: CloudAgentConnectionHealth["status"] = "expired"): CloudAgentConnectionHealth {
+  return { version: 1, status, observedAt: "2026-10-15T11:00:00Z", selectedCredentialRevision: 7,
+    credentialRevision: status === "credential_unavailable" ? null : status === "credential_changed" ? 8 : 7,
+    materialVersion: status === "credential_unavailable" ? null : 3,
+    expiresAt: status === "expired" ? "2026-10-15T10:59:00Z" : status === "expiring" ? "2026-10-15T11:00:30Z" : null,
+    refresh: status === "ready" ? "idle" : "reconnect_required" };
+}
+function selectedCodex(status: CloudAgentConnectionHealth["status"] = "expired"): void {
+  f.provider = "codex";
+  f.snapshot.data!.credentials[0]!.kind = "codex-chatgpt";
+  Object.assign(f.snapshot.data!.connections[0]!, { provider: "codex", connected: false, health: selectedHealth(status) });
+  f.signIn.mockResolvedValue(credential("codex-chatgpt"));
+}
+
+describe("selected cloud account health and reconnect", () => {
+  it.each(["expired", "expiring"] as const)("shows %s instead of Connected and starts a fresh native ceremony", async status => {
+    selectedCodex(status);
+    // A stale legacy flag must not override the exact health observation.
+    f.snapshot.data!.connections[0]!.connected = true;
+    expect(text(tree())).not.toContain("Connected");
+    expect(text(tree())).toContain(status === "expired" ? "Connection expired" : "Connection expires soon");
+    expect(action("Disconnect")).toBeDefined();
+    action("Reconnect").props.onClick!();
+    expect(dialog().props.open).toBe(true);
+    expect(elements(dialog().props.children).some(element => element.props["aria-label"] === "Account name")).toBe(true);
+    expect((dialog().props as { connected?: boolean }).connected).toBe(false);
+    submit().props.onClick!();
+    await connected();
+    expect(f.signIn).toHaveBeenCalledOnce();
+    expectSelection();
+  });
+
+  it("does not treat a new unselected import as health for the old selection", () => {
+    selectedCodex();
+    f.snapshot.data!.credentials.push(credential("codex-chatgpt"));
+    expect(text(tree())).toContain("Connection expired");
+    expect(text(tree())).not.toContain("Connected");
+    expect(action("Reconnect")).toBeDefined();
+  });
+
+  it("keeps a legacy selection's health explicitly unavailable", () => {
+    expect(text(tree())).toContain("Status unavailable");
+    expect(text(tree())).not.toContain("Connected");
+    expect(action("Configure")).toBeDefined();
+  });
+
+  it("shows Connected only for ready health at the exact selected source revision", () => {
+    selectedCodex("ready");
+    f.snapshot.data!.connections[0]!.connected = true;
+    expect(text(tree())).toContain("Connected");
+    f.snapshot.data!.credentials[0]!.revision += 1;
+    expect(text(tree())).not.toContain("Connected");
+    expect(text(tree())).toContain("Account changed");
+  });
+
+  it.each([
+    ["consent_required", "Permission required", "Configure"],
+    ["credential_changed", "Account changed", "Configure"],
+    ["credential_unavailable", "Account unavailable", "Reconnect"],
+  ] as const)("keeps %s as a closed observation with an explicit action", (status, label, actionLabel) => {
+    selectedCodex(status);
+    expect(text(tree())).toContain(label);
+    expect(text(tree())).not.toContain("Connected");
+    expect(action(actionLabel)).toBeDefined();
+    expect(action("Disconnect")).toBeDefined();
+    expect(f.request).not.toHaveBeenCalled();
+    expect(f.signIn).not.toHaveBeenCalled();
+  });
+
+  it("does not turn an in-progress refresh observation into readiness or a client refresh", () => {
+    selectedCodex();
+    Object.assign(f.snapshot.data!.connections[0]!, { health: { ...selectedHealth(), refresh: "in_progress" } });
+    expect(text(tree())).toContain("Connection expired");
+    expect(text(tree())).not.toContain("Connected");
+    expect(action("Reconnect")).toBeDefined();
+    expect(f.request).not.toHaveBeenCalled();
+    expect(f.signIn).not.toHaveBeenCalled();
+  });
+
+  it.each(["agent_credential_conflict", "agent_connection_conflict"])("retains the new import after %s and retries only on an explicit click", async code => {
+    selectedCodex();
+    f.request.mockRejectedValueOnce(Object.assign(new Error("untrusted conflict detail"), { code, status: 409 }));
+    f.snapshot.refresh.mockImplementationOnce(async () => {
+      f.snapshot.data!.connections[0]!.revision = 14;
+      f.snapshot.data!.credentials.push({ ...credential("codex-chatgpt"), revision: 8 });
+    });
+    // Add account also must preserve a completed import on selection failure.
+    action("Add account").props.onClick!();
+    submit().props.onClick!();
+    await vi.waitFor(() => expect(f.snapshot.refresh).toHaveBeenCalledOnce());
+    expect(f.error).toHaveBeenCalledExactlyOnceWith("Your saved accounts changed. Review the refreshed list, then connect again.");
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(f.signIn).toHaveBeenCalledOnce();
+    expect(dialog().props.open).toBe(true);
+    expect(text(dialog().props.children)).toContain("New account");
+    expect(submit().props.disabled).toBe(false);
+    f.error.mockClear();
+    submit().props.onClick!();
+    await connected();
+    expect(f.signIn).toHaveBeenCalledOnce();
+    expect(f.request).toHaveBeenCalledTimes(2);
+    expect(f.request.mock.calls[1]?.[2]).toEqual(expect.objectContaining({ body: expect.objectContaining({
+      expectedRevision: 14, credentialId: f.createdId, credentialRevision: 8,
+    }) }));
+  });
+
+  it.each(["owner-retired", "owner-a-b-a", "hidden"])("does not select or publish an import after %s", async state => {
+    selectedCodex();
+    let resolve!: (value: CloudProviderCredential) => void;
+    f.signIn.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    action("Add account").props.onClick!();
+    submit().props.onClick!();
+    expect(f.signIn).toHaveBeenCalledOnce();
+    if (state === "owner-retired") f.current = false;
+    if (state === "owner-a-b-a") f.epoch += 2;
+    if (state === "hidden") f.active = false;
+    tree();
+    resolve(credential("codex-chatgpt"));
+    await vi.waitFor(() => expect(f.signIn.mock.settledResults[0]?.type).toBe("fulfilled"));
+    expect(f.request).not.toHaveBeenCalled();
+    expect(f.snapshot.refresh).not.toHaveBeenCalled();
+    expect(f.success).not.toHaveBeenCalled();
+    expect(f.error).not.toHaveBeenCalled();
+  });
+
+  it("does not publish a late native device code after owner A to B to A", async () => {
+    selectedCodex();
+    let resolve!: (value: CloudProviderCredential) => void;
+    f.signIn.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    action("Add account").props.onClick!();
+    submit().props.onClick!();
+    f.epoch += 2;
+    tree();
+    f.signIn.mock.calls[0]![2]({ attemptId: f.createdId, organizationId: f.organizationId, provider: "codex", state: "connecting",
+      deviceCode: { verificationUrl: "https://auth.openai.com/codex/device", userCode: "RETIRED-CODE" } });
+    expect(text(dialog().props.children)).not.toContain("RETIRED-CODE");
+    resolve(credential("codex-chatgpt"));
+    await vi.waitFor(() => expect(f.signIn.mock.settledResults[0]?.type).toBe("fulfilled"));
+    expect(f.request).not.toHaveBeenCalled();
+  });
+
+  it("does not recreate or select an imported account absent from refreshed metadata", async () => {
+    selectedCodex();
+    f.request.mockRejectedValueOnce(Object.assign(new Error("agent_connection_conflict"), { code: "agent_connection_conflict" }));
+    action("Add account").props.onClick!();
+    submit().props.onClick!();
+    await vi.waitFor(() => expect(submit().props.disabled).toBe(false));
+    expect(text(dialog().props.children)).toContain("New account");
+    f.error.mockClear();
+    submit().props.onClick!();
+    await vi.waitFor(() => expect(f.error).toHaveBeenCalledOnce());
+    expect(f.error).toHaveBeenCalledWith("This saved account is unavailable. Refresh accounts and choose again.");
+    expect(f.signIn).toHaveBeenCalledOnce();
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(f.success).not.toHaveBeenCalled();
+  });
+
+  it.each(["resolve", "reject"])("does not publish a late selection %s after the owner changes", async outcome => {
+    let resolve!: (value: unknown) => void, reject!: (error: unknown) => void;
+    f.request.mockImplementationOnce(() => new Promise((done, fail) => { resolve = done; reject = fail; }));
+    action("Configure").props.onClick!();
+    submit().props.onClick!();
+    f.epoch += 2;
+    tree();
+    if (outcome === "resolve") resolve({ revision: 13 });
+    else reject(Object.assign(new Error("agent_credential_conflict"), { code: "agent_credential_conflict" }));
+    await vi.waitFor(() => expect(submit().props.children).toBe("Connect"));
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(f.success).not.toHaveBeenCalled();
+    expect(f.error).not.toHaveBeenCalled();
+    expect(f.snapshot.refresh).not.toHaveBeenCalled();
+  });
 });
 
 describe("one-step organization provider connection", () => {

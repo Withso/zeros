@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "codexProtocolVersion": "0.161.0",
+  "codexProtocolVersion": "0.162.1",
   "threadItems": {
     "handled": [
       "userMessage",
@@ -67,6 +67,7 @@
       "thread/prediction/request",
       "thread/attachment/add",
       "thread/attachment/list",
+      "thread/attachmentOwner/list",
       "thread/attachment/remove",
       "memory/status",
       "rollout/compress",

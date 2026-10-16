@@ -21,6 +21,51 @@ function baseEnv(): NodeJS.ProcessEnv {
   };
 }
 
+describe("Local-only release channels", () => {
+  it.each(["beta", "production"])("disables every cloud subsystem on %s before reading its stale configuration", channel => {
+    const config = loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+      CLOUD_WORKSPACES_ENABLED: "true", CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+      CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: "true", CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true",
+      CLOUD_RUNTIME_PUBLICATION_ENABLED: "true", CLOUD_WORKSPACE_PROVIDER: "retired-provider",
+      CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: "legacy", CLOUD_RUNTIME_OIDC_ENVIRONMENT: "alpha" });
+    expect(config.cloudWorkspaces).toBeNull();
+    expect(config.cloudAgentCredentials).toBeNull();
+    expect(config.selectedCloudWorker).toBeNull();
+    expect(config.cloudRuntimePublication).toMatchObject({ enabled: false, s3: null });
+    expect(config.cloudWorkspaceResumeExistingEnabled).toBe(false);
+    expect(config.cloudWorkspaceNewRuntimeProfile).toBe("v4");
+  });
+
+  it("still validates the shared database and authentication configuration", () => {
+    expect(() => loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "beta", DATABASE_URL: "invalid" })).toThrow();
+    expect(() => loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "production", AUTH_AUDIENCE: "" })).toThrow();
+  });
+
+  it.each(["beta", "production"])("restores the existing cloud config on %s when its checked-in pause switch is flipped", async channel => {
+    vi.resetModules();
+    vi.doMock("./cloud-workspace-channels.json", () => ({ default: { development: true, alpha: true,
+      beta: channel === "beta", production: channel === "production" } }));
+    try {
+      const { loadConfig: unpausedConfig } = await import("./config.js");
+      const config = unpausedConfig({ ...cloudSetupEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+        CLOUD_WORKSPACE_OBJECT_STORE_KIND: "s3", CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: undefined,
+        CLOUD_RUNTIME_PUBLICATION_ENABLED: "true", CLOUD_WORKSPACE_S3_ENDPOINT: "https://objects.example.test",
+        CLOUD_WORKSPACE_S3_BUCKET: "runtime-artifacts", CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: "synthetic-access",
+        CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: "synthetic-secret" });
+      expect(config.cloudWorkspaces).toMatchObject({ provider: "boat", backgroundWorkersEnabled: true });
+      expect(config.cloudWorkspaces?.setupExecution).not.toBeNull();
+      expect(config.cloudAgentCredentials).not.toBeNull();
+      expect(config.cloudRuntimePublication).toMatchObject({ enabled: true, environment: channel });
+      // Unpause restores credential validation too; it is not a bypass.
+      expect(() => unpausedConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel, CLOUD_WORKSPACES_ENABLED: "true" }))
+        .toThrow(/cloud workspace/i);
+    } finally {
+      vi.doUnmock("./cloud-workspace-channels.json");
+      vi.resetModules();
+    }
+  });
+});
+
 describe("retired Alpha deletion readiness exception", () => {
   // Automatic deferral replaced the expiring allowlist. A value left in a
   // deployed environment, including a malformed one, must not affect boot.
@@ -42,10 +87,10 @@ describe("same-generation resume configuration", () => {
         CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "false" }).cloudWorkspaceResumeExistingEnabled).toBe(false);
     }
   });
-  it("defaults off elsewhere and rejects an explicit non-Alpha enable", () => {
+  it("defaults off in development and rejects an explicit development enable", () => {
     expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "alpha",
       CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true" }).cloudWorkspaceResumeExistingEnabled).toBe(true);
-    for (const channel of ["development", "beta", "production", "preview", ""]) {
+    for (const channel of ["development", "preview", ""]) {
       expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel }).cloudWorkspaceResumeExistingEnabled).toBe(false);
       expect(() => loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
         CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true" })).toThrow(/resume.*Alpha/i);
@@ -112,7 +157,7 @@ describe("runtime publication configuration", () => {
     expect(message.includes("http:")).toBe(false);
   });
 
-  it.each(["alpha", "beta", "production"])("admits publication with the matching default OIDC environment on %s", channel => {
+  it.each(["alpha"])("admits publication with the matching default OIDC environment on %s", channel => {
     const config = loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel });
     expect(config.cloudRuntimePublication).toMatchObject({
       enabled: true, audience: `zeros-control-plane-${channel}`, environment: channel,
@@ -125,31 +170,36 @@ describe("runtime publication configuration", () => {
     expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel })).toThrow(/runtime publication.*channel/i);
   });
 
-  it.each(["alpha", "beta", "production"])("refuses an explicit OIDC environment for another deployment channel: %s", channel => {
+  it.each(["alpha"])("refuses an explicit OIDC environment for another deployment channel: %s", channel => {
     expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
       CLOUD_RUNTIME_OIDC_ENVIRONMENT: channel === "alpha" ? "beta" : "alpha" }))
       .toThrow(/runtime publication.*CLOUD_RUNTIME_OIDC_ENVIRONMENT/);
   });
 
-  it.each(["beta", "production"])("keeps the legacy null-environment opt-out confined to Alpha: %s", channel => {
-    expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
-      CLOUD_RUNTIME_OIDC_ENVIRONMENT: "" })).toThrow(/runtime publication.*CLOUD_RUNTIME_OIDC_ENVIRONMENT/);
+  it.each(["beta", "production"])("keeps publication inert on %s regardless of a leftover OIDC environment", channel => {
+    for (const environment of [undefined, "", "alpha", channel]) {
+      expect(loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+        CLOUD_RUNTIME_OIDC_ENVIRONMENT: environment }).cloudRuntimePublication)
+        .toMatchObject({ enabled: false, environment: channel, s3: null });
+    }
   });
 });
 
 describe("v4 runtime admission configuration", () => {
   it("defaults qualifications to full without a staff or runtime rollout switch", () => {
     expect(loadConfig(cloudSetupEnv()).cloudWorkspaces?.runtime).toEqual({
-      qualificationMode: "full", qualificationEnabled: false, stagingEnabled: false,
+      qualificationMode: "full", qualificationEnabled: false, stagingEnabled: false, imagesEnabled: false,
     });
   });
   it("accepts only the explicit runtime switches", () => {
     expect(loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: "v4",
-      CLOUD_RUNTIME_V4_STAFF_ONLY: "false", CLOUD_RUNTIME_QUALIFICATION_MODE: "smoke", CLOUD_RUNTIME_QUALIFICATION_ENABLED: "true" }).cloudWorkspaces?.runtime)
-      .toEqual({ qualificationMode: "smoke", qualificationEnabled: true, stagingEnabled: false });
+      CLOUD_RUNTIME_V4_STAFF_ONLY: "false", CLOUD_RUNTIME_QUALIFICATION_MODE: "smoke", CLOUD_RUNTIME_QUALIFICATION_ENABLED: "true",
+      CLOUD_RUNTIME_IMAGES_ENABLED: "true" }).cloudWorkspaces?.runtime)
+      .toEqual({ qualificationMode: "smoke", qualificationEnabled: true, stagingEnabled: false, imagesEnabled: true });
     expect(loadConfig({ ...cloudSetupEnv(), CLOUD_RUNTIME_V4_STAFF_ONLY: "true" }).cloudWorkspaces?.runtime)
       .toEqual(loadConfig(cloudSetupEnv()).cloudWorkspaces?.runtime);
-    for (const name of ["CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE", "CLOUD_RUNTIME_QUALIFICATION_MODE", "CLOUD_RUNTIME_QUALIFICATION_ENABLED"]) {
+    for (const name of ["CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE", "CLOUD_RUNTIME_QUALIFICATION_MODE", "CLOUD_RUNTIME_QUALIFICATION_ENABLED",
+      "CLOUD_RUNTIME_IMAGES_ENABLED"]) {
       expect(() => loadConfig({ ...cloudSetupEnv(), [name]: "invalid" })).toThrow(name);
     }
   });
@@ -228,7 +278,8 @@ describe("database authority configuration", () => {
     expect(loadConfig(baseEnv())).toMatchObject({
       databaseMigrationUrl: baseEnv().DATABASE_URL,
       databaseMigrationsOnBoot: true,
-      databasePoolMax: 10,
+      databasePoolMax: 6,
+      processRole: "combined",
     });
     expect(loadConfig({ ...baseEnv(), DATABASE_MIGRATION_URL: "postgres://migrator@database.test/zeros", DATABASE_MIGRATIONS_ON_BOOT: "false", DATABASE_POOL_MAX: "6" })).toMatchObject({
       databaseMigrationUrl: "postgres://migrator@database.test:5432/zeros",
@@ -262,11 +313,18 @@ describe("database authority configuration", () => {
     expect(() => loadConfig({ ...baseEnv(), SLOW_REQUEST_LOG_MS: value })).toThrow();
   });
 
-  it.each(["1", "2"])("reserves both lock and callback capacity alongside shared LISTEN (max %s)", max => {
+  it.each(["1"])("reserves both lock and callback capacity (max %s)", max => {
     expect(() => loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: max })).toThrow(/DATABASE_POOL_MAX/);
   });
   it("permits two runtime connections when the listener has its own pool", () => {
     expect(loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: "2", DATABASE_LISTEN_URL: baseEnv().DATABASE_URL }).databasePoolMax).toBe(2);
+    expect(loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: "2" }).databasePoolMax).toBe(2);
+  });
+  it("separates API replica and worker roles without changing placement gates", () => {
+    for (const role of ["api", "worker", "combined"]) {
+      expect(loadConfig({ ...baseEnv(), CONTROL_PLANE_PROCESS_ROLE: role }).processRole).toBe(role);
+    }
+    expect(() => loadConfig({ ...baseEnv(), CONTROL_PLANE_PROCESS_ROLE: "all" })).toThrow(/CONTROL_PLANE_PROCESS_ROLE/);
   });
   const psFixture = new URL("postgres://region.horizon.psdb.cloud:5432/zeros?sslmode=verify-full");
   psFixture.username = "app.branchtest";

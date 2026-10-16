@@ -224,7 +224,7 @@ export async function manageCloudAgentRuntime(
       );
     // One image lock also fences absent rows and operation retries. Acquisition
     // order remains identical for all exact credential-kind subsets.
-    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) /*lock_purpose='runtime-qualification'*/", [
       `cloud-runtime-qualification:${evidence.provider}:${evidence.imageRef}`,
     ]);
     const receipt = (

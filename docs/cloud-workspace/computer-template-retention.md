@@ -1,10 +1,17 @@
 # Cloud Computer template retention
 
-The control plane retains each organization's active template, previous template,
-the newest ten ready versions (ordered by build version), and every template
-referenced by a workspace whose workspace/data deletion is not complete. Stopped
-workspaces and retired generations still protect their sources for recovery.
-These sets overlap; ten is not a cap on all retained templates.
+This is the stopped-builder policy. [Durable named snapshots](computer-named-snapshots.md)
+share its active + previous + referenced keep-set and also protect unresolved
+provider creates. Retaining database metadata or a stopped builder does not
+extend Boat's 14-day clock.
+
+The control plane retains only each organization's active template, previous
+template, and every template referenced by a workspace whose workspace/data
+deletion is not complete. Stopped workspaces and retired generations still
+protect their sources for recovery.
+There is no additional ready-history hold: even the newest ready template is
+eligible for retirement when none of these holds applies. Workspace-source holds
+are released only when the workspace is `deleted` and `data_deleted_at` is set.
 
 Activation and successful automatic activation notify
 `cloud_computer_template_retention` after their transaction commits. The worker
@@ -34,13 +41,17 @@ lost reply, mismatched receipt or missing journal remains unresolved and is
 retried. `retired` means logical sandbox deletion is confirmed; this worker does
 not track physical byte erasure or poll deletion-operation progress. Historical
 build/configuration/commit metadata remains available for Rebuild. Retiring and
-retired history cannot Activate.
+retired history cannot Activate: the route returns HTTP 409
+`cloud_computer_not_built` with "This template is no longer retained. Rebuild this
+version before activating it." Rebuild creates a new version from the historical
+configuration and recorded repository commits.
 
 Organization final erasure checks B7's operation journals across provider accounts
-before deleting template, build or mutation journals. A missing sandbox ID is
+and waits for every named artifact to be retired before deleting template,
+build or mutation journals. A missing sandbox ID is
 not cleanup evidence: an unallocated create must be positively closed, including
 every recorded create attempt. Once the durable deletion request enters
-irreversible purge, retention releases active/previous/newest holds, including
+irreversible purge, retention releases active/previous holds, including
 staff force-purge before the original grace deadline.
 Workspace-source holds remain until workspace/data cleanup is complete. A
 scheduled deletion still inside its recovery window does not release templates.
@@ -65,9 +76,10 @@ deployed database or fabricate protected-file evidence.
    prefix. `cleanupFailedBuilds` reconciles C3's failed/uncertain allocations.
    `close` must retain the local database if cleanup is unconfirmed.
 3. Run `pnpm exec tsx scripts/cloud-workspace-validation/computer-template-retention-live-check.mts --adapter .context/c6-alpha-adapter.mts --report .context/c6-alpha-retention.json`.
-   This builds fourteen sanitized, stopped templates, activates older versions
-   1/2, pins version 3 in the local source sidecar, and verifies that only version
-   4 retires while versions 5–14 remain ready. It checks an idempotent rerun.
+   This builds four sanitized, stopped templates, activates version 2 then
+   version 1 (active 1, previous 2), pins version 3 in the local source sidecar,
+   and verifies that version 4 retires while versions 1–3 remain ready. It checks
+   an idempotent rerun.
 4. Cleanup runs in `finally`: release local source/head holds, run retention on
    the disposable org, and reconcile failed builds. The JSON report records
    build IDs, sandbox IDs, deletion operation IDs and confirmed logical deletion.

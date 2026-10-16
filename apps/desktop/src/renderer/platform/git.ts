@@ -134,6 +134,7 @@ import {
   bridgeDesignSetScreenshot,
   bridgeDesignSetRuntimeAudit,
   bridgeDesignSetSelection,
+  bridgeDesignStyleBuildPresence,
   bridgeDesignSnapshot,
   bridgeDesignTokens,
   bridgeDesignUpdateToken,
@@ -192,6 +193,7 @@ export type {
   DesignMutationResultWire,
   DesignScreenshotInputWire,
   DesignSelectionInputWire,
+  DesignStyleSourceWire,
   DesignTokenWire,
   DesignTokenMutationWire,
   DesignWorkspaceSnapshotWire,
@@ -606,6 +608,17 @@ export async function designSetScreenshot(
     requireBridge("publish a design screenshot"),
     workspaceId,
     screenshot,
+  );
+}
+
+export async function designStyleBuildPresence(
+  workspaceId: string,
+  present: boolean,
+): Promise<void> {
+  await bridgeDesignStyleBuildPresence(
+    requireBridge("report Design presence"),
+    workspaceId,
+    present,
   );
 }
 

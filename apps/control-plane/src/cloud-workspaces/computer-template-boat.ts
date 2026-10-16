@@ -1,11 +1,15 @@
 import type pg from "pg";
-import type { Tx } from "../db.js";
+import type { Config } from "../config.js";
+import { withSystemTx, type Tx } from "../db.js";
 import type { BoatApiClient } from "./boat-client.js";
+import { boatComputerDisplayName } from "./boat-display-name.js";
 import { BoatCloudBuilderVms, builderVmSourceResolver } from "./cloud-builder-vm.js";
 import { DatabaseBuilderVmOperationStore, type BuilderVmIntent } from "./cloud-builder-vm-store.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { loadPinnedCloudRuntime, selectCloudRuntime } from "./runtime-selection.js";
 import type { RuntimeDescriptor } from "./runtime-contract.js";
+import { BoatComputerTemplateSnapshots } from "./computer-template-snapshot-boat.js";
+import { ComputerTemplateSnapshots } from "./computer-template-snapshots.js";
 
 export type { BuilderVm, BuilderFixedCommand, ClosedDiagnostic, CloudBuilderVms } from "./cloud-builder-vm.js";
 export { BuilderVmError } from "./cloud-builder-vm.js";
@@ -14,9 +18,10 @@ export { COMPUTER_TEMPLATE_FIXED_COMMANDS } from "./cloud-builder-commands.js";
 
 /** Claim preparation and every create/replay use the same immutable intent. */
 export function computerTemplateBuilderIntent(input: {
-  baseImageId: string; name: string; operationKey: string;
+  baseImageId: string; imageId?: string | null; name: string; operationKey: string;
 }): BuilderVmIntent {
-  return { purpose: "computer-build", source: { kind: "base", baseImageId: input.baseImageId },
+  return { purpose: "computer-build", source: input.imageId === undefined || input.imageId === null
+    ? { kind: "base", baseImageId: input.baseImageId } : { kind: "image", imageId: input.imageId },
     name: input.name, operationKey: input.operationKey, ttlSeconds: 1800 };
 }
 export type ComputerTemplateRuntime = {
@@ -31,10 +36,21 @@ export type ComputerTemplateRuntime = {
 export function createComputerTemplateBoatAdapters(input: {
   pool: pg.Pool; client: Pick<BoatApiClient, "request">;
   accountScope: string; billingOrg: string; qualificationMode: CloudRuntimeQualificationMode;
+  deploymentChannel: Config["deploymentChannel"];
 }) {
   const operations = new DatabaseBuilderVmOperationStore(input.pool, input.accountScope);
   const vms = new BoatCloudBuilderVms({ client: input.client, billingOrg: input.billingOrg, operations,
-    resolveSource: builderVmSourceResolver(input.pool) });
+    resolveSource: builderVmSourceResolver(input.pool),
+    resolveDisplayName: async intent => {
+      const row = await withSystemTx(input.pool, async tx => (await tx.query<{ org_id: string; org_slug: string; version: string }>(
+        `SELECT template.org_id,org.slug AS org_slug,build.version
+         FROM cloud_computer_templates template JOIN cloud_computer_v2_builds build ON build.id=template.build_id AND build.org_id=template.org_id
+         JOIN organizations org ON org.id=template.org_id
+         WHERE template.builder_operation_key=$1 AND template.account_scope=$2 AND lower(template.billing_org)=lower($3)`,
+        [intent.operationKey, input.accountScope, input.billingOrg])).rows[0]);
+      return row ? boatComputerDisplayName({ organizationId: row.org_id, organizationSlug: row.org_slug,
+        version: row.version, channel: input.deploymentChannel }) : null;
+    } });
   const runtime = {
     async select(tx: Tx): Promise<ComputerTemplateRuntime | null> {
       const selected = await selectCloudRuntime(tx, input.qualificationMode);
@@ -49,5 +65,9 @@ export function createComputerTemplateBoatAdapters(input: {
       }, input.qualificationMode) !== null;
     },
   };
-  return { operations, vms, runtime };
+  const snapshots = new ComputerTemplateSnapshots(input.pool, {
+    provider: new BoatComputerTemplateSnapshots(input.client, input.billingOrg, input.deploymentChannel), channel: input.deploymentChannel,
+    accountScope: input.accountScope, billingOrg: input.billingOrg,
+  });
+  return { operations, vms, runtime, snapshots };
 }

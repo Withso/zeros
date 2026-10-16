@@ -1,17 +1,31 @@
 import { createHash } from "node:crypto";
 
-const filename = "0136_cloud_runtime_transfers.sql";
-const exact: Readonly<Record<string, readonly string[]>> = {
-  "widen-check": [3, 4, 5].map(n =>
-    `ALTER TABLE cloud_workspace_generation_transitions DROP CONSTRAINT cloud_workspace_generation_transitions_check${n};`),
-  "nullable-enrollment": ["setup_run_id", "setup_execution_fence", "registration_grant_id"].map(column =>
-    `ALTER TABLE cloud_workspace_engine_instances ALTER COLUMN ${column} DROP NOT NULL;`),
-  "enrollment-trigger": ["cloud_engine_runtime_binding", "cloud_engine_current_setup_fence"].map(trigger =>
-    `DROP TRIGGER ${trigger} ON cloud_workspace_engine_instances;`),
+// Each reviewed migration lists its exact exempted statements by rule.
+const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0136_cloud_runtime_transfers.sql": {
+    "widen-check": [3, 4, 5].map(n =>
+      `ALTER TABLE cloud_workspace_generation_transitions DROP CONSTRAINT cloud_workspace_generation_transitions_check${n};`),
+    "nullable-enrollment": ["setup_run_id", "setup_execution_fence", "registration_grant_id"].map(column =>
+      `ALTER TABLE cloud_workspace_engine_instances ALTER COLUMN ${column} DROP NOT NULL;`),
+    "enrollment-trigger": ["cloud_engine_runtime_binding", "cloud_engine_current_setup_fence"].map(trigger =>
+      `DROP TRIGGER ${trigger} ON cloud_workspace_engine_instances;`),
+  },
+  "0145_cloud_computer_named_snapshots.sql": {},
+  "0146_cloud_provider_snapshot_recovery.sql": {},
+  // The constraint is re-added at once with one more allowed purpose.
+  "0141_cloud_runtime_images.sql": {
+    "widen-check": ["ALTER TABLE cloud_builder_vm_operations DROP CONSTRAINT cloud_builder_vm_operations_purpose_check;"],
+  },
+  "0142_cloud_workspace_data_purge.sql": {
+    "retain-transfer-audit": ["ALTER TABLE cloud_workspace_allocation_transfers DROP CONSTRAINT cloud_workspace_allocation_tr_transition_id_workspace_id_o_fkey;"],
+  },
 };
 // Exact reviewed function body, including quoted SQL. Changing its semantics or
 // even formatting requires updating this review pin and compatibility evidence.
+const computerNamedPinDigest = "8ec827f17e5dd360032affa81051498682ab39b8c355284f5b341f30e8126258";
+const providerRecoveryEvidenceDigest = "e5f93ac17017bc01286ac0e856530ed299bfb0307622f8f2b850d4d0590993ed";
 const authorityDigest = "797f837c345244da5af77d503614c9ddf3abb03048998a0081b98a3c2512ab30";
+const deletedBootPointerDigest = "9cff55a9f31819e2468f331b64d2ba978b0e1dd2bdb39d332dad892fe49fc562";
 
 /** Split only at top-level SQL semicolons. Dollar bodies, nested comments and
  * quoted values remain intact; an annotation inside a function cannot exempt
@@ -70,7 +84,8 @@ function statements(sql: string): { text: string; header: string }[] {
 
 export function applyReviewedExpandExceptions(file: string, sql: string): string {
   if (!sql.includes("zeros-expand-exception:")) return sql;
-  if (file !== filename) throw new Error("Expand exceptions are reviewed only for 0136_cloud_runtime_transfers.sql");
+  const exact = reviewed[file];
+  if (!exact) throw new Error("Expand exceptions are reviewed only for listed migrations");
   let accepted = 0;
   const output = statements(sql).map(({ header, text }) => {
     const annotations = [...header.matchAll(/^-- zeros-expand-exception: ([a-z-]+) (\S[^\r\n]{15,})$/gm)];
@@ -78,8 +93,14 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     if (annotations.length !== 1) throw new Error("An expand exception must annotate exactly one statement");
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
-    const allowed = exact[rule]?.includes(statement) || (rule === "allocation-authority" &&
-      createHash("sha256").update(statement).digest("hex") === authorityDigest);
+    const allowed = exact[rule]?.includes(statement) || (rule === "allocation-authority" && file === "0136_cloud_runtime_transfers.sql" &&
+      createHash("sha256").update(statement).digest("hex") === authorityDigest) ||
+      (rule === "deleted-boot-pointer" && file === "0142_cloud_workspace_data_purge.sql" &&
+        createHash("sha256").update(statement).digest("hex") === deletedBootPointerDigest) ||
+      (rule === "computer-named-pin" && file === "0145_cloud_computer_named_snapshots.sql" &&
+        createHash("sha256").update(statement).digest("hex") === computerNamedPinDigest) ||
+      (rule === "provider-recovery-evidence" && file === "0146_cloud_provider_snapshot_recovery.sql" &&
+        createHash("sha256").update(statement).digest("hex") === providerRecoveryEvidenceDigest);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
     return "\n";

@@ -8,6 +8,8 @@ import { workerEnvironment } from "./worker-test-fixtures";
 import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 
 const dependencies = vi.hoisted(() => ({ command: vi.fn(), providers: vi.fn(), github: vi.fn(), inputs: vi.fn(), checkout: vi.fn() }));
+const channelPolicy = vi.hoisted(() => ({ development: true, alpha: true, beta: false, production: false }));
+vi.mock("../../apps/control-plane/src/cloud-workspace-channels.json", () => ({ default: channelPolicy }));
 vi.mock("./io", async original => {
   const real = await original<typeof import("./io")>();
   return { ...real, command: dependencies.command, jsonClient: () => real.jsonClient(fetch, async () => {}) };
@@ -22,6 +24,7 @@ const oldWorker = { provider: "boat", imageRef: `boat:zeros-alpha-old@sha256:${d
   architecture: "linux/amd64", storageMiB: 4096 };
 let directory: string, previousDirectory: string, previousArgv: string[];
 beforeEach(async () => {
+  channelPolicy.beta = false; channelPolicy.production = false;
   vi.resetAllMocks(); previousDirectory = process.cwd(); previousArgv = process.argv;
   directory = await mkdtemp(path.join(os.tmpdir(), "zeros-release-predeploy-test-")); process.chdir(directory);
   for (const [key, value] of Object.entries({ ...workerEnvironment(), ZEROS_HOSTED_PROMOTION: "enabled",
@@ -158,7 +161,10 @@ describe("Alpha hosted preparation from the old deployment", () => {
     await expect(main()).rejects.toThrow("Provider request failed"); expect(test.providers.waitIdentity).not.toHaveBeenCalled();
     expect(test.providers.deploy).not.toHaveBeenCalled(); await expect(readFile(".context/release/hosted-receipt.json")).rejects.toThrow();
   });
-  it.each(["beta", "production"] as const)("keeps %s plan and services closed on a 503 even with a valid ready body", async channel => {
+  it.each(["beta", "production"] as const)("keeps unpaused %s plan and services closed on a 503 even with a valid ready body", async channel => {
+    // Flipping the configuration restores the original cloud preflight. The
+    // paused repair path is covered by cli.test.ts and local-only-channels.
+    channelPolicy[channel] = true;
     const test = fixture(channel); test.respond({ ...test.backend, workerQualified: true });
     for (const pending of ["false", "true"]) {
       vi.stubEnv("WORKER_PROMOTION_REQUIRED", pending);

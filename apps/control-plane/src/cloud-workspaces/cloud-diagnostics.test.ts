@@ -1,9 +1,39 @@
 import { describe, expect, it } from "vitest";
 import { CloudProviderError } from "./provider.js";
-import { classifyCloudFailure, parseSetupDiagnostic, setupDiagnosticSchema, cloudStopReason, publicCloudIncident } from "./cloud-diagnostics.js";
+import { DatabaseAcquireTimeoutError, DatabaseConnectionLostError } from "../db.js";
+import { classifyCloudFailure, cloudDiagnosticSchema, parseSetupDiagnostic, setupDiagnosticSchema, cloudStopReason, publicCloudIncident } from "./cloud-diagnostics.js";
 import { CLOUD_ENGINE_STARTUP_PHASES, CLOUD_ENGINE_STARTUP_NAMES, CLOUD_ENGINE_STARTUP_CODES, CLOUD_ENGINE_STARTUP_ERRNOS,
   parseCloudEngineStartupFailure } from "../../../desktop/src/engine/agents/containment/cloud-engine-startup-failure.mjs";
 describe("bounded cloud diagnostics", () => {
+  it.each([
+    new DatabaseConnectionLostError(), new DatabaseAcquireTimeoutError(),
+    Object.assign(new Error("private-database-detail"), { code: "40001" }),
+    Object.assign(new Error("private-database-detail"), { code: "40P01" }),
+    ...["57014", "55P03", "57P01", "08006", "database_acquire_unavailable"].map(code => Object.assign(new Error("private-database-detail"), { code })),
+  ])("OF19 classifies known database unavailability without raw exception material", error => {
+    const diagnostic = classifyCloudFailure(error, "ledger_commit");
+    expect(diagnostic).toMatchObject({ code: "control_plane_unavailable", errorClass: "database", retryable: true });
+    expect(JSON.stringify(diagnostic)).not.toContain("private-database-detail");
+  });
+  it("OF19 retains only closed compute throw sites", () => {
+    const diagnostic = { phase: "ledger_commit", code: "compute_reconciliation_failed", errorClass: "unknown", retryable: true };
+    for (const site of ["allocation_binding", "allocation_observation", "meter_commit", "renewal_plan", "renewal_reservation", "renewal_commit", "reconciliation_bookkeeping", "retry_proof"])
+      expect(cloudDiagnosticSchema.safeParse({ ...diagnostic, site }).success).toBe(true);
+    expect(cloudDiagnosticSchema.safeParse({ ...diagnostic, site: "private-path-or-message" }).success).toBe(false);
+  });
+  it("OF19 distinguishes the CP outage stop from a permanent safety failure without a wire migration", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    expect(publicCloudIncident({ id, reason: "safety_failure", stopReason: "control_plane_unavailable" })).toMatchObject({
+      code: "cloud_workspace_control_plane_unavailable",
+    });
+    expect(cloudStopReason("control_plane_unavailable").code).toBe("control_plane_unavailable");
+    expect(classifyCloudFailure(Object.assign(new Error("private-corruption-detail"), { code: "23514" }), "ledger_commit"))
+      .toMatchObject({ code: "compute_reconciliation_failed", errorClass: "database", sqlState: "23514" });
+  });
+  it.each(["setup_worker_stopped", "setup_heartbeat_failed", "setup_lease_lost", "setup_timed_out",
+    "setup_unknown_failure", "setup_executor_failure"])("keeps the closed worker failure code %s", code => {
+    expect(classifyCloudFailure({ code }, "runtime").code).toBe(code);
+  });
   it("retains typed causes without messages, stacks, nested bodies or arbitrary codes", () => {
     const canary = "credential-canary-do-not-retain";
     const db = Object.assign(new Error(canary), { code: "40001", detail: canary });
@@ -43,6 +73,15 @@ describe("bounded cloud diagnostics", () => {
         expect(parseCloudEngineStartupFailure(engineStartup)).toEqual(engineStartup);
         const diagnostic = { version: 1, phase: "engine_readiness", engineStartup };
         expect(parseSetupDiagnostic(diagnostic)).toEqual(diagnostic);
+      }
+  });
+  it("keeps boot substages and typed denial/transport causes readable without retaining provider text", () => {
+    for (const phase of ["boot_owner", "boot_bootstrap", "boot_credentials", "boot_durability", "boot_activate", "boot_install"])
+      for (const code of ["cloud_admission_authority_timeout", "cloud_validation_authority_http_5xx", "cloud_validation_access_denied",
+        "cloud_agent_credential_revoked", "command_storage_unavailable"]) {
+        const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: { phase, name: "CloudAgentExecutionError", code, errno: null } };
+        expect(parseSetupDiagnostic(diagnostic)).toEqual(diagnostic);
+        expect(parseSetupDiagnostic({ ...diagnostic, engineStartup: { ...diagnostic.engineStartup, body: "private-canary" } })).toBeNull();
       }
   });
   it("distinguishes stable stop reasons", () => {

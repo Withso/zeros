@@ -3,6 +3,7 @@ import { CloudTranscriptOwnerSchema, CloudTranscriptPruneSchema, CachedTranscrip
   transcriptCacheKey, type CachedTranscriptWindow, type CloudTranscriptOwner, type CloudTranscriptPrune,
   CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch,
   CloudHistoryRestoreMetadataSchema, cloudHistoryBindingKey,
+  continueCachedTranscriptPresentation,
   type CloudHistoryRestoreFence, type CloudHistoryRestoreMetadata,
 } from "../platform/cloud-transcript-cache-contract";
 
@@ -129,9 +130,12 @@ export class CloudTranscriptCache {
       previous.restoreHead = fence; previous.authoritativeHead = true; return;
     }
     const key = transcriptCacheKey(previous.owner), pending = this.fenceFlights.get(key);
+    const saved = this.peek(previous.owner);
+    const continued = saved && continueCachedTranscriptPresentation(saved, fence);
     this.forget(key);
     const token: Token = { owner: previous.owner, generation: this.generation, restoreHead: fence, authoritativeHead: true };
     this.tokens.set(key, token);
+    if (continued) this.remember(token, continued);
     const flight = (async () => {
       try {
         await pending;
@@ -148,6 +152,8 @@ export class CloudTranscriptCache {
         if (installed.success && installed.data.restoreHead && cloudHistoryFencesMatch(fence, installed.data.restoreHead)) {
           token.cacheEpoch = installed.data.cacheEpoch;
           if (installed.data.historyEpoch) token.historyEpoch = installed.data.historyEpoch;
+          if (installed.data.window && this.acceptsWindow(token, installed.data.window))
+            this.remember(token, prepareCachedTranscriptWindow(installed.data.window));
         }
       } catch { /* The renderer fence remains authoritative even if optional disk I/O fails. */ }
     })().finally(() => { if (this.fenceFlights.get(key) === flight) this.fenceFlights.delete(key); });

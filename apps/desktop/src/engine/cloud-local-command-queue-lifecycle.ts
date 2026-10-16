@@ -185,13 +185,26 @@ export class CloudLocalCommandWriterLifecycle {
   }
   async drainAndSeal(options: { mirror: { flush(input?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void> };
     retireNative(): Promise<void>; waitForWork(): Promise<void>; freezeNormal(): void;
-    request(seal: CloudLocalCommandWriterSeal, signal: AbortSignal): Promise<unknown>; timeoutMs?: number }): Promise<void> {
+    request(seal: CloudLocalCommandWriterSeal, signal: AbortSignal): Promise<unknown>; timeoutMs?: number;
+    onStage?(stage: "mirror_flush" | "seal_create" | "normal_freeze" | "seal_ack"): void;
+    onDeadline?(): void }): Promise<void> {
     this.begin();
     const timeoutMs = options.timeoutMs ?? 30_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new CloudCommandRuntimeError("command_conflict");
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs);
+    let deadlineReported = false;
+    const stage = (value: Parameters<NonNullable<typeof options.onStage>>[0]) => {
+      try { options.onStage?.(value); } catch { /* Diagnostics cannot change custody or seal ordering. */ }
+    };
     const wait = <T>(flight: Promise<T>): Promise<T> => new Promise((resolve, reject) => {
-      const failed = () => { cleanup(); reject(new CloudCommandRuntimeError("command_service_unavailable")); };
+      const failed = () => {
+        cleanup();
+        if (!deadlineReported) {
+          deadlineReported = true;
+          try { options.onDeadline?.(); } catch { /* Keep the original failure. */ }
+        }
+        reject(new CloudCommandRuntimeError("command_service_unavailable"));
+      };
       const cleanup = () => controller.signal.removeEventListener("abort", failed);
       if (controller.signal.aborted) { void flight.catch(() => {}); failed(); return; }
       controller.signal.addEventListener("abort", failed, { once: true });
@@ -201,19 +214,23 @@ export class CloudLocalCommandWriterLifecycle {
       let seal = this.seal;
       if (!seal) {
         await wait(options.retireNative()); await wait(options.waitForWork());
+        stage("mirror_flush");
         await wait(options.mirror.flush({ signal: controller.signal, timeoutMs }));
         if (controller.signal.aborted) throw new CloudCommandRuntimeError("command_service_unavailable");
+        stage("seal_create");
         seal = this.createSeal();
       }
       // The FULL descriptor may have committed before freezeNormal failed.
       // Re-establish quiescence, durability and current heads before retrying
       // that immutable descriptor. A known successful freeze needs no writer
       // reopen, but its current file/head proof is still checked every time.
+      stage("normal_freeze");
       this.options.assertQuiescent();
       if (this.frozenSealHash !== seal.sha256) this.checkpointNormal();
       this.assertFrozenHead(seal);
       options.freezeNormal(); this.frozenSealHash = seal.sha256;
       if (!this.acknowledged) {
+        stage("seal_ack");
         const reply = CloudLocalCommandWriterSealAckSchema.parse(await wait(options.request(seal,controller.signal)));
         this.assertFrozenHead(seal);
         this.acknowledge(reply);

@@ -55,7 +55,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { writeContextAttachment } from "../agent-history-client";
-import { ensureFileAttachment } from "../file-attachment-transfer";
+import { ensureFileAttachment, publishSavedAttachment } from "../file-attachment-transfer";
 import { utf8ToBase64 } from "../encode-attachments";
 import { HARD_TEXT_CAP_BYTES, MAX_IMAGE_BYTES } from "../agent-attachments";
 import {
@@ -167,6 +167,7 @@ interface QueuedContextGraphWrite {
   attachmentId: string;
   base64?: string;
   attachment?: ComposerAttachment;
+  legacyAttachment?: ComposerAttachment;
   mimeType: string;
   filename: string;
 }
@@ -233,6 +234,10 @@ function writeStagedAttachment(
           filename: write.filename,
           mimeType: write.mimeType,
         }))
+    .then((result) => {
+      if (write.legacyAttachment && result?.relativePath)
+        publishSavedAttachment(cwd, write.legacyAttachment, result);
+    })
     .catch((err) => reportStagingFailure(cwd, write.filename, err));
 }
 
@@ -297,7 +302,7 @@ export function executeGraphSync(cwd: string, plan: GraphSyncPlan): void {
     if (!queued.has(a.id)) {
       queued.set(a.id, {
         attachmentId: a.id,
-        ...(reference ? { attachment: a } : { base64: base64! }),
+        ...(reference ? { attachment: a } : { base64: base64!, legacyAttachment: a }),
         mimeType: a.mimeType,
         filename: a.name,
       });

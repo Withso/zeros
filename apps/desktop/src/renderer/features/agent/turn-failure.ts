@@ -2,6 +2,7 @@ import type { AgentMessage } from "@zeros/protocol/agent-messages";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
 import { claudeOrganizationStartupCode, claudeOrganizationStartupMessage } from "@zeros/protocol/claude-startup-notice";
 import type { AgentFailure } from "../../platform/bridge/failure";
+import { isProviderWorkEvent } from "./transcript-notices";
 
 export interface TurnFailure {
   message: string;
@@ -24,6 +25,20 @@ export function isTurnFailureNotice(
   );
 }
 
+/** A failed retry remains in durable history. Later parent work or an explicit
+ * recovery receipt supersedes it only within this same provider turn. */
+export function turnFailureRecovered(events: readonly AgentMessage[], turnId: string): boolean {
+  let progressed = false;
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.kind === "error_notice" && !event.parentToolId && event.code === "claude-background-recovered" &&
+        (!event.turnFailure || event.turnFailure.turnId === turnId)) return true;
+    if (isTurnFailureNotice(event, turnId)) return progressed;
+    if (isProviderWorkEvent(event)) progressed = true;
+  }
+  return false;
+}
+
 export function turnFailureForCard(input: {
   events: AgentMessage[];
   turnId: string;
@@ -37,6 +52,7 @@ export function turnFailureForCard(input: {
   if (
     input.live ||
     input.retrying ||
+    turnFailureRecovered(input.events, input.turnId) ||
     input.stopReason === "cancelled" ||
     input.status === "cancelled"
   )

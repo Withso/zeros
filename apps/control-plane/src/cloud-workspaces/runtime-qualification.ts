@@ -3,6 +3,7 @@ import { HttpError } from "../authz.js";
 import type { Config } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { BoatApiClient } from "./boat-client.js";
+import { boatRuntimeDisplayName } from "./boat-display-name.js";
 import { BoatCloudBuilderVms, BuilderVmError, builderVmBaseSnapshot, builderVmSourceResolver, prepareBuilderVmOperation, type BuilderVm, type CloudBuilderVms } from "./cloud-builder-vm.js";
 import { DatabaseBuilderVmOperationStore, type BuilderVmIntent, type BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
 import { RUNTIME_SMOKE_CHECKS, type ClosedDiagnostic } from "./cloud-builder-commands.js";
@@ -74,7 +75,7 @@ export class RuntimeQualificationWorker {
     if (!this.options.vms || !this.options.operations || !this.options.artifacts)
       throw new HttpError(503, "runtime_smoke_unavailable", "Runtime smoke qualification unavailable");
     return withSystemTx(this.options.pool, async tx => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [SCHEDULE_LOCK]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) /*lock_purpose='runtime-qualification'*/", [SCHEDULE_LOCK]);
       if (!await eligibleBundle(tx, runtimeId)) throw new HttpError(409, "runtime_smoke_ineligible", "Runtime is not eligible for smoke qualification");
       const previous = (await tx.query<Run>(`SELECT * FROM cloud_runtime_qualification_runs
         WHERE runtime_id=$1 AND state IN ('queued','running')`, [runtimeId])).rows[0];
@@ -110,7 +111,7 @@ export class RuntimeQualificationWorker {
 
   private async claim(): Promise<{ run: Run; reconcile: boolean } | null> {
     return withSystemTx(this.options.pool, async tx => {
-      const lock = (await tx.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS locked", [SCHEDULE_LOCK])).rows[0];
+      const lock = (await tx.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS locked /*lock_purpose='runtime-qualification'*/", [SCHEDULE_LOCK])).rows[0];
       if (!lock?.locked) return null;
       const running = (await tx.query<Run>(`SELECT * FROM cloud_runtime_qualification_runs WHERE state='running' FOR UPDATE`)).rows[0];
       if (running) {
@@ -217,13 +218,24 @@ export class RuntimeQualificationWorker {
     } catch (error) {
       result = error instanceof QualificationFailure ? error.diagnostic : failure(stage, error instanceof BuilderVmError ? error.check : "operation_failed");
     }
+    if (result && !result.ok) {
+      // Commit the first closed failure before potentially slow provider
+      // cleanup. Another replica may own the later reconciliation attempt.
+      await withSystemTx(this.options.pool, tx => tx.query(`UPDATE cloud_runtime_qualification_runs
+        SET diagnostic=COALESCE(diagnostic,$2::jsonb) WHERE id=$1 AND state='running'`,
+      [run.id, JSON.stringify(result)])).catch(() => {
+        // Diagnostic storage must not prevent deletion. finish() still has
+        // this result if the database recovers during cleanup.
+        console.warn("[cloud-runtime] qualification_diagnostic_persist_failed");
+      });
+    }
     // Cleanup precedes approval. An unknown create is replayed with the exact
     // journalled key/body solely to recover its identity and delete it.
     const cleaned = await this.cleanup(run);
     if (!cleaned) {
       await withSystemTx(this.options.pool, async tx => {
-        await tx.query(`UPDATE cloud_runtime_qualification_runs SET diagnostic=$2,deadline_at=LEAST(deadline_at,clock_timestamp()),cleanup_lease_until=NULL
-          WHERE id=$1 AND state='running'`, [run.id, JSON.stringify(failure("cleanup", "cleanup_unconfirmed"))]);
+        await tx.query(`UPDATE cloud_runtime_qualification_runs SET diagnostic=COALESCE(diagnostic,$2::jsonb),deadline_at=LEAST(deadline_at,clock_timestamp()),cleanup_lease_until=NULL
+          WHERE id=$1 AND state='running'`, [run.id, JSON.stringify(result && !result.ok ? result : failure("cleanup", "cleanup_unconfirmed"))]);
       });
       return;
     }
@@ -263,7 +275,7 @@ export class RuntimeQualificationWorker {
       const base = (await tx.query(`SELECT 1 FROM cloud_runtime_base_images base JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
         WHERE base.base_image_id=$1 AND base.base_compatibility_id=$2 AND base.revoked_at IS NULL AND contract.revoked_at IS NULL FOR SHARE OF base,contract`,
       [run.base_image_id, run.base_compatibility_id])).rowCount;
-      const active = (await tx.query<{ state: Run["state"]; timely: boolean }>(`SELECT state,deadline_at>clock_timestamp() AS timely FROM cloud_runtime_qualification_runs
+      const active = (await tx.query<{ state: Run["state"]; timely: boolean; diagnostic: ClosedDiagnostic | null }>(`SELECT state,diagnostic,deadline_at>clock_timestamp() AS timely FROM cloud_runtime_qualification_runs
         WHERE id=$1 FOR UPDATE`, [run.id])).rows[0];
       if (!active) return;
       if (active.state !== "running") {
@@ -271,6 +283,7 @@ export class RuntimeQualificationWorker {
           WHERE id=$1 AND state IN ('failed','succeeded')`, [run.id]);
         return;
       }
+      if (active.diagnostic?.ok === false) result = active.diagnostic;
       if (result.ok && (!bundle || !base)) result = failure("admit", "runtime_ineligible");
       if (result.ok && !active.timely) result = failure("admit", "timeout");
       if (result.ok) {
@@ -300,6 +313,7 @@ export function createRuntimeQualificationWorker(config: Config, pool: pg.Pool, 
   const vms = operations && cloud?.boat ? new BoatCloudBuilderVms({
     client: new BoatApiClient({ apiKey: cloud.apiKey, billingOrg: cloud.boat.billingOrg, timeoutMs: 45_000 }),
     billingOrg: cloud.boat.billingOrg, operations, resolveSource: builderVmSourceResolver(pool),
+    resolveDisplayName: () => boatRuntimeDisplayName(config.deploymentChannel, "qualify"),
   }) : null;
   return new RuntimeQualificationWorker({ pool, enabled, vms, operations, artifacts });
 }

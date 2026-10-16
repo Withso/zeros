@@ -6,6 +6,7 @@ import { CHANNELS, ReleaseIdentity, releaseSource, type PromotionConfig } from "
 import { CLOUD_WORKER_VARIABLES, cloudProvisionSummary, planCloudProvision } from "./cloud-provision";
 import { assertNotOlderBranch, createProviders } from "./providers";
 import { jsonClient } from "./io";
+import { cloudWorkspaceChannelEnabled } from "../../apps/control-plane/src/cloud-workspaces/channel-policy";
 
 class CloudProvisionFailure extends Error {
   constructor(names: string[]) { super([...new Set(names)].sort().map(name => `${name} fail`).join("\n")); }
@@ -18,6 +19,9 @@ export function cloudProvisionConfig(env: NodeJS.ProcessEnv) {
   if (env.RELEASE_CHANNEL === "alpha" && mode === "apply") reject("RELEASE_CHANNEL");
   let source;
   try { source = releaseSource(env); } catch { return reject("RELEASE_CHANNEL", "RELEASE_SHA", "RELEASE_BRANCH", "GITHUB_REPOSITORY"); }
+  // Paused cloud configuration is deliberately inert in loadConfig. Refuse
+  // provisioning before provider reads instead of validating an inactive block.
+  if (!cloudWorkspaceChannelEnabled(source.channel)) reject("CLOUD_WORKSPACE_CHANNEL");
   if (![undefined, "", "true", "false"].includes(env.CLOUD_PROVISION_ENABLE_CLOUD)) reject("CLOUD_PROVISION_ENABLE_CLOUD");
   // With worker promotion off, the worker lane cannot select or qualify an
   // image, so cloud is enabled on a selected tuple without native qualification.

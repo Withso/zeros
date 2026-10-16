@@ -131,12 +131,78 @@ refresh. Account, target generation, operation version and Stop guards remain
 unconditional. Restart fixtures cover source-generation replies arriving after
 ready target publication; widening timeouts is not the production behavior.
 
-Workers read durable eligible retry/lease deadlines after each pass and debounce
-already-due/locked work by 100 ms. Independent periodic maintenance remains at
-its configured cadence; notification passes do not repeat maintenance. Original
-claim locks, due dates, fences and prerequisites decide execution. No hint or a
-failed deadline read falls back to scanning. Serial in-flight work is not
-preempted; a newly committed deadline without a hint may await the fallback.
+Workers read durable eligible retry/lease deadlines before claiming and after
+each pass. An empty queue incurs one read and no claim transaction. Already-due
+or locked work is debounced by 100 ms. Migration 0143 adds empty, commit-bound
+notifications for newly scheduled work, including future deadlines; rollbacks
+emit nothing. LISTEN reconnects rescan every registered queue, and a hint that
+arrives during a drain remains pending. Original claim locks, due dates, owner
+and generation fences, and prerequisites still decide execution.
+
+The default fallback is jittered between 30 and 60 seconds. Outbox, access,
+invitation and security/directory publication, forks, checkpoints, setup and
+restore incidents, deletion/retention, historical retirement and Computer builds
+use the shared scheduler. Runtime staging also retains its shorter retry
+deadlines. Lifecycle scheduling keeps separate health, funding and paid-authority
+deadlines; a quiet fallback does not extend an engine lease, funded deadline or
+the current stop policy. Provider drift and orphan inventory are maintenance
+work. Local Personal and organization-local Host execution are unchanged.
+
+Runtime-image retirement and object rotation/garbage collection use a separate
+maintenance cadence: one startup pass, then a jittered 150–300-second sweep.
+Runtime registry and Computer-builder completion hints wake image maintenance
+sooner through the existing shared listener. A lost hint still has the bounded
+sweep fallback. These sweeps do not replace the 30–60-second queue fallback.
+Image passes inspect at most 18 ready candidates, keep the two newest usable
+images and attempt at most 16 eligible named-snapshot removals. A cursor advances
+past unconfirmed removals so one failing name cannot starve the following page;
+account, channel, wallet and recorded-builder fences still govern every action.
+Presence checks reuse the kept-image inventory instead of querying it again.
+
+A full image page or object batch continues after 100 ms, with at most four
+passes in an automatic burst. The burst limit also applies when failed garbage
+collection keeps returning an attempted item. Object reference-count repair
+still precedes every collection pass; object retention, restore windows, holds,
+lease checks and explicit workspace deletion keep their existing authority.
+Shutdown drains the active pass and drops pending continuations. Sweep discovery
+may wait up to five minutes, including discovery of expired maintenance leases;
+interactive lifecycle claims and funded/engine deadlines are unchanged.
+
+Account maintenance uses one shared deadline read for WorkOS commands, security
+mail and account/organization deletion. Migration 0144 adds empty commit-bound
+wakes, including future retries, organization provisioning and completion of
+ordered predecessors. Each queue retains its own in-flight work and existing
+batch cadence, so a slow provider command cannot block security mail or deletion.
+The Events API repair sweep retains its 60-second cadence. These account paths
+serve Local and cloud users even when cloud workspaces are disabled; deletion
+still waits for its existing controlled-migration boundary.
+
+Notifications are hints, not a durable queue or an authority grant. Missing
+hints or a failed deadline read retry within the fallback. A healthy notification
+path targets claim p99 below one second; an outage uses the bounded fallback.
+Serial in-flight work is not preempted. Fake-clock and local Postgres tests
+verify these mechanisms; Alpha's quiet ≤0.5 tx/s and claim percentile require a
+deployed measurement with the worker replica count recorded.
+
+For rollback, `WORKER_POLL_INTERVALS_MS` accepts a JSON map of explicit fallback
+intervals, for example `{"outbox":5000,"setup":1000}`. Keys are `outbox`, `access`,
+`invitations`, `security`, `setup` (including recovery), `forks`, `checkpoints`,
+`lifecycle`, `operations`, `retirement`, `templates`, `runtimeStaging`,
+`runtimeImages`, `objects` and
+`workos` (the shared account-queue fallback).
+An override disables jitter for that worker; deadlines and notifications still
+wake sooner. Remove a key to restore its default. Explicit legacy
+`CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS` and `CLOUD_WORKSPACE_SETUP_INTERVAL_MS`
+settings remain honored; remove those short-interval overrides when enabling
+quiet scheduling. The per-worker map takes precedence. Invalid keys/intervals
+fail configuration without reflecting values.
+
+Deploy the additive migration before the compatible control plane. Older
+replicas ignore the new hints and keep polling, so code rollback does not
+require dropping triggers or cancelling queued work. Security/directory
+publication and its dedicated listener remain active when cloud workers are
+disabled. Reassess temporary short-interval overrides after the Alpha soak;
+do not use the global worker pause as a scheduling rollback for running VMs.
 
 ## Closed setup clocks
 

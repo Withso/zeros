@@ -1,7 +1,8 @@
 // Claude's quiet background continuation, below the settled turn footer.
-import { memo, useEffect, useState } from "react";
+import { memo } from "react";
 import { formatElapsed, ZerosSpinner } from "@/renderer/shared/ui/loading";
 import type { BackgroundTask } from "../../platform/bridge/agent-events";
+import { useVisibleClock } from "../../state/use-visible-clock";
 
 export const BackgroundTasksWaitingLine = memo(
   function BackgroundTasksWaitingLine({
@@ -43,21 +44,10 @@ const BackgroundTaskElapsed = memo(function BackgroundTaskElapsed({
   startedAt: number;
   active: boolean;
 }) {
-  // Retained hidden chats stay mounted, so only advance the clock while this
-  // chat surface is active.
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    if (!active) return;
-    const intervalId = window.setInterval(
-      () => setTick((value) => value + 1),
-      1_000,
-    );
-    return () => window.clearInterval(intervalId);
-  }, [active]);
-  void tick;
+  const now = useVisibleClock(active);
   return (
     <span className="text-fg2 shrink-0 text-xs tabular-nums">
-      {formatElapsed(Math.max(0, Date.now() - startedAt))}
+      {formatElapsed(Math.max(0, now - startedAt))}
     </span>
   );
 });

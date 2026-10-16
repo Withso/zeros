@@ -125,6 +125,8 @@ snapshots/diff/
 .claude/skills/*
 !.claude/skills/zeros-ui/
 !.claude/skills/zeros-workspaces/
+!.claude/skills/zstack/
+!.claude/skills/zstack-*/
 
 # Codex + Cursor harness config. Same class as .claude/ above: machine-local
 # agent state, never product source. Unlike .claude/ these were never listed,
@@ -137,6 +139,8 @@ snapshots/diff/
 .cursor/rules/*
 !.cursor/rules/zeros-ui.mdc
 !.cursor/rules/zeros-workspaces.mdc
+!.cursor/rules/zstack.mdc
+!.cursor/rules/zstack-*.mdc
 
 # External worktree-tool config. Only the machine-local layer is ignored.
 #
@@ -167,4 +171,11 @@ snapshots/diff/
 
 # Zeros Design metadata (managed by Zeros)
 /.zeros/
+!/Zeros\ -\ Design/
+!/Zeros\ -\ Design/canvas.json
+!/Zeros\ -\ Design/design.toml
+!/Zeros\ -\ Design/meta/
+!/Zeros\ -\ Design/meta/canvas.json
+!/Zeros\ -\ Design/meta/design.toml
+!/Zeros\ -\ Design/rules.md
 # End Zeros Design metadata

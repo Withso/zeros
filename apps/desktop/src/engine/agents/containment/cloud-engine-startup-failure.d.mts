@@ -1,5 +1,6 @@
 export const CLOUD_ENGINE_STARTUP_FAILURE_FILE: "cloud-engine-startup-failure.json";
-export type CloudEngineStartupPhase = "startup" | "registration" | "history_restore" | "boot_owner";
+export type CloudEngineStartupPhase = "startup" | "registration" | "history_restore" | "boot_owner" |
+  "boot_bootstrap" | "boot_credentials" | "boot_durability" | "boot_activate" | "boot_install";
 export type CloudEngineStartupFailure = { phase: CloudEngineStartupPhase; name: string; code: string; errno: number | null };
 export const CLOUD_ENGINE_STARTUP_PHASES: readonly CloudEngineStartupPhase[];
 export const CLOUD_ENGINE_STARTUP_NAMES: readonly string[];

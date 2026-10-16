@@ -1,6 +1,7 @@
 import type pg from "pg";
 import { z } from "zod";
 import { withSystemTx, type Tx } from "../db.js";
+import { postgresNotificationSubscription } from "../postgres-notifications.js";
 import { BOAT_RESOURCE_ID_PATTERN, type BoatApiClient } from "./boat-client.js";
 import type { BuilderVmOperation } from "./cloud-builder-vm-store.js";
 import { lockCloudComputerOrganization } from "./computer-identity.js";
@@ -8,7 +9,7 @@ import { CloudProviderError } from "./provider.js";
 
 export const COMPUTER_TEMPLATE_RETENTION_CHANNEL =
   "cloud_computer_template_retention";
-export const COMPUTER_TEMPLATE_READY_HISTORY = 10;
+export const COMPUTER_TEMPLATE_READY_HISTORY = 0;
 
 /** The deletion-only subset of B7's BuilderVmOperationStore. The journal is
  * already scoped to a stable provider account, never to a credential version. */
@@ -61,6 +62,21 @@ export function computerTemplateKeepSet(input: {
     ...input.referenced,
     ...input.newestReady.slice(0, COMPUTER_TEMPLATE_READY_HISTORY),
   ]);
+}
+
+/** Named and stopped artifacts share the workspace/data deletion boundary.
+ * Retired generations and legacy pins still hold their Computer source. */
+export async function computerTemplateWorkspaceReferences(
+  tx: Tx,
+  org: string,
+): Promise<string[]> {
+  const references = await tx.query<{ template_id: string }>(
+    `SELECT DISTINCT source.template_id FROM cloud_workspace_computer_sources source
+     JOIN cloud_workspaces workspace ON workspace.id=source.workspace_id AND workspace.org_id=source.org_id
+     WHERE source.org_id=$1 AND (workspace.status<>'deleted' OR workspace.data_deleted_at IS NULL)`,
+    [org],
+  );
+  return references.rows.map((row) => row.template_id);
 }
 
 /** The caller holds the organization row. Serialize with build preparation,
@@ -116,7 +132,7 @@ export async function computerTemplateCleanupPending(
       return true;
     if (template.account_scope && !rows.length) return true;
   }
-  return false;
+  return (await tx.query("SELECT 1 FROM cloud_computer_template_snapshots WHERE org_id=$1 AND state<>'retired' LIMIT 1", [org])).rowCount !== 0;
 }
 
 /** C5 must accept forks under this same org/head lock and require ready.
@@ -179,15 +195,7 @@ export class CloudComputerTemplateRetentionWorker {
       )
     ).rows[0];
     if (!head) return new Set();
-    // Retired/superseded generations can still be recovery sources. A delete
-    // request alone is insufficient: keep every source until workspace/data
-    // cleanup has actually reached its terminal state.
-    const references = await tx.query<{ template_id: string }>(
-      `SELECT DISTINCT source.template_id FROM cloud_workspace_computer_sources source
-       JOIN cloud_workspaces workspace ON workspace.id=source.workspace_id AND workspace.org_id=source.org_id
-       WHERE source.org_id=$1 AND (workspace.status<>'deleted' OR workspace.data_deleted_at IS NULL)`,
-      [org],
-    );
+    const references = await computerTemplateWorkspaceReferences(tx, org);
     const newest = head.erasing
       ? []
       : (
@@ -202,7 +210,7 @@ export class CloudComputerTemplateRetentionWorker {
     return computerTemplateKeepSet({
       active: head.erasing ? null : head.active_build_id,
       previous: head.erasing ? null : head.previous_build_id,
-      referenced: references.rows.map((row) => row.template_id),
+      referenced: references,
       newestReady: newest,
     });
   }
@@ -481,44 +489,22 @@ export class CloudComputerTemplateRetentionWorker {
     };
     const timer = setInterval(() => run(), this.options.intervalMs ?? 60_000);
     timer.unref();
-    const listener = listenerPool
-      .connect()
-      .then(async (client) => {
-        const onNotification = (notice: pg.Notification) => {
-          if (
-            notice.channel === COMPUTER_TEMPLATE_RETENTION_CHANNEL &&
-            z.string().uuid().safeParse(notice.payload).success
-          )
-            run(notice.payload);
-        };
-        const onError = () =>
-          (this.options.logger ?? console).warn(
-            "[computer-template-retention] notifications unavailable; periodic sweep remains enabled",
-          );
-        client.on("notification", onNotification);
-        client.on("error", onError);
-        try {
-          await client.query(`LISTEN ${COMPUTER_TEMPLATE_RETENTION_CHANNEL}`);
-        } catch {
-          onError();
-        }
-        return async () => {
-          client.removeListener("notification", onNotification);
-          client.removeListener("error", onError);
-          await client
-            .query(`UNLISTEN ${COMPUTER_TEMPLATE_RETENTION_CHANNEL}`)
-            .catch(() => undefined);
-          client.release(true);
-        };
-      })
-      .catch(() => async () => undefined);
+    const listener = postgresNotificationSubscription(listenerPool, {
+      channels: [COMPUTER_TEMPLATE_RETENTION_CHANNEL],
+      onNotification: notice => {
+        if (z.string().uuid().safeParse(notice.payload).success) run(notice.payload);
+      },
+      onReady: () => run(),
+      onUnavailable: () => (this.options.logger ?? console).warn(
+        "[computer-template-retention] notifications unavailable; periodic sweep remains enabled",
+      ),
+    });
+    void listener.start().catch(() => {});
     run();
     return async () => {
       this.stopping = true;
       clearInterval(timer);
-      await (
-        await listener
-      )();
+      await listener.stop();
       await this.ticking;
     };
   }

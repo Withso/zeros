@@ -45,6 +45,7 @@ const rt = vi.hoisted(() => ({
    *  omits the capability fields entirely, which must read as "unknown" rather
    *  than as an authoritative "no effort knob / no Fast". */
   modelList: null as null | { data?: unknown[] },
+  modelListReader: null as null | ((params: unknown) => Promise<unknown>),
   notificationHandlers: new Map<string, (params: unknown) => void>(),
 }));
 
@@ -60,6 +61,7 @@ vi.mock("../app-server", () => ({
         rt.requests.push([method, params]);
         if (method === "config/read") return { config: {} };
         if (method === "model/list") {
+          if (rt.modelListReader) return rt.modelListReader(params);
           return (
             rt.modelList ?? {
               data: [
@@ -88,9 +90,9 @@ vi.mock("../app-server", () => ({
         cliVersion: "0.139.0",
         binarySource: { source: "path", path: "codex" },
         child: { pid: 1234, killed: false },
-        startThread: async () => ({
+        startThread: async (params: { model?: string }) => ({
           threadId: "thread-1",
-          model: "gpt-5",
+          model: params.model ?? "gpt-5",
           approvalPolicy: "on-request",
           sandbox: { type: "workspaceWrite" },
           raw: {},
@@ -168,6 +170,80 @@ function makeAdapter(authenticationContext?: () => string) {
 }
 
 describe("codex mid-turn reconnect + per-session crash signalling", () => {
+  it("refreshes an expired catalog through an existing runtime without another boot", async () => {
+    const { adapter } = makeAdapter();
+    try {
+      await adapter.newSession({ cwd: "/tmp/proj" });
+      rt.modelList = { data: [{ id: "gpt-6-astra" }] };
+      await adapter.initialize();
+      expect(rt.requests.filter(([method]) => method === "model/list")).toHaveLength(1);
+      vi.setSystemTime(Date.now() + 15 * 60 * 1_000);
+      await vi.waitFor(async () => {
+        expect((await adapter.initialize())._meta?.models?.map(model => model.value)).toEqual(["gpt-6-astra"]);
+      });
+      expect(rt.requests.filter(([method]) => method === "model/list")).toHaveLength(2);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("publishes an authoritative empty account catalog and caches the answer", async () => {
+    const { adapter } = makeAdapter();
+    try {
+      rt.modelList = { data: [] };
+      const first = await adapter.newSession({ cwd: "/tmp/proj" });
+      expect(first.initialize._meta).toMatchObject({ models: [], modelsAccountScoped: true });
+      await adapter.newSession({ cwd: "/tmp/proj" });
+      expect(rt.requests.filter(([method]) => method === "model/list")).toHaveLength(1);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("collects every model page before publishing account eligibility", async () => {
+    const { adapter } = makeAdapter();
+    try {
+      rt.modelListReader = async params => (params as { cursor?: string }).cursor === "second"
+        ? { data: [{ id: "gpt-6-astra" }], nextCursor: null }
+        : { data: [{ id: "gpt-5.6-sol" }], nextCursor: "second" };
+      const result = await adapter.newSession({ cwd: "/tmp/proj" });
+      expect(result.initialize._meta?.models?.map(model => model.value)).toEqual(["gpt-5.6-sol", "gpt-6-astra"]);
+      expect(rt.requests.filter(([method]) => method === "model/list")).toHaveLength(2);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("keeps confirmed models when a later page fails instead of publishing a partial list", async () => {
+    const { adapter } = makeAdapter();
+    try {
+      const first = await adapter.newSession({ cwd: "/tmp/proj" });
+      const confirmed = first.initialize._meta?.models;
+      vi.setSystemTime(Date.now() + 15 * 60 * 1_000);
+      rt.modelListReader = async params => {
+        if ((params as { cursor?: string }).cursor) throw new Error("offline");
+        return { data: [{ id: "gpt-6-astra" }], nextCursor: "second" };
+      };
+      await adapter.newSession({ cwd: "/tmp/proj" });
+      expect((await adapter.initialize())._meta?.models).toBe(confirmed);
+      expect(rt.requests.filter(([method]) => method === "model/list")).toHaveLength(3);
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["rpc", "completion"] as const)("refreshes once after a %s model rejection without replaying or replacing the selected model", async kind => {
+    const { adapter } = makeAdapter();
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: { OPENAI_MODEL: "gpt-5.6-sol", ZEROS_REQUIRE_EXACT_MODEL: "1" } });
+      rt.modelList = { data: [{ id: "gpt-6-astra" }] };
+      const rejection = { code: "model_not_found", message: "The selected model is unavailable." };
+      const turns: unknown[] = [];
+      rt.runTurnImpl = async params => {
+        turns.push(params);
+        if (kind === "rpc") throw rejection;
+        return { turnId: "rejected", status: "failed", raw: { turn: { error: rejection } } };
+      };
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("hi") })).rejects.toMatchObject({ failure: { kind: "protocol-error", advice: expect.stringMatching(/model menu/) } });
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.map(model => model.value)).toEqual(["gpt-6-astra"]));
+      expect(turns).toHaveLength(1);
+      expect(turns[0]).toMatchObject({ model: "gpt-5.6-sol" });
+      expect(rt.requests.filter(([method]) => method === "model/list")).toHaveLength(2);
+    } finally { await adapter.dispose(); }
+  });
+
   it("does not publish models from admission that began under a previous account", async () => {
     const { adapter } = makeAdapter(() => "account-b");
     rt.modelList = {
@@ -225,6 +301,7 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     rt.runTurnImpl = null;
     rt.requests = [];
     rt.modelList = null;
+    rt.modelListReader = null;
     rt.notificationHandlers.clear();
   });
   afterEach(() => {

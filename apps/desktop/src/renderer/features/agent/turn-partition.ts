@@ -1,6 +1,7 @@
-import { toolPresentationReady } from "./renderers/tool-readiness";
+import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 import { isTurnFailureNotice } from "./turn-failure";
-// Split working narration/tools from provider-declared final answers.
+import { isProviderWorkEvent, isUsageNotice } from "./transcript-notices";
+// Split working narration/tools from provider-declared partial/final answers.
 // Live events retain their source order and become inspectable immediately.
 
 import type { AgentMessage, AgentToolMessage } from "./use-agent-session";
@@ -9,8 +10,8 @@ export interface TurnPartition {
   /** Tools, thinking, in-between narration, sub-agents — the reasoning
    *  feed shown dimmed (and collapsible once the turn settles). */
   working: AgentMessage[];
-  /** The trailing agent/system text and standalone output records, rendered
-   *  brightly. Empty when the turn ended with working content only. */
+  /** Confirmed partial/final answers, legacy trailing text and standalone
+   * output records, rendered brightly without changing turn lifetime. */
   finalOutput: AgentMessage[];
 }
 
@@ -98,26 +99,27 @@ export function partitionTurn(
   events: AgentMessage[],
   options?: PartitionOptions,
 ): TurnPartition {
-  events = events.filter(isVisibleTranscriptEvent);
+  events = withoutRedundantAgentTasks(events).filter(isVisibleTranscriptEvent);
   const finalOutputIndexes = new Set<number>();
   const failureTurnId = options?.failureTurnId;
   let liveFailureIndex = -1;
   events.forEach((event, index) => {
+    if (isProviderWorkEvent(event)) liveFailureIndex = -1;
     if (options?.live && failureTurnId && isTurnFailureNotice(event, failureTurnId)) {
       liveFailureIndex = index;
     }
     if (
       event.kind === "text" &&
       event.role === "agent" &&
-      event.phase === "final_answer"
+      (event.phase === "final_answer" || event.phase === "partial_answer")
     ) {
       finalOutputIndexes.add(index);
     }
   });
   // Legacy providers have no phase. Keep their settled trailing-answer
-  // convention, while an explicit final phase survives any late bookkeeping.
+  // convention, while explicit answers survive further work and bookkeeping.
   for (let i = events.length - 1; !options?.live && i >= 0; i--) {
-    if (isBackgroundTask(events[i])) continue;
+    if (isBackgroundTask(events[i]) || isUsageNotice(events[i])) continue;
     if (isFinalOutputEvent(events[i])) {
       finalOutputIndexes.add(i);
     } else {
@@ -127,6 +129,8 @@ export function partitionTurn(
   const working: AgentMessage[] = [];
   const finalOutput: AgentMessage[] = [];
   events.forEach((event, index) => {
+    // Usage is a product status rendered once below the turn's output.
+    if (isUsageNotice(event)) return;
     // Keep the native event as an answer boundary above: dropping a failure
     // before partitioning would turn unfinished phase-less prose into output.
     // Before settlement, show the latest terminal notice outside activity.

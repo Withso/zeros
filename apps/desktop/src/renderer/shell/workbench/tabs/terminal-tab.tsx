@@ -59,6 +59,10 @@ import { RunStream } from "../../../shared/ui/loading";
 import { DynamicIcon } from "../../../shared/ui/icon-registry";
 import { useWorkspaceStore } from "../../../state/store";
 import { useActiveWorkspace } from "../../../state/use-active-workspace";
+import {
+  documentIsVisible,
+  useDocumentActive,
+} from "../../../state/use-document-active";
 import { isLocalMainWorkspace } from "../../../state/local-main-workspace";
 import { useNativeRuntime } from "../../../platform/runtime";
 import { ptyTerminals, onPtyTerminalsChanged } from "../../../platform/pty";
@@ -1042,6 +1046,7 @@ function useSetupStatus(
   workspace: Workspace | null,
   active: boolean,
 ): SetupStatus {
+  const observe = useDocumentActive(active);
   const workspaceId = workspace?.id ?? null;
   const repoRoot =
     workspace && isLocalMainWorkspace(workspace)
@@ -1058,13 +1063,14 @@ function useSetupStatus(
     status: workspaceId ? (setupStatusCache.get(workspaceId) ?? null) : null,
   }));
   useEffect(() => {
-    if (!workspaceId || !active) return;
+    if (!workspaceId || !observe) return;
     let cancelled = false;
     // Monotonic pull token: DB_CHANGED can fire back-to-back (running → then
     // passed) and the responses may resolve out of order — only the LATEST
     // issued pull may commit, or the dot could stick on a stale "running".
     let pullGen = 0;
     const pull = async () => {
+      if (cancelled || !documentIsVisible()) return;
       const gen = ++pullGen;
       try {
         // statusOnly: skip the log payload + command resolution — this hook
@@ -1075,7 +1081,7 @@ function useSetupStatus(
           repoRoot,
           statusOnly: true,
         });
-        if (!cancelled && gen === pullGen) {
+        if (!cancelled && documentIsVisible() && gen === pullGen) {
           setupStatusCache.delete(workspaceId);
           setupStatusCache.set(workspaceId, next.state);
           if (setupStatusCache.size > MAX_SETUP_STATUS_SNAPSHOTS) {
@@ -1108,7 +1114,7 @@ function useSetupStatus(
       cancelled = true;
       off?.();
     };
-  }, [workspaceId, repoRoot, bridge, active]);
+  }, [workspaceId, repoRoot, bridge, observe]);
   if (!workspaceId) return null;
   return snapshot.workspaceId === workspaceId
     ? snapshot.status

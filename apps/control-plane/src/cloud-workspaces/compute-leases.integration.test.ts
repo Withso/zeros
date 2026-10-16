@@ -13,6 +13,8 @@ import {
   vi,
 } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { withSystemTx, createPool, DatabaseConnectionLostError } from "../db.js";
+import { completeWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import {
   seedProviderLossAttestation,
   seedReadyCloudWorkspace,
@@ -67,6 +69,47 @@ function abortingPool(base: pg.Pool, input: {
             }
           }
           history.push(sql);
+          return Reflect.apply(target.query, target, args);
+        };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    };
+    const value = Reflect.get(target, key);
+    return typeof value === "function" ? value.bind(target) : value;
+  } });
+  return { pool, observed };
+}
+
+/** Real local PostgreSQL failures at the metering transaction boundary. */
+function interruptedLedgerPool(base: pg.Pool, kind: "connection_lost" | "statement_timeout" | "committed_connection_lost", at: "meter" | "reserve" = "meter") {
+  const observed = { interruptions: 0, connectionEnded: false };
+  const pool = new Proxy(base, { get(target, key) {
+    if (key === "connect") return async () => {
+      const client = await target.connect();
+      let metered = false;
+      return new Proxy(client, { get(target, key) {
+        if (key === "query") return async (...args: unknown[]) => {
+          const sql = typeof args[0] === "string" ? args[0] : (args[0] as { text?: string }).text ?? "";
+          const write = at === "meter" ? sql.includes("SET debited_micro_usd=debited_micro_usd+$2")
+            : sql.includes("UPDATE managed_compute_credit_periods SET reserved_micro_usd=reserved_micro_usd+$2");
+          if (write) metered = true;
+          const interrupt = observed.interruptions === 0 && (kind === "committed_connection_lost"
+            ? metered && sql === "COMMIT" : write);
+          if (interrupt) {
+            observed.interruptions++;
+            const committed = kind === "committed_connection_lost" ? await Reflect.apply(target.query, target, args) : undefined;
+            if (kind !== "statement_timeout") {
+              const pid = (await target.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+              const ended = new Promise<void>(resolve => target.once("end", () => { observed.connectionEnded = true; resolve(); }));
+              await base.query("SELECT pg_terminate_backend($1)", [pid]);
+              await ended;
+              if (kind === "committed_connection_lost") return committed;
+            } else {
+              await target.query("SET LOCAL statement_timeout='2ms'");
+              await target.query("SELECT pg_sleep(1)");
+            }
+          }
           return Reflect.apply(target.query, target, args);
         };
         const value = Reflect.get(target, key);
@@ -282,7 +325,7 @@ suite("managed compute lifecycle admission", () => {
     const lease = (await pool.query("SELECT *,clock_timestamp() AS observed_now FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0];
     expect(lease.lease_owner).toBeNull();
     expect(lease.lease_expires_at).toBeNull();
-    expect(lease.last_error_code).toBe("compute_reconciliation_failed");
+    expect(lease.last_error_code).toBe("control_plane_unavailable");
     expect(lease.next_check_at.getTime()).toBeGreaterThan(lease.observed_now.getTime());
     expect(lease.next_check_at.getTime()).toBeLessThanOrEqual(Math.min(lease.funded_until.getTime(), lease.provider_expires_at.getTime()) - 315000);
     await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
@@ -373,6 +416,107 @@ suite("managed compute lifecycle admission", () => {
   async function publicWorkspaceError() {
     return (await publicWorkspace()).error;
   }
+
+  async function userStop() {
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: f.userId } as AuthedUser); await next(); });
+    app.route("/", createCloudWorkspaceRoutes(pool, null, { workosEnabled: false }));
+    const response = await app.request(`/v1/organizations/${f.organizationId}/cloud-workspaces/${f.workspaceId}/stop`, {
+      method: "POST", headers: { "Idempotency-Key": randomUUID() },
+    });
+    expect(response.status).toBe(202);
+    return (await pool.query<{ id: string }>("SELECT id FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='stop'", [f.workspaceId])).rows[0]!.id;
+  }
+
+  it("adopts a slow user stop across lease ticks without cancelling its final checkpoint", async () => {
+    await ready(); await age();
+    const intentId = await userStop();
+    const checkpoint = (await pool.query("SELECT id,deadline_at FROM workspace_checkpoint_requests WHERE lifecycle_intent_id=$1", [intentId])).rows[0];
+    expect(checkpoint).toBeDefined();
+    for (let n = 0; n < 2; n++) {
+      // A safety observation begins draining while the user's capture is in flight.
+      await pool.query("UPDATE managed_compute_allocation_leases SET state='draining',next_check_at=now() WHERE id=$1", [input.intentId]);
+      expect(await coordinator.runOnce()).toBe(true);
+    }
+    expect((await pool.query("SELECT id,state,error_code FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='stop'", [f.workspaceId])).rows)
+      .toEqual([{ id: intentId, state: "queued", error_code: null }]);
+    expect((await pool.query("SELECT id,state,deadline_at FROM workspace_checkpoint_requests WHERE lifecycle_intent_id=$1", [intentId])).rows)
+      .toEqual([{ id: checkpoint.id, state: "queued", deadline_at: checkpoint.deadline_at }]);
+    expect((await pool.query("SELECT stop_intent_id,last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0])
+      .toEqual({ stop_intent_id: intentId, last_error_code: null });
+    const reconciler = new CloudWorkspaceReconciler({ pool, provider: asProvider(), intervalMs: 1000, workosEnabled: false });
+    await reconciler.runOnce();
+    expect(provider.stop).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT state,revoked_at FROM cloud_workspace_engine_instances WHERE id=$1", [f.engineInstanceId])).rows[0])
+      .toEqual({ state: "ready", revoked_at: null });
+  });
+
+  it("does not supersede an observing user stop or classify desired stopped as unavailable", async () => {
+    await ready(); await age();
+    // A stop admitted before engine readiness has no checkpoint gate. A later
+    // lease observation still must not issue another provider lifecycle intent.
+    await pool.query("UPDATE cloud_workspaces SET status='setting_up' WHERE id=$1", [f.workspaceId]);
+    const intentId = await userStop();
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='observing' WHERE id=$1", [intentId]);
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT id,state,error_code FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='stop'", [f.workspaceId])).rows)
+      .toEqual([{ id: intentId, state: "observing", error_code: null }]);
+    expect((await pool.query("SELECT stop_intent_id,last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0])
+      .toEqual({ stop_intent_id: intentId, last_error_code: null });
+    expect((await pool.query("SELECT count(*)::int count FROM cloud_workspace_diagnostic_incidents WHERE workspace_id=$1", [f.workspaceId])).rows[0].count).toBe(0);
+  });
+
+  it("records stop_unsealed before a forced provider stop after the seal deadline without replacing the user intent", async () => {
+    await ready(); await age();
+    const intentId = await userStop();
+    await pool.query("UPDATE workspace_checkpoint_requests SET created_at=now()-interval '6 minutes',deadline_at=now()-interval '1 second' WHERE lifecycle_intent_id=$1", [intentId]);
+    const force = () => requestManagedComputeStop(pool, { leaseId: input.intentId, reason: "compute_credit_exhausted", force: true });
+    await force();
+    const epoch = (await pool.query("SELECT authority_epoch FROM cloud_workspaces WHERE id=$1", [f.workspaceId])).rows[0].authority_epoch;
+    await force();
+    expect((await pool.query("SELECT authority_epoch FROM cloud_workspaces WHERE id=$1", [f.workspaceId])).rows[0].authority_epoch).toBe(epoch);
+    expect((await pool.query("SELECT id,state FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='stop'", [f.workspaceId])).rows)
+      .toEqual([{ id: intentId, state: "queued" }]);
+    expect((await pool.query("SELECT state,error_code,checkpoint_id FROM workspace_checkpoint_requests WHERE lifecycle_intent_id=$1", [intentId])).rows)
+      .toEqual([{ state: "cancelled", error_code: "stop_unsealed", checkpoint_id: null }]);
+    const requestId = (await pool.query("SELECT id FROM workspace_checkpoint_requests WHERE lifecycle_intent_id=$1", [intentId])).rows[0].id;
+    // A late capture cannot turn a cancelled gate into durable success.
+    await expect(withSystemTx(pool, tx => completeWorkspaceCheckpointRequest(tx, {
+      workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1,
+      requestId, checkpointId: randomUUID(), reason: "before_stop",
+    }))).rejects.toThrow();
+    const receipts = () => pool.query("SELECT subject FROM audit_log WHERE action='cloud_workspace.stop_unsealed' AND subject->>'intentId'=$1", [intentId]);
+    provider.stop.mockImplementation(async () => {
+      expect((await receipts()).rows).toEqual([{ subject: expect.objectContaining({ intentId, generation: 1, outcome: "stop_unsealed" }) }]);
+      return { ...resource(), state: "stopped" };
+    });
+    const reconciler = new CloudWorkspaceReconciler({ pool, provider: asProvider(), intervalMs: 1000, workosEnabled: false });
+    await reconciler.runOnce();
+    expect(provider.stop).toHaveBeenCalledOnce();
+    expect((await receipts()).rowCount).toBe(1);
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [intentId])).rows[0].state).toBe("succeeded");
+  });
+
+  it("does not let delete settlement bypass an in-flight user checkpoint", async () => {
+    await ready(); await age();
+    const intentId = await userStop();
+    provider.stop.mockResolvedValue({ ...resource(), state: "stopped" });
+    expect(await coordinator.beforeDelete(input, asProvider(), resource())).toBe(false);
+    expect(provider.stop).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT state,error_code FROM workspace_checkpoint_requests WHERE lifecycle_intent_id=$1", [intentId])).rows[0])
+      .toEqual({ state: "queued", error_code: null });
+    expect((await pool.query("SELECT count(*)::int count FROM audit_log WHERE action='cloud_workspace.stop_unsealed'")).rows[0].count).toBe(0);
+  });
+
+  it("requests a final checkpoint when delete settlement has no admitted stop", async () => {
+    await ready();
+    provider.stop.mockResolvedValue({ ...resource(), state: "stopped" });
+    expect(await coordinator.beforeDelete(input, asProvider(), resource())).toBe(false);
+    expect(provider.stop).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT state,reason FROM workspace_checkpoint_requests WHERE workspace_id=$1", [f.workspaceId])).rows)
+      .toEqual([{ state: "queued", reason: "before_stop" }]);
+    expect((await pool.query("SELECT count(*)::int count FROM audit_log WHERE action='cloud_workspace.stop_unsealed'")).rows[0].count).toBe(0);
+  });
 
   async function failSetup(code: string, log = "") {
     await pool.query(`UPDATE cloud_workspace_setup_runs SET state='failed',completed_at=now(),
@@ -684,6 +828,182 @@ suite("managed compute lifecycle admission", () => {
       ).rows[0].state,
     ).toBe("queued");
   });
+  it.each(["connection_lost", "statement_timeout", "committed_connection_lost"] as const)("OF19 retains prepaid running compute after a real ledger %s", async kind => {
+    await ready(); await age();
+    const interrupted = interruptedLedgerPool(pool, kind);
+    const observedErrors: Array<{ name: string; code: unknown }> = [];
+    const originalMeter = DatabaseManagedComputeCreditLedger.prototype.meter;
+    vi.spyOn(DatabaseManagedComputeCreditLedger.prototype, "meter").mockImplementation(async function (this: DatabaseManagedComputeCreditLedger, input) {
+      try { return await originalMeter.call(this, input); }
+      catch (error) {
+        observedErrors.push({ name: (error as Error).name, code: (error as { code?: unknown }).code });
+        throw error;
+      }
+    });
+    const log = vi.fn();
+    const broken = new CloudWorkspaceComputeLeaseCoordinator({ pool: interrupted.pool, providerResolver: resolver(), workosEnabled: false, policy, logger: { error: log } });
+    expect(await broken.runOnce()).toBe(true);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("control_plane_unavailable, meter_commit"));
+    expect(interrupted.observed.interruptions).toBe(1);
+    expect(observedErrors).toEqual([kind !== "statement_timeout"
+      ? { name: "DatabaseConnectionLostError", code: "database_connection_lost" }
+      : { name: "error", code: "57014" }]);
+    expect((await pool.query("SELECT state,stop_intent_id FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0])
+      .toEqual({ state: "active", stop_intent_id: null });
+    expect((await pool.query("SELECT count(*)::int AS n FROM workspace_checkpoint_requests WHERE workspace_id=$1", [f.workspaceId])).rows[0].n).toBe(0);
+    expect(provider.stop).not.toHaveBeenCalled();
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+    expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+    const retryDelay = Number((await nextCheck()).from_now);
+    expect(retryDelay).toBeGreaterThan(0);
+    expect(retryDelay).toBeLessThanOrEqual(300);
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp() WHERE id=$1", [input.intentId]);
+    expect(await broken.runOnce()).toBe(true);
+    expect((await pool.query("SELECT state,last_error_code,first_error_at FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0])
+      .toEqual({ state: "active", last_error_code: null, first_error_at: null });
+    expect((await balance())[0]!.debitedMicroUsd).toBe(6000);
+    expect((await pool.query("SELECT count(*)::int AS n FROM managed_compute_credit_events WHERE reservation_id=$1 AND kind='debit'", [input.intentId])).rows[0].n).toBe(1);
+    expect(pool.waitingCount).toBe(0);
+  });
+
+  it("OF19 re-observes an ambiguously committed reservation before renewing and never duplicates funding", async () => {
+    await ready(); await age();
+    const expires = new Date(Date.now() + 400_000);
+    provider.inspect.mockResolvedValue({ ...resource(), metadata: { computeLeaseExpiresAt: expires.toISOString() } });
+    await pool.query("UPDATE managed_compute_allocation_leases SET provider_expires_at=$2 WHERE id=$1", [input.intentId, expires]);
+    const interrupted = interruptedLedgerPool(pool, "committed_connection_lost", "reserve");
+    const worker = new CloudWorkspaceComputeLeaseCoordinator({ pool: interrupted.pool, providerResolver: resolver(), workosEnabled: false, policy });
+    await worker.runOnce();
+    expect(interrupted.observed.interruptions).toBe(1);
+    await expectNoStop();
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+    const reservations = () => pool.query("SELECT id,period_id,authorized_micro_usd,reserved_micro_usd,debited_micro_usd FROM managed_compute_credit_reservations WHERE id=$1", [input.intentId]);
+    const committed = (await reservations()).rows;
+    expect(committed).toHaveLength(1);
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp() WHERE id=$1", [input.intentId]);
+    await worker.runOnce();
+    const recovered = (await reservations()).rows;
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({ id: committed[0].id, period_id: committed[0].period_id });
+    // A fresh plan may reserve a few extra seconds; it must re-use all money
+    // already committed, not add the original reservation again.
+    expect(Number(recovered[0].authorized_micro_usd) - Number(committed[0].authorized_micro_usd)).toBeLessThan(500);
+    expect(Number(recovered[0].reserved_micro_usd) + Number(recovered[0].debited_micro_usd)).toBe(Number(recovered[0].authorized_micro_usd));
+    expect(provider.renewComputeLease).toHaveBeenCalledOnce();
+    expect(provider.createWithComputeLease).toHaveBeenCalledOnce();
+    expect(provider.startWithComputeLease).not.toHaveBeenCalled();
+  });
+
+  it.each(["api", "worker"] as const)("OF19 keeps funded compute after a real %s pool acquire timeout", async kind => {
+    await ready(); await age();
+    const base = kind === "api" ? createPool(process.env.TEST_DATABASE_URL!, { workload: "api", maxConnections: 1 })
+      : new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1, connectionTimeoutMillis: 25 });
+    let armed = false, failed = false;
+    const wrapped = new Proxy(base, { get(target, key) {
+      if (key === "connect") return async () => {
+        if (armed && !failed) {
+          failed = true;
+          const held = await target.connect();
+          try { return await target.connect(); } finally { held.release(); }
+        }
+        return target.connect();
+      };
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    const originalMeter = DatabaseManagedComputeCreditLedger.prototype.meter;
+    vi.spyOn(DatabaseManagedComputeCreditLedger.prototype, "meter").mockImplementation(async function (this: DatabaseManagedComputeCreditLedger, input) {
+      armed = true;
+      return originalMeter.call(this, input);
+    });
+    try {
+      const worker = new CloudWorkspaceComputeLeaseCoordinator({ pool: wrapped, providerResolver: resolver(), workosEnabled: false, policy });
+      await worker.runOnce();
+      expect(failed).toBe(true);
+      await expectNoStop();
+      expect((await pool.query("SELECT last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].last_error_code).toBe("control_plane_unavailable");
+      expect(provider.renewComputeLease).not.toHaveBeenCalled();
+      expect(base.waitingCount).toBe(0);
+    } finally { await base.end(); }
+  });
+
+  it.each(["40001", "40P01"] as const)("OF19 classifies exhausted %s as unavailable without replaying provider I/O", async code => {
+    await ready(); await age();
+    const db = abortingPool(pool, { code, count: 3, when: providerLookup });
+    await originalCoordinator(db.pool).runOnce();
+    expect(db.observed.aborts).toBe(3);
+    await expectNoStop();
+    expect((await pool.query("SELECT last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].last_error_code).toBe("control_plane_unavailable");
+    expect(provider.inspect).not.toHaveBeenCalled();
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("OF19 unavailable re-observation is unknown, including unavailable database clock=%s", async clockUnavailable => {
+    await ready(); await age();
+    const interrupted = interruptedLedgerPool(pool, "connection_lost");
+    const worker = new CloudWorkspaceComputeLeaseCoordinator({ pool: interrupted.pool, providerResolver: resolver(), workosEnabled: false, policy });
+    vi.spyOn(worker as unknown as { activeAllocationRetry(): Promise<boolean> }, "activeAllocationRetry").mockRejectedValue(new DatabaseConnectionLostError());
+    if (clockUnavailable) {
+      vi.spyOn(worker as unknown as { now(): Promise<number> }, "now").mockRejectedValue(new DatabaseConnectionLostError());
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 86_400_000);
+    }
+    await expect(worker.runOnce()).resolves.toBe(true);
+    await expectNoStop();
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+    const row = (await pool.query("SELECT *,clock_timestamp() AS observed_now FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0];
+    expect(row.next_check_at.getTime()).toBeGreaterThan(row.observed_now.getTime());
+    expect(row.next_check_at.getTime()).toBeLessThanOrEqual(Math.min(row.funded_until.getTime(), row.provider_expires_at.getTime()) - 315000);
+    expect(row.last_error_code).toBe("control_plane_unavailable");
+  });
+
+  it.each(["funded_until", "provider_expires_at"] as const)("OF19 stops at the confirmed %s checkpoint margin with a closed CP-unavailable incident", async deadline => {
+    await ready(); await age();
+    await pool.query("UPDATE managed_compute_allocation_leases SET " + deadline + "=statement_timestamp()+interval '5 minutes'" +
+      (deadline === "funded_until" ? ",provider_expires_at=least(provider_expires_at,statement_timestamp()+interval '5 minutes')" : "") + " WHERE id=$1", [input.intentId]);
+    const interrupted = interruptedLedgerPool(pool, "connection_lost");
+    await new CloudWorkspaceComputeLeaseCoordinator({ pool: interrupted.pool, providerResolver: resolver(), workosEnabled: false, policy }).runOnce();
+    expect((await pool.query("SELECT state FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].state).toBe("draining");
+    const incident = (await pool.query("SELECT first_cause FROM cloud_workspace_diagnostic_incidents WHERE operation_id=$1", [input.intentId])).rows[0];
+    expect(incident.first_cause).toMatchObject({ code: "control_plane_unavailable", errorClass: "database", stopReason: "control_plane_unavailable", decision: "checkpoint", site: "meter_commit" });
+    // Public errors remain hidden while the final checkpoint still preserves
+    // the ready workspace. A later finite-deadline escalation keeps its cause.
+    await requestManagedComputeStop(pool, { leaseId: input.intentId, reason: "compute_scope_unavailable", force: true });
+    expect(await publicWorkspaceError()).toMatchObject({ code: "cloud_workspace_control_plane_unavailable" });
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+    expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+  });
+
+  it("OF19 never turns an outage fallback into a stop for a different allocation generation", async () => {
+    await ready(); await age();
+    await pool.query("UPDATE managed_compute_allocation_leases SET lease_owner='compute:original-proof',lease_expires_at=clock_timestamp()+interval '5 minutes' WHERE id=$1", [input.intentId]);
+    await requestManagedComputeStop(pool, { leaseId: input.intentId, reason: "control_plane_unavailable",
+      expectedLeaseOwner: "compute:original-proof", expectedGeneration: 2 });
+    await expectNoStop();
+    expect((await pool.query("SELECT lease_owner FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].lease_owner).toBe("compute:original-proof");
+  });
+
+  it("OF19 still refuses a known revoked engine after a real ledger connection loss", async () => {
+    await ready(); await age();
+    await pool.query("UPDATE cloud_workspace_engine_instances SET revoked_at=clock_timestamp(),state='revoked' WHERE id=$1", [f.engineInstanceId]);
+    const interrupted = interruptedLedgerPool(pool, "connection_lost");
+    await new CloudWorkspaceComputeLeaseCoordinator({ pool: interrupted.pool, providerResolver: resolver(), workosEnabled: false, policy }).runOnce();
+    expect((await pool.query("SELECT state FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].state).toBe("draining");
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+  });
+
+  it("OF19 keeps permanent ledger corruption on the safety path", async () => {
+    await ready(); await age();
+    vi.spyOn(DatabaseManagedComputeCreditLedger.prototype, "meter").mockRejectedValueOnce(Object.assign(new Error("private-corruption-canary"), { code: "23514" }));
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT state FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].state).toBe("draining");
+    const incident = (await pool.query("SELECT reason,first_cause FROM cloud_workspace_diagnostic_incidents WHERE operation_id=$1", [input.intentId])).rows[0];
+    expect(incident).toMatchObject({ reason: "safety_failure", first_cause: { sqlState: "23514" } });
+    expect(incident.first_cause.stopReason).not.toBe("control_plane_unavailable");
+    expect(JSON.stringify(incident)).not.toContain("private-corruption-canary");
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+  });
+
   it("retains a typed incident before safety stop and after settlement", async () => {
     await ready(); await age();
     provider.readComputeUsage.mockRejectedValueOnce(Object.assign(new Error("credential-canary"), { code: "23514" }));
@@ -825,6 +1145,78 @@ suite("managed compute lifecycle admission", () => {
         )
       ).rows[0].state,
     ).toBe("settled");
+  });
+  it("settles at the last confirmed meter only once a lower final reading persists 15 minutes after the stop", async () => {
+    await ready();
+    await age();
+    provider.inspect.mockResolvedValue(resource(200));
+    await coordinator.runOnce();
+    expect((await balance())[0]).toMatchObject({ debitedMicroUsd: 6000 });
+    provider.inspect.mockResolvedValue({ ...resource(), state: "archived" });
+    provider.readComputeUsage.mockImplementation(async (id, window) => ({
+      resourceId: id,
+      since: window!.since.toISOString(),
+      until: window!.until!.toISOString(),
+      billableSeconds: 0,
+      secondsPerDollar: 100000,
+      listPriceMicroUsd: 0,
+      running: false,
+    }));
+    await coordinator.runOnce();
+    // An older, unrelated failure streak must not shorten the grace.
+    await pool.query(
+      "UPDATE managed_compute_allocation_leases SET last_error_code='compute_final_meter_unavailable',first_error_at=now()-interval '1 hour' WHERE id=$1",
+      [input.intentId],
+    );
+    const pass = async (stopAge: string) => {
+      await pool.query(
+        "UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-$2::interval,next_check_at=now() WHERE id=$1",
+        [input.intentId, stopAge],
+      );
+      await coordinator.runOnce();
+      return (await pool.query<{ state: string; last_error_code: string | null; reservation: string; billable: string; final_reason: string | null }>(
+        `SELECT lease.state,lease.last_error_code,reservation.state AS reservation,reservation.billable_seconds AS billable,reservation.final_reason
+        FROM managed_compute_allocation_leases lease JOIN managed_compute_credit_reservations reservation ON reservation.id=lease.id WHERE lease.id=$1`,
+        [input.intentId],
+      )).rows[0]!;
+    };
+    for (const stopAge of ["10 seconds", "10 seconds", "14 minutes"])
+      expect(await pass(stopAge)).toMatchObject({ last_error_code: "compute_credit_meter_rejected", reservation: "open", billable: "600" });
+    expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+    expect(await pass("16 minutes")).toMatchObject({
+      state: "settled", last_error_code: null, reservation: "final", billable: "600", final_reason: "allocation_stopped",
+    });
+    expect((await balance())[0]).toMatchObject({ debitedMicroUsd: 6000, reservedMicroUsd: 0, availableMicroUsd: 14000 });
+  });
+  it("keeps a stopped VM unsettled when its lower final reading is otherwise invalid", async () => {
+    await ready();
+    await age();
+    provider.inspect.mockResolvedValue(resource(200));
+    await coordinator.runOnce();
+    provider.inspect.mockResolvedValue({ ...resource(), state: "archived" });
+    provider.readComputeUsage.mockImplementation(async (id, window) => ({
+      resourceId: id,
+      since: window!.since.toISOString(),
+      until: window!.until!.toISOString(),
+      billableSeconds: 0,
+      secondsPerDollar: 50000,
+      listPriceMicroUsd: 0,
+      running: false,
+    }));
+    await coordinator.runOnce();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await pool.query(
+        "UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-interval '1 hour',next_check_at=now() WHERE id=$1",
+        [input.intentId],
+      );
+      await coordinator.runOnce();
+    }
+    expect((await pool.query(
+      `SELECT lease.state<>'settled' AS unsettled,lease.last_error_code,reservation.state AS reservation
+      FROM managed_compute_allocation_leases lease JOIN managed_compute_credit_reservations reservation ON reservation.id=lease.id WHERE lease.id=$1`,
+      [input.intentId],
+    )).rows[0]).toEqual({ unsettled: true, last_error_code: "compute_credit_meter_rejected", reservation: "open" });
+    expect((await balance())[0]).toMatchObject({ debitedMicroUsd: 6000 });
   });
   const stoppedMeter = () => {
     provider.inspect.mockResolvedValue({ ...resource(), state: "archived" });
@@ -1036,9 +1428,12 @@ suite("managed compute lifecycle admission", () => {
     expect(health.reasons).toContain("compute_settlement_stalled");
     expect(JSON.stringify(health)).not.toContain(f.workspaceId);
   });
-  it("stops and defers deletion while usage settlement is pending", async () => {
+  it("stops after the bounded fallback and defers deletion while usage settlement is pending", async () => {
     await ready();
+    await pool.query("UPDATE managed_compute_allocation_leases SET provider_expires_at=now()+interval '30 seconds' WHERE id=$1", [input.intentId]);
     provider.stop.mockResolvedValue({ ...resource(), state: "archived" });
+    expect(await coordinator.beforeDelete(input, asProvider(), resource())).toBe(false);
+    expect(provider.stop).not.toHaveBeenCalled();
     expect(
       await coordinator.beforeDelete(input, asProvider(), resource()),
     ).toBe(false);

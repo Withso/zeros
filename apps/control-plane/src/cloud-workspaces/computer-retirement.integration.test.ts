@@ -13,7 +13,8 @@ import {
   vi,
 } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
-import { withSystemTx } from "../db.js";
+import { createPool, withSystemTx } from "../db.js";
+import { withWorkOSProviderLocks } from "../workos-provider-locks.js";
 import { ensureCloudComputerIdentity } from "./computer-identity.js";
 import {
   CloudComputerRetirementWorker,
@@ -27,6 +28,19 @@ import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 const account = "zeros-v2-test-retirement-account";
 const base = `boat:zeros-v2-test-base@sha256:${"a".repeat(64)}`;
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
+function barrier() {
+  let release!: () => void;
+  const promise = new Promise<void>(resolve => { release = resolve; });
+  return { promise, release };
+}
+async function promptly<T>(work: Promise<T>, description: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${description} exceeded one second`)), 1_000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
 d("historical Cloud Computer retirement", () => {
   let pool: pg.Pool;
   let fixture: Awaited<ReturnType<typeof seedReadyCloudWorkspace>>;
@@ -139,6 +153,82 @@ d("historical Cloud Computer retirement", () => {
     ).rows[0];
   const tick = () =>
     new ComputerImageRetirementWorker(pool, account, driver).tick();
+
+  it("keeps short worker transactions and both callbacks moving with Computer and WorkOS session locks held", async () => {
+    const id = await captured();
+    const workerPool = createPool(process.env.TEST_DATABASE_URL!, { workload: "worker" });
+    const lockPool = createPool(process.env.TEST_DATABASE_URL!, { workload: "retirement-lock" });
+    const computerEntered = barrier(), workosEntered = barrier(), callbacks = barrier(), releaseHolders = barrier();
+    const computerCheckpoint = barrier(), workosCheckpoint = barrier();
+    let cleanup = false;
+    const retirement = new ComputerImageRetirementWorker(workerPool, account, {
+      ...driver,
+      async removeSnapshot(_image, persist) {
+        computerEntered.release(); await callbacks.promise;
+        if (cleanup) return true;
+        await persist(); computerCheckpoint.release();
+        await releaseHolders.promise; return true;
+      },
+    }, [], lockPool).tick();
+    void retirement.catch(() => {});
+    let workos: Promise<void> | undefined, short: Promise<number> | undefined;
+    try {
+      await promptly(computerEntered.promise, "Computer provider barrier");
+      workos = withWorkOSProviderLocks(workerPool, [`pool-overlap:${randomUUID()}`], async () => {
+        workosEntered.release(); await callbacks.promise;
+        if (cleanup) return;
+        await withSystemTx(workerPool, tx => tx.query("SELECT 1"));
+        workosCheckpoint.release(); await releaseHolders.promise;
+      });
+      void workos.catch(() => {});
+      await promptly(workosEntered.promise, "WorkOS provider barrier");
+      // Both real session-lock holders stay checked out until the short work
+      // and both DB callbacks finish. No sleep guesses at when they acquired.
+      short = withSystemTx(workerPool, async tx => (await tx.query("SELECT 42 AS value")).rows[0].value as number);
+      await expect(promptly(short, "Independent worker transaction")).resolves.toBe(42);
+      callbacks.release();
+      await promptly(Promise.all([computerCheckpoint.promise, workosCheckpoint.promise]), "Protected callbacks");
+      expect(workerPool.waitingCount).toBe(0);
+      expect(lockPool.totalCount).toBe(1);
+      releaseHolders.release();
+      await Promise.all([retirement, workos]);
+      expect(await row(id)).toMatchObject({ state: "retired", cleanup_state: "complete" });
+    } finally {
+      cleanup = true; callbacks.release(); releaseHolders.release();
+      await Promise.allSettled([retirement, workos, short]);
+      await Promise.all([workerPool.end(), lockPool.end()]);
+    }
+  });
+
+  it("defers a contended retirement account lock without pinning the remaining worker query slot", async () => {
+    const id = await captured(), blocker = await pool.connect();
+    const workerPool = createPool(process.env.TEST_DATABASE_URL!, { workload: "worker" });
+    const lockPool = createPool(process.env.TEST_DATABASE_URL!, { workload: "retirement-lock" });
+    const entered = barrier(), release = barrier();
+    let workos: Promise<void> | undefined, sweep: Promise<void> | undefined;
+    try {
+      await blocker.query("SELECT pg_advisory_lock(hashtextextended($1,62172))", [account]);
+      workos = withWorkOSProviderLocks(workerPool, [`pool-overlap:${randomUUID()}`], async () => {
+        entered.release(); await release.promise;
+      });
+      void workos.catch(() => {});
+      await promptly(entered.promise, "WorkOS provider barrier");
+      sweep = new ComputerImageRetirementWorker(workerPool, account, driver, [], lockPool).tick();
+      void sweep.catch(() => {});
+      await promptly(sweep, "Contended retirement deferral");
+      await expect(promptly(withSystemTx(workerPool, async tx => (await tx.query("SELECT 42 AS value")).rows[0].value),
+        "Independent worker transaction")).resolves.toBe(42);
+      expect(driver.removeSnapshot).not.toHaveBeenCalled();
+      expect(await row(id)).toMatchObject({ state: "attested" });
+    } finally {
+      await blocker.query("SELECT pg_advisory_unlock(hashtextextended($1,62172))", [account]);
+      blocker.release(); release.release();
+      await Promise.allSettled([workos, sweep]);
+      await Promise.all([workerPool.end(), lockPool.end()]);
+    }
+    await tick();
+    expect(await row(id)).toMatchObject({ state: "retired", cleanup_state: "complete" });
+  });
 
   it("refuses every historical authenticated endpoint without saving, building or activating", async () => {
     await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [

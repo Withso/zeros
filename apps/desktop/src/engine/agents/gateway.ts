@@ -883,17 +883,14 @@ export function resolveAgentCwd(
   });
 }
 
-/** True when a cached initialize belongs to an adapter that discovers its
- *  model list asynchronously (`_meta.modelsDynamic`, set by the @cursor/sdk) and
- *  hasn't populated `_meta.models` yet. Such an initialize must be re-read on
- *  the next request so the live, account-specific catalog replaces the
- *  model-less first snapshot — otherwise the model pill is stuck on the
- *  bundled fallback and never reflects the user's real Cursor models. */
+/** Refreshable account catalogs own their TTL inside the adapter. Consult its
+ * cheap snapshot on an active read even after the first answer; caching that
+ * answer forever here would hide both expiry and model-rejection refreshes. */
 export function shouldRepollInitialize(init: InitializeResponse): boolean {
   const meta = init._meta;
   return (
     !!meta?.modelsDynamic &&
-    !(Array.isArray(meta.models) && meta.models.length > 0)
+    (meta.modelsAccountScoped === true || !(Array.isArray(meta.models) && meta.models.length > 0))
   );
 }
 
@@ -4715,7 +4712,13 @@ export class AgentGateway {
     return this.agentInitializes.get(agentId) ?? null;
   }
 
-  async initializeAgent(agentId: string): Promise<InitializeResponse> {
+  async initializeAgent(agentId: string, executionId?: string): Promise<InitializeResponse> {
+    if (executionId !== undefined) {
+      const adapter = this.adapters.get(agentId);
+      if (adapter?.initializeSession) {
+        return advertiseAgentCapabilities(adapter, await adapter.initializeSession(executionId));
+      }
+    }
     const identity = this.providerAuthConfigFingerprint(agentId);
     if (this.agentInitializeIdentities.get(agentId) !== identity) {
       this.agentInitializeIdentities.set(agentId, identity);
@@ -4730,13 +4733,9 @@ export class AgentGateway {
       if (identity !== this.providerAuthConfigFingerprint(agentId))
         return this.initializeAgent(agentId);
       const cached = this.agentInitializes.get(agentId);
-      // Serve the cache UNLESS it's a dynamic-models adapter (Cursor) whose
-      // first initialize was model-less because the catalog is discovered only
-      // after a runtime boots. In that case re-read the adapter so a freshly
-      // populated `_meta.models` reaches the renderer instead of the stale
-      // model-less snapshot. adapter.initialize() is cheap+idempotent (returns
-      // the adapter's own cached object), so the re-poll is safe and self-
-      // limits once `models` lands.
+      // Adapter initialization is a cheap metadata read. Refreshable catalogs
+      // retain their last snapshot and perform bounded background discovery
+      // only through an existing admitted runtime.
       if (cached && !shouldRepollInitialize(cached)) return cached;
       const init = advertiseAgentCapabilities(
         adapter,

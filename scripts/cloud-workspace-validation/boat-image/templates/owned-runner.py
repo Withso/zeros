@@ -1,3 +1,6 @@
+import sys
+sys.dont_write_bytecode = True
+
 import hashlib
 import json
 import os
@@ -5,7 +8,6 @@ import pathlib
 import re
 import signal
 import subprocess
-import sys
 import time
 
 

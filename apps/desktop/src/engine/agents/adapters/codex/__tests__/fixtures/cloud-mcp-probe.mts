@@ -55,6 +55,7 @@ authority.exports = { ...require(runtimeFile), resolveCloudRuntime: () => runtim
 require.cache[runtimeFile] = authority;
 const { buildMcpServerOverrides } = await import('../../app-server');
 const { cloudCodexRequest, cloudCodexConfig } = await import('../../cloud-policy');
+const { executionMcpServers } = await import('../../../../cloud-provider-execution');
 const { captureCloudCodexProjectConfig } = await import('../../cloud-project-config');
 const { resolveCloudCodexBinaryFromImage } = await import('../../binary-resolver');
 const {path:binary}=await resolveCloudCodexBinaryFromImage(workerRoot);
@@ -73,7 +74,7 @@ async function probe(label:string,repoConfig:string,servers:McpServerRegistratio
     coordinator:{nativeHome},nativeCapabilities:null,environment:null,productServers:[],userServers:servers} as unknown as CloudLegacyProviderExecution;
   if(project)await captureCloudCodexProjectConfig(execution,cwd);
   const projectArgs=project?Object.entries(cloudCodexConfig(execution)).filter(([name])=>!name.startsWith('sqlite_home')).flatMap(([name,value])=>['-c',`${name}=${JSON.stringify(value)}`]):[];
-  const child=spawn(binary,['app-server',...projectArgs,...buildMcpServerOverrides(servers.map(server => server.transport === "stdio" ? {...server, startupTimeoutSec: 1} : server),{cloudCwd:cwd})],{cwd,env:{HOME:home,CODEX_HOME:path.join(home,'.codex'),PATH:process.env.PATH!,RUST_LOG:'off'},stdio:['pipe','pipe','pipe'],detached:true});
+  const child=spawn(binary,['app-server',...projectArgs,...buildMcpServerOverrides(executionMcpServers(execution,[])!.map(server => server.transport === "stdio" ? {...server, startupTimeoutSec: 1} : server),{cloudCwd:cwd})],{cwd,env:{HOME:home,CODEX_HOME:path.join(home,'.codex'),PATH:process.env.PATH!,RUST_LOG:'off'},stdio:['pipe','pipe','pipe'],detached:true});
   const exited=new Promise<void>(resolve=>child.once('exit',()=>resolve()));
   let stderr=''; let id=0;
   const pending=new Map<number,{resolve:(v:unknown)=>void,reject:(e:Error)=>void}>();
@@ -97,10 +98,11 @@ async function probe(label:string,repoConfig:string,servers:McpServerRegistratio
       const status=await bounded(request('mcpServerStatus/list',{threadId:result.thread.id,detail:'full'}));
       const launched=await readFile(path.join(cwd,'late-launched'),'utf8').catch(()=>null);
       const inherited=await readFile(path.join(cwd,'inherited-env'),'utf8').catch(()=>null);
+      const assetEnvironment=await readFile(path.join(cwd,'asset-env.json'),'utf8').then(JSON.parse).catch(()=>null);
       const effective=project?await bounded(request<{config:Record<string,unknown>}>('config/read',cloudCodexRequest(execution,'test','config/read',{cwd:'/foreign',includeLayers:false}))):null;
       const skillResult=project?await bounded(request<{data:Array<{skills:Array<{name:string}>}>}>('skills/list',cloudCodexRequest(execution,'test','skills/list',{cwds:['/foreign'],forceReload:true}))):null;
       const projectLaunched=project?await readFile(path.join(cwd,'project-mcp-launched'),'utf8').catch(()=>null):null;
-      console.log(JSON.stringify({label,initial:initial.config.mcp_servers,threadStarted:true,thread:!!result.thread,status,launched,inherited,
+      console.log(JSON.stringify({label,initial:initial.config.mcp_servers,threadStarted:true,thread:!!result.thread,status,launched,inherited,assetEnvironment,assetRoot:runtime.workerRoot,assetRuntimeId:runtime.runtimeId,
         ...(project?{projectSettings:effective?.config,projectLaunched,skillNames:skillResult?.data.flatMap(row=>row.skills.map(skill=>skill.name)),trustedCwd:params.cwd,
           instructionSources:result.instructionSources,
           instructionsLoaded:result.instructionSources.some(source=>source===path.join(cwd,'AGENTS.md')||source===`file://${path.join(cwd,'AGENTS.md')}`),
@@ -112,6 +114,9 @@ async function probe(label:string,repoConfig:string,servers:McpServerRegistratio
 }
 
 try {
+  await probe('runtime asset environment', '', [{name:'asset-probe',transport:'stdio',command:'node',
+    env:{GIT_CONFIG_SYSTEM:'/user/gitconfig-trap',GIT_EXEC_PATH:'/user/git-exec-trap',FONTCONFIG_FILE:'/user/fontconfig-trap',FONTCONFIG_PATH:'/user/fonts-trap'},args:['-e',
+    "require('fs').writeFileSync('asset-env.json',JSON.stringify(Object.fromEntries(['GIT_CONFIG_SYSTEM','GIT_EXEC_PATH','FONTCONFIG_FILE','FONTCONFIG_PATH'].map(name=>[name,process.env[name]||'absent']))));require('readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.id===undefined)return;const result=r.method==='initialize'?{protocolVersion:r.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'probe',version:'1'}}:r.method==='tools/list'?{tools:[]}:{};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result})+'\\n');})"]}]);
   await probe('transport replacement', '[mcp_servers.example]\nurl="http://127.0.0.1:9/mcp"\n', [{name:'example',transport:'stdio',command:'node',args:['-e','process.exit(0)']}]);
   await probe('lower layer environment inheritance', '[mcp_servers.example]\ncommand="node"\nstartup_timeout_sec=1\n[mcp_servers.example.env]\nLOWER_LAYER="v7-synthetic-lower-layer-secret"\n', [{name:'example',transport:'stdio',command:'node',args:['-e',
     "require('fs').writeFileSync('inherited-env',process.env.LOWER_LAYER||'absent');require('readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.id===undefined)return;const result=r.method==='initialize'?{protocolVersion:r.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'probe',version:'1'}}:r.method==='tools/list'?{tools:[]}:{};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result})+'\\n');})"]}]);

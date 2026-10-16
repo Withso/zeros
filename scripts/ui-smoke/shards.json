@@ -1,5 +1,6 @@
 [
   [
+    "text-selection",
     "design-inline-tools",
     "code-review",
     "design-layout",
@@ -36,6 +37,8 @@
     "shared-default-model",
     "design-canvas-refinements",
     "sticky-bottom",
+    "scroll-area-cleanup",
+    "scroll-area-drag",
     "cloud-preview",
     "design-selection",
     "tools",

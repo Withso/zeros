@@ -24,6 +24,10 @@ import { useEffect, useState } from "react";
 import { workspaceSetupInfo } from "../../platform/git";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import type { Workspace } from "../../platform/git";
+import {
+  documentIsVisible,
+  useDocumentActive,
+} from "../../state/use-document-active";
 
 export interface WorkspaceSetupSummary {
   /** Null until the first read lands — callers must render nothing rather than
@@ -51,9 +55,10 @@ export function useWorkspaceSetupSummary(
   } | null>(null);
 
   const bridge = useBridge();
+  const active = useDocumentActive(true);
 
   useEffect(() => {
-    if (!workspaceId) return;
+    if (!workspaceId || !active) return;
     let cancelled = false;
     // Monotonic pull token: DB_CHANGED fires back-to-back across a setup
     // transition (running → passed) and the responses can resolve out of
@@ -61,6 +66,7 @@ export function useWorkspaceSetupSummary(
     // "Setup script is running" after the run finished.
     let pullGen = 0;
     const pull = async () => {
+      if (cancelled || !documentIsVisible()) return;
       const gen = ++pullGen;
       try {
         // omitLog: this row needs hasCommand (statusOnly reports it as a
@@ -72,7 +78,7 @@ export function useWorkspaceSetupSummary(
           repoRoot,
           omitLog: true,
         });
-        if (cancelled || gen !== pullGen) return;
+        if (cancelled || !documentIsVisible() || gen !== pullGen) return;
         setSnapshot({
           workspaceId,
           value: { hasCommand: next.hasCommand, state: next.state },
@@ -98,7 +104,7 @@ export function useWorkspaceSetupSummary(
       cancelled = true;
       off?.();
     };
-  }, [workspaceId, repoRoot, bridge]);
+  }, [workspaceId, repoRoot, bridge, active]);
 
   if (!workspaceId) return EMPTY;
   return snapshot?.workspaceId === workspaceId ? snapshot.value : EMPTY;

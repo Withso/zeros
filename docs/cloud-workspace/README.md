@@ -37,6 +37,8 @@ migration, publication, adoption and acceptance gates.
   `cloud:agent:e2e`, strict versus explicit PARTIAL scope, and pending provider proof.
 - [Boot funding and credential changes](agent-authentication-and-language-tools.md#negotiated-boot-funding):
   role consent, trust in the owner's keys, next-run cards, removal and warm-session Stop.
+- [Selected cloud agent accounts](agent-connection-health.md): selected-source health,
+  expiry, explicit reconnect and bounded selection recovery.
 - [Local queue and stopped history](data-and-sync.md#negotiated-local-queue-and-compact-history):
   at-most-once dispatch, compact journal, current-head fences and the 16 MiB cap.
 - [Direct ingress](client-runtime-contract.md#portable-runtime-ingress) and
@@ -51,9 +53,9 @@ migration, publication, adoption and acceptance gates.
 | Area | Owning guides |
 | --- | --- |
 | Client routing, commands and access | [Client/runtime contract](client-runtime-contract.md), [relay capacity](relay-capacity.md), [native access acceptance](native-access-acceptance.md), [native preview acceptance](native-preview-acceptance.md) |
-| Durable data and copies | [Data and sync](data-and-sync.md), [native checkpoint format](checkpoint-native-format.md) |
+| Durable data and copies | [Data and sync](data-and-sync.md), [native checkpoint format](checkpoint-native-format.md), [stopped snapshot recovery](checkpoint-recovery.md) |
 | Organization and account authority | [Organization setup](organization-setup.md), [Pro backend](pro-backend.md), [account Pro operations](account-pro-operations.md), [compute credits](compute-credits.md) |
-| Cloud Computer | [Template builds](computer-template-builds.md), [template forks](template-forks.md), [template retention](computer-template-retention.md), [Computer tools](computer-tools.md), [environment/setup](computer-environment.md) |
+| Cloud Computer | [Template builds](computer-template-builds.md), [durable named snapshots](computer-named-snapshots.md), [runtime images](runtime-images.md), [template forks](template-forks.md), [template retention](computer-template-retention.md), [Computer tools](computer-tools.md), [environment/setup](computer-environment.md) |
 | Native agents and customization | [Authentication/language tools](agent-authentication-and-language-tools.md), [bounded repo configuration](agent-authentication-and-language-tools.md#repository-instructions-and-configuration), [MCP and skills](mcp-and-skills.md), [provider background work](provider-background-work.md) |
 | Runtime and updates | [Runtime bundles](runtime-bundles.md), [live runtime updates](live-runtime-updates.md), [runtime lifecycle acceptance](runtime-lifecycle-acceptance.md), [runtime skew gate](runtime-skew-gate.md), [release worker retirement and cleanup](release-worker-qualification.md) |
 | Operations | [Provider contract](provider-contract.md), [lifecycle diagnostics](lifecycle-diagnostics.md), [infrastructure and operations](infrastructure-and-operations.md), [database qualification](database-qualification.md) |

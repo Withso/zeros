@@ -1,0 +1,9 @@
+{
+  "id": "hourly-canary-executed-green",
+  "kind": "seeded",
+  "area": "release-dev-environment",
+  "fixedBy": "pr:493",
+  "symptom": "A skipped successful workflow could activate or satisfy the hourly gate, and rerunning its only green could erase activation. Finished PR checks retained an older green canary result, while a newer run in progress blocked cloud PRs before its outcome existed.",
+  "rule": "Count executed product and receipt-upload steps, retain activation across attempts, and evaluate the newest completed run or attempt while a newer run is in progress. Refresh the required exact-head status and recheck completion-based freshness after asynchronous reads. Noncloud lanes only alert; the exact reviewed incident repair is the only cloud exception.",
+  "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-hourly-actions.test.ts scripts/__tests__/zeros-dev-hourly-gate.test.ts scripts/__tests__/zeros-dev-hourly-status.test.ts scripts/__tests__/zeros-dev-hourly-workflow.test.ts scripts/__tests__/agent-merge.test.ts"
+}

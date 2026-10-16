@@ -362,6 +362,20 @@ retires grants and queues compute Stop for a formerly ready or busy workspace.
 This applies to managed and customer providers independently of the deployment's
 managed default. Setup has its own bounded deadline and retry policy.
 
+Stop, Restart and Archive deliver their final checkpoint directive in a heartbeat
+response, so without help an engine sees it only at its next beat (default
+interval 10 seconds). Engines opt into an optional checkpoint hint: one
+heartbeat-token request to `/internal/v1/cloud-workspaces/engine/checkpoint-hint`
+that the control plane holds for up to 25 seconds and answers `pending: true`
+as soon as an undelivered request is queued for that exact live engine's
+generation. A database notification releases the waiter across replicas, with a
+5-second recheck if notifications are down. The engine then heartbeats at once.
+The hint is read-only: it renews no lease, takes no workspace lock and grants
+no authority, and delivery, fencing and acknowledgement stay with the
+heartbeat. A 404 (older control plane) or a refused hint ends the fast path;
+other failures back off to 30 seconds. Hints have their own per-address budget
+so waiting engines never use the lifecycle, command or record budgets.
+
 Transient actor-admission renewal retains only the last confirmed lease through
 its original expiry; an error cannot extend it. Explicit authority loss/4xx
 closes it immediately. The relay forwards safe native 1008 and shutdown 1012
@@ -443,6 +457,23 @@ the legacy payload's required grant. A ready, authorized warm Send performs no
 per-send grant or per-turn CP admit/validate. Background actor renewal,
 credential publication and mirroring continue, with finite authority deadlines.
 This removes foreground dependencies; it does not promise zero total CP traffic.
+
+Actor-confirm observes a coherent, read-only boot projection. Warm-context reads
+the same persisted scope and versions in a serializable transaction, publishing
+only its bounded context record. Neither path takes the funding owner's mutation
+lock or locks authority rows with `FOR UPDATE`. Warm-context accepts only the
+already delivered credential revision and live adoption; pending publication
+must finish through normal sync. Bootstrap, sync, refresh, adoption and removal
+keep their mutation locks, revision checks and revocation publication.
+
+Each observation expires at the earliest of its original request start plus ten
+seconds, its transaction start plus ten seconds, and the engine/auth deadlines.
+A coherent read begun before revocation may finish within that original bound;
+the next renewal observes the revocation. Only serialization aborts (`40001`)
+retry warm-context, with at most three complete attempts under the original
+deadline. Every attempt rereads authority, sources, customization and context
+capacity. Actor confirmation alone cannot renew an expired context. These CP
+paths do not change Local Personal or organization-local authority or lifecycle.
 
 The shared engine protocol advertises `cloud.commands.v1` on `ENGINE_READY` only when the
 engine is registered with the control plane. The authenticated workspace bridge
@@ -826,6 +857,28 @@ is no caller URL, query bearer or reused grant. Electron freezes the descriptor;
 the renderer requires both authenticated actor confirmation and matching
 `ENGINE_READY.cloudLocalCommands` before sending queued work.
 
+Admission failures carry a closed `error.phase`: `grant`, `provider_endpoint`,
+`provider_host_key`, or `engine_reach`. The current public admission route only
+performs the first two; it does not claim to have reached the engine or checked
+an SSH host key. Logs retain that phase and closed outcome fields, never raw
+provider messages, addresses or grant material.
+
+A typed transient endpoint failure returns HTTP 503 with
+`error.code: "cloud_runtime_temporarily_unavailable"`, `error.retryable: true`
+and an integer `Retry-After` of 1–300 seconds (default 1, rounded up). Unknown
+faults stay HTTP 500 / `internal`; identity, integrity and permission refusals
+are not retry signals. Existing pool-capacity failures keep `service_busy`.
+A caller retries only the exact transient admission contract, with a fresh
+device proof, a bounded attempt count and its original connection deadline.
+This response does not imply that a client retry policy is installed.
+
+The failed, unpublished actor grant is revoked before publishing the transient
+response. Concurrent or repeated revocation never rewrites its terminal receipt;
+successful admission still consumes its grant only once. If revocation cannot
+be confirmed, return nonretryable HTTP 500 with the original failed phase and
+log `grantCleanup: "unconfirmed"`. The undisclosed grant retains its existing
+two-minute admission expiry; uncertain cleanup never triggers a replacement.
+
 A transport-only failure may request a fresh admission with
 `connectionChannel: "control-plane-websocket"`. CP fallback must retain every
 boot/owner field and authority epoch while rotating the admission token and
@@ -849,6 +902,9 @@ and key version, generation, engine lease, and grant authority every five
 seconds, with a hard ten-second renewal deadline. Engine enforcement also
 covers direct provider connections. Renewal checks a previously consumed grant;
 it neither consumes a fresh grant nor writes an audit event on every tick.
+Relay authority uses a coherent read-only projection. Its monotonic deadline
+starts before each authority lookup, including initial resolution; time spent
+waiting for the CP does not extend the lease.
 The admission expiry limits new connections; device and account revocation
 still apply throughout an established connection. A late verification reply
 cannot reopen a closed connection. Historical unbound SSH admission remains

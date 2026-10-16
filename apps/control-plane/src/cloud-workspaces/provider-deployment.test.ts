@@ -58,7 +58,7 @@ describe("production cloud provider composition", () => {
   } as unknown as pg.Pool;
   it("gives every managed Boat client the configured billing wallet", () => {
     boatClients.length = 0;
-    createCloudProviderDeployment(pool, config());
+    createCloudProviderDeployment(pool, config(), "alpha");
     expect(boatClients.length).toBeGreaterThanOrEqual(2);
     expect(new Set(boatClients.map((client) => client.billingOrg))).toEqual(
       new Set(["team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41"]),
@@ -72,6 +72,7 @@ describe("production cloud provider composition", () => {
     const { provider, registry } = createCloudProviderDeployment(
       pool,
       config(),
+      "alpha",
     );
     expect(provider.name).toBe("boat");
     expect(registry.names().sort()).toEqual(["boat"]);
@@ -102,7 +103,7 @@ describe("production cloud provider composition", () => {
         "/var/lib/zeros/qualification-objects",
       CLOUD_WORKSPACE_OBJECT_KEY_V1: Buffer.alloc(32, 2).toString("base64url"),
     });
-    const { registry } = createCloudProviderDeployment(pool, cloud);
+    const { registry } = createCloudProviderDeployment(pool, cloud, "alpha");
     expect(registry.hosted("boat", "setup").commandRunner).toBeInstanceOf(
       BoatSetupCommandRunner,
     );

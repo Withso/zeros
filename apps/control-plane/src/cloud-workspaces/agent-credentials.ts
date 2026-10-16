@@ -11,11 +11,13 @@ import {readCloudAgentComputeTrust} from "./agent-compute-trust.js";
 import {CODEX_AUTH_RUNTIME_VERSION,parseCodexNativeCache,sealCodexNativeCache,type CodexNativeAuthCache} from "./codex-auth-cache.js";
 import {rememberCodexRefreshSeed} from "./codex-auth-renewal.js";
 import {cloudAgentModels} from "./agent-models.js";
+import {cloudAgentConnectionHealth,type CloudAgentConnectionHealthRow} from "./agent-connection-health.js";
 import {readCloudAgentBootAvailability} from "./agent-boot-credentials.js";
 import {cloudRuntimeQualificationMode} from "./runtime-config.js";
 import {runtimeCredentialQualificationJoin,runtimeNativeCapabilities} from "./runtime-selection.js";
 import { prepareCloudAgentCredentialRemoval, readCloudAgentCredentialRemoval, decideCloudAgentCredentialRemoval,
   assertLegacyCloudAgentCredentialMutationAllowed, prepareCloudAgentCredentialPublication,
+  prepareCloudAgentConnectionPublication,
   commitCloudAgentCredentialPublication, serializeCloudAgentCredentialSourceMutation,
   pendingCloudAgentCredentialRemoteRemoval,acknowledgeCloudAgentCredentialRemoteRemoval,
   type CloudAgentCredentialRemovalOutcome } from "./agent-credential-mutations.js";
@@ -34,7 +36,7 @@ export const CloudAgentDelegationSchema=z.object({id:uuid,credentialId:uuid,expe
   granteeUserId:uuid,models:z.array(CloudAgentModelSchema).min(1).max(32),allModels:z.boolean().optional(),expiresAt:z.string().datetime(),
   computeConsent:z.object({fingerprint:z.string().regex(/^[a-f0-9]{64}$/),trust:z.enum(["zeros-managed","compute-administrator"])}).strict().optional()}).strict();
 type Credential={id:string;owner_user_id:string;kind:CloudAgentCredentialKind;display_name:string;revision:string;current_version:number;
-  revoked_at:Date|null;last_operation_id:string;last_request_sha256:Buffer;connection_method:"api"|"account";usable?:boolean};
+  revoked_at:Date|null;last_operation_id:string;last_request_sha256:Buffer;connection_method:"api"|"account"};
 type Delegation={id:string;credential_id:string;owner_user_id:string;credential_revision:string;workspace_id:string;org_id:string;
   grantee_user_id:string;owner_fingerprint:string;grantee_fingerprint:string;compute_fingerprint:string;compute_trust:"zeros-managed"|"compute-administrator";models:string[];all_models:boolean;expires_at:Date;revoked_at:Date|null};
 type OrganizationConnection={provider:string;revision:string;credential_id:string|null;credential_revision:string|null;models:string[];all_models:boolean;consent_fingerprint:string;request_sha256:Buffer};
@@ -150,18 +152,33 @@ export class DatabaseCloudAgentCredentialService {
       await this.owner(tx,ownerUserId);
       const fingerprint=await this.organizationConsent(tx,ownerUserId,organizationId);
       await this.reconcileLegacyOrganizations(tx,ownerUserId,organizationId);
-      const credentials=(await tx.query<Credential>(`SELECT credential.*,
-        (credential.kind<>'cursor-api-key' OR material.material_expires_at IS NULL OR material.material_expires_at>clock_timestamp()+interval '1 minute') AS usable
+      const credentials=(await tx.query<Credential>(`SELECT credential.*
         FROM cloud_agent_credential_organizations association
         JOIN cloud_agent_credentials credential ON credential.id=association.credential_id AND credential.owner_user_id=association.owner_user_id
         JOIN cloud_agent_credential_versions material ON material.credential_id=credential.id AND material.version=credential.current_version
         WHERE association.org_id=$1 AND association.owner_user_id=$2 AND credential.revoked_at IS NULL
         ORDER BY credential.created_at DESC,credential.id LIMIT 100`,[organizationId,ownerUserId])).rows;
-      const connections=(await tx.query<OrganizationConnection>(`SELECT * FROM cloud_agent_organization_connections
-        WHERE org_id=$1 AND owner_user_id=$2 ORDER BY provider`,[organizationId,ownerUserId])).rows;
-      return {credentials:credentials.map(metadata),connections:connections.map(row=>({provider:row.provider,revision:Number(row.revision),
-        credentialId:row.credential_id,models:[...cloudAgentModels(row.provider)],allModels:row.all_models,connected:row.consent_fingerprint===fingerprint&&credentials.some(
-          credential=>credential.id===row.credential_id&&credential.revision===row.credential_revision&&credential.usable)}))};
+      // Join the selected source and refresh metadata in one snapshot. A new
+      // unselected import must not make an expired selection look connected.
+      const connections=(await tx.query<OrganizationConnection&CloudAgentConnectionHealthRow>(`SELECT connection.*,
+        credential.revision AS live_credential_revision,credential.kind AS credential_kind,
+        material.version AS material_version,material.material_expires_at,
+        cache.credential_revision AS refresh_revision,cache.material_version AS refresh_material_version,
+        cache.runtime_version AS refresh_runtime_version,cache.state AS refresh_state,
+        cache.attempt_started_at AS refresh_attempt_started_at,clock_timestamp() AS observed_at
+        FROM cloud_agent_organization_connections connection
+        LEFT JOIN cloud_agent_credential_organizations association ON association.org_id=connection.org_id
+          AND association.owner_user_id=connection.owner_user_id AND association.credential_id=connection.credential_id
+        LEFT JOIN cloud_agent_credentials credential ON credential.id=association.credential_id
+          AND credential.owner_user_id=association.owner_user_id AND credential.revoked_at IS NULL
+        LEFT JOIN cloud_agent_credential_versions material ON material.credential_id=credential.id AND material.version=credential.current_version
+        LEFT JOIN cloud_codex_auth_caches cache ON cache.credential_id=credential.id AND credential.kind='codex-chatgpt'
+        WHERE connection.org_id=$1 AND connection.owner_user_id=$2 ORDER BY connection.provider`,[organizationId,ownerUserId])).rows;
+      return {credentials:credentials.map(metadata),connections:connections.map(row=>{
+        const health=cloudAgentConnectionHealth(row,fingerprint);
+        return {provider:row.provider,revision:Number(row.revision),credentialId:row.credential_id,
+          models:[...cloudAgentModels(row.provider)],allModels:row.all_models,connected:health.status==="ready",health};
+      })};
     });
   }
 
@@ -192,20 +209,20 @@ export class DatabaseCloudAgentCredentialService {
       await serializeCloudAgentCredentialSourceMutation(tx,ownerUserId);
       const fingerprint=await this.organizationConsent(tx,ownerUserId,organizationId);
       const hash=createHash("sha256").update(JSON.stringify([input.credentialId,input.credentialId?input.credentialRevision:null,models,fingerprint,...(allModels?["all-models"]:[])])).digest();
-      // The released selection API has no operation ID. A deterministic private
-      // ID gives exact same-request retries one durable fence without widening it.
+      // Preserve the original implicit request identity. An expired attempt
+      // must close positively before a later authenticated request gets a new
+      // bounded fence; neither replay nor a successor renews its deadline.
       const idBytes=createHash("sha256").update(JSON.stringify([ownerUserId,organizationId,provider,input.expectedRevision,hash.toString("hex")])).digest().subarray(0,16);
       idBytes[6]=(idBytes[6]!&15)|64;idBytes[8]=(idBytes[8]!&63)|128;
       const hex=idBytes.toString("hex"),operationId=`${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
       const target={kind:"publish-connection" as const,organizationId,provider:provider as "claude"|"codex"|"cursor",
         expectedRevision:input.expectedRevision,credentialId:input.credentialId,requestDigest:hash.toString("hex")};
-      const state=await prepareCloudAgentCredentialPublication(tx,ownerUserId,operationId,target);
-      return {operationId,target,state};
+      return {...await prepareCloudAgentConnectionPublication(tx,ownerUserId,operationId,target),target};
     });
     if(preparation.state==="pending")throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId,input.credentialId!==null);
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[ownerUserId]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[ownerUserId]);
       const fingerprint=await this.organizationConsent(tx,ownerUserId,organizationId);
       await this.reconcileLegacyOrganizations(tx,ownerUserId,organizationId);
       // Preserve released request hashes when the additive flag is absent/false.
@@ -249,7 +266,7 @@ export class DatabaseCloudAgentCredentialService {
     }
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId);
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[ownerUserId]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[ownerUserId]);
       await this.organizationConsent(tx,ownerUserId,organizationId);
       await assertLegacyCloudAgentCredentialMutationAllowed(tx,ownerUserId,{credentialId,organizationId});
       await tx.query(`UPDATE cloud_agent_credential_delegations SET revoked_at=coalesce(revoked_at,now())
@@ -265,7 +282,7 @@ export class DatabaseCloudAgentCredentialService {
     if(!uuid.safeParse(workspaceId).success)invalid();
     await withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId,true);
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[ownerUserId]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[ownerUserId]);
       const workspace=(await tx.query<{org_id:string}>("SELECT org_id FROM cloud_workspaces WHERE id=$1 AND deleted_at IS NULL",[workspaceId])).rows[0];
       if(!workspace)unavailable();
       // Guests may have explicit workspace grants but cannot inherit a member's
@@ -327,12 +344,13 @@ export class DatabaseCloudAgentCredentialService {
     // leave the background control pending rather than roll it back.
     const publicationState=await withSystemTx(this.pool,tx=>prepareCloudAgentCredentialPublication(tx,input.ownerUserId,input.operationId,publication));
     if(publicationState==="pending")throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");
+    if(publicationState==="expired")throw new HttpError(409,"agent_credential_conflict","Agent credential operation expired. Start a new request.");
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,input.ownerUserId,true);
       if(input.organizationId)await this.organizationConsent(tx,input.ownerUserId,input.organizationId);
       // A per-owner transaction lock bounds concurrent creation without taking
       // mutable user authorization locks or allowing duplicate count checks.
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[input.ownerUserId]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[input.ownerUserId]);
       const previous=(await tx.query<Credential>("SELECT * FROM cloud_agent_credentials WHERE id=$1 FOR UPDATE",[input.credentialId])).rows[0];
       if(previous){
         if(previous.owner_user_id!==input.ownerUserId)unavailable();

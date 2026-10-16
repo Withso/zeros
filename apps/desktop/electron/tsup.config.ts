@@ -13,6 +13,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { defineConfig } from "tsup";
+import { cloudWorkspaceChannelEnabled } from "../shared/cloud-workspace-channel";
 
 export default defineConfig({
   entry: {
@@ -45,7 +46,8 @@ export default defineConfig({
     // into main.cjs; main then pins the engine child's inherited environment.
     // A packaged app cannot be enabled later with a launch-time env override.
     __ZEROS_CLOUD_WORKSPACES_ENABLED_BAKED__: JSON.stringify(
-      process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true",
+      cloudWorkspaceChannelEnabled(process.env.ZEROS_CHANNEL || "stable") &&
+        process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true",
     ),
     // Main-process GitHub App OAuth cannot read Vite's renderer-only
     // import.meta.env at runtime. Bake the same public control-plane origin into

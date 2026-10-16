@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import { isDatabaseTransactionRollback, retryAbortedDatabaseTransaction, withRetryableSystemTx } from "../db-retry.js";
+import { retryAbortedDatabaseTransaction, withRetryableSystemTx } from "../db-retry.js";
+import { isDatabaseUnavailable } from "../db.js";
 import { DatabaseManagedComputeCreditLedger, readManagedComputeAllocationLost } from "./compute-credits.js";
 import {computeUserFundingAuthorityLive,lockComputeUserFunding,prepareComputeUserPeriods,readStaffComputeAllowance} from "./compute-funding.js";
 import {ensureProMonthlyAllowance} from "./pro-allowance.js";
@@ -20,8 +21,9 @@ import {
 import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { assertSingleProviderResource } from "./provider.js";
 import { requestManagedComputeStop } from "./compute-credit-stop.js";
-import { classifyCloudFailure, diagnosticCode, type CloudDiagnosticPhase } from "./cloud-diagnostics.js";
+import { classifyCloudFailure, diagnosticCode, type CloudDiagnostic, type CloudDiagnosticPhase, type ComputeFailureSite } from "./cloud-diagnostics.js";
 import { retainCloudDiagnostic, diagnosticStorageFailed, recoverCloudDiagnostic, runCloudDiagnosticCleanup } from "./cloud-diagnostic-store.js";
+import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
 
 export type ManagedComputePolicy = {
   provider: string;
@@ -37,6 +39,7 @@ export type ManagedComputeStart = CloudProviderCreateInput & {
 };
 type Lease = {
   current_generation?: number;
+  observed_at?: Date;
   id: string;
   workspace_id: string;
   org_id: string;
@@ -108,6 +111,10 @@ const ALLOCATION_RETRY_WINDOW_MS = 45 * 60_000;
 /** A final meter queries this far behind the provider clock, so it can cover
  * the first stopped observation only once this much time has passed. */
 const FINAL_METER_LAG_MS = 5000;
+/** A stopped allocation's lower final reading may be a passing provider fault.
+ * It settles at the confirmed meter only this long after the stop was first
+ * observed, on a retry after an earlier rejection. */
+const REGRESSED_FINAL_METER_GRACE_MS = 15 * 60_000;
 const MAX_CHECKPOINT_DEADLINE_MS = 300_000;
 const STOP_MARGIN_MS = 15_000;
 // Reserve the full checkpoint deadline plus the existing stop margin. Retry
@@ -603,17 +610,22 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     // A failed transaction may have overlapped Stop, claim recovery or a
     // shortened budget. The captured lease alone cannot authorize a retry.
     const current = await withRetryableSystemTx(this.options.pool, async tx => (await tx.query<{
-      funded_until: Date; provider_expires_at: Date; runway_live: boolean;
+      funded_until: Date; provider_expires_at: Date; reservation_valid: boolean;
     }>(`SELECT funded_until,provider_expires_at,
-        least(funded_until,provider_expires_at)>clock_timestamp()+($7::bigint*interval '1 millisecond') AS runway_live
-      FROM managed_compute_allocation_leases
+        EXISTS (SELECT 1 FROM managed_compute_credit_reservations reservation WHERE reservation.id=lease.id
+          AND reservation.workspace_id=lease.workspace_id AND reservation.org_id=lease.org_id
+          AND reservation.generation=lease.generation AND reservation.billing_epoch=lease.billing_epoch AND reservation.user_id=lease.user_id) AS reservation_valid
+      FROM managed_compute_allocation_leases lease
       WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp() AND state='active'
-        AND provider_resource_id=$3 AND user_id=$4 AND billing_epoch=$5 AND provider=$6`,
-    [lease.id,this.workerId,lease.provider_resource_id,lease.user_id,lease.billing_epoch,lease.provider,PROVIDER_RETRY_SAFETY_MARGIN_MS])).rows[0]);
-    if (!current) return false;
+        AND provider_resource_id=$3 AND user_id=$4 AND billing_epoch=$5 AND provider=$6
+        AND workspace_id=$7 AND org_id=$8 AND generation=$9
+        AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),generation)=$10`,
+    [lease.id,this.workerId,lease.provider_resource_id,lease.user_id,lease.billing_epoch,lease.provider,
+      lease.workspace_id,lease.org_id,lease.generation,this.identity(lease).generation])).rows[0]);
+    if (!current) throw failure("compute_lease_superseded");
     lease.funded_until = current.funded_until;
     lease.provider_expires_at = current.provider_expires_at;
-    if (current.runway_live !== true) return false;
+    if (!current.reservation_valid) return false;
     const scope = await this.scope(this.identity(lease));
     if (!scope.live || scope.desired_state !== "running" || scope.generation !== this.identity(lease).generation ||
         scope.user_id !== lease.user_id || money(scope.billing_epoch) !== money(lease.billing_epoch)) return false;
@@ -622,7 +634,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     return true;
   }
 
-  private async stopAtBudget(lease: Lease, reason: string, incidentId?: string | null, stopReason?: "provider_outage"): Promise<void> {
+  private async stopAtBudget(lease: Lease, reason: string, incidentId?: string | null, stopReason?: "provider_outage" | "control_plane_unavailable"): Promise<void> {
     const now = await this.now();
     const remaining =
       Math.min(
@@ -636,6 +648,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       ...(incidentId ? { incidentId } : {}),
       force: remaining < 45_000,
       expectedLeaseOwner: this.workerId,
+      expectedGeneration: this.identity(lease).generation,
       checkpointDeadlineMs: Math.max(
         30_000,
         Math.min(MAX_CHECKPOINT_DEADLINE_MS, remaining - STOP_MARGIN_MS),
@@ -664,6 +677,33 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     );
     if (!lease) return true;
     assertProviderResourceIdentity(resource, input);
+    const stopGate = await withRetryableSystemTx(this.options.pool, async tx => {
+      await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [input.organizationId]);
+      await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE", [input.workspaceId, input.organizationId]);
+      const intent = (await tx.query<{ id: string; operation: "stop" | "archive" | "delete"; requested_by: string | null }>(
+        `SELECT id,operation,requested_by FROM cloud_workspace_lifecycle_intents
+         WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND operation IN ('stop','archive','delete')
+           AND state IN ('queued','observing','dispatching') ORDER BY created_at DESC,id LIMIT 1`,
+        [input.workspaceId, input.organizationId, input.generation],
+      )).rows[0];
+      return intent ? { ready: await prepareCloudWorkspaceStopSeal(tx, {
+        ...input, intentId: intent.id, operation: intent.operation, requestedBy: intent.requested_by,
+      }) } : null;
+    });
+    if (!stopGate) {
+      // A direct settlement caller has no lifecycle claim proving a drain.
+      // Admit a bounded stop first; its reconciler owns the provider dispatch.
+      const now = await this.now();
+      const remaining = Math.min(lease.provider_expires_at?.getTime() ?? now, lease.funded_until?.getTime() ?? now) - now;
+      await requestManagedComputeStop(this.options.pool, {
+        leaseId: lease.id, reason: "compute_delete_settlement", force: remaining < 45_000,
+        checkpointDeadlineMs: Math.max(30_000, Math.min(MAX_CHECKPOINT_DEADLINE_MS, remaining - STOP_MARGIN_MS)),
+      });
+      return false;
+    }
+    // The lifecycle caller normally proved its final checkpoint before claim.
+    // Settlement must not turn an overlapping user drain into a forced stop.
+    if (!stopGate.ready) return false;
     await requestManagedComputeStop(this.options.pool, {
       leaseId: lease.id,
       reason: "compute_delete_settlement",
@@ -695,6 +735,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     // Durable hourly job runs even when no allocation is due; failure cannot
     // prevent the finite-lease safety path from running.
     await runCloudDiagnosticCleanup(this.options.pool).catch(() => undefined);
+    const claimStarted = performance.now();
     const lease = await withRetryableSystemTx(
       this.options.pool,
       async (tx) =>
@@ -708,19 +749,19 @@ export class CloudWorkspaceComputeLeaseCoordinator {
               OR (runtime.phase IN ('rolling_back','rollback_enrolling','rollback_checking') AND runtime.rollback_deadline_at>clock_timestamp())))
         AND (lease_owner IS NULL OR lease_expires_at<=clock_timestamp()) ORDER BY next_check_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE managed_compute_allocation_leases lease SET lease_owner=$1,lease_expires_at=clock_timestamp()+interval '5 minutes'
-      FROM candidate WHERE lease.id=candidate.id RETURNING lease.*`,
+      FROM candidate WHERE lease.id=candidate.id RETURNING lease.*,clock_timestamp() AS observed_at,
+        coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),lease.generation) AS current_generation`,
             [this.workerId],
           )
         ).rows[0],
     );
     if (!lease) return false;
-    lease.current_generation=await withRetryableSystemTx(this.options.pool,async tx=>(await tx.query<{generation:number}>(
-      `SELECT coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=$1),$2) AS generation`,
-      [lease.id,lease.generation])).rows[0]!.generation);
     let recheckAt: Date | null = null, failed = false;
     let phase: CloudDiagnosticPhase = "provider_inspect", phaseStarted = performance.now();
+    let site: ComputeFailureSite | undefined;
     try {
-      recheckAt = await this.reconcile(lease, next => { phase = next; phaseStarted = performance.now(); });
+      recheckAt = await this.reconcile(lease, (next, nextSite) => { phase = next; site = nextSite; phaseStarted = performance.now(); });
+      phase = "ledger_commit"; site = "reconciliation_bookkeeping"; phaseStarted = performance.now();
       await withRetryableSystemTx(this.options.pool, (tx) =>
         tx.query(
           `UPDATE managed_compute_allocation_leases SET last_error_code=NULL,first_error_at=NULL
@@ -733,19 +774,40 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       }).catch(() => undefined);
     } catch (error) {
       failed = true;
-      const diagnostic = classifyCloudFailure(error, phase);
-      const code = diagnostic.code;
+      let diagnostic: CloudDiagnostic = { ...classifyCloudFailure(error, phase), ...(site ? { site } : {}) };
       const transientProvider = error instanceof CloudProviderError && error.retryable &&
-        diagnostic.providerCode?.startsWith("provider_") === true && code !== "provider_resource_lost";
-      const transientDatabase = isDatabaseTransactionRollback(error);
-      const currentActive = (transientProvider || transientDatabase) && await this.activeAllocationRetry(lease).catch(() => false);
-      const now = await this.now();
+        diagnostic.providerCode?.startsWith("provider_") === true && diagnostic.code !== "provider_resource_lost";
+      let transientDatabase = isDatabaseUnavailable(error);
+      // Unavailable proof is not revocation. This grants no new authority or
+      // funding: only the already confirmed finite provider deadline remains.
+      let proofFailed = false;
+      const proofStarted = performance.now();
+      const currentActive = (transientProvider || transientDatabase) && await this.activeAllocationRetry(lease).catch(proofError => {
+        proofFailed = true;
+        phaseStarted = proofStarted;
+        diagnostic = { ...classifyCloudFailure(proofError, "authority_check"), site: "retry_proof" };
+        if (!isDatabaseUnavailable(proofError)) return false;
+        transientDatabase = true;
+        return null;
+      });
+      const now = await this.now().catch(clockError => {
+        if (!isDatabaseUnavailable(clockError)) throw clockError;
+        // Anchor to DB time sampled by the claim, charging the entire round
+        // trip conservatively. Host wall-clock changes cannot extend runway.
+        return lease.observed_at!.getTime() + Math.max(0, performance.now() - claimStarted);
+      });
       const remaining = this.runwayDeadline(lease) - now;
-      const activeRetry = currentActive && remaining > PROVIDER_RETRY_SAFETY_MARGIN_MS;
+      const activeRetry = lease.state === "active" && currentActive !== false &&
+        Number.isFinite(remaining) && remaining > PROVIDER_RETRY_SAFETY_MARGIN_MS &&
+        (lease.lease_expires_at?.getTime() ?? 0) > now;
+      if (transientDatabase && lease.state === "active" && currentActive === false && !proofFailed)
+        diagnostic = { phase: "authority_check", code: "compute_scope_unavailable", errorClass: "unknown", retryable: false, site: "retry_proof" };
+      const code = diagnostic.code;
       const retry = code === "compute_lease_superseded" ||
         activeRetry || ((transientDatabase || (error instanceof CloudProviderError && error.retryable)) && await this.pendingAllocationRetry(lease).catch(() => false));
-      const stopReason = transientProvider && lease.state === "active" && remaining <= PROVIDER_RETRY_SAFETY_MARGIN_MS
-        ? "provider_outage" as const : undefined;
+      const stopReason = currentActive !== false && lease.state === "active" && remaining <= PROVIDER_RETRY_SAFETY_MARGIN_MS
+        ? transientDatabase ? "control_plane_unavailable" as const : transientProvider ? "provider_outage" as const : undefined
+        : undefined;
       if (activeRetry) recheckAt = new Date(Math.min(this.runwayDeadline(lease) - PROVIDER_RETRY_SAFETY_MARGIN_MS,
         lease.lease_expires_at?.getTime() ?? Infinity));
       const bounded = (value: number) => Math.max(-86_400_000, Math.min(86_400_000, Math.floor(value)));
@@ -764,11 +826,13 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       } catch { await diagnosticStorageFailed(this.options.pool); }
       await withRetryableSystemTx(this.options.pool, (tx) => tx.query(
         `UPDATE managed_compute_allocation_leases SET last_error_code=$3,first_error_at=coalesce(first_error_at,clock_timestamp()),updated_at=now()
-        WHERE id=$1 AND lease_owner=$2`, [lease.id, this.workerId, code],
+        WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp()
+          AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=managed_compute_allocation_leases.id),generation)=$4`,
+        [lease.id, this.workerId, code, this.identity(lease).generation],
       )).catch(() => undefined);
       if (!retry) await this.stopAtBudget(lease, code, incidentId, stopReason);
       this.options.logger?.error(
-        `[cloud-workspace] compute reconciliation failed (${code}${diagnostic.sqlState ? `, SQLSTATE ${diagnostic.sqlState}` : ""})`,
+        `[cloud-workspace] compute reconciliation failed (${code}${diagnostic.site ? `, ${diagnostic.site}` : ""}${diagnostic.sqlState ? `, SQLSTATE ${diagnostic.sqlState}` : ""})`,
       );
     } finally {
       await withRetryableSystemTx(this.options.pool, (tx) =>
@@ -783,8 +847,9 @@ export class CloudWorkspaceComputeLeaseCoordinator {
             greatest(interval '15 seconds',clock_timestamp()-coalesce(first_error_at,clock_timestamp()))))
           WHEN $3::timestamptz IS NULL THEN clock_timestamp()+interval '15 seconds'
           ELSE greatest($3::timestamptz,clock_timestamp()+interval '1 second') END,updated_at=now()
-        WHERE id=$1 AND lease_owner=$2`,
-          [lease.id, this.workerId, recheckAt, failed],
+        WHERE id=$1 AND lease_owner=$2
+          AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=managed_compute_allocation_leases.id),generation)=$5`,
+          [lease.id, this.workerId, recheckAt, failed, this.identity(lease).generation],
         ),
       );
     }
@@ -793,7 +858,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
 
   /** Returns when a just-stopped allocation can next settle, or null to keep
    * the regular cadence. */
-  private async reconcile(lease: Lease, phase: (phase: CloudDiagnosticPhase) => void): Promise<Date | null> {
+  private async reconcile(lease: Lease, phase: (phase: CloudDiagnosticPhase, site?: ComputeFailureSite) => void): Promise<Date | null> {
     const identity = this.identity(lease);
     const resolved = this.options.providerResolver
       ? (
@@ -852,11 +917,22 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       lease.provider_resource_id !== resource.resourceId
     )
       throw failure("provider_identity_mismatch");
-    phase("ledger_commit");
+    phase("ledger_commit", "allocation_binding");
     await withRetryableSystemTx(this.options.pool, async (tx) => {
-      const current=await tx.query(`SELECT id FROM managed_compute_allocation_leases
-        WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp() FOR UPDATE`,[lease.id,this.workerId]);
+      // Every pass re-observes the original allocation and reservation before
+      // writing, including a lost COMMIT whose diagnostic could not be saved.
+      const current=await tx.query<{reservation_valid:boolean}>(`SELECT id,state<>'active' OR EXISTS (
+          SELECT 1 FROM managed_compute_credit_reservations reservation WHERE reservation.id=lease.id
+            AND reservation.workspace_id=lease.workspace_id AND reservation.org_id=lease.org_id
+            AND reservation.generation=lease.generation AND reservation.billing_epoch=lease.billing_epoch AND reservation.user_id=lease.user_id) AS reservation_valid
+        FROM managed_compute_allocation_leases lease
+        WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp()
+          AND workspace_id=$3 AND org_id=$4 AND generation=$5 AND user_id=$6 AND billing_epoch=$7 AND provider=$8
+          AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),generation)=$9
+          AND provider_resource_id IS NOT DISTINCT FROM $10
+        FOR UPDATE`,[lease.id,this.workerId,lease.workspace_id,lease.org_id,lease.generation,lease.user_id,lease.billing_epoch,lease.provider,identity.generation,lease.provider_resource_id]);
       if (!current.rowCount) throw failure("compute_lease_superseded");
+      if (!current.rows[0]!.reservation_valid) throw failure("compute_credit_conflict");
       const bound = await tx.query(
         `UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$4
         WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND (provider_resource_id IS NULL OR provider_resource_id=$4) RETURNING workspace_id`,
@@ -876,6 +952,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     });
     lease.provider_resource_id = resource.resourceId;
     const stopped = ["stopped", "archived"].includes(resource.state) || resource.computeStopped === true;
+    phase("ledger_commit", "allocation_observation");
     const observed = await withRetryableSystemTx(
       this.options.pool,
       async (tx) =>
@@ -938,18 +1015,26 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       await this.stillClaimed(lease);
       if (finalStopped && usage.running)
         throw failure("compute_stop_meter_unconfirmed", true);
-      phase("ledger_commit");
+      phase("ledger_commit", "meter_commit");
+      const meter = { reservationId: lease.id, periodId: row.period_id, usage, allocationLeaseClaim: { owner: this.workerId } };
       await retryAbortedDatabaseTransaction(() => this.ledger.meter({
-        reservationId: lease.id,
-        periodId: row.period_id,
-        usage,
-        allocationLeaseClaim: { owner: this.workerId },
+        ...meter,
         ...(finalStopped
           ? { finalReason: "allocation_stopped" as const }
           : until === row.ends_at.getTime()
             ? { finalReason: "period_ended" as const }
             : {}),
-      }));
+      })).catch(async (error: unknown) => {
+        // The provider can later report less for a window we already metered.
+        // Once the stop is old enough, settle the stopped allocation at its
+        // confirmed meter instead of holding it open forever. The ledger
+        // accepts only a valid stopped reading that is lower than that meter.
+        if (!finalStopped || !(error instanceof CloudProviderError) || error.code !== "compute_credit_meter_rejected" ||
+            lease.last_error_code !== "compute_credit_meter_rejected" ||
+            observed.now.getTime() - observed.stopped_observed_at!.getTime() < REGRESSED_FINAL_METER_GRACE_MS) throw error;
+        await retryAbortedDatabaseTransaction(() => this.ledger.finalizeRegressed(meter));
+        this.options.logger?.error("[cloud-workspace] settled a stopped allocation at its confirmed meter after the provider meter regressed");
+      });
     }
     if (finalStopped) {
       phase("final_settlement");
@@ -960,10 +1045,16 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       return new Date(observed.stopped_observed_at!.getTime() + FINAL_METER_LAG_MS + 1000);
     phase("authority_check");
     const scope = await this.scope(identity);
+    if (scope.generation === identity.generation && scope.desired_state !== "running") {
+      // A user lifecycle request is a stop to observe, not a lost compute
+      // scope. Adoption preserves its drain; only the finite budget may force it.
+      const setupCode = diagnosticCode(scope.setup_failure_code);
+      await this.stopAtBudget(lease, setupCode === scope.setup_failure_code ? setupCode : "workspace_stop_requested");
+      return null;
+    }
     if (
       lease.state === "draining" ||
       !scope.live ||
-      scope.desired_state !== "running" ||
       scope.generation !== this.identity(lease).generation ||
       scope.user_id !== lease.user_id ||
       money(scope.billing_epoch) !== money(lease.billing_epoch)
@@ -984,12 +1075,13 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     // A failed inspect/meter/renew skipped lease maintenance. Renew on the
     // first complete recovery pass instead of waiting for the half-TTL mark.
     if (expiry - observed.now.getTime() > renewWhenMs && !lease.last_error_code?.startsWith("provider_")) return null;
-    phase("ledger_commit");
+    phase("ledger_commit", "renewal_plan");
     const plan = await this.plan(lease);
     if (!plan) {
       await this.stopAtBudget(lease, "compute_credit_exhausted");
       return null;
     }
+    phase("ledger_commit", "renewal_reservation");
     await this.fund(lease, plan, this.workerId);
     await this.stillClaimed(lease);
     phase("authority_check");
@@ -1017,7 +1109,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       deadline > plan.fundedUntil.getTime()
     )
       throw failure("compute_lease_unconfirmed", true);
-    phase("ledger_commit");
+    phase("ledger_commit", "renewal_commit");
     await withRetryableSystemTx(this.options.pool, (tx) =>
       tx.query(
         `UPDATE managed_compute_allocation_leases SET provider_expires_at=greatest(provider_expires_at,$3),

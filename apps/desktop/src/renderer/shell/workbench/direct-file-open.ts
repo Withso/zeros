@@ -44,9 +44,11 @@ export function buildDirectFileOpenAction(
     preferredBlankId?: string | null;
     /** Exact workspace owner captured before an asynchronous resolution. */
     scope?: string;
+    /** Saved/tool references are literal filenames, including edge spaces. */
+    literalPath?: boolean;
   },
 ): Action {
-  const path = rawPath.trim();
+  const path = options?.literalPath ? rawPath : rawPath.trim();
   if (!path) throw new Error("A direct file open requires a non-empty path");
   const scoped = options?.scope === undefined ? {} : { scope: options.scope };
   const preferredExisting = options?.preferredExistingTabId

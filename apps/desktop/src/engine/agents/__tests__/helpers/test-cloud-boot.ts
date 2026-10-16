@@ -7,7 +7,7 @@ import { CloudAgentContextCache, createCloudBootAgentExecutionFactory, cloudBoot
 
 /** Real private registry/cache/factory identity with synthetic admitted data.
  * Native containment, CP endpoints and provider qualification are not proven. */
-export async function testCloudBootFixture(cwd = "/srv/zeros/workspace", provider: "cursor" | "codex" | "claude" = "cursor") {
+export async function testCloudBootFixture(cwd = "/srv/zeros/workspace", provider: "cursor" | "codex" | "claude" = "cursor", model = "test-model") {
   const scope = { organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID(),
     bootId: randomUUID(), writerEpoch: randomUUID(), fundingOwnerUserId: randomUUID(), fundingOwnerEpoch: 1 };
   let live = true;
@@ -22,7 +22,7 @@ export async function testCloudBootFixture(cwd = "/srv/zeros/workspace", provide
     authorityEpoch: 1, cacheRevision: 1, desiredCacheRevision: 1,
     initialAdoptions: [{ provider: "cursor", status: "missing" }, { provider: "claude", status: "missing" }, { provider: "codex", status: "missing" }],
     providers: [{ provider, status: "ready", credentialId: randomUUID(), credentialRevision: 1, connectionRevision: 1,
-      adoptionId: randomUUID(), displayName: "Synthetic account", kind: provider === "cursor" ? "cursor-api-key" : provider === "claude" ? "claude-api-key" : "codex-api-key", models: ["test-model"],
+      adoptionId: randomUUID(), displayName: "Synthetic account", kind: provider === "cursor" ? "cursor-api-key" : provider === "claude" ? "claude-api-key" : "codex-api-key", models: [model],
       nativeCapabilities, materialVersion: 1, expiresAt: null, refreshAfter: null, authorityExpiresAt: null,
       material: { kind: provider === "cursor" ? "cursor-api-key" : provider === "claude" ? "claude-api-key" : "codex-api-key", apiKey: "synthetic-cursor-private-key" } },
       { provider: provider === "claude" ? "codex" : "claude", status: "unavailable", code: "cloud_agent_credential_required" },
@@ -38,7 +38,7 @@ export async function testCloudBootFixture(cwd = "/srv/zeros/workspace", provide
       history: { owner: "d".repeat(64), currentKeyVersion: 1, keys: { 1: "a".repeat(43) } } },
   } satisfies CloudAgentWarmActorResponse));
   const contexts = new CloudAgentContextCache({ scope, registry, engineLive, isAdmittedCwd: root => root === cwd, request: contextRequest });
-  const base = { actor, provider, conversationId: "conversation", model: "test-model", cwd };
+  const base = { actor, provider, conversationId: "conversation", model, cwd };
   const context = await contexts.warm(base), input = { ...base, context, executionId: randomUUID() };
   const canStart = vi.fn(() => true), legacy = { prepare: vi.fn(async () => { throw new Error("Unexpected legacy admission"); }) };
   const factory = createCloudBootAgentExecutionFactory({ legacy, credentials, contexts, registry, engineLive, canStart,

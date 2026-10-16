@@ -5,6 +5,7 @@ import { z } from "zod";
 import { CLOUD_TRANSCRIPT_CACHE_BYTES, CLOUD_TRANSCRIPT_CACHE_ENTRIES, CLOUD_TRANSCRIPT_WINDOW_BYTES,
   CloudTranscriptOwnerSchema, CloudTranscriptPruneSchema, CachedTranscriptWindowSchema,
   CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch,
+  continueCachedTranscriptPresentation,
   prepareCachedTranscriptWindow, type CachedTranscriptWindow, type CloudTranscriptOwner, type CloudTranscriptPrune,
   type CloudHistoryRestoreFence,
 } from "../src/renderer/platform/cloud-transcript-cache-contract";
@@ -135,8 +136,11 @@ export class CloudTranscriptCacheStore {
       if (scope.historyEpoch !== undefined && this.historyEpochs.get(key)?.epoch !== scope.historyEpoch) return;
       if (previous && !cloudHistoryFenceCanAdvance(previous, scope.restoreHead)) return;
       if (previous && cloudHistoryFencesMatch(previous, scope.restoreHead)) return;
+      const saved = previous ? this.read({ accountId: scope.accountId, organizationId: identity.organizationId,
+        workspaceId: identity.workspaceId, chatId: identity.chatId }) : null;
+      const continued = saved && continueCachedTranscriptPresentation(saved, scope.restoreHead);
       this.historyEpochs.set(key, { owner: identity, epoch: randomUUID() });
-      this.storeRecord(identity, null, scope.restoreHead);
+      this.storeRecord(identity, continued, scope.restoreHead);
       return;
     }
     if (scope.retainedWorkspaces) { this.retainWorkspaces(scope.accountId, scope.retainedWorkspaces); return; }

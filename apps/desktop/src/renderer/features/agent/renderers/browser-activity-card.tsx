@@ -1,4 +1,5 @@
-import { memo, useState } from "react";
+import { memo } from "react";
+import { useTurnDisclosure } from "../turn-disclosures";
 import {
   ChevronDown,
   ChevronRight,
@@ -42,7 +43,7 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
   closed: boolean;
   ctx: RendererContext;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useTurnDisclosure<boolean>(events[0].id, "browser", false);
   const session = useConversationBrowserActivity(ctx.chatId ?? undefined);
   const latest = actions.at(-1);
   const groupStatus = browserActivityGroupStatus(events, closed);

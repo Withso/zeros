@@ -76,6 +76,9 @@ function diffShadowCss(surface: "bg1" | "bg2" | "sidebar-bg"): string {
     font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   }
   pre, code { background: transparent; }
+  /* The document disables chrome selection. Opt only source lines back in
+     inside the shadow root; headers, gutters and separators stay chrome. */
+  [data-line] { -webkit-user-select: text; user-select: text; }
   :host {
     background: var(--${surface});
     --diffs-gap-block: 0px;

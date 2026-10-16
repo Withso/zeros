@@ -462,6 +462,7 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       break;
     case "AGENT_INIT_AGENT":
       if (!isNonEmptyStr(env.agentId)) bad("agentId");
+      if (env.chatId !== undefined && (!isNonEmptyStr(env.chatId) || env.chatId.length > 512)) bad("chatId");
       break;
     case "AGENT_AUTHENTICATE":
       if (!isNonEmptyStr(env.agentId)) bad("agentId");

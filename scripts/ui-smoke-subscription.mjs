@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runProviderUsageObservationSmoke } from "./ui-smoke-provider-usage-observation.mjs";
 
 export async function runSubscriptionSmoke({ page, check }) {
   const base = new URL(page.url()).origin;
@@ -50,6 +51,12 @@ export async function runSubscriptionSmoke({ page, check }) {
     await expect(page.getByText("AGENT STOPPED", { exact: true })).toHaveCount(
       0,
     );
+    await page.getByRole("button", { name: "Toggle read-only transcript" }).click();
+    await expect(page.locator('[data-authentication-status="required"]')).toHaveCount(1);
+    await expect(page.locator("[data-authentication-notice]")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Toggle read-only transcript" }).click();
+    await expect(page.locator("[data-authentication-notice]")).toBeVisible();
     await page.getByRole("button", { name: "Stale credential hint" }).click();
     await expect(
       page.locator("[data-authentication-notice]"),
@@ -67,9 +74,9 @@ export async function runSubscriptionSmoke({ page, check }) {
         .click();
       await expect(page.locator("#session-status")).toHaveText("auth-required");
       await expect(page.locator("[data-user-prompt]")).toHaveCount(2);
-      await expect(
-        page.getByText("AGENT STOPPED", { exact: true }),
-      ).toBeVisible();
+      await expect(page.getByText("AGENT STOPPED", { exact: true })).toHaveCount(0);
+      await expect(page.locator('[data-authentication-status="required"]')).toHaveCount(1);
+      await expect(page.locator('[data-authentication-status="signed-in"]')).toHaveCount(0);
       await expect(page.locator("[data-authentication-notice]")).toBeVisible();
       before = await counts();
     }
@@ -199,7 +206,8 @@ export async function runSubscriptionSmoke({ page, check }) {
       `${provider}: ordinary sends retain the chat and original context, then settle the blocked turn`,
       true,
     );
-    await expect(page.getByText("AGENT STOPPED", { exact: true })).toHaveCount(
+    await expect(page.getByText("AGENT STOPPED", { exact: true })).toHaveCount(0);
+    await expect(page.locator('[data-authentication-status="signed-in"]')).toHaveCount(
       provider === "claude" ? 2 : 1,
     );
     await expect(page.locator("[data-authentication-notice]")).toHaveCount(0);
@@ -441,6 +449,7 @@ export async function runUsageSmoke({ page, check }) {
   await page.clock.fastForward(31 * 60_000);
   expect((await counts()).usageReads).toBe(hiddenReads);
   check("Usage refreshes every 30 minutes while visible and pauses while hidden", true);
+  await runProviderUsageObservationSmoke({ page, check });
 }
 
 export async function runQueueSmoke({ page, check }) {
@@ -494,6 +503,29 @@ export async function runQueueSmoke({ page, check }) {
     await action("edited H", "Delete");
     await expect(page.locator("[data-queued-id]")).toHaveCount(0);
     check(`${provider}: slow steering settles; Stop restores edit/delete; selected sends preserve FIFO`, true);
+    await page.getByRole("button", { name: "Finish turn", exact: true }).click();
+    await expect(page.locator("#queue-status")).toHaveText("ready");
+    await page.getByRole("button", { name: "Reopen conversation", exact: true }).click();
+    await expect(page.locator("#queue-status")).toHaveText("ready");
+    await send("Resumed turn");
+    await send("Resumed follow-up");
+    await expect(row("Resumed follow-up").getByRole("button", { name: "Send now", exact: true })).toBeEnabled();
+    await action("Resumed follow-up", "Send now");
+    await page.getByRole("button", { name: "Confirm delivery", exact: true }).click();
+    await expect(row("Resumed follow-up")).toHaveCount(0);
+    check(`${provider}: reopened conversation restores native steering capability`, true);
+    if (provider === "claude") {
+      await page.getByRole("button", { name: "Start background task", exact: true }).click();
+      await page.getByRole("button", { name: "Finish turn", exact: true }).click();
+      await expect(page.locator("#queue-status")).toHaveText("ready");
+      await send("Wait for background verification");
+      await expect(row("Wait for background verification")).toBeVisible();
+      await expect(page.locator("#queue-prompts")).not.toContainText("Wait for background verification");
+      await page.getByRole("button", { name: "Finish background task", exact: true }).click();
+      await expect(page.locator("#queue-prompts")).toContainText("Wait for background verification");
+      await expect(row("Wait for background verification")).toHaveCount(0);
+      check("Claude queues after its foreground reply while background work remains", true);
+    }
   }
   // Synthetic cloud readiness state on the real queue/composer controls. The
   // actual cloud wake/FIFO lifecycle is covered by cloud-composer-wake.test.ts.

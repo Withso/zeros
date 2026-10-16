@@ -1,4 +1,5 @@
 import { refuseRetiredWorkerPromotion } from "./worker-retirement";
+import { cloudWorkspaceChannelEnabled } from "../../apps/control-plane/src/cloud-workspaces/channel-policy";
 import { appendFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -56,8 +57,8 @@ export async function publicPagesSource(origin: string, surface: "app" | "ops", 
   } catch { return null; } finally { clearTimeout(timer); }
 }
 
-export async function hostedWorkerPromotionRequired(enabled: boolean, _candidate: Pick<DisabledCandidate, "channel" | "sourceSha" | "provider">, _deps: GuardDependencies = {}) {
-  if (!enabled) return false;
+export async function hostedWorkerPromotionRequired(enabled: boolean, candidate: Pick<DisabledCandidate, "channel" | "sourceSha" | "provider">, _deps: GuardDependencies = {}) {
+  if (!enabled || !cloudWorkspaceChannelEnabled(candidate.channel)) return false;
   refuseRetiredWorkerPromotion();
 }
 
@@ -132,8 +133,9 @@ export async function disabledGuard(_files: string[], candidate: DisabledCandida
   return { ...changes, blocked, manualCutoverVerified, workerVerified, message: notes.join(" ") };
 }
 async function main() {
-  if (process.env.ZEROS_WORKER_PROMOTION === "enabled") refuseRetiredWorkerPromotion();
   const source = releaseSource(process.env);
+  const cloudChannel = cloudWorkspaceChannelEnabled(source.channel);
+  if (cloudChannel && process.env.ZEROS_WORKER_PROMOTION === "enabled") refuseRetiredWorkerPromotion();
   const enabled = process.env.ZEROS_HOSTED_PROMOTION === "enabled";
   if (enabled) promotionConfig(process.env); // Missing authority is a failure, never a silent skip.
   const workerRequired = enabled && await hostedWorkerPromotionRequired(process.env.ZEROS_WORKER_PROMOTION === "enabled", {
@@ -141,7 +143,7 @@ async function main() {
   });
   const result = enabled ? { blocked: false, message: "Hosted promotion enabled; required secret names and target identities are present." }
     : await disabledGuard([], {
-      ...source, cloudEnabled: process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true", provider: process.env.CLOUD_WORKSPACE_PROVIDER,
+      ...source, cloudEnabled: cloudChannel && process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true", provider: process.env.CLOUD_WORKSPACE_PROVIDER,
     });
   console.log(`::${result.blocked ? "error" : enabled ? "notice" : "warning"}::${result.message}`);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${result.message}\n`);

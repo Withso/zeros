@@ -32,6 +32,7 @@ import type { Workspace } from "../../platform/git";
 import { workspaceIsReadOnly } from "../../state/workspace-history";
 import { WorkspaceHistoryBar } from "../workspace-history-bar";
 import { useActivePage } from "../../state/store";
+import { CloudHistoryRecoveryNotice } from "./cloud-history-recovery-notice";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import { BrowserFloatStack } from "@/renderer/features/browser/browser-float-stack";
@@ -449,6 +450,7 @@ export function ConversationPane({
                   )
                 }
               />
+              {workspace?.placement === "cloud" && <CloudHistoryRecoveryNotice folder={workspace.path} active={surfaceActive && !readOnly} />}
               <ConversationPaneLayout
                 workspace={workspace}
                 readOnly={readOnly}

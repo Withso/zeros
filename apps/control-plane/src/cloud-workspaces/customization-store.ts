@@ -14,7 +14,7 @@ export function readCustomizationDocument(row: CustomizationRow | undefined, key
 export async function lockCustomization(tx: Tx, org: string) {
   // Admission and updates share this lock, including absent scope rows. A
   // first save cannot race a lease that observed an empty organization.
-  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,71511))", [org]);
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,71511)) /*lock_purpose='customization'*/", [org]);
 }
 export async function readCustomizationRows(tx: Tx, org: string, actor: string) {
   return (await tx.query<CustomizationRow>("SELECT * FROM cloud_customization WHERE org_id=$1 AND (owner_user_id IS NULL OR owner_user_id=$2) ORDER BY owner_user_id NULLS FIRST", [org, actor])).rows;

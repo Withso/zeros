@@ -103,6 +103,8 @@ export function CloudWorkspaceDetailsContent({
 }) {
   const resources = workspace.generation.resources;
   const recoveryState = workspace.recovery?.state;
+  const restored = !recoveryState && workspace.recovery?.restored?.generation === workspace.generation.number
+    ? workspace.recovery.restored : null;
   const refusal = cloudWorkspaceExecutionRefusal(workspace);
   const usage = ["ready", "busy"].includes(workspace.status) && !recoveryState && !refusal &&
     resourceUsage?.organizationId === workspace.organizationId && resourceUsage.workspaceId === workspace.id &&
@@ -195,11 +197,22 @@ export function CloudWorkspaceDetailsContent({
       {recoveryState && workspace.recovery?.checkpointAt && (
         <p className="text-fg3 mt-3 text-xs">Saved checkpoint · {new Date(workspace.recovery.checkpointAt).toLocaleString()}</p>
       )}
+      {!refusal && restored && (
+        <p className="text-fg2 mt-3 text-xs" role="status">Restored from checkpoint · {new Date(restored.checkpointAt).toLocaleString()}</p>
+      )}
+      {!refusal && (restored || recoveryState) && (
+        <p className="text-fg3 mt-3 text-xs">
+          Checkpoint recovery restores saved repository files, Git state and supported conversation history.
+          {" "}Home directories, ignored or private files outside checkpoint exports, credentials, running processes and extra installed packages are not restored.
+          {" "}Work newer than this checkpoint may be missing.
+        </p>
+      )}
       {refusal && <p className="text-fg2 mt-3 text-xs" role="alert">{refusal.message}</p>}
       {!refusal && workspace.setupFailure && (
         <div className="mt-3"><CloudWorkspaceSetupFailure failure={workspace.setupFailure} /></div>
       )}
-      {!refusal && workspace.error && !recoveryState && !workspace.setupFailure && (
+      {!refusal && workspace.error && !workspace.setupFailure && (!recoveryState || recoveryState === "recovery_needed" &&
+        ["cloud_recovery_computer_unavailable", "cloud_recovery_repository_unavailable"].includes(workspace.error.code)) && (
         <p className="text-red-primary mt-3 text-xs" role="alert">
           {workspace.error.message}
         </p>

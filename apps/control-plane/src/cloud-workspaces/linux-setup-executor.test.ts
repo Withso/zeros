@@ -159,6 +159,42 @@ describe("CloudWorkspaceLinuxSetupExecutor", () => {
     return { ...f, executor, runtimeArtifacts, resolveRuntimeArtifact, descriptor, pin, objectKey, artifact, artifactUrl, installerDiagnostic, output };
   };
 
+  it("waits for a restoring base before minting any setup authority", async () => {
+    const f = v4(), order: string[] = [];
+    f.runner.awaitReadiness = vi.fn(async (input: { resourceId: string; runtimeBaseCompatibilityId: string; timeoutSeconds: number }) => {
+      order.push(`ready:${input.resourceId}:${input.runtimeBaseCompatibilityId}:${input.timeoutSeconds}`);
+    });
+    vi.mocked(f.broker.issue).mockImplementation(async () => { order.push("issue"); return f.grant; });
+    f.runtimeArtifacts.presignGet.mockImplementation(async () => { order.push("presign"); return f.artifact; });
+    vi.mocked(f.runner.execute).mockImplementation(async () => { order.push("execute"); return { exitCode: 0, output: f.output, outputTruncated: false }; });
+    const result = await f.executor.execute(f.input, new AbortController().signal);
+    expect(order).toEqual([`ready:sandbox-exact-id:${runtimeBase.compatibilityId}:300`, "issue", "presign", "execute"]);
+    const control = result.timings?.clocks.find(clock => clock.source === "control_plane");
+    expect(control?.spans.map(span => [span.stage, span.outcome])).toEqual(expect.arrayContaining([["bootstrap_probe", "passed"], ["admission", "passed"]]));
+  });
+  it("does not mint setup authority when the pre-admission wait fails or is cancelled", async () => {
+    const failing = v4();
+    failing.runner.awaitReadiness = vi.fn(async () => { throw new CloudProviderError("provider_request_failed", "closed", true, { httpStatus: 409 }); });
+    await expect(failing.executor.execute(failing.input, new AbortController().signal))
+      .rejects.toMatchObject({ code: "setup_provider_request_failed", retryable: true });
+    const cancelled = v4(), controller = new AbortController();
+    cancelled.runner.awaitReadiness = vi.fn(async (_input: unknown, signal: AbortSignal) => { controller.abort(); signal.throwIfAborted(); });
+    await expect(cancelled.executor.execute(cancelled.input, controller.signal))
+      .rejects.toMatchObject({ code: "setup_execution_aborted", retryable: true });
+    for (const f of [failing, cancelled]) {
+      expect(f.broker.issue).not.toHaveBeenCalled();
+      expect(f.runtimeArtifacts.presignGet).not.toHaveBeenCalled();
+      expect(f.runner.execute).not.toHaveBeenCalled();
+    }
+  });
+  it("does not wait for a v4 base on legacy setup", async () => {
+    const f = harness(execution());
+    f.runner.awaitReadiness = vi.fn(async () => {});
+    vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 0, output: JSON.stringify({ version: 1, audience: "zeros-cloud-workspace-setup-result-v1",
+      outcome: "ready", readiness: readiness(execution()) }), outputTruncated: false });
+    await f.executor.execute(f.input, new AbortController().signal).catch(() => undefined);
+    expect(f.runner.awaitReadiness).not.toHaveBeenCalled();
+  });
   it("wraps the unchanged setup payload in the fixed v4 installer input with a 15-minute artifact capability", async () => {
     const f = v4();
     await expect(f.executor.execute(f.input, new AbortController().signal)).resolves.toMatchObject({ readiness: readiness(f.input) });
@@ -618,4 +654,62 @@ describe("CloudWorkspaceLinuxSetupExecutor", () => {
     });
     expect(String(error)).not.toContain("secret-bearing");
   });
+
+  it.each(["checkpoint_restore_invalid", "engine_readiness_failed"])(
+    "keeps the first %s failure and its stage when admission cleanup also fails", async helperCode => {
+      const f = v4();
+      const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+        phase: "boot_durability", name: "Error", code: "EIO", errno: -5 } };
+      const timings = { version: 1, clocks: [{ source: "setup", clockId: randomUUID(), startedAt: new Date(NOW).toISOString(),
+        spans: [{ stage: "engine_readiness", startMs: 1, endMs: 2, outcome: "failed" }] }] };
+      vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 1, outputTruncated: false,
+        output: JSON.stringify({ version: 4, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error",
+          code: helperCode, diagnostic, timings }) + "\n" + JSON.stringify({ ...f.installerDiagnostic,
+          stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] }) });
+      vi.mocked(f.broker.revoke).mockRejectedValue(new Error("private-cleanup-canary"));
+      const error = await f.executor.execute(f.input, new AbortController().signal).catch((value: unknown) => value);
+      expect(error).toMatchObject({ code: `setup_${helperCode}`, diagnostic: expect.objectContaining(diagnostic),
+        cleanupDiagnostic: expect.objectContaining({ code: "setup_admission_revoke_failed", phase: "setup_admission" }),
+        timings: { clocks: expect.arrayContaining(timings.clocks) } });
+      if (helperCode === "checkpoint_restore_invalid") expect(error).toMatchObject({ retryable: false });
+      expect(String(error)).not.toContain("private-cleanup-canary");
+      expect(JSON.stringify(error)).not.toContain("private-cleanup-canary");
+    });
+
+  it.each([
+    ["checkpoint_expected_writer_mismatch", "setup_checkpoint_incomplete", false],
+    ["checkpoint_manifest_missing", "setup_checkpoint_incomplete", false],
+    ["checkpoint_part_missing", "setup_checkpoint_incomplete", false],
+    ["checkpoint_seal_missing", "setup_checkpoint_incomplete", false],
+    ["checkpoint_part_hash", "setup_checkpoint_restore_invalid", false],
+    ["checkpoint_writer_scope", "setup_checkpoint_restore_invalid", false],
+    ["checkpoint_inventory_timeout", "setup_checkpoint_restore_unavailable", true],
+  ] as const)("maps %s to a closed %s outcome before failed cleanup", async (code, expected, retryable) => {
+    const f = v4();
+    const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+      phase: "history_restore", name: "CloudCommandRuntimeError", code, errno: null } };
+    vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 1, outputTruncated: false,
+      output: JSON.stringify({ version: 2, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error",
+        code: "engine_readiness_failed", diagnostic }) + "\n" + JSON.stringify({ ...f.installerDiagnostic,
+        stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] }) });
+    vi.mocked(f.broker.revoke).mockRejectedValue(new Error("private-cleanup-canary"));
+    const error = await f.executor.execute(f.input, new AbortController().signal).catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: expected, retryable, diagnostic: expect.objectContaining(diagnostic),
+      cleanupDiagnostic: expect.objectContaining({ code: "setup_admission_revoke_failed" }) });
+    expect(JSON.stringify(error)).not.toContain("canary");
+  });
+
+  it.each(["credential_control_authority_rejected", "credential_control_conflict", "credential_control_invalid",
+    "credential_control_limit", "credential_control_storage_unavailable"])(
+    "does not retry a proven engine credential-fence %s failure", async code => {
+      const f = v4();
+      const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+        phase: "boot_durability", name: "CloudCredentialControlError", code, errno: null } };
+      vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 1, outputTruncated: false,
+        output: JSON.stringify({ version: 2, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error",
+          code: "engine_readiness_failed", diagnostic }) + "\n" + JSON.stringify({ ...f.installerDiagnostic,
+          stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] }) });
+      await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({
+        code: "setup_engine_readiness_failed", retryable: false, diagnostic: expect.objectContaining(diagnostic) });
+    });
 });

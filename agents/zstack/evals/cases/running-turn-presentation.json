@@ -1,0 +1,9 @@
+{
+  "id": "running-turn-presentation",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pr:537",
+  "symptom": "A running turn lost its working indicator during reconnect or when an older turn's completion arrived on the same execution.",
+  "rule": "Track foreground turn identity independently of liveness; stale receipts and rejected notifications cannot change a successor or release its gates (zstack-review).",
+  "check": "pnpm test:git apps/desktop/src/renderer/features/agent/__tests__/running-turn-activity.test.ts apps/desktop/src/renderer/features/agent/__tests__/running-turn-flush.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-runtime-upgrade-send.test.ts"
+}

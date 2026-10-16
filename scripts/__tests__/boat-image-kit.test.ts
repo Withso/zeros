@@ -140,7 +140,7 @@ describe("Boat image kit", () => {
     });
     const migration = "node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs\n";
     expect(script).toContain(migration);
-    const resolver = " cloud-runtime-root.mjs";
+    const resolver = " cloud-runtime-root.mjs cloud-runtime-assets.mjs";
     expect(script).toContain(`cloud-runtime-profile.mjs${resolver} cloud-engine-cgroup.mjs`);
     const timings = " cloud-setup-timings.mjs";
     const checkout = " cloud-computer-checkout.mjs";

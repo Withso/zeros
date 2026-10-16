@@ -1238,12 +1238,11 @@ export function useComposerEditor(
   const ctxValue = useMemo(
     () => ({
       getAttachment: (id: string) => attachmentMapRef.current.get(id),
-      onPreviewImage: openPreview,
       cwd,
       attachmentImagesActive,
       editable,
     }),
-    [openPreview, cwd, attachmentImagesActive, editable],
+    [cwd, attachmentImagesActive, editable],
   );
 
   const editorContent = (

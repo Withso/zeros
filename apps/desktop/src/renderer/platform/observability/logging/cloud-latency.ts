@@ -1,4 +1,4 @@
-export type CloudLatencySpan = "intent_history_visible" | "click_transcript_paint" | "submit_first_text";
+export type CloudLatencySpan = "intent_history_visible" | "click_transcript_paint" | "transcript_loading_visible" | "submit_first_text";
 export interface CloudLatencySample {
   span: CloudLatencySpan;
   duration_ms: number;

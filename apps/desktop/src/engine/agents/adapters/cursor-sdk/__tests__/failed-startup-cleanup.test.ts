@@ -155,7 +155,7 @@ describe("CursorSdkAdapter — failed session host startup cleanup", () => {
     const coordinator = await cloudBoundary();
     vi.spyOn(cloudExecution,"cloudProviderExecution").mockReturnValue({
       coordinator, productServers: [],
-      lease: { customization: undefined },
+      lease: { customization: undefined, assertLive() {} },
     } as unknown as cloudExecution.CloudProviderExecution);
     resumeSpy.mockRejectedValueOnce(new Error("Agent prior-agent-id not found"));
     const adapter=new CursorSdkAdapter(makeCtx());
@@ -170,7 +170,7 @@ describe("CursorSdkAdapter — failed session host startup cleanup", () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     const admitted = await cloudBoundary(), providerHome = admitted.providerHomePath!;
     vi.spyOn(cloudExecution,"cloudProviderExecution").mockReturnValue({
-      coordinator: admitted, productServers: [], lease: { customization: undefined },
+      coordinator: admitted, productServers: [], lease: { customization: undefined, assertLive() {} },
     } as unknown as cloudExecution.CloudProviderExecution);
     try {
       await adapter.newSession({ cwd: root, env: { CURSOR_API_KEY: "key" }, executionBoundary: admitted });

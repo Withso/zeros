@@ -89,6 +89,11 @@ authentication method, executable override, and gateway URL belong here; API
 keys remain in the OS secret store. `[github]` account selection and browser
 policy are user-only. Repository and worktree schemas exclude account fields.
 
+`preferences.follow_up_behavior` is `"queue"` (the default) or `"steer"` and is
+exposed in Settings → General. It applies to both Local and cloud composers.
+Queue waits for foreground and background work; Steer submits immediately.
+Cmd/Ctrl+Enter uses the alternate behavior for a new follow-up.
+
 Browser storage is a synchronous cache for app startup, with a durable outbox
 for unacknowledged preference edits. The first migration merges under existing
 file choices; `preferences_version = 1` prevents deleted choices from being
@@ -130,6 +135,20 @@ checkout; legacy `directory` paths remain readable. The folder's tracked
 `design.toml` v2 owns registration, while `canvas.json` owns its scene. These
 files are separate from private `.zeros/` settings. Removing private settings
 loses the selection, not the portable Design document.
+
+Design `build` style sources declare their build command in the tracked
+`meta/canvas.json`, so every checkout builds them while a Design tab is open.
+Private `[[design.style_builds]]` entries override that command for one
+person: `output` (the source's repository-relative `.css` path, usually in
+`.zeros/design-styles/`, which Zeros keeps out of Git), `command` (run in the
+checkout like a setup script, in the repository task boundary with the
+scrubbed environment), optional `watch = true` for a command that keeps
+running, optional `inputs` (files or folders whose changes re-run a one-shot
+command) and optional `timeout_seconds` (1–600, default 120). These entries are
+read from the user, repo-local and workspace-local layers only. `[design]
+repository_style_builds = false` (any layer, including a managed policy)
+stops declared builds while personal entries still run
+([build sources](design-mode-roadmap.md#imported-style-sources)).
 
 Settings owns directory selection, adoption, rename and registration removal.
 The [Design directory contract](design-mode-roadmap.md#source-metadata-and-personal-state)

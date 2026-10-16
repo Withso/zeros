@@ -31,7 +31,7 @@ beforeEach(() => {
   mocked.assertRequiredChecks.mockResolvedValue(undefined);
   mocked.assertCurrent.mockResolvedValue(undefined);
   mocked.betaReceipt.mockResolvedValue(undefined);
-  mocked.requiredChecks.mockResolvedValue([]);
+  mocked.requiredChecks.mockResolvedValue(["Preflight", "CodeQL"].map(workflow => ({ workflow, runId: 100, attempt: 1, succeeded: true })));
   mocked.waitForRequiredCI.mockImplementation(async (read: () => Promise<unknown>) => read());
   mocked.automaticAlpha.mockResolvedValue(false);
   mocked.alphaBarrierUnmutated.mockResolvedValue(true);

@@ -14,7 +14,7 @@ const { createRuntimeSpy, createSpy, resumeSpy, prewarmSpy } = vi.hoisted(() => 
 }));
 vi.mock("../host/host-client", () => {
   const module = { Agent: { create: createSpy, resume: resumeSpy, list: vi.fn(async () => ({ items: [] })) },
-    Cursor: { models: { list: vi.fn(async () => []) } }, platform: { prewarm: prewarmSpy } };
+    Cursor: { models: { list: vi.fn(async () => [{ id: "grok-4.6", parameters: [] }]) } }, platform: { prewarm: prewarmSpy } };
   return { createCursorHostRuntime: createRuntimeSpy, getCursorHostModule: vi.fn(() => module),
     CURSOR_HOST_EXITED_CODE: "CURSOR_HOST_EXITED", CURSOR_HOST_CRASH_LOOP_CODE: "CURSOR_HOST_CRASH_LOOP", CURSOR_HOST_CRASH_LOOP_ADVICE: "Restart Cursor" };
 });
@@ -34,7 +34,7 @@ const ctx = (): AgentAdapterContext => ({ projectRoot: root, mcpServers: [userSe
 const cloudBoundary = () => ({ status: { actor: "agent-code", backend: "cloud-worker" }, nativeHome,
   providerHomePath: nativeHome.paths.home } as unknown as PreparedBoundary);
 const execution = (extra: Record<string, unknown> = {}) => ({ coordinator: cloudBoundary(),
-  productServers: [minted], lease: {}, ...extra } as unknown as cloudExecution.CloudProviderExecution);
+  productServers: [minted], lifetime: { assertLive() {} }, lease: {}, ...extra } as unknown as cloudExecution.CloudProviderExecution);
 const sessionOptions = () => ({ cwd: root, env: { CURSOR_API_KEY: "key", CURSOR_MODEL: "grok-4.6" }, mcpServers: [userServer, unminted], executionBoundary: cloudBoundary() });
 const configured = (options: Record<string, unknown>) => options.mcpServers as Record<string, { url: string; headers?: Record<string, string> }> | undefined;
 
@@ -54,7 +54,7 @@ beforeEach(async () => {
   agent.send.mockReset().mockImplementation(async () => ({ id: "run-1", stream: async function* () {}, wait: async () => ({ status: "finished" }) }));
   prewarmSpy.mockReset().mockResolvedValue({ prewarmed: true });
   createRuntimeSpy.mockReset().mockImplementation(() => ({
-    module: { Agent: { create: createSpy, resume: resumeSpy, list: vi.fn(async () => ({ items: [] })) }, Cursor: { models: { list: vi.fn(async () => []) } }, platform: { prewarm: prewarmSpy } },
+    module: { Agent: { create: createSpy, resume: resumeSpy, list: vi.fn(async () => ({ items: [] })) }, Cursor: { models: { list: vi.fn(async () => [{ id: "grok-4.6", parameters: [] }]) } }, platform: { prewarm: prewarmSpy } },
     dispose: vi.fn(async () => {}),
   }));
   // Every admitted execution carries a lease; this one has no customization.
@@ -76,7 +76,7 @@ describe("Cursor cloud product tools", () => {
     const coordinator = { ...options.executionBoundary, nativeHome, providerHomePath: nativeHome.paths.home,
       environment: () => ({ ...nativeHome.environment(), ZEROS_CURSOR_STATE_ROOT: stateRoot }) };
     vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ coordinator,
-      productServers: [], lease: {} } as unknown as cloudExecution.CloudProviderExecution);
+      productServers: [], lifetime: { assertLive() {} }, lease: {} } as unknown as cloudExecution.CloudProviderExecution);
     const adapter = new CursorSdkAdapter(ctx());
     try {
       if (operation === "new") await adapter.newSession(options);

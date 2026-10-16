@@ -12,6 +12,14 @@ import { CloudAgentCredentialActualUseSchema } from "../cloud-events";
 const base = { id: "1", timestamp: 0 } as const;
 
 describe("parseBridgeMessage — trust-boundary validation", () => {
+  it("validates the optional conversation route for agent catalog reads", () => {
+    const request = { ...base, source: "browser", type: "AGENT_INIT_AGENT", agentId: "codex" };
+    expect(parseBridgeMessage(request)).toEqual(request);
+    expect(parseBridgeMessage({ ...request, chatId: "chat" })).toMatchObject({ chatId: "chat" });
+    for (const chatId of [null, {}, [], 1, "", "x".repeat(513)]) {
+      expect(() => parseBridgeMessage({ ...request, chatId })).toThrow(/chatId/);
+    }
+  });
   it("round-trips the engine's exact cloud credential-use envelope", () => {
     const scope = { version: 1, mode: "boot-owner-v1", fundingScope: "workspace-roles-v1", authorityEpoch: 1,
       organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID(),

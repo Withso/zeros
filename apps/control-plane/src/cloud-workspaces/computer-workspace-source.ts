@@ -6,6 +6,8 @@ import { CloudComputerV2RepositoryManifestSchema, type CloudComputerV2Repository
 import { loadPinnedCloudRuntime, selectCloudRuntime, type CloudRuntimePin } from "./runtime-selection.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { CloudProviderError, type CloudProviderCreateInput } from "./provider.js";
+import type { ComputerSnapshotIdentity } from "./computer-template-snapshot-boat.js";
+import { isComputerTemplateSnapshotName, type ComputerSnapshotChannel } from "./computer-template-name.js";
 
 const templateRef = /^boat-template:([A-Za-z0-9_-]{1,128})$/;
 const pathName = /^[a-z0-9_.-]{1,100}$/;
@@ -16,11 +18,14 @@ type TemplateRow = {
   manifest_sha256: string; engine_protocol_version: number;
   source_commit: string; architecture: "linux/amd64"; storage_mib: number | string;
   repository_manifest: unknown; protected_contract_digest: Buffer;
+  named_snapshot_required: boolean; snapshot_image_ref: string | null; snapshot_state: string | null;
+  snapshot_name: string | null; snapshot_id: string | null; snapshot_verified_at: Date | null;
 };
 export type CloudComputerWorkspaceSource = {
   buildId: string; templateId: string; configId: string; sourceSandboxId: string;
   baseImageId: string; baseCompatibilityId: string; templateRuntimeId: string;
   protectedContractDigest: string; repositories: CloudComputerV2RepositoryManifest;
+  namedSnapshot?: ComputerSnapshotIdentity & { imageRef: string; state: string };
 };
 export type CloudComputerRepositoryGrant = {
   id: string; githubInstallationId: number; repositoryId: string;
@@ -37,17 +42,22 @@ function buildRequired(): never {
   throw new HttpError(409, "cloud_computer_build_required", "Build your Cloud Computer before creating a workspace.");
 }
 
-const templateSelect = `SELECT build.id AS build_id,build.version,build.config_id,template.provider_resource_id,
-  template.account_scope,template.billing_org,template.protected_contract_digest,
+const templateSelect = (consistentRead=false) => `SELECT build.id AS build_id,build.version,build.config_id,template.provider_resource_id,
+  template.account_scope,template.billing_org,template.protected_contract_digest,template.named_snapshot_required,
+  snapshot.image_ref AS snapshot_image_ref,snapshot.state AS snapshot_state,snapshot.snapshot_name,snapshot.snapshot_id,
+  snapshot.verified_at AS snapshot_verified_at,
   build.base_image_id,base.base_compatibility_id,build.runtime_id,bundle.manifest_sha256,bundle.engine_protocol_version,
   base.source_commit,base.architecture,base.storage_mib,build.repository_manifest
   FROM cloud_computer_v2_builds build
   JOIN cloud_computer_templates template ON template.build_id=build.id AND template.org_id=build.org_id
   JOIN cloud_runtime_base_images base ON base.base_image_id=build.base_image_id AND base.provider='boat'
   JOIN cloud_runtime_bundles bundle ON bundle.runtime_id=build.runtime_id
+  LEFT JOIN cloud_computer_template_snapshots snapshot ON snapshot.build_id=template.build_id AND snapshot.org_id=template.org_id
+    AND snapshot.source_sandbox_id=template.provider_resource_id AND snapshot.account_scope=template.account_scope
+    AND snapshot.billing_org=template.billing_org AND snapshot.manifest_sha256=template.manifest_sha256
   WHERE build.id=$1 AND build.org_id=$2 AND build.state='succeeded' AND template.state='ready'
     AND template.stopped_at IS NOT NULL AND template.protected_contract_digest IS NOT NULL
-  FOR SHARE OF build,template`;
+  ${consistentRead ? "" : "FOR SHARE OF build,template"}`;
 
 async function sourceFromRow(tx: Tx, organizationId: string, row: TemplateRow): Promise<CloudComputerWorkspaceSource> {
   const manifest = CloudComputerV2RepositoryManifestSchema.safeParse(row.repository_manifest);
@@ -63,7 +73,10 @@ async function sourceFromRow(tx: Tx, organizationId: string, row: TemplateRow): 
     })) buildRequired();
   return { buildId: row.build_id, templateId: row.build_id, configId: row.config_id, sourceSandboxId: row.provider_resource_id,
     baseImageId: row.base_image_id, baseCompatibilityId: row.base_compatibility_id, templateRuntimeId: row.runtime_id,
-    protectedContractDigest: row.protected_contract_digest.toString("hex"), repositories: manifest.data };
+    protectedContractDigest: row.protected_contract_digest.toString("hex"), repositories: manifest.data,
+    ...(row.snapshot_name && row.snapshot_id && row.snapshot_image_ref && row.snapshot_verified_at && row.snapshot_state
+      ? { namedSnapshot: { name: row.snapshot_name, snapshotId: row.snapshot_id, sourceSandboxId: row.provider_resource_id,
+        imageRef: row.snapshot_image_ref, state: row.snapshot_state } } : {}) };
 }
 
 /** A C1 config's approved repository is the org read grant. It deliberately
@@ -134,8 +147,9 @@ export async function selectComputerWorkspaceSource(tx: Tx, input: {
     throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed during workspace creation. Refresh before trying again.");
   if (!head) return null;
   if (!head.active_build_id) buildRequired();
-  const row = (await tx.query<TemplateRow>(templateSelect, [head.active_build_id, input.organizationId])).rows[0];
+  const row = (await tx.query<TemplateRow>(templateSelect(), [head.active_build_id, input.organizationId])).rows[0];
   if (!row) buildRequired();
+  if (row.named_snapshot_required && row.snapshot_state !== "ready") buildRequired();
   if (input.expectedActiveVersion !== undefined && Number(row.version) !== input.expectedActiveVersion)
     throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed. Refresh before creating an admin workspace.");
   const source = await sourceFromRow(tx, input.organizationId, row);
@@ -149,7 +163,7 @@ export async function selectComputerWorkspaceSource(tx: Tx, input: {
   const runtime = await loadPinnedCloudRuntime(tx, pin, input.qualificationMode) ? pin :
     (await selectCloudRuntime(tx, input.qualificationMode, pin.baseImageId))?.pin;
   if (!runtime) throw new HttpError(409, "cloud_runtime_unavailable", "A qualified cloud runtime is unavailable");
-  return { source, runtime, imageRef: `boat-template:${source.sourceSandboxId}`,
+  return { source, runtime, imageRef: source.namedSnapshot?.state === "ready" ? source.namedSnapshot.imageRef : `boat-template:${source.sourceSandboxId}`,
     sourceCommit: row.source_commit, architecture: row.architecture, storageMiB: Number(row.storage_mib) };
 }
 
@@ -176,7 +190,8 @@ export async function copyComputerWorkspaceSource(tx: Tx, input: {
 
 /** Saved-generation lookup shared by setup and the provider's fork admission.
  * A later activation never changes the environment of an accepted generation. */
-export async function loadComputerWorkspaceSource(tx: Tx, input: { workspaceId: string; generation: number; organizationId: string }) {
+export async function loadComputerWorkspaceSource(tx: Tx, input: { workspaceId: string; generation: number; organizationId: string },
+  options: { consistentRead?: boolean } = {}) {
   const saved = (await tx.query<{ build_id: string; config_id: string; image_ref: string; runtime_base_image_id: string }>(
     `SELECT source.build_id,source.config_id,generation.image_ref,generation.runtime_base_image_id
      FROM cloud_workspace_generations generation
@@ -184,9 +199,10 @@ export async function loadComputerWorkspaceSource(tx: Tx, input: { workspaceId: 
      WHERE generation.workspace_id=$1 AND generation.generation=$2 AND generation.org_id=$3`,
     [input.workspaceId, input.generation, input.organizationId])).rows[0];
   if (!saved) return null;
-  const row = (await tx.query<TemplateRow>(templateSelect, [saved.build_id, input.organizationId])).rows[0];
+  const row = (await tx.query<TemplateRow>(templateSelect(options.consistentRead), [saved.build_id, input.organizationId])).rows[0];
   if (!row || row.config_id !== saved.config_id || row.base_image_id !== saved.runtime_base_image_id ||
-    saved.image_ref !== `boat-template:${row.provider_resource_id}`) buildRequired();
+    (saved.image_ref !== `boat-template:${row.provider_resource_id}` &&
+      (!row.snapshot_verified_at || saved.image_ref !== row.snapshot_image_ref))) buildRequired();
   return sourceFromRow(tx, input.organizationId, row);
 }
 
@@ -217,5 +233,26 @@ export async function resolveComputerTemplateFork(pool: pg.Pool, accountScope: s
     const source = saved && await loadComputerWorkspaceSource(tx, { ...input, organizationId: saved.org_id });
     if (!source) throw new CloudProviderError("provider_template_identity_mismatch", "Cloud Computer template identity is unavailable", false);
     return source.sourceSandboxId;
+  });
+}
+
+/** Named allocation never reads the expired builder. The saved generation,
+ * tenant, account, wallet and immutable capture receipt authorize the name. */
+export async function resolveComputerNamedTemplate(pool: pg.Pool, accountScope: string, billingOrg: string,
+  input: CloudProviderCreateInput, channel: ComputerSnapshotChannel): Promise<ComputerSnapshotIdentity> {
+  return withSystemTx(pool, async tx => {
+    const saved = (await tx.query<{ org_id: string }>(`SELECT generation.org_id FROM cloud_workspace_generations generation
+      JOIN cloud_workspace_computer_sources source USING(workspace_id,generation,org_id)
+      JOIN cloud_computer_template_snapshots snapshot ON snapshot.build_id=source.template_id AND snapshot.org_id=source.org_id
+      WHERE generation.workspace_id=$1 AND generation.generation=$2 AND generation.image_ref=$3
+        AND snapshot.image_ref=generation.image_ref AND snapshot.state='ready' AND snapshot.verified_at IS NOT NULL
+        AND snapshot.account_scope=$4 AND snapshot.billing_org=$5 AND snapshot.channel=$6`,
+    [input.workspaceId, input.generation, input.imageRef, accountScope, billingOrg, channel])).rows[0];
+    const source = saved && await loadComputerWorkspaceSource(tx, { ...input, organizationId: saved.org_id });
+    if (!source?.namedSnapshot || source.namedSnapshot.state !== "ready" || source.namedSnapshot.imageRef !== input.imageRef ||
+        !isComputerTemplateSnapshotName(source.namedSnapshot.name, channel))
+      throw new CloudProviderError("provider_template_identity_mismatch", "Cloud Computer named snapshot identity is unavailable", false);
+    const { name, snapshotId, sourceSandboxId } = source.namedSnapshot;
+    return { name, snapshotId, sourceSandboxId };
   });
 }

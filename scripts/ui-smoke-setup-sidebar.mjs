@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runSetupObservationSmoke } from "./ui-smoke-setup-observation.mjs";
 
 export async function runSetupSidebarSmoke({ page, check }) {
   const base = new URL(page.url()).origin;
@@ -213,4 +214,5 @@ export async function runSetupSidebarSmoke({ page, check }) {
   await expect(run).toBeDisabled();
   expect(await requests()).toHaveLength(8);
   check("Setup Run remains disabled without a runnable workspace", true);
+  await runSetupObservationSmoke({ page, check });
 }

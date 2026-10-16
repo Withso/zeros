@@ -4,6 +4,8 @@ import type pg from "pg";
 
 import { withSystemTx } from "../db.js";
 import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
+import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 
 export interface CloudWorkspaceDeletionObjectService {
   deleteUnreferencedSystem(input: {
@@ -51,8 +53,7 @@ export class CloudWorkspaceOperationsWorker {
   private readonly leaseMs: number;
   private readonly maxAttempts: number;
   private readonly deletionBatchSize: number;
-  private timer: NodeJS.Timeout | null = null;
-  private active: Promise<void> | null = null;
+  private readonly scheduler: CloudWorkerScheduler;
   private started = false;
   private stopped = false;
 
@@ -90,6 +91,9 @@ export class CloudWorkspaceOperationsWorker {
     ) {
       throw new Error("cloud workspace operations configuration is invalid");
     }
+    this.scheduler = new CloudWorkerScheduler(this.intervalMs, async () => { await this.runOnce(); }, () => {
+      (this.options.logger ?? console).error("[cloud-workspace] operations tick failed; will retry");
+    }, () => readCloudWorkerNextDelay(this.pool, "operations"), { readBeforeRun: true, jitter: options.intervalMs === undefined });
   }
 
   start(): () => Promise<void> {
@@ -97,34 +101,15 @@ export class CloudWorkspaceOperationsWorker {
       throw new Error("cloud workspace operations lifecycle is invalid");
     }
     this.started = true;
-    const tick = () => {
-      if (this.stopped) return;
-      const task = this.runOnce()
-        .then(() => undefined)
-        .catch((error) => {
-          (this.options.logger ?? console).error(
-            `[cloud-workspace] operations tick failed: ${
-              error instanceof Error ? error.name : "unknown"
-            }`,
-          );
-        });
-      this.active = task;
-      void task.finally(() => {
-        if (this.active === task) this.active = null;
-        if (this.stopped) return;
-        this.timer = setTimeout(tick, this.intervalMs);
-        this.timer.unref();
-      });
-    };
-    tick();
+    this.scheduler.start();
     return () => this.stop();
   }
 
+  notify(): void { this.scheduler.notify(); }
+
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    await this.active;
+    await this.scheduler.stop();
   }
 
   async runOnce(): Promise<{
@@ -773,11 +758,19 @@ export class CloudWorkspaceOperationsWorker {
 
   private async purgeDeletionRecords(job: DeletionJob): Promise<void> {
     await withSystemTx(this.pool, async (tx) => {
+      // Lifecycle and the guarded operator lock workspace before job. Keep
+      // that order so an approval replay cannot deadlock a finishing purge.
+      const workspace = await tx.query(
+        `SELECT 1 FROM cloud_workspaces WHERE id = $1 AND org_id = $2
+           AND status = 'deleted' AND desired_state = 'deleted' AND data_deleted_at IS NULL FOR UPDATE`,
+        [job.workspaceId, job.organizationId],
+      );
+      if (workspace.rowCount !== 1) return;
       const owned = await tx.query(
         `SELECT 1 FROM workspace_deletion_jobs
-         WHERE id = $1 AND state = 'deleting_records'
-           AND lease_owner = $2 FOR UPDATE`,
-        [job.id, job.leaseOwner],
+         WHERE id = $1 AND state = 'deleting_records' AND lease_owner = $2
+           AND workspace_id = $3 AND org_id = $4 AND lease_expires_at > clock_timestamp() FOR UPDATE`,
+        [job.id, job.leaseOwner, job.workspaceId, job.organizationId],
       );
       if ((owned.rowCount ?? 0) !== 1) return;
       const remaining = await tx.query(
@@ -789,6 +782,15 @@ export class CloudWorkspaceOperationsWorker {
         throw new Error("workspace_deletion_objects_incomplete");
       }
       const scope = [job.workspaceId, job.organizationId];
+      await tx.query(
+        `SELECT set_config('app.workspace_deletion_job_id', $1, true),
+                set_config('app.workspace_deletion_lease_owner', $2, true)`,
+        [job.id, job.leaseOwner],
+      );
+      const authorized = await tx.query<{ allowed: boolean }>(
+        "SELECT cloud_workspace_data_purge_authorized($1, $2) AS allowed", scope,
+      );
+      if (!authorized.rows[0]?.allowed) throw new Error("workspace_deletion_purge_not_authorized");
       for (const statement of [
         // Source-bearing replay and queued commands belong to the deleted
         // workspace, not its billing tombstone. Their engine references are
@@ -799,6 +801,12 @@ export class CloudWorkspaceOperationsWorker {
         `DELETE FROM cloud_workspace_conversation_controls
          WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM cloud_workspace_action_receipts
+         WHERE workspace_id = $1 AND org_id = $2`,
+        `UPDATE cloud_workspaces SET agent_boot_id = NULL
+         WHERE id = $1 AND org_id = $2 AND agent_boot_id IS NOT NULL`,
+        `DELETE FROM cloud_workspace_local_command_history_heads
+         WHERE workspace_id = $1 AND org_id = $2`,
+        `DELETE FROM cloud_workspace_local_command_writers
          WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM workspace_export_grants
          WHERE workspace_id = $1 AND org_id = $2`,
@@ -832,6 +840,13 @@ export class CloudWorkspaceOperationsWorker {
         `DELETE FROM port_forward_sessions
          WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM workspace_executions
+         WHERE workspace_id = $1 AND org_id = $2`,
+        `DELETE FROM cloud_workspace_setup_attestations
+         WHERE workspace_id = $1 AND org_id = $2`,
+        // One statement also handles chained transfers whose target engine is
+        // the next transfer's source. Enrollment/attestation cascades are
+        // operational data; allocation and generation audit rows stay intact.
+        `DELETE FROM cloud_workspace_runtime_transitions
          WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM cloud_workspace_setup_runs
          WHERE workspace_id = $1 AND org_id = $2`,
@@ -874,13 +889,16 @@ export class CloudWorkspaceOperationsWorker {
          ON CONFLICT (idempotency_key) DO NOTHING`,
         [job.workspaceId, job.organizationId, job.id],
       );
-      await tx.query(
+      const completed = await tx.query(
         `UPDATE workspace_deletion_jobs
          SET state = 'succeeded', lease_owner = NULL, lease_expires_at = NULL,
              error_code = NULL, completed_at = now(), updated_at = now()
-         WHERE id = $1 AND lease_owner = $2`,
-        [job.id, job.leaseOwner],
+         WHERE id = $1 AND lease_owner = $2 AND workspace_id = $3 AND org_id = $4
+           AND lease_expires_at > clock_timestamp()
+         RETURNING id`,
+        [job.id, job.leaseOwner, job.workspaceId, job.organizationId],
       );
+      if (completed.rowCount !== 1) throw new Error("workspace_deletion_lease_lost");
     });
   }
 }

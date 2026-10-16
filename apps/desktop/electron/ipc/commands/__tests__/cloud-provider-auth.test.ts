@@ -75,6 +75,7 @@ function pendingLogin() {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.stubEnv("ZEROS_CHANNEL", "alpha");
   vi.stubGlobal("__ZEROS_CLOUD_WORKSPACES_ENABLED_BAKED__", false);
   vi.stubEnv("ZEROS_CLOUD_WORKSPACES_ENABLED", "false");
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -111,7 +112,18 @@ afterEach(async () => {
 });
 
 describe("cloud account enrollment IPC without workspace execution", () => {
-  it.each(["beta", "production"])("imports native Codex through the authenticated %s backend with cloud disabled", async (channel) => {
+  it.each(["beta", "stable"])("refuses %s enrollment before session or provider access", async channel => {
+    vi.stubEnv("ZEROS_CHANNEL", channel);
+    await expect(invoke(connection(), event())).rejects.toThrow(/not available.*channel/i);
+    expect(deps.session).not.toHaveBeenCalled();
+    expect(deps.fetch).not.toHaveBeenCalled();
+    expect(deps.login).not.toHaveBeenCalled();
+    expect(deps.cursorLogin).not.toHaveBeenCalled();
+    expect(deps.mkdir).not.toHaveBeenCalled();
+  });
+
+  it.each(["dev", "alpha"])("imports native Codex through the authenticated %s backend with workspace execution disabled", async (channel) => {
+    vi.stubEnv("ZEROS_CHANNEL", channel);
     deps.baseUrl.mockReturnValue(`https://${channel}.example.test`);
     const request = connection(), sender = event();
     const timeout = vi.spyOn(AbortSignal, "timeout");

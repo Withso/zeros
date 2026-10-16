@@ -13,10 +13,21 @@ import { CloudAgentContextCache, createCloudBootAgentExecutionFactory, cloudBoot
   type CloudBootAgentExecutionFactory, type CloudBootAgentSelection, type CloudBootSelectionInput,
   type CloudAgentExecutionLifetime } from "./agents/cloud-provider-execution";
 import { CloudLocalCommandQueue, type CloudLocalCommandHistory } from "./cloud-local-command-queue";
+import { verifyAndPrepareCloudLocalCommandPredecessor, cloudLocalCommandHistoryRecoveryId, cloudLocalCommandHistoryRecoveryCustodySha256,
+  type CloudLocalCommandPredecessor } from "./cloud-local-command-queue-checkpoint";
 import { CloudCredentialStartFences, CloudAgentCredentialControlExchangeResponseSchema, CloudCredentialControlError } from "./cloud-local-command-queue-start-fences";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
-import { CloudAgentExecutionError } from "./cloud-agent-execution-client";
+import { CloudAgentExecutionError, isTransientCloudAgentAuthorityError,
+  type CloudAgentBootRequests, type CloudAgentBootResponses } from "./cloud-agent-execution-client";
 import type { CloudRuntimeRegistration, CloudRuntimeClientAdmission } from "./cloud-runtime-registration";
+import { classifyCloudEngineStartupFailure, type CloudEngineStartupFailure,
+  type CloudEngineStartupPhase } from "./agents/containment/cloud-engine-startup-failure.mjs";
+
+const STARTUP_BUDGET_MS = 30_000;
+const STARTUP_RETRY_DELAYS_MS = [250, 500] as const;
+type StartupOperation = "bootstrap" | "sync" | "activate";
+type StartupObservation = { phase: CloudEngineStartupPhase; outcome: "start" | "ready" | "retry" | "failed";
+  elapsedMs: number; attempt?: number; failure?: CloudEngineStartupFailure };
 
 type Reference = Pick<CloudAgentBootScope, "organizationId" | "workspaceId" | "generation" | "engineInstanceId">;
 type Conversation = { provider: "claude" | "codex" | "cursor"; model: string; cwd: string };
@@ -25,7 +36,8 @@ type Interest = Conversation & { conversationId: string; sessionId: string; time
 type Actor = { admission: CloudRuntimeClientAdmission; confirmedUntilMs: number; timer: ReturnType<typeof setTimeout> | null };
 type Options = {
   file: string; scope: Reference; runtimeBootId: string;
-  registration: Pick<CloudRuntimeRegistration, "localCommandsNegotiated" | "agentBootRequest" | "credentialControlsRequest">;
+  predecessor?: CloudLocalCommandPredecessor | null;
+  registration: Pick<CloudRuntimeRegistration, "localCommandsNegotiated" | "agentBootAuthorityRemainingMs" | "agentBootRequest" | "credentialControlsRequest">;
   legacy: CloudAgentExecutionFactory; supervisor: CloudAgentLeaseSupervisor; engineLive(): boolean;
   isAdmittedCwd(cwd: string, actor: CloudAuthorizedActor): boolean;
   resolveConversation(conversationId: string): Conversation | null;
@@ -43,6 +55,8 @@ type Options = {
   /** Admission fences stop new actors/claims without pretending the last
    * confirmed authority needed for final replication has been revoked. */
   startsAllowed?(): boolean;
+  /** Closed, content-free evidence only; never readiness or admission. */
+  observeStartup?(observation: StartupObservation): void;
 };
 
 /** Registration establishes a candidate; only an exact activation response
@@ -51,6 +65,9 @@ type Options = {
 export class CloudLocalAgentBootRuntime {
   private readonly controller = new AbortController();
   private initializing: Promise<boolean> | null = null;
+  private startupFailure: { error: unknown } | null = null;
+  private startupDeadlineMs: number | null = null;
+  private startupPhase: { phase: CloudEngineStartupPhase; startedAt: number } | null = null;
   private closed = false;
   private activated = false;
   private sealing = false;
@@ -62,6 +79,7 @@ export class CloudLocalAgentBootRuntime {
   private queueValue: CloudLocalCommandQueue | null = null;
   private fencesValue: CloudCredentialStartFences | null = null;
   private readonly actors = new Map<string, Actor>();
+  private readonly actorConfirmations = new Map<string, Promise<void>>();
   private readonly interests = new Map<string, Interest>();
   private readonly flights = new Set<Promise<unknown>>();
   private cacheTimer: ReturnType<typeof setTimeout> | null = null;
@@ -117,36 +135,112 @@ export class CloudLocalAgentBootRuntime {
   }
   initialize(): Promise<boolean> {
     if (!this.live()) return Promise.reject(new CloudCommandRuntimeError("engine_authority_rejected"));
+    if (this.startupFailure) return Promise.reject(this.startupFailure.error);
     if (this.activated) return Promise.resolve(true);
     if (this.initializing) return this.initializing;
     if (!this.options.registration.localCommandsNegotiated()) return Promise.resolve(false);
-    const task = this.initializeBoot(); this.initializing = task;
+    this.startupDeadlineMs ??= performance.now() + Math.min(STARTUP_BUDGET_MS, this.options.registration.agentBootAuthorityRemainingMs());
+    const task = this.initializeBoot().then(value => { this.observeStartup("ready"); return value; }, error => {
+      // A later readiness/socket waiter cannot buy another retry budget or
+      // repeat a failed installation. Recovery requires the owning engine's
+      // normal stop/start path, with a new runtime instance.
+      this.startupFailure = { error }; this.activated = false;
+      if (this.cacheTimer) clearTimeout(this.cacheTimer); this.cacheTimer = null;
+      if (this.controlsTimer) clearTimeout(this.controlsTimer); this.controlsTimer = null;
+      this.observeStartup("failed", error); throw error;
+    }); this.initializing = task;
     void task.finally(() => { if (this.initializing === task) this.initializing = null; }).catch(() => {});
     return task;
+  }
+  private observeStartup(outcome: StartupObservation["outcome"], error?: unknown, attempt?: number): void {
+    if (!this.startupPhase) return;
+    const { phase, startedAt } = this.startupPhase;
+    try { this.options.observeStartup?.({ phase, outcome, elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      ...(attempt === undefined ? {} : { attempt }), ...(error === undefined ? {} : { failure: classifyCloudEngineStartupFailure(error, phase) }) });
+    } catch { /* Diagnostics never change startup or authority. */ }
+  }
+  private enterStartupPhase(phase: CloudEngineStartupPhase): void {
+    this.observeStartup("ready"); this.startupPhase = { phase, startedAt: performance.now() }; this.observeStartup("start");
+    this.startupRemainingMs();
+  }
+  private startupTimeout(): CloudAgentExecutionError {
+    return new CloudAgentExecutionError("authority_timeout", this.startupPhase?.phase === "boot_bootstrap" ? "admission" : "validation");
+  }
+  private startupRemainingMs(): number {
+    const authority = this.options.registration.agentBootAuthorityRemainingMs();
+    if (!this.live() || this.controller.signal.aborted || !Number.isFinite(authority) || authority <= 0)
+      throw new CloudCommandRuntimeError("engine_authority_rejected");
+    const remaining = Math.min(authority, (this.startupDeadlineMs ?? 0) - performance.now());
+    if (remaining <= 0) throw this.startupTimeout();
+    return remaining;
+  }
+  /** Bound both HTTP and backoff, including a late/non-cooperating transport.
+   * The monotonic boot budget and the captured authority deadline never slide. */
+  private async withinStartupDeadline<T>(signal: AbortSignal, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(this.startupTimeout()), this.startupRemainingMs()); timer.unref?.();
+    const combined = AbortSignal.any([signal, this.controller.signal, timeout.signal]);
+    let abort!: () => void;
+    const stopped = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(timeout.signal.aborted ? timeout.signal.reason : new CloudCommandRuntimeError("engine_authority_rejected"));
+      combined.addEventListener("abort", abort, { once: true });
+    });
+    try {
+      if (combined.aborted) throw new CloudCommandRuntimeError("engine_authority_rejected");
+      const result = await Promise.race([work(combined), stopped]);
+      this.startupRemainingMs();
+      if (combined.aborted) throw new CloudCommandRuntimeError("engine_authority_rejected");
+      return result;
+    } finally { clearTimeout(timer); combined.removeEventListener("abort", abort); }
+  }
+  private async startupRequest<Operation extends StartupOperation>(operation: Operation, request: CloudAgentBootRequests[Operation],
+    signal: AbortSignal): Promise<CloudAgentBootResponses[Operation]> {
+    // Only the exact remote request is replayed. Reconstructing the FULL queue
+    // after an unknown activation ACK would quarantine accepted intent.
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.withinStartupDeadline(signal, bounded => this.options.registration.agentBootRequest(operation, request, bounded)); }
+      catch (error) {
+        const delay = STARTUP_RETRY_DELAYS_MS[attempt];
+        if (!isTransientCloudAgentAuthorityError(error) || delay === undefined || this.startupRemainingMs() <= delay) throw error;
+        this.observeStartup("retry", error, attempt + 1);
+        await this.withinStartupDeadline(signal, bounded => new Promise<void>((resolve, reject) => {
+          const abort = () => { clearTimeout(timer); reject(new CloudCommandRuntimeError("engine_authority_rejected")); };
+          const timer = setTimeout(() => { bounded.removeEventListener("abort", abort); resolve(); }, delay); timer.unref?.();
+          bounded.addEventListener("abort", abort, { once: true });
+          if (bounded.aborted) abort();
+        }));
+      }
+    }
   }
   private async initializeBoot(): Promise<boolean> {
     // Bootstrap is single-flight. An unknown activation ACK never reconstructs
     // or reopens a ledger, since reopen quarantines unverified accepted intent.
     if (!this.credentials) {
+      this.enterStartupPhase("boot_bootstrap");
       const request = CloudAgentBootCredentialRequestSchema.parse({ ...this.options.scope, version: 1, mode: "boot-owner-v1" });
-      const response = CloudAgentBootCredentialResponseSchema.parse(await this.options.registration.agentBootRequest(
+      const response = CloudAgentBootCredentialResponseSchema.parse(await this.startupRequest(
         "bootstrap", request, this.controller.signal));
       if (!this.live() || Object.entries(this.options.scope).some(([key, value]) => response[key as keyof typeof response] !== value) ||
           response.bootId !== this.options.runtimeBootId) throw new CloudAgentExecutionError("authority_response_invalid");
       this.scopeValue = Object.freeze(CloudAgentBootScopeSchema.parse(Object.fromEntries(
         Object.keys(CloudAgentBootScopeSchema.shape).map(key => [key, response[key as keyof typeof response]]))));
+      this.enterStartupPhase("boot_credentials");
       this.registry = new CloudActorAuthorityRegistry({ scope: this.scope, engineLive: () => this.live() });
       this.credentials = new CloudAgentCredentialCache({ scope: this.scope, engineLive: () => this.live(), request: {
         bootstrap: async () => response,
-        sync: (body, signal) => this.options.registration.agentBootRequest("sync", body, signal),
+        sync: (body, signal) => this.initializing ? this.startupRequest("sync", body, signal) :
+          this.options.registration.agentBootRequest("sync", body, signal),
         refresh: (body, signal) => this.options.registration.agentBootRequest("refresh", body, signal),
       } });
       await this.credentials.initialize(this.controller.signal);
+      this.enterStartupPhase("boot_durability");
       this.contexts = new CloudAgentContextCache({ scope: this.scope, registry: this.registry, engineLive: () => this.live(),
         isAdmittedCwd: (cwd, actor) => this.options.isAdmittedCwd(cwd, actor),
         request: (body, signal) => this.requestContext(body, signal) });
       mkdirSync(path.dirname(this.options.file), { recursive: true, mode: 0o700 });
       this.fencesValue = new CloudCredentialStartFences({ file: this.options.file, scope: this.scope, engineLive: () => this.live(),
+        predecessor: this.options.predecessor,
+        verifyPredecessor: (receipt, file, db) => verifyAndPrepareCloudLocalCommandPredecessor(receipt, file, db, this.scope),
         associationFloor: (provider,credentialId) => this.credentials!.associationFloor(provider,credentialId),
         activity: selectors => this.factory?.bootScopeActivity(selectors) ?? { complete: false, foreground: 0, reservedLaunches: 0, background: 0, idleHosts: 0, scopes: [] },
         retire: selectors => this.factory ? this.factory.retireBootCredentials(selectors) : Promise.reject(new CloudCommandRuntimeError("engine_authority_rejected")),
@@ -191,29 +285,37 @@ export class CloudLocalAgentBootRuntime {
           const record = this.selections.get(claimId);
           if (record) { this.closeUnused(record.lifetime); this.selections.delete(claimId); }
         } });
-      this.scheduleCache();
     }
+    this.enterStartupPhase("boot_credentials");
     const credentials = this.credentials, metadata = credentials.metadata;
     if (metadata.desiredCacheRevision > metadata.cacheRevision) {
       await credentials.synchronize(this.controller.signal);
       if (credentials.metadata.desiredCacheRevision > credentials.metadata.cacheRevision)
         throw new CloudCommandRuntimeError("cloud_agent_credential_refresh_required");
     }
+    this.enterStartupPhase("boot_durability");
     this.queueValue!.durability(); await this.options.beforeActivate();
-    const activated = CloudAgentBootActivateResponseSchema.parse(await this.options.registration.agentBootRequest("activate",
-      { ...this.reference(), expectedCacheRevision: credentials.metadata.cacheRevision }, this.controller.signal));
+    this.enterStartupPhase("boot_activate");
+    const historyRecoveryId = cloudLocalCommandHistoryRecoveryId(this.options.predecessor);
+    const historyRecoveryCustodySha256 = cloudLocalCommandHistoryRecoveryCustodySha256(this.options.predecessor, this.scope);
+    if (historyRecoveryId && !historyRecoveryCustodySha256) throw new CloudCommandRuntimeError("checkpoint_writer_scope");
+    const activated = CloudAgentBootActivateResponseSchema.parse(await this.startupRequest("activate",
+      { ...this.reference(), expectedCacheRevision: credentials.metadata.cacheRevision,
+        ...(historyRecoveryId && historyRecoveryCustodySha256 ? { historyRecoveryId, historyRecoveryCustodySha256 } : {}) }, this.controller.signal));
     if (!this.live() || Object.entries(this.scope).some(([key, value]) => activated[key as keyof typeof activated] !== value))
       throw new CloudAgentExecutionError("authority_response_invalid");
     // ACK can prove a newer ready floor, but carries no credential material.
     // Keep starts parked until background sync positively installs that floor.
     if (activated.cacheRevision > credentials.metadata.cacheRevision) {
+      this.enterStartupPhase("boot_credentials");
       credentials.markDesired(activated.cacheRevision); await credentials.synchronize(this.controller.signal);
     }
     if (credentials.metadata.cacheRevision < activated.cacheRevision || credentials.metadata.desiredCacheRevision > credentials.metadata.cacheRevision)
       throw new CloudCommandRuntimeError("cloud_agent_credential_refresh_required");
+    this.enterStartupPhase("boot_install");
     await this.options.install(this.factory!, this.queueValue!);
-    if (!this.live()) throw new CloudCommandRuntimeError("engine_authority_rejected");
-    this.activated = true; this.scheduleControls(); this.options.changed(); return true;
+    this.startupRemainingMs();
+    this.activated = true; this.scheduleCache(); this.scheduleControls(); this.options.changed(); return true;
   }
   /** Independent of Send and socket lifetime. The FULL ACK is retained until
    * the entire strict current-scope exchange succeeds; unknown HTTP responses
@@ -226,8 +328,12 @@ export class CloudLocalAgentBootRuntime {
       const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...reference } = scope;
       const response = CloudAgentCredentialControlExchangeResponseSchema.parse(await this.options.registration.credentialControlsRequest(
         { ...reference, version: 1, mode: "boot-owner-v1", acknowledgements: ack ? [ack] : [] }, this.controller.signal));
-      if (!this.active || response.controls.some(control => Object.entries(scope).some(([key, value]) => control[key as keyof typeof control] !== value)))
+      if (!this.authorityActive || response.controls.some(control => Object.entries(scope).some(([key, value]) => control[key as keyof typeof control] !== value)))
         throw new CloudCredentialControlError("credential_control_authority_rejected");
+      // A local checkpoint fence closes admission without retiring the writer
+      // needed for its final seal. Discard a valid late reply and retain its
+      // immutable ACK; only an active exchange may confirm/apply controls.
+      if (!this.active) return;
       if (ack) this.fencesValue!.confirmAcknowledgement(ack);
       // Each call synchronously installs its FULL start fence before awaiting
       // refresh or native retirement. No later control is hidden behind I/O.
@@ -254,6 +360,25 @@ export class CloudLocalAgentBootRuntime {
     if (!this.active) return;
     const actor = admission.actor;
     if (!actor || !admission.accountUserId) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+    // Token redemption/renewal remains per connection. Only the subsequent
+    // exact actor proof is shared with other sockets and the background loop.
+    // This runtime owns one immutable boot/writer/funding scope.
+    const snapshot = { ...admission, actor: { ...actor } };
+    const key = JSON.stringify([snapshot.accountUserId, snapshot.authorityEpoch, actor.sessionId,
+      actor.deviceId, actor.role, actor.fingerprint]);
+    const pending = this.actorConfirmations.get(key);
+    if (pending) return pending;
+    if (this.actorConfirmations.size >= 256) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+    const task = this.confirmActorAdmission(snapshot);
+    this.actorConfirmations.set(key, task); this.flights.add(task);
+    void task.finally(() => {
+      if (this.actorConfirmations.get(key) === task) this.actorConfirmations.delete(key);
+      this.flights.delete(task);
+    }).catch(() => {});
+    return task;
+  }
+  private async confirmActorAdmission(admission: CloudRuntimeClientAdmission & { actor: NonNullable<CloudRuntimeClientAdmission["actor"]> }): Promise<void> {
+    const actor = admission.actor;
     const result = await this.options.registration.agentBootRequest("actor-confirm",
       { ...this.reference(), actorSessionId: actor.sessionId }, this.controller.signal);
     const proof = CloudActorProvenanceSchema.parse(result.provenance);
@@ -343,7 +468,9 @@ export class CloudLocalAgentBootRuntime {
     record.timer = setTimeout(() => {
       record.timer = null; if (!this.live() || !current()) return;
       const flight = work(); this.flights.add(flight);
-      void flight.catch(() => { if (current()) this.schedule(record, 500, work, current); }).finally(() => this.flights.delete(flight));
+      void flight.catch(error => {
+        if (current() && isTransientCloudAgentAuthorityError(error)) this.schedule(record, 500, work, current);
+      }).finally(() => this.flights.delete(flight));
     }, Math.max(250, Math.min(5_000, delay))); record.timer.unref?.();
   }
   private scheduleCache(retry = false): void {

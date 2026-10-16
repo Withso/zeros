@@ -267,6 +267,11 @@ describe("isInterruptedTurn", () => {
 });
 
 describe("turnFooterStatusLabel", () => {
+  it("does not turn a recovered retry into a stale stopped-agent label", () => {
+    expect(turnFooterStatusLabel({ status: "failed", stopReason: null }, null, "AGENT STOPPED", false, true)).toBeNull();
+    expect(turnFooterStatusLabel({ status: "cancelled", stopReason: "cancelled" }, null, null, false, true)).toBe("STOPPED BY USER");
+  });
+
   it("prioritizes stopped-by-user over failure labels", () => {
     expect(
       turnFooterStatusLabel(

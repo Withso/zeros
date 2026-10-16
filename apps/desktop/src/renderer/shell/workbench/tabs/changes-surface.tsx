@@ -511,6 +511,7 @@ function ChangesSurface({
         discardable: intent.discardable ?? false,
         isNewFile: intent.isNewFile ?? false,
         viewerMode: undefined,
+        changesRequestedFile: undefined,
       };
       // A fresh open is a new intent — clear the one-shot post-discard reset
       // marker, EXCEPT while this tab's editor holds an unsaved draft: the
@@ -538,6 +539,7 @@ function ChangesSurface({
       previousOrderedPaths.current,
       orderedPaths,
       selected,
+      model.scope.kind === "all" && !model.turnFilter ? tab.changesRequestedFile : undefined,
     );
     const selectedDisappeared = !!selected && !orderedPaths.includes(selected);
     if (selectedDisappeared && dirtyEditorIds.has(tab.id)) return;
@@ -580,6 +582,7 @@ function ChangesSurface({
     model.turnFilter,
     orderedPaths,
     selected,
+    tab.changesRequestedFile,
     dirtyEditorIds,
     tab.id,
     applySelection,
@@ -867,7 +870,7 @@ function ChangesSurface({
                     type: "UPDATE_WORKBENCH_TAB",
                     id: tab.id,
                     scope,
-                    updates: { changesPresentation },
+                    updates: { changesPresentation, changesRequestedFile: undefined },
                   })
                 }
                 queryForFile={queryForFile}
@@ -936,12 +939,14 @@ function ChangesSurface({
                   </div>
                 );
               })}
-            {!selected && (
+            {(!selected || (!dirtyEditorIds.has(tab.id) && tab.changesRequestedFile === selected && !model.loading && !model.error && !orderedPaths.includes(selected))) && (
               <div className="pointer-events-none absolute inset-0 flex h-full min-h-0 flex-col">
                 <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
                   <FileDiff className="text-muted-fg size-10" strokeWidth={1} />
-                  <p className="text-fg2 m-0 text-xs">
-                    {model.loading
+                  <p className="text-fg2 m-0 max-w-full break-words text-xs">
+                    {selected && tab.changesRequestedFile === selected
+                      ? `No current changes for ${selected}`
+                      : model.loading
                       ? "Loading changes…"
                       : model.error
                         ? "Choose another comparison or retry."

@@ -1,9 +1,12 @@
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
+import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 import { randomUUID } from "node:crypto";
 
 import type pg from "pg";
 
 import { withSystemTx, type Tx } from "../db.js";
 import { cloudWorkspaceHasActiveWork } from "./idle-workloads.js";
+import { CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL, checkpointHintKey } from "./engine-checkpoint-hints.js";
 
 export type WorkspaceCheckpointRequestReason =
   | "before_stop"
@@ -117,6 +120,10 @@ export async function enqueueWorkspaceCheckpointRequest(
   ) {
     throw new Error("workspace checkpoint request idempotency conflict");
   }
+  // Wakes an engine waiting for a checkpoint hint once this commits. The
+  // payload is a lookup key, not authority; delivery stays on the heartbeat.
+  await tx.query("SELECT pg_notify($1,$2)", [CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL,
+    checkpointHintKey(input.workspaceId, input.generation)]);
   return { id: row.id, deadlineAt: row.deadline_at };
 }
 
@@ -184,6 +191,12 @@ export async function completeWorkspaceCheckpointRequest(
   const idle = await tx.query("SELECT 1 FROM workspace_checkpoint_requests WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4 AND idle_engine_instance_id IS NOT NULL",
     [input.requestId, input.workspaceId, input.organizationId, input.generation]);
   if (idle.rowCount && await cloudWorkspaceHasActiveWork(tx, input)) throw new Error("Workspace became active before idle checkpoint completed");
+  if (["before_stop", "before_archive", "before_delete", "before_rebuild"].includes(input.reason) &&
+      (await tx.query(`SELECT 1 FROM cloud_workspace_local_command_writers
+        WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND state='active' AND sealed_sequence IS NULL`,
+      [input.workspaceId, input.organizationId, input.generation])).rowCount) {
+    throw new Error("Final checkpoint requires the current native writer seal");
+  }
   const result = await tx.query(
     `UPDATE workspace_checkpoint_requests
      SET state = 'succeeded', checkpoint_id = $6, completed_at = clock_timestamp(),
@@ -210,8 +223,7 @@ export async function completeWorkspaceCheckpointRequest(
  * retryable by an explicit new user request; it never guesses that shutdown is
  * safe. */
 export class CloudWorkspaceCheckpointRequestWorker {
-  private timer: NodeJS.Timeout | null = null;
-  private active: Promise<void> | null = null;
+  private readonly scheduler: CloudWorkerScheduler;
   private started = false;
   private stopped = false;
 
@@ -222,7 +234,7 @@ export class CloudWorkspaceCheckpointRequestWorker {
       logger?: Pick<Console, "error">;
     } = {},
   ) {
-    const interval = options.intervalMs ?? 5_000;
+    const interval = options.intervalMs ?? 60_000;
     if (
       !Number.isSafeInteger(interval) ||
       interval < 500 ||
@@ -230,41 +242,23 @@ export class CloudWorkspaceCheckpointRequestWorker {
     ) {
       throw new Error("workspace checkpoint request worker timing is invalid");
     }
+    this.scheduler = new CloudWorkerScheduler(interval, async () => { await this.expireOnce(); }, () => {
+      (this.options.logger ?? console).error("[cloud-workspace] checkpoint expiry tick failed; will retry");
+    }, () => readCloudWorkerNextDelay(this.pool, "checkpoints"), { readBeforeRun: true, jitter: options.intervalMs === undefined });
   }
 
   start(): () => Promise<void> {
-    if (this.started || this.stopped) {
-      throw new Error("workspace checkpoint request worker lifecycle is invalid");
-    }
+    if (this.started || this.stopped) throw new Error("workspace checkpoint request worker lifecycle is invalid");
     this.started = true;
-    const run = (): void => {
-      if (this.stopped) return;
-      const task = this.expireOnce()
-        .then(() => undefined)
-        .catch((error) => {
-        (this.options.logger ?? console).error(
-          `[cloud-workspace] checkpoint expiry tick failed: ${
-            error instanceof Error ? error.name : "unknown"
-          }`,
-        );
-        });
-      this.active = task;
-      void task.finally(() => {
-        if (this.active === task) this.active = null;
-        if (this.stopped) return;
-        this.timer = setTimeout(run, this.options.intervalMs ?? 5_000);
-        this.timer.unref();
-      });
-    };
-    run();
+    this.scheduler.start();
     return () => this.stop();
   }
 
+  notify(): void { this.scheduler.notify(); }
+
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    await this.active;
+    await this.scheduler.stop();
   }
 
   async expireOnce(): Promise<number> {

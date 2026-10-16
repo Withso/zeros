@@ -1,3 +1,5 @@
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
+import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 import {
   createHash,
   randomBytes,
@@ -1743,7 +1745,7 @@ export class DatabaseCloudWorkspaceForkService {
       // workspace id. The workspace authorization is intentionally checked
       // before returning an existing result: idempotency is not an access
       // capability after Team membership or ownership is revoked.
-      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 31))`, [
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 31)) /*lock_purpose='workspace-fork'*/`, [
         `cloud-to-local-fork:${input.organizationId}:${input.accountUserId}:${input.idempotencyKey}`,
       ]);
       await lockCloudWorkspaceScope(tx, input);
@@ -2521,8 +2523,7 @@ async function expireWorkspaceForkIntents(tx: Tx): Promise<number> {
 
 export class CloudWorkspaceForkWorker {
   private readonly workerId: string;
-  private timer: NodeJS.Timeout | null = null;
-  private active: Promise<void> | null = null;
+  private readonly scheduler: CloudWorkerScheduler;
   private stopped = false;
   private started = false;
 
@@ -2536,7 +2537,7 @@ export class CloudWorkspaceForkWorker {
       logger?: Pick<Console, "error">;
     } = {},
   ) {
-    const intervalMs = options.intervalMs ?? 2_000;
+    const intervalMs = options.intervalMs ?? 60_000;
     const leaseMs = options.leaseMs ?? 60_000;
     if (
       !Number.isSafeInteger(intervalMs) ||
@@ -2548,36 +2549,23 @@ export class CloudWorkspaceForkWorker {
     )
       throw new Error("cloud workspace fork worker timing is invalid");
     this.workerId = options.workerId ?? `cloud-fork:${randomUUID()}`;
+    this.scheduler = new CloudWorkerScheduler(intervalMs, () => this.drain(), () => {
+      (this.options.logger ?? console).error("[cloud-workspace] fork tick failed; will retry");
+    }, () => readCloudWorkerNextDelay(this.pool, "forks"), { readBeforeRun: true, jitter: options.intervalMs === undefined });
   }
 
   start(): () => Promise<void> {
-    if (this.started || this.stopped)
-      throw new Error("fork worker lifecycle is invalid");
+    if (this.started || this.stopped) throw new Error("fork worker lifecycle is invalid");
     this.started = true;
-    const run = () => {
-      if (this.stopped) return;
-      const task = this.drain().catch((error) =>
-        (this.options.logger ?? console).error(
-          `[cloud-workspace] fork tick failed: ${error instanceof Error ? error.name : "unknown"}`,
-        ),
-      );
-      this.active = task;
-      void task.finally(() => {
-        if (this.active === task) this.active = null;
-        if (this.stopped) return;
-        this.timer = setTimeout(run, this.options.intervalMs ?? 2_000);
-        this.timer.unref();
-      });
-    };
-    run();
+    this.scheduler.start();
     return () => this.stop();
   }
 
+  notify(): void { this.scheduler.notify(); }
+
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    await this.active;
+    await this.scheduler.stop();
   }
 
   private async drain(): Promise<void> {

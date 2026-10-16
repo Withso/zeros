@@ -41,6 +41,7 @@ import {
   runTool,
 } from "./toolchain";
 import { verifyBundleDirectory } from "./verify";
+import { stageRuntimeSystemAssets } from "./system-assets";
 
 export function buildPathPrefixes(paths: {
   work: string;
@@ -378,9 +379,22 @@ export async function buildRuntimeBundle(options: {
           "Playwright's license is retained in worker/node_modules/playwright-core/LICENSE.\n",
         { mode: 0o444, flag: "wx" },
       );
+      packages.push(...await stageRuntimeSystemAssets({ checkout, runtime, work, env }));
       await writeDependencyInventory(runtime, packages);
       return packages;
     });
+    await stage("engine_startup", () =>
+      runTool(
+        path.join(runtime, "bin/node"),
+        [
+          path.join(checkout, "scripts/smoke-engine-bundle.mjs"),
+          "--dist-engine",
+          path.join(runtime, "worker/dist-engine"),
+        ],
+        command,
+        "engine_startup",
+      ),
+    );
     // Inventory is read back from the final copied tree, not inferred from pnpm.
     const entries = await stage("inventory_payload", () =>
       inventoryTree(runtime),
@@ -388,6 +402,7 @@ export async function buildRuntimeBundle(options: {
     const nativeRequirements = await stage("verify_abi", () =>
       inspectNativeRequirements(runtime, entries, env),
     );
+    check(nativeRequirements.some(entry => entry.path === "bin/git-lfs"), "asset_git_lfs_abi");
     const forbiddenPaths = buildPathPrefixes({ work, sourceDir, outDir });
     await stage("scan_payload", () => scanPayload(runtime, forbiddenPaths));
     const claude = JSON.parse(

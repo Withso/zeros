@@ -1,5 +1,5 @@
 ---
-description: "Zeros design system for renderer UI: use when building or changing UI under apps/desktop/src/renderer or styles/ — components, tokens, colors, spacing, typography, contrast, and the checks that gate them."
+description: "Zeros design system for renderer UI: use when building or changing UI under apps/desktop/src/renderer or styles/, or designing Zeros screens in Zeros - Design/ — components, tokens, colors, spacing, typography, contrast, and the checks that gate them."
 globs: apps/desktop/src/renderer/**,styles/**
 alwaysApply: false
 ---
@@ -57,7 +57,16 @@ The full guide is `docs/design-system.md`; token values are in
    findings; never raise `styles/policy/ui-debt.json`, add a `check:ui ignore`
    comment, or loosen `styles/policy/contrast-contract.json` to get green.
    Token or contract changes: run `pnpm design:docs` and say so in the handoff.
+   Interaction, overlay, focus or popover work also runs `pnpm test:ui-smoke`
+   and `pnpm build:ui`. State, navigation, loading, tab, panel or list work
+   follows `docs/ui-interaction-performance.md`.
 8. **Local and cloud:** every surface renders correctly for Local and
    organization workspaces with local and cloud placement, including each cloud
    VM state (setting up, starting, sleeping, stopped, failed, archived). Follow
    RULES.md §8 (the `zeros-workspaces` skill) and state both impacts in the PR.
+9. **Mockups:** design Zeros screens in `Zeros - Design/` (the Design tab),
+   whose `tokens.css` is generated from the same sources; never hand-copy
+   token values into a standalone HTML file. To implement a frame, map its
+   values to utilities (`var(--bg2)` is `bg-bg2`; a `--space-<step>` value is
+   that Tailwind step, such as `p-3`) and its controls to the shared
+   primitives instead of copying its CSS.

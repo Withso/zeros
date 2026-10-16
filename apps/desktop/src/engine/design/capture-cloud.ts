@@ -6,6 +6,7 @@ import path from "node:path";
 import { isCloudDeploymentOwner } from "../agents/containment/cloud-deployment-authority.mjs";
 import { isCloudExecutionBoundary } from "../agents/containment/cloud-execution-boundary";
 import { resolveCloudRuntime } from "../agents/containment/cloud-runtime-root.mjs";
+import { cloudRuntimeAssetEnvironment } from "../agents/containment/cloud-runtime-assets.mjs";
 import type { ExecutionBoundary, PreparedBoundary } from "../agents/containment/types";
 import { DESIGN_CAPTURE_PNG_BYTES, DESIGN_CAPTURE_TIMEOUT_MS } from "@zeros/protocol/design-capture";
 import { startDesignCaptureService, type DesignCaptureHost, type DesignCaptureService } from "./capture-service";
@@ -48,6 +49,7 @@ export function createCloudDesignCaptureHost(boundary: ExecutionBoundary,
       const child = await prepared.spawn({ command: runtime.profile === "v4" ? runtime.node : process.execPath,
         args: [`${runtime.workerRoot}/dist-engine/design-capture-worker.js`], cwd: home, stdio: "pipe",
         env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", HOME: home, TMPDIR: home,
+          ...cloudRuntimeAssetEnvironment(runtime),
           PLAYWRIGHT_BROWSERS_PATH: `${runtime.workerRoot}/design-browsers` } });
       jobSignal.throwIfAborted();
       if (!child.stdin || !child.stdout) throw new Error("Cloud Design renderer pipes are unavailable.");

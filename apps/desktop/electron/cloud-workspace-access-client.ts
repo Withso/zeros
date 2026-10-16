@@ -1,4 +1,4 @@
-import { CloudActorRuntimeGrantSchema, type CloudActorRuntimeGrant } from "@zeros/protocol/cloud-actors";
+import { CloudActorRuntimeGrantSchema } from "@zeros/protocol/cloud-actors";
 import { CloudActorConnectionGrantSchema, type CloudActorConnectionGrant } from "@zeros/protocol/cloud-runtime-connection";
 import type { CloudReplicaDeviceProof } from "../src/engine/cloud-replica-device";
 import { cloudDetectedPortsSchema, type CloudDetectedPorts } from "./cloud-workspace-detected-ports";
@@ -16,6 +16,20 @@ const HOST_PATTERN =
 const DEFAULT_SSH_HOSTS: readonly string[] = [];
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
+const ADMISSION_RETRY_CODE = "cloud_runtime_temporarily_unavailable";
+
+export type CloudWorkspaceAdmissionFailure = {
+  status: 503; code: typeof ADMISSION_RETRY_CODE; phase: "provider_endpoint"; retryAfterMs: number;
+};
+export type CloudWorkspaceAdmissionRetry = CloudWorkspaceAdmissionFailure & { attempt: 2 | 3; delayMs: number };
+export type CloudWorkspaceAdmissionOptions = {
+  signal?: AbortSignal;
+  /** The broker's original session/handle fence, checked before every proof and request. */
+  assertCurrent?: () => void;
+  onAdmissionFailure?: (failure: CloudWorkspaceAdmissionFailure) => void;
+  onAdmissionRetry?: (retry: CloudWorkspaceAdmissionRetry) => void;
+};
+type AdmissionAdvice = { phase: "provider_endpoint"; retryable: true; retryAfterMs: number };
 
 const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   ...Object.fromEntries(Object.entries(CLOUD_RUNTIME_ACCESS_ERRORS).filter(([code]) => code !== "request_failed").map(([code, value]) => [code, value.message])),
@@ -137,18 +151,46 @@ type EngineAdmissionSigner = (accessToken: string, input: { organizationId: stri
 type Fetch = typeof fetch;
 
 export class CloudWorkspaceAccessClientError extends Error {
+  readonly phase?: "provider_endpoint";
+  readonly retryable?: true;
+  readonly retryAfterMs?: number;
   constructor(
     public readonly status: number,
     public readonly code: string,
     message: string,
+    advice?: AdmissionAdvice,
   ) {
     super(message);
     this.name = "CloudWorkspaceAccessClientError";
+    if (advice) Object.assign(this, advice);
   }
 
-  toJSON(): { status: number; code: string; message: string } {
-    return { status: this.status, code: this.code, message: this.message };
+  toJSON(): { status: number; code: string; message: string } & Partial<AdmissionAdvice> {
+    return { status: this.status, code: this.code, message: this.message,
+      ...(this.retryable ? { phase: this.phase, retryable: this.retryable, retryAfterMs: this.retryAfterMs } : {}) };
   }
+}
+
+function admissionTimeout(): CloudWorkspaceAccessClientError {
+  return new CloudWorkspaceAccessClientError(408, "request_timeout", "The cloud workspace admission request timed out");
+}
+
+/** Bound signing and response parsing too, including transports that ignore abort.
+ * A valid grant received after cancellation still has a retirement owner. */
+function admissionBound<T>(work: Promise<T>, signal: AbortSignal, late?: (value: T) => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const abort = () => { if (!settled) { settled = true; signal.removeEventListener("abort", abort); reject(admissionTimeout()); } };
+    if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
+    work.then(value => {
+      if (settled) { late?.(value); return; }
+      settled = true; signal.removeEventListener("abort", abort); resolve(value);
+    }, error => { if (!settled) { settled = true; signal.removeEventListener("abort", abort); reject(error); } });
+  });
+}
+
+function observeAdmission<T>(observe: ((value: T) => void) | undefined, value: T): void {
+  try { observe?.(value); } catch { /* Diagnostics never change admission authority. */ }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -276,6 +318,13 @@ function safeError(
 ): CloudWorkspaceAccessClientError {
   const error = isRecord(body) && isRecord(body.error) ? body.error : null;
   const candidate = typeof error?.code === "string" ? error.code : "";
+  const delay = response.headers.get("retry-after") ?? "";
+  if (response.status === 503 && candidate === ADMISSION_RETRY_CODE && error?.retryable === true &&
+    error.phase === "provider_endpoint" && /^[1-9][0-9]{0,2}$/.test(delay) && Number(delay) <= 300) {
+    return new CloudWorkspaceAccessClientError(503, ADMISSION_RETRY_CODE,
+      "The cloud workspace runtime is temporarily unavailable",
+      { phase: "provider_endpoint", retryable: true, retryAfterMs: Number(delay) * 1000 });
+  }
   const code = Object.hasOwn(SAFE_ERROR_MESSAGES, candidate)
     ? candidate
     : "request_failed";
@@ -349,6 +398,7 @@ export class CloudWorkspaceAccessClient {
   private readonly baseUrl: string;
   private readonly fetch: Fetch;
   private readonly now: () => number;
+  private readonly monotonic: () => number;
   private readonly allowedSshHosts: ReadonlySet<string>;
   private readonly allowedPreviewHostSuffixes: ReadonlySet<string>;
 
@@ -358,6 +408,7 @@ export class CloudWorkspaceAccessClient {
     signPreview?: (accessToken: string, payload: CloudPreviewProofPayload) => Promise<CloudReplicaDeviceProof>;
     fetch?: Fetch;
     now?: () => number;
+    monotonic?: () => number;
     allowedSshHosts?: readonly string[];
     allowedPreviewHostSuffixes?: readonly string[];
     allowInsecureLoopback?: boolean;
@@ -370,6 +421,7 @@ export class CloudWorkspaceAccessClient {
     this.signPreview = input.signPreview;
     this.fetch = input.fetch ?? globalThis.fetch;
     this.now = input.now ?? Date.now;
+    this.monotonic = input.monotonic ?? (() => performance.now());
     const hosts = input.allowedSshHosts ?? DEFAULT_SSH_HOSTS;
     if (
       hosts.some(
@@ -431,6 +483,7 @@ export class CloudWorkspaceAccessClient {
       deviceProof?: CloudReplicaDeviceProof;
       runtimeAdmission?: string;
       signal?: AbortSignal;
+      onDispatched?: () => void;
     },
   ): Promise<unknown> {
     const headers: Record<string, string> = {
@@ -458,7 +511,7 @@ export class CloudWorkspaceAccessClient {
     };
     let response: Response;
     try {
-      response = await this.fetch(`${this.baseUrl}${input.path}`, {
+      const pending = this.fetch(`${this.baseUrl}${input.path}`, {
         method: input.method,
         headers,
         ...(input.body === undefined
@@ -469,6 +522,10 @@ export class CloudWorkspaceAccessClient {
         credentials: "omit",
         signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
+      // Count only requests handed to the transport, even if diagnostics abort
+      // or consume the remaining budget. Observers cannot authorize a request.
+      observeAdmission(input.onDispatched, undefined);
+      response = await pending;
     } catch {
       throw new CloudWorkspaceAccessClientError(
         0,
@@ -851,25 +908,64 @@ export class CloudWorkspaceAccessClient {
     };
   }
 
-  async issueEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string;directProviderVersion?:1;connectionChannel?:"control-plane-websocket"}):Promise<CloudActorConnectionGrant> {
-    const requestPath=this.runtimePath(input.organizationId,input.workspaceId),now=this.now();
+  async issueEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string;directProviderVersion?:1;connectionChannel?:"control-plane-websocket"},
+    options: CloudWorkspaceAdmissionOptions = {}):Promise<CloudActorConnectionGrant> {
+    // Copy the owning identity and preference once; retries cannot adopt a caller's mutation.
+    input = { ...input };
+    const requestPath=this.runtimePath(input.organizationId,input.workspaceId);
     if(input.directProviderVersion!==undefined&&input.directProviderVersion!==1||
       input.connectionChannel!==undefined&&(input.connectionChannel!=="control-plane-websocket"||input.directProviderVersion!==1))
       throw new CloudWorkspaceAccessClientError(0,"invalid_request","Cloud workspace admission preference is invalid");
     if(!this.signEngineAdmission)throw new CloudWorkspaceAccessClientError(0,"device_proof_required","A trusted device is required for cloud workspace access");
-    const proof=await this.signEngineAdmission(accessToken,{organizationId:input.organizationId,workspaceId:input.workspaceId});
-    if(!UUID_PATTERN.test(proof.deviceId)||!Number.isSafeInteger(proof.keyVersion)||proof.keyVersion<1||
-      !Number.isSafeInteger(proof.timestampMs)||Math.abs(proof.timestampMs-this.now())>60000||
-      !/^[A-Za-z0-9_-]{16,128}$/.test(proof.nonce)||!/^[A-Za-z0-9_-]{86}$/.test(proof.signature))
-      throw new CloudWorkspaceAccessClientError(0,"device_proof_required","The cloud workspace device proof is invalid");
-    const body=await this.request(accessToken,{method:"POST",path:requestPath,expectedStatus:201,body:{actorProtocolVersion:2,
-      ...(input.directProviderVersion===1?{directProviderVersion:1}:{}),...(input.connectionChannel?{connectionChannel:input.connectionChannel}:{})},deviceProof:proof});
-    const parsed=input.directProviderVersion===1?CloudActorConnectionGrantSchema.safeParse(body):CloudActorRuntimeGrantSchema.safeParse(body);
-    const bridge=new URL("/v1/cloud-workspaces/bridge",this.baseUrl);bridge.protocol=bridge.protocol==="https:"?"wss:":"ws:";
-    if(!parsed.success||parsed.data.organizationId!==input.organizationId||parsed.data.workspaceId!==input.workspaceId||
-      parsed.data.bridgeUrl!==bridge.toString()||!validExpiry(parsed.data.expiresAt,now,2))
-      throw new CloudWorkspaceAccessClientError(201,"bad_response","The cloud workspace control plane returned invalid runtime access");
-    return parsed.data;
+    const deadline = this.monotonic() + REQUEST_TIMEOUT_MS, timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), REQUEST_TIMEOUT_MS);
+    const signal = options.signal ? AbortSignal.any([options.signal, timeout.signal]) : timeout.signal;
+    const current = () => { if (signal.aborted || this.monotonic() >= deadline) throw admissionTimeout(); options.assertCurrent?.(); };
+    const retire = (grant: CloudActorConnectionGrant) => {
+      void this.revokeEngineAdmission(accessToken, { ...input, grantToken: grant.grantToken }).catch(() => undefined);
+    };
+    let retry: CloudWorkspaceAdmissionFailure | undefined;
+    try {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        current();
+        const issue = async () => {
+          const proof=await this.signEngineAdmission!(accessToken,{organizationId:input.organizationId,workspaceId:input.workspaceId});
+          current();
+          if(!UUID_PATTERN.test(proof.deviceId)||!Number.isSafeInteger(proof.keyVersion)||proof.keyVersion<1||
+            !Number.isSafeInteger(proof.timestampMs)||Math.abs(proof.timestampMs-this.now())>60000||
+            !/^[A-Za-z0-9_-]{16,128}$/.test(proof.nonce)||!/^[A-Za-z0-9_-]{86}$/.test(proof.signature))
+            throw new CloudWorkspaceAccessClientError(0,"device_proof_required","The cloud workspace device proof is invalid");
+          current();
+          const body=await this.request(accessToken,{method:"POST",path:requestPath,expectedStatus:201,body:{actorProtocolVersion:2,
+            ...(input.directProviderVersion===1?{directProviderVersion:1}:{}),...(input.connectionChannel?{connectionChannel:input.connectionChannel}:{})},deviceProof:proof,signal,
+            onDispatched: () => { if (retry) observeAdmission(options.onAdmissionRetry,
+              { ...retry, attempt: attempt as 2 | 3, delayMs: retry.retryAfterMs }); } });
+          const parsed=input.directProviderVersion===1?CloudActorConnectionGrantSchema.safeParse(body):CloudActorRuntimeGrantSchema.safeParse(body);
+          const bridge=new URL("/v1/cloud-workspaces/bridge",this.baseUrl);bridge.protocol=bridge.protocol==="https:"?"wss:":"ws:";
+          if(!parsed.success||parsed.data.organizationId!==input.organizationId||parsed.data.workspaceId!==input.workspaceId||
+            parsed.data.bridgeUrl!==bridge.toString()||!validExpiry(parsed.data.expiresAt,this.now(),2))
+            throw new CloudWorkspaceAccessClientError(201,"bad_response","The cloud workspace control plane returned invalid runtime access");
+          return parsed.data;
+        };
+        try {
+          const grant = await admissionBound(issue(), signal, retire);
+          try { current(); } catch (error) { retire(grant); throw error; }
+          return grant;
+        } catch (error) {
+          if (!(error instanceof CloudWorkspaceAccessClientError) || error.status !== 503 || error.code !== ADMISSION_RETRY_CODE ||
+            error.retryable !== true || error.phase !== "provider_endpoint" || !error.retryAfterMs) throw error;
+          retry = { status: 503, code: ADMISSION_RETRY_CODE, phase: "provider_endpoint", retryAfterMs: error.retryAfterMs };
+          observeAdmission(options.onAdmissionFailure, { ...retry });
+          current();
+          if (attempt === 3) throw error;
+          if (retry.retryAfterMs >= deadline - this.monotonic()) throw admissionTimeout();
+          let delay: ReturnType<typeof setTimeout> | undefined;
+          try { await admissionBound(new Promise<void>(resolve => { delay = setTimeout(resolve, retry!.retryAfterMs); }), signal); }
+          finally { clearTimeout(delay); }
+        }
+      }
+      throw admissionTimeout();
+    } finally { clearTimeout(timer); }
   }
 
   async revokeEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string;grantToken:string}):Promise<void>{

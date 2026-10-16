@@ -407,8 +407,9 @@ function childExit(child, timeoutMs) {
 // controller H while it launches engine T. The adapter already hashed T; this
 // independent check also prevents a root caller selecting an unverified tree.
 const VERIFY_SELECTED_RUNTIME = `
-import importlib.util,json,sys
+import sys
 sys.dont_write_bytecode=True
+import importlib.util,json
 s=importlib.util.spec_from_file_location('bootstrap','/opt/zeros-bootstrap/bootstrap.py')
 b=importlib.util.module_from_spec(s);s.loader.exec_module(b)
 try:
@@ -432,7 +433,7 @@ export function verifySelectedCloudRuntime(expected) {
   if (process.platform !== "linux" || process.geteuid?.() !== 0)
     throw new Error("Cloud runtime selection requires the root host");
   const active = parseCloudActiveRuntime(expected);
-  const result = spawnSync("/usr/bin/python3", ["-I", "-c", VERIFY_SELECTED_RUNTIME], {
+  const result = spawnSync("/usr/bin/python3", ["-I", "-B", "-c", VERIFY_SELECTED_RUNTIME], {
     input: JSON.stringify(active), encoding: "utf8", timeout: 90_000, maxBuffer: 8192,
     env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", HOME: "/root", LANG: "C.UTF-8" },
     stdio: ["pipe", "pipe", "ignore"],

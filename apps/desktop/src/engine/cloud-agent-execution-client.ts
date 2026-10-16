@@ -11,12 +11,14 @@ import {
   CloudAgentBootRefreshRequestSchema, CloudAgentBootRefreshResponseSchema,
   CloudAgentActorConfirmRequestSchema, CloudAgentActorConfirmResponseSchema,
   CloudAgentWarmActorRequestSchema, CloudAgentWarmActorResponseSchema,
+  CloudAgentHistoryRecoveryRequestSchema, CloudAgentHistoryRecoveryResponseSchema,
   type CloudAgentBootCredentialRequest, type CloudAgentBootCredentialResponse,
   type CloudAgentBootSyncRequest, type CloudAgentBootSyncResponse,
   type CloudAgentBootActivateRequest, type CloudAgentBootActivateResponse,
   type CloudAgentBootRefreshRequest, type CloudAgentBootRefreshResponse,
   type CloudAgentActorConfirmRequest, type CloudAgentActorConfirmResponse,
   type CloudAgentWarmActorRequest, type CloudAgentWarmActorResponse,
+  type CloudAgentHistoryRecoveryRequest, type CloudAgentHistoryRecoveryResponse,
 } from "@zeros/protocol/cloud-agent-bootstrap";
 import { isDeepStrictEqual } from "node:util";
 import { cloudMcpDigest } from "./agents/cloud-mcp";
@@ -29,6 +31,13 @@ export class CloudAgentExecutionError extends Error{
     this.code=encodeCloudCommandFailure({stage,category});this.failure=cloudCommandFailureFromCode(this.code);
   }
 }
+/** Only closed transport/server categories can consume an already confirmed
+ * authority window. An unknown error or explicit rejection is never grace. */
+export function isTransientCloudAgentAuthorityError(error: unknown): boolean {
+  const cause = decodeCloudCommandFailure(error && typeof error === "object" && "code" in error ? error.code : undefined);
+  return cause !== null && (cause.category === "authority_transport" || cause.category === "authority_timeout" ||
+    cause.category === "authority_http_5xx" || cause.category === "rate_limited");
+}
 export class CloudAgentAdmissionError extends Error {
   constructor(readonly code:CloudAgentAdmissionCode){super(code);this.name="CloudAgentAdmissionError";}
 }
@@ -40,6 +49,7 @@ export class CloudComputerToolsUpdateRequiredError extends Error {
 }
 
 export type CloudAgentBootRequests = {
+  "recover-history": CloudAgentHistoryRecoveryRequest;
   bootstrap: CloudAgentBootCredentialRequest;
   sync: CloudAgentBootSyncRequest;
   activate: CloudAgentBootActivateRequest;
@@ -48,6 +58,7 @@ export type CloudAgentBootRequests = {
   "warm-context": CloudAgentWarmActorRequest;
 };
 export type CloudAgentBootResponses = {
+  "recover-history": CloudAgentHistoryRecoveryResponse;
   bootstrap: CloudAgentBootCredentialResponse;
   sync: CloudAgentBootSyncResponse;
   activate: CloudAgentBootActivateResponse;
@@ -57,6 +68,7 @@ export type CloudAgentBootResponses = {
 };
 export type CloudAgentBootOperation = keyof CloudAgentBootRequests;
 const bootContracts = {
+  "recover-history": { request: CloudAgentHistoryRecoveryRequestSchema, response: CloudAgentHistoryRecoveryResponseSchema, limit: 16 * 1024 },
   bootstrap: { request: CloudAgentBootCredentialRequestSchema, response: CloudAgentBootCredentialResponseSchema, limit: 256 * 1024 },
   sync: { request: CloudAgentBootSyncRequestSchema, response: CloudAgentBootSyncResponseSchema, limit: 256 * 1024 },
   activate: { request: CloudAgentBootActivateRequestSchema, response: CloudAgentBootActivateResponseSchema, limit: 8 * 1024 },
@@ -128,7 +140,14 @@ export async function requestCloudAgentBoot<Operation extends CloudAgentBootOper
     if (!response.ok && Object.keys(document).join() === "error") {
       const code = (document as { error?: unknown }).error;
       const cause = decodeCloudCommandFailure(code);
-      if (cause) throw new CloudAgentExecutionError(cause.category, cause.stage);
+      if (cause) {
+        const error = new CloudAgentExecutionError(cause.category, cause.stage);
+        // The HTTP refusal must not be lost when decoding a conflicting
+        // transient envelope; callers may retry that category during renewal.
+        if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429 &&
+            isTransientCloudAgentAuthorityError(error)) throw failure("authority_http_4xx");
+        throw error;
+      }
       if (isCloudAgentAdmissionCode(code))
         throw code === "cloud_runtime_upgrade_required" ? new CloudRuntimeUpgradeRequiredError() : new CloudAgentAdmissionError(code);
     }

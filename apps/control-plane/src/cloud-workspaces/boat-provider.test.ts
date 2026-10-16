@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
-import { BoatWorkspaceProvider } from "./boat-provider.js";
+import { BoatWorkspaceProvider, type BoatWorkspaceProviderOptions } from "./boat-provider.js";
 import type {
   CloudProviderOperationRecord,
   CloudProviderOperationStore,
@@ -71,7 +72,7 @@ function memberCapRefusal() {
 }
 const walletOf = (init?: RequestInit) => new Headers(init?.headers).get("x-boat-org");
 const unreported = { team: undefined };
-function fixture(extraOptions: { billingOrg?: string } = {}) {
+function fixture(extraOptions: Partial<Pick<BoatWorkspaceProviderOptions, "billingOrg" | "resolveDisplayName">> = {}) {
   let stored: CloudProviderOperationRecord | null = null;
   const attempts = new Map<string, boolean>();
   const operations: CloudProviderOperationStore = {
@@ -164,6 +165,189 @@ function fixture(extraOptions: { billingOrg?: string } = {}) {
   };
 }
 
+describe("read-only deletion retirement evidence", () => {
+  it.each(["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"])(
+    "requires the exact %s receipt and sandbox absence without completing deletion", async stage => {
+      const f = fixture();
+      await f.allocate();
+      await f.operations.beginDelete(RESOURCE);
+      await f.operations.bindDeletion(RESOURCE, OPERATION);
+      const before = structuredClone(f.stored());
+      f.fetcher.mockClear();
+      f.fetcher.mockResolvedValueOnce(json(deletion("blocked", { stage,
+        requestedAt: new Date(NOW).toISOString(), expectedBy: stage === "waiting_for_uploads" ? new Date(NOW + 6 * 3600_000).toISOString() : null })))
+        .mockResolvedValueOnce(json({ ok: false }, 404));
+      const observation = await f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal });
+      expect(observation).toEqual({ workspaceId: INPUT.workspaceId, generation: INPUT.generation, resourceId: RESOURCE,
+        deletionOperationId: OPERATION, stage, requestedAt: new Date(NOW).toISOString(),
+        expectedBy: stage === "waiting_for_uploads" ? new Date(NOW + 6 * 3600_000).toISOString() : null,
+        observedAt: new Date(NOW).toISOString() });
+      expect(f.fetcher.mock.calls.map(([url, init]) => [String(url), init?.method ?? "GET"])).toEqual([
+        [`https://boat.dev/api/v1/deletion-operations/${OPERATION}`, "GET"],
+        [`https://boat.dev/api/v1/sandboxes/${RESOURCE}`, "GET"],
+      ]);
+      expect(f.stored()).toEqual(before);
+      expect(f.operations.recordDeletionProgress).not.toHaveBeenCalled();
+      expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+      expect(f.access.revokeSshAccess).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { id: `bdop_${"b".repeat(32)}` }, { kind: "snapshot" }, { targetId: "bx_3456789a" },
+    { status: "processing" }, { status: "pending" }, { stage: "retrying" }, { stage: null },
+    { expectedBy: null }, { expectedBy: "invalid" }, { expectedBy: new Date(NOW + 7 * 3600_000).toISOString() },
+    { requestedAt: new Date(NOW - 60_000).toISOString() }, { completedAt: new Date(NOW).toISOString() },
+  ])("refuses incomplete or foreign storage-only evidence %j", async changed => {
+    const f = fixture(); await f.allocate(); await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE, OPERATION);
+    f.fetcher.mockClear();
+    f.fetcher.mockResolvedValueOnce(json(deletion("blocked", { stage: "waiting_for_uploads", requestedAt: new Date(NOW).toISOString(),
+      expectedBy: new Date(NOW + 6 * 3600_000).toISOString(), ...changed })));
+    await expect(f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: "provider_deletion_unconfirmed" });
+    expect(f.fetcher).toHaveBeenCalledTimes(1);
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+  });
+
+  it.each([200, 401, 500])("does not turn sandbox HTTP %s into absence", async status => {
+    const f = fixture(); await f.allocate(); await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE, OPERATION);
+    f.fetcher.mockClear();
+    f.fetcher.mockResolvedValueOnce(json(deletion("blocked", { stage: "waiting_for_restore", requestedAt: new Date(NOW).toISOString() })))
+      .mockResolvedValueOnce(json(status === 200 ? sandbox("archived") : { ok: false }, status));
+    await expect(f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal })).rejects.toBeInstanceOf(CloudProviderError);
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.operations.recordDeletionProgress).not.toHaveBeenCalled();
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+  });
+
+  it("never replays a missing DELETE receipt or accepts a bare receipt 404", async () => {
+    const f = fixture(); await f.allocate(); await f.operations.beginDelete(RESOURCE); f.fetcher.mockClear();
+    await expect(f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: "provider_deletion_unconfirmed" });
+    expect(f.fetcher).not.toHaveBeenCalled();
+    await f.operations.bindDeletion(RESOURCE, OPERATION);
+    f.fetcher.mockResolvedValueOnce(json({ ok: false }, 404));
+    await expect(f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: "provider_not_found" });
+    expect(f.fetcher).toHaveBeenCalledTimes(1);
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+  });
+
+  it("keeps an overdue upload estimate pending and refuses journal changes during I/O", async () => {
+    const f = fixture(); await f.allocate(); await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE, OPERATION);
+    f.fetcher.mockResolvedValueOnce(json(deletion("blocked", { stage: "waiting_for_uploads", requestedAt: new Date(NOW).toISOString(),
+      expectedBy: new Date(NOW).toISOString() }))).mockResolvedValueOnce(json({ ok: false }, 404));
+    const future = new BoatWorkspaceProvider({ ...f.options, now: () => NOW + 7 * 3600_000 });
+    expect((await future.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal })).stage).toBe("waiting_for_uploads");
+    f.fetcher.mockResolvedValueOnce(json(deletion("blocked", { stage: "waiting_for_restore", requestedAt: new Date(NOW).toISOString() })))
+      .mockImplementationOnce(async () => { f.stored().deletionOperationId = `bdop_${"b".repeat(32)}`; return json({ ok: false }, 404); });
+    await expect(f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: "provider_deletion_unconfirmed" });
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+  });
+});
+
+describe("Boat workspace display names", () => {
+  describe.each(["lookup", "PATCH"] as const)("pending label %s", stage => {
+    it.each([
+      ["base", 1, "create"], ["base", 3, "createWithComputeLease"],
+      ["template", 1, "create"], ["template", 3, "createWithComputeLease"],
+    ] as const)("returns %s generation %s from %s before naming and catches its later rejection", async (source, generation, method) => {
+      let rejectLabel!: (error: Error) => void;
+      const pending = new Promise<never>((_resolve, reject) => { rejectLabel = reject; });
+      const resolveDisplayName = vi.fn(() => stage === "lookup" ? pending : "example-alpha-workspace-demo");
+      const f = fixture({ resolveDisplayName });
+      const sourceId = "bx_3456789a";
+      const input = { ...INPUT, generation, ...(source === "template" ? { imageRef: `boat-template:${sourceId}` } : {}) };
+      const provider = source === "base" ? f.provider : new BoatWorkspaceProvider({ ...f.options,
+        imageRef: input.imageRef, ttlSeconds: 1800, resolveTemplate: async () => sourceId });
+      if (source === "template") {
+        f.fetcher.mockResolvedValueOnce(json(sandbox("archived", { id: sourceId, lastSnapshotStatus: "completed" })))
+          .mockResolvedValueOnce(json({ ok: true, sandboxId: RESOURCE }, 202))
+          .mockResolvedValueOnce(json(sandbox("ready", { sourceSandboxId: sourceId })));
+      } else f.fetcher.mockResolvedValueOnce(json(sandbox()));
+      if (stage === "PATCH") f.fetcher.mockImplementationOnce(() => pending);
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      const created = method === "create" ? provider.create(input) : provider.createWithComputeLease(input, 1800);
+      try {
+        expect(await Promise.race([created, nextTurn().then(() => null)])).toMatchObject({ resourceId: RESOURCE, generation });
+        expect(f.stored().resourceId).toBe(RESOURCE);
+        expect(resolveDisplayName).toHaveBeenCalledExactlyOnceWith(input);
+        expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(stage === "PATCH");
+        rejectLabel(new Error("late naming failure"));
+        await nextTurn();
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        rejectLabel(new Error("release pending label"));
+        await created;
+        await nextTurn();
+        process.off("unhandledRejection", unhandled);
+      }
+    });
+  });
+
+  it.each([["base", 1], ["base", 3], ["template", 1], ["template", 3]] as const)("labels a new %s allocation in generation %s after binding and wallet confirmation", async (source, generation) => {
+    const name = "example-org-beta-workspace-search-ui";
+    const resolveDisplayName = vi.fn(async () => name);
+    const f = fixture({ resolveDisplayName });
+    const sourceId = "bx_3456789a";
+    const input = { ...INPUT, generation, ...(source === "template" ? { imageRef: `boat-template:${sourceId}` } : {}) };
+    const provider = source === "base" ? f.provider : new BoatWorkspaceProvider({ ...f.options,
+      imageRef: input.imageRef, ttlSeconds: 1800, resolveTemplate: async () => sourceId });
+    if (source === "template") {
+      f.fetcher.mockResolvedValueOnce(json(sandbox("archived", { id: sourceId, lastSnapshotStatus: "completed" })))
+        .mockResolvedValueOnce(json({ ok: true, sandboxId: RESOURCE }, 202))
+        .mockResolvedValueOnce(json(sandbox("ready", { sourceSandboxId: sourceId })));
+    } else f.fetcher.mockResolvedValueOnce(json(sandbox()));
+    f.fetcher.mockImplementationOnce(async (_url, init) => {
+      expect(f.stored().resourceId).toBe(RESOURCE);
+      expect(init?.method).toBe("PATCH");
+      return json({ ok: true });
+    });
+    await expect(provider.create(input)).resolves.toMatchObject({ resourceId: RESOURCE, generation });
+    expect(resolveDisplayName).toHaveBeenCalledExactlyOnceWith(input);
+    const patches = f.fetcher.mock.calls.filter(([, init]) => init?.method === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.[0]).toBe(`https://boat.dev/api/v1/sandboxes/${RESOURCE}`);
+    expect(patches[0]?.[1]?.body).toBe(JSON.stringify({ name }));
+  });
+
+  it.each([false, true])("keeps a recorded create body byte-identical when the label changes (monitoring policy %s)", async monitoring => {
+    const resolveDisplayName = vi.fn(async () => "renamed-org-alpha-workspace-renamed-workspace");
+    const f = fixture({ resolveDisplayName });
+    const original = { type: "default", from: "zeros-linux-qualified", ttlSeconds: null, noEnv: true, env: {},
+      ...(monitoring ? { monitoring: false } : {}) };
+    const requestSha256 = createHash("sha256").update(JSON.stringify({ imageRef: INPUT.imageRef, body: original, createAttemptJournalVersion: 1 })).digest("hex");
+    await f.operations.prepareCreate({ ...INPUT, requestSha256 });
+    f.fetcher.mockResolvedValueOnce(json(sandbox())).mockResolvedValueOnce(json({ ok: true }));
+    await f.provider.create({ ...INPUT, idempotencyKey: "retry-from-new-wake" });
+    expect(f.fetcher.mock.calls[0]?.[1]?.body).toBe(JSON.stringify(original));
+    expect(new Headers(f.fetcher.mock.calls[0]?.[1]?.headers).get("idempotency-key")).toBe(INPUT.idempotencyKey);
+    expect(f.stored().requestSha256).toBe(requestSha256);
+    expect(f.fetcher.mock.calls.at(-1)?.[1]?.body).toBe(JSON.stringify({ name: await resolveDisplayName() }));
+  });
+
+  it("preserves the allocation when naming fails and retries only the label on an already bound create", async () => {
+    const f = fixture({ resolveDisplayName: async () => "example-alpha-workspace-demo" });
+    f.fetcher.mockResolvedValueOnce(json(sandbox())).mockRejectedValueOnce(new Error("name unavailable"));
+    await expect(f.provider.createWithComputeLease(INPUT, 1800)).resolves.toMatchObject({ resourceId: RESOURCE });
+    f.fetcher.mockResolvedValueOnce(json(sandbox())).mockResolvedValueOnce(json({ ok: true }));
+    await expect(f.provider.createWithComputeLease(INPUT, 1800)).resolves.toMatchObject({ resourceId: RESOURCE });
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(2);
+  });
+
+  it("does not resolve or patch names on an unconfirmed wallet", async () => {
+    const resolveDisplayName = vi.fn(async () => "example-alpha-workspace-demo");
+    const f = fixture({ resolveDisplayName });
+    f.fetcher.mockImplementation(async () => json(sandbox("ready", { team: { id: OTHER_WALLET } })));
+    await expect(f.provider.create(INPUT)).rejects.toMatchObject({ code: "provider_billing_scope_mismatch" });
+    expect(resolveDisplayName).not.toHaveBeenCalled();
+    expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
+  });
+});
+
 describe("Boat workspace monitoring policy", () => {
   it.each([
     ["new", true], ["new", undefined], ["legacy", true], ["legacy", undefined],
@@ -218,6 +402,61 @@ describe("Boat workspace monitoring policy", () => {
     await f.provider.createWithComputeLease(INPUT, 900).catch(() => undefined);
     await expect(f.provider.createWithComputeLease(INPUT, 1800)).rejects.toMatchObject({ code: "provider_operation_conflict" });
     expect(f.operations.prepareCreate).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("Boat named Computer templates", () => {
+  const source = { name: "example-alpha-computer-v1", snapshotId: "snapshot_fixture", sourceSandboxId: "bx_abcdefgh" };
+  const input = { ...INPUT, imageRef: `boat-computer:${source.name}@sha256:${"b".repeat(64)}` };
+  function namedFixture() {
+    const f = fixture();
+    const resolveNamedTemplate = vi.fn(async () => source);
+    const provider = new BoatWorkspaceProvider({ ...f.options, imageRef: input.imageRef, snapshotChannel: "alpha", ttlSeconds: 1800, resolveNamedTemplate });
+    return { ...f, provider, resolveNamedTemplate };
+  }
+  it("creates from the ready name after the exact captured sandbox has expired", async () => {
+    const f = namedFixture();
+    f.fetcher.mockResolvedValueOnce(json({ ok: true, snapshot: { ...source, status: "ready" } }))
+      .mockResolvedValueOnce(json(sandbox()));
+    expect(await f.provider.create(input)).toMatchObject({ resourceId: RESOURCE });
+    expect(f.resolveNamedTemplate).toHaveBeenCalledWith(input);
+    const post = f.fetcher.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(post[0]).toBe("https://boat.dev/api/v1/sandboxes");
+    expect(JSON.parse(String(post[1]!.body))).toMatchObject({ from: source.name, ttlSeconds: 1800, noEnv: true, env: {}, monitoring: false });
+    expect(f.fetcher.mock.calls.some(([url]) => String(url).includes(`/sandboxes/${source.sourceSandboxId}`))).toBe(false);
+  });
+  it.each([{ status: "saving" }, { snapshotId: "substituted_snapshot" }, { sourceSandboxId: "bx_3456789a" }, { name: "foreign-name" }])(
+    "refuses an unready or substituted named artifact before allocation: %j", changed => {
+      const f = namedFixture();
+      f.fetcher.mockResolvedValue(json({ ok: true, snapshot: { ...source, status: "ready", ...changed } }));
+      return expect(f.provider.create(input)).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    },
+  );
+  it("requires a saved generation resolver and a finite compute lease", async () => {
+    const f = fixture();
+    const missing = new BoatWorkspaceProvider({ ...f.options, imageRef: input.imageRef, ttlSeconds: 1800 });
+    await expect(missing.create(input)).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    const unlimited = new BoatWorkspaceProvider({ ...f.options, imageRef: input.imageRef, resolveNamedTemplate: async () => source });
+    await expect(unlimited.create(input)).rejects.toMatchObject({ code: "provider_compute_lease_invalid" });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+  it.each(["beta", "production", "development"])("never allocates from a %s Computer through Alpha", async channel => {
+    const f = fixture(), foreign = { ...source, name: `example-${channel}-computer-v1` };
+    const imageRef = `boat-computer:${foreign.name}@sha256:${"b".repeat(64)}`;
+    const provider = new BoatWorkspaceProvider({ ...f.options, imageRef, snapshotChannel: "alpha", ttlSeconds: 1800,
+      resolveNamedTemplate: async () => foreign });
+    await expect(provider.create({ ...INPUT, imageRef })).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+  it("reconciles an already-bound allocation after its named Computer retires", async () => {
+    const f = namedFixture();
+    f.fetcher.mockResolvedValueOnce(json({ ok: true, snapshot: { ...source, status: "ready" } }))
+      .mockResolvedValueOnce(json(sandbox())).mockResolvedValueOnce(json(sandbox()));
+    await f.provider.create(input);
+    f.resolveNamedTemplate.mockRejectedValue(new Error("fixture name retired"));
+    expect(await f.provider.create(input)).toMatchObject({ resourceId: RESOURCE });
+    expect(f.resolveNamedTemplate).toHaveBeenCalledTimes(1);
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   });
 });
 
@@ -833,6 +1072,33 @@ describe("Boat allocation lifecycle", () => {
     await expect(f.provider.inspect(RESOURCE)).resolves.toMatchObject({state:'archiving',computeStopped:true});
     await expect(f.provider.stop(RESOURCE)).resolves.toMatchObject({state:'archiving',computeStopped:true});
     expect(f.fetcher.mock.calls.filter(([,init])=>init?.method==='POST')).toHaveLength(1);
+  });
+
+  it.each(["completed", null])("identifies an explicitly missing stopped capture with %s history before resume", async lastSnapshotStatus => {
+    const f = fixture(); await f.allocate();
+    f.fetcher.mockImplementation(async () => json(sandbox("archived", { snapshotAvailable: false, lastSnapshotStatus })));
+    await expect(f.provider.inspect(RESOURCE)).resolves.toMatchObject({ state: "failed", computeStopped: true,
+      metadata: { snapshotMissing: true } });
+    await expect(f.provider.startWithComputeLease(RESOURCE, 600)).rejects.toMatchObject({ code: "provider_snapshot_missing", retryable: false });
+    expect(f.fetcher.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+  });
+
+  it.each([
+    { snapshotAvailable: undefined, lastSnapshotStatus: "completed" },
+    { snapshotAvailable: false, lastSnapshotStatus: undefined },
+    { snapshotAvailable: true, lastSnapshotStatus: "failed" },
+    { snapshotAvailable: false, lastSnapshotStatus: "failed" },
+    { snapshotAvailable: false, lastSnapshotStatus: "cancelled" },
+    { snapshotAvailable: false, lastSnapshotStatus: "queued" },
+    { snapshotAvailable: false, lastSnapshotStatus: "in_progress" },
+    { snapshotAvailable: false, lastSnapshotStatus: "completed", state: "error" },
+    { snapshotAvailable: false, lastSnapshotStatus: "completed", state: "cancelled" },
+    { snapshotAvailable: false, lastSnapshotStatus: "completed", team: undefined },
+    { snapshotAvailable: false, lastSnapshotStatus: "completed", team: { id: OTHER_WALLET } },
+  ])("does not infer missing capture authority from ambiguous or failed evidence %j", async evidence => {
+    const f = fixture(); await f.allocate();
+    f.fetcher.mockResolvedValue(json(sandbox("archived", evidence)));
+    expect((await f.provider.inspect(RESOURCE))?.metadata.snapshotMissing).not.toBe(true);
   });
 
   it("does not race resume against an in-progress archive", async () => {

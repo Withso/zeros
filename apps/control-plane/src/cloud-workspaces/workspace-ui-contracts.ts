@@ -1,5 +1,23 @@
 import { z } from "zod";
 
+// Mirrored in @zeros/protocol/cloud-runtime-lifecycle; never admission authority.
+export const CloudWorkspaceHistoryRecoverySchema = z.object({
+  recoveryId: z.string().uuid(), code: z.literal("history_recovered_with_gap"), coverage: z.literal("unknown"),
+  generation: z.number().int().positive().safe(), engineInstanceId: z.string().uuid(), bootId: z.string().uuid(),
+  writerEpoch: z.string().uuid(), completedAt: z.string().datetime({ offset: true }),
+}).strict();
+export type CloudWorkspaceHistoryRecovery = z.infer<typeof CloudWorkspaceHistoryRecoverySchema>;
+
+// Mirrored in @zeros/protocol/cloud-runtime-lifecycle; checked by UI parity.
+export const CloudWorkspaceCheckpointRestoreSchema = z.object({
+  checkpointId: z.string().uuid(),
+  checkpointAt: z.string().datetime({ offset: true }),
+  completedAt: z.string().datetime({ offset: true }),
+  sourceGeneration: z.number().int().positive().safe(),
+  generation: z.number().int().positive().safe(),
+}).strict().refine(value => value.generation > value.sourceGeneration);
+export type CloudWorkspaceCheckpointRestore = z.infer<typeof CloudWorkspaceCheckpointRestoreSchema>;
+
 // Mirrored in the desktop facade. Control-plane cannot import @zeros/protocol.
 export const CloudWorkspaceRenameInputSchema = z.object({
   // Reject controls before whitespace normalization.

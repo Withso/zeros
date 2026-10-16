@@ -73,6 +73,33 @@ hydrates successfully, including when hydration fails or the old native close
 acknowledgement arrives late. Account replacement and owner deletion still
 prune that snapshot; another workspace and the Local connection stay independent.
 
+Cloud transport and compute lifecycle are separate facts. A ready or busy VM
+does not become Starting when its socket disconnects. Short gaps keep the
+existing quiet grace; longer gaps show Connecting or Reconnecting, and real
+rejections and prolonged failures still use the existing error escalation.
+Only lifecycle documents or an explicit Restart can report a compute transition.
+
+An explicit cloud navigation, interaction or queued-send attempt owns one
+ephemeral wake intent. Carry it through readiness retries, admission replacement,
+and any preparation before enqueueing; allocate it only when the work begins.
+A ready/busy preparation does not write a wake intent. It rechecks current
+account, owner, access, Stop, lifecycle, live admission and physical root.
+Explicit navigation arms the selected destination after its atomic selection,
+including a different sidebar row or programmatic open. If idle capture commits
+before admission, that existing two-minute interaction window waits for the
+in-flight admission to settle, then follows the normal stopped-workspace wake
+path. A later local Stop, owner/access change, hide, blur or expiry clears it.
+Actual wakes retain their confirmed receipt across repeated preparations. The
+receipt is never send authority: native commands retain their checkpoint and
+execution fences.
+An uncertain response retries the same idempotency ID and initiating reason;
+a definitive refusal needs a new explicit attempt. Stop, account replacement,
+owner deletion and the original fifteen-minute safety cap retire old work.
+Explicit Retry renews the intent; reconnect, catalog, history, hover and selection
+restore never do. This identity stays in renderer memory, outside persisted
+messages and provider commands. Local Personal and organization-local behavior
+is unchanged.
+
 Cloud catalog polling is not a transcript mutation. Retain the cloud history
 revision and unchanged snapshot references, deduplicate concurrent history warms,
 and notify chat/message consumers only when that exact workspace's confirmed
@@ -85,6 +112,40 @@ or engine replacement rehydrates once its authorized chat metadata is available.
 If it shared a read that retired after that cleanup, it retries once after the
 read releases its identity. This recovery must not start an agent, wake a VM,
 poll on ordinary failures, or reactivate a hidden surface.
+
+Cloud presentation readiness is separate from authoritative transcript
+hydration. An eligible account/org/workspace/chat cache window (at most 200
+messages and 512 KiB) can paint while the session remains `loading`; it suppresses
+Loading, but cannot authorize a send, queue drain or completion. Connected peers
+with no message snapshot still use the parallel cache read. Cache misses,
+eviction, denial and known incomplete/null/deleted heads remain truthful. Reads
+carry their own verified head and CP/native source through the final await;
+the currently connected peer is not proof of an earlier page's provenance.
+Provisional rows do not mount native turn metadata reads or offer edit, reset,
+fork, permission or retry actions. Their bounded cached window mounts rich
+turns around the visible tail or saved reading anchor first, then on viewport
+approach. All checkpoint anchors remain available for scroll-back; revealed
+turns stay mounted within that existing window. Hidden surfaces suspend the
+observer. Authoritative and Local turns retain their normal rendering, and
+unchanged validation preserves visible message nodes and collection references.
+
+The acceptance target for an eligible 200-row window is a visible paint under
+100 ms during start or resume, measured on the minified production build. The
+development-mode UI smoke (`scripts/ui-smoke-cloud-transcript-paint.mjs`) is a
+regression guard with a looser bound, because development React is not the
+shipped build.
+
+A new authenticated boot may retain presentation only when the complete
+immutable manifest, source, coverage, conversation and funding identity match.
+Disk alone cannot prove a successor. Binding changes still retire read and
+confirmation tokens and rotate the durable history nonce; old writes cannot
+restore retired bytes. Projection revisions are not compared across bindings.
+Changed source/edit/delete/incomplete heads invalidate incompatible rows before
+paint. Unchanged validation keeps message references. Local Personal and
+organization-local hydration remain authoritative. Closed cache outcomes/head
+facts and visible-paint/loading durations enter cloud diagnostics without
+content, hashes or durable owner/conversation identifiers.
+
 Sending immediately after Stop may race the cancelled command's durable
 retirement. Resume can retry only when the entire revision advance is accounted
 for by the same dispatching commands becoming terminal. A newer Stop, recovery,
@@ -93,6 +154,58 @@ waiting for persistence must not keep the completed turn's timer running.
 Archived workspaces and pending provider storage deletion use the normal catalog
 cadence; neither keeps all workspaces on fast setup polling. Actual startup and
 interactive lifecycle transitions still receive fast refreshes.
+
+The account catalog owns one next-due timeout: 30 seconds for stable rows and
+2 seconds during those transitions, measured from the read's monotonic start.
+Catalog events update the due time; focus and visibility events coalesce with
+that same read. Hidden, signed-out, disabled and pending-network states have no
+passive timer. A slow transcript-cache read does not delay the catalog fallback;
+after it resolves, recheck workspace eligibility before restoring chat metadata.
+Switching A → B → A retires each request identity, so an old response cannot
+clear the current flight, restore another owner's chats or schedule its timer.
+
+Runtime availability uses one observer per account/catalog/workspace/generation
+key, shared by the composer and workspace details. Stable visible surfaces use
+a 30-second fallback; open details retain the existing 5-second VM-startup and
+2-second runtime-transition cadence. Hidden or inactive surfaces do not start
+reads, poll, or focus. In-flight reads suppress passive timers, and foreground
+events coalesce with an existing cache refresh without postponing its deadline.
+Keep the confirmed exact-key snapshot through refresh failures and honor data
+warmed on intent. Passive observation never wakes or upgrades a workspace.
+
+Setup observation also requires a visible window: the output view, off-tab
+status dot and chat provenance stop passive reads while hidden. A retained
+Setup view cancels its 900 ms running poll and 2 s first-snapshot retry, keeps
+its confirmed exact-workspace output, and catches up on reveal. In-flight
+invalidation queues cannot start hidden or retired reads, and a superseded
+response cannot replace that confirmed output. Reveal during an old flight
+coalesces one fresh read. Log reconciliation appends only an exact extension of
+the confirmed prefix; a hidden rerun may replace it with an equal or longer log
+without the observer seeing the intermediate empty snapshot. The visible
+fallbacks and engine-owned setup process continue to have their existing
+behavior; hiding the window never stops setup.
+
+Provider Information also requires both an active surface and a visible
+document. Its 30-minute usage fallback and one-minute reset-label clock are
+removed while hidden; focus cannot initiate a hidden usage read. Reveal
+refreshes the exact provider/method/account/auth-revision/identity cache and
+updates elapsed reset labels immediately, retaining confirmed usage through
+the shared request. Explicit Refresh, the 25-second native request timeout and
+five-minute automatic-failure backoff keep their existing behavior. This is
+the native account information surface; organization provider connections
+retain their separate cloud contract.
+
+The organization settings courier uses one visible-only 15-minute fallback
+and a 30-second focus freshness guard. Reveal catches up once when stale or
+invalidated; explicit settings and membership invalidations coalesce into one
+trailing read. Hidden windows and pending observations have no passive timer;
+every asynchronous tail rechecks visibility, the observation epoch and the
+account-store generation.
+Owner changes, account resets and sign-out still clear the Local engine context
+immediately while hidden. A late A → B → A response or clear acknowledgement
+cannot revive the old context; ordinary same-owner refresh failures retain the
+confirmed settings. Personal remains device-local and this courier never
+addresses a cloud VM. Local ownership migration retains its existing path.
 
 Deletion cleanup follows semantic path ownership, not raw equality: include
 normalized descendant cwd keys, but protect a separately registered nested
@@ -307,6 +420,13 @@ Finished transcript, editor, xterm, iframe, and virtualized-diff trees can be mo
 - Do not retain cheap or unbounded surfaces merely for consistency.
 
 Current deck helpers live in `apps/desktop/src/renderer/shell/retained-view-keys.ts` and `apps/desktop/src/renderer/shell/use-retained-view-keys.ts`.
+
+Background-task elapsed labels share `state/use-visible-clock.ts`: one timer
+per renderer with visible consumers, none when the document is hidden or all
+consumers are inactive. Reveal samples wall time immediately; elapsed state
+still comes from each chat's own `startedAt`. Snapshot reads do not advance or
+consume a pending publication. This display clock never controls task,
+authentication, or request deadlines, which retain their own authority.
 
 ### 5. Preserve identities through hot renders
 

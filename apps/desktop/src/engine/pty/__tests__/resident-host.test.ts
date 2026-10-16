@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomBytes, randomUUID } from "node:crypto";
-import { fork, type ChildProcess } from "node:child_process";
+import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer, type Server } from "node:net";
@@ -12,6 +12,8 @@ import type { ResidentEngineAuthority } from "../resident-protocol";
 import { HostExecutionBoundary } from "../../agents/containment/host-boundary";
 import { sessionsRoot } from "../../agents/session-paths";
 import type { PreparedBoundary } from "../../agents/containment/types";
+import { cloudRuntimeAssetEnvironment } from "../../agents/containment/cloud-runtime-assets.mjs";
+import { lfsLoginRuntime, runtimeLfsLoginFixture } from "../../../../../../scripts/__tests__/fixtures/runtime-system-assets/login-fixture";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -154,6 +156,23 @@ describe.runIf(process.platform === "linux")("Local Host interrupted launches", 
 });
 
 describe.runIf(process.platform === "linux")("resident cloud terminals", () => {
+  it.runIf(!!lfsLoginRuntime).each([false, true])("keeps pinned LFS through a real login profile (legacy resident=%s)", async legacyResident => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-resident-lfs-")); roots.push(root);
+    const fixture = await runtimeLfsLoginFixture(root, legacyResident), socketPath = path.join(root, "host.sock");
+    const host = new ResidentPtyHost({ root, socketPath, organizationId, workspaceId,
+      shell: fixture.wrapper, identity: { uid: process.getuid!(), gid: process.getgid!() } });
+    hosts.push(host); await host.start(); const current = authority(1); host.authorize(current);
+    const client = new ResidentPtyClient({ socketPath, authority: current }); clients.push(client); await client.connect();
+    const session = await client.create({ sessionId: "runtime-lfs", cwd: root, cols: 100, rows: 30,
+      env: { ...cloudRuntimeAssetEnvironment(fixture.runtime), HOME: "/srv/zeros/home/agent", PATH: `${fixture.runtime.binRoot}:/usr/bin:/bin` } });
+    await client.write(session.sessionId, { producerId: randomUUID(), sequence: 1, data: `${fixture.command}; exit\n` });
+    await expect.poll(async () => (await client.list())[0].exited, { timeout: 20_000 }).toBe(true);
+    const output = (await client.snapshot(session.sessionId)).data;
+    expect(output).toContain("git-lfs/3.7.1 ");
+    expect(output).toContain("P5_LFS_OK");
+    expect(output).not.toContain("HOSTILE_LFS");
+  }, 30_000);
+
   it("refuses a different Unix identity even if a caller supplies a valid resident scope", () => {
     expect(() => new ResidentPtyHost({root: '/tmp', socketPath: '/tmp/unused.sock', organizationId, workspaceId,
       shell: '/bin/bash', identity: {uid: process.getuid!() + 1, gid: process.getgid!()}})).toThrow('request_rejected');
@@ -169,7 +188,17 @@ describe.runIf(process.platform === "linux")("resident cloud terminals", () => {
   it('reports original resident groups, including foreground commands, without changing session custody',async()=>{
     const f=await setup(),client=await f.connect();
     expect(await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
-    const session=await client.create({sessionId:'observed-work',cwd:f.root,cols:80,rows:24,env:{PATH:'/usr/bin:/bin'},command:'sleep 60 & wait'});
+    const gate=path.join(f.root,'start-workload');execFileSync('mkfifo',[gate]);
+    const session=await client.create({sessionId:'observed-work',cwd:f.root,cols:80,rows:24,
+      env:{PATH:'/usr/bin:/bin',ZEROS_TEST_WORKLOAD_GATE:gate},
+      command:'printf "SHELL_WAITING\\n"; read -r start < "$ZEROS_TEST_WORKLOAD_GATE"; sleep 60 & printf "WORKLOAD_%s\\n" READY; wait'});
+    await expect.poll(async()=>(await client.snapshot(session.sessionId)).data).toContain('SHELL_WAITING');
+    // The Host wrapper may look busy before the actual command starts, then
+    // briefly look like a quiet shell. Hold that launch gap explicitly. A
+    // filesystem gate does not mark terminal input active and mask the proof.
+    await expect.poll(()=>client.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
+    await writeFile(gate,'start\n');
+    await expect.poll(async()=>(await client.snapshot(session.sessionId)).data).toContain('WORKLOAD_READY');
     await expect.poll(async()=>await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:true});
     const nextAuthority=authority(2);f.host.authorize(nextAuthority);const next=await f.connect(nextAuthority);
     expect((await next.list())[0].pid).toBe(session.pid);expect((await next.inspectWorkloads()).busy).toBe(true);
@@ -214,7 +243,9 @@ describe.runIf(process.platform === "linux")("resident cloud terminals", () => {
   const f=await setup(),client=await f.connect();
   const session=await client.create({sessionId:"busy-original-shell",cwd:f.root,cols:80,rows:24,env:{PATH:"/usr/bin:/bin",HOME:f.root}});
   await expect.poll(()=>client.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
-  await client.write(session.sessionId,{producerId:randomUUID(),sequence:1,data:"printf 'BUILTIN_%s\\n' READY; while :; do :; done\n"});
+  // Interactive bash ignores TERM by default. Keep this workload builtin-only,
+  // but let its shell exit before teardown proves the original group empty.
+  await client.write(session.sessionId,{producerId:randomUUID(),sequence:1,data:"trap 'exit 0' TERM; printf 'BUILTIN_%s\\n' READY; while :; do :; done\n"});
   await expect.poll(async()=>(await client.snapshot(session.sessionId)).data).toContain("BUILTIN_READY");
   const clock=vi.spyOn(Date,"now").mockReturnValue(Date.now()+11*60_000);
   try {expect(await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:true});}

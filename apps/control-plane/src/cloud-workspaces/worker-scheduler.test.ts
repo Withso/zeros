@@ -10,6 +10,36 @@ function deferred() {
 }
 
 describe("cloud worker durable deadlines", () => {
+  it("skips empty claims and sleeps until a hinted durable deadline", async () => {
+    const run = vi.fn().mockResolvedValue(undefined);
+    const deadline = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(250)
+      .mockResolvedValueOnce(0).mockResolvedValue(null);
+    const worker = new CloudWorkerScheduler(60_000, run, vi.fn(), deadline, { readBeforeRun: true });
+    worker.start(); await vi.advanceTimersByTimeAsync(0);
+    expect(run).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500); worker.notify();
+    await vi.advanceTimersByTimeAsync(249); expect(run).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); expect(run).toHaveBeenCalledOnce();
+    await worker.stop();
+  });
+
+  it("jitters the fallback between 30 and 60 seconds and repairs a dropped wake", async () => {
+    const random = vi.spyOn(Math, "random").mockReturnValueOnce(0).mockReturnValue(1);
+    const run = vi.fn().mockResolvedValue(undefined);
+    let due = false;
+    const deadline = vi.fn(async () => due ? 0 : null);
+    run.mockImplementation(async () => { due = false; });
+    const worker = new CloudWorkerScheduler(60_000, run, vi.fn(), deadline, { readBeforeRun: true, jitter: true });
+    worker.start(); await vi.advanceTimersByTimeAsync(0);
+    due = true; // Deliberately drop the transactional wake notification.
+    await vi.advanceTimersByTimeAsync(29_999); expect(run).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); expect(run).toHaveBeenCalledOnce();
+    const reads = deadline.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(59_999); expect(deadline).toHaveBeenCalledTimes(reads);
+    await vi.advanceTimersByTimeAsync(1); expect(deadline).toHaveBeenCalledTimes(reads + 1);
+    await worker.stop(); random.mockRestore();
+  });
+
   it("preserves notification and periodic behavior for workers without a deadline source", async () => {
     const run = vi.fn().mockResolvedValue(undefined);
     const worker = new CloudWorkerScheduler(5_000, run, vi.fn());

@@ -5,6 +5,7 @@ import type { MiddlewareHandler } from "hono";
 import { routePath } from "hono/route";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
+import { advisoryLockPurpose, type DatabaseTimingSpan, type RequestDatabaseTiming } from "./database-timing.js";
 
 export const DEFAULT_SLOW_REQUEST_LOG_MS = 1000;
 
@@ -42,7 +43,8 @@ function clockUs(): number | null {
   } catch { return null; }
 }
 
-type RequestTimingState = { transactions: number; heldMs: number; waitMs: number; closed: boolean; cost?: DatabaseCostState };
+type RequestTimingState = { transactions: number; heldMs: number; waitMs: number; closed: boolean; cost?: DatabaseCostState;
+  spans?: DatabaseTimingSpan[]; started: number; droppedSpans: number };
 
 /** Application-issued queries only. Encoded producer payload bytes are not
  * disk/WAL bytes or billing. null means missing coverage, never zero cost. */
@@ -255,7 +257,7 @@ function observablePromise(value: unknown): value is Promise<unknown> {
 }
 
 type ObservedMethod = (this: unknown, ...args: unknown[]) => unknown;
-function replacePort(target: PoolClient | Pool, key: "query" | "connect", initial: DatabaseCostState,
+function replacePort(target: PoolClient | Pool, key: "query" | "connect", initial: { unavailable: boolean },
   wrap: (original: ObservedMethod) => ObservedMethod, optional = false, onUnavailable = () => {
     initial.unavailable = true;
     const current = currentDatabaseCost();
@@ -409,21 +411,57 @@ function observeRequestPool(pool: Pool): (() => void) | undefined {
   };
 }
 
-/** Temporarily observe a checked-out client's actual query port. Disabled
- * requests return before even looking up query, preserving its identity.
+/** Temporarily observe a checked-out client's actual query port. With both
+ * observers disabled, return before looking up query, preserving its identity.
  * The returned cleanup must run before the client goes back to the pool. */
 export function observeDatabaseTransaction(client: PoolClient): (() => void) | undefined {
+  const restoreLocks = observeDatabaseLockQueries(client);
   const state = currentDatabaseCost();
-  if (!state || state.closed) return undefined;
+  if (!state || state.closed) return restoreLocks;
   const owners = uncheckedClients.get(client), checkouts = owners?.get(state) ?? 0;
   if (checkouts > 0) { owners!.set(state, checkouts - 1); state.uncheckedClientCheckouts--; }
   const tx: TransactionCost = { phase: "unknown", bytes: 0, unknownBytes: 0, owned: true };
   const restore = installQueryObservation(client, () => ({ state, tx }), state);
-  if (!restore) return undefined;
+  if (!restore) return restoreLocks;
   return () => {
     restore();
+    restoreLocks?.();
     if (!state.closed && tx.phase !== "committed" && tx.phase !== "rolled-back") state.unavailable = true;
   };
+}
+
+/** Observe only tagged advisory statements, preserving the driver's exact
+ * return/callback contract. The owner restores the port before pool release. */
+export function observeDatabaseLockQueries(client: PoolClient): (() => void) | undefined {
+  const timing = active.getStore();
+  if (!timing?.spans || timing.closed) return undefined;
+  const unavailable = () => { if (!timing.closed) timing.droppedSpans++; };
+  return replacePort(client, "query", { unavailable: false }, original => function (this: unknown, ...args: unknown[]): unknown {
+    const purpose = advisoryLockPurpose(args[0]);
+    if (!purpose || timing.closed) return Reflect.apply(original, this, args);
+    const started = performance.now();
+    let settled = false;
+    const settle = (failed: boolean) => {
+      if (settled) return;
+      settled = true;
+      appendSpan(timing, { kind: "advisory-lock", offsetMs: Math.max(0, started - timing.started),
+        durationMs: Math.max(0, performance.now() - started), purpose, failed });
+    };
+    const callback = args.at(-1);
+    if (typeof callback === "function") args[args.length - 1] = function (this: unknown, ...values: unknown[]) {
+      settle(values[0] != null);
+      return Reflect.apply(callback, this, values);
+    };
+    let returned: unknown;
+    try { returned = Reflect.apply(original, this, args); } catch (error) { settle(true); throw error; }
+    if (typeof callback !== "function") {
+      try {
+        if (observablePromise(returned)) void Promise.prototype.then.call(returned, () => settle(false), () => settle(true));
+        else unavailable();
+      } catch { unavailable(); }
+    }
+    return returned;
+  }, false, unavailable);
 }
 
 function costSummary(state: DatabaseCostState, method: string, route: string, status: number | "error"): RequestDatabaseCost {
@@ -450,6 +488,14 @@ function costSummary(state: DatabaseCostState, method: string, route: string, st
 }
 
 const active = new AsyncLocalStorage<RequestTimingState>();
+function appendSpan(timing: RequestTimingState, span: DatabaseTimingSpan): void {
+  if (!timing.spans || timing.closed) return;
+  if (timing.spans.length >= 64 || !Number.isFinite(span.durationMs) || !Number.isFinite(span.offsetMs)) {
+    timing.droppedSpans++;
+    return;
+  }
+  timing.spans.push(Object.freeze(span));
+}
 // pg may deliver callbacks from an existing socket resource. Cost attribution
 // follows the submitting observation without altering legacy timing's scope.
 const callbackCosts = new AsyncLocalStorage<DatabaseCostState | undefined>();
@@ -501,14 +547,19 @@ export function recordTransactionTiming(waitMs: number, totalMs: number): void {
   timing.transactions += 1;
   timing.waitMs += waitMs;
   timing.heldMs += Math.max(0, totalMs - waitMs);
+  const offset = Math.max(0, performance.now() - timing.started - totalMs);
+  appendSpan(timing, { kind: "pool-wait", offsetMs: offset, durationMs: Math.max(0, waitMs), purpose: null, failed: false });
+  appendSpan(timing, { kind: "transaction", offsetMs: offset + waitMs, durationMs: Math.max(0, totalMs - waitMs), purpose: null, failed: null });
 }
 
-/** Attribute a pool wait that ended without a connection, such as an acquire
- * timeout under pool saturation. */
-export function recordPoolWait(waitMs: number): void {
+/** Attribute an acquire outside the transaction helper. By default it ended
+ * without a connection; manual lock owners also record successful acquires. */
+export function recordPoolWait(waitMs: number, failed = true): void {
   const timing = active.getStore();
   if (!timing || timing.closed) return;
   timing.waitMs += waitMs;
+  appendSpan(timing, { kind: "pool-wait", offsetMs: Math.max(0, performance.now() - timing.started - waitMs),
+    durationMs: Math.max(0, waitMs), purpose: null, failed });
 }
 
 /** Log requests slower than `slowMs` once, by the template of the route that
@@ -520,10 +571,22 @@ export function requestTiming(options: {
   slowMs: number;
   log?: (line: string) => void;
   costObserver?: (cost: RequestDatabaseCost) => void | Promise<void>;
+  timingObserver?: (timing: RequestDatabaseTiming) => void | Promise<void>;
   databasePool?: Pool;
 }): RequestTimingMiddleware {
   const log = options.log ?? ((line: string) => console.warn(line));
   const observer = options.costObserver;
+  let pendingTimings = 0;
+  const emitTiming = (summary: RequestDatabaseTiming) => {
+    if (!options.timingObserver || pendingTimings >= 16) return;
+    pendingTimings++;
+    const done = () => { pendingTimings--; };
+    try {
+      const returned = options.timingObserver(summary);
+      if (observablePromise(returned)) void Promise.prototype.then.call(returned, done, done);
+      else done();
+    } catch { done(); }
+  };
   let pending = 0, dropped = 0, errors = 0;
   const emit = (summary: RequestDatabaseCost) => {
     if (!observer) return;
@@ -537,9 +600,10 @@ export function requestTiming(options: {
     } catch { release(true); }
   };
   const middleware: MiddlewareHandler = async (c, next) => {
-    const timing: RequestTimingState = { transactions: 0, heldMs: 0, waitMs: 0, closed: false,
-      ...(observer ? { cost: newDatabaseCost() } : {}) };
     const started = performance.now();
+    const timing: RequestTimingState = { transactions: 0, heldMs: 0, waitMs: 0, closed: false, started, droppedSpans: 0,
+      ...(options.timingObserver ? { spans: [] } : {}),
+      ...(observer ? { cost: newDatabaseCost() } : {}) };
     let failed = false;
     try {
       if (observer && options.databasePool) {
@@ -554,6 +618,9 @@ export function requestTiming(options: {
       throw error;
     } finally {
       timing.closed = true;
+      if (timing.spans) emitTiming(Object.freeze({ version: 1, scope: "transaction-helpers-and-provider-locks",
+        method: /^[A-Z]{3,7}$/.test(c.req.method) ? c.req.method : "OTHER", route: routePath(c) || "unmatched",
+        status: !failed && c.finalized ? c.res.status : "error", spans: Object.freeze(timing.spans), droppedSpans: timing.droppedSpans }));
       if (timing.cost) {
         timing.cost.closed = true;
         emit(costSummary(timing.cost, /^[A-Z]{3,7}$/.test(c.req.method) ? c.req.method : "OTHER",

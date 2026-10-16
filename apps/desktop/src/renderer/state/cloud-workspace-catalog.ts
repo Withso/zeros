@@ -19,6 +19,7 @@ import { ControlPlaneError } from "../features/team/control-plane";
 import type { Project } from "./projects-store";
 import { clearCloudComposerPrs } from "./read-caches";
 import { cloudWorkspaceExecutionRefusal } from "../platform/cloud-workspace-execution";
+import { forgetCloudHistoryRecoveryDismissals } from "./cloud-history-recovery-dismissal";
 
 export const cloudWorkspaceDetails =
   new KeyedAsyncCache<CloudWorkspaceDocument>(128);
@@ -44,6 +45,15 @@ const detailReads = new Map<string, Promise<CloudWorkspaceDocument>>();
 // newly allocated token if that owner later becomes readable again.
 const detailOwnerGenerations = new Map<string, number>();
 let nextDetailOwnerGeneration = 0;
+/** Removal retires the owner even if the same workspace becomes visible again.
+ * Catalog-only owners need a token before their first detail read or wake. */
+export function cloudWorkspaceOwnerGeneration(target: CloudWorkspaceTarget): number | undefined {
+  if (!canReadCloudWorkspace(cloudWorkspaceDocument(target))) return undefined;
+  const key = cloudWorkspaceKey(target);
+  const owner = detailOwnerGenerations.get(key) ?? ++nextDetailOwnerGeneration;
+  detailOwnerGenerations.set(key, owner);
+  return owner;
+}
 const listeners = new Set<() => void>();
 // Renderer-owned Stop intent wins over input captured before that request.
 // Engine idle stops do not enter this map and still consume recent input.
@@ -63,6 +73,7 @@ const engineRows = new Map<string, Workspace>();
 
 function publishDocument(doc: CloudWorkspaceDocument): void {
   const key = cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id });
+  if (!canReadCloudWorkspace(doc)) forgetCloudHistoryRecoveryDismissals([key]);
   const previous = cloudWorkspaceDetails.peekSnapshot(key).data;
   if (previous && JSON.stringify(previous) === JSON.stringify(doc)) return;
   cloudWorkspaceDetails.setData(key, doc);
@@ -235,6 +246,9 @@ export function acceptCloudWorkspaceDocument(
       Date.parse(prior.updatedAt) > Date.parse(doc.updatedAt))
   )
     return;
+  if (!canReadCloudWorkspace(doc)) detailOwnerGenerations.delete(cloudWorkspaceKey({
+    organizationId: doc.organizationId, workspaceId: doc.id,
+  }));
   if (prior && JSON.stringify(prior) === JSON.stringify(doc)) {
     if (detailReadGeneration === undefined) detailCatalogGenerations.delete(prior);
     return;
@@ -291,7 +305,7 @@ export async function refreshCloudWorkspaceCatalog(): Promise<void> {
           documents = [...documents.filter((item) => item.id !== row.id), row];
       }
       const documentsChanged = JSON.stringify(before) !== JSON.stringify(documents);
-      const currentOwners = new Set(documents.map(row => cloudWorkspaceKey({
+      const currentOwners = new Set(documents.filter(canReadCloudWorkspace).map(row => cloudWorkspaceKey({
         organizationId: row.organizationId, workspaceId: row.id,
       })));
       for (const key of new Set([...detailOwnerGenerations.keys(), ...cloudWorkspaceDetails.keys()])) {
@@ -385,19 +399,66 @@ export async function waitForCloudWorkspaceLifecycle(
   const account = epoch;
   const terminal = operation === "wake" ? ["ready", "busy"]
     : [operation === "archive" ? "archived" : operation === "delete" ? "deleted" : "stopped"];
-  const deadline = Date.now() + 60_000;
-  let doc = initial;
-  while (!terminal.includes(doc.status)) {
-    if (doc.error) throw new Error(doc.error.message);
-    if (Date.now() >= deadline)
-      throw new Error("The cloud workspace operation is still running. Its status will update when it finishes.");
-    await new Promise(resolve => setTimeout(resolve, 1_000));
-    if (account !== epoch) throw new Error("Cloud account changed");
-    const current = cloudWorkspaceDocument(target);
-    if (!current) throw new Error("Cloud workspace access changed");
-    doc = terminal.includes(current.status) ? current : await refreshCloudWorkspace(target);
-  }
-  return doc;
+  if (terminal.includes(initial.status)) return initial;
+  // The accepted document can still carry an earlier error, such as a past
+  // setup incident. Only a different error or a failed status ends the wait.
+  const earlier = initial.error;
+  const failure = (current: CloudWorkspaceDocument) =>
+    current.status === "failed" || (current.error !== null &&
+      (current.error.code !== earlier?.code || current.error.message !== earlier.message))
+      ? new Error(current.error?.message ?? "The cloud workspace operation failed")
+      : null;
+  const refused = failure(initial);
+  if (refused) throw refused;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let safety: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(safety);
+      off();
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      cleanup();
+      reject(error);
+    };
+    const observe = () => {
+      if (settled) return;
+      try {
+        if (account !== epoch) throw new Error("Cloud account changed");
+        const current = cloudWorkspaceDocument(target);
+        if (!current) throw new Error("Cloud workspace access changed");
+        if (terminal.includes(current.status)) {
+          cleanup();
+          resolve(current);
+        } else {
+          const error = failure(current);
+          if (error) throw error;
+        }
+      } catch (error) { fail(error); }
+    };
+    const poll = () => {
+      timer = setTimeout(() => {
+        timer = undefined;
+        observe();
+        if (settled) return;
+        void refreshCloudWorkspace(target).then(() => {
+          observe();
+          if (!settled) poll();
+        }, fail);
+      }, 1_000);
+    };
+    // Exact catalog events can finish even while the fallback read is hung.
+    const off = subscribeCloudWorkspaces(observe);
+    safety = setTimeout(() => fail(new Error(
+      "The cloud workspace operation is still running. Its status will update when it finishes.",
+    )), 60_000);
+    observe();
+    if (!settled) poll();
+  });
 }
 function settleLifecycleIntents(doc: CloudWorkspaceDocument): void {
   const wakeKey = `${epoch}:${cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id })}:wake`;
@@ -429,6 +490,7 @@ export async function manageCloudWorkspace(
   operation: "wake" | "stop" | "archive" | "delete",
   wait = false,
   reason?: "interaction",
+  wakeIntentId?: string,
 ): Promise<CloudWorkspaceDocument> {
   const refusal = operation === "wake" ? cloudWorkspaceExecutionRefusal(cloudWorkspaceDocument(target)) : null;
   if (refusal) throw new ControlPlaneError(409, refusal.code, refusal.message);
@@ -439,10 +501,10 @@ export async function manageCloudWorkspace(
   if (owner !== undefined) detailOwnerGenerations.set(workspaceKey, owner);
   const generation = cloudWorkspaceDocument(target)?.generation.number;
   const previous = lifecycleIntents.get(key);
-  const intent: LifecycleIntent = previous && (operation !== "wake" || previous.owner === owner &&
+  const intent: LifecycleIntent = previous && (!wakeIntentId || previous.id === wakeIntentId) && (operation !== "wake" || previous.owner === owner &&
       (previous.generation === generation || generation !== undefined && previous.generation !== undefined &&
         (generation >= previous.generation || isCloudWorkspaceLifecyclePending(cloudWorkspaceDocument(target)))))
-    ? previous : { id: crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version, reason: operation === "wake" ? reason : undefined };
+    ? previous : { id: wakeIntentId ?? crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version, reason: operation === "wake" ? reason : undefined };
   if (intent.task) {
     const doc = await intent.task;
     return wait ? waitForCloudWorkspaceLifecycle(target, operation, doc) : doc;
@@ -494,7 +556,7 @@ export async function manageCloudWorkspace(
                 : "stopped",
           ];
     if (wait) doc = await waitForCloudWorkspaceLifecycle(target, operation, doc);
-    if (terminal.includes(doc.status)) lifecycleIntents.delete(key);
+    if (terminal.includes(doc.status) && lifecycleIntents.get(key) === intent) lifecycleIntents.delete(key);
     return doc;
   })().catch(error => {
     // A definitive rejection cannot become a successful replay. Retain the

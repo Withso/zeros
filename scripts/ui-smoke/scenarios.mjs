@@ -55,6 +55,7 @@ const coreInline = {
 // its shared pages and inherited viewport changes. A shard gives each unit a
 // separate context seeded at this viewport and, where needed, a valid origin.
 export const scenarioRegistry = [
+  fresh("text-selection", "text-selection", "runTextSelectionSmoke", 1440, 1100),
   fresh(
     "git-review-actions",
     "git-review-actions",
@@ -338,6 +339,8 @@ export const scenarioRegistry = [
     800,
   ),
   shared("sticky-bottom", "sticky-bottom", "runStickyBottomSmoke", 1100, 800),
+  fresh("scroll-area-cleanup", "scroll-area-cleanup", "runScrollAreaCleanupSmoke", 900, 650),
+  fresh("scroll-area-drag", "scroll-area-drag", "runScrollAreaDragSmoke", 900, 650),
   // Subscription installs a context-wide clock. Keep it last, including in its
   // shard; its context is also isolated from other units in a sharded run.
   shared("subscription", "subscription", "runSubscriptionSmoke", 1100, 800),

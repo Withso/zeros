@@ -7,7 +7,7 @@ B7 database journal, the actual adapter/helper transport, and fake provider and
 GitHub boundaries.
 This is the supported Alpha build path for active organization owners/admins;
 engineering staff membership and the desktop internal flag are not required.
-The legacy image producer/service is removed. Historical cancellation and
+The legacy custom-Computer image producer/service is removed. Historical cancellation and
 receipt-verified deletion run in the cleanup-only retirement worker, independent
 of setup-worker startup; enrollment can proceed while cleanup is pending.
 Historical tables, identities and referenced snapshots remain. No live
@@ -20,6 +20,10 @@ The approved base's setup recipes and account inventory remain immutable. The ro
 legacy mutable checkout/HOME ownership from 10001/10002 to 10003 only after positive old-engine drain.
 Agents can read engine data on their VM: one trust domain per workspace. Conversation directories
 separate state, not agents from each other.
+
+Completed builds also require a ready [durable named snapshot](computer-named-snapshots.md)
+with an exact saved-tree proof. New workspace allocations use the saved name;
+legacy accepted generation pins keep their original fork path.
 
 ## Worker and durable authority
 
@@ -34,27 +38,48 @@ creator, and frees capacity; a failed preparation rolls back the claim. The acce
 manifest is added independently after clones finish. The public C1 request and
 response shapes stay unchanged except for the closed `tcb_modified` error.
 
+With `CLOUD_RUNTIME_IMAGES_ENABLED=true`, the claim also selects a ready
+[runtime image](runtime-images.md) for that exact runtime/base, channel and
+provider scope. Its share lock lasts through recording the immutable
+`builder_source_image_id` and builder intent. Missing or disabled images use the
+base path. A null source-image pin preserves the original intent digest; a saved
+image pin remains authoritative on replay and cleanup even after withdrawal or
+flag disablement.
+
+The consumer withdraws an image only after an initial runtime/base identity
+mismatch. A TCB failure still fails the build, but the frozen helper also emits
+`tcb_modified` for internal timeouts and generic OS errors, so it leaves the
+shared image ready. Set `CLOUD_RUNTIME_IMAGES_ENABLED=false` to use the base for
+new claims while investigating repeated failures. Automatic TCB withdrawal
+requires a future qualified base that distinguishes corruption from transient
+errors. See the runtime-image [rollout and rollback guidance](runtime-images.md#rollout-and-rollback)
+before enabling images or reverting the control plane.
+
 `CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS` defaults to 2 and accepts 1–32. Pass the
 same config value to C1 and the worker. Running builds and terminal builders
 without positive stop/delete or journal-confirmed non-allocation evidence count against the global cap. An
 organization with unresolved compute cannot claim another build. Verified
 archival releases compute capacity while physical deletion can retry.
 
-The pipeline is base create → build-purpose runtime install → protected-file
-baseline → shallow repository clones → root recipe → integrity and runtime
-self-test → sanitation → verified archive → C1 completion CAS. The baseline
-digest and final manifest digest are stored outside the VM. The source ref is
-`boat-template:<sandboxId>`; there is no named snapshot or verifier VM.
-Per the ACD-11/D8 capture decision, the final evidence is the sanitation manifest
-plus the stopped/ARCHIVED sandbox confirmed by B7's provider GET. There is no
-separate snapshot operation. Boat's stop saves the disk first and reports itself
+The pipeline starts with base create and build-purpose runtime install, or a
+create from a ready runtime image with the pinned runtime already current and
+idle. The image path skips artifact presigning and installation. Both continue
+with protected-file baseline → shallow repository clones → root recipe → integrity and runtime
+self-test → sanitation → verified archive → named save and saved-tree proof →
+C1 completion CAS. The baseline digest and final manifest digest are stored
+outside the VM. New source refs are `boat-computer:<name>@sha256:<manifest>`;
+legacy accepted `boat-template:<sandboxId>` pins keep their fork path. The final
+Computer uses a named saved-tree proof, without an additional verifier VM.
+The separate runtime-image producer still owns its shared name and cold probe.
+The final evidence includes the sanitation manifest, B7's confirmed stopped
+sandbox, and the complete tree of the exact named snapshot. Boat's stop saves
+the disk first and reports itself
 as an operation: B7 pins the stop it issued or joined (`GET
 /sandboxes/{id}/stops/{stopId}`), rechecks it after every poll, and captures
 only when that exact stop is `completed` and the sandbox is archived. While the
 stop is `pending` or `failing` (Boat retries a refused save itself) it waits
-until one minute before the build's 30-minute deadline, because saving a
-builder's disk can take Boat well over ten minutes; the last minute is kept for
-recording the capture and completing the build. Capture then requires the
+until six minutes before the build's 30-minute deadline, reserving five minutes
+for the named save/proof and one minute for completion. Capture then requires the
 archived sandbox's `snapshotAvailable` with a `completed` `lastSnapshotStatus`,
 the same evidence a template fork checks on its source. A builder that is
 already archived, or a stop without an identity, is refused: an archive this
@@ -88,8 +113,9 @@ closed. Failed, cancelled and superseded builds delete their VM; if deletion
 fails, they attempt verified stop, then retain a cleanup lease/retry record.
 Completion checks the deadline independently of the sweep. A lost completion
 reply cannot delete an already active template. Ready-template retention (active,
-previous, referenced generations, newest ten) belongs to the separate retention
-worker, not this build worker.
+previous, and sources of workspaces whose workspace/data deletion is unfinished)
+belongs to the separate retention worker, not this build worker. There is no
+additional ready-history hold; retired versions require Rebuild before Activate.
 
 ## Base-owned helpers
 
@@ -123,7 +149,8 @@ descriptor and a presigned GET URL expiring in 900 seconds. Its input is limited
 to 64 KiB. Every helper ends with a closed `zeros.diagnostic/v1` line. B7
 returns the bounded stdout **and** parsed last diagnostic, with the command
 stage and closed failure checks validated. Computer-command stdin is accepted
-only for a computer-build VM. Poll batches are measured after JSON escaping,
+for a computer-build VM; a runtime-image VM may invoke only the TCB helper for
+its cold probe. Poll batches are measured after JSON escaping,
 reserving 4096 bytes for the diagnostic and both newlines within the real
 64 KiB transport limit. The adapter/helper test executes the actual Python
 entrypoint through B7's pinned-SSH channel fixture and drains escaped/multibyte
@@ -136,7 +163,7 @@ installation connection after minting and revokes every minted token in a
 helper only on SSH stdin, then Git through a private root-owned Unix socket and
 fixed askpass. They never enter a Git URL, argv, environment variable or file.
 Each clone fetches depth one at the selected ref, records its exact SHA, removes
-credential helpers and hooks, and ends at
+credential helpers, disables template hooks, and ends at
 `/srv/zeros/files/repos/<owner>/<name>`, owned by UID/GID 10001 under the frozen
 base's legacy setup contract. The root broker adopts mutable checkout ownership
 to 10003 after positive old-engine drain, before new runtime attestation. The repo root and
@@ -184,14 +211,49 @@ mode must remain unchanged. Namespace/seccomp/cgroup isolation belongs to the
 verified launcher. Adding unrelated packages is allowed; replacing a protected
 dependency requires a new approved base/runtime.
 
+Before repositories or recipes run, a deterministic base/runtime mismatch or a
+confirmed non-timeout `tcb_modified` baseline withdraws an image from selection.
+Transport failures, malformed results and later recipe/integrity failures do not
+quarantine the shared image. Both source paths still require the complete
+baseline and post-install checks.
+
 Sanitation verifies integrity and repository SHAs again, normalizes Git config
-and repo ownership, stops the idle host and removes private homes, setup and
+and repo ownership, stops the idle host and empties private homes, setup and
 admission state, logs/journals, settings, sessions and machine-specific state.
-It preserves B4's home/state directory ownership and modes, runtime receipts,
-installed software and selected repo trees. Epoch contents and session payloads
+Ordinary private files are truncated in place after descriptor and pathname
+validation; directory identities, ownership and modes survive. No cleanup of
+these paths depends on unlinking an entry: an incremental saved disk can retain
+the ancestor's bytes after a live deletion. Symlinks, hard links and special
+files fail sanitation without following or truncating their targets.
+It preserves runtime receipts, installed software and selected repo trees.
+Epoch contents and session payloads
 are explicit generated-metadata exclusions; their parents and facade pointers
 remain protected. Provider-managed OS SSH identity stays under Boat's lifecycle,
 matching B4. No publication renames a pre-existing directory (contracts §22).
+
+The sanitizer materializes empty `disk-epoch`, `sessions/boot.json`,
+`sessions/reconciliation.json`, `active-runtime.json`, `random-seed` and
+`timesync/clock` files even if a known name is absent from the live tree.
+`computer-build` and the private home trees retain empty directories and files.
+Bootstrap recognizes only metadata-validated zero bytes as an absent epoch or
+boot intent; malformed nonempty content, including JSON `null`, remains invalid.
+Projection directories may retain only ordinary empty descendants. Links,
+special files, nested mounts and nonempty descendants still prevent boot.
+Empty cached files do not grant runtime, workspace or account admission.
+
+A live walk cannot discover arbitrary filenames deleted before sanitation.
+The exact saved-tree proof is therefore still required, independently of the
+helper's clean receipt; any inherited private bytes keep the Computer unready.
+Repository normalization remains separate from private-state sanitation.
+Visible ordinary `.git/hooks` files are emptied in place; aliases and special
+files fail sanitation. The normalized local Git config persists
+`core.hooksPath=/dev/null`, so ordinary Git in a restored clone cannot execute
+an inherited hook that was already absent from the live sanitation tree.
+The saved-tree private-state proof deliberately excludes repository content;
+this setting prevents hook execution, not recovery or erasure of unknown
+inherited repository bytes. An intentional workspace hook installation must
+explicitly replace this local setting. Local checkouts outside Computer builds
+are unaffected.
 
 For contracts §23, B10 binds `/srv/zeros/{files,state,home}` from
 `/home/user/.zeros-persist/*` on every boot/restore. C3 continues to address the
@@ -199,7 +261,71 @@ logical paths and never deletes or empties `/home/user/.zeros-persist`; it
 cleans its explicit private targets through those binds and retains repository
 data. B10 also owns the workspace-time `/srv/zeros/repos` bind outside a build
 and regeneration of the empty machine-id after restore. C3 keeps emptying
-machine-id during sanitation and does not change base boot files.
+machine-id during sanitation. `/etc/machine-id` and a regular
+`/var/lib/dbus/machine-id` retain their existing atomic empty-file replacement;
+the latter's provider-owned symlink is deliberately left intact. These are not
+claims that every OS identity or arbitrary private path is scrubbed.
+
+## Qualifying a base with empty-state sanitation
+
+Changing the protected bootstrap or Computer helper changes the generated
+`bc1-` compatibility ID. Deploying the control plane cannot update a helper
+already pinned in a base, runtime image or Computer. Qualify a newly built base
+and its runtime pairing before selecting it for new builds. Existing workspace
+pins, Local Personal and organization-local runtimes are unaffected.
+
+The operator qualification requires an approved Alpha budget and disposable
+resource names. Local tests do not qualify the provider's incremental capture,
+Ubuntu services or real mount lifecycle. Keep the old qualified pins available
+through the following gates:
+
+1. Run the retained Python security/recovery suite and the adjacent base,
+   Computer-helper, projection and fresh-base tests. Preserve the incremental
+   union, pre-truncation race, empty-marker crash-point, malformed-state and
+   projection rejection tests. Never loosen the saved-tree proof to pass.
+2. Use the base kit's existing `runtime-base-v4 live-check` flow with a fresh
+   state directory and unused name. Record source commit, protected-file hashes,
+   compatibility ID, builder/cold-clone evidence and snapshot size. Verify that
+   both `bootstrap.py` and `computer-build.py` are the newly qualified bytes.
+   Re-run the base's sanitize/verify sequence to check idempotence.
+3. Qualify a runtime against that exact new base, then produce a new runtime
+   image for the same pair. Build one Computer directly from the base and one
+   from that runtime image, using an approved synthetic repository and recipe.
+   Both paths must reach the same helper and compatibility ID; an old image is
+   not evidence for the new base.
+4. For each path, record a pre-sanitation saved generation containing synthetic
+   marker/private state, then the build's exact completed stop and named saved
+   tree. Every visible sanitized file must remain ordinary and zero bytes;
+   protected executables, repository content and directory modes must match.
+   Exercise nested private home files, projection leftovers, job records and
+   the six known markers above. Retained unknown private entries, aliases or
+   invalid metadata fail qualification. Inspect the synthetic repositories'
+   saved `.git/config` and hook inventory separately: normal origin, disabled
+   hooks, no credential helpers, and explicit empty replacements for visible
+   pre-sanitation hooks. The private-state proof does not certify these paths.
+   Do not read real credential contents.
+5. Cold-clone each qualified Computer through workspace creation. Check a fresh
+   boot ID, one epoch publication per boot, a freshly published active descriptor
+   and valid persistence bindings. Repeat boot and stop/resume; no parser may
+   admit an empty file as a credential or descriptor. Run create/send/stop/resume
+   with each supported agent and confirm that retained empty HOME/config files
+   do not block initial setup. Verify random-seed regeneration and timesync
+   service health on the Ubuntu clone. Synthetic tests separately cover death
+   after boot intent, epoch and boot-ID publication without double increments.
+   Exercise ordinary Git checkout and commit without the helper's `-c` flags,
+   with an approved synthetic inherited-hook sentinel: no hook may execute,
+   and repository contents/SHA, ownership and normal Git operations must work.
+   Explicitly installing a workspace hook must remain possible after replacing
+   the template's local `core.hooksPath` setting.
+6. Admit new allocations only after both source paths, exact saved proofs and
+   cold clones pass. A failed proof retains the save intent and artifact for
+   investigation. If rollout fails, stop selecting the new base/runtime images
+   for new claims and use previously qualified pins; never relabel a new
+   sanitized artifact with an older helper or rewrite an existing workspace pin.
+
+Record only closed results, counts, hashes and approved resource receipts in
+private qualification evidence. Disposable resource cleanup is an explicit
+operator step after the evidence is retained.
 
 ## Integration and remaining enablement
 
@@ -222,7 +348,8 @@ mode still governs runtime selection and validation.
 controlled migrations, starts it with the other cloud background workers, and
 awaits its stop callback before closing the database pool on shutdown. The
 existing background-worker pause switch also pauses template builds. No new
-environment flags are required.
+setup-worker flag is required. `CLOUD_RUNTIME_IMAGES_ENABLED` independently
+enables the optional image source and defaults to false.
 
 Live qualification remains an operator task:
 

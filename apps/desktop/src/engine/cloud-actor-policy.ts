@@ -30,6 +30,8 @@ const edits=new Set([
   "git.reviewHunk", "git.resolveConflict",
   "design.capture","design.review.capture","design.transaction.apply","design.review.resolve","design.history.undo","design.history.redo",
   "design.context.create","design.verification.open","design.token.update","design.lint","design.selection.set","design.screenshot.set","design.runtime.audit",
+  // Runs the person's own style build in the checkout, like a Run action.
+  "design.styleBuilds.presence",
   "design.frame.create","design.frame.rename","design.frame.duplicate","design.frame.delete","design.canvas.update",
   "design.node.styles","design.node.transfer","design.node.text","design.node.html","design.asset.insert","design.asset.upload",
   "design.stage","design.unstage","design.save","design.commit",

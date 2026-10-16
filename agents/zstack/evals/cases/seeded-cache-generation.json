@@ -1,0 +1,9 @@
+{
+  "id": "seeded-cache-generation",
+  "kind": "seeded",
+  "area": "renderer keyed state",
+  "fixedBy": "pr:504",
+  "symptom": "A stale async read overwrites the newer exact-key state after invalidation or an optimistic write.",
+  "rule": "zstack-eval mutates the generation guard only in an isolated pinned projection; the fixed assertions must pass before the same assertions can count as catches.",
+  "check": "pnpm test:git apps/desktop/src/renderer/state/__tests__/keyed-async-cache.test.ts"
+}

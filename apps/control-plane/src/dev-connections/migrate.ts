@@ -13,7 +13,7 @@ const migrations = [
 export async function migrateDevConnections(pool: pg.Pool) {
   const tx = await pool.connect();
   try {
-    await tx.query("BEGIN; SELECT pg_advisory_xact_lock(730318510)");
+    await tx.query("BEGIN; SELECT pg_advisory_xact_lock(730318510) /*lock_purpose='dev-connection-migration'*/");
     const product = await tx.query(
       "SELECT to_regclass('public.users') AS product",
     );

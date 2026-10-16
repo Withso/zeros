@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   readFileSync,
   realpathSync,
   unlinkSync,
@@ -30,6 +31,7 @@ const nativeNamespaces =
     { stdio: "ignore" },
   ).status === 0;
 const sandbox = path.resolve("scripts/cloud-workspace-validation/sandbox");
+const realLfsRuntime = process.env.ZEROS_RUNTIME_SYSTEM_ASSETS_TEST_DIR;
 const helper = path.resolve(
   "scripts/cloud-workspace-validation/runtime-base-v4/computer-build.py",
 );
@@ -94,6 +96,7 @@ describe("computer template repository projection", () => {
       }).resolve();
       try {
         tree.write(`${runtime.workerRoot}/package.json`, {});
+        tree.write(`${runtime.workerRoot}/gitconfig`, "[core]\n", 0o444);
         for (const name of [
           "cloud-engine-launcher.mjs",
           "cloud-engine-view.mjs",
@@ -104,8 +107,10 @@ describe("computer template repository projection", () => {
           "publish-cloud-workload-custody.mjs",
           "cloud-runtime-profile.mjs",
           "cloud-runtime-root.mjs",
+          "cloud-runtime-assets.mjs",
           "runtime-layout.json",
           "prepare-cloud-image-files.mjs",
+          "prepare-cloud-git.mjs",
         ])
           tree.write(
             `${runtime.libRoot}/${name}`,
@@ -114,6 +119,10 @@ describe("computer template repository projection", () => {
         unlinkSync(tree.physical(runtime.node));
         copyFileSync(process.execPath, tree.physical(runtime.node));
         chmodSync(tree.physical(runtime.node), 0o555);
+        if (realLfsRuntime) {
+          copyFileSync(path.join(realLfsRuntime, "bin/git-lfs"), tree.physical(`${runtime.binRoot}/git-lfs`));
+          chmodSync(tree.physical(`${runtime.binRoot}/git-lfs`), 0o555);
+        }
         unlinkSync(tree.physical(runtime.engineNamespace));
         execFileSync(
           "cc",
@@ -158,6 +167,26 @@ describe("computer template repository projection", () => {
           "/opt/zeros-bootstrap/computer-build.py",
           readFileSync(helper, "utf8"),
           0o555,
+        );
+        // Base and runtime verification have their own tests. This stand-in
+        // selects the fixture runtime so the real install shell can resolve
+        // its environment.
+        tree.write(
+          "/opt/zeros-bootstrap/bootstrap.py",
+          `import contextlib
+class Failure(Exception): pass
+class Bootstrap:
+    def __init__(self, root, uid, gid): pass
+    def base(self): pass
+    @contextlib.contextmanager
+    def lock(self, name):
+        if name != "runtime-publication.lock": raise Failure("lock")
+        yield
+    def current(self): return "${tree.descriptor.runtimeId}"
+    def verify_runtime(self, runtime_id, full):
+        if runtime_id != "${tree.descriptor.runtimeId}" or full is not True: raise Failure("runtime")
+`,
+          0o444,
         );
         tree.write("/usr/bin/rg", "fixture executable", 0o555);
         tree.write(`${runtime.workerRoot}/binaries/rg`, "fixture executable", 0o555);
@@ -208,6 +237,9 @@ spec=importlib.util.spec_from_file_location("computer_build", "/opt/zeros-bootst
 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 args=module.SystemHost().install_command("11111111-1111-4111-8111-111111111111", 5)
 script="test \\"$PWD\\" = /srv/zeros/repos\\n"
+script+="test \\"$GIT_CONFIG_SYSTEM\\" = ${tree.descriptor.root}/worker/gitconfig\\n"
+script+="test \\"$FONTCONFIG_FILE\\" = ${tree.descriptor.root}/worker/design-fonts/fonts.conf\\n"
+script+="test \\"\${PATH%%:*}\\" = ${tree.descriptor.root}/bin\\n"
 for index in range(${repositoryCount}):
     script+="cd /srv/zeros/repos/fixture/repo"+str(index)+"\\npwd > install-path\\n"
 result=subprocess.run(args[args.index("/usr/bin/unshare"):], input=script.encode(), env=module.ENVIRONMENT,
@@ -255,6 +287,26 @@ for (let index=0; index<${repositoryCount}; index++) {
   assert.equal(child.status,0,'workspace identity cannot use secondary repository');
 }
 if (${repositoryCount} === 0) assert(!fs.existsSync('/srv/zeros/repos'));
+const gitExec='/opt/zeros-infra/.git-exec/${runtime.runtimeId}';
+assert.equal(process.env.GIT_EXEC_PATH,gitExec);
+assert.equal(fs.lstatSync('/opt/zeros-infra/.git-exec').mode&0o7777,0o755);
+assert.equal(fs.readlinkSync(gitExec+'/git-lfs'),'${runtime.binRoot}/git-lfs');
+assert.equal(fs.lstatSync(gitExec).uid,0);
+assert.equal(fs.lstatSync(gitExec).mode&0o777,0o555);
+assert.throws(()=>fs.writeFileSync(gitExec+'/injected','denied'));
+const git=spawnSync('/usr/bin/git',['--exec-path'],{encoding:'utf8',env:process.env});
+assert.equal(git.status,0);assert.equal(git.stdout.trim(),gitExec);
+const hostile='/srv/zeros/home/agent/hostile';fs.mkdirSync(hostile);
+fs.writeFileSync(hostile+'/git-lfs','#!/bin/sh\\nexit 97\\n',{mode:0o755});
+const env={...process.env,PATH:hostile+':/usr/bin:/bin',GIT_CONFIG_GLOBAL:'/dev/null'};
+if (${Boolean(realLfsRuntime)}) {
+  const lfs=spawnSync('/usr/bin/git',['lfs','version'],{encoding:'utf8',env});
+  assert.equal(lfs.status,0,lfs.stderr);assert.match(lfs.stdout,/^git-lfs\\/3\\.7\\.1 /);
+}
+for (const args of [['init','--quiet','.'],['submodule','status']]) {
+  const result=spawnSync('/usr/bin/git',args,{encoding:'utf8',env});
+  assert.equal(result.status,0,result.stderr);
+}
 process.stdout.write('template projection checked');
 `,
         );
@@ -284,7 +336,11 @@ assert.equal(adoptCloudComputerBuildRepositories(),${repositoryCount});
 ${alteration}
 const resourceProjection={version:1,resources:null,memoryBudget:{nominalMemoryBytes:null,
   measuredMemoryBytes:null,hostMemoryMax:'268435456',source:'fallback',capped:false}};
-const prepare=()=>prepareCloudEngineView(runtime,{},'qualify',undefined,undefined,resourceProjection);
+process.umask(0o077);
+const prepare=()=>{
+  const result=prepareCloudEngineView(runtime,{},'qualify',undefined,undefined,resourceProjection);
+  assert.equal(process.umask(),0o077);return result;
+};
 if (${JSON.stringify(error)}) {
   assert.throws(prepare,{message:${JSON.stringify(error)}});
   process.stdout.write('unsafe projection rejected');
@@ -374,7 +430,7 @@ if (${JSON.stringify(error)}) {
           "--tmpfs",
           "/tmp",
         ];
-        for (const name of ["python3", "unshare", "mount", "bash"])
+        for (const name of ["python3", "unshare", "mount", "bash", "sh", "basename", "sed", "uname", "git", "git-shell", "scalar"].filter(name => existsSync(`/usr/bin/${name}`)))
           outer.push(
             "--ro-bind",
             realpathSync(`/usr/bin/${name}`),

@@ -1,4 +1,5 @@
 import type { CloudAdmissionState } from "./cloud-admission-failure";
+import type { CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
 // ──────────────────────────────────────────────────────────
 // Agent session — type definitions + pure utilities
 // ──────────────────────────────────────────────────────────
@@ -150,6 +151,10 @@ export interface AgentSessionState {
    *  `loading` is an explicit cold-read state so an empty array can never be
    *  mistaken for a genuinely new chat while SQLite is being rehydrated. */
   transcriptState: "resident" | "cold" | "loading";
+  /** Verified cloud presentation may paint while authoritative hydration is
+   * pending. It never grants admission, completes a turn or drains a queue.
+   * Only a CP/cache window carries this proof; native live rows are separate. */
+  transcriptPresentation: { source: "cache" | "control-plane"; restoreHead?: CloudHistoryRestoreFence } | null;
   /** A durable transcript update arrived while the payload was cold/loading.
    *  Raw streaming deltas are deliberately not folded into an empty array;
    *  reopening performs an exact SQLite window read instead. */
@@ -182,6 +187,10 @@ export interface AgentSessionState {
    *  whenever the session is warming/ready/streaming. */
   failure: import("../../platform/bridge/failure").AgentFailure | null;
   lastStopReason: StopReason | null;
+  /** Latest foreground turn for this exact execution. Retained after it settles
+   * so a delayed older receipt cannot settle or clear the successor's state.
+   * This is live renderer identity, never a persisted history authority. */
+  foregroundTurnId: string | null;
   /** Engine-owned active-turn start. Restored by loadSession after a renderer
    * reload so an empty live tail does not restart its elapsed clock at 0s. */
   activeTurnStartedAt: number | null;
@@ -270,6 +279,8 @@ export interface AgentSessionControls {
     /** Called once the session provider owns this pending submission. */
     onAccepted?: () => void,
     cloudQueue?: import("./sessions-context").CloudQueuedPrompt,
+    wakeIntent?: import("../../state/cloud-workspace-wake").CloudWorkspaceWakeIntent,
+    followUpBehavior?: import("../settings/follow-up-behavior").FollowUpBehavior,
   ): Promise<void>;
   /** Cancel the in-flight prompt (if any). */
   cancel(): Promise<void>;

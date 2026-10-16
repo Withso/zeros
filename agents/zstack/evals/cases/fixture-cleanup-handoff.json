@@ -1,0 +1,9 @@
+{
+  "id": "fixture-cleanup-handoff",
+  "kind": "replay",
+  "area": "release-dev-environment",
+  "fixedBy": "pr:515",
+  "symptom": "Local fixture investigations could leave storage-pending resources outside the Actions signed predecessor chain, so a name-based exception would cross the cleanup ownership boundary.",
+  "rule": "Transfer only explicitly selected authenticated receipts through a bounded device-signed cleanup-only manifest. Recheck the exact fixture, repository and retirement, retain consumed manifest identity after physical deletion, and never grant runtime, credential or allocation authority to imported work.",
+  "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-cleanup-handoff.test.ts scripts/__tests__/zeros-dev-hourly-main.test.ts scripts/__tests__/zeros-dev-cli.test.ts"
+}
