@@ -44,10 +44,13 @@ CREATE INDEX control_plane_jobs_due ON control_plane_jobs(kind, run_at) WHERE st
 CREATE INDEX control_plane_jobs_leases ON control_plane_jobs(kind, locked_until) WHERE state = 'running';
 CREATE INDEX control_plane_jobs_failed ON control_plane_jobs(finished_at) WHERE state = 'failed';
 
--- Empty, commit-bound hints only (0134's function). Future run_at values
--- wake too, so an idle runner learns about a new earliest deadline. Updates
--- that leave state and run_at unchanged, such as an idempotent re-enqueue,
--- stay silent.
+-- Empty, commit-bound hints only (0134's function). Inserts and changes to a
+-- queued job's run_at wake runners even for a future time, so an idle runner
+-- learns about a new earliest deadline. A running job that returns to the
+-- queue wakes them only when it is due now: a retry's backoff is armed by
+-- the runner that failed it, and other replicas find it by their poll.
+-- Updates that leave state and run_at unchanged, such as an idempotent
+-- re-enqueue, stay silent.
 CREATE TRIGGER control_plane_job_enqueued
   AFTER INSERT ON control_plane_jobs
   FOR EACH ROW WHEN (NEW.state = 'queued')
@@ -56,7 +59,8 @@ CREATE TRIGGER control_plane_job_enqueued
 CREATE TRIGGER control_plane_job_requeued
   AFTER UPDATE OF state, run_at ON control_plane_jobs
   FOR EACH ROW WHEN (NEW.state = 'queued'
-    AND (OLD.state IS DISTINCT FROM NEW.state OR OLD.run_at IS DISTINCT FROM NEW.run_at))
+    AND (OLD.state IS DISTINCT FROM NEW.state OR OLD.run_at IS DISTINCT FROM NEW.run_at)
+    AND (NEW.run_at <= now() OR OLD.state = 'queued'))
   EXECUTE FUNCTION notify_cloud_worker_available('zeros_control_plane_job_work');
 
 ALTER TABLE control_plane_jobs ENABLE ROW LEVEL SECURITY;

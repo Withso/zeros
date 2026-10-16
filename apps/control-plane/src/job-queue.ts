@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { withSystemStatement, withSystemTx, type Tx } from "./db.js";
+import { sql, SqlFragment } from "./sql-fragment.js";
 
 /** Durable control-plane job queue. Delivery is at least once: a handler can
  * run again after a crash, lease loss or shutdown release, so handlers re-read
@@ -93,8 +94,34 @@ const MAX_PAYLOAD_BYTES = 4_096;
 const KIND = /^[a-z][a-z0-9_]{0,62}$/;
 const OWNER = /^[A-Za-z0-9:._-]{1,128}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-// Payloads carry identifiers, never credentials. Refuse the obvious mistakes.
-const SECRET_KEY = /secret|token|password|passphrase|credential|private|bearer|cookie|authorization/i;
+const ERROR_CODE = /^[a-z][a-z_]{2,62}$/;
+
+// Payloads and dedupe keys carry identifiers, never credentials. These
+// screens refuse the obvious mistakes; they are not a secret scanner.
+const SECRET_KEY_TEXT = /secret|token|password|passwd|passphrase|credential|private|bearer|cookie|authori[sz]|signature|jwt|apikey|accesskey|signingkey|oauth/i;
+const SECRET_KEY_WORDS = new Set(["auth", "session", "sessionid", "dsn"]);
+const SECRET_KEY_QUALIFIERS = new Set(["api", "access", "signing", "secret", "private", "client", "encryption", "master"]);
+const SECRET_VALUE = new RegExp([
+  String.raw`\bbearer\s+\S`,
+  String.raw`\bbasic\s+[A-Za-z0-9+/=]{8,}`,
+  String.raw`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`,
+  String.raw`\b(?:gh[pousr]_|github_pat_|glpat-|xox[abprs]-|sk-|sk_live_|rk_live_)[A-Za-z0-9_-]{16,}`,
+  String.raw`\bAKIA[0-9A-Z]{16}\b`,
+  "-----BEGIN [A-Z ]+-----",
+  String.raw`[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@`,
+  String.raw`\b(?:secret|token|password|passwd|api[_-]?key)\s*[=:]\s*\S`,
+].join("|"), "i");
+// Without the `u` flag these classes match UTF-16 code units, so they find
+// unpaired surrogates, which PostgreSQL text and jsonb cannot store.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+function isStorableText(value: string): boolean { return !value.includes("\0") && !LONE_SURROGATE.test(value); }
+function looksLikeSecretKey(key: string): boolean {
+  if (SECRET_KEY_TEXT.test(key)) return true;
+  const words = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  return words.some((word, index) => SECRET_KEY_WORDS.has(word) ||
+    (word === "key" && index > 0 && SECRET_KEY_QUALIFIERS.has(words[index - 1]!)));
+}
 
 export function isValidJobKind(kind: string): boolean { return KIND.test(kind); }
 export function isValidJobOwner(owner: string): boolean { return OWNER.test(owner); }
@@ -104,30 +131,26 @@ function boundedInteger(value: number, min: number, max: number): number {
   return value;
 }
 
-// The literal helpers below are the only values interpolated into the
-// one-round-trip batches; each accepts a closed character set without quotes.
-function integerLiteral(value: number, min: number, max: number): string { return String(boundedInteger(value, min, max)); }
-function patternLiteral(value: string, pattern: RegExp): string {
-  if (!pattern.test(value)) throw new Error("job_queue_literal_invalid");
-  return `'${value}'`;
-}
-const kindLiteral = (kind: string) => patternLiteral(kind, KIND);
-const uuidLiteral = (id: string) => `${patternLiteral(id, UUID)}::uuid`;
-const ownerLiteral = (owner: string) => patternLiteral(owner, OWNER);
-function errorCodeLiteral(code: JobErrorCode): string {
+function errorCodeLiteral(code: JobErrorCode): SqlFragment {
   if (!JOB_ERROR_CODES.includes(code)) throw new Error("job_error_code_invalid");
-  return `'${code}'`;
+  return SqlFragment.text(code, ERROR_CODE);
 }
 
 function validatePayload(payload: JobPayload): string {
   const visit = (value: JobJson, depth: number): void => {
     if (depth > 8) throw new Error("job_payload_too_deep");
-    if (value === null || typeof value === "string" || typeof value === "boolean") return;
+    if (value === null || typeof value === "boolean") return;
+    if (typeof value === "string") {
+      if (!isStorableText(value)) throw new Error("job_payload_invalid");
+      if (SECRET_VALUE.test(value)) throw new Error("job_payload_secret_value");
+      return;
+    }
     if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("job_payload_invalid"); return; }
     if (Array.isArray(value)) { for (const item of value) visit(item, depth + 1); return; }
     if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) throw new Error("job_payload_invalid");
     for (const [key, item] of Object.entries(value)) {
-      if (SECRET_KEY.test(key)) throw new Error("job_payload_secret_key");
+      if (!isStorableText(key)) throw new Error("job_payload_invalid");
+      if (looksLikeSecretKey(key)) throw new Error("job_payload_secret_key");
       visit(item as JobJson, depth + 1);
     }
   };
@@ -165,9 +188,11 @@ const ENQUEUE_SQL = `
 
 function enqueueParameters(input: EnqueueJobInput): unknown[] {
   if (!KIND.test(input.kind)) throw new Error("job_kind_invalid");
-  if (typeof input.dedupeKey !== "string" || input.dedupeKey.length < 1 || input.dedupeKey.length > 200) {
+  if (typeof input.dedupeKey !== "string" || input.dedupeKey.length < 1 || input.dedupeKey.length > 200 ||
+    !isStorableText(input.dedupeKey)) {
     throw new Error("job_dedupe_key_invalid");
   }
+  if (SECRET_VALUE.test(input.dedupeKey)) throw new Error("job_dedupe_key_secret");
   for (const id of [input.orgId, input.workspaceId]) {
     if (id !== undefined && id !== null && !UUID.test(id)) throw new Error("job_scope_invalid");
   }
@@ -238,30 +263,28 @@ export async function claimJobs(
   observe?: JobQueueObserver,
 ): Promise<{ jobs: ClaimedJob[]; expired: number; nextDueInMs: number | null }> {
   if (!input.kinds.length) throw new Error("job_kinds_required");
-  const kinds = input.kinds.map(policy => kindLiteral(policy.kind));
-  if (new Set(kinds).size !== kinds.length) throw new Error("job_kinds_duplicate");
-  const policy = input.kinds
-    .map((entry, index) => `(${kinds[index]}, ${integerLiteral(entry.leaseMs, 1_000, 3_600_000)})`)
-    .join(", ");
-  const kindArray = `ARRAY[${kinds.join(", ")}]::text[]`;
-  const exhausted = "(due.expired AND due.exhausted AND NOT due.rerun)";
-  const result = await withSystemStatement<ClaimRow>(pool, `
+  if (new Set(input.kinds.map(policy => policy.kind)).size !== input.kinds.length) throw new Error("job_kinds_duplicate");
+  const kinds = input.kinds.map(policy => SqlFragment.text(policy.kind, KIND));
+  const policy = SqlFragment.list(input.kinds.map((entry, index) =>
+    sql`(${kinds[index]!}, ${SqlFragment.integer(entry.leaseMs, 1_000, 3_600_000)})`));
+  const exhausted = sql`(due.expired AND due.exhausted AND NOT due.rerun)`;
+  const result = await withSystemStatement<ClaimRow>(pool, sql`
     WITH policy(kind, lease_ms) AS (VALUES ${policy}),
     due AS (
       SELECT job.id, job.state = 'running' AS expired, job.attempts >= job.max_attempts AS exhausted,
         job.rerun_at IS NOT NULL AS rerun
       FROM control_plane_jobs job
-      WHERE job.kind = ANY(${kindArray})
+      WHERE job.kind = ANY(ARRAY[${SqlFragment.list(kinds)}]::text[])
         AND ((job.state = 'queued' AND job.run_at <= now()) OR (job.state = 'running' AND job.locked_until <= now()))
       ORDER BY job.run_at, job.id
-      LIMIT ${integerLiteral(input.limit, 1, 100)}
+      LIMIT ${SqlFragment.integer(input.limit, 1, 100)}
       FOR UPDATE OF job SKIP LOCKED
     ), claimed AS (
       UPDATE control_plane_jobs job SET
         state = CASE WHEN ${exhausted} THEN 'failed' ELSE 'running' END,
         attempts = CASE WHEN ${exhausted} THEN job.attempts
           WHEN due.expired AND due.exhausted THEN 1 ELSE job.attempts + 1 END,
-        lease_owner = CASE WHEN ${exhausted} THEN NULL ELSE ${ownerLiteral(input.owner)} END,
+        lease_owner = CASE WHEN ${exhausted} THEN NULL ELSE ${SqlFragment.text(input.owner, OWNER)} END,
         lease_token = CASE WHEN ${exhausted} THEN NULL ELSE gen_random_uuid() END,
         locked_until = CASE WHEN ${exhausted} THEN NULL ELSE now() + policy.lease_ms * interval '1 millisecond' END,
         last_error_code = CASE WHEN due.expired THEN 'lease_expired' ELSE job.last_error_code END,
@@ -306,8 +329,8 @@ export async function claimJobs(
 }
 
 export type JobLease = Pick<ClaimedJob, "id" | "leaseToken">;
-function leaseMatch(lease: JobLease): string {
-  return `job.id = ${uuidLiteral(lease.id)} AND job.lease_token = ${uuidLiteral(lease.leaseToken)} AND job.state = 'running'`;
+function leaseMatch(lease: JobLease): SqlFragment {
+  return sql`job.id = ${SqlFragment.uuid(lease.id)} AND job.lease_token = ${SqlFragment.uuid(lease.leaseToken)} AND job.state = 'running'`;
 }
 
 /** Delete a finished job, or requeue it when another request arrived during
@@ -319,7 +342,7 @@ export async function completeJob(
 ): Promise<"deleted" | "requeued" | "lost"> {
   // The locking CTE observes the newest rerun_at even when an enqueue
   // committed after this statement's snapshot; the sibling writes recheck it.
-  const result = await withSystemStatement<{ requeued: number; deleted: number }>(pool, `
+  const result = await withSystemStatement<{ requeued: number; deleted: number }>(pool, sql`
     WITH target AS (
       SELECT job.id, job.rerun_at FROM control_plane_jobs job WHERE ${leaseMatch(lease)} FOR UPDATE
     ), requeued AS (
@@ -340,21 +363,23 @@ export async function completeJob(
 
 /** Record a failed attempt. A retryable failure with attempts left is queued
  * after `delayMs`; otherwise the job is terminally failed. A request that
- * arrived during the failing run still gets a fresh run after the delay. */
+ * arrived during the failing run instead starts a fresh job at its requested
+ * time, without the failed run's backoff. */
 export async function failJob(
   pool: pg.Pool,
   lease: JobLease,
   failure: { code: JobErrorCode; retryable: boolean; delayMs: number },
   observe?: JobQueueObserver,
 ): Promise<"retrying" | "failed" | "lost"> {
-  const terminal = `(${failure.retryable ? "false" : "true"} OR job.attempts >= job.max_attempts)`;
-  const final = `(${terminal} AND job.rerun_at IS NULL)`;
-  const result = await withSystemStatement<{ state: "queued" | "failed" }>(pool, `
+  const terminal = sql`(${SqlFragment.boolean(!failure.retryable)} OR job.attempts >= job.max_attempts)`;
+  const final = sql`(${terminal} AND job.rerun_at IS NULL)`;
+  const result = await withSystemStatement<{ state: "queued" | "failed" }>(pool, sql`
     UPDATE control_plane_jobs job SET
       state = CASE WHEN ${final} THEN 'failed' ELSE 'queued' END,
       attempts = CASE WHEN ${terminal} AND NOT ${final} THEN 0 ELSE job.attempts END,
       run_at = CASE WHEN ${final} THEN job.run_at
-        ELSE now() + ${integerLiteral(failure.delayMs, 0, MAX_DELAY_MS)} * interval '1 millisecond' END,
+        WHEN ${terminal} THEN greatest(now(), job.rerun_at)
+        ELSE now() + ${SqlFragment.integer(failure.delayMs, 0, MAX_DELAY_MS)} * interval '1 millisecond' END,
       finished_at = CASE WHEN ${final} THEN clock_timestamp() END,
       last_error_code = ${errorCodeLiteral(failure.code)},
       lease_owner = NULL, lease_token = NULL, locked_until = NULL, rerun_at = NULL, updated_at = clock_timestamp()
@@ -373,9 +398,9 @@ export async function extendJobLease(
   leaseMs: number,
   observe?: JobQueueObserver,
 ): Promise<boolean> {
-  const result = await withSystemStatement(pool, `
+  const result = await withSystemStatement(pool, sql`
     UPDATE control_plane_jobs job SET
-      locked_until = now() + ${integerLiteral(leaseMs, 1_000, 3_600_000)} * interval '1 millisecond',
+      locked_until = now() + ${SqlFragment.integer(leaseMs, 1_000, 3_600_000)} * interval '1 millisecond',
       updated_at = clock_timestamp()
     WHERE ${leaseMatch(lease)}`);
   observe?.({ operation: "extend", ...BATCH_COST, rows: result.rowCount ?? 0 });
@@ -387,8 +412,9 @@ export async function extendJobLease(
 export async function releaseJobs(pool: pg.Pool, leases: readonly JobLease[], observe?: JobQueueObserver): Promise<number> {
   if (!leases.length) return 0;
   if (leases.length > 100) throw new Error("job_release_too_large");
-  const values = leases.map(lease => `(${uuidLiteral(lease.id)}, ${uuidLiteral(lease.leaseToken)})`).join(", ");
-  const result = await withSystemStatement(pool, `
+  const values = SqlFragment.list(leases.map(lease =>
+    sql`(${SqlFragment.uuid(lease.id)}, ${SqlFragment.uuid(lease.leaseToken)})`));
+  const result = await withSystemStatement(pool, sql`
     UPDATE control_plane_jobs job SET state = 'queued', run_at = now(), attempts = greatest(job.attempts - 1, 0),
       lease_owner = NULL, lease_token = NULL, locked_until = NULL, rerun_at = NULL, updated_at = clock_timestamp()
     FROM (VALUES ${values}) AS lease(id, token)
@@ -403,12 +429,12 @@ export async function purgeFailedJobs(
   input: { olderThanMs: number; limit: number },
   observe?: JobQueueObserver,
 ): Promise<number> {
-  const result = await withSystemStatement(pool, `
+  const result = await withSystemStatement(pool, sql`
     DELETE FROM control_plane_jobs WHERE id IN (
       SELECT job.id FROM control_plane_jobs job
       WHERE job.state = 'failed'
-        AND job.finished_at < now() - ${integerLiteral(input.olderThanMs, 60_000, 365 * 24 * 60 * 60_000)} * interval '1 millisecond'
-      ORDER BY job.finished_at LIMIT ${integerLiteral(input.limit, 1, 1_000)})`);
+        AND job.finished_at < now() - ${SqlFragment.integer(input.olderThanMs, 60_000, 365 * 24 * 60 * 60_000)} * interval '1 millisecond'
+      ORDER BY job.finished_at LIMIT ${SqlFragment.integer(input.limit, 1, 1_000)})`);
   observe?.({ operation: "purge", ...BATCH_COST, rows: result.rowCount ?? 0 });
   return result.rowCount ?? 0;
 }

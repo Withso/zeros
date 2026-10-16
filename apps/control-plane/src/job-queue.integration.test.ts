@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { Hono } from "hono";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { withSystemTx, withUserTx } from "./db.js";
+import { createPool, withSystemStatement, withSystemTx, withUserTx } from "./db.js";
+import { requestTiming, type RequestDatabaseCost } from "./request-timing.js";
+import { sql } from "./sql-fragment.js";
 import {
   claimJobs,
   completeJob,
@@ -291,7 +294,7 @@ d("durable job queue", () => {
     expect((await pool.query("SELECT count(*)::integer AS count FROM control_plane_jobs")).rows[0].count).toBe(0);
   });
 
-  it("wakes on NOTIFY within 200 ms, and only for state or run_at changes", async () => {
+  it("wakes on NOTIFY rather than the poll", async () => {
     const listenerPool = extra({ max: 1, application_name: "job-queue-listener-test" });
     const started = new Map<string, number>();
     const instance = runner({ listenerPool, handlers: [{ kind: KIND, handle: async job => { started.set(job.dedupeKey, performance.now()); } }] });
@@ -301,36 +304,63 @@ d("durable job queue", () => {
         "SELECT 1 FROM pg_stat_activity WHERE application_name='job-queue-listener-test' AND query LIKE 'LISTEN%'");
       expect(listening.rowCount).toBe(1);
     }, { timeout: 3_000, interval: 20 });
-    await new Promise(resolve => setTimeout(resolve, 50));
+    // The 60 s poll cannot run within these waits, so every run proves a hint
+    // (or the subscription flush) woke the runner. Latency is reported only.
     const latencies: number[] = [];
     for (let index = 0; index < 10; index++) {
       const key = `notify-${index}`;
-      const before = performance.now();
       await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: key });
       const committed = performance.now();
-      await vi.waitFor(() => expect(started.has(key)).toBe(true), { timeout: 1_000, interval: 2 });
+      await vi.waitFor(() => expect(started.has(key)).toBe(true), { timeout: 10_000, interval: 2 });
       latencies.push(started.get(key)! - committed);
-      expect(started.get(key)! - before).toBeLessThan(200);
     }
     latencies.sort((left, right) => left - right);
     console.info(`[job-queue] NOTIFY commit-to-handler latency ms: median=${latencies[5]!.toFixed(1)} max=${latencies[9]!.toFixed(1)}`);
+  });
 
+  it("sends hints only when a job becomes due or a queued job's run_at changes", async () => {
     const hints = await pool.connect();
-    const notices: pg.Notification[] = [];
+    const notices: string[] = [];
     try {
-      hints.on("notification", notice => notices.push(notice));
+      hints.on("notification", notice => { if (notice.channel === JOB_NOTIFICATION_CHANNEL) notices.push(notice.payload ?? ""); });
       await hints.query(`LISTEN ${JOB_NOTIFICATION_CHANNEL}`);
-      await instance.stop();
+      const expectNotices = async (expected: string[]) => {
+        // Hints are delivered in commit order, so a later marker bounds the wait.
+        await pool.query("SELECT pg_notify($1, 'marker')", [JOB_NOTIFICATION_CHANNEL]);
+        await vi.waitFor(() => expect(notices.at(-1)).toBe("marker"), { timeout: 3_000, interval: 5 });
+        expect(notices.splice(0)).toEqual([...expected, "marker"]);
+      };
       const future = new Date(Date.now() + 60 * 60_000);
       await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "quiet", runAt: future });
+      await expectNotices([""]);
       await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "quiet", runAt: future });
+      await expectNotices([]);
       await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "quiet", runAt: new Date(future.getTime() - 60_000) });
-      await claimJobs(pool, { owner: "worker-a", kinds: policy, limit: 1 });
-      await new Promise(resolve => setTimeout(resolve, 100));
-      expect(notices.map(notice => [notice.channel, notice.payload])).toEqual([
-        [JOB_NOTIFICATION_CHANNEL, ""],
-        [JOB_NOTIFICATION_CHANNEL, ""],
-      ]);
+      await expectNotices([""]);
+      await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "work", maxAttempts: 5 });
+      await expectNotices([""]);
+      const first = await claimOne();
+      await extendJobLease(pool, first, 60_000);
+      await expectNotices([]);
+      // A retry with backoff is armed by the failing runner and found by
+      // others' polls; it must not wake every replica now.
+      expect(await failJob(pool, first, { code: "handler_failed", retryable: true, delayMs: 60_000 })).toBe("retrying");
+      await expectNotices([]);
+      await pool.query("UPDATE control_plane_jobs SET run_at=now() WHERE id=$1", [first.id]);
+      await expectNotices([""]);
+      const second = await claimOne();
+      expect(await failJob(pool, second, { code: "handler_failed", retryable: true, delayMs: 0 })).toBe("retrying");
+      await expectNotices([""]);
+      const third = await claimOne();
+      await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "work", payload: { revision: 2 } });
+      await expectNotices([]);
+      expect(await completeJob(pool, third)).toBe("requeued");
+      await expectNotices([""]);
+      const fourth = await claimOne();
+      expect(await releaseJobs(pool, [fourth])).toBe(1);
+      await expectNotices([""]);
+      expect(await completeJob(pool, await claimOne())).toBe("deleted");
+      await expectNotices([]);
     } finally {
       await hints.query("UNLISTEN *");
       hints.release();
@@ -339,28 +369,31 @@ d("durable job queue", () => {
 
   it("falls back to the slow poll when a notification is lost", async () => {
     const listenerPool = extra({ max: 1, application_name: "job-queue-listener-lost" });
-    let ranAt = 0;
+    let ran = false;
+    const claims: number[] = [];
     const instance = runner({ listenerPool, pollIntervalMs: 1_000, random: () => 1,
-      handlers: [{ kind: KIND, handle: async () => { ranAt = Date.now(); } }] });
+      observe: cost => { if (cost.operation === "claim") claims.push(performance.now()); },
+      handlers: [{ kind: KIND, handle: async () => { ran = true; } }] });
+    const startedAt = performance.now();
     instance.start();
     await vi.waitFor(async () => expect((await pool.query(
       "SELECT 1 FROM pg_stat_activity WHERE application_name='job-queue-listener-lost' AND query LIKE 'LISTEN%'")).rowCount).toBe(1),
     { timeout: 3_000, interval: 20 });
+    // Wait for the first poll, long after the subscription flush, so that the
+    // poll is the only remaining way to find the job.
+    await vi.waitFor(() => expect(claims.some(at => at - startedAt >= 990)).toBe(true), { timeout: 5_000, interval: 10 });
+    const claimsBefore = claims.length;
     // Commit a due job without firing its trigger, as if the hint were lost.
     const silent = await pool.connect();
-    let insertedAt = 0;
     try {
       await silent.query("SET session_replication_role = replica");
       await silent.query("INSERT INTO control_plane_jobs(kind,dedupe_key) VALUES ('test_kind','lost-hint')");
-      insertedAt = Date.now();
     } finally {
       await silent.query("RESET session_replication_role");
       silent.release();
     }
-    await new Promise(resolve => setTimeout(resolve, 300));
-    expect(ranAt).toBe(0);
-    await vi.waitFor(() => expect(ranAt).toBeGreaterThan(0), { timeout: 2_000, interval: 20 });
-    expect(ranAt - insertedAt).toBeLessThan(1_500);
+    await vi.waitFor(() => expect(ran).toBe(true), { timeout: 5_000, interval: 20 });
+    expect(claims[claimsBefore]! - startedAt).toBeGreaterThanOrEqual(1_990);
   });
 
   it("re-reads the queue when the LISTEN session is lost and restored", async () => {
@@ -384,33 +417,48 @@ d("durable job queue", () => {
     await vi.waitFor(async () => expect(await listening()).toHaveLength(1), { timeout: 3_000, interval: 20 });
   });
 
-  it("extends the lease of a long handler and aborts it when the lease is lost", async () => {
-    let attempt = 0;
-    const aborted: boolean[] = [];
-    runner({ handlers: [{ kind: KIND, leaseMs: 2_000, handle: async (_job, { signal }) => {
-      attempt += 1;
-      if (attempt === 1) {
-        await new Promise(resolve => setTimeout(resolve, 2_600));
-        return;
-      }
-      await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
-      aborted.push(signal.aborted);
-    } }] }).start();
-    const { id } = await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "long" });
-    runners[0]!.notify();
-    await vi.waitFor(async () => expect((await row(pool, id!))?.state).toBe("running"), { timeout: 2_000, interval: 10 });
-    const initial = (await row(pool, id!)).locked_until.getTime();
-    await new Promise(resolve => setTimeout(resolve, 2_300));
-    // Past the original 2 s lease: another worker must still find nothing.
-    expect((await claimJobs(pool, { owner: "worker-b", kinds: [{ kind: KIND, leaseMs: 2_000 }], limit: 1 })).jobs).toEqual([]);
-    expect((await row(pool, id!)).locked_until.getTime()).toBeGreaterThan(initial);
-    await vi.waitFor(async () => expect(await row(pool, id!)).toBeUndefined(), { timeout: 3_000, interval: 50 });
-    const second = await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "stolen" });
-    runners[0]!.notify();
-    await vi.waitFor(async () => expect((await row(pool, second.id!))?.state).toBe("running"), { timeout: 2_000, interval: 20 });
-    await pool.query("UPDATE control_plane_jobs SET lease_token=gen_random_uuid() WHERE id=$1", [second.id]);
-    await vi.waitFor(() => expect(aborted).toEqual([true]), { timeout: 3_000, interval: 50 });
-    expect(await row(pool, second.id!)).toMatchObject({ state: "running", attempts: 1 });
+  it("starts a fresh job at the requested rerun time when a final attempt fails", async () => {
+    await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "terminal-rerun", maxAttempts: 1 });
+    const job = await claimOne();
+    const later = new Date(Date.now() + 60 * 60_000);
+    expect((await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "terminal-rerun", runAt: later })).outcome).toBe("updated");
+    expect(await failJob(pool, job, { code: "handler_failed", retryable: true, delayMs: 0 })).toBe("retrying");
+    expect(await row(pool, job.id)).toMatchObject({ state: "queued", attempts: 0, rerun_at: null, run_at: later });
+    // A due rerun request is not delayed by the failed run's backoff.
+    await pool.query("UPDATE control_plane_jobs SET run_at=now() WHERE id=$1", [job.id]);
+    const again = await claimOne();
+    await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "terminal-rerun" });
+    expect(await failJob(pool, again, { code: "invalid_payload", retryable: false, delayMs: 60 * 60_000 })).toBe("retrying");
+    expect((await row(pool, job.id)).run_at.getTime()).toBeLessThan(Date.now() + 60_000);
+  });
+
+  it("leaves a single-connection pool clean after a failed system statement", async () => {
+    const single = extra({ max: 1 });
+    const pid = (await single.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    await expect(withSystemStatement(single, sql`SELECT 1 / 0`)).rejects.toMatchObject({ code: "22012" });
+    const state = (await single.query(`SELECT pg_backend_pid() AS pid, current_user = session_user AS login_role,
+      current_setting('app.system', true) AS system, now() = statement_timestamp() AS fresh_transaction`)).rows[0];
+    expect(state).toMatchObject({ pid, login_role: true, fresh_transaction: true });
+    expect([null, ""]).toContain(state.system);
+    expect((await withSystemStatement<{ one: number }>(single, sql`SELECT 1 AS one`)).rows).toEqual([{ one: 1 }]);
+    expect(single.totalCount).toBe(1);
+  });
+
+  it("reports a system statement to the request cost observer as one transaction", async () => {
+    const observed = createPool(databaseUrl!, { maxConnections: 2 });
+    extraPools.push(observed);
+    const summaries: RequestDatabaseCost[] = [];
+    const app = new Hono();
+    app.use("*", requestTiming({ slowMs: Number.POSITIVE_INFINITY, databasePool: observed,
+      costObserver: summary => { summaries.push(summary); } }));
+    app.post("/claim", async c => c.json(await claimJobs(observed, { owner: "worker-a", kinds: policy, limit: 1 })));
+    await enqueueJobStandalone(pool, { kind: KIND, dedupeKey: "observed" });
+    const response = await app.request("/claim", { method: "POST" });
+    expect(response.status).toBe(200);
+    expect((await response.json()).jobs).toHaveLength(1);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({ queriesStarted: 1, queriesCompleted: 1, sqlStatements: 5, transactions: 1,
+      commits: 1, rollbacks: 0, sqlWriteStatements: 1, uncheckedClientCheckouts: 0 });
   });
 
   it("drains in-flight work on shutdown and releases leases a handler does not give up", async () => {

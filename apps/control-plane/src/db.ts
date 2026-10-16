@@ -16,6 +16,7 @@ import pg from "pg";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import { assertWorkOSProviderLockHeld } from "./workos-provider-lock-context.js";
 import { observeDatabaseTransaction, recordPoolWait, recordTransactionTiming } from "./request-timing.js";
+import { SqlFragment } from "./sql-fragment.js";
 
 export type Db = pg.Pool;
 export type Tx = pg.PoolClient;
@@ -220,15 +221,16 @@ export async function withUserTx<T>(
 
 /** One-round-trip system transaction for a single statement: BEGIN, the same
  * role and RLS context as `withSystemTx`, the statement and COMMIT travel as
- * one simple-protocol batch. That protocol cannot bind parameters, so callers
- * must build `statement` only from strictly validated identifiers, integers
- * and UUIDs, never from free text. A failed batch costs one extra ROLLBACK. */
+ * one simple-protocol batch. That protocol cannot bind parameters, so the
+ * statement must be a `SqlFragment`, built only from template text and
+ * validated literals. A failed batch costs one extra ROLLBACK. */
 export async function withSystemStatement<R extends pg.QueryResultRow>(
   pool: pg.Pool,
-  statement: string,
+  statement: SqlFragment,
 ): Promise<pg.QueryResult<R>> {
   assertWorkOSProviderLockHeld();
-  if (statement.includes(";")) throw new Error("system_statement_must_be_single");
+  if (!(statement instanceof SqlFragment)) throw new Error("system_statement_fragment_required");
+  if (statement.text.includes(";")) throw new Error("system_statement_must_be_single");
   const started = performance.now();
   let client: pg.PoolClient;
   try {
@@ -239,11 +241,13 @@ export async function withSystemStatement<R extends pg.QueryResultRow>(
   }
   const acquired = performance.now();
   const connection = observeOwnedConnection(client);
+  const stopObserving = observeDatabaseTransaction(client);
   let discard = false;
   try {
     connection.assert();
+    // The newline ends any trailing `--` comment before COMMIT.
     const results = await client.query(
-      `BEGIN; ${ENTER_APP_ROLE}; SELECT set_config('app.system', 'on', true); ${statement}; COMMIT`,
+      `BEGIN; ${ENTER_APP_ROLE}; SELECT set_config('app.system', 'on', true); ${statement.text}\n; COMMIT`,
     ) as unknown as pg.QueryResult<R>[];
     connection.assert();
     if (!Array.isArray(results) || results.length !== 5) throw new Error("system_statement_batch_invalid");
@@ -256,6 +260,7 @@ export async function withSystemStatement<R extends pg.QueryResultRow>(
     if (connection.lost) throw new DatabaseConnectionLostError();
     throw err;
   } finally {
+    stopObserving?.();
     connection.release(discard);
     recordTransactionTiming(acquired - started, performance.now() - started);
   }
