@@ -294,6 +294,25 @@ describe("engine uplink server", () => {
     expect(alerts).toEqual(["uplink_supersede_churn"]);
   });
 
+  it("dispatches unsequenced engine frames to extensions and keeps ignoring unknown types", async () => {
+    const seen: Array<{ t: string; d: Record<string, unknown> }> = [];
+    await start({ extensions: [{ feature: "relay.v1",
+      onFrame: (_session, t, d) => {
+        if (!t.startsWith("relay.")) return false;
+        seen.push({ t, d });
+        return t === "relay.reject" ? "invalid" : true;
+      } }] });
+    const { peer } = await connect({ features: ["relay.v1"] });
+    peer.send({ t: "relay.accept", d: { channel: 7 } });
+    peer.send({ t: "relay.credit", d: { channel: 7, bytes: 65_536 } });
+    peer.send({ t: "mystery.frame", d: {} }); // unknown unsequenced: ignored
+    await until(() => seen.length === 2);
+    expect(seen).toEqual([{ t: "relay.accept", d: { channel: 7 } }, { t: "relay.credit", d: { channel: 7, bytes: 65_536 } }]);
+    expect(peer.ws.readyState).toBe(WebSocket.OPEN);
+    peer.send({ t: "relay.reject", d: { channel: 7, code: "capability_invalid" } });
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
+  });
+
   it("routes binary relay chunks to the negotiated extension and answers unknown channels with sys.error", async () => {
     const chunks: { channel: number; final: boolean; binary: boolean; payload: string }[] = [];
     await start({ extensions: [{ feature: "relay.v1",

@@ -58,8 +58,10 @@ export interface UplinkSession {
 export interface UplinkExtension {
   readonly feature: string;
   onOpen?(session: UplinkSession, resumed: boolean): void;
-  /** True when the reliable frame type belongs to this extension; a thrown
-   * error or `"invalid"` closes the uplink with 4400. */
+  /** True when the frame type belongs to this extension; a thrown error or
+   * `"invalid"` closes the uplink with 4400. Sequenced (reliable) and
+   * unsequenced engine→CP frames both arrive here, in receive order;
+   * unsequenced types are never replayed on a resume. */
   onFrame?(session: UplinkSession, t: string, d: Record<string, unknown>): boolean | "invalid";
   /** True when the relay chunk's channel belongs to this extension; a
    * thrown error closes the uplink with 4400. Unclaimed channels get a
@@ -463,8 +465,21 @@ class UplinkConnection {
       const createdAt = this.deltaCreatedAt.shift();
       if (!this.authApplied || createdAt === undefined) return this.invalid("auth_applied_unexpected");
       this.server.options.metric?.("capability_revocation_push_ms", Math.max(0, this.now() - createdAt));
+      return;
     }
-    // sys.ack carries only `a`; other unsequenced types are ignored.
+    // sys.ack carries only `a`, applied above. Other unsequenced engine→CP
+    // frames (relay.accept/reject/credit/close, …) belong to the negotiated
+    // extensions; unknown unsequenced types stay ignored (the contract's
+    // unknown-type rule).
+    if (frame.t === "sys.ack") return;
+    for (const extension of this.server.options.extensions) {
+      if (!this.features.has(extension.feature) || !extension.onFrame) continue;
+      try {
+        const handled = extension.onFrame(this.session!, frame.t, d);
+        if (handled === "invalid") return this.invalid("frame_invalid");
+        if (handled) return;
+      } catch { return this.invalid("frame_invalid"); }
+    }
   }
 
   /** Binary frames are relay chunks (contract "Binary relay frame"). Relay
