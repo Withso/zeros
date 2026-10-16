@@ -9,8 +9,9 @@ import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 // Execute the actual chat notification effect, with only React scheduling and
 // external sinks supplied. The unrelated editor/native tree is not mounted.
 const source = ts.createSourceFile("agent-chat.tsx", readFileSync(new URL("../agent-chat.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let effectSource = "", noticeSource = "";
+let effectSource = "", noticeSource = "", legacyLabelSource = "";
 function visit(node: ts.Node) {
+  if (ts.isFunctionDeclaration(node) && node.name?.text === "labelForFailure") legacyLabelSource = node.getText(source);
   if (ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration => declaration.name.getText(source) === "preparationFailure")) noticeSource = node.getText(source);
   if (ts.isBlock(node)) {
     const index = node.statements.findIndex(statement => ts.isVariableStatement(statement) &&
@@ -20,8 +21,10 @@ function visit(node: ts.Node) {
   ts.forEachChild(node, visit);
 }
 visit(source);
-if (!effectSource.includes("useEffect") || !noticeSource) throw new Error("Chat failure boundary missing");
-const script = new vm.Script(ts.transpileModule(`${effectSource}\n${noticeSource}\npreparationFailure;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText);
+if (!effectSource.includes("useEffect")) throw new Error("Chat failure boundary missing");
+// Replay the prior toast implementation too: absence of the inline notice must
+// fail a behavioral assertion, not prevent the regression suite from loading.
+const script = new vm.Script(ts.transpileModule(`${legacyLabelSource}\n${effectSource}\n${noticeSource || "const preparationFailure = null;"}\npreparationFailure;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText);
 const cloud = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const protocol = (detail: string): AgentFailure => ({ kind: "protocol-error", stage: "newSession", agentId: "cursor", message: detail });
 
