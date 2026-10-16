@@ -12,16 +12,15 @@
 // See docs/cloud-workspace/load-simulator.md.
 
 import { promises as dns } from "node:dns";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { cpus, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { cpus } from "node:os";
 import { parseArgs } from "node:util";
 import pg from "pg";
 import { rebuildMigratedTestDatabase } from "../test-database.js";
 import { budgetsFromMeasurement, checkBudgets, type LoadBudgets } from "./budgets.js";
 import { createSimulator } from "./harness.js";
 import { DatabaseCostMeter } from "./instrument.js";
-import { formatReport, type LoadSimulationReport } from "./report.js";
+import { formatReport, writeReport, type LoadSimulationReport } from "./report.js";
 import { ServerStats } from "./server-stats.js";
 import { measureHotPaths, projectSteadyState, runScenario, type HotPathResult, type ScenarioResult } from "./simulation.js";
 import type { SimulatorOperationName } from "./harness.js";
@@ -96,7 +95,6 @@ async function main(): Promise<void> {
     throw new Error(`Invalid options (ascending workspace counts up to ${LOAD_SIMULATOR_CAPS.workspaces}).\n${usage}`);
   const background = !values["no-background"];
   const workosEnabled = values.workos !== "off";
-  const out = values.out ?? join(tmpdir(), "zeros-load-sim", `report-${new Date().toISOString().replaceAll(":", "-")}.json`);
 
   const budgets = JSON.parse(readFileSync(new URL("./budgets.json", import.meta.url), "utf8")) as LoadBudgets;
   const admin = new pg.Pool({ connectionString: databaseUrl, max: 1, application_name: "zeros-load-sim-admin" });
@@ -150,8 +148,7 @@ async function main(): Promise<void> {
       projection: projectSteadyState(hotPaths, quiet, [0, 1, 10, 50, 100, 500], emptyInventory),
       topStatements,
     };
-    mkdirSync(dirname(out), { recursive: true });
-    writeFileSync(out, JSON.stringify(report, null, 2) + "\n");
+    const out = writeReport(report, values.out);
     console.log(formatReport(report));
     console.error(`[load:db] report written to ${out}`);
     if (values["write-budgets"]) {

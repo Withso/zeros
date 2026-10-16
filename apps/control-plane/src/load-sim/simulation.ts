@@ -172,7 +172,7 @@ export async function runScenario(sim: Simulator, options: {
   const failures: Record<string, number> = {};
   const firstFailure: Record<string, string> = {};
   const sleepers = new Map<NodeJS.Timeout, () => void>();
-  let running = true;
+  const run = new AbortController();
   const next = random(0x5eed + options.activeWorkspaces);
   const sleep = (ms: number) => new Promise<void>(resolve => {
     const timer = setTimeout(() => { sleepers.delete(timer); resolve(); }, ms);
@@ -186,13 +186,14 @@ export async function runScenario(sim: Simulator, options: {
       const periodMs = cadence.periodSeconds * 1000;
       loops.push((async () => {
         await sleep(next() * periodMs);
-        while (running) {
+        while (!run.signal.aborted) {
           const started = Date.now();
           await sim.meter.measure(name, () => operation(workspace)).catch((error: unknown) => {
             failures[name] = (failures[name] ?? 0) + 1;
             firstFailure[name] ??= error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 200) : String(error);
           });
-          if (!running) break;
+          // The run can end while the operation is in flight; do not start another sleep.
+          if (run.signal.aborted) break;
           await sleep(cadence.afterCompletion ? periodMs : Math.max(0, periodMs - (Date.now() - started)));
         }
       })());
@@ -206,7 +207,7 @@ export async function runScenario(sim: Simulator, options: {
   const cpuBefore = process.cpuUsage();
   const started = performance.now();
   await new Promise(resolve => setTimeout(resolve, options.durationMs));
-  running = false;
+  run.abort();
   for (const [timer, resolve] of sleepers) {
     clearTimeout(timer);
     resolve();

@@ -1,10 +1,14 @@
 // Database-free unit tests for the load simulator's budget check, projection
-// guards and client-side cost meter.
+// guards, client-side cost meter and report file.
 
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type pg from "pg";
 import { BUDGET_POLICY, checkBudgets, type LoadBudgets } from "./budgets.js";
 import { DatabaseCostMeter, emptyCost, type OperationCost } from "./instrument.js";
+import { writeReport, type LoadSimulationReport } from "./report.js";
 import { projectSteadyState, STEADY_STATE_CADENCES, WORKER_PER_WORKSPACE_CADENCES, type HotPathResult, type Projection } from "./simulation.js";
 
 const perCall = (overrides: Partial<OperationCost> = {}): Omit<OperationCost, "calls"> => {
@@ -123,4 +127,34 @@ describe("DatabaseCostMeter", () => {
     expect(cost.commits).toBe(1);
     expect(cost.checkouts).toBe(1);
   });
+});
+
+describe("writeReport", () => {
+  const report = { version: 1, generatedAt: "2026-10-16T14:00:00.000Z" } as LoadSimulationReport;
+  const withRoot = (test: (root: string) => void) => {
+    const root = mkdtempSync(join(tmpdir(), "zeros-load-sim-report-test-"));
+    try { test(root); } finally { rmSync(root, { recursive: true, force: true }); }
+  };
+
+  it("writes the default report into a fresh private directory, not a fixed shared path", () => withRoot(root => {
+    // Another local user can pre-create a fixed name under the shared temporary directory.
+    const planted = join(root, "planted");
+    mkdirSync(planted);
+    symlinkSync(planted, join(root, "zeros-load-sim"));
+    const first = writeReport(report, undefined, root), second = writeReport(report, undefined, root);
+    expect(readdirSync(planted)).toEqual([]);
+    expect(dirname(first)).not.toBe(dirname(second));
+    for (const path of [first, second]) {
+      expect(dirname(dirname(path))).toBe(root);
+      expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(report);
+    }
+  }));
+
+  it("writes an explicit path as given, creating its parent", () => withRoot(root => {
+    const out = join(root, "nested", "load.json");
+    expect(writeReport(report, out, root)).toBe(out);
+    expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(report);
+  }));
 });

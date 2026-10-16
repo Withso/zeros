@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { HotPathResult, Projection, ScenarioResult } from "./simulation.js";
 import type { StatementSample } from "./server-stats.js";
 
@@ -69,4 +72,20 @@ export function formatReport(report: LoadSimulationReport): string {
     report.topStatements.slice(0, 10).map(row => [fixed(row.totalExecMs, 1), String(row.calls), fixed(row.meanExecMs, 3),
       "`" + row.query.replaceAll("|", "\\|").replaceAll("`", "'").slice(0, 160) + "`"])));
   return sections.join("\n\n") + "\n";
+}
+
+/** Writes the JSON report and returns its path. An explicit path is the
+ * caller's choice. The default gets a fresh 0700 directory and an exclusively
+ * created 0600 file, because another local user can pre-create or symlink a
+ * fixed name under the shared temporary directory. */
+export function writeReport(report: LoadSimulationReport, out?: string, root = tmpdir()): string {
+  const json = JSON.stringify(report, null, 2) + "\n";
+  if (out) {
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, json);
+    return out;
+  }
+  const path = join(mkdtempSync(join(root, "zeros-load-sim-")), `report-${report.generatedAt.replaceAll(":", "-")}.json`);
+  writeFileSync(path, json, { mode: 0o600, flag: "wx" });
+  return path;
 }

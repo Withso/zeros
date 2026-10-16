@@ -38,7 +38,7 @@ pnpm --dir apps/control-plane load:db -- --workspaces 0,1,10 --duration 20 --out
 | `--iterations` | `25` | Serial calls per operation for the per-request table. |
 | `--no-background` | off | Do not start the in-process background workers. |
 | `--workos off` | on | Run the services with WorkOS authority disabled. |
-| `--out` | `$TMPDIR/zeros-load-sim/report-<time>.json` | JSON report path; the Markdown tables are always printed. |
+| `--out` | `$TMPDIR/zeros-load-sim-<random>/report-<time>.json` | JSON report path; the Markdown tables are always printed. Each default report gets a new private directory. |
 | `--write-budgets` | none | Write budgets derived from this run (see "Budgets"). |
 
 The run exits with code 1 when a measurement exceeds `budgets.json` or when
