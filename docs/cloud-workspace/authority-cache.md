@@ -68,3 +68,22 @@ prints the same counts and never keys, tokens or values.
   - `mismatchCacheAllows` / `mismatchCacheDenies`: the entry was stale and no
     hint removed it. The entry is dropped. Enforcement requires both to stay
     at zero on fixture and owner traffic.
+
+## Uplink auth snapshots
+
+`DatabaseUplinkAuthSource` (realtime/uplink-auth-source.ts) serves the S2
+`auth.sync` snapshot from the same authority facts. Its scope is the
+workspace's own principals: everyone with current access, plus anyone who
+lost access to that workspace inside the 36-minute revocation retention
+window, recorded by `cloud_capability_access_losses` in the committing
+transaction. Nothing about other workspaces' members is sent to a VM.
+
+`auth.sync` travels in one S2 control frame (64 KiB). The source refuses an
+encoded snapshot over `UPLINK_AUTH_SYNC_MAX_BYTES` (60 KiB, leaving the frame
+envelope headroom) with `UplinkSnapshotTooLargeError`, counted as
+`counters.oversizeSnapshots`; the server then parks the engine with
+`internal_error` instead of sending a frame the engine would reject and
+reconnect-loop on. At roughly 126 bytes per principal with two devices the
+bound holds about 480 principals per workspace; beyond it, shrinking the
+snapshot (omitting principals unchanged inside the window, or a chunked
+sync) is a contract minor tracked with the contract owner.
