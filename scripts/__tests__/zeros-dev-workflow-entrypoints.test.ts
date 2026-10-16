@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { CHAIN_RESTART } from "../zeros-dev/chain-restart.mjs";
 
 const { load } = createRequire(import.meta.url)("js-yaml") as { load(input: string): unknown };
 
@@ -54,14 +55,16 @@ describe("actual zeros-dev workflow entry processes", () => {
     expect(entries).toEqual(["scripts/zeros-dev/hourly-actions.mjs", "scripts/zeros-dev/hourly-main.ts"]);
   });
 
-  it.each(["gate0", "infrastructure"])("executes pnpm exec tsx hourly-main.ts for %s without credentials or network", async profile => {
+  it.each([
+    { profile: "gate0", restart: false }, { profile: "infrastructure", restart: false }, { profile: "infrastructure", restart: true },
+  ])("executes pnpm exec tsx hourly-main.ts for $profile (chain restart: $restart) without credentials or network", async ({ profile, restart }) => {
     const f = await isolated(), execution = { workflowRunId: "17", attempt: 1, sourceSha: "a".repeat(40) };
     const result = await execute("pnpm", ["exec", "tsx", "scripts/zeros-dev/hourly-main.ts"], {
       ...f.env, GITHUB_ACTIONS: "true", GITHUB_REPOSITORY: "Withso/zeros", GITHUB_REF: "refs/heads/main",
       GITHUB_WORKFLOW_REF: "Withso/zeros/.github/workflows/zeros-dev-e2e.yml@refs/heads/main", GITHUB_EVENT_NAME: "workflow_dispatch",
       GITHUB_RUN_ID: "17", GITHUB_RUN_ATTEMPT: "1", GITHUB_SHA: execution.sourceSha,
       ZEROS_DEV_PROFILE: profile, ZEROS_DEV_E2E_START_MS: String(Date.now()), GITHUB_WORKSPACE: f.directory, RUNNER_TEMP: f.directory,
-      ZEROS_DEV_E2E_PLAN: JSON.stringify({ execution, profile, bootstrap: true, previous: null, artifactId: null }),
+      ZEROS_DEV_E2E_PLAN: JSON.stringify({ execution, profile, bootstrap: true, previous: null, artifactId: null, ...(restart ? { chainRestart: CHAIN_RESTART } : {}) }),
     });
     expect(result.exit).toBe(1);
     expect(result.stderr).not.toMatch(/Transform failed|Top-level await|ZEROS_TEST_NETWORK_DENIED/);

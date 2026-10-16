@@ -16,6 +16,15 @@ import { AlphaTransport } from "../zeros-dev/transport";
 import { parseFixture } from "../zeros-dev/config";
 import { computerBuild } from "../../apps/desktop/src/renderer/features/settings/__tests__/cloud-computer-v2-fixtures";
 import { PRESTART_RECOVERY } from "../zeros-dev/prestart-recovery.mjs";
+import { CHAIN_RESTART } from "../zeros-dev/chain-restart.mjs";
+
+// The real retired receipt is not a test fixture. Pin synthetic bytes by digest
+// so the restart path is exercised end to end; every other pin stays real.
+const retiredReceipt = vi.hoisted(() => `{"synthetic":"retired chain receipt"}\n`);
+vi.mock("../zeros-dev/chain-restart.mjs", async importOriginal => {
+  const { createHash } = await import("node:crypto"), original = await importOriginal<typeof import("../zeros-dev/chain-restart.mjs")>();
+  return { ...original, CHAIN_RESTART: Object.freeze({ ...original.CHAIN_RESTART, receiptSha256: createHash("sha256").update(retiredReceipt).digest("hex") }) };
+});
 
 const roots: string[] = [];
 const stdout: string[] = [];
@@ -26,9 +35,9 @@ beforeEach(() => {
 });
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 const maskLine = (value: string) => `::add-mask::${value.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A")}\n`;
-async function fixture() {
+async function fixture(deviceId: string = randomUUID()) {
   const root = await mkdtemp(path.join(os.tmpdir(), "zd-actions-")); roots.push(root); await mkdir(path.join(root, ".git"), { mode: 0o700 });
-  const accountId = randomUUID(), credential = { ...createCloudReplicaDeviceCredential(accountId), deviceId: randomUUID() };
+  const accountId = randomUUID(), credential = { ...createCloudReplicaDeviceCredential(accountId), deviceId };
   const values = { ZEROS_DEV_PASSWORD: "synthetic-password-value", ZEROS_DEV_WORKOS_SUBJECT: "user_fixture", ZEROS_DEV_ACCOUNT_ID: accountId,
     ZEROS_DEV_EMAIL: "fixture@example.test", ZEROS_DEV_ORGANIZATION_ID: randomUUID(), ZEROS_DEV_REPOSITORY: "fixture/repository", ZEROS_DEV_REPOSITORY_ID: "123",
     ZEROS_DEV_GITHUB_INSTALLATION_ID: randomUUID(), ZEROS_DEV_DEVICE_PRIVATE_KEY_B64: Buffer.from(JSON.stringify(credential)).toString("base64") };
@@ -99,8 +108,8 @@ describe("ephemeral Actions fixture credentials", () => {
   });
 });
 
-async function actionsFixture() {
-  const f = await fixture(), temp = path.join(f.root, "temporary"); await mkdir(temp, { mode: 0o700 });
+async function actionsFixture(deviceId?: string) {
+  const f = await fixture(deviceId), temp = path.join(f.root, "temporary"); await mkdir(temp, { mode: 0o700 });
   const execution = { workflowRunId: "17", attempt: 1, sourceSha: "a".repeat(40) };
   const env = { ...f.env, GITHUB_WORKSPACE: f.root, RUNNER_TEMP: temp, ZEROS_DEV_E2E_START_MS: String(Date.now()),
     ZEROS_DEV_E2E_PLAN: JSON.stringify({ execution, bootstrap: true, previous: null, artifactId: null }) };
@@ -412,5 +421,49 @@ describe("Actions orchestration through signed files", () => {
     expect(f.services.api.cleanup).toHaveBeenCalledOnce(); expect(f.services.credentials.cleanup).toHaveBeenCalledOnce();
     expect((await f.checkpoint()).payload.result).toMatchObject({ success: false, code: "deadline" });
     expect(f.output).toContainEqual(expect.objectContaining({ phase: "workspace_create", code: "deadline" }));
+  });
+
+  async function restartFixture(options: { deviceId?: string; receipt?: string | null } = {}) {
+    const f = await actionsFixture(options.deviceId), incoming = path.join(f.env.RUNNER_TEMP, "zeros-dev-previous");
+    await mkdir(incoming, { mode: 0o700 });
+    if (options.receipt !== null) await writeFile(path.join(incoming, "receipt.json"), options.receipt ?? retiredReceipt, { mode: 0o600 });
+    f.env.ZEROS_DEV_E2E_PLAN = JSON.stringify({ ...JSON.parse(f.env.ZEROS_DEV_E2E_PLAN), chainRestart: CHAIN_RESTART });
+    return f;
+  }
+  it("starts a new signed chain from the exact retired receipt without importing it or skipping prior cleanup", async () => {
+    const f = await restartFixture();
+    f.services.api.assertFixtureEmpty.mockImplementation(async (_signal, predecessors) => {
+      expect(predecessors).toEqual([]);
+      const checkpoint = await f.checkpoint();
+      expect(checkpoint.payload).toMatchObject({ deviceId: f.credential.deviceId, chainRestart: CHAIN_RESTART });
+      expect(checkpoint.payload.runs.map((run: Run) => run.hourly?.workflowRunId)).toEqual(["17"]);
+    });
+    expect(await runActions(f.env, f.options as never)).toBe(1); // The synthetic new runtime is deliberately unavailable.
+    expect(f.services.session.login).toHaveBeenCalledOnce(); expect(f.services.api.assertFixtureEmpty).toHaveBeenCalled();
+    const artifact = await f.checkpoint();
+    expect(artifact.payload).toMatchObject({ deviceId: f.credential.deviceId, chainRestart: CHAIN_RESTART,
+      result: { success: false, code: "runtime_unavailable" } });
+    expect(artifact.payload.runs).toHaveLength(1);
+  });
+  it("keeps a chain restart blocked while an old fixture workspace remains", async () => {
+    const f = await restartFixture();
+    f.services.api.assertFixtureEmpty.mockRejectedValue(new ZerosDevError("cleanup_pending"));
+    expect(await runActions(f.env, f.options as never)).toBe(1);
+    expect(f.services.api.createWorkspace).not.toHaveBeenCalled(); expect(f.services.credentials.install).not.toHaveBeenCalled();
+    expect((await f.checkpoint()).payload).toMatchObject({ chainRestart: CHAIN_RESTART, result: { code: "cleanup_pending" } });
+  });
+  it.each([
+    { label: "the retired device", deviceId: CHAIN_RESTART.retiredDeviceId, code: "chain_restart_device_retired" },
+    { label: "changed retired receipt bytes", receipt: `${retiredReceipt} `, code: "chain_restart_mismatch" },
+    { label: "a missing retired receipt", receipt: null, code: "artifact_invalid" },
+    { label: "a restart that is not a bootstrap", plan: { bootstrap: false, previous: { workflowRunId: "16", attempt: 1, sourceSha: "a".repeat(40) }, artifactId: "99" },
+      code: "artifact_invalid" },
+  ])("refuses a chain restart with $label before login or any receipt", async ({ deviceId, receipt, plan, code }) => {
+    const f = await restartFixture({ deviceId, receipt });
+    if (plan) f.env.ZEROS_DEV_E2E_PLAN = JSON.stringify({ ...JSON.parse(f.env.ZEROS_DEV_E2E_PLAN), ...plan });
+    expect(await runActions(f.env, f.options as never)).toBe(1);
+    expect(f.services.session.login).not.toHaveBeenCalled(); expect(f.services.api.assertFixtureEmpty).not.toHaveBeenCalled();
+    await expect(f.checkpoint()).rejects.toMatchObject({ code: "ENOENT" });
+    expect(f.output).toContainEqual(expect.objectContaining({ schema: "zeros.dev-hourly-result/v1", success: false, code }));
   });
 });
