@@ -72,7 +72,7 @@ otherwise. It takes about 10 seconds and checks:
 | `createPool` API and worker pools with production pool settings | Boat provider (`FakeBoatProvider` returns immediately) |
 | Engine services: heartbeat, durable record head, credential controls, actor confirmation | Engine and desktop processes, relay sockets and HTTP framing (except the catalog route) |
 | Desktop paths: actor-session renew, relay authority revalidation, catalog through the Hono route with `resolveAuthenticatedUser` | WorkOS network calls |
-| Provider resolver, reconciler tick/drift/orphan sweep, access revocation, checkpoint request and security-event workers | WorkOS sync, outbox and other workers not listed |
+| Provider resolver, reconciler job claim/intent claim/drift/orphan sweep, access revocation, checkpoint request and security-event workers | WorkOS sync, outbox and other workers not listed |
 
 Each workspace is seeded as a ready workspace with a WorkOS link, a database
 qualification, a cursor credential, an activated boot, a user, session and
@@ -144,7 +144,7 @@ PostgreSQL 18.6 on loopback, Node 24, 4 CPUs, WorkOS authority on.
 | `client.relayRevalidate` | 1 | 10 | 8 | 5.7 | 40 |
 | `client.catalog` (including authentication) | 2 | 14 | 10 | 15.9 | 50 |
 | `provider.resolve` | 1 | 7 | 5 | 2.2 | 25 |
-| `worker.lifecycleDeadlines` | 1 | 5 | 3 | 5.3 | 15 |
+| `worker.lifecycleJobClaim` | 1 | 5 | 1 | 0.9 | 5 |
 | `worker.reconcileOnce` | 1 | 5 | 3 | 4.5 | 15 |
 | `worker.reconcileDrift` (due) | 6 | 36 | 24 | 12.3 | 120 |
 | `worker.reconcileOrphans` | 1 empty, 2 at 1 workspace, 51 at 50 | | | | |

@@ -674,6 +674,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     if (runtimeStagingWorker) stopCloudRuntimeStagingWorker = runtimeStagingWorker.start();
     Object.assign(workerNotifications, {
       lifecycle: () => lifecycle.reconciler.notify(),
+      jobs: () => lifecycle.reconciler.notify(),
       setup: () => setupWorker?.notify(),
       recovery: () => setupWorker?.notify(),
       access: () => accessRevocationWorker!.notify(),

@@ -25,8 +25,8 @@ import { ServerStats } from "./server-stats.js";
 import { measureHotPaths, projectSteadyState, runScenario, type HotPathResult, type ScenarioResult } from "./simulation.js";
 import type { SimulatorOperationName } from "./harness.js";
 
-const WORKER_OPERATIONS: readonly SimulatorOperationName[] = ["worker.lifecycleDeadlines", "worker.reconcileOnce", "worker.reconcileDrift", "worker.reconcileOrphans"];
-const EMPTY_INVENTORY_OPERATIONS: readonly SimulatorOperationName[] = ["worker.lifecycleDeadlines", "worker.reconcileOnce", "worker.reconcileOrphans"];
+const WORKER_OPERATIONS: readonly SimulatorOperationName[] = ["worker.lifecycleJobClaim", "worker.reconcileOnce", "worker.reconcileDrift", "worker.reconcileOrphans"];
+const EMPTY_INVENTORY_OPERATIONS: readonly SimulatorOperationName[] = ["worker.lifecycleJobClaim", "worker.reconcileOnce", "worker.reconcileOrphans"];
 
 /** Ceilings so a mistyped flag cannot monopolise a shared machine. */
 const LOAD_SIMULATOR_CAPS = { workspaces: 200, durationSeconds: 600, iterations: 1_000 } as const;
