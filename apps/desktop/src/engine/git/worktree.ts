@@ -2043,10 +2043,13 @@ export async function reconcileInterruptedWorkspaceLifecycles(
       recovered++;
     } catch (err) {
       failed++;
+      // The journal is retained and retried at every startup; say how to
+      // unblock it, since the same line otherwise repeats each launch.
+      const remediation = isGitError(err) ? err.remediation : undefined;
       console.error(
         `[worktree] lifecycle recovery failed for ${entry.operation} ${entry.workspaceId}: ${
           err instanceof Error ? err.message : String(err)
-        }`,
+        }${remediation ? ` (${remediation})` : ""}`,
       );
     }
   }
