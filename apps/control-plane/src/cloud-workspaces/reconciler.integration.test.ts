@@ -14,7 +14,7 @@ import {
 } from "./provider.js";
 import { runtimeWitness } from "./runtime-test-fixtures.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
-import { readLifecycleDeadlines } from "./lifecycle-deadlines.js";
+import { readLifecycleDueInMs } from "./lifecycle-jobs.js";
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
 import { CloudWorkspaceCheckpointRequestWorker, enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
@@ -802,7 +802,7 @@ d("cloud workspace reconciliation", () => {
     });
 
   describe("durable retry deadlines", () => {
-    const nextDelay = async () => (await readLifecycleDeadlines(pool, "boat", 1_000)).lifecycle ?? null;
+    const nextDelay = () => readLifecycleDueInMs(pool, "lifecycle", null, { provider: "boat", driftIntervalMs: 1_000 });
 
     it.each(["queued", "observing"])("reads future %s work before the periodic interval", async intentState => {
       const seeded = await seedWorkspace({ intentState });
@@ -968,7 +968,7 @@ d("cloud workspace reconciliation", () => {
       await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+interval '1 hour' WHERE id=$1", [seeded.intentId]);
       await barrier();
       expect(notices.splice(0)).toEqual(["zeros_cloud_lifecycle_work"]);
-      expect((await readLifecycleDeadlines(pool, "boat", 1_000)).lifecycle).toBeGreaterThan(3_500_000);
+      expect(await readLifecycleDueInMs(pool, "lifecycle", null, { provider: "boat", driftIntervalMs: 1_000 })).toBeGreaterThan(3_500_000);
       expect(await reconciler(new FakeProvider()).runOnce()).toBe(false);
       await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE id=$1", [seeded.intentId]);
       await barrier();

@@ -144,6 +144,16 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
    * started, so every later change will arrive as a hint. */
   feedCurrent(): boolean { return this.current; }
 
+  /** True when any organization has the flag on. Process-level mount gates
+   * use this; per-organization admission still checks `enabled(orgId, …)`. */
+  anyEnabled(flag: RolloutFlagName): boolean {
+    const definition: RolloutFlagDefinition | undefined = ROLLOUT_FLAGS[flag];
+    if (!definition) return false;
+    if (!this.current && definition.whileFeedUnavailable === "off") return false;
+    for (const flags of this.values.values()) if (flags.has(flag)) return true;
+    return false;
+  }
+
   /** Called after any change to what `enabled` may return. */
   onChange(listener: () => void): () => void {
     this.listeners.add(listener);

@@ -41,6 +41,9 @@ failing input, or a reproduction. Drop anything you can't substantiate.
   can't extend authority.
 - Windows tolerate ordinary clock skew and are compared against documented
   bounds.
+- A jittered retry has a minimum delay. Full jitter can draw zero, and a
+  zero-delay retry of a failure that arrives without yielding re-enters the
+  loop through promise callbacks and starves the event loop.
 
 **Database cost**
 - Price every recurring query: CPU per call times calls per second, against
@@ -64,6 +67,9 @@ failing input, or a reproduction. Drop anything you can't substantiate.
   deltas: a gate cannot tell a late hint from the first poll.
 - Provider-shaped fixtures match the real wire shape. Qualify against a real
   response at least once.
+- Retry waits and terminal codes come from the provider's documented error
+  envelope, not HTTP convention. Pin each documented wait field and each code
+  that ends an operation with a wire-shaped test.
 - Replay provider updates through the shared history reducer as well as the
   producer. An emitted replacement can look correct while an immutable consumer
   silently ignores it.

@@ -28,6 +28,8 @@ export type EngineAuthorityEntry = {
   setupEnrolled: boolean;
   runtimeReady: boolean;
   leaseExpiresAtMs: number;
+  /** Registered boot identity, projected for uplink boot binding (S2). */
+  runtimeBootId: string | null;
   /** Earliest lease, funding, credential or entitlement deadline, capped by
    * the cache TTL. The entry is unusable from this instant. */
   deadlineMs: number;
@@ -39,7 +41,7 @@ export type EngineAuthorityMode = { kind: "assert"; transitionRecordSync?: boole
 
 export type EngineAuthorityDecision =
   | { allowed: false }
-  | { allowed: true; authorityEpoch: number; accountUserId: string; leaseExpiresAtMs: number };
+  | { allowed: true; authorityEpoch: number; accountUserId: string; leaseExpiresAtMs: number; runtimeBootId: string | null };
 
 const DENIED: EngineAuthorityDecision = Object.freeze({ allowed: false });
 
@@ -54,7 +56,8 @@ export function decideEngineAuthority(
   const enrolled = entry.setupEnrolled || entry.runtimeReady ||
     (mode.kind === "assert" && mode.transitionRecordSync === true);
   if (!enrolled || (mode.kind === "read" && entry.revoked)) return DENIED;
-  return { allowed: true, authorityEpoch: entry.authorityEpoch, accountUserId: entry.accountUserId, leaseExpiresAtMs: entry.leaseExpiresAtMs };
+  return { allowed: true, authorityEpoch: entry.authorityEpoch, accountUserId: entry.accountUserId,
+    leaseExpiresAtMs: entry.leaseExpiresAtMs, runtimeBootId: entry.runtimeBootId };
 }
 
 function sameDecision(left: EngineAuthorityDecision, right: EngineAuthorityDecision): boolean {
@@ -408,6 +411,7 @@ export async function loadEngineAuthorityEntry(pool: pg.Pool, key: EngineAuthori
   const row = await withSystemTx(pool, async tx => (await tx.query<{
     authority_epoch: string; account_user_id: string; heartbeat_token_hash: Buffer | null; live: boolean; fenced: boolean;
     revoked: boolean; setup_enrolled: boolean; runtime_ready: boolean; lease_expires_at: Date; deadline: Date;
+    runtime_boot_id: string | null;
   }>(`WITH authority AS MATERIALIZED (
       SELECT * FROM cloud_workspace_engine_authority_current($1,$2,$3,$4,$5,false))
     SELECT authority.authority_epoch, authority.account_user_id, authority.heartbeat_token_hash, authority.live, authority.fenced,
@@ -417,7 +421,7 @@ export async function loadEngineAuthorityEntry(pool: pg.Pool, key: EngineAuthori
         WHERE enrollment.id=engine.runtime_transition_enrollment_id AND enrollment.consumed_at IS NOT NULL
           AND enrollment.revoked_at IS NULL AND enrollment.sequence=runtime.enrollment_sequence
           AND runtime.phase IN ('healthy','rolled_back')) AS runtime_ready,
-      engine.lease_expires_at,
+      engine.lease_expires_at, engine.runtime_boot_id,
       least(engine.lease_expires_at, clock_timestamp()+make_interval(secs=>$6::double precision/1000),
         (SELECT min(least(lease.funded_until,lease.provider_expires_at)) FROM managed_compute_allocation_leases lease
           WHERE lease.workspace_id=$1 AND lease.org_id=$2 AND lease.state IN ('active','draining')
@@ -443,6 +447,7 @@ export async function loadEngineAuthorityEntry(pool: pg.Pool, key: EngineAuthori
   return {
     authorityEpoch, accountUserId: row.account_user_id, heartbeatTokenHash: Buffer.from(row.heartbeat_token_hash),
     revoked: row.revoked, setupEnrolled: row.setup_enrolled, runtimeReady: row.runtime_ready, leaseExpiresAtMs, deadlineMs,
+    runtimeBootId: row.runtime_boot_id,
   };
 }
 

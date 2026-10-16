@@ -1083,6 +1083,17 @@ describe("Boat allocation lifecycle", () => {
     expect(f.fetcher.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
   });
 
+  it("treats Boat's refusal to resume a stopped sandbox whose disk it deleted as a missing capture", async () => {
+    const f = fixture(); await f.allocate();
+    f.fetcher.mockResolvedValueOnce(json(sandbox("archived", { lastSnapshotStatus: "completed" })))
+      .mockResolvedValueOnce(json({ ok: false, type: "sandbox.error", status: 409, code: "snapshot_data_expired", message: "private-canary",
+        error: { code: "snapshot_data_expired", status: 409, message: "private-canary" } }, 409));
+    const error = await f.provider.startWithComputeLease(RESOURCE, 600).catch((error: unknown) => error);
+    expect(error).toMatchObject({ code: "provider_snapshot_missing", retryable: false });
+    expect(JSON.stringify(error)).not.toContain("private-canary");
+    expect(f.fetcher.mock.calls.filter(([url]) => String(url).endsWith("/resume"))).toHaveLength(1);
+  });
+
   it.each([
     { snapshotAvailable: undefined, lastSnapshotStatus: "completed" },
     { snapshotAvailable: false, lastSnapshotStatus: undefined },

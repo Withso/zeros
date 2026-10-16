@@ -46,6 +46,12 @@ END $$;
 CREATE TRIGGER cloud_rollout_flag_changes_append_only
   BEFORE UPDATE OR DELETE ON cloud_rollout_flag_changes FOR EACH ROW
   EXECUTE FUNCTION reject_cloud_rollout_flag_change_mutation();
+-- zeros-expand-exception: truncate-guard this trigger rejects TRUNCATE; it cannot truncate
+CREATE TRIGGER cloud_rollout_flag_changes_no_truncate
+  BEFORE TRUNCATE ON cloud_rollout_flag_changes FOR EACH STATEMENT
+  EXECUTE FUNCTION reject_cloud_rollout_flag_change_mutation();
+-- zeros-expand-exception: privilege-tightening revoking PUBLIC's default EXECUTE tightens privileges
+REVOKE ALL ON FUNCTION reject_cloud_rollout_flag_change_mutation() FROM PUBLIC;
 
 -- An empty, commit-bound hint (0134's function). Subscribers reload the whole
 -- table, so one statement-level notification covers any number of rows,
@@ -63,7 +69,7 @@ CREATE POLICY cloud_rollout_flags_system_read ON cloud_rollout_flags
 CREATE POLICY cloud_rollout_flags_owner ON cloud_rollout_flags
   FOR ALL USING (current_user = pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid = 'public.cloud_rollout_flags'::regclass)))
   WITH CHECK (current_user = pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid = 'public.cloud_rollout_flags'::regclass)));
--- zeros-expand-exception: new-table-privileges Narrows the default grants of a table created in this migration
+-- zeros-expand-exception: privilege-tightening revokes the 0004 default DML grant from zeros_app
 REVOKE ALL ON cloud_rollout_flags FROM PUBLIC, zeros_app;
 GRANT SELECT ON cloud_rollout_flags TO zeros_app;
 
@@ -72,5 +78,5 @@ ALTER TABLE cloud_rollout_flag_changes FORCE ROW LEVEL SECURITY;
 CREATE POLICY cloud_rollout_flag_changes_owner ON cloud_rollout_flag_changes
   FOR ALL USING (current_user = pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid = 'public.cloud_rollout_flag_changes'::regclass)))
   WITH CHECK (current_user = pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid = 'public.cloud_rollout_flag_changes'::regclass)));
--- zeros-expand-exception: new-table-privileges Narrows the default grants of a table created in this migration
+-- zeros-expand-exception: privilege-tightening revokes the 0004 default DML grant from zeros_app
 REVOKE ALL ON cloud_rollout_flag_changes FROM PUBLIC, zeros_app;

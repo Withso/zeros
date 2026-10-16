@@ -67,6 +67,12 @@ import { PostgresSecurityEventBroker, SecurityEventPublisher } from "./security-
 import { RolloutFlagSnapshot } from "./rollout-flags.js";
 import { EngineAuthorityCache, installEngineAuthorityCache } from "./cloud-workspaces/engine-authority-cache.js";
 import { CapabilitySigningKeyStore } from "./cloud-workspaces/capability-keys.js";
+import { AuditUplinkSecurityAlerts } from "./realtime/uplink-alerts.js";
+import { uplinkCapabilityAuthority } from "./realtime/uplink-auth-source.js";
+import { DatabaseUplinkAuthority } from "./realtime/uplink-authority.js";
+import { startUplinkNotifications } from "./realtime/uplink-notifications.js";
+import { DatabaseUplinkPresenceStore, UplinkPresenceWriter } from "./realtime/uplink-presence.js";
+import { CloudEngineUplinkServer, realtimeInstanceId } from "./realtime/uplink-server.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
@@ -75,13 +81,19 @@ const config = loadConfig();
 const runtimeArtifacts = createRuntimeArtifactStore({
   s3: config.cloudRuntimePublication?.s3 ?? config.cloudWorkspaces?.durability?.s3 ?? null,
 });
-const servesApi = config.processRole !== "worker";
-const workerPool = config.processRole !== "api"
+const processRole = config.processRole ?? "combined";
+// `servesApi`: an interactive pool and the cloud services behind requests and
+// WebSocket upgrades. Realtime replicas serve only upgrades; they never mount
+// the HTTP API and never start durable queue consumers (realtime.md).
+const servesApi = processRole !== "worker";
+const servesHttpApi = processRole === "api" || processRole === "combined";
+const workerPool = processRole === "worker" || processRole === "combined"
   ? createPool(config.databaseUrl, { workload: "worker", applicationName: "zeros-workers" }) : null;
 // A worker-only process uses its worker pool for readiness. It never creates
 // an unused API pool, and API replicas never start durable queue consumers.
 const pool = servesApi ? createPool(config.databaseUrl, {
   workload: "api", maxConnections: config.databasePoolMax ?? 6,
+  ...(processRole === "realtime" ? { applicationName: "zeros-realtime" } : {}),
 }) : workerPool!;
 if (config.development && "generation" in config.development) {
   await assertHostedDatabaseOwnership(pool, config.development);
@@ -193,7 +205,7 @@ const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.s
 // migration) every flag reads as off.
 const rolloutFlagSnapshot = config.cloudWorkspaces && runtimeReady
   ? new RolloutFlagSnapshot({ pool, listenerPool }) : null;
-void rolloutFlagSnapshot?.start();
+const rolloutFlagsStarted = rolloutFlagSnapshot?.start();
 // Engine authority cache: shadow comparison and fence-free reads, each behind
 // its rollout flag. Without flags it only holds a LISTEN subscription.
 const engineAuthorityCache = rolloutFlagSnapshot
@@ -217,7 +229,7 @@ const cloudCapabilities = capabilityKeyStore && config.cloudWorkspaces?.capabili
 const retirementLockPool = workerPool && runtimeReady && config.cloudWorkspaces?.boat &&
   config.cloudWorkspaces.backgroundWorkersEnabled !== false
   ? createPool(config.databaseUrl, { workload: "retirement-lock", applicationName: "zeros-retirement-locks" }) : null;
-const runtimeQualification = servesApi && runtimeReady
+const runtimeQualification = servesHttpApi && runtimeReady
   ? createRuntimeQualificationWorker(config, pool, runtimeArtifacts) : null;
 const runtimeQualificationWorker = workerPool && runtimeReady
   ? createRuntimeQualificationWorker(config, workerPool, runtimeArtifacts) : null;
@@ -561,7 +573,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     // waiting engines share the dedicated notification session.
     const checkpointHints = new CloudEngineCheckpointHints(pool);
     const checkpointProgress = new CloudEngineCheckpointProgress(pool, { workosEnabled: config.auth.provider === "workos" });
-    stopCloudCheckpointHintNotifications = startCloudEngineCheckpointHintNotifications(listenerPool, checkpointHints);
+    if (servesHttpApi) stopCloudCheckpointHintNotifications = startCloudEngineCheckpointHintNotifications(listenerPool, checkpointHints);
     closeCloudCheckpointHints = () => checkpointHints.close();
     cloudWorkspaceInternalSetupService = {
       ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos",undefined,
@@ -701,6 +713,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     if (runtimeStagingWorker) stopCloudRuntimeStagingWorker = runtimeStagingWorker.start();
     Object.assign(workerNotifications, {
       lifecycle: () => lifecycle.reconciler.notify(),
+      jobs: () => lifecycle.reconciler.notify(),
       setup: () => setupWorker?.notify(),
       recovery: () => setupWorker?.notify(),
       access: () => accessRevocationWorker!.notify(),
@@ -742,9 +755,9 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   };
 }
 
-const cloudGithubWriteGrants = config.github && cloudWorkspaceInternalSetupService
+const cloudGithubWriteGrants = config.github && cloudWorkspaceInternalSetupService && servesHttpApi
   ? new DatabaseCloudGithubWriteGrants(pool, config.auth.provider === "workos") : undefined;
-const cloudGithubReads = config.github && cloudWorkspaceInternalSetupService
+const cloudGithubReads = config.github && cloudWorkspaceInternalSetupService && servesHttpApi
   ? new DatabaseCloudGithubReads(pool, config.auth.provider === "workos", new GithubCloudWorkspaceCredentialBroker(config.github)) : undefined;
 const cloudGithubWriteCleanup = workerPool && config.github && runtimeReady &&
   config.cloudWorkspaces?.setupExecution && config.cloudWorkspaces.durability
@@ -819,8 +832,42 @@ if (servesApi && cloudWorkspaceAccessService && migrationResult.status.state !==
     revalidate: (request, grant) => access.revalidatePreviewWebSocket(request, grant),
   });
 }
+// The S2 engine uplink is served by realtime and combined processes once the
+// capability authority supplies keys, epochs and engine tokens; each
+// organization is admitted only while its `realtime_uplink` flag is on. The
+// capability authority mounts once the first flag load shows `capabilities`
+// on for any organization (and again if a later change turns it on), so a
+// flags-off deployment never mounts the socket.
+let cloudEngineUplink: CloudEngineUplinkServer | undefined;
+let uplinkPresence: UplinkPresenceWriter | undefined;
+let stopUplinkNotifications: () => Promise<void> = async () => {};
+const mountEngineUplink = () => {
+  if (cloudEngineUplink || shuttingDown) return;
+  if (processRole !== "realtime" && processRole !== "combined") return;
+  const uplinkAuth = uplinkCapabilityAuthority({
+    pool, keyStore: capabilityKeyStore,
+    issuer: config.cloudWorkspaces?.capabilityIssuer ?? null, flags: rolloutFlagSnapshot,
+  });
+  if (!uplinkAuth || !rolloutFlagSnapshot || migrationResult.status.state !== "current") return;
+  const presenceStore = new DatabaseUplinkPresenceStore(pool);
+  const alerts = new AuditUplinkSecurityAlerts({ pool });
+  uplinkPresence = new UplinkPresenceWriter(presenceStore);
+  cloudEngineUplink = new CloudEngineUplinkServer({
+    authority: new DatabaseUplinkAuthority({ pool, workosEnabled: config.auth.provider === "workos", alerts }),
+    authSource: uplinkAuth.source,
+    capabilities: uplinkAuth.issuer,
+    flags: rolloutFlagSnapshot,
+    realtimeInstance: realtimeInstanceId(),
+    presence: uplinkPresence,
+    alerts,
+  });
+  stopUplinkNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore);
+};
+void rolloutFlagsStarted?.then(mountEngineUplink);
+rolloutFlagSnapshot?.onChange(mountEngineUplink);
 server.on("upgrade", (request, socket, head) => {
   if (!servesApi || shuttingDown || migrationResult.status.state !== "current") { socket.destroy(); return; }
+  if (cloudEngineUplink?.handleUpgrade(request, socket, head)) return;
   if (cloudRuntimeServiceRelay?.handleUpgrade(request, socket, head)) return;
   if (cloudPreviewWebSocketRelay?.handleUpgrade(request, socket, head)) return;
   if (!cloudRuntimeBridge?.handleUpgrade(request, socket, head)) socket.destroy();
@@ -831,15 +878,12 @@ function shutdown(signal: string): void {
   shuttingDown = true;
   stopGithubCleanup();
   if (githubWriteCleanup) clearInterval(githubWriteCleanup);
-  cloudRuntimeBridge?.close();
-  // Held engine hints would otherwise keep the server open past its exit deadline.
-  closeCloudCheckpointHints();
-  cloudPreviewWebSocketRelay?.close();
-  cloudRuntimeServiceRelay?.close();
-  console.log(`[control-plane] ${signal}; draining`);
+  const drainMs = config.shutdownDrainMs ?? 0;
+  console.log(`[control-plane] ${signal}; draining${drainMs ? ` sessions over ${drainMs}ms` : ""}`);
   const backgroundStopped = Promise.allSettled([
     stopCloudWorkerNotifications(),
     stopCloudCheckpointHintNotifications(),
+    stopUplinkNotifications(),
     cloudGithubReads?.close(),
     githubWriteCleanupPending,
     stopCloudSetupWorker(),
@@ -866,11 +910,34 @@ function shutdown(signal: string): void {
     engineAuthorityCache?.stop(),
     capabilityKeyStore?.stop(),
   ]);
-  const deadline = setTimeout(() => process.exit(1), 15_000);
+  const deadline = setTimeout(() => process.exit(1), 15_000 + drainMs);
   deadline.unref();
+  // Upgrades are refused from here on. With a drain window, open sessions
+  // keep working and are told to reconnect gradually while the replacement
+  // instance takes new ones; HTTP keeps serving until they are gone.
+  if (drainMs > 0) {
+    void Promise.allSettled([
+      cloudRuntimeBridge?.drain(drainMs),
+      cloudPreviewWebSocketRelay?.drain(drainMs),
+      cloudRuntimeServiceRelay?.drain(drainMs),
+      cloudEngineUplink?.drain(drainMs),
+    ]).then(() => closeServer(backgroundStopped, deadline));
+  } else closeServer(backgroundStopped, deadline);
+}
+
+function closeServer(backgroundStopped: Promise<unknown>, deadline: ReturnType<typeof setTimeout>): void {
+  cloudRuntimeBridge?.close();
+  // Held engine hints would otherwise keep the server open past its exit deadline.
+  closeCloudCheckpointHints();
+  cloudPreviewWebSocketRelay?.close();
+  cloudRuntimeServiceRelay?.close();
+  cloudEngineUplink?.close();
   server.close(() => {
     void backgroundStopped
       .then(async () => {
+        // A lost-uplink write that misses this window is overwritten by the
+        // next owner's connect; until then its stale last_seen_at marks it.
+        await uplinkPresence?.close(2_000);
         const pools = new Set([pool, listenerPool]);
         if (workerPool) pools.add(workerPool);
         if (retirementLockPool) pools.add(retirementLockPool);

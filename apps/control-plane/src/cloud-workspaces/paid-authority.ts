@@ -421,15 +421,18 @@ export class DatabaseCloudWorkspacePaidAuthorityReconciler {
     }
   }
 
-  async runOnce(): Promise<CloudWorkspacePaidAuthorityReconcileResult | null> {
+  /** Process one due check, optionally only for one workspace. */
+  async runOnce(workspaceId: string | null = null): Promise<CloudWorkspacePaidAuthorityReconcileResult | null> {
     return withSystemTx(this.pool, async (tx) => {
       const candidate = (
         await tx.query<{ workspace_id: string; org_id: string; reason: string }>(
           `SELECT authority.workspace_id, authority.org_id, authority.reason
            FROM cloud_workspace_paid_authority_checks authority
            WHERE authority.next_check_at <= now()
+             AND ($1::uuid IS NULL OR authority.workspace_id = $1)
            ORDER BY authority.next_check_at, authority.workspace_id
            LIMIT 1`,
+          [workspaceId],
         )
       ).rows[0];
       if (!candidate) return null;

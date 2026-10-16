@@ -55,7 +55,11 @@ d("durable job queue", () => {
   const extraPools: pg.Pool[] = [];
   beforeAll(() => { pool = new pg.Pool({ connectionString: databaseUrl, max: 6 }); });
   afterAll(async () => { await pool.end(); });
-  beforeEach(async () => { await resetMigratedTestDatabase(pool); });
+  beforeEach(async () => {
+    await resetMigratedTestDatabase(pool);
+    // Migrations backfill lifecycle jobs (0150); these tests own the queue.
+    await pool.query("DELETE FROM control_plane_jobs");
+  });
   afterEach(async () => {
     await Promise.all(runners.splice(0).map(runner => runner.stop()));
     await Promise.all(extraPools.splice(0).map(extra => extra.end()));

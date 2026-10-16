@@ -2,6 +2,7 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer, type ClientOptions, type RawData } from "ws";
 import { assertProviderPreviewEndpoint, type CloudProviderEngineEndpoint } from "./provider.js";
+import { staggeredDrain } from "../realtime/drain.js";
 
 export type CloudPreviewSocketGrant = {
   grantId: string; workspaceId: string; organizationId: string; generation: number;
@@ -137,6 +138,15 @@ export class CloudPreviewWebSocketRelay {
     };
     void admit().catch(() => pair.retire(503));
     return true;
+  }
+  /** Refuses new sockets at once and ends open ones at random moments across
+   * the window, so preview clients reconnect to the replacement gradually. */
+  drain(windowMs: number, random?: () => number): Promise<void> {
+    this.closed = true;
+    const open: Pair[] = [];
+    for (const pair of [...this.pairs]) if (pair.client) open.push(pair); else pair.retire(503);
+    return staggeredDrain({ items: open, windowMs, retire: pair => pair.retire(), pending: () => this.pairs.size, graceMs: 100,
+      ...(random ? { random } : {}) });
   }
   close(): void { this.closed = true; for (const pair of [...this.pairs]) pair.retire(503); this.server.close(); }
 }

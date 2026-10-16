@@ -204,9 +204,10 @@ export function createApp(
     });
     return app;
   }
-  if (config.processRole === "worker") {
+  if (config.processRole === "worker" || config.processRole === "realtime") {
     // Worker replicas publish health/readiness but never serve user or engine
     // requests. Their two query slots remain available to the queues they own.
+    // Realtime replicas serve only WebSocket upgrades (index.ts) besides this.
     app.get("/healthz", async c => {
       c.header("Cache-Control", "no-store");
       try { await pool.query("SELECT 1"); return c.json({ ok: true }); }

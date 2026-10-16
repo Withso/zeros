@@ -14,12 +14,20 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
   "0153_cloud_capability_keys.sql": {
     "new-table-privileges": ["REVOKE ALL ON cloud_capability_signing_keys FROM PUBLIC, zeros_app;"],
   },
-  "0149_cloud_rollout_flags.sql": {
-    "new-table-privileges": ["cloud_rollout_flags", "cloud_rollout_flag_changes"].map(table =>
-      `REVOKE ALL ON ${table} FROM PUBLIC, zeros_app;`),
-  },
   "0145_cloud_computer_named_snapshots.sql": {},
   "0146_cloud_provider_snapshot_recovery.sql": {},
+  "0149_cloud_rollout_flags.sql": {
+    // A guard that rejects TRUNCATE cannot truncate.
+    "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate
+  BEFORE TRUNCATE ON cloud_rollout_flag_changes FOR EACH STATEMENT
+  EXECUTE FUNCTION reject_cloud_rollout_flag_change_mutation();`],
+    // REVOKE only narrows the 0004 default DML grant and PUBLIC's EXECUTE.
+    "privilege-tightening": [
+      "REVOKE ALL ON FUNCTION reject_cloud_rollout_flag_change_mutation() FROM PUBLIC;",
+      "REVOKE ALL ON cloud_rollout_flags FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_rollout_flag_changes FROM PUBLIC, zeros_app;",
+    ],
+  },
   // The constraint is re-added at once with one more allowed purpose.
   "0141_cloud_runtime_images.sql": {
     "widen-check": ["ALTER TABLE cloud_builder_vm_operations DROP CONSTRAINT cloud_builder_vm_operations_purpose_check;"],

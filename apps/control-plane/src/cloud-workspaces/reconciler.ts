@@ -22,7 +22,15 @@ import {
 import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
-import { readLifecycleDeadlines, type LifecycleWork } from "./lifecycle-deadlines.js";
+import { JobRunner } from "../job-runner.js";
+import { isValidJobOwner, type ClaimedJob } from "../job-queue.js";
+import {
+  auditLifecycleJobs,
+  LIFECYCLE_JOB_KINDS,
+  lifecycleWorkForJob,
+  rescheduleLifecycleJob,
+  type LifecycleWork,
+} from "./lifecycle-jobs.js";
 import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
 import { runCloudDiagnosticCleanup } from "./cloud-diagnostic-store.js";
 import {
@@ -92,7 +100,17 @@ export type CloudWorkspaceReconcilerOptions = {
   paidAuthorityRecheckIntervalMs?: number;
   workerId?: string;
   logger?: ReconcileLogger;
+  /** Concurrent lifecycle jobs per process. The default, 1, keeps the
+   * former tick's serial provider calls. */
+  jobConcurrency?: number;
+  /** Safety audit for lost job enqueues (default hourly). */
+  jobAuditIntervalMs?: number;
 };
+
+// Bounded work per job run, as in the former per-tick loops; a job that hits
+// it reschedules itself immediately.
+const MAX_CLAIMS_PER_JOB = 20;
+const ORPHAN_SWEEP_INTERVAL_MS = 60_000;
 
 function requestDigest(value: unknown): Buffer {
   return createHash("sha256").update(JSON.stringify(value)).digest();
@@ -282,10 +300,12 @@ export class CloudWorkspaceReconciler {
   private readonly runtimeUpgradeConfig: CloudWorkspaceBackendConfig | null;
   private readonly workosEnabled: boolean;
   private readonly scheduler: CloudWorkerScheduler;
+  private readonly jobs: JobRunner;
+  private readonly jobAuditIntervalMs: number;
   private stopped = false;
   private ticking = false;
-  private due = new Set<LifecycleWork>();
-  private orphanSweepAt = Date.now() + 60_000;
+  private orphanSweepAt = Date.now() + ORPHAN_SWEEP_INTERVAL_MS;
+  private auditAt: number;
 
   constructor(options: CloudWorkspaceReconcilerOptions) {
     this.pool = options.pool;
@@ -333,67 +353,110 @@ export class CloudWorkspaceReconciler {
       throw new Error("Cloud workspace reconciler worker identity is invalid");
     }
     this.logger = options.logger ?? console;
+    this.jobAuditIntervalMs = options.jobAuditIntervalMs ?? 60 * 60_000;
+    if (!Number.isSafeInteger(this.jobAuditIntervalMs) || this.jobAuditIntervalMs < 1_000 ||
+      this.jobAuditIntervalMs > 24 * 60 * 60_000) {
+      throw new Error("Cloud workspace reconciler timing is invalid");
+    }
+    // Replicas start together after a deploy; spread their audits.
+    this.auditAt = Date.now() + Math.round(this.jobAuditIntervalMs * (0.5 + Math.random() * 0.5));
+    // Due work arrives as jobs. This loop only runs the inventory sweep and
+    // the lost-enqueue audit, and reads nothing until one of them is due.
     this.scheduler = new CloudWorkerScheduler(this.intervalMs, () => this.tick(), () => {
-      this.logger.error("[cloud-workspace] reconcile tick failed; will retry");
-    }, () => this.readNextDelayMs(), { readBeforeRun: true, jitter: options.intervalMs === undefined });
+      this.logger.error("[cloud-workspace] reconcile maintenance failed; will retry");
+    }, async () => Math.min(this.orphanSweepAt, this.auditAt) - Date.now(), { readBeforeRun: true });
+    const leaseMs = Math.max(60_000, Math.min(3_600_000, this.leaseMs));
+    this.jobs = new JobRunner({
+      pool: this.pool,
+      concurrency: options.jobConcurrency ?? 1,
+      pollIntervalMs: Math.min(300_000, Math.max(1_000, this.intervalMs)),
+      ownerId: isValidJobOwner(this.workerId) ? this.workerId : `control-plane:${randomUUID()}`,
+      logger: this.logger,
+      handlers: (Object.keys(LIFECYCLE_JOB_KINDS) as LifecycleWork[]).map(work => ({
+        kind: LIFECYCLE_JOB_KINDS[work],
+        leaseMs: 60_000,
+        // A lifecycle dispatch holds its own intent lease for up to leaseMs.
+        timeoutMs: leaseMs,
+        backoff: { baseMs: 1_000, maxMs: 5 * 60_000 },
+        handle: job => this.runJob(job),
+      })),
+    });
   }
 
   start(): () => Promise<void> {
+    this.jobs.start();
     this.scheduler.start();
     return () => this.stop();
   }
 
-  notify(): void { this.scheduler.notify(); }
+  /** A hint that lifecycle work may be due: claim due jobs now. */
+  notify(): void { this.jobs.notify(); }
 
   async stop(): Promise<void> {
     this.stopped = true;
-    await this.scheduler.stop();
+    await Promise.all([this.scheduler.stop(), this.jobs.stop()]);
   }
 
   private async tick(): Promise<void> {
     if (this.ticking || this.stopped) return;
     this.ticking = true;
     try {
-      let authorityProcessed = 0;
-      while (
-        this.due.has("paidAuthority") && !this.stopped &&
-        authorityProcessed < 20 &&
-        (await this.paidAuthority.runOnce()) !== null
-      ) {
-        authorityProcessed += 1;
-      }
-      let processed = 0;
-      let unavailableEngines = 0;
-      while (this.due.has("engineHealth") && !this.stopped && unavailableEngines < 20 && await stopUnavailableCloudEngine(this.pool, this.providerResolver ? null : this.provider.name)) {
-        unavailableEngines += 1;
-      }
-      let computeProcessed = 0;
-      while (this.due.has("compute") && !this.stopped && computeProcessed < 20 && await this.computeLeases.runOnce()) computeProcessed += 1;
-      if (this.due.has("diagnostics") && !this.due.has("compute") && !this.stopped) await runCloudDiagnosticCleanup(this.pool);
-      // Maintenance can enqueue a stop after the preflight read. Drain that
-      // work in this pass, preserving immediate convergence at the deadline.
-      const lifecycleDue = this.due.has("lifecycle") || authorityProcessed > 0 ||
-        unavailableEngines > 0 || computeProcessed > 0;
-      while (lifecycleDue && !this.stopped && processed < 20 && (await this.runOnce())) {
-        processed += 1;
-      }
-      if (this.due.has("drift") && !this.stopped && processed === 0) await this.reconcileDriftOnce();
-      if (!this.stopped && Date.now() >= this.orphanSweepAt) {
+      if (Date.now() >= this.orphanSweepAt) {
         try { await this.reconcileOrphansOnce(); }
-        finally { this.orphanSweepAt = Date.now() + 60_000; }
+        finally { this.orphanSweepAt = Date.now() + ORPHAN_SWEEP_INTERVAL_MS; }
+      }
+      if (!this.stopped && Date.now() >= this.auditAt) {
+        try { await this.auditJobs(); }
+        finally { this.auditAt = Date.now() + this.jobAuditIntervalMs; }
       }
     } finally {
       this.ticking = false;
     }
   }
 
-  private async readNextDelayMs(): Promise<number | null> {
-    const deadlines = await readLifecycleDeadlines(this.pool, this.providerResolver ? null : this.provider.name, this.intervalMs);
-    this.due = new Set((Object.entries(deadlines) as [LifecycleWork, number][]).filter(([, delay]) => delay <= 0).map(([kind]) => kind));
-    return Math.min(this.orphanSweepAt - Date.now(), ...Object.values(deadlines));
+  private dueScope() {
+    return { provider: this.providerResolver ? null : this.provider.name, driftIntervalMs: this.intervalMs };
   }
 
-  private async claimIntent(): Promise<ClaimedIntent | null> {
+  /** Enqueue any pending deadline that lost its job. */
+  async auditJobs(): Promise<Partial<Record<LifecycleWork, number>>> {
+    const repaired = await auditLifecycleJobs(this.pool, this.dueScope());
+    const total = Object.values(repaired).reduce((sum, count) => sum + count, 0);
+    if (total) this.logger.warn(`[cloud-workspace] lifecycle job audit repaired ${total} missing or late job(s)`);
+    return repaired;
+  }
+
+  /** Run one lifecycle job: claim that workspace's due work of the job's kind
+   * through the existing fenced claim, then reschedule at the next due time. */
+  async runJob(job: Pick<ClaimedJob, "kind" | "workspaceId" | "orgId" | "payload">): Promise<void> {
+    const work = lifecycleWorkForJob(job.kind);
+    if (!work) return;
+    const scope = work === "diagnostics" ? null : job.workspaceId;
+    // A workspace job without a workspace cannot be scoped; never widen it.
+    if (work !== "diagnostics" && !scope) return;
+    const provider = this.dueScope().provider;
+    let processed = 0;
+    const drain = async (claim: () => Promise<boolean>) => {
+      while (!this.stopped && processed < MAX_CLAIMS_PER_JOB && await claim()) processed += 1;
+    };
+    switch (work) {
+      case "paidAuthority": await drain(async () => (await this.paidAuthority.runOnce(scope)) !== null); break;
+      case "engineHealth": await drain(() => stopUnavailableCloudEngine(this.pool, provider, scope)); break;
+      case "compute": await drain(() => this.computeLeases.runOnce(scope)); break;
+      case "lifecycle": await drain(() => this.runOnce(scope)); break;
+      case "drift": if (await this.reconcileDriftOnce(scope)) processed = 1; break;
+      // Work still due after a pass is contested (SKIP LOCKED): back off.
+      case "diagnostics": await runCloudDiagnosticCleanup(this.pool); break;
+    }
+    // Completion deletes the job, so it is rescheduled even during shutdown;
+    // work a shutdown interrupted is due again now, for another replica.
+    await rescheduleLifecycleJob(this.pool, work, job, { ...this.dueScope(), processed: processed > 0 || this.stopped });
+    // Maintenance can enqueue a stop. Claim it now rather than wait for the
+    // commit hint, which a runner without a listener never receives.
+    if (processed > 0 && work !== "lifecycle") this.jobs.notify();
+  }
+
+  private async claimIntent(workspaceId: string | null = null): Promise<ClaimedIntent | null> {
     return withSystemTx(this.pool, async (tx) => {
       const result = await tx.query<{
         id: string;
@@ -434,6 +497,7 @@ export class CloudWorkspaceReconciler {
          LEFT JOIN workspace_checkpoint_requests checkpoint_request
            ON checkpoint_request.lifecycle_intent_id = i.id
          WHERE i.next_attempt_at <= now()
+           AND ($1::uuid IS NULL OR i.workspace_id = $1)
            AND (i.resume_after_intent_id IS NULL OR EXISTS (
              SELECT 1 FROM cloud_workspace_lifecycle_intents prerequisite
              WHERE prerequisite.id=i.resume_after_intent_id AND prerequisite.state='succeeded'
@@ -467,6 +531,7 @@ export class CloudWorkspaceReconciler {
          ORDER BY i.created_at, i.id
          FOR UPDATE OF i, cw SKIP LOCKED
          LIMIT 1`,
+        [workspaceId],
       );
       const row = result.rows[0];
       if (!row) return null;
@@ -547,8 +612,8 @@ export class CloudWorkspaceReconciler {
     });
   }
 
-  async runOnce(): Promise<boolean> {
-    const intent = await this.claimIntent();
+  async runOnce(workspaceId: string | null = null): Promise<boolean> {
+    const intent = await this.claimIntent(workspaceId);
     if (!intent) return false;
     const mayUpgradeOnWake = !!this.runtimeUpgradeConfig && intent.affectsWorkspace &&
       !intent.generationTransitionId && ["create", "wake"].includes(intent.operation);
@@ -1170,7 +1235,7 @@ export class CloudWorkspaceReconciler {
     });
   }
 
-  private async driftCandidate(): Promise<DriftCandidate | null> {
+  private async driftCandidate(workspaceId: string | null): Promise<DriftCandidate | null> {
     return withSystemTx(this.pool, async (tx) => {
       const result = await tx.query<{
         workspace_id: string;
@@ -1193,6 +1258,7 @@ export class CloudWorkspaceReconciler {
            AND NOT EXISTS (SELECT 1 FROM cloud_workspace_restore_incidents incident WHERE incident.workspace_id=cw.id
              AND incident.source_generation=cw.current_generation AND incident.state IN ('queued','waiting_for_capacity','waiting_for_funding','restoring','recovery_needed'))
            AND ($1::text IS NULL OR pb.provider = $1)
+           AND ($3::uuid IS NULL OR cw.id = $3)
            AND pb.next_drift_check_at <= clock_timestamp()
            AND (pb.last_observed_at IS NULL OR
                 pb.last_observed_at < now() - ($2::bigint * interval '1 millisecond'))
@@ -1205,7 +1271,7 @@ export class CloudWorkspaceReconciler {
          ORDER BY pb.next_drift_check_at, pb.last_observed_at NULLS FIRST, cw.updated_at, cw.id
          FOR UPDATE OF cw, pb SKIP LOCKED
          LIMIT 1`,
-        [this.providerResolver ? null : this.provider.name, this.intervalMs],
+        [this.providerResolver ? null : this.provider.name, this.intervalMs, workspaceId],
       );
       const row = result.rows[0];
       if (!row) return null;
@@ -1229,8 +1295,8 @@ export class CloudWorkspaceReconciler {
     });
   }
 
-  async reconcileDriftOnce(): Promise<boolean> {
-    const candidate = await this.driftCandidate();
+  async reconcileDriftOnce(workspaceId: string | null = null): Promise<boolean> {
+    const candidate = await this.driftCandidate(workspaceId);
     if (!candidate) return false;
     try {
       return await this.observeDriftCandidate(candidate);

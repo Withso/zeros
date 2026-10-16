@@ -1,10 +1,8 @@
 # Control-plane job queue
 
-Status: the queue core is implemented and tested, but **nothing runs it yet**.
-No production module imports `JobRunner` or enqueues a job, so a control-plane
-deploy that carries migration `0148_control_plane_jobs.sql` adds an empty
-table, two triggers and a policy, and nothing else changes. Later slices move
-the reconciler's due work onto it (see [next slice](#next-slice-the-six-due-kinds)).
+Status: the lifecycle reconciler runs its due work on this queue (see
+[lifecycle due work](#lifecycle-due-work)). Migration `0150_cloud_lifecycle_jobs.sql`
+adds the enqueue triggers; no other worker uses the queue yet.
 
 Source: `apps/control-plane/src/job-queue.ts` (SQL operations),
 `apps/control-plane/src/job-runner.ts` (runner),
@@ -196,44 +194,63 @@ row, which would block enqueue behind the reconciler's `FOR UPDATE` claims on
 `cloud_workspaces`. Handlers already re-read and fence the workspace, so a job
 for a deleted workspace completes as a no-op.
 
-## Next slice: the six due kinds
+## Lifecycle due work
 
-Today `readLifecycleDeadlines` (`src/cloud-workspaces/lifecycle-deadlines.ts`)
-runs one six-branch `UNION ALL` read in a repeatable-read transaction before
-and after every reconciler tick, joining intents, generations, bindings, engine
-instances, compute leases, runtime transitions and diagnostics to compute a
-due time per kind, even when nothing is due. Then `tick()` runs each due
-kind's own claim. On the queue, each source row's writer enqueues (or a
-trigger enqueues) a job with the row's deadline as `run_at`, and the runner
-claims due jobs directly. The union read and the reconciler's deadline
-bookkeeping are removed. With nothing due, these kinds then cost one
-indexed claim per replica per fallback poll instead of the six-branch join
-before and after every tick.
+The reconciler's six due kinds run as jobs. They replaced the six-branch
+`UNION ALL` read (`readLifecycleDeadlines`) that ran in a repeatable-read
+transaction before and after every reconciler tick, even when nothing was due.
 
-| Current kind | Job kind | Dedupe key | `run_at` source | Handler |
+Source: `src/cloud-workspaces/lifecycle-jobs.ts` (kinds, per-kind due queries,
+reschedule and audit), `CloudWorkspaceReconciler.runJob` in
+`src/cloud-workspaces/reconciler.ts`, migration
+`migrations/0150_cloud_lifecycle_jobs.sql`. Tests:
+`src/cloud-workspaces/lifecycle-jobs.integration.test.ts`,
+`worker-scheduling.test.ts` and `worker-idle.test.ts`.
+
+| Kind | Job kind | Dedupe key | Enqueued by (trigger on) | Handler, scoped to the job's workspace |
 | --- | --- | --- | --- | --- |
-| `lifecycle` | `cloud_lifecycle_intent` | `workspace:<workspace_id>` (one dispatch per workspace at a time) | intent `next_attempt_at`, or `lease_expires_at` while dispatching; prerequisites, checkpoint requests and local-to-cloud forks re-enqueue on completion (today's `0134`/`0143` triggers) | the existing fenced `claimIntent` + dispatch, scoped to that workspace |
-| `paidAuthority` | `cloud_paid_authority_check` | `workspace:<workspace_id>` (the table's primary key) | `cloud_workspace_paid_authority_checks.next_check_at` | `DatabaseCloudWorkspacePaidAuthorityReconciler.runOnce`, scoped to the workspace |
-| `engineHealth` | `cloud_engine_health` | `workspace:<workspace_id>:generation:<n>` | latest ready engine `lease_expires_at` for the current generation; the handler re-enqueues for the renewed expiry when the engine is still live | `stopUnavailableCloudEngine`, scoped to the workspace |
-| `compute` | `cloud_compute_lease` | `lease:<managed_compute_allocation_leases.id>` | `greatest(next_check_at, lease_expires_at while held, runtime activation or rollback deadline)` | `CloudWorkspaceComputeLeaseCoordinator.runOnce`, scoped to the lease |
-| `drift` | `cloud_provider_drift_sweep` (then `cloud_workspace_drift_inspect` per mismatch) | `provider:<name>`; `workspace:<workspace_id>` | sweep: previous sweep + 60 s (one paged provider list); inspect: now | list-based drift: compare the list with bindings, enqueue an inspect only on mismatch, replacing per-binding `next_drift_check_at` polling |
-| `diagnostics` | `cloud_diagnostic_cleanup` | `singleton` | `cloud_workspace_diagnostic_cleanup.next_run_at`, or now when an unrecovered incident is recorded | `runCloudDiagnosticCleanup` |
+| `lifecycle` | `cloud_lifecycle_intent` | `workspace:<id>` | intents (`next_attempt_at`, dispatch lease, leaving the active states), checkpoint requests and local-to-cloud forks changing state | fenced `claimIntent` + dispatch |
+| `paidAuthority` | `cloud_paid_authority_check` | `workspace:<id>` | `cloud_workspace_paid_authority_checks.next_check_at` | `DatabaseCloudWorkspacePaidAuthorityReconciler.runOnce` |
+| `engineHealth` | `cloud_engine_health` | `workspace:<id>` | engine enrollment, state or revocation change, shortened lease; workspace becoming running and ready or busy, or a new generation; an intent leaving the active states | `stopUnavailableCloudEngine` |
+| `compute` | `cloud_compute_lease` | `workspace:<id>` | allocation lease state, check time or lease; runtime transition phase or deadlines | `CloudWorkspaceComputeLeaseCoordinator.runOnce` |
+| `drift` | `cloud_workspace_drift` | `workspace:<id>` | binding `next_drift_check_at`; restore incident state; an intent leaving the active states | `reconcileDriftOnce` |
+| `diagnostics` | `cloud_diagnostic_cleanup` | `singleton` | cleanup `next_run_at`; recovery watermark or a publishable incident | `runCloudDiagnosticCleanup` |
 
-Open design points for that slice:
-
-- `engineHealth` deadlines move later on every engine lease renewal. Under
-  earliest-wins, the job runs at the old expiry, sees the renewal and
-  reschedules itself: one claim and completion per renewal period per running
-  workspace. That is interim cost; track C replaces database engine liveness
-  with uplink presence. An explicit `postpone` enqueue mode is the alternative
-  if measurement says otherwise.
-- Whether to enqueue from the existing writers or from triggers on the source
-  tables. Triggers cover every writer and match the existing hint triggers;
-  explicit enqueues keep the logic in TypeScript. Either way the enqueue
-  commits with the domain write.
-- Cutover: run the queue path and the union path side by side behind a flag
-  for the fixture organization, compare due decisions, then delete the union
-  read (each slice ends with the old path deleted).
+- **Triggers, not TypeScript enqueues.** They cover every writer, including
+  stored functions and operator repairs, and commit with the domain write.
+  Every source table is written only in system transactions, so the
+  `SECURITY INVOKER` functions satisfy the queue's `system_only` policy.
+- **`run_at` is a lower bound.** A trigger never schedules later than the
+  real due time. A job that runs early claims nothing, and the handler then
+  reschedules it at the exact next due time from the same per-kind query the
+  claim's eligibility mirrors. Nothing pending: the job completes and is
+  deleted. Engine lease renewals therefore write no job: the job runs at the
+  old expiry, sees the renewal and moves itself to the new one, about one run
+  per lease period (90 s) per running workspace until engine liveness moves
+  off the database.
+- **Bounded runs.** A process runs one lifecycle job at a time by default
+  (`jobConcurrency`), keeping the former tick's serial provider calls. A run
+  makes at most 20 claims; one that hits the bound, or that a shutdown
+  interrupts, reschedules itself now. Maintenance that enqueues a stop wakes the runner
+  at once.
+- **No spinning on contended rows.** When work is due but the run claimed
+  nothing (rows locked elsewhere, `SKIP LOCKED`), the reschedule backs off
+  1 s doubling to 60 s and keeps the streak in the payload
+  (`{"emptyRuns": n}`). Any trigger enqueue resets the payload.
+- **Audit.** Each replica runs `auditLifecycleJobs` hourly (first run jittered
+  between 30 and 60 minutes after start): it gives every pending deadline
+  without a job, or with a later one, a queued job at its due time and logs a
+  warning with the count. Under correct operation it repairs nothing.
+- **Wake-ups.** The process's shared worker LISTEN session wakes the runner on
+  the queue channel and on the existing lifecycle hint; the runner's fallback
+  poll is the reconciler interval, clamped to 1 s-5 min. The reconciler's own
+  scheduler now only runs the 60 s orphan inventory sweep and the audit and
+  reads nothing from the database until one is due.
+- **Rollout.** Control-plane internal: the migration backfills one job per
+  pending deadline, and older replicas during a deploy keep their own union
+  polling and ignore the jobs; both paths claim through the same fenced
+  transactions. Drift stays per binding until list-based reconciliation
+  replaces it.
 
 The P0.10 timer inventory also lists idle timers that later become queue- or
 event-driven: **C03** (the mirror idle timer, about 60 empty mirror checks a
@@ -251,9 +268,9 @@ slice.
 - **Local workspace impact:** none. The queue is control-plane only. Local
   Personal and organization-local workspaces never reach it, and the desktop
   app and engine are unchanged.
-- **Cloud workspace impact:** none until a later slice registers handlers and
-  starts a runner. The migration is expand-only and older control-plane
-  replicas ignore the new table and channel.
+- **Cloud workspace impact:** lifecycle convergence is unchanged in outcome
+  and timing; the work is found through jobs instead of a repeated scan. The
+  migrations are expand-only and older control-plane replicas ignore the jobs.
 
 ## Rejected alternatives
 

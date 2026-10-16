@@ -50,10 +50,10 @@
       "statements": 9,
       "roundTrips": 7
     },
-    "worker.lifecycleDeadlines": {
+    "worker.lifecycleJobClaim": {
       "transactions": 1,
       "statements": 7,
-      "roundTrips": 4
+      "roundTrips": 2
     },
     "worker.reconcileOnce": {
       "transactions": 1,

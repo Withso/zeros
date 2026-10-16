@@ -73,7 +73,9 @@ export async function readCurrentCloudEngineAuthority(
     workspaceId: string; organizationId: string; generation: number;
     engineInstanceId: string; heartbeatToken: string; workosEnabled: boolean;
   },
-): Promise<CurrentCloudEngineAuthority & { version: 1; confirmedUntilMs: number }> {
+): Promise<CurrentCloudEngineAuthority & {
+  version: 1; confirmedUntilMs: number; leaseExpiresAtMs: number; runtimeBootId: string | null;
+}> {
   const cache = installedEngineAuthorityCache();
   if (!cache?.shadowing(input.organizationId) || !validIdentityInput(input)) return readCurrentCloudEngineAuthoritySql(tx, input);
   const hash = tokenHash(input.heartbeatToken), mode = { kind: "read" } as const;
@@ -84,7 +86,8 @@ export async function readCurrentCloudEngineAuthority(
       cache.recordEnforcedHit();
       return { version: 1, workspaceId: input.workspaceId, organizationId: input.organizationId, generation: input.generation,
         authorityEpoch: cached.authorityEpoch, accountUserId: cached.accountUserId, engineInstanceId: input.engineInstanceId,
-        confirmedUntilMs: Math.min(Date.now() + 10_000, cached.leaseExpiresAtMs) };
+        confirmedUntilMs: Math.min(Date.now() + 10_000, cached.leaseExpiresAtMs),
+        leaseExpiresAtMs: cached.leaseExpiresAtMs, runtimeBootId: cached.runtimeBootId };
     }
   }
   return observeEngineAuthority(cache, input, hash, mode, readCurrentCloudEngineAuthoritySql(tx, input));
@@ -99,7 +102,9 @@ async function observeEngineAuthority<T extends CurrentCloudEngineAuthority>(
 ): Promise<T> {
   try {
     const authority = await sql;
-    cache.observe(input, hash, mode, { allowed: true, authorityEpoch: authority.authorityEpoch, accountUserId: authority.accountUserId, leaseExpiresAtMs: 0 });
+    const projection = authority as T & { leaseExpiresAtMs?: number; runtimeBootId?: string | null };
+    cache.observe(input, hash, mode, { allowed: true, authorityEpoch: authority.authorityEpoch, accountUserId: authority.accountUserId,
+      leaseExpiresAtMs: projection.leaseExpiresAtMs ?? 0, runtimeBootId: projection.runtimeBootId ?? null });
     return authority;
   } catch (error) {
     if (error instanceof CloudWorkspaceEngineAuthorityError) cache.observe(input, hash, mode, { allowed: false });
@@ -113,12 +118,16 @@ async function readCurrentCloudEngineAuthoritySql(
     workspaceId: string; organizationId: string; generation: number;
     engineInstanceId: string; heartbeatToken: string; workosEnabled: boolean;
   },
-): Promise<CurrentCloudEngineAuthority & { version: 1; confirmedUntilMs: number }> {
+): Promise<CurrentCloudEngineAuthority & {
+  version: 1; confirmedUntilMs: number; leaseExpiresAtMs: number; runtimeBootId: string | null;
+}> {
   if (!validIdentityInput(input)) throw new CloudWorkspaceEngineAuthorityError();
   const row = (await tx.query<{
     authority_epoch: string; account_user_id: string; heartbeat_token_hash: Buffer; confirmed_until: Date;
+    lease_expires_at: Date; runtime_boot_id: string | null;
   }>(`SELECT workspace.authority_epoch,engine.account_user_id,engine.heartbeat_token_hash,
-      least(transaction_timestamp()+interval '10 seconds',engine.lease_expires_at) AS confirmed_until
+      least(transaction_timestamp()+interval '10 seconds',engine.lease_expires_at) AS confirmed_until,
+      engine.lease_expires_at,engine.runtime_boot_id
     FROM cloud_workspace_engine_instances engine
     JOIN cloud_workspaces workspace ON workspace.id=engine.workspace_id AND workspace.org_id=engine.org_id
     WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3 AND engine.id=$4 AND engine.generation=$3
@@ -139,7 +148,8 @@ async function readCurrentCloudEngineAuthoritySql(
       !Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1 || confirmedUntilMs === undefined ||
       !Number.isSafeInteger(confirmedUntilMs) || confirmedUntilMs <= Date.now()) throw new CloudWorkspaceEngineAuthorityError();
   return { version: 1, workspaceId: input.workspaceId, organizationId: input.organizationId, generation: input.generation,
-    authorityEpoch, accountUserId: row.account_user_id, engineInstanceId: input.engineInstanceId, confirmedUntilMs };
+    authorityEpoch, accountUserId: row.account_user_id, engineInstanceId: input.engineInstanceId, confirmedUntilMs,
+    leaseExpiresAtMs: row.lease_expires_at.getTime(), runtimeBootId: row.runtime_boot_id };
 }
 
 /** Authenticate the exact engine identity without asserting that it remains

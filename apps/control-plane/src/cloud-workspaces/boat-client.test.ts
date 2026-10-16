@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { classifyCloudFailure } from "./cloud-diagnostics.js";
-import { BoatApiClient, BoatBootPendingError } from "./boat-client.js";
+import { BoatApiClient, BoatBootPendingError, BoatSnapshotExpiredError } from "./boat-client.js";
 
 function fixture() {
   const fetcher = vi.fn<typeof fetch>();
@@ -204,6 +204,75 @@ describe("Boat API boundary", () => {
     })).rejects.toMatchObject({
       code: "provider_request_failed", httpStatus: 409, retryable: true, retryAfterMs: 7000,
     });
+  });
+  // Boat sends no Retry-After header; its waits are in the body, at a
+  // position the documentation does not pin down.
+  it.each([
+    ["the envelope", (hint: Record<string, unknown>) => hint],
+    ["the error", (hint: Record<string, unknown>) => ({ error: { code: "out_of_capacity", status: 503, ...hint } })],
+    ["the error details", (hint: Record<string, unknown>) => ({ error: { code: "out_of_capacity", status: 503, details: hint } })],
+  ])("reads a capacity wait from %s without a Retry-After header", async (_position, place) => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ ok: false, type: "sandbox.error", status: 503, code: "out_of_capacity",
+      ...place({ retryAfterSeconds: 120 }) }, { status: 503 }));
+    await expect(f.client.request("/sandboxes/bx_23456789/resume", { method: "POST" })).rejects.toMatchObject({
+      code: "provider_request_failed", httpStatus: 503, retryable: true, retryAfterMs: 120_000,
+    });
+  });
+  it("waits out the per-IP request limit for the body's retryAfter seconds", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ ok: false, code: "IP_RATE_LIMIT_EXCEEDED", retryAfter: 42 }, { status: 429 }));
+    await expect(f.client.request("/sandboxes")).rejects.toMatchObject({
+      code: "provider_rate_limited", retryable: true, retryAfterMs: 42_000,
+    });
+  });
+  it.each([["minute", 60_000], ["hour", 300_000], ["day", 300_000]])(
+    "paces a refused start in the rolling %s window instead of retrying at once",
+    async (window, retryAfterMs) => {
+      const f = fixture();
+      f.fetcher.mockResolvedValue(Response.json({ ok: false, type: "sandbox.error", status: 429, code: "rate_limited",
+        error: { code: "rate_limited", status: 429, details: { window, limit: 12 } } }, { status: 429 }));
+      await expect(f.client.request("/sandboxes/bx_23456789/resume", { method: "POST" })).rejects.toMatchObject({
+        code: "provider_rate_limited", retryable: true, retryAfterMs,
+      });
+    },
+  );
+  it.each([
+    { code: "out_of_capacity", retryAfterSeconds: -5 },
+    { code: "out_of_capacity", retryAfterSeconds: 0 },
+    { code: "out_of_capacity", retryAfterSeconds: "soon" },
+    { code: "out_of_capacity", retryAfterSeconds: null },
+    { code: "out_of_capacity", retryAfter: { seconds: 5 } },
+    { code: "out_of_capacity", retryAfterSeconds: true },
+    { code: "limit_reached", window: "minute" },
+    { code: "rate_limited", window: "week" },
+  ])("ignores an unusable body retry hint %j", async body => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ ok: false, ...body }, { status: 503 }));
+    const error = await f.client.request("/sandboxes").catch((error: unknown) => error);
+    expect(error).toMatchObject({ retryable: true });
+    expect((error as { retryAfterMs?: number }).retryAfterMs).toBeUndefined();
+  });
+  it("bounds a body retry hint and keeps the longer of the body and a header", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(Response.json({ ok: false, code: "out_of_capacity", retryAfterSeconds: 86_400 }, { status: 503 }));
+    await expect(f.client.request("/sandboxes")).rejects.toMatchObject({ retryAfterMs: 300_000 });
+    f.fetcher.mockResolvedValueOnce(Response.json({ ok: false, code: "no_ready_machine", retryAfterSeconds: 5 },
+      { status: 503, headers: { "retry-after": "9" } }));
+    await expect(f.client.request("/sandboxes")).rejects.toMatchObject({ retryAfterMs: 9000 });
+    f.fetcher.mockResolvedValueOnce(Response.json({ ok: false, code: "no_ready_machine", retryAfterSeconds: "5" },
+      { status: 503, headers: { "retry-after": "2" } }));
+    await expect(f.client.request("/sandboxes")).rejects.toMatchObject({ retryAfterMs: 5000 });
+  });
+  it("retains only the closed expired-data classification when Boat deleted a stopped sandbox's disk", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ ok: false, type: "sandbox.error", status: 409, code: "snapshot_data_expired",
+      message: "private-canary", error: { code: "snapshot_data_expired", status: 409, message: "private-canary" } }, { status: 409 }));
+    const error = await f.client.request("/sandboxes/bx_23456789/resume", { method: "POST" }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(BoatSnapshotExpiredError);
+    expect(error).toMatchObject({ code: "provider_request_failed", retryable: false, httpStatus: 409 });
+    expect(JSON.stringify(error)).not.toContain("private-canary");
+    expect(String(error)).not.toContain("private-canary");
   });
   it("treats the trial's total compute cap as exhausted budget even when HTTP reports 429", async () => {
     const f = fixture();

@@ -11,6 +11,7 @@ import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 export async function stopUnavailableCloudEngine(
   pool: pg.Pool,
   provider: string | null,
+  workspaceId: string | null = null,
 ): Promise<boolean> {
   return withSystemTx(pool, async (tx) => {
     const skipped: string[] = [];
@@ -25,7 +26,7 @@ export async function stopUnavailableCloudEngine(
       JOIN cloud_workspace_generations generation ON generation.workspace_id=workspace.id
         AND generation.org_id=workspace.org_id AND generation.generation=workspace.current_generation
       WHERE ($1::text IS NULL OR generation.provider=$1) AND workspace.desired_state='running'
-        AND NOT (workspace.id=ANY($2::uuid[]))
+        AND NOT (workspace.id=ANY($2::uuid[])) AND ($3::uuid IS NULL OR workspace.id=$3)
         AND workspace.status IN ('ready','busy') AND workspace.deleted_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM cloud_workspace_engine_instances engine
           WHERE engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id
@@ -37,7 +38,7 @@ export async function stopUnavailableCloudEngine(
             AND intent.state IN ('queued','dispatching','observing'))
       ORDER BY workspace.updated_at,workspace.id
       FOR UPDATE OF organization SKIP LOCKED LIMIT 1`,
-          [provider, skipped],
+          [provider, skipped, workspaceId],
         )
       ).rows[0];
       if (!candidate) return false;
