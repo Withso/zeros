@@ -115,6 +115,25 @@ bound holds about 480 principals per workspace; beyond it, shrinking the
 snapshot (omitting principals unchanged inside the window, or a chunked
 sync) is a contract minor tracked with the contract owner.
 
+## Capability placement (S1 step 8)
+
+`api` (engine tokens, pinned `zeros:api`/`engine`) and `realtime` (client
+tokens on relay admission, pinned `zeros:realtime`/`client`) verify through
+`ServiceCapabilityVerifier` (cloud-workspaces/capability-service-verifier.ts),
+which wraps the shared verifier. Step 8 compares the token's `gen` and `ein`
+with the workspace's current placement, never with the request:
+`EngineAuthorityCache.placement()` answers from memory while the cache is
+enforcing for the organization (the one usable, unrevoked, enrolled entry;
+none or more than one falls through), and otherwise `readCapabilityPlacement`
+reads the current generation and its one live engine instance. Two live
+engines in one generation (a handover) give no instance, so an engine-bound
+token fails closed until the handover settles.
+
+With `capabilities` on, the engine command mirror and seal routes
+(`engine:history.write`) check a token sent in `X-Zeros-Capability`; the
+heartbeat bearer stays the mutation fence in v1, and a request without a
+token keeps today's path so engines that predate engine tokens keep working
+during the rollout. With the flag off nothing changes.
 ## Capability signing keys runbook
 
 S1 signing keys are Ed25519, sealed at rest with the dedicated

@@ -8,6 +8,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { CloudRuntimeWitnessSchema, CloudAgentRuntimeSchema } from "./runtime-contract.js";
 import { createCloudCommandRoutes } from "./command-routes.js";
+import type { EngineCapabilityGate } from "./capability-service-verifier.js";
 import type { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { createCloudEventRoutes } from "./event-routes.js";
 import type { DatabaseCloudWorkspaceEventService } from "./event-streams.js";
@@ -591,7 +592,7 @@ export const cloudWorkspaceInternalResponseHeaders: MiddlewareHandler = async (c
 
 export function createCloudWorkspaceInternalRoutes(
   service: CloudWorkspaceInternalSetupService,
-  options?: { engineUplink?: CloudWorkspaceEngineUplinkAdvertisement },
+  options?: { engineUplink?: CloudWorkspaceEngineUplinkAdvertisement; engineCapabilities?: EngineCapabilityGate },
 ): Hono {
   const routes = new Hono();
   /** The additive `uplink` member, only for an opted-in engine of an
@@ -614,7 +615,8 @@ export function createCloudWorkspaceInternalRoutes(
     return next();
   };
   for (const path of CLOUD_WORKSPACE_INTERNAL_PATHS) routes.use(path, cloudWorkspaceInternalResponseHeaders);
-  if (service.commands) routes.route("/", createCloudCommandRoutes(service.commands));
+  if (service.commands) routes.route("/", createCloudCommandRoutes(service.commands,
+    options?.engineCapabilities ? { capabilities: options.engineCapabilities } : {}));
   if (service.events) routes.route("/", createCloudEventRoutes(service.events));
   if (service.actions) routes.route("/", createCloudActionRoutes(service.actions));
   if (service.agentExecutions) routes.route("/",createCloudAgentExecutionRoutes(service.agentExecutions));
