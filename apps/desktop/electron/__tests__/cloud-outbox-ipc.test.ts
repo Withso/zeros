@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -26,7 +27,7 @@ vi.mock("../../src/engine/cloud-workspace-capability", () => ({
   cloudWorkspaceDesktopCapabilityEnabled: () => h.capability,
 }));
 
-import { CloudOutbox } from "../cloud-outbox";
+import { CloudOutbox, cloudOutboxFileName } from "../cloud-outbox";
 import {
   __setCloudOutboxSenderForTests,
   cloudWorkspaceOutboxEnqueue,
@@ -158,5 +159,34 @@ describe("cloud workspace outbox IPC", () => {
     signIn({ ...userB });
     expect(cloudWorkspaceOutboxList({}, event)).toHaveLength(0);
     expect(h.sent.length).toBe(sentBefore);
+  });
+
+  it("keeps scheduled retries across a session change for the same account", async () => {
+    const calls: string[] = [];
+    __setCloudOutboxSenderForTests(
+      async (entry) => {
+        calls.push(entry.id);
+        if (calls.length === 1) throw Object.assign(new Error("send failed"), { status: 503 });
+        return { status: 202, replayed: false };
+      },
+      (delayMs, run) => {
+        h.timers.push({ delayMs, run });
+      },
+    );
+    const entry = cloudWorkspaceOutboxEnqueue(
+      { operation: "wake", organizationId: ORGANIZATION, workspaceId: WORKSPACE },
+      event,
+    ) as { id: string };
+    await vi.waitFor(() => expect(h.timers).toHaveLength(1));
+    signIn({ ...userA });
+    const retry = h.timers.shift();
+    expect(retry).toBeDefined();
+    retry!.run();
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    const file = path.join(h.directory, "cloud-outbox-v1", cloudOutboxFileName(userA.accountId));
+    await vi.waitFor(() =>
+      expect(JSON.parse(readFileSync(file, "utf8")).entries[0]).toMatchObject({ id: entry.id, state: "completed" }),
+    );
+    expect(calls).toHaveLength(2);
   });
 });

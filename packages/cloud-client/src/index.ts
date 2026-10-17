@@ -54,5 +54,12 @@ export type {
   DeviceProofHeaders,
   RetryDecision,
 } from "./rest-client";
+export {
+  canonicalJson,
+  DEVICE_PROOF_VERSION,
+  deviceProofMessage,
+  deviceProofPayloadDigest,
+} from "./device-proof";
+export type { DeviceProofAction, DeviceProofRequest } from "./device-proof";
 export { CloudOrgFlagCache, probeFromConnectFailure } from "./feature-probe";
 export type { CloudFlagState } from "./feature-probe";
