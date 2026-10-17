@@ -202,7 +202,7 @@ import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "./agents/conta
 import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-action-runtime";
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
-import { CloudEngineUplinkClient, EngineUplinkAuthState } from "./cloud-engine-uplink";
+import { CloudEngineUplinkClient, EngineUplinkAuthState, sanitizeCredAckCode } from "./cloud-engine-uplink";
 import { CloudEventRuntime } from "./cloud-event-runtime";
 import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome, type CloudAgentHistoryRestoreMetadata,
@@ -3693,8 +3693,11 @@ export class ZerosEngine {
           await boot.refreshCredentialControls();
           return { result: "applied" as const };
         } catch (error) {
-          const code = error && typeof error === "object" && "code" in error ? String(error.code) : "cred_fetch_failed";
-          return { result: "failed" as const, code };
+          // error.code can be ECONNRESET, a number or arbitrarily long —
+          // none are contract codes; non-conforming values map to
+          // cred_fetch_failed so the CP never 4400s us into a re-push loop.
+          return { result: "failed" as const,
+            code: sanitizeCredAckCode(error && typeof error === "object" && "code" in error ? error.code : undefined) };
         }
       },
       // The moment the gate closes (or never negotiates the push), the

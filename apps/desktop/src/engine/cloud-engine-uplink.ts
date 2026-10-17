@@ -188,6 +188,13 @@ export type EngineUplinkCredentialRevision = Readonly<{ kind: "agent-controls" |
 /** The outcome the engine reports back in `cred.ack` after its exchange. */
 export type EngineUplinkCredentialAck = Readonly<{ result: "applied" | "failed"; code?: string }>;
 
+/** The S2 `code` shape (`^[a-z][a-z0-9_]{2,63}$`). Any other value maps to
+ * `cred_fetch_failed`: a non-conforming code would 4400 the connection
+ * into a resync re-push loop, so the engine side never emits one. */
+export function sanitizeCredAckCode(code: unknown): string {
+  return typeof code === "string" && /^[a-z][a-z0-9_]{2,63}$/.test(code) ? code : "cred_fetch_failed";
+}
+
 export type CloudEngineUplinkOptions = {
   endpoint: string;
   /** The heartbeat credential; the uplink authenticates with it once per connection. */
@@ -423,7 +430,10 @@ export class CloudEngineUplinkClient {
         this.noteEstablished();
       }
       this.sendReliable("cred.ack", {
-        kind, revision, result: outcome.result, ...(outcome.code ? { code: outcome.code } : {}),
+        kind, revision, result: outcome.result,
+        // Hold the wire to the contract's code shape whatever the handler
+        // returned (a raw error code can be ECONNRESET, a number, …).
+        ...(outcome.result === "failed" ? { code: sanitizeCredAckCode(outcome.code) } : {}),
       });
     }
   }

@@ -536,6 +536,39 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("maps a non-contract failure code to cred_fetch_failed on the wire", async () => {
+    const codes = ["ECONNRESET", "42", "x".repeat(65), "Has-Caps"];
+    let index = 0;
+    const { client, sockets } = fakeClient({
+      onCredentialRevision: async () => ({ result: "failed" as const, code: codes[index++] }),
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    for (let revision = 1; revision <= codes.length; revision++) {
+      sockets[0]!.frame({ t: "cred.revision", s: revision, d: { kind: "agent-controls", revision } });
+      await flush();
+    }
+    // Every non-conforming code leaves as cred_fetch_failed: a bad code
+    // would 4400 the connection into a resync re-push loop.
+    expect(sockets[0]!.ofType("cred.ack").map(frame => frame.d))
+      .toEqual(codes.map((_, i) => expect.objectContaining({ revision: i + 1, result: "failed", code: "cred_fetch_failed" })));
+    client.stop();
+  });
+
+  it("passes a contract-conforming failure code through", async () => {
+    const { client, sockets } = fakeClient({
+      onCredentialRevision: async () => ({ result: "failed" as const, code: "engine_authority_rejected" }),
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")[0]).toMatchObject({ d: { revision: 7, result: "failed", code: "engine_authority_rejected" } });
+    client.stop();
+  });
+
   it("closes 4400 on a malformed cred.revision", async () => {
     const { client, sockets } = fakeClient({ onCredentialRevision: async () => ({ result: "applied" }) });
     client.start();
