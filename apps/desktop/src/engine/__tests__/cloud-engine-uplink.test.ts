@@ -772,6 +772,7 @@ describe("engine uplink client against the real control-plane server", () => {
       authority, realtimeInstance: "realtime-test",
       flags: {
         enabled: (orgId, flag) => enabled && flag === "realtime_uplink" && orgId === identity.organizationId,
+        anyEnabled: flag => enabled && flag === "realtime_uplink",
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
       authSource: {
