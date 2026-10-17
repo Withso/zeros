@@ -381,15 +381,50 @@ registration there is no uplink client at all.
   the session's token and returns an `auth.renewed` reply carrying the new
   `expiresAtMs`. A failed renewal closes the session with its S1 socket
   code; a malformed frame closes it with `4400`. A session that is not
-  renewed closes with `capability_expired` at `exp`. The cloud transport
-  does not carry the S3 `auth` frames yet, so no session reaches this
-  path in this release.
-- **Client admission.** The engine's capability admission
-  (`EngineCapabilityAuth.verifyClient`, `admit` and `handleInBandAuth`) has
-  no caller in this release: direct and relay client sessions keep the
-  client-admission call even with `capabilities` on. It is wired when
-  clients send S3 tokens (track F1) and relay admission verifies them
-  (track C5).
+  renewed closes with `capability_expired` at `exp`. Direct `zeros-cap.v1`
+  sessions reach this path; relay sessions do not yet (track C5).
+- **Direct runtime handshake (S3 Part 3).** `CloudTransport` treats an
+  upgrade that offers `zeros-cap.v1` once and carries no bearer (no
+  `x-zeros-cloud-token` header, `zeros-cloud-token.*` subprotocol or
+  `token` parameter) as a capability upgrade. Until `auth.ok` the socket
+  counts as a pending upgrade against `maxConnections`, may send one `auth`
+  text frame within the handshake timeout, and is not read past 64 KiB.
+  `EngineCapabilityAuth.authenticateRuntimeClient` verifies the capability,
+  has `api` admit its actor (below) and opens the verifier session; the
+  engine then sends `auth.ok`, and only then does the socket join the
+  engine, as the admitted actor, whose lease renews with the returned
+  renewal token like a redeemed grant. A handoff fence or shutdown refuses
+  sockets still waiting (`1013 runtime_unavailable`, `1001`). An engine
+  without a verifier (no advertised uplink) selects `zeros-v1` for an offer
+  that names it and closes `1000 legacy`, so the SDK falls back to its
+  grant. Sessions the verifier closes (an epoch raise, a revocation or
+  `exp`) close with their S1 socket codes.
+- **Client admission.**
+  `POST /internal/v2/cloud-workspaces/engine/capability-admission`
+  (`internal-routes.ts`, `DatabaseCloudWorkspaceActorSessionService.admitCapability`)
+  turns a client's `zeros:engine` capability, which the engine verified,
+  into an actor session. The engine sends the token, its proof and the route
+  it arrived on, with its heartbeat credential. `api` verifies the token
+  again (signature, placement, `ws:read`, and proof of possession in a
+  replay window of its own), then requires the token's authority epoch,
+  access revision, member epoch, account auth revision, device key, source
+  session and role to be current. A token issued before a revocation, role
+  change or key change is therefore refused even inside its lifetime. The
+  session is recorded already consumed, so it can never be redeemed as a
+  grant or open a relay. The engine renews it with the returned
+  `renewalToken` like a redeemed grant, under the same checks and the same
+  limit of 100 live sessions per workspace. An organization with
+  `capabilities` off gets `401 cloud_actor_admission_rejected` before any
+  SQL; an issuer outage answers `503 capability_issuer_unavailable`. On the
+  direct route the engine calls it for every `auth` frame it verified
+  (`CloudRuntimeRegistration.admitCapabilityClient`), behind the same
+  engine gates as a redeemed grant, and requires the returned account,
+  device and role to be the capability's own. A refusal (any 4xx other
+  than 408 and 429, or a `200` that fails the response schema) closes
+  the socket `4403 capability_revoked`. Anything not answered, there or
+  by the engine's own gates, closes it `1013 capability_issuer_unavailable`
+  so the client retries. Relay sessions keep the client-admission call
+  until the relay route moves onto the uplink (C5).
 - **Credential push.** The engine offers `cred.v1`; a pushed `cred.revision`
   runs the same credential-controls exchange the poll runs (coalesced to
   the latest revision per kind while one is in flight) and is answered with

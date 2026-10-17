@@ -1,5 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { open, rename, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+
+import type { CloudActorContext } from "@zeros/protocol/cloud-actors";
 
 import {
   CapabilityVerifier,
@@ -52,6 +55,10 @@ export const ENGINE_CAPABILITY_FALLBACK_INTERVAL_MS = 60_000;
 export const ENGINE_CAPABILITY_FALLBACK_FRACTION = 0.8;
 /** S3 runtime auth frames: one JSON text message of at most 16 KiB. */
 export const RUNTIME_AUTH_FRAME_MAX_BYTES = 16 * 1024;
+/** S3 Part 3: the subprotocol whose first client frame is `auth`. */
+export const RUNTIME_AUTH_SUBPROTOCOL = "zeros-cap.v1";
+/** S3 Part 3: the contract major this engine speaks in the `auth` frame. */
+export const RUNTIME_AUTH_CONTRACT = 1;
 
 const SOCKET_CLOSE: Partial<Record<CapabilityErrorCode, number>> = {
   capability_contract_unsupported: 4426,
@@ -67,12 +74,16 @@ export function capabilityCloseCode(code: CapabilityErrorCode): number | null {
   return SOCKET_CLOSE[code] ?? 4401;
 }
 
-const TOKEN_PATTERN = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+/** The socket close of a session the verifier closed: a raise, a
+ * revocation or its deadline. */
+export function capabilitySessionClose({ sessionId, code }: CapabilitySessionClosure): { sessionId: string } & RuntimeClientClose {
+  return { sessionId, code: capabilityCloseCode(code) ?? 4401, reason: code };
+}
 
-function renewFrame(value: Record<string, unknown>): EngineClientAuth | null {
-  const d = value.d;
-  if (!isPlainRecord(d) || !exactKeys(d, ["capability", "proof"])) return null;
-  const { capability, proof } = d;
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const CLIENT_SESSION_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function clientAuth(capability: unknown, proof: unknown): EngineClientAuth | null {
   if (typeof capability !== "string" || capability.length < 32 || capability.length > 4096 || !TOKEN_PATTERN.test(capability)) return null;
   if (!isPlainRecord(proof) || !exactKeys(proof, ["timestampMs", "nonce", "signature"])) return null;
   const { timestampMs, nonce, signature } = proof;
@@ -80,6 +91,73 @@ function renewFrame(value: Record<string, unknown>): EngineClientAuth | null {
   if (typeof nonce !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(nonce)) return null;
   if (typeof signature !== "string" || !/^[A-Za-z0-9_-]{86}$/.test(signature)) return null;
   return { capability, proof: { timestampMs, nonce, signature } };
+}
+
+function renewFrame(value: Record<string, unknown>): EngineClientAuth | null {
+  const d = value.d;
+  return isPlainRecord(d) && exactKeys(d, ["capability", "proof"]) ? clientAuth(d.capability, d.proof) : null;
+}
+
+/** S3 Part 3: a top-level `t` and no `type` marks a handshake frame;
+ * engine protocol messages always carry `type`. */
+export function isRuntimeHandshakeFrame(value: unknown): value is Record<string, unknown> {
+  return isPlainRecord(value) && !Object.hasOwn(value, "type") && Object.hasOwn(value, "t");
+}
+
+export type RuntimeAuthFrame =
+  | { ok: true; auth: EngineClientAuth; clientSessionId: string }
+  | { ok: false; code: number; reason: "capability_missing" | "capability_malformed" | "capability_contract_unsupported" };
+
+/** The first client frame of a direct `zeros-cap.v1` connection (S3 Part 3):
+ * one `auth` text frame of at most 16 KiB, or a 4401 close. A contract major
+ * above this engine's closes with 4426 before the rest of the frame is read,
+ * so a newer client learns which major to fall back to. The relay-only
+ * `engine` pair is malformed on the direct route. */
+export function parseRuntimeAuthFrame(text: string, byteLength: number): RuntimeAuthFrame {
+  if (byteLength > RUNTIME_AUTH_FRAME_MAX_BYTES) return { ok: false, code: 4401, reason: "capability_malformed" };
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { return { ok: false, code: 4401, reason: "capability_missing" }; }
+  if (!isPlainRecord(value) || value.t !== "auth") return { ok: false, code: 4401, reason: "capability_missing" };
+  const d = value.d;
+  if (isPlainRecord(d) && typeof d.contract === "number" && Number.isSafeInteger(d.contract) && d.contract > RUNTIME_AUTH_CONTRACT)
+    return { ok: false, code: 4426, reason: "capability_contract_unsupported" };
+  const auth = isPlainRecord(d) && exactKeys(value, ["t", "d"]) && exactKeys(d, ["capability", "proof", "clientSessionId", "contract"]) &&
+    d.contract === RUNTIME_AUTH_CONTRACT && typeof d.clientSessionId === "string" && CLIENT_SESSION_PATTERN.test(d.clientSessionId)
+    ? clientAuth(d.capability, d.proof) : null;
+  if (!auth || !isPlainRecord(d)) return { ok: false, code: 4401, reason: "capability_malformed" };
+  return { ok: true, auth, clientSessionId: String(d.clientSessionId) };
+}
+
+/** The control plane's admission of a verified client (`POST
+ * …/engine/capability-admission`): an actor session it already consumed,
+ * renewed with `renewalToken` exactly like a redeemed grant. */
+export type CapabilityActorAdmission = Readonly<{
+  admission: { accountUserId: string; authorityEpoch: number; actor: CloudActorContext };
+  renewalToken: string;
+}>;
+
+export type RuntimeClientClose = { code: number; reason: string };
+
+export type RuntimeClientAuthResult =
+  | ({ ok: false } & RuntimeClientClose)
+  | {
+      ok: true;
+      sessionId: string;
+      authOk: string;
+      admission: CapabilityActorAdmission["admission"];
+      renewalToken: string;
+      /** Opens the verifier session; the close when it was revoked meanwhile. */
+      open(): RuntimeClientClose | null;
+    };
+
+/** Either side cannot answer yet: the client retries (1013). */
+const AUTH_UNAVAILABLE = { ok: false, code: 1013, reason: "capability_issuer_unavailable" } as const;
+/** The control plane refused the actor or answered for someone else. */
+const ACTOR_REFUSED = { ok: false, code: 4403, reason: "capability_revoked" } as const;
+
+/** `auth.ok` for an admitted session: its scopes and capability expiry. */
+export function runtimeAuthOkFrame(sessionId: string, verified: CapabilityVerifySuccess): string {
+  return JSON.stringify({ t: "auth.ok", d: { sessionId, scopes: verified.claims.scp, expiresAtMs: verified.claims.exp * 1000 } });
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -165,9 +243,14 @@ export type EngineCapabilityAuthOptions = {
   onSessionsClosed?: (closures: readonly CapabilitySessionClosure[]) => void;
   /** The S1 engine-token REST fallback (`POST …/engine/capability`). */
   requestEngineCapability?: () => Promise<EngineUplinkCapability>;
+  /** S3 Part 3 direct route: the control plane admits a verified client's
+   * actor. Null is a refusal; an error whose `code` is
+   * `cloud_client_authority_transient` asks the client to retry. */
+  admitActor?: (client: EngineClientAuth, route: CapabilityRoute) => Promise<CapabilityActorAdmission | null>;
 };
 
 export type EngineClientAuth = Readonly<{ capability: string; proof: CapabilityProof }>;
+export type { CapabilityRoute, CapabilitySessionClosure };
 
 export class EngineCapabilityAuth implements EngineUplinkAuthSink {
   readonly verifier: CapabilityVerifier;
@@ -285,6 +368,40 @@ export class EngineCapabilityAuth implements EngineUplinkAuthSink {
     return this.verifier.verify(auth.capability, { aud: "zeros:engine", knd: "client" }, this.context(route, auth.proof));
   }
 
+  /** The first frame of a direct `zeros-cap.v1` socket (S3 Part 3). The
+   * capability is verified against this placement (S1 steps 1-12), then the
+   * control plane admits the client's actor, whose account, device and role
+   * must be the capability's own. A failure carries its socket close: the S1
+   * code, 4403 for a refused actor, 1013 while either side cannot answer. */
+  async authenticateRuntimeClient(frame: string, byteLength: number): Promise<RuntimeClientAuthResult> {
+    const parsed = parseRuntimeAuthFrame(frame, byteLength);
+    if (!parsed.ok) return { ok: false, code: parsed.code, reason: parsed.reason };
+    const verified = await this.verifyClient(parsed.auth, "direct");
+    if (!verified.ok) {
+      const code = capabilityCloseCode(verified.code) ?? (verified.code === "capability_scope_denied" ? 4403 : 1013);
+      return { ok: false, code, reason: verified.code };
+    }
+    const admitActor = this.options.admitActor;
+    if (!admitActor || this.stopped) return AUTH_UNAVAILABLE;
+    let admitted: CapabilityActorAdmission | null;
+    try {
+      admitted = await admitActor(parsed.auth, "direct");
+    } catch (error) {
+      return isPlainRecord(error) && error.code === "cloud_client_authority_transient" ? AUTH_UNAVAILABLE : ACTOR_REFUSED;
+    }
+    if (!admitted) return ACTOR_REFUSED;
+    if (this.stopped) return AUTH_UNAVAILABLE;
+    const { claims } = verified;
+    const { admission } = admitted;
+    if (claims.sub !== `user:${admission.accountUserId}` || admission.actor.deviceId !== claims.did || admission.actor.role !== claims.role)
+      return ACTOR_REFUSED;
+    const sessionId = randomUUID();
+    return {
+      ok: true, sessionId, authOk: runtimeAuthOkFrame(sessionId, verified), admission, renewalToken: admitted.renewalToken,
+      open: () => this.openRuntimeSession(sessionId, verified),
+    };
+  }
+
   /** Admits a verified client as an open session the verifier re-checks. */
   admit(sessionId: string, verified: CapabilityVerifySuccess, route: CapabilityRoute): void {
     this.verifier.openSession(sessionId, verified, this.context(route));
@@ -306,7 +423,7 @@ export class EngineCapabilityAuth implements EngineUplinkAuthSink {
    * session with its S1 socket code; issuer unavailability keeps it open
    * until its deadline so the client can retry. */
   async handleInBandAuth(sessionId: string, message: unknown, byteLength: number, route: CapabilityRoute): Promise<InBandAuthOutcome> {
-    if (!isPlainRecord(message) || Object.hasOwn(message, "type") || !Object.hasOwn(message, "t")) return { kind: "engine" };
+    if (!isRuntimeHandshakeFrame(message)) return { kind: "engine" };
     const auth = byteLength <= RUNTIME_AUTH_FRAME_MAX_BYTES && message.t === "auth.renew" && exactKeys(message, ["t", "d"])
       ? renewFrame(message) : null;
     if (!auth) {
@@ -331,6 +448,18 @@ export class EngineCapabilityAuth implements EngineUplinkAuthSink {
     this.stopProbe();
     if (this.recheckTimer) clearInterval(this.recheckTimer);
     this.recheckTimer = null;
+  }
+
+  private openRuntimeSession(sessionId: string, verified: CapabilityVerifySuccess): RuntimeClientClose | null {
+    if (this.stopped) return { code: AUTH_UNAVAILABLE.code, reason: AUTH_UNAVAILABLE.reason };
+    this.admit(sessionId, verified, "direct");
+    // Steps 8-11 again: an epoch raise or a revocation can land while the
+    // control plane admits the actor.
+    const closure = this.verifier.recheck().find(closed => closed.sessionId === sessionId);
+    if (!closure) return null;
+    this.closeClient(sessionId);
+    const { code, reason } = capabilitySessionClose(closure);
+    return { code, reason };
   }
 
   private context(route: CapabilityRoute, proof?: CapabilityProof): CapabilityVerifyContext {

@@ -105,7 +105,7 @@ import {
   createCloudCapabilityKeyRoutes,
   type CloudCapabilityService,
 } from "./cloud-workspaces/capability-routes.js";
-import { createEngineCapabilityGate } from "./cloud-workspaces/capability-service-verifier.js";
+import { createEngineCapabilityGate, createEngineClientCapabilityGate } from "./cloud-workspaces/capability-service-verifier.js";
 
 export type CreateAppDependencies = {
   zerosDevAuth?: ZerosDevAuthDependencies;
@@ -507,7 +507,8 @@ export function createApp(
         dependencies.cloudWorkspaceInternalSetupService,
         {
           ...(dependencies.cloudWorkspaceEngineUplink ? { engineUplink: dependencies.cloudWorkspaceEngineUplink } : {}),
-          ...(dependencies.cloudCapabilities ? { engineCapabilities: createEngineCapabilityGate(dependencies.cloudCapabilities) } : {}),
+          ...(dependencies.cloudCapabilities ? { engineCapabilities: createEngineCapabilityGate(dependencies.cloudCapabilities),
+            clientCapabilities: createEngineClientCapabilityGate(dependencies.cloudCapabilities) } : {}),
         },
       ),
     );

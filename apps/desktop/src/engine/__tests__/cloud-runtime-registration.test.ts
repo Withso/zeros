@@ -3,6 +3,7 @@ import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 
 import {
   CLOUD_RUNTIME_ENV,
+  CloudClientAuthorityTransientError,
   CloudRuntimeRegistration,
   consumeCloudRuntimeEnvironment,
   type CloudDurableRecordSyncContext,
@@ -1648,4 +1649,69 @@ describe("engine uplink advertisement", () => {
       }
     } finally { await registration.stop(); }
     await expect(registration.requestEngineCapability()).rejects.toThrow();
+  });
+
+  it("asks the control plane to admit a verified capability's actor through the heartbeat authority", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const renewalToken = `zwa_${"R".repeat(43)}`;
+    const admitted = { ...actorAdmissionResponse(4), renewalToken };
+    let answer: () => Response = () => Response.json(admitted);
+    const fetcher = vi.fn<typeof fetch>(async url => {
+      const route = new URL(String(url)).pathname;
+      if (route.endsWith("/register")) return Response.json({ ...registrationResponse(), ...advertised });
+      if (route === "/internal/v2/cloud-workspaces/engine/capability-admission") return answer();
+      return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: NOW + 90_000 });
+    });
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    const client = { capability: `${"a".repeat(20)}.${"b".repeat(40)}.${"c".repeat(43)}`,
+      proof: { timestampMs: NOW, nonce: "N".repeat(22), signature: "S".repeat(86) } };
+    const transient = () => expect(registration.admitCapabilityClient(client, "direct")).rejects.toBeInstanceOf(CloudClientAuthorityTransientError);
+    await transient();
+    expect(fetcher).not.toHaveBeenCalled();
+    try {
+      await registration.start();
+      expect(await registration.admitCapabilityClient(client, "direct")).toEqual({
+        admission: { accountUserId: ACCOUNT_USER_ID, authorityEpoch: 4, actor: { sessionId: admitted.actorSessionId,
+          deviceId: admitted.deviceId, role: "developer", fingerprint: admitted.fingerprint } },
+        renewalToken,
+      });
+      const calls = () => fetcher.mock.calls.filter(([url]) => new URL(String(url)).pathname.endsWith("/engine/capability-admission"));
+      const [call] = calls();
+      expect(new URL(String(call![0])).origin).toBe(new URL(heartbeatEndpoint).origin);
+      expect(call![1]?.headers).toMatchObject({ authorization: `Bearer zwh_${"H".repeat(43)}`, "content-type": "application/json" });
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        workspaceId: runtime.execution.workspaceId, organizationId: runtime.execution.organizationId,
+        generation: runtime.execution.generation, engineInstanceId: runtime.engine.instanceId,
+        capability: client.capability, proof: client.proof, route: "direct",
+      });
+      // The control plane's refusals.
+      for (const status of [401, 403, 404, 422]) {
+        answer = () => Response.json({ error: { code: "cloud_actor_admission_rejected" } }, { status });
+        expect(await registration.admitCapabilityClient(client, "relay")).toBeNull();
+      }
+      expect(JSON.parse(String(calls().at(-1)![1]?.body))).toMatchObject({ route: "relay" });
+      for (const invalid of [actorAdmissionResponse(4), { ...admitted, renewalToken: "zwa_short" }, { ...admitted, extra: 1 }]) {
+        answer = () => Response.json(invalid);
+        expect(await registration.admitCapabilityClient(client, "direct")).toBeNull();
+      }
+      // Not answered yet: the client retries.
+      for (const next of [408, 429, 500, 503].map(status => () => Response.json({ error: { code: "later" } }, { status })))  {
+        answer = next;
+        await transient();
+      }
+      answer = () => new Response("<html>", { headers: { "content-type": "text/html" } });
+      await transient();
+      answer = () => { throw new TypeError("network"); };
+      await transient();
+      let stopping: Promise<void> | undefined;
+      answer = () => { stopping = registration.stop(); return Response.json(admitted); };
+      await transient();
+      await stopping;
+    } finally { await registration.stop(); }
+    answer = () => Response.json(admitted);
+    await transient();
   });});

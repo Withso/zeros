@@ -1,7 +1,7 @@
 # S3. Client contract v1 (cloud workspaces)
 
-Status: **FROZEN** · Contract ID `zeros-client` · Version `1.2.0`
-(runtime connect proofs and errors; see [Changelog](#changelog)) ·
+Status: **FROZEN** · Contract ID `zeros-client` · Version `1.2.1`
+(direct-route handshake closes; see [Changelog](#changelog)) ·
 Schemas: [Draft schema: REST API (OpenAPI 3.1)](#draft-schema-rest-api-openapi-31),
 [Draft schema: device stream frames](#draft-schema-device-stream-frames),
 [Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames)
@@ -302,17 +302,18 @@ A client opens the runtime connection to one of the routes from
 `BaseMessage` of the engine protocol
 (`packages/protocol/src/messages.ts:221`): the client offers subprotocol
 `zeros-cap.v1` in `Sec-WebSocket-Protocol`, and a server that speaks this
-contract selects it (the engine's `handleProtocols` hook,
-`apps/desktop/src/engine/transport/cloud.ts:506-507`, picks from the offered
-set). For N−1 rollout the client may also offer `zeros-v1`; a server that
-selects `zeros-v1` does not speak this contract, and the client falls back to
-today's token-in-subprotocol behavior (`cloud.ts:70-110`) for one release
-cycle.
+contract selects it (the `handleProtocols` hook of the engine's
+`CloudTransport`, `apps/desktop/src/engine/transport/cloud.ts`, picks from
+the offered set). The upgrade carries no bearer. For N−1 rollout the client
+may also offer `zeros-v1`; a server that selects `zeros-v1` does not speak
+this contract, and the client falls back to today's token-in-subprotocol
+behavior for one release cycle. An engine that cannot verify capabilities
+selects `zeros-v1` for such an offer and then closes `1000` (`legacy`).
 
 The first client frame must be `auth` and must arrive within 10 s of the
 upgrade, or the server closes with `4401` (`capability_missing`). The frame
 is one JSON text message of at most 16 KiB, on top of the existing pre-auth
-connection limits (`cloud.ts:128-137`):
+connection limits (`CloudTransport`'s connection cap and handshake timeout):
 
 ```json
 { "t": "auth", "d": { "capability": "<S1 token for this route's audience>",
@@ -327,11 +328,17 @@ verifies it locally (S1). On the relay route the frame carries the
 (proof signed with `route: relay`); `realtime` verifies its own token and
 forwards the engine pair in S2 `relay.open`. The verifier replies
 `auth.ok { sessionId, scopes, expiresAtMs }` or closes with the S1 close
-code. Renewal is in-band: the client sends `auth.renew` with a fresh
-capability and proof, and the verifier replies `auth.renewed` with the new
-`expiresAtMs`, without reconnecting. After `auth.ok` the existing engine
-message protocol flows unchanged; the handshake frames are never engine
-messages.
+code. Nothing else is accepted before `auth.ok`: a second frame closes with
+`4400`. On the direct route the engine has `api` admit the verified
+client's actor session; a refusal closes with `4403` (`capability_revoked`).
+While the verifier cannot answer (no S2 `auth.sync` applied yet, the issuer
+unavailable, or `api` not answering), or the engine cannot take the
+connection (handoff, connection cap), it closes with `1013`, and the client
+reconnects with backoff. Renewal is in-band: the client sends `auth.renew`
+with a fresh capability and proof, and the verifier replies `auth.renewed`
+with the new `expiresAtMs`, without reconnecting. After `auth.ok` the
+existing engine message protocol flows unchanged; the handshake frames are
+never engine messages.
 
 Telling them apart after `auth.ok`: a text message whose top-level JSON
 object has a `t` member and no `type` member is a handshake frame
@@ -404,8 +411,8 @@ and the real CP.
 | Wake, stop, archive, delete | `cloud-workspaces.ts:272-300` | Same endpoints via outbox; progress from `lifecycle.changed` |
 | Create | `cloud-workspaces.ts:331-364` | Same endpoint via outbox |
 | Runtime admission | `apps/desktop/electron/cloud-workspace-access-client.ts:457` → `routes.ts:2049` | `runtime/connect` |
-| Client authority renewal every 5 s (lease 10 s) | `apps/desktop/src/engine/transport/cloud.ts:154,554-607` | `auth.renew` every ~3 min, pushed |
-| Token-in-subprotocol runtime auth (`zeros-v1` parsing, `handleProtocols`) | `apps/desktop/src/engine/transport/cloud.ts:70-110,506-507` | `zeros-cap.v1` subprotocol and pre-protocol `auth` frame |
+| Client authority renewal every 5 s (lease 10 s) | `apps/desktop/src/engine/transport/cloud.ts` (`MAX_CLIENT_AUTHORITY_LEASE_MS`, `renewAuthority`) | `auth.renew` every ~3 min, pushed |
+| Token-in-subprotocol runtime auth (`zeros-v1` parsing, `handleProtocols`) | `apps/desktop/src/engine/transport/cloud.ts` (`tokenCredential`, `handleProtocols`) | `zeros-cap.v1` subprotocol and pre-protocol `auth` frame |
 | Direct-then-relay fallback after 5 s | `apps/desktop/src/renderer/platform/bridge/runtime-client.ts:29,591-603` | Hedged connect at 400 ms, first ready wins |
 | Relay bridge `/v1/cloud-workspaces/bridge` | `apps/control-plane/src/cloud-workspaces/engine-client-admission.ts:11` | Relay route over the uplink (S2) |
 | History pages | `apps/desktop/src/renderer/platform/cloud-history.ts:106` | Same endpoints |
@@ -469,7 +476,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
 openapi: 3.1.0
 info:
   title: Zeros cloud workspace client contract (S3)
-  version: 1.2.0
+  version: 1.2.1
   description: >-
     FROZEN reference sketch of the REST half of client contract v1 for cloud
     workspaces. Existing endpoints keep their current request and response
@@ -1598,6 +1605,16 @@ is a review aid until freeze; the frozen source of truth will be Zod in
 
 ## Changelog
 
+- **1.2.1** (2026-10-17, clarifications; no schema change):
+  - [Part 3](#part-3-runtime-connection) gives the engine's closes before
+    `auth.ok` on the direct route: `4400` for a second frame, `4403`
+    (`capability_revoked`) when `api` refuses the verified client's actor
+    session, and `1013` while the verifier or `api` cannot answer or the
+    engine cannot take the connection; the client reconnects with backoff.
+    An engine that cannot verify capabilities selects `zeros-v1` for an
+    offer that names it and closes `1000` (`legacy`).
+  - Code references name `CloudTransport` and its members instead of line
+    numbers.
 - **1.2.0** (2026-10-17, documentation of the new endpoints; no response
   shape change):
   - [Device proof](#device-proof) gives the signed message and each

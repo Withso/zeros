@@ -12,10 +12,14 @@ import { requireSupportedCloudWorkspaceGeneration } from "./supported-generation
 import {readCurrentCloudAgentBootBinding} from "./agent-boot-credentials.js";
 import {CloudAgentBootScopeSchema,type CloudAgentBootScope} from "./agent-boot-contract.js";
 import { CloudRuntimeAdmissionError, type CloudRuntimeAdmissionPhase } from "./runtime-admission-errors.js";
+import type { CapabilityClaims } from "./capability-contract.js";
 
 export const CLOUD_ACTOR_ADMISSION_PATH = "/internal/v2/cloud-workspaces/engine/client-admission";
 export const CLOUD_ACTOR_ADMISSION_AUDIENCE = "zeros-cloud-workspace-engine-client-admission-v2";
 export const CLOUD_ACTOR_TOKEN_PATTERN = /^zwa_[A-Za-z0-9_-]{43}$/;
+/** Capability-backed actor admission: the engine forwards a client's S1
+ * `zeros:engine` capability and proof with its heartbeat credential. */
+export const CLOUD_CAPABILITY_ACTOR_ADMISSION_PATH = "/internal/v2/cloud-workspaces/engine/capability-admission";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const hash = (token:string) => createHash("sha256").update(token).digest();
 const actorGrantSchema=z.object({version:z.literal(2),audience:z.literal(CLOUD_ACTOR_ADMISSION_AUDIENCE),workspaceId:z.string().uuid(),organizationId:z.string().uuid(),
@@ -236,6 +240,71 @@ export class DatabaseCloudWorkspaceActorSessionService {
     if(current.mode==="legacy")return null;
     if(current.binding.writerState!=="active"||current.binding.generation!==authority.generation||current.binding.engineInstanceId!==authority.engineInstanceId)rejected();
     return CloudAgentBootScopeSchema.parse(Object.fromEntries(Object.keys(CloudAgentBootScopeSchema.shape).map(field=>[field,current.binding[field as keyof typeof current.binding]])));
+  }
+
+  /** Admits a client that authenticated to this engine with its S1
+   * `zeros:engine` capability, which the caller verified (steps 1-13 with
+   * proof of possession) against this engine's placement. The client gets the
+   * session a redeemed grant gets, already consumed: the engine renews it with
+   * the returned token like a grant session, so every renewal check applies.
+   * The token's role, epochs, device key and source session must still be
+   * current, so one issued before a revocation, role change or key change is
+   * refused even inside its lifetime. The session never opens a relay, which
+   * requires an unconsumed grant. */
+  async admitCapability(input:CloudActorEngineScope & {claims:CapabilityClaims}) {
+    const {claims}=input;
+    const actorUserId=claims.sub.startsWith("user:")?claims.sub.slice(5):"";
+    const {role,sid,did,cnf}=claims,deviceKeyVersion=claims.ep.dk;
+    if(claims.knd!=="client"||claims.aud!=="zeros:engine"||claims.wsp!==input.workspaceId.toLowerCase()||
+      claims.org!==input.organizationId.toLowerCase()||claims.gen!==input.generation||
+      (claims.ein!==undefined&&claims.ein!==input.engineInstanceId.toLowerCase())||!uuid.test(actorUserId)||
+      !role||!sid||!did||!cnf||deviceKeyVersion===undefined)rejected();
+    return withSystemTx(this.options.pool,async tx=>{
+      const engine=await assertCurrentCloudEngineAuthority(tx,{...input,workosEnabled:this.options.workosEnabled,lock:"share"});
+      await requireSupportedCloudWorkspaceGeneration(tx,input);
+      if(claims.ep.wa!==engine.authorityEpoch)rejected();
+      const facts=(await tx.query<{access_revision:string;member_epoch:string;auth_revision:string;device_key_version:string;
+        device_public_key:Buffer;provider_session_id:string;provider_sub:string;created_at:string}>(`SELECT workspace.access_revision,
+          coalesce((SELECT member.epoch FROM cloud_capability_member_epochs member
+            WHERE member.org_id=workspace.org_id AND member.user_id=$3),1) AS member_epoch,
+          account.auth_revision,device.key_version AS device_key_version,device.public_key AS device_public_key,
+          source.provider_session_id,source.provider_sub,source.created_at::text
+        FROM cloud_workspaces workspace
+        JOIN cloud_workspace_engine_instances engine ON engine.id=$4 AND engine.workspace_id=workspace.id
+          AND engine.org_id=workspace.org_id AND engine.generation=$5 AND engine.actor_protocol_version=2
+        JOIN users account ON account.id=$3
+        JOIN devices device ON device.id=$6 AND device.user_id=$3 AND device.trust_state='trusted' AND device.revoked_at IS NULL
+        JOIN auth_sessions source ON source.id=$7 AND source.user_id=$3 AND source.provider='workos'
+        WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.deleted_at IS NULL
+          AND cloud_workspace_actor_auth_live($3,'workos',source.provider_sub,source.provider_session_id,source.created_at)`,
+      [input.workspaceId,input.organizationId,actorUserId,input.engineInstanceId,input.generation,did,sid])).rows[0];
+      if(!facts||([[facts.access_revision,claims.ep.wr],[facts.member_epoch,claims.ep.me],[facts.auth_revision,claims.ep.ac],
+        [facts.device_key_version,deviceKeyVersion]] as const).some(([current,token])=>Number(current)!==token)||
+        facts.device_public_key.length!==32||facts.device_public_key.toString("base64url")!==cnf.jwk.x)rejected();
+      const authority=await authorizeCloudWorkspaceActor(tx,{workspaceId:input.workspaceId,organizationId:input.organizationId,actorUserId,capability:"read"});
+      if(authority.role!==role)rejected();
+      // Unlike issue(), this holds share locks only, so concurrent admissions
+      // may pass the count together; the limit bounds resources, not authority.
+      const active=(await tx.query<{count:string}>(`SELECT count(*) FROM cloud_workspace_actor_sessions
+        WHERE workspace_id=$1 AND revoked_at IS NULL AND session_expires_at>clock_timestamp()
+          AND ((consumed_at IS NULL AND admission_expires_at>clock_timestamp()) OR last_renewed_at>clock_timestamp()-interval '30 seconds')`,[input.workspaceId])).rows[0]!;
+      if(Number(active.count)>=100)throw new HttpError(429,"cloud_actor_session_limit","Workspace connection limit reached");
+      const id=randomUUID(),token=`zwa_${randomBytes(32).toString("base64url")}`;
+      await tx.query(`INSERT INTO cloud_workspace_actor_sessions
+        (id,workspace_id,org_id,generation,engine_instance_id,actor_user_id,device_id,device_key_version,
+         authority_epoch,actor_fingerprint,actor_role,token_hash,admission_expires_at,session_expires_at,consumed_at,last_renewed_at,
+         auth_provider,auth_subject,auth_session_id,auth_session_created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,clock_timestamp()+interval '2 minutes',clock_timestamp()+interval '24 hours',
+          clock_timestamp(),clock_timestamp(),'workos',$13,$14,$15)`,[id,input.workspaceId,input.organizationId,input.generation,
+        input.engineInstanceId,actorUserId,did,deviceKeyVersion,engine.authorityEpoch,authority.fingerprint,authority.role,hash(token),
+        facts.provider_sub,facts.provider_session_id,facts.created_at]);
+      // The checks every renewal of this session makes, on the new row.
+      const current=await recordedActorAuthority(tx,{workspaceId:input.workspaceId,organizationId:input.organizationId,actorUserId,
+        actor:{actorUserId,deviceId:did,deviceKeyVersion,fingerprint:authority.fingerprint,sourceSessionId:id},capability:"read"},true);
+      if(current.role!==authority.role)rejected();
+      return {version:2 as const,audience:CLOUD_ACTOR_ADMISSION_AUDIENCE,admitted:true as const,authorityEpoch:engine.authorityEpoch,
+        accountUserId:actorUserId,actorSessionId:id,deviceId:did,role:authority.role,fingerprint:authority.fingerprint,renewalToken:token};
+    });
   }
 
   async consume(input:CloudActorEngineScope & {token:string;renew?:boolean}) {

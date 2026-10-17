@@ -24,6 +24,9 @@ import { installedEngineAuthorityCache, type EngineAuthorityCache } from "./engi
 
 export const API_ENGINE_CAPABILITY_PIN: CapabilityPin = Object.freeze({ aud: "zeros:api", knd: "engine" });
 export const REALTIME_CLIENT_CAPABILITY_PIN: CapabilityPin = Object.freeze({ aud: "zeros:realtime", knd: "client" });
+/** Client tokens for the engine, re-verified on `api` when an engine asks for
+ * a capability-backed actor session. */
+export const ENGINE_CLIENT_CAPABILITY_PIN: CapabilityPin = Object.freeze({ aud: "zeros:engine", knd: "client" });
 
 /** The header an engine sends its `zeros:api` token in, beside the heartbeat
  * bearer that remains the request's mutation fence in v1. */
@@ -143,6 +146,19 @@ export function createEngineCapabilityGate(service: CloudCapabilityService): Eng
     flags: service.flags,
     verifier: createApiEngineCapabilityVerifier({ issuer: service.issuer, keys: () => service.keyStore.publicKeySet(),
       placement: capabilityPlacementResolver(service.pool), ...(service.now ? { now: service.now } : {}) }),
+  };
+}
+
+/** Capability-backed actor admission on `api`, behind the same flag. Its
+ * verifier keeps its own proof replay window, apart from the engine's. */
+export type EngineClientCapabilityGate = Readonly<{ flags: RolloutFlagReader; verifier: ServiceCapabilityVerifier }>;
+
+export function createEngineClientCapabilityGate(service: CloudCapabilityService): EngineClientCapabilityGate {
+  return {
+    flags: service.flags,
+    verifier: new ServiceCapabilityVerifier({ pin: ENGINE_CLIENT_CAPABILITY_PIN, issuer: service.issuer,
+      keys: () => service.keyStore.publicKeySet(), placement: capabilityPlacementResolver(service.pool),
+      ...(service.now ? { now: service.now } : {}) }),
   };
 }
 
