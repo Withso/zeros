@@ -849,6 +849,13 @@ async function loadWorkspace(
   return row;
 }
 
+/** The workspace document as `GET …/cloud-workspaces/{workspace}` authorizes
+ * and projects it for this user; 404 not_found when the user may not read it. */
+export async function readCloudWorkspaceDocument(tx: Tx, input: { organizationId: string; workspaceId: string; userId: string },
+  config: CloudWorkspaceBackendConfig | null) {
+  return workspaceDocument(await loadWorkspace(tx, input.organizationId, input.workspaceId, input.userId), config);
+}
+
 async function loadIntentByKey(
   tx: Tx,
   orgId: string,

@@ -56,6 +56,7 @@ import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks
 import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
 import type { DatabaseCloudWorkspaceHealthService } from "./cloud-workspaces/health.js";
 import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
+import type { CloudDirectProviderEndpointLookup } from "./cloud-workspaces/actor-sessions.js";
 import { DatabaseCloudRuntimeAccessAdmissionService } from "./cloud-workspaces/runtime-access-admission.js";
 import { CloudRuntimeBridgeRelay } from "./cloud-workspaces/runtime-bridge.js";
 import { CloudPreviewWebSocketRelay } from "./cloud-workspaces/preview-websocket-relay.js";
@@ -207,6 +208,7 @@ let cloudWorkspaceEngineClientAdmissionService:
   | DatabaseCloudWorkspaceEngineClientAdmissionService
   | undefined;
 let cloudWorkspaceProviderResolver: CloudWorkspaceProviderResolver | undefined;
+let cloudDirectRoute: { enginePort: number; endpoint: CloudDirectProviderEndpointLookup } | undefined;
 const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending";
 // Per-organization rollout flags for new cloud paths, read from memory on hot
 // paths. Without the cloud runtime (maintenance, a pending controlled
@@ -462,6 +464,13 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     const setup = cloud.setupExecution;
     const blobs = blobService;
     const endpoint = (path: string) => `${setup.controlPlaneOrigin}${path}`;
+    const directProviderEndpoint: CloudDirectProviderEndpointLookup = async scope=>{
+      const {provider}=await providerResolver.resolve({organizationId:scope.organizationId,workspaceId:scope.workspaceId,generation:scope.generation,purpose:"preview"});
+      if(provider.name!=="boat"||!provider.getEngineEndpoint||scope.remotePort!==setup.enginePort)
+        throw new Error("cloud_actor_runtime_unavailable");
+      return provider.getEngineEndpoint(scope.resourceId,setup.enginePort);
+    };
+    cloudDirectRoute = { enginePort: setup.enginePort, endpoint: directProviderEndpoint };
     cloudWorkspaceEngineClientAdmissionService =
       new DatabaseCloudWorkspaceEngineClientAdmissionService({
         pool,
@@ -469,12 +478,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
         enginePort: setup.enginePort,
         workosEnabled: config.auth.provider === "workos",
         relayEnabled: true,
-        directProviderEndpoint:async scope=>{
-          const {provider}=await providerResolver.resolve({organizationId:scope.organizationId,workspaceId:scope.workspaceId,generation:scope.generation,purpose:"preview"});
-          if(provider.name!=="boat"||!provider.getEngineEndpoint||scope.remotePort!==setup.enginePort)
-            throw new Error("cloud_actor_runtime_unavailable");
-          return provider.getEngineEndpoint(scope.resourceId,setup.enginePort);
-        },
+        directProviderEndpoint,
       });
     const clientAdmission = cloudWorkspaceEngineClientAdmissionService;
     const sameRelayAuthority = (
@@ -814,6 +818,9 @@ const app = createApp(config, pool, emailConfig, {
     : {}),
   ...(cloudWorkspaceHealthService ? { cloudWorkspaceHealthService } : {}),
   ...(cloudCapabilities ? { cloudCapabilities } : {}),
+  // The relay route joins once realtime serves /v1/relay.
+  ...(cloudCapabilities ? { cloudRuntimeConnect: { capabilities: cloudCapabilities, cloudWorkspaces: config.cloudWorkspaces,
+    ...(cloudDirectRoute ? { direct: cloudDirectRoute } : {}) } } : {}),
 });
 
 let shuttingDown = false;

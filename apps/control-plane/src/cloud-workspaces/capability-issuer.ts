@@ -161,6 +161,8 @@ export async function issueEngineCapability(
   });
 }
 
+export type ClientCapabilityAudience = Extract<CapabilityAudience, "zeros:engine" | "zeros:realtime">;
+
 export type ClientCapabilityRequest = {
   organizationId: string;
   workspaceId: string;
@@ -169,7 +171,14 @@ export type ClientCapabilityRequest = {
   deviceId: string;
   /** auth_sessions.id of the caller's CP session. */
   sessionId: string;
-  audience: Extract<CapabilityAudience, "zeros:engine" | "zeros:realtime">;
+  audience: ClientCapabilityAudience;
+};
+
+export type IssuedClientCapabilities<A extends ClientCapabilityAudience> = {
+  generation: number;
+  /** The engine instance the tokens name in `ein`; null when none is live. */
+  engineInstanceId: string | null;
+  capabilities: Record<A, IssuedCapability>;
 };
 
 /** Client token (S1 "Issuance"): one statement reads the role, every epoch,
@@ -182,6 +191,21 @@ export async function issueClientCapability(
   issuer: string,
   request: ClientCapabilityRequest,
 ): Promise<IssuedCapability> {
+  const { audience, ...scope } = request;
+  return (await issueClientCapabilities(tx, store, issuer, scope, [audience])).capabilities[audience];
+}
+
+/** Client tokens for several audiences from the same single read, so they
+ * carry the same generation, `ein`, role and epochs (S3 runtime connect).
+ * `engineInstanceId` restricts `ein` to that instance: when it is no longer
+ * live the tokens name no engine and `engineInstanceId` is null. */
+export async function issueClientCapabilities<A extends ClientCapabilityAudience>(
+  tx: Tx,
+  store: CapabilitySigningKeyStore,
+  issuer: string,
+  request: Omit<ClientCapabilityRequest, "audience"> & { engineInstanceId?: string },
+  audiences: readonly A[],
+): Promise<IssuedClientCapabilities<A>> {
   if (!store.signer()) throw new CapabilityIssuerUnavailableError();
   const row = (await tx.query<{
     generation: number; authority_epoch: string; access_revision: string; role: string | null;
@@ -212,6 +236,7 @@ export async function issueClientCapability(
            AND engine.generation=workspace.current_generation AND engine.state='ready'
            AND engine.revoked_at IS NULL AND engine.final_checkpoint_at IS NULL
            AND engine.lease_expires_at>clock_timestamp()
+           AND ($6::uuid IS NULL OR engine.id=$6::uuid)
          ORDER BY engine.created_at DESC LIMIT 1) AS engine_instance_id
      FROM cloud_workspaces workspace
      JOIN cloud_workspace_generations g ON g.workspace_id=workspace.id AND g.generation=workspace.current_generation
@@ -219,7 +244,7 @@ export async function issueClientCapability(
      LEFT JOIN devices device ON device.id=$4 AND device.user_id=$3
      LEFT JOIN auth_sessions session ON session.id=$5 AND session.user_id=$3
      WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.deleted_at IS NULL`,
-    [request.workspaceId, request.organizationId, request.actorUserId, request.deviceId, request.sessionId],
+    [request.workspaceId, request.organizationId, request.actorUserId, request.deviceId, request.sessionId, request.engineInstanceId ?? null],
   )).rows[0];
   if (!row) throw new CapabilityIssuanceError("cloud_workspace_not_found");
   const role = row.role as Role | null;
@@ -245,20 +270,24 @@ export async function issueClientCapability(
   );
   const exp = Math.min(nowSeconds + CAPABILITY_TOKEN_LIFETIME_SECONDS, Math.floor(deadlineMs / 1000));
   if (exp <= nowSeconds) throw new CapabilityIssuanceError("capability_expired");
-  return sign(store, {
-    ...baseClaims(issuer, { organizationId: request.organizationId, workspaceId: request.workspaceId, generation: row.generation }),
-    aud: request.audience,
+  const scope = { organizationId: request.organizationId, workspaceId: request.workspaceId, generation: row.generation };
+  const shared = {
     sub: `user:${request.actorUserId}`,
-    knd: "client",
+    knd: "client" as const,
     ...(row.engine_instance_id ? { ein: row.engine_instance_id } : {}),
     role,
     scp: capabilityScopesForRole(role, supported, supported && row.supported_generation),
     ep: { wa: authorityEpoch, wr: accessRevision, me: memberEpoch, ac: authRevision, dk: deviceKeyVersion },
     sid: request.sessionId,
     did: request.deviceId,
-    cnf: { jwk: { kty: "OKP", crv: "Ed25519", x: row.device_public_key.toString("base64url") } },
+    cnf: { jwk: { kty: "OKP" as const, crv: "Ed25519" as const, x: row.device_public_key.toString("base64url") } },
     iat: nowSeconds,
     nbf: nowSeconds,
     exp,
-  });
+  };
+  const capabilities = {} as Record<A, IssuedCapability>;
+  for (const audience of new Set(audiences)) {
+    capabilities[audience] = await sign(store, { ...baseClaims(issuer, scope), aud: audience, ...shared });
+  }
+  return { generation: row.generation, engineInstanceId: row.engine_instance_id, capabilities };
 }

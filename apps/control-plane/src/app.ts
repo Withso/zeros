@@ -16,6 +16,7 @@ import { createCloudGithubWriteRoutes, CLOUD_GITHUB_WRITE_PATH } from "./cloud-w
 import type { DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
 import type { DatabaseCloudGithubReads } from "./cloud-workspaces/github-read-proxy.js";
 import { createDeviceSessionRoutes, type DeviceSessionRouteOptions } from "./realtime/device-session-routes.js";
+import { createCloudRuntimeConnectRoutes, type CloudRuntimeConnectOptions } from "./cloud-workspaces/runtime-connect-routes.js";
 import { CLOUD_GITHUB_READ_PATH, createCloudGithubReadRoutes } from "./cloud-workspaces/github-read-routes.js";
 import { createCloudIdleStopRoutes, CLOUD_IDLE_STOP_PATH, type DatabaseCloudIdleStop } from "./cloud-workspaces/idle-stop.js";
 import {isCustomerCloudPath,publicCloudError} from "./cloud-workspaces/public-contract.js";
@@ -121,6 +122,8 @@ export type CreateAppDependencies = {
   cloudCapabilities?: CloudCapabilityService;
   /** S3 `POST /v1/device-sessions`; mounted only with a realtime origin. */
   deviceSessions?: DeviceSessionRouteOptions;
+  /** S3 `runtime/connect` and `runtime/capabilities`; mounted only with an S1 issuer. */
+  cloudRuntimeConnect?: CloudRuntimeConnectOptions;
   cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
   cloudRuntimeServiceAccess?: DatabaseCloudRuntimeServiceAccess;
   cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver;
@@ -706,6 +709,7 @@ export function createApp(
     ),
   );
   if (dependencies.deviceSessions && !pendingMigration) app.route("/", createDeviceSessionRoutes(pool, dependencies.deviceSessions));
+  if (dependencies.cloudRuntimeConnect && !pendingMigration) app.route("/", createCloudRuntimeConnectRoutes(dependencies.cloudRuntimeConnect));
   app.route(
     "/",
     createRoutes(pool, emailConfig, config.cloudWorkspaces, {

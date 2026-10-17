@@ -75,6 +75,19 @@ const SESSION_ACTIVE = `(ds.provider_session_id IS NULL OR EXISTS (SELECT 1 FROM
  * unexpired. One predicate for consume and every later recheck. */
 const LIVE = `ds.expires_at > clock_timestamp() AND ${ACCOUNT_ACTIVE} AND ${DEVICE_TRUSTED} AND ${SESSION_ACTIVE}`;
 
+/** Whether a device session is live and was issued to this account, device
+ * and CP session: what a runtime connection names so renewals can reach it. */
+export async function deviceSessionLive(tx: Tx, input: {
+  deviceSessionId: string; accountUserId: string; deviceId: string; providerSessionId: string | null;
+}): Promise<boolean> {
+  if (!UUID.test(input.deviceSessionId)) return false;
+  const row = (await tx.query<{ live: boolean }>(
+    `SELECT (${LIVE}) AS live FROM cloud_device_sessions ds
+     WHERE ds.id = $1 AND ds.user_id = $2 AND ds.device_id = $3 AND ds.provider_session_id IS NOT DISTINCT FROM $4`,
+    [input.deviceSessionId, input.accountUserId, input.deviceId, input.providerSessionId])).rows[0];
+  return row?.live === true;
+}
+
 /** Why a device session may no longer stream, in the order it is checked;
  * maps onto the `capability.revoked` scope the stream sends before 4401. */
 export type DeviceSessionState = "live" | "expired" | "account" | "device" | "session";

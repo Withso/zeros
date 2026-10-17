@@ -37,6 +37,7 @@ export const ROLLOUT_FLAGS = {
   credential_push: { whileFeedUnavailable: "retain", summary: "Push credential-control revisions over the uplink" },
   relay_over_uplink: { whileFeedUnavailable: "retain", summary: "Relay client sessions over the uplink" },
   presence_in_memory: { whileFeedUnavailable: "retain", summary: "Keep presence and engine liveness in memory" },
+  runtime_connect: { whileFeedUnavailable: "retain", summary: "Serve S3 runtime connect and capability renewal", requires: ["capabilities"] },
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;
