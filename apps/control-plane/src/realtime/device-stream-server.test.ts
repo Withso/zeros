@@ -71,6 +71,9 @@ class FakeAuthority implements DeviceSessionAuthority {
 /** Accounts' current access sets; the server must re-read, never trust a hint. */
 class FakeCatalog implements DeviceStreamCatalogSource {
   readonly access = new Map<string, Map<string, DeviceStreamWorkspace>>();
+  /** Organizations each account belongs to; others belong to `defaultOrganizations`. */
+  readonly organizations = new Map<string, string[]>();
+  defaultOrganizations: string[] = [];
   catalogVersion = 10;
   reads = 0;
   grant(account: string, workspace: DeviceStreamWorkspace) {
@@ -92,7 +95,8 @@ class FakeCatalog implements DeviceStreamCatalogSource {
   async read(account: string, ids: readonly string[] | null): Promise<DeviceStreamCatalogRead> {
     this.reads += 1;
     const all = [...(this.access.get(account)?.values() ?? [])];
-    return { catalogVersion: this.catalogVersion, workspaces: ids ? all.filter(workspace => ids.includes(workspace.id)) : all, complete: true };
+    return { catalogVersion: this.catalogVersion, organizationIds: this.organizations.get(account) ?? this.defaultOrganizations,
+      workspaces: ids ? all.filter(workspace => ids.includes(workspace.id)) : all, complete: true };
   }
   async candidates(_ids: readonly string[], accounts: readonly string[]) { return new Set(accounts); }
   async organizationAccounts(_org: string, accounts: readonly string[]) { return new Set(accounts); }
@@ -199,6 +203,8 @@ describe("device stream server", () => {
   let catalog: FakeCatalog;
   let url: string;
   let flags: Record<RolloutFlagName, boolean>;
+  /** Organizations for which `flags` are on. */
+  let flaggedOrganizations: Set<string>;
   let subscriber: SecurityEventSubscriber | null;
   const flagListeners = new Set<() => void>();
   const peers: Peer[] = [];
@@ -213,8 +219,8 @@ describe("device stream server", () => {
     server = new DeviceStreamServer({
       authority, catalog,
       flags: {
-        enabled: (orgId, flag) => orgId === organizationId && flags[flag],
-        anyEnabled: flag => flags[flag],
+        enabled: (orgId, flag) => flaggedOrganizations.has(orgId) && flags[flag],
+        anyEnabled: flag => flaggedOrganizations.size > 0 && flags[flag],
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
       securityEvents: { subscribe: value => { subscriber = value; return () => { subscriber = null; }; } },
@@ -241,6 +247,14 @@ describe("device stream server", () => {
     expect(ready.t).toBe("ready");
     return { peer, ready };
   }
+  /** A hello the server must refuse: the close (null if it stays open) and any frames before it. */
+  async function refusedHello(who: DeviceSessionPrincipal, resume?: { cursor: string }) {
+    const peer = dial();
+    await peer.opened;
+    peer.send({ t: "hello", d: { contract: { min: 1, max: 1 }, ticket: authority.issue(who), ...(resume ? { resume: { ...resume, catalogVersion: 0 } } : {}) } });
+    const closed = await Promise.race([peer.closed, new Promise<null>(resolve => setTimeout(() => resolve(null), 1_000))]);
+    return { closed, frames: peer.frames.map(frame => frame.t) };
+  }
   const event = (kind: RealtimeSecurityEvent["kind"], fields: Partial<RealtimeSecurityEvent>): RealtimeSecurityEvent =>
     ({ sequence: ++sequence, kind, userId: null, organizationId: null, workspaceId: null, providerSessionId: null, ...fields });
   const until = async (predicate: () => boolean) => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise(r => setTimeout(r, 10)); };
@@ -249,6 +263,8 @@ describe("device stream server", () => {
     authority = new FakeAuthority();
     catalog = new FakeCatalog();
     organizationId = randomUUID();
+    flaggedOrganizations = new Set([organizationId]);
+    catalog.defaultOrganizations = [organizationId];
     subscriber = null;
     flags = { device_stream: true, presence_in_memory: true, authority_cache_shadow: false, authority_cache_enforce: false,
       capabilities: false, realtime_uplink: false, credential_push: false, relay_over_uplink: false };
@@ -547,6 +563,31 @@ describe("device stream server", () => {
     flags.device_stream = false;
     for (const listener of flagListeners) listener();
     expect((await live.peer.closed).code).toBe(4404);
+  });
+
+  it("streams for an account only while an organization it belongs to has device_stream on", async () => {
+    await start();
+    const pilot = organizationId, other = randomUUID();
+    const member = principal(), outsider = principal();
+    catalog.organizations.set(outsider.accountUserId, [other]);
+    const live = await connect(member);
+    // Another organization has the flag, but none of the outsider's does.
+    expect(await refusedHello(outsider)).toEqual({ closed: { code: 4404, reason: "device_stream_disabled" }, frames: [] });
+    // The pilot moves to the outsider's organization: the member closes 4404 and cannot resume.
+    flaggedOrganizations.delete(pilot);
+    flaggedOrganizations.add(other);
+    for (const listener of flagListeners) listener();
+    expect(await Promise.race([live.peer.closed, new Promise(resolve => setTimeout(() => resolve(null), 1_000))]))
+      .toEqual({ code: 4404, reason: "device_stream_disabled" });
+    expect(await refusedHello(member, { cursor: String(live.ready.d.cursor) }))
+      .toEqual({ closed: { code: 4404, reason: "device_stream_disabled" }, frames: [] });
+    const streaming = await connect(outsider);
+    // Leaving the last streaming organization closes the stream on the next re-read.
+    catalog.organizations.set(outsider.accountUserId, [pilot]);
+    subscriber!.events([event("organization.access_revoked", { userId: outsider.accountUserId, organizationId: other })]);
+    expect(await Promise.race([streaming.peer.closed, new Promise(resolve => setTimeout(() => resolve(null), 1_000))]))
+      .toEqual({ code: 4404, reason: "device_stream_disabled" });
+    expect(server.counters.closed.device_stream_disabled).toBe(4);
   });
 
   describe("reference client", () => {

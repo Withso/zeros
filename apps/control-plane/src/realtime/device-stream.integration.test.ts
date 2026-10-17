@@ -30,6 +30,8 @@ d("device stream database paths", () => {
   let deviceId: string;
   let pair: ReturnType<typeof generateKeyPairSync>;
   let flagOn: boolean;
+  /** Organizations whose `device_stream` is on while `flagOn`. */
+  let flagged: Set<string>;
 
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 6 }); });
   afterAll(async () => { await pool.end(); });
@@ -37,6 +39,7 @@ d("device stream database paths", () => {
     await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     flagOn = true;
+    flagged = new Set([fixture.organizationId]);
     user = await ensureUser(pool, { provider: "workos", providerSubject: `workos|${fixture.userId}`, email: `stream-${fixture.userId}@example.test`,
       displayName: "Owner", session: { id: `session_${randomUUID()}`, clientKind: "desktop", authTime: Math.floor(Date.now() / 1000),
         tokenExpiresAt: Math.floor(Date.now() / 1000) + 3600 } });
@@ -53,7 +56,7 @@ d("device stream database paths", () => {
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", user); await next(); });
     app.route("/", createDeviceSessionRoutes(pool, {
-      flags: { enabled: () => flagOn, anyEnabled: () => flagOn },
+      flags: { enabled: orgId => flagOn && flagged.has(orgId), anyEnabled: () => flagOn && flagged.size > 0 },
       streamUrl: `wss://realtime.example.test${DEVICE_STREAM_PATH}`, workosEnabled: true,
     }));
     app.onError((error, c) => error instanceof HttpError
@@ -103,6 +106,20 @@ d("device stream database paths", () => {
     const off = await post({ deviceId, client });
     expect(off.status).toBe(404);
     expect(off.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("issues a ticket only while an organization the account belongs to has device_stream on", async () => {
+    expect((await post({ deviceId, client })).status).toBe(201);
+    // Another organization keeps the flag, so the process still serves the stream.
+    flagged = new Set([randomUUID()]);
+    const refused = await post({ deviceId, client });
+    expect(refused.status).toBe(404);
+    expect(refused.headers.get("cache-control")).toBe("no-store");
+    flagged.add(fixture.organizationId);
+    await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, user.id]);
+    expect((await post({ deviceId, client })).status).toBe(404);
+    // Refused requests issue nothing.
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_device_sessions WHERE user_id=$1", [user.id])).rows[0]).toEqual({ count: 1 });
   });
 
   async function issue(reuseId: string | null = null) {
@@ -181,9 +198,17 @@ d("device stream database paths", () => {
     expect(owner.workspaces).toEqual([expect.objectContaining({ id: fixture.workspaceId, organizationId: fixture.organizationId,
       document: expect.objectContaining({ id: fixture.workspaceId, placement: "cloud" }) })]);
     await expect(source.read(fixture.userId, [randomUUID()])).resolves.toMatchObject({ workspaces: [] });
-    await expect(source.read(stranger, null)).resolves.toMatchObject({ workspaces: [] });
+    await expect(source.read(stranger, null)).resolves.toMatchObject({ workspaces: [], organizationIds: [] });
     await expect(source.candidates([fixture.workspaceId], [fixture.userId, stranger])).resolves.toEqual(new Set([fixture.userId]));
     await expect(source.organizationAccounts(fixture.organizationId, [fixture.userId, stranger])).resolves.toEqual(new Set([fixture.userId]));
+    expect(owner.organizationIds).toContain(fixture.organizationId);
+    // A live guest grant admits through its organization; a revoked one does not.
+    const grantId = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,created_by,expires_at)
+      VALUES($1,$2,$3,$4,'viewer',$5,clock_timestamp()+interval '1 hour')`, [grantId, fixture.workspaceId, fixture.organizationId, stranger, fixture.userId]);
+    await expect(source.read(stranger, [randomUUID()])).resolves.toMatchObject({ organizationIds: [fixture.organizationId] });
+    await pool.query("UPDATE cloud_workspace_guest_grants SET revoked_at=now() WHERE id=$1", [grantId]);
+    await expect(source.read(stranger, null)).resolves.toMatchObject({ organizationIds: [] });
   });
 
   describe("end to end", () => {

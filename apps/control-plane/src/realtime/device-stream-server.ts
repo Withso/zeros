@@ -5,7 +5,7 @@ import WebSocket, { WebSocketServer, type RawData } from "ws";
 
 import type { RolloutFlagReader } from "../rollout-flags.js";
 import type { DeviceSessionAuthority, DeviceSessionPrincipal, DeviceSessionState } from "./device-sessions.js";
-import type { DeviceStreamCatalogRead, DeviceStreamCatalogSource, DeviceStreamWorkspace } from "./device-stream-catalog.js";
+import { deviceStreamAdmits, type DeviceStreamCatalogRead, type DeviceStreamCatalogSource, type DeviceStreamWorkspace } from "./device-stream-catalog.js";
 import {
   DEVICE_STREAM_CLOSE,
   DEVICE_STREAM_CONTRACT,
@@ -34,7 +34,8 @@ import { MAX_DRAIN_MS, staggeredDrain } from "./drain.js";
 import type { RealtimeSecurityEvent, RealtimeSecurityEventFeed } from "./security-event-feed.js";
 import { UplinkAdmission, uplinkSourceAddress, type AdmissionTicket } from "./uplink-admission.js";
 
-/** The S3 device stream reads `device_stream` (process admission) and
+/** The S3 device stream reads `device_stream` (any organization mounts it;
+ * an account streams while one of its organizations has it) and
  * `presence_in_memory` (per organization), plus change notifications so a
  * flag turned off closes open streams. */
 export type DeviceStreamFlags = RolloutFlagReader & { onChange?(listener: () => void): () => void };
@@ -114,6 +115,8 @@ type DeviceSessionRecord = {
   buffer: BufferedFrame[];
   bufferBytes: number;
   known: Map<string, Known>;
+  /** From the last read; `device_stream` admits the account through them. */
+  organizationIds: readonly string[];
   catalogVersion: number;
   connection: DeviceStreamConnection | null;
   expiry: ReturnType<typeof setTimeout> | null;
@@ -267,10 +270,13 @@ export class DeviceStreamServer {
     this.wss.close();
   }
 
-  /** The flag turned off: every stream closes 4404 without resume; the
-   * client's next `POST /v1/device-sessions` answers 404 and it polls. */
+  /** A stream whose account no longer has an organization with the flag on
+   * closes 4404 without resume, and parked ones are dropped; the client's
+   * next `POST /v1/device-sessions` answers 404 and it polls. */
   applyRollout(): void {
-    if (this.enabled()) return;
+    const mounted = this.enabled();
+    for (const record of [...this.records.values()]) if (!mounted || !this.admits(record.organizationIds)) this.disable(record);
+    if (mounted) return;
     for (const connection of [...this.connections]) connection.close(DEVICE_STREAM_CLOSE.disabled, "device_stream_disabled", { park: false });
   }
 
@@ -352,6 +358,10 @@ export class DeviceStreamServer {
       catch { connection.close(DEVICE_STREAM_CLOSE.internalError, "internal_error", { park: false }); return; }
       if (connection.isClosed()) return;
       if (this.draining) { connection.close(DEVICE_STREAM_CLOSE.draining, "draining", { park: false }); return; }
+      if (!this.admits(baseline.organizationIds)) {
+        connection.close(DEVICE_STREAM_CLOSE.disabled, "device_stream_disabled", { park: false });
+        return;
+      }
       record = this.newRecord(principal, baseline);
     }
     if (record.expiry) clearTimeout(record.expiry);
@@ -438,7 +448,7 @@ export class DeviceStreamServer {
     const record: DeviceSessionRecord = {
       principal, lineage: randomBytes(16).toString("base64url"), seq: 0, floor: 0, buffer: [], bufferBytes: 0,
       known: new Map(baseline.workspaces.map(workspace => [workspace.id, known(workspace)])),
-      catalogVersion: baseline.catalogVersion, connection: null, expiry: null,
+      organizationIds: baseline.organizationIds, catalogVersion: baseline.catalogVersion, connection: null, expiry: null,
     };
     this.records.set(principal.deviceSessionId, record);
     let set = this.byAccount.get(principal.accountUserId);
@@ -450,6 +460,16 @@ export class DeviceStreamServer {
   private supersede(record: DeviceSessionRecord): void {
     record.connection?.close(DEVICE_STREAM_CLOSE.superseded, "superseded", { park: false, keepRecord: true });
     this.dropRecord(record);
+  }
+
+  private admits(organizationIds: readonly string[]): boolean {
+    return deviceStreamAdmits(this.options.flags, organizationIds);
+  }
+
+  private disable(record: DeviceSessionRecord): void {
+    const connection = record.connection;
+    this.dropRecord(record);
+    connection?.close(DEVICE_STREAM_CLOSE.disabled, "device_stream_disabled", { park: false });
   }
 
   private dropRecord(record: DeviceSessionRecord): void {
@@ -525,6 +545,8 @@ export class DeviceStreamServer {
 
   /** Diffs a re-read against what the device session was last told. */
   private apply(record: DeviceSessionRecord, read: DeviceStreamCatalogRead, filter: ReadonlySet<string> | null): void {
+    record.organizationIds = read.organizationIds;
+    if (!this.admits(record.organizationIds)) { this.disable(record); return; }
     const rows = new Map(read.workspaces.map(workspace => [workspace.id, workspace]));
     const ids = filter ? [...filter] : [...new Set([...record.known.keys(), ...rows.keys()])];
     record.catalogVersion = Math.max(record.catalogVersion, read.catalogVersion);

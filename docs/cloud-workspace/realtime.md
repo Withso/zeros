@@ -211,8 +211,12 @@ authority supplies keys, epochs and engine tokens
 device stream (`s3-client-contract.md` Part 2) on `/v1/device-stream`. It
 mounts in `realtime` and `combined` processes once any organization has the
 `device_stream` flag on; until then there is no socket, feed or LISTEN, the
-upgrade answers 404 and clients keep polling. Turning the flag off closes
-every stream with `4404`; the next `POST /v1/device-sessions` answers 404.
+upgrade answers 404 and clients keep polling. An account streams only while
+an organization it belongs to (as a member, or through a live guest grant)
+has the flag on: otherwise `POST /v1/device-sessions` answers 404 and a
+hello closes `4404`. Every catalog re-read refreshes that set, so turning
+the flag off for the organization, or leaving it, closes the account's
+streams with `4404` without resume and drops its parked device sessions.
 
 - **Tickets.** `POST /v1/device-sessions` (api; device proof action
   `device-session.create` over `{ deviceSessionId }`, 30/min per account,
