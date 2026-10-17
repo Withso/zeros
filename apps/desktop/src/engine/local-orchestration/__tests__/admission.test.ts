@@ -15,7 +15,13 @@ import { LocalCapabilityRegistry, LocalOrchestrationServer } from "../server";
 import type { LocalOrchestrationService } from "../service";
 import type { LocalOrchestrationPorts } from "../types";
 
-const WS = "/tmp/zeros-local-adm/ws";
+const roots: string[] = [];
+function temporary(): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-local-adm-"));
+  roots.push(root);
+  return root;
+}
+let workspacePath: string;
 
 const fileRace = vi.hoisted(() => ({ at: "" as "stat" | "realpath" | "", swap: () => {}, swaps: 0 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -107,7 +113,7 @@ const ports = {
   isCloudWorker: () => cloud,
   featureOpen: () => open,
   getChat: (id: string) => chats.get(id) ?? null,
-  listManagedWorkspaces: () => [managed("ws_1", WS), managed("ws_org", "/tmp/zeros-local-adm/org", "org_1")],
+  listManagedWorkspaces: () => [managed("ws_1", workspacePath), managed("ws_org", "/tmp/zeros-local-adm/org", "org_1")],
   listProjects: () => [],
 } as unknown as LocalOrchestrationPorts;
 const calls: unknown[] = [];
@@ -124,17 +130,18 @@ let admissions: LocalOrchestrationAdmissions;
 const disposers: Array<() => Promise<void>> = [];
 
 beforeEach(() => {
+  workspacePath = temporary();
   fileRace.at = "";
   fileRace.swaps = 0;
   open = true;
   cloud = false;
   calls.length = 0;
   chats.clear();
-  chats.set("local", chat("local", WS));
-  chats.set("local-claude", chat("local-claude", WS));
-  chats.set("local-cursor", chat("local-cursor", WS));
+  chats.set("local", chat("local", workspacePath));
+  chats.set("local-claude", chat("local-claude", workspacePath));
+  chats.set("local-cursor", chat("local-cursor", workspacePath));
   chats.set("org", chat("org", "/tmp/zeros-local-adm/org"));
-  chats.set("loose", chat("loose", fs.mkdtempSync(path.join(os.tmpdir(), "zeros-local-adm-"))));
+  chats.set("loose", chat("loose", temporary()));
   registry = new LocalCapabilityRegistry();
   server = new LocalOrchestrationServer(registry, async () => localOk({}, { engine: "e" }), () => "engine");
   admissions = new LocalOrchestrationAdmissions({
@@ -150,12 +157,13 @@ beforeEach(() => {
 afterEach(async () => {
   for (const dispose of disposers.splice(0)) await dispose();
   await server.stop();
+  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 const input = (conversationId: string | undefined, agentId = "codex") => ({
   agentId,
   executionId: `exec-${conversationId}`,
-  cwd: WS,
+  cwd: workspacePath,
   conversationId,
   signal: new AbortController().signal,
 });
@@ -197,7 +205,7 @@ describe("Local CLI admission", () => {
   });
 
   it("gives each execution a private drop folder for sandboxed shells, removed when it ends", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-local-adm-box-"));
+    const root = temporary();
     const withBox = new LocalOrchestrationAdmissions({
       ports,
       service,
@@ -213,7 +221,6 @@ describe("Local CLI admission", () => {
     expect((fs.statSync(dir).mode & 0o777).toString(8)).toBe("700");
     await tools.dispose();
     expect(fs.existsSync(dir)).toBe(false);
-    fs.rmSync(root, { recursive: true, force: true });
   });
 
   it("ends access when the execution ends", async () => {
@@ -239,12 +246,11 @@ describe("Local CLI admission", () => {
   });
 
   it("reads a --message-file inside the chat's workspace through the tool, and nothing outside it", async () => {
-    fs.mkdirSync(path.join(WS, ".context"), { recursive: true });
-    fs.writeFileSync(path.join(WS, ".context", "brief.md"), "A long brief");
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-local-adm-outside-"));
+    fs.mkdirSync(path.join(workspacePath, ".context"));
+    fs.writeFileSync(path.join(workspacePath, ".context", "brief.md"), "A long brief");
+    const outside = temporary();
     fs.writeFileSync(path.join(outside, "secret.txt"), "not yours");
-    fs.rmSync(path.join(WS, ".context", "link.txt"), { force: true });
-    fs.symlinkSync(path.join(outside, "secret.txt"), path.join(WS, ".context", "link.txt"));
+    fs.symlinkSync(path.join(outside, "secret.txt"), path.join(workspacePath, ".context", "link.txt"));
     const scope = { executionId: "exec-local", chatId: "local", agentId: "codex", surface: "cli" as const };
     const signal = new AbortController().signal;
     const reader = admissions.messageFileReader("local");
@@ -262,8 +268,7 @@ describe("Local CLI admission", () => {
   });
 
   it.each(["file", "directory"] as const)("does not read host content when the checked message %s is replaced", async (kind) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-local-adm-race-"));
-    disposers.push(async () => { fs.rmSync(root, { recursive: true, force: true }); });
+    const root = temporary();
     const workspace = path.join(root, "workspace");
     const inside = path.join(workspace, "briefs");
     const outside = path.join(root, "outside");
@@ -292,8 +297,7 @@ describe("Local CLI admission", () => {
   });
 
   it("reads workspace symlinks and added directories that resolve to admitted files", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-local-adm-links-"));
-    disposers.push(async () => { fs.rmSync(root, { recursive: true, force: true }); });
+    const root = temporary();
     const workspace = path.join(root, "workspace");
     const added = path.join(root, "added");
     fs.mkdirSync(workspace);

@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -16,6 +17,17 @@ function temporary(): string {
 function fakeRuntime(filename: string): void {
   mkdirSync(path.dirname(filename), { recursive: true });
   writeFileSync(filename, '#!/bin/sh\nprintf "<%s>\\n" "$@"\n', { mode: 0o755 });
+}
+async function readLauncher(filename: string): Promise<string> {
+  const handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    expect(info.isFile()).toBe(true);
+    expect(info.mode & 0o777).toBe(0o755);
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
 }
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -67,7 +79,7 @@ describe("Local CLI launcher", () => {
     const file = path.join(directory, "zeros");
     expect(statSync(directory).mode & 0o777).toBe(0o700);
     expect(statSync(path.dirname(directory)).mode & 0o777).toBe(0o700);
-    expect(statSync(file).mode & 0o777).toBe(0o755);
+    await readLauncher(file);
     expect(readdirSync(directory)).toEqual(["zeros"]);
     const result = spawnSync(file, ["local", "message", "send", "a", "--message", "a 'quote' $(uname)"], { encoding: "utf8" });
     expect(result.status).toBe(0);
@@ -76,9 +88,10 @@ describe("Local CLI launcher", () => {
     const replacement = path.join(root, "next runtime");
     fakeRuntime(replacement);
     await ensureLocalCliBinDir({ dataDir, execPath: replacement });
-    expect(readFileSync(file, "utf8")).toContain(replacement);
-    expect(readFileSync(file, "utf8")).not.toContain(executable);
-    expect(readFileSync(file, "utf8")).not.toMatch(/TOKEN|Bearer/);
+    const source = await readLauncher(file);
+    expect(source).toContain(replacement);
+    expect(source).not.toContain(executable);
+    expect(source).not.toMatch(/TOKEN|Bearer/);
     expect(readdirSync(directory)).toEqual(["zeros"]);
   });
 
