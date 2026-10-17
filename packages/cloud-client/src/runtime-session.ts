@@ -13,6 +13,8 @@ export const RUNTIME_AUTH_CONTRACT = 1;
 /** S3 Part 3: the server closes 4401 when `auth` has not arrived 10 s after the
  * upgrade; the client waits as long for `auth.ok`. */
 export const RUNTIME_AUTH_TIMEOUT_MS = 10_000;
+/** An attempt whose socket has not opened by then fails with `connect_timeout`. */
+export const RUNTIME_CONNECT_TIMEOUT_MS = 10_000;
 export const RUNTIME_RENEW_TIMEOUT_MS = 10_000;
 /** S3 runtime connect: `relayHedgeMs` is clamped to 300-500 ms. */
 export const RUNTIME_RELAY_HEDGE_MIN_MS = 300;
@@ -309,7 +311,8 @@ export class RuntimeConnection {
       return;
     }
     if (queued.length === MAX_QUEUED_MESSAGES) {
-      this.close(1008, "message_queue_full");
+      // Not 1008: a browser WebSocket accepts only 1000 and 3000-4999 from a client.
+      this.close(1000, "message_queue_full");
       return;
     }
     queued.push(text);
@@ -434,11 +437,15 @@ function connectErrorCode(failures: readonly RuntimeAttemptFailure[]): string {
 
 type AttemptPhase = "connecting" | "authenticating" | "won" | "ended";
 
+/** Stands in until the factory returns, and for an attempt whose socket could not be created. */
+const UNOPENED_SOCKET: RuntimeSocket = { send: () => undefined, close: () => undefined };
+
 interface Attempt {
   readonly route: RuntimeRouteKind;
-  readonly socket: RuntimeSocket;
+  socket: RuntimeSocket;
   phase: AttemptPhase;
-  authTimer?: ReturnType<typeof setTimeout>;
+  /** The connect timer until the socket opens, then the auth timer. */
+  timer?: ReturnType<typeof setTimeout>;
   failure?: RuntimeAttemptFailure;
   connection?: RuntimeConnection;
 }
@@ -467,7 +474,7 @@ class RouteRace {
 
   start(): void {
     this.startAttempt(0);
-    if (this.routes.length > 1) {
+    if (this.routes.length > 1 && !this.settled && this.attempts.length === 1) {
       this.hedgeTimer = setTimeout(() => this.startAttempt(1), relayHedgeDelayMs(this.connect.relayHedgeMs));
     }
   }
@@ -476,12 +483,21 @@ class RouteRace {
     if (this.settled || index !== this.attempts.length || index >= this.routes.length) return;
     clearTimeout(this.hedgeTimer);
     const route = this.routes[index];
-    const socket = this.options.createSocket(route.url, [RUNTIME_SUBPROTOCOL, RUNTIME_LEGACY_SUBPROTOCOL], {
-      open: (protocol) => this.onOpen(index, protocol),
-      message: (text) => this.onMessage(index, text),
-      close: (code, reason) => this.onClose(index, code, reason),
-    });
-    this.attempts.push({ route: route.kind, socket, phase: "connecting" });
+    const attempt: Attempt = { route: route.kind, socket: UNOPENED_SOCKET, phase: "connecting" };
+    this.attempts.push(attempt);
+    attempt.timer = setTimeout(() => {
+      this.abort(attempt, 1000, "connect_timeout", { route: attempt.route, closeCode: null, reason: "connect_timeout" });
+    }, RUNTIME_CONNECT_TIMEOUT_MS);
+    try {
+      attempt.socket = this.options.createSocket(route.url, [RUNTIME_SUBPROTOCOL, RUNTIME_LEGACY_SUBPROTOCOL], {
+        open: (protocol) => this.onOpen(index, protocol),
+        message: (text) => this.onMessage(index, text),
+        close: (code, reason) => this.onClose(index, code, reason),
+      });
+    } catch {
+      // For example a browser WebSocket refusing the URL.
+      this.fail(attempt, { route: attempt.route, closeCode: null, reason: "socket_failed" });
+    }
   }
 
   private onOpen(index: number, protocol: string): void {
@@ -500,7 +516,8 @@ class RouteRace {
       return;
     }
     attempt.phase = "authenticating";
-    attempt.authTimer = setTimeout(() => {
+    clearTimeout(attempt.timer);
+    attempt.timer = setTimeout(() => {
       this.abort(attempt, 1000, "auth_timeout", { route: attempt.route, closeCode: null, reason: "auth_timeout" });
     }, RUNTIME_AUTH_TIMEOUT_MS);
     void this.sendAuth(attempt);
@@ -581,7 +598,7 @@ class RouteRace {
   }
 
   private win(attempt: Attempt, ok: AuthOk): void {
-    clearTimeout(attempt.authTimer);
+    clearTimeout(attempt.timer);
     attempt.phase = "won";
     this.settle(attempt);
     attempt.connection = new RuntimeConnection({
@@ -596,7 +613,7 @@ class RouteRace {
   }
 
   private legacy(attempt: Attempt): void {
-    clearTimeout(attempt.authTimer);
+    clearTimeout(attempt.timer);
     attempt.phase = "ended";
     attempt.socket.close(1000, "legacy");
     if (this.settled) return;
@@ -611,7 +628,7 @@ class RouteRace {
     for (const other of this.attempts) {
       if (other === winner || other.phase === "won" || other.phase === "ended") continue;
       other.phase = "ended";
-      clearTimeout(other.authTimer);
+      clearTimeout(other.timer);
       other.socket.close(1000, "superseded");
     }
   }
@@ -624,7 +641,7 @@ class RouteRace {
   }
 
   private fail(attempt: Attempt, failure: RuntimeAttemptFailure): void {
-    clearTimeout(attempt.authTimer);
+    clearTimeout(attempt.timer);
     attempt.phase = "ended";
     attempt.failure = failure;
     if (this.settled) return;

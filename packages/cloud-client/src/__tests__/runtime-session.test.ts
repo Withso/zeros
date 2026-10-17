@@ -9,6 +9,7 @@ import {
   decodeCapabilityClaims,
   relayHedgeDelayMs,
   RUNTIME_AUTH_TIMEOUT_MS,
+  RUNTIME_CONNECT_TIMEOUT_MS,
   RUNTIME_RENEW_TIMEOUT_MS,
   RuntimeConnectError,
   type RuntimeConnection,
@@ -105,9 +106,12 @@ async function startConnect(
   signProof: (message: string) => Promise<string> = vi.fn(async (message: string) =>
     fakeSignature(message),
   ),
+  /** URLs the factory refuses by throwing, as a browser WebSocket does for an invalid URL. */
+  refuse: (url: string) => boolean = () => false,
 ): Promise<Run> {
   const sockets: FakeSocket[] = [];
   const createSocket: RuntimeSocketFactory = (url, protocols, handlers) => {
+    if (refuse(url)) throw new SyntaxError(`refused ${url}`);
     const socket: FakeSocket = { url, protocols, sent: [], handlers };
     sockets.push(socket);
     return {
@@ -308,6 +312,53 @@ describe("connectRuntime route race", () => {
     expect(error).toBeInstanceOf(RuntimeConnectError);
     expect(error).toMatchObject({ code: "runtime_unreachable" });
   });
+
+  it("fails a route whose socket never opens with connect_timeout", async () => {
+    const run = await startConnect();
+    await advance(400);
+    expect(run.sockets).toHaveLength(2);
+    await advance(RUNTIME_CONNECT_TIMEOUT_MS - 400);
+    expect(run.sockets[0].closed).toEqual({ code: 1000, reason: "connect_timeout" });
+    expect(run.sockets[1].closed).toBeUndefined();
+    await advance(400);
+    expect(run.sockets[1].closed).toEqual({ code: 1000, reason: "connect_timeout" });
+    const error: unknown = await run.pending.catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(RuntimeConnectError);
+    expect(error).toMatchObject({
+      code: "runtime_unreachable",
+      failures: [
+        { route: "direct", closeCode: null, reason: "connect_timeout" },
+        { route: "relay", closeCode: null, reason: "connect_timeout" },
+      ],
+    });
+  });
+
+  it("fails a route whose socket cannot be created and keeps racing the other", async () => {
+    const noDirect = await startConnect(connectResponse(), undefined, (url) => url === DIRECT_URL);
+    expect(noDirect.sockets.map((socket) => socket.url)).toEqual([RELAY_URL]);
+    noDirect.sockets[0].handlers.open(PROTOCOL);
+    await advance(0);
+    noDirect.sockets[0].handlers.message(authOk());
+    expect((await connectedOf(noDirect.pending)).route).toBe("relay");
+
+    const noRelay = await startConnect(connectResponse(), undefined, (url) => url === RELAY_URL);
+    noRelay.sockets[0].handlers.open(PROTOCOL);
+    await advance(400);
+    expect(noRelay.sockets).toHaveLength(1);
+    noRelay.sockets[0].handlers.message(authOk());
+    expect((await connectedOf(noRelay.pending)).route).toBe("direct");
+
+    const none = await startConnect(connectResponse(), undefined, () => true);
+    const error: unknown = await none.pending.catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(RuntimeConnectError);
+    expect(error).toMatchObject({
+      code: "runtime_unreachable",
+      failures: [
+        { route: "direct", closeCode: null, reason: "socket_failed" },
+        { route: "relay", closeCode: null, reason: "socket_failed" },
+      ],
+    });
+  });
 });
 
 describe("runtime auth handshake", () => {
@@ -453,6 +504,16 @@ describe("RuntimeConnection", () => {
     socket.handlers.message('{"t":"auth.ok","d":{}}');
     expect(socket.closed).toEqual({ code: 4400, reason: "unexpected_handshake_frame" });
     expect(received).toHaveLength(3);
+  });
+
+  it("closes with a code a browser accepts when a 257th message arrives before any listener", async () => {
+    const run = await startConnect();
+    const { connection, socket } = await connectOver(run, "direct");
+    for (let index = 0; index < 256; index += 1) socket.handlers.message(`{"type":"M${index}"}`);
+    expect(socket.closed).toBeUndefined();
+    socket.handlers.message('{"type":"overflow"}');
+    expect(socket.closed).toEqual({ code: 1000, reason: "message_queue_full" });
+    expect(connection.closed).toBe(true);
   });
 
   it("renews over either route with the engine token, a fresh proof and one shared promise", async () => {
