@@ -384,12 +384,27 @@ registration there is no uplink client at all.
   renewed closes with `capability_expired` at `exp`. The cloud transport
   does not carry the S3 `auth` frames yet, so no session reaches this
   path in this release.
-- **Client admission.** The engine's capability admission
-  (`EngineCapabilityAuth.verifyClient`, `admit` and `handleInBandAuth`) has
-  no caller in this release: direct and relay client sessions keep the
-  client-admission call even with `capabilities` on. It is wired when
-  clients send S3 tokens (track F1) and relay admission verifies them
-  (track C5).
+- **Client admission.**
+  `POST /internal/v2/cloud-workspaces/engine/capability-admission`
+  (`internal-routes.ts`, `DatabaseCloudWorkspaceActorSessionService.admitCapability`)
+  turns a client's `zeros:engine` capability, which the engine verified,
+  into an actor session. The engine sends the token, its proof and the route
+  it arrived on, with its heartbeat credential. `api` verifies the token
+  again (signature, placement, `ws:read`, and proof of possession in a
+  replay window of its own), then requires the token's authority epoch,
+  access revision, member epoch, account auth revision, device key, source
+  session and role to be current. A token issued before a revocation, role
+  change or key change is therefore refused even inside its lifetime. The
+  session is recorded already consumed, so it can never be redeemed as a
+  grant or open a relay. The engine renews it with the returned
+  `renewalToken` like a redeemed grant, under the same checks and the same
+  limit of 100 live sessions per workspace. An organization with
+  `capabilities` off gets `401 cloud_actor_admission_rejected` before any
+  SQL; an issuer outage answers `503 capability_issuer_unavailable`. The
+  engine's capability admission (`EngineCapabilityAuth.verifyClient`,
+  `admit` and `handleInBandAuth`) does not call it yet: direct and relay
+  client sessions keep the client-admission call even with `capabilities`
+  on.
 - **Credential push.** The engine offers `cred.v1`; a pushed `cred.revision`
   runs the same credential-controls exchange the poll runs (coalesced to
   the latest revision per kind while one is in flight) and is answered with

@@ -603,6 +603,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       admitEngineClient: (input) =>
         cloudWorkspaceEngineClientAdmissionService!.consume(input),
       admitActorClient: (input) => cloudWorkspaceEngineClientAdmissionService!.consumeActor(input),
+      admitCapabilityActor: (input) => cloudWorkspaceEngineClientAdmissionService!.admitCapabilityActor(input),
       admitRuntimeAccess: (input) => runtimeAccess.admit(input),
       appendRecord: (input) => recordService.append(input),
       readRecordHead: (input) => recordService.headForEngine(input),
