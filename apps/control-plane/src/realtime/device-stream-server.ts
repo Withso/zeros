@@ -155,6 +155,8 @@ export class DeviceStreamServer {
    * re-reads touch only the device sessions involved. */
   private readonly byWorkspace = new Map<string, Set<DeviceSessionRecord>>();
   private readonly byOrganization = new Map<string, Map<DeviceSessionRecord, number>>();
+  /** Records without a connection, in the order they were parked. */
+  private readonly parked = new Set<DeviceSessionRecord>();
   private readonly presence = new Map<string, Map<string, { state: PresenceState; since: string; connections: Set<DeviceStreamConnection> }>>();
   private readonly presenceDirty = new Set<string>();
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -386,6 +388,7 @@ export class DeviceStreamServer {
     }
     if (record.expiry) clearTimeout(record.expiry);
     record.expiry = null;
+    this.parked.delete(record);
     record.connection = connection;
     connection.bind(record);
     this.counters.admitted += 1;
@@ -410,6 +413,7 @@ export class DeviceStreamServer {
     if (keepRecord) return;
     if (!park || this.closed) { this.dropRecord(record); return; }
     record.expiry = this.timer(() => { if (!record.connection) this.dropRecord(record); }, this.options.resumeRetentionMs);
+    this.parked.add(record);
   }
 
   /** @internal */ ack(record: DeviceSessionRecord, cursor: string): boolean {
@@ -461,10 +465,11 @@ export class DeviceStreamServer {
     // through `byAccount` but invisible to revocation, which walks `records`.
     const current = this.records.get(principal.deviceSessionId);
     if (current) this.supersede(current);
+    // Connected device sessions are never evicted; the one parked longest goes first.
     while (this.records.size >= this.options.maxDeviceSessions) {
-      const parked = [...this.records.values()].find(record => !record.connection);
-      if (!parked) break;
-      this.dropRecord(parked);
+      const oldest = this.parked.values().next();
+      if (oldest.done) break;
+      this.dropRecord(oldest.value);
     }
     const record: DeviceSessionRecord = {
       principal, lineage: randomBytes(16).toString("base64url"), seq: 0, floor: 0, buffer: [], bufferBytes: 0,
@@ -516,6 +521,7 @@ export class DeviceStreamServer {
   private dropRecord(record: DeviceSessionRecord): void {
     if (record.expiry) clearTimeout(record.expiry);
     record.expiry = null;
+    this.parked.delete(record);
     // Only the current record under an id is indexed (`newRecord` supersedes first).
     if (this.records.get(record.principal.deviceSessionId) !== record) return;
     this.records.delete(record.principal.deviceSessionId);

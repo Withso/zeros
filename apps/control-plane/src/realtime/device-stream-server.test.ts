@@ -489,6 +489,21 @@ describe("device stream server", () => {
     expect((await third.peer.next("notification")).d).toMatchObject({ workspaceId: held.id, kind: "turn.failed" });
   });
 
+  it("at capacity evicts the device session parked longest, never a connected one", async () => {
+    await start({ maxDeviceSessions: 3 });
+    const first = principal(), second = principal();
+    const a = await connect(first), b = await connect(second), live = await connect(principal());
+    b.peer.ws.terminate();
+    await until(() => server.size === 2);
+    a.peer.ws.terminate();
+    await until(() => server.size === 1);
+    // `second` was parked first, though `first` was created first.
+    await connect(principal());
+    expect((await connect(first, { cursor: String(a.ready.d.cursor) })).ready.d.resumed).toBe(true);
+    expect((await connect(second, { cursor: String(b.ready.d.cursor) })).ready.d.resumed).toBe(false);
+    expect(live.peer.ws.readyState).toBe(WebSocket.OPEN);
+  });
+
   it("answers ready resumed:false and catalog.reset for another lineage or an acknowledged-away cursor", async () => {
     await start();
     const who = principal(), held = workspace(organizationId);
