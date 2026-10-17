@@ -24,6 +24,7 @@ const engineMethods = ZerosEngine.prototype as unknown as {
   cloudRuntimeReadiness(this: unknown): Readiness;
   verifyCloudActorClient(this: unknown, token: string, renew?: boolean): Promise<unknown>;
   initializeCloudAgentBoot(this: unknown): Promise<void>;
+  cloudEngineUplinkReadiness(this: unknown): { ready: boolean; phase: string };
 };
 /** Exercise the actual transport callback without starting a native engine. */
 function internalReadiness(engine: unknown): () => Readiness {
@@ -518,6 +519,12 @@ describe("engine boot-mode orchestration", () => {
     release!();
     await Promise.all([stale, pushed]);
     expect(f.controls).toHaveBeenCalledTimes(2); // a second exchange ran after the push
+  });
+  it("reports the uplink readiness phase as stopping while the engine stops", () => {
+    const readiness = (state: { running: boolean; engineStopping: boolean }) => engineMethods.cloudEngineUplinkReadiness.call(state);
+    expect(readiness({ running: false, engineStopping: false })).toEqual({ ready: false, phase: "starting" });
+    expect(readiness({ running: true, engineStopping: false })).toEqual({ ready: true, phase: "ready" });
+    expect(readiness({ running: false, engineStopping: true })).toEqual({ ready: false, phase: "stopping" });
   });
   it.each(["Local Personal", "organization-local"])("keeps %s off the cloud boot path", async _owner => {
     const registration = { localCommandsNegotiated: vi.fn(() => true) }, restore = vi.fn();
