@@ -1,9 +1,11 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CLOUD_OUTBOX_RESEND_WINDOW_MS,
   CloudOutbox,
+  cloudOutboxFileName,
   createCloudOutboxIfEnabled,
   type CloudOutboxEntry,
   type CloudOutboxSender,
@@ -61,12 +63,12 @@ function sendError(input: { status?: number; code?: string; networkError?: boole
   });
 }
 
-function openOutbox(dir: string, accountId: string, h: Harness): CloudOutbox {
+function openOutbox(dir: string, accountId: string, h: Harness, now: () => number = () => 1_760_000_000_000): CloudOutbox {
   const outbox = new CloudOutbox({
     accountId,
     directory: dir,
     send: h.send,
-    now: () => 1_760_000_000_000,
+    now,
     schedule: (delayMs, run) => h.timers.push({ delayMs, run }),
     onSettled: (entry) => h.settled.push({ ...entry }),
   });
@@ -300,6 +302,74 @@ describe("CloudOutbox", () => {
     expect(reopened.list()).toHaveLength(0);
     const after = await readdir(dir);
     expect(after.some((name) => name.endsWith(".corrupt"))).toBe(true);
+  });
+
+  it("records the first send before the request leaves", async () => {
+    const dir = await directory();
+    const file = path.join(dir, cloudOutboxFileName(ACCOUNT_A));
+    let onDisk: unknown;
+    const h = harness(async () => {
+      onDisk = JSON.parse(await readFile(file, "utf8"));
+      return { status: 202, replayed: false };
+    });
+    const outbox = openOutbox(dir, ACCOUNT_A, h);
+    outbox.enqueue({ operation: "wake", organizationId: ORGANIZATION, workspaceId: WORKSPACE });
+    await outbox.drain();
+    expect(h.sent).toHaveLength(1);
+    expect(onDisk).toMatchObject({ entries: [{ firstSentAt: 1_760_000_000_000 }] });
+  });
+
+  it("never resends a pending entry after the resend window", async () => {
+    const dir = await directory();
+    let now = 1_760_000_000_000;
+    const h = harness(async () => {
+      throw sendError({ networkError: true });
+    });
+    const outbox = openOutbox(dir, ACCOUNT_A, h, () => now);
+    const entry = outbox.enqueue({ operation: "wake", organizationId: ORGANIZATION, workspaceId: WORKSPACE });
+    await outbox.drain();
+    expect(h.sent).toHaveLength(1);
+    now += CLOUD_OUTBOX_RESEND_WINDOW_MS;
+    await outbox.drain();
+    expect(h.sent).toHaveLength(1);
+    expect(outbox.list().find((candidate) => candidate.id === entry.id)).toMatchObject({
+      state: "failed",
+      lastError: { code: "outbox_resend_window_expired" },
+    });
+    expect(h.settled).toHaveLength(1);
+    expect(h.settled[0]).toMatchObject({ id: entry.id, state: "failed" });
+  });
+
+  it("still sends an unsent entry for the first time days later", async () => {
+    const dir = await directory();
+    let now = 1_760_000_000_000;
+    const h = harness(async () => ({ status: 202, replayed: false }));
+    const outbox = openOutbox(dir, ACCOUNT_A, h, () => now);
+    const entry = outbox.enqueue({ operation: "wake", organizationId: ORGANIZATION, workspaceId: WORKSPACE });
+    now += 3 * 24 * 60 * 60 * 1000;
+    await outbox.drain();
+    expect(h.sent.map((sent) => sent.id)).toEqual([entry.id]);
+    expect(outbox.list().find((candidate) => candidate.id === entry.id)?.state).toBe("completed");
+  });
+
+  it("reads an outbox file written before firstSentAt existed", async () => {
+    const dir = await directory();
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(dir, { recursive: true });
+    const entry = {
+      id: "66666666-6666-4666-8666-666666666666",
+      operation: "wake",
+      organizationId: ORGANIZATION,
+      workspaceId: WORKSPACE,
+      createdAt: 1_760_000_000_000,
+      attempts: 0,
+      state: "pending",
+    };
+    await writeFile(path.join(dir, cloudOutboxFileName(ACCOUNT_A)), JSON.stringify({ version: 1, entries: [entry] }));
+    const h = harness(async () => ({ status: 202, replayed: false }));
+    const outbox = openOutbox(dir, ACCOUNT_A, h);
+    await outbox.drain();
+    expect(h.sent.map((sent) => sent.id)).toEqual([entry.id]);
   });
 });
 

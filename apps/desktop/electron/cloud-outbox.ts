@@ -27,6 +27,11 @@ import { classifyFailure, retryDelayMs } from "@zeros/cloud-client";
 
 export const CLOUD_OUTBOX_MAX_ENTRIES = 500;
 export const CLOUD_OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** The control plane remembers an Idempotency-Key's answer for 24 h. A
+ * pending entry is resent only within this window after its first send
+ * (one hour of margin for clock differences); after it, a resend could run
+ * the command a second time. */
+export const CLOUD_OUTBOX_RESEND_WINDOW_MS = 23 * 60 * 60 * 1000;
 
 const OperationSchema = z.enum(["create", "wake", "stop", "archive", "delete", "rename"]);
 export type CloudOutboxOperation = z.infer<typeof OperationSchema>;
@@ -41,6 +46,7 @@ const EntrySchema = z
     body: z.record(z.string(), z.unknown()).optional(),
     createdAt: z.number().int().nonnegative(),
     attempts: z.number().int().nonnegative(),
+    firstSentAt: z.number().int().nonnegative().optional(),
     state: z.enum(["pending", "completed", "failed"]),
     replayed: z.boolean().optional(),
     lastError: z.object({ code: z.string(), status: z.number().int().optional() }).strict().optional(),
@@ -68,6 +74,7 @@ export type CloudOutboxOptions = {
   onSettled?: (entry: CloudOutboxEntry) => void;
   maxEntries?: number;
   ttlMs?: number;
+  resendWindowMs?: number;
 };
 
 /** Keys that must never be written to disk: capabilities, tickets, tokens… */
@@ -89,6 +96,7 @@ export class CloudOutbox {
   private readonly schedule: (delayMs: number, run: () => void) => void;
   private readonly maxEntries: number;
   private readonly ttlMs: number;
+  private readonly resendWindowMs: number;
   private readonly send: CloudOutboxSender;
   private readonly onSettled?: (entry: CloudOutboxEntry) => void;
   private draining: Promise<void> | null = null;
@@ -102,9 +110,12 @@ export class CloudOutbox {
     this.schedule = options.schedule ?? ((delayMs, run) => setTimeout(run, delayMs).unref?.());
     this.maxEntries = options.maxEntries ?? CLOUD_OUTBOX_MAX_ENTRIES;
     this.ttlMs = options.ttlMs ?? CLOUD_OUTBOX_TTL_MS;
+    this.resendWindowMs = options.resendWindowMs ?? CLOUD_OUTBOX_RESEND_WINDOW_MS;
     this.send = options.send;
     if (options.onSettled) this.onSettled = options.onSettled;
     if (!Number.isSafeInteger(this.maxEntries) || this.maxEntries < 1 || this.maxEntries > CLOUD_OUTBOX_MAX_ENTRIES)
+      throw new Error("Invalid cloud outbox bound.");
+    if (!Number.isSafeInteger(this.resendWindowMs) || this.resendWindowMs < 1)
       throw new Error("Invalid cloud outbox bound.");
     if (!existsSync(this.file)) return;
     let parsed: z.infer<typeof FileSchema>;
@@ -199,6 +210,18 @@ export class CloudOutbox {
       const cutoff = this.now() - this.ttlMs;
       const entry = this.entries.find((candidate) => candidate.state === "pending" && candidate.createdAt >= cutoff);
       if (!entry) return;
+      if (entry.firstSentAt !== undefined && this.now() - entry.firstSentAt >= this.resendWindowMs) {
+        entry.state = "failed";
+        entry.lastError = { code: "outbox_resend_window_expired" };
+        this.persist();
+        this.onSettled?.({ ...entry });
+        continue;
+      }
+      if (entry.firstSentAt === undefined) {
+        // Recorded before the request leaves, so a crash mid-send still counts it.
+        entry.firstSentAt = this.now();
+        this.persist();
+      }
       try {
         const result = await this.send({ ...entry });
         entry.state = "completed";
