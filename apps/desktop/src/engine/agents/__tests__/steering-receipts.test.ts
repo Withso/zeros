@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { SteeringReceipts } from "../steering-receipts";
+import { STEERING_RECEIPT_CAPACITY, SteeringReceipts } from "../steering-receipts";
 
 describe("steering request receipts", () => {
   it("shares in-flight delivery and replays its terminal acknowledgement exactly once", async () => {
@@ -27,7 +27,7 @@ describe("steering request receipts", () => {
   it("keeps old acknowledgements at capacity instead of delivering a retry twice", async () => {
     const ledger = new SteeringReceipts<string>();
     const deliver = vi.fn(async () => "delivered");
-    for (let i = 0; i < 256; i++)
+    for (let i = 0; i < STEERING_RECEIPT_CAPACITY; i++)
       await ledger.run("execution", String(i), deliver);
     await expect(ledger.run("execution", "overflow", deliver)).rejects.toThrow(
       "Steering receipt capacity",
@@ -35,7 +35,19 @@ describe("steering request receipts", () => {
     await expect(ledger.run("execution", "0", deliver)).resolves.toBe(
       "delivered",
     );
-    expect(deliver).toHaveBeenCalledTimes(256);
+    expect(deliver).toHaveBeenCalledTimes(STEERING_RECEIPT_CAPACITY);
+  });
+
+  it("accepts thousands of steers in one long-lived execution and never forgets one", async () => {
+    const ledger = new SteeringReceipts<string>();
+    const deliver = vi.fn(async () => "delivered");
+    for (let i = 0; i < 2_000; i++)
+      await ledger.run("execution", String(i), deliver);
+    expect(deliver).toHaveBeenCalledTimes(2_000);
+    // The composer retries a lost steer by its exact id, however late.
+    await expect(ledger.run("execution", "0", deliver)).resolves.toBe("delivered");
+    expect(deliver).toHaveBeenCalledTimes(2_000);
+    expect(STEERING_RECEIPT_CAPACITY).toBeGreaterThan(256);
   });
 
   it("isolates execution replacements and keeps failed receipt retries idempotent", async () => {

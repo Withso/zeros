@@ -94,7 +94,8 @@ the single Design architecture, implementation and future-phase reference.
 For renderer state, navigation, loading, tabs, panels, or list work, also read
 `docs/ui-interaction-performance.md` when it is present.
 For provider event handling or tool transcript UI, also read
-`docs/agent-tool-presentation.md`.
+`docs/agent-tool-presentation.md`. For agent orchestration through
+`zeros local` (the Zeros Local CLI), read `docs/local-cli.md`.
 
 ## Agent credentials
 

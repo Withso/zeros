@@ -27,6 +27,15 @@
       "description": "family → the curated model value new chats use when no favorite is selected. Must name a model in that family.",
       "additionalProperties": { "type": "string", "minLength": 1 }
     },
+    "fallbacks": {
+      "type": "object",
+      "description": "family → ordered curated model values an adapter may run instead when the selected model cannot run for the account. Each entry must be a curated, non-liveRequired model in that family.",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 },
+        "uniqueItems": true
+      }
+    },
     "aliases": {
       "type": "object",
       "description": "family → { aliasId → canonical model value }",

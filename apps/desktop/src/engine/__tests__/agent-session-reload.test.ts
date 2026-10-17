@@ -1962,6 +1962,8 @@ describe("in-flight prompt staleness", () => {
       expect.objectContaining({
         type: "AGENT_PROMPT_FAILED",
         error: "The agent is already responding to this chat.",
+        // The sender queues behind this exact turn instead of failing.
+        activeTurn: { turnId: "user-1", startedAt: 1_234 },
       }),
     ]);
     expect(state.activePromptContexts.has("session-1")).toBe(true);

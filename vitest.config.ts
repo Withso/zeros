@@ -22,6 +22,8 @@ export default defineConfig({
       "apps/desktop/src/engine/agents/**/__tests__/**/*.test.ts",
       // Zeros-owned browser, computer and simulator tools for every agent.
       "apps/desktop/src/engine/agent-control/__tests__/**/*.test.ts",
+      // Zeros Local CLI: orchestration service, endpoint, CLI and launcher.
+      "apps/desktop/src/engine/local-orchestration/__tests__/**/*.test.ts",
       "apps/desktop/src/renderer/state/__tests__/**/*.test.ts",
       // Native renderer boundary parsers (pure validation, no Electron host).
       "apps/desktop/src/renderer/platform/__tests__/**/*.test.ts",

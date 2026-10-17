@@ -13,6 +13,9 @@ export interface AgentWorkspaceTools {
 export interface AgentSessionTools {
   readonly env: Readonly<Record<string, string>>;
   readonly mcpServers: readonly McpServerRegistration[];
+  /** Absolute directories to put first on the provider's PATH (the bundled
+   * `zeros` launcher). Prepended to the merged PATH, never replacing it. */
+  readonly pathPrepend?: readonly string[];
   /** Revoke authority synchronously before awaiting transport teardown. */
   revoke(): void;
   dispose(): Promise<void>;
@@ -83,6 +86,7 @@ export function composeAgentSessionToolFactories(
     return {
       env,
       mcpServers: admitted.flatMap((tools) => tools.mcpServers),
+      pathPrepend: admitted.flatMap((tools) => tools.pathPrepend ?? []),
       preparePrompt: async () => {
         const parts = await Promise.all(admitted.map((tools) => tools.preparePrompt?.()));
         return parts.filter((part): part is string => typeof part === "string" && part.length > 0).join("\n\n");
@@ -104,6 +108,18 @@ export function composeAgentSessionToolFactories(
       },
     };
   };
+}
+
+/** Put admitted directories first on PATH without dropping or duplicating the
+ * existing entries. */
+export function prependPath(
+  env: Record<string, string>,
+  dirs: readonly string[] | undefined,
+): void {
+  const add = (dirs ?? []).filter((dir) => typeof dir === "string" && dir.startsWith("/") && !dir.includes(":"));
+  if (add.length === 0) return;
+  const current = (env.PATH ?? process.env.PATH ?? "").split(":").filter((p) => p.length > 0 && !add.includes(p));
+  env.PATH = [...new Set(add), ...current].join(":");
 }
 
 interface Entry {
@@ -172,6 +188,7 @@ export class AgentSessionToolRegistry {
         return servers;
       }
       Object.assign(env, tools.env);
+      prependPath(env, tools.pathPrepend);
       const reserved = new Set(tools.mcpServers.map((server) => server.name));
       return [
         ...tools.mcpServers,

@@ -20,11 +20,13 @@ const OPEN: AgentControlAvailability = {
   zerosBrowser: true,
   computerUse: true,
   simulators: true,
+  localOrchestration: true,
 };
 const CLOSED: AgentControlAvailability = {
   zerosBrowser: false,
   computerUse: false,
   simulators: false,
+  localOrchestration: false,
 };
 const FAMILIES = ["codex", "claude", "cursor"] as const;
 

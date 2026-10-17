@@ -14,6 +14,7 @@
 //   project-opening    { root: string } (early "folder picked" signal, pre-respawn)
 //   menu-open-project  {} (File → Open Folder / Cmd+O → renderer openProject)
 //   deep-link          string
+//   local-navigation   string (validated chat/workspace link; navigation only)
 //   engine-restarted   { port: number }
 //   engine-crash       { ... } (watchdog could not respawn)
 //   gh:device-code     { ... } (GitHub device-flow verification code)
@@ -46,6 +47,37 @@ export interface ZerosEventEnvelope {
 }
 
 let mainWindow: BrowserWindow | null = null;
+let localNavigationReady = false;
+let pendingLocalNavigation: string | null = null;
+let openLocalNavigationWindow: (() => void) | undefined;
+
+/** Window construction stays in main, shared with macOS dock activation. */
+export function setLocalNavigationWindowOpener(open: () => void): void {
+  openLocalNavigationWindow = open;
+}
+
+/** Navigation is one latest intent, not a replay of windowless agent traffic.
+ * The renderer subscribes before consuming it through local_navigation_ready. */
+export function emitLocalNavigation(url: string): void {
+  if (!getMainWindow() || !localNavigationReady) {
+    pendingLocalNavigation = url;
+  } else {
+    emitEvent("local-navigation", url);
+  }
+  openLocalNavigationWindow?.();
+}
+
+export function takePendingLocalNavigation(): string | null {
+  if (!getMainWindow()) return null;
+  localNavigationReady = true;
+  const pending = pendingLocalNavigation;
+  pendingLocalNavigation = null;
+  return pending;
+}
+
+export function suspendLocalNavigation(): void {
+  localNavigationReady = false;
+}
 
 // COLD-LAUNCH BUFFER. When the app is launched BY a zeros:// deep link (e.g. an
 // OAuth handoff `zeros://auth/callback#code=…`), the URL is handled before the
@@ -78,8 +110,17 @@ export function getMainWindow(): BrowserWindow | null {
 /** Called once from main.ts after BrowserWindow creation. */
 export function setMainWindow(win: BrowserWindow): void {
   mainWindow = win;
+  localNavigationReady = false;
+  win.webContents.on("did-start-navigation", (details) => {
+    if (mainWindow === win && details.isMainFrame && !details.isSameDocument) {
+      localNavigationReady = false;
+    }
+  });
   win.on("closed", () => {
-    if (mainWindow === win) mainWindow = null;
+    if (mainWindow === win) {
+      mainWindow = null;
+      localNavigationReady = false;
+    }
   });
 
   if (!everHadWindow) {

@@ -35,6 +35,9 @@
 // ──────────────────────────────────────────────────────────
 
 export interface LazyBootResumeInput {
+  /** An external link selects context, never a new provider execution. Even
+   * persisted draft text and focused panes must remain adopt-only. */
+  readonly navigationOnly?: boolean;
   /** This chat is the workspace's focused conversation. */
   readonly isFocusedChat: boolean;
   /** A queued create-intent message is waiting to be sent into this chat. */
@@ -51,6 +54,7 @@ export interface LazyBootResumeInput {
  *  `true` ⇒ send `adoptOnly` and treat a miss as "leave it idle, admit later".
  *  `false` ⇒ the ordinary eager path: adopt if possible, otherwise admit now. */
 export function deferBootSessionAdmission(input: LazyBootResumeInput): boolean {
+  if (input.navigationOnly) return true;
   if (input.preparing) return false;
   if (input.isFocusedChat) return false;
   if (input.pendingAutoSend || input.composerHasText) return false;

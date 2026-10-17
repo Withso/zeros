@@ -25,6 +25,29 @@ describe("materializeMcpServerRegistration", () => {
     });
   });
 
+  it("keeps the server's tool deadline when it resolves credentials", () => {
+    expect(
+      materializeMcpServerRegistration(
+        {
+          name: "zeros_local",
+          transport: "http",
+          url: "http://127.0.0.1:43127/mcp",
+          headersFromEnv: { Authorization: "ZEROS_LOCAL_TOOLS_CAPABILITY" },
+          toolTimeoutSec: 660,
+          defaultToolsApproval: "approve",
+        },
+        { ZEROS_LOCAL_TOOLS_CAPABILITY: "Bearer opaque" },
+      ),
+    ).toEqual({
+      name: "zeros_local",
+      transport: "http",
+      url: "http://127.0.0.1:43127/mcp",
+      headers: { Authorization: "Bearer opaque" },
+      toolTimeoutSec: 660,
+      defaultToolsApproval: "approve",
+    });
+  });
+
   it("fails closed when a referenced secret is missing", () => {
     expect(() =>
       materializeMcpServerRegistration(

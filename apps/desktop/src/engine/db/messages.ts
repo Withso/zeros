@@ -424,6 +424,29 @@ export function getChatMessagesFrom(
   };
 }
 
+/** One chat's rows after an `ord`, oldest first — the paged transcript read
+ *  behind `zeros local chat messages`. Scoped to the chat BEFORE paging, so
+ *  another chat's traffic can never create gaps or leak through the cursor. */
+export function listChatMessagesAfterOrd(
+  chatId: string,
+  afterOrd: number,
+  limit: number,
+): PersistedMessageRow[] {
+  if (!chatId) return [];
+  const rows = openZerosDb()
+    .prepare(
+      "SELECT msg_id, ord, kind, payload, created_at FROM chat_messages WHERE chat_id = ? AND ord > ? ORDER BY ord ASC LIMIT ?",
+    )
+    .all(chatId, afterOrd, Math.max(1, Math.min(limit, WINDOW_MAX_ROWS))) as (MsgDbRow & { ord: number })[];
+  return rows.map((r) => ({
+    msgId: r.msg_id,
+    ord: r.ord,
+    kind: r.kind,
+    payload: r.payload,
+    createdAt: r.created_at,
+  }));
+}
+
 /** The highest `ord` in a chat (0 when empty) — the reset-undo guard reads this
  *  to confirm the truncated tail is still free before re-inserting at exact ords. */
 export function maxChatMessageOrd(chatId: string): number {

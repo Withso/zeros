@@ -15,6 +15,7 @@ import type {
   AgentMessagePhase,
   ModeSwitchUpdate,
   ModelFallbackInfo,
+  ModelSettingsSummary,
   SessionNotification,
   ToolCall,
   ToolCallUpdate,
@@ -134,6 +135,38 @@ export interface AgentTextMessage {
    *  generated brief the short label can't round-trip). Persisted with the
    *  payload so reopened chats keep the treatment. */
   autoAction?: string;
+  /** Zeros Local CLI: another chat's agent sent this user-role message
+   *  (`zeros local message send`). Engine-stamped only; a client never sets
+   *  it. `text` is the sender's own text — the provider received it behind a
+   *  `[Zeros] From agent …` label. Renderers show a "Sent from" header with
+   *  the sender's chat pill instead of that label. */
+  localFrom?: LocalMessageChatRef;
+  /** Zeros Local CLI: a note the engine delivered to a chat following
+   *  another (it finished its turn, or waits on a question/permission card).
+   *  The provider received it as user input; renderers show a compact
+   *  tool-style row, never a user bubble. `text` is a short plain summary. */
+  localNote?: LocalMessageNote;
+}
+
+/** A chat named by a Zeros Local CLI message or note. */
+export interface LocalMessageChatRef {
+  chatId: string;
+  /** The chat's title when recorded; renderers prefer the live title. */
+  title: string;
+  /** The chat's agent (`claude`, `codex`, `cursor`, …), for its logo. */
+  agentId: string | null;
+  /** `<scheme>://chat/<chatId>` for this channel. */
+  link: string;
+}
+
+export interface LocalMessageNote extends LocalMessageChatRef {
+  event: "done" | "question" | "permission";
+  /** `done`: how the turn ended (`completed`, `failed`, `cancelled`, …). */
+  status?: string;
+  /** `question`/`permission`: the waiting card. */
+  cardId?: string;
+  cardKind?: string;
+  cardTitle?: string;
 }
 
 export interface AgentTextMessageAttachment {
@@ -502,10 +535,29 @@ export function applyUpdate(
     : false;
   if (retiredParent && upd.sessionUpdate !== "message_parent_update") return messages;
   switch (upd.sessionUpdate) {
+    case "user_message_recorded": {
+      // Engine-recorded whole row: insert by id, never coalesce. A row a
+      // provider echo already adopted keeps its native messageId.
+      const message = upd.message;
+      if (!message || message.kind !== "text" || message.role !== "user" || typeof message.id !== "string" || !message.id)
+        return messages;
+      const index = messages.findIndex((m) => m.id === message.id);
+      if (index < 0) return [...messages, message];
+      const previous = messages[index]!;
+      const next = [...messages];
+      next[index] = previous.kind === "text" && previous.messageId !== undefined && message.messageId === undefined
+        ? { ...message, messageId: previous.messageId }
+        : message;
+      return next;
+    }
     case "model_fallback": {
       const messageId = `model-fallback-${upd.noticeId}`;
-      const { provider, fromModel, toModel, scope, reason } = upd;
-      const info = { provider, fromModel, toModel, scope, reason };
+      const { provider, fromModel, toModel, scope, reason, fromSettings, toSettings } = upd;
+      const info: ModelFallbackInfo = {
+        provider, fromModel, toModel, scope, reason,
+        ...(fromSettings ? { fromSettings } : {}),
+        ...(toSettings ? { toSettings } : {}),
+      };
       const index = messages.findIndex((m) => m.kind === "text" && m.messageId === messageId);
       if (index >= 0) {
         const previous = messages[index] as AgentTextMessage;
@@ -751,9 +803,45 @@ export function applyUpdate(
   }
 }
 
-export function modelFallbackText(info: ModelFallbackInfo, model = info.toModel): string {
+const FALLBACK_EFFORT_LABELS: Record<string, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+  max: "Max",
+  ultracode: "Ultracode",
+};
+
+/** "Extra High Fast" for a settings summary; null when it names nothing. */
+export function modelSettingsText(
+  settings: ModelSettingsSummary | undefined,
+  effortLabel: (effort: string) => string = (effort) => FALLBACK_EFFORT_LABELS[effort] ?? effort,
+): string | null {
+  const parts = [
+    settings?.effort ? effortLabel(settings.effort) : null,
+    settings?.fast ? "Fast" : null,
+  ].filter((part): part is string => !!part);
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
+/** Plain transcript narration for a fallback. `model` and `fromModel` are
+ *  display labels when the caller has the curated catalog, else wire ids. */
+export function modelFallbackText(
+  info: ModelFallbackInfo,
+  model = info.toModel,
+  fromModel: string | null = info.fromModel,
+  effortLabel?: (effort: string) => string,
+): string {
   if (info.provider === "codex" && info.reason === "cybersecurity")
     return `Model fallback to ${model} because of a cybersecurity-related safety check`;
+  if (info.reason === "unavailable" && fromModel)
+    return `Model fallback to ${model} because ${fromModel} isn't available for this account`;
+  if (info.reason === "settings") {
+    const ran = modelSettingsText(info.toSettings, effortLabel);
+    const refused = modelSettingsText(info.fromSettings, effortLabel);
+    const provider = info.provider === "cursor" ? "Cursor" : info.provider === "codex" ? "Codex" : "Claude";
+    return `Model fallback to ${model} ${ran ?? "default settings"} because ${provider} rejected ${refused ?? "the selected settings"}`;
+  }
   return info.scope === "session" ? `Model switched to ${model}` : `Model fallback used ${model}`;
 }
 

@@ -52,6 +52,8 @@ import { MarkdownCodeBlock } from "./markdown-code-block";
 import { useAttachmentImageSource } from "../attachment-image-source";
 import { useStreamingText, useStreamingTextEdge } from "./use-streaming-text";
 import { fallbackDisplayText } from "../model-fallback";
+import { LocalLinkHtml, LocalLinkText } from "../local-links/text";
+import { LocalNoteRow } from "../local-links/note-row";
 
 type ChatRole = "user" | "assistant" | "system";
 
@@ -129,6 +131,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     // groupMessagesIntoTurns drops them before they reach
     // this renderer; this guard covers any other dispatch path.
     if (message.resumeBoundary || message.retracted) return null;
+    if (message.localNote) return <LocalNoteRow note={message.localNote} />;
 
     return (
       <>
@@ -225,10 +228,10 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                           lang={seg.lang}
                         />
                       ) : (
-                        <div
+                        <LocalLinkHtml
                           key={i}
                           className="zeros-md-prose"
-                          dangerouslySetInnerHTML={{ __html: seg.html }}
+                          html={seg.html}
                         />
                       ),
                     )}
@@ -242,9 +245,9 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                   // doesn't shrink min-content, so unbroken pastes overflowed
                   // the w-fit user bubble past a narrow pane's left edge.
                   <div className="leading-snug wrap-anywhere whitespace-pre-wrap">
-                    {message.role === "user"
+                    <LocalLinkText text={message.role === "user"
                       ? text.trimEnd()
-                      : text}
+                      : text} />
                   </div>
                 )}
               </>
@@ -289,7 +292,7 @@ function MessageSegmentView({
   attachmentCwd?: string | null;
   attachmentImagesActive?: boolean;
 }) {
-  if (seg.type === "text") return <>{seg.text}</>;
+  if (seg.type === "text") return <LocalLinkText text={seg.text} />;
   if (seg.type === "mention") {
     return (
       <MentionPillView label={seg.label} path={seg.path} kind={seg.kind} />

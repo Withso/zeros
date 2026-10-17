@@ -3,8 +3,8 @@
 // to the adapter and caller; output or status changes never own expansion.
 // File identities stay visible when open; command/query previews do not.
 
-import { memo, useId } from "react";
-import { CircleX, Minus, Plus } from "lucide-react";
+import { memo, useId, useMemo } from "react";
+import { CircleX, Minus, Plus, Terminal } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
@@ -25,6 +25,10 @@ import { useTurnDisclosure } from "../turn-disclosures";
 import { ListRow } from "@/renderer/shared/ui/primitives";
 import { ImageHoverCard, imagePreviewMimeType } from "../image-hover-card";
 import { filePillPath, openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill-navigation";
+import { useLocalLinks } from "../local-links/context";
+import { LocalLinkPill } from "../local-links/pill";
+import { localLinkSpans } from "../local-links/model";
+import { localCliPresentation, type LocalCliTarget } from "./local-cli-presentation";
 
 interface EventRowProps {
   message: AgentMessage;
@@ -94,7 +98,12 @@ export const EventRow = memo(function EventRow({
   open: controlledOpen,
   onOpenChange,
 }: EventRowProps) {
-  const meta = metaOverride ?? metaForEvent(message);
+  const links = useLocalLinks();
+  const localCli = useMemo(() => links.enabled && message.kind === "tool" ? localCliPresentation(message, links.scheme) : null, [message, links.enabled, links.scheme]);
+  const meta = useMemo(() => {
+    const original = metaOverride ?? metaForEvent(message);
+    return localCli ? { ...original, Icon: Terminal, label: localCli.label, target: localCli.preview, targetFile: false } : original;
+  }, [metaOverride, message, localCli]);
   const [localOpen, setLocalOpen] = useTurnDisclosure<boolean>(message.id, disclosureKey, defaultOpen ?? false);
   const open = controlledOpen ?? localOpen;
   const detailId = useId();
@@ -119,6 +128,14 @@ export const EventRow = memo(function EventRow({
 
   const accessibleTarget = meta.targetFile ? meta.target?.replace(/\/+$/, "").split("/").pop() : meta.target;
   const fileRow = !!(meta.target && meta.targetFile);
+  const localTargets = useMemo<LocalCliTarget[]>(() => {
+    if (!links.enabled) return [];
+    if (localCli) return localCli.targets;
+    const hrefs = [meta.label, fileRow ? "" : meta.target ?? ""]
+      .flatMap((text) => localLinkSpans(text, links.scheme).map((span) => span.href));
+    return [...new Set(hrefs)].map((href) => ({ href }));
+  }, [links.enabled, links.scheme, localCli, meta, fileRow]);
+  const separateTargets = fileRow || !!localCli || localTargets.length > 0;
   const active = ctx.attachmentImagesActive !== false;
   const destination = isTool && message.toolKind === "edit" ? "changes" : "file";
   const path = meta.filePath;
@@ -149,6 +166,13 @@ export const EventRow = memo(function EventRow({
     {trailingNode ?? (meta.trailing ? <span className="text-fg2 shrink-0 text-xs tabular-nums">{meta.trailing}</span> : null)}
     {transportTruncated && <span className="bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium" title="The provider truncated this tool payload">Truncated</span>}
   </>;
+  const preview = meta.target && !open ? (
+    <span data-tool-preview="" className={cn(
+      "max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs font-medium",
+      localCli && sTone !== "fail" && "font-mono",
+      sTone === "fail" ? "bg-red-bg text-red-primary" : "bg-bg1-hover text-fg3",
+    )}>{meta.target}</span>
+  ) : null;
   const disclosure = (
     <ListRow
       // Width hugs the content (`w-fit`) and never exceeds the lane
@@ -156,9 +180,9 @@ export const EventRow = memo(function EventRow({
       // instead of painting the empty space out to the right edge.
       className={cn(
         "-ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
-        !fileRow && "group/event-row",
+        !separateTargets && "group/event-row",
         expandable ? "hover:bg-bg2-hover/40 cursor-pointer" : "cursor-default",
-        fileRow && "m-0 min-w-0 shrink-0 gap-2 rounded-sm p-0",
+        separateTargets && "m-0 min-w-0 shrink-0 gap-2 rounded-sm p-0",
         rowTint,
       )}
       onClick={() => {
@@ -192,7 +216,7 @@ export const EventRow = memo(function EventRow({
           )}
         >
           <ToolIdentityIcon
-            artwork={sTone === "fail" ? undefined : artwork}
+            artwork={sTone === "fail" || localCli ? undefined : artwork}
             appId={
               sTone !== "fail" && surface?.kind === "computer"
                 ? surface.appId
@@ -231,18 +255,20 @@ export const EventRow = memo(function EventRow({
         {sTone === "fail" ? "Error" : meta.label}
       </span>
 
-      {!fileRow && meta.target && !open && (
-          <span data-tool-preview="" className={cn("max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs font-medium", sTone === "fail" ? "bg-red-bg text-red-primary" : "bg-bg1-hover text-fg3")}>
-            {meta.target}
-          </span>
-      )}
-      {!fileRow && trailing}
+      {!separateTargets && preview}
+      {!separateTargets && trailing}
     </ListRow>
   );
 
   return (
     <div className="flex flex-col">
-      {fileRow ? <div className={cn("group/event-row -ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1", rowTint)}>{disclosure}{filePill}{trailing}</div> : disclosure}
+      {separateTargets ? <div className={cn("group/event-row -ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1", !fileRow && "flex-wrap", rowTint)}>
+        {disclosure}
+        {filePill}
+        {localTargets.map((target) => <LocalLinkPill key={target.href} href={target.href} fallback={target.fallback} />)}
+        {!fileRow && preview}
+        {trailing}
+      </div> : disclosure}
       {expandable && open && (
         <div id={detailId} className={cn("min-w-0 pr-2", isThinking ? "py-1" : "pt-1.5 pb-2")}>
           {isThinking ? (

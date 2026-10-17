@@ -3,8 +3,9 @@ import { toolRecord } from "./native-tool-presentation";
 
 /** Presentation only: unwrap a literal shell invocation, never evaluate shell
  * syntax. Extra arguments, expansion in the outer shell and malformed quoting
- * stay verbatim because removing them could change the apparent operation. */
-export function displayCommand(rawInput: unknown): string | null {
+ * stay verbatim because removing them could change the apparent operation.
+ * Classification callers also preserve unquoted newline command boundaries. */
+export function displayCommand(rawInput: unknown, singleCommand = false): string | null {
   const input = toolRecord(rawInput);
   const command = input.command ?? input.cmd ?? input.script;
   if (
@@ -14,7 +15,7 @@ export function displayCommand(rawInput: unknown): string | null {
     return shellBody(command) ?? command.map(quoteWord).join(" ");
   }
   if (typeof command !== "string" || !command) return null;
-  const words = literalWords(command);
+  const words = literalWords(command, singleCommand);
   return (words && shellBody(words)) ?? command;
 }
 

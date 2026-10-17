@@ -201,43 +201,96 @@ describe("background chat title requests", () => {
       expect.objectContaining({ id: "chat-2" }),
     );
   });
-  it.each([401, 429, 503])(
-    "leaves the seed on HTTP %s without retries",
-    async (status) => {
-      vi.mocked(fetch).mockResolvedValue(
-        new Response("private error", { status }),
-      );
+  it("waits for a fresh sign-in after HTTP 401 instead of retrying or guessing", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response("private error", { status: 401 }));
+    const { requestAiChatTitle } = await import("../chat-title");
+    const input = args();
+    requestAiChatTitle(input);
+    await settled();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(input.dispatch).not.toHaveBeenCalled();
+    // The attempt is not spent: a later sign-in names the chat.
+    vi.mocked(fetch).mockResolvedValue(Response.json({ title: "Fix login redirect bug" }));
+    requestAiChatTitle(input, true);
+    await settled();
+    expect(input.dispatch).toHaveBeenCalledOnce();
+  });
+
+  const failures: Array<[string, () => void]> = [
+    ["HTTP 429", () => vi.mocked(fetch).mockResolvedValue(new Response("busy", { status: 429 }))],
+    ["HTTP 503", () => vi.mocked(fetch).mockResolvedValue(new Response("down", { status: 503 }))],
+    ["a network error", () => vi.mocked(fetch).mockRejectedValue(new Error("private network detail"))],
+    ["a null title", () => vi.mocked(fetch).mockResolvedValue(Response.json({ title: null }))],
+    ["an unusable title", () => vi.mocked(fetch).mockResolvedValue(Response.json({ title: "Two words" }))],
+  ];
+  it.each(failures)("retries %s twice, spaced, then titles the chat from its prompt", async (_label, fail) => {
+    vi.useFakeTimers();
+    try {
+      fail();
       const { requestAiChatTitle } = await import("../chat-title");
       const input = args();
       requestAiChatTitle(input);
-      await settled();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      // Each retry asks again rather than reading a cached failure.
+      const ids = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(init!.body as string).messageId);
+      expect(new Set(ids).size).toBe(3);
+      expect(input.dispatch).toHaveBeenCalledExactlyOnceWith({
+        type: "UPDATE_CHAT_TITLE_IF",
+        id: "chat-1",
+        title: "Fix the login redirect bug",
+        expectedTitle: "Untitled",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names a chat from its prompt at once when the service refuses it outright", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response("bad", { status: 400 }));
+    const { requestAiChatTitle } = await import("../chat-title");
+    const input = args();
+    requestAiChatTitle(input);
+    await settled();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(input.dispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: "Fix the login redirect bug" }));
+  });
+
+  it("succeeds on a retry without the fallback", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(new Response("busy", { status: 429 }))
+        .mockResolvedValue(Response.json({ title: "Fix login redirect bug" }));
+      const { requestAiChatTitle } = await import("../chat-title");
+      const input = args();
       requestAiChatTitle(input);
-      await settled();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(input.dispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: "Fix login redirect bug" }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops retrying when the user renames the chat meanwhile", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(fetch).mockResolvedValue(new Response("busy", { status: 429 }));
+      const { requestAiChatTitle } = await import("../chat-title");
+      const input = args();
+      requestAiChatTitle(input);
+      await vi.advanceTimersByTimeAsync(0);
+      state.chats[0]!.title = "My own name";
+      await vi.advanceTimersByTimeAsync(80_000);
       expect(fetch).toHaveBeenCalledOnce();
       expect(input.dispatch).not.toHaveBeenCalled();
-    },
-  );
-  it.each([
-    null,
-    { title: null },
-    { title: 12 },
-    { title: "Two words" },
-    { title: "Error: authentication failed" },
-  ])("ignores unusable response %#", async (body) => {
-    vi.mocked(fetch).mockResolvedValue(Response.json(body));
-    const { requestAiChatTitle } = await import("../chat-title");
-    const input = args();
-    requestAiChatTitle(input);
-    await settled();
-    expect(input.dispatch).not.toHaveBeenCalled();
-  });
-  it("contains network errors", async () => {
-    vi.mocked(fetch).mockRejectedValue(new Error("private network detail"));
-    const { requestAiChatTitle } = await import("../chat-title");
-    const input = args();
-    requestAiChatTitle(input);
-    await settled();
-    expect(input.dispatch).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("makes no request while signed out, unconfigured, blank, or already renamed", async () => {
     const { requestAiChatTitle } = await import("../chat-title");

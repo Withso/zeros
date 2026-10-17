@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AgentSessionToolRegistry,
   composeAgentSessionToolFactories,
+  prependPath,
   type AgentSessionTools,
 } from "../session-tools";
 
@@ -237,5 +238,22 @@ describe("composed session tools", () => {
     await expect(composeAgentSessionToolFactories([async () => left, async () => right])(input)).rejects.toThrow(/same/i);
     expect(left.dispose).toHaveBeenCalledOnce();
     expect(right.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("puts admitted launcher directories first on PATH without dropping the user's", async () => {
+    const env: Record<string, string> = { PATH: "/usr/bin:/opt/zeros/bin:/bin" };
+    prependPath(env, ["/opt/zeros/bin", "relative/bin", "/bad:dir"]);
+    expect(env.PATH).toBe("/opt/zeros/bin:/usr/bin:/bin");
+    const untouched: Record<string, string> = { PATH: "/usr/bin" };
+    prependPath(untouched, undefined);
+    expect(untouched.PATH).toBe("/usr/bin");
+
+    const local = { ...resource(), env: { LOCAL_TOKEN: "t" }, mcpServers: [{ ...server, name: "zeros_local" }], pathPrepend: ["/opt/zeros/bin"] };
+    const registry = new AgentSessionToolRegistry(composeAgentSessionToolFactories([async () => resource(), async () => local]));
+    const spawnEnv: Record<string, string> = { PATH: "/usr/bin" };
+    await registry.admit({ executionId: "path", cwd: "/a" }, [], spawnEnv);
+    expect(spawnEnv.PATH).toBe("/opt/zeros/bin:/usr/bin");
+    expect(spawnEnv.LOCAL_TOKEN).toBe("t");
+    await registry.dispose();
   });
 });

@@ -49,6 +49,28 @@
     {
       "role": "text",
       "fg": [
+        "blue-fg"
+      ],
+      "on": [
+        "blue-pill-bg",
+        "blue-pill-hover"
+      ],
+      "why": "Workspace link pill labels at rest and hover; Light uses a stronger fill on the bg2 composer."
+    },
+    {
+      "role": "focus",
+      "fg": [
+        "highlighted-bright"
+      ],
+      "on": [
+        "blue-pill-bg",
+        "blue-pill-hover"
+      ],
+      "why": "Opaque keyboard focus ring on Local link pills."
+    },
+    {
+      "role": "text",
+      "fg": [
         "fg1",
         "fg2",
         "fg3"

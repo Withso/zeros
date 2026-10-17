@@ -137,7 +137,7 @@ describe("internal feature flags", () => {
   it("starts staged agent control features on for staff only", async () => {
     const backing = installLocalStorageStub();
     const store = await freshStore();
-    for (const feature of ["zerosBrowser", "computerUse", "simulators"] as const) {
+    for (const feature of ["zerosBrowser", "computerUse", "simulators", "localOrchestration"] as const) {
       expect(store.isInternalFeatureEnabled(feature)).toBe(true);
       signedInAs("developer");
       expect(store.isInternalFeatureActive(feature)).toBe(true);

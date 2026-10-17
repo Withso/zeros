@@ -153,6 +153,35 @@ export function validateCatalog(catalog) {
     }
   }
 
+  // Fallbacks are models an adapter may run on the user's behalf, so each one
+  // must be a curated row of its family that can run without live discovery.
+  if (catalog.fallbacks !== undefined) {
+    if (!catalog.fallbacks || typeof catalog.fallbacks !== "object" || Array.isArray(catalog.fallbacks)) {
+      errors.push("`fallbacks` must be an object");
+    } else {
+      for (const [family, list] of Object.entries(catalog.fallbacks)) {
+        if (!Array.isArray(list)) {
+          errors.push(`fallbacks.${family} must be an array`);
+          continue;
+        }
+        const curated = new Map((catalog.families[family] ?? []).map((m) => [m?.value, m]));
+        const seen = new Set();
+        for (const [i, value] of list.entries()) {
+          const at = `fallbacks.${family}[${i}]`;
+          if (typeof value !== "string" || value.length === 0) {
+            errors.push(`${at} must be a non-empty string`);
+            continue;
+          }
+          if (seen.has(value)) errors.push(`${at} "${value}" is a duplicate`);
+          seen.add(value);
+          const model = curated.get(value);
+          if (!model) errors.push(`${at} → "${value}" is not a curated ${family} model`);
+          else if (model.liveRequired === true) errors.push(`${at} → "${value}" is liveRequired and cannot be a fallback`);
+        }
+      }
+    }
+  }
+
   // Aliases must resolve to a curated value in their family (exact or [1m]-base).
   if (catalog.aliases && typeof catalog.aliases === "object") {
     for (const [family, map] of Object.entries(catalog.aliases)) {

@@ -724,6 +724,35 @@ export async function bridgeChatSummaries(
   }));
 }
 
+/** What names an Untitled Local chat: its first real prompt and whether the
+ *  agent answered it (`chats.titleSeeds`, desktop engine only). */
+export interface ChatTitleSeedWire {
+  chatId: string;
+  messageId: string;
+  prompt: string;
+  answered: boolean;
+}
+
+export async function bridgeChatTitleSeeds(
+  bridge: RuntimeClient,
+  chatIds: readonly string[],
+): Promise<ChatTitleSeedWire[]> {
+  if (chatIds.length === 0) return [];
+  const r = (await workspaceOp(bridge, "chats.titleSeeds", { chatIds: chatIds.slice(0, 50) })) as
+    | { seeds?: unknown }
+    | undefined;
+  // An older engine does not know the op (it throws); a shape it never sent
+  // degrades to nothing rather than a request with a missing prompt.
+  return (Array.isArray(r?.seeds) ? r.seeds : []).filter(
+    (seed): seed is ChatTitleSeedWire =>
+      !!seed &&
+      typeof (seed as ChatTitleSeedWire).chatId === "string" &&
+      typeof (seed as ChatTitleSeedWire).messageId === "string" &&
+      typeof (seed as ChatTitleSeedWire).prompt === "string" &&
+      typeof (seed as ChatTitleSeedWire).answered === "boolean",
+  );
+}
+
 // ── Incremental delta sync ──────────────────────────────────
 
 /** A transcript row changed since the pull cursor (the message half of delta

@@ -52,6 +52,7 @@
     "./review-hunks": "./src/review-hunks.ts",
     "./workspace-paths": "./src/workspace-paths.ts",
     "./identities": "./src/identities.ts",
+    "./local-orchestration": "./src/local-orchestration.ts",
     "./containment": "./src/containment.ts",
     "./external-url": "./src/external-url.ts",
     "./browser-tools": "./src/browser-tools.ts",

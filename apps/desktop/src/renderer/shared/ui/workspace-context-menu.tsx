@@ -1,6 +1,7 @@
 import React, { useRef, type MouseEvent, type ReactNode } from "react";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
-import { Archive, Check, RotateCw } from "lucide-react";
+import { Archive, Check, Link, RotateCw } from "lucide-react";
+import { copyLocalLink, useCanCopyLocalLink } from "../../state/local-link-actions";
 
 import {
   workspaceSetStatus,
@@ -66,6 +67,8 @@ export function WorkspaceContextMenu({
   placement = "pointer",
 }: WorkspaceContextMenuProps) {
   const archiving = useWorkspaceArchiving(workspace.id);
+  const canCopyLink = useCanCopyLocalLink(workspace);
+  const folderWorkspace = isLocalMainWorkspace(workspace);
   const archiveInert = archiveDisabled || archiving;
   const setStatus = (status: WorkspaceStatus) => {
     if (status === workspace.status) return;
@@ -112,7 +115,7 @@ export function WorkspaceContextMenu({
     : children;
 
   // Root folders have no engine workspace row to archive or change status.
-  if (isLocalMainWorkspace(workspace)) return <>{children}</>;
+  if (folderWorkspace && !canCopyLink) return <>{children}</>;
 
   return (
     <ContextMenu
@@ -130,7 +133,7 @@ export function WorkspaceContextMenu({
         {guardedTrigger}
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuSub>
+        {!folderWorkspace && <ContextMenuSub>
           <ContextMenuSubTrigger>
             <StatusIcon status={workspace.status} className="size-3.5" />
             <span>Set status</span>
@@ -149,9 +152,16 @@ export function WorkspaceContextMenu({
               </ContextMenuItem>
             ))}
           </ContextMenuSubContent>
-        </ContextMenuSub>
+        </ContextMenuSub>}
 
-        {onRestart && (
+        {canCopyLink && (
+          <ContextMenuItem onSelect={() => void copyLocalLink(workspace)}>
+            <Link />
+            <span>Copy link</span>
+          </ContextMenuItem>
+        )}
+
+        {!folderWorkspace && onRestart && (
           <>
             <ContextMenuSeparator />
             <Tooltip label={restartDisabledReason}>
@@ -165,7 +175,7 @@ export function WorkspaceContextMenu({
           </>
         )}
 
-        {onArchive && (
+        {!folderWorkspace && onArchive && (
           <>
             <ContextMenuSeparator />
             <ContextMenuItem onSelect={onArchive} disabled={archiveInert}>

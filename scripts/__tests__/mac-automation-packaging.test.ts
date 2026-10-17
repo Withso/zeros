@@ -6,6 +6,7 @@ import {
   rmdirSync,
   symlinkSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -69,6 +70,28 @@ describe("macOS automation packaging", () => {
       // never follow a link into the real checkout.
       for (const entry of readdirSync(checkout))
         unlinkSync(join(checkout, entry));
+      rmdirSync(checkout);
+    }
+  });
+
+  it.each([
+    ["missing launcher mapping", builder.replace(/  - from: apps\/desktop\/resources\/bin\n    to: bin\n/, ""), "Local CLI resource must map"],
+    ["wrong launcher destination", builder.replace("    to: bin\n", "    to: wrong-bin\n"), "Local CLI resource must map"],
+    ["hidden plugin omitted", builder.replace(/(from: apps\/desktop\/resources\/zeros-local-cli-skill[\s\S]*?)      - "\.claude-plugin\/\*\*\/\*"/, "$1"), "Local CLI skill filter must include"],
+  ])("rejects a Local CLI package with %s", (_label, config, diagnostic) => {
+    const root = resolve(".");
+    const checkout = mkdtempSync(join(tmpdir(), "zeros-cli-package-"));
+    try {
+      for (const entry of readdirSync(root)) {
+        if (entry !== "binaries" && entry !== "electron-builder.yml")
+          symlinkSync(join(root, entry), join(checkout, entry));
+      }
+      writeFileSync(join(checkout, "electron-builder.yml"), config);
+      const result = spawnSync(process.execPath, ["scripts/check-packaging-paths.mjs"], { cwd: checkout, encoding: "utf8" });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(diagnostic);
+    } finally {
+      for (const entry of readdirSync(checkout)) unlinkSync(join(checkout, entry));
       rmdirSync(checkout);
     }
   });

@@ -10,6 +10,8 @@ export const AGENT_CONTROL_FEATURES = [
   "computerUse",
   /** Simulator tabs, agent simulator tools and video key frames. */
   "simulators",
+  /** Zeros Local CLI: agents start, message and follow other Local chats. */
+  "localOrchestration",
 ] as const;
 export type AgentControlFeature = (typeof AGENT_CONTROL_FEATURES)[number];
 
@@ -27,6 +29,7 @@ export const AGENT_CONTROL_ROLLOUT: Readonly<
   zerosBrowser: "internal",
   computerUse: "internal",
   simulators: "internal",
+  localOrchestration: "internal",
 });
 
 /** Which staged features this copy of Zeros has open. The renderer decides
@@ -69,11 +72,14 @@ export function initialAgentControlAvailability(
     zerosBrowser: rollout.zerosBrowser === "default",
     computerUse: rollout.computerUse === "default",
     simulators: rollout.simulators === "default",
+    localOrchestration: rollout.localOrchestration === "default",
   };
 }
 
 /** Main and the engine read a push strictly: a missing or malformed feature
- * rejects all of it, so a bad update never half-applies. */
+ * rejects all of it, so a bad update never half-applies. Features added after
+ * the first three read a missing value as closed, so a push from a renderer
+ * that predates them still applies. */
 export function readAgentControlAvailability(
   value: unknown,
 ): AgentControlAvailability | null {
@@ -86,10 +92,17 @@ export function readAgentControlAvailability(
   ) {
     return null;
   }
+  if (
+    record.localOrchestration !== undefined &&
+    typeof record.localOrchestration !== "boolean"
+  ) {
+    return null;
+  }
   return {
     zerosBrowser: record.zerosBrowser,
     computerUse: record.computerUse,
     simulators: record.simulators,
+    localOrchestration: record.localOrchestration === true,
   };
 }
 
@@ -135,6 +148,7 @@ const UNAVAILABLE_REASONS: Record<AgentControlFeature, string> = {
   zerosBrowser: "The Zeros browser isn't available in this copy of Zeros.",
   computerUse: "Computer use isn't available in this copy of Zeros.",
   simulators: "Simulators aren't available in this copy of Zeros.",
+  localOrchestration: "Zeros Local CLI isn't available in this copy of Zeros.",
 };
 
 /** What a tool call or request hears while its feature is closed. It names no

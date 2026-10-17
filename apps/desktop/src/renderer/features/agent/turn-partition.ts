@@ -81,6 +81,7 @@ function isBudgetStop(e: AgentMessage): boolean {
  * The parent can be idle while a task still runs. Its activity signal, rather
  * than the child task's status, determines whether the answer is settled. */
 function isBackgroundTask(e: AgentMessage): boolean {
+  if (e.kind === "text" && e.localNote) return true;
   if (e.kind === "error_notice" && !e.parentToolId && e.code?.startsWith("claude-background-")) return true;
   if (e.kind !== "tool") return false;
   const tool = e as AgentToolMessage;

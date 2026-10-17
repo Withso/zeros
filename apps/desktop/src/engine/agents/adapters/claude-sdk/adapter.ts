@@ -1,6 +1,7 @@
 import { TurnUsageLedger } from "../shared/turn-usage";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { FallbackModelSelection } from "../shared/fallback-model-selection";
+import { isCuratedModel } from "../shared/curated-models";
 import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 import { exactModelFallbackError, requireExplicitModel } from "../shared/exact-model-selection";
 import {
@@ -93,6 +94,7 @@ import type {
 import type { AccountDetails } from "@zeros/protocol/messages";
 import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
 import { BROWSER_TOOL_NAMESPACE } from "@zeros/protocol/browser-tools";
+import { LOCAL_ORCHESTRATION_TOOL_SERVER } from "@zeros/protocol/local-orchestration";
 import { COMPUTER_TOOL_NAMESPACE } from "@zeros/protocol/computer-use-tools";
 import { DEVICE_TOOL_NAMESPACE } from "@zeros/protocol/device-tools";
 import { buildCodeAgentDesignTerritoryNotice } from "@zeros/protocol/system-instructions";
@@ -664,6 +666,8 @@ const ZEROS_CONTROL_NAMESPACES: readonly string[] = [
   BROWSER_TOOL_NAMESPACE,
   COMPUTER_TOOL_NAMESPACE,
   DEVICE_TOOL_NAMESPACE,
+  // Zeros Local CLI: the engine decides allow/deny for every call.
+  LOCAL_ORCHESTRATION_TOOL_SERVER,
 ];
 
 /** The engine's own control tools (in-app browser, computer use, simulators).
@@ -1422,6 +1426,16 @@ export class ClaudeSdkAdapter implements AgentAdapter {
               this.ctx.emit.onSessionUpdate(this.agentId, n);
               return;
             }
+          }
+          if (state && update.sessionUpdate === "model_fallback" && update.scope === "session" && !update.parentToolId &&
+              !isCuratedModel(this.agentId, update.toModel)) {
+            // Only curated models become the chat's model. This response used
+            // the provider's fallback; reassert the user's choice before the
+            // next send and narrate the fallback as response-local.
+            const selected = state.model ?? state.env?.ANTHROPIC_MODEL?.trim();
+            if (selected && selected !== update.toModel) state.pendingModelReapply = { model: selected };
+            this.ctx.emit.onSessionUpdate(this.agentId, { ...n, update: { ...update, scope: "local" } });
+            return;
           }
           if (state && update.sessionUpdate === "model_fallback" && update.scope === "session" && !update.parentToolId) {
             const adopted = state.modelSelection.adopt(update.toModel, update.fromModel, update.turnStartedAt);
@@ -2535,6 +2549,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                   noticeId: `claude-neterr-${randomUUID()}`,
                   severity: "error",
                   recoverable: true,
+                  // Live reconnect status, then a quiet row; never a lasting banner.
+                  code: "connection_lost",
                   message: "Connection lost — reconnecting…",
                 },
               });
@@ -3357,7 +3373,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       }
       if (
         state.permissionMode !== "plan" &&
-        isZerosControlTool(toolName, zerosControlServers, options.mcpServer)
+        isZerosControlTool(toolName, zerosControlServers, options.mcpServer) &&
+        // An explicit user ask/deny rule for the Local CLI tool still wins.
+        !(
+          options.mcpServer?.name === LOCAL_ORCHESTRATION_TOOL_SERVER &&
+          (options.matchedAskRule != null || options.defaultToNo === true || options.suppressAlwaysAllowRule === true)
+        )
       ) {
         return Promise.resolve({ behavior: "allow", updatedInput: input });
       }
@@ -4490,6 +4511,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                     type: s.transport,
                     url: s.url,
                     ...(s.headers ? { headers: s.headers } : {}),
+                    // Local CLI waits can run for minutes; give the SDK the
+                    // server's own deadline (other servers keep the default).
+                    ...(s.name === LOCAL_ORCHESTRATION_TOOL_SERVER && s.toolTimeoutSec
+                      ? { timeout: s.toolTimeoutSec * 1000 }
+                      : {}),
                   },
             ]),
           ) as Options["mcpServers"])

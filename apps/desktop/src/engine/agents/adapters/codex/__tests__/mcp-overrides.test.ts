@@ -80,6 +80,32 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
     ]);
   });
 
+  it("pre-approves only the engine-registered Local CLI tools", () => {
+    const args = buildMcpServerOverrides([
+      {
+        name: "zeros_local",
+        transport: "http",
+        url: "http://127.0.0.1:43126/mcp",
+        headersFromEnv: { Authorization: "ZEROS_LOCAL_TOOLS_CAPABILITY" },
+        toolTimeoutSec: 660,
+        defaultToolsApproval: "approve",
+      },
+      { name: "ordinary", transport: "http", url: "https://example.test/mcp" },
+    ]);
+    expect(args).toEqual([
+      "-c",
+      'mcp_servers.zeros_local.url="http://127.0.0.1:43126/mcp"',
+      "-c",
+      'mcp_servers.zeros_local.env_http_headers={ "Authorization" = "ZEROS_LOCAL_TOOLS_CAPABILITY" }',
+      "-c",
+      "mcp_servers.zeros_local.tool_timeout_sec=660",
+      "-c",
+      'mcp_servers.zeros_local.default_tools_approval_mode="approve"',
+      "-c",
+      'mcp_servers.ordinary.url="https://example.test/mcp"',
+    ]);
+  });
+
   it("emits command/args/env for a stdio server", () => {
     const args = buildMcpServerOverrides([
       {

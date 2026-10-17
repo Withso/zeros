@@ -42,6 +42,8 @@ import { X as XIcon } from "lucide-react";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import "./composer-editor.css";
 import { MentionNode, AttachmentNode } from "./nodes";
+import { LocalLinkNode, localLinkPasteSlice } from "./local-link-node";
+import { useLocalLinks } from "../local-links/context";
 import { ComposerKeymap } from "./keymap";
 import {
   ComposerSuggestions,
@@ -315,6 +317,9 @@ function looksLikeFileDrag(e: DragEvent | React.DragEvent): boolean {
 export function useComposerEditor(
   opts: UseComposerEditorOpts,
 ): ComposerEditorApi {
+  const localLinks = useLocalLinks();
+  const localLinksRef = useRef(localLinks);
+  localLinksRef.current = localLinks;
   // agentName / agentSupportsImage / modelId are read at call time via optsRef
   // (so the once-built editor always validates against the current agent/model).
   const { agentId, cwd, originUrl, availableCommands, placeholder } = opts;
@@ -704,6 +709,7 @@ export function useComposerEditor(
       Text,
       MentionNode,
       AttachmentNode,
+      LocalLinkNode,
       ComposerKeymap.configure({
         onSubmit: handleSubmit,
         onEscape: handleEscape,
@@ -761,7 +767,15 @@ export function useComposerEditor(
       handlePaste: (view, event) => {
         if (pasteComposerClipboard(view, event, optsRef.current.cwd, attachmentMapRef.current)) return true;
         const payload = classifyComposerPaste(event.clipboardData);
-        if (!payload) return false;
+        if (!payload) {
+          const links = localLinksRef.current;
+          const text = event.clipboardData?.getData("text/plain");
+          const slice = links.enabled && text ? localLinkPasteSlice(text, view.state.schema, links.scheme) : null;
+          if (!slice) return false;
+          event.preventDefault();
+          view.dispatch(view.state.tr.replaceSelection(slice).setMeta("uiEvent", "paste").scrollIntoView());
+          return true;
+        }
         event.preventDefault();
         if (payload.kind === "files") {
           void insertFilesRef.current(payload.files);

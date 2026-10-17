@@ -23,6 +23,7 @@ import { marked, type Token, type TokensList } from "marked";
 import DOMPurify from "dompurify";
 import { fileRefPath } from "./markdown-file-path";
 import { isLoopbackUrl } from "@/renderer/shell/workbench/tabs/localhost-url";
+import { parseLocalLink } from "@zeros/protocol/local-orchestration";
 
 // Re-exported so callers can keep importing it from the markdown barrel; the
 // detection itself lives in markdown-file-path.ts (pure → unit-testable).
@@ -42,6 +43,13 @@ marked.use({
 // `target` attribute through sanitisation (DOMPurify strips it by
 // default since `_blank` can be abused without `rel`). Configured
 // once at module load.
+// Keep a strictly validated passive identity as data while DOMPurify removes
+// the custom-scheme href. Only the gated Local transcript renderer uses it;
+// other markdown consumers never gain custom-protocol navigation.
+DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
+  if (node.nodeName === "A" && data.attrName === "href" && parseLocalLink(data.attrValue))
+    (node as Element).setAttribute("data-local-link", data.attrValue);
+});
 DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   if (node.nodeName === "A") {
     const a = node as HTMLAnchorElement;

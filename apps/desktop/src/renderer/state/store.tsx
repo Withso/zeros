@@ -2,6 +2,7 @@ import type { ComposerAttachment } from "../features/agent/composer-attachments"
 import type { AgentTextMessageAttachment } from "../features/agent/use-agent-session";
 import type { WorkbenchScopeMap } from "../shell/workbench/tab-model";
 import type { WorkspaceListFilter } from "./workspace-list-filter";
+import type { Workspace } from "../platform/git";
 import type {
   ProviderBinding,
   ProviderMetadata,
@@ -230,6 +231,11 @@ export type WorkspaceState = {
   // time (MainShellBody) — a removed repo falls back to the Dashboard rather
   // than rendering a dead page.
   activeRepoId: string | null;
+  /** Ephemeral native-link destination. Its fresh ownership snapshot supports
+   * explicit main-checkout links; passive navigation cannot create or resume. */
+  localLinkNavigation?: { workspace: Workspace; folder: string; passive: boolean };
+  /** Ephemeral selection clock. Background hydration is not a new intent. */
+  navigationVersion?: number;
   // Repository-hub tabs belong to their repository, not to the app. Switching
   // repo A → B → A therefore restores A's own last view rather than leaking B's.
   repoPageViewByProject: Record<string, RepoPageView>;

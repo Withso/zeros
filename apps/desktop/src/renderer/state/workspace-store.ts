@@ -148,6 +148,8 @@ export type Action =
     }
   /** Return to Home's last complete destination in one store snapshot. */
   | { type: "OPEN_HOME" }
+  | { type: "OPEN_LOCAL_LINK"; workspace: import("../platform/git").Workspace; folder: string; chat: ChatThread | null }
+  | { type: "ACTIVATE_LOCAL_LINK"; folder: string }
   // A workspace click changes route + chat/scope as one store snapshot. This
   // prevents subscribers from observing the new page with the previous
   // workspace's chat between two dispatches.
@@ -156,6 +158,7 @@ export type Action =
       folder: string;
       repoRoot: string;
       chatId: string | null;
+      localLinkNavigation?: WorkspaceState["localLinkNavigation"];
       /** Cold remembered target: suppress destructive/default work until the
        * exact repository workspace snapshot confirms it. */
       validationPending?: boolean;
@@ -975,6 +978,19 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         pendingWorkspaceValidationFolder: null,
       };
     }
+    case "OPEN_LOCAL_LINK": {
+      const next = action.chat ? reducer(state, { type: "MERGE_CHATS", chats: [action.chat] }) : state;
+      return reducer(next, {
+        type: "OPEN_WORKSPACE", folder: action.folder, repoRoot: action.workspace.repoRoot,
+        chatId: action.chat?.id ?? null,
+        localLinkNavigation: { workspace: action.workspace, folder: action.folder, passive: true },
+      });
+    }
+    case "ACTIVATE_LOCAL_LINK": {
+      const navigation = state.localLinkNavigation;
+      if (!navigation?.passive || navigation.folder !== action.folder) return state;
+      return { ...state, localLinkNavigation: { ...navigation, passive: false } };
+    }
     case "OPEN_WORKSPACE": {
       const newAgentFolder = action.chatId ? null : action.folder;
       const pendingChatHydrationFolder = action.chatHydrationPending ||
@@ -1009,6 +1025,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         state.pendingWorkspaceValidationFolder ===
           pendingWorkspaceValidationFolder &&
         state.pendingChatHydrationFolder === pendingChatHydrationFolder &&
+        state.localLinkNavigation === action.localLinkNavigation &&
         state.workspaceListFilter === workspaceListFilter
       ) {
         return state;
@@ -1016,6 +1033,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       return {
         ...state,
         activePage: nextActivePage,
+        localLinkNavigation: action.localLinkNavigation,
         activeChatId: action.chatId,
         newAgentFolder,
         lastWorkspaceFolder: action.folder,
@@ -2257,9 +2275,14 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
   // active chat per workspace folder so switching back restores the user's
   // place (a no-op reducer result stays a no-op through both).
   dispatch: (action) =>
-    set((s) =>
-      rememberActiveChatForFolder(rememberActiveFolder(reducer(s, action))),
-    ),
+    set((s) => {
+      const next = rememberActiveChatForFolder(rememberActiveFolder(reducer(s, action)));
+      if (action.type === "HYDRATE_CHATS" || next === s) return next;
+      const navigated = next.activePage !== s.activePage || next.activeRepoId !== s.activeRepoId ||
+        next.activeChatId !== s.activeChatId || next.newAgentFolder !== s.newAgentFolder ||
+        next.lastWorkspaceFolder !== s.lastWorkspaceFolder;
+      return navigated ? { ...next, navigationVersion: (s.navigationVersion ?? 0) + 1 } : next;
+    }),
 }));
 
 /** Record one deliberate action without subscribing the caller to the store.

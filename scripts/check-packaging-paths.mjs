@@ -21,7 +21,7 @@
 // renamed package input or updater asset.
 // ──────────────────────────────────────────────────────────
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 
 const yml = readFileSync("electron-builder.yml", "utf8");
 const stableReleaseWorkflow = readFileSync(
@@ -236,6 +236,37 @@ for (const from of froms) {
     continue;
   if (!existsSync(from))
     errs.push(`extraResources from: "${from}" does not exist`);
+}
+
+// The Local CLI runs outside asar and locates its engine and skill relatively.
+// A directory existing is not enough: the launcher and hidden plugin manifest
+// must survive the resource mapping and filters too.
+const localCliResources = [
+  ["apps/desktop/resources/bin", "bin"],
+  ["apps/desktop/resources/zeros-local-cli-skill", "zeros-local-cli-skill"],
+];
+const resourceBlocks = yml.split(/(?=^  - from:)/m);
+for (const [source, destination] of localCliResources) {
+  const block = resourceBlocks.find((entry) =>
+    unquote(entry.match(/^  - from:\s*(.+)$/m)?.[1] ?? "") === source,
+  );
+  if (!block || unquote(block.match(/^    to:\s*(.+)$/m)?.[1] ?? "") !== destination) {
+    errs.push(`Local CLI resource must map ${source} to ${destination}`);
+  }
+  if (destination === "zeros-local-cli-skill" && !block?.includes('".claude-plugin/**/*"')) {
+    errs.push("Local CLI skill filter must include .claude-plugin/**/*");
+  }
+}
+for (const file of [
+  "apps/desktop/resources/bin/zeros",
+  "apps/desktop/resources/zeros-local-cli-skill/.claude-plugin/plugin.json",
+  "apps/desktop/resources/zeros-local-cli-skill/skills/zeros-local-cli/SKILL.md",
+]) {
+  if (!existsSync(file) || !statSync(file).isFile()) errs.push(`Local CLI resource file missing: ${file}`);
+}
+const localLauncher = "apps/desktop/resources/bin/zeros";
+if (existsSync(localLauncher) && !(statSync(localLauncher).mode & 0o111)) {
+  errs.push("Local CLI bin/zeros must be executable");
 }
 
 // ── Bundled agent runtimes must actually ship ─────────────

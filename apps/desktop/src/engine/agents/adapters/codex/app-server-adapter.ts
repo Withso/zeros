@@ -3,6 +3,7 @@ import {cloudExecutionLifetime,cloudProviderExecution} from "../../cloud-provide
 import {cloudCodexImage} from "./cloud-policy";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
 import { FallbackModelSelection } from "../shared/fallback-model-selection";
+import { isCuratedModel } from "../shared/curated-models";
 import { exactModelFallbackError, requireExplicitModel } from "../shared/exact-model-selection";
 import {
   AccountModelDiscovery,
@@ -2741,6 +2742,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
             this.ctx.emit.onSessionUpdate(this.agentId, notification);
             return;
           }
+        }
+        if (session && this.sessions.get(zerosSessionId) === session && update.sessionUpdate === "model_fallback" && update.scope === "session" && !update.parentToolId &&
+            !isCuratedModel(this.agentId, update.toModel)) {
+          // Only curated models become the chat's model. Each turn sends the
+          // user's OPENAI_MODEL, so the next turn reasserts it; this reroute
+          // is narrated as a one-response fallback.
+          this.ctx.emit.onSessionUpdate(this.agentId, { ...notification, update: { ...update, scope: "local" } });
+          return;
         }
         if (session && this.sessions.get(zerosSessionId) === session && update.sessionUpdate === "model_fallback" && update.scope === "session" && !update.parentToolId) {
           const adopted = session.modelSelection.adopt(update.toModel, update.fromModel);

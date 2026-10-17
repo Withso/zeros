@@ -233,11 +233,30 @@ choose another model; it neither guesses parameters nor swaps the requested
 Grok model. Late responses cannot
 replace a newer session or metadata snapshot. This read neither authorizes a
 send nor changes a saved model; cloud exact-model refusal remains terminal for
-that attempt. The legacy Local ID-only fallback policy is unchanged. Execution
-rejection makes that account's model unselectable during refresh, even if the
-registry still lists it. Unavailable menu rows retain their saved identity,
-explain the reason, and offer a view of eligible choices without changing the
-selection or favorite.
+that attempt. Every Local substitute comes from the curated catalog's
+`fallbacks.cursor` (Composer 2.5, then Auto), never from the account's wider
+list. Three Cursor cases differ. A missing Grok schema refuses (above).
+Cursor's run backend refusing a registry model's *settings* ("Invalid
+parameters for registry model") is not a refusal of the model: the same turn
+retries the account's own advertised settings — the variant closest to the
+requested effort and Fast, the default variant, then Cursor's defaults — and
+later turns in the denial window start from the settings that ran. If
+the cached substitute is refused, the current turn first tries the saved
+selection if it has not tried it yet, then continues the advertised settings
+without duplicates. Only when none run, or Cursor refuses the model itself, is
+the model denied for the account (unselectable during refresh, even if the
+registry still lists it) and
+a curated fallback runs. Narration is a per-turn **Model fallback** row
+(`model_fallback`, `provider: "cursor"`, `scope: "local"`) emitted once the
+attempt produces output, with `reason: "settings"` (and both settings
+summaries) or `reason: "unavailable"` — the first turn and later, resumed or
+agent-started turns alike. Exact-model mode still refuses without substitutes,
+and the saved pick and settings are retried after the window. Development
+builds log each refused selection and the account's advertised registry
+schema. `zeros local models` reads the adapter's current catalog, so a refused
+model shows as unavailable there too. Unavailable menu rows retain their saved
+identity, explain the reason, and offer a view of eligible choices without
+changing the selection or favorite.
 
 Agent error toasts report a new failure observed by the active exact chat. Mount,
 reveal, unchanged replay and owner changes do not notify historical state. Keep
@@ -274,6 +293,9 @@ readiness checks and retry counts remain authoritative.
   cards, icons or disclosures. Claude local copy is `Model fallback used Opus 5`;
   session copy is `Model switched to Sonnet 5`. Codex safety copy is
   `Model fallback to Sol 5.6 because of a cybersecurity-related safety check`.
+  Cursor copy names the reason: `Model fallback to Composer 2.5 because Grok
+  4.7 isn't available for this account`, or for refused settings `Model
+  fallback to Grok 4.7 Extra High Fast because Cursor rejected Extra High`.
   Substitute the actual catalog model. Codex narration uses the concise
   name/version order; the existing picker retains its shared catalog label.
   Do not infer a safety reason from arbitrary provider prose.
@@ -283,8 +305,11 @@ readiness checks and retry counts remain authoritative.
   local; absent scope means session for older supported SDKs. An inferred
   overload fallback is response-local. An explicit notice for that same native
   request refines the existing narration in place.
-- Only a confirmed main-session fallback changes the saved chat model, composer
-  dropdown and subsequent native sends. Codex root `model/rerouted` supplies
+- Only a confirmed main-session fallback to a curated catalog model changes the
+  saved chat model, composer dropdown and subsequent native sends. A session
+  fallback to any other model is narrated as response-local; Claude reasserts
+  the user's model before the next send and Codex sends it with the next turn.
+  The engine refuses to persist a non-catalog model as defense in depth. Codex root `model/rerouted` supplies
   the target; child-thread reroutes never change the parent. Persist the choice
   in the engine even without a renderer. Apply the renderer's model control
   update immediately, before a queued prompt can drain, independently of
@@ -361,6 +386,32 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
 - Unknown tools retain their provider name and readable payload. Omit the
   internal category `other` from the target. If old history lacks a tool name,
   keep its result visible; do not invent a name from the output.
+- Zeros Local CLI calls (a literal `zeros local …` shell command, or the
+  `zeros_local` `run` tool's `args`) keep the terminal icon and get a plain
+  name — **Chat created**, **Workspace created**, **Message sent**,
+  **Waited for chat** and so on (`renderers/local-cli-presentation.ts`),
+  present-tense while running and the normal **Error** treatment on failure.
+  The target chat/workspace pill comes from the operand or, for create, the
+  result envelope; the mono command preview follows. Compound commands and
+  expansions stay ordinary shell rows.
+- `localNote` user rows (a note the CLI delivered to a following chat) render
+  as the same compact terminal row — **Chat finished**, **Permission
+  requested**, **Question asked** with the source chat's pill — never a user
+  bubble, and count as tool calls. A steered note joins the accepting turn.
+  `localFrom` rows are messages: a right-aligned **Sent from** header with the
+  sender's pill sits above the bubble (live, steered and saved history alike);
+  the bubble holds the sender's own text, Copy only. Both arrive live as
+  `user_message_recorded` updates ([Local CLI](local-cli.md#delivery)).
+- Links for this channel's scheme (`zeros…://chat|workspace/…`) render as
+  pills in prose, bubbles, tool rows and the composer, with the composer
+  attachment pill's metrics. A chat pill is the attachment shell (`bg1`,
+  `border3`, `fg1` label) with the agent's own coloured logo; a workspace pill
+  is a borderless blue fill (`blue-pill-bg`, stronger in Light, unchanged in
+  Dark). In tool rows the pills come first, right after the operation name;
+  the preview stays plain text. A failed Local CLI row uses the standard
+  **Error** treatment (`bg-red-bg text-red-primary`, ordinary font) and keeps
+  its pills unrecoloured. Fenced code and raw tool output keep the text. Pills
+  appear only for Local Personal owners while `localOrchestration` is open.
 
 ## Expanded cards
 
@@ -572,6 +623,19 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   routine transport/wait records and synthetic feedback cannot prove recovery.
   A terminal tool result without an observed invocation also cannot prove
   recovery; retain its outcome without clearing the failure or Retry action.
+- Chat banners are for what the user can act on now. The failure card, with
+  its recovery actions, belongs to the latest turn only; once the agent works
+  on a newer turn it retires to the footer's one-line status (for example
+  **CONNECTION LOST**), so history stays honest without stacking banners.
+  Reconnect progress (`connection_lost`, `api_retry`) is live status while it
+  is the streaming tail and a quiet compact row afterwards. A send the engine
+  refuses because another turn already runs on the session (another window,
+  or an agent's message through the Zeros Local CLI) was never delivered: it
+  is not a failure and shows no banner. The engine's typed `activeTurn`
+  returns it to the follow-up queue behind that turn, whose terminal
+  `turn_state` sends it next (or Send now steers it); the running turn's output
+  stays under its own prompt. Cloud placements keep their admission queue.
+  Provider facts (model fallback, usage limits) stay plain inline text.
 - Authentication failures have one product Sign in notice. In history, show a
   compact **Sign-in required** status until a later turn in that conversation
   produces genuine root model work, then show **Signed in**. A new prompt,

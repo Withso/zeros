@@ -11,6 +11,10 @@ import { agentReportText, matchSubagent } from "./subagent";
 import { EventStripe } from "./event-stripe";
 import { renderDetail } from "./event-row-renderer";
 import { renderMarkdown } from "../markdown";
+import { LocalLinkHtml } from "../local-links/text";
+import { LocalLinkPill } from "../local-links/pill";
+import { useLocalLinks } from "../local-links/context";
+import { localLinkSpans } from "../local-links/model";
 import { displayNameForModelValue, effortLabel, familyForModelValue } from "../model-catalog";
 import type { ChatEffort } from "../../../state/store";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -25,6 +29,7 @@ const NO_CHILDREN: AgentMessage[] = [];
 
 export const SubagentCard: Renderer<AgentToolMessage> = memo(
   function SubagentCard({ message: tool, ctx }) {
+    const links = useLocalLinks();
     const input = toolRecord(tool.rawInput);
     const output = toolRecord(tool.rawOutput);
     const info = matchSubagent(tool);
@@ -82,9 +87,14 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
     const bodyId = useId();
     const promptId = useId();
     const Chevron = open ? ChevronDown : ChevronRight;
+    const headerLinks = useMemo(() => links.enabled
+      ? [...new Set(localLinkSpans(headerText, links.scheme).map((span) => span.href))]
+      : [], [links.enabled, links.scheme, headerText]);
+    const linkedHeader = headerLinks.length > 0;
     if (!toolPresentationReady(tool)) return null;
     return (
       <div className="flex min-w-0 flex-col" data-agent-group="">
+        <div className={linkedHeader ? "flex min-w-0 flex-wrap items-center gap-2" : "contents"}>
         <ListRow
           type="button"
           className="group/subagent-row min-w-0 transition-colors"
@@ -129,15 +139,18 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
             {label}
             {effortText ? <span data-agent-effort="" className={cn("text-fg2 text-xs opacity-80", failed && "text-red-primary")}>{` ${effortText}`}</span> : null}
           </span>
-          <span
+          {!linkedHeader && <span
             className={cn(
               "min-w-0 truncate text-xs",
               failed ? "text-red-primary" : "text-fg2",
             )}
           >
             {headerText}
-          </span>
+          </span>}
         </ListRow>
+        {headerLinks.map((href) => <LocalLinkPill key={href} href={href} />)}
+        {linkedHeader && <span data-tool-preview="" className={cn("min-w-0 truncate text-xs", failed ? "text-red-primary" : "text-fg2")}>{headerText}</span>}
+        </div>
         {open && (
           <div
             id={bodyId}
@@ -158,10 +171,10 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
                   <span className="text-fg1 text-sm">Prompt</span>
                 </ListRow>
                 {promptOpen && (
-                  <div
+                  <LocalLinkHtml
                     id={promptId}
                     className="zeros-agent-md py-2"
-                    dangerouslySetInnerHTML={{ __html: promptHtml }}
+                    html={promptHtml}
                   />
                 )}
               </div>
@@ -188,15 +201,15 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
               !resultInChildren &&
               (failed ? (
                 <ToolDetailSurface label="Agent error" failed>
-                  <div
+                  <LocalLinkHtml
                     className="zeros-agent-md px-3 py-2"
-                    dangerouslySetInnerHTML={{ __html: resultHtml }}
+                    html={resultHtml}
                   />
                 </ToolDetailSurface>
               ) : (
-                <div
+                <LocalLinkHtml
                   className="zeros-agent-md"
-                  dangerouslySetInnerHTML={{ __html: resultHtml }}
+                  html={resultHtml}
                 />
               ))}
             {!running &&

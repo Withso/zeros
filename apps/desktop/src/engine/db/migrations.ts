@@ -1516,6 +1516,112 @@ export const MIGRATIONS: Migration[] = [
         BEGIN SELECT RAISE(ABORT, 'Review comments are immutable'); END;
     `,
   },
+  {
+    version: 41,
+    name: "local orchestration families, shares, follows and receipts",
+    up: `
+      -- Zeros Local CLI. All tables are engine-owned, additive and Local-only.
+      -- No FKs to chats: lineage, shares and receipts outlive archived or
+      -- deleted chats so surviving children stay related and a pruned key is
+      -- never reused as fresh.
+      CREATE TABLE local_orchestration_links (
+        chat_id TEXT PRIMARY KEY,
+        parent_chat_id TEXT NOT NULL,
+        root_chat_id TEXT NOT NULL,
+        created_request_id TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_local_orch_links_root ON local_orchestration_links(root_chat_id);
+      CREATE INDEX idx_local_orch_links_parent ON local_orchestration_links(parent_chat_id);
+      CREATE TABLE local_orchestration_family_workspaces (
+        root_chat_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        created_by_chat_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (root_chat_id, workspace_id)
+      );
+      CREATE TABLE local_orchestration_shares (
+        holder_chat_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('chat', 'workspace')),
+        target_id TEXT NOT NULL,
+        granted_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (holder_chat_id, kind, target_id)
+      );
+      CREATE TABLE local_orchestration_follows (
+        follower_chat_id TEXT NOT NULL,
+        target_chat_id TEXT NOT NULL,
+        events TEXT NOT NULL,
+        turn_id TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (follower_chat_id, target_chat_id, turn_id)
+      );
+      CREATE INDEX idx_local_orch_follows_target ON local_orchestration_follows(target_chat_id);
+      CREATE TABLE local_orchestration_notifications (
+        id TEXT PRIMARY KEY,
+        follower_chat_id TEXT NOT NULL,
+        source_chat_id TEXT NOT NULL,
+        event TEXT NOT NULL CHECK (event IN ('done', 'question', 'permission')),
+        event_key TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'delivered', 'unknown', 'retired')),
+        text TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (follower_chat_id, source_chat_id, event, event_key)
+      );
+      CREATE INDEX idx_local_orch_notifications_pending
+        ON local_orchestration_notifications(follower_chat_id, state);
+      CREATE TABLE local_orchestration_requests (
+        requester_chat_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        state TEXT NOT NULL,
+        target_chat_id TEXT,
+        turn_id TEXT,
+        result_json TEXT,
+        error_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (requester_chat_id, request_id)
+      );
+      CREATE INDEX idx_local_orch_requests_target
+        ON local_orchestration_requests(requester_chat_id, target_chat_id, created_at);
+      CREATE TABLE local_orchestration_message_origins (
+        chat_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        origin_kind TEXT NOT NULL CHECK (origin_kind IN ('agent', 'zeros')),
+        sender_chat_id TEXT,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, message_id)
+      );
+      CREATE TABLE local_orchestration_card_answers (
+        card_id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        answered_by_chat_id TEXT NOT NULL,
+        answer TEXT NOT NULL,
+        answered_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_local_orch_card_answers_chat
+        ON local_orchestration_card_answers(chat_id, answered_at);
+      CREATE TABLE local_orchestration_human_stops (
+        chat_id TEXT PRIMARY KEY,
+        generation INTEGER NOT NULL,
+        stopped_at INTEGER NOT NULL,
+        cleared_at INTEGER
+      );
+    `,
+  },
+  {
+    version: 42,
+    name: "local orchestration note presentation",
+    up: `
+      -- What the follower's transcript shows for a note (which chat, which
+      -- event); the provider still receives \`text\`. Null on older rows.
+      ALTER TABLE local_orchestration_notifications ADD COLUMN note_json TEXT;
+    `,
+  },
 ];
 
 /** Run all pending migrations in order, each in its own transaction. Idempotent

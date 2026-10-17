@@ -336,6 +336,7 @@ import {
   listChats,
   listChatsSince,
   summariesForFolder,
+  chatTitleSeeds,
   getChat,
   setChatComposerMode,
   wasChatDeleted,
@@ -3959,6 +3960,12 @@ export class WorkspaceService {
           // resurrects a chat deleted while that renderer was offline.
           chatDeletions: tombstonesSince("chat", 0),
         };
+      }
+      // What names an Untitled chat (desktop only: relay clients are refused
+      // by the deny-by-default remote gate, which does not list this op).
+      case "chats.titleSeeds": {
+        const ids = Array.isArray(params.chatIds) ? params.chatIds.filter((id): id is string => typeof id === "string") : [];
+        return { seeds: chatTitleSeeds(ids.slice(0, 50)) };
       }
       case "chats.summariesForFolder": {
         const exclude = optStr(params, "excludeChatId");

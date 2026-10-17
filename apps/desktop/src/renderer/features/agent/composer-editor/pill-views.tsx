@@ -20,8 +20,10 @@ import { Tooltip } from "@/renderer/shared/ui/primitives";
 // by every caller. The label caps at 16/18rem, but in a narrower pane the pill
 // must cap its complete margin box at the composer/bubble width; the truncating
 // label then absorbs the squeeze while attachment remove buttons remain usable.
-export const PILL_SHELL =
-  "inline-flex h-5 max-w-[calc(100%-3px)] items-center gap-1 rounded-sm border border-border3 bg-bg1 align-middle text-xs leading-none text-fg1 select-none";
+export const PILL_METRICS =
+  "inline-flex h-5 max-w-[calc(100%-3px)] mx-[1.5px] items-center rounded-sm align-middle text-xs leading-none select-none";
+export const PILL_SHELL = `${PILL_METRICS} gap-1 border border-border3 bg-bg1 text-fg1`;
+export const COMPOSER_PILL_SPACING = "gap-2 px-1.5";
 
 export function MentionPillView({
   label,
@@ -34,7 +36,7 @@ export function MentionPillView({
 }) {
   return (
     <Tooltip label={path || label}>
-      <span data-mention-pill="" className={cn(PILL_SHELL, "mx-[1.5px] px-2")}>
+      <span data-mention-pill="" className={cn(PILL_SHELL, "px-2")}>
         <FileTypeIcon name={path || label} kind={kind} size={13} />
         <span className="max-w-[18rem] truncate">{label}</span>
       </span>
@@ -77,7 +79,7 @@ export function AttachmentPillView({
         <button
           type="button"
           data-attachment-pill=""
-          className={cn(PILL_SHELL, "mx-[1.5px] cursor-pointer px-1.5")}
+          className={cn(PILL_SHELL, "cursor-pointer px-1.5")}
           onClick={(e) => {
             // Don't trigger the bubble's click-to-edit.
             e.stopPropagation();
@@ -93,7 +95,7 @@ export function AttachmentPillView({
     <Tooltip label={name}>
       <span
         data-attachment-pill=""
-        className={cn(PILL_SHELL, "mx-[1.5px] px-1.5")}
+        className={cn(PILL_SHELL, "px-1.5")}
       >
         {inner}
       </span>

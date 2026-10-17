@@ -149,10 +149,11 @@ Organizations can lock every switch above through managed settings.
 
 ## Rollout
 
-Three agent control features reach users in stages: the Zeros browser
+Four features reach users in stages through this table: the Zeros browser
 (`zeros_browser` for Claude Code and Cursor, and Codex's switch to it), Zeros
-computer use, and simulators. The Codex browser fixes ship to everyone and
-have no gate. `AGENT_CONTROL_ROLLOUT` in
+computer use, simulators, and the [Zeros Local CLI](local-cli.md)
+(`localOrchestration`). The Codex browser fixes ship to everyone and have no
+gate. `AGENT_CONTROL_ROLLOUT` in
 `packages/protocol/src/agent-control-rollout.ts` sets each feature's stage,
 so moving a feature to its next stage changes only that table.
 
@@ -162,7 +163,7 @@ so moving a feature to its next stage changes only that table.
 | `experimental` | Anyone who turns on the feature's Settings → Experimental switch, which starts off.                          |
 | `default`      | Everyone, with no switch.                                                                                    |
 
-All three features are `internal` today. Each stage has one switch, so a
+All four features are `internal` today. Each stage has one switch, so a
 feature never has two places to turn it off. The switch is a rollout gate,
 not an authority boundary: each feature keeps its own Settings, approvals and
 managed policy.
@@ -181,6 +182,11 @@ A closed feature behaves as Zeros did before it:
 - **Simulators:** Settings → Simulators and the "+" menu entries are hidden,
   a restored Simulator tab says simulators aren't available, a dropped video
   attaches without key frames, and agents get no `zeros_device` tools.
+- **Zeros Local CLI:** new executions get no `ZEROS_LOCAL_*` environment, no
+  launcher on `PATH` and no `zeros_local` tool, and calls from executions
+  admitted earlier fail with "Zeros Local CLI isn't available in this copy of
+  Zeros." "Copy link" is hidden. A push without the `localOrchestration` key
+  (an older renderer) still applies and keeps it closed.
 
 The renderer decides (`useAgentControlAvailability` in
 `apps/desktop/src/renderer/features/settings/agent-control-rollout.ts`), and

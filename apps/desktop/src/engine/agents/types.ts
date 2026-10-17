@@ -239,6 +239,10 @@ export interface McpRemoteServerRegistration<T extends "http" | "sse"> {
   /** Provider wait for one tool call. Only Codex has a short default (60 s);
    * other providers already wait for the server. */
   toolTimeoutSec?: number;
+  /** Engine-registered servers that make their own allow/deny decision (the
+   * Zeros Local CLI tool) skip the provider's per-call approval. Never set
+   * from user or repository configuration. */
+  defaultToolsApproval?: "approve";
 }
 
 // ── Gateway construction shape (drop-in with AgentSessionManager) ──

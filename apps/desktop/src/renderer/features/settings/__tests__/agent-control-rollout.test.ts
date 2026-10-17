@@ -54,8 +54,8 @@ async function fresh(): Promise<{
   };
 }
 
-const OPEN = { zerosBrowser: true, computerUse: true, simulators: true };
-const CLOSED = { zerosBrowser: false, computerUse: false, simulators: false };
+const OPEN = { zerosBrowser: true, computerUse: true, simulators: true, localOrchestration: true };
+const CLOSED = { zerosBrowser: false, computerUse: false, simulators: false, localOrchestration: false };
 
 beforeEach(() => {
   vi.unstubAllGlobals();
@@ -79,7 +79,7 @@ describe("agent control rollout gate", () => {
 
   it("stays closed for everyone else, whatever their stored flags say", async () => {
     const { rollout, internal, experimental } = await fresh();
-    for (const feature of ["zerosBrowser", "computerUse", "simulators"] as const) {
+    for (const feature of ["zerosBrowser", "computerUse", "simulators", "localOrchestration"] as const) {
       internal.setInternalFeatureEnabled(feature, true);
       experimental.setExperimentalEnabled(feature, true);
     }
@@ -102,10 +102,22 @@ describe("agent control rollout gate", () => {
       "zerosBrowser",
       "computerUse",
       "simulators",
+      "localOrchestration",
     ]);
     expect(rollout.agentControlFeaturesAt("experimental")).toEqual([]);
     for (const feature of rollout.agentControlFeaturesAt("internal")) {
       expect(rollout.AGENT_CONTROL_FEATURE_ROWS[feature].label).toBeTruthy();
     }
+  });
+
+  it("closes Local CLI on a flag change or loss of staff access", async () => {
+    const { rollout, internal } = await fresh();
+    signedInAs("developer");
+    expect(rollout.isAgentControlFeatureActive("localOrchestration")).toBe(true);
+    internal.setInternalFeatureEnabled("localOrchestration", false);
+    expect(rollout.agentControlAvailability()).toEqual({ ...OPEN, localOrchestration: false });
+    internal.setInternalFeatureEnabled("localOrchestration", true);
+    signedInAs(null);
+    expect(rollout.agentControlAvailability()).toEqual(CLOSED);
   });
 });

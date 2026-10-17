@@ -14,6 +14,11 @@ import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
 
 import {
   CursorSdkAdapter,
+  CURSOR_FALLBACK_MODELS,
+  cursorRegistrySettingsLadder,
+  cursorSelectionSettings,
+  isCursorRegistrySettingsRejection,
+  resolveCursorModelId,
   resolveValidModelId,
   applyCursorReasoning,
   isCursorModelGatedError,
@@ -23,6 +28,9 @@ import {
   parseCursorAdditionalDirs,
 } from "../adapter";
 import type { AgentAdapterContext, ContentBlock } from "../../../types";
+import { ACCOUNT_MODEL_TTL_MS } from "../../shared/account-model-discovery";
+import { modelChoicesFor } from "../../../../local-orchestration/spawn-settings";
+import { modelsForAgent } from "../../../../../renderer/features/agent/model-catalog";
 
 const {
   createSpy,
@@ -275,10 +283,67 @@ describe("resolveValidModelId (pure)", () => {
       ),
     ).toBe("composer-2.5");
   });
-  it("falls back to any Composer model when no preference matches", () => {
-    expect(
-      resolveValidModelId("bogus", new Set(["composer-9", "gpt-5.5"])),
-    ).toBe("composer-9");
+  it("substitutes only the catalog's curated fallbacks, in catalog order", () => {
+    // `composer-2` and `composer-9` are real account models but not curated
+    // rows: a stale pick must never land on a model the picker doesn't offer.
+    expect(resolveValidModelId("bogus", new Set(["composer-9", "composer-2", "gpt-5.5"]))).toBe("bogus");
+    expect(resolveValidModelId("bogus", new Set(["composer-2", "default"]))).toBe("default");
+    expect(resolveValidModelId("bogus", new Set(["default", "composer-2.5"]))).toBe("composer-2.5");
+    expect(CURSOR_FALLBACK_MODELS).toEqual(["composer-2.5", "default"]);
+  });
+
+  it("defaults an absent pick to a curated model", () => {
+    expect(resolveCursorModelId(undefined)).toBe("composer-2.5");
+  });
+});
+
+describe("cursorRegistrySettingsLadder (pure)", () => {
+  const GROK = {
+    id: "grok-4.7",
+    parameters: [
+      { id: "context", values: [{ value: "256k" }, { value: "500k" }] },
+      { id: "reasoning_effort", values: ["low", "medium", "high", "xhigh"].map((value) => ({ value })) },
+      { id: "fast", values: [{ value: "false" }, { value: "true" }] },
+    ],
+    variants: [
+      { displayName: "Grok 4.7 High Fast", isDefault: true, params: [
+        { id: "context", value: "500k" }, { id: "reasoning_effort", value: "high" }, { id: "fast", value: "true" },
+      ] },
+      { displayName: "Grok 4.7 Extra High Fast", params: [
+        { id: "context", value: "500k" }, { id: "reasoning_effort", value: "xhigh" }, { id: "fast", value: "true" },
+      ] },
+    ],
+  };
+  const requested = { id: "grok-4.7", params: [
+    { id: "context", value: "500k" }, { id: "reasoning_effort", value: "xhigh" }, { id: "fast", value: "false" },
+  ] };
+
+  it("tries the closest advertised variant, the default variant, then Cursor's own defaults", () => {
+    expect(cursorRegistrySettingsLadder(requested, GROK, "xhigh", false)).toEqual([
+      { id: "grok-4.7", params: GROK.variants[1].params },
+      { id: "grok-4.7", params: GROK.variants[0].params },
+      { id: "grok-4.7" },
+    ]);
+  });
+
+  it("never repeats the requested settings and never invents a parameter", () => {
+    // The requested settings already are the closest and default variant.
+    const ladder = cursorRegistrySettingsLadder(
+      { id: "grok-4.7", params: GROK.variants[0].params }, GROK, "high", true);
+    expect(ladder).toEqual([{ id: "grok-4.7" }]);
+    expect(cursorRegistrySettingsLadder({ id: "grok-4.7" }, { id: "grok-4.7", parameters: [] }, "xhigh", false)).toEqual([]);
+  });
+
+  it("summarizes the effort and Fast a selection actually runs", () => {
+    expect(cursorSelectionSettings(requested)).toEqual({ effort: "xhigh", fast: false });
+    expect(cursorSelectionSettings({ id: "grok-4.7", params: [{ id: "reasoning_effort", value: "extra-high" }] }))
+      .toEqual({ effort: "xhigh", fast: null });
+    expect(cursorSelectionSettings({ id: "grok-4.7" })).toEqual({ effort: null, fast: null });
+  });
+
+  it("recognizes Cursor's registry settings rejection separately from model access", () => {
+    expect(isCursorRegistrySettingsRejection('AI Model Not Found Invalid parameters for registry model: "grok-4.7"')).toBe(true);
+    expect(isCursorRegistrySettingsRejection("Cannot use this model: grok-4.7. Available models: default.")).toBe(false);
   });
 });
 
@@ -1651,6 +1716,7 @@ describe("CursorSdkAdapter — reject-recovery on a model the account can't run"
     modelsListSpy.mockResolvedValue([
       { id: "composer-2.5", displayName: "Composer 2.5" },
       { id: "composer-2", displayName: "Composer 2" },
+      { id: "default", displayName: "Auto", aliases: ["auto"] },
     ]);
     const error = { code: "invalid_model", message: "Selection rejected." };
     if (stage === "create") createSpy.mockRejectedValueOnce(error);
@@ -1660,7 +1726,8 @@ describe("CursorSdkAdapter — reject-recovery on a model the account can't run"
     try {
       const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "composer-2.5" } });
       await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).resolves.toMatchObject({ stopReason: "end_turn" });
-      expect(sendSpy.mock.calls.at(-1)?.[1].model).toEqual({ id: "composer-2" });
+      // The next curated fallback, never the uncurated `composer-2`.
+      expect(sendSpy.mock.calls.at(-1)?.[1].model).toEqual({ id: "default" });
       expect(stage === "create" ? createSpy : sendSpy).toHaveBeenCalledTimes(2);
       expect(storeGetSpy).not.toHaveBeenCalled();
     } finally { await adapter.dispose(); }
@@ -1670,6 +1737,7 @@ describe("CursorSdkAdapter — reject-recovery on a model the account can't run"
     modelsListSpy.mockResolvedValue([
       { id: "composer-2.5", displayName: "Composer 2.5" },
       { id: "composer-2", displayName: "Composer 2" },
+      { id: "default", displayName: "Auto", aliases: ["auto"] },
     ]);
     sendSpy.mockImplementationOnce(async (_message, options) => {
       options.onDelta({ update: { type: "text-delta", text: "Partial work" } });
@@ -1684,11 +1752,12 @@ describe("CursorSdkAdapter — reject-recovery on a model the account can't run"
   });
 
   it("reads the store's real error, then retries once with a confirmed-good model", async () => {
-    // Account catalog includes composer-2.5 (so it's the picked default) AND
-    // composer-2 (the retry target).
+    // Account catalog includes composer-2.5 (so it's the picked default),
+    // Auto (the next curated fallback) and the uncurated composer-2.
     modelsListSpy.mockResolvedValue([
       { id: "composer-2.5", displayName: "Composer 2.5" },
       { id: "composer-2", displayName: "Composer 2" },
+      { id: "default", displayName: "Auto", aliases: ["auto"] },
     ]);
     // First run errors (detail-less wait); second run succeeds.
     sendSpy
@@ -1710,7 +1779,7 @@ describe("CursorSdkAdapter — reject-recovery on a model the account can't run"
 
     expect(sendSpy).toHaveBeenCalledTimes(2);
     expect(sendSpy.mock.calls[0][1].model).toEqual({ id: "composer-2.5" });
-    expect(sendSpy.mock.calls[1][1].model).toEqual({ id: "composer-2" }); // fallback
+    expect(sendSpy.mock.calls[1][1].model).toEqual({ id: "default" }); // curated fallback
     // The store was consulted to recover the real reason.
     expect(storeGetSpy).toHaveBeenCalled();
   });
@@ -1719,6 +1788,7 @@ describe("CursorSdkAdapter — reject-recovery on a model the account can't run"
     modelsListSpy.mockResolvedValue([
       { id: "composer-2.5", displayName: "Composer 2.5" },
       { id: "composer-2", displayName: "Composer 2" },
+      { id: "default", displayName: "Auto", aliases: ["auto"] },
     ]);
     sendSpy.mockImplementation(async () => makeRun("error"));
     storeGetSpy.mockResolvedValue({
@@ -1875,6 +1945,292 @@ describe("CursorSdkAdapter — bounded registry discovery", () => {
     } finally {
       releaseCatalog();
     }
+  });
+});
+
+describe("CursorSdkAdapter — registry model denial recovery", () => {
+  const ENV = { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "grok-4.7" };
+  // `composer-2` is an account model but not a curated row: never a fallback.
+  const MODELS = [{ id: "grok-4.7", parameters: [] }, { id: "composer-2", parameters: [] }, { id: "composer-2.5", parameters: [] }];
+  const REJECTION = { code: "invalid_model", message: "The selected model cannot run on this account." };
+  function setup() {
+    modelsListSpy.mockResolvedValue(MODELS);
+    const ctx = makeCtx();
+    let messages: AgentMessage[] = [];
+    ctx.emit.onSessionUpdate = (_agent, event) => { messages = applyUpdate(messages, event); };
+    return {
+      adapter: new CursorSdkAdapter(ctx),
+      notices: () => messages.filter(message => message.kind === "text" && message.modelFallback),
+    };
+  }
+
+  it.each(["send", "wait"])("uses the confirmed fallback again on the next turn after a %s rejection", async stage => {
+    const { adapter, notices } = setup();
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: ENV });
+      if (stage === "send") sendSpy.mockRejectedValueOnce(REJECTION);
+      else sendSpy.mockResolvedValueOnce({ ...makeRun("error"), wait: async () => ({ status: "error", error: REJECTION }) });
+      await adapter.prompt({ sessionId: session.sessionId, turnId: "first", prompt: TEXT });
+      await expect(adapter.prompt({ sessionId: session.sessionId, turnId: "next", prompt: TEXT }))
+        .resolves.toMatchObject({ stopReason: "end_turn", response: { effectiveModel: "composer-2.5" } });
+      expect(sendSpy.mock.calls.map(call => call[1].model.id)).toEqual(["grok-4.7", "composer-2.5", "composer-2.5"]);
+      expect(notices()).toHaveLength(2);
+      for (const notice of notices()) expect(notice).toMatchObject({
+        role: "agent", phase: "commentary", text: "Model fallback to composer-2.5 because grok-4.7 isn't available for this account",
+        modelFallback: { provider: "cursor", fromModel: "grok-4.7", toModel: "composer-2.5", scope: "local", reason: "unavailable" },
+      });
+      expect(ENV.CURSOR_MODEL).toBe("grok-4.7");
+      const initialize = await adapter.initialize();
+      expect(initialize._meta?.models).toEqual(expect.arrayContaining([
+        expect.objectContaining({ value: "grok-4.7", selectable: false }),
+        expect.objectContaining({ value: "composer-2.5", selectable: true }),
+      ]));
+      expect(modelsForAgent("cursor", initialize).find(model => model.value === "grok-4.7")?.selectable).toBe(false);
+      expect(modelChoicesFor("cursor", initialize).find(model => model.model === "grok-4.7")?.availability).toBe("unavailable");
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["newSession", "loadSession"] as const)("recovers a registry rejection during %s and retains the notice on later turns", async method => {
+    const { adapter, notices } = setup();
+    const attempt = method === "newSession" ? createSpy : resumeSpy;
+    attempt.mockRejectedValueOnce(REJECTION);
+    try {
+      const options = { cwd: "/tmp/proj", env: ENV, executionId: "registry" };
+      if (method === "newSession") await adapter.newSession(options);
+      else await adapter.loadSession({ ...options, sessionId: "saved-native-agent" });
+      expect(attempt.mock.calls.map(call => call[method === "newSession" ? 0 : 1].model.id))
+        .toEqual(["grok-4.7", "composer-2.5"]);
+      await adapter.prompt({ sessionId: "registry", prompt: TEXT });
+      expect(notices()).toHaveLength(1);
+      expect(notices()[0]).toMatchObject({ modelFallback: { provider: "cursor", toModel: "composer-2.5", scope: "local", reason: "unavailable" } });
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["newSession", "loadSession"] as const)("reopens a denied registry choice through %s without submitting it again", async method => {
+    const { adapter, notices } = setup();
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: ENV });
+      sendSpy.mockRejectedValueOnce(REJECTION);
+      await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+      const options = { cwd: "/tmp/proj", env: ENV, executionId: "reopened" };
+      if (method === "newSession") await adapter.newSession(options);
+      else await adapter.loadSession({ ...options, sessionId: "saved-native-agent" });
+      const attempt = method === "newSession" ? createSpy : resumeSpy;
+      expect(attempt.mock.calls.at(-1)?.[method === "newSession" ? 0 : 1].model.id).toBe("composer-2.5");
+      await adapter.prompt({ sessionId: "reopened", prompt: TEXT });
+      expect(sendSpy.mock.calls.at(-1)?.[1].model.id).toBe("composer-2.5");
+      expect(notices()).toHaveLength(2);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("keeps exact-model sends, creation and resume refusing a cached denial", async () => {
+    const { adapter, notices } = setup();
+    const env = { ...ENV, ZEROS_REQUIRE_EXACT_MODEL: "1" };
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env });
+      sendSpy.mockRejectedValueOnce(REJECTION);
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).rejects.toBeDefined();
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).rejects.toThrow(/substitution is disabled/);
+      await expect(adapter.newSession({ cwd: "/tmp/proj", env })).rejects.toThrow(/substitution is disabled/);
+      await expect(adapter.loadSession({ sessionId: "saved", cwd: "/tmp/proj", env })).rejects.toThrow(/substitution is disabled/);
+      expect(sendSpy).toHaveBeenCalledOnce();
+      expect(createSpy).toHaveBeenCalledOnce();
+      expect(resumeSpy).not.toHaveBeenCalled();
+      expect(notices()).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("keeps an actionable error when no confirmed retry model exists", async () => {
+    const { adapter, notices } = setup();
+    modelsListSpy.mockResolvedValue([MODELS[0]]);
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: ENV });
+      sendSpy.mockRejectedValueOnce(REJECTION);
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).rejects.toBeDefined();
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).rejects.toMatchObject({
+        failure: { kind: "protocol-error", advice: expect.stringContaining("choose another model") },
+      });
+      expect(sendSpy).toHaveBeenCalledOnce();
+      expect(notices()).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("retries the requested model after denial expiry while the next catalog read is held", async () => {
+    let now = 1_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { adapter } = setup();
+    let release!: (models: typeof MODELS) => void;
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: ENV });
+      sendSpy.mockRejectedValueOnce(REJECTION);
+      await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.find(model => model.value === "grok-4.7")?.selectable).toBe(false));
+      modelsListSpy.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+      now += ACCOUNT_MODEL_TTL_MS;
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).resolves.toMatchObject({ stopReason: "end_turn" });
+      expect(sendSpy.mock.calls.map(call => call[1].model.id)).toEqual(["grok-4.7", "composer-2.5", "grok-4.7"]);
+      release(MODELS);
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.find(model => model.value === "grok-4.7")?.selectable).toBe(true));
+    } finally { release?.(MODELS); await adapter.dispose(); }
+  });
+});
+
+describe("CursorSdkAdapter — registry settings recovery", () => {
+  // Observed 2026-10-14…17 on a Local account: every Grok 4.7 Extra High run
+  // ended with this refusal, while the same id had run with other settings.
+  const SETTINGS_REJECTION = 'AI Model Not Found Invalid parameters for registry model: "grok-4.7"';
+  const context = { id: "context", value: "500k" };
+  const effort = (value: string) => ({ id: "reasoning_effort", value });
+  const fast = (value: boolean) => ({ id: "fast", value: String(value) });
+  const GROK = {
+    id: "grok-4.7",
+    displayName: "Grok 4.7",
+    parameters: [
+      { id: "context", values: [{ value: "256k" }, { value: "500k" }] },
+      { id: "reasoning_effort", values: ["low", "medium", "high", "xhigh"].map((value) => ({ value })) },
+      { id: "fast", values: [{ value: "false" }, { value: "true" }] },
+    ],
+    variants: [
+      { displayName: "Grok 4.7 High Fast", isDefault: true, params: [context, effort("high"), fast(true)] },
+      { displayName: "Grok 4.7 Extra High Fast", params: [context, effort("xhigh"), fast(true)] },
+    ],
+  };
+  const ENV = { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "grok-4.7", ZEROS_THINKING_EFFORT: "xhigh", ZEROS_FAST_MODE: "0" };
+  const key = (params?: { id: string; value: string }[]) =>
+    (params ?? []).map((p) => `${p.id}=${p.value}`).sort().join(",");
+  function setup(accepts: (model: { id: string; params?: { id: string; value: string }[] }) => boolean) {
+    modelsListSpy.mockResolvedValue([
+      GROK, { id: "composer-2" }, { id: "composer-2.5" }, { id: "default", aliases: ["auto"] },
+    ]);
+    sendSpy.mockImplementation(async (_message, options) => accepts(options.model)
+      ? makeRun()
+      : { ...makeRun("error"), wait: async () => ({ status: "error", error: SETTINGS_REJECTION }) });
+    const ctx = makeCtx();
+    let messages: AgentMessage[] = [];
+    ctx.emit.onSessionUpdate = (_agent, event) => { messages = applyUpdate(messages, event); };
+    return {
+      adapter: new CursorSdkAdapter(ctx),
+      notices: () => messages.filter((message) => message.kind === "text" && message.modelFallback),
+    };
+  }
+
+  it("keeps Grok 4.7 on Cursor's closest advertised settings and reuses them next turn", async () => {
+    const advertised = new Set(GROK.variants.map((variant) => key(variant.params)));
+    const { adapter, notices } = setup((model) => model.id !== "grok-4.7" || advertised.has(key(model.params)));
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: ENV });
+      await expect(adapter.prompt({ sessionId: session.sessionId, turnId: "one", prompt: TEXT }))
+        .resolves.toMatchObject({ stopReason: "end_turn", response: { effectiveModel: "grok-4.7" } });
+      await adapter.prompt({ sessionId: session.sessionId, turnId: "two", prompt: TEXT });
+      expect(sendSpy.mock.calls.map((call) => call[1].model.id)).toEqual(["grok-4.7", "grok-4.7", "grok-4.7"]);
+      expect(sendSpy.mock.calls.map((call) => key(call[1].model.params))).toEqual([
+        key([context, effort("xhigh"), fast(false)]),
+        key([context, effort("xhigh"), fast(true)]),
+        key([context, effort("xhigh"), fast(true)]),
+      ]);
+      expect(notices()).toHaveLength(2);
+      expect(notices()[0]).toMatchObject({
+        text: "Model fallback to grok-4.7 Extra High Fast because Cursor rejected Extra High",
+        modelFallback: {
+          provider: "cursor", fromModel: "grok-4.7", toModel: "grok-4.7", scope: "local", reason: "settings",
+          fromSettings: { effort: "xhigh", fast: false }, toSettings: { effort: "xhigh", fast: true },
+        },
+      });
+      // Refused settings are not a refusal of the model for this account.
+      const initialize = await adapter.initialize();
+      expect(initialize._meta?.models?.find((model) => model.value === "grok-4.7")?.selectable).toBe(true);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("falls back to a curated model only after every advertised Grok setting is refused", async () => {
+    const { adapter, notices } = setup((model) => model.id !== "grok-4.7");
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: ENV });
+      await expect(adapter.prompt({ sessionId: session.sessionId, turnId: "one", prompt: TEXT }))
+        .resolves.toMatchObject({ response: { effectiveModel: "composer-2.5" } });
+      expect(sendSpy.mock.calls.map((call) => [call[1].model.id, key(call[1].model.params)])).toEqual([
+        ["grok-4.7", key([context, effort("xhigh"), fast(false)])],
+        ["grok-4.7", key([context, effort("xhigh"), fast(true)])],
+        ["grok-4.7", key([context, effort("high"), fast(true)])],
+        ["grok-4.7", ""],
+        ["composer-2.5", ""],
+      ]);
+      expect(notices()).toEqual([expect.objectContaining({
+        text: "Model fallback to composer-2.5 because grok-4.7 isn't available for this account",
+        modelFallback: expect.objectContaining({ fromModel: "grok-4.7", toModel: "composer-2.5", reason: "unavailable" }),
+      })]);
+      expect((await adapter.initialize())._meta?.models?.find((model) => model.value === "grok-4.7")?.selectable).toBe(false);
+      // The next turn goes straight to the curated fallback.
+      await adapter.prompt({ sessionId: session.sessionId, turnId: "two", prompt: TEXT });
+      expect(sendSpy.mock.calls.at(-1)?.[1].model).toEqual({ id: "composer-2.5" });
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["throw", "terminal"] as const)("retries the original settings when a cached substitute stops working (%s)", async (failure) => {
+    const requested = key([context, effort("xhigh"), fast(false)]);
+    const substitute = key([context, effort("xhigh"), fast(true)]);
+    let originalWorks = false;
+    const { adapter } = setup((model) => model.id !== "grok-4.7" || key(model.params) === (originalWorks ? requested : substitute));
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: ENV });
+      await adapter.prompt({ sessionId: session.sessionId, turnId: "one", prompt: TEXT });
+      expect(sendSpy.mock.calls.map((call) => key(call[1].model.params))).toEqual([requested, substitute]);
+      originalWorks = true;
+      if (failure === "throw") {
+        sendSpy.mockImplementation(async (_message, options) => {
+          if (key(options.model.params) === substitute) throw new Error(SETTINGS_REJECTION);
+          return makeRun();
+        });
+      }
+      sendSpy.mockClear();
+      const recovered = await adapter.prompt({ sessionId: session.sessionId, turnId: "two", prompt: TEXT });
+      expect(recovered.response.effectiveModel).toBe("grok-4.7");
+      expect(sendSpy.mock.calls.map((call) => key(call[1].model.params))).toEqual([substitute, requested]);
+      expect((await adapter.initialize())._meta?.models?.find((model) => model.value === "grok-4.7")?.selectable).toBe(true);
+      sendSpy.mockClear();
+      await adapter.prompt({ sessionId: session.sessionId, turnId: "three", prompt: TEXT });
+      expect(sendSpy.mock.calls.map((call) => key(call[1].model.params))).toEqual([requested]);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("walks the curated fallbacks in catalog order and never runs an uncurated model", async () => {
+    const { adapter } = setup((model) => model.id === "default");
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: ENV });
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT }))
+        .resolves.toMatchObject({ response: { effectiveModel: "default" } });
+      expect(sendSpy.mock.calls.map((call) => call[1].model.id))
+        .toEqual(["grok-4.7", "grok-4.7", "grok-4.7", "grok-4.7", "composer-2.5", "default"]);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("retries the requested settings after the window instead of keeping the substitute forever", async () => {
+    let now = 1_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const advertised = new Set(GROK.variants.map((variant) => key(variant.params)));
+    const { adapter } = setup((model) => model.id !== "grok-4.7" || advertised.has(key(model.params)));
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: ENV });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+      now += ACCOUNT_MODEL_TTL_MS;
+      await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+      expect(sendSpy.mock.calls.map((call) => key(call[1].model.params))).toEqual([
+        key([context, effort("xhigh"), fast(false)]),
+        key([context, effort("xhigh"), fast(true)]),
+        key([context, effort("xhigh"), fast(false)]),
+        key([context, effort("xhigh"), fast(true)]),
+      ]);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("exact-model mode never tries other settings or models", async () => {
+    const { adapter, notices } = setup((model) => model.id !== "grok-4.7");
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: { ...ENV, ZEROS_REQUIRE_EXACT_MODEL: "1" } });
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).rejects.toBeDefined();
+      expect(sendSpy).toHaveBeenCalledOnce();
+      expect(notices()).toEqual([]);
+    } finally { await adapter.dispose(); }
   });
 });
 

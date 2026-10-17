@@ -890,6 +890,41 @@
         }
       }
     },
+    "blue-pill-bg": {
+      "$type": "color",
+      "$value": "{tokens.blue-bg}",
+      "$description": "Workspace link pill fill; Light separates it from the composer surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-pill-bg",
+          "section": "base-yellow-wash",
+          "utility": "--color-blue-pill-bg",
+          "utilitySection": "utilities-local-links",
+          "utilityOrder": 125
+        }
+      }
+    },
+    "blue-pill-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [
+          226,
+          57,
+          24
+        ]
+      },
+      "$description": "Workspace link pill hover fill",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-pill-hover",
+          "section": "base-yellow-wash",
+          "utility": "--color-blue-pill-hover",
+          "utilitySection": "utilities-local-links",
+          "utilityOrder": 126
+        }
+      }
+    },
     "violet-primary": {
       "$type": "color",
       "$value": {

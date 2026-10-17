@@ -54,6 +54,30 @@ describe("Codex fallback selection", () => {
     expect(updates.filter((u) => (u as { sessionUpdate: string }).sessionUpdate === "current_model_update")).toHaveLength(manual ? 0 : 1);
     await instance.dispose();
   });
+
+  it("keeps the curated selection when Codex reroutes to a model outside the catalog", async () => {
+    const updates: unknown[] = [];
+    const instance = new CodexAppServerAdapter({ projectRoot: "/tmp/proj", mcpServers: [], sessionDirRoot: "/tmp/sessions",
+      emit: { onSessionUpdate: (_a, n) => updates.push(n.update), onPermissionRequest: vi.fn(), onQuestionRequest: vi.fn(), onAgentStderr: vi.fn(), onAgentExit: vi.fn() } });
+    const { session: info } = await instance.newSession({ cwd: "/tmp/proj", env: { OPENAI_MODEL: "gpt-6-astra" } });
+    const session = (instance as unknown as { sessions: Map<string, import("../app-server-adapter").CodexSession> }).sessions.get(info.sessionId)!;
+    let calls = 0;
+    vi.mocked(session.runtime.runTurn).mockImplementation(async () => {
+      if (calls++ === 0) native.state.notificationHandlers.get("model/rerouted")?.({
+        threadId: session.threadId, turnId: "native-turn", fromModel: "gpt-6-astra", toModel: "gpt-5.3-codex", reason: "highRiskCyberActivity",
+      });
+      return { status: "completed", turnId: "native-turn", raw: {} } as never;
+    });
+    try {
+      await instance.prompt({ sessionId: info.sessionId, prompt: [{ type: "text", text: "First" }] });
+      await instance.prompt({ sessionId: info.sessionId, prompt: [{ type: "text", text: "Next" }] });
+      expect(vi.mocked(session.runtime.runTurn).mock.calls.at(-1)?.[0]).toMatchObject({ model: "gpt-6-astra" });
+      expect(updates.filter((u) => (u as { sessionUpdate: string }).sessionUpdate === "current_model_update")).toHaveLength(0);
+      // The response still says what ran, as a one-response fallback.
+      expect(updates.find((u) => (u as { sessionUpdate: string }).sessionUpdate === "model_fallback"))
+        .toMatchObject({ toModel: "gpt-5.3-codex", scope: "local" });
+    } finally { await instance.dispose(); }
+  });
 });
 
 const native = vi.hoisted(() => {

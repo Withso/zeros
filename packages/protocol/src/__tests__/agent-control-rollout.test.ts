@@ -28,11 +28,13 @@ const OPEN: AgentControlAvailability = {
   zerosBrowser: true,
   computerUse: true,
   simulators: true,
+  localOrchestration: true,
 };
 const CLOSED: AgentControlAvailability = {
   zerosBrowser: false,
   computerUse: false,
   simulators: false,
+  localOrchestration: false,
 };
 const FAMILIES = ["codex", "claude", "cursor"] as const;
 
@@ -42,6 +44,7 @@ describe("agent control rollout", () => {
       "zerosBrowser",
       "computerUse",
       "simulators",
+      "localOrchestration",
     ]);
     for (const feature of AGENT_CONTROL_FEATURES) {
       expect(AGENT_CONTROL_ROLLOUT[feature]).toBe("internal");
@@ -82,8 +85,14 @@ describe("agent control rollout", () => {
         zerosBrowser: "default",
         computerUse: "experimental",
         simulators: "internal",
+        localOrchestration: "default",
       }),
-    ).toEqual({ zerosBrowser: true, computerUse: false, simulators: false });
+    ).toEqual({
+      zerosBrowser: true,
+      computerUse: false,
+      simulators: false,
+      localOrchestration: true,
+    });
   });
 
   it("reads a pushed availability strictly", () => {
@@ -100,9 +109,20 @@ describe("agent control rollout", () => {
       { zerosBrowser: true, computerUse: true },
       { ...OPEN, simulators: "true" },
       { ...OPEN, computerUse: 1 },
+      { ...OPEN, localOrchestration: "true" },
+      { ...OPEN, localOrchestration: null },
     ]) {
       expect(readAgentControlAvailability(bad)).toBeNull();
     }
+    // A push from a renderer that predates the Local CLI still applies and
+    // keeps the Local CLI closed.
+    expect(
+      readAgentControlAvailability({
+        zerosBrowser: true,
+        computerUse: true,
+        simulators: true,
+      }),
+    ).toEqual({ ...OPEN, localOrchestration: false });
     expect(sameAgentControlAvailability(OPEN, { ...OPEN })).toBe(true);
     expect(
       sameAgentControlAvailability(OPEN, { ...OPEN, simulators: false }),
