@@ -338,7 +338,8 @@ if (runningDev) process.env.ZEROS_DEV = "1";
 // Main is the authority. Packaged/full Dev cannot inherit Local admission;
 // Local cannot read a hosted Dev account store, even from a parent app shell.
 if (IS_LOCAL_DEVELOPMENT) {
-  process.env.ZEROS_ISOLATE = "1";
+  // Sharing is resolved below against Local's own channel root. Preserve an
+  // explicit isolation choice, but never inherit a hosted Dev store path.
   delete process.env.ZEROS_SHARED_SECRETS_DIR;
 } else {
   delete process.env.ZEROS_LOCAL_DEVELOPMENT;

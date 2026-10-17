@@ -219,6 +219,21 @@ describe("provider browser authorization boundary", () => {
     expect(methods).not.toContain("account/read");
   });
 
+  it("does not treat a zero exit without a Claude authorization ceremony as a credential commit", async () => {
+    const server = processFixture();
+    const spawn = vi.fn(() => server.proc), committed = vi.fn();
+    const driver = createSubscriptionDriver("claude", {
+      resolveRuntime: async () => ({ command: "/bundled/claude", cwd: "/auth", env: {}, cleanup: async () => {} }),
+      spawn, openBrowser: vi.fn(),
+    });
+    const login = driver.login({ signal: AbortSignal.timeout(2000), onCodeRequired() {}, onCredentialsCommitted: committed });
+    const rejected = expect(login).rejects.toThrow();
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+    server.exit({ code: 0, signal: null });
+    await rejected;
+    expect(committed).not.toHaveBeenCalled();
+  });
+
   it("supports the bundled Claude authorization host while rejecting unrelated browser destinations", () => {
     expect(
       subscriptionBrowserUrl(

@@ -60,14 +60,16 @@ function decodeAccounts(
     const store = raw ? storeSchema.parse(JSON.parse(raw)) : empty();
     if (!metadata) return store;
     const revisions = revisionsSchema.parse(JSON.parse(metadata));
-    return {
+    // Reads and mutations must use the same schema ordering: the manager
+    // compares snapshots before publishing credential-change invalidations.
+    return storeSchema.parse({
       ...store,
       selectionRevision: revisions.selection,
       accounts: store.accounts.map((account) => ({
         ...account,
         revision: revisions.accounts[account.id],
       })),
-    };
+    });
   } catch {
     throw new Error("Saved accounts could not be read.");
   }

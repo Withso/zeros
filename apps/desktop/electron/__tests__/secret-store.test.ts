@@ -19,6 +19,8 @@ import { localDevCallbackStore } from "../local-dev-callback-store";
 import { WorkOSDevCallbackRelay } from "../workos-dev-callback-relay";
 import { GithubDevCallbackRelay } from "../github-dev-callback-relay";
 import { readProviderAccounts, updateProviderAccounts } from "../provider-account-store";
+import { ProviderAccountManager } from "../provider-account-manager";
+import type { SubscriptionAccount } from "../provider-subscription-controller";
 
 const directories: string[] = [];
 const originalSharedDirectory = process.env.ZEROS_SHARED_SECRETS_DIR;
@@ -61,6 +63,45 @@ it("keeps saved accounts readable by older worktrees while retaining private rev
   setSecret("provider-accounts-codex", JSON.stringify({ ...legacy, accounts: [{ ...legacy.accounts[0], state: "expired" }] }));
   expect(readProviderAccounts("codex")).toMatchObject({ selectionRevision: 3, accounts: [{ revision: 2, state: "expired" }] });
 });
+
+it.each(["claude", "codex", "cursor"] as const)(
+  "publishes only real account changes after %s store round trips",
+  async (provider) => {
+    await secretDirectory();
+    let nativeAccount: SubscriptionAccount = {
+      state: "connected", email: "account@example.test", plan: "Pro",
+    };
+    const changed = vi.fn();
+    const manager = new ProviderAccountManager({
+      readStore: () => readProviderAccounts(provider),
+      updateStore: update => updateProviderAccounts(provider, update),
+      createProfile: async id => provider === "cursor" ? undefined : `/fixture/profiles/${id}`,
+      read: async () => nativeAccount,
+      login: async () => ({
+        account: nativeAccount,
+        ...(provider === "cursor" ? { credential: { apiKey: "fixture-key", expiresAtMs: 9999999999999 } } : {}),
+      }),
+      discard: async () => {},
+      changed,
+    });
+    const signal = new AbortController().signal;
+    const first = await manager.login({ signal, onCodeRequired() {} });
+    await manager.login({ signal, onCodeRequired() {} });
+    await manager.select(first.activeAccountId!, signal);
+    const keys = [`provider-accounts-${provider}`, `provider-accounts-${provider}:revisions`];
+    const persisted = keys.map(key => getSecret(key));
+    changed.mockClear();
+    for (let read = 0; read < 5; read++) await manager.read(signal);
+    expect(keys.map(key => getSecret(key))).toEqual(persisted);
+    expect(changed).not.toHaveBeenCalled();
+
+    nativeAccount = { ...nativeAccount, state: "expired" };
+    expect((await manager.read(signal)).state).toBe("expired");
+    expect(changed).toHaveBeenCalledOnce();
+    for (let read = 0; read < 5; read++) await manager.read(signal);
+    expect(changed).toHaveBeenCalledOnce();
+  },
+);
 
 describe("encrypted secret store whole-file safety", () => {
   it("adopts existing Local provider credentials once without overwriting shared choices or importing app sessions", async () => {

@@ -5,6 +5,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentFailure } from "../../../platform/bridge/failure";
 import { isRecoverable, isTransportShaped } from "../../../platform/bridge/failure";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
+import { turnFailureForCard } from "../turn-failure";
+import { groupMessagesIntoTurns } from "../turn-grouping";
+import { tailTurnInFlight } from "../tail-indicators";
 
 // Execute the actual chat notification effect, with only React scheduling and
 // external sinks supplied. The unrelated editor/native tree is not mounted.
@@ -12,7 +15,9 @@ const source = ts.createSourceFile("agent-chat.tsx", readFileSync(new URL("../ag
 let effectSource = "", noticeSource = "", legacyLabelSource = "";
 function visit(node: ts.Node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === "labelForFailure") legacyLabelSource = node.getText(source);
-  if (ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration => declaration.name.getText(source) === "preparationFailure")) noticeSource = node.getText(source);
+  if (ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
+    ["preparationTurn", "preparationTurnRead", "preparationTurnFailure", "preparationFailure"].includes(declaration.name.getText(source))))
+    noticeSource += node.getText(source) + "\n";
   if (ts.isBlock(node)) {
     const index = node.statements.findIndex(statement => ts.isVariableStatement(statement) &&
       statement.declarationList.declarations.some(declaration => /^lastError.*Ref$/.test(declaration.name.getText(source))));
@@ -28,7 +33,7 @@ const script = new vm.Script(ts.transpileModule(`${legacyLabelSource}\n${effectS
 const cloud = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const protocol = (detail: string): AgentFailure => ({ kind: "protocol-error", stage: "newSession", agentId: "cursor", message: detail });
 
-function mounted(folder: string) {
+function mounted(folder: string, history?: { status: string; stopReason?: string; readOnly?: boolean }) {
   const refs: Array<{ current: unknown }> = [];
   const toast = { error: vi.fn() }, warn = vi.fn(), localRefresh = vi.fn(), cloudRefresh = vi.fn();
   let session = { agentId: "cursor", agentName: "Cursor", status: "ready", error: null as string | null,
@@ -38,7 +43,15 @@ function mounted(folder: string) {
     let index = 0;
     return script.runInNewContext({ session, chatId, interactive, chatThread: { folder }, cloudComputerV2: true,
       isErrorState: ["failed", "auth-required"].includes(session.status), isTransportShaped, isRecoverable, isCloudWorkspace,
-      readOnly: false, turns: [], detachedCloudAdmission: null,
+      readOnly: history?.readOnly ?? false,
+      turns: history ? groupMessagesIntoTurns([
+        { id: "earlier-prompt", kind: "text", role: "user", text: "Earlier request", createdAt: 1 },
+        { id: "earlier-answer", kind: "text", role: "agent", text: "Earlier answer", createdAt: 2 },
+      ]) : [],
+      detachedCloudAdmission: null, provisionalTranscript: false, surfaceActive: interactive,
+      pendingLocalTurnId: null, isStreaming: false, tailTurnInFlight, turnFailureForCard,
+      turnRowCache: {}, turnRowKey: () => "fixture-turn", turnGet: vi.fn(),
+      useCachedRead: () => ({ data: history ?? null }),
       cloudCatalogGeneration: () => account,
       toast, console: { warn },
       useRef: (initial: unknown) => refs[index++] ?? (refs[index - 1] = { current: initial }),
@@ -72,6 +85,36 @@ describe("agent failure notification ownership", () => {
     expect(view.render({ failure: protocol("synthetic fault B") })?.message).toBe("synthetic fault B");
     expect(view.toast).not.toHaveBeenCalled();
     expect(view.warn).not.toHaveBeenCalled();
+  });
+
+  describe.each(["/local/personal", "/organization/local", cloud])("startup failure with history in %s", folder => {
+    it.each(["completed", "cancelled"])("shows one explanation after a %s turn", status => {
+      for (const stage of ["initialize", "loadSession"] as const) {
+        const view = mounted(folder, { status, stopReason: status === "cancelled" ? "cancelled" : "end_turn" });
+        const failure = { ...protocol("The provider executable is unavailable."), stage };
+        view.render();
+        expect(view.render({ status: "failed", failure })?.message).toBe(failure.message);
+        expect(view.toast).not.toHaveBeenCalled();
+        expect(turnFailureForCard({ events: [], turnId: "earlier-prompt", fallback: failure, status })).toBeNull();
+        expect(view.render({ status: "ready", failure: null })).toBeNull();
+      }
+    });
+
+    it("leaves an unfinished turn's failure to its existing card", () => {
+      const view = mounted(folder, { status: "failed" });
+      const failure = { ...protocol("The provider could not initialize."), stage: "initialize" as const };
+      expect(view.render({ status: "failed", failure })).toBeNull();
+      expect(turnFailureForCard({ events: [], turnId: "earlier-prompt", fallback: failure, status: "failed" })?.message).toBe(failure.message);
+      expect(view.toast).not.toHaveBeenCalled();
+    });
+
+    it("keeps read-only history and recoverable startup failures quiet", () => {
+      const failure = protocol("Synthetic startup failure");
+      expect(mounted(folder, { status: "completed", readOnly: true }).render({ status: "failed", failure })).toBeNull();
+      for (const kind of ["transport-closed", "lifecycle-superseded", "timeout", "auth-required", "cloud-credentials-unavailable"] as const) {
+        expect(mounted(folder, { status: "completed" }).render({ status: "failed", failure: { ...failure, kind } })).toBeNull();
+      }
+    });
   });
 
   it("does not turn hidden or foreign-owner failure state into a notification", () => {

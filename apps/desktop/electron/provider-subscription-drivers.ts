@@ -247,7 +247,7 @@ export function createSubscriptionDriver(
           ? readClaude(runtime, signal, deps.allowApiKey)
           : withCodex(runtime, signal, rpc => readCodex(rpc, deps.allowApiKey)),
       ),
-    login: ({ signal, onCodeRequired }) =>
+    login: ({ signal, onCodeRequired, onCredentialsCommitted }) =>
       withRuntime(signal, async (runtime) => {
         if (provider === "claude") {
           await withProcess(
@@ -295,8 +295,15 @@ export function createSubscriptionDriver(
               const onStderr = (chunk: Buffer) => onData("stderr", chunk);
               proc.child.stdout?.on("data", onStdout);
               proc.child.stderr?.on("data", onStderr);
+              // Observe native completion even when cancellation wins the
+              // process race. A successful exit precedes our status/cleanup.
+              const exited = proc.exited.then((result) => {
+                if (opened && result.code === 0 && !result.error && !result.signal)
+                  onCredentialsCommitted?.();
+                return result;
+              });
               try {
-                const result = await Promise.race([proc.exited, failed]);
+                const result = await Promise.race([exited, failed]);
                 if (
                   !opened ||
                   result.code !== 0 ||
@@ -333,6 +340,10 @@ export function createSubscriptionDriver(
               settle = resolve;
             },
           );
+          const complete = (result: AccountLoginCompletedNotification) => {
+            if (result.success) onCredentialsCommitted?.();
+            settle(result);
+          };
           const early = new Map<string, AccountLoginCompletedNotification>();
           rpc.onNotification("account/login/completed", (raw) => {
             const result = raw as AccountLoginCompletedNotification;
@@ -341,7 +352,7 @@ export function createSubscriptionDriver(
               typeof result.success !== "boolean"
             )
               return;
-            if (result.loginId === loginId) settle(result);
+            if (result.loginId === loginId) complete(result);
             else if (!loginId && early.size < 8)
               early.set(result.loginId, result);
           });
@@ -358,7 +369,7 @@ export function createSubscriptionDriver(
             if (signal.aborted) cancel();
             const existing = early.get(loginId);
             early.clear();
-            if (existing) settle(existing);
+            if (existing) complete(existing);
             if (response.type === "chatgptDeviceCode") {
               // The pinned native runtime supplies only a public verification
               // URL and one-time code. Never accept arbitrary browser targets.

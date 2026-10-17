@@ -23,6 +23,9 @@ export interface SubscriptionDriver {
     signal: AbortSignal;
     accountId?: string;
     onCodeRequired: (submit: (code: string) => void) => void;
+    /** Native login has committed credentials, before status/cleanup can fail.
+     * No credential material leaves the driver through this notification. */
+    onCredentialsCommitted?: () => void;
   }): Promise<SubscriptionAccount>;
 }
 

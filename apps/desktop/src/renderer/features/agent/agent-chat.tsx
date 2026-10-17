@@ -103,6 +103,9 @@ import { QuestionCard } from "./question-card";
 import { readPlan, isPlanReviewRequest } from "./renderers/plan-body";
 import { WorkspaceDirectoryPicker } from "./workspace-directory-picker";
 import { useProjects } from "../../state/use-projects";
+import { turnGet } from "../../platform/turns";
+import { turnRowCache, turnRowKey } from "../../state/read-caches";
+import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
 import { Bot, Square, ArrowLeft, Upload, Check } from "lucide-react";
 import {
@@ -282,6 +285,7 @@ import { tailTurnInFlight } from "./tail-indicators";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { TurnFooter, turnFooterFailureLabel } from "./turn-footer";
+import { turnFailureForCard } from "./turn-failure";
 import { JumpToLatestButton, JumpToPromptPill } from "./jump-pills";
 import {
   CheckpointRail,
@@ -3207,11 +3211,41 @@ export function AgentChat({
     chatThread?.folder,
     session.cloudSendWait,
   ]);
-  // A new chat has no turn footer yet. Keep terminal startup failures local to
-  // that chat, while normal reconnects and superseded preparation stay quiet.
+  // Use the footer's exact cached row to decide whether it can present this
+  // failure. Completed/cancelled history cannot own a later startup failure.
+  // The read is shared with that footer and remains inert on hidden surfaces.
+  const preparationTurn = turns.at(-1);
+  const preparationTurnRead = useCachedRead(
+    turnRowCache,
+    !readOnly && !provisionalTranscript && chatId && preparationTurn?.userPrompt &&
+      session.status === "failed" && session.failure?.stage !== "prompt"
+      ? turnRowKey(chatId, preparationTurn.recordedTurnId ?? preparationTurn.userPrompt.id)
+      : null,
+    (key) => {
+      const [ownerChatId, turnId] = key.split("\u0000");
+      return turnGet(ownerChatId, turnId);
+    },
+    { maxAgeMs: 30_000, enabled: surfaceActive },
+  );
+  const preparationTurnFailure = !provisionalTranscript && chatId && preparationTurn?.userPrompt &&
+    session.status === "failed" && session.failure?.stage !== "prompt"
+    ? turnFailureForCard({
+        events: preparationTurn.providerEvents,
+        turnId: preparationTurn.recordedTurnId ?? preparationTurn.userPrompt.id,
+        fallback: session.failure,
+        recoveryFailure: preparationTurn.userPrompt.recoveryFailure,
+        status: preparationTurnRead.data?.status,
+        stopReason: session.lastStopReason ?? preparationTurnRead.data?.stopReason,
+        live: tailTurnInFlight({ sessionStreaming: isStreaming,
+          pendingLocalTurn: pendingLocalTurnId === preparationTurn.userPrompt.id,
+          hasEvents: preparationTurn.events.length > 0 }),
+        retrying: pendingLocalTurnId === preparationTurn.userPrompt.id,
+      }) : null;
+  // Keep terminal startup failures in this chat exactly once, while normal
+  // reconnects and superseded preparation stay quiet.
   const preparationFailure = !readOnly && session.status === "failed" &&
     session.failure && session.failure.stage !== "prompt" &&
-    !turns.some(turn => turn.userPrompt) && !detachedCloudAdmission &&
+    !preparationTurnFailure && !detachedCloudAdmission &&
     !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) &&
     session.failure.kind !== "auth-required" &&
     session.failure.kind !== "cloud-credentials-unavailable" &&

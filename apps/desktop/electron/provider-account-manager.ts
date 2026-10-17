@@ -139,9 +139,13 @@ export class ProviderAccountManager implements SubscriptionDriver {
     draft.configDir =
       existing?.configDir ?? (await this.deps.createProfile(draft.id));
     let committed = false;
+    let nativeCredentialsCommitted = false;
     try {
       options.signal.throwIfAborted();
-      const { account, credential } = await this.deps.login(draft, options);
+      const { account, credential } = await this.deps.login(draft, {
+        ...options,
+        onCredentialsCommitted: () => { nativeCredentialsCommitted = true; },
+      });
       options.signal.throwIfAborted();
       if (account.state !== "connected")
         throw new Error("Sign-in did not connect an account.");
@@ -174,7 +178,9 @@ export class ProviderAccountManager implements SubscriptionDriver {
           selectionRevision: (current.selectionRevision ?? 0) + 1,
           accounts: existing
             ? current.accounts.map((account) =>
-                account.id === existing.id ? saved : account,
+                account.id === existing.id
+                  ? { ...saved, revision: (account.revision ?? 0) + 1 }
+                  : account,
               )
             : [...current.accounts, saved],
         };
@@ -195,6 +201,28 @@ export class ProviderAccountManager implements SubscriptionDriver {
           } catch {
             // An unreadable store is not proof that the account was removed.
           }
+        }
+        if (!discard && nativeCredentialsCommitted) {
+          // The native profile is already changed, even if its later status
+          // read, cleanup or selection check failed. Publish a generation for
+          // that exact saved profile without changing the newer selection.
+          let advanced = false;
+          this.deps.updateStore((current) => {
+            const saved = current.accounts.find(account => account.id === draft.id);
+            if (!saved) {
+              discard = true;
+              return current;
+            }
+            if (saved.configDir !== draft.configDir) return current;
+            advanced = true;
+            return {
+              ...current,
+              accounts: current.accounts.map(account => account.id === draft.id
+                ? { ...account, revision: (account.revision ?? 0) + 1 }
+                : account),
+            };
+          });
+          if (advanced) await this.deps.changed();
         }
         if (discard) await this.deps.discard(draft).catch(() => {});
       }
