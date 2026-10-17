@@ -31,6 +31,8 @@ const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
 const MAX_RUNTIME_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
+/** CLOUD_CAPABILITY_ENGINE_PATH in the control plane's capability-routes.ts. */
+const ENGINE_CAPABILITY_PATH = "/internal/v2/cloud-workspaces/engine/capability";
 const CHECKPOINT_HINT_PATH = "/internal/v1/cloud-workspaces/engine/checkpoint-hint";
 const CHECKPOINT_HINT_AUDIENCE = "zeros-cloud-workspace-engine-checkpoint-hint-v1" as const;
 // Outlives the control plane's 25-second hint wait.
@@ -1042,12 +1044,33 @@ export class CloudRuntimeRegistration {
    * with, or null when the control plane did not advertise one (rollout flag
    * off, or an older control plane). The HTTP heartbeat remains the lease
    * owner either way. */
-  engineUplink(): { endpoint: string; token: string } | null {
+  engineUplink(): { endpoint: string; token: string; controlPlaneOrigin: string } | null {
     const document = this.document;
     if (!document?.uplink || this.stopped || this.authorityLost) return null;
-    return { endpoint: document.uplink.endpoint, token: document.heartbeat.token };
+    // The S1 issuer is the control plane's api origin, the same origin the
+    // heartbeat endpoint names.
+    return { endpoint: document.uplink.endpoint, token: document.heartbeat.token,
+      controlPlaneOrigin: new URL(document.heartbeat.endpoint).origin };
   }
 
+  /** The S1 engine-token REST fallback: a `zeros:api` engine capability
+   * issued against this registration's heartbeat credential and boot id.
+   * The caller (EngineCapabilityAuth) decides when; this only asks once. */
+  async requestEngineCapability(): Promise<{ token: string; expiresAtMs: number }> {
+    const document = this.document;
+    if (!document || !this.hasControlAuthority(document)) throw new Error("Cloud engine capability authority is unavailable");
+    const { heartbeatEndpoint, heartbeatToken, ...scope } = this.authority(document);
+    const raw = await this.post(new URL(ENGINE_CAPABILITY_PATH, heartbeatEndpoint).href, heartbeatToken,
+      { ...scope, bootId: this.runtimeBootId });
+    const capability = isRecord(raw) && exactKeys(raw, ["capability"]) ? raw.capability : null;
+    if (!isRecord(capability) || !exactKeys(capability, ["token", "expiresAt"]) ||
+        typeof capability.token !== "string" || capability.token.length < 32 || capability.token.length > 4096 ||
+        !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(capability.token) || typeof capability.expiresAt !== "string")
+      throw new Error("Invalid engine capability response");
+    const expiresAtMs = Date.parse(capability.expiresAt);
+    if (!Number.isSafeInteger(expiresAtMs)) throw new Error("Invalid engine capability response");
+    return { token: capability.token, expiresAtMs };
+  }
   /** Asks for an immediate beat. A superseded uplink (4409) re-verifies its
    * registration authority through the heartbeat before redialing (S2 rule 4). */
   requestHeartbeatSoon(): void {

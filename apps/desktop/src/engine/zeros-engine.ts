@@ -202,7 +202,8 @@ import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "./agents/conta
 import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-action-runtime";
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
-import { CloudEngineUplinkClient, EngineUplinkAuthState, sanitizeCredAckCode, type EngineUplinkReadiness } from "./cloud-engine-uplink";
+import { CloudEngineUplinkClient, sanitizeCredAckCode, type EngineUplinkReadiness } from "./cloud-engine-uplink";
+import { EngineCapabilityAuth, fileCapabilityAuthStore, jwksFetcher } from "./cloud-capability-auth";
 import { CloudEventRuntime } from "./cloud-event-runtime";
 import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome, type CloudAgentHistoryRestoreMetadata,
@@ -1154,6 +1155,7 @@ export class ZerosEngine {
   /** S2 uplink client; null on Local placements and whenever the control
    * plane did not advertise an endpoint (rollout flag off or older CP). */
   private cloudEngineUplink: CloudEngineUplinkClient | null = null;
+  private cloudCapabilityAuth: EngineCapabilityAuth | null = null;
   private readonly cloudDurabilityRuntime: CloudWorkspaceDurabilityRuntime | null;
   private readonly cloudRecordRuntime: CloudWorkspaceRecordRuntime | null;
   private readonly cloudCheckpointScheduler: CloudCheckpointScheduler | null;
@@ -3590,6 +3592,8 @@ export class ZerosEngine {
     const cloudEngineUplink = this.cloudEngineUplink;
     this.cloudEngineUplink = null;
     if (cloudEngineUplink) await settle(() => cloudEngineUplink.stop());
+    this.cloudCapabilityAuth?.stop();
+    this.cloudCapabilityAuth = null;
     if (this.cloudRuntimeRegistration && !this.cloudLegacyResidentRequiresFreshView) {
       await settle(() => this.cloudRuntimeRegistration!.stop());
     }
@@ -3702,6 +3706,21 @@ export class ZerosEngine {
     if (!registration || !config) return;
     const advertised = registration.engineUplink();
     if (!advertised) return;
+    // The durable S1 verifier state. An advertised uplink means the
+    // organization's realtime_uplink flag, which requires capabilities.
+    const capabilityAuth = new EngineCapabilityAuth({
+      identity: {
+        workspaceId: config.execution.workspaceId,
+        organizationId: config.execution.organizationId,
+        generation: config.execution.generation,
+        engineInstanceId: config.engine.instanceId,
+      },
+      issuer: advertised.controlPlaneOrigin,
+      store: fileCapabilityAuthStore(path.join(engineRuntimeDir(this.root), "cloud-capability-auth.json")),
+      fetchKeys: jwksFetcher(advertised.controlPlaneOrigin),
+      requestEngineCapability: () => registration.requestEngineCapability(),
+    });
+    this.cloudCapabilityAuth = capabilityAuth;
     const uplink = new CloudEngineUplinkClient({
       endpoint: advertised.endpoint,
       token: advertised.token,
@@ -3713,9 +3732,7 @@ export class ZerosEngine {
         bootId: registration.runtimeBootId,
       },
       runtimeVersion: VERSION,
-      // The in-memory S1 verifier state; track B binds the shared verifier
-      // (signature and epoch checks) to this state.
-      auth: new EngineUplinkAuthState(),
+      auth: capabilityAuth,
       readiness: () => this.cloudEngineUplinkReadiness(),
       features: ["cred.v1"],
       // Credential-control push (P0.10 C01): a pushed revision runs the same
@@ -3742,7 +3759,10 @@ export class ZerosEngine {
       // The moment the gate closes (or never negotiates the push), the
       // credential poll returns to its fast fallback cadence instead of
       // waiting out an armed 30 s timer.
-      onEstablishedChange: established => { if (!established) this.cloudAgentBoot?.rescheduleControls(); },
+      onEstablishedChange: established => {
+        capabilityAuth.uplinkEstablished(established);
+        if (!established) this.cloudAgentBoot?.rescheduleControls();
+      },
       onReverifyAuthority: () => registration.requestHeartbeatSoon(),
       onParked: reason =>
         console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`),
@@ -3751,7 +3771,11 @@ export class ZerosEngine {
       metric: (name, valueMs) => console.info(`[engine-uplink] metric ${name}=${Math.round(valueMs)}ms`),
     });
     this.cloudEngineUplink = uplink;
-    uplink.start();
+    // The hello offers the last durable cursor; an unreadable file starts
+    // from a complete snapshot.
+    void capabilityAuth.restore().catch(() => undefined).then(() => {
+      if (this.cloudEngineUplink === uplink) uplink.start();
+    });
   }
 
   private handleCloudRuntimeAuthorityLoss(): void {

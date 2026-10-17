@@ -203,6 +203,24 @@ authority supplies keys, epochs and engine tokens
   `repository` push `failed`/`cred_kind_unsupported` without calling its
   handler or recording the revision, so adding the kind later is an
   explicit signal, never a silent swallow.
+- **Revocation push (S-3).** `capability-revocation-push.ts` consumes the
+  process's security-event feed, which it shares with the device stream.
+  Migration 0158 writes a `capability.epochs_changed` row in the same
+  transaction as every epoch bump (member epochs, `users.auth_revision`,
+  device key version or revocation, workspace authority epoch and access
+  revision). Clients never see that kind, because `listSecurityEvents`
+  filters it out. For each event the producer finds the owned uplinks of
+  affected workspaces whose organization has `capabilities` on. It re-reads
+  their current epochs and revocations from `auth.snapshot` (never from the
+  event payload) and pushes `auth.epochs`, so `capability_revocation_push_ms`
+  runs from the event's `created_at`. On a feed `gap` it re-reads every
+  owned uplink. It sends `capability.revoked` to device streams only for
+  epoch events: the device stream already re-checks the account, session,
+  organization and workspace authorization kinds itself. It reads nothing
+  while no organization has `capabilities` on, resolves the workspaces of
+  every user named in a batch with one query, and retries a failed pass as
+  a full re-read of every owned uplink after 1 s, doubling to 30 s while
+  reads keep failing.
 - **Lease.** The HTTP heartbeat still owns the engine lease in this release;
   the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
 
@@ -347,6 +365,31 @@ registration there is no uplink client at all.
   revocations, latest capability); the shared verifier (track B) binds
   signature checks to that state. `engine_uplink_hello_ms` and
   `engine_uplink_auth_apply_ms` are recorded per connect.
+- **Engine token renewal.** `realtime` pushes a fresh `auth.capability` at
+  60% of the token's lifetime. `EngineCapabilityAuth`
+  (`cloud-capability-auth.ts`) keeps the later-expiring of the tokens it
+  holds. When the uplink has been down for 30 s (startup counts as down),
+  it asks `api` directly once the held token reaches 80% of its lifetime,
+  or at once if it holds none. That request is
+  `POST /internal/v2/cloud-workspaces/engine/capability` with the heartbeat
+  credential and the registered `bootId`, sent at most once a minute, and
+  it stops as soon as the uplink is up again.
+- **In-band client renewal.** `handleInBandAuth` handles one text message
+  of an admitted client session. A message with a top-level `t` and no
+  `type` is a handshake frame. Only `auth.renew` is accepted, it must be
+  16 KiB or smaller, and it is validated strictly. A valid renewal swaps
+  the session's token and returns an `auth.renewed` reply carrying the new
+  `expiresAtMs`. A failed renewal closes the session with its S1 socket
+  code; a malformed frame closes it with `4400`. A session that is not
+  renewed closes with `capability_expired` at `exp`. The cloud transport
+  does not carry the S3 `auth` frames yet, so no session reaches this
+  path in this release.
+- **Client admission.** The engine's capability admission
+  (`EngineCapabilityAuth.verifyClient`, `admit` and `handleInBandAuth`) has
+  no caller in this release: direct and relay client sessions keep the
+  client-admission call even with `capabilities` on. It is wired when
+  clients send S3 tokens (track F1) and relay admission verifies them
+  (track C5).
 - **Credential push.** The engine offers `cred.v1`; a pushed `cred.revision`
   runs the same credential-controls exchange the poll runs (coalesced to
   the latest revision per kind while one is in flight) and is answered with

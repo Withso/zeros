@@ -15,7 +15,7 @@ import {
   issueClientCapability,
   issueEngineCapability,
 } from "./capability-issuer.js";
-import { createCloudCapabilityEngineRoutes, createCloudCapabilityKeyRoutes } from "./capability-routes.js";
+import { CAPABILITY_FALLBACK_FAILURE_CEILING, createCloudCapabilityEngineRoutes, createCloudCapabilityKeyRoutes } from "./capability-routes.js";
 import { CAPABILITY_TOKEN_TYPE, CapabilityClaimsSchema } from "./capability-contract.js";
 
 const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
@@ -324,17 +324,17 @@ d("capability keys and issuance with PostgreSQL", () => {
     expect((await post(afterRevoke)).status).toBe(401);
   });
 
-  it("throttles failed engine-token requests per engine id before any SQL", async () => {
+  it("throttles failed engine-token requests per engine id and client address before any SQL", async () => {
     await activateFirst();
     const value = await store();
     await vi.waitFor(() => expect(value.signer()).not.toBeNull());
     let clock = 1_800_000_000_000;
     const app = createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags("capabilities"),
-      workosEnabled: false, now: () => clock });
+      workosEnabled: false, now: () => clock }, { clientAddress: c => c.req.header("x-test-address") ?? "unknown" });
     const bootId = (await pool.query<{ runtime_boot_id: string }>(
       "SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0]!.runtime_boot_id;
-    const post = (engineInstanceId: string, token: string) => app.request("/internal/v2/cloud-workspaces/engine/capability", {
-      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    const post = (engineInstanceId: string, token: string, address = "203.0.113.9") => app.request("/internal/v2/cloud-workspaces/engine/capability", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-test-address": address },
       body: JSON.stringify({ organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, generation: 1, engineInstanceId, bootId }),
     });
     const guess = `zwh_${"Z".repeat(43)}`;
@@ -344,6 +344,38 @@ d("capability keys and issuance with PostgreSQL", () => {
     expect(Number(throttled.headers.get("retry-after"))).toBeGreaterThan(0);
     // Another engine id keeps its own budget.
     expect((await post(randomUUID(), guess)).status).toBe(401);
+    // A caller elsewhere who knows the engine id cannot hold the engine's
+    // own address at 429.
+    expect((await post(fixture.engineInstanceId, fixture.heartbeatToken, "198.51.100.4")).status).toBe(201);
+    clock += 60_000;
+    expect((await post(fixture.engineInstanceId, guess)).status).toBe(401);
+  });
+
+  it("caps failed engine-token attempts per process so rotating engine ids cannot drive unbounded SQL", async () => {
+    await activateFirst();
+    const value = await store();
+    await vi.waitFor(() => expect(value.signer()).not.toBeNull());
+    let clock = 1_800_000_000_000;
+    let address = 0;
+    const app = createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags("capabilities"),
+      workosEnabled: false, now: () => clock }, { clientAddress: () => `192.0.2.${address}` });
+    const bootId = (await pool.query<{ runtime_boot_id: string }>(
+      "SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0]!.runtime_boot_id;
+    const post = (engineInstanceId: string, token: string) => app.request("/internal/v2/cloud-workspaces/engine/capability", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, generation: 1, engineInstanceId, bootId }),
+    });
+    const guess = `zwh_${"Z".repeat(43)}`;
+    for (let attempt = 0; attempt < CAPABILITY_FALLBACK_FAILURE_CEILING; attempt++) {
+      address = attempt % 250;
+      expect((await post(randomUUID(), guess)).status).toBe(401);
+    }
+    const query = vi.spyOn(pool, "connect");
+    const capped = await post(randomUUID(), guess);
+    expect(capped.status).toBe(429);
+    expect(Number(capped.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(query).not.toHaveBeenCalled();
+    query.mockRestore();
     clock += 60_000;
     expect((await post(fixture.engineInstanceId, fixture.heartbeatToken)).status).toBe(201);
   });

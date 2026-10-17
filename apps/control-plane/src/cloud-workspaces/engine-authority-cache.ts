@@ -251,6 +251,25 @@ export class EngineAuthorityCache {
     return decideEngineAuthority(slot.entry, tokenHash, mode, this.now());
   }
 
+  /** Memory only: the generation and engine instance of the one usable,
+   * unrevoked, enrolled entry for a workspace (S1 step 8 on `api` and
+   * `realtime`). `undefined` when there is none or more than one, so the
+   * caller asks SQL. A generation change invalidates the workspace, so a
+   * usable entry is for the current generation. */
+  placement(workspaceId: string, organizationId: string): { generation: number; engineInstanceId: string } | undefined {
+    if (!this.feedCurrent()) return undefined;
+    const now = this.now();
+    let found: { generation: number; engineInstanceId: string } | undefined;
+    for (const id of [...(this.byWorkspace.get(workspaceId.toLowerCase()) ?? [])]) {
+      const slot = this.usable(id);
+      if (!slot || slot.key.organizationId !== organizationId.toLowerCase() || slot.entry.revoked ||
+          !(slot.entry.setupEnrolled || slot.entry.runtimeReady) || now >= slot.entry.deadlineMs) continue;
+      if (found && (found.generation !== slot.key.generation || found.engineInstanceId !== slot.key.engineInstanceId)) return undefined;
+      found = { generation: slot.key.generation, engineInstanceId: slot.key.engineInstanceId };
+    }
+    return found;
+  }
+
   /** Records an enforced answer so shadow statistics stay comparable. */
   recordEnforcedHit(): void { this.counters.enforcedHits += 1; }
 

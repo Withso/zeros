@@ -104,6 +104,7 @@ import {
   createCloudCapabilityKeyRoutes,
   type CloudCapabilityService,
 } from "./cloud-workspaces/capability-routes.js";
+import { createEngineCapabilityGate } from "./cloud-workspaces/capability-service-verifier.js";
 
 export type CreateAppDependencies = {
   zerosDevAuth?: ZerosDevAuthDependencies;
@@ -501,16 +502,17 @@ export function createApp(
       "/",
       createCloudWorkspaceInternalRoutes(
         dependencies.cloudWorkspaceInternalSetupService,
-        dependencies.cloudWorkspaceEngineUplink
-          ? { engineUplink: dependencies.cloudWorkspaceEngineUplink }
-          : undefined,
+        {
+          ...(dependencies.cloudWorkspaceEngineUplink ? { engineUplink: dependencies.cloudWorkspaceEngineUplink } : {}),
+          ...(dependencies.cloudCapabilities ? { engineCapabilities: createEngineCapabilityGate(dependencies.cloudCapabilities) } : {}),
+        },
       ),
     );
     // The engine-token REST fallback shares the internal surface's response
     // headers and pre-auth rate limit (path-based middleware above).
     if (dependencies.cloudCapabilities) {
       app.use(CLOUD_CAPABILITY_ENGINE_PATH, cloudWorkspaceInternalResponseHeaders);
-      app.route("/", createCloudCapabilityEngineRoutes(dependencies.cloudCapabilities));
+      app.route("/", createCloudCapabilityEngineRoutes(dependencies.cloudCapabilities, { clientAddress: internalClientIp }));
     }
   }
 

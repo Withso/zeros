@@ -17,6 +17,71 @@ import {
 import { assertCurrentCloudEngineAuthority, CloudWorkspaceEngineAuthorityError, readCurrentCloudEngineAuthority } from "./engine-authority.js";
 
 const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
+
+const DEADLINE_COLUMNS = new Set(["lease_expires_at", "funded_until", "provider_expires_at", "covered_until"]);
+const PRESERVED_PREDICATES: Record<string, string> = {
+  reserved_micro_usd: "((new_row ->> 'reserved_micro_usd')::numeric > 0) = ((old_row ->> 'reserved_micro_usd')::numeric > 0)",
+};
+
+/**
+ * Each extension-only branch of notify_cloud_authority_cache lists the
+ * columns an UPDATE may change without a hint. A listed column is safe only
+ * as a deadline guarded (inside that same branch) to move later, as a column
+ * whose predicate the branch itself preserves, or when neither the predicate
+ * closure nor the loader reads it. Returns the branches and every violation.
+ */
+function authorityExemptions(notifier: string, code: string) {
+  const branches = [...notifier.matchAll(/TG_TABLE_NAME = '([a-z_]+)'\s+AND \(new_row - ARRAY\[([^\]]*)\]\)/g)].map(match => {
+    const start = match.index!;
+    const end = notifier.slice(start).search(/\bTHEN\b/);
+    return {
+      table: match[1]!,
+      columns: [...match[2]!.matchAll(/'([a-z_]+)'/g)].map(column => column[1]!),
+      text: end < 0 ? "" : notifier.slice(start, start + end),
+    };
+  });
+  const violations: string[] = [];
+  for (const { table, columns, text } of branches) {
+    for (const column of columns) {
+      if (DEADLINE_COLUMNS.has(column)) {
+        if (!text.includes(`(new_row ->> '${column}')::timestamptz >= (old_row ->> '${column}')::timestamptz`)) violations.push(`${table}.${column} may only move later`);
+      } else if (PRESERVED_PREDICATES[column]) {
+        if (!text.includes(PRESERVED_PREDICATES[column])) violations.push(`${table}.${column} keeps its predicate`);
+      } else if (new RegExp(`\\b${column}\\b`).test(code)) {
+        violations.push(`${table}.${column} is read by the authority predicate or loader`);
+      }
+    }
+  }
+  return { branches, violations };
+}
+
+describe("authority cache exemption guard", () => {
+  const guarded = `IF TG_TABLE_NAME = 'a_table'
+       AND (new_row - ARRAY['covered_until']) = (old_row - ARRAY['covered_until'])
+       AND (new_row ->> 'covered_until')::timestamptz >= (old_row ->> 'covered_until')::timestamptz THEN
+      RETURN NULL;
+    END IF;`;
+  it("accepts a deadline exemption guarded inside its own branch", () => {
+    expect(authorityExemptions(guarded, "").violations).toEqual([]);
+  });
+  it("rejects a second table that exempts a deadline without its own guard", () => {
+    const unguarded = guarded + `
+    IF TG_TABLE_NAME = 'b_table'
+       AND (new_row - ARRAY['covered_until']) = (old_row - ARRAY['covered_until']) THEN
+      RETURN NULL;
+    END IF;`;
+    expect(authorityExemptions(unguarded, "").violations).toEqual(["b_table.covered_until may only move later"]);
+  });
+  it("rejects a preserved predicate that sits in another table's branch", () => {
+    const notifier = `IF TG_TABLE_NAME = 'a_table'
+       AND (new_row - ARRAY['reserved_micro_usd']) = (old_row - ARRAY['reserved_micro_usd']) THEN
+      RETURN NULL;
+    END IF;
+    IF TG_TABLE_NAME = 'b_table' AND (new_row - ARRAY['x']) = (old_row - ARRAY['x'])
+       AND ${PRESERVED_PREDICATES.reserved_micro_usd} THEN RETURN NULL; END IF;`;
+    expect(authorityExemptions(notifier, "").violations).toEqual(["a_table.reserved_micro_usd keeps its predicate"]);
+  });
+});
 const hash = (token: string) => createHash("sha256").update(token, "utf8").digest();
 
 /** Tables read by the cache loader beyond the authority function closure. */
@@ -117,37 +182,17 @@ d("engine authority cache with PostgreSQL", () => {
   });
 
   it("exempts from invalidation only columns that cannot lower a cached authority", async () => {
-    // Each extension-only branch of notify_cloud_authority_cache lists the
-    // columns an UPDATE may change without a hint. A listed column is safe
-    // only as a deadline guarded to move later (entries are bounded by the
-    // deadline they loaded), as a column whose predicate the branch itself
-    // preserves, or when neither the predicate closure nor the loader reads it.
     const closure = await functionInputTables(pool, ["cloud_workspace_engine_authority_current", "cloud_workspace_engine_authority_snapshot"]);
     const code = [...closure.bodies.values()].flat().map(stripSqlLiterals).join("\n") + "\n" +
       readFileSync(new URL("./engine-authority-cache.ts", import.meta.url), "utf8");
     const notifier = (await pool.query<{ body: string }>(
       "SELECT prosrc AS body FROM pg_proc WHERE proname='notify_cloud_authority_cache'")).rows[0]!.body;
-    const branches = [...notifier.matchAll(/TG_TABLE_NAME = '([a-z_]+)'\s+AND \(new_row - ARRAY\[([^\]]*)\]\)/g)]
-      .map(match => ({ table: match[1]!, columns: [...match[2]!.matchAll(/'([a-z_]+)'/g)].map(column => column[1]!) }));
+    const { branches, violations } = authorityExemptions(notifier, code);
     expect(branches.map(branch => branch.table).sort()).toEqual([
       "cloud_workspace_engine_instances", "cloud_workspace_generations", "cloud_workspace_provider_bindings",
       "managed_compute_allocation_leases", "managed_compute_credit_reservations"]);
-    const deadlines = new Set(["lease_expires_at", "funded_until", "provider_expires_at", "covered_until"]);
-    const preserved: Record<string, string> = {
-      reserved_micro_usd: "((new_row ->> 'reserved_micro_usd')::numeric > 0) = ((old_row ->> 'reserved_micro_usd')::numeric > 0)",
-    };
-    for (const { table, columns } of branches) {
-      for (const column of columns) {
-        if (deadlines.has(column)) {
-          expect(notifier, `${table}.${column} may only move later`)
-            .toContain(`(new_row ->> '${column}')::timestamptz >= (old_row ->> '${column}')::timestamptz`);
-        } else if (preserved[column]) {
-          expect(notifier, `${table}.${column} keeps its predicate`).toContain(preserved[column]);
-        } else {
-          expect(new RegExp(`\\b${column}\\b`).test(code), `${table}.${column} is read by the authority predicate or loader`).toBe(false);
-        }
-      }
-    }
+    expect(branches.every(branch => branch.text.length > 0)).toBe(true);
+    expect(violations).toEqual([]);
   });
 
   it("loads with the locking predicate's exact body minus its row locks", async () => {

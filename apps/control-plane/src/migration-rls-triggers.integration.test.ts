@@ -36,7 +36,8 @@ const COVERED_TRIGGERS: Record<string, readonly string[]> = {
   ],
   teams: ["cloud_capability_epoch_teams", "team_cloud_workspace_retirement", "zz_cloud_authority_cache"],
   users: [
-    "cloud_actor_staff_revision", "cloud_capability_epoch_users", "staff_pro_benefit_sync", "user_auth_cloud_authority_check",
+    "cloud_actor_staff_revision", "cloud_capability_epoch_event_accounts", "cloud_capability_epoch_users", "staff_pro_benefit_sync",
+    "user_auth_cloud_authority_check",
     "user_cloud_workspace_authority_retirement", "user_staff_cloud_authority_check", "zz_cloud_authority_cache",
   ],
 };
@@ -141,6 +142,7 @@ d("triggers on user-writable tables with PostgreSQL", () => {
 
     it("users: rename and mark the own account deleted", async () => {
       await asUser(member, "UPDATE users SET display_name='Renamed' WHERE id=$1", [member]);
+      await asUser(member, "UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1", [member]);
       await asUser(member, "UPDATE users SET deleted_at=clock_timestamp() WHERE id=$1", [member]);
     });
   });

@@ -80,6 +80,7 @@ import { startDeviceStreamNotifications } from "./realtime/device-stream-notific
 import { DEVICE_STREAM_PATH } from "./realtime/device-stream-protocol.js";
 import { DeviceStreamServer } from "./realtime/device-stream-server.js";
 import { DatabaseRealtimeSecurityEventFeed, DatabaseSecurityEventSource } from "./realtime/security-event-feed.js";
+import { CapabilityRevocationPush, DatabaseCapabilityRevocationSource } from "./realtime/capability-revocation-push.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
@@ -863,6 +864,25 @@ if (servesApi && cloudWorkspaceAccessService && migrationResult.status.state !==
 let cloudEngineUplink: CloudEngineUplinkServer | undefined;
 let uplinkPresence: UplinkPresenceWriter | undefined;
 let stopUplinkNotifications: () => Promise<void> = async () => {};
+// One security-event feed per realtime process, shared by the device stream
+// and the S1 revocation producer (auth.epochs to owned uplinks,
+// capability.revoked to device streams), started by whichever mounts first.
+let realtimeSecurityEvents: DatabaseRealtimeSecurityEventFeed | undefined;
+let capabilityRevocationPush: CapabilityRevocationPush | undefined;
+let uplinkAuthSource: ReturnType<typeof uplinkCapabilityAuthority> = null;
+const sharedSecurityEvents = () => {
+  realtimeSecurityEvents ??= new DatabaseRealtimeSecurityEventFeed(new DatabaseSecurityEventSource(pool), { listenerPool });
+  void realtimeSecurityEvents.start();
+  return realtimeSecurityEvents;
+};
+const startCapabilityRevocationPush = () => {
+  if (capabilityRevocationPush || !rolloutFlagSnapshot) return;
+  capabilityRevocationPush = new CapabilityRevocationPush({
+    feed: sharedSecurityEvents(), source: new DatabaseCapabilityRevocationSource(pool), flags: rolloutFlagSnapshot,
+    uplink: () => cloudEngineUplink && uplinkAuthSource ? { server: cloudEngineUplink, auth: uplinkAuthSource.source } : null,
+    deviceStreams: () => deviceStream,
+  });
+};
 const mountEngineUplink = () => {
   if (cloudEngineUplink || shuttingDown) return;
   if (processRole !== "realtime" && processRole !== "combined") return;
@@ -895,7 +915,13 @@ const mountEngineUplink = () => {
     alerts,
     extensions: [uplinkCredPush],
   });
-  stopUplinkNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore, console, uplinkCredPush);
+  uplinkAuthSource = uplinkAuth;
+  startCapabilityRevocationPush();
+  const stopNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore, console, uplinkCredPush);
+  stopUplinkNotifications = async () => {
+    capabilityRevocationPush?.stop();
+    await Promise.allSettled([stopNotifications(), realtimeSecurityEvents?.stop()]);
+  };
 };
 void rolloutFlagsStarted?.then(mountEngineUplink);
 rolloutFlagSnapshot?.onChange(mountEngineUplink);
@@ -910,14 +936,14 @@ const mountDeviceStream = () => {
   if (deviceStream || shuttingDown) return;
   if (processRole !== "realtime" && processRole !== "combined") return;
   if (!rolloutFlagSnapshot || migrationResult.status.state !== "current" || !rolloutFlagSnapshot.anyEnabled("device_stream")) return;
-  deviceStreamSecurityEvents = new DatabaseRealtimeSecurityEventFeed(new DatabaseSecurityEventSource(pool), { listenerPool });
+  deviceStreamSecurityEvents = sharedSecurityEvents();
   deviceStream = new DeviceStreamServer({
     authority: new DatabaseDeviceSessionAuthority(pool),
     catalog: new DatabaseDeviceStreamCatalogSource(pool, config.cloudWorkspaces ?? null),
     flags: rolloutFlagSnapshot,
     securityEvents: deviceStreamSecurityEvents,
   });
-  void deviceStreamSecurityEvents.start();
+  startCapabilityRevocationPush();
   stopDeviceStreamNotifications = startDeviceStreamNotifications(listenerPool, deviceStream);
 };
 void rolloutFlagsStarted?.then(mountDeviceStream);
