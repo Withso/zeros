@@ -78,7 +78,7 @@ export type RuntimeConnectResult =
    * the caller uses the legacy admission for this workspace. */
   | { kind: "legacy"; route: RuntimeRouteKind };
 
-type CapabilityClaims = { aud: string; wsp: string; jti: string; exp: number };
+type CapabilityClaims = { aud: string; wsp: string; jti: string; exp: number; iat?: number };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -133,9 +133,11 @@ export function decodeCapabilityClaims(token: string): CapabilityClaims | null {
     if (payload === undefined) return null;
     const claims: unknown = JSON.parse(base64urlToText(payload));
     if (!isRecord(claims)) return null;
-    const { aud, wsp, jti, exp } = claims;
+    const { aud, wsp, jti, exp, iat } = claims;
     if (typeof aud !== "string" || typeof wsp !== "string" || typeof jti !== "string") return null;
     if (typeof exp !== "number" || !Number.isSafeInteger(exp)) return null;
+    // A missing or non-integer iat is left out; it never makes the claims unusable.
+    if (typeof iat === "number" && Number.isSafeInteger(iat)) return { aud, wsp, jti, exp, iat };
     return { aud, wsp, jti, exp };
   } catch {
     return null;
