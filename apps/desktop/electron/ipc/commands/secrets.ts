@@ -47,7 +47,7 @@ export const keychainSet: CommandHandler = async (args) => {
         account,
       )
     )
-      void pushProviderCredentialsToEngine().catch(() => {});
+      await pushProviderCredentialsToEngine();
   } catch (err) {
     throw new Error(
       `keychain set failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -98,7 +98,7 @@ export const keychainDelete: CommandHandler = async (args) => {
         account,
       )
     )
-      void pushProviderCredentialsToEngine().catch(() => {});
+      await pushProviderCredentialsToEngine();
   } catch (err) {
     throw new Error(
       `keychain delete failed: ${err instanceof Error ? err.message : String(err)}`,

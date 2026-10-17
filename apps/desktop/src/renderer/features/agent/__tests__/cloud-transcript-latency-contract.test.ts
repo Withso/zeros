@@ -46,5 +46,8 @@ it("gates cached row actions by the cloud chat identity even before folder metad
   for (const folder of ["/personal/local", "/organization/local"]) {
     context.chatId = "local-chat"; context.chatThread = { folder }; context.session = { ...BLANK, cwd: folder };
     vm.runInNewContext(code, context); expect(context.provisional).toBe(false);
+    // A Local boot-cache paint is equally read-only until the engine confirms.
+    context.session = { ...BLANK, cwd: folder, transcriptState: "loading", transcriptPresentation: { source: "cache" } };
+    vm.runInNewContext(code, context); expect(context.provisional).toBe(true);
   }
 });

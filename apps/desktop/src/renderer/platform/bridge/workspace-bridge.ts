@@ -791,9 +791,20 @@ export type MessageWindowSnapshot = {
   source: "local" | "native" | "control-plane" | "unknown";
   restoreHead?: CloudHistoryRestoreFence;
   isCurrent?: () => boolean;
+  /** Local engines only: the opening prompt of the turn `messages[0]` belongs
+   *  to, when that turn is longer than the contiguous window. */
+  turnOpening?: PersistedMessageWire;
 };
 
-type MessageWindowResponse = { messages?: PersistedMessageWire[]; projection?: unknown; historyHeads?: unknown } | undefined;
+type MessageWindowResponse = { messages?: PersistedMessageWire[]; projection?: unknown; historyHeads?: unknown; turnOpening?: unknown } | undefined;
+
+function persistedMessageWire(value: unknown): PersistedMessageWire | undefined {
+  const row = value as Partial<PersistedMessageWire> | null | undefined;
+  return row && typeof row.msgId === "string" && row.msgId.length > 0 && typeof row.kind === "string" &&
+    typeof row.payload === "string" && typeof row.createdAt === "number"
+    ? { msgId: row.msgId, kind: row.kind, payload: row.payload, createdAt: row.createdAt }
+    : undefined;
+}
 
 /** Bare row consumers (copy, attachments and paging) cannot distinguish a
  * missing projection from an empty conversation once its receipt is dropped. */
@@ -817,8 +828,12 @@ function messageWindowSnapshot(bridge: RuntimeClient, chatId: string, r: Message
     restoreHead = { projection: metadata.projection, conversationId: target.id,
       head: metadata.historyHeads.find(head => head.conversationId === target.id) ?? null };
   }
+  // Cloud history keeps its own projection contract; only a Local window may
+  // carry a turn opening.
+  const turnOpening = target ? undefined : persistedMessageWire(r?.turnOpening);
   return { messages: r?.messages ?? [], source: receipt?.source ?? (target ? "unknown" : "local"),
-    ...(restoreHead ? { restoreHead } : {}), ...(receipt ? { isCurrent: receipt.isCurrent } : {}) };
+    ...(restoreHead ? { restoreHead } : {}), ...(receipt ? { isCurrent: receipt.isCurrent } : {}),
+    ...(turnOpening ? { turnOpening } : {}) };
 }
 
 export async function bridgeMessageWindowSnapshot(

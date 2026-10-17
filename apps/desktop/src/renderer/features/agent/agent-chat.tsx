@@ -1,6 +1,7 @@
 import { CloudAgentCredentialCards } from "./cloud-agent-credential-cards";
 import { cloudAdmissionForTurn } from "./cloud-admission-failure";
 import { TurnFailureCard } from "./turn-failure-card";
+import { AgentNotice } from "./agent-notice";
 import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
 import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-send-failure-toast";
 // ──────────────────────────────────────────────────────────
@@ -20,6 +21,7 @@ import { useCloudTranscriptLatency, useCloudTranscriptLoading } from "./use-clou
 import { useTranscriptHistoryStatus } from "./use-transcript-history-status";
 import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { hasTranscriptPresentation } from "./transcript-retention";
+import { presentLeadingPrompt } from "./transcript-leading-prompt";
 import { startCloudSubmitSpan } from "../../state/cloud-workspace-latency";
 import React, {
   useCallback,
@@ -102,6 +104,9 @@ import { QuestionCard } from "./question-card";
 import { readPlan, isPlanReviewRequest } from "./renderers/plan-body";
 import { WorkspaceDirectoryPicker } from "./workspace-directory-picker";
 import { useProjects } from "../../state/use-projects";
+import { turnGet } from "../../platform/turns";
+import { turnRowCache, turnRowKey } from "../../state/read-caches";
+import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
 import { Bot, Square, ArrowLeft, Upload, Check } from "lucide-react";
 import {
@@ -167,8 +172,8 @@ import {
 } from "../../platform/bridge/agent-events";
 import type { ContentBlock } from "../../platform/bridge/agent-events";
 import {
+  isRecoverable,
   isTransportShaped,
-  type AgentFailure,
 } from "../../platform/bridge/failure";
 import type {
   AgentMessage,
@@ -253,7 +258,7 @@ import {
   refreshAgents,
 } from "./agents-cache";
 import { invalidateCloudAgentRegistry, useWorkspaceAgents } from "./workspace-agent-registry";
-import { isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings, requestUserSettingsSection } from "../settings/settings-navigation";
@@ -281,6 +286,7 @@ import { tailTurnInFlight } from "./tail-indicators";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { TurnFooter, turnFooterFailureLabel } from "./turn-footer";
+import { turnFailureForCard } from "./turn-failure";
 import { JumpToLatestButton, JumpToPromptPill } from "./jump-pills";
 import {
   CheckpointRail,
@@ -302,6 +308,10 @@ import {
   truncateMessagesFrom as ipcTruncateMessagesFrom,
 } from "./agent-history-client";
 
+/** How long an empty chat waits for its folder's transcript list before it
+ * shows the workspace rows instead of nothing. */
+const TRANSCRIPT_LIST_GRACE_MS = 400;
+
 // Error classification is handled by sessions-provider's AgentFailure
 // pipeline; the UI now branches on session.status directly (warming /
 // ready / reconnecting / auth-required / failed). No more regex
@@ -311,45 +321,6 @@ import {
 // ("Plan only; no edits or commands"). The plan enter/exit helpers and
 // isPlanMode both key off this so they work for BOTH agents.
 const PLAN_MODE_RX = /plan|read.?only/i;
-
-/** Map an AgentFailure (or the bare status
- *  when failure isn't classified yet) to the short label used in the toast. */
-function labelForFailure(
-  failure: AgentFailure | null,
-  status: AgentSessionState["status"],
-): string {
-  if (failure) {
-    switch (failure.kind) {
-      case "session-expired":
-        return "Session expired";
-      case "timeout":
-        return "Timed out";
-      case "auth-required":
-        return "Sign in required";
-      case "verification-required":
-        return "Verification required";
-      case "cloud-credentials-unavailable":
-        return "Cloud credentials unavailable";
-      case "transport-closed":
-        return "Disconnected";
-      case "rate-limited":
-        return "Rate limited";
-      case "design-protection-failed":
-        return "Design protection failed";
-      case "subprocess-exited":
-        return "Agent exited";
-      case "protocol-error":
-        if (/agent response failure/i.test(failure.message)) {
-          return "Agent response failure";
-        }
-        return "Agent error";
-      default:
-        return "Agent error";
-    }
-  }
-  if (status === "auth-required") return "Sign in required";
-  return "Agent error";
-}
 
 interface AgentChatProps {
   /** Saved workspace history shares the transcript, with all writing disabled. */
@@ -403,9 +374,14 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
-  const provisionalTranscript = (isCloudWorkspace(chatThread?.folder ?? session.cwd) || !!parseCloudScopedId(chatId)) &&
-    session.transcriptState === "loading" && !!session.transcriptPresentation;
+  // A cached window (cloud restore cache or the Local boot cache) paints while
+  // the authoritative read is pending. It is read-only presentation until then.
+  const provisionalTranscript = session.transcriptState === "loading" && !!session.transcriptPresentation;
   const transcriptReadOnly = readOnly || provisionalTranscript;
+  // A Local chat known to be empty shows its empty state while the engine
+  // confirms it (e.g. right after a restart), never a blank pane.
+  const emptyStateReady = session.transcriptState === "resident" ||
+    provisionalTranscript && session.transcriptPresentation?.empty === true && session.messages.length === 0;
   const cloudNativeCapabilities=session.boundary?.cloudExecution?.capabilities??session.session?.nativeCapabilities;
   const goalsAvailable=!isCloudWorkspace(chatThread?.folder)||cloudNativeCapabilities?.goals===true;
   const browserConfirmation = useBrowserConfirmation(chatId);
@@ -1047,7 +1023,7 @@ export function AgentChat({
         return;
       }
       void loadAgents((force) => agentSessions.listAgents(force)).catch(() => {
-        /* failures surface via the regular toast pipeline */
+        /* Keep the last confirmed registry during background revalidation. */
       });
     }, AGENT_REGISTRY_VERIFICATION_DELAY_MS);
     return () => clearTimeout(timer);
@@ -1958,7 +1934,7 @@ export function AgentChat({
   // calls warmChatTranscriptSummaries on pointer/focus intent, so it can stay
   // locally stateful and the dialog still opens from the exact-key cache.
   const transcriptRowLive =
-    session.transcriptState === "resident" &&
+    emptyStateReady &&
     !transcriptCatchingUp &&
     session.messages.length === 0 &&
     !session.error &&
@@ -1982,13 +1958,25 @@ export function AgentChat({
   const warmTranscriptPicker = useCallback(() => {
     warmChatTranscriptSummaries(chatThread?.folder, chatId);
   }, [chatThread?.folder, chatId]);
+  // A cold list normally lands in one local round trip. If the engine is busy
+  // or still starting, stop waiting after a short grace and show the workspace
+  // rows; the transcript row takes their place when the list lands. Keyed by
+  // chat, and the timer runs only for the visible empty chat.
+  const [transcriptWaitExpiredFor, setTranscriptWaitExpiredFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!chatId || !interactive || !transcriptRowLive || transcriptsLoaded) return;
+    const timer = window.setTimeout(() => setTranscriptWaitExpiredFor(chatId), TRANSCRIPT_LIST_GRACE_MS);
+    return () => window.clearTimeout(timer);
+  }, [chatId, interactive, transcriptRowLive, transcriptsLoaded]);
   // The provenance block's shape hangs on this ONE question, and `null` for
   // "not known yet" is the load-bearing third answer — see
   // provenanceBlockShape. Derived from the same array the row renders, so the
   // rows can never step aside for a row that then draws nothing.
   const hasTranscripts = transcriptsLoaded
     ? transcriptSummaries.length > 0
-    : null;
+    : transcriptWaitExpiredFor === chatId
+      ? false
+      : null;
 
   // Source chats whose transcript read is in flight. A pill in here is still
   // clickable — the click cancels (see cancelTranscriptAttach).
@@ -2922,15 +2910,22 @@ export function AgentChat({
   // can still hydrate such rows; drop them before grouping so they neither
   // render as an unknown-kind row nor form an empty leading turn.
   const stableTurnsRef = useRef<ReturnType<typeof groupMessagesIntoTurns>>([]);
+  // A Local window can begin inside one long turn; its opening prompt travels
+  // beside the window (transcript-leading-prompt.ts) so the turn keeps its
+  // prompt bubble, checkpoint and footer.
+  const leadingPrompt = session.leadingPrompt ?? null;
   const turns = useMemo(
     () =>
       stabilizeTurns(
         stableTurnsRef.current,
         groupMessagesIntoTurns(
-          visibleMessages.filter((m) => (m.kind as string) !== "mode_switch"),
+          presentLeadingPrompt(
+            visibleMessages.filter((m) => (m.kind as string) !== "mode_switch"),
+            leadingPrompt,
+          ),
         ),
       ),
-    [visibleMessages],
+    [visibleMessages, leadingPrompt],
   );
   const authenticationRecoveredAt = useMemo(() => latestAuthenticationRecoveryTurn(turns), [turns]);
   // Only a committed render becomes the baseline. Mutating this ref inside
@@ -3184,15 +3179,13 @@ export function AgentChat({
 
   // The error states `failed` / `auth-required` no longer lock the composer
   // (2026-07-10, see canSend below) — sending IS the retry affordance. This
-  // flag now only drives the error-feedback surfaces: the toast effect below
-  // and the Send button's "error" tint.
+  // flag drives the Send button's error tint; failures stay in this chat.
   const isErrorState =
     (session.status === "failed" || session.status === "auth-required") &&
     !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait?.state === "waiting");
 
-  // Toasts describe a new failure observed by this active chat, never a
-  // historical snapshot on mount/reveal. Seed from the current state and
-  // advance while hidden too; the transcript/auth notice retains old errors.
+  // Real authentication rejections invalidate the exact registry once. Mount,
+  // reveal and routine lifecycle failures must not fan out probes or toasts.
   const lastErrorObservationRef = useRef({ chatId, folder: chatThread?.folder,
     account: cloudCatalogGeneration(), agentId: session.agentId, failure: session.failure,
     error: session.error, status: session.status });
@@ -3210,37 +3203,14 @@ export function AgentChat({
     if (sameFailure && previous.error === current.error && previous.status === current.status) return;
     if (cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) return;
     if (session.failure?.kind === "lifecycle-superseded" || session.failure?.kind === "transport-closed") return;
-    const label = labelForFailure(session.failure, session.status);
-    const agentLabel = session.agentName ?? session.agentId ?? "Agent";
     const detail = session.failure?.message ?? session.error ?? undefined;
-    // Defense in depth — even if a future code path forgets to route a
-    // recoverable error through classifyRpcError + statusForFailure,
-    // the toast itself should not surface transport-layer noise as a
-    // hard agent error. `isTransportShaped` is shared with the
-    // classifier so both call sites use the same definition.
+    // A transport message is not evidence of rejected credentials.
     if (isTransportShaped(detail)) {
       return;
     }
-    // Technical provider text stays in the failure/transcript boundary. Do not
-    // copy arbitrary messages into console output on navigation or revalidation.
-    // Authentication uses the product notice. Other prompt failures have a
-    // turn footer; initialization failures and actionable advice use a toast.
     const isAuth =
       session.status === "auth-required" ||
       session.failure?.kind === "auth-required";
-    // `advice` is user-facing by contract (AgentFailure.advice) — unlike
-    // `message` it's written for the toast, not the log.
-    const advice = session.failure?.advice;
-    const pillAlreadyShows =
-      session.failure?.stage === "prompt" && !isAuth && !advice;
-    if (!pillAlreadyShows && !isAuth) {
-      toast.error(`${agentLabel}: ${label}`, {
-        // De-dup: repeats of the same chat's error REPLACE the toast
-        // instead of stacking identical copies.
-        id: `agent-error-${chatId ?? agentLabel}`,
-        description: advice,
-      });
-    }
     // Auth probe is a heuristic (file-existence on ~/.codex/auth.json and
     // friends). When the actual CLI explicitly rejects authentication, refresh
     // the cached provider state so its connection indicator converges. A
@@ -3270,6 +3240,47 @@ export function AgentChat({
     chatThread?.folder,
     session.cloudSendWait,
   ]);
+  // Use the footer's exact cached row to decide whether it can present this
+  // failure. Completed/cancelled history cannot own a later startup failure.
+  // The read is shared with that footer and remains inert on hidden surfaces.
+  const preparationTurn = turns.at(-1);
+  const preparationTurnRead = useCachedRead(
+    turnRowCache,
+    !readOnly && !provisionalTranscript && chatId && preparationTurn?.userPrompt &&
+      session.status === "failed" && session.failure?.stage !== "prompt"
+      ? turnRowKey(chatId, preparationTurn.recordedTurnId ?? preparationTurn.userPrompt.id)
+      : null,
+    (key) => {
+      const [ownerChatId, turnId] = key.split("\u0000");
+      return turnGet(ownerChatId, turnId);
+    },
+    { maxAgeMs: 30_000, enabled: surfaceActive },
+  );
+  const preparationTurnFailure = !provisionalTranscript && chatId && preparationTurn?.userPrompt &&
+    session.status === "failed" && session.failure?.stage !== "prompt"
+    ? turnFailureForCard({
+        events: preparationTurn.providerEvents,
+        turnId: preparationTurn.recordedTurnId ?? preparationTurn.userPrompt.id,
+        fallback: session.failure,
+        recoveryFailure: preparationTurn.userPrompt.recoveryFailure,
+        status: preparationTurnRead.data?.status,
+        stopReason: session.lastStopReason ?? preparationTurnRead.data?.stopReason,
+        live: tailTurnInFlight({ sessionStreaming: isStreaming,
+          pendingLocalTurn: pendingLocalTurnId === preparationTurn.userPrompt.id,
+          hasEvents: preparationTurn.events.length > 0 }),
+        retrying: pendingLocalTurnId === preparationTurn.userPrompt.id,
+      }) : null;
+  // Keep terminal startup failures in this chat exactly once, while normal
+  // reconnects and superseded preparation stay quiet.
+  const preparationFailure = !readOnly && session.status === "failed" &&
+    session.failure && session.failure.stage !== "prompt" &&
+    !preparationTurnFailure && !detachedCloudAdmission &&
+    !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) &&
+    session.failure.kind !== "auth-required" &&
+    session.failure.kind !== "cloud-credentials-unavailable" &&
+    session.failure.kind !== "lifecycle-superseded" &&
+    !isRecoverable(session.failure) && !isTransportShaped(session.failure.message)
+      ? session.failure : null;
   // ── Plan review (Claude's ExitPlanMode) ─────────────────────────────────
   // Plan review is NOT a permission gate. A regular Allow/Deny holds the turn
   // until it's answered (see <PermissionCard>); a pending plan lets the user
@@ -4703,11 +4714,6 @@ export function AgentChat({
         </header>
       )}
 
-      {/* Agent errors surface only through the toast surface (with agent name).
-          Reset session lives in the settings/menu surface so an inline error
-          banner does not interrupt transcript flow. The useEffect higher up fires
-          toast.error("Claude Code: …") on every status transition. */}
-
       {/* SummaryHandoffPill was removed with in-chat agent switching.
           Zeros-native forks stage their concise transcript directly in the
           destination composer; sourceChatId remains product-owned lineage and
@@ -4823,7 +4829,7 @@ export function AgentChat({
               )}
             {!readOnly &&
               !transcriptCatchingUp &&
-              session.transcriptState === "resident" &&
+              emptyStateReady &&
               session.messages.length === 0 &&
               !session.error && (
                 <ChatProvenance
@@ -5113,6 +5119,12 @@ export function AgentChat({
                 </React.Fragment>
               );
             })}
+            {preparationFailure && (
+              <AgentNotice
+                data-agent-preparation-notice
+                message={preparationFailure.advice ?? preparationFailure.message}
+              />
+            )}
             {detachedCloudAdmission && (
               <TurnFailureCard
                 failure={{ kind: "cloud-admission", message: detachedCloudAdmission.message, newChatAllowed: false }}
@@ -5215,9 +5227,7 @@ export function AgentChat({
         {readOnly ? composerReplacement : (
         <div className="mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-0.5 border-t-0 bg-transparent px-7 pt-0 pb-4">
           <CloudAgentCredentialCards folder={chatThread?.folder} chatId={chatId} active={interactive} />
-          {/* Inline composer errors use the shared toast surface: the
-            "Error: <label>" surfaces as a toast.error from a useEffect
-            higher up. The composer remains enabled when isErrorState is set:
+          {/* The composer remains enabled when isErrorState is set:
             sending from an error state is the retry affordance (see canSend);
             only the Send button keeps its "error" tint. */}
           {/* Embedded-terminal command (Claude /mcp, /login, …): a banner →

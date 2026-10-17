@@ -165,15 +165,23 @@ describe("composer attachment menu interaction path", () => {
   });
 
   it("keeps folder and excluded-chat boundaries collision-free", () => {
+    // Local folders share one list per folder; the excluded chat is dropped
+    // locally, so the folder alone is the key.
+    expect(chatTranscriptSummariesKey("/repo/a", "chat/b")).toBe(
+      chatTranscriptSummariesKey("/repo/a", "other"),
+    );
     expect(chatTranscriptSummariesKey("/repo/a", "chat/b")).not.toBe(
       chatTranscriptSummariesKey("/repo/a/chat", "b"),
     );
-    expect(chatTranscriptSummariesKey("/repo\u0000a", "chat")).not.toBe(
-      chatTranscriptSummariesKey("/repo", "a\u0000chat"),
+    expect(JSON.parse(chatTranscriptSummariesKey("/repo", null))).toEqual(["/repo"]);
+    // Cloud folders keep the exact (folder, excluded chat) engine read.
+    const cloud = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    expect(chatTranscriptSummariesKey(cloud, "chat/b")).not.toBe(
+      chatTranscriptSummariesKey(`${cloud}/chat`, "b"),
     );
-    expect(JSON.parse(chatTranscriptSummariesKey("/repo", null))).toEqual([
-      "/repo",
-      null,
-    ]);
+    expect(chatTranscriptSummariesKey(`${cloud}\u0000a`, "chat")).not.toBe(
+      chatTranscriptSummariesKey(cloud, "a\u0000chat"),
+    );
+    expect(JSON.parse(chatTranscriptSummariesKey(cloud, null))).toEqual([cloud, null]);
   });
 });

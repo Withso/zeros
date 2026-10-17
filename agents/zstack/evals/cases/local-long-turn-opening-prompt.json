@@ -1,0 +1,9 @@
+{
+  "id": "local-long-turn-opening-prompt",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pr:568",
+  "symptom": "A Local turn longer than the engine's 1000-row snap budget reopened with no user prompt: the 200-row tail window started inside the turn and rendered headless.",
+  "rule": "A window that cannot be snapped carries its turn's opening prompt beside the contiguous rows, and every front trim, prepend and replacement re-derives it (docs/ui-interaction-performance.md, playbooks/bug-fix.md).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/workspace/__tests__/service.test.ts -t 'opening prompt on Local tail windows'"
+}

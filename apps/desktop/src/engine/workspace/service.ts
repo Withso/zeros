@@ -351,7 +351,7 @@ import {
 import { headRev, tombstonesSince } from "../db/sync";
 import {
   WINDOW_MAX_ROWS,
-  windowChatMessages,
+  windowChatMessagesPage,
   windowOlderChatMessages,
   upsertChatMessagesBulk,
   searchMessages,
@@ -4103,22 +4103,24 @@ export class WorkspaceService {
         const chatId = reqStr(params, "chatId");
         const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
         const before = optNum(params, "before");
-        const messages = windowChatMessages(chatId, limit, before);
-        const needsImageMigration = messages.some((row) =>
+        const page = windowChatMessagesPage(chatId, limit, before);
+        // A Local turn longer than the row budget reports its opening prompt
+        // beside the contiguous window. Cloud workers keep their existing
+        // wire shape: their history carries its own projection contract.
+        const opening = opts.cloudWorker ? undefined : page.turnOpening;
+        const rows = opening ? [opening, ...page.messages] : page.messages;
+        const needsImageMigration = rows.some((row) =>
           payloadNeedsLegacyImageMigration(row.payload),
         );
         const folder = needsImageMigration
           ? this.legacyImageMigrationCwd(chatId)
           : null;
-        return {
-          messages: folder
-            ? await externalizeLegacyMessageImages({
-                cwd: folder,
-                chatId,
-                rows: messages,
-              })
-            : messages,
-        };
+        const migrated = folder
+          ? await externalizeLegacyMessageImages({ cwd: folder, chatId, rows })
+          : rows;
+        return opening
+          ? { messages: migrated.slice(1), turnOpening: migrated[0] }
+          : { messages: migrated };
       }
       case "messages.windowOlder": {
         const chatId = reqStr(params, "chatId");
