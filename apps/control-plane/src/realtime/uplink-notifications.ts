@@ -19,9 +19,13 @@ export interface UplinkCredNotificationSink {
 export function handleUplinkNotification(server: Pick<CloudEngineUplinkServer, "ownerChanged" | "revalidate" | "revalidateWorkspace">,
   channel: string, payload: string, cred?: UplinkCredNotificationSink): void {
   if (channel === UPLINK_CRED_REVISION_CHANNEL) {
-    const [engineInstanceId, revisionText] = payload.split(":");
-    const revision = Number(revisionText);
-    if (engineInstanceId && UUID.test(engineInstanceId) && Number.isSafeInteger(revision) && revision >= 1)
+    // Exactly `<engine uuid>:<decimal revision>`, as migration 0154's trigger
+    // writes it; anything else is not ours to interpret.
+    const parts = payload.split(":", 3);
+    if (parts.length !== 2) return;
+    const [engineInstanceId, revisionText] = parts as [string, string];
+    const revision = /^[1-9][0-9]{0,15}$/.test(revisionText) ? Number(revisionText) : NaN;
+    if (UUID.test(engineInstanceId) && Number.isSafeInteger(revision))
       cred?.revisionChanged(engineInstanceId, revision);
     return;
   }
