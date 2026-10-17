@@ -202,7 +202,7 @@ import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "./agents/conta
 import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-action-runtime";
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
-import { CloudEngineUplinkClient, EngineUplinkAuthState } from "./cloud-engine-uplink";
+import { CloudEngineUplinkClient, EngineUplinkAuthState, sanitizeCredAckCode, type EngineUplinkReadiness } from "./cloud-engine-uplink";
 import { CloudEventRuntime } from "./cloud-event-runtime";
 import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome, type CloudAgentHistoryRestoreMetadata,
@@ -1301,6 +1301,9 @@ export class ZerosEngine {
   private actualPort = 0;
   private framework: Framework = "unknown";
   private running = false;
+  /** Set once stop() begins tearing a running engine down; the uplink then
+   * reports `stopping` rather than `starting`. */
+  private engineStopping = false;
 
   constructor(options?: EngineOptions) {
     this.cloudRuntimeConfig = consumeCloudRuntimeEnvironment();
@@ -3435,6 +3438,7 @@ export class ZerosEngine {
       if (t !== this.local) await t.start();
     }
 
+    this.engineStopping = false;
     this.running = true;
     try {
       this.cloudStartupPhase = "registration";
@@ -3525,6 +3529,10 @@ export class ZerosEngine {
       return;
     }
     this.running = false;
+    this.engineStopping = true;
+    // The CP records the not-ready transition before the uplink closes
+    // (the uplink itself is stopped a few steps below).
+    this.cloudEngineUplink?.reportReadiness();
     this.cloud?.setHumanServicesPaused(true);
     const humanServicesRetired = settle(() => this.cloudHumanServices?.pause());
     const languageServicesRetired = settle(() => this.cloudLanguageServices?.pause());
@@ -3654,6 +3662,10 @@ export class ZerosEngine {
    * registration). The HTTP heartbeat remains the lease owner; the uplink
    * carries push traffic and presence and parks without redialing when the
    * control plane definitively refuses it. */
+  private cloudEngineUplinkReadiness(): EngineUplinkReadiness {
+    return { ready: this.running, phase: this.running ? "ready" : this.engineStopping ? "stopping" : "starting" };
+  }
+
   private startCloudEngineUplink(): void {
     const registration = this.cloudRuntimeRegistration;
     const config = this.cloudRuntimeConfig;
@@ -3674,10 +3686,39 @@ export class ZerosEngine {
       // The in-memory S1 verifier state; track B binds the shared verifier
       // (signature and epoch checks) to this state.
       auth: new EngineUplinkAuthState(),
-      readiness: () => ({ ready: this.running, phase: this.running ? "ready" : "starting" }),
+      readiness: () => this.cloudEngineUplinkReadiness(),
+      features: ["cred.v1"],
+      // Credential-control push (P0.10 C01): a pushed revision runs the same
+      // credential-controls exchange the 500 ms poll runs; the poll itself
+      // stays as the fallback (see controlsPollIntervalMs at the boot).
+      onCredentialRevision: async () => {
+        // Only agent-controls reaches here: the uplink acks any other kind
+        // failed/cred_kind_unsupported before calling this handler.
+        const boot = this.cloudAgentBoot;
+        if (!boot) return { result: "applied" as const }; // pre-boot: the activation exchange converges
+        try {
+          // A fresh exchange, never a flight that predates the bump (C3
+          // review SHOULD-3: joining a stale flight acks applied falsely).
+          await boot.refreshCredentialControls();
+          return { result: "applied" as const };
+        } catch (error) {
+          // error.code can be ECONNRESET, a number or arbitrarily long —
+          // none are contract codes; non-conforming values map to
+          // cred_fetch_failed so the CP never 4400s us into a re-push loop.
+          return { result: "failed" as const,
+            code: sanitizeCredAckCode(error && typeof error === "object" && "code" in error ? error.code : undefined) };
+        }
+      },
+      // The moment the gate closes (or never negotiates the push), the
+      // credential poll returns to its fast fallback cadence instead of
+      // waiting out an armed 30 s timer.
+      onEstablishedChange: established => { if (!established) this.cloudAgentBoot?.rescheduleControls(); },
       onReverifyAuthority: () => registration.requestHeartbeatSoon(),
       onParked: reason =>
         console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`),
+      // No engine metrics pipeline exists yet; the durations are per-connect
+      // and per-sync rarities, so the uplink log channel carries them.
+      metric: (name, valueMs) => console.info(`[engine-uplink] metric ${name}=${Math.round(valueMs)}ms`),
     });
     this.cloudEngineUplink = uplink;
     uplink.start();
@@ -4437,6 +4478,13 @@ export class ZerosEngine {
         generation: config.execution.generation, engineInstanceId: config.engine.instanceId },
       supervisor: { onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss() },
       engineLive: () => this.running && !this.cloudRuntimeAuthorityStopping,
+      // While the uplink's gate is open, cred.revision pushes carry control
+      // changes and the poll drops to a 30 s safety net; any uplink loss
+      // returns it to the 500 ms fallback cadence.
+      controlsPollIntervalMs: () => (this.cloudEngineUplink?.established ? 30_000 : 500),
+      // A successful poll clears the uplink's failed-push mark, so a
+      // transient push failure recovers the slow cadence after one poll.
+      controlsExchange: ok => { if (ok) this.cloudEngineUplink?.noteCredentialExchangeSucceeded(); },
       startsAllowed: () => !this.cloudRuntimeHandoffFenced && !this.cloudRuntimeCheckpointQuiescing && !this.cloudLegacyResidentRequiresFreshView,
       isAdmittedCwd: cwd => {
         try {

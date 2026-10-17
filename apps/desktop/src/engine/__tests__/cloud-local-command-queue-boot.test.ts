@@ -24,6 +24,7 @@ const engineMethods = ZerosEngine.prototype as unknown as {
   cloudRuntimeReadiness(this: unknown): Readiness;
   verifyCloudActorClient(this: unknown, token: string, renew?: boolean): Promise<unknown>;
   initializeCloudAgentBoot(this: unknown): Promise<void>;
+  cloudEngineUplinkReadiness(this: unknown): { ready: boolean; phase: string };
 };
 /** Exercise the actual transport callback without starting a native engine. */
 function internalReadiness(engine: unknown): () => Readiness {
@@ -73,7 +74,9 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
   const options = { file: path.join(directory, "queue.sqlite"), scope, runtimeBootId: f.scope.bootId, registration, observeStartup: startup,
     legacy: f.legacy, supervisor: { onRetirementFailure: vi.fn() }, engineLive: () => live,
     isAdmittedCwd: (cwd: string) => cwd === f.input.cwd, resolveConversation: () => ({ cwd: f.input.cwd, provider: f.input.provider, model: f.input.model }),
-    history: () => ({ recordSequence: 1, eventSequence: 1 }), beforeActivate, install, changed };
+    history: () => ({ recordSequence: 1, eventSequence: 1 }), beforeActivate, install, changed,
+    controlsPollIntervalMs: undefined as (() => number) | undefined,
+    controlsExchange: undefined as ((ok: boolean) => void) | undefined };
   const boot = new CloudLocalAgentBootRuntime(options); cleanups.push(() => boot.dispose());
   const admission = { accountUserId: f.provenance.actor.userId, authorityEpoch: f.provenance.authorityEpoch,
     actor: { sessionId: f.provenance.actorSessionId, deviceId: f.provenance.actor.deviceId,
@@ -447,6 +450,81 @@ describe("engine boot-mode orchestration", () => {
     release(); await starting;
     await vi.advanceTimersByTimeAsync(500);
     expect(f.controls).toHaveBeenCalled();
+  });
+  it("backs the credential-control poll off to the wired fallback cadence and back", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    let controlsIntervalMs = 500;
+    const f = await fixture();
+    f.options.controlsPollIntervalMs = () => controlsIntervalMs;
+    await f.boot.initialize();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(1);
+    // Uplink established: the engine wires the slow fallback cadence. The
+    // already-armed 500 ms timer fires once more; the next schedule reads it.
+    controlsIntervalMs = 30_000;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(29_500);
+    expect(f.controls).toHaveBeenCalledTimes(3);
+    // Uplink lost: after the armed slow timer fires, the cadence is 500 ms again.
+    controlsIntervalMs = 500;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.controls).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(5);
+  });
+  it("reports credential-control exchange outcomes", async () => {
+    const outcomes: boolean[] = [];
+    const f = await fixture();
+    f.options.controlsExchange = ok => outcomes.push(ok);
+    await f.boot.initialize();
+    await f.boot.pollCredentialControls();
+    f.controls.mockRejectedValueOnce(new Error("exchange unavailable"));
+    await expect(f.boot.pollCredentialControls()).rejects.toThrow("exchange unavailable");
+    expect(outcomes).toEqual([true, false]);
+  });
+  it("reschedules the controls poll immediately when the uplink's gate closes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    let controlsIntervalMs = 30_000; // uplink established: the slow safety cadence
+    const f = await fixture();
+    f.options.controlsPollIntervalMs = () => controlsIntervalMs;
+    await f.boot.initialize();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.controls).toHaveBeenCalledTimes(1);
+    // The gate closes right after the 30 s timer was armed: without an
+    // immediate reschedule nothing polls for up to 30 s.
+    controlsIntervalMs = 500;
+    f.boot.rescheduleControls();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(3);
+  });
+  it("a pushed revision runs a fresh exchange instead of joining an in-flight poll", async () => {
+    const f = await fixture();
+    await f.boot.initialize();
+    let release: (() => void) | null = null;
+    // Hold a timer-started flight open: it began before the push's bump
+    // committed, so joining it would ack applied against stale controls.
+    f.controls.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { version: 1 as const, mode: "boot-owner-v1" as const, controls: [] as unknown[] };
+    });
+    const stale = f.boot.pollCredentialControls();
+    await Promise.resolve();
+    expect(f.controls).toHaveBeenCalledTimes(1);
+    const pushed = f.boot.refreshCredentialControls();
+    release!();
+    await Promise.all([stale, pushed]);
+    expect(f.controls).toHaveBeenCalledTimes(2); // a second exchange ran after the push
+  });
+  it("reports the uplink readiness phase as stopping while the engine stops", () => {
+    const readiness = (state: { running: boolean; engineStopping: boolean }) => engineMethods.cloudEngineUplinkReadiness.call(state);
+    expect(readiness({ running: false, engineStopping: false })).toEqual({ ready: false, phase: "starting" });
+    expect(readiness({ running: true, engineStopping: false })).toEqual({ ready: true, phase: "ready" });
+    expect(readiness({ running: false, engineStopping: true })).toEqual({ ready: false, phase: "stopping" });
   });
   it.each(["Local Personal", "organization-local"])("keeps %s off the cloud boot path", async _owner => {
     const registration = { localCommandsNegotiated: vi.fn(() => true) }, restore = vi.fn();

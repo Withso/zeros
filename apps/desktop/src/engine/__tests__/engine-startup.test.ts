@@ -49,7 +49,8 @@ function fixture(cloud = true) {
     setupHostControlChannel: vi.fn(), setupParentDeathWatchdog: vi.fn(),
     local, transports: [local], setup: { reconcileStaleRuns: vi.fn() },
     activityHeartbeat: { start: vi.fn(), stop: vi.fn() },
-    cloudRuntimeRegistration: cloud ? { start: vi.fn(), stop: vi.fn() } : null,
+    // engineUplink: null is the CP not advertising an uplink (HTTP-only).
+    cloudRuntimeRegistration: cloud ? { start: vi.fn(), stop: vi.fn(), engineUplink: () => null } : null,
     cloudEvents: cloud ? { start: vi.fn(), close: vi.fn() } : null,
     cloudIdleStop: { close: vi.fn() }, startGateway: vi.fn(), writePortFile: vi.fn(),
     agents: { revokeSessionTools: vi.fn(), dispose: vi.fn() },

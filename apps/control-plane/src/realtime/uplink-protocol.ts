@@ -16,6 +16,10 @@ export const UPLINK_RELAY_KIND = { data: 0x01, dataFinal: 0x02 } as const;
 /** The largest frame the socket accepts: one chunk plus its header. Text
  * frames are capped separately at `UPLINK_MAX_CONTROL_FRAME_BYTES`. */
 export const UPLINK_MAX_BINARY_FRAME_BYTES = UPLINK_MAX_RELAY_CHUNK_BYTES + UPLINK_RELAY_HEADER_BYTES;
+/** The ws hard ceiling sits 1 KiB above the exact caps so an oversized
+ * frame reaches the parser and closes 4400 (the contract's size
+ * violation) instead of dying at the socket with an unspecified 1009. */
+export const UPLINK_MAX_SOCKET_PAYLOAD_BYTES = UPLINK_MAX_BINARY_FRAME_BYTES + 1024;
 
 export type UplinkRelayChunk = Readonly<{
   /** Last chunk of the relayed client message. */
@@ -77,7 +81,9 @@ export const UPLINK_FEATURES = {
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const seq = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const timestampMs = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
-const code = z.string().regex(/^[a-z][a-z0-9_]{2,63}$/);
+/** The contract's machine code shape, shared by every frame that carries one. */
+export const UplinkCodeSchema = z.string().regex(/^[a-z][a-z0-9_]{2,63}$/);
+const code = UplinkCodeSchema;
 
 export const UplinkEnvelopeSchema = z.object({
   t: z.string().regex(/^[a-z][a-z0-9]{0,31}\.[a-z][a-z0-9_]{0,47}$/),

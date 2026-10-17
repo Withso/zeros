@@ -89,7 +89,11 @@ authority supplies keys, epochs and engine tokens
 - **Rollout.** A hello is admitted only while the organization's
   `realtime_uplink` flag is on ([rollout flags](rollout-flags.md)). Turning
   the flag off closes that organization's open uplinks with `4404`; engines
-  then keep the HTTP heartbeat and the credential poll, which stay in place.
+  then keep the HTTP heartbeat and the credential poll, which stay in
+  place. Rollback limitation: a `4404`-parked engine does not re-dial on
+  its own — the advertisement arrives with registration, so a parked engine
+  picks the endpoint up again only at its next restart or re-registration
+  (the heartbeat itself never carries it).
 - **Admission.** One consistent authority read
   (`readCurrentCloudEngineAuthority`) checks the heartbeat credential,
   workspace, generation and engine instance, and compares the hello's
@@ -113,10 +117,14 @@ authority supplies keys, epochs and engine tokens
 - **Ownership.** Presence lives in memory. `cloud_workspace_engine_uplinks`
   (migration 0151) is written only on connect, readiness change and loss,
   plus a 5 min watermark, through a bounded coalescing retry queue. Each
-  write carries a connection ID; a connect never overwrites a newer one. A
-  new owner row notifies `zeros_cloud_engine_uplink_owner`, and an instance
-  holding an older uplink closes it with `4409`. After a listener reconnect
-  every owned uplink re-reads its owner and authority.
+  write carries a connection ID; a connect never overwrites a newer one.
+  "Newer" is a deterministic order on unsynchronized replica clocks: the
+  later `connected_at` wins, and a same-millisecond tie (or skew within the
+  connect gap) breaks by connection ID, in both the in-memory owner rule
+  and the presence upsert fence. A new owner row notifies
+  `zeros_cloud_engine_uplink_owner`, and an instance holding an older
+  uplink closes it with `4409`. After a listener reconnect every owned
+  uplink re-reads its owner and authority.
 - **Framing.** Control frames are UTF-8 JSON text capped at 64 KiB; relay
   data travels in binary frames (8-byte header, then a chunk of at most
   256 KiB), never base64 in `d`, so the socket payload ceiling is
@@ -128,6 +136,26 @@ authority supplies keys, epochs and engine tokens
   without an intervening `sys.drain` writes `security.uplink_*` to the
   organization's audit log and logs a `[security]` line for paging. These
   are operator events, not the client-delivered `security_events` outbox.
+- **Credential push.** The `cred.v1` extension (`uplink-cred.ts`) replaces
+  the engine's 500 ms credential-control poll while the uplink is up
+  (P0.10 C01). At the gate it pushes the boot binding's current desired
+  revision (the contract's resync rule), and a trigger on
+  `cloud_agent_boot_bindings.desired_cache_revision` (migration 0154)
+  notifies every bump, routed to the owning instance over
+  `zeros_cloud_agent_credential_revision`. The notification is only a hint:
+  the engine's exchange re-reads authority. `cred.ack` (`applied`/`failed`)
+  arrives over the reliable channel. A bump committed while the listener
+  was down never notifies; it is repaired both at the next gate open and,
+  for engines whose gate is already open, when the listener is ready again:
+  `onReady` reads the current revisions of every owned `cred.v1` uplink in
+  one system statement and pushes them (the engine acks a revision it
+  already applied without an exchange). Only `agent-controls` has a
+  revision source today: the CP has no `repository` revision, so it never
+  pushes that kind, and repository credentials keep arriving on the HTTP
+  heartbeat response (`repositoryCredential`) unchanged. The engine acks any
+  `repository` push `failed`/`cred_kind_unsupported` without calling its
+  handler or recording the revision, so adding the kind later is an
+  explicit signal, never a silent swallow.
 - **Lease.** The HTTP heartbeat still owns the engine lease in this release;
   the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
 
@@ -167,6 +195,12 @@ registration there is no uplink client at all.
   revocations, latest capability); the shared verifier (track B) binds
   signature checks to that state. `engine_uplink_hello_ms` and
   `engine_uplink_auth_apply_ms` are recorded per connect.
+- **Credential push.** The engine offers `cred.v1`; a pushed `cred.revision`
+  runs the same credential-controls exchange the poll runs (coalesced to
+  the latest revision per kind while one is in flight) and is answered with
+  `cred.ack`. The poll stays as the fallback: 500 ms while the uplink's
+  gate is closed, a 30 s safety cadence once it is open
+  (`controlsPollIntervalMs` in `cloud-local-command-queue-boot.ts`).
 
 ## Railway configuration (planned)
 
@@ -178,6 +212,7 @@ service, when an operator adds it, uses:
 | Image and start command | Same as the control-plane service |
 | `CONTROL_PLANE_PROCESS_ROLE` | `realtime` |
 | `CONTROL_PLANE_DRAIN_SECONDS` | `30` |
+| `CLOUD_WORKSPACE_REALTIME_URL` (also set on the `api` service, which advertises) | the service's credential-free public origin, e.g. `https://realtime.example.com` |
 | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | at least the drain window plus 15 (`45`), so SIGKILL never cuts the drain short |
 | `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS` | long enough for the replacement to pass `/healthz` before the old instance is signalled |
 | `DATABASE_MIGRATIONS_ON_BOOT` | `false`; the API service owns boot migrations |

@@ -1,6 +1,7 @@
 # S2. VM uplink protocol
 
-Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.0.0` ·
+Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.1.0` (additive;
+see [Changelog](#changelog)) ·
 Schema: [Draft schema: uplink text frames](#draft-schema-uplink-text-frames)
 
 Draft 3 (freeze review): the `auth` and `relay` channels are per-connection
@@ -321,6 +322,7 @@ the old (`4409`). Relay channels on the draining instance are closed with
 | 4401 | `uplink_unauthenticated` | Credential definitively invalid or expired. Sent only when the durable read succeeded and rejected the credential; a verification that could not complete (database slow or down) closes with `1011` instead | Stop reconnecting; existing authority-loss path |
 | 1011 | `internal_error` | `realtime` could not complete verification | Reconnect with backoff |
 | 4403 | `uplink_forbidden` | Generation, engine instance or `bootId` not current | Existing authority-loss path; never retry with the same identity |
+| 4404 | `uplink_disabled` | Rollout flag off for this organization | Park; the HTTP heartbeat and the credential poll continue; re-dial only after a new registration advertisement carries the endpoint again |
 | 4408 | `ping_timeout` | Missed pings | Reconnect |
 | 4409 | `uplink_superseded` | A newer uplink with the registered `bootId` took over | Re-verify registration authority, then reconnect with backoff; use the authority-loss path only if the registration is no longer current |
 | 4426 | `protocol_unsupported` | No common version | Report; keep running until lease deadline |
@@ -844,3 +846,13 @@ review aid until freeze; the frozen source of truth will be Zod in
   ]
 }
 ```
+
+## Changelog
+
+- **1.1.0** (2026-10-16, additive): added close `4404 uplink_disabled` —
+  the rollout flag is off for the organization; the engine parks, the HTTP
+  heartbeat and the credential poll continue, and the engine re-dials only
+  after a new registration advertisement carries the endpoint again. Also
+  recorded that `sys.error` may carry a `channel` hint, which the frozen
+  unknown-field rule (receivers ignore unknown payload fields) already
+  permits.

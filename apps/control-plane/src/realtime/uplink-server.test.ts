@@ -7,8 +7,9 @@ import WebSocket from "ws";
 import type { UplinkSecurityAlertKind } from "./uplink-alerts.js";
 import type { EngineCapabilityResult } from "./uplink-auth-source.js";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "./uplink-authority.js";
+import { UplinkCredentialPush } from "./uplink-cred.js";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "./uplink-presence.js";
-import { UPLINK_CLOSE, UPLINK_PATH, UPLINK_SUBPROTOCOL } from "./uplink-protocol.js";
+import { UPLINK_CLOSE, UPLINK_MAX_BINARY_FRAME_BYTES, UPLINK_PATH, UPLINK_SUBPROTOCOL } from "./uplink-protocol.js";
 import { CloudEngineUplinkServer, type UplinkServerOptions } from "./uplink-server.js";
 
 vi.setConfig({ testTimeout: 15_000 });
@@ -204,6 +205,39 @@ describe("engine uplink server", () => {
     expect(metrics.map(([name]) => name)).toEqual(["uplink_auth_sync_ms"]);
   });
 
+  it("holds the gate until the first successful auth.capability, retrying a down issuer with a floored jitter", async () => {
+    capability = { ok: false, reason: "unavailable" };
+    let issues = 0;
+    const opened: boolean[] = [];
+    await start({
+      capabilityRetryMs: 300, random: () => 0,
+      capabilities: { issue: async () => { issues += 1; return capability; } },
+      extensions: [{ feature: "cred.v1", onOpen: () => { opened.push(true); } }],
+    });
+    const peer = dial();
+    await peer.opened;
+    peer.send(hello({ features: ["cred.v1"] }));
+    await peer.next("sys.welcome");
+    await peer.next("auth.keys");
+    const sync = await peer.next("auth.sync");
+    peer.send({ t: "auth.applied", d: { syncId: sync.d!.syncId, authCursor: "c-1" } });
+    await until(() => issues >= 1);
+    uplink.session(identity.engineInstanceId)!.sendReliable("cred.revision", { kind: "agent-controls", revision: 7 });
+    // Several floored retries happen while the issuer is down, but nothing
+    // flows: no capability, no reliable frame, no extension onOpen.
+    await new Promise(resolve => setTimeout(resolve, 450));
+    expect(issues).toBeGreaterThanOrEqual(2);
+    expect(issues).toBeLessThanOrEqual(8); // the 100 ms floor: never a spin
+    expect(peer.frames).toEqual([]);
+    expect(opened).toEqual([]);
+    // Recovery: the capability lands first, then the retransmit/buffered
+    // frame, then onOpen (frozen handshake step 4).
+    capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 300_000 };
+    expect((await peer.next()).t).toBe("auth.capability");
+    expect(await peer.next()).toMatchObject({ t: "cred.revision", s: 1, d: { revision: 7 } });
+    expect(opened).toEqual([true]);
+  });
+
   it("closes 1011 when the auth source cannot answer and 4400 on a foreign syncId", async () => {
     authFails = true;
     await start();
@@ -246,6 +280,18 @@ describe("engine uplink server", () => {
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.forbidden });
   });
 
+  it("floors capability renewal at 5 s even when the issuer returns a near-past expiry", async () => {
+    let issues = 0;
+    await start({ capabilities: { issue: async () => { issues += 1; return capability; } } });
+    capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 1_000 };
+    await connect();
+    expect(issues).toBe(1);
+    // 60% of a 1 s lifetime would reissue at 600 ms (1 s floor today); the
+    // contract cadence (300 s at 60%) never needs faster than 5 s.
+    await new Promise(resolve => setTimeout(resolve, 1_400));
+    expect(issues).toBe(1);
+  });
+
   it("closes 4403 when api refuses the engine capability from current authority", async () => {
     capability = { ok: false, reason: "authority" };
     await start();
@@ -276,6 +322,27 @@ describe("engine uplink server", () => {
     expect(uplink.size).toBe(1);
   });
 
+  it("falls back to a fresh session on an out-of-range resume cursor without destroying the lineage", async () => {
+    await start();
+    const first = await connect();
+    const token = first.welcome.d!.resumeToken as string;
+    // One reliable frame sits unacked in the outbox (lastAcked 0, sent s=1).
+    uplink.session(identity.engineInstanceId)!.sendReliable("cred.revision", { kind: "agent-controls", revision: 7 });
+    expect(await first.peer.next()).toMatchObject({ t: "cred.revision", s: 1 });
+    first.peer.ws.terminate(); // peer_closed parks the lineage (park: true)
+    await until(() => uplink.size === 0);
+    // A cursor beyond anything the server sent cannot be replayed: fresh
+    // session, resumed:false — but the lineage must survive for the real
+    // owner that re-dials with a valid cursor.
+    const foreign = await connect({ resume: { token, lastReceivedSeq: 99 } });
+    expect(foreign.welcome.d).toMatchObject({ resumed: false });
+    foreign.peer.ws.terminate();
+    await until(() => uplink.size === 0);
+    const owner = await connect({ resume: { token, lastReceivedSeq: 0 } });
+    expect(owner.welcome.d).toMatchObject({ resumed: true });
+    expect(await owner.peer.next("cred.revision")).toMatchObject({ t: "cred.revision", s: 1, d: { revision: 7 } });
+  });
+
   it("records one churn event per resume-supersede, alerting only past the limit", async () => {
     await start();
     let live = await connect();
@@ -292,6 +359,89 @@ describe("engine uplink server", () => {
     await expect(live.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.superseded });
     expect(fourth.welcome.d).toMatchObject({ resumed: true });
     expect(alerts).toEqual(["uplink_supersede_churn"]);
+  });
+
+  it("pushes cred.revision to cred.v1 uplinks on changes and resyncs the current revision at the gate", async () => {
+    const currentRevision: number | null = 7;
+    const acks: Array<Record<string, unknown>> = [];
+    const cred = new UplinkCredentialPush({
+      sessionFor: engineInstanceId => uplink.session(engineInstanceId),
+      readRevision: async () => currentRevision,
+      onAck: (_session, ack) => { acks.push(ack); },
+    });
+    await start({ extensions: [cred] });
+    // An engine that did not offer cred.v1 (an older build mid-deploy) is
+    // never pushed: no resync frame at the gate, no change push.
+    const legacy = await connect();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(legacy.peer.frames).toEqual([]);
+    legacy.peer.ws.terminate();
+    const { peer } = await connect({ features: ["cred.v1"] });
+    // Contract resync: the current revision follows the gate.
+    expect(await peer.next("cred.revision")).toMatchObject({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    cred.revisionChanged(identity.engineInstanceId, 8);
+    expect(await peer.next("cred.revision")).toMatchObject({ s: 2, d: { kind: "agent-controls", revision: 8 } });
+    cred.revisionChanged(randomUUID(), 9); // not owned by this instance: no push
+    peer.send({ t: "cred.ack", s: 1, d: { kind: "agent-controls", revision: 8, result: "applied" } });
+    await until(() => acks.length === 1);
+    expect(acks[0]).toEqual({ kind: "agent-controls", revision: 8, result: "applied" });
+    peer.send({ t: "cred.ack", s: 2, d: { kind: "agent-controls", revision: "oops", result: "applied" } });
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
+  });
+
+  it("resyncs only owned cred.v1 uplinks from one batch read", async () => {
+    const reads: string[][] = [];
+    const cred = new UplinkCredentialPush({
+      sessionFor: engineInstanceId => uplink.session(engineInstanceId),
+      readRevision: async () => null,
+      readRevisions: async ids => { reads.push([...ids]); return new Map(ids.map(id => [id, 11])); },
+    });
+    await start({ extensions: [cred] });
+    const legacyEngine = randomUUID();
+    const legacy = await connect({ engineInstanceId: legacyEngine });
+    const { peer } = await connect({ features: ["cred.v1"] });
+    await cred.resync([...uplink.ownedEngineInstances(), randomUUID()]);
+    expect(reads).toEqual([[identity.engineInstanceId]]);
+    expect(await peer.next("cred.revision")).toMatchObject({ d: { kind: "agent-controls", revision: 11 } });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(legacy.peer.frames.filter(frame => frame.t === "cred.revision")).toEqual([]);
+  });
+
+  it("closes 4400 on a cred.ack whose code violates the contract shape", async () => {
+    const cred = new UplinkCredentialPush({
+      sessionFor: engineInstanceId => uplink.session(engineInstanceId),
+      readRevision: async () => null,
+      onAck: (_session, ack) => { acks.push(ack); },
+    });
+    const acks: Array<Record<string, unknown>> = [];
+    await start({ extensions: [cred] });
+    const { peer } = await connect({ features: ["cred.v1"] });
+    peer.send({ t: "cred.ack", s: 1, d: { kind: "agent-controls", revision: 2, result: "failed", code: "cred_fetch_failed" } });
+    await until(() => acks.length === 1);
+    expect(acks[0]).toMatchObject({ result: "failed", code: "cred_fetch_failed" });
+    // The engine maps its raw error codes itself; anything else that still
+    // violates ^[a-z][a-z0-9_]{2,63}$ is a malformed frame.
+    peer.send({ t: "cred.ack", s: 2, d: { kind: "agent-controls", revision: 3, result: "failed", code: "ECONNRESET" } });
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
+  });
+
+  it("dispatches unsequenced engine frames to extensions and keeps ignoring unknown types", async () => {
+    const seen: Array<{ t: string; d: Record<string, unknown> }> = [];
+    await start({ extensions: [{ feature: "relay.v1",
+      onFrame: (_session, t, d) => {
+        if (!t.startsWith("relay.")) return false;
+        seen.push({ t, d });
+        return t === "relay.reject" ? "invalid" : true;
+      } }] });
+    const { peer } = await connect({ features: ["relay.v1"] });
+    peer.send({ t: "relay.accept", d: { channel: 7 } });
+    peer.send({ t: "relay.credit", d: { channel: 7, bytes: 65_536 } });
+    peer.send({ t: "mystery.frame", d: {} }); // unknown unsequenced: ignored
+    await until(() => seen.length === 2);
+    expect(seen).toEqual([{ t: "relay.accept", d: { channel: 7 } }, { t: "relay.credit", d: { channel: 7, bytes: 65_536 } }]);
+    expect(peer.ws.readyState).toBe(WebSocket.OPEN);
+    peer.send({ t: "relay.reject", d: { channel: 7, code: "capability_invalid" } });
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
   });
 
   it("routes binary relay chunks to the negotiated extension and answers unknown channels with sys.error", async () => {
@@ -317,7 +467,10 @@ describe("engine uplink server", () => {
     await until(() => chunks.length === 2);
     expect(chunks[1]).toMatchObject({ final: true, binary: true });
     peer.ws.send(chunk(8, "orphan"));
-    expect(await peer.next("sys.error")).toMatchObject({ d: { code: "relay_channel_unknown", channel: 8 } });
+    // The frozen sys.error payload is { code, message, fatal }; `channel` is
+    // an additive hint receivers may ignore.
+    expect(await peer.next("sys.error")).toMatchObject({ d: {
+      code: "relay_channel_unknown", message: expect.any(String), fatal: false, channel: 8 } });
     expect(peer.ws.readyState).toBe(WebSocket.OPEN);
   });
 
@@ -332,6 +485,15 @@ describe("engine uplink server", () => {
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
   });
 
+  it("closes 4400 frame_invalid on an oversized binary frame (the contract's size violation, not 1009)", async () => {
+    await start();
+    const { peer } = await connect();
+    const frame = Buffer.alloc(UPLINK_MAX_BINARY_FRAME_BYTES + 1, 0);
+    frame[0] = 0x01; frame[1] = 0x01;
+    peer.ws.send(frame);
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid, reason: "frame_invalid" });
+  });
+
   it("closes 4409 when another instance records a newer owner, and ignores older ones", async () => {
     await start();
     const { peer } = await connect();
@@ -341,6 +503,22 @@ describe("engine uplink server", () => {
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(peer.ws.readyState).toBe(WebSocket.OPEN);
     uplink.ownerChanged(identity.engineInstanceId, randomUUID(), local.connectedAtMs + 1);
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.superseded });
+  });
+
+  it("breaks same-millisecond owner ties deterministically by connection id", async () => {
+    await start();
+    const { peer } = await connect();
+    const local = uplink.presence(identity.engineInstanceId)!;
+    // Replica clocks are NTP-disciplined but not identical; a tie (or skew
+    // within the connect gap) breaks by connection id, higher wins.
+    const shift = (id: string, delta: number) => String.fromCharCode(id.charCodeAt(0) + delta) + id.slice(1);
+    const lowerId = shift(local.connectionId, -1);
+    const higherId = shift(local.connectionId, 1);
+    uplink.ownerChanged(identity.engineInstanceId, lowerId, local.connectedAtMs);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(peer.ws.readyState).toBe(WebSocket.OPEN);
+    uplink.ownerChanged(identity.engineInstanceId, higherId, local.connectedAtMs);
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.superseded });
   });
 
