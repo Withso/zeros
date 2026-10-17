@@ -1035,6 +1035,8 @@ describe("engine uplink client against the real control-plane server", () => {
     expect(client.state).not.toBe("parked");
     authority.result = { ok: true, accountUserId: "user-1", leaseExpiresAtMs: Date.now() + 60_000 };
     await until(() => a.uplink.counters.admitted === 1);
+    // The server counts the admission before the client reads its welcome.
+    await until(() => client.state === "connected");
     expect(client.state).toBe("connected");
   });
 });
