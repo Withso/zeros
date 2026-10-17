@@ -243,21 +243,32 @@ streams with `4404` without resume and drops its parked device sessions.
   change, insert and hard delete) and by the security-event feed:
   `workspace.authorization_changed` (that workspace),
   `organization.authorization_changed` and `organization.access_revoked`
-  (the organization's connected accounts), `account.*` (that account).
+  (the organization's connected accounts), `account.*` (that account, and
+  the accounts viewing a workspace it owns: the owner's Pro status and staff
+  allowance decide `canStart` for every viewer).
   Hints carry ids only. Every listener ready (the first one too, since
   streams are admitted before LISTEN is up) and every feed gap re-reads
   every connected account and re-checks every device session. Re-reads are
   coalesced (25 ms) with four accounts in flight; one read covers up to
   1,000 workspaces, a targeted re-read of more is split into reads of at
-  most 1,000 ids, and a truncated read never infers a removal.
+  most 1,000 ids, and a truncated read never infers a removal. Reads are
+  numbered as they start, and a re-read applies only to device sessions
+  whose baseline read started before it, so a read already in flight never
+  hands a newer session older access.
 - **Fan-out.** A workspace's frames go only to device sessions whose last
   re-read contained it. Losing access (or deletion) sends
   `capability.revoked { scope: "workspace" }`, then one
   `catalog.changed { op: "remove" }`, and nothing further for it. An
-  upsert is sent only when the workspace's `version` grows, so document
-  fields that change without a bump (the viewer's `actorRole` and
-  `capabilities`, including `canStart` and `startUnavailableReason` after a
-  role or allowance change) reach the stream with the next bump (S3-Q8).
+  upsert is sent when the workspace's `version` grows, or at the same
+  `version` when the document differs from the last one sent, ignoring the
+  timestamps that move on their own (`lastObservedAt`, `updatedAt`,
+  `generation.lastObservedAt`). That is how the viewer's `actorRole` and
+  `capabilities` (including `canStart` and `startUnavailableReason`) reach
+  the stream after a role or allowance change (S3-Q8, S3 1.1.0). The
+  comparison uses a digest of the last document sent, computed once per read
+  row. `lifecycle.changed` still needs a `version` bump. Changes that
+  publish no event (allowance funding, an entitlement reaching its end)
+  arrive with the account's next re-read.
 - **catalogVersion.** The global `cloud_catalog_version_seq` position (read
   before the rows), so it is monotonic per account; frames carry the
   maximum seen by that device session. The REST catalog returns the same

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/** S3 device stream wire constants (contract 1.0.0, Part 2). The CP mirrors
+/** S3 device stream wire constants (contract 1.1.0, Part 2). The CP mirrors
  * the frozen JSON schema here and never imports `@zeros/protocol`. */
 export const DEVICE_STREAM_PATH = "/v1/device-stream";
 export const DEVICE_STREAM_CONTRACT = 1;

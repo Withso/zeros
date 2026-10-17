@@ -1,7 +1,7 @@
 # S3. Client contract v1 (cloud workspaces)
 
-Status: **FROZEN** · Contract ID `zeros-client` · Version `1.0.1`
-(clarifications; see [Changelog](#changelog)) ·
+Status: **FROZEN** · Contract ID `zeros-client` · Version `1.1.0`
+(same-version catalog replacement; see [Changelog](#changelog)) ·
 Schemas: [Draft schema: REST API (OpenAPI 3.1)](#draft-schema-rest-api-openapi-31),
 [Draft schema: device stream frames](#draft-schema-device-stream-frames),
 [Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames)
@@ -147,8 +147,15 @@ Every workspace document already carries `version`
 (`apps/desktop/src/renderer/platform/cloud-workspace-contract.ts`). The
 catalog response adds `catalogVersion` (monotonic per account) so a client can
 resume the device stream from a known snapshot. Clients apply a pushed
-document only if its `version` is greater than the one they hold for the same
-`cloud://` workspace key. `catalogVersion` is a watermark, not a consistent
+document if its `version` is greater than the one they hold for the same
+`cloud://` workspace key. A `catalog.changed` upsert at the held `version`
+replaces the held document: viewer-specific and derived fields (`actorRole`,
+`capabilities`, including `canStart` and `startUnavailableReason`) change
+without a `version` bump (S3-Q8). The stream delivers these upserts in order,
+so the latest one wins; a REST read that races one at the same `version` may
+show either document until the next event, and the server authorizes every
+command anyway. A pushed document with a lower `version` is ignored.
+`catalogVersion` is a watermark, not a consistent
 snapshot point: a snapshot reporting N may lack a change that drew a value up
 to N but committed later, and that change still arrives as an event. Clients
 never drop or skip an event because of `catalogVersion`.
@@ -193,14 +200,22 @@ Fan-out follows current access: `realtime` sends `catalog.changed`,
 only to device sessions whose account currently has access to it, and
 re-evaluates that on the same security events that bump S1 epochs (`me`,
 `wr`, `ac`). A removed member's device sessions get `catalog.changed` with
-`op: "remove"` and nothing further for that workspace.
+`op: "remove"` and nothing further for that workspace. When a re-read finds a
+document that differs from the last one sent at the same `version` (ignoring
+timestamps that move on their own, such as `lastObservedAt`), `realtime`
+sends an upsert at that `version`. An `account.*` security event also
+re-reads the device sessions viewing that account's own workspaces, because
+the owner's Pro status and staff allowance decide `canStart` for every
+viewer. Changes that publish no event, such as allowance funding or an
+entitlement reaching its end, arrive with the account's next re-read.
 
 Resume: the server keeps resumable events for 10 min per device session.
 `hello.resume.cursor` older than that, or a different `realtime` instance
 without the history, yields `ready { resumed: false }` followed by
 `catalog.reset`; the client re-reads the snapshot (REST) while keeping its
 last confirmed view on screen. Resource `version` comparisons make
-duplicates harmless. On a successful resume, replayed `capability.revoked`
+duplicates harmless; a duplicate same-version upsert carries the document the
+client already holds. On a successful resume, replayed `capability.revoked`
 events are sent before any other replayed event. `ready.cursor` is then the
 resume position, and revocations replayed ahead of their order carry that
 position as `c`, so resuming from the last `c` received never skips a
@@ -285,8 +300,9 @@ sketches:
    revalidating.
 2. **Exact-key state.** Key every workspace by its `cloud://` identity;
    retain the last confirmed snapshot per key during revalidation; drop
-   responses whose request key no longer matches; apply pushed documents only
-   if `version` increases.
+   responses whose request key no longer matches; apply a pushed document
+   when its `version` increases, and replace the held document when an
+   upsert repeats the held `version` (S3-Q8).
 3. **Outbox.** Every command is enqueued with its `Idempotency-Key` before
    sending, persisted per account, retried on network errors, 429, 502, 503,
    504 and `retryable: true`, with full jitter (250 ms base, 30 s cap) until
@@ -380,7 +396,7 @@ not part of this contract and do not change.
 | S3-Q5 | Outbox persistence location on the Mac | Electron main, per account, bounded (500 entries, 7 days), cleared on sign-out. | Accepted; the outbox never stores capabilities or tickets. |
 | S3-Q6 | Version path prefix (`/v2/…`) for new endpoints? | No; keep `/v1` and evolve additively; the contract major is negotiated in bodies and frames. | Accepted. |
 | S3-Q7 | Push full documents or deltas in `catalog.changed`? | Full documents (bounded, already schema-validated by the client); deltas later if size matters. | Accepted. |
-| S3-Q8 | Viewer-specific and derived document fields (`actorRole`, `capabilities`, including `canStart` and `startUnavailableReason`) change without a workspace `version` bump, after a role or allowance change. How do they reach the device stream? | Until decided, they arrive only with the next `version` bump; a client re-reads the REST document when it needs current values (for example before offering Start), and the server authorizes every command anyway. Candidates for 1.x: a same-version replacement rule for upserts, or a separate per-viewer frame. | Open (recorded 2026-10-17). |
+| S3-Q8 | Viewer-specific and derived document fields (`actorRole`, `capabilities`, including `canStart` and `startUnavailableReason`) change without a workspace `version` bump, after a role or allowance change. How do they reach the device stream? | Same-version replacement: when a re-read finds a document that differs from the last one sent at the same `version` (timestamps that move on their own excluded), `realtime` sends a `catalog.changed` upsert at that `version`, and clients replace the held document. An `account.*` event also re-reads the viewers of that account's own workspaces. Changes that publish no event (allowance funding, an entitlement reaching its end) arrive with the account's next re-read; the server authorizes every command anyway. | Accepted in 1.1.0 (2026-10-17). |
 
 ## Draft schema: REST API (OpenAPI 3.1)
 
@@ -394,7 +410,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
 openapi: 3.1.0
 info:
   title: Zeros cloud workspace client contract (S3)
-  version: 1.0.1
+  version: 1.1.0
   description: >-
     FROZEN reference sketch of the REST half of client contract v1 for cloud
     workspaces. Existing endpoints keep their current request and response
@@ -1498,6 +1514,18 @@ is a review aid until freeze; the frozen source of truth will be Zod in
 
 ## Changelog
 
+- **1.1.0** (2026-10-17, behavior; no schema change):
+  - Same-version replacement (S3-Q8, accepted). A `catalog.changed` upsert
+    may repeat the `version` a client holds when viewer-specific or derived
+    fields changed (`actorRole`, `capabilities`, including `canStart` and
+    `startUnavailableReason`); clients replace the held document. Lower
+    versions are still ignored, and `lifecycle.changed` still comes only
+    with a `version` bump.
+  - An `account.*` security event also re-reads the device sessions viewing
+    that account's own workspaces, because the owner's Pro status and staff
+    allowance decide `canStart` for every viewer.
+  - Compatible with 1.0 clients: a client that ignores equal versions stays
+    correct and sees the new values with the next `version` bump, as before.
 - **1.0.1** (2026-10-17, clarifications; no schema change):
   - `catalogVersion` is a watermark, not a consistent snapshot point.
     Sequence positions are drawn before commit, so a snapshot reporting N
