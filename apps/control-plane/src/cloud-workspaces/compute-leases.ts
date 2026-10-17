@@ -40,6 +40,8 @@ export type ManagedComputeStart = CloudProviderCreateInput & {
 type Lease = {
   current_generation?: number;
   observed_at?: Date;
+  /** next_check_at when this pass claimed the lease, exact to the microsecond. */
+  claimed_next_check_at?: string;
   id: string;
   workspace_id: string;
   org_id: string;
@@ -120,6 +122,10 @@ const STOP_MARGIN_MS = 15_000;
 // Reserve the full checkpoint deadline plus the existing stop margin. Retry
 // backoff must never sleep past this boundary, even during a lasting outage.
 const PROVIDER_RETRY_SAFETY_MARGIN_MS = MAX_CHECKPOINT_DEADLINE_MS + STOP_MARGIN_MS;
+// A healthy running lease is next checked at its renewal point, but never
+// later than this, so a change that no trigger reports is still observed.
+const RUNNING_LEASE_CHECK_CEILING_MS = 10 * 60_000;
+const REGULAR_RECHECK_MS = 15_000;
 
 /** Owns spending authority around provider calls. It never accepts an engine's
  * CPU meter as compute billing, and a failed request never releases a hold. */
@@ -288,6 +294,16 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       )).rows[0];
       if (!claimed) throw failure("compute_lease_busy", true);
       return claimed;
+    }).catch(async (error: unknown) => {
+      // The refused start waits for this lease to settle, which a long healthy cadence would otherwise delay.
+      if (error instanceof CloudProviderError && error.code === "compute_previous_lease_pending")
+        await withRetryableSystemTx(this.options.pool, (tx) => tx.query(
+          `UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp()
+        WHERE workspace_id=$1 AND generation=$2 AND state<>'settled'
+          AND lifecycle_intent_id IS DISTINCT FROM $3 AND (next_check_at>clock_timestamp() OR lease_owner IS NOT NULL)`,
+          [input.workspaceId, input.generation, input.intentId],
+        )).catch(() => undefined);
+      throw error;
     });
   }
 
@@ -484,11 +500,14 @@ export class CloudWorkspaceComputeLeaseCoordinator {
   }
 
   /** Reconcile a lost create/resume reply before declaring a running VM ready.
-   * Provider liveness alone never establishes spending authority. */
+   * Provider liveness alone never establishes spending authority. Requests a
+   * check of the lease unless the caller is that check (`requestCheck: false`),
+   * which schedules the next one itself. */
   async observeRunning(
     input: { workspaceId: string; organizationId: string; generation: number },
     provider: CloudWorkspaceProvider,
     resource: CloudProviderResource,
+    { requestCheck = true }: { requestCheck?: boolean } = {},
   ): Promise<void> {
     assertProviderResourceIdentity(resource, input);
     const scope = await this.scope(input);
@@ -533,13 +552,14 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       await tx.query(
         `UPDATE managed_compute_allocation_leases SET provider_resource_id=$2,
         provider_expires_at=greatest(provider_expires_at,$3::timestamptz),stopped_observed_at=NULL,
-        state=CASE WHEN $4 THEN 'active' ELSE state END,updated_at=now(),next_check_at=now()
+        state=CASE WHEN $4 THEN 'active' ELSE state END,updated_at=now(),next_check_at=CASE WHEN $5 THEN now() ELSE next_check_at END
         WHERE id=$1`,
         [
           lease.id,
           resource.resourceId,
           resource.state === "running" ? new Date(expires) : null,
           resource.state === "running",
+          requestCheck,
         ],
       );
     });
@@ -748,7 +768,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
               OR (runtime.phase IN ('rolling_back','rollback_enrolling','rollback_checking') AND runtime.rollback_deadline_at>clock_timestamp())))
         AND (lease_owner IS NULL OR lease_expires_at<=clock_timestamp()) ORDER BY next_check_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE managed_compute_allocation_leases lease SET lease_owner=$1,lease_expires_at=clock_timestamp()+interval '5 minutes'
-      FROM candidate WHERE lease.id=candidate.id RETURNING lease.*,clock_timestamp() AS observed_at,
+      FROM candidate WHERE lease.id=candidate.id RETURNING lease.*,lease.next_check_at::text AS claimed_next_check_at,clock_timestamp() AS observed_at,
         coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),lease.generation) AS current_generation`,
             [this.workerId, workspaceId],
           )
@@ -839,20 +859,32 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           // A just-stopped allocation settles once its final meter can cover
           // the stop; recheck then instead of after a full poll. A persistent
           // failure (for example an unattested provider loss) backs off to
-          // five minutes rather than requesting another stop every poll.
+          // five minutes rather than requesting another stop every poll. A
+          // check requested while this pass ran (a lifecycle change, a refused
+          // start, a provider loss) moved next_check_at; it is kept, never
+          // replaced by this pass's later schedule.
           `UPDATE managed_compute_allocation_leases SET lease_owner=NULL,lease_expires_at=NULL,
-        next_check_at=CASE
+        next_check_at=least(CASE WHEN $6::timestamptz IS NOT NULL AND next_check_at IS DISTINCT FROM $6::timestamptz THEN next_check_at END,CASE
           WHEN $4 THEN least(coalesce($3::timestamptz,'infinity'::timestamptz),clock_timestamp()+least(interval '5 minutes',
             greatest(interval '15 seconds',clock_timestamp()-coalesce(first_error_at,clock_timestamp()))))
           WHEN $3::timestamptz IS NULL THEN clock_timestamp()+interval '15 seconds'
-          ELSE greatest($3::timestamptz,clock_timestamp()+interval '1 second') END,updated_at=now()
+          ELSE greatest($3::timestamptz,clock_timestamp()+interval '1 second') END),updated_at=now()
         WHERE id=$1 AND lease_owner=$2
           AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=managed_compute_allocation_leases.id),generation)=$5`,
-          [lease.id, this.workerId, recheckAt, failed, this.identity(lease).generation],
+          [lease.id, this.workerId, recheckAt, failed, this.identity(lease).generation, lease.claimed_next_check_at ?? null],
         ),
       );
     }
     return true;
+  }
+
+  /** When a healthy running allocation whose provider deadline is `expiryMs`
+   * is next checked: at its renewal point, early enough that a failed check
+   * still leaves the checkpoint and stop margin, within the regular cadence
+   * and the ceiling. */
+  private runningRecheckAt(expiryMs: number, nowMs: number, renewWhenMs: number): Date {
+    const due = expiryMs - Math.max(renewWhenMs, PROVIDER_RETRY_SAFETY_MARGIN_MS);
+    return new Date(Math.max(nowMs + REGULAR_RECHECK_MS, Math.min(nowMs + RUNNING_LEASE_CHECK_CEILING_MS, due)));
   }
 
   /** Returns when a just-stopped allocation can next settle, or null to keep
@@ -1064,7 +1096,9 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       return null;
     }
     if (resource.state !== "running") return null;
-    await this.observeRunning(identity, provider, resource);
+    // A check requested during this pass is kept, so this pass's own
+    // observation must not request one: the lease would be due at once.
+    await this.observeRunning(identity, provider, resource, { requestCheck: false });
     const expiry = Date.parse(String(resource.metadata.computeLeaseExpiresAt));
     // Leave ample time for checkpoint/stop and avoid a PATCH per meter poll.
     const renewWhenMs = Math.max(
@@ -1073,7 +1107,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     );
     // A failed inspect/meter/renew skipped lease maintenance. Renew on the
     // first complete recovery pass instead of waiting for the half-TTL mark.
-    if (expiry - observed.now.getTime() > renewWhenMs && !lease.last_error_code?.startsWith("provider_")) return null;
+    if (expiry - observed.now.getTime() > renewWhenMs && !lease.last_error_code?.startsWith("provider_")) return this.runningRecheckAt(expiry, observed.now.getTime(), renewWhenMs);
     phase("ledger_commit", "renewal_plan");
     const plan = await this.plan(lease);
     if (!plan) {
@@ -1094,7 +1128,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     )
       throw failure("compute_lease_superseded");
     // The request cannot shorten an already confirmed funded lease.
-    if (observed.now.getTime() + plan.ttlSeconds * 1000 <= expiry) return null;
+    if (observed.now.getTime() + plan.ttlSeconds * 1000 <= expiry) return this.runningRecheckAt(expiry, observed.now.getTime(), renewWhenMs);
     phase("provider_renew");
     const renewed = await provider.renewComputeLease(
       resource.resourceId,
@@ -1116,7 +1150,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         [lease.id, this.workerId, new Date(deadline)],
       ),
     );
-    return null;
+    return this.runningRecheckAt(deadline, now, renewWhenMs);
   }
 
   /** The generation's bound allocation, which the lease may not have recorded

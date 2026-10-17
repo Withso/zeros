@@ -60,6 +60,12 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
       "record_cloud_capability_epoch_event_trigger()",
     ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
   },
+  "0159_cloud_compute_lease_recheck.sql": {
+    // PUBLIC's default EXECUTE on the function created in the same migration.
+    "privilege-tightening": [
+      "REVOKE ALL ON FUNCTION recheck_cloud_workspace_compute_leases() FROM PUBLIC;",
+    ],
+  },
   "0149_cloud_rollout_flags.sql": {
     // A guard that rejects TRUNCATE cannot truncate.
     "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate
