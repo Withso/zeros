@@ -1,6 +1,9 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   evaluateLocalSeams,
@@ -244,6 +247,120 @@ describe("runLocalUntouched CLI wiring", () => {
         env: { EVENT_NAME: "pull_request" },
         cwd: process.cwd(),
       }),
+    ).toThrow(/failing closed/);
+  });
+});
+
+// A pull request must be judged by the seam manifest its BASE carries — the
+// head copy is attacker-controlled in pr mode, so a PR could otherwise weaken
+// its own gate in the same diff that crosses a seam.
+describe("runLocalUntouched base-manifest loading (pr mode)", () => {
+  const MANIFEST_PATH = "docs/cloud-workspace/local-seams.json";
+  const CLOUD_FILE = "apps/control-plane/src/cloud-thing.ts";
+  const LOCAL_FILE = "scripts/local-runner.mjs";
+  const manifestWithRule = {
+    schema: "zeros.local-seams/v1",
+    sign_off_label: "local-seams-sign-off",
+    cloud_paths: ["apps/control-plane/**"],
+    local_only: [{ include: [LOCAL_FILE] }],
+    shared_seams: [],
+  };
+  const manifestWithoutRule = {
+    ...manifestWithRule,
+    local_only: [{ include: ["scripts/other-local.mjs"] }],
+  };
+
+  let repos: string[] = [];
+  let savedExitCode: number | undefined;
+  beforeEach(() => {
+    savedExitCode = process.exitCode;
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    process.exitCode = savedExitCode;
+    for (const repo of repos.splice(0))
+      rmSync(repo, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function git(cwd: string, args: string[]): string {
+    return execFileSync("git", args, { cwd, encoding: "utf8" });
+  }
+  function write(repo: string, file: string, content: string) {
+    const target = path.join(repo, file);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, content);
+  }
+  function commitAll(repo: string, message: string): string {
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", message]);
+    return git(repo, ["rev-parse", "HEAD"]).trim();
+  }
+  function makeRepo(): string {
+    const repo = mkdtempSync(path.join(tmpdir(), "zeros-seams-"));
+    repos.push(repo);
+    git(repo, ["init", "-q", "-b", "main"]);
+    git(repo, ["config", "user.email", "seams@example.com"]);
+    git(repo, ["config", "user.name", "Seams Test"]);
+    git(repo, ["config", "commit.gpgsign", "false"]);
+    return repo;
+  }
+  function prEnv(baseSha: string, headSha: string) {
+    return {
+      EVENT_NAME: "pull_request",
+      PULL_REQUEST_BASE_SHA: baseSha,
+      PULL_REQUEST_HEAD_SHA: headSha,
+      GITHUB_SHA: headSha,
+      LABELS_JSON: "[]",
+    };
+  }
+
+  it("judges the PR by the base manifest even when the head weakens it", () => {
+    const repo = makeRepo();
+    write(repo, MANIFEST_PATH, JSON.stringify(manifestWithRule));
+    write(repo, LOCAL_FILE, "// local runner v1\n");
+    write(repo, CLOUD_FILE, "export const v = 1;\n");
+    const base = commitAll(repo, "base");
+    // The PR drops the local_only rule AND edits the Local-only file.
+    write(repo, MANIFEST_PATH, JSON.stringify(manifestWithoutRule));
+    write(repo, LOCAL_FILE, "// local runner v2\n");
+    write(repo, CLOUD_FILE, "export const v = 2;\n");
+    const head = commitAll(repo, "weaken the gate");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = runLocalUntouched({ argv: [], env: prEnv(base, head), cwd: repo });
+    expect(result.problems.length).toBeGreaterThan(0);
+    expect(result.localOnlyHits).toContain(LOCAL_FILE);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("falls back to the head copy only when the base has no manifest at all", () => {
+    const repo = makeRepo();
+    write(repo, LOCAL_FILE, "// local runner v1\n");
+    write(repo, CLOUD_FILE, "export const v = 1;\n");
+    const base = commitAll(repo, "base without the manifest");
+    // This PR introduces the manifest — the head copy is the only one.
+    write(repo, MANIFEST_PATH, JSON.stringify(manifestWithRule));
+    write(repo, LOCAL_FILE, "// local runner v2\n");
+    write(repo, CLOUD_FILE, "export const v = 2;\n");
+    const head = commitAll(repo, "introduce the manifest");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = runLocalUntouched({ argv: [], env: prEnv(base, head), cwd: repo });
+    expect(result.problems.length).toBeGreaterThan(0);
+    expect(result.localOnlyHits).toContain(LOCAL_FILE);
+  });
+
+  it("fails closed when the base manifest exists but is unreadable", () => {
+    const repo = makeRepo();
+    write(repo, MANIFEST_PATH, "{ not json");
+    write(repo, CLOUD_FILE, "export const v = 1;\n");
+    const base = commitAll(repo, "base with a broken manifest");
+    write(repo, MANIFEST_PATH, JSON.stringify(manifestWithRule));
+    write(repo, CLOUD_FILE, "export const v = 2;\n");
+    const head = commitAll(repo, "fix the manifest");
+    expect(() =>
+      runLocalUntouched({ argv: [], env: prEnv(base, head), cwd: repo }),
     ).toThrow(/failing closed/);
   });
 });

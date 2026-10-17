@@ -16,9 +16,18 @@
 // PULL_REQUEST_HEAD_SHA, GITHUB_SHA, LABELS_JSON); local mode previews
 // committed, staged, unstaged and untracked work against origin/main.
 // Evidence failures fail closed.
+//
+// The manifest itself is evidence: in pr mode it is read from the pull
+// request's BASE commit (git show), never from the head — otherwise a PR
+// could weaken its own gate in the same diff that crosses a seam. The single
+// exception is the PR that introduces the manifest: when the base has no
+// manifest at all, the head copy is the only one. Local mode previews against
+// the working-tree copy.
 // ──────────────────────────────────────────────────────────
 
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -33,6 +42,7 @@ const DEFAULT_MANIFEST = new URL(
   "../../docs/cloud-workspace/local-seams.json",
   import.meta.url,
 );
+const MANIFEST_REPO_PATH = "docs/cloud-workspace/local-seams.json";
 
 function fail(message) {
   throw new Error(`Invalid local-seams manifest: ${message}`);
@@ -122,6 +132,65 @@ export function loadLocalSeamsManifest(file = DEFAULT_MANIFEST) {
     throw new Error(`The local-seams manifest is unreadable: ${error.message}`);
   }
   return validateLocalSeamsManifest(parsed);
+}
+
+/** The head (working-tree) copy, for local previews and the introducing PR. */
+function loadHeadManifest(cwd) {
+  if (!cwd) return { manifest: loadLocalSeamsManifest(), source: "worktree" };
+  return {
+    manifest: loadLocalSeamsManifest(path.join(cwd, MANIFEST_REPO_PATH)),
+    source: "worktree",
+  };
+}
+
+/**
+ * The manifest a pull request is judged by: the BASE commit's copy. A PR can
+ * extend the manifest, but the gate that evaluates it is the one that existed
+ * before it. Fails closed when the base copy is unreadable, except when the
+ * base has no manifest at all — the PR introducing it is judged by the head
+ * copy it adds (there is nothing older to trust).
+ */
+export function loadBaseLocalSeamsManifest({ baseSha, cwd } = {}) {
+  if (!baseSha)
+    throw new Error(
+      "local-untouched cannot read the base manifest without a base SHA; failing closed.",
+    );
+  let blob;
+  try {
+    blob = execFileSync("git", ["show", `${baseSha}:${MANIFEST_REPO_PATH}`], {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (error) {
+    const detail = `${error.stderr ?? ""}${error.message ?? ""}`;
+    if (/does not exist|exists on (disk|HEAD), but not in/.test(detail))
+      return {
+        manifest: loadHeadManifest(cwd).manifest,
+        source: "head (this pull request introduces the manifest)",
+      };
+    throw new Error(
+      `local-untouched cannot read the base manifest at ${baseSha} (${detail.trim()}); failing closed.`,
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(blob);
+  } catch (error) {
+    throw new Error(
+      `The base local-seams manifest at ${baseSha} is unreadable: ${error.message}; failing closed.`,
+    );
+  }
+  try {
+    return {
+      manifest: validateLocalSeamsManifest(parsed),
+      source: `base ${baseSha}`,
+    };
+  } catch (error) {
+    throw new Error(
+      `The base local-seams manifest at ${baseSha} is invalid: ${error.message}; failing closed.`,
+    );
+  }
 }
 
 function ruleHits(file, rules) {
@@ -241,13 +310,16 @@ function parseMode(argv) {
 
 export function runLocalUntouched({ argv = [], env = process.env, cwd } = {}) {
   const mode = parseMode(argv);
-  const manifest = loadLocalSeamsManifest();
   const collected =
     mode === "local" ? collectLocalChanges({ cwd }) : collectPrChanges({ env, cwd });
   if (collected.changes === null)
     throw new Error(
       `local-untouched cannot prove the changed paths (${collected.reason}); failing closed.`,
     );
+  const { manifest, source: manifestSource } =
+    mode === "local"
+      ? loadHeadManifest(cwd)
+      : loadBaseLocalSeamsManifest({ baseSha: collected.baseSha, cwd });
   const labels = mode === "local" ? [] : parseLabelNames(env.LABELS_JSON);
   // The lane floor comes from the same trusted policy CI uses, so a policy
   // regression that drops a Local lane from a shared seam is caught here.
@@ -271,6 +343,7 @@ export function runLocalUntouched({ argv = [], env = process.env, cwd } = {}) {
     result,
     laneSource: "scripts/ci/scope-rules.json",
   });
+  console.log(`Manifest: ${manifestSource}.`);
   for (const line of lines) console.log(line);
   if (result.problems.length > 0) {
     for (const problem of result.problems) console.error(`::error::${problem}`);

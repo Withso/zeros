@@ -198,9 +198,12 @@ the test files. They sit under `zeros/ci-gate` with tolerated results, so a
 failure shows on the PR without blocking it, until the owner promotes a lane
 into the required selection. `local-untouched` runs on every PR: it fails a
 cloud-program change that touches Local-only files (per
-`docs/cloud-workspace/local-seams.json`) without the `local-seams-sign-off`
+`docs/cloud-workspace/local-seams.json`, judged by the base commit's copy so a
+PR cannot weaken its own gate) without the `local-seams-sign-off`
 label, or that crosses a shared seam (engine core, renderer bridge, protocol,
-account auth) while the Local test lanes are unselected. The load-simulator
+account auth) while the Local test lanes are unselected. Only the owner
+applies `local-seams-sign-off`; agents never add it — the label is the owner's
+explicit sign-off, and agents act with the owner's GitHub identity. The load-simulator
 budget check itself runs in the control-plane database lane on every CP
 change; `cloud-scale` adds the 10×/100× scenario suite by label or load-sim
 path, with a nightly promotion deferred to the track G rollout.
