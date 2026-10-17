@@ -2917,6 +2917,53 @@ d("cloud workspace reconciliation", () => {
       if (listed) expect(observed.rows[0]).toMatchObject({ observed_state: itemState, fresh: true });
     });
 
+    const correctiveIntents = (workspaceId: string) => pool.query<{ operation: string; state: string }>(
+      `SELECT operation, state FROM cloud_workspace_lifecycle_intents
+       WHERE workspace_id = $1 AND requested_by IS NULL ORDER BY created_at`, [workspaceId]).then((result) => result.rows);
+
+    // A stop that failed terminally leaves the VM running, the binding still
+    // observing it running and the workspace failed with desired_state
+    // stopped. The listing equals the last observation, but drift alone
+    // corrects the divergence from the desired state.
+    const seedFailedStop = async () => {
+      const seeded = await seedWorkspace({ desiredState: "stopped", status: "failed", operation: "stop",
+        intentState: "failed", providerResourceId: "vm-1", observedState: "running" });
+      const provider = new InventoryProvider();
+      provider.items = [{ resourceId: "vm-1", state: "running", computeStopped: false,
+        workspaceId: seeded.workspaceId, generation: 1 }];
+      provider.resources.set("vm-1", provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, "running", "vm-1"));
+      return { seeded, provider };
+    };
+
+    it("issues the corrective stop for a running VM whose workspace should be stopped (no sweep)", async () => {
+      const { seeded, provider } = await seedFailedStop();
+      await runDueLifecycleJobs(pool, reconciler(provider), ["drift"]);
+      expect(await correctiveIntents(seeded.workspaceId)).toEqual([{ operation: "stop", state: "queued" }]);
+    });
+
+    it("still issues the corrective stop after a sweep lists the VM unchanged", async () => {
+      const { seeded, provider } = await seedFailedStop();
+      const worker = reconciler(provider);
+      await worker.reconcileOrphansOnce();
+      await runDueLifecycleJobs(pool, worker, ["drift"]);
+      expect(provider.inspectCount).toBe(1);
+      expect(await correctiveIntents(seeded.workspaceId)).toEqual([{ operation: "stop", state: "queued" }]);
+    });
+
+    it.each([
+      { name: "running VM of a settled stopped workspace", desiredState: "stopped" as const, status: "stopped", state: "running" as const, computeStopped: false },
+      { name: "stopped VM of a settled archived workspace", desiredState: "archived" as const, status: "archived", state: "stopped" as const, computeStopped: true },
+      { name: "running VM of a workspace that is still setting up", desiredState: "running" as const, status: "setting_up", state: "running" as const, computeStopped: false },
+    ])("does not pace a $name", async (input) => {
+      const seeded = await seedWorkspace({ desiredState: input.desiredState, status: input.status,
+        intentState: "succeeded", providerResourceId: "vm-1", observedState: input.state });
+      const provider = new InventoryProvider();
+      provider.items = [{ resourceId: "vm-1", state: input.state, computeStopped: input.computeStopped,
+        workspaceId: seeded.workspaceId, generation: 1 }];
+      await reconciler(provider).reconcileOrphansOnce();
+      expect(await driftSchedule(seeded.workspaceId)).toMatchObject({ pushed: false, due: true });
+    });
+
     it("ignores provider inventory the journal cannot place", async () => {
       // The hosted provider account also holds sandboxes created outside the
       // journal (runtime images, staging, qualification, computer templates,

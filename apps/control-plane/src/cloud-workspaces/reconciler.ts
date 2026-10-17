@@ -1646,23 +1646,41 @@ export class CloudWorkspaceReconciler {
     // matches, or every sweep would force an inspect and defeat the slow
     // settled cadence. Running-desired workspaces keep forcing: their
     // inspect drives recovery.
-    const matched = `((scoped.seen_id IS NOT NULL
+    // Matching the last observation is not enough: drift's inspect is also
+    // what corrects a VM that diverges from desired_state (a failed stop
+    // leaves it running and observed running). Only a settled workspace whose
+    // listing already satisfies its desired state, as operationSatisfied
+    // would judge it, may be paced; everything else stays on the inspect path.
+    const matched = `(scoped.steady AND ((scoped.seen_id IS NOT NULL
         AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state)
       OR (scoped.seen_id IS NULL AND scoped.settled
-        AND binding.observed_state IN ('absent','deleted')))`;
+        AND binding.observed_state IN ('absent','deleted'))))`;
     await withSystemTx(this.pool, async (tx) => {
       // The statement row-locks every scoped binding. One stalled holder must
       // not block the sweep (and the audit queued behind it): fail this scope
       // and retry at the next minute instead.
       await tx.query(`SET LOCAL lock_timeout = '${SWEEP_LOCK_TIMEOUT_MS}ms'`);
       await tx.query(
-      `WITH inventory(resource_id, state) AS (
-         SELECT * FROM unnest($2::text[], $3::text[])
+      `WITH inventory(resource_id, state, compute_stopped) AS (
+         SELECT * FROM unnest($2::text[], $3::text[], $9::boolean[])
        ), scoped AS (
          SELECT binding.workspace_id, binding.generation, binding.provider_resource_id,
                 inventory.resource_id AS seen_id, inventory.state AS seen_state,
                 ((workspace.desired_state = 'stopped' AND workspace.status = 'stopped')
-                  OR (workspace.desired_state = 'archived' AND workspace.status = 'archived')) AS settled
+                  OR (workspace.desired_state = 'archived' AND workspace.status = 'archived')) AS settled,
+                CASE workspace.desired_state
+                  WHEN 'running' THEN workspace.status IN ('ready','busy')
+                    AND inventory.state = 'running'
+                  WHEN 'stopped' THEN workspace.status = 'stopped'
+                    AND (inventory.resource_id IS NULL
+                      OR inventory.state IN ('stopped','archived','deleted')
+                      OR (inventory.compute_stopped AND inventory.state <> 'failed'))
+                  -- A listed stopped sandbox may or may not have offloaded
+                  -- storage; only an inspect can tell, so it is not paced.
+                  WHEN 'archived' THEN workspace.status = 'archived'
+                    AND (inventory.resource_id IS NULL OR inventory.state IN ('archived','deleted'))
+                  ELSE false
+                END AS steady
          FROM cloud_workspace_provider_bindings binding
          JOIN provider_connections connection
            ON connection.id = binding.provider_connection_id
@@ -1727,6 +1745,7 @@ export class CloudWorkspaceReconciler {
         scope.organizationId,
         scope.connectionId,
         scope.connectionVersion,
+        ids.map((id) => inventory.get(id)!.computeStopped === true),
       ],
       );
     });
