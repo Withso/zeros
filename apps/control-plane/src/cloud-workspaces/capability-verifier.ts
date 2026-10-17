@@ -209,6 +209,7 @@ export type CapabilityVerifierOptions = {
 const COMPACT = /^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/;
 const NONCE = /^[A-Za-z0-9_-]{22}$/;
 const SIGNATURE = /^[A-Za-z0-9_-]{86}$/;
+const CAPABILITY_REVOCATION_SWEEP_INTERVAL_MS = 1_000;
 
 function decodeJson(segment: string): Record<string, unknown> | null {
   try {
@@ -227,6 +228,7 @@ export class CapabilityVerifier {
   private refreshing: Promise<void> | null = null;
   private readonly known = new Map<string, number>();
   private readonly revoked = new Map<string, number>();
+  private lastRevocationSweepAtMs = Number.NEGATIVE_INFINITY;
   private readonly proofsSeen = new Map<string, number>();
   private readonly sessions = new Map<string, OpenSession>();
   private readonly now: () => number;
@@ -265,8 +267,13 @@ export class CapabilityVerifier {
     let raised = false;
     for (const [subject, epoch] of entries) {
       if (!Number.isSafeInteger(epoch) || epoch < 0) continue;
-      if (epoch > (this.known.get(subject) ?? 0)) { this.known.set(subject, epoch); raised = true; }
+      const known = this.known.get(subject);
+      if (known === undefined) this.known.set(subject, epoch);
+      else if (epoch > known) { this.known.set(subject, epoch); raised = true; }
     }
+    // Step 10 records every subject of every token it admits, so a subject
+    // seen for the first time belongs to no open session: only a raise over a
+    // known value can close one.
     return raised ? this.recheck() : [];
   }
 
@@ -275,9 +282,10 @@ export class CapabilityVerifier {
   /** Known epochs and live revocations, for a verifier that persists them. */
   exportState(): { known: Array<[string, number]>; revoked: Array<["sid" | "did", string, number]> } {
     this.pruneRevocations();
+    const now = this.now();
     return {
       known: [...this.known],
-      revoked: [...this.revoked].map(([key, until]) => [key.slice(0, 3) as "sid" | "did", key.slice(4), until]),
+      revoked: [...this.revoked].filter(([, until]) => until > now).map(([key, until]) => [key.slice(0, 3) as "sid" | "did", key.slice(4), until]),
     };
   }
 
@@ -290,8 +298,15 @@ export class CapabilityVerifier {
   }
 
   isRevoked(kind: "sid" | "did", id: string): boolean {
-    this.pruneRevocations();
-    return this.revoked.has(`${kind}:${id}`);
+    return this.revokedNow(`${kind}:${id}`, this.now());
+  }
+
+  /** Checks one key, dropping it once expired, without walking the map. */
+  private revokedNow(key: string, now: number): boolean {
+    const until = this.revoked.get(key);
+    if (until === undefined) return false;
+    if (until <= now) { this.revoked.delete(key); return false; }
+    return true;
   }
 
   /** Registers a session admitted with `claims` so later raises, revocations
@@ -418,7 +433,7 @@ export class CapabilityVerifier {
       const known = subject ? this.known.get(subject) : undefined;
       if (known !== undefined && epoch !== undefined && epoch < known) return "capability_revoked";
     }
-    if ((claims.sid && this.revoked.has(`sid:${claims.sid}`)) || (claims.did && this.revoked.has(`did:${claims.did}`)))
+    if ((claims.sid && this.revokedNow(`sid:${claims.sid}`, now)) || (claims.did && this.revokedNow(`did:${claims.did}`, now)))
       return "capability_revoked";
     return null;
   }
@@ -430,7 +445,12 @@ export class CapabilityVerifier {
         typeof proof.signature !== "string" || !SIGNATURE.test(proof.signature) ||
         Math.abs(now - proof.timestampMs) > CAPABILITY_POP_TIMESTAMP_LEEWAY_MS) return false;
     const replayKey = `${claims.jti}\n${proof.nonce}`;
-    for (const [seen, until] of this.proofsSeen) if (until <= now) this.proofsSeen.delete(seen);
+    // Entries are recorded a fixed window after `now`, so insertion order is
+    // expiry order and expired entries are always at the head.
+    for (const [seen, until] of this.proofsSeen) {
+      if (until > now) break;
+      this.proofsSeen.delete(seen);
+    }
     if (this.proofsSeen.has(replayKey)) return false;
     const message = capabilityProofMessage({ aud: pin.aud, wsp: context.workspaceId, jti: claims.jti,
       timestampMs: proof.timestampMs, nonce: proof.nonce, route: context.route });
@@ -445,8 +465,11 @@ export class CapabilityVerifier {
     return valid;
   }
 
+  /** Drops expired revocations, at most once per sweep interval. */
   private pruneRevocations(): void {
     const now = this.now();
+    if (now - this.lastRevocationSweepAtMs < CAPABILITY_REVOCATION_SWEEP_INTERVAL_MS) return;
+    this.lastRevocationSweepAtMs = now;
     for (const [key, until] of this.revoked) if (until <= now) this.revoked.delete(key);
   }
 
