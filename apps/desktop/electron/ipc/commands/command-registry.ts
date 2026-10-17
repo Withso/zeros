@@ -131,6 +131,11 @@ import {
   cloudWorkspaceSshTerminal,
   cloudWorkspaceTunnelStart,
 } from "./cloud-workspace-access";
+import {
+  cloudWorkspaceOutboxEnqueue,
+  cloudWorkspaceOutboxList,
+  installCloudOutboxLifecycle,
+} from "./cloud-outbox";
 export function registerAllCommands(): void {
   registerAttachmentSourceIpc();
   installCloudTranscriptCacheLifecycle();
@@ -200,6 +205,11 @@ export function registerAllCommands(): void {
   setCommand("cloud_workspace_capability", cloudWorkspaceCapability);
   setCommand("cloud_workspace_runtime_refresh", cloudWorkspaceRuntimeRefresh);
   setCommand("cloud_workspace_runtime_close", cloudWorkspaceRuntimeClose);
+  // Durable per-account lifecycle outbox (S3-Q5): every cloud workspace
+  // command enters here before the network; sign-out clears it.
+  setCommand("cloud_workspace_outbox_enqueue", cloudWorkspaceOutboxEnqueue);
+  setCommand("cloud_workspace_outbox_list", cloudWorkspaceOutboxList);
+  installCloudOutboxLifecycle();
 
   // Auth (browser sign-in flow via app.zeros.build/auth.zeros.build)
   // Auth0 session @ rest — main owns the full token pair (auth-session.ts); the
