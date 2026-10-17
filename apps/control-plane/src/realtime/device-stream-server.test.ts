@@ -6,7 +6,7 @@ import WebSocket, { WebSocketServer } from "ws";
 
 import type { RolloutFlagName } from "../rollout-flags.js";
 import type { DeviceSessionAuthority, DeviceSessionPrincipal, DeviceSessionState } from "./device-sessions.js";
-import type { DeviceStreamCatalogRead, DeviceStreamCatalogSource, DeviceStreamWorkspace } from "./device-stream-catalog.js";
+import { DEVICE_STREAM_MAX_CATALOG, type DeviceStreamCatalogRead, type DeviceStreamCatalogSource, type DeviceStreamWorkspace } from "./device-stream-catalog.js";
 import { DEVICE_STREAM_CLOSE, DEVICE_STREAM_PATH } from "./device-stream-protocol.js";
 import { DeviceStreamServer, type DeviceStreamServerOptions } from "./device-stream-server.js";
 import type { RealtimeSecurityEvent, SecurityEventSubscriber } from "./security-event-feed.js";
@@ -95,8 +95,10 @@ class FakeCatalog implements DeviceStreamCatalogSource {
   async read(account: string, ids: readonly string[] | null): Promise<DeviceStreamCatalogRead> {
     this.reads += 1;
     const all = [...(this.access.get(account)?.values() ?? [])];
+    // Like the database source, one read returns at most DEVICE_STREAM_MAX_CATALOG rows.
+    const rows = ids ? all.filter(workspace => ids.includes(workspace.id)) : all;
     return { catalogVersion: this.catalogVersion, organizationIds: this.organizations.get(account) ?? this.defaultOrganizations,
-      workspaces: ids ? all.filter(workspace => ids.includes(workspace.id)) : all, complete: true };
+      workspaces: rows.slice(0, DEVICE_STREAM_MAX_CATALOG), complete: rows.length <= DEVICE_STREAM_MAX_CATALOG };
   }
   async candidates(_ids: readonly string[], accounts: readonly string[]) { return new Set(accounts); }
   async organizationAccounts(_org: string, accounts: readonly string[]) { return new Set(accounts); }
@@ -381,6 +383,29 @@ describe("device stream server", () => {
     expect((await a.peer.next("notification")).d).toMatchObject({ workspaceId: held.id, kind: "turn.completed" });
     expect(await b.peer.drainFrames()).toEqual([]);
     expect(await c.peer.drainFrames()).toEqual([]);
+  });
+
+  it("never reads a removal from a targeted re-read that one catalog read cannot cover", async () => {
+    await start();
+    const who = principal();
+    const held = Array.from({ length: DEVICE_STREAM_MAX_CATALOG }, () => workspace(organizationId));
+    for (const value of held) catalog.grant(who.accountUserId, value);
+    const { peer } = await connect(who);
+    await peer.drainFrames();
+    // One more workspace arrives by hint, so the device session holds more than one read covers.
+    const newest = workspace(organizationId);
+    catalog.grant(who.accountUserId, newest);
+    held.push(newest);
+    server.workspaceChanged(newest.id);
+    expect((await peer.next("catalog.changed")).d).toMatchObject({ workspaceId: newest.id, op: "upsert" });
+    // A bulk change hints every held workspace inside one coalescing window.
+    for (const value of held) { catalog.update(value.id, { status: "busy" }); server.workspaceChanged(value.id); }
+    await until(() => peer.frames.filter(frame => frame.t === "catalog.changed").length >= held.length);
+    const frames = await peer.drainFrames();
+    expect(frames.filter(frame => frame.t === "capability.revoked")).toEqual([]);
+    expect(frames.filter(frame => frame.t === "catalog.changed" && frame.d.op === "remove")).toEqual([]);
+    expect(new Set(frames.filter(frame => frame.t === "catalog.changed" && frame.d.version === 2).map(frame => frame.d.workspaceId)).size)
+      .toBe(held.length);
   });
 
   it("re-evaluates access on membership security events and on a feed gap", async () => {

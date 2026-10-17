@@ -5,7 +5,13 @@ import WebSocket, { WebSocketServer, type RawData } from "ws";
 
 import type { RolloutFlagReader } from "../rollout-flags.js";
 import type { DeviceSessionAuthority, DeviceSessionPrincipal, DeviceSessionState } from "./device-sessions.js";
-import { deviceStreamAdmits, type DeviceStreamCatalogRead, type DeviceStreamCatalogSource, type DeviceStreamWorkspace } from "./device-stream-catalog.js";
+import {
+  DEVICE_STREAM_MAX_CATALOG,
+  deviceStreamAdmits,
+  type DeviceStreamCatalogRead,
+  type DeviceStreamCatalogSource,
+  type DeviceStreamWorkspace,
+} from "./device-stream-catalog.js";
 import {
   DEVICE_STREAM_CLOSE,
   DEVICE_STREAM_CONTRACT,
@@ -538,9 +544,19 @@ export class DeviceStreamServer {
   private async refreshAccount(accountUserId: string, filter: ReadonlySet<string> | null): Promise<void> {
     const live = () => [...(this.byAccount.get(accountUserId) ?? [])].filter(record => record.connection?.isReady());
     if (live().length === 0) return;
-    const read = await this.options.catalog.read(accountUserId, filter ? [...filter] : null);
-    if (this.closed) return;
-    for (const record of live()) this.apply(record, read, filter);
+    // One read returns at most DEVICE_STREAM_MAX_CATALOG rows, so a targeted
+    // re-read of more ids is split into reads that each cover all of theirs.
+    const chunks: (string[] | null)[] = [];
+    if (!filter) chunks.push(null);
+    else {
+      const ids = [...filter];
+      for (let offset = 0; offset < ids.length; offset += DEVICE_STREAM_MAX_CATALOG) chunks.push(ids.slice(offset, offset + DEVICE_STREAM_MAX_CATALOG));
+    }
+    for (const chunk of chunks) {
+      const read = await this.options.catalog.read(accountUserId, chunk);
+      if (this.closed) return;
+      for (const record of live()) this.apply(record, read, chunk ? new Set(chunk) : null);
+    }
   }
 
   /** Diffs a re-read against what the device session was last told. */
@@ -561,7 +577,7 @@ export class DeviceStreamServer {
             previous.observedState !== row.observedState))
           this.emit(record, "lifecycle.changed", { workspaceId: id, version: row.version, status: row.status,
             generation: row.generation, observedState: row.observedState }, true);
-      } else if (previous && (filter || read.complete)) {
+      } else if (previous && read.complete) {
         // Lost access (or deleted): revoke runtime capabilities first, then
         // a single remove, and nothing more for this workspace.
         record.known.delete(id);

@@ -246,7 +246,8 @@ streams with `4404` without resume and drops its parked device sessions.
   Hints carry ids only. A listener reconnect or a feed gap re-reads every
   connected account and re-checks every device session. Re-reads are
   coalesced (25 ms) with four accounts in flight; one read covers up to
-  1,000 workspaces, and a truncated read never infers a removal.
+  1,000 workspaces, a targeted re-read of more is split into reads of at
+  most 1,000 ids, and a truncated read never infers a removal.
 - **Fan-out.** A workspace's frames go only to device sessions whose last
   re-read contained it. Losing access (or deletion) sends
   `capability.revoked { scope: "workspace" }`, then one
