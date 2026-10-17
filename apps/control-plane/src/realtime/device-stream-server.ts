@@ -323,7 +323,7 @@ export class DeviceStreamServer {
   async open(connection: DeviceStreamConnection, principal: DeviceSessionPrincipal,
     resume: { cursor: string } | undefined): Promise<void> {
     const existing = this.records.get(principal.deviceSessionId);
-    if (existing && existing.principal.accountUserId !== principal.accountUserId) this.dropRecord(existing);
+    if (existing && existing.principal.accountUserId !== principal.accountUserId) this.supersede(existing);
     const previous = this.records.get(principal.deviceSessionId);
     let resumed = false;
     let reset: CatalogResetReason | null = null;
@@ -351,14 +351,9 @@ export class DeviceStreamServer {
       try { baseline = await this.options.catalog.read(principal.accountUserId, null); }
       catch { connection.close(DEVICE_STREAM_CLOSE.internalError, "internal_error", { park: false }); return; }
       if (connection.isClosed()) return;
-      if (previous) {
-        previous.connection?.close(DEVICE_STREAM_CLOSE.superseded, "superseded", { park: false, keepRecord: true });
-        this.dropRecord(previous);
-      }
+      if (this.draining) { connection.close(DEVICE_STREAM_CLOSE.draining, "draining", { park: false }); return; }
       record = this.newRecord(principal, baseline);
     }
-    if (connection.isClosed() || this.closed) return;
-    if (this.draining) { connection.close(DEVICE_STREAM_CLOSE.draining, "draining", { park: false }); return; }
     if (record.expiry) clearTimeout(record.expiry);
     record.expiry = null;
     record.connection = connection;
@@ -430,6 +425,11 @@ export class DeviceStreamServer {
   // ---- fan-out ----
 
   private newRecord(principal: DeviceSessionPrincipal, baseline: DeviceStreamCatalogRead): DeviceSessionRecord {
+    // The record under this id may belong to another hello that finished its
+    // baseline read first. Replacing it silently would leave its socket fed
+    // through `byAccount` but invisible to revocation, which walks `records`.
+    const current = this.records.get(principal.deviceSessionId);
+    if (current) this.supersede(current);
     while (this.records.size >= this.options.maxDeviceSessions) {
       const parked = [...this.records.values()].find(record => !record.connection);
       if (!parked) break;
@@ -445,6 +445,11 @@ export class DeviceStreamServer {
     if (!set) this.byAccount.set(principal.accountUserId, set = new Set());
     set.add(record);
     return record;
+  }
+
+  private supersede(record: DeviceSessionRecord): void {
+    record.connection?.close(DEVICE_STREAM_CLOSE.superseded, "superseded", { park: false, keepRecord: true });
+    this.dropRecord(record);
   }
 
   private dropRecord(record: DeviceSessionRecord): void {

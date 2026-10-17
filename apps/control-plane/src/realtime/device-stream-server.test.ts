@@ -450,6 +450,54 @@ describe("device stream server", () => {
     expect(again).toBeInstanceOf(Error);
   });
 
+  it("supersedes the older of two concurrent fresh hellos, so a revocation reaches every socket of the device session", async () => {
+    await start();
+    const who = principal(), held = workspace(organizationId);
+    catalog.grant(who.accountUserId, held);
+    const read = catalog.read.bind(catalog);
+    const gates: (() => void)[] = [];
+    const deferred = async (account: string, ids: readonly string[] | null) => {
+      await new Promise<void>(resolve => gates.push(resolve));
+      return read(account, ids);
+    };
+    vi.spyOn(catalog, "read").mockImplementationOnce(deferred).mockImplementationOnce(deferred);
+    const hello = async () => {
+      const peer = dial();
+      await peer.opened;
+      peer.send({ t: "hello", d: { contract: { min: 1, max: 1 }, ticket: authority.issue(who) } });
+      return peer;
+    };
+    // Both baseline reads are in flight before either finishes.
+    const first = await hello();
+    await until(() => gates.length === 1);
+    const second = await hello();
+    await until(() => gates.length === 2);
+    gates[0]!();
+    expect((await first.next("ready")).d).toMatchObject({ deviceSessionId: who.deviceSessionId, resumed: false });
+    gates[1]!();
+    expect((await second.next("ready")).d).toMatchObject({ deviceSessionId: who.deviceSessionId, resumed: false });
+    await until(() => first.ws.readyState === WebSocket.CLOSED);
+    expect(first.ws.readyState).toBe(WebSocket.CLOSED);
+    expect(await first.closed).toEqual({ code: 4409, reason: "superseded" });
+    authority.states.set(who.deviceSessionId, "session");
+    subscriber!.events([event("session.revoked", { userId: who.accountUserId, providerSessionId: who.providerSessionId })]);
+    expect(await second.next("capability.revoked")).toMatchObject({ d: { scope: "session", reason: "session_revoked" } });
+    expect(await second.closed).toEqual({ code: 4401, reason: "unauthenticated" });
+    await until(() => server.size === 0);
+    expect(server.size).toBe(0);
+  });
+
+  it("closes the previous socket 4409 when a device session id arrives for another account", async () => {
+    await start();
+    const who = principal();
+    const first = await connect(who);
+    await connect({ ...who, accountUserId: randomUUID() });
+    await until(() => first.peer.ws.readyState === WebSocket.CLOSED);
+    expect(first.peer.ws.readyState).toBe(WebSocket.CLOSED);
+    expect(await first.peer.closed).toEqual({ code: 4409, reason: "superseded" });
+    expect(server.size).toBe(1);
+  });
+
   it("shares presence latest-wins with members who have access, behind presence_in_memory", async () => {
     await start();
     const owner = principal(), member = principal(), held = workspace(organizationId);
