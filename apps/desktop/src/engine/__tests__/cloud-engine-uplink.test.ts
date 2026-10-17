@@ -547,6 +547,22 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("reports established changes at the gate and on loss", async () => {
+    const changes: boolean[] = [];
+    const { client, sockets } = fakeClient({ onEstablishedChange: established => changes.push(established) });
+    client.start();
+    await flush();
+    expect(client.established).toBe(false);
+    await serveHandshake(sockets[0]!);
+    expect(client.established).toBe(true);
+    expect(changes).toEqual([true]); // gate opened
+    sockets[0]!.fail();
+    await flush();
+    expect(client.established).toBe(false);
+    expect(changes).toEqual([true, false]); // the poll cadence must fall back now, not after 30 s
+    client.stop();
+  });
+
   it("acks in-order reliable CP frames and closes on a sequence gap, then redials", async () => {
     const { client, sockets } = fakeClient({ random: () => 0.5 });
     client.start();

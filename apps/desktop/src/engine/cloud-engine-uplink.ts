@@ -210,6 +210,10 @@ export type CloudEngineUplinkOptions = {
    * explicit signal, never silently swallowed. Defaults to
    * `["agent-controls"]`. */
   credentialKinds?: readonly EngineUplinkCredentialRevision["kind"][];
+  /** Reports flips of `established`. The engine drops the credential poll
+   * back to its fast fallback cadence the moment the gate closes instead of
+   * waiting out an armed slow timer. */
+  onEstablishedChange?: (established: boolean) => void;
   /** 4409: re-verify registration authority before the redial (S2 rule 4). */
   onReverifyAuthority?: () => void;
   /** Terminal close: the client parks and never redials (HTTP stays up). */
@@ -290,7 +294,19 @@ export class CloudEngineUplinkClient {
   /** True while a connection's gate is open (its first auth.capability
    * arrived): pushed cred.revision frames flow, so the credential-control
    * poll can back off to its slow fallback cadence. */
-  get established(): boolean { return this.connection?.gateOpen === true; }
+  get established(): boolean { return this.computeEstablished(); }
+  private lastEstablished = false;
+
+  private computeEstablished(): boolean { return this.connection?.gateOpen === true; }
+
+  /** @internal Recompute `established` at every input change (gate open,
+   * connection loss, stop) and report a flip exactly once. */
+  noteEstablished(): void {
+    const value = this.computeEstablished();
+    if (value === this.lastEstablished) return;
+    this.lastEstablished = value;
+    this.options.onEstablishedChange?.(value);
+  }
 
   start(): void {
     if (this.started) return;
@@ -307,6 +323,7 @@ export class CloudEngineUplinkClient {
     this.handoff?.initiateClose(CLOSE.normal, "engine_stopping");
     this.connection = this.handoff = null;
     this.resume = null;
+    this.noteEstablished();
   }
 
   /** Reliable engine→CP frame (`status.ready`, later `cred.ack`, …). Frames
@@ -462,6 +479,7 @@ export class CloudEngineUplinkClient {
       this.handoff = null;
       const old = this.connection;
       this.connection = connection;
+      this.noteEstablished(); // the replacement's gate is closed until its capability lands
       // Drain handoff: the replacement is up; retire the drained uplink.
       if (old && old !== connection) old.initiateClose(CLOSE.normal, "drain_handoff");
     }
@@ -494,6 +512,7 @@ export class CloudEngineUplinkClient {
     }
     if (connection !== this.connection) return;
     this.connection = null;
+    this.noteEstablished(); // the gate is closed from here to the next capability
     if (!this.started || this.stopped || this.parked) return;
     if (connection.draining && code === CLOSE.superseded) {
       // The expected end of a drain handoff: the replacement's resume took
@@ -831,6 +850,7 @@ class Connection {
     // the connection's FIRST capability; renewals only hold the new token.
     if (this.gateOpen) return;
     this.gateOpen = true;
+    this.uplink.noteEstablished();
     if (this.uplink.outboxPending()) {
       this.uplink.retransmit(this);
     } else if (this.uplink.config.readiness) {

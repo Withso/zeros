@@ -355,6 +355,13 @@ export class CloudLocalAgentBootRuntime {
     void task.finally(() => { if (this.controlsFlight === task) this.controlsFlight = null; this.flights.delete(task); this.scheduleControls(); }).catch(() => {});
     return task;
   }
+  /** The uplink's established state changed: re-read the poll cadence and
+   * re-arm now instead of waiting out a timer set under the old cadence
+   * (a 30 s timer would otherwise outlive the gate that justified it). */
+  rescheduleControls(): void {
+    if (!this.active) return;
+    this.scheduleControls();
+  }
   /** A pushed credential revision must not join a flight that started before
    * the bump committed (it could return the old controls and the push would
    * be acked applied against them). Await any in-flight exchange, then run

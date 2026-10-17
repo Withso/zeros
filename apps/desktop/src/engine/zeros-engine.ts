@@ -3697,6 +3697,10 @@ export class ZerosEngine {
           return { result: "failed" as const, code };
         }
       },
+      // The moment the gate closes (or never negotiates the push), the
+      // credential poll returns to its fast fallback cadence instead of
+      // waiting out an armed 30 s timer.
+      onEstablishedChange: established => { if (!established) this.cloudAgentBoot?.rescheduleControls(); },
       onReverifyAuthority: () => registration.requestHeartbeatSoon(),
       onParked: reason =>
         console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`),

@@ -473,6 +473,23 @@ describe("engine boot-mode orchestration", () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(f.controls).toHaveBeenCalledTimes(5);
   });
+  it("reschedules the controls poll immediately when the uplink's gate closes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    let controlsIntervalMs = 30_000; // uplink established: the slow safety cadence
+    const f = await fixture();
+    f.options.controlsPollIntervalMs = () => controlsIntervalMs;
+    await f.boot.initialize();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.controls).toHaveBeenCalledTimes(1);
+    // The gate closes right after the 30 s timer was armed: without an
+    // immediate reschedule nothing polls for up to 30 s.
+    controlsIntervalMs = 500;
+    f.boot.rescheduleControls();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(3);
+  });
   it("a pushed revision runs a fresh exchange instead of joining an in-flight poll", async () => {
     const f = await fixture();
     await f.boot.initialize();
