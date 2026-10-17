@@ -1380,6 +1380,76 @@ suite("managed compute lifecycle admission", () => {
       .rejects.toMatchObject({ code: "compute_previous_lease_pending" });
     expect((await pool.query("SELECT next_check_at<=clock_timestamp() AS due FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0]).toEqual({ due: true });
   });
+  // A worker's claim: owned, due when it was claimed, and not yet released.
+  const claimByOtherWorker = async () => (await pool.query<{ at: string }>(
+    `UPDATE managed_compute_allocation_leases SET lease_owner='other-worker',lease_expires_at=clock_timestamp()+interval '5 minutes',
+      next_check_at=clock_timestamp()-interval '1 second' WHERE id=$1 RETURNING next_check_at::text AS at`,
+    [input.intentId],
+  )).rows[0]!.at;
+  const pokedSince = async (db: pg.Pool | pg.PoolClient, at: string) => (await db.query<{ poked: boolean }>(
+    "SELECT next_check_at>$2::timestamptz AS poked FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId, at],
+  )).rows[0]!.poked;
+  it("keeps a re-check requested while a check is running", async () => {
+    await ready();
+    await age();
+    // A lifecycle change, refused start or provider loss lands during the provider call.
+    provider.inspect.mockImplementation(async () => {
+      await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp() WHERE id=$1", [input.intentId]);
+      return resource(800);
+    });
+    expect(await coordinator.runOnce()).toBe(true);
+    expect(provider.inspect).toHaveBeenCalled();
+    expect(Number((await nextCheck()).from_now)).toBeLessThanOrEqual(0);
+  });
+  it("re-checks a lease under check when the workspace lifecycle changes", async () => {
+    await ready();
+    const at = await claimByOtherWorker();
+    const writer = await pool.connect();
+    try {
+      await writer.query("BEGIN");
+      await writer.query("UPDATE cloud_workspaces SET desired_state='stopped' WHERE id=$1", [f.workspaceId]);
+      expect(await pokedSince(writer, at)).toBe(true);
+    } finally {
+      await writer.query("ROLLBACK").catch(() => undefined);
+      writer.release();
+    }
+  });
+  it("never waits for a lease row lock when the workspace lifecycle changes", async () => {
+    await ready();
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp()+interval '1 hour' WHERE id=$1", [input.intentId]);
+    const holder = await pool.connect(), writer = await pool.connect();
+    try {
+      // A short transaction of the lease's check holds its row.
+      await holder.query("BEGIN");
+      await holder.query("SELECT 1 FROM managed_compute_allocation_leases WHERE id=$1 FOR UPDATE", [input.intentId]);
+      await writer.query("BEGIN");
+      await writer.query("SET LOCAL lock_timeout='1s'");
+      await writer.query("UPDATE cloud_workspaces SET desired_state='stopped' WHERE id=$1", [f.workspaceId]);
+      // Skipped rather than waited for: the held lease keeps its schedule.
+      expect((await writer.query(
+        "SELECT next_check_at>clock_timestamp()+interval '50 minutes' AS scheduled FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId],
+      )).rows[0]).toEqual({ scheduled: true });
+    } finally {
+      await writer.query("ROLLBACK").catch(() => undefined);
+      await holder.query("ROLLBACK").catch(() => undefined);
+      writer.release();
+      holder.release();
+    }
+  });
+  it("re-checks a previous allocation under check when a start is refused for it", async () => {
+    await ready();
+    const at = await claimByOtherWorker();
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [input.intentId]);
+    const next = randomUUID();
+    await pool.query(
+      `INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256)
+      VALUES ($1,$2,1,$3,$4,'wake',$5,$6)`,
+      [next, f.workspaceId, f.organizationId, f.userId, randomUUID(), randomBytes(32)],
+    );
+    await expect(coordinator.allocate({ ...input, intentId: next, idempotencyKey: next }, asProvider(), null))
+      .rejects.toMatchObject({ code: "compute_previous_lease_pending" });
+    expect(await pokedSince(pool, at)).toBe(true);
+  });
   it("wakes only a start that was refused for the unsettled allocation", async () => {
     await ready();
     await age();

@@ -14,10 +14,19 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
-  UPDATE managed_compute_allocation_leases
+  -- A lease under check is re-checked too: its worker keeps a check requested
+  -- while it ran. SKIP LOCKED, so a workspace write never waits for a lease
+  -- row; a lease skipped here is still checked at its scheduled time, at most
+  -- ten minutes away.
+  UPDATE managed_compute_allocation_leases lease
   SET next_check_at = clock_timestamp()
-  WHERE workspace_id = NEW.id AND org_id = NEW.org_id
-    AND state <> 'settled' AND next_check_at > clock_timestamp();
+  FROM (
+    SELECT id FROM managed_compute_allocation_leases
+    WHERE workspace_id = NEW.id AND org_id = NEW.org_id AND state <> 'settled'
+      AND (next_check_at > clock_timestamp() OR lease_owner IS NOT NULL)
+    FOR UPDATE SKIP LOCKED
+  ) due
+  WHERE lease.id = due.id;
   RETURN NEW;
 END;
 $$;
