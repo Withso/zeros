@@ -6,7 +6,7 @@ import { createPool, withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import type { RolloutFlagName } from "../rollout-flags.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
-import { functionInputTables, stripSqlLiterals } from "./function-input-tables.js";
+import { functionInputTables, stripSqlLiterals } from "./function-input-tables-test-utils.js";
 import {
   AUTHORITY_CACHE_CHANNEL,
   EngineAuthorityCache,
