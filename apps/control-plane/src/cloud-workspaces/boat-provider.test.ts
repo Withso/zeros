@@ -1231,8 +1231,8 @@ describe("paged inventory", () => {
     const archiving = { ...sandbox("archived", {}).sandbox, id: "bx_98765432",
       snapshotAvailable: false, lastSnapshotStatus: "in_progress" };
     f.fetcher
-      .mockResolvedValueOnce(listPage([known, archiving], { nextCursor: "cursor-2", hasMore: true, limit: 200 }))
-      .mockResolvedValueOnce(listPage([stray, { garbage: true }], { nextCursor: null, hasMore: false, limit: 200 }));
+      .mockResolvedValueOnce(listPage([known, archiving], { nextCursor: "cursor-2", hasMore: true, limit: 100 }))
+      .mockResolvedValueOnce(listPage([stray, { garbage: true }], { nextCursor: null, hasMore: false, limit: 100 }));
 
     const observed = [];
     for await (const item of f.provider.listInventory!()) observed.push(item);
@@ -1246,8 +1246,8 @@ describe("paged inventory", () => {
         workspaceId: null, generation: null },
     ]);
     expect(f.fetcher.mock.calls.map(([url]) => String(url))).toEqual([
-      "https://boat.dev/api/v1/sandboxes?limit=200",
-      "https://boat.dev/api/v1/sandboxes?limit=200&cursor=cursor-2",
+      "https://boat.dev/api/v1/sandboxes?limit=100",
+      "https://boat.dev/api/v1/sandboxes?limit=100&cursor=cursor-2",
     ]);
   });
 
@@ -1269,8 +1269,8 @@ describe("paged inventory", () => {
       .mockResolvedValueOnce(listPage([], { nextCursor: null, hasMore: false }));
     for await (const _ of f.provider.listInventory!()) { /* drain */ }
     expect(f.fetcher.mock.calls.map(([url]) => String(url))).toEqual([
-      "https://boat.dev/api/v1/sandboxes?limit=200",
-      "https://boat.dev/api/v1/sandboxes?limit=200&cursor=c%2B2%2F%3D%7E%2A",
+      "https://boat.dev/api/v1/sandboxes?limit=100",
+      "https://boat.dev/api/v1/sandboxes?limit=100&cursor=c%2B2%2F%3D%7E%2A",
     ]);
   });
 
@@ -1294,7 +1294,7 @@ describe("paged inventory", () => {
     await expect(iterator[Symbol.asyncIterator]().next()).rejects.toMatchObject({
       code: "provider_response_invalid",
     });
-    expect(f.fetcher).toHaveBeenCalledTimes(100);
+    expect(f.fetcher).toHaveBeenCalledTimes(200);
   });
 });
 

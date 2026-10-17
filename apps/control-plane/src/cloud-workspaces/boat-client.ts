@@ -365,8 +365,10 @@ export class BoatApiClient {
   async listSandboxes(
     input: { cursor?: string | null; limit?: number } = {},
   ): Promise<{ sandboxes: unknown[]; nextCursor: string | null }> {
-    const limit = input.limit ?? 200;
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+    // Boat publishes no maximum page size; 100 is the size the operator
+    // inventory (cloud-provider-evidence.ts) has paged this endpoint with.
+    const limit = input.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
       throw new Error("Invalid Boat list page size");
     const cursor = input.cursor ?? null;
     // Cursors are opaque (a standard base64 cursor carries +/=). Percent-

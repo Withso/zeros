@@ -281,9 +281,9 @@ export type Projection = {
 };
 
 /** Boat calls one replica issues at N workspaces: one paged list per minute
- * (200 per page) plus one inspect per fallback drift run (6 h horizon). */
+ * (100 per page) plus one inspect per fallback drift run (6 h horizon). */
 function projectedBoatCallsPerMinute(workspaces: number): number {
-  return Math.max(1, Math.ceil(workspaces / 200)) + workspaces * (60 / 21_600);
+  return Math.max(1, Math.ceil(workspaces / 100)) + workspaces * (60 / 21_600);
 }
 
 export function projectSteadyState(hotPaths: readonly HotPathResult[], quietTransactionsPerSecond: number,
