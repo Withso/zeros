@@ -288,7 +288,10 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   transaction) on every sweep on every replica: `ceil(journal rows / 200)`
   transactions per minute per replica on top of the list calls. The load
   simulator's provider yields identity inline, so `worker.reconcileOrphans`
-  does not price that scan yet.
+  does not price that scan yet. The sweep's safety ceiling
+  (`maxManagedResourcesPerSweep`, default 10,000) counts only listed
+  sandboxes the journal places; the provider bounds the whole listing (Boat
+  stops at 200 pages).
 - **Keep-alive write volume is deliberate.** A paced binding is rewritten
   once its `drift_paced_until` falls inside `fallback − fallback/12` (every
   30 minutes at the 6 h default), so each binding costs one `UPDATE` plus at

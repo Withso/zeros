@@ -1603,8 +1603,12 @@ export class CloudWorkspaceReconciler {
         const inventory = new Map<string, CloudProviderInventoryItem>();
         let capped = false;
         for await (const item of scope.provider.listInventory()) {
-          if (observed >= this.maxManagedResourcesPerSweep) { capped = true; break; }
-          observed += 1;
+          // The sweep skips sandboxes the journal cannot place (runtime
+          // images, staging, templates), so they must not use up the ceiling.
+          if (item.workspaceId !== null) {
+            if (observed >= this.maxManagedResourcesPerSweep) { capped = true; break; }
+            observed += 1;
+          }
           inventory.set(item.resourceId, item);
         }
         if (capped) {

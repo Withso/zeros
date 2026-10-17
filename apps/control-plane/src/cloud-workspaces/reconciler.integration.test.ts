@@ -3128,6 +3128,20 @@ d("cloud workspace reconciliation", () => {
       expect((await health.read()).operationalState).toBe("healthy");
     });
 
+    it("does not spend the sweep's safety ceiling on inventory the journal cannot place", async () => {
+      const seeded = await seedWorkspace({ status: "ready", intentState: "succeeded",
+        providerResourceId: "bound-resource", observedState: "running" });
+      const strays: CloudProviderInventoryItem[] = Array.from({ length: 3 }, (_, index) => ({
+        resourceId: `stray-${index}`, state: "running", computeStopped: false, workspaceId: null, generation: null }));
+      const provider = new InventoryProvider();
+      // The account's unjournaled sandboxes are listed before the bound one.
+      provider.items = [...strays, { resourceId: "bound-resource", state: "running", computeStopped: false,
+        workspaceId: seeded.workspaceId, generation: 1 }];
+
+      await expect(reconciler(provider, { maxManagedResourcesPerSweep: 1 }).reconcileOrphansOnce()).resolves.toBe(1);
+      expect(await driftSchedule(seeded.workspaceId)).toMatchObject({ paced: true });
+    });
+
     it("recovers an unbound known generation from inventory and forces its refresh", async () => {
       const seeded = await seedWorkspace({ intentState: "succeeded" });
       const provider = new InventoryProvider();
