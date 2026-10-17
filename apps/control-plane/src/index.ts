@@ -65,6 +65,8 @@ import { DatabaseCloudWorkspaceCommandService } from "./cloud-workspaces/command
 import { DatabaseCloudWorkspaceEventService } from "./cloud-workspaces/event-streams.js";
 import { PostgresSecurityEventBroker, SecurityEventPublisher } from "./security-events.js";
 import { RolloutFlagSnapshot } from "./rollout-flags.js";
+import { EngineAuthorityCache, installEngineAuthorityCache } from "./cloud-workspaces/engine-authority-cache.js";
+import { CapabilitySigningKeyStore } from "./cloud-workspaces/capability-keys.js";
 import { AuditUplinkSecurityAlerts } from "./realtime/uplink-alerts.js";
 import { UplinkCredentialPush } from "./realtime/uplink-cred.js";
 import { uplinkCapabilityAuthority } from "./realtime/uplink-auth-source.js";
@@ -204,7 +206,25 @@ const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.s
 // migration) every flag reads as off.
 const rolloutFlagSnapshot = config.cloudWorkspaces && runtimeReady
   ? new RolloutFlagSnapshot({ pool, listenerPool }) : null;
-void rolloutFlagSnapshot?.start();
+const rolloutFlagsStarted = rolloutFlagSnapshot?.start();
+// Engine authority cache: shadow comparison and fence-free reads, each behind
+// its rollout flag. Without flags it only holds a LISTEN subscription.
+const engineAuthorityCache = rolloutFlagSnapshot
+  ? new EngineAuthorityCache({ pool, listenerPool, flags: rolloutFlagSnapshot }) : null;
+engineAuthorityCache?.start();
+installEngineAuthorityCache(engineAuthorityCache ?? undefined);
+// S1 capability signing keys: a dedicated keyring opens the sealed current
+// key; the store reloads on the keys NOTIFY. Without both envs there is no
+// issuer and every capability route fails closed.
+const capabilityKeyStore = rolloutFlagSnapshot && config.cloudWorkspaces?.capabilityKeyring
+  ? new CapabilitySigningKeyStore({ pool, listenerPool, keyring: config.cloudWorkspaces.capabilityKeyring }) : null;
+void capabilityKeyStore?.start();
+const cloudCapabilities = capabilityKeyStore && config.cloudWorkspaces?.capabilityIssuer
+  ? {
+      pool, keyStore: capabilityKeyStore, issuer: config.cloudWorkspaces.capabilityIssuer,
+      flags: rolloutFlagSnapshot!, workosEnabled: config.auth.provider === "workos",
+    }
+  : undefined;
 // Historical Computer retirement holds session locks across provider I/O and
 // query-pool callbacks. WorkOS may independently hold one worker query slot.
 const retirementLockPool = workerPool && runtimeReady && config.cloudWorkspaces?.boat &&
@@ -779,6 +799,7 @@ const app = createApp(config, pool, emailConfig, {
     ? { cloudWorkspaceEngineClientAdmissionService }
     : {}),
   ...(cloudWorkspaceHealthService ? { cloudWorkspaceHealthService } : {}),
+  ...(cloudCapabilities ? { cloudCapabilities } : {}),
 });
 
 let shuttingDown = false;
@@ -822,12 +843,21 @@ if (servesApi && cloudWorkspaceAccessService && migrationResult.status.state !==
 }
 // The S2 engine uplink is served by realtime and combined processes once the
 // capability authority supplies keys, epochs and engine tokens; each
-// organization is admitted only while its `realtime_uplink` flag is on.
-const uplinkAuth = processRole === "realtime" || processRole === "combined" ? uplinkCapabilityAuthority() : null;
+// organization is admitted only while its `realtime_uplink` flag is on. The
+// capability authority mounts once the first flag load shows `capabilities`
+// on for any organization (and again if a later change turns it on), so a
+// flags-off deployment never mounts the socket.
 let cloudEngineUplink: CloudEngineUplinkServer | undefined;
 let uplinkPresence: UplinkPresenceWriter | undefined;
 let stopUplinkNotifications: () => Promise<void> = async () => {};
-if (uplinkAuth && rolloutFlagSnapshot && migrationResult.status.state === "current") {
+const mountEngineUplink = () => {
+  if (cloudEngineUplink || shuttingDown) return;
+  if (processRole !== "realtime" && processRole !== "combined") return;
+  const uplinkAuth = uplinkCapabilityAuthority({
+    pool, keyStore: capabilityKeyStore,
+    issuer: config.cloudWorkspaces?.capabilityIssuer ?? null, flags: rolloutFlagSnapshot,
+  });
+  if (!uplinkAuth || !rolloutFlagSnapshot || migrationResult.status.state !== "current") return;
   const presenceStore = new DatabaseUplinkPresenceStore(pool);
   const alerts = new AuditUplinkSecurityAlerts({ pool });
   uplinkPresence = new UplinkPresenceWriter(presenceStore);
@@ -856,7 +886,9 @@ if (uplinkAuth && rolloutFlagSnapshot && migrationResult.status.state === "curre
     extensions: [uplinkCredPush],
   });
   stopUplinkNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore, console, uplinkCredPush);
-}
+};
+void rolloutFlagsStarted?.then(mountEngineUplink);
+rolloutFlagSnapshot?.onChange(mountEngineUplink);
 server.on("upgrade", (request, socket, head) => {
   if (!servesApi || shuttingDown || migrationResult.status.state !== "current") { socket.destroy(); return; }
   if (cloudEngineUplink?.handleUpgrade(request, socket, head)) return;
@@ -899,6 +931,8 @@ function shutdown(signal: string): void {
     securityEventBroker.stop(),
     stopSecurityEventPublisher(),
     rolloutFlagSnapshot?.stop(),
+    engineAuthorityCache?.stop(),
+    capabilityKeyStore?.stop(),
   ]);
   const deadline = setTimeout(() => process.exit(1), 15_000 + drainMs);
   deadline.unref();

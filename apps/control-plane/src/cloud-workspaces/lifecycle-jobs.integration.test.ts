@@ -3,6 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { claimJobs, completeJob, type ClaimedJob } from "../job-queue.js";
+import { runDueLifecycleJobs } from "./lifecycle-job-test-utils.js";
 import { withSystemTx } from "../db.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
 import type { CloudWorkspaceProvider } from "./provider.js";
@@ -102,6 +103,58 @@ d("lifecycle jobs", () => {
     expect((await job("engineHealth", f.workspaceId))?.delay_ms).toBeLessThanOrEqual(0);
     expect(await runDue("lifecycle")).toBe(1);
     expect(await job("lifecycle", f.workspaceId)).toBeUndefined();
+  });
+
+  it("reads the slow drift cadence once a workspace settles stopped and the fast one while running", async () => {
+    const f = await seedReadyCloudWorkspace(pool);
+    const slowScope = { provider: null, driftIntervalMs: 60_000, stoppedDriftIntervalMs: 6 * 60 * 60_000 };
+    await pool.query(`UPDATE cloud_workspace_provider_bindings
+      SET last_observed_at=now(), next_drift_check_at=now()-interval '1 second' WHERE workspace_id=$1`, [f.workspaceId]);
+    const running = await readLifecycleDueInMs(pool, "drift", f.workspaceId, slowScope);
+    expect(running).toBeGreaterThan(0);
+    expect(running).toBeLessThanOrEqual(60_000);
+    await pool.query("UPDATE cloud_workspaces SET desired_state='stopped', status='stopped' WHERE id=$1", [f.workspaceId]);
+    expect(await readLifecycleDueInMs(pool, "drift", f.workspaceId, slowScope)).toBeGreaterThan(5 * 60 * 60_000);
+  });
+
+  it("runs the hourly diagnostic retention as its own job", async () => {
+    await pool.query("UPDATE cloud_workspace_diagnostic_cleanup SET next_run_at=now()-interval '1 second'");
+    expect((await job("diagnostics", null))?.delay_ms).toBeLessThanOrEqual(0);
+    expect(await runDue("diagnostics")).toBe(1);
+    expect((await pool.query("SELECT next_run_at > now()+interval '30 minutes' AS later FROM cloud_workspace_diagnostic_cleanup")).rows[0]).toEqual({ later: true });
+    expect((await job("diagnostics", null))?.delay_ms).toBeGreaterThan(30 * 60_000);
+  });
+
+  it("purges terminally failed jobs after a week during the hourly audit", async () => {
+    const insert = (key: string, age: string) => pool.query(
+      `INSERT INTO control_plane_jobs (kind, dedupe_key, state, finished_at, last_error_code)
+       VALUES ('cloud_engine_health', $1, 'failed', now() - $2::interval, 'handler_failed')`,
+      [key, age]);
+    await insert("workspace:old", "8 days");
+    await insert("workspace:recent", "1 hour");
+    await reconciler().auditJobs();
+    const rows = (await pool.query(
+      "SELECT dedupe_key FROM control_plane_jobs WHERE state='failed' ORDER BY dedupe_key")).rows;
+    expect(rows).toEqual([{ dedupe_key: "workspace:recent" }]);
+  });
+
+  it("drains a diagnostic publication backlog without empty-run backoff", async () => {
+    const f = await seedReadyCloudWorkspace(pool);
+    await pool.query(
+      `INSERT INTO cloud_workspace_diagnostic_incidents
+         (workspace_id, org_id, generation, operation_kind, operation_id, reason, first_cause, terminal_cause)
+       SELECT $1, $2, 1, 'engine', gen_random_uuid(), 'engine_expired', '{}'::jsonb, '{}'::jsonb
+       FROM generate_series(1, 300)`,
+      [f.workspaceId, f.organizationId]);
+    await pool.query(
+      "UPDATE cloud_workspaces SET diagnostic_recovery_at=now(), diagnostic_recovery_generation=1 WHERE id=$1",
+      [f.workspaceId]);
+    // One driver call drains every batch of 256; a backoff-paced drain would
+    // publish one batch and leave the rest for later runs.
+    await runDueLifecycleJobs(pool, reconciler(), ["diagnostics"]);
+    expect((await pool.query(
+      "SELECT count(*)::int AS count FROM cloud_workspace_diagnostic_incidents WHERE recovered_at IS NULL")).rows[0])
+      .toEqual({ count: 0 });
   });
 
   it("records a deadline written during a run as that job's next run", async () => {

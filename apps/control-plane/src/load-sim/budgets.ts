@@ -9,9 +9,15 @@ export type RequestBudget = { transactions: number; statements: number; roundTri
 export type LoadBudgets = {
   version: 1;
   policy: string;
-  /** PLAN targets; reported against, not enforced, until the hot paths are rebuilt. */
-  targets: { quietTransactionsPerSecond: number; perActiveWorkspaceTransactionsPerSecond: number };
-  steadyState: { perActiveWorkspaceTransactionsPerSecond: number; perRunningEngineTransactionsPerSecond: number };
+  /** PLAN targets; reported against, not enforced, until the hot paths are rebuilt.
+   * boatCallsPerMinute is enforced: Boat rate-limits 1000 requests per minute
+   * per egress IP, and every control-plane replica shares one. */
+  targets: { quietTransactionsPerSecond: number; perActiveWorkspaceTransactionsPerSecond: number; boatCallsPerMinute: number };
+  steadyState: { perActiveWorkspaceTransactionsPerSecond: number; perRunningEngineTransactionsPerSecond: number;
+    perStoppedWorkspaceTransactionsPerSecond: number;
+    /** Notifying commits per active workspace per second (jobs channel
+     * included); PostgreSQL serializes notifying commits at commit time. */
+    notifyingCommitsPerActiveWorkspacePerSecond: number };
   perRequest: Record<string, RequestBudget>;
 };
 
@@ -20,7 +26,7 @@ export const BUDGET_POLICY = "transactions: measured, no headroom (a new transac
 
 /** Derive budgets from a measurement using BUDGET_POLICY. */
 export function budgetsFromMeasurement(hotPaths: readonly HotPathResult[], projection: Projection,
-  targets: LoadBudgets["targets"]): LoadBudgets {
+  targets: LoadBudgets["targets"], notifyingCommitsPerActiveWorkspace = 0): LoadBudgets {
   const up = (value: number) => Math.ceil(value * 100 - 1e-9) / 100;
   return {
     version: 1,
@@ -29,6 +35,8 @@ export function budgetsFromMeasurement(hotPaths: readonly HotPathResult[], proje
     steadyState: {
       perActiveWorkspaceTransactionsPerSecond: up(projection.perWorkspace.transactionsPerSecond * 1.1),
       perRunningEngineTransactionsPerSecond: up(projection.perRunningEngineTransactionsPerSecond * 1.1),
+      perStoppedWorkspaceTransactionsPerSecond: up(projection.perStoppedWorkspaceTransactionsPerSecond * 1.1),
+      notifyingCommitsPerActiveWorkspacePerSecond: Math.max(0.01, up(notifyingCommitsPerActiveWorkspace * 1.1)),
     },
     perRequest: Object.fromEntries(hotPaths.map(row => [row.operation, {
       transactions: Math.ceil(row.perCall.transactions - 1e-9),
@@ -40,7 +48,8 @@ export function budgetsFromMeasurement(hotPaths: readonly HotPathResult[], proje
 
 export type BudgetViolation = { subject: string; metric: string; measured: number; budget: number };
 
-export function checkBudgets(budgets: LoadBudgets, hotPaths: readonly HotPathResult[], projection: Projection): BudgetViolation[] {
+export function checkBudgets(budgets: LoadBudgets, hotPaths: readonly HotPathResult[], projection: Projection,
+  notifyingCommitsPerActiveWorkspace = 0): BudgetViolation[] {
   const violations: BudgetViolation[] = [];
   for (const [operation, budget] of Object.entries(budgets.perRequest)) {
     const row = hotPaths.find(result => result.operation === operation);
@@ -60,9 +69,20 @@ export function checkBudgets(budgets: LoadBudgets, hotPaths: readonly HotPathRes
   const steady = [
     ["perActiveWorkspaceTransactionsPerSecond", projection.perWorkspace.transactionsPerSecond],
     ["perRunningEngineTransactionsPerSecond", projection.perRunningEngineTransactionsPerSecond],
+    ["perStoppedWorkspaceTransactionsPerSecond", projection.perStoppedWorkspaceTransactionsPerSecond],
   ] as const;
+  if (notifyingCommitsPerActiveWorkspace > budgets.steadyState.notifyingCommitsPerActiveWorkspacePerSecond)
+    violations.push({ subject: "steadyState", metric: "notifyingCommitsPerActiveWorkspacePerSecond",
+      measured: notifyingCommitsPerActiveWorkspace, budget: budgets.steadyState.notifyingCommitsPerActiveWorkspacePerSecond });
   for (const [metric, measured] of steady) {
     if (measured > budgets.steadyState[metric]) violations.push({ subject: "steadyState", metric, measured, budget: budgets.steadyState[metric] });
+  }
+  // Every replica sweeps from behind one egress IP; the largest projected
+  // footprint must leave Boat's shared per-minute limit to real traffic.
+  for (const row of projection.atWorkspaces) {
+    const measured = row.boatCallsPerMinutePerReplica * 2;
+    if (measured > budgets.targets.boatCallsPerMinute)
+      violations.push({ subject: `boatCallsPerMinute at ${row.workspaces} workspaces (2 replicas)`, metric: "boatCallsPerMinute", measured, budget: budgets.targets.boatCallsPerMinute });
   }
   return violations;
 }

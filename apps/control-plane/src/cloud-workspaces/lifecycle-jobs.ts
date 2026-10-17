@@ -23,8 +23,8 @@ export function lifecycleWorkForJob(kind: string): LifecycleWork | null { return
 
 // Each branch yields (workspace_id, org_id, due_at) for one kind, with the
 // same eligibility as that kind's claim. $scope limits it to one workspace
-// (null: all), $provider filters by provider (null: all) and $drift is the
-// drift interval in ms.
+// (null: all), $provider filters by provider (null: all), and $drift/$stopped
+// are the running and settled-stopped drift intervals in ms.
 const DUE: Record<LifecycleWork, string> = {
   lifecycle: `
     SELECT i.workspace_id, i.org_id, greatest(i.next_attempt_at,
@@ -66,7 +66,9 @@ const DUE: Record<LifecycleWork, string> = {
             OR (runtime.phase IN ('rolling_back','rollback_enrolling','rollback_checking') AND runtime.rollback_deadline_at>now())))) AS due_at
     FROM managed_compute_allocation_leases lease WHERE ($scope::uuid IS NULL OR lease.workspace_id=$scope) AND lease.state<>'settled'`,
   drift: `
-    SELECT cw.id AS workspace_id, cw.org_id, greatest(pb.next_drift_check_at,pb.last_observed_at+($drift::bigint*interval '1 millisecond')) AS due_at
+    SELECT cw.id AS workspace_id, cw.org_id, greatest(pb.next_drift_check_at,pb.last_observed_at+
+      (CASE WHEN (cw.desired_state='stopped' AND cw.status='stopped') OR (cw.desired_state='archived' AND cw.status='archived')
+        THEN $stopped::bigint ELSE $drift::bigint END)*interval '1 millisecond') AS due_at
     FROM cloud_workspaces cw JOIN cloud_workspace_provider_bindings pb ON pb.workspace_id=cw.id AND pb.generation=cw.current_generation
     WHERE ($scope::uuid IS NULL OR cw.id=$scope) AND cw.status<>'deleted' AND ($provider::text IS NULL OR pb.provider=$provider)
       AND NOT EXISTS (SELECT 1 FROM cloud_workspace_restore_incidents incident WHERE incident.workspace_id=cw.id
@@ -84,28 +86,38 @@ const DUE: Record<LifecycleWork, string> = {
         AND incident.generation<=workspace.diagnostic_recovery_generation LIMIT 1)`,
 };
 
-type DueParameters = { scope: string | null; provider: string | null; drift: number };
+type DueParameters = { scope: string | null; provider: string | null; drift: number; stopped: number };
+
+/** Default drift cadence for workspaces settled stopped or archived: a few
+ * hours instead of every minute. Running and transitional workspaces keep
+ * the reconciler interval. */
+export const DEFAULT_STOPPED_DRIFT_INTERVAL_MS = 6 * 60 * 60_000;
 
 /** Bind one kind's due query after `leading` caller parameters, passing only
  * the named parameters it uses: PostgreSQL rejects an unreferenced one. */
 function dueQuery(work: LifecycleWork, values: DueParameters, leading: readonly unknown[]): { text: string; values: unknown[] } {
   const bound = [...leading];
   const positions = new Map<keyof DueParameters, number>();
-  const text = DUE[work].replace(/\$(scope|provider|drift)\b/g, (_match, name: keyof DueParameters) => {
+  const text = DUE[work].replace(/\$(scope|provider|drift|stopped)\b/g, (_match, name: keyof DueParameters) => {
     if (!positions.has(name)) { bound.push(values[name]); positions.set(name, bound.length); }
     return `$${positions.get(name)}`;
   });
   return { text, values: bound };
 }
 
-export type LifecycleDueScope = { provider: string | null; driftIntervalMs: number };
+export type LifecycleDueScope = { provider: string | null; driftIntervalMs: number; stoppedDriftIntervalMs?: number };
+
+function dueParameters(scope: LifecycleDueScope, workspaceId: string | null): DueParameters {
+  return { scope: workspaceId, provider: scope.provider, drift: scope.driftIntervalMs,
+    stopped: scope.stoppedDriftIntervalMs ?? DEFAULT_STOPPED_DRIFT_INTERVAL_MS };
+}
 
 /** The exact next due time of one kind for one workspace (or the diagnostics
  * singleton), in milliseconds from now; null when nothing is pending. */
 export async function readLifecycleDueInMs(
   pool: pg.Pool, work: LifecycleWork, workspaceId: string | null, scope: LifecycleDueScope,
 ): Promise<number | null> {
-  const due = dueQuery(work, { scope: workspaceId, provider: scope.provider, drift: scope.driftIntervalMs }, []);
+  const due = dueQuery(work, dueParameters(scope, workspaceId), []);
   return withSystemTx(pool, async tx => {
     const row = (await tx.query<{ delay_ms: string | null }>(
       `SELECT extract(epoch FROM (min(due_at)-now()))*1000 AS delay_ms FROM (${due.text}) work WHERE due_at IS NOT NULL`,
@@ -135,7 +147,7 @@ export async function rescheduleLifecycleJob(
 ): Promise<void> {
   const workspaceId = work === "diagnostics" ? null : job.workspaceId;
   const emptyRuns = lifecycleJobEmptyRuns(job);
-  const due = dueQuery(work, { scope: workspaceId, provider: scope.provider, drift: scope.driftIntervalMs }, [
+  const due = dueQuery(work, dueParameters(scope, workspaceId), [
     LIFECYCLE_JOB_KINDS[work], workspaceId === null ? "singleton" : `workspace:${workspaceId}`,
     workspaceId, workspaceId === null ? null : job.orgId, scope.processed, emptyRuns, emptyRunDelayMs(emptyRuns),
   ]);
@@ -163,7 +175,7 @@ export async function rescheduleLifecycleJob(
 export async function auditLifecycleJobs(pool: pg.Pool, scope: LifecycleDueScope): Promise<Partial<Record<LifecycleWork, number>>> {
   const repaired: Partial<Record<LifecycleWork, number>> = {};
   for (const work of Object.keys(DUE) as LifecycleWork[]) {
-    const due = dueQuery(work, { scope: null, provider: scope.provider, drift: scope.driftIntervalMs }, [LIFECYCLE_JOB_KINDS[work]]);
+    const due = dueQuery(work, dueParameters(scope, null), [LIFECYCLE_JOB_KINDS[work]]);
     const count = await withSystemTx(pool, async tx => (await tx.query(`
       INSERT INTO control_plane_jobs AS job (kind, dedupe_key, org_id, workspace_id, run_at)
       SELECT $1, coalesce('workspace:' || workspace_id::text, 'singleton'), org_id, workspace_id, min(due_at)

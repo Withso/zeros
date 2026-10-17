@@ -65,6 +65,17 @@ export function leaseSafetyMarginMs(leaseMs: number): number {
   return Math.min(5_000, Math.max(1_000, Math.floor(leaseMs / 10)));
 }
 
+/** A provider's requested wait is a floor, never a tight loop: an hour- or
+ * day-long window is capped like any other backoff (the fallback poll remains
+ * the outer net), and jitter afterwards spreads replicas that share one rate
+ * limit, so capped waits land between 300 and 360 seconds instead of all on
+ * exactly 300. */
+export function retryAfterFloorMs(retryAfterMs: number | null, random: () => number = Math.random): number {
+  if (retryAfterMs === null || retryAfterMs <= 0) return 0;
+  const jitter = 1 + 0.2 * Math.min(1, Math.max(0, random()));
+  return Math.round(Math.min(5 * 60_000, retryAfterMs) * jitter);
+}
+
 type ActiveJob = {
   job: ClaimedJob;
   controller: AbortController;
@@ -334,7 +345,8 @@ export class JobRunner {
       if (await completeJob(this.pool, job, this.observe) === "requeued") this.notify();
       return;
     }
-    const delayMs = Math.max(jobRetryDelayMs(job.attempts, handler.backoff, this.random), outcome.retryAfterMs ?? 0);
+    const delayMs = Math.max(jobRetryDelayMs(job.attempts, handler.backoff, this.random),
+      retryAfterFloorMs(outcome.retryAfterMs, this.random));
     const result = await failJob(this.pool, job, { code: outcome.code, retryable: outcome.retryable, delayMs }, this.observe);
     if (result === "retrying") this.arm(delayMs);
     else if (result === "failed") this.logger.warn(`[jobs] ${job.kind} failed terminally: ${outcome.code}`);

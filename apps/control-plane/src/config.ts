@@ -2,6 +2,7 @@ import type { CodexFingerprintKeys } from "./cloud-workspaces/codex-fingerprint-
 import type { RuntimeOidcConfig } from "./cloud-workspaces/runtime-oidc.js";
 import type { RuntimeArtifactStoreConfig } from "./cloud-workspaces/runtime-artifact-store.js";
 import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type CloudAgentCredentialConfig } from "./cloud-workspaces/agent-credential-config.js";
+import { loadCapabilityKeyring, type CapabilityKeyring } from "./cloud-workspaces/capability-keyring.js";
 // ──────────────────────────────────────────────────────────
 // Config — every knob comes from the environment, validated at boot.
 //
@@ -228,6 +229,10 @@ export type CloudWorkspaceBackendConfig = {
    * It is independent from setup execution so settings can be prepared while
    * the unqualified image worker remains disabled. */
   settingsSecretEncryptionKeys: Readonly<Record<number, string>>;
+  /** S1 issuer origin (iss claim); absent while capabilities are unconfigured. */
+  capabilityIssuer?: string | null;
+  /** Dedicated CLOUD_CAPABILITY_KEYS_JSON keyring for signing-key envelopes. */
+  capabilityKeyring?: CapabilityKeyring;
   codexRefreshFingerprints?: CodexFingerprintKeys;
   currentSettingsSecretEncryptionKeyVersion: number | null;
   /** Legacy V1 alias retained while deployments move to the keyring vars. */
@@ -382,6 +387,11 @@ const CloudWorkspaceEnvSchema = z.object({
   CLOUD_WORKSPACES_ENABLED: z.literal("true"),
   CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
   CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: z.coerce.number().int().min(1).max(32).default(2),
+  // S1 capability issuer origin and its dedicated signing keyring (never the
+  // settings keyring). Optional until the capabilities rollout starts.
+  CLOUD_CAPABILITY_ISSUER: z.string().regex(/^https:\/\/[^/\s]+$/).optional(),
+  CLOUD_CAPABILITY_KEYS_JSON: z.string().min(2).max(4096).optional(),
+  CLOUD_CAPABILITY_CURRENT_KEY_VERSION: z.string().regex(/^[1-9][0-9]{0,4}$/).optional(),
   CLOUD_WORKSPACE_PROVIDER: z.literal("boat").default("boat"),
   BOAT_API_KEY: z
     .string()
@@ -1186,6 +1196,7 @@ function loadCloudWorkspaceConfig(
     : null;
   const { settingsSecretEncryptionKeys, currentSettingsSecretEncryptionKeyVersion, settingsSecretKeyV1, codexRefreshFingerprints } =
     loadCloudAgentCredentialConfig(env);
+  const capabilityKeyring = loadCapabilityKeyring(env);
   const durabilityRequested =
     setupEnabled === "true" ||
     [
@@ -1448,6 +1459,8 @@ function loadCloudWorkspaceConfig(
     backgroundWorkersEnabled: value.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED === "true",
     computerMaxConcurrentBuilds: value.CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS,
     settingsSecretEncryptionKeys,
+    capabilityIssuer: value.CLOUD_CAPABILITY_ISSUER ?? null,
+    ...(capabilityKeyring?{capabilityKeyring}:{}),
     ...(codexRefreshFingerprints?{codexRefreshFingerprints}:{}),
     currentSettingsSecretEncryptionKeyVersion,
     settingsSecretKeyV1,

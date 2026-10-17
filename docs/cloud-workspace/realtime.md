@@ -140,7 +140,7 @@ authority supplies keys, epochs and engine tokens
   the engine's 500 ms credential-control poll while the uplink is up
   (P0.10 C01). At the gate it pushes the boot binding's current desired
   revision (the contract's resync rule), and a trigger on
-  `cloud_agent_boot_bindings.desired_cache_revision` (migration 0152)
+  `cloud_agent_boot_bindings.desired_cache_revision` (migration 0154)
   notifies every bump, routed to the owning instance over
   `zeros_cloud_agent_credential_revision`. The notification is only a hint:
   the engine's exchange re-reads authority. `cred.ack` (`applied`/`failed`)

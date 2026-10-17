@@ -23,20 +23,30 @@ const hotPath = (operation: string, overrides: Partial<OperationCost> = {}): Hot
 const baseBudgets = (perRequest: LoadBudgets["perRequest"]): LoadBudgets => ({
   version: 1,
   policy: BUDGET_POLICY,
-  targets: { quietTransactionsPerSecond: 0.5, perActiveWorkspaceTransactionsPerSecond: 0.01 },
-  steadyState: { perActiveWorkspaceTransactionsPerSecond: 10, perRunningEngineTransactionsPerSecond: 10 },
+  targets: { quietTransactionsPerSecond: 0.5, perActiveWorkspaceTransactionsPerSecond: 0.01, boatCallsPerMinute: 1000 },
+  steadyState: { perActiveWorkspaceTransactionsPerSecond: 10, perRunningEngineTransactionsPerSecond: 10, perStoppedWorkspaceTransactionsPerSecond: 1,
+    notifyingCommitsPerActiveWorkspacePerSecond: 0.5 },
   perRequest,
 });
 
 const baseProjection = (): Projection => ({
   perWorkspace: { transactionsPerSecond: 1, statementsPerSecond: 1, roundTripsPerSecond: 1, byOperation: [] },
   perRunningEngineTransactionsPerSecond: 1,
+  perStoppedWorkspaceTransactionsPerSecond: 0.5,
   perWorkspaceWorker: [],
   perConnectedClientTransactionsPerSecond: 0,
   atWorkspaces: [],
 });
 
 describe("checkBudgets", () => {
+  it("flags notifying commits per active workspace above the budget", () => {
+    const budgets = baseBudgets({});
+    expect(checkBudgets(budgets, [], baseProjection(), 1)).toEqual([
+      { subject: "steadyState", metric: "notifyingCommitsPerActiveWorkspacePerSecond", measured: 1, budget: 0.5 },
+    ]);
+    expect(checkBudgets(budgets, [], baseProjection(), 0.5)).toEqual([]);
+  });
+
   it("flags a budgeted operation that was not measured", () => {
     const budgets = baseBudgets({ "engine.heartbeat": { transactions: 1, statements: 1, roundTrips: 1 } });
     expect(checkBudgets(budgets, [], baseProjection())).toEqual([
@@ -55,6 +65,14 @@ describe("checkBudgets", () => {
     const budgets = baseBudgets({ "engine.heartbeat": { transactions: 1, statements: 1, roundTrips: 1 } });
     const violations = checkBudgets(budgets, [hotPath("engine.heartbeat", { statements: 2 })], baseProjection());
     expect(violations).toEqual([{ subject: "engine.heartbeat", metric: "statements", measured: 2, budget: 1 }]);
+  });
+
+  it("flags a Boat call projection over the shared per-minute limit", () => {
+    const budgets = baseBudgets({});
+    const projection = { ...baseProjection(), atWorkspaces: [{ workspaces: 1000, transactionsPerSecond: 1, statementsPerSecond: 1, boatCallsPerMinutePerReplica: 600 }] };
+    expect(checkBudgets(budgets, [], projection)).toEqual([
+      { subject: "boatCallsPerMinute at 1000 workspaces (2 replicas)", metric: "boatCallsPerMinute", measured: 1200, budget: 1000 },
+    ]);
   });
 
   it("flags an operation whose per-request transactions fall below one", () => {

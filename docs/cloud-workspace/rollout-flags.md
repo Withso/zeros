@@ -75,6 +75,14 @@ organizations and unknown flag names.
    one transaction; the NOTIFY reaches every process at commit.
 4. Re-running the same document reports `replayed` and changes nothing.
 
-`channel` must match `RAILWAY_ENVIRONMENT_NAME` (or
-`CONTROL_PLANE_ROLLOUT_FLAG_CHANNEL`). Disabling is the same document with
-`"enabled": false` and a new `operationId`.
+`channel` comes from `CONTROL_PLANE_ROLLOUT_FLAG_CHANNEL` and must match
+`RAILWAY_ENVIRONMENT_NAME` when both are set (neither silently wins).
+Executing against `"channel": "production"` additionally requires
+`CONTROL_PLANE_ROLLOUT_FLAG_PRODUCTION_CONFIRMED=true`. Disabling is the same
+document with `"enabled": false` and a new `operationId`. A document that
+already matches the live state is refused as a no-op instead of writing a
+receipt, and the organization must be active and cloud-enabled. The process
+snapshot retries a failed reload with a 1–30 s backoff (below the 60 s safety
+refresh), and a reload that a change hint waits on for more than 2 s drops
+the feed-current mark, so a relaxing flag (`authority_cache_enforce`) cannot
+stay on for a hung read.
