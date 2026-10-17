@@ -199,7 +199,9 @@ failure shows on the PR without blocking it, until the owner promotes a lane
 into the required selection. `local-untouched` runs on every PR: it fails a
 cloud-program change that touches Local-only files (per
 `docs/cloud-workspace/local-seams.json`, judged by the base commit's copy so a
-PR cannot weaken its own gate) without the `local-seams-sign-off`
+PR cannot weaken its own gate; the manifest is itself a CI-definition path, so
+editing it needs an owner merge, and a PR whose head copy does not parse or
+validate fails) without the `local-seams-sign-off`
 label, or that crosses a shared seam (engine core, renderer bridge, protocol,
 account auth) while the Local test lanes are unselected. Only the owner
 applies `local-seams-sign-off`; agents never add it — the label is the owner's
@@ -384,8 +386,10 @@ CI-definition PRs need an owner merge. Agents must not auto-merge changes to the
 paths recognized by `scripts/ci/ci-definition.mjs`: workflows/actions,
 `.github/actionlint.yaml`, `.github/CODEOWNERS`, `scripts/ci/**`, `scripts/agent-runtime/**`, `scripts/check-*`,
 the explicit Vitest runner, composer entry and `scripts/ui-smoke/**`, release
-scripts, root Vitest/ESLint configs, root package/lock/workspace files, and the
-control-plane/web package and lockfiles.
+scripts, root Vitest/ESLint configs, root package/lock/workspace files, the
+control-plane/web package and lockfiles, and the Local seams manifest
+`docs/cloud-workspace/local-seams.json` (the `local-untouched` gate trusts the
+base copy, so an unreviewed edit would let the next PR cross a weakened seam).
 
 List definition paths in a committed diff with:
 

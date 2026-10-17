@@ -386,6 +386,23 @@ describe("runLocalUntouched base-manifest loading (pr mode)", () => {
     expect(result.localOnlyHits).toContain(LOCAL_FILE);
   });
 
+  it.each([
+    ["unparseable", "{ not json"],
+    ["invalid-schema", JSON.stringify({ ...manifestWithRule, schema: "zeros.local-seams/v0" })],
+  ])("fails the PR that introduces an %s head manifest", (_kind, headManifest) => {
+    const repo = makeRepo();
+    write(repo, MANIFEST_PATH, JSON.stringify(manifestWithRule));
+    write(repo, CLOUD_FILE, "export const v = 1;\n");
+    const base = commitAll(repo, "base");
+    write(repo, MANIFEST_PATH, headManifest);
+    const head = commitAll(repo, "break the manifest");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = runLocalUntouched({ argv: [], env: prEnv(base, head), cwd: repo });
+    expect(result.problems).toEqual([expect.stringMatching(/head local-seams manifest/)]);
+    expect(process.exitCode).toBe(1);
+  });
+
   it("fails closed when the base manifest exists but is unreadable", () => {
     const repo = makeRepo();
     write(repo, MANIFEST_PATH, "{ not json");

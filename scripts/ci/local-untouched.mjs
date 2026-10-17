@@ -344,6 +344,15 @@ export function runLocalUntouched({ argv = [], env = process.env, cwd } = {}) {
     labels,
     selectedLanes,
   });
+  // Seams are judged by the base copy, but a malformed head copy must fail
+  // the PR that introduces it rather than the next one that inherits it.
+  if (mode === "pr") {
+    try {
+      loadHeadManifest(cwd);
+    } catch (error) {
+      result.problems.push(`The head local-seams manifest is invalid: ${error.message}`);
+    }
+  }
   const lines = formatLocalSeamsReport({
     manifest,
     result,
