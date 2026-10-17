@@ -679,7 +679,9 @@ export function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackend
 /** S3 `catalogVersion`: the position of the global catalog sequence that
  * every workspace document version change draws from (migration 0156), so it
  * is monotonic per account. Read it before the rows it describes: a change
- * that commits after the read reaches the device stream as an event. */
+ * that commits after the read reaches the device stream as an event.
+ * Sequences are not transactional, so the position can include a change that
+ * has not committed yet: it is a watermark, never a reason to skip an event. */
 export async function readCatalogVersion(tx: Tx): Promise<number> {
   const row = (await tx.query<{ last_value: string; is_called: boolean }>(
     "SELECT last_value, is_called FROM cloud_catalog_version_seq")).rows[0];
@@ -1973,9 +1975,9 @@ export function createCloudWorkspaceRoutes(
 
     const { rows, catalogVersion } = await withSystemTx(pool, async (tx) => {
       if(orgId!==null)await requireOrganizationMembership(tx, orgId, user.id);
-      // The version is read before the page: a change published after this
-      // cursor reaches the device stream as an event, so the snapshot never
-      // claims a version whose change it might not contain.
+      // Read before the page. The position may include a change that has not
+      // committed yet, so the page need not contain every change up to it;
+      // such a change reaches the device stream as an event when it commits.
       const catalogVersion = await readCatalogVersion(tx);
       return { catalogVersion, rows: await queryCloudWorkspaceCatalog(tx, { orgId, userId: user.id, limit: limit + 1, cursor, includeDeleted }) };
     });

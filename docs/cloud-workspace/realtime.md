@@ -256,7 +256,11 @@ streams with `4404` without resume and drops its parked device sessions.
 - **catalogVersion.** The global `cloud_catalog_version_seq` position (read
   before the rows), so it is monotonic per account; frames carry the
   maximum seen by that device session. The REST catalog returns the same
-  value. Membership changes do not draw from the sequence.
+  value. Membership changes do not draw from the sequence. Sequences are not
+  transactional: a position can include a change whose transaction has not
+  committed, so a snapshot at version N need not contain every change up to
+  N. It is a watermark, not a snapshot point; nothing filters by it, and
+  clients order and deduplicate by each workspace's `version` only.
 - **Resume.** Resumable frames (`catalog.changed`, `lifecycle.changed`,
   `notification`, `capability.revoked`) carry `c = <lineage>.<seq>` and are
   kept for 10 minutes per device session (at most 1,000 frames or 1 MiB;

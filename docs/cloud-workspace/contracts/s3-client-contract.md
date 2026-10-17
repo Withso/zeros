@@ -1,6 +1,7 @@
 # S3. Client contract v1 (cloud workspaces)
 
-Status: **FROZEN** · Contract ID `zeros-client` · Version `1.0.0` ·
+Status: **FROZEN** · Contract ID `zeros-client` · Version `1.0.1`
+(clarification; see [Changelog](#changelog)) ·
 Schemas: [Draft schema: REST API (OpenAPI 3.1)](#draft-schema-rest-api-openapi-31),
 [Draft schema: device stream frames](#draft-schema-device-stream-frames),
 [Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames)
@@ -147,7 +148,10 @@ Every workspace document already carries `version`
 catalog response adds `catalogVersion` (monotonic per account) so a client can
 resume the device stream from a known snapshot. Clients apply a pushed
 document only if its `version` is greater than the one they hold for the same
-`cloud://` workspace key.
+`cloud://` workspace key. `catalogVersion` is a watermark, not a consistent
+snapshot point: a snapshot reporting N may lack a change that drew a value up
+to N but committed later, and that change still arrives as an event. Clients
+never drop or skip an event because of `catalogVersion`.
 
 ## Part 2: Device stream
 
@@ -386,7 +390,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
 openapi: 3.1.0
 info:
   title: Zeros cloud workspace client contract (S3)
-  version: 1.0.0
+  version: 1.0.1
   description: >-
     FROZEN reference sketch of the REST half of client contract v1 for cloud
     workspaces. Existing endpoints keep their current request and response
@@ -1487,3 +1491,11 @@ is a review aid until freeze; the frozen source of truth will be Zod in
   ]
 }
 ```
+
+## Changelog
+
+- **1.0.1** (2026-10-17, clarification; no wire change): `catalogVersion`
+  is a watermark, not a consistent snapshot point. Sequence positions are
+  drawn before commit, so a snapshot reporting N may lack a change that drew
+  a value up to N; that change still arrives as an event, and clients never
+  drop or skip an event because of `catalogVersion`.
