@@ -22,8 +22,6 @@ import type { WorkspaceDocument } from "../src/generated/rest";
 
 const SUPPORTED_CONTRACT = 1;
 const HEARTBEAT_INTERVAL_MS = 20000;
-// Token shape per the contract: three base64url segments, 32+ chars.
-const MOCK_TOKEN = `AAAAAAAAAAAAAAAA.${"b".repeat(38)}.${"c".repeat(43)}`;
 const NOW_ISO = "2026-10-16T00:00:00.000Z";
 
 const DEFAULT_WORKSPACE: WorkspaceDocument = {
@@ -33,6 +31,25 @@ const DEFAULT_WORKSPACE: WorkspaceDocument = {
   status: "running",
   placement: "cloud",
 };
+
+// Capability tokens: three base64url segments, 32+ chars overall, whose middle
+// segment decodes to the audience, workspace and jti the SDK signs for.
+function mockCapabilityToken(claims: JsonObject): string {
+  const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
+  return `${header}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.${"A".repeat(86)}`;
+}
+const MOCK_ENGINE_TOKEN = mockCapabilityToken({
+  aud: "zeros:engine",
+  wsp: DEFAULT_WORKSPACE.id,
+  jti: "MOCKjtiENGINE000000000",
+  exp: 1760000300,
+});
+const MOCK_REALTIME_TOKEN = mockCapabilityToken({
+  aud: "zeros:realtime",
+  wsp: DEFAULT_WORKSPACE.id,
+  jti: "MOCKjtiREALTIME0000000",
+  exp: 1760000300,
+});
 
 export interface ContractMockOptions {
   workspaces?: WorkspaceDocument[];
@@ -155,8 +172,8 @@ export async function createContractMock(
   };
 
   const capabilities = () => ({
-    engine: { token: MOCK_TOKEN, expiresAt: NOW_ISO },
-    realtime: { token: MOCK_TOKEN, expiresAt: NOW_ISO },
+    engine: { token: MOCK_ENGINE_TOKEN, expiresAt: NOW_ISO },
+    realtime: { token: MOCK_REALTIME_TOKEN, expiresAt: NOW_ISO },
   });
 
   function handleRest(
@@ -370,7 +387,10 @@ export async function createContractMock(
     });
   }
 
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({
+    noServer: true,
+    handleProtocols: (protocols) => (protocols.has("zeros-cap.v1") ? "zeros-cap.v1" : false),
+  });
   const server: Server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
