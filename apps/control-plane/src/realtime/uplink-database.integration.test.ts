@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { installEngineAuthorityCache, type EngineAuthorityCache } from "../cloud-workspaces/engine-authority-cache.js";
 import { seedReadyCloudWorkspace } from "../cloud-workspaces/test-fixtures.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { AuditUplinkSecurityAlerts } from "./uplink-alerts.js";
@@ -61,6 +62,32 @@ d("engine uplink database paths", () => {
     expect(logged[0]).not.toContain(token);
   });
 
+  it("answers a rejected hello within one database transaction", async () => {
+    const connect = vi.spyOn(pool, "connect");
+    try {
+      await expect(authority().verify(identity, `zwh_${randomBytes(32).toString("base64url")}`))
+        .resolves.toEqual({ ok: false, reason: "unauthenticated" });
+      expect(connect).toHaveBeenCalledTimes(1);
+      connect.mockClear();
+      await expect(authority().verify({ ...identity, generation: 2 }, token)).resolves.toEqual({ ok: false, reason: "authority" });
+      expect(connect).toHaveBeenCalledTimes(1);
+    } finally { connect.mockRestore(); }
+  });
+
+  it("reads authority from SQL even when the authority cache would allow", async () => {
+    // A notification-driven recheck can run before the cache's own
+    // invalidation lands, so the uplink never asks the cache.
+    const stale = {
+      shadowing: () => true, enforcing: () => true, recordEnforcedHit: () => {}, observe: () => {},
+      lookup: () => ({ allowed: true, authorityEpoch: 1, accountUserId: ownerUserId, leaseExpiresAtMs: Date.now() + 60_000,
+        runtimeBootId: identity.bootId, deadlineMs: null }),
+    };
+    installEngineAuthorityCache(stale as unknown as EngineAuthorityCache);
+    try {
+      await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked', revoked_at=clock_timestamp() WHERE id=$1", [identity.engineInstanceId]);
+      await expect(authority().verify(identity, token)).resolves.toEqual({ ok: false, reason: "authority" });
+    } finally { installEngineAuthorityCache(undefined); }
+  });
   it("reports an unreachable database as unavailable, never as a credential rejection", async () => {
     const broken = new pg.Pool({ connectionString: "postgres://nobody:nothing@127.0.0.1:1/none", connectionTimeoutMillis: 500 });
     try {

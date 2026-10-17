@@ -80,8 +80,8 @@ disconnects, keyed by an opaque resume token
 
 ## Engine uplink server
 
-`apps/control-plane/src/realtime/uplink-server.ts` implements the frozen S2
-contract (`contracts/s2-uplink.md`, 1.0.0) at `/v1/uplink`. It is mounted
+`apps/control-plane/src/realtime/uplink-server.ts` implements the S2
+contract (`contracts/s2-uplink.md`, 1.1.0) at `/v1/uplink`. It is mounted
 only in `realtime` and `combined` processes, and only once the capability
 authority supplies keys, epochs and engine tokens
 (`realtime/uplink-auth-source.ts`; until then the uplink stays unmounted).
@@ -94,29 +94,64 @@ authority supplies keys, epochs and engine tokens
   its own — the advertisement arrives with registration, so a parked engine
   picks the endpoint up again only at its next restart or re-registration
   (the heartbeat itself never carries it).
+- **Pre-authentication limits.** Before any credential check an upgrade
+  spends a token from its source address's bucket (100 burst, 30 per
+  second, at most 64 sockets awaiting their welcome) and from a
+  process-wide ceiling (500 burst, 500 per second, 256 handshakes in
+  flight). The source is `X-Real-IP`, then `CF-Connecting-IP`, then the
+  socket peer, each only when it parses as an IP: the same trust model as
+  the HTTP engine paths' pre-auth limits. One source flooding shaped tokens
+  therefore spends only its own budget; refusals are `429` or `503`.
 - **Admission.** One consistent authority read
   (`readCurrentCloudEngineAuthority`) checks the heartbeat credential,
   workspace, generation and engine instance, and compares the hello's
   `bootId` with `cloud_workspace_engine_instances.runtime_boot_id`. Close
   codes: `4401` only when the read succeeded and no engine holds the
   credential; `4403` for a stale engine or an unregistered `bootId`;
-  `1011` when the read could not complete.
+  `1011` when the read could not complete. A rejection tells "unknown" from
+  "stale" with one more statement in the same transaction, so a rejected
+  hello costs one transaction. The read always goes to SQL, never the
+  in-process authority cache (`authority_cache_enforce`): a
+  notification-driven recheck may run before the cache's invalidation for
+  the same commit lands.
 - **Handshake.** `sys.welcome`, then `auth.keys` and `auth.sync` with a fresh
   `syncId`. Until the engine's `auth.applied` the server sends only `sys.*`
   frames; reliable frames queued meanwhile are held. It then sends an
   `auth.capability` issued by `api` from current authority, retransmits
   unacknowledged reliable frames on a resume, and lets feature modules
   resync. Epoch deltas confirmed by `auth.applied` record
-  `capability_revocation_push_ms`.
+  `capability_revocation_push_ms`. The engine has 10 s
+  (`UPLINK_AUTH_APPLIED_TIMEOUT_MS`) from `auth.sync` to `auth.applied`;
+  its durable auth sink must settle `auth.keys` plus `auth.sync` within
+  that bound, or the uplink closes `4400` and the redial waits the same way.
+  At most 1 000 epoch deltas may be held or await `auth.applied`; past that
+  the uplink closes `4429` and resyncs from the snapshot on the redial.
+- **Oversized `auth.sync` (interim).** The engine closes `4400` on any text
+  frame above 64 KiB, and S2 1.1.0 cannot split `auth.sync`; an
+  organization-shared workspace with roughly 500 principals crosses it. Until
+  the contract owner decides on split frames (end of Wave 1) the server
+  refuses to send any oversized frame: it closes `1011`
+  (`auth_sync_too_large` or `outbound_frame_too_large`), counts it under
+  `counters.closed` and logs one `[realtime]` line with the frame type and
+  size only. The engine answers `1011` with its full-jitter backoff (30 s
+  cap) instead of a tight `4400` loop, and stays on the 500 ms credential
+  poll.
 - **Teardown.** Authority is re-read every 60 s and at once on a
   `zeros_cloud_engine_uplink_authority` notification (engine state,
   revocation, credential or final checkpoint changes; workspace generation,
   desired state, deletion, status liveness or authority epoch changes). A
   loss closes with `4403`. An unavailable database never closes an
-  established uplink.
+  established uplink. A notification that arrives while a re-read is in
+  flight runs one more re-read after it, and a hello whose read overlapped a
+  notification for its engine or workspace re-reads once it owns the engine,
+  so a revocation committed after a read's snapshot is never dropped. During
+  a drain the instance keeps its uplink `LISTEN` until the uplink server
+  closes, so engines still on it keep pushes and teardown.
 - **Ownership.** Presence lives in memory. `cloud_workspace_engine_uplinks`
   (migration 0151) is written only on connect, readiness change and loss,
-  plus a 5 min watermark, through a bounded coalescing retry queue. Each
+  plus a 5 min watermark, through a bounded coalescing retry queue that
+  rotates connections fairly. Readiness writes are rate-limited per uplink
+  (a burst of three, then one per 2 s, the latest state winning). Each
   write carries a connection ID; a connect never overwrites a newer one.
   "Newer" is a deterministic order on unsynchronized replica clocks: the
   later `connected_at` wins, and a same-millisecond tie (or skew within the
@@ -124,7 +159,11 @@ authority supplies keys, epochs and engine tokens
   and the presence upsert fence. A new owner row notifies
   `zeros_cloud_engine_uplink_owner`, and an instance holding an older
   uplink closes it with `4409`. After a listener reconnect every owned
-  uplink re-reads its owner and authority.
+  uplink re-reads its owner and authority. With one replica (below) the
+  clock order cannot misfire; above one, replica clocks must agree to well
+  under the reconnect gap (seconds, NTP-disciplined), or a replica ahead by
+  more fences the true newer owner's writes and its row reads
+  `disconnected` while it is connected. Nothing reads the rows yet.
 - **Framing.** Control frames are UTF-8 JSON text capped at 64 KiB; relay
   data travels in binary frames (8-byte header, then a chunk of at most
   256 KiB), never base64 in `d`, so the socket payload ceiling is
@@ -149,7 +188,14 @@ authority supplies keys, epochs and engine tokens
   for engines whose gate is already open, when the listener is ready again:
   `onReady` reads the current revisions of every owned `cred.v1` uplink in
   one system statement and pushes them (the engine acks a revision it
-  already applied without an exchange). Only `agent-controls` has a
+  already applied without an exchange). While the listener session is down
+  the engines stay `established` and fall back to the 30 s safety poll, so a
+  bump lands within 30 s in the worst case; the `[realtime]` unavailable
+  line marks the window. `cred.v1` is negotiated only while the
+  organization's `credential_push` flag is on; a flip closes the affected
+  uplinks with `1001 features_changed`, and the re-dial (resuming the
+  lineage) renegotiates, so turning the flag off returns those engines to
+  the 500 ms poll without parking them. Only `agent-controls` has a
   revision source today: the CP has no `repository` revision, so it never
   pushes that kind, and repository credentials keep arriving on the HTTP
   heartbeat response (`repositoryCredential`) unchanged. The engine acks any

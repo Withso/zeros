@@ -61,6 +61,8 @@ const DESIRED_REVISION_CHUNK = 1_000;
  * are reliable, so the exchange itself needs no CP-side retry state. */
 export class UplinkCredentialPush implements UplinkExtension {
   readonly feature = UPLINK_CRED_FEATURE;
+  /** Off, `cred.v1` is never negotiated, so the engine keeps its 500 ms poll. */
+  readonly flag = "credential_push" as const;
   private readonly sessionFor: (engineInstanceId: string) => UplinkSession | null;
   private readonly readRevision: (identity: UplinkIdentity) => Promise<number | null>;
   private readonly readRevisions: ((engineInstanceIds: readonly string[]) => Promise<ReadonlyMap<string, number>>) | undefined;

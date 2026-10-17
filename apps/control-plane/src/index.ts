@@ -904,7 +904,6 @@ function shutdown(signal: string): void {
   const backgroundStopped = Promise.allSettled([
     stopCloudWorkerNotifications(),
     stopCloudCheckpointHintNotifications(),
-    stopUplinkNotifications(),
     cloudGithubReads?.close(),
     githubWriteCleanupPending,
     stopCloudSetupWorker(),
@@ -953,8 +952,11 @@ function closeServer(backgroundStopped: Promise<unknown>, deadline: ReturnType<t
   cloudPreviewWebSocketRelay?.close();
   cloudRuntimeServiceRelay?.close();
   cloudEngineUplink?.close();
+  // The uplink LISTEN outlives the drain: engines still on this instance keep
+  // credential pushes and authority teardown until their uplink is closed.
+  const uplinkNotificationsStopped = stopUplinkNotifications();
   server.close(() => {
-    void backgroundStopped
+    void Promise.allSettled([backgroundStopped, uplinkNotificationsStopped])
       .then(async () => {
         // A lost-uplink write that misses this window is overwritten by the
         // next owner's connect; until then its stale last_seen_at marks it.

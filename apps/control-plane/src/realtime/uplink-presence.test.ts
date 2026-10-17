@@ -45,4 +45,22 @@ describe("uplink presence writer", () => {
     expect(writer.size).toBe(3);
     expect(writer.dropped).toBe(3);
   });
+
+  it("rotates connections fairly: a re-enqueued hot connection waits behind the others", async () => {
+    const order: string[] = [];
+    const releases: (() => void)[] = [];
+    const writer = new UplinkPresenceWriter({ write: s => new Promise<void>(resolve => {
+      order.push(s.connectionId); releases.push(resolve);
+    }) }, { concurrency: 1 });
+    const hot = randomUUID(), quiet = randomUUID();
+    writer.enqueue(snapshot(hot, 1));
+    writer.enqueue(snapshot(quiet, 1));
+    // The hot connection changes again while its first write is in flight.
+    writer.enqueue(snapshot(hot, 2));
+    releases.shift()!();
+    await settle();
+    releases.shift()!();
+    await settle();
+    expect(order).toEqual([hot, quiet, hot]);
+  });
 });

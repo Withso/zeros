@@ -49,12 +49,15 @@ class Peer {
 class FakeAuthority implements UplinkAuthority {
   calls = 0;
   result: UplinkAuthorityResult = { ok: true, accountUserId: randomUUID(), leaseExpiresAtMs: Date.now() + 60_000 };
+  /** While set, reads wait on it; the answer is decided when the read starts (its snapshot). */
+  hold: Promise<void> | null = null;
   async verify(_identity: UplinkIdentity, token: string): Promise<UplinkAuthorityResult> {
     this.calls += 1;
-    return token === TOKEN || token === OTHER_TOKEN ? this.result : { ok: false, reason: "unauthenticated" };
+    const decided: UplinkAuthorityResult = token === TOKEN || token === OTHER_TOKEN ? this.result : { ok: false, reason: "unauthenticated" };
+    if (this.hold) await this.hold;
+    return decided;
   }
 }
-
 describe("engine uplink server", () => {
   let http: Server;
   let uplink: CloudEngineUplinkServer;
@@ -66,6 +69,7 @@ describe("engine uplink server", () => {
   let authFails: boolean;
   let url: string;
   let enabled: boolean;
+  let credentialPush: boolean;
   const flagListeners = new Set<() => void>();
   const peers: Peer[] = [];
   let identity: UplinkIdentity;
@@ -76,7 +80,8 @@ describe("engine uplink server", () => {
     uplink = new CloudEngineUplinkServer({
       authority, realtimeInstance: "realtime-test",
       flags: {
-        enabled: (orgId, flag) => enabled && flag === "realtime_uplink" && orgId === identity.organizationId,
+        enabled: (orgId, flag) => orgId === identity.organizationId &&
+          (flag === "realtime_uplink" ? enabled : flag === "credential_push" ? credentialPush : false),
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
       authSource: {
@@ -117,7 +122,7 @@ describe("engine uplink server", () => {
   const until = async (predicate: () => boolean) => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise(r => setTimeout(r, 10)); };
 
   beforeEach(() => {
-    authority = new FakeAuthority(); writes = []; alerts = []; metrics = []; enabled = true; authFails = false;
+    authority = new FakeAuthority(); writes = []; alerts = []; metrics = []; enabled = true; credentialPush = true; authFails = false;
     capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 300_000 };
     identity = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 3, engineInstanceId: randomUUID(), bootId: randomUUID() };
   });
@@ -313,11 +318,11 @@ describe("engine uplink server", () => {
   it("supersedes with 4409 and raises churn and address alerts", async () => {
     await start();
     const { peer: first } = await connect();
-    const { peer: second } = await connect({}, { authorization: `Bearer ${TOKEN}`, "x-forwarded-for": "203.0.113.9" });
+    const { peer: second } = await connect({}, { authorization: `Bearer ${TOKEN}`, "x-real-ip": "203.0.113.9" });
     await expect(first.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.superseded });
     expect(second.ws.readyState).toBe(WebSocket.OPEN);
     expect(alerts).toEqual(["uplink_supersede_address"]);
-    for (let i = 0; i < 3; i++) await connect({}, { authorization: `Bearer ${TOKEN}`, "x-forwarded-for": "203.0.113.9" });
+    for (let i = 0; i < 3; i++) await connect({}, { authorization: `Bearer ${TOKEN}`, "x-real-ip": "203.0.113.9" });
     expect(alerts).toContain("uplink_supersede_churn");
     expect(uplink.size).toBe(1);
   });
@@ -619,5 +624,154 @@ describe("engine uplink server", () => {
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.draining });
     await drained;
     await expect(dial().opened).rejects.toThrow("http 503");
+  });
+
+  const shapedToken = () => `zwh_${randomUUID().replace(/-/g, "").padEnd(43, "x")}`;
+  const outcome = (peer: Peer) => peer.opened.then(() => "open", (error: Error) => error.message);
+
+  it("admits per source, so one flooding source cannot lock out another source's engine", async () => {
+    await start({ admissionBurst: 12, sourceAdmissionBurst: 4 });
+    // A frozen refill clock keeps the test independent of dial speed.
+    const now = vi.spyOn(performance, "now").mockReturnValue(performance.now());
+    try {
+      const flood = Array.from({ length: 10 }, () => dial({ authorization: `Bearer ${shapedToken()}`, "x-real-ip": "198.51.100.7" }));
+      const flooded = await Promise.all(flood.map(outcome));
+      expect(flooded.filter(result => result === "open")).toHaveLength(4);
+      expect(flooded.filter(result => result === "http 429")).toHaveLength(6);
+      // Another source's engine still gets through while the flood continues.
+      const { welcome } = await connect({}, { authorization: `Bearer ${TOKEN}`, "x-real-ip": "203.0.113.5" });
+      expect(welcome.d).toMatchObject({ resumed: false });
+      // The global ceiling stays a backstop across sources: 12 tokens, 5 used.
+      const others = await Promise.all(["192.0.2.1", "192.0.2.2"].flatMap(ip =>
+        Array.from({ length: 4 }, () => outcome(dial({ authorization: `Bearer ${shapedToken()}`, "x-real-ip": ip })))));
+      expect(others.filter(result => result === "open")).toHaveLength(7);
+      expect(uplink.counters.refused.rate_limited).toBe(7);
+    } finally { now.mockRestore(); }
+  });
+
+  it("bounds the unauthenticated sockets one source may hold open", async () => {
+    await start({ sourceMaxUnadmitted: 2 });
+    const headers = () => ({ authorization: `Bearer ${shapedToken()}`, "x-real-ip": "198.51.100.8" });
+    const first = dial(headers()), second = dial(headers());
+    expect(await Promise.all([outcome(first), outcome(second)])).toEqual(["open", "open"]);
+    expect(await outcome(dial(headers()))).toBe("http 503");
+    // A rejected hello frees its slot.
+    first.send(hello());
+    await expect(first.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.unauthenticated });
+    await until(() => uplink.size === 1);
+    expect(await outcome(dial(headers()))).toBe("open");
+  });
+
+  it("re-reads authority when a revocation is notified while a recheck is in flight", async () => {
+    await start();
+    const { peer } = await connect();
+    let release!: () => void;
+    authority.hold = new Promise(resolve => { release = resolve; });
+    uplink.revalidate([identity.engineInstanceId]);
+    await until(() => authority.calls === 2);
+    authority.result = { ok: false, reason: "authority" };
+    uplink.revalidate([identity.engineInstanceId]);
+    authority.hold = null;
+    release();
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.forbidden });
+    expect(authority.calls).toBe(3);
+  });
+
+  it("re-reads authority after admission when a revocation is notified during the hello's read", async () => {
+    await start();
+    let release!: () => void;
+    authority.hold = new Promise(resolve => { release = resolve; });
+    const peer = dial();
+    await peer.opened;
+    peer.send(hello());
+    await until(() => authority.calls === 1);
+    // The revocation commits after the hello's snapshot; the uplink is not
+    // owned yet, so the notification targets nobody.
+    authority.result = { ok: false, reason: "authority" };
+    uplink.revalidateWorkspace(identity.workspaceId);
+    authority.hold = null;
+    release();
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.forbidden });
+    expect(authority.calls).toBe(2);
+  });
+
+  it("negotiates cred.v1 only while credential_push is on and renegotiates when it flips", async () => {
+    credentialPush = false;
+    const cred = new UplinkCredentialPush({ sessionFor: id => uplink.session(id), readRevision: async () => 7 });
+    await start({ extensions: [cred] });
+    const off = await connect({ features: ["cred.v1"] });
+    expect(off.welcome.d!.features).toEqual([]);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(off.peer.frames.filter(frame => frame.t === "cred.revision")).toEqual([]);
+    // Turning the flag on closes the uplink so the engine re-dials and negotiates it.
+    credentialPush = true;
+    for (const listener of flagListeners) listener();
+    await expect(off.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.goingAway, reason: "features_changed" });
+    const on = await connect({ features: ["cred.v1"] });
+    expect(on.welcome.d!.features).toEqual(["cred.v1"]);
+    expect(await on.peer.next("cred.revision")).toMatchObject({ d: { revision: 7 } });
+    // Turning it off closes it again, so the engine drops back to the 500 ms poll.
+    credentialPush = false;
+    for (const listener of flagListeners) listener();
+    await expect(on.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.goingAway, reason: "features_changed" });
+    // An unaffected uplink (no cred.v1 offered) stays open across flips.
+    const legacy = await connect();
+    credentialPush = true;
+    for (const listener of flagListeners) listener();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(legacy.peer.ws.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("rate-limits one uplink's durable readiness writes, keeping the latest snapshot", async () => {
+    await start({ presenceMinIntervalMs: 300 });
+    const { peer } = await connect();
+    await until(() => writes.length === 1);
+    for (let s = 1; s <= 400; s++) {
+      peer.send({ t: "status.ready", s, d: { ready: s % 2 === 0, phase: s % 2 === 0 ? "ready" : "degraded" } });
+      if (s % 50 === 0) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect((await peer.next("sys.ack")).a).toBeGreaterThan(0);
+    await until(() => uplink.presence(identity.engineInstanceId)?.phase === "ready");
+    const during = writes.length;
+    expect(during).toBeLessThanOrEqual(5);
+    await new Promise(resolve => setTimeout(resolve, 700));
+    expect(writes.length).toBeLessThanOrEqual(during + 2);
+    expect(writes.at(-1)).toMatchObject({ connected: true, ready: true, phase: "ready" });
+  });
+
+  it("refuses to send an auth.sync above the frame cap: 1011, counted, logged without identifiers", async () => {
+    const members: Record<string, number> = {}, accounts: Record<string, number> = {}, devices: Record<string, number> = {};
+    for (let i = 0; i < 600; i++) { members[randomUUID()] = 3; accounts[randomUUID()] = 2; devices[randomUUID()] = 1; }
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await start({ authSource: {
+        keys: async () => [KEY],
+        snapshot: async () => ({ epochs: { wa: 4, wr: 2, members, accounts, devices }, revocations: [], authCursor: "c-1", complete: true }),
+      } });
+      const peer = dial();
+      await peer.opened;
+      peer.send(hello());
+      await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.internalError, reason: "auth_sync_too_large" });
+      expect(peer.frames.map(frame => frame.t)).toEqual(["sys.welcome", "auth.keys"]);
+      expect(uplink.counters.closed.auth_sync_too_large).toBe(1);
+      const lines = warn.mock.calls.map(call => call.join(" "));
+      expect(lines).toHaveLength(1);
+      for (const id of [identity.workspaceId, identity.organizationId, identity.engineInstanceId, identity.bootId])
+        expect(lines[0]).not.toContain(id);
+    } finally { warn.mockRestore(); }
+  });
+
+  it("bounds epoch deltas held for the gate and awaiting auth.applied (4429, never a desync)", async () => {
+    await start({ maxOutstandingAuthDeltas: 3 });
+    const { peer } = await connect();
+    for (let i = 0; i < 3; i++) uplink.pushAuthEpochs(identity.workspaceId, { epochs: { wa: 5 + i }, revocations: [], authCursor: `c-${i}` }, Date.now());
+    for (let i = 0; i < 3; i++) await peer.next("auth.epochs");
+    // The engine's honest applied for the oldest delta is still accepted.
+    peer.send({ t: "auth.applied", d: { authCursor: "c-0" } });
+    await until(() => metrics.filter(([name]) => name === "capability_revocation_push_ms").length === 1);
+    expect(peer.ws.readyState).toBe(WebSocket.OPEN);
+    uplink.pushAuthEpochs(identity.workspaceId, { epochs: { wa: 9 }, revocations: [], authCursor: "c-9" }, Date.now());
+    uplink.pushAuthEpochs(identity.workspaceId, { epochs: { wa: 10 }, revocations: [], authCursor: "c-10" }, Date.now());
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.backpressure });
   });
 });

@@ -72,11 +72,13 @@ export async function readCurrentCloudEngineAuthority(
   input: {
     workspaceId: string; organizationId: string; generation: number;
     engineInstanceId: string; heartbeatToken: string; workosEnabled: boolean;
+    /** `bypass` always reads SQL and leaves the cache untouched. */
+    cache?: "bypass";
   },
 ): Promise<CurrentCloudEngineAuthority & {
   version: 1; confirmedUntilMs: number; leaseExpiresAtMs: number; runtimeBootId: string | null;
 }> {
-  const cache = installedEngineAuthorityCache();
+  const cache = input.cache === "bypass" ? undefined : installedEngineAuthorityCache();
   if (!cache?.shadowing(input.organizationId) || !validIdentityInput(input)) return readCurrentCloudEngineAuthoritySql(tx, input);
   const hash = tokenHash(input.heartbeatToken), mode = { kind: "read" } as const;
   // Only an allowed answer is served from memory; a miss or denial asks SQL.

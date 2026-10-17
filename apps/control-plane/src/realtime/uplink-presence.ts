@@ -105,7 +105,10 @@ export class UplinkPresenceWriter {
 
   enqueue(snapshot: UplinkPresenceSnapshot): void {
     if (this.closed) return;
-    if (!this.pending.has(snapshot.connectionId)) {
+    // Re-inserting moves a re-enqueued connection behind the others: pump()
+    // scans in insertion order, so a hot connection cannot hold a slot.
+    if (this.pending.has(snapshot.connectionId)) this.pending.delete(snapshot.connectionId);
+    else {
       while (this.pending.size >= this.maxPending) {
         const oldest = [...this.pending.keys()].find(key => !this.inFlight.has(key));
         if (oldest === undefined) break;

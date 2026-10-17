@@ -31,8 +31,11 @@ export interface UplinkAuthority {
 
 /** One consistent read of the engine's current authority, the same
  * projection short-lived engine reads use, plus the registered bootId
- * (`cloud_workspace_engine_instances.runtime_boot_id`). Only a rejection
- * takes a second read, to tell an unknown credential from a stale engine. */
+ * (`cloud_workspace_engine_instances.runtime_boot_id`). A rejection adds one
+ * statement in the same transaction, to tell an unknown credential from a
+ * stale engine. The read always goes to SQL, never the in-process authority
+ * cache: a notification-driven recheck may run before that cache's own
+ * invalidation for the same commit has arrived. */
 export class DatabaseUplinkAuthority implements UplinkAuthority {
   constructor(private readonly options: {
     pool: pg.Pool;
@@ -41,24 +44,29 @@ export class DatabaseUplinkAuthority implements UplinkAuthority {
   }) {}
 
   async verify(identity: UplinkIdentity, heartbeatToken: string): Promise<UplinkAuthorityResult> {
-    let read: Awaited<ReturnType<typeof readCurrentCloudEngineAuthority>>;
+    let outcome: { read: Awaited<ReturnType<typeof readCurrentCloudEngineAuthority>> } | { known: boolean };
     try {
-      read = await withSystemTx(this.options.pool, tx => readCurrentCloudEngineAuthority(tx, {
-        workspaceId: identity.workspaceId, organizationId: identity.organizationId, generation: identity.generation,
-        engineInstanceId: identity.engineInstanceId, heartbeatToken, workosEnabled: this.options.workosEnabled,
-      }), { consistentRead: true });
-    } catch (error) {
-      if (!(error instanceof CloudWorkspaceEngineAuthorityError)) return { ok: false, reason: "unavailable" };
-      try {
-        const known = await withSystemTx(this.options.pool, tx => tx.query(
-          "SELECT 1 FROM cloud_workspace_engine_instances WHERE heartbeat_token_hash = $1",
-          [createHash("sha256").update(heartbeatToken, "utf8").digest()],
-        ));
-        return { ok: false, reason: known.rowCount ? "authority" : "unauthenticated" };
-      } catch {
-        return { ok: false, reason: "unavailable" };
-      }
+      outcome = await withSystemTx(this.options.pool, async tx => {
+        try {
+          return { read: await readCurrentCloudEngineAuthority(tx, {
+            workspaceId: identity.workspaceId, organizationId: identity.organizationId, generation: identity.generation,
+            engineInstanceId: identity.engineInstanceId, heartbeatToken, workosEnabled: this.options.workosEnabled,
+            cache: "bypass",
+          }) };
+        } catch (error) {
+          if (!(error instanceof CloudWorkspaceEngineAuthorityError)) throw error;
+          // Same transaction: a rejected hello costs one round trip set, so
+          // unauthenticated dials cannot buy two transactions each.
+          const known = await tx.query("SELECT 1 FROM cloud_workspace_engine_instances WHERE heartbeat_token_hash = $1",
+            [createHash("sha256").update(heartbeatToken, "utf8").digest()]);
+          return { known: (known.rowCount ?? 0) > 0 };
+        }
+      }, { consistentRead: true });
+    } catch {
+      return { ok: false, reason: "unavailable" };
     }
+    if (!("read" in outcome)) return { ok: false, reason: outcome.known ? "authority" : "unauthenticated" };
+    const read = outcome.read;
     if (read.runtimeBootId !== identity.bootId) {
       this.options.alerts?.raise("uplink_boot_mismatch", identity);
       return { ok: false, reason: "boot_mismatch" };

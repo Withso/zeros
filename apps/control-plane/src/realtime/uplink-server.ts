@@ -5,6 +5,7 @@ import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 
 import { MAX_DRAIN_MS } from "./drain.js";
+import { UplinkAdmission, uplinkSourceAddress, type AdmissionTicket } from "./uplink-admission.js";
 import { InboundSequence, ReliableOutbox, ResumeStore } from "./resume.js";
 import type { UplinkSecurityAlerts } from "./uplink-alerts.js";
 import type { EngineCapabilityIssuer, UplinkAuthSource } from "./uplink-auth-source.js";
@@ -12,6 +13,7 @@ import type { UplinkAuthority, UplinkIdentity } from "./uplink-authority.js";
 import type { UplinkPhase, UplinkPresenceSnapshot, UplinkPresenceWriter } from "./uplink-presence.js";
 import {
   UPLINK_ACK_DELAY_MS,
+  UPLINK_AUTH_APPLIED_TIMEOUT_MS,
   UPLINK_CLOSE,
   UPLINK_DEFAULT_PING_INTERVAL_MS,
   UPLINK_HELLO_TIMEOUT_MS,
@@ -36,7 +38,7 @@ import {
   type UplinkHello,
   type UplinkStatusReport,
 } from "./uplink-protocol.js";
-import type { RolloutFlagReader } from "../rollout-flags.js";
+import type { RolloutFlagName, RolloutFlagReader } from "../rollout-flags.js";
 
 /** The rollout feed the uplink reads: `realtime_uplink` per organization,
  * plus change notifications so a flag turned off closes open uplinks. */
@@ -57,6 +59,10 @@ export interface UplinkSession {
  * the resume retransmit finished; with `resumed: false` the module resyncs. */
 export interface UplinkExtension {
   readonly feature: string;
+  /** Rollout flag that gates negotiating `feature`, per organization. A
+   * flip closes the affected uplinks (1001 `features_changed`) so the
+   * engine re-dials and renegotiates. */
+  readonly flag?: RolloutFlagName;
   onOpen?(session: UplinkSession, resumed: boolean): void;
   /** True when the frame type belongs to this extension; a thrown error or
    * `"invalid"` closes the uplink with 4400. Sequenced (reliable) and
@@ -117,6 +123,20 @@ export type UplinkServerOptions = {
   resumeRetentionMs?: number;
   maxConnections?: number;
   maxPendingHandshakes?: number;
+  /** Pre-authentication admission: the process-wide burst (refilled one
+   * token per 2 ms) and, per source address, a burst, a steady rate and the
+   * sockets it may hold before their welcome. */
+  admissionBurst?: number;
+  sourceAdmissionBurst?: number;
+  sourceAdmissionPerSecond?: number;
+  sourceMaxUnadmitted?: number;
+  /** Durable readiness writes per uplink: a burst of three, then one per
+   * interval; the latest state is written when the interval allows. */
+  presenceMinIntervalMs?: number;
+  /** Epoch deltas held for the gate or awaiting `auth.applied`; past it the
+   * uplink closes 4429 and resyncs on the redial. */
+  maxOutstandingAuthDeltas?: number;
+  logger?: Pick<Console, "warn">;
   /** Bytes the socket may buffer before the uplink closes with 4429. */
   maxSocketBufferBytes?: number;
   now?: () => number;
@@ -133,13 +153,13 @@ export type UplinkCounters = {
   closed: Record<string, number>;
 };
 
-const ADMISSION_BURST = 500;
 const ADMISSION_REFILL_MS = 2;
+const PRESENCE_BURST = 3;
 const CHURN_WINDOW_MS = 10 * 60_000;
 const CHURN_LIMIT = 3;
 
 /** Server side of the S2 engine uplink (docs/cloud-workspace/contracts/s2-uplink.md,
- * frozen 1.0.0). Liveness, readiness and activity live in memory; presence
+ * 1.1.0). Liveness, readiness and activity live in memory; presence
  * reaches the database only on transitions plus a coarse watermark. */
 export class CloudEngineUplinkServer {
   private readonly wss = new WebSocketServer({
@@ -153,8 +173,12 @@ export class CloudEngineUplinkServer {
   private readonly supersedes = new Map<string, number[]>();
   readonly resume: ResumeStore<Lineage>;
   private pendingHandshakes = 0;
-  private admissionTokens = ADMISSION_BURST;
-  private lastRefill = performance.now();
+  private readonly admission: UplinkAdmission;
+  /** Authority notifications, so an admission whose read overlapped one
+   * re-reads after it owns the engine. */
+  private authoritySeq = 0;
+  private allNotifiedAt = 0;
+  private readonly notifiedAt = new Map<string, number>();
   private closed = false;
   private draining = false;
   readonly counters: UplinkCounters = { admitted: 0, resumed: 0, refused: {}, closed: {} };
@@ -164,13 +188,22 @@ export class CloudEngineUplinkServer {
     this.options = {
       pingIntervalMs: UPLINK_DEFAULT_PING_INTERVAL_MS,
       helloTimeoutMs: UPLINK_HELLO_TIMEOUT_MS,
-      authAppliedTimeoutMs: 10_000,
+      authAppliedTimeoutMs: UPLINK_AUTH_APPLIED_TIMEOUT_MS,
       ackDelayMs: UPLINK_ACK_DELAY_MS,
       watermarkIntervalMs: UPLINK_WATERMARK_INTERVAL_MS,
       authorityRecheckMs: 60_000,
       capabilityRetryMs: 30_000,
       maxConnections: 20_000,
       maxPendingHandshakes: 256,
+      admissionBurst: 500,
+      // 300 engines behind one egress re-dialing across a drain's 10 s spread
+      // fit (100 + 30/s x 10 s); one source holds at most a fifth of the burst.
+      sourceAdmissionBurst: 100,
+      sourceAdmissionPerSecond: 30,
+      sourceMaxUnadmitted: 64,
+      presenceMinIntervalMs: 2_000,
+      maxOutstandingAuthDeltas: 1_000,
+      logger: console,
       maxSocketBufferBytes: 4 * 1024 * 1024,
       now: Date.now,
       random: Math.random,
@@ -180,6 +213,11 @@ export class CloudEngineUplinkServer {
     if (!/^[A-Za-z0-9:._-]{1,128}$/.test(this.options.realtimeInstance)) throw new Error("invalid realtime instance id");
     const ping = this.options.pingIntervalMs;
     if (!Number.isSafeInteger(ping) || ping < 10_000 || ping > 30_000) throw new Error("uplink ping interval must be 10-30 s");
+    this.admission = new UplinkAdmission({
+      globalBurst: this.options.admissionBurst, globalRefillMs: ADMISSION_REFILL_MS,
+      sourceBurst: this.options.sourceAdmissionBurst, sourcePerSecond: this.options.sourceAdmissionPerSecond,
+      sourceMaxUnadmitted: this.options.sourceMaxUnadmitted,
+    });
     this.resume = new ResumeStore<Lineage>({ now: this.options.now,
       ...(options.resumeRetentionMs !== undefined ? { retentionMs: options.resumeRetentionMs } : {}) });
     this.stopFlagListener = this.options.flags.onChange?.(() => this.applyRollout()) ?? null;
@@ -193,13 +231,27 @@ export class CloudEngineUplinkServer {
     return this.options.flags.enabled(organizationId, "realtime_uplink");
   }
 
+  /** The extensions both sides offer whose rollout flag (if any) is on. */
+  negotiate(organizationId: string, offered: ReadonlySet<string>): Set<string> {
+    return new Set(this.options.extensions
+      .filter(extension => offered.has(extension.feature) &&
+        (!extension.flag || this.options.flags.enabled(organizationId, extension.flag)))
+      .map(extension => extension.feature));
+  }
+
   /** A flag turned off closes that organization's uplinks with 4404; the
-   * engines stop dialing and keep the HTTP heartbeat and credential poll. */
+   * engines stop dialing and keep the HTTP heartbeat and credential poll. A
+   * feature flag that changes what an uplink would negotiate closes it with
+   * 1001 so the engine re-dials (resuming its lineage) and renegotiates;
+   * until then it keeps its 500 ms credential poll. */
   applyRollout(): void {
     for (const connection of [...this.all]) {
       const organizationId = connection.identity?.organizationId;
-      if (organizationId && !this.uplinkEnabled(organizationId))
+      if (!organizationId) continue;
+      if (!this.uplinkEnabled(organizationId))
         connection.close(UPLINK_CLOSE.disabled, "uplink_disabled", { park: false });
+      else if (connection.featuresStale())
+        connection.close(UPLINK_CLOSE.goingAway, "features_changed", { park: true });
     }
   }
 
@@ -229,11 +281,14 @@ export class CloudEngineUplinkServer {
   /** Re-reads authority now for the given engines (or every owned uplink),
    * closing with 4403 those that are no longer current. */
   revalidate(engineInstanceIds?: Iterable<string>): void {
-    const targets = engineInstanceIds ? [...engineInstanceIds].map(id => this.current.get(id)) : [...this.current.values()];
+    const ids = engineInstanceIds ? [...engineInstanceIds] : null;
+    this.noteAuthority(ids?.map(id => `e:${id}`) ?? null);
+    const targets = ids ? ids.map(id => this.current.get(id)) : [...this.current.values()];
     for (const connection of targets) void connection?.recheck();
   }
 
   revalidateWorkspace(workspaceId: string): void {
+    this.noteAuthority([`w:${workspaceId}`]);
     for (const connection of this.current.values())
       if (connection.identity?.workspaceId === workspaceId) void connection.recheck();
   }
@@ -249,6 +304,26 @@ export class CloudEngineUplinkServer {
         (connectedAtMs === local.connectedAtMs && connectionId < local.connectionId)) return;
     if (!local.drained) this.recordSupersede(local.identity!);
     local.supersede();
+  }
+
+  private noteAuthority(keys: string[] | null): void {
+    this.authoritySeq += 1;
+    if (!keys || this.notifiedAt.size + keys.length > 20_000) {
+      this.notifiedAt.clear();
+      this.allNotifiedAt = this.authoritySeq;
+      return;
+    }
+    for (const key of keys) this.notifiedAt.set(key, this.authoritySeq);
+  }
+
+  /** @internal */ authoritySequence(): number { return this.authoritySeq; }
+
+  /** @internal Whether an authority notification for the engine or its
+   * workspace arrived after `since`. */
+  authorityNotifiedSince(identity: UplinkIdentity, since: number): boolean {
+    return this.allNotifiedAt > since ||
+      (this.notifiedAt.get(`e:${identity.engineInstanceId}`) ?? 0) > since ||
+      (this.notifiedAt.get(`w:${identity.workspaceId}`) ?? 0) > since;
   }
 
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): boolean {
@@ -268,24 +343,25 @@ export class CloudEngineUplinkServer {
     if (!offered.includes(UPLINK_SUBPROTOCOL)) return refuse("protocol", 400, "Bad Request");
     if (this.all.size >= this.options.maxConnections || this.pendingHandshakes >= this.options.maxPendingHandshakes)
       return refuse("capacity", 503, "Service Unavailable");
-    const now = performance.now();
-    this.admissionTokens = Math.min(ADMISSION_BURST, this.admissionTokens + (now - this.lastRefill) / ADMISSION_REFILL_MS);
-    this.lastRefill = now;
-    if (this.admissionTokens < 1) return refuse("rate_limited", 429, "Too Many Requests");
-    this.admissionTokens -= 1;
+    // Before any credential check, so admission is per source: a flood of
+    // shaped tokens from one address spends only that address's budget.
+    const address = uplinkSourceAddress(request);
+    const ticket = this.admission.admit(address);
+    if (ticket === "rate_limited") return refuse("rate_limited", 429, "Too Many Requests");
+    if (ticket === "capacity") return refuse("capacity", 503, "Service Unavailable");
     this.pendingHandshakes += 1;
     let settled = false;
     const settle = () => { if (!settled) { settled = true; this.pendingHandshakes -= 1; } };
-    socket.once("close", settle);
-    const address = sourceAddress(request);
+    socket.once("close", () => { settle(); ticket.release(); });
     try {
       this.wss.handleUpgrade(request, socket, head, ws => {
         settle();
-        if (this.closed || this.draining) { ws.close(UPLINK_CLOSE.draining, "draining"); return; }
-        this.all.add(new UplinkConnection(this, ws, token, address));
+        if (this.closed || this.draining) { ticket.release(); ws.close(UPLINK_CLOSE.draining, "draining"); return; }
+        this.all.add(new UplinkConnection(this, ws, token, address, ticket));
       });
     } catch {
       settle();
+      ticket.release();
       socket.destroy();
     }
     return true;
@@ -372,6 +448,7 @@ class UplinkConnection {
   private peerLastReceived = 0;
   private protocol = 0;
   private features = new Set<string>();
+  private offered: ReadonlySet<string> = new Set();
   private lastSeenAtMs = 0;
   private leaseExpiresAtMs = 0;
   private state: "hello" | "admitting" | "welcomed" | "closed" = "hello";
@@ -382,7 +459,11 @@ class UplinkConnection {
    * resume retransmit, in that order. */
   private flowing = false;
   private pendingDeltas: UplinkAuthDelta[] = [];
+  /** One entry per delta sent or held and not yet applied, oldest first. */
   private deltaCreatedAt: number[] = [];
+  private presenceTokens = PRESENCE_BURST;
+  private presenceAtMs = 0;
+  private presenceTimer: ReturnType<typeof setTimeout> | null = null;
   private helloTimer: ReturnType<typeof setTimeout> | null = null;
   private authTimer: ReturnType<typeof setTimeout> | null = null;
   private ackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -392,12 +473,14 @@ class UplinkConnection {
   private authorityTimer: ReturnType<typeof setInterval> | null = null;
   private drainTimers: ReturnType<typeof setTimeout>[] = [];
   private rechecking = false;
+  private recheckAgain = false;
 
   constructor(
     private readonly server: CloudEngineUplinkServer,
     private readonly ws: WebSocket,
     private readonly token: string,
     readonly address: string,
+    private readonly admission: AdmissionTicket,
   ) {
     this.helloTimer = setTimeout(() => this.close(UPLINK_CLOSE.frameInvalid, "hello_timeout", { park: false }),
       server.options.helloTimeoutMs);
@@ -517,7 +600,7 @@ class UplinkConnection {
       const changed = lineage.ready !== ready.data.ready || lineage.phase !== ready.data.phase;
       lineage.ready = ready.data.ready;
       lineage.phase = ready.data.phase;
-      if (changed) this.writePresence(true);
+      if (changed) this.writeReadiness();
       return "ok";
     }
     if (t === "status.report") {
@@ -554,6 +637,7 @@ class UplinkConnection {
       engineInstanceId: hello.engineInstanceId, bootId: hello.bootId,
     });
     // Validation happens before any supersede: a failing hello never touches a live uplink.
+    const notifiedFrom = this.server.authoritySequence();
     const verified = await options.authority.verify(identity, this.token);
     if (this.state !== "admitting") return;
     if (!verified.ok) {
@@ -566,8 +650,8 @@ class UplinkConnection {
     this.identity = identity;
     this.protocol = protocol;
     this.leaseExpiresAtMs = verified.leaseExpiresAtMs;
-    const offered = new Set(hello.features);
-    this.features = new Set(options.extensions.map(extension => extension.feature).filter(feature => offered.has(feature)));
+    this.offered = new Set(hello.features);
+    this.features = this.server.negotiate(identity.organizationId, this.offered);
     // A token resumes only with the credential, engine instance and bootId
     // it was issued to — and only when its cursor can be repaired. Peek
     // first: a cursor the outbox cannot replay (a foreign or confused peer)
@@ -589,6 +673,7 @@ class UplinkConnection {
     this.lineage ??= { outbox: new ReliableOutbox(), inbound: new InboundSequence(), ready: false, phase: null, report: null, activity: null };
     this.connectedAtMs = this.lastSeenAtMs = this.now();
     this.state = "welcomed";
+    this.admission.release();
     this.server.take(this, observed);
     this.server.counters.admitted += 1;
     if (this.resumed) this.server.counters.resumed += 1;
@@ -601,8 +686,12 @@ class UplinkConnection {
       protocol, features: [...this.features], resumeToken: this.resumeToken, resumed: this.resumed,
       pingIntervalMs: options.pingIntervalMs, leaseExpiresAtMs: this.leaseExpiresAtMs,
     } });
+    this.presenceAtMs = this.now();
     this.writePresence(true);
     this.startTimers();
+    // A revocation that committed after the hello's read notified while this
+    // engine was not owned yet, so it reached nobody: read again now.
+    if (this.server.authorityNotifiedSince(identity, notifiedFrom)) void this.recheck();
     let keys, snapshot;
     try {
       [keys, snapshot] = await Promise.all([options.authSource.keys(), options.authSource.snapshot(identity, hello.authCursor)]);
@@ -613,7 +702,7 @@ class UplinkConnection {
     this.syncId = randomUUID();
     this.syncSentAtMs = this.now();
     this.send({ t: "auth.keys", d: { keys } });
-    this.send({ t: "auth.sync", d: { syncId: this.syncId, ...snapshot } });
+    if (!this.send({ t: "auth.sync", d: { syncId: this.syncId, ...snapshot } })) return;
     this.authTimer = setTimeout(() => this.invalid("auth_applied_timeout"), options.authAppliedTimeoutMs);
     this.authTimer.unref?.();
   }
@@ -662,8 +751,12 @@ class UplinkConnection {
 
   pushEpochs(delta: UplinkAuthDelta, createdAtMs: number): void {
     if (this.state !== "welcomed") return;
+    // Every held or sent delta keeps its entry until its auth.applied, so the
+    // engine's honest applied is never "unexpected"; an engine this far
+    // behind resyncs from the snapshot on its redial instead.
+    if (this.deltaCreatedAt.length >= this.server.options.maxOutstandingAuthDeltas)
+      return this.close(UPLINK_CLOSE.backpressure, "auth_deltas_backlog", { park: true });
     this.deltaCreatedAt.push(createdAtMs);
-    if (this.deltaCreatedAt.length > 1_000) this.deltaCreatedAt.shift();
     if (!this.authApplied) { this.pendingDeltas.push(delta); return; }
     this.send({ t: "auth.epochs", d: delta });
   }
@@ -679,18 +772,49 @@ class UplinkConnection {
     for (const timer of [this.livenessTimer, this.watermarkTimer, this.authorityTimer]) timer.unref?.();
   }
 
+  /** True when the flags now negotiate a different feature set. */
+  featuresStale(): boolean {
+    if (this.state !== "welcomed" || !this.identity) return false;
+    const now = this.server.negotiate(this.identity.organizationId, this.offered);
+    return now.size !== this.features.size || [...now].some(feature => !this.features.has(feature));
+  }
+
   /** Authority loss closes with 4403 at once; an unavailable database
-   * never closes an established uplink. */
+   * never closes an established uplink. A recheck requested while a read is
+   * in flight runs once more after it: that read's snapshot may predate the
+   * notifying commit. */
   async recheck(): Promise<void> {
-    if (this.state !== "welcomed" || !this.identity || this.rechecking) return;
+    if (this.state !== "welcomed" || !this.identity) return;
+    if (this.rechecking) { this.recheckAgain = true; return; }
     this.rechecking = true;
     try {
-      const verified = await this.server.options.authority.verify(this.identity, this.token).catch(() => null);
-      if (this.state !== "welcomed") return;
-      if (verified?.ok) { this.leaseExpiresAtMs = verified.leaseExpiresAtMs; return; }
-      if (!verified || verified.reason === "unavailable") return;
-      this.close(UPLINK_CLOSE.forbidden, "uplink_forbidden", { park: false });
+      do {
+        this.recheckAgain = false;
+        const verified = await this.server.options.authority.verify(this.identity, this.token).catch(() => null);
+        if (this.state !== "welcomed") return;
+        if (verified?.ok) { this.leaseExpiresAtMs = verified.leaseExpiresAtMs; continue; }
+        if (!verified || verified.reason === "unavailable") continue;
+        return this.close(UPLINK_CLOSE.forbidden, "uplink_forbidden", { park: false });
+      } while (this.recheckAgain);
     } finally { this.rechecking = false; }
+  }
+
+  /** Readiness writes are bounded per uplink (a burst, then one per
+   * interval). A flip inside the interval schedules one trailing write that
+   * reads the state when it fires, so the latest readiness always lands. */
+  private writeReadiness(): void {
+    if (this.presenceTimer || this.state !== "welcomed") return;
+    const intervalMs = this.server.options.presenceMinIntervalMs, now = this.now();
+    this.presenceTokens = Math.min(PRESENCE_BURST, this.presenceTokens + Math.max(0, now - this.presenceAtMs) / intervalMs);
+    this.presenceAtMs = now;
+    if (this.presenceTokens >= 1) {
+      this.presenceTokens -= 1;
+      this.writePresence(true);
+      return;
+    }
+    this.presenceTimer = setTimeout(() => { this.presenceTimer = null; this.writeReadiness(); },
+      Math.ceil((1 - this.presenceTokens) * intervalMs));
+    this.presenceTimer.unref?.();
   }
 
   private writePresence(transition: boolean): void {
@@ -721,14 +845,32 @@ class UplinkConnection {
   private sendReliable(t: string, d: Record<string, unknown>): boolean {
     if (this.state !== "welcomed" || !this.lineage) return false;
     const lineage = this.lineage;
+    // Room for the envelope's t, s and a around d.
+    const bytes = Buffer.byteLength(JSON.stringify(d), "utf8") + Buffer.byteLength(t, "utf8") + 64;
+    if (bytes > UPLINK_MAX_CONTROL_FRAME_BYTES) { this.outboundTooLarge(t, bytes); return false; }
     const frame = lineage.outbox.push(s => ({ t, text: JSON.stringify({ t, s, a: lineage.inbound.lastContiguous, d }) }));
     if (!frame) { this.close(UPLINK_CLOSE.backpressure, "backpressure", { park: true }); return false; }
     if (this.flowing) this.sendText(frame.text);
     return true;
   }
 
-  private send(frame: { t: string; a?: number; d?: Record<string, unknown> }): void {
-    this.sendText(JSON.stringify(frame));
+  /** False when the frame was refused as oversize (the uplink is closing). */
+  private send(frame: { t: string; a?: number; d?: Record<string, unknown> }): boolean {
+    const text = JSON.stringify(frame);
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > UPLINK_MAX_CONTROL_FRAME_BYTES) { this.outboundTooLarge(frame.t, bytes); return false; }
+    this.sendText(text);
+    return true;
+  }
+
+  /** The engine must close 4400 on a text frame above the cap, so sending
+   * one would only start a redial loop. Until the contract can split
+   * `auth.sync`, refuse it here: 1011, which the engine answers with its
+   * full-jitter backoff. The log names the frame type and size only. */
+  private outboundTooLarge(t: string, bytes: number): void {
+    this.server.options.logger.warn(
+      `[realtime] uplink ${t} frame of ${bytes} bytes exceeds the ${UPLINK_MAX_CONTROL_FRAME_BYTES}-byte cap; closing 1011`);
+    this.close(UPLINK_CLOSE.internalError, t === "auth.sync" ? "auth_sync_too_large" : "outbound_frame_too_large", { park: false });
   }
 
   private sendText(text: string): void {
@@ -767,6 +909,7 @@ class UplinkConnection {
     if (this.state === "closed") return;
     const welcomed = this.state === "welcomed";
     this.state = "closed";
+    this.admission.release();
     this.server.count("closed", reason);
     if (this.resumeToken && this.lineage) {
       if (options.park) this.server.resume.park(this.resumeToken, this.lineage);
@@ -788,10 +931,10 @@ class UplinkConnection {
   }
 
   private stopTimers(): void {
-    for (const timer of [this.helloTimer, this.authTimer, this.ackTimer, this.capabilityTimer, ...this.drainTimers])
+    for (const timer of [this.helloTimer, this.authTimer, this.ackTimer, this.capabilityTimer, this.presenceTimer, ...this.drainTimers])
       if (timer) clearTimeout(timer);
     for (const timer of [this.livenessTimer, this.watermarkTimer, this.authorityTimer]) if (timer) clearInterval(timer);
-    this.helloTimer = this.authTimer = this.ackTimer = this.capabilityTimer = null;
+    this.helloTimer = this.authTimer = this.ackTimer = this.capabilityTimer = this.presenceTimer = null;
     this.livenessTimer = this.watermarkTimer = this.authorityTimer = null;
     this.drainTimers = [];
   }
@@ -806,14 +949,4 @@ export function realtimeInstanceId(env: NodeJS.ProcessEnv = process.env): string
 function lineageKey(identity: UplinkIdentity, token: string): string {
   const credential = createHash("sha256").update(token, "utf8").digest("base64url");
   return [credential, identity.organizationId, identity.workspaceId, identity.generation, identity.engineInstanceId, identity.bootId].join(":");
-}
-
-/** The address the nearest proxy saw: the last `X-Forwarded-For` hop when
- * present (appended by the platform proxy, not chosen by the client),
- * otherwise the socket peer. Used only to notice supersede tug-of-war. */
-function sourceAddress(request: IncomingMessage): string {
-  const forwarded = request.headers["x-forwarded-for"];
-  const value = Array.isArray(forwarded) ? forwarded.at(-1) : forwarded;
-  const last = value?.split(",").at(-1)?.trim();
-  return (last || request.socket.remoteAddress || "unknown").slice(0, 64);
 }
