@@ -32,6 +32,7 @@ import { createReleaseIdentityRoutes } from "./release-identity.js";
 import { ClientCompatibility, createClientCompatibilityMiddleware } from "./client-compatibility.js";
 import { createAuthMiddleware } from "./auth.js";
 import { rateLimit } from "./ratelimit.js";
+import { clientAddress } from "./client-address.js";
 import { createChatTitleRoutes } from "./chat-titles.js";
 import { createRoutes } from "./routes.js";
 import { HttpError } from "./authz.js";
@@ -286,16 +287,9 @@ export function createApp(
       "cloud-preview-preauth",
       600,
       60_000,
-      (c) => {
-        // Railway supplies X-Real-IP. A direct Cloudflare Tunnel strips that
-        // header and supplies CF-Connecting-IP instead, so do not collapse all
-        // protected preview clients into the shared anonymous bucket.
-        const clientIp =
-          c.req.header("X-Real-IP")?.trim() ??
-          c.req.header("CF-Connecting-IP")?.trim() ??
-          "";
-        return isIP(clientIp) ? clientIp : "unknown";
-      },
+      // A direct Cloudflare Tunnel supplies CF-Connecting-IP instead of
+      // X-Real-IP, so protected preview clients keep their own buckets.
+      (c) => clientAddress((name) => c.req.header(name)),
     );
     app.use("*", async (c, next) => {
       const access = dependencies.cloudWorkspaceAccessService!;
@@ -437,13 +431,7 @@ export function createApp(
     // qualification tunnel supplies CF-Connecting-IP. Prefer Railway's header
     // when both are present, validate either value, and collapse missing or
     // attacker-controlled garbage into one bounded bucket.
-    const internalClientIp = (c: Context) => {
-      const clientIp =
-        c.req.header("X-Real-IP")?.trim() ??
-        c.req.header("CF-Connecting-IP")?.trim() ??
-        "";
-      return isIP(clientIp) ? clientIp : "unknown";
-    };
+    const internalClientIp = (c: Context) => clientAddress((name) => c.req.header(name));
     const internalPreAuthLimit = rateLimit(
       "cloud-workspace-internal-preauth",
       600,

@@ -1,5 +1,6 @@
 import type { IncomingMessage } from "node:http";
-import { isIP } from "node:net";
+
+import { clientAddress } from "../client-address.js";
 
 export type AdmissionLimits = {
   /** Process-wide ceiling: burst, refilled one token per `globalRefillMs`. */
@@ -73,16 +74,11 @@ export class UplinkAdmission {
   }
 }
 
-/** The client address under the same trust model as the HTTP engine paths'
- * pre-auth limits (app.ts): the platform proxy's `X-Real-IP`, else the
- * protected tunnel's `CF-Connecting-IP`, else the socket peer, each only when
- * it parses as an IP; anything else collapses into one `unknown` bucket. */
+/** An upgrade's source under the HTTP pre-auth limits' rule (`clientAddress`),
+ * falling back to the socket peer when neither edge header is present. */
 export function uplinkSourceAddress(request: IncomingMessage): string {
-  const header = (name: string) => {
+  return clientAddress(name => {
     const value = request.headers[name];
-    return (Array.isArray(value) ? value[0] : value)?.trim() ?? "";
-  };
-  for (const candidate of [header("x-real-ip"), header("cf-connecting-ip"), request.socket.remoteAddress ?? ""])
-    if (candidate && isIP(candidate)) return candidate;
-  return "unknown";
+    return Array.isArray(value) ? value[0] : value;
+  }, request.socket.remoteAddress);
 }

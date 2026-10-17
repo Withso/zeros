@@ -98,10 +98,11 @@ authority supplies keys, epochs and engine tokens
   spends a token from its source address's bucket (100 burst, 30 per
   second, at most 64 sockets awaiting their welcome) and from a
   process-wide ceiling (500 burst, 500 per second, 256 handshakes in
-  flight). The source is `X-Real-IP`, then `CF-Connecting-IP`, then the
-  socket peer, each only when it parses as an IP: the same trust model as
-  the HTTP engine paths' pre-auth limits. One source flooding shaped tokens
-  therefore spends only its own budget; refusals are `429` or `503`.
+  flight). The source is a present `X-Real-IP`, else `CF-Connecting-IP`,
+  else the socket peer; a value that does not parse as an IP shares one
+  `unknown` bucket. This is the rule of the HTTP engine paths' pre-auth
+  limits (`client-address.ts`). One source flooding shaped tokens therefore
+  spends only its own budget; refusals are `429` or `503`.
 - **Admission.** One consistent authority read
   (`readCurrentCloudEngineAuthority`) checks the heartbeat credential,
   workspace, generation and engine instance, and compares the hello's

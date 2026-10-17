@@ -10,8 +10,13 @@ describe("uplink admission", () => {
   it("keys sources like the HTTP pre-auth limits and collapses garbage into one bucket", () => {
     expect(uplinkSourceAddress(request({ "x-real-ip": "203.0.113.5", "cf-connecting-ip": "198.51.100.1" }))).toBe("203.0.113.5");
     expect(uplinkSourceAddress(request({ "cf-connecting-ip": "198.51.100.1" }))).toBe("198.51.100.1");
-    expect(uplinkSourceAddress(request({ "x-real-ip": "not an ip" }))).toBe("10.0.0.9");
+    expect(uplinkSourceAddress(request({}))).toBe("10.0.0.9");
     expect(uplinkSourceAddress(request({}, "garbage"))).toBe("unknown");
+    // A present X-Real-IP is authoritative: garbage there never falls through
+    // to a caller-chosen CF-Connecting-IP or to the socket peer.
+    expect(uplinkSourceAddress(request({ "x-real-ip": "not an ip" }))).toBe("unknown");
+    expect(uplinkSourceAddress(request({ "x-real-ip": "not an ip", "cf-connecting-ip": "198.51.100.77" }))).toBe("unknown");
+    expect(uplinkSourceAddress(request({ "cf-connecting-ip": "garbage" }))).toBe("unknown");
   });
 
   it("refills per source, holds unadmitted sockets per source and bounds tracked sources", () => {
