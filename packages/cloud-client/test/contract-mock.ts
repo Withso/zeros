@@ -39,10 +39,13 @@ export interface ContractMockOptions {
   deviceSessionId?: string;
   /**
    * Organizations that answer runtime/connect. An organization outside the
-   * list answers 404 cloud_workspaces_disabled — the legacy answer the SDK
-   * flag probe keys on (S3 flag discovery). Defaults to every org flagged.
+   * list answers like a control plane without the route (404 not_found) —
+   * the legacy answer the SDK flag probe keys on (S3 flag discovery).
+   * Defaults to every org flagged.
    */
   flaggedOrganizations?: string[];
+  /** Workspaces a flagged organization answers 404 cloud_workspace_not_found for. */
+  deletedWorkspaces?: string[];
 }
 
 export interface ContractMock {
@@ -58,6 +61,8 @@ export interface ContractMock {
     pathIncludes: string;
     status: number;
     body?: JsonObject;
+    /** A non-JSON body, e.g. a proxy's HTML 404 page. */
+    raw?: string;
   }): void;
   close(): Promise<void>;
 }
@@ -102,7 +107,8 @@ export async function createContractMock(
   const ticket = `mock-ticket-${"t".repeat(32)}`;
   const cursor = "c-1";
   const idempotent = new Map<string, { status: number; body: JsonObject }>();
-  const faults: { method: string; pathIncludes: string; status: number; body?: JsonObject }[] = [];
+  const faults: { method: string; pathIncludes: string; status: number; body?: JsonObject; raw?: string }[] = [];
+  const deleted = new Set(options.deletedWorkspaces ?? []);
   const flagged = options.flaggedOrganizations
     ? new Set(options.flaggedOrganizations)
     : null;
@@ -150,6 +156,11 @@ export async function createContractMock(
     );
     if (faultIndex >= 0) {
       const [fault] = faults.splice(faultIndex, 1);
+      if (fault!.raw !== undefined) {
+        response.writeHead(fault!.status, { "content-type": "text/html" });
+        response.end(fault!.raw);
+        return;
+      }
       json(response, fault!.status, fault!.body ?? errorBody("injected_fault", "Injected test fault.", { retryable: fault!.status === 429 || fault!.status >= 500 }));
       return;
     }
@@ -190,9 +201,14 @@ export async function createContractMock(
     if (request.method === "POST" && path.endsWith("/runtime/connect")) {
       // Unflagged orgs answer the legacy way; the SDK probe maps this to the
       // legacy admission path for the org (S3 flag discovery, decision 1).
-      const organization = /^\/v1\/organizations\/([^/]+)\//.exec(path)?.[1];
+      const match = /^\/v1\/organizations\/([^/]+)\/cloud-workspaces\/([^/]+)\//.exec(path);
+      const organization = match?.[1];
       if (flagged && organization && !flagged.has(organization)) {
-        json(response, 404, errorBody("cloud_workspaces_disabled", "Cloud workspaces v1 is not enabled for this organization."));
+        json(response, 404, errorBody("not_found", `No contract route for ${request.method} ${path}.`));
+        return;
+      }
+      if (match?.[2] && deleted.has(match[2])) {
+        json(response, 404, errorBody("cloud_workspace_not_found", "Cloud workspace not found."));
         return;
       }
       json(response, 201, {

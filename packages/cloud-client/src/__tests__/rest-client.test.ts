@@ -203,25 +203,68 @@ describe("CloudOrgFlagCache (per-org flag discovery, decision 1)", () => {
       calls += 1;
       return calls > 2 ? "sdk" : "legacy";
     });
-    const [a, b] = await Promise.all([cache.resolve("org-1"), cache.resolve("org-1")]);
+    const [a, b] = await Promise.all([cache.resolve("org-1", "ws-1"), cache.resolve("org-1", "ws-1")]);
     expect(a).toBe("legacy");
     expect(b).toBe("legacy");
     expect(calls).toBe(1);
-    expect(await cache.resolve("org-1")).toBe("legacy");
+    expect(await cache.resolve("org-1", "ws-2")).toBe("legacy");
     expect(calls).toBe(1);
-    expect(await cache.resolve("org-2")).toBe("legacy");
+    expect(await cache.resolve("org-2", "ws-3")).toBe("legacy");
     expect(calls).toBe(2);
     // catalog.changed re-evaluates the cached decision.
     cache.invalidate();
-    expect(await cache.resolve("org-1")).toBe("sdk");
+    expect(await cache.resolve("org-1", "ws-1")).toBe("sdk");
     expect(calls).toBe(3);
   });
 
   it("does not let a transient failure decide the flag", async () => {
     expect(probeFromConnectFailure(new CloudRestError({ status: 503, code: "upstream_unavailable" }))).toBeNull();
-    expect(probeFromConnectFailure(new CloudRestError({ status: 404, code: "not_found" }))).toBe("legacy");
     expect(probeFromConnectFailure(new CloudRestError({ status: 403, code: "cloud_workspaces_disabled" }))).toBe("legacy");
     expect(probeFromConnectFailure(new Error("network down"))).toBeNull();
+  });
+
+  it("maps only a route-absent 404 to legacy, never a deleted workspace", () => {
+    // A legacy control plane has no runtime/connect route: generic not_found.
+    expect(probeFromConnectFailure(new CloudRestError({ status: 404, code: "not_found" }))).toBe("legacy");
+    // A 404 without a parseable S3 error envelope (proxy, static 404 page).
+    expect(probeFromConnectFailure(new CloudRestError({ status: 404, code: "request_failed", envelope: false }))).toBe("legacy");
+    // A flagged organization answering for a deleted workspace says nothing about the flag.
+    expect(probeFromConnectFailure(new CloudRestError({ status: 404, code: "cloud_workspace_not_found" }))).toBeNull();
+  });
+
+  it("records whether a failed response carried an S3 error envelope", async () => {
+    const { client, mock } = await createClientPair();
+    mock.injectOnce({ method: "GET", pathIncludes: "/v1/cloud-workspaces", status: 404, raw: "<html>gone</html>" });
+    const error = await client.invoke("listCloudWorkspaces").catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CloudRestError);
+    expect((error as CloudRestError).envelope).toBe(false);
+    expect(probeFromConnectFailure(error)).toBe("legacy");
+  });
+
+  it("does not cache legacy for a deleted workspace in a flagged organization", async () => {
+    const deleted = "44444444-4444-4444-8444-444444444444";
+    const { client } = await createClientPair({
+      flaggedOrganizations: [ORGANIZATION],
+      deletedWorkspaces: [deleted],
+    });
+    let probes = 0;
+    const cache = new CloudOrgFlagCache(async (organization, workspace) => {
+      probes += 1;
+      try {
+        await client.invoke("connectCloudWorkspaceRuntime", {
+          pathParams: { organization, workspace },
+          body: { deviceSessionId: DEVICE_SESSION, clientSessionId: CLIENT_SESSION, routes: ["direct"] },
+          deviceProof: true,
+        });
+        return "sdk";
+      } catch (error) {
+        return probeFromConnectFailure(error);
+      }
+    });
+    expect(await cache.resolve(ORGANIZATION, deleted)).toBeNull();
+    expect(await cache.resolve(ORGANIZATION, WORKSPACE)).toBe("sdk");
+    expect(await cache.resolve(ORGANIZATION, WORKSPACE)).toBe("sdk");
+    expect(probes).toBe(2);
   });
 });
 

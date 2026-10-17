@@ -32,6 +32,8 @@ export type CloudRestErrorInput = {
   retryable?: boolean;
   retryAfterMs?: number;
   operationId?: string;
+  /** False when the body held no S3 error envelope (defaults to true). */
+  envelope?: boolean;
 };
 
 /** Parsed S3 Error envelope. `retryable` and `retryAfterMs` drive the outbox. */
@@ -41,6 +43,8 @@ export class CloudRestError extends Error {
   readonly retryable: boolean;
   readonly retryAfterMs?: number;
   readonly operationId?: string;
+  /** Whether the failed response carried a parseable S3 error envelope. */
+  readonly envelope: boolean;
 
   constructor(input: CloudRestErrorInput) {
     super(input.message ?? `cloud request failed: ${input.status} ${input.code}`);
@@ -48,6 +52,7 @@ export class CloudRestError extends Error {
     this.status = input.status;
     this.code = input.code;
     this.retryable = input.retryable ?? false;
+    this.envelope = input.envelope ?? true;
     if (input.retryAfterMs !== undefined) this.retryAfterMs = input.retryAfterMs;
     if (input.operationId !== undefined) this.operationId = input.operationId;
   }
@@ -206,6 +211,7 @@ export class CloudRestClient {
       throw new CloudRestError({
         status: 0,
         code: "network_error",
+        envelope: false,
         message: cause instanceof Error ? cause.message : "network request failed",
         retryable: true,
         operationId,
@@ -216,6 +222,7 @@ export class CloudRestClient {
       const envelope = body as { error?: { code?: unknown; message?: unknown; retryable?: unknown; retryAfterMs?: unknown } } | undefined;
       throw new CloudRestError({
         status: response.status,
+        envelope: typeof envelope?.error?.code === "string",
         code: typeof envelope?.error?.code === "string" ? envelope.error.code : "request_failed",
         message: typeof envelope?.error?.message === "string" ? envelope.error.message : undefined,
         retryable: envelope?.error?.retryable === true,
