@@ -3691,7 +3691,7 @@ export class ZerosEngine {
       // Credential-control push (P0.10 C01): a pushed revision runs the same
       // credential-controls exchange the 500 ms poll runs; the poll itself
       // stays as the fallback (see controlsPollIntervalMs at the boot).
-      onCredentialRevision: async revision => {
+      onCredentialRevision: async () => {
         // Only agent-controls reaches here: the uplink acks any other kind
         // failed/cred_kind_unsupported before calling this handler.
         const boot = this.cloudAgentBoot;
