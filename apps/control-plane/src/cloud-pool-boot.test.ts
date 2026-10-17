@@ -196,11 +196,15 @@ describe("cloud workload ownership", () => {
 
   it("closes sessions at once without a drain window, as before", async () => {
     await import("./index.js");
-    vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     const relay = instance("CloudRuntimeBridgeRelay");
     process.listeners("SIGTERM").find(handler => !oldTerm.includes(handler))!();
     expect(relay.drain).not.toHaveBeenCalled(); expect(relay.close).toHaveBeenCalledOnce();
     expect(state.close).toHaveBeenCalledOnce();
+    // Shutdown exits only after the stops settle; returning before that leaks
+    // the real process.exit into the next test once the spy is restored.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(exit).toHaveBeenCalledExactlyOnceWith(0);
   });
 
   it("drains relay sessions before closing the server when a window is configured", async () => {
