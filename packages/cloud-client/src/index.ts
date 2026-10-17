@@ -12,6 +12,30 @@ export {
   type DeviceStreamParseResult,
 } from "./device-stream";
 export {
+  DeviceStreamClient,
+  DEVICE_STREAM_ACK_INTERVAL_MS,
+  DEVICE_STREAM_CLIENT_CONTRACT,
+  DEVICE_STREAM_DEAD_AFTER_MS,
+  DEVICE_STREAM_DEAD_CLOSE_CODE,
+  DEVICE_STREAM_MAX_RESUME_WORKSPACES,
+  DEVICE_STREAM_SEND_BURST,
+  DEVICE_STREAM_SEND_PER_SECOND,
+  DEVICE_STREAM_STABLE_MS,
+} from "./device-stream-client";
+export type {
+  DeviceSessionGrant,
+  DeviceStreamClientOptions,
+  DeviceStreamEvent,
+  DeviceStreamPayloadFrame,
+  DeviceStreamPresenceState,
+  DeviceStreamResumeBase,
+  DeviceStreamSocket,
+  DeviceStreamSocketFactory,
+  DeviceStreamSocketHandlers,
+  DeviceStreamState,
+  DeviceStreamStopReason,
+} from "./device-stream-client";
+export {
   isRuntimeHandshakeFrame,
   parseRuntimeAuthFrame,
   type RuntimeAuthParseResult,
