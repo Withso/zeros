@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPool, withSystemTx } from "../db.js";
@@ -27,6 +27,7 @@ const LOADER_TABLES = [
 d("engine authority cache with PostgreSQL", () => {
   let pool: pg.Pool, listenerPool: pg.Pool;
   let scope: EngineAuthorityKey & { heartbeatToken: string };
+  let fixture: Awaited<ReturnType<typeof seedReadyCloudWorkspace>>;
   const caches: EngineAuthorityCache[] = [];
   beforeAll(() => {
     pool = new pg.Pool({ connectionString: url, max: 4 });
@@ -40,6 +41,7 @@ d("engine authority cache with PostgreSQL", () => {
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
     const f = await seedReadyCloudWorkspace(pool);
+    fixture = f;
     scope = { workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1,
       engineInstanceId: f.engineInstanceId, heartbeatToken: f.heartbeatToken, workosEnabled: false };
   });
@@ -177,6 +179,57 @@ d("engine authority cache with PostgreSQL", () => {
       SET lease_expires_at=clock_timestamp()+interval '1 second' WHERE id=$1`, [scope.engineInstanceId]));
     expect(shortened).toEqual([`w:${scope.workspaceId}`]);
     await vi.waitFor(() => expect(value.lookup(scope, hash(scope.heartbeatToken), { kind: "assert" })).toBeUndefined());
+  });
+
+  it("ignores extension-only and bookkeeping updates but not shortenings or state changes", async () => {
+    const value = await cache();
+    await cached(value);
+    // An active compute lease with both deadlines funded.
+    const intentId = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256,state,completed_at)
+      VALUES($1,$2,$3,1,$4,'create',$5,$6,'succeeded',now())`,
+      [intentId, scope.workspaceId, scope.organizationId, fixture.userId, randomUUID(), randomBytes(32)]);
+    const leaseId = randomUUID();
+    await pool.query(`INSERT INTO managed_compute_allocation_leases(id,workspace_id,org_id,generation,billing_epoch,user_id,lifecycle_intent_id,
+      provider,provider_resource_id,policy_id,seconds_per_dollar,weight_numerator,weight_denominator,ttl_seconds,funded_until,provider_expires_at,state)
+      VALUES($1,$2,$3,1,1,$4,$5,'boat','res-1','policy',3600,1,1,60,clock_timestamp()+interval '1 hour',clock_timestamp()+interval '50 minutes','active')`,
+      [leaseId, scope.workspaceId, scope.organizationId, fixture.userId, intentId]);
+    // An open credit reservation with its account, period and scope rows.
+    await pool.query("INSERT INTO managed_compute_credit_accounts(org_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+      [scope.organizationId, fixture.userId]);
+    const periodId = randomUUID(), reservationId = randomUUID();
+    await pool.query(`INSERT INTO managed_compute_credit_periods(id,org_id,user_id,starts_at,ends_at,funding_mode)
+      VALUES($1,$2,$3,now()-interval '1 day',now()+interval '30 days','business')`, [periodId, scope.organizationId, fixture.userId]);
+    await pool.query(`INSERT INTO managed_compute_reservation_scopes(id,org_id,user_id,workspace_id,generation,billing_epoch,policy_id,seconds_per_dollar)
+      VALUES($1,$2,$3,$4,1,1,'policy',3600)`, [reservationId, scope.organizationId, fixture.userId, scope.workspaceId]);
+    await pool.query(`INSERT INTO managed_compute_credit_reservations(id,period_id,org_id,user_id,workspace_id,generation,billing_epoch,policy_id,seconds_per_dollar,
+      meter_since,meter_through,covered_until,authorized_micro_usd,reserved_micro_usd)
+      VALUES($1,$2,$3,$4,$5,1,1,'policy',3600,now()-interval '1 hour',now(),now()+interval '2 hours',1000000,500000)`,
+      [reservationId, periodId, scope.organizationId, fixture.userId, scope.workspaceId]);
+
+    // A cached entry is bounded by the deadlines it loaded, so deadline
+    // extensions, credit metering and drift bookkeeping cannot keep a stopped
+    // workspace live: none of these commits notify.
+    expect(await notificationsDuring(() => pool.query(`UPDATE managed_compute_allocation_leases
+      SET funded_until=funded_until+interval '10 minutes',provider_expires_at=provider_expires_at+interval '10 minutes',updated_at=now() WHERE id=$1`, [leaseId]))).toEqual([]);
+    expect(await notificationsDuring(() => pool.query(`UPDATE managed_compute_credit_reservations
+      SET authorized_micro_usd=authorized_micro_usd+1000,reserved_micro_usd=reserved_micro_usd+1000,covered_until=covered_until+interval '1 hour',updated_at=now() WHERE id=$1`, [reservationId]))).toEqual([]);
+    expect(await notificationsDuring(() => pool.query(`UPDATE managed_compute_credit_reservations
+      SET actual_micro_usd=10,billable_seconds=60,meter_through=now(),debited_micro_usd=10,updated_at=now() WHERE id=$1`, [reservationId]))).toEqual([]);
+    expect(await notificationsDuring(() => pool.query(`UPDATE cloud_workspace_provider_bindings
+      SET next_drift_check_at=now()+interval '1 hour',last_observed_at=now(),observed_state='running',updated_at=now() WHERE workspace_id=$1`, [scope.workspaceId]))).toEqual([]);
+
+    // A shortened deadline, a state change or an authority-relevant column
+    // change still invalidates.
+    expect(await notificationsDuring(() => pool.query(
+      `UPDATE managed_compute_allocation_leases SET funded_until=funded_until-interval '10 minutes',
+       provider_expires_at=provider_expires_at-interval '10 minutes' WHERE id=$1`, [leaseId]))).toEqual([`w:${scope.workspaceId}`]);
+    expect(await notificationsDuring(() => pool.query(
+      "UPDATE managed_compute_credit_reservations SET covered_until=covered_until-interval '30 minutes' WHERE id=$1", [reservationId]))).toEqual([`w:${scope.workspaceId}`]);
+    expect(await notificationsDuring(() => pool.query(
+      "UPDATE managed_compute_credit_reservations SET state='final',final_reason='period_ended',reserved_micro_usd=0 WHERE id=$1", [reservationId]))).toEqual([`w:${scope.workspaceId}`]);
+    expect(await notificationsDuring(() => pool.query(
+      "UPDATE cloud_workspace_provider_bindings SET provider_resource_id='moved' WHERE workspace_id=$1", [scope.workspaceId]))).toEqual([`w:${scope.workspaceId}`]);
   });
 
   it("agrees with SQL on fixture traffic in shadow mode", async () => {

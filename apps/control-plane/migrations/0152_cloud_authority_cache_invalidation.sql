@@ -36,6 +36,36 @@ BEGIN
        AND (new_row ->> 'lease_expires_at')::timestamptz >= (old_row ->> 'lease_expires_at')::timestamptz THEN
       RETURN NULL;
     END IF;
+    -- Lease renewals only extend funded_until/provider_expires_at. A cached
+    -- entry is bounded by the deadline it loaded, so an extension can never
+    -- keep a stopped workspace live; a shortened deadline or any other
+    -- column change still notifies.
+    IF TG_TABLE_NAME = 'managed_compute_allocation_leases'
+       AND (new_row - ARRAY['funded_until', 'provider_expires_at', 'updated_at'])
+         = (old_row - ARRAY['funded_until', 'provider_expires_at', 'updated_at'])
+       AND (old_row ->> 'funded_until') IS NOT NULL
+       AND (new_row ->> 'funded_until')::timestamptz >= (old_row ->> 'funded_until')::timestamptz
+       AND (old_row ->> 'provider_expires_at') IS NOT NULL
+       AND (new_row ->> 'provider_expires_at')::timestamptz >= (old_row ->> 'provider_expires_at')::timestamptz THEN
+      RETURN NULL;
+    END IF;
+    -- Credit top-ups and usage metering move money columns and extend
+    -- covered_until, but the authority predicate reads only state and
+    -- covered_until, so these writes cannot revive authority either. A state
+    -- change or a shortened covered_until still notifies.
+    IF TG_TABLE_NAME = 'managed_compute_credit_reservations'
+       AND (new_row - ARRAY['covered_until', 'meter_through', 'authorized_micro_usd', 'reserved_micro_usd', 'actual_micro_usd', 'debited_micro_usd', 'exposure_micro_usd', 'billable_seconds', 'updated_at'])
+         = (old_row - ARRAY['covered_until', 'meter_through', 'authorized_micro_usd', 'reserved_micro_usd', 'actual_micro_usd', 'debited_micro_usd', 'exposure_micro_usd', 'billable_seconds', 'updated_at'])
+       AND (new_row ->> 'covered_until')::timestamptz >= (old_row ->> 'covered_until')::timestamptz THEN
+      RETURN NULL;
+    END IF;
+    -- Drift bookkeeping columns on provider bindings are not read by the
+    -- authority predicate, so sweep writes never invalidate.
+    IF TG_TABLE_NAME = 'cloud_workspace_provider_bindings'
+       AND (new_row - ARRAY['observed_state', 'observed_metadata', 'last_observed_at', 'next_drift_check_at', 'updated_at'])
+         = (old_row - ARRAY['observed_state', 'observed_metadata', 'last_observed_at', 'next_drift_check_at', 'updated_at']) THEN
+      RETURN NULL;
+    END IF;
   END IF;
   IF old_key IS NULL AND new_key IS NULL THEN
     PERFORM pg_notify('zeros_cloud_authority_cache', '*');
