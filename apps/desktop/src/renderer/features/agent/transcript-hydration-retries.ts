@@ -34,6 +34,11 @@ export class TranscriptHydrationRetries {
     this.schedule(chatId, read);
   }
 
+  /** True while this chat waits for a connected edge to retry its read. */
+  has(chatId: string): boolean {
+    return this.reads.has(chatId);
+  }
+
   delete(chatId: string): void {
     this.reads.get(chatId)?.stop();
     this.reads.delete(chatId);

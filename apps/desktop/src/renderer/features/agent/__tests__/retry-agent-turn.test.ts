@@ -4,6 +4,8 @@ import type { ChatThread } from "../../../state/store";
 import type { SessionsActions } from "../sessions-context";
 import type { ComposerAttachment } from "../composer-attachments";
 import { retryAgentTurn } from "../retry-agent-turn";
+import { BLANK } from "../sessions-store";
+import type { AgentSessionState } from "../use-agent-session";
 
 const { encode, transcript } = vi.hoisted(() => ({
   encode: vi.fn(),
@@ -36,19 +38,22 @@ const source: ChatThread = {
   updatedAt: 2,
 };
 
-function harness() {
+const output: AgentTextMessage = {
+  id: "a1", kind: "text", role: "agent", text: "Work completed so far", createdAt: 2,
+};
+
+function harness(initial: Partial<AgentSessionState> = {}) {
   const chats = new Map([[source.id, source]]);
-  let messages = [prompt];
+  let slot: AgentSessionState = {
+    ...BLANK, agentId: "codex", agentRole: "code", cwd: "/repo",
+    messages: [prompt], status: "ready", ...initial,
+  };
   let generation = 0;
   const sessions = {
     getSendGeneration: vi.fn(() => generation),
-    getSession: vi.fn((id: string) => ({
-      agentId: "codex",
-      agentRole: "code",
-      cwd: "/repo",
-      messages: id === source.id ? messages : [],
-      status: "ready",
-    })),
+    getSession: vi.fn((id: string): AgentSessionState => id === source.id ? slot : {
+      ...BLANK, agentId: "codex", agentRole: "code", cwd: slot.cwd, status: "ready",
+    }),
     getCloseActivity: vi.fn(() => ({ running: false, queuedCount: 0 })),
     prepareForSend: vi.fn<() => Promise<void> | null>(() => null),
     ensureSession: vi.fn(async () => {}),
@@ -67,8 +72,9 @@ function harness() {
       generation += 1;
     },
     advance: () => {
-      messages = [...messages, { ...prompt, id: "u2" }];
+      slot = { ...slot, messages: [...slot.messages, { ...prompt, id: "u2" }] };
     },
+    update: (patch: Partial<AgentSessionState>) => { slot = { ...slot, ...patch }; },
   };
 }
 
@@ -90,6 +96,64 @@ beforeEach(() => {
 });
 
 describe("explicit failed-turn recovery", () => {
+  describe.each([
+    { owner: "Local", folder: "/repo", offWindow: true },
+    { owner: "organization-local", folder: "/organization/repo", offWindow: true },
+    { owner: "cloud", folder: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", offWindow: false },
+  ])("$owner", ({ folder, offWindow }) => {
+    it.each([false, true])("retries the confirmed opening prompt, new chat: %s", async (newChat) => {
+      const h = harness({
+        cwd: folder, transcriptState: "resident",
+        messages: offWindow ? [output] : [prompt, output],
+        leadingPrompt: offWindow ? prompt : null,
+      });
+      h.chats.set(source.id, { ...source, folder });
+      await retryAgentTurn({ chatId: source.id, prompt, events: [output], newChat }, h.dependencies);
+      expect(h.sessions.sendPrompt).toHaveBeenCalledOnce();
+      const args = h.sessions.sendPrompt.mock.calls[0] as unknown[];
+      expect(args[0]).toBe(newChat ? h.dependencies.publishChat.mock.calls[0][0].id : source.id);
+      expect(args[1]).toContain(prompt.retryText);
+      expect(transcript).toHaveBeenCalledTimes(newChat ? 1 : 0);
+    });
+  });
+
+  it.each(["cold", "loading"] as const)("does not retry an off-window prompt from a %s transcript", async (transcriptState) => {
+    const h = harness({
+      messages: [output], leadingPrompt: prompt, transcriptState,
+      transcriptPresentation: { source: "cache" },
+    });
+    await retryAgentTurn({ chatId: source.id, prompt, events: [output], newChat: false }, h.dependencies);
+    expect(h.sessions.prepareForSend).not.toHaveBeenCalled();
+    expect(h.sessions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(["newer turn", "changed opening", "eviction", "cached presentation", "workspace change", "cancellation"] as const)(
+    "revalidates an off-window opening after attachment reads: %s",
+    async (change) => {
+      const h = harness({ messages: [output], leadingPrompt: prompt, transcriptState: "resident" });
+      let release!: () => void;
+      encode.mockReturnValueOnce(new Promise(resolve => {
+        release = () => resolve({ blocks: [], bubbleAttachments: [], skipped: [] });
+      }));
+      const retry = retryAgentTurn({ chatId: source.id, prompt, events: [output], newChat: false }, h.dependencies);
+      try {
+        expect(encode).toHaveBeenCalledOnce();
+        switch (change) {
+          case "newer turn": h.advance(); break;
+          case "changed opening": h.update({ leadingPrompt: { ...prompt, id: "u2" } }); break;
+          case "eviction": h.update({ transcriptState: "cold", messages: [], leadingPrompt: null }); break;
+          case "cached presentation": h.update({ transcriptState: "loading", transcriptPresentation: { source: "cache" } }); break;
+          case "workspace change": h.chats.set(source.id, { ...source, folder: "/another-repo" }); break;
+          case "cancellation": h.cancel(); break;
+        }
+      } finally {
+        release();
+        await retry;
+      }
+      expect(h.sessions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
   it("uses the same cloud wake identity for preparation and the queued retry", async () => {
     const h = harness();
     h.chats.set(source.id, { ...source, folder: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222" });
@@ -134,7 +198,7 @@ describe("explicit failed-turn recovery", () => {
       segments: [before, { type: "attachment", ...attachment }, after],
     };
     const h = harness();
-    h.sessions.getSession.mockImplementation(() => ({ agentId: "codex", agentRole: "code", cwd: "/repo", messages: [withAttachment], status: "ready" }));
+    h.sessions.getSession.mockImplementation(() => ({ ...BLANK, agentId: "codex", agentRole: "code", cwd: "/repo", messages: [withAttachment], status: "ready" }));
     const refreshed = { ...attachment, diskPath: newPath, size: 42 };
     encode.mockResolvedValue({ blocks: [{ type: "text", text: "current file reference" }], bubbleAttachments: [refreshed], skipped: [] });
     await retryAgentTurn({ chatId: "source", prompt: withAttachment, events: [], newChat: false }, h.dependencies);
@@ -148,7 +212,7 @@ describe("explicit failed-turn recovery", () => {
     const segmentedPrompt: AgentTextMessage = { ...prompt, segments: [{ type: "text", text: prompt.text }] };
     const h = harness();
     const messages = new Map<string, AgentTextMessage[]>([["source", [segmentedPrompt]]]);
-    h.sessions.getSession.mockImplementation((id: string) => ({ agentId: "codex", agentRole: "code", cwd: "/repo", messages: messages.get(id) ?? [], status: "ready" }));
+    h.sessions.getSession.mockImplementation((id: string) => ({ ...BLANK, agentId: "codex", agentRole: "code", cwd: "/repo", messages: messages.get(id) ?? [], status: "ready" }));
     encode.mockImplementation(async (attachments: ComposerAttachment[]) => ({
       blocks: attachments.map(a => ({ type: "text", text: a.text || a.name })),
       bubbleAttachments: attachments.map(a => ({ kind: a.kind, name: a.name, mimeType: a.mimeType, delivery: "reference", attachmentId: a.contextAttachmentId ?? a.id, diskPath: a.diskPath ?? `.context/local/attachments/${a.id}/transcript.txt` })),

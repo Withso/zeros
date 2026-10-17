@@ -92,7 +92,11 @@ export async function retryAgentTurn(
     const chat = deps.getChat(chatId);
     const session = deps.sessions.getSession(chatId);
     const activity = deps.sessions.getCloseActivity(chatId);
-    const lastPrompt = session && lastUserPrompt(session.messages);
+    if (!session || session.transcriptState !== "resident" || session.transcriptPresentation) return false;
+    // The opening of a long turn may sit outside the resident window. Only
+    // the engine-confirmed opening can authorize this explicit retry.
+    const lastPrompt = lastUserPrompt(session.messages) ??
+      (session.leadingPrompt?.queued ? undefined : session.leadingPrompt);
     return (
       deps.sessions.getSendGeneration(chatId) === sourceGeneration &&
       chat?.agentId === source.agentId &&

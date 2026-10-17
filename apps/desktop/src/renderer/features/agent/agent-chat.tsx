@@ -20,6 +20,7 @@ import { useCloudTranscriptLatency, useCloudTranscriptLoading } from "./use-clou
 import { useTranscriptHistoryStatus } from "./use-transcript-history-status";
 import { cloudHistoryFenceHasTranscript } from "../../platform/cloud-transcript-cache-contract";
 import { hasTranscriptPresentation } from "./transcript-retention";
+import { presentLeadingPrompt } from "./transcript-leading-prompt";
 import { startCloudSubmitSpan } from "../../state/cloud-workspace-latency";
 import React, {
   useCallback,
@@ -253,7 +254,7 @@ import {
   refreshAgents,
 } from "./agents-cache";
 import { invalidateCloudAgentRegistry, useWorkspaceAgents } from "./workspace-agent-registry";
-import { isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings, requestUserSettingsSection } from "../settings/settings-navigation";
@@ -301,6 +302,10 @@ import {
   windowOlderMessages as ipcWindowOlderMessages,
   truncateMessagesFrom as ipcTruncateMessagesFrom,
 } from "./agent-history-client";
+
+/** How long an empty chat waits for its folder's transcript list before it
+ * shows the workspace rows instead of nothing. */
+const TRANSCRIPT_LIST_GRACE_MS = 400;
 
 // Error classification is handled by sessions-provider's AgentFailure
 // pipeline; the UI now branches on session.status directly (warming /
@@ -403,9 +408,14 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
-  const provisionalTranscript = (isCloudWorkspace(chatThread?.folder ?? session.cwd) || !!parseCloudScopedId(chatId)) &&
-    session.transcriptState === "loading" && !!session.transcriptPresentation;
+  // A cached window (cloud restore cache or the Local boot cache) paints while
+  // the authoritative read is pending. It is read-only presentation until then.
+  const provisionalTranscript = session.transcriptState === "loading" && !!session.transcriptPresentation;
   const transcriptReadOnly = readOnly || provisionalTranscript;
+  // A Local chat known to be empty shows its empty state while the engine
+  // confirms it (e.g. right after a restart), never a blank pane.
+  const emptyStateReady = session.transcriptState === "resident" ||
+    provisionalTranscript && session.transcriptPresentation?.empty === true && session.messages.length === 0;
   const cloudNativeCapabilities=session.boundary?.cloudExecution?.capabilities??session.session?.nativeCapabilities;
   const goalsAvailable=!isCloudWorkspace(chatThread?.folder)||cloudNativeCapabilities?.goals===true;
   const browserConfirmation = useBrowserConfirmation(chatId);
@@ -1958,7 +1968,7 @@ export function AgentChat({
   // calls warmChatTranscriptSummaries on pointer/focus intent, so it can stay
   // locally stateful and the dialog still opens from the exact-key cache.
   const transcriptRowLive =
-    session.transcriptState === "resident" &&
+    emptyStateReady &&
     !transcriptCatchingUp &&
     session.messages.length === 0 &&
     !session.error &&
@@ -1982,13 +1992,25 @@ export function AgentChat({
   const warmTranscriptPicker = useCallback(() => {
     warmChatTranscriptSummaries(chatThread?.folder, chatId);
   }, [chatThread?.folder, chatId]);
+  // A cold list normally lands in one local round trip. If the engine is busy
+  // or still starting, stop waiting after a short grace and show the workspace
+  // rows; the transcript row takes their place when the list lands. Keyed by
+  // chat, and the timer runs only for the visible empty chat.
+  const [transcriptWaitExpiredFor, setTranscriptWaitExpiredFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!chatId || !interactive || !transcriptRowLive || transcriptsLoaded) return;
+    const timer = window.setTimeout(() => setTranscriptWaitExpiredFor(chatId), TRANSCRIPT_LIST_GRACE_MS);
+    return () => window.clearTimeout(timer);
+  }, [chatId, interactive, transcriptRowLive, transcriptsLoaded]);
   // The provenance block's shape hangs on this ONE question, and `null` for
   // "not known yet" is the load-bearing third answer — see
   // provenanceBlockShape. Derived from the same array the row renders, so the
   // rows can never step aside for a row that then draws nothing.
   const hasTranscripts = transcriptsLoaded
     ? transcriptSummaries.length > 0
-    : null;
+    : transcriptWaitExpiredFor === chatId
+      ? false
+      : null;
 
   // Source chats whose transcript read is in flight. A pill in here is still
   // clickable — the click cancels (see cancelTranscriptAttach).
@@ -2922,15 +2944,22 @@ export function AgentChat({
   // can still hydrate such rows; drop them before grouping so they neither
   // render as an unknown-kind row nor form an empty leading turn.
   const stableTurnsRef = useRef<ReturnType<typeof groupMessagesIntoTurns>>([]);
+  // A Local window can begin inside one long turn; its opening prompt travels
+  // beside the window (transcript-leading-prompt.ts) so the turn keeps its
+  // prompt bubble, checkpoint and footer.
+  const leadingPrompt = session.leadingPrompt ?? null;
   const turns = useMemo(
     () =>
       stabilizeTurns(
         stableTurnsRef.current,
         groupMessagesIntoTurns(
-          visibleMessages.filter((m) => (m.kind as string) !== "mode_switch"),
+          presentLeadingPrompt(
+            visibleMessages.filter((m) => (m.kind as string) !== "mode_switch"),
+            leadingPrompt,
+          ),
         ),
       ),
-    [visibleMessages],
+    [visibleMessages, leadingPrompt],
   );
   const authenticationRecoveredAt = useMemo(() => latestAuthenticationRecoveryTurn(turns), [turns]);
   // Only a committed render becomes the baseline. Mutating this ref inside
@@ -4823,7 +4852,7 @@ export function AgentChat({
               )}
             {!readOnly &&
               !transcriptCatchingUp &&
-              session.transcriptState === "resident" &&
+              emptyStateReady &&
               session.messages.length === 0 &&
               !session.error && (
                 <ChatProvenance

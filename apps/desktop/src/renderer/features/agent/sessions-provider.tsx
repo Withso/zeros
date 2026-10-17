@@ -91,6 +91,7 @@ import { deriveMcpSecretEnv } from "./mcp-secrets";
 import { deriveEnvVaultEnv } from "./env-vault";
 import {
   type AgentMessage,
+  type AgentSessionState,
   type AgentTextMessage,
   type AgentUsage,
 } from "./use-agent-session";
@@ -102,7 +103,6 @@ import {
   useSessionsStore,
 } from "./sessions-store";
 import {
-  appendMessages as persistAppendMessages,
   clearChat as persistClearChat,
   windowMessages as persistWindowMessages,
   windowMessagesSnapshot as persistMessageWindow,
@@ -160,7 +160,7 @@ import { countPromptAttachments } from "./attachment-reference";
 import { ActionsCtx, type SessionsActions, type CloudQueuedPrompt } from "./sessions-context";
 import { registerAttachmentSourceOwner } from "./attachment-source-retention";
 import { questionRequestIsBrowserApproval } from "./pending-question-tools";
-import { nativeInvoke, nativeListen } from "../../platform/runtime";
+import { nativeInvoke, nativeListen, onNativeBeforeQuit } from "../../platform/runtime";
 import {
   admissionRouteWithoutFlight,
   admissionCancellationAction,
@@ -213,9 +213,22 @@ import {
 } from "../../platform/observability/analytics/agent-events";
 import {
   messageSnapshotsEqual,
-  seedPersistedMessageRefs,
-  updatePersistedMessageRefs,
+  retainMessageReferences,
 } from "./message-persistence-tracker";
+import { localTranscriptCache, isLocalTranscriptChat } from "../../state/local-transcript-cache";
+import {
+  forgetFreshLocalChat,
+  presentCachedLocalTranscript,
+  presentKnownEmptyLocalTranscript,
+  rememberLocalTranscript,
+  takeFreshLocalChat,
+} from "./local-transcript-presentation";
+import { forgetEmptyLocalChat, rememberEmptyLocalChat } from "./fresh-local-chats";
+import {
+  flushPersistedTranscriptSummaries,
+  forgetLocalChatPrompt,
+  noteLocalChatPrompt,
+} from "./use-chat-transcript-summaries";
 import {
   canApplyTranscriptRead,
   invalidateTranscriptRequest,
@@ -557,12 +570,6 @@ export function AgentSessionsProvider({
   // Warm retained chats reconcile against durable history in the background.
   // Hover intent followed by selection must share that same window read.
   const reconcileInFlightRef = useRef(new Map<string, Promise<void>>());
-  // Message-object identity bookkeeping must be bounded by the same resident
-  // transcript window as the store. Keeping this at provider scope also lets a
-  // disk hydrate seed refs BEFORE its synchronous Zustand publication.
-  const persistedMessageRefsRef = useRef(
-    new Map<string, Map<string, AgentMessage>>(),
-  );
   const nativeTranscriptSnapshotsRef = useRef(new NativeTranscriptSnapshots());
   // Exact chat ids owned by the committed 12-view renderer deck. This is
   // intentionally published by a passive effect in ChatDeck, never by
@@ -576,7 +583,6 @@ export function AgentSessionsProvider({
     store.applyCloudHistoryRestoreHead(chatId, fence, !replacement && cloudHasNativeTranscript(bridge, chatId, before.executionId), origin !== "disk");
     const after = getStore().sessions[chatId];
     if (after?.messages !== before.messages) {
-      persistedMessageRefsRef.current.delete(chatId);
       nativeTranscriptSnapshotsRef.current.delete(chatId);
     }
     if (after?.transcriptState === "loading") pendingHydratesRef.current.add(chatId);
@@ -1535,7 +1541,6 @@ export function AgentSessionsProvider({
         pendingHydratesRef.current.delete(chatId);
         invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
         invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
-        persistedMessageRefsRef.current.delete(chatId);
         nativeTranscriptSnapshotsRef.current.delete(chatId);
         store.detachSession(chatId);
         continue;
@@ -1560,7 +1565,6 @@ export function AgentSessionsProvider({
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
-      persistedMessageRefsRef.current.delete(chatId);
       nativeTranscriptSnapshotsRef.current.delete(chatId);
 
       if (
@@ -5392,7 +5396,6 @@ export function AgentSessionsProvider({
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
-      persistedMessageRefsRef.current.delete(chatId);
       nativeTranscriptSnapshotsRef.current.delete(chatId);
       sendQueueRef.current.delete(chatId);
       queueHeldRef.current.delete(chatId);
@@ -5403,6 +5406,9 @@ export function AgentSessionsProvider({
       promptActivityRef.current.delete(chatId);
       cancelGenerationsRef.current.delete(chatId);
       getStore().removeSession(chatId);
+      // A reset transcript must not repaint from the Local cache.
+      localTranscriptCache.forget(chatId);
+      forgetFreshLocalChat(chatId);
       // Drop on-disk transcript too so a "reset" really starts clean.
       void persistClearChat(chatId).catch((err) => {
         console.warn("[Zeros agent-history] reset clear failed:", err);
@@ -5523,15 +5529,12 @@ export function AgentSessionsProvider({
             if (native && head) nativeTranscriptSnapshotsRef.current.confirm(chatId, getStore().sessions[chatId], head, page.isCurrent);
             return;
           }
-          let refs = persistedMessageRefsRef.current.get(chatId);
-          if (!refs) {
-            refs = new Map();
-            persistedMessageRefsRef.current.set(chatId, refs);
-          }
-          seedPersistedMessageRefs(refs, next);
           getStore().setSession(chatId, {
             ...fresh,
             messages: next,
+            // The window owns the front only when it replaced it; scrolled-up
+            // history above the anchor keeps its own derived opening.
+            leadingPrompt: !cloud && next[0]?.id === windowed[0]?.id ? page.leadingPrompt ?? null : fresh.leadingPrompt,
             transcriptState: "resident",
             transcriptPresentation: presentation,
             transcriptDirty: false,
@@ -5578,6 +5581,14 @@ export function AgentSessionsProvider({
           void reconcileChatMessages(chatId);
           return;
         }
+        // Local Personal or organization-local: never a cloud-scoped id or a
+        // slot bound to a cloud workspace.
+        const localChat = !parseCloudScopedId(chatId) && !isCloudWorkspace(slot?.cwd);
+        // A Local chat this renderer just created has no history to read.
+        if (!slot && localChat && takeFreshLocalChat(chatId)) {
+          getStore().setSession(chatId, { ...BLANK, transcriptState: "resident" });
+          return;
+        }
         // Publish an explicit cold-read state before any await. `messages: []`
         // alone means "genuinely new chat" elsewhere in the UI; loading must
         // never flash provenance/attach affordances for an evicted conversation.
@@ -5590,6 +5601,23 @@ export function AgentSessionsProvider({
           getStore().setSession(chatId, {
             ...BLANK,
             transcriptState: "loading",
+          });
+        }
+        // Local: paint the last confirmed window (memory now, disk shortly)
+        // while the engine — possibly still starting — answers. Provisional;
+        // the authoritative publish below replaces it.
+        if (localChat) {
+          const remembered = localTranscriptCache.peek(chatId);
+          if (remembered) presentCachedLocalTranscript(chatId, remembered);
+          // Known empty (e.g. after a restart): paint the empty state, no
+          // cached window to look for.
+          else if (!presentKnownEmptyLocalTranscript(chatId)) void localTranscriptCache.read(chatId).then((cached) => {
+            // At launch the engine is not connected yet: this hydrate parks,
+            // releasing its request, before the disk read returns. A parked
+            // chat still owns its presentation; eviction and reset unpark it.
+            if (cached && (isCurrentTranscriptRequest(hydrateInFlightRef.current, chatId, request) ||
+                pendingHydratesRef.current.has(chatId)))
+              presentCachedLocalTranscript(chatId, cached);
           });
         }
         // The slot is cold, so this read DECIDES what the user sees. An empty
@@ -5680,20 +5708,19 @@ export function AgentSessionsProvider({
           }
           if (fresh.transcriptState !== "loading") return;
           const changedWhileLoading = fresh.transcriptDirty;
-          let refs = persistedMessageRefsRef.current.get(chatId);
-          if (!refs) {
-            refs = new Map();
-            persistedMessageRefsRef.current.set(chatId, refs);
-          }
           const next = cloudComputerV2 && isCloudWorkspace(fresh.cwd)
             ? [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))]
             : deduped;
-          const confirmed = messageSnapshotsEqual(fresh.messages, next) ? fresh.messages : next;
-          seedPersistedMessageRefs(refs, confirmed);
+          // A Local cached paint keeps every row the engine confirms unchanged,
+          // so validation re-renders only what actually differs.
+          const confirmed = localChat && fresh.transcriptPresentation
+            ? retainMessageReferences(fresh.messages, next)
+            : messageSnapshotsEqual(fresh.messages, next) ? fresh.messages : next;
           getStore().setSession(chatId, {
             ...BLANK,
             ...fresh,
             messages: confirmed,
+            leadingPrompt: localChat ? page.leadingPrompt ?? null : undefined,
             transcriptState: "resident",
             transcriptDirty: false,
             transcriptPresentation: page.source === "control-plane" && page.restoreHead && cloudHistoryFenceHasTranscript(page.restoreHead)
@@ -6436,7 +6463,6 @@ export function AgentSessionsProvider({
     reconcileInFlightRef.current.clear();
     capabilityRefreshInFlightRef.current.clear();
     loadFlightAdoptOnlyRef.current.clear();
-    persistedMessageRefsRef.current.clear();
     nativeTranscriptSnapshotsRef.current.clear();
     authPromptsRef.current.clear();
     // Note: we deliberately do NOT clear the disk transcript here.
@@ -6461,7 +6487,6 @@ export function AgentSessionsProvider({
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
-      persistedMessageRefsRef.current.delete(chatId);
       nativeTranscriptSnapshotsRef.current.delete(chatId);
       // Release the dedupe owner immediately. Its promise still settles behind
       // identity checks, while a fast History reopen may start a fresh bind.
@@ -6597,68 +6622,130 @@ export function AgentSessionsProvider({
     ],
   );
 
-  // ── Persistence subscription ────────────────────────────
+  // ── Transcript cache subscription ───────────────────────
   //
-  // Fires after every store mutation (which is rAF-coalesced via the
-  // bridge effect above). Diffs each chat's message list against the
-  // last-persisted reference map and writes only the changed entries.
-  // Streaming text chunks share a stable msgId, so the main process
-  // upserts in place — no row explosion.
-  //
-  // Reference equality is the dirty marker: the store's reducers return
-  // identical state when nothing changed, so unchanged chats short-circuit
-  // before any diffing.
+  // The engine persists transcripts on emit, so the renderer never writes
+  // them. This subscription only keeps the Local transcript cache current:
+  //   • a resident window that leaves memory (deck eviction) is remembered
+  //     immediately from its last resident state;
+  //   • a settled resident window (turn finished, edit, reconcile) is marked
+  //     and remembered once on an idle tick — never per streamed chunk.
+  // It also releases native confirmation receipts with their transcript.
   useEffect(() => {
     let prevSessions = useSessionsStore.getState().sessions;
+    let prevPendingTurns = useSessionsStore.getState().pendingLocalTurns;
+    const settled = new Set<string>();
+    let cancelCapture: (() => void) | null = null;
+    const folderFor = (chatId: string, slot: AgentSessionState) =>
+      slot.cwd ??
+      useWorkspaceStore.getState().chats.find((chat) => chat.id === chatId)
+        ?.folder;
+    const capture = () => {
+      cancelCapture = null;
+      const sessions = useSessionsStore.getState().sessions;
+      for (const chatId of settled) {
+        const slot = sessions[chatId];
+        if (slot?.transcriptState === "resident" && slot.status !== "streaming") {
+          rememberLocalTranscript(chatId, slot, folderFor(chatId, slot));
+        }
+      }
+      settled.clear();
+    };
 
     const unsubscribe = useSessionsStore.subscribe((state) => {
-      if (state.sessions === prevSessions) return;
-      const nextSessions = state.sessions;
-
-      for (const [chatId, slot] of Object.entries(nextSessions)) {
-        if (slot === prevSessions[chatId]) continue; // unchanged
-        if (slot.transcriptState !== "resident") {
-          // Eviction must release the second, less-visible owner of historical
-          // message objects too. The next disk hydrate seeds its exact refs.
-          persistedMessageRefsRef.current.delete(chatId);
-          nativeTranscriptSnapshotsRef.current.delete(chatId);
-          continue;
-        }
-        let chatMap = persistedMessageRefsRef.current.get(chatId);
-        if (!chatMap) {
-          chatMap = new Map();
-          persistedMessageRefsRef.current.set(chatId, chatMap);
-        }
-        const toWrite = updatePersistedMessageRefs(chatMap, slot.messages);
-        if (toWrite.length > 0) {
-          void persistAppendMessages(chatId, toWrite).catch((err) => {
-            console.warn(
-              `[Zeros agent-history] append failed for ${chatId}:`,
-              err,
-            );
+      if (state.pendingLocalTurns !== prevPendingTurns) {
+        // A prompt this renderer just committed shows in its folder's
+        // "Add chat transcripts" row at once, before the engine reports it.
+        for (const [chatId, turnId] of Object.entries(state.pendingLocalTurns)) {
+          if (prevPendingTurns[chatId] === turnId) continue;
+          const slot = state.sessions[chatId];
+          const messages = slot?.messages ?? [];
+          let prompt: AgentMessage | undefined;
+          for (let index = messages.length - 1; index >= 0 && !prompt; index -= 1) {
+            if (messages[index].id === turnId) prompt = messages[index];
+          }
+          if (!slot || prompt?.kind !== "text" || prompt.role !== "user") continue;
+          const chat = useWorkspaceStore.getState().chats.find((candidate) => candidate.id === chatId);
+          noteLocalChatPrompt({
+            chatId,
+            folder: chat?.folder ?? slot.cwd,
+            text: prompt.text,
+            title: chat?.title ?? null,
+            agentId: chat?.agentId ?? slot.agentId,
+            agentName: chat?.agentName ?? slot.agentName,
+            at: prompt.createdAt,
           });
         }
-        // The agent_chat_meta sidecar write was removed: it was
-        // write-only (getChatMeta had no readers), and the agentId/sessionId
-        // that drive resume already live on the chat ROW — conversation/chat-view
-        // dispatches UPDATE_CHAT_SETTINGS on a new sessionId, which the chats
-        // persistence mirrors via dbUpsertChat.
+        prevPendingTurns = state.pendingLocalTurns;
       }
-
-      // Drop entries for chats that disappeared (reset/close).
-      // Lets the next ensureSession/hydrate write a full transcript again
-      // instead of relying on stale diff state.
-      for (const chatId of persistedMessageRefsRef.current.keys()) {
-        if (!(chatId in nextSessions)) {
-          persistedMessageRefsRef.current.delete(chatId);
+      if (state.sessions === prevSessions) return;
+      const nextSessions = state.sessions;
+      for (const chatId in nextSessions) {
+        const slot = nextSessions[chatId];
+        const before = prevSessions[chatId];
+        if (slot === before) continue; // unchanged
+        // Any sign of history ends the known-empty fast path at once.
+        if (slot.messages.length > 0 || slot.hasTranscript) forgetEmptyLocalChat(chatId);
+        if (slot.transcriptState !== "resident") {
+          // The next disk hydrate confirms native rows afresh.
           nativeTranscriptSnapshotsRef.current.delete(chatId);
+          if (before?.transcriptState === "resident") {
+            rememberLocalTranscript(chatId, before, folderFor(chatId, before));
+          }
+          continue;
+        }
+        if (slot.status === "streaming" || !isLocalTranscriptChat(chatId, slot.cwd)) continue;
+        if (before?.transcriptState === "resident" && before.status === slot.status &&
+            before.messages === slot.messages && before.leadingPrompt === slot.leadingPrompt) continue;
+        if (slot.messages.length === 0) {
+          // Invalidation cannot wait for an idle write: the chat may be
+          // evicted or the app closed before capture runs.
+          rememberLocalTranscript(chatId, slot, folderFor(chatId, slot));
+          // Engine-confirmed empty: the next launch paints it without a read.
+          if (!slot.hasTranscript && !slot.transcriptPresentation) {
+            rememberEmptyLocalChat(chatId, folderFor(chatId, slot));
+          }
+          settled.delete(chatId);
+        } else {
+          settled.add(chatId);
         }
       }
-
+      for (const chatId in prevSessions) {
+        if (!(chatId in nextSessions)) {
+          nativeTranscriptSnapshotsRef.current.delete(chatId);
+          settled.delete(chatId);
+          // Closed, reset or deleted: the engine's list is the only truth now.
+          forgetLocalChatPrompt(chatId);
+        }
+      }
       prevSessions = nextSessions;
+      if (settled.size > 0 && !cancelCapture) {
+        const timer = window.setTimeout(capture, 750);
+        cancelCapture = () => window.clearTimeout(timer);
+      }
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      cancelCapture?.();
+    };
+  }, []);
+
+  // Write pending cache copies before the window goes away.
+  useEffect(() => {
+    const flush = () => {
+      flushPersistedTranscriptSummaries();
+      void localTranscriptCache.flush();
+    };
+    const stopQuit = onNativeBeforeQuit(() => {
+      flushPersistedTranscriptSummaries();
+      return localTranscriptCache.flush();
+    });
+    window.addEventListener("pagehide", flush);
+    return () => {
+      stopQuit();
+      window.removeEventListener("pagehide", flush);
+    };
   }, []);
 
   // ── Analytics: agent failures ───────────────────────────
