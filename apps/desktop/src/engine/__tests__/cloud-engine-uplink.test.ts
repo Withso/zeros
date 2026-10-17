@@ -514,6 +514,28 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("acks an unsupported credential kind as failed without applying or recording it", async () => {
+    const calls: number[] = [];
+    const { client, sockets } = fakeClient({
+      onCredentialRevision: async ({ revision }) => { calls.push(revision); return { result: "applied" as const }; },
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "repository", revision: 5 } });
+    await flush();
+    expect(calls).toEqual([]); // the handler never sees a kind the engine does not consume
+    expect(sockets[0]!.ofType("cred.ack")).toEqual([
+      expect.objectContaining({ d: { kind: "repository", revision: 5, result: "failed", code: "cred_kind_unsupported" } }),
+    ]);
+    // Not recorded as applied: a re-push is answered again, never deduped silently.
+    sockets[0]!.frame({ t: "cred.revision", s: 2, d: { kind: "repository", revision: 5 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(2);
+    expect(calls).toEqual([]);
+    client.stop();
+  });
+
   it("closes 4400 on a malformed cred.revision", async () => {
     const { client, sockets } = fakeClient({ onCredentialRevision: async () => ({ result: "applied" }) });
     client.start();

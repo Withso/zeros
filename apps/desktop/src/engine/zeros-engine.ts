@@ -3683,7 +3683,8 @@ export class ZerosEngine {
       // credential-controls exchange the 500 ms poll runs; the poll itself
       // stays as the fallback (see controlsPollIntervalMs at the boot).
       onCredentialRevision: async revision => {
-        if (revision.kind !== "agent-controls") return { result: "applied" as const }; // nothing consumes repository pushes yet
+        // Only agent-controls reaches here: the uplink acks any other kind
+        // failed/cred_kind_unsupported before calling this handler.
         const boot = this.cloudAgentBoot;
         if (!boot) return { result: "applied" as const }; // pre-boot: the activation exchange converges
         try {

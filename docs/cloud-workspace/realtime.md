@@ -145,7 +145,12 @@ authority supplies keys, epochs and engine tokens
   `zeros_cloud_agent_credential_revision`. The notification is only a hint:
   the engine's exchange re-reads authority. `cred.ack` (`applied`/`failed`)
   arrives over the reliable channel; a lost notification while the listener
-  was down is repaired at the next gate open.
+  was down is repaired at the next gate open. Only `agent-controls` has a
+  revision source today: no `repository` revision exists on the CP, so the
+  CP never pushes it and the poll path still covers repository controls.
+  The engine acks any `repository` push `failed`/`cred_kind_unsupported`
+  without recording it, so adding the kind later is an explicit signal,
+  never a silent swallow.
 - **Lease.** The HTTP heartbeat still owns the engine lease in this release;
   the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
 

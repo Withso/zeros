@@ -204,6 +204,12 @@ export type CloudEngineUplinkOptions = {
    * credential exchange). Pushes coalesce to the latest revision per kind
    * while one is in flight; the result is reported as `cred.ack`. */
   onCredentialRevision?: (revision: EngineUplinkCredentialRevision) => Promise<EngineUplinkCredentialAck>;
+  /** The credential kinds the engine consumes. A push of any other kind is
+   * acked `failed`/`cred_kind_unsupported` without calling the handler and
+   * without recording it applied, so a future `repository` push is an
+   * explicit signal, never silently swallowed. Defaults to
+   * `["agent-controls"]`. */
+  credentialKinds?: readonly EngineUplinkCredentialRevision["kind"][];
   /** 4409: re-verify registration authority before the redial (S2 rule 4). */
   onReverifyAuthority?: () => void;
   /** Terminal close: the client parks and never redials (HTTP stays up). */
@@ -343,6 +349,11 @@ export class CloudEngineUplinkClient {
   pushCredentialRevision(revision: EngineUplinkCredentialRevision): void {
     const handler = this.options.onCredentialRevision;
     if (!handler) return; // nothing consumes pushes yet; the poll keeps working
+    if (!(this.options.credentialKinds ?? ["agent-controls"]).includes(revision.kind)) {
+      this.sendReliable("cred.ack",
+        { kind: revision.kind, revision: revision.revision, result: "failed", code: "cred_kind_unsupported" });
+      return;
+    }
     if (revision.revision <= (this.credApplied.get(revision.kind) ?? 0)) {
       this.sendReliable("cred.ack", { kind: revision.kind, revision: revision.revision, result: "applied" });
       return;
