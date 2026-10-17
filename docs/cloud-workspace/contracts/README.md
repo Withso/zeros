@@ -8,7 +8,7 @@ tests and migrations remain authoritative once they exist.
 | --- | --- | --- | --- | --- | --- |
 | S1 | [Capabilities and revocation](s1-capabilities.md) | `zeros-cap` 1.0.0 | FROZEN | [JSON Schema: header and claims](s1-capabilities.md#draft-schema-capability-header-and-claims) | Tracks A, B, C |
 | S2 | [VM uplink protocol](s2-uplink.md) | `zeros-uplink` 1.1.0 | FROZEN | [JSON Schema: uplink text frames](s2-uplink.md#draft-schema-uplink-text-frames) | Tracks C, D, E |
-| S3 | [Client contract v1](s3-client-contract.md) | `zeros-client` 1.2.0 | FROZEN | [OpenAPI 3.1: REST](s3-client-contract.md#draft-schema-rest-api-openapi-31), [JSON Schema: device stream frames](s3-client-contract.md#draft-schema-device-stream-frames), [JSON Schema: runtime auth frames](s3-client-contract.md#draft-schema-runtime-auth-frames) | Tracks C, F1, F2 |
+| S3 | [Client contract v1](s3-client-contract.md) | `zeros-client` 1.2.1 | FROZEN | [OpenAPI 3.1: REST](s3-client-contract.md#draft-schema-rest-api-openapi-31), [JSON Schema: device stream frames](s3-client-contract.md#draft-schema-device-stream-frames), [JSON Schema: runtime auth frames](s3-client-contract.md#draft-schema-runtime-auth-frames) | Tracks C, F1, F2 |
 
 Until the Zod schemas replace them, each machine-readable sketch lives in a fenced block inside the
 contract that owns it, under a "Draft schema" heading and directly after a

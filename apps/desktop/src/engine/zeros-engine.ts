@@ -203,7 +203,15 @@ import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-actio
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { CloudEngineUplinkClient, sanitizeCredAckCode, type EngineUplinkReadiness } from "./cloud-engine-uplink";
-import { EngineCapabilityAuth, fileCapabilityAuthStore, jwksFetcher } from "./cloud-capability-auth";
+import {
+  EngineCapabilityAuth,
+  capabilitySessionClose,
+  fileCapabilityAuthStore,
+  jwksFetcher,
+  type CapabilityActorAdmission,
+  type CapabilityRoute,
+  type EngineClientAuth,
+} from "./cloud-capability-auth";
 import { CloudEventRuntime } from "./cloud-event-runtime";
 import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome, type CloudAgentHistoryRestoreMetadata,
@@ -322,6 +330,7 @@ import {
   CloudClientAuthorityTransientError,
   consumeCloudRuntimeEnvironment,
   type CloudCheckpointDirective,
+  type CloudRuntimeClientAdmission,
   type CloudRuntimeConfig,
 } from "./cloud-runtime-registration";
 import {
@@ -2212,6 +2221,8 @@ export class ZerosEngine {
               },
               verifyToken: (token: string) => this.verifyCloudActorClient(token),
               renewToken: (token: string) => this.verifyCloudActorClient(token, true),
+              // S3 Part 3 direct route; null until an advertised uplink starts the verifier.
+              capabilityAuth: () => this.cloudCapabilityAuth,
               verifyServiceAccess: (token: string) => this.cloudRuntimeCheckpointQuiescing || this.cloudLegacyResidentRequiresFreshView
                 ? Promise.resolve(null) : this.cloudRuntimeRegistration!.verifyServiceAccess(token),
               resolveAgentPreviewTarget: (target) => this.agents.resolveNativePreviewTarget(target),
@@ -3719,6 +3730,8 @@ export class ZerosEngine {
       store: fileCapabilityAuthStore(path.join(engineRuntimeDir(this.root), "cloud-capability-auth.json")),
       fetchKeys: jwksFetcher(advertised.controlPlaneOrigin),
       requestEngineCapability: () => registration.requestEngineCapability(),
+      admitActor: (client, route) => this.admitCloudCapabilityActor(client, route),
+      onSessionsClosed: closures => this.cloud?.closeCapabilitySessions(closures.map(capabilitySessionClose)),
     });
     this.cloudCapabilityAuth = capabilityAuth;
     const uplink = new CloudEngineUplinkClient({
@@ -4935,7 +4948,13 @@ export class ZerosEngine {
     } catch { return null; }
   }
 
-  private async verifyCloudActorClient(token: string, renew = false) {
+  /** Redeems a client's credential behind this engine's admission gates: a
+   * grant token (renewed with `renew`), or the control plane's admission of
+   * a verified capability's actor. */
+  private async verifyCloudActorClient(
+    credential: string | ((registration: CloudRuntimeRegistration) => Promise<CloudRuntimeClientAdmission | null>),
+    renew = false,
+  ) {
     if (this.cloudLegacyResidentRequiresFreshView) return null;
     const registration = this.cloudRuntimeRegistration;
     if (!registration) return null;
@@ -4948,7 +4967,8 @@ export class ZerosEngine {
       if (registration !== this.cloudRuntimeRegistration || boot !== this.cloudAgentBoot || !boot.active ||
           !this.cloudLocalEvents || this.cloudRuntimeAuthorityStopping) return null;
     }
-    const admission = await registration.verifyClientAdmission(token, renew);
+    const admission = typeof credential === "string"
+      ? await registration.verifyClientAdmission(credential, renew) : await credential(registration);
     if (!admission || registration !== this.cloudRuntimeRegistration) return null;
     if (registration.localCommandsNegotiated()) {
       if (!boot || boot !== this.cloudAgentBoot || !boot.active || this.cloudRuntimeAuthorityStopping) return null;
@@ -4963,6 +4983,29 @@ export class ZerosEngine {
           this.cloudRuntimeAuthorityStopping) return null;
     }
     return admission;
+  }
+
+  /** S3 Part 3 direct route: the control plane admits the actor of a
+   * capability this engine verified, behind the same gates as a redeemed
+   * grant. Only the control plane refuses (null, a 4403 close); anything
+   * this engine cannot answer yet is transient, so the client retries. */
+  private async admitCloudCapabilityActor(client: EngineClientAuth, route: CapabilityRoute): Promise<CapabilityActorAdmission | null> {
+    const outcome: { admitted?: CapabilityActorAdmission; refused?: true } = {};
+    let admission: CloudRuntimeClientAdmission | null;
+    try {
+      admission = await this.verifyCloudActorClient(async registration => {
+        const admitted = await registration.admitCapabilityClient(client, route);
+        if (admitted) outcome.admitted = admitted;
+        else outcome.refused = true;
+        return admitted?.admission ?? null;
+      });
+    } catch (error) {
+      if (isTransientCloudAgentAuthorityError(error)) throw new CloudClientAuthorityTransientError();
+      throw error;
+    }
+    if (admission && outcome.admitted) return outcome.admitted;
+    if (outcome.refused) return null;
+    throw new CloudClientAuthorityTransientError();
   }
 
   private async handleCloudCommandOperation(op: string, params: Record<string, unknown>,client:TransportClient): Promise<unknown> {

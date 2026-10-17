@@ -5,7 +5,7 @@ import { requestCloudGithubWrite, type CloudGithubWriteRequest } from "./cloud-g
 import { requestCloudGithubRead } from "./cloud-github-read-client";
 import type { CloudCommandEngineRequest } from "@zeros/protocol/cloud-commands";
 import { CloudAgentBootScopeSchema, CloudAgentHistoryRecoveryResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
-import { CloudActorAdmissionResponseSchema, type CloudActorContext } from "@zeros/protocol/cloud-actors";
+import { CloudActorAdmissionResponseSchema, CloudCapabilityActorAdmissionResponseSchema, type CloudActorContext } from "@zeros/protocol/cloud-actors";
 import type { CloudEventEngineRequest } from "@zeros/protocol/cloud-events";
 import type { CloudActionEngineRequest } from "@zeros/protocol/cloud-actions";
 import type {CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
@@ -33,6 +33,8 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
 /** CLOUD_CAPABILITY_ENGINE_PATH in the control plane's capability-routes.ts. */
 const ENGINE_CAPABILITY_PATH = "/internal/v2/cloud-workspaces/engine/capability";
+/** CLOUD_CAPABILITY_ACTOR_ADMISSION_PATH in the control plane's actor-sessions.ts. */
+const CAPABILITY_ADMISSION_PATH = "/internal/v2/cloud-workspaces/engine/capability-admission";
 const CHECKPOINT_HINT_PATH = "/internal/v1/cloud-workspaces/engine/checkpoint-hint";
 const CHECKPOINT_HINT_AUDIENCE = "zeros-cloud-workspace-engine-checkpoint-hint-v1" as const;
 // Outlives the control plane's 25-second hint wait.
@@ -109,6 +111,21 @@ export type CloudRuntimeClientAdmission = {
   authorityEpoch: number;
   actor?: CloudActorContext;
 };
+
+/** A client capability this engine verified (S1) with its proof of
+ * possession, forwarded so the control plane verifies it again. */
+export type CloudCapabilityClientCredential = Readonly<{
+  capability: string;
+  proof: Readonly<{ timestampMs: number; nonce: string; signature: string }>;
+}>;
+
+/** The control plane's admission of a capability's actor (S3 Part 3): an
+ * actor session it already consumed, renewed with `renewalToken` exactly like
+ * a redeemed grant. */
+export type CloudCapabilityActorAdmission = Readonly<{
+  admission: CloudRuntimeClientAdmission & { actor: CloudActorContext };
+  renewalToken: string;
+}>;
 
 export type CloudRuntimeServiceAccess = {
   version: 1;
@@ -907,6 +924,41 @@ export class CloudRuntimeRegistration {
         throw new CloudClientAuthorityTransientError();
       return null;
     } finally { finish?.(outcome); }
+  }
+
+  /** S3 Part 3: the control plane admits the actor of a client capability
+   * this engine verified, through this engine's heartbeat authority. Null is
+   * the control plane's refusal. Anything not answered yet, here or there,
+   * throws CloudClientAuthorityTransientError so the client retries. */
+  async admitCapabilityClient(
+    client: CloudCapabilityClientCredential,
+    route: "direct" | "relay",
+  ): Promise<CloudCapabilityActorAdmission | null> {
+    const document = this.document;
+    if (!document || !this.hasControlAuthority(document)) throw new CloudClientAuthorityTransientError();
+    const { heartbeatEndpoint, heartbeatToken, ...scope } = this.authority(document);
+    const { timestampMs, nonce, signature } = client.proof;
+    let raw: unknown;
+    try {
+      raw = await this.post(new URL(CAPABILITY_ADMISSION_PATH, heartbeatEndpoint).href, heartbeatToken,
+        { ...scope, capability: client.capability, proof: { timestampMs, nonce, signature }, route });
+    } catch (error) {
+      // Only the control plane's own 4xx answer refuses; an unreadable
+      // response is not an answer.
+      if (error instanceof CloudRuntimeRequestError && error.terminal && error.status !== undefined &&
+          error.status !== 408 && error.status !== 429) return null;
+      throw new CloudClientAuthorityTransientError();
+    }
+    if (this.stopped || this.authorityLost || this.document !== document || !this.hasControlAuthority(document))
+      throw new CloudClientAuthorityTransientError();
+    const parsed = CloudCapabilityActorAdmissionResponseSchema.safeParse(raw);
+    if (!parsed.success) return null;
+    const admitted = parsed.data;
+    return {
+      admission: { accountUserId: admitted.accountUserId, authorityEpoch: admitted.authorityEpoch,
+        actor: { sessionId: admitted.actorSessionId, deviceId: admitted.deviceId, role: admitted.role, fingerprint: admitted.fingerprint } },
+      renewalToken: admitted.renewalToken,
+    };
   }
 
   async verifyServiceAccess(

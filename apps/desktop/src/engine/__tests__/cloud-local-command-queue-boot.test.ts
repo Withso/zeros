@@ -7,7 +7,7 @@ import { CloudLocalAgentBootRuntime } from "../cloud-local-command-queue-boot";
 import { testCloudBootFixture } from "../agents/__tests__/helpers/test-cloud-boot";
 import { isCloudBootAgentExecutionFactory, isCloudBootAgentSelection, type CloudBootAgentExecutionFactory } from "../agents/cloud-provider-execution";
 import type { CloudLocalCommandQueue } from "../cloud-local-command-queue";
-import { CloudRuntimeRegistration, type CloudCheckpointDirective } from "../cloud-runtime-registration";
+import { CloudClientAuthorityTransientError, CloudRuntimeRegistration, type CloudCheckpointDirective } from "../cloud-runtime-registration";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { CloudAgentAdmissionError, CloudAgentExecutionError, type CloudAgentBootResponses } from "../cloud-agent-execution-client";
 import { CloudAgentBootSyncResponseSchema, CloudAgentBootRefreshResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
@@ -23,6 +23,7 @@ type Readiness = ReturnType<CloudRuntimeRegistration["readiness"]>;
 const engineMethods = ZerosEngine.prototype as unknown as {
   cloudRuntimeReadiness(this: unknown): Readiness;
   verifyCloudActorClient(this: unknown, token: string, renew?: boolean): Promise<unknown>;
+  admitCloudCapabilityActor(this: unknown, client: unknown, route: "direct" | "relay"): Promise<unknown>;
   initializeCloudAgentBoot(this: unknown): Promise<void>;
   cloudEngineUplinkReadiness(this: unknown): { ready: boolean; phase: string };
 };
@@ -652,7 +653,46 @@ describe("engine boot-mode orchestration", () => {
     await expect(engineMethods.verifyCloudActorClient.call(engine, "synthetic-legacy-token")).resolves.toBe(admission);
     expect(initialize).not.toHaveBeenCalled(); expect(verify).toHaveBeenCalledOnce();
   });
-  it("keeps exact final authority usable while an admission barrier refuses new starts", async () => {
+  it("admits a verified capability's actor behind the grant gates, refusing only on the control plane's answer", async () => {
+    const client = { capability: "synthetic.capability.token", proof: { timestampMs: 1, nonce: "n", signature: "s" } };
+    const admitted = { admission: { accountUserId: randomUUID(), authorityEpoch: 1, actor: { sessionId: randomUUID(),
+      deviceId: randomUUID(), role: "developer", fingerprint: "a".repeat(64) } }, renewalToken: `zwa_${"Q".repeat(43)}` };
+    let answer: () => Promise<unknown> = async () => admitted;
+    const admitCapabilityClient = vi.fn(async (..._args: unknown[]) => answer());
+    const registration = { localCommandsNegotiated: () => false, admitCapabilityClient };
+    const engine = { cloudRuntimeAuthorityStopping: false, cloudLegacyResidentRequiresFreshView: false,
+      cloudRuntimeRegistration: registration, verifyCloudActorClient: engineMethods.verifyCloudActorClient };
+    const admit = () => engineMethods.admitCloudCapabilityActor.call(engine, client, "direct");
+    await expect(admit()).resolves.toBe(admitted);
+    expect(admitCapabilityClient).toHaveBeenCalledWith(client, "direct");
+    answer = async () => null;
+    await expect(admit()).resolves.toBeNull();
+    answer = async () => { throw new CloudClientAuthorityTransientError(); };
+    await expect(admit()).rejects.toMatchObject({ code: "cloud_client_authority_transient" });
+    // A gate this engine cannot pass yet is transient, never a refusal.
+    answer = async () => admitted;
+    engine.cloudLegacyResidentRequiresFreshView = true;
+    await expect(admit()).rejects.toMatchObject({ code: "cloud_client_authority_transient" });
+    engine.cloudLegacyResidentRequiresFreshView = false;
+    answer = async () => { engine.cloudRuntimeRegistration = { ...registration }; return admitted; };
+    await expect(admit()).rejects.toMatchObject({ code: "cloud_client_authority_transient" });
+    expect(admitCapabilityClient).toHaveBeenCalledTimes(4);
+  });
+  it.each(["authority_transport", "authority_http_5xx", "access_denied", "lifecycle_superseded"] as const)(
+    "keeps a capability admission's actor-confirm %s transient only when it is", async category => {
+      const error = new CloudAgentExecutionError(category, "validation");
+      const admitted = { admission: { accountUserId: randomUUID(), authorityEpoch: 1, actor: { sessionId: randomUUID(),
+        deviceId: randomUUID(), role: "developer", fingerprint: "a".repeat(64) } }, renewalToken: `zwa_${"Q".repeat(43)}` };
+      const confirmAdmission = vi.fn(async () => { throw error; });
+      const engine = { cloudLocalHistoryRestored: true, cloudLocalEvents: {}, cloudRuntimeAuthorityStopping: false,
+        cloudRuntimeRegistration: { localCommandsNegotiated: () => true, admitCapabilityClient: async () => admitted },
+        cloudAgentBoot: { active: true, initialize: async () => true, confirmAdmission },
+        verifyCloudActorClient: engineMethods.verifyCloudActorClient };
+      const admission = engineMethods.admitCloudCapabilityActor.call(engine, {}, "direct");
+      if (category.startsWith("authority_")) await expect(admission).rejects.toMatchObject({ code: "cloud_client_authority_transient" });
+      else await expect(admission).rejects.toBe(error);
+      expect(confirmAdmission).toHaveBeenCalledWith(admitted.admission);
+    });  it("keeps exact final authority usable while an admission barrier refuses new starts", async () => {
     const f = await fixture(); let startsAllowed = true;
     Object.assign(f.options, { startsAllowed: () => startsAllowed });
     await f.boot.initialize(); startsAllowed = false;

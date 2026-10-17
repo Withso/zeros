@@ -19,9 +19,13 @@ import {
   ENGINE_CAPABILITY_FALLBACK_INTERVAL_MS,
   RUNTIME_AUTH_FRAME_MAX_BYTES,
   capabilityCloseCode,
+  capabilitySessionClose,
   EngineAuthSinkTimeoutError,
   EngineCapabilityAuth,
   fileCapabilityAuthStore,
+  parseRuntimeAuthFrame,
+  type CapabilityActorAdmission,
+  type EngineCapabilityAuthOptions,
   type EngineCapabilityAuthStore,
   type PersistedCapabilityAuth,
 } from "../cloud-capability-auth";
@@ -324,6 +328,163 @@ describe("in-band client auth.renew (S3 Part 3)", () => {
     expect(capabilityCloseCode("capability_expired")).toBe(4401);
     expect(capabilityCloseCode("capability_scope_denied")).toBeNull();
     expect(capabilityCloseCode("capability_issuer_unavailable")).toBeNull();
+  });
+
+  it("closes a session the verifier closed with its S1 socket code", () => {
+    expect(capabilitySessionClose({ sessionId: "s", code: "capability_expired" })).toEqual({ sessionId: "s", code: 4401, reason: "capability_expired" });
+    expect(capabilitySessionClose({ sessionId: "s", code: "capability_revoked" })).toEqual({ sessionId: "s", code: 4403, reason: "capability_revoked" });
+    expect(capabilitySessionClose({ sessionId: "s", code: "capability_generation_mismatch" }))
+      .toEqual({ sessionId: "s", code: 4409, reason: "capability_generation_mismatch" });
+  });
+});
+
+describe("direct zeros-cap.v1 auth frame (S3 Part 3)", () => {
+  const NOW_MS = TEST_CAPABILITY_NOW_S * 1000;
+  const CLIENT_SESSION = "77777777-7777-4777-8777-777777777777";
+  const ADMITTED: CapabilityActorAdmission = {
+    admission: { accountUserId: TEST_CAPABILITY_IDS.user, authorityEpoch: 3, actor: { sessionId: "88888888-8888-4888-8888-888888888888",
+      deviceId: TEST_CAPABILITY_IDS.device, role: "developer", fingerprint: "f".repeat(64) } },
+    renewalToken: `zwa_${"Q".repeat(43)}`,
+  };
+  const UNAVAILABLE = { ok: false, code: 1013, reason: "capability_issuer_unavailable" };
+  const REFUSED = { ok: false, code: 4403, reason: "capability_revoked" };
+  let nonces = 0;
+
+  function authFrame(options: { device?: string; route?: "direct" | "relay" } = {}) {
+    const jti = "DDDDDDDDDDDDDDDDDDDDDD";
+    const capability = signTestCapability(TEST_CAPABILITY_HEADER, testClientClaims({ jti }));
+    const nonce = `${String(++nonces).padStart(4, "0")}${"N".repeat(18)}`;
+    const signature = signTestProof(options.device ?? "device-a",
+      { aud: "zeros:engine", wsp: TEST_CAPABILITY_IDS.workspace, jti, timestampMs: NOW_MS, nonce, route: options.route ?? "direct" });
+    return { t: "auth", d: { capability, proof: { timestampMs: NOW_MS, nonce, signature }, clientSessionId: CLIENT_SESSION, contract: 1 } };
+  }
+
+  async function engine(admitActor?: EngineCapabilityAuthOptions["admitActor"], closed: string[] = []) {
+    const auth = new EngineCapabilityAuth({ identity: ids, issuer: fixture.issuer, store: memoryStore(), now: () => NOW_MS,
+      ...(admitActor ? { admitActor } : {}), onSessionsClosed: closures => closed.push(...closures.map(c => `${c.sessionId}:${c.code}`)) });
+    await auth.applyKeys(fixture.keys as never);
+    await auth.applySync(sync("c-1"));
+    return auth;
+  }
+
+  function authenticate(auth: EngineCapabilityAuth, frame: unknown) {
+    const serialized = JSON.stringify(frame);
+    return auth.authenticateRuntimeClient(serialized, Buffer.byteLength(serialized));
+  }
+
+  it("parses exactly one direct auth frame and closes 4401 for anything else", () => {
+    const frame = authFrame();
+    const serialized = JSON.stringify(frame);
+    expect(parseRuntimeAuthFrame(serialized, Buffer.byteLength(serialized)))
+      .toEqual({ ok: true, clientSessionId: CLIENT_SESSION, auth: { capability: frame.d.capability, proof: frame.d.proof } });
+    const missing = { ok: false, code: 4401, reason: "capability_missing" };
+    const malformed = { ok: false, code: 4401, reason: "capability_malformed" };
+    expect(parseRuntimeAuthFrame("not json", 8)).toEqual(missing);
+    expect(parseRuntimeAuthFrame(JSON.stringify({ t: "auth.renew", d: frame.d }), 64)).toEqual(missing);
+    expect(parseRuntimeAuthFrame(JSON.stringify({ type: "CONNECTED" }), 20)).toEqual(missing);
+    expect(parseRuntimeAuthFrame(serialized, RUNTIME_AUTH_FRAME_MAX_BYTES + 1)).toEqual(malformed);
+    for (const d of [{ contract: 0 }, { contract: "1" }, { clientSessionId: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA" }, { clientSessionId: "s" }, { capability: "x".repeat(40) },
+      { extra: true }, { engine: { capability: frame.d.capability, proof: frame.d.proof } }, { proof: { ...frame.d.proof, extra: 1 } }]) {
+      const value = JSON.stringify({ ...frame, d: { ...frame.d, ...d } });
+      expect(parseRuntimeAuthFrame(value, Buffer.byteLength(value))).toEqual(malformed);
+    }
+    const extra = JSON.stringify({ ...frame, id: 1 });
+    expect(parseRuntimeAuthFrame(extra, Buffer.byteLength(extra))).toEqual(malformed);
+  });
+
+  it("closes 4426 for a newer contract major before reading the rest of the frame", () => {
+    const value = JSON.stringify({ t: "auth", d: { contract: 2 } });
+    expect(parseRuntimeAuthFrame(value, Buffer.byteLength(value))).toEqual({ ok: false, code: 4426, reason: "capability_contract_unsupported" });
+  });
+
+  it("verifies the capability, admits its actor and opens the session only once the socket joins", async () => {
+    const admitActor = vi.fn(async () => ADMITTED);
+    const auth = await engine(admitActor);
+    const frame = authFrame();
+    const result = await authenticate(auth, frame);
+    if (!result.ok) throw new Error(result.reason);
+    expect(admitActor).toHaveBeenCalledWith({ capability: frame.d.capability, proof: frame.d.proof }, "direct");
+    expect(result.sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(JSON.parse(result.authOk)).toEqual({ t: "auth.ok",
+      d: { sessionId: result.sessionId, scopes: ["ws:edit", "ws:prompt", "ws:read"], expiresAtMs: (TEST_CAPABILITY_NOW_S + 290) * 1000 } });
+    expect(result).toMatchObject({ admission: ADMITTED.admission, renewalToken: ADMITTED.renewalToken });
+    expect(auth.verifier.openSessionIds()).toEqual([]);
+    expect(result.open()).toBeNull();
+    expect(auth.verifier.openSessionIds()).toEqual([result.sessionId]);
+    auth.closeClient(result.sessionId);
+    expect(auth.verifier.openSessionIds()).toEqual([]);
+    auth.stop();
+  });
+
+  it("closes with the S1 code, without asking the control plane, when verification fails", async () => {
+    const admitActor = vi.fn(async () => ADMITTED);
+    const auth = await engine(admitActor);
+    expect(await authenticate(auth, authFrame({ device: "device-b" }))).toEqual({ ok: false, code: 4401, reason: "capability_proof_invalid" });
+    expect(await authenticate(auth, authFrame({ route: "relay" }))).toMatchObject({ ok: false, code: 4401 });
+    const replayed = authFrame();
+    expect((await authenticate(auth, replayed)).ok).toBe(true);
+    expect(await authenticate(auth, replayed)).toMatchObject({ ok: false, code: 4401 });
+    expect(admitActor).toHaveBeenCalledOnce();
+    auth.stop();
+  });
+
+  it("is unavailable (1013) before the first auth.sync and while either side cannot answer", async () => {
+    const unsynced = new EngineCapabilityAuth({ identity: ids, issuer: fixture.issuer, store: memoryStore(), now: () => NOW_MS,
+      admitActor: async () => ADMITTED });
+    await unsynced.applyKeys(fixture.keys as never);
+    expect(await authenticate(unsynced, authFrame())).toEqual(UNAVAILABLE);
+    unsynced.stop();
+    const transient = await engine(async () => { throw Object.assign(new Error("later"), { code: "cloud_client_authority_transient" }); });
+    expect(await authenticate(transient, authFrame())).toEqual(UNAVAILABLE);
+    transient.stop();
+    const unwired = await engine();
+    expect(await authenticate(unwired, authFrame())).toEqual(UNAVAILABLE);
+    unwired.stop();
+    let release: ((value: CapabilityActorAdmission) => void) | undefined;
+    const stopping = await engine(() => new Promise(resolve => { release = resolve; }));
+    const pending = authenticate(stopping, authFrame());
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    stopping.stop();
+    release!(ADMITTED);
+    expect(await pending).toEqual(UNAVAILABLE);
+  });
+
+  it("refuses (4403) an actor the control plane refused or admitted for someone else", async () => {
+    const other = "99999999-9999-4999-8999-999999999999";
+    const actor = ADMITTED.admission.actor;
+    for (const answer of [null, { ...ADMITTED, admission: { ...ADMITTED.admission, accountUserId: other } },
+      { ...ADMITTED, admission: { ...ADMITTED.admission, actor: { ...actor, deviceId: other } } },
+      { ...ADMITTED, admission: { ...ADMITTED.admission, actor: { ...actor, role: "owner" as const } } }]) {
+      const auth = await engine(async () => answer);
+      expect(await authenticate(auth, authFrame())).toEqual(REFUSED);
+      expect(auth.verifier.openSessionIds()).toEqual([]);
+      auth.stop();
+    }
+    const failed = await engine(async () => { throw new Error("cloud_actor_authority_rejected"); });
+    expect(await authenticate(failed, authFrame())).toEqual(REFUSED);
+    failed.stop();
+  });
+
+  it("closes a session revoked while the control plane admitted it, and reports the others that closed", async () => {
+    const closed: string[] = [];
+    const admitActor = vi.fn(async (): Promise<CapabilityActorAdmission | null> => ADMITTED);
+    const auth = await engine(admitActor, closed);
+    const earlier = await authenticate(auth, authFrame());
+    if (!earlier.ok) throw new Error(earlier.reason);
+    expect(earlier.open()).toBeNull();
+    let release: ((value: CapabilityActorAdmission) => void) | undefined;
+    admitActor.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const pending = authenticate(auth, authFrame());
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    auth.verifier.revoke("sid", TEST_CAPABILITY_IDS.session);
+    expect(closed).toEqual([`${earlier.sessionId}:capability_revoked`]);
+    release!(ADMITTED);
+    const result = await pending;
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.open()).toEqual({ code: 4403, reason: "capability_revoked" });
+    expect(auth.verifier.openSessionIds()).toEqual([]);
+    expect(closed).toEqual([`${earlier.sessionId}:capability_revoked`, `${result.sessionId}:capability_revoked`]);
+    auth.stop();
   });
 });
 describe("engine capability verifier Local boundary", () => {
