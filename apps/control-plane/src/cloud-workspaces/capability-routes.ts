@@ -65,30 +65,51 @@ function capabilityError(c: Context, error: unknown) {
  * An organization with the flag off gets the same 401 as a bad credential,
  * without SQL, so an unauthenticated caller cannot use the endpoint as a
  * flag oracle. Failed attempts (flag off included, for the same reason) are
- * limited to FAILURE_LIMIT per engine id per minute before any SQL runs;
- * this bounds credential guessing against one engine and the authority
- * queries a caller can drive through one id. */
+ * limited before any SQL runs, in two ways:
+ * - FAILURE_LIMIT per (engine id, trusted client address) per minute, which
+ *   bounds credential guessing against one engine without letting a caller
+ *   elsewhere who knows the id hold the engine's own fallback at 429;
+ * - CAPABILITY_FALLBACK_FAILURE_CEILING failed attempts per api process per
+ *   minute across all keys, which bounds the authority SQL a caller rotating
+ *   engine ids or addresses can drive. While the ceiling holds, every request
+ *   (a legitimate engine's included) gets 429 until the window turns; that
+ *   is accepted for a fallback that only fires during a `realtime` outage. */
 const FAILURE_LIMIT = 5;
+export const CAPABILITY_FALLBACK_FAILURE_CEILING = 120;
 const WINDOW_MS = 60_000;
 
-export function createCloudCapabilityEngineRoutes(service: CloudCapabilityService): Hono {
+export type CloudCapabilityEngineRouteOptions = {
+  /** The caller's address from the trusted proxy header; one shared bucket
+   * when absent or invalid. */
+  clientAddress?: (c: Context) => string;
+};
+
+export function createCloudCapabilityEngineRoutes(service: CloudCapabilityService, options: CloudCapabilityEngineRouteOptions = {}): Hono {
   const app = new Hono();
   const issuedAt = new Map<string, number>();
   const failures = new Map<string, { count: number; since: number }>();
+  const ceiling = { count: 0, since: Number.NEGATIVE_INFINITY };
   const now = service.now ?? Date.now;
+  const clientAddress = options.clientAddress ?? (() => "unknown");
   const prune = () => {
     const cutoff = now() - 2 * WINDOW_MS;
     if (issuedAt.size > 10_000) for (const [id, at] of issuedAt) if (at < cutoff) issuedAt.delete(id);
     if (failures.size > 10_000) for (const [id, entry] of failures) if (entry.since < cutoff) failures.delete(id);
   };
-  const recordFailure = (engineInstanceId: string) => {
-    const entry = failures.get(engineInstanceId);
-    if (!entry || now() - entry.since >= WINDOW_MS) failures.set(engineInstanceId, { count: 1, since: now() });
+  const recordFailure = (key: string) => {
+    const entry = failures.get(key);
+    if (!entry || now() - entry.since >= WINDOW_MS) failures.set(key, { count: 1, since: now() });
     else entry.count += 1;
+    if (now() - ceiling.since >= WINDOW_MS) { ceiling.count = 1; ceiling.since = now(); }
+    else ceiling.count += 1;
   };
-  const rejected = (c: Context, engineInstanceId: string) => {
-    recordFailure(engineInstanceId);
+  const rejected = (c: Context, key: string) => {
+    recordFailure(key);
     return c.json({ error: { code: "engine_authority_rejected" } }, 401);
+  };
+  const throttled = (c: Context, since: number) => {
+    c.header("Retry-After", String(Math.max(1, Math.ceil((WINDOW_MS - (now() - since)) / 1000))));
+    return c.json({ error: { code: "capability_issuer_unavailable" } }, 429);
   };
   app.use(CLOUD_CAPABILITY_ENGINE_PATH, bodyLimit({ maxSize: 4 * 1024 }));
   app.post(CLOUD_CAPABILITY_ENGINE_PATH, async c => {
@@ -101,12 +122,11 @@ export function createCloudCapabilityEngineRoutes(service: CloudCapabilityServic
     if (!heartbeatToken || !parsed.success) return c.json({ error: { code: "capability_missing" } }, 401);
     const request = parsed.data;
     prune();
-    const failed = failures.get(request.engineInstanceId);
-    if (failed && now() - failed.since < WINDOW_MS && failed.count >= FAILURE_LIMIT) {
-      c.header("Retry-After", String(Math.ceil((WINDOW_MS - (now() - failed.since)) / 1000)));
-      return c.json({ error: { code: "capability_issuer_unavailable" } }, 429);
-    }
-    if (!service.flags.enabled(request.organizationId, "capabilities")) return rejected(c, request.engineInstanceId);
+    const failureKey = `${request.engineInstanceId}\n${clientAddress(c)}`;
+    if (now() - ceiling.since < WINDOW_MS && ceiling.count >= CAPABILITY_FALLBACK_FAILURE_CEILING) return throttled(c, ceiling.since);
+    const failed = failures.get(failureKey);
+    if (failed && now() - failed.since < WINDOW_MS && failed.count >= FAILURE_LIMIT) return throttled(c, failed.since);
+    if (!service.flags.enabled(request.organizationId, "capabilities")) return rejected(c, failureKey);
     const last = issuedAt.get(request.engineInstanceId);
     if (last !== undefined && now() - last < WINDOW_MS) {
       c.header("Retry-After", String(Math.ceil((WINDOW_MS - (now() - last)) / 1000)));
@@ -128,10 +148,10 @@ export function createCloudCapabilityEngineRoutes(service: CloudCapabilityServic
       // Only a granted token spends the once-a-minute budget; failures must
       // not lock out a retrying engine.
       issuedAt.set(request.engineInstanceId, now());
-      failures.delete(request.engineInstanceId);
+      failures.delete(failureKey);
       return c.json({ capability: { token: issued.token, expiresAt: issued.expiresAt.toISOString() } }, 201);
     } catch (error) {
-      if (!(error instanceof CapabilityIssuerUnavailableError)) recordFailure(request.engineInstanceId);
+      if (!(error instanceof CapabilityIssuerUnavailableError)) recordFailure(failureKey);
       return capabilityError(c, error);
     }
   });

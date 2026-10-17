@@ -522,7 +522,7 @@ export function createApp(
     // headers and pre-auth rate limit (path-based middleware above).
     if (dependencies.cloudCapabilities) {
       app.use(CLOUD_CAPABILITY_ENGINE_PATH, cloudWorkspaceInternalResponseHeaders);
-      app.route("/", createCloudCapabilityEngineRoutes(dependencies.cloudCapabilities));
+      app.route("/", createCloudCapabilityEngineRoutes(dependencies.cloudCapabilities, { clientAddress: internalClientIp }));
     }
   }
 
