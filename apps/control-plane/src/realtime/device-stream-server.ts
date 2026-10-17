@@ -121,6 +121,9 @@ type DeviceSessionRecord = {
   buffer: BufferedFrame[];
   bufferBytes: number;
   known: Map<string, Known>;
+  /** The catalog read that set `known` first. A re-read that started before
+   * it can be older than what the device session was told. */
+  baselineRead: number;
   /** From the last read; `device_stream` admits the account through them. */
   organizationIds: readonly string[];
   catalogVersion: number;
@@ -155,6 +158,8 @@ export class DeviceStreamServer {
    * re-reads touch only the device sessions involved. */
   private readonly byWorkspace = new Map<string, Set<DeviceSessionRecord>>();
   private readonly byOrganization = new Map<string, Map<DeviceSessionRecord, number>>();
+  /** Catalog reads, numbered in the order they start. */
+  private reads = 0;
   /** Records without a connection, in the order they were parked. */
   private readonly parked = new Set<DeviceSessionRecord>();
   private readonly presence = new Map<string, Map<string, { state: PresenceState; since: string; connections: Set<DeviceStreamConnection> }>>();
@@ -376,6 +381,7 @@ export class DeviceStreamServer {
       // A fresh lineage starts from the current catalog, without frames:
       // the client reads the REST snapshot after `ready`.
       let baseline: DeviceStreamCatalogRead;
+      const baselineRead = ++this.reads;
       try { baseline = await this.options.catalog.read(principal.accountUserId, null); }
       catch { connection.close(DEVICE_STREAM_CLOSE.internalError, "internal_error", { park: false }); return; }
       if (connection.isClosed()) return;
@@ -384,7 +390,7 @@ export class DeviceStreamServer {
         connection.close(DEVICE_STREAM_CLOSE.disabled, "device_stream_disabled", { park: false });
         return;
       }
-      record = this.newRecord(principal, baseline);
+      record = this.newRecord(principal, baseline, baselineRead);
     }
     if (record.expiry) clearTimeout(record.expiry);
     record.expiry = null;
@@ -459,7 +465,7 @@ export class DeviceStreamServer {
 
   // ---- fan-out ----
 
-  private newRecord(principal: DeviceSessionPrincipal, baseline: DeviceStreamCatalogRead): DeviceSessionRecord {
+  private newRecord(principal: DeviceSessionPrincipal, baseline: DeviceStreamCatalogRead, baselineRead: number): DeviceSessionRecord {
     // The record under this id may belong to another hello that finished its
     // baseline read first. Replacing it silently would leave its socket fed
     // through `byAccount` but invisible to revocation, which walks `records`.
@@ -473,7 +479,7 @@ export class DeviceStreamServer {
     }
     const record: DeviceSessionRecord = {
       principal, lineage: randomBytes(16).toString("base64url"), seq: 0, floor: 0, buffer: [], bufferBytes: 0,
-      known: new Map(), organizationIds: baseline.organizationIds, catalogVersion: baseline.catalogVersion,
+      known: new Map(), baselineRead, organizationIds: baseline.organizationIds, catalogVersion: baseline.catalogVersion,
       connection: null, expiry: null,
     };
     this.records.set(principal.deviceSessionId, record);
@@ -599,9 +605,13 @@ export class DeviceStreamServer {
       for (let offset = 0; offset < ids.length; offset += DEVICE_STREAM_MAX_CATALOG) chunks.push(ids.slice(offset, offset + DEVICE_STREAM_MAX_CATALOG));
     }
     for (const chunk of chunks) {
+      const started = ++this.reads;
       const read = await this.options.catalog.read(accountUserId, chunk);
       if (this.closed) return;
-      for (const record of live()) this.apply(record, read, chunk ? new Set(chunk) : null);
+      // A device session whose baseline read started later may already know
+      // more: this read could re-send a workspace it lost or revoke one it
+      // holds. The re-read `open` scheduled covers it.
+      for (const record of live()) if (started > record.baselineRead) this.apply(record, read, chunk ? new Set(chunk) : null);
     }
   }
 

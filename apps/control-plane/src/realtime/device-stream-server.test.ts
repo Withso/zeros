@@ -440,6 +440,38 @@ describe("device stream server", () => {
     expect(reads.mock.calls.filter(([account]) => account === stranger.accountUserId)).toEqual([]);
   });
 
+  it("never applies to a device session a re-read that started before its own baseline read", async () => {
+    await start();
+    const who = principal(), lost = workspace(organizationId), gained = workspace(organizationId);
+    catalog.grant(who.accountUserId, lost);
+    const first = await connect(who);
+    await first.peer.drainFrames();
+    // The next re-read takes its rows now and answers only after a second
+    // device session of the account has read its own baseline.
+    const read = catalog.read.bind(catalog);
+    let answer!: () => void;
+    const answered = new Promise<void>(resolve => { answer = resolve; });
+    let taken = false;
+    vi.spyOn(catalog, "read").mockImplementationOnce(async (account, ids) => {
+      const rows = await read(account, ids);
+      taken = true;
+      await answered;
+      return rows;
+    });
+    subscriber!.events([event("account.authorization_changed", { userId: who.accountUserId })]);
+    await until(() => taken);
+    catalog.revoke(who.accountUserId, lost.id);
+    catalog.grant(who.accountUserId, gained);
+    const second = await connect(principal(who.accountUserId));
+    answer();
+    // The first device session learns both changes from the following re-read ...
+    expect((await first.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: lost.id, op: "remove" });
+    expect((await first.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: gained.id, op: "upsert" });
+    // ... and the second, whose baseline was already current, is never sent
+    // the workspace it lost nor a revocation of the one it holds.
+    expect(await second.peer.drainFrames()).toEqual([]);
+  });
+
   it("resumes on this instance, replaying capability.revoked before other missed events", async () => {
     await start();
     const who = principal(), held = workspace(organizationId), other = workspace(organizationId);
