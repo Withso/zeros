@@ -223,7 +223,9 @@ d("device stream database paths", () => {
       await new Promise(resolve => http?.close(resolve));
     });
 
-    it("pushes catalog.changed for a committed workspace update to the owner's device session", async () => {
+    const wait = async (predicate: () => boolean) => { for (let i = 0; i < 300 && !predicate(); i++) await new Promise(r => setTimeout(r, 10)); };
+    async function serve() {
+      stop = async () => {};
       listenerPool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1 });
       server = new DeviceStreamServer({
         authority: new DatabaseDeviceSessionAuthority(pool),
@@ -231,11 +233,12 @@ d("device stream database paths", () => {
         flags: { enabled: () => true, anyEnabled: () => true },
         refreshDelayMs: 5,
       });
-      stop = startDeviceStreamNotifications(listenerPool, server, { warn: () => {} });
       http = createServer((_req, res) => res.end());
       http.on("upgrade", (req, socket, head) => { if (!server.handleUpgrade(req, socket, head)) socket.destroy(); });
       await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
-      // The owner's device session (fixture user), not the route's separate account.
+    }
+    /** A ready stream for the owner's device session (fixture user), not the route's separate account. */
+    async function ownerStream() {
       const ownerDevice = randomBytes(32);
       const ownerDeviceId = (await pool.query<{ id: string }>(
         "INSERT INTO devices(user_id,label,platform,public_key,key_fingerprint) VALUES($1,'Owner','linux',$2,$3) RETURNING id",
@@ -247,16 +250,37 @@ d("device stream database paths", () => {
       ws.on("message", data => frames.push(JSON.parse(String(data))));
       await new Promise(resolve => ws.once("open", resolve));
       ws.send(JSON.stringify({ t: "hello", d: { contract: { min: 1, max: 1 }, ticket: issued.ticket } }));
-      const wait = async (predicate: () => boolean) => { for (let i = 0; i < 300 && !predicate(); i++) await new Promise(r => setTimeout(r, 10)); };
       await wait(() => frames.some(frame => frame.t === "ready"));
       expect(frames[0]).toMatchObject({ t: "ready", d: { deviceSessionId: issued.deviceSessionId, resumed: false } });
+      return { ws, frames };
+    }
+    const bump = async () => Number((await pool.query<{ version: string }>(
+      "UPDATE cloud_workspaces SET version=version+1 WHERE id=$1 RETURNING version", [fixture.workspaceId])).rows[0]!.version);
+
+    it("pushes catalog.changed for a committed workspace update to the owner's device session", async () => {
+      await serve();
+      stop = startDeviceStreamNotifications(listenerPool, server, { warn: () => {} });
+      const { ws, frames } = await ownerStream();
       // Let the listener come up before the change commits.
       await new Promise(resolve => setTimeout(resolve, 200));
-      const version = Number((await pool.query<{ version: string }>(
-        "UPDATE cloud_workspaces SET version=version+1 WHERE id=$1 RETURNING version", [fixture.workspaceId])).rows[0]!.version);
+      const version = await bump();
       await wait(() => frames.some(frame => frame.t === "catalog.changed"));
       expect(frames.find(frame => frame.t === "catalog.changed")).toMatchObject({ d: { workspaceId: fixture.workspaceId, version, op: "upsert",
         workspace: { id: fixture.workspaceId, version } } });
+      ws.terminate();
+    });
+
+    it("re-reads streams admitted before the catalog listener was first ready", async () => {
+      await serve();
+      const { ws, frames } = await ownerStream();
+      // The post-ready re-read has run; this change commits while nothing listens.
+      await new Promise(resolve => setTimeout(resolve, 200));
+      const version = await bump();
+      await new Promise(resolve => setTimeout(resolve, 200));
+      expect(frames.filter(frame => frame.t === "catalog.changed")).toEqual([]);
+      stop = startDeviceStreamNotifications(listenerPool, server, { warn: () => {} });
+      await wait(() => frames.some(frame => frame.t === "catalog.changed"));
+      expect(frames.find(frame => frame.t === "catalog.changed")).toMatchObject({ d: { workspaceId: fixture.workspaceId, version, op: "upsert" } });
       ws.terminate();
     });
   });

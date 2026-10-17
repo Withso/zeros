@@ -243,8 +243,9 @@ streams with `4404` without resume and drops its parked device sessions.
   `workspace.authorization_changed` (that workspace),
   `organization.authorization_changed` and `organization.access_revoked`
   (the organization's connected accounts), `account.*` (that account).
-  Hints carry ids only. A listener reconnect or a feed gap re-reads every
-  connected account and re-checks every device session. Re-reads are
+  Hints carry ids only. Every listener ready (the first one too, since
+  streams are admitted before LISTEN is up) and every feed gap re-reads
+  every connected account and re-checks every device session. Re-reads are
   coalesced (25 ms) with four accounts in flight; one read covers up to
   1,000 workspaces, a targeted re-read of more is split into reads of at
   most 1,000 ids, and a truncated read never infers a removal.
