@@ -295,7 +295,9 @@ d("durable job queue", () => {
     runners[0]!.start();
     await vi.waitFor(() => expect(done).toBe(12), { timeout: 5_000, interval: 20 });
     expect(peak).toBe(3);
-    expect((await pool.query("SELECT count(*)::integer AS count FROM control_plane_jobs")).rows[0].count).toBe(0);
+    // A handler returns before the runner's completion deletes its row.
+    await vi.waitFor(async () => expect((await pool.query(
+      "SELECT count(*)::integer AS count FROM control_plane_jobs")).rows[0].count).toBe(0), { timeout: 5_000, interval: 20 });
   });
 
   it("wakes on NOTIFY rather than the poll", async () => {
