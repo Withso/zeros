@@ -36,7 +36,7 @@ registered `whileFeedUnavailable` value:
 | `authority_cache_enforce` | **off** | Relaxes a per-request SQL check. A missed "disable" must never keep it on, so it falls back to SQL. |
 | `capabilities` | retain | Both paths are safe; flapping would bounce clients between them. Capabilities carry their own 5 min bound. |
 | `realtime_uplink` | retain | Transport choice; the old HTTP paths stay available. |
-| `device_stream` | retain | Transport choice; clients keep polling as before when off. |
+| `device_stream` | retain | Transport choice; clients keep polling as before when off. Any organization with it on mounts the stream; an account streams while an organization it belongs to (member or live guest grant) has it on. |
 | `credential_push` | retain | Transport choice; the poll remains as fallback. |
 | `relay_over_uplink` | retain | Transport choice; the existing relay remains. |
 | `presence_in_memory` | retain | Transport choice; database presence remains. |

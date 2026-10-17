@@ -98,10 +98,11 @@ authority supplies keys, epochs and engine tokens
   spends a token from its source address's bucket (100 burst, 30 per
   second, at most 64 sockets awaiting their welcome) and from a
   process-wide ceiling (500 burst, 500 per second, 256 handshakes in
-  flight). The source is `X-Real-IP`, then `CF-Connecting-IP`, then the
-  socket peer, each only when it parses as an IP: the same trust model as
-  the HTTP engine paths' pre-auth limits. One source flooding shaped tokens
-  therefore spends only its own budget; refusals are `429` or `503`.
+  flight). The source is a present `X-Real-IP`, else `CF-Connecting-IP`,
+  else the socket peer; a value that does not parse as an IP shares one
+  `unknown` bucket. This is the rule of the HTTP engine paths' pre-auth
+  limits (`client-address.ts`). One source flooding shaped tokens therefore
+  spends only its own budget; refusals are `429` or `503`.
 - **Admission.** One consistent authority read
   (`readCurrentCloudEngineAuthority`) checks the heartbeat credential,
   workspace, generation and engine instance, and compares the hello's
@@ -211,8 +212,12 @@ authority supplies keys, epochs and engine tokens
 device stream (`s3-client-contract.md` Part 2) on `/v1/device-stream`. It
 mounts in `realtime` and `combined` processes once any organization has the
 `device_stream` flag on; until then there is no socket, feed or LISTEN, the
-upgrade answers 404 and clients keep polling. Turning the flag off closes
-every stream with `4404`; the next `POST /v1/device-sessions` answers 404.
+upgrade answers 404 and clients keep polling. An account streams only while
+an organization it belongs to (as a member, or through a live guest grant)
+has the flag on: otherwise `POST /v1/device-sessions` answers 404 and a
+hello closes `4404`. Every catalog re-read refreshes that set, so turning
+the flag off for the organization, or leaving it, closes the account's
+streams with `4404` without resume and drops its parked device sessions.
 
 - **Tickets.** `POST /v1/device-sessions` (api; device proof action
   `device-session.create` over `{ deviceSessionId }`, 30/min per account,
@@ -239,27 +244,41 @@ every stream with `4404`; the next `POST /v1/device-sessions` answers 404.
   `workspace.authorization_changed` (that workspace),
   `organization.authorization_changed` and `organization.access_revoked`
   (the organization's connected accounts), `account.*` (that account).
-  Hints carry ids only. A listener reconnect or a feed gap re-reads every
-  connected account and re-checks every device session. Re-reads are
+  Hints carry ids only. Every listener ready (the first one too, since
+  streams are admitted before LISTEN is up) and every feed gap re-reads
+  every connected account and re-checks every device session. Re-reads are
   coalesced (25 ms) with four accounts in flight; one read covers up to
-  1,000 workspaces, and a truncated read never infers a removal.
+  1,000 workspaces, a targeted re-read of more is split into reads of at
+  most 1,000 ids, and a truncated read never infers a removal.
 - **Fan-out.** A workspace's frames go only to device sessions whose last
   re-read contained it. Losing access (or deletion) sends
   `capability.revoked { scope: "workspace" }`, then one
-  `catalog.changed { op: "remove" }`, and nothing further for it.
+  `catalog.changed { op: "remove" }`, and nothing further for it. An
+  upsert is sent only when the workspace's `version` grows, so document
+  fields that change without a bump (the viewer's `actorRole` and
+  `capabilities`, including `canStart` and `startUnavailableReason` after a
+  role or allowance change) reach the stream with the next bump (S3-Q8).
 - **catalogVersion.** The global `cloud_catalog_version_seq` position (read
   before the rows), so it is monotonic per account; frames carry the
   maximum seen by that device session. The REST catalog returns the same
-  value. Membership changes do not draw from the sequence.
+  value. Membership changes do not draw from the sequence. Sequences are not
+  transactional: a position can include a change whose transaction has not
+  committed, so a snapshot at version N need not contain every change up to
+  N. It is a watermark, not a snapshot point; nothing filters by it, and
+  clients order and deduplicate by each workspace's `version` only.
 - **Resume.** Resumable frames (`catalog.changed`, `lifecycle.changed`,
   `notification`, `capability.revoked`) carry `c = <lineage>.<seq>` and are
   kept for 10 minutes per device session (at most 1,000 frames or 1 MiB;
   `ack` trims, at most once per second). A disconnected device session is
-  parked on this instance for 10 minutes. A resume from a cursor still held
-  replays the missed frames, `capability.revoked` first, then re-reads the
-  catalog. Another lineage (another instance or a restart) gets
-  `ready { resumed: false }` + `catalog.reset instance_changed`; a cursor
-  older than the retained frames gets `resume_expired`.
+  parked on this instance for 10 minutes; at the 50,000-session cap the one
+  parked longest is dropped first, and a connected one never is. A resume
+  from a cursor still held replays the missed frames, `capability.revoked`
+  first, then re-reads the catalog. Its `ready.cursor` is the resume
+  position, and revocations sent ahead of their order carry that position
+  as `c`, so a client that drops mid-replay and resumes from the last `c`
+  it received gets the rest again. Another lineage (another instance or a
+  restart) gets `ready { resumed: false }` + `catalog.reset instance_changed`;
+  a cursor older than the retained frames gets `resume_expired`.
 - **Authority.** Device sessions are re-checked every 60 s and on
   `account.*` / `session.revoked`: an expired device session, a revoked
   account, device or CP session sends `capability.revoked` with scope
@@ -273,7 +292,9 @@ every stream with `4404`; the next `POST /v1/device-sessions` answers 404.
 - **Producers.** `publishNotification`, `revokeCapabilities` and
   `pushCapabilityRenewal` (for `attach`ed runtime sessions) are the entry
   points for notification and capability producers; none is wired in this
-  release, so no `notification` or `capability.renewed` frame is sent yet.
+  release (notifications arrive with Tracks D/E, capability renewal and
+  revocation with Track B's S-3 producer), so no `notification` or
+  `capability.renewed` frame is sent yet.
 - **Drain.** The C0 staggered drain sends `drain { reconnectAfterMs }`
   (0-5 s) and closes `4503`.
 - **Local.** Only cloud workspaces exist in the catalog the stream reads;

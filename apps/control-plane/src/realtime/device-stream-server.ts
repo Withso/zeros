@@ -5,7 +5,13 @@ import WebSocket, { WebSocketServer, type RawData } from "ws";
 
 import type { RolloutFlagReader } from "../rollout-flags.js";
 import type { DeviceSessionAuthority, DeviceSessionPrincipal, DeviceSessionState } from "./device-sessions.js";
-import type { DeviceStreamCatalogRead, DeviceStreamCatalogSource, DeviceStreamWorkspace } from "./device-stream-catalog.js";
+import {
+  DEVICE_STREAM_MAX_CATALOG,
+  deviceStreamAdmits,
+  type DeviceStreamCatalogRead,
+  type DeviceStreamCatalogSource,
+  type DeviceStreamWorkspace,
+} from "./device-stream-catalog.js";
 import {
   DEVICE_STREAM_CLOSE,
   DEVICE_STREAM_CONTRACT,
@@ -34,7 +40,8 @@ import { MAX_DRAIN_MS, staggeredDrain } from "./drain.js";
 import type { RealtimeSecurityEvent, RealtimeSecurityEventFeed } from "./security-event-feed.js";
 import { UplinkAdmission, uplinkSourceAddress, type AdmissionTicket } from "./uplink-admission.js";
 
-/** The S3 device stream reads `device_stream` (process admission) and
+/** The S3 device stream reads `device_stream` (any organization mounts it;
+ * an account streams while one of its organizations has it) and
  * `presence_in_memory` (per organization), plus change notifications so a
  * flag turned off closes open streams. */
 export type DeviceStreamFlags = RolloutFlagReader & { onChange?(listener: () => void): () => void };
@@ -114,6 +121,8 @@ type DeviceSessionRecord = {
   buffer: BufferedFrame[];
   bufferBytes: number;
   known: Map<string, Known>;
+  /** From the last read; `device_stream` admits the account through them. */
+  organizationIds: readonly string[];
   catalogVersion: number;
   connection: DeviceStreamConnection | null;
   expiry: ReturnType<typeof setTimeout> | null;
@@ -141,6 +150,13 @@ export class DeviceStreamServer {
   private readonly connections = new Set<DeviceStreamConnection>();
   private readonly records = new Map<string, DeviceSessionRecord>();
   private readonly byAccount = new Map<string, Set<DeviceSessionRecord>>();
+  /** Current records by the workspaces in `known`, and by those workspaces'
+   * organizations with how many each record holds, so fan-out and targeted
+   * re-reads touch only the device sessions involved. */
+  private readonly byWorkspace = new Map<string, Set<DeviceSessionRecord>>();
+  private readonly byOrganization = new Map<string, Map<DeviceSessionRecord, number>>();
+  /** Records without a connection, in the order they were parked. */
+  private readonly parked = new Set<DeviceSessionRecord>();
   private readonly presence = new Map<string, Map<string, { state: PresenceState; since: string; connections: Set<DeviceStreamConnection> }>>();
   private readonly presenceDirty = new Set<string>();
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -267,10 +283,13 @@ export class DeviceStreamServer {
     this.wss.close();
   }
 
-  /** The flag turned off: every stream closes 4404 without resume; the
-   * client's next `POST /v1/device-sessions` answers 404 and it polls. */
+  /** A stream whose account no longer has an organization with the flag on
+   * closes 4404 without resume, and parked ones are dropped; the client's
+   * next `POST /v1/device-sessions` answers 404 and it polls. */
   applyRollout(): void {
-    if (this.enabled()) return;
+    const mounted = this.enabled();
+    for (const record of [...this.records.values()]) if (!mounted || !this.admits(record.organizationIds)) this.disable(record);
+    if (mounted) return;
     for (const connection of [...this.connections]) connection.close(DEVICE_STREAM_CLOSE.disabled, "device_stream_disabled", { park: false });
   }
 
@@ -291,8 +310,8 @@ export class DeviceStreamServer {
   /** Fans a notification out to every device session whose account
    * currently holds the workspace; parked sessions get it on resume. */
   publishNotification(notification: DeviceStreamNotification): void {
-    for (const record of this.records.values())
-      if (record.known.has(notification.workspaceId)) this.emit(record, "notification", { ...notification }, true);
+    for (const record of this.byWorkspace.get(notification.workspaceId) ?? [])
+      this.emit(record, "notification", { ...notification }, true);
   }
 
   /** Revokes runtime capabilities on matching device sessions (B's S-3
@@ -300,10 +319,13 @@ export class DeviceStreamServer {
    * those accounts, so a lost member gets `op: "remove"`. */
   revokeCapabilities(target: { accountUserId?: string; workspaceId?: string; organizationId?: string },
     scope: CapabilityRevokedScope, reason: string): void {
-    for (const record of this.records.values()) {
+    const holders = target.workspaceId ? this.byWorkspace.get(target.workspaceId)
+      : target.organizationId ? this.byOrganization.get(target.organizationId)?.keys()
+      : target.accountUserId ? this.byAccount.get(target.accountUserId) : this.records.values();
+    for (const record of holders ?? []) {
       if (target.accountUserId && record.principal.accountUserId !== target.accountUserId) continue;
       if (target.workspaceId && !record.known.has(target.workspaceId)) continue;
-      if (target.organizationId && ![...record.known.values()].some(known => known.organizationId === target.organizationId)) continue;
+      if (target.organizationId && !this.byOrganization.get(target.organizationId)?.has(record)) continue;
       this.emit(record, "capability.revoked", { ...(target.workspaceId ? { workspaceId: target.workspaceId } : {}), reason, scope }, true);
       this.scheduleAccount(record.principal.accountUserId, target.workspaceId ? [target.workspaceId] : null);
     }
@@ -323,19 +345,25 @@ export class DeviceStreamServer {
   async open(connection: DeviceStreamConnection, principal: DeviceSessionPrincipal,
     resume: { cursor: string } | undefined): Promise<void> {
     const existing = this.records.get(principal.deviceSessionId);
-    if (existing && existing.principal.accountUserId !== principal.accountUserId) this.dropRecord(existing);
+    if (existing && existing.principal.accountUserId !== principal.accountUserId) this.supersede(existing);
     const previous = this.records.get(principal.deviceSessionId);
     let resumed = false;
     let reset: CatalogResetReason | null = null;
-    let replay: BufferedFrame[] = [];
+    let replay: string[] = [];
+    let position: string | null = null;
     if (resume) {
       const cursor = decodeDeviceStreamCursor(resume.cursor);
       if (previous && cursor && cursor.lineage === previous.lineage) {
         if (cursor.sequence <= previous.seq && cursor.sequence >= previous.floor) {
           resumed = true;
+          const resumedAt = encodeDeviceStreamCursor(previous.lineage, cursor.sequence);
+          position = resumedAt;
           const missed = previous.buffer.filter(frame => frame.seq > cursor.sequence);
-          // S3: replayed revocations go first, then everything else in order.
-          replay = [...missed.filter(frame => frame.revocation), ...missed.filter(frame => !frame.revocation)];
+          // S3: replayed revocations go first. Sent ahead of their order they
+          // carry the resume position, as `ready` does, so a client that keeps
+          // the last cursor it saw never holds one past a frame still to come.
+          replay = [...missed.filter(frame => frame.revocation).map(frame => restamp(frame.text, resumedAt)),
+            ...missed.filter(frame => !frame.revocation).map(frame => frame.text)];
         } else reset = "resume_expired";
       } else reset = "instance_changed";
     }
@@ -351,27 +379,27 @@ export class DeviceStreamServer {
       try { baseline = await this.options.catalog.read(principal.accountUserId, null); }
       catch { connection.close(DEVICE_STREAM_CLOSE.internalError, "internal_error", { park: false }); return; }
       if (connection.isClosed()) return;
-      if (previous) {
-        previous.connection?.close(DEVICE_STREAM_CLOSE.superseded, "superseded", { park: false, keepRecord: true });
-        this.dropRecord(previous);
+      if (this.draining) { connection.close(DEVICE_STREAM_CLOSE.draining, "draining", { park: false }); return; }
+      if (!this.admits(baseline.organizationIds)) {
+        connection.close(DEVICE_STREAM_CLOSE.disabled, "device_stream_disabled", { park: false });
+        return;
       }
       record = this.newRecord(principal, baseline);
     }
-    if (connection.isClosed() || this.closed) return;
-    if (this.draining) { connection.close(DEVICE_STREAM_CLOSE.draining, "draining", { park: false }); return; }
     if (record.expiry) clearTimeout(record.expiry);
     record.expiry = null;
+    this.parked.delete(record);
     record.connection = connection;
     connection.bind(record);
     this.counters.admitted += 1;
     if (resumed) this.counters.resumed += 1;
     if (reset) this.counters.reset[reset] = (this.counters.reset[reset] ?? 0) + 1;
     connection.sendFrame("ready", {
-      deviceSessionId: principal.deviceSessionId, cursor: encodeDeviceStreamCursor(record.lineage, record.seq), resumed,
+      deviceSessionId: principal.deviceSessionId, cursor: position ?? encodeDeviceStreamCursor(record.lineage, record.seq), resumed,
       heartbeatIntervalMs: this.options.heartbeatIntervalMs, contract: DEVICE_STREAM_CONTRACT,
     });
     if (reset) connection.sendFrame("catalog.reset", { reason: reset });
-    for (const frame of replay) connection.sendText(frame.text);
+    for (const text of replay) connection.sendText(text);
     // Changes while parked, or while the baseline read ran, arrive as diffs.
     this.scheduleAccount(principal.accountUserId, null);
   }
@@ -385,6 +413,7 @@ export class DeviceStreamServer {
     if (keepRecord) return;
     if (!park || this.closed) { this.dropRecord(record); return; }
     record.expiry = this.timer(() => { if (!record.connection) this.dropRecord(record); }, this.options.resumeRetentionMs);
+    this.parked.add(record);
   }
 
   /** @internal */ ack(record: DeviceSessionRecord, cursor: string): boolean {
@@ -410,6 +439,7 @@ export class DeviceStreamServer {
     if (!members) this.presence.set(workspaceId, members = new Map());
     const userId = record.principal.accountUserId;
     const member = members.get(userId);
+    connection.presenceWorkspaces.add(workspaceId);
     if (!member) members.set(userId, { state, since: new Date(this.options.now()).toISOString(), connections: new Set([connection]) });
     else {
       member.connections.add(connection);
@@ -430,30 +460,77 @@ export class DeviceStreamServer {
   // ---- fan-out ----
 
   private newRecord(principal: DeviceSessionPrincipal, baseline: DeviceStreamCatalogRead): DeviceSessionRecord {
+    // The record under this id may belong to another hello that finished its
+    // baseline read first. Replacing it silently would leave its socket fed
+    // through `byAccount` but invisible to revocation, which walks `records`.
+    const current = this.records.get(principal.deviceSessionId);
+    if (current) this.supersede(current);
+    // Connected device sessions are never evicted; the one parked longest goes first.
     while (this.records.size >= this.options.maxDeviceSessions) {
-      const parked = [...this.records.values()].find(record => !record.connection);
-      if (!parked) break;
-      this.dropRecord(parked);
+      const oldest = this.parked.values().next();
+      if (oldest.done) break;
+      this.dropRecord(oldest.value);
     }
     const record: DeviceSessionRecord = {
       principal, lineage: randomBytes(16).toString("base64url"), seq: 0, floor: 0, buffer: [], bufferBytes: 0,
-      known: new Map(baseline.workspaces.map(workspace => [workspace.id, known(workspace)])),
-      catalogVersion: baseline.catalogVersion, connection: null, expiry: null,
+      known: new Map(), organizationIds: baseline.organizationIds, catalogVersion: baseline.catalogVersion,
+      connection: null, expiry: null,
     };
     this.records.set(principal.deviceSessionId, record);
-    let set = this.byAccount.get(principal.accountUserId);
-    if (!set) this.byAccount.set(principal.accountUserId, set = new Set());
-    set.add(record);
+    addTo(this.byAccount, principal.accountUserId, record);
+    for (const workspace of baseline.workspaces) this.know(record, workspace.id, known(workspace));
     return record;
+  }
+
+  /** Changes what a device session was told about a workspace, keeping the
+   * workspace and organization indexes in step with `known`. */
+  private know(record: DeviceSessionRecord, workspaceId: string, value: Known): void {
+    const previous = record.known.get(workspaceId);
+    record.known.set(workspaceId, value);
+    // A record dropped while its re-read was being applied stays unindexed.
+    if (this.records.get(record.principal.deviceSessionId) !== record) return;
+    if (!previous) addTo(this.byWorkspace, workspaceId, record);
+    if (previous?.organizationId === value.organizationId) return;
+    if (previous) countIn(this.byOrganization, previous.organizationId, record, -1);
+    countIn(this.byOrganization, value.organizationId, record, 1);
+  }
+
+  private unknow(record: DeviceSessionRecord, workspaceId: string): void {
+    const previous = record.known.get(workspaceId);
+    if (!previous) return;
+    record.known.delete(workspaceId);
+    removeFrom(this.byWorkspace, workspaceId, record);
+    countIn(this.byOrganization, previous.organizationId, record, -1);
+  }
+
+  private supersede(record: DeviceSessionRecord): void {
+    record.connection?.close(DEVICE_STREAM_CLOSE.superseded, "superseded", { park: false, keepRecord: true });
+    this.dropRecord(record);
+  }
+
+  private admits(organizationIds: readonly string[]): boolean {
+    return deviceStreamAdmits(this.options.flags, organizationIds);
+  }
+
+  private disable(record: DeviceSessionRecord): void {
+    const connection = record.connection;
+    this.dropRecord(record);
+    connection?.close(DEVICE_STREAM_CLOSE.disabled, "device_stream_disabled", { park: false });
   }
 
   private dropRecord(record: DeviceSessionRecord): void {
     if (record.expiry) clearTimeout(record.expiry);
     record.expiry = null;
-    if (this.records.get(record.principal.deviceSessionId) === record) this.records.delete(record.principal.deviceSessionId);
-    const set = this.byAccount.get(record.principal.accountUserId);
-    set?.delete(record);
-    if (set?.size === 0) this.byAccount.delete(record.principal.accountUserId);
+    this.parked.delete(record);
+    // Only the current record under an id is indexed (`newRecord` supersedes first).
+    if (this.records.get(record.principal.deviceSessionId) !== record) return;
+    this.records.delete(record.principal.deviceSessionId);
+    removeFrom(this.byAccount, record.principal.accountUserId, record);
+    for (const [workspaceId, value] of record.known) {
+      removeFrom(this.byWorkspace, workspaceId, record);
+      const counts = this.byOrganization.get(value.organizationId);
+      if (counts?.delete(record) && counts.size === 0) this.byOrganization.delete(value.organizationId);
+    }
   }
 
   /** Queues a resumable or plain frame for one device session. Resumable
@@ -513,13 +590,25 @@ export class DeviceStreamServer {
   private async refreshAccount(accountUserId: string, filter: ReadonlySet<string> | null): Promise<void> {
     const live = () => [...(this.byAccount.get(accountUserId) ?? [])].filter(record => record.connection?.isReady());
     if (live().length === 0) return;
-    const read = await this.options.catalog.read(accountUserId, filter ? [...filter] : null);
-    if (this.closed) return;
-    for (const record of live()) this.apply(record, read, filter);
+    // One read returns at most DEVICE_STREAM_MAX_CATALOG rows, so a targeted
+    // re-read of more ids is split into reads that each cover all of theirs.
+    const chunks: (string[] | null)[] = [];
+    if (!filter) chunks.push(null);
+    else {
+      const ids = [...filter];
+      for (let offset = 0; offset < ids.length; offset += DEVICE_STREAM_MAX_CATALOG) chunks.push(ids.slice(offset, offset + DEVICE_STREAM_MAX_CATALOG));
+    }
+    for (const chunk of chunks) {
+      const read = await this.options.catalog.read(accountUserId, chunk);
+      if (this.closed) return;
+      for (const record of live()) this.apply(record, read, chunk ? new Set(chunk) : null);
+    }
   }
 
   /** Diffs a re-read against what the device session was last told. */
   private apply(record: DeviceSessionRecord, read: DeviceStreamCatalogRead, filter: ReadonlySet<string> | null): void {
+    record.organizationIds = read.organizationIds;
+    if (!this.admits(record.organizationIds)) { this.disable(record); return; }
     const rows = new Map(read.workspaces.map(workspace => [workspace.id, workspace]));
     const ids = filter ? [...filter] : [...new Set([...record.known.keys(), ...rows.keys()])];
     record.catalogVersion = Math.max(record.catalogVersion, read.catalogVersion);
@@ -528,16 +617,16 @@ export class DeviceStreamServer {
       const row = rows.get(id), previous = record.known.get(id);
       if (row) {
         if (previous && row.version <= previous.version) continue;
-        record.known.set(id, known(row));
+        this.know(record, id, known(row));
         this.emit(record, "catalog.changed", { workspaceId: id, version: row.version, catalogVersion, op: "upsert", workspace: row.document }, true);
         if (previous && row.generation >= 1 && (previous.status !== row.status || previous.generation !== row.generation ||
             previous.observedState !== row.observedState))
           this.emit(record, "lifecycle.changed", { workspaceId: id, version: row.version, status: row.status,
             generation: row.generation, observedState: row.observedState }, true);
-      } else if (previous && (filter || read.complete)) {
+      } else if (previous && read.complete) {
         // Lost access (or deleted): revoke runtime capabilities first, then
         // a single remove, and nothing more for this workspace.
-        record.known.delete(id);
+        this.unknow(record, id);
         this.emit(record, "capability.revoked", { workspaceId: id, reason: "workspace_access_lost", scope: "workspace" }, true);
         this.emit(record, "catalog.changed", { workspaceId: id, version: previous.version, catalogVersion, op: "remove" }, true);
         if (record.connection) { this.dropPresence(record.connection, id); record.connection.detachWorkspace(id); }
@@ -550,8 +639,8 @@ export class DeviceStreamServer {
     this.dirtyWorkspaces.clear();
     if (ids.length === 0 || this.closed) return;
     const accounts = new Set<string>();
-    for (const record of this.records.values())
-      if (record.connection?.isReady() && ids.some(id => record.known.has(id))) accounts.add(record.principal.accountUserId);
+    for (const id of ids)
+      for (const record of this.byWorkspace.get(id) ?? []) if (record.connection?.isReady()) accounts.add(record.principal.accountUserId);
     const connected = this.connectedAccounts();
     try {
       for (const account of await this.options.catalog.candidates(ids, connected)) accounts.add(account);
@@ -563,9 +652,8 @@ export class DeviceStreamServer {
 
   private async refreshOrganization(organizationId: string): Promise<void> {
     const accounts = new Set<string>();
-    for (const record of this.records.values())
-      if (record.connection?.isReady() && [...record.known.values()].some(known => known.organizationId === organizationId))
-        accounts.add(record.principal.accountUserId);
+    for (const record of this.byOrganization.get(organizationId)?.keys() ?? [])
+      if (record.connection?.isReady()) accounts.add(record.principal.accountUserId);
     const connected = this.connectedAccounts();
     try {
       for (const account of await this.options.catalog.organizationAccounts(organizationId, connected)) accounts.add(account);
@@ -631,14 +719,19 @@ export class DeviceStreamServer {
   // ---- presence ----
 
   private dropPresence(connection: DeviceStreamConnection, onlyWorkspaceId?: string): void {
-    for (const [workspaceId, members] of this.presence) {
-      if (onlyWorkspaceId && workspaceId !== onlyWorkspaceId) continue;
-      for (const [userId, member] of members) {
-        if (!member.connections.delete(connection) || member.connections.size > 0) continue;
-        members.delete(userId);
-        this.markPresence(workspaceId);
-      }
+    // Only a bound connection can have set presence.
+    const userId = connection.record?.principal.accountUserId;
+    if (userId === undefined) return;
+    const workspaceIds = onlyWorkspaceId === undefined ? [...connection.presenceWorkspaces]
+      : connection.presenceWorkspaces.has(onlyWorkspaceId) ? [onlyWorkspaceId] : [];
+    for (const workspaceId of workspaceIds) {
+      connection.presenceWorkspaces.delete(workspaceId);
+      const members = this.presence.get(workspaceId);
+      const member = members?.get(userId);
+      if (!members || !member?.connections.delete(connection) || member.connections.size > 0) continue;
+      members.delete(userId);
       if (members.size === 0) this.presence.delete(workspaceId);
+      this.markPresence(workspaceId);
     }
   }
 
@@ -653,7 +746,7 @@ export class DeviceStreamServer {
     for (const workspaceId of dirty) {
       const members = [...(this.presence.get(workspaceId)?.entries() ?? [])].slice(0, MAX_PRESENCE_MEMBERS)
         .map(([userId, member]) => ({ userId, state: member.state, since: member.since }));
-      for (const record of this.records.values()) {
+      for (const record of this.byWorkspace.get(workspaceId) ?? []) {
         const known = record.known.get(workspaceId);
         if (!known || !record.connection?.isReady() || !this.options.flags.enabled(known.organizationId, "presence_in_memory")) continue;
         this.emit(record, "presence.changed", { workspaceId, members }, false);
@@ -666,6 +759,34 @@ export class DeviceStreamServer {
     timer.unref?.();
     return timer;
   }
+}
+
+function addTo<K, V>(map: Map<K, Set<V>>, key: K, value: V): void {
+  let set = map.get(key);
+  if (!set) map.set(key, set = new Set());
+  set.add(value);
+}
+
+function removeFrom<K, V>(map: Map<K, Set<V>>, key: K, value: V): void {
+  const set = map.get(key);
+  if (set?.delete(value) && set.size === 0) map.delete(key);
+}
+
+function countIn<K, V>(map: Map<K, Map<V, number>>, key: K, value: V, delta: 1 | -1): void {
+  let counts = map.get(key);
+  if (!counts) {
+    if (delta < 0) return;
+    map.set(key, counts = new Map());
+  }
+  const next = (counts.get(value) ?? 0) + delta;
+  if (next > 0) counts.set(value, next);
+  else counts.delete(value);
+  if (counts.size === 0) map.delete(key);
+}
+
+function restamp(text: string, cursor: string): string {
+  const { t, d } = JSON.parse(text) as { t: string; d: unknown };
+  return JSON.stringify({ t, d, c: cursor });
 }
 
 function known(workspace: DeviceStreamWorkspace): Known {
@@ -686,6 +807,8 @@ class DeviceStreamConnection {
   private lastAckMs = -Infinity;
   private readonly attachments = new Map<string, Set<string>>();
   private attachmentCount = 0;
+  /** Workspaces this connection set presence in. */
+  readonly presenceWorkspaces = new Set<string>();
 
   constructor(private readonly server: DeviceStreamServer, private readonly ws: WebSocket, private readonly admission: AdmissionTicket) {
     const now = server.options.now();

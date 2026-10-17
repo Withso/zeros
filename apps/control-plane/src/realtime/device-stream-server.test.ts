@@ -6,7 +6,7 @@ import WebSocket, { WebSocketServer } from "ws";
 
 import type { RolloutFlagName } from "../rollout-flags.js";
 import type { DeviceSessionAuthority, DeviceSessionPrincipal, DeviceSessionState } from "./device-sessions.js";
-import type { DeviceStreamCatalogRead, DeviceStreamCatalogSource, DeviceStreamWorkspace } from "./device-stream-catalog.js";
+import { DEVICE_STREAM_MAX_CATALOG, type DeviceStreamCatalogRead, type DeviceStreamCatalogSource, type DeviceStreamWorkspace } from "./device-stream-catalog.js";
 import { DEVICE_STREAM_CLOSE, DEVICE_STREAM_PATH } from "./device-stream-protocol.js";
 import { DeviceStreamServer, type DeviceStreamServerOptions } from "./device-stream-server.js";
 import type { RealtimeSecurityEvent, SecurityEventSubscriber } from "./security-event-feed.js";
@@ -71,6 +71,9 @@ class FakeAuthority implements DeviceSessionAuthority {
 /** Accounts' current access sets; the server must re-read, never trust a hint. */
 class FakeCatalog implements DeviceStreamCatalogSource {
   readonly access = new Map<string, Map<string, DeviceStreamWorkspace>>();
+  /** Organizations each account belongs to; others belong to `defaultOrganizations`. */
+  readonly organizations = new Map<string, string[]>();
+  defaultOrganizations: string[] = [];
   catalogVersion = 10;
   reads = 0;
   grant(account: string, workspace: DeviceStreamWorkspace) {
@@ -92,7 +95,10 @@ class FakeCatalog implements DeviceStreamCatalogSource {
   async read(account: string, ids: readonly string[] | null): Promise<DeviceStreamCatalogRead> {
     this.reads += 1;
     const all = [...(this.access.get(account)?.values() ?? [])];
-    return { catalogVersion: this.catalogVersion, workspaces: ids ? all.filter(workspace => ids.includes(workspace.id)) : all, complete: true };
+    // Like the database source, one read returns at most DEVICE_STREAM_MAX_CATALOG rows.
+    const rows = ids ? all.filter(workspace => ids.includes(workspace.id)) : all;
+    return { catalogVersion: this.catalogVersion, organizationIds: this.organizations.get(account) ?? this.defaultOrganizations,
+      workspaces: rows.slice(0, DEVICE_STREAM_MAX_CATALOG), complete: rows.length <= DEVICE_STREAM_MAX_CATALOG };
   }
   async candidates(_ids: readonly string[], accounts: readonly string[]) { return new Set(accounts); }
   async organizationAccounts(_org: string, accounts: readonly string[]) { return new Set(accounts); }
@@ -199,6 +205,8 @@ describe("device stream server", () => {
   let catalog: FakeCatalog;
   let url: string;
   let flags: Record<RolloutFlagName, boolean>;
+  /** Organizations for which `flags` are on. */
+  let flaggedOrganizations: Set<string>;
   let subscriber: SecurityEventSubscriber | null;
   const flagListeners = new Set<() => void>();
   const peers: Peer[] = [];
@@ -213,8 +221,8 @@ describe("device stream server", () => {
     server = new DeviceStreamServer({
       authority, catalog,
       flags: {
-        enabled: (orgId, flag) => orgId === organizationId && flags[flag],
-        anyEnabled: flag => flags[flag],
+        enabled: (orgId, flag) => flaggedOrganizations.has(orgId) && flags[flag],
+        anyEnabled: flag => flaggedOrganizations.size > 0 && flags[flag],
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
       securityEvents: { subscribe: value => { subscriber = value; return () => { subscriber = null; }; } },
@@ -241,6 +249,14 @@ describe("device stream server", () => {
     expect(ready.t).toBe("ready");
     return { peer, ready };
   }
+  /** A hello the server must refuse: the close (null if it stays open) and any frames before it. */
+  async function refusedHello(who: DeviceSessionPrincipal, resume?: { cursor: string }) {
+    const peer = dial();
+    await peer.opened;
+    peer.send({ t: "hello", d: { contract: { min: 1, max: 1 }, ticket: authority.issue(who), ...(resume ? { resume: { ...resume, catalogVersion: 0 } } : {}) } });
+    const closed = await Promise.race([peer.closed, new Promise<null>(resolve => setTimeout(() => resolve(null), 1_000))]);
+    return { closed, frames: peer.frames.map(frame => frame.t) };
+  }
   const event = (kind: RealtimeSecurityEvent["kind"], fields: Partial<RealtimeSecurityEvent>): RealtimeSecurityEvent =>
     ({ sequence: ++sequence, kind, userId: null, organizationId: null, workspaceId: null, providerSessionId: null, ...fields });
   const until = async (predicate: () => boolean) => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise(r => setTimeout(r, 10)); };
@@ -249,6 +265,8 @@ describe("device stream server", () => {
     authority = new FakeAuthority();
     catalog = new FakeCatalog();
     organizationId = randomUUID();
+    flaggedOrganizations = new Set([organizationId]);
+    catalog.defaultOrganizations = [organizationId];
     subscriber = null;
     flags = { device_stream: true, presence_in_memory: true, authority_cache_shadow: false, authority_cache_enforce: false,
       capabilities: false, realtime_uplink: false, credential_push: false, relay_over_uplink: false };
@@ -367,6 +385,29 @@ describe("device stream server", () => {
     expect(await c.peer.drainFrames()).toEqual([]);
   });
 
+  it("never reads a removal from a targeted re-read that one catalog read cannot cover", async () => {
+    await start();
+    const who = principal();
+    const held = Array.from({ length: DEVICE_STREAM_MAX_CATALOG }, () => workspace(organizationId));
+    for (const value of held) catalog.grant(who.accountUserId, value);
+    const { peer } = await connect(who);
+    await peer.drainFrames();
+    // One more workspace arrives by hint, so the device session holds more than one read covers.
+    const newest = workspace(organizationId);
+    catalog.grant(who.accountUserId, newest);
+    held.push(newest);
+    server.workspaceChanged(newest.id);
+    expect((await peer.next("catalog.changed")).d).toMatchObject({ workspaceId: newest.id, op: "upsert" });
+    // A bulk change hints every held workspace inside one coalescing window.
+    for (const value of held) { catalog.update(value.id, { status: "busy" }); server.workspaceChanged(value.id); }
+    await until(() => peer.frames.filter(frame => frame.t === "catalog.changed").length >= held.length);
+    const frames = await peer.drainFrames();
+    expect(frames.filter(frame => frame.t === "capability.revoked")).toEqual([]);
+    expect(frames.filter(frame => frame.t === "catalog.changed" && frame.d.op === "remove")).toEqual([]);
+    expect(new Set(frames.filter(frame => frame.t === "catalog.changed" && frame.d.version === 2).map(frame => frame.d.workspaceId)).size)
+      .toBe(held.length);
+  });
+
   it("re-evaluates access on membership security events and on a feed gap", async () => {
     await start();
     const member = principal(), held = workspace(organizationId);
@@ -378,6 +419,25 @@ describe("device stream server", () => {
     catalog.revoke(member.accountUserId, held.id);
     subscriber!.gap("listener_restored");
     expect((await peer.next("catalog.changed")).d).toMatchObject({ workspaceId: held.id, op: "remove" });
+  });
+
+  it("finds a member who lost a workspace or organization through what it was told, since the catalog no longer names it", async () => {
+    await start();
+    const member = principal(), stranger = principal(), held = workspace(organizationId), other = workspace(organizationId);
+    catalog.grant(member.accountUserId, held);
+    catalog.grant(member.accountUserId, other);
+    const m = await connect(member), s = await connect(stranger);
+    await Promise.all([m.peer.drainFrames(), s.peer.drainFrames()]);
+    vi.spyOn(catalog, "candidates").mockResolvedValue(new Set<string>());
+    vi.spyOn(catalog, "organizationAccounts").mockResolvedValue(new Set<string>());
+    const reads = vi.spyOn(catalog, "read");
+    catalog.revoke(member.accountUserId, held.id);
+    server.workspaceChanged(held.id);
+    expect((await m.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: held.id, op: "remove" });
+    catalog.revoke(member.accountUserId, other.id);
+    subscriber!.events([event("organization.authorization_changed", { organizationId })]);
+    expect((await m.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: other.id, op: "remove" });
+    expect(reads.mock.calls.filter(([account]) => account === stranger.accountUserId)).toEqual([]);
   });
 
   it("resumes on this instance, replaying capability.revoked before other missed events", async () => {
@@ -403,6 +463,45 @@ describe("device stream server", () => {
     // The post-resume re-read reports what changed while parked.
     expect((await second.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: other.id, op: "remove" });
     expect(server.counters.resumed).toBe(1);
+  });
+
+  it("never hands a resuming client a cursor past a replayed frame it has not received", async () => {
+    await start();
+    const who = principal(), held = workspace(organizationId), other = workspace(organizationId);
+    catalog.grant(who.accountUserId, held);
+    catalog.grant(who.accountUserId, other);
+    const first = await connect(who);
+    first.peer.ws.terminate();
+    await until(() => server.size === 0);
+    server.publishNotification({ id: randomUUID(), kind: "turn.failed", workspaceId: held.id, title: "Failed", createdAt: new Date().toISOString() });
+    server.revokeCapabilities({ workspaceId: other.id }, "workspace", "membership_changed");
+    const start0 = String(first.ready.d.cursor);
+    const second = await connect(who, { cursor: start0 });
+    // `ready` and the revocation replayed ahead of order both name the resume position.
+    expect(second.ready.d).toMatchObject({ resumed: true, cursor: start0 });
+    const revoked = await second.peer.next();
+    expect(revoked).toMatchObject({ t: "capability.revoked", c: start0 });
+    // Dropping right after the revocation and resuming from it still replays the notification.
+    second.peer.ws.terminate();
+    await until(() => server.size === 0);
+    const third = await connect(who, { cursor: revoked.c! });
+    expect(third.ready.d.resumed).toBe(true);
+    expect((await third.peer.next("notification")).d).toMatchObject({ workspaceId: held.id, kind: "turn.failed" });
+  });
+
+  it("at capacity evicts the device session parked longest, never a connected one", async () => {
+    await start({ maxDeviceSessions: 3 });
+    const first = principal(), second = principal();
+    const a = await connect(first), b = await connect(second), live = await connect(principal());
+    b.peer.ws.terminate();
+    await until(() => server.size === 2);
+    a.peer.ws.terminate();
+    await until(() => server.size === 1);
+    // `second` was parked first, though `first` was created first.
+    await connect(principal());
+    expect((await connect(first, { cursor: String(a.ready.d.cursor) })).ready.d.resumed).toBe(true);
+    expect((await connect(second, { cursor: String(b.ready.d.cursor) })).ready.d.resumed).toBe(false);
+    expect(live.peer.ws.readyState).toBe(WebSocket.OPEN);
   });
 
   it("answers ready resumed:false and catalog.reset for another lineage or an acknowledged-away cursor", async () => {
@@ -450,6 +549,54 @@ describe("device stream server", () => {
     expect(again).toBeInstanceOf(Error);
   });
 
+  it("supersedes the older of two concurrent fresh hellos, so a revocation reaches every socket of the device session", async () => {
+    await start();
+    const who = principal(), held = workspace(organizationId);
+    catalog.grant(who.accountUserId, held);
+    const read = catalog.read.bind(catalog);
+    const gates: (() => void)[] = [];
+    const deferred = async (account: string, ids: readonly string[] | null) => {
+      await new Promise<void>(resolve => gates.push(resolve));
+      return read(account, ids);
+    };
+    vi.spyOn(catalog, "read").mockImplementationOnce(deferred).mockImplementationOnce(deferred);
+    const hello = async () => {
+      const peer = dial();
+      await peer.opened;
+      peer.send({ t: "hello", d: { contract: { min: 1, max: 1 }, ticket: authority.issue(who) } });
+      return peer;
+    };
+    // Both baseline reads are in flight before either finishes.
+    const first = await hello();
+    await until(() => gates.length === 1);
+    const second = await hello();
+    await until(() => gates.length === 2);
+    gates[0]!();
+    expect((await first.next("ready")).d).toMatchObject({ deviceSessionId: who.deviceSessionId, resumed: false });
+    gates[1]!();
+    expect((await second.next("ready")).d).toMatchObject({ deviceSessionId: who.deviceSessionId, resumed: false });
+    await until(() => first.ws.readyState === WebSocket.CLOSED);
+    expect(first.ws.readyState).toBe(WebSocket.CLOSED);
+    expect(await first.closed).toEqual({ code: 4409, reason: "superseded" });
+    authority.states.set(who.deviceSessionId, "session");
+    subscriber!.events([event("session.revoked", { userId: who.accountUserId, providerSessionId: who.providerSessionId })]);
+    expect(await second.next("capability.revoked")).toMatchObject({ d: { scope: "session", reason: "session_revoked" } });
+    expect(await second.closed).toEqual({ code: 4401, reason: "unauthenticated" });
+    await until(() => server.size === 0);
+    expect(server.size).toBe(0);
+  });
+
+  it("closes the previous socket 4409 when a device session id arrives for another account", async () => {
+    await start();
+    const who = principal();
+    const first = await connect(who);
+    await connect({ ...who, accountUserId: randomUUID() });
+    await until(() => first.peer.ws.readyState === WebSocket.CLOSED);
+    expect(first.peer.ws.readyState).toBe(WebSocket.CLOSED);
+    expect(await first.peer.closed).toEqual({ code: 4409, reason: "superseded" });
+    expect(server.size).toBe(1);
+  });
+
   it("shares presence latest-wins with members who have access, behind presence_in_memory", async () => {
     await start();
     const owner = principal(), member = principal(), held = workspace(organizationId);
@@ -469,6 +616,54 @@ describe("device stream server", () => {
     flags.presence_in_memory = false;
     b.peer.send({ t: "presence.set", d: { workspaceId: held.id, state: "active" } });
     expect((await b.peer.drainFrames()).filter(frame => frame.t === "presence.changed")).toEqual([]);
+  });
+
+  it("keeps a member present until its last connection leaves, and takes it out of only the workspace it loses", async () => {
+    await start();
+    const owner = principal(), member = principal(), held = workspace(organizationId), kept = workspace(organizationId);
+    for (const value of [held, kept]) { catalog.grant(owner.accountUserId, value); catalog.grant(member.accountUserId, value); }
+    const presence = async (peer: Peer) => (await peer.drainFrames()).filter(frame => frame.t === "presence.changed").map(frame => frame.d);
+    const phone = await connect(owner), laptop = await connect(principal(owner.accountUserId)), b = await connect(member);
+    for (const peer of [phone.peer, laptop.peer]) peer.send({ t: "presence.set", d: { workspaceId: held.id, state: "active" } });
+    expect((await b.peer.next("presence.changed")).d).toMatchObject({ workspaceId: held.id, members: [{ userId: owner.accountUserId, state: "active" }] });
+    phone.peer.ws.terminate();
+    await until(() => server.size === 2);
+    expect(await presence(b.peer)).toEqual([]);
+    laptop.peer.ws.terminate();
+    expect((await b.peer.next("presence.changed")).d).toEqual({ workspaceId: held.id, members: [] });
+    const desk = await connect(principal(owner.accountUserId));
+    for (const value of [held, kept]) b.peer.send({ t: "presence.set", d: { workspaceId: value.id, state: "idle" } });
+    await until(() => desk.peer.frames.filter(frame => frame.t === "presence.changed").length === 2);
+    await presence(desk.peer);
+    catalog.revoke(member.accountUserId, held.id);
+    server.workspaceChanged(held.id);
+    expect((await desk.peer.next("presence.changed")).d).toEqual({ workspaceId: held.id, members: [] });
+    expect(await presence(desk.peer)).toEqual([]);
+    desk.peer.send({ t: "presence.set", d: { workspaceId: kept.id, state: "active" } });
+    const shared = (await desk.peer.next("presence.changed")).d as { workspaceId: string; members: { userId: string; state: string }[] };
+    expect(shared.workspaceId).toBe(kept.id);
+    expect(shared.members.map(value => `${value.userId}:${value.state}`).sort())
+      .toEqual([`${member.accountUserId}:idle`, `${owner.accountUserId}:active`].sort());
+  });
+
+  it("revokes by organization only on device sessions holding one of its workspaces", async () => {
+    await start();
+    const other = randomUUID(), member = principal(), outsider = principal();
+    const elsewhere = workspace(other);
+    catalog.grant(member.accountUserId, elsewhere);
+    catalog.grant(outsider.accountUserId, workspace(organizationId));
+    const m = await connect(member), o = await connect(outsider);
+    await Promise.all([m.peer.drainFrames(), o.peer.drainFrames()]);
+    server.revokeCapabilities({ organizationId: other }, "organization", "organization_access_revoked");
+    expect((await m.peer.next("capability.revoked")).d).toEqual({ reason: "organization_access_revoked", scope: "organization" });
+    expect(await o.peer.drainFrames()).toEqual([]);
+    // With its last workspace there gone, the member no longer holds the organization.
+    catalog.revoke(member.accountUserId, elsewhere.id);
+    server.workspaceChanged(elsewhere.id);
+    expect((await m.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: elsewhere.id, op: "remove" });
+    await m.peer.drainFrames();
+    server.revokeCapabilities({ organizationId: other }, "organization", "organization_access_revoked");
+    expect(await m.peer.drainFrames()).toEqual([]);
   });
 
   it("delivers capability.renewed only for an attached runtime session", async () => {
@@ -499,6 +694,31 @@ describe("device stream server", () => {
     flags.device_stream = false;
     for (const listener of flagListeners) listener();
     expect((await live.peer.closed).code).toBe(4404);
+  });
+
+  it("streams for an account only while an organization it belongs to has device_stream on", async () => {
+    await start();
+    const pilot = organizationId, other = randomUUID();
+    const member = principal(), outsider = principal();
+    catalog.organizations.set(outsider.accountUserId, [other]);
+    const live = await connect(member);
+    // Another organization has the flag, but none of the outsider's does.
+    expect(await refusedHello(outsider)).toEqual({ closed: { code: 4404, reason: "device_stream_disabled" }, frames: [] });
+    // The pilot moves to the outsider's organization: the member closes 4404 and cannot resume.
+    flaggedOrganizations.delete(pilot);
+    flaggedOrganizations.add(other);
+    for (const listener of flagListeners) listener();
+    expect(await Promise.race([live.peer.closed, new Promise(resolve => setTimeout(() => resolve(null), 1_000))]))
+      .toEqual({ code: 4404, reason: "device_stream_disabled" });
+    expect(await refusedHello(member, { cursor: String(live.ready.d.cursor) }))
+      .toEqual({ closed: { code: 4404, reason: "device_stream_disabled" }, frames: [] });
+    const streaming = await connect(outsider);
+    // Leaving the last streaming organization closes the stream on the next re-read.
+    catalog.organizations.set(outsider.accountUserId, [pilot]);
+    subscriber!.events([event("organization.access_revoked", { userId: outsider.accountUserId, organizationId: other })]);
+    expect(await Promise.race([streaming.peer.closed, new Promise(resolve => setTimeout(() => resolve(null), 1_000))]))
+      .toEqual({ code: 4404, reason: "device_stream_disabled" });
+    expect(server.counters.closed.device_stream_disabled).toBe(4);
   });
 
   describe("reference client", () => {

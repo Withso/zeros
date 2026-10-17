@@ -14,19 +14,16 @@ export function handleDeviceStreamNotification(server: Pick<DeviceStreamServer, 
   if (match) server.workspaceChanged(match[1]!);
 }
 
-/** Shares the process's LISTEN session. Every (re)connect re-reads every
- * connected account, so a hint lost while the listener was down is repaired
- * from the durable rows rather than trusted. */
+/** Shares the process's LISTEN session. Every ready, the first included,
+ * re-reads every connected account: the server admits streams before LISTEN
+ * is up, so a hint committed before then is repaired from the durable rows
+ * like one lost while the listener was down. */
 export function startDeviceStreamNotifications(pool: pg.Pool, server: DeviceStreamServer,
   logger: Pick<Console, "warn"> = console): () => Promise<void> {
-  let ready = false;
   const listener = postgresNotificationSubscription(pool, {
     channels: [DEVICE_STREAM_CATALOG_CHANNEL],
     onNotification: notice => handleDeviceStreamNotification(server, notice.channel, notice.payload ?? ""),
-    onReady: () => {
-      if (ready) server.refreshEverything();
-      ready = true;
-    },
+    onReady: () => server.refreshEverything(),
     onUnavailable: () => logger.warn("[realtime] device stream catalog notifications unavailable; relying on security events and reconnects"),
   });
   void listener.start().catch(() => {});

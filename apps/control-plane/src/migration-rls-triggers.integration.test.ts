@@ -67,7 +67,8 @@ d("triggers on user-writable tables with PostgreSQL", () => {
       [deviceId, userId, key, createHash("sha256").update(key).digest()]);
     await pool.query(`INSERT INTO cloud_device_sessions(id,user_id,device_id,ticket_hash,ticket_expires_at,expires_at)
       VALUES($1,$2,$3,$4,now()+interval '1 minute',now()+interval '1 day')`,
-    [deviceSessionId, userId, deviceId, createHash("sha256").update(`ticket:${deviceSessionId}`).digest()]);    return deviceId;
+    [deviceSessionId, userId, deviceId, createHash("sha256").update(`ticket:${deviceSessionId}`).digest()]);
+    return deviceId;
   }
   const asUser = (userId: string, statement: string, values: unknown[]) =>
     withUserTx(pool, userId, (tx: Tx) => tx.query(statement, values));

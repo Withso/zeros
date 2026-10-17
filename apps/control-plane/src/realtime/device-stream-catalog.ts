@@ -1,8 +1,9 @@
 import type pg from "pg";
 
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { queryCloudWorkspaceCatalog, readCatalogVersion, workspaceDocument } from "../cloud-workspaces/routes.js";
+import type { RolloutFlagReader } from "../rollout-flags.js";
 
 /** A device-stream re-read covers at most this many workspaces per account,
  * the same bound as `hello.resume.workspaces`. */
@@ -23,6 +24,8 @@ export type DeviceStreamWorkspace = Readonly<{
 export type DeviceStreamCatalogRead = Readonly<{
   /** `cloud_catalog_version_seq`, read before the rows. */
   catalogVersion: number;
+  /** The account's `readDeviceStreamOrganizations`, read in the same transaction. */
+  organizationIds: readonly string[];
   workspaces: readonly DeviceStreamWorkspace[];
   /** False when the account has more workspaces than one read covers; the
    * stream then never infers a removal from absence. */
@@ -44,6 +47,28 @@ export interface DeviceStreamCatalogSource {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const MAX_ORGANIZATIONS = 1_000;
+
+/** The organizations whose `device_stream` flag admits an account: those it
+ * is a member of and those it holds a live guest grant in. Past the bound an
+ * account can only be refused the stream, never admitted by mistake. */
+export async function readDeviceStreamOrganizations(tx: Tx, accountUserId: string): Promise<string[]> {
+  if (!UUID.test(accountUserId)) return [];
+  const rows = await tx.query<{ org_id: string }>(
+    `SELECT org_id::text AS org_id FROM organization_members WHERE user_id = $1
+     UNION SELECT org_id::text FROM cloud_workspace_guest_grants
+       WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()
+     LIMIT ${MAX_ORGANIZATIONS}`, [accountUserId]);
+  return rows.rows.map(row => row.org_id);
+}
+
+/** `device_stream` is per organization: an account streams while any of its
+ * organizations has it on. `anyEnabled` only decides whether a process mounts
+ * the stream at all. */
+export function deviceStreamAdmits(flags: RolloutFlagReader, organizationIds: Iterable<string>): boolean {
+  for (const organizationId of organizationIds) if (flags.enabled(organizationId, "device_stream")) return true;
+  return false;
+}
 
 export class DatabaseDeviceStreamCatalogSource implements DeviceStreamCatalogSource {
   constructor(private readonly pool: pg.Pool, private readonly config: CloudWorkspaceBackendConfig | null) {}
@@ -52,7 +77,8 @@ export class DatabaseDeviceStreamCatalogSource implements DeviceStreamCatalogSou
     const ids = workspaceIds?.filter(id => UUID.test(id)) ?? null;
     return withSystemTx(this.pool, async tx => {
       const catalogVersion = await readCatalogVersion(tx);
-      if (ids && ids.length === 0) return { catalogVersion, workspaces: [], complete: true };
+      const organizationIds = await readDeviceStreamOrganizations(tx, accountUserId);
+      if (ids && ids.length === 0) return { catalogVersion, organizationIds, workspaces: [], complete: true };
       const rows = await queryCloudWorkspaceCatalog(tx, {
         orgId: null, userId: accountUserId, limit: DEVICE_STREAM_MAX_CATALOG + 1, cursor: null,
         ...(ids ? { workspaceIds: ids } : {}),
@@ -66,7 +92,7 @@ export class DatabaseDeviceStreamCatalogSource implements DeviceStreamCatalogSou
           document: document as Record<string, unknown>,
         });
       });
-      return { catalogVersion, workspaces, complete };
+      return { catalogVersion, organizationIds, workspaces, complete };
     });
   }
 

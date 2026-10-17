@@ -1,6 +1,7 @@
 # S3. Client contract v1 (cloud workspaces)
 
-Status: **FROZEN** · Contract ID `zeros-client` · Version `1.0.0` ·
+Status: **FROZEN** · Contract ID `zeros-client` · Version `1.0.1`
+(clarifications; see [Changelog](#changelog)) ·
 Schemas: [Draft schema: REST API (OpenAPI 3.1)](#draft-schema-rest-api-openapi-31),
 [Draft schema: device stream frames](#draft-schema-device-stream-frames),
 [Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames)
@@ -147,7 +148,10 @@ Every workspace document already carries `version`
 catalog response adds `catalogVersion` (monotonic per account) so a client can
 resume the device stream from a known snapshot. Clients apply a pushed
 document only if its `version` is greater than the one they hold for the same
-`cloud://` workspace key.
+`cloud://` workspace key. `catalogVersion` is a watermark, not a consistent
+snapshot point: a snapshot reporting N may lack a change that drew a value up
+to N but committed later, and that change still arrives as an event. Clients
+never drop or skip an event because of `catalogVersion`.
 
 ## Part 2: Device stream
 
@@ -197,7 +201,10 @@ without the history, yields `ready { resumed: false }` followed by
 `catalog.reset`; the client re-reads the snapshot (REST) while keeping its
 last confirmed view on screen. Resource `version` comparisons make
 duplicates harmless. On a successful resume, replayed `capability.revoked`
-events are sent before any other replayed event.
+events are sent before any other replayed event. `ready.cursor` is then the
+resume position, and revocations replayed ahead of their order carry that
+position as `c`, so resuming from the last `c` received never skips a
+replayed event.
 
 Close codes: `4401` for a missing, expired or reused ticket (fetch a new one
 through `POST /v1/device-sessions`), `4426` when no common contract major
@@ -373,6 +380,7 @@ not part of this contract and do not change.
 | S3-Q5 | Outbox persistence location on the Mac | Electron main, per account, bounded (500 entries, 7 days), cleared on sign-out. | Accepted; the outbox never stores capabilities or tickets. |
 | S3-Q6 | Version path prefix (`/v2/…`) for new endpoints? | No; keep `/v1` and evolve additively; the contract major is negotiated in bodies and frames. | Accepted. |
 | S3-Q7 | Push full documents or deltas in `catalog.changed`? | Full documents (bounded, already schema-validated by the client); deltas later if size matters. | Accepted. |
+| S3-Q8 | Viewer-specific and derived document fields (`actorRole`, `capabilities`, including `canStart` and `startUnavailableReason`) change without a workspace `version` bump, after a role or allowance change. How do they reach the device stream? | Until decided, they arrive only with the next `version` bump; a client re-reads the REST document when it needs current values (for example before offering Start), and the server authorizes every command anyway. Candidates for 1.x: a same-version replacement rule for upserts, or a separate per-viewer frame. | Open (recorded 2026-10-17). |
 
 ## Draft schema: REST API (OpenAPI 3.1)
 
@@ -386,7 +394,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
 openapi: 3.1.0
 info:
   title: Zeros cloud workspace client contract (S3)
-  version: 1.0.0
+  version: 1.0.1
   description: >-
     FROZEN reference sketch of the REST half of client contract v1 for cloud
     workspaces. Existing endpoints keep their current request and response
@@ -1487,3 +1495,19 @@ is a review aid until freeze; the frozen source of truth will be Zod in
   ]
 }
 ```
+
+## Changelog
+
+- **1.0.1** (2026-10-17, clarifications; no schema change):
+  - `catalogVersion` is a watermark, not a consistent snapshot point.
+    Sequence positions are drawn before commit, so a snapshot reporting N
+    may lack a change that drew a value up to N; that change still arrives
+    as an event, and clients never drop or skip an event because of
+    `catalogVersion`.
+  - On a successful resume, `ready.cursor` is the resume position, and
+    `capability.revoked` events replayed ahead of their order carry it as
+    `c`. A client that resumes from the last `c` it received never skips a
+    replayed event.
+  - Open question S3-Q8 records that viewer-specific and derived document
+    fields change without a `version` bump and so reach the device stream
+    only with the next one.

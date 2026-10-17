@@ -9,6 +9,7 @@ import type { RolloutFlagReader } from "../rollout-flags.js";
 import { deviceProof } from "../cloud-workspaces/routes.js";
 import { consumeCloudWorkspaceDeviceProof, replicaErrorToHttp, WorkspaceReplicaError } from "../cloud-workspaces/replicas.js";
 import { issueDeviceSession } from "./device-sessions.js";
+import { deviceStreamAdmits, readDeviceStreamOrganizations } from "./device-stream-catalog.js";
 import { DEVICE_STREAM_CONTRACT, DEVICE_STREAM_HEARTBEAT_INTERVAL_MS } from "./device-stream-protocol.js";
 
 export const DEVICE_SESSIONS_PATH = "/v1/device-sessions";
@@ -53,6 +54,8 @@ export function createDeviceSessionRoutes(pool: pg.Pool, options: DeviceSessionR
       throw new HttpError(409, "contract_unsupported", "No common device stream contract");
     try {
       const issued = await withSystemTx(pool, async tx => {
+        if (!deviceStreamAdmits(options.flags, await readDeviceStreamOrganizations(tx, user.id)))
+          throw new HttpError(404, "not_found", "Not found");
         await consumeCloudWorkspaceDeviceProof(tx, { accountUserId: user.id, action: DEVICE_SESSION_PROOF_ACTION,
           payload: { deviceSessionId: body.deviceSessionId ?? null }, proof });
         return issueDeviceSession(tx, { accountUserId: user.id, deviceId: proof.deviceId,
