@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   evaluateLocalSeams,
+  loadBaseLocalSeamsManifest,
   loadLocalSeamsManifest,
   runLocalUntouched,
   validateLocalSeamsManifest,
@@ -332,6 +333,40 @@ describe("runLocalUntouched base-manifest loading (pr mode)", () => {
     expect(result.problems.length).toBeGreaterThan(0);
     expect(result.localOnlyHits).toContain(LOCAL_FILE);
     expect(process.exitCode).toBe(1);
+  });
+
+  it("still fails a PR that drops the real scripts/electron-local.mjs rule and edits that file", () => {
+    const repo = makeRepo();
+    const real = loadLocalSeamsManifest();
+    write(repo, MANIFEST_PATH, JSON.stringify(real));
+    write(repo, "scripts/electron-local.mjs", "// v1\n");
+    write(repo, CLOUD_FILE, "export const v = 1;\n");
+    const base = commitAll(repo, "base");
+    const weakened = {
+      ...real,
+      local_only: real.local_only.filter(
+        (rule: { include: string[] }) => !rule.include.includes("scripts/electron-local.mjs"),
+      ),
+    };
+    expect(weakened.local_only.length).toBe(real.local_only.length - 1);
+    write(repo, MANIFEST_PATH, JSON.stringify(weakened));
+    write(repo, "scripts/electron-local.mjs", "// v2\n");
+    write(repo, CLOUD_FILE, "export const v = 2;\n");
+    const head = commitAll(repo, "weaken the real gate");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = runLocalUntouched({ argv: [], env: prEnv(base, head), cwd: repo });
+    expect(result.localOnlyHits).toContain("scripts/electron-local.mjs");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("fails closed when the base commit cannot be read", () => {
+    const repo = makeRepo();
+    write(repo, CLOUD_FILE, "export const v = 1;\n");
+    commitAll(repo, "only commit");
+    expect(() =>
+      loadBaseLocalSeamsManifest({ baseSha: "0123456789abcdef0123456789abcdef01234567", cwd: repo }),
+    ).toThrow(/failing closed/);
   });
 
   it("falls back to the head copy only when the base has no manifest at all", () => {

@@ -243,7 +243,9 @@ It does not provide an immutable merge request or an App-owned merge gate.
 | `ci:cloud-scale`      | Advisory 10×/100× load-budget lane             |
 
 The vocabulary is closed. An unknown `ci:*` label fails with the supported list;
-ordinary labels have no effect. `LABELS_JSON` accepts a JSON array of strings or
+ordinary labels have no effect. `local-seams-sign-off` is not a `ci:*` label
+and selects nothing; it only satisfies `local-untouched`, and only the owner
+applies it; agents never add it. `LABELS_JSON` accepts a JSON array of strings or
 GitHub label objects with `name`. Preview requests with:
 
 ```sh

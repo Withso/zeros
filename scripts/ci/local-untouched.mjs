@@ -155,20 +155,26 @@ export function loadBaseLocalSeamsManifest({ baseSha, cwd } = {}) {
     throw new Error(
       "local-untouched cannot read the base manifest without a base SHA; failing closed.",
     );
-  let blob;
-  try {
-    blob = execFileSync("git", ["show", `${baseSha}:${MANIFEST_REPO_PATH}`], {
+  const git = (args) =>
+    execFileSync("git", args, {
       cwd,
       encoding: "utf8",
       maxBuffer: 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
     });
-  } catch (error) {
-    const detail = `${error.stderr ?? ""}${error.message ?? ""}`;
-    if (/does not exist|exists on (disk|HEAD), but not in/.test(detail))
+  let blob;
+  try {
+    // Ask the tree whether the base carries the manifest instead of parsing
+    // git's (localizable) error text: only a confirmed absence may fall back.
+    const listed = git(["ls-tree", "--name-only", `${baseSha}^{commit}`, "--", MANIFEST_REPO_PATH]);
+    if (listed.trim() === "")
       return {
         manifest: loadHeadManifest(cwd).manifest,
         source: "head (this pull request introduces the manifest)",
       };
+    blob = git(["show", `${baseSha}:${MANIFEST_REPO_PATH}`]);
+  } catch (error) {
+    const detail = `${error.stderr ?? ""}${error.message ?? ""}`;
     throw new Error(
       `local-untouched cannot read the base manifest at ${baseSha} (${detail.trim()}); failing closed.`,
     );
