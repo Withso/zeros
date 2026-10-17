@@ -123,5 +123,5 @@ export async function checkEmptyChatTranscriptRow({ page, check, harnessBase, sc
     provisional.total > 0 && provisional.missing === 0 && provisional.loading === 0,
     `${provisional.total} frames: ${provisional.missing} without the row, ${provisional.loading} with Loading`);
   await page.evaluate(() => window.transcriptRowFixture.setDelay(0));
-  await page.clock.pauseAt(new Date());
+  await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1_000);
 }

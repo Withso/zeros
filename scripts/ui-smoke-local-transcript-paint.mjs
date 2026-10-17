@@ -17,7 +17,10 @@ export async function checkLocalTranscriptPaint({ page, check, screenshotDir }) 
     await page.getByRole("button", { name: label, exact: true }).click();
     await page.evaluate(async ({ chatId, store }) => {
       const { useSessionsStore } = await import(store);
-      useSessionsStore.getState().patchSession(chatId, { messages: [], hasTranscript: true,
+      const state = useSessionsStore.getState();
+      // Seed known history explicitly: an empty message patch derives this
+      // flag from the existing slot and cannot turn a new chat into an old one.
+      state.setSession(chatId, { ...state.sessions[chatId], messages: [], hasTranscript: true,
         transcriptState: "loading", transcriptPresentation: null });
     }, { chatId, store: STORE });
     // A genuine cold read with nothing remembered stays truthful.
@@ -80,5 +83,6 @@ export async function checkLocalTranscriptPaint({ page, check, screenshotDir }) 
   if (screenshotDir) await page.screenshot({ path: `${screenshotDir}/local-transcript-long-turn.png`, animations: "disabled" });
   check("A Local window that begins inside one long turn still shows that turn's opening prompt", true);
   expect(await page.evaluate(() => window.composerSendFailureFixture.sends)).toBe(0);
-  await page.clock.pauseAt(new Date());
+  // Earlier scenarios advance the browser clock; never rewind to host time.
+  await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1_000);
 }

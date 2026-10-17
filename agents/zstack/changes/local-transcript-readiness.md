@@ -26,3 +26,10 @@ Encoded in `local-transcript-hydrate.test.ts` (production hydrate callback),
 `db.test.ts` long-turn and coalesced-write cases, `service.test.ts`, the extended latency
 contract test, `scripts/ui-smoke-local-transcript-paint.mjs`, and the
 `[Zeros] slow boot phases` line.
+
+Integration smoke exposed an invalid fixture: an empty `patchSession` derives
+`hasTranscript` from the existing slot, so it cannot seed known old history.
+Seed the complete session before asserting cold-history presentation, and
+pause a previously advanced browser clock relative to browser time instead
+of the host clock. The Local transcript paint and transcript-row browser
+checks retain the assertions and encode these fixture boundaries.
