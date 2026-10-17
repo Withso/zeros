@@ -268,6 +268,15 @@ export class CapabilityVerifier {
 
   knownEpoch(subject: string): number | undefined { return this.known.get(subject); }
 
+  /** Known epochs and live revocations, for a verifier that persists them. */
+  exportState(): { known: Array<[string, number]>; revoked: Array<["sid" | "did", string, number]> } {
+    this.pruneRevocations();
+    return {
+      known: [...this.known],
+      revoked: [...this.revoked].map(([key, until]) => [key.slice(0, 3) as "sid" | "did", key.slice(4), until]),
+    };
+  }
+
   /** Session (`sid`) and device (`did`) revocations: a union, each entry
    * kept until its own `until` (default: the retention window). */
   revoke(kind: "sid" | "did", id: string, untilMs = this.now() + CAPABILITY_REVOCATION_RETENTION_MS): CapabilitySessionClosure[] {

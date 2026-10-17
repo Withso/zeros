@@ -1042,10 +1042,13 @@ export class CloudRuntimeRegistration {
    * with, or null when the control plane did not advertise one (rollout flag
    * off, or an older control plane). The HTTP heartbeat remains the lease
    * owner either way. */
-  engineUplink(): { endpoint: string; token: string } | null {
+  engineUplink(): { endpoint: string; token: string; controlPlaneOrigin: string } | null {
     const document = this.document;
     if (!document?.uplink || this.stopped || this.authorityLost) return null;
-    return { endpoint: document.uplink.endpoint, token: document.heartbeat.token };
+    // The S1 issuer is the control plane's api origin, the same origin the
+    // heartbeat endpoint names.
+    return { endpoint: document.uplink.endpoint, token: document.heartbeat.token,
+      controlPlaneOrigin: new URL(document.heartbeat.endpoint).origin };
   }
 
   /** Asks for an immediate beat. A superseded uplink (4409) re-verifies its

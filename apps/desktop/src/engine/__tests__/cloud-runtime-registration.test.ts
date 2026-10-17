@@ -1579,6 +1579,7 @@ describe("engine uplink advertisement", () => {
     await f.registration.start();
     expect(f.registration.engineUplink()).toEqual({
       endpoint: "wss://realtime.example.test/v1/uplink", token: `zwh_${"H".repeat(43)}`,
+      controlPlaneOrigin: new URL(registrationResponse().heartbeat.endpoint).origin,
     });
     await f.registration.stop();
     expect(f.registration.engineUplink()).toBeNull();
