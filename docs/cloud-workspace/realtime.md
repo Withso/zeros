@@ -253,7 +253,11 @@ streams with `4404` without resume and drops its parked device sessions.
 - **Fan-out.** A workspace's frames go only to device sessions whose last
   re-read contained it. Losing access (or deletion) sends
   `capability.revoked { scope: "workspace" }`, then one
-  `catalog.changed { op: "remove" }`, and nothing further for it.
+  `catalog.changed { op: "remove" }`, and nothing further for it. An
+  upsert is sent only when the workspace's `version` grows, so document
+  fields that change without a bump (the viewer's `actorRole` and
+  `capabilities`, including `canStart` and `startUnavailableReason` after a
+  role or allowance change) reach the stream with the next bump (S3-Q8).
 - **catalogVersion.** The global `cloud_catalog_version_seq` position (read
   before the rows), so it is monotonic per account; frames carry the
   maximum seen by that device session. The REST catalog returns the same
@@ -288,7 +292,9 @@ streams with `4404` without resume and drops its parked device sessions.
 - **Producers.** `publishNotification`, `revokeCapabilities` and
   `pushCapabilityRenewal` (for `attach`ed runtime sessions) are the entry
   points for notification and capability producers; none is wired in this
-  release, so no `notification` or `capability.renewed` frame is sent yet.
+  release (notifications arrive with Tracks D/E, capability renewal and
+  revocation with Track B's S-3 producer), so no `notification` or
+  `capability.renewed` frame is sent yet.
 - **Drain.** The C0 staggered drain sends `drain { reconnectAfterMs }`
   (0-5 s) and closes `4503`.
 - **Local.** Only cloud workspaces exist in the catalog the stream reads;

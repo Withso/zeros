@@ -380,6 +380,7 @@ not part of this contract and do not change.
 | S3-Q5 | Outbox persistence location on the Mac | Electron main, per account, bounded (500 entries, 7 days), cleared on sign-out. | Accepted; the outbox never stores capabilities or tickets. |
 | S3-Q6 | Version path prefix (`/v2/…`) for new endpoints? | No; keep `/v1` and evolve additively; the contract major is negotiated in bodies and frames. | Accepted. |
 | S3-Q7 | Push full documents or deltas in `catalog.changed`? | Full documents (bounded, already schema-validated by the client); deltas later if size matters. | Accepted. |
+| S3-Q8 | Viewer-specific and derived document fields (`actorRole`, `capabilities`, including `canStart` and `startUnavailableReason`) change without a workspace `version` bump, after a role or allowance change. How do they reach the device stream? | Until decided, they arrive only with the next `version` bump; a client re-reads the REST document when it needs current values (for example before offering Start), and the server authorizes every command anyway. Candidates for 1.x: a same-version replacement rule for upserts, or a separate per-viewer frame. | Open (recorded 2026-10-17). |
 
 ## Draft schema: REST API (OpenAPI 3.1)
 
@@ -1507,3 +1508,6 @@ is a review aid until freeze; the frozen source of truth will be Zod in
     `capability.revoked` events replayed ahead of their order carry it as
     `c`. A client that resumes from the last `c` it received never skips a
     replayed event.
+  - Open question S3-Q8 records that viewer-specific and derived document
+    fields change without a `version` bump and so reach the device stream
+    only with the next one.
