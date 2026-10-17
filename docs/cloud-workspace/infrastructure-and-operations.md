@@ -229,6 +229,34 @@ scripts through Boat's command API, whose command text and output Boat retains
 unless monitoring is off; never pass secrets through it. Boat's account-level
 **Monitoring off** is not evidence for any existing or replayed allocation.
 
+### Request tracing
+
+The control plane records OpenTelemetry traces and exports them over OTLP/HTTP
+to the self-hosted Tempo service on Railway, reached on the private network at
+`http://<service>.railway.internal:4318/v1/traces`. Tempo keeps traces for seven
+days; that retention is set on the Tempo service.
+
+Two environment variables control tracing. An unset
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` disables it. Otherwise the endpoint must use
+`https`, or `http` only on a Railway private host or `localhost`, and must carry
+no credentials or query. `CONTROL_PLANE_TRACE_SAMPLE_RATIO` (0 to 1, default 0)
+sets the share of requests without a remote parent that are recorded. A request
+that carries a W3C `traceparent` header follows its caller's sampling decision,
+so at the default only requests whose `traceparent` is sampled are recorded.
+
+Each recorded request has one server span named by its route template. Child
+spans cover pool waits, shared transactions and provider locks, and Boat API
+calls, which are named `boat <method> <route template>`. Span attributes come
+from a closed list, `TRACE_ATTRIBUTE_TYPES` in `apps/control-plane/src/tracing.ts`,
+and carry no identifiers, tokens, prompts, payloads, raw paths or error messages.
+Health probes are not traced.
+
+The cloud SDK can start a trace per request with its `tracing` option, or
+continue a caller's trace with a per-request `traceparent`. WebSockets and the VM
+leg are not traced yet; an optional S2 1.1 envelope member is approved for a
+later slice. If the exporter is down, spans are dropped rather than queued
+without bound (the queue holds 2,048 spans), and requests are never affected.
+
 ## Health alerts
 
 `/healthz` reports aggregate cloud health: `operationalState` is `healthy` or

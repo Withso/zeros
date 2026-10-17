@@ -64,6 +64,8 @@ const EnvSchema = z.object({
   /** Graceful drain window on SIGTERM; 0 keeps the immediate close. */
   CONTROL_PLANE_DRAIN_SECONDS: z.coerce.number().int().min(0).max(120).default(0),
   SLOW_REQUEST_LOG_MS: z.coerce.number().int().min(50).max(60_000).default(DEFAULT_SLOW_REQUEST_LOG_MS),
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: z.string().optional(),
+  CONTROL_PLANE_TRACE_SAMPLE_RATIO: z.coerce.number().min(0).max(1).default(0),
   DESKTOP_RELEASE_LEDGER_URL: z.string().optional(),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
@@ -337,6 +339,9 @@ export type Config = {
   workerPollIntervalsMs?: WorkerPollIntervals;
   /** Requests at least this slow are logged once by route template. */
   slowRequestLogMs?: number;
+  /** Absent when tracing is disabled; see `traceExportUrl`. */
+  tracesUrl?: string;
+  traceSampleRatio?: number;
   /** Receives aggregate cloud health alerts; null disables them. */
   operationsAlertEmail?: string | null;
   /** All application routes and background writers are disabled during cutover. */
@@ -1632,6 +1637,19 @@ function loadOperationsAlertEmail(env: NodeJS.ProcessEnv, diagnostics: ConfigDia
   return null;
 }
 
+/** OTLP over https, or plain http only to a Railway private host or this machine. */
+function traceExportUrl(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT must be a URL"); }
+  const privateHttp = url.protocol === "http:" &&
+    (url.hostname.endsWith(".railway.internal") || url.hostname === "localhost" || url.hostname === "127.0.0.1");
+  if ((url.protocol !== "https:" && !privateHttp) || url.username || url.password || url.search || url.hash)
+    throw new Error("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT must be https (or http on a Railway private host) without credentials or a query");
+  return url.toString();
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: ConfigDiagnostics = console): Config {
   const development = developmentIdentity(env);
   const parsed = EnvSchema.safeParse(env);
@@ -1697,6 +1715,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   }
 
   const cloudWorkspaces = cloudChannel ? loadCloudWorkspaceConfig(env, github) : null;
+  const tracesUrl = traceExportUrl(e.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
   return {
     databaseUrl: parseDatabaseTarget(e.DATABASE_URL).toString(),
     ...(e.DATABASE_LISTEN_URL ? {databaseListenUrl: parseDatabaseTarget(e.DATABASE_LISTEN_URL).toString()} : {}),
@@ -1708,6 +1727,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     shutdownDrainMs: e.CONTROL_PLANE_DRAIN_SECONDS * 1_000,
     workerPollIntervalsMs: loadWorkerPollIntervals(env, cloudWorkspaces !== null),
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
+    ...(tracesUrl ? { tracesUrl } : {}),
+    traceSampleRatio: e.CONTROL_PLANE_TRACE_SAMPLE_RATIO,
     operationsAlertEmail: loadOperationsAlertEmail(env, diagnostics),
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,

@@ -85,12 +85,17 @@ import { CapabilityRevocationPush, DatabaseCapabilityRevocationSource } from "./
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
+import { configureControlPlaneTracing, createOtlpTraceExporter, shutdownControlPlaneTracing } from "./tracing.js";
 
 const config = loadConfig();
 const runtimeArtifacts = createRuntimeArtifactStore({
   s3: config.cloudRuntimePublication?.s3 ?? config.cloudWorkspaces?.durability?.s3 ?? null,
 });
 const processRole = config.processRole ?? "combined";
+if (config.tracesUrl) {
+  configureControlPlaneTracing({ exporter: createOtlpTraceExporter(config.tracesUrl), sampleRatio: config.traceSampleRatio ?? 0,
+    processRole, deploymentChannel: config.deploymentChannel });
+}
 // `servesApi`: an interactive pool and the cloud services behind requests and
 // WebSocket upgrades. Realtime replicas serve only upgrades; they never mount
 // the HTTP API and never start durable queue consumers (realtime.md).
@@ -1035,6 +1040,7 @@ function closeServer(backgroundStopped: Promise<unknown>, deadline: ReturnType<t
         // A lost-uplink write that misses this window is overwritten by the
         // next owner's connect; until then its stale last_seen_at marks it.
         await uplinkPresence?.close(2_000);
+        await shutdownControlPlaneTracing(2_000);
         const pools = new Set([pool, listenerPool]);
         if (workerPool) pools.add(workerPool);
         if (retirementLockPool) pools.add(retirementLockPool);

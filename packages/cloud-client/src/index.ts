@@ -99,5 +99,6 @@ export {
   deviceProofPayloadDigest,
 } from "./device-proof";
 export type { DeviceProofAction, DeviceProofRequest } from "./device-proof";
+export { createTraceparent, TRACEPARENT_PATTERN, type TraceparentOptions } from "./trace-context";
 export { CloudOrgFlagCache, probeFromConnectFailure } from "./feature-probe";
 export type { CloudFlagState } from "./feature-probe";
