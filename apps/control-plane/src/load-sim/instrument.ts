@@ -19,6 +19,9 @@ export type OperationCost = {
   /** Explicit BEGIN blocks plus implicit single-call autocommit transactions. */
   transactions: number;
   commits: number;
+  /** Commits of transactions that issued NOTIFY/pg_notify; PostgreSQL
+   * serializes all notifying commits at commit time. */
+  notifyingCommits: number;
   rollbacks: number;
   /** Pool checkouts (`pool.connect`). */
   checkouts: number;
@@ -29,7 +32,7 @@ export type OperationCost = {
 
 export const emptyCost = (): OperationCost => ({
   calls: 0, roundTrips: 0, statements: 0, transactions: 0, commits: 0,
-  rollbacks: 0, checkouts: 0, clientDbMs: 0, errors: 0,
+  notifyingCommits: 0, rollbacks: 0, checkouts: 0, clientDbMs: 0, errors: 0,
 });
 
 export const UNATTRIBUTED = "unattributed";
@@ -103,7 +106,7 @@ export class DatabaseCostMeter {
   private observe(
     run: () => unknown,
     args: readonly unknown[],
-    session: { inTransaction: boolean } | null,
+    session: { inTransaction: boolean; notifying: boolean } | null,
   ): unknown {
     // Callback-style calls are not used by the control plane; leave them untouched.
     if (typeof args[args.length - 1] === "function") return run();
@@ -115,9 +118,19 @@ export class DatabaseCostMeter {
     // PostgreSQL runs a call outside an explicit block as its own transaction.
     if (begins || !session?.inTransaction) cost.transactions += 1;
     if (session && begins) session.inTransaction = true;
-    if (keyword === "COMMIT" || keyword === "END") cost.commits += 1;
+    const notifies = /\bpg_notify\s*\(|^\s*NOTIFY\b/i.test(sql);
+    if (keyword === "COMMIT" || keyword === "END") {
+      cost.commits += 1;
+      if (session?.notifying) cost.notifyingCommits += 1;
+    }
+    // A notify outside an explicit block is its own autocommit transaction.
+    if (notifies && !session?.inTransaction && keyword !== "COMMIT" && keyword !== "END") cost.notifyingCommits += 1;
     if (keyword === "ROLLBACK") cost.rollbacks += 1;
-    if (session && (keyword === "COMMIT" || keyword === "END" || keyword === "ROLLBACK")) session.inTransaction = false;
+    if (session && notifies) session.notifying = true;
+    if (session && (keyword === "COMMIT" || keyword === "END" || keyword === "ROLLBACK")) {
+      session.inTransaction = false;
+      session.notifying = false;
+    }
     const started = performance.now();
     const settle = (result: unknown, failed: boolean) => {
       cost.clientDbMs += performance.now() - started;
@@ -139,7 +152,7 @@ export class DatabaseCostMeter {
     const wrapClient = (client: pg.PoolClient): pg.PoolClient => {
       const existing = clients.get(client);
       if (existing) return existing;
-      const session = { inTransaction: false };
+      const session = { inTransaction: false, notifying: false };
       const proxy = new Proxy(client, {
         get: (target, key) => {
           if (key === "query") {

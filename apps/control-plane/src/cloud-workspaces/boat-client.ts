@@ -173,6 +173,11 @@ function retryAfterMs(response: Response, value: Record<string, unknown> | null)
 
 /** Credentials are sent only to the provider's pinned API origin. Redirects,
  * response bodies and vendor error text never enter coordinator diagnostics. */
+// The API path accepts only [A-Za-z0-9_=&%.-] in a query; escape the rest,
+// mirroring encodeCursor in cloud-provider-evidence.ts.
+const encodeListCursor = (cursor: string) =>
+  encodeURIComponent(cursor).replace(/[!'()*~]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+
 export class BoatApiClient {
   private readonly fetcher: typeof fetch;
   constructor(private readonly options: BoatApiClientOptions) {
@@ -353,5 +358,43 @@ export class BoatApiClient {
         true,
       );
     }
+  }
+
+  /** One page of the account's sandboxes for inventory sweeps. A page holds
+   * full sandbox documents, so no per-sandbox inspect follows. */
+  async listSandboxes(
+    input: { cursor?: string | null; limit?: number } = {},
+  ): Promise<{ sandboxes: unknown[]; nextCursor: string | null }> {
+    const limit = input.limit ?? 200;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+      throw new Error("Invalid Boat list page size");
+    const cursor = input.cursor ?? null;
+    // Cursors are opaque (a standard base64 cursor carries +/=). Percent-
+    // encode so the request path keeps its documented query character set
+    // instead of rejecting a valid page turn.
+    if (cursor !== null && (cursor.length === 0 || cursor.length > 512))
+      throw new CloudProviderError(
+        "provider_response_invalid",
+        "Boat returned an invalid response",
+        false,
+      );
+    const page = await this.request(
+      `/sandboxes?limit=${limit}${cursor ? `&cursor=${encodeListCursor(cursor)}` : ""}`,
+    );
+    const pageInfo =
+      page.pageInfo && typeof page.pageInfo === "object" && !Array.isArray(page.pageInfo)
+        ? (page.pageInfo as Record<string, unknown>)
+        : null;
+    if (!Array.isArray(page.sandboxes) || !pageInfo)
+      throw new CloudProviderError(
+        "provider_response_invalid",
+        "Boat returned an invalid response",
+        false,
+      );
+    const nextCursor =
+      pageInfo.hasMore === true && typeof pageInfo.nextCursor === "string"
+        ? pageInfo.nextCursor
+        : null;
+    return { sandboxes: page.sandboxes, nextCursor };
   }
 }
