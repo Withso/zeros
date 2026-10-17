@@ -1,7 +1,7 @@
 import { WebSocket } from "ws";
 
 /**
- * S2 engine uplink client (`contracts/s2-uplink.md`, frozen 1.0.0): the
+ * S2 engine uplink client (`contracts/s2-uplink.md`, 1.1.0): the
  * cloud engine's WebSocket to `realtime`. Cloud workspaces only; a Local
  * engine never constructs this class. The HTTP heartbeat remains the lease
  * owner in this release — the uplink carries push traffic and presence and
@@ -82,7 +82,16 @@ export type EngineUplinkCapability = Readonly<{ token: string; expiresAtMs: numb
 
 /** The frozen S1 application points the uplink drives. Track B's shared
  * capability verifier binds these to signature and epoch checks; the uplink
- * itself never verifies tokens. */
+ * itself never verifies tokens.
+ *
+ * Every `applyKeys`, `applySync` and `applyDelta` must resolve or reject
+ * within a bound. The control plane waits 10 s from `auth.sync` for
+ * `auth.applied` (`UPLINK_AUTH_APPLIED_TIMEOUT_MS`), so `applyKeys` plus
+ * `applySync` of one connection must settle within that together; a slower
+ * sink closes 4400 and redials into the same wait. The client applies them one at a time
+ * on a single chain shared by all connections, so a call that never settles
+ * wedges auth for every later connection; a rejection instead closes that
+ * connection with `auth_apply_failed` and the redial re-sends the state. */
 export interface EngineUplinkAuthSink {
   /** The last applied cursor, offered in `sys.hello` (`authCursor`). */
   authCursor(): string | undefined;
@@ -770,7 +779,10 @@ class Connection {
   }
 
   private receive(data: Buffer, isBinary: boolean): void {
-    if (this.finished) return;
+    // After this side starts the close handshake, ws keeps delivering frames
+    // already on the wire. They belong to a retiring lineage: counting them
+    // could swallow the replacement's first reliable frame as a duplicate.
+    if (this.finished || this.initiated) return;
     this.lastReceivedAtMs = this.uplink.now();
     if (isBinary) {
       // Relay channels arrive with C4; no channel can exist yet. The

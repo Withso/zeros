@@ -6,7 +6,7 @@
  * withUserTx with a member fixture, and runs the organization, account and
  * workspace hard-delete cascades. A new trigger on such a table fails the
  * inventory check until a case below covers it. */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { withSystemTx, withUserTx, type Tx } from "./db.js";
@@ -14,6 +14,8 @@ import { resetMigratedTestDatabase } from "./test-database.js";
 import { seedReadyProCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./cloud-workspaces/test-fixtures.js";
 
 const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
+const DEVICE_IDS = ["00000000-0000-4000-8000-0000000000d1", "00000000-0000-4000-8000-0000000000d2"] as const;
+const DEVICE_SESSION_IDS = ["00000000-0000-4000-8000-0000000000e1", "00000000-0000-4000-8000-0000000000e2"] as const;
 
 /** Every non-internal trigger on a table with a policy that admits a
  * non-system write, as of this suite's cases. */
@@ -58,6 +60,14 @@ d("triggers on user-writable tables with PostgreSQL", () => {
     const id = randomUUID();
     await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,$3)", [id, `${id}@example.test`, label]);
     return id;
+  }
+  async function seedDeviceSession(userId: string, deviceId: string, deviceSessionId: string) {
+    const key = createHash("sha256").update(`key:${deviceId}`).digest();
+    await pool.query("INSERT INTO devices(id,user_id,label,platform,public_key,key_fingerprint) VALUES($1,$2,'Purge','linux',$3,$4)",
+      [deviceId, userId, key, createHash("sha256").update(key).digest()]);
+    await pool.query(`INSERT INTO cloud_device_sessions(id,user_id,device_id,ticket_hash,ticket_expires_at,expires_at)
+      VALUES($1,$2,$3,$4,now()+interval '1 minute',now()+interval '1 day')`,
+    [deviceSessionId, userId, deviceId, createHash("sha256").update(`ticket:${deviceSessionId}`).digest()]);    return deviceId;
   }
   const asUser = (userId: string, statement: string, values: unknown[]) =>
     withUserTx(pool, userId, (tx: Tx) => tx.query(statement, values));
@@ -160,9 +170,15 @@ d("triggers on user-writable tables with PostgreSQL", () => {
         inviter_fingerprint,expires_at,accepted_at,accepted_by) VALUES($1,$2,$3,$4,$5,'viewer',$6,$7,now()+interval '1 day',now(),$8)`,
       [randomUUID(), fixture.workspaceId, fixture.organizationId, Buffer.alloc(32, 1), Buffer.alloc(32, 2), fixture.userId,
         "a".repeat(64), guest]);
+      // Device sessions cascade with their device and with their account.
+      const removedDevice = await seedDeviceSession(member, DEVICE_IDS[0], DEVICE_SESSION_IDS[0]);
+      await seedDeviceSession(member, DEVICE_IDS[1], DEVICE_SESSION_IDS[1]);
+      await asSystem("DELETE FROM devices WHERE id=$1", [removedDevice]);
+      expect((await pool.query("SELECT id FROM cloud_device_sessions ORDER BY id")).rows).toEqual([{ id: DEVICE_SESSION_IDS[1] }]);
       await asSystem("DELETE FROM users WHERE id=$1", [guest]);
       await asSystem("DELETE FROM users WHERE id=$1", [member]);
       expect((await pool.query("SELECT 1 FROM users WHERE id IN ($1,$2)", [guest, member])).rowCount).toBe(0);
+      expect((await pool.query("SELECT 1 FROM cloud_device_sessions")).rowCount).toBe(0);
     });
 
     it("a workspace with members once its restricting computer source is gone", async () => {

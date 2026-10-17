@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/** S2 `zeros-uplink` wire constants (contract 1.0.0, frozen). The CP
+/** S2 `zeros-uplink` wire constants (contract 1.1.0). The CP
  * mirrors the contract here and never imports `@zeros/protocol`. */
 export const UPLINK_PATH = "/v1/uplink";
 export const UPLINK_SUBPROTOCOL = "zeros-uplink.v1";
@@ -48,6 +48,11 @@ export function parseUplinkRelayChunk(frame: Buffer): UplinkRelayChunk | null {
 export const UPLINK_DEFAULT_PING_INTERVAL_MS = 20_000;
 export const UPLINK_HELLO_TIMEOUT_MS = 10_000;
 export const UPLINK_ACK_DELAY_MS = 250;
+/** Time from `auth.sync` to the engine's `auth.applied`. It covers the
+ * engine's serialized durable applies of `auth.keys` and `auth.sync`, so
+ * the engine's auth sink must settle that pair within it (B4's sink bound);
+ * a longer sink closes 4400 and redials into the same wait. */
+export const UPLINK_AUTH_APPLIED_TIMEOUT_MS = 10_000;
 /** Liveness and readiness are durable only on transitions plus this watermark. */
 export const UPLINK_WATERMARK_INTERVAL_MS = 5 * 60_000;
 

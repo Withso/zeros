@@ -74,6 +74,12 @@ import { DatabaseUplinkAuthority } from "./realtime/uplink-authority.js";
 import { startUplinkNotifications } from "./realtime/uplink-notifications.js";
 import { DatabaseUplinkPresenceStore, UplinkPresenceWriter } from "./realtime/uplink-presence.js";
 import { CloudEngineUplinkServer, realtimeInstanceId } from "./realtime/uplink-server.js";
+import { DatabaseDeviceSessionAuthority } from "./realtime/device-sessions.js";
+import { DatabaseDeviceStreamCatalogSource } from "./realtime/device-stream-catalog.js";
+import { startDeviceStreamNotifications } from "./realtime/device-stream-notifications.js";
+import { DEVICE_STREAM_PATH } from "./realtime/device-stream-protocol.js";
+import { DeviceStreamServer } from "./realtime/device-stream-server.js";
+import { DatabaseRealtimeSecurityEventFeed, DatabaseSecurityEventSource } from "./realtime/security-event-feed.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
@@ -787,6 +793,13 @@ const app = createApp(config, pool, emailConfig, {
         endpoint: config.cloudWorkspaces.setupExecution.engineUplinkEndpoint,
         flags: rolloutFlagSnapshot } }
     : {}),
+  // The device-stream ticket names the stream on the same realtime origin.
+  ...(rolloutFlagSnapshot && config.cloudWorkspaces?.setupExecution?.engineUplinkEndpoint
+    ? { deviceSessions: {
+        flags: rolloutFlagSnapshot,
+        streamUrl: new URL(DEVICE_STREAM_PATH, config.cloudWorkspaces.setupExecution.engineUplinkEndpoint).toString(),
+        workosEnabled: config.auth.provider === "workos" } }
+    : {}),
   ...(cloudWorkspaceAccessService ? { cloudWorkspaceAccessService } : {}),
   ...(cloudWorkspaceProviderResolver ? { cloudWorkspaceProviderResolver } : {}),
   ...(cloudRuntimeServiceAccess ? { cloudRuntimeServiceAccess } : {}),
@@ -886,9 +899,33 @@ const mountEngineUplink = () => {
 };
 void rolloutFlagsStarted?.then(mountEngineUplink);
 rolloutFlagSnapshot?.onChange(mountEngineUplink);
+// The S3 device stream is served by realtime and combined processes once any
+// organization has `device_stream` on; until then no feed, LISTEN or socket
+// exists and clients keep polling. Access is re-evaluated on the process's
+// security-event feed and workspace catalog notifications.
+let deviceStream: DeviceStreamServer | undefined;
+let deviceStreamSecurityEvents: DatabaseRealtimeSecurityEventFeed | undefined;
+let stopDeviceStreamNotifications: () => Promise<void> = async () => {};
+const mountDeviceStream = () => {
+  if (deviceStream || shuttingDown) return;
+  if (processRole !== "realtime" && processRole !== "combined") return;
+  if (!rolloutFlagSnapshot || migrationResult.status.state !== "current" || !rolloutFlagSnapshot.anyEnabled("device_stream")) return;
+  deviceStreamSecurityEvents = new DatabaseRealtimeSecurityEventFeed(new DatabaseSecurityEventSource(pool), { listenerPool });
+  deviceStream = new DeviceStreamServer({
+    authority: new DatabaseDeviceSessionAuthority(pool),
+    catalog: new DatabaseDeviceStreamCatalogSource(pool, config.cloudWorkspaces ?? null),
+    flags: rolloutFlagSnapshot,
+    securityEvents: deviceStreamSecurityEvents,
+  });
+  void deviceStreamSecurityEvents.start();
+  stopDeviceStreamNotifications = startDeviceStreamNotifications(listenerPool, deviceStream);
+};
+void rolloutFlagsStarted?.then(mountDeviceStream);
+rolloutFlagSnapshot?.onChange(mountDeviceStream);
 server.on("upgrade", (request, socket, head) => {
   if (!servesApi || shuttingDown || migrationResult.status.state !== "current") { socket.destroy(); return; }
   if (cloudEngineUplink?.handleUpgrade(request, socket, head)) return;
+  if (deviceStream?.handleUpgrade(request, socket, head)) return;
   if (cloudRuntimeServiceRelay?.handleUpgrade(request, socket, head)) return;
   if (cloudPreviewWebSocketRelay?.handleUpgrade(request, socket, head)) return;
   if (!cloudRuntimeBridge?.handleUpgrade(request, socket, head)) socket.destroy();
@@ -904,7 +941,6 @@ function shutdown(signal: string): void {
   const backgroundStopped = Promise.allSettled([
     stopCloudWorkerNotifications(),
     stopCloudCheckpointHintNotifications(),
-    stopUplinkNotifications(),
     cloudGithubReads?.close(),
     githubWriteCleanupPending,
     stopCloudSetupWorker(),
@@ -942,6 +978,7 @@ function shutdown(signal: string): void {
       cloudPreviewWebSocketRelay?.drain(drainMs),
       cloudRuntimeServiceRelay?.drain(drainMs),
       cloudEngineUplink?.drain(drainMs),
+      deviceStream?.drain(drainMs),
     ]).then(() => closeServer(backgroundStopped, deadline));
   } else closeServer(backgroundStopped, deadline);
 }
@@ -953,8 +990,13 @@ function closeServer(backgroundStopped: Promise<unknown>, deadline: ReturnType<t
   cloudPreviewWebSocketRelay?.close();
   cloudRuntimeServiceRelay?.close();
   cloudEngineUplink?.close();
+  // The uplink LISTEN outlives the drain: engines still on this instance keep
+  // credential pushes and authority teardown until their uplink is closed.
+  const uplinkNotificationsStopped = stopUplinkNotifications();
+  deviceStream?.close();
+  const deviceStreamStopped = Promise.allSettled([stopDeviceStreamNotifications(), deviceStreamSecurityEvents?.stop()]);
   server.close(() => {
-    void backgroundStopped
+    void Promise.allSettled([backgroundStopped, uplinkNotificationsStopped, deviceStreamStopped])
       .then(async () => {
         // A lost-uplink write that misses this window is overwritten by the
         // next owner's connect; until then its stale last_seen_at marks it.
