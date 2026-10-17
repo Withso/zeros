@@ -19,7 +19,11 @@ clock) and `src/job-queue.integration.test.ts`.
   claims do. A notification or a job row never grants authority.
 - **States.** `queued` → `running` → deleted on success. A retryable failure
   returns to `queued` with a later `run_at`. `failed` is terminal and retained
-  until `purgeFailedJobs` removes it. Completed jobs are not retained.
+  until `purgeFailedJobs` removes it. Completed jobs are not retained. The
+  table has no foreign keys by design, so a hard-deleted organization or
+  workspace leaves its `failed` rows, which carry only its ids, for up to the
+  seven-day purge; its queued rows find nothing on their next run and
+  complete.
 - **Dedupe.** At most one active (`queued` or `running`) job per
   `(kind, dedupe_key)` (partial unique index). A `failed` job does not block a
   new one. Encode the scope in the key (for example `workspace:<id>`); a
@@ -311,6 +315,8 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   stored functions and operator repairs, and commit with the domain write.
   Every source table is written only in system transactions, so the
   `SECURITY INVOKER` functions satisfy the queue's `system_only` policy.
+  They keep PostgreSQL's default `PUBLIC` execute grant, which admits
+  nothing: every table they write accepts only system context.
 - **`run_at` is a lower bound.** A trigger never schedules later than the
   real due time. A job that runs early claims nothing, and the handler then
   reschedules it at the exact next due time from the same per-kind query the
