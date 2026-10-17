@@ -34,6 +34,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:chaos": "vitest run src/chaos",
     "load:relay": "tsx src/cloud-workspaces/runtime-bridge-load.ts",
     "load:db": "tsx src/load-sim/run.ts",
     "cloud-runtime:manage": "tsx src/manage-cloud-agent-runtime.ts",

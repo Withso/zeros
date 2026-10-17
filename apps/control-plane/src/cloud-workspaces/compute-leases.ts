@@ -122,6 +122,9 @@ const STOP_MARGIN_MS = 15_000;
 // Reserve the full checkpoint deadline plus the existing stop margin. Retry
 // backoff must never sleep past this boundary, even during a lasting outage.
 const PROVIDER_RETRY_SAFETY_MARGIN_MS = MAX_CHECKPOINT_DEADLINE_MS + STOP_MARGIN_MS;
+// The Boat client already caps a provider wait at five minutes. An active
+// allocation's runway bound still applies on top of it.
+const MAX_PROVIDER_RETRY_AFTER_MS = 300_000;
 // A healthy running lease is next checked at its renewal point, but never
 // later than this, so a change that no trigger reports is still observed.
 const RUNNING_LEASE_CHECK_CEILING_MS = 10 * 60_000;
@@ -775,7 +778,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         ).rows[0],
     );
     if (!lease) return false;
-    let recheckAt: Date | null = null, failed = false;
+    let recheckAt: Date | null = null, failed = false, retryAfterMs: number | null = null;
     let phase: CloudDiagnosticPhase = "provider_inspect", phaseStarted = performance.now();
     let site: ComputeFailureSite | undefined;
     try {
@@ -796,6 +799,8 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       let diagnostic: CloudDiagnostic = { ...classifyCloudFailure(error, phase), ...(site ? { site } : {}) };
       const transientProvider = error instanceof CloudProviderError && error.retryable &&
         diagnostic.providerCode?.startsWith("provider_") === true && diagnostic.code !== "provider_resource_lost";
+      if (error instanceof CloudProviderError && error.retryable && Number.isFinite(error.retryAfterMs))
+        retryAfterMs = Math.min(MAX_PROVIDER_RETRY_AFTER_MS, Math.max(0, Math.floor(error.retryAfterMs!)));
       let transientDatabase = isDatabaseUnavailable(error);
       // Unavailable proof is not revocation. This grants no new authority or
       // funding: only the already confirmed finite provider deadline remains.
@@ -863,15 +868,17 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           // check requested while this pass ran (a lifecycle change, a refused
           // start, a provider loss) moved next_check_at; it is kept, never
           // replaced by this pass's later schedule.
+          // A provider wait is honored up to five minutes, never past the runway bound.
           `UPDATE managed_compute_allocation_leases SET lease_owner=NULL,lease_expires_at=NULL,
         next_check_at=least(CASE WHEN $6::timestamptz IS NOT NULL AND next_check_at IS DISTINCT FROM $6::timestamptz THEN next_check_at END,CASE
-          WHEN $4 THEN least(coalesce($3::timestamptz,'infinity'::timestamptz),clock_timestamp()+least(interval '5 minutes',
-            greatest(interval '15 seconds',clock_timestamp()-coalesce(first_error_at,clock_timestamp()))))
+          WHEN $4 THEN least(coalesce($3::timestamptz,'infinity'::timestamptz),greatest(clock_timestamp()+least(interval '5 minutes',
+            greatest(interval '15 seconds',clock_timestamp()-coalesce(first_error_at,clock_timestamp()))),
+            clock_timestamp()+coalesce($7::bigint,0)*interval '1 millisecond'))
           WHEN $3::timestamptz IS NULL THEN clock_timestamp()+interval '15 seconds'
           ELSE greatest($3::timestamptz,clock_timestamp()+interval '1 second') END),updated_at=now()
         WHERE id=$1 AND lease_owner=$2
           AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=managed_compute_allocation_leases.id),generation)=$5`,
-          [lease.id, this.workerId, recheckAt, failed, this.identity(lease).generation, lease.claimed_next_check_at ?? null],
+          [lease.id, this.workerId, recheckAt, failed, this.identity(lease).generation, lease.claimed_next_check_at ?? null, retryAfterMs],
         ),
       );
     }
