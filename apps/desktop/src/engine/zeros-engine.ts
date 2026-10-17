@@ -3656,16 +3656,16 @@ export class ZerosEngine {
     }
   }
 
+  private cloudEngineUplinkReadiness(): EngineUplinkReadiness {
+    return { ready: this.running, phase: this.running ? "ready" : this.engineStopping ? "stopping" : "starting" };
+  }
+
   /** S2 engine uplink (contracts/s2-uplink.md): cloud placements only, and
    * only when the control plane advertised an endpoint to this opted-in
    * engine (the organization's `realtime_uplink` rollout flag was on at
    * registration). The HTTP heartbeat remains the lease owner; the uplink
    * carries push traffic and presence and parks without redialing when the
    * control plane definitively refuses it. */
-  private cloudEngineUplinkReadiness(): EngineUplinkReadiness {
-    return { ready: this.running, phase: this.running ? "ready" : this.engineStopping ? "stopping" : "starting" };
-  }
-
   private startCloudEngineUplink(): void {
     const registration = this.cloudRuntimeRegistration;
     const config = this.cloudRuntimeConfig;

@@ -82,7 +82,13 @@ export type EngineUplinkCapability = Readonly<{ token: string; expiresAtMs: numb
 
 /** The frozen S1 application points the uplink drives. Track B's shared
  * capability verifier binds these to signature and epoch checks; the uplink
- * itself never verifies tokens. */
+ * itself never verifies tokens.
+ *
+ * Every `applyKeys`, `applySync` and `applyDelta` must resolve or reject
+ * within a bound (for example 10 s). The client applies them one at a time
+ * on a single chain shared by all connections, so a call that never settles
+ * wedges auth for every later connection; a rejection instead closes that
+ * connection with `auth_apply_failed` and the redial re-sends the state. */
 export interface EngineUplinkAuthSink {
   /** The last applied cursor, offered in `sys.hello` (`authCursor`). */
   authCursor(): string | undefined;
