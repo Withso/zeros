@@ -633,6 +633,18 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("closes 4400 on a welcome with an empty resume token", async () => {
+    const { client, sockets } = fakeClient();
+    client.start();
+    await flush();
+    // An empty token would never be offered back, so a later resumed: false
+    // welcome could not reset the lineage and the old outbox would loop.
+    await serveHandshake(sockets[0]!, { token: "" });
+    expect(sockets[0]!.closeCalls[0]).toMatchObject({ code: 4400, reason: "welcome_invalid" });
+    expect(client.state).not.toBe("connected");
+    client.stop();
+  });
+
   it("established stays false when cred.v1 was not negotiated", async () => {
     const changes: boolean[] = [];
     const { client, sockets } = fakeClient({ onEstablishedChange: established => changes.push(established) });

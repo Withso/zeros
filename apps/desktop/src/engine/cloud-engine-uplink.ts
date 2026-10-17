@@ -837,7 +837,7 @@ class Connection {
     if (this.welcomed) return this.initiateClose(CLOSE.frameInvalid, "welcome_repeated");
     if (this.helloTimer) clearTimeout(this.helloTimer);
     this.helloTimer = null;
-    if (typeof d.resumeToken !== "string" || typeof d.protocol !== "number" || d.protocol < 1)
+    if (typeof d.resumeToken !== "string" || d.resumeToken.length === 0 || typeof d.protocol !== "number" || d.protocol < 1)
       return this.initiateClose(CLOSE.frameInvalid, "welcome_invalid");
     if (d.features !== undefined &&
         (!Array.isArray(d.features) || d.features.some(feature => typeof feature !== "string")))
