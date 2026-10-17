@@ -13,6 +13,7 @@ export const DEVICE_STREAM_MAX_CATALOG = 1_000;
 export type DeviceStreamWorkspace = Readonly<{
   id: string;
   organizationId: string;
+  ownerUserId: string;
   version: number;
   status: string;
   generation: number;
@@ -87,7 +88,8 @@ export class DatabaseDeviceStreamCatalogSource implements DeviceStreamCatalogSou
       const workspaces = rows.slice(0, DEVICE_STREAM_MAX_CATALOG).map(row => {
         const document = workspaceDocument(row, this.config);
         return Object.freeze({
-          id: document.id, organizationId: document.organizationId, version: document.version, status: document.status,
+          id: document.id, organizationId: document.organizationId, ownerUserId: document.ownerUserId,
+          version: document.version, status: document.status,
           generation: Number(document.generation.number ?? 0), observedState: document.generation.observedState ?? "unknown",
           document: document as Record<string, unknown>,
         });

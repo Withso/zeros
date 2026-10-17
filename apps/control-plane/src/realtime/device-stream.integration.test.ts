@@ -270,6 +270,37 @@ d("device stream database paths", () => {
       ws.terminate();
     });
 
+    it("re-sends a document at the same version after a role change, and nothing for observation timestamps alone", async () => {
+      await serve();
+      const { ws, frames } = await ownerStream();
+      // Let the post-ready re-read finish.
+      await new Promise(resolve => setTimeout(resolve, 200));
+      const version = Number((await pool.query<{ version: string }>("SELECT version FROM cloud_workspaces WHERE id=$1",
+        [fixture.workspaceId])).rows[0]!.version);
+      await pool.query("UPDATE cloud_workspace_members SET role='developer' WHERE workspace_id=$1 AND user_id=$2",
+        [fixture.workspaceId, fixture.userId]);
+      server.refreshEverything();
+      await wait(() => frames.some(frame => frame.t === "catalog.changed"));
+      expect(frames.filter(frame => frame.t === "catalog.changed")).toEqual([expect.objectContaining({ d: expect.objectContaining({
+        workspaceId: fixture.workspaceId, version, op: "upsert",
+        workspace: expect.objectContaining({ version, actorRole: null, capabilities: expect.objectContaining({ canManage: false }) }) }) })]);
+      frames.splice(0);
+      const source = new DatabaseDeviceStreamCatalogSource(pool, null);
+      const observed = async () => (await source.read(fixture.userId, [fixture.workspaceId])).workspaces[0]!.document as
+        { lastObservedAt: unknown; updatedAt: unknown; generation: { lastObservedAt: unknown } };
+      const before = await observed();
+      await pool.query("UPDATE cloud_workspaces SET last_observed_at=now(), updated_at=now() WHERE id=$1", [fixture.workspaceId]);
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET last_observed_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
+      const after = await observed();
+      expect(after.lastObservedAt).not.toEqual(before.lastObservedAt);
+      expect(after.updatedAt).not.toEqual(before.updatedAt);
+      expect(after.generation.lastObservedAt).not.toEqual(before.generation.lastObservedAt);
+      server.refreshEverything();
+      await new Promise(resolve => setTimeout(resolve, 300));
+      expect(frames).toEqual([]);
+      ws.terminate();
+    });
+
     it("re-reads streams admitted before the catalog listener was first ready", async () => {
       await serve();
       const { ws, frames } = await ownerStream();

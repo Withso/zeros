@@ -82,6 +82,11 @@ class FakeCatalog implements DeviceStreamCatalogSource {
     set.set(workspace.id, workspace);
   }
   revoke(account: string, workspaceId: string) { this.access.get(account)?.delete(workspaceId); }
+  /** Changes what one account reads of a workspace without a version bump, like a role or sponsor change. */
+  restate(account: string, workspaceId: string, patch: Record<string, unknown>) {
+    const set = this.access.get(account), current = set?.get(workspaceId);
+    if (set && current) set.set(workspaceId, { ...current, document: { ...current.document, ...patch } });
+  }
   /** Bumps a workspace for every account that holds it, like a committed update. */
   update(workspaceId: string, patch: Partial<Pick<DeviceStreamWorkspace, "status" | "observedState" | "generation">>) {
     this.catalogVersion += 1;
@@ -104,9 +109,9 @@ class FakeCatalog implements DeviceStreamCatalogSource {
   async organizationAccounts(_org: string, accounts: readonly string[]) { return new Set(accounts); }
 }
 
-const workspace = (organizationId: string, id = randomUUID()): DeviceStreamWorkspace => ({
-  id, organizationId, version: 1, status: "ready", generation: 1, observedState: "running",
-  document: { id, organizationId, version: 1, status: "ready", placement: "cloud" },
+const workspace = (organizationId: string, id = randomUUID(), ownerUserId = randomUUID()): DeviceStreamWorkspace => ({
+  id, organizationId, ownerUserId, version: 1, status: "ready", generation: 1, observedState: "running",
+  document: { id, organizationId, ownerUserId, version: 1, status: "ready", placement: "cloud" },
 });
 
 /** Reference S3 client, test-only (the SDK is F1). Full-jitter backoff with a
@@ -470,6 +475,50 @@ describe("device stream server", () => {
     // ... and the second, whose baseline was already current, is never sent
     // the workspace it lost nor a revocation of the one it holds.
     expect(await second.peer.drainFrames()).toEqual([]);
+  });
+
+  it("re-sends a document at the same version when fields outside the version change, never for observation timestamps alone", async () => {
+    await start();
+    const member = principal(), held = workspace(organizationId);
+    catalog.grant(member.accountUserId, held);
+    const { peer } = await connect(member);
+    await peer.drainFrames();
+    // A role change: the viewer's fields change and the version does not (S3-Q8).
+    catalog.restate(member.accountUserId, held.id, { actorRole: "developer", capabilities: { canWrite: true, canStart: false },
+      generation: { number: 1, observedState: "running", lastObservedAt: "2026-10-17T10:00:00.000Z" } });
+    subscriber!.events([event("account.authorization_changed", { userId: member.accountUserId })]);
+    expect((await peer.next("catalog.changed")).d).toMatchObject({ workspaceId: held.id, version: 1, op: "upsert",
+      workspace: { version: 1, actorRole: "developer", capabilities: { canWrite: true } } });
+    expect(await peer.drainFrames()).toEqual([]);
+    catalog.restate(member.accountUserId, held.id, { lastObservedAt: "2026-10-17T10:01:00.000Z", updatedAt: "2026-10-17T10:01:00.000Z",
+      generation: { number: 1, observedState: "running", lastObservedAt: "2026-10-17T10:01:00.000Z" } });
+    subscriber!.events([event("account.authorization_changed", { userId: member.accountUserId })]);
+    server.refreshEverything();
+    expect(await peer.drainFrames(300)).toEqual([]);
+    // A later bump still announces the lifecycle change it carries.
+    catalog.update(held.id, { status: "busy" });
+    server.workspaceChanged(held.id);
+    expect((await peer.next("catalog.changed")).d).toMatchObject({ version: 2, workspace: { actorRole: "developer", status: "busy" } });
+    expect((await peer.next("lifecycle.changed")).d).toMatchObject({ workspaceId: held.id, version: 2, status: "busy" });
+  });
+
+  it("re-reads every device session holding an owner's workspaces when the owner's account changes", async () => {
+    await start();
+    const owner = randomUUID(), member = principal(), bystander = principal();
+    const held = workspace(organizationId, randomUUID(), owner), other = workspace(organizationId);
+    catalog.grant(member.accountUserId, held);
+    catalog.grant(bystander.accountUserId, other);
+    const m = await connect(member), b = await connect(bystander);
+    await Promise.all([m.peer.drainFrames(), b.peer.drainFrames()]);
+    vi.spyOn(catalog, "candidates").mockResolvedValue(new Set<string>());
+    const reads = vi.spyOn(catalog, "read");
+    // The owner sponsors Start for every viewer; its Pro lapsing bumps no version.
+    catalog.restate(member.accountUserId, held.id, { capabilities: { canStart: false, startUnavailableReason: "sponsor_unavailable" } });
+    subscriber!.events([event("account.authorization_changed", { userId: owner })]);
+    expect((await m.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: held.id, version: 1, op: "upsert",
+      workspace: { capabilities: { startUnavailableReason: "sponsor_unavailable" } } });
+    expect(await b.peer.drainFrames()).toEqual([]);
+    expect(reads.mock.calls.filter(([account]) => account === bystander.accountUserId)).toEqual([]);
   });
 
   it("resumes on this instance, replaying capability.revoked before other missed events", async () => {

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
@@ -107,7 +107,17 @@ export type DeviceStreamCounters = {
   closed: Record<string, number>;
 };
 
-type Known = { organizationId: string; version: number; status: string; generation: number; observedState: string };
+/** What a device session was last told of a workspace: the lifecycle fields
+ * last announced with a version, and a digest of the last document sent. */
+type Known = {
+  organizationId: string;
+  ownerUserId: string;
+  version: number;
+  status: string;
+  generation: number;
+  observedState: string;
+  fingerprint: string;
+};
 type BufferedFrame = { seq: number; text: string; bytes: number; atMs: number; revocation: boolean };
 
 /** One device session's stream state. It outlives its connection for the
@@ -158,6 +168,9 @@ export class DeviceStreamServer {
    * re-reads touch only the device sessions involved. */
   private readonly byWorkspace = new Map<string, Set<DeviceSessionRecord>>();
   private readonly byOrganization = new Map<string, Map<DeviceSessionRecord, number>>();
+  /** Workspaces in any current record's `known`, by owner, with how many
+   * records hold each: an owner's account decides `canStart` for every viewer. */
+  private readonly byOwner = new Map<string, Map<string, number>>();
   /** Catalog reads, numbered in the order they start. */
   private reads = 0;
   /** Records without a connection, in the order they were parked. */
@@ -496,9 +509,14 @@ export class DeviceStreamServer {
     // A record dropped while its re-read was being applied stays unindexed.
     if (this.records.get(record.principal.deviceSessionId) !== record) return;
     if (!previous) addTo(this.byWorkspace, workspaceId, record);
-    if (previous?.organizationId === value.organizationId) return;
-    if (previous) countIn(this.byOrganization, previous.organizationId, record, -1);
-    countIn(this.byOrganization, value.organizationId, record, 1);
+    if (previous?.organizationId !== value.organizationId) {
+      if (previous) countIn(this.byOrganization, previous.organizationId, record, -1);
+      countIn(this.byOrganization, value.organizationId, record, 1);
+    }
+    if (previous?.ownerUserId !== value.ownerUserId) {
+      if (previous) countIn(this.byOwner, previous.ownerUserId, workspaceId, -1);
+      countIn(this.byOwner, value.ownerUserId, workspaceId, 1);
+    }
   }
 
   private unknow(record: DeviceSessionRecord, workspaceId: string): void {
@@ -507,6 +525,7 @@ export class DeviceStreamServer {
     record.known.delete(workspaceId);
     removeFrom(this.byWorkspace, workspaceId, record);
     countIn(this.byOrganization, previous.organizationId, record, -1);
+    countIn(this.byOwner, previous.ownerUserId, workspaceId, -1);
   }
 
   private supersede(record: DeviceSessionRecord): void {
@@ -536,6 +555,7 @@ export class DeviceStreamServer {
       removeFrom(this.byWorkspace, workspaceId, record);
       const counts = this.byOrganization.get(value.organizationId);
       if (counts?.delete(record) && counts.size === 0) this.byOrganization.delete(value.organizationId);
+      countIn(this.byOwner, value.ownerUserId, workspaceId, -1);
     }
   }
 
@@ -626,7 +646,17 @@ export class DeviceStreamServer {
     for (const id of ids) {
       const row = rows.get(id), previous = record.known.get(id);
       if (row) {
-        if (previous && row.version <= previous.version) continue;
+        if (previous && row.version <= previous.version) {
+          // S3-Q8: fields outside the version (the viewer's role and
+          // capabilities, derived fields) re-send the document at the same
+          // version. The lifecycle fields stay as last announced, so the next
+          // bump still reports their change.
+          const print = fingerprint(row);
+          if (row.version < previous.version || print === previous.fingerprint) continue;
+          this.know(record, id, { ...previous, organizationId: row.organizationId, ownerUserId: row.ownerUserId, fingerprint: print });
+          this.emit(record, "catalog.changed", { workspaceId: id, version: row.version, catalogVersion, op: "upsert", workspace: row.document }, true);
+          continue;
+        }
         this.know(record, id, known(row));
         this.emit(record, "catalog.changed", { workspaceId: id, version: row.version, catalogVersion, op: "upsert", workspace: row.document }, true);
         if (previous && row.generation >= 1 && (previous.status !== row.status || previous.generation !== row.generation ||
@@ -683,6 +713,8 @@ export class DeviceStreamServer {
           if (!event.userId) { this.refreshEverything(); return; }
           for (const record of this.byAccount.get(event.userId) ?? []) recheck.add(record);
           this.scheduleAccount(event.userId, null);
+          // The owner's Pro sponsors Start for every viewer of its workspaces.
+          for (const workspaceId of this.byOwner.get(event.userId)?.keys() ?? []) this.workspaceChanged(workspaceId);
           break;
         case "session.revoked":
           for (const record of this.records.values())
@@ -800,8 +832,35 @@ function restamp(text: string, cursor: string): string {
 }
 
 function known(workspace: DeviceStreamWorkspace): Known {
-  return { organizationId: workspace.organizationId, version: workspace.version, status: workspace.status,
-    generation: workspace.generation, observedState: workspace.observedState };
+  return { organizationId: workspace.organizationId, ownerUserId: workspace.ownerUserId, version: workspace.version,
+    status: workspace.status, generation: workspace.generation, observedState: workspace.observedState,
+    fingerprint: fingerprint(workspace) };
+}
+
+const fingerprints = new WeakMap<DeviceStreamWorkspace, string>();
+
+/** A digest of a document without the timestamps that move on their own
+ * (`lastObservedAt`, `generation.lastObservedAt`, `updatedAt`). Cached per
+ * row, since every device session of an account diffs the same read. */
+function fingerprint(workspace: DeviceStreamWorkspace): string {
+  let print = fingerprints.get(workspace);
+  if (print !== undefined) return print;
+  const stable: Record<string, unknown> = { ...workspace.document };
+  delete stable.lastObservedAt;
+  delete stable.updatedAt;
+  if (stable.generation && typeof stable.generation === "object" && !Array.isArray(stable.generation)) {
+    const generation: Record<string, unknown> = { ...stable.generation };
+    delete generation.lastObservedAt;
+    stable.generation = generation;
+  }
+  print = createHash("sha256").update(JSON.stringify(stable, sortedKeys)).digest("base64url").slice(0, 22);
+  fingerprints.set(workspace, print);
+  return print;
+}
+
+function sortedKeys(_key: string, value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  return Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 type ConnectionState = "hello" | "opening" | "ready" | "closed";
