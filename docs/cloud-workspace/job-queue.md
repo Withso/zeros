@@ -226,19 +226,40 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   re-observes every `stoppedDriftIntervalMs` (default 6 h): both the due
   query and the claim apply the longer cadence, and the release reschedules
   on the candidate's own cadence. Any trigger enqueue (`next_drift_check_at`,
-  an intent completing) still wakes it at once.
+  an intent completing) still wakes it at once: enqueues move a queued job
+  only earlier, and the inventory sweep below never moves a job that is
+  already due.
 - **Inventory paces drift for providers with a paged list.** Boat's
-  `GET /sandboxes` pages (200 per page) replace one inspect per sandbox per
-  minute: the 60-second managed-resource sweep compares each scoped binding
-  against the listing. A match pushes the binding's `next_drift_check_at`
-  one fallback horizon out (`inventoryFallbackMs`, default 6 h); a missing
-  or mismatched resource is forced due now, which the binding trigger turns
-  into that workspace's drift job — the only runs that inspect. If sweeps
-  stop, the fallback horizon expires and per-workspace drift inspects resume
-  on their own. Boat calls drop from one inspect per workspace per minute to
-  `ceil(sandboxes / 200)` list calls per minute per replica, far under the
-  1000 requests/min/IP rate limit; a provider `retryAfterMs` wait floors the
-  job retry (capped at 5 minutes, then jittered up to 20 percent).
+  `GET /sandboxes` pages (100 per page; Boat publishes no maximum, and 100 is
+  the size the operator inventory already pages with) replace one inspect
+  per sandbox per minute: the 60-second managed-resource sweep compares each
+  scoped current-generation binding against the listing. A match pushes the
+  binding's `next_drift_check_at` one fallback horizon out
+  (`inventoryFallbackMs`, default 6 h) and moves that workspace's queued
+  drift job with it, unless the job is already due; a missing or mismatched
+  resource is forced due now, which the binding trigger turns into that
+  workspace's drift job — the only runs that inspect. For a workspace
+  settled `stopped` or `archived` whose sandbox an inspect already observed
+  `absent` or `deleted`, absence from the listing is a match, so it keeps the
+  slow cadence; a sandbox that reappears still mismatches and forces an
+  inspect. If sweeps stop, the fallback horizon expires and per-workspace
+  drift inspects resume on their own. Boat calls drop from one inspect per
+  workspace per minute to `ceil(sandboxes / 100)` list calls per minute per
+  replica, far under the 1000 requests/min/IP rate limit; a provider
+  `retryAfterMs` wait floors the job retry (capped at 5 minutes, then
+  jittered up to 20 percent).
+- **Keep-alive write volume is deliberate.** A matched binding is rewritten
+  once its deadline falls inside `fallback − fallback/12` (every 30 minutes at
+  the 6 h default), so each binding costs one `UPDATE` plus at most one job
+  `UPDATE` per 30 minutes — about 333 of each per sweep at 10,000 bindings, in
+  one statement and one commit, with notifies deduplicated per channel.
+  Extending from the existing deadline instead would cut that about 11 times
+  but let a stalled sweep leave a binding uninspected for up to twice the
+  fallback horizon; the bounded horizon wins.
+- **The sweep never waits on a stalled lock.** Its statement row-locks every
+  scoped binding under `SET LOCAL lock_timeout = '2s'`; a scope that times
+  out logs `inventory scope failed` and retries at the next minute, so one
+  stuck holder cannot delay the sweep or the hourly audit behind it.
 - **Triggers, not TypeScript enqueues.** They cover every writer, including
   stored functions and operator repairs, and commit with the domain write.
   Every source table is written only in system transactions, so the

@@ -127,6 +127,7 @@ export type CloudWorkspaceReconcilerOptions = {
 // it reschedules itself immediately.
 const MAX_CLAIMS_PER_JOB = 20;
 const ORPHAN_SWEEP_INTERVAL_MS = 60_000;
+const SWEEP_LOCK_TIMEOUT_MS = 2_000;
 
 function requestDigest(value: unknown): Buffer {
   return createHash("sha256").update(JSON.stringify(value)).digest();
@@ -1640,12 +1641,28 @@ export class CloudWorkspaceReconciler {
     inventory: Map<string, CloudProviderInventoryItem>,
   ): Promise<void> {
     const ids = [...inventory.keys()];
-    await withSystemTx(this.pool, (tx) => tx.query(
+    // A settled stopped or archived workspace whose sandbox an inspect
+    // already confirmed gone can never appear in the listing; its absence
+    // matches, or every sweep would force an inspect and defeat the slow
+    // settled cadence. Running-desired workspaces keep forcing: their
+    // inspect drives recovery.
+    const matched = `((scoped.seen_id IS NOT NULL
+        AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state)
+      OR (scoped.seen_id IS NULL AND scoped.settled
+        AND binding.observed_state IN ('absent','deleted')))`;
+    await withSystemTx(this.pool, async (tx) => {
+      // The statement row-locks every scoped binding. One stalled holder must
+      // not block the sweep (and the audit queued behind it): fail this scope
+      // and retry at the next minute instead.
+      await tx.query(`SET LOCAL lock_timeout = '${SWEEP_LOCK_TIMEOUT_MS}ms'`);
+      await tx.query(
       `WITH inventory(resource_id, state) AS (
          SELECT * FROM unnest($2::text[], $3::text[])
        ), scoped AS (
-         SELECT binding.workspace_id, binding.provider_resource_id,
-                inventory.resource_id AS seen_id, inventory.state AS seen_state
+         SELECT binding.workspace_id, binding.generation, binding.provider_resource_id,
+                inventory.resource_id AS seen_id, inventory.state AS seen_state,
+                ((workspace.desired_state = 'stopped' AND workspace.status = 'stopped')
+                  OR (workspace.desired_state = 'archived' AND workspace.status = 'archived')) AS settled
          FROM cloud_workspace_provider_bindings binding
          JOIN provider_connections connection
            ON connection.id = binding.provider_connection_id
@@ -1653,6 +1670,9 @@ export class CloudWorkspaceReconciler {
          JOIN cloud_workspaces workspace ON workspace.id = binding.workspace_id
          LEFT JOIN inventory ON inventory.resource_id = binding.provider_resource_id
          WHERE binding.provider = $1 AND binding.provider_resource_id IS NOT NULL
+           -- Only the current generation can be claimed; an old generation's
+           -- row must neither be paced nor move the workspace's drift job.
+           AND binding.generation = workspace.current_generation
            AND workspace.status <> 'deleted'
            -- An active restore incident excludes its workspace from drift
            -- checks; the sweep must not push its schedule out either, or the
@@ -1670,36 +1690,33 @@ export class CloudWorkspaceReconciler {
        )
        , moved AS (
          UPDATE cloud_workspace_provider_bindings binding
-         SET next_drift_check_at = CASE WHEN scoped.seen_id IS NULL
-               OR scoped.seen_state IS DISTINCT FROM binding.observed_state
+         SET next_drift_check_at = CASE WHEN NOT ${matched}
                THEN clock_timestamp()
                ELSE clock_timestamp() + ($4::bigint * interval '1 millisecond') END,
-             last_observed_at = CASE WHEN scoped.seen_id IS NULL
-               OR scoped.seen_state IS DISTINCT FROM binding.observed_state
+             last_observed_at = CASE WHEN NOT ${matched}
                THEN NULL ELSE binding.last_observed_at END
          FROM scoped
          WHERE binding.workspace_id = scoped.workspace_id
+           AND binding.generation = scoped.generation
            AND binding.provider = $1
            AND binding.provider_resource_id = scoped.provider_resource_id
-           AND (((scoped.seen_id IS NULL
-                  OR scoped.seen_state IS DISTINCT FROM binding.observed_state)
-                 AND binding.next_drift_check_at > clock_timestamp())
-             OR ((scoped.seen_id IS NOT NULL
-                  AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state)
-                 AND binding.next_drift_check_at < clock_timestamp()
+           AND ((NOT ${matched} AND binding.next_drift_check_at > clock_timestamp())
+             OR (${matched} AND binding.next_drift_check_at < clock_timestamp()
                    + (($4::bigint - $4::bigint / 12) * interval '1 millisecond')))
-         RETURNING binding.workspace_id, binding.next_drift_check_at,
-           (scoped.seen_id IS NOT NULL
-            AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state) AS matched
+         RETURNING binding.workspace_id, binding.next_drift_check_at, ${matched} AS matched
        )
        -- Enqueues only ever move a queued job earlier, so without this the
-       -- workspace's drift job would empty-run every keep-alive margin.
+       -- workspace's drift job would empty-run every keep-alive margin. A job
+       -- already due was made due by an event (an intent completing, a
+       -- restore resolving, an inventory re-bind) and must run, not wait out
+       -- the horizon.
        UPDATE control_plane_jobs job
        SET run_at = moved.next_drift_check_at, updated_at = clock_timestamp()
        FROM moved
        WHERE moved.matched AND job.kind = 'cloud_workspace_drift'
          AND job.state = 'queued'
          AND job.dedupe_key = 'workspace:' || moved.workspace_id::text
+         AND job.run_at > clock_timestamp()
          AND job.run_at < moved.next_drift_check_at`,
       [
         scope.provider.name,
@@ -1711,7 +1728,8 @@ export class CloudWorkspaceReconciler {
         scope.connectionId,
         scope.connectionVersion,
       ],
-    ));
+      );
+    });
     // Orphan rows clear once a binding claims the resource again; orphan
     // bookkeeping and cleanup cover only inventory no binding claims.
     const bound = await withSystemTx(this.pool, async (tx) => {
