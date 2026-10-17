@@ -4,9 +4,21 @@ import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildCapabilityConformance, conformanceOutcome } from "../../../../control-plane/src/cloud-workspaces/capability-conformance-test-utils";
+import {
+  TEST_CAPABILITY_HEADER,
+  TEST_CAPABILITY_IDS,
+  TEST_CAPABILITY_NOW_S,
+  signTestCapability,
+  signTestProof,
+  testClientClaims,
+} from "../../../../control-plane/src/cloud-workspaces/capability-verifier-test-utils";
 import { UPLINK_AUTH_APPLIED_TIMEOUT_MS } from "../../../../control-plane/src/realtime/uplink-protocol";
 import {
   ENGINE_AUTH_SINK_BOUND_MS,
+  ENGINE_CAPABILITY_FALLBACK_AFTER_DOWN_MS,
+  ENGINE_CAPABILITY_FALLBACK_INTERVAL_MS,
+  RUNTIME_AUTH_FRAME_MAX_BYTES,
+  capabilityCloseCode,
   EngineAuthSinkTimeoutError,
   EngineCapabilityAuth,
   fileCapabilityAuthStore,
@@ -154,6 +166,166 @@ describe("engine durable auth sink", () => {
   });
 });
 
+describe("engine token REST fallback (S1 Lifetimes and Issuance)", () => {
+  const token = (label: string, expiresAtMs: number) => ({ token: label, expiresAtMs });
+
+  it("asks api only after the uplink has been down 30 s and the held token reached 80% of its lifetime", async () => {
+    vi.useFakeTimers();
+    const start = Date.now();
+    const request = vi.fn(async () => token("fallback", Date.now() + 300_000));
+    const auth = new EngineCapabilityAuth({ identity: ids, issuer: fixture.issuer, store: memoryStore(), requestEngineCapability: request });
+    auth.uplinkEstablished(true);
+    auth.holdCapability(token("pushed", start + 300_000));
+    auth.uplinkEstablished(false);
+    await vi.advanceTimersByTimeAsync(ENGINE_CAPABILITY_FALLBACK_AFTER_DOWN_MS);
+    expect(request).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(240_000 - ENGINE_CAPABILITY_FALLBACK_AFTER_DOWN_MS - 1);
+    expect(request).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(auth.engineCapability()?.token).toBe("fallback");
+    // The fallback token renews at its own 80% mark.
+    await vi.advanceTimersByTimeAsync(240_000 - 1);
+    expect(request).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(request).toHaveBeenCalledTimes(2);
+    auth.stop();
+  });
+
+  it("never asks while the uplink is up: the uplink pushes the renewal at 60%", async () => {
+    vi.useFakeTimers();
+    const request = vi.fn(async () => token("fallback", Date.now() + 300_000));
+    const auth = new EngineCapabilityAuth({ identity: ids, issuer: fixture.issuer, store: memoryStore(), requestEngineCapability: request });
+    auth.uplinkEstablished(true);
+    auth.holdCapability(token("pushed", Date.now() + 300_000));
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(request).not.toHaveBeenCalled();
+    auth.stop();
+  });
+
+  it("starts 30 s after boot without any token and asks at most once a minute", async () => {
+    vi.useFakeTimers();
+    const request = vi.fn(async (): Promise<{ token: string; expiresAtMs: number }> => { throw new Error("api unavailable"); });
+    const auth = new EngineCapabilityAuth({ identity: ids, issuer: fixture.issuer, store: memoryStore(), requestEngineCapability: request });
+    await vi.advanceTimersByTimeAsync(ENGINE_CAPABILITY_FALLBACK_AFTER_DOWN_MS - 1);
+    expect(request).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(request).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(ENGINE_CAPABILITY_FALLBACK_INTERVAL_MS - 1);
+    expect(request).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(request).toHaveBeenCalledTimes(2);
+    auth.uplinkEstablished(true);
+    await vi.advanceTimersByTimeAsync(10 * ENGINE_CAPABILITY_FALLBACK_INTERVAL_MS);
+    expect(request).toHaveBeenCalledTimes(2);
+    auth.stop();
+  });
+
+  it("keeps the later-expiring token when a push lands during a fallback request", async () => {
+    vi.useFakeTimers();
+    let answer!: (value: { token: string; expiresAtMs: number }) => void;
+    const request = vi.fn(() => new Promise<{ token: string; expiresAtMs: number }>(resolve => { answer = resolve; }));
+    const auth = new EngineCapabilityAuth({ identity: ids, issuer: fixture.issuer, store: memoryStore(), requestEngineCapability: request });
+    await vi.advanceTimersByTimeAsync(ENGINE_CAPABILITY_FALLBACK_AFTER_DOWN_MS);
+    expect(request).toHaveBeenCalledTimes(1);
+    auth.holdCapability(token("pushed", Date.now() + 300_000));
+    answer(token("fallback", Date.now() + 200_000));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(auth.engineCapability()?.token).toBe("pushed");
+    auth.stop();
+  });
+});
+
+describe("in-band client auth.renew (S3 Part 3)", () => {
+  const valid = () => fixture.vectors.find(v => v.name === "zeros:engine valid")!;
+  const RENEWED_EXP_S = TEST_CAPABILITY_NOW_S + 300;
+
+  function renewal(device = "device-a", jti = "CCCCCCCCCCCCCCCCCCCCCC", timestampMs = TEST_CAPABILITY_NOW_S * 1000) {
+    const capability = signTestCapability(TEST_CAPABILITY_HEADER, testClientClaims({ jti, iat: TEST_CAPABILITY_NOW_S, nbf: TEST_CAPABILITY_NOW_S, exp: RENEWED_EXP_S }));
+    const nonce = "R".repeat(22);
+    const signature = signTestProof(device, { aud: "zeros:engine", wsp: TEST_CAPABILITY_IDS.workspace, jti, timestampMs, nonce, route: "direct" });
+    return { t: "auth.renew", d: { capability, proof: { timestampMs, nonce, signature } } };
+  }
+
+  async function admitted(clock: { now: number }, closed: string[] = []) {
+    const vector = valid();
+    clock.now = vector.nowMs;
+    const auth = new EngineCapabilityAuth({ identity: ids, issuer: fixture.issuer, store: memoryStore(), now: () => clock.now,
+      onSessionsClosed: closures => closed.push(...closures.map(c => `${c.sessionId}:${c.code}`)) });
+    await auth.applyKeys(fixture.keys as never);
+    await auth.applySync(sync("c-1"));
+    const result = await auth.verifyClient({ capability: vector.token, proof: vector.context.proof! }, "direct");
+    if (!result.ok) throw new Error(result.code);
+    auth.admit("client-1", result, "direct");
+    return auth;
+  }
+
+  const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+
+  it("swaps the session's token without reconnecting and replies auth.renewed with the new expiry", async () => {
+    const clock = { now: 0 };
+    const closed: string[] = [];
+    const auth = await admitted(clock, closed);
+    const frame = renewal();
+    expect(await auth.handleInBandAuth("client-1", frame, bytes(frame), "direct"))
+      .toEqual({ kind: "reply", frame: JSON.stringify({ t: "auth.renewed", d: { expiresAtMs: RENEWED_EXP_S * 1000 } }) });
+    expect(auth.verifier.sessionClaims("client-1")?.jti).toBe("CCCCCCCCCCCCCCCCCCCCCC");
+    // Past the first token's exp the renewed session stays open; past the
+    // renewed exp it closes with capability_expired.
+    clock.now = (TEST_CAPABILITY_NOW_S + 295) * 1000;
+    auth.verifier.recheck();
+    expect(closed).toEqual([]);
+    clock.now = RENEWED_EXP_S * 1000;
+    auth.verifier.recheck();
+    expect(closed).toEqual(["client-1:capability_expired"]);
+    auth.stop();
+  });
+
+  it("closes a session that never renews with capability_expired at exp", async () => {
+    const clock = { now: 0 };
+    const closed: string[] = [];
+    const auth = await admitted(clock, closed);
+    clock.now = (TEST_CAPABILITY_NOW_S + 290) * 1000;
+    auth.verifier.recheck();
+    expect(closed).toEqual(["client-1:capability_expired"]);
+    auth.stop();
+  });
+
+  it("closes with the S1 socket code when a renewal fails verification", async () => {
+    const clock = { now: 0 };
+    const auth = await admitted(clock);
+    const frame = renewal("device-b");
+    expect(await auth.handleInBandAuth("client-1", frame, bytes(frame), "direct"))
+      .toEqual({ kind: "close", code: 4401, reason: "capability_proof_invalid" });
+    expect(auth.verifier.openSessionIds()).toEqual([]);
+    auth.stop();
+  });
+
+  it("passes engine messages through and closes 4400 on any other handshake frame", async () => {
+    const clock = { now: 0 };
+    const auth = await admitted(clock);
+    const engine = { type: "ping", t: "auth.renew" };
+    expect(await auth.handleInBandAuth("client-1", engine, bytes(engine), "direct")).toEqual({ kind: "engine" });
+    expect(await auth.handleInBandAuth("client-1", [1], 3, "direct")).toEqual({ kind: "engine" });
+    for (const frame of [{ t: "auth", d: {} }, { t: "auth.renew", d: { capability: 1 } }, { t: "auth.renew", d: { ...renewal().d, extra: true } }]) {
+      expect(await auth.handleInBandAuth("client-1", frame, bytes(frame), "direct")).toEqual({ kind: "close", code: 4400, reason: "frame_invalid" });
+    }
+    const frame = renewal();
+    expect(await auth.handleInBandAuth("client-1", frame, RUNTIME_AUTH_FRAME_MAX_BYTES + 1, "direct"))
+      .toEqual({ kind: "close", code: 4400, reason: "frame_invalid" });
+    auth.stop();
+  });
+
+  it("maps every S1 error code to its socket close", () => {
+    expect(capabilityCloseCode("capability_workspace_mismatch")).toBe(4403);
+    expect(capabilityCloseCode("capability_revoked")).toBe(4403);
+    expect(capabilityCloseCode("capability_generation_mismatch")).toBe(4409);
+    expect(capabilityCloseCode("capability_contract_unsupported")).toBe(4426);
+    expect(capabilityCloseCode("capability_expired")).toBe(4401);
+    expect(capabilityCloseCode("capability_scope_denied")).toBeNull();
+    expect(capabilityCloseCode("capability_issuer_unavailable")).toBeNull();
+  });
+});
 describe("engine capability verifier Local boundary", () => {
   const ENGINE = join(process.cwd(), "apps", "desktop");
   function sources(directory: string, found: string[] = []): string[] {

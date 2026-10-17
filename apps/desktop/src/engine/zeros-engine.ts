@@ -3718,6 +3718,7 @@ export class ZerosEngine {
       issuer: advertised.controlPlaneOrigin,
       store: fileCapabilityAuthStore(path.join(engineRuntimeDir(this.root), "cloud-capability-auth.json")),
       fetchKeys: jwksFetcher(advertised.controlPlaneOrigin),
+      requestEngineCapability: () => registration.requestEngineCapability(),
     });
     this.cloudCapabilityAuth = capabilityAuth;
     const uplink = new CloudEngineUplinkClient({

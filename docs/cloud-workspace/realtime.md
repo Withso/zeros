@@ -329,6 +329,25 @@ registration there is no uplink client at all.
   revocations, latest capability); the shared verifier (track B) binds
   signature checks to that state. `engine_uplink_hello_ms` and
   `engine_uplink_auth_apply_ms` are recorded per connect.
+- **Engine token renewal.** `realtime` pushes a fresh `auth.capability` at
+  60% of the token's lifetime. `EngineCapabilityAuth`
+  (`cloud-capability-auth.ts`) keeps the later-expiring of the tokens it
+  holds. When the uplink has been down for 30 s (startup counts as down),
+  it asks `api` directly once the held token reaches 80% of its lifetime,
+  or at once if it holds none. That request is
+  `POST /internal/v2/cloud-workspaces/engine/capability` with the heartbeat
+  credential and the registered `bootId`, sent at most once a minute, and
+  it stops as soon as the uplink is up again.
+- **In-band client renewal.** `handleInBandAuth` handles one text message
+  of an admitted client session. A message with a top-level `t` and no
+  `type` is a handshake frame. Only `auth.renew` is accepted, it must be
+  16 KiB or smaller, and it is validated strictly. A valid renewal swaps
+  the session's token and returns an `auth.renewed` reply carrying the new
+  `expiresAtMs`. A failed renewal closes the session with its S1 socket
+  code; a malformed frame closes it with `4400`. A session that is not
+  renewed closes with `capability_expired` at `exp`. The cloud transport
+  does not carry the S3 `auth` frames yet, so no session reaches this
+  path in this release.
 - **Credential push.** The engine offers `cred.v1`; a pushed `cred.revision`
   runs the same credential-controls exchange the poll runs (coalesced to
   the latest revision per kind while one is in flight) and is answered with

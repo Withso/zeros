@@ -29,3 +29,4 @@ export {
   type CapabilityVerifyResult,
   type CapabilityVerifySuccess,
 } from "../../../control-plane/src/cloud-workspaces/capability-verifier.js";
+export type { CapabilityErrorCode } from "../../../control-plane/src/cloud-workspaces/capability-contract.js";

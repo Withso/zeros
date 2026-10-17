@@ -1615,4 +1615,37 @@ describe("engine uplink advertisement", () => {
     expect(String(f.fetcher.mock.calls[1]?.[0])).toBe(heartbeatEndpoint);
     await f.registration.stop();
   });
-});
+
+  it("requests an engine capability by REST with the heartbeat credential and the registered boot id", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const token = `${"a".repeat(20)}.${"b".repeat(40)}.${"c".repeat(43)}`;
+    let answer: unknown = { capability: { token, expiresAt: new Date(NOW + 300_000).toISOString() } };
+    const fetcher = vi.fn<typeof fetch>(async url => {
+      const route = new URL(String(url)).pathname;
+      if (route.endsWith("/register")) return Response.json({ ...registrationResponse(), ...advertised });
+      if (route === "/internal/v2/cloud-workspaces/engine/capability") return Response.json(answer, { status: 201 });
+      return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: NOW + 90_000 });
+    });
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start();
+      expect(await registration.requestEngineCapability()).toEqual({ token, expiresAtMs: NOW + 300_000 });
+      const call = fetcher.mock.calls.find(([url]) => new URL(String(url)).pathname.endsWith("/engine/capability"))!;
+      expect(new URL(String(call[0])).origin).toBe(new URL(heartbeatEndpoint).origin);
+      expect(call[1]?.headers).toMatchObject({ authorization: `Bearer zwh_${"H".repeat(43)}`, "content-type": "application/json" });
+      expect(JSON.parse(String(call[1]?.body))).toEqual({
+        workspaceId: runtime.execution.workspaceId, organizationId: runtime.execution.organizationId,
+        generation: runtime.execution.generation, engineInstanceId: runtime.engine.instanceId, bootId: registration.runtimeBootId,
+      });
+      for (const invalid of [{ capability: { token } }, { capability: { token: "x", expiresAt: new Date(NOW).toISOString() } },
+        { capability: { token, expiresAt: "soon" } }, { capability: { token, expiresAt: new Date(NOW).toISOString() }, extra: 1 }]) {
+        answer = invalid;
+        await expect(registration.requestEngineCapability()).rejects.toThrow();
+      }
+    } finally { await registration.stop(); }
+    await expect(registration.requestEngineCapability()).rejects.toThrow();
+  });});
