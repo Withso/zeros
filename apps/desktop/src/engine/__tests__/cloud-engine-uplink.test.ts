@@ -95,11 +95,11 @@ function fakeClient(extra: Partial<CloudEngineUplinkOptions> & { now?: () => num
 }
 
 /** Plays the server side of the frozen handshake on a fake socket. */
-async function serveHandshake(socket: FakeSocket, options: { resumed?: boolean; token?: string; pingIntervalMs?: number; cursor?: string } = {}) {
+async function serveHandshake(socket: FakeSocket, options: { resumed?: boolean; token?: string; pingIntervalMs?: number; cursor?: string; features?: string[] } = {}) {
   socket.frame({ t: "sys.welcome", d: {
     protocol: 1, connectionId: "c-1", resumeToken: options.token ?? "r1",
     resumed: options.resumed ?? false, pingIntervalMs: options.pingIntervalMs ?? 20_000,
-    leaseExpiresAtMs: Date.now() + 60_000, serverInstance: "s1", features: [],
+    leaseExpiresAtMs: Date.now() + 60_000, serverInstance: "s1", features: options.features ?? ["cred.v1"],
   } });
   await flush();
   socket.frame({ t: "auth.keys", d: { keys: [KEY] } });
@@ -544,6 +544,53 @@ describe("engine uplink client (socket level)", () => {
     sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: "soon" } });
     await flush();
     expect(sockets[0]!.closeCalls[0]).toMatchObject({ code: 4400, reason: "frame_invalid" });
+    client.stop();
+  });
+
+  it("established stays false when cred.v1 was not negotiated", async () => {
+    const changes: boolean[] = [];
+    const { client, sockets } = fakeClient({ onEstablishedChange: established => changes.push(established) });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!, { features: [] }); // an extension list without cred.v1
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(0);
+    expect(client.established).toBe(false); // gate open, but no pushes will flow: keep the fast poll
+    expect(changes).toEqual([]);
+    client.stop();
+  });
+
+  it("a failed push drops established until the next successful exchange", async () => {
+    const changes: boolean[] = [];
+    let fail = true;
+    const { client, sockets } = fakeClient({
+      onEstablishedChange: established => changes.push(established),
+      onCredentialRevision: async () => {
+        if (fail) throw new Error("exchange unavailable");
+        return { result: "applied" as const };
+      },
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    expect(client.established).toBe(true);
+    expect(changes).toEqual([true]);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")[0]).toMatchObject({ d: { revision: 7, result: "failed" } });
+    expect(client.established).toBe(false); // the failed push retries via the fast poll
+    expect(changes).toEqual([true, false]);
+    // A successful fallback poll clears the mark without waiting for a push.
+    client.noteCredentialExchangeSucceeded();
+    expect(client.established).toBe(true);
+    expect(changes).toEqual([true, false, true]);
+    // And a failed push again: a later successful PUSH clears it the same way.
+    sockets[0]!.frame({ t: "cred.revision", s: 2, d: { kind: "agent-controls", revision: 8 } });
+    await flush();
+    expect(client.established).toBe(false);
+    fail = false;
+    sockets[0]!.frame({ t: "cred.revision", s: 3, d: { kind: "agent-controls", revision: 9 } });
+    await flush();
+    expect(client.established).toBe(true);
     client.stop();
   });
 

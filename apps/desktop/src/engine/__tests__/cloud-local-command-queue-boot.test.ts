@@ -74,7 +74,8 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
     legacy: f.legacy, supervisor: { onRetirementFailure: vi.fn() }, engineLive: () => live,
     isAdmittedCwd: (cwd: string) => cwd === f.input.cwd, resolveConversation: () => ({ cwd: f.input.cwd, provider: f.input.provider, model: f.input.model }),
     history: () => ({ recordSequence: 1, eventSequence: 1 }), beforeActivate, install, changed,
-    controlsPollIntervalMs: undefined as (() => number) | undefined };
+    controlsPollIntervalMs: undefined as (() => number) | undefined,
+    controlsExchange: undefined as ((ok: boolean) => void) | undefined };
   const boot = new CloudLocalAgentBootRuntime(options); cleanups.push(() => boot.dispose());
   const admission = { accountUserId: f.provenance.actor.userId, authorityEpoch: f.provenance.authorityEpoch,
     actor: { sessionId: f.provenance.actorSessionId, deviceId: f.provenance.actor.deviceId,
@@ -472,6 +473,16 @@ describe("engine boot-mode orchestration", () => {
     expect(f.controls).toHaveBeenCalledTimes(4);
     await vi.advanceTimersByTimeAsync(500);
     expect(f.controls).toHaveBeenCalledTimes(5);
+  });
+  it("reports credential-control exchange outcomes", async () => {
+    const outcomes: boolean[] = [];
+    const f = await fixture();
+    f.options.controlsExchange = ok => outcomes.push(ok);
+    await f.boot.initialize();
+    await f.boot.pollCredentialControls();
+    f.controls.mockRejectedValueOnce(new Error("exchange unavailable"));
+    await expect(f.boot.pollCredentialControls()).rejects.toThrow("exchange unavailable");
+    expect(outcomes).toEqual([true, false]);
   });
   it("reschedules the controls poll immediately when the uplink's gate closes", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });

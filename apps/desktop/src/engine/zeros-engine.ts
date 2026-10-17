@@ -4470,6 +4470,9 @@ export class ZerosEngine {
       // changes and the poll drops to a 30 s safety net; any uplink loss
       // returns it to the 500 ms fallback cadence.
       controlsPollIntervalMs: () => (this.cloudEngineUplink?.established ? 30_000 : 500),
+      // A successful poll clears the uplink's failed-push mark, so a
+      // transient push failure recovers the slow cadence after one poll.
+      controlsExchange: ok => { if (ok) this.cloudEngineUplink?.noteCredentialExchangeSucceeded(); },
       startsAllowed: () => !this.cloudRuntimeHandoffFenced && !this.cloudRuntimeCheckpointQuiescing && !this.cloudLegacyResidentRequiresFreshView,
       isAdmittedCwd: cwd => {
         try {

@@ -62,6 +62,10 @@ type Options = {
    * fallback) and a slow safety cadence once the uplink's cred push carries
    * revisions (P0.10 C01). Defaults to 500 ms. */
   controlsPollIntervalMs?(): number;
+  /** The outcome of each credential-control exchange. The engine clears its
+   * failed-push-outstanding mark on a poll success so the uplink's
+   * `established` recovers without waiting for the CP to push again. */
+  controlsExchange?(ok: boolean): void;
 };
 
 /** Registration establishes a candidate; only an exact activation response
@@ -344,7 +348,9 @@ export class CloudLocalAgentBootRuntime {
       // refresh or native retirement. No later control is hidden behind I/O.
       await Promise.all(response.controls.map(control => this.fencesValue!.handle(control)));
       this.options.changed(); this.scheduleCache();
+      this.options.controlsExchange?.(true);
     })().catch(error => {
+      this.options.controlsExchange?.(false);
       if (error && typeof error === "object" && "code" in error &&
           ["engine_authority_rejected", "credential_control_authority_rejected"].includes(String(error.code))) {
         this.activated = false; this.options.supervisor.onRetirementFailure(error);

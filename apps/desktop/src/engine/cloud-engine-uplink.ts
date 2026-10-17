@@ -297,7 +297,26 @@ export class CloudEngineUplinkClient {
   get established(): boolean { return this.computeEstablished(); }
   private lastEstablished = false;
 
-  private computeEstablished(): boolean { return this.connection?.gateOpen === true; }
+  /** A pushed cred.revision failed to apply. While outstanding, established
+   * stays false so the fallback poll (500 ms) retries what the CP does not
+   * re-push; cleared by the next successful exchange, push or poll. */
+  private credFailedOutstanding = false;
+
+  private computeEstablished(): boolean {
+    const connection = this.connection;
+    return connection?.gateOpen === true
+      && connection.features.has("cred.v1") // no negotiated push channel: poll fast
+      && !this.credFailedOutstanding;
+  }
+
+  /** A credential-control exchange succeeded outside a push (the fallback
+   * poll): clears a failed-push-outstanding mark so `established` recovers
+   * without waiting for the CP to push again. */
+  noteCredentialExchangeSucceeded(): void {
+    if (!this.credFailedOutstanding) return;
+    this.credFailedOutstanding = false;
+    this.noteEstablished();
+  }
 
   /** @internal Recompute `established` at every input change (gate open,
    * connection loss, stop) and report a flip exactly once. */
@@ -396,8 +415,13 @@ export class CloudEngineUplinkClient {
       }
       // A failed revision is not recorded: a later re-push retries the
       // exchange (and the fallback poll converges regardless).
-      if (outcome.result === "applied")
+      if (outcome.result === "applied") {
         this.credApplied.set(kind, Math.max(revision, this.credApplied.get(kind) ?? 0));
+        if (this.credFailedOutstanding) { this.credFailedOutstanding = false; this.noteEstablished(); }
+      } else {
+        this.credFailedOutstanding = true; // drops the poll to its fast cadence until recovery
+        this.noteEstablished();
+      }
       this.sendReliable("cred.ack", {
         kind, revision, result: outcome.result, ...(outcome.code ? { code: outcome.code } : {}),
       });
@@ -604,6 +628,8 @@ class Connection {
   /** Opens on this connection's first auth.capability (frozen step 4);
    * reliable engine frames send live only while it is open. */
   gateOpen = false;
+  /** The welcome's negotiated extension set (`sys.welcome.features`). */
+  features: ReadonlySet<string> = new Set();
   /** The hello offered a resume token: a `resumed: false` welcome then
    * means the server lost that lineage, and its unacked frames reset. */
   offeredResume = false;
@@ -780,9 +806,13 @@ class Connection {
     this.helloTimer = null;
     if (typeof d.resumeToken !== "string" || typeof d.protocol !== "number" || d.protocol < 1)
       return this.initiateClose(CLOSE.frameInvalid, "welcome_invalid");
+    if (d.features !== undefined &&
+        (!Array.isArray(d.features) || d.features.some(feature => typeof feature !== "string")))
+      return this.initiateClose(CLOSE.frameInvalid, "welcome_invalid");
     this.welcomed = true;
     this.welcomedAtMs = this.uplink.now();
     this.resumeToken = d.resumeToken;
+    this.features = new Set((d.features as string[] | undefined) ?? []);
     this.pingIntervalMs = clampPingInterval(d.pingIntervalMs);
     this.uplink.welcomed(this, d.resumed === true);
     this.pingTimer = setInterval(() => this.send({ t: "sys.ping", d: { ts: this.uplink.now() } }), this.pingIntervalMs);
