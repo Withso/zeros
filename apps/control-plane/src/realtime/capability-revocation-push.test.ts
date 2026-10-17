@@ -18,6 +18,8 @@ const W1 = "11111111-1111-4111-8111-111111111111";
 const W2 = "33333333-3333-4333-8333-333333333333";
 const W3 = "44444444-4444-4444-8444-444444444444";
 const USER = "55555555-5555-4555-8555-555555555555";
+const USER2 = "66666666-6666-4666-8666-666666666666";
+const USER3 = "77777777-7777-4777-8777-777777777777";
 const T0 = 1_800_000_000_000;
 /** S1 "Revocation": commit to engine auth.applied within 2 s at p99. */
 const BUDGET_MS = 2_000;
@@ -69,7 +71,8 @@ function setup(options: {
   snapshotDelayMs?: number;
   feed?: { subscribe: FakeFeed["subscribe"] };
 } = {}) {
-  const uplinks = new FakeUplinks(options.identities ?? [identity(W1), identity(W2), identity(W3, OTHER_ORG)]);
+  const identities = options.identities ?? [identity(W1), identity(W2), identity(W3, OTHER_ORG)];
+  const uplinks = new FakeUplinks(identities);
   const streams = { revokeCapabilities: vi.fn<RevocationDeviceStreams["revokeCapabilities"]>() };
   const feed = new FakeFeed();
   let wa = 10;
@@ -77,9 +80,10 @@ function setup(options: {
     if (options.snapshotDelayMs) await new Promise(resolve => setTimeout(resolve, options.snapshotDelayMs));
     return { epochs: { wa: wa++, wr: 1, members: { [USER]: 3 } }, revocations: [], authCursor: `t-${id.workspaceId}`, complete: true };
   });
+  const orgOf = new Map(identities.map(id => [id.workspaceId, id.organizationId]));
   const source: CapabilityRevocationSource = {
     details: vi.fn(async sequences => new Map(sequences.map(sequence => [sequence, options.details?.[sequence] ?? { createdAtMs: Date.now() }]))),
-    workspacesForUser: vi.fn(async (_user, _org, ids) => ids.filter(id => (options.userWorkspaces ?? [W1]).includes(id))),
+    workspacesForUsers: vi.fn(async (targets, ids) => targets.flatMap(target => ids.filter(id => (options.userWorkspaces ?? [W1]).includes(id) && (target.organizationId === null || orgOf.get(id) === target.organizationId)).map(workspaceId => ({ userId: target.userId, organizationId: target.organizationId, workspaceId })))),
   };
   const orgs = new Set(options.flagOrgs ?? [ORG, OTHER_ORG]);
   const flags: RolloutFlagReader = { enabled: (org, flag) => flag === "capabilities" && orgs.has(org), anyEnabled: flag => flag === "capabilities" && orgs.size > 0 };
@@ -105,11 +109,27 @@ describe("capability revocation push", () => {
     const f = setup({ details: { 1: { createdAtMs: T0, epoch: "me" } }, userWorkspaces: [W2] });
     f.feed.subscriber!.events([event(1, { userId: USER, organizationId: ORG })]);
     await f.push.settled();
-    expect(f.source.workspacesForUser).toHaveBeenCalledWith(USER, ORG, [W1, W2]);
+    expect(f.source.workspacesForUsers).toHaveBeenCalledExactlyOnceWith([{ userId: USER, organizationId: ORG }], [W1, W2, W3]);
     expect(f.uplinks.received(W1)).toEqual([]);
     expect(f.uplinks.received(W2)).toHaveLength(1);
     expect(f.uplinks.received(W3)).toEqual([]);
     expect(f.streams.revokeCapabilities).toHaveBeenCalledExactlyOnceWith({ accountUserId: USER, organizationId: ORG }, "organization", "membership_changed");
+  });
+
+  it("reads the workspaces of every user in a batch with one query", async () => {
+    const f = setup({ details: { 1: { createdAtMs: T0, epoch: "me" }, 2: { createdAtMs: T0, epoch: "me" }, 3: { createdAtMs: T0, epoch: "me" } }, userWorkspaces: [W1, W2] });
+    f.feed.subscriber!.events([
+      event(1, { userId: USER, organizationId: ORG }),
+      event(2, { userId: USER2, organizationId: ORG }),
+      event(3, { userId: USER3, organizationId: ORG }),
+    ]);
+    await f.push.settled();
+    expect(f.source.workspacesForUsers).toHaveBeenCalledExactlyOnceWith([
+      { userId: USER, organizationId: ORG }, { userId: USER2, organizationId: ORG }, { userId: USER3, organizationId: ORG },
+    ], [W1, W2, W3]);
+    expect(f.uplinks.received(W1)).toHaveLength(1);
+    expect(f.uplinks.received(W2)).toHaveLength(1);
+    expect(f.uplinks.received(W3)).toEqual([]);
   });
 
   it("never sends capability.revoked for kinds the device stream re-checks itself", async () => {
@@ -138,12 +158,72 @@ describe("capability revocation push", () => {
     expect(f.streams.revokeCapabilities).not.toHaveBeenCalled();
   });
 
+  it("reads nothing while no organization has capabilities", async () => {
+    const f = setup({ flagOrgs: [], details: { 1: { createdAtMs: T0, epoch: "wa", workspaceId: W1 } } });
+    f.feed.subscriber!.events([event(1, { organizationId: ORG })]);
+    f.feed.subscriber!.gap("listener_restored");
+    await f.push.settled();
+    expect(f.source.details).not.toHaveBeenCalled();
+    expect(f.snapshot).not.toHaveBeenCalled();
+    expect(f.streams.revokeCapabilities).not.toHaveBeenCalled();
+  });
+
   it("re-reads every owned workspace on a gap", async () => {
     const f = setup();
     f.feed.subscriber!.gap("listener_restored");
     await f.push.settled();
     expect([W1, W2, W3].map(id => f.uplinks.received(id).length)).toEqual([1, 1, 1]);
     expect(f.streams.revokeCapabilities).not.toHaveBeenCalled();
+  });
+
+  it("re-reads every owned workspace one second after a failed read", async () => {
+    vi.useFakeTimers({ now: T0 });
+    const f = setup({ details: { 1: { createdAtMs: T0, epoch: "wa", workspaceId: W1 } } });
+    vi.mocked(f.source.details).mockRejectedValueOnce(new Error("db"));
+    f.feed.subscriber!.events([event(1, { organizationId: ORG })]);
+    await vi.advanceTimersByTimeAsync(0);
+    await f.push.settled();
+    expect([W1, W2, W3].map(id => f.uplinks.received(id).length)).toEqual([0, 0, 0]);
+    expect(f.push.counters.readFailures).toBe(1);
+    await vi.advanceTimersByTimeAsync(999);
+    expect([W1, W2, W3].map(id => f.uplinks.received(id).length)).toEqual([0, 0, 0]);
+    await vi.advanceTimersByTimeAsync(1);
+    await f.push.settled();
+    expect([W1, W2, W3].map(id => f.uplinks.received(id).length)).toEqual([1, 1, 1]);
+  });
+
+  it("backs off while snapshot reads keep failing and resets after a clean pass", async () => {
+    vi.useFakeTimers({ now: T0 });
+    const f = setup({ identities: [identity(W1)] });
+    f.snapshot.mockRejectedValueOnce(new Error("db")).mockRejectedValueOnce(new Error("db")).mockRejectedValueOnce(new Error("db"));
+    f.feed.subscriber!.gap("listener_restored");
+    await f.push.settled();
+    expect(f.snapshot).toHaveBeenCalledTimes(1);
+    for (const [ms, calls] of [[999, 1], [1, 2], [1999, 2], [1, 3], [3999, 3], [1, 4]] as const) {
+      await vi.advanceTimersByTimeAsync(ms);
+      await f.push.settled();
+      expect(f.snapshot).toHaveBeenCalledTimes(calls);
+    }
+    expect(f.uplinks.received(W1)).toHaveLength(1);
+    f.snapshot.mockRejectedValueOnce(new Error("db"));
+    f.feed.subscriber!.gap("listener_restored");
+    await f.push.settled();
+    expect(f.snapshot).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1000);
+    await f.push.settled();
+    expect(f.snapshot).toHaveBeenCalledTimes(6);
+    expect(f.uplinks.received(W1)).toHaveLength(2);
+  });
+
+  it("stop cancels a pending retry", async () => {
+    vi.useFakeTimers({ now: T0 });
+    const f = setup({ details: { 1: { createdAtMs: T0, epoch: "wa", workspaceId: W1 } } });
+    vi.mocked(f.source.details).mockRejectedValueOnce(new Error("db"));
+    f.feed.subscriber!.events([event(1, { organizationId: ORG })]);
+    await f.push.settled();
+    f.push.stop();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(f.snapshot).not.toHaveBeenCalled();
   });
 });
 

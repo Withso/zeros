@@ -102,12 +102,16 @@ d("capability epoch events with PostgreSQL", () => {
     const source = new DatabaseCapabilityRevocationSource(pool);
     const other = randomUUID();
     await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Other')", [other, `${other}@example.test`]);
-    expect(await source.workspacesForUser(member, fixture.organizationId, [fixture.workspaceId])).toEqual([fixture.workspaceId]);
-    expect(await source.workspacesForUser(other, null, [fixture.workspaceId])).toEqual([]);
-    expect(await source.workspacesForUser(member, randomUUID(), [fixture.workspaceId])).toEqual([]);
+    const expected = [{ userId: member, organizationId: fixture.organizationId, workspaceId: fixture.workspaceId }];
+    expect(await source.workspacesForUsers([], [fixture.workspaceId])).toEqual([]);
+    expect(await source.workspacesForUsers([
+      { userId: member, organizationId: fixture.organizationId },
+      { userId: other, organizationId: null },
+      { userId: member, organizationId: randomUUID() },
+    ], [fixture.workspaceId])).toEqual(expected);
     await pool.query("DELETE FROM cloud_workspace_members WHERE workspace_id=$1 AND user_id=$2", [fixture.workspaceId, member]);
     await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, member]);
-    expect(await source.workspacesForUser(member, fixture.organizationId, [fixture.workspaceId])).toEqual([fixture.workspaceId]);
+    expect(await source.workspacesForUsers([{ userId: member, organizationId: fixture.organizationId }], [fixture.workspaceId])).toEqual(expected);
   });
 
   it("pushes the raised epoch to the owning uplink through the real feed, timed from created_at", async () => {

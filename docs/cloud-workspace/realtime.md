@@ -215,7 +215,11 @@ authority supplies keys, epochs and engine tokens
   runs from the event's `created_at`. On a feed `gap` it re-reads every
   owned uplink. It sends `capability.revoked` to device streams only for
   epoch events: the device stream already re-checks the account, session,
-  organization and workspace authorization kinds itself.
+  organization and workspace authorization kinds itself. It reads nothing
+  while no organization has `capabilities` on, resolves the workspaces of
+  every user named in a batch with one query, and retries a failed pass as
+  a full re-read of every owned uplink after 1 s, doubling to 30 s while
+  reads keep failing.
 - **Lease.** The HTTP heartbeat still owns the engine lease in this release;
   the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
 

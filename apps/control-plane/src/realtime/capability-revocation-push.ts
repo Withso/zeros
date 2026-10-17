@@ -22,6 +22,11 @@ import type { UplinkAuthDelta } from "./uplink-protocol.js";
 
 export const CAPABILITY_EPOCH_EVENT_KIND = "capability.epochs_changed";
 
+/** A pass whose reads failed is retried as a full re-read of every owned
+ * uplink, doubling the delay while it keeps failing. */
+export const CAPABILITY_REVOCATION_RETRY_MIN_MS = 1_000;
+export const CAPABILITY_REVOCATION_RETRY_MAX_MS = 30_000;
+
 /** Kinds that can change an epoch or a revocation an engine verifies. */
 const UPLINK_KINDS: ReadonlySet<string> = new Set([
   CAPABILITY_EPOCH_EVENT_KIND, "account.revoked", "account.authorization_changed", "session.revoked",
@@ -36,13 +41,17 @@ export type CapabilityEventDetail = Readonly<{
   workspaceId?: string;
 }>;
 
+export type CapabilityUserTarget = Readonly<{ userId: string; organizationId: string | null }>;
+
 /** Durable reads behind the producer, injectable for tests. */
 export interface CapabilityRevocationSource {
   /** `created_at` and the 0158 routing payload for delivered events. */
   details(sequences: readonly number[]): Promise<ReadonlyMap<number, CapabilityEventDetail>>;
-  /** Of `workspaceIds`, those the user has or lost (within the revocation
-   * retention window) access to: the S1 snapshot scope. */
-  workspacesForUser(userId: string, organizationId: string | null, workspaceIds: readonly string[]): Promise<string[]>;
+  /** For each target, the workspaces of `workspaceIds` (in the target's
+   * organization when it names one) the user has or lost within the
+   * revocation retention window: the S1 snapshot scope. */
+  workspacesForUsers(targets: readonly CapabilityUserTarget[], workspaceIds: readonly string[]):
+    Promise<Array<{ userId: string; organizationId: string | null; workspaceId: string }>>;
 }
 
 export interface RevocationUplinks {
@@ -75,6 +84,8 @@ export class CapabilityRevocationPush {
   private pending: Pending = { events: [], resync: false };
   private running: Promise<void> | null = null;
   private stopped = false;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryDelayMs = CAPABILITY_REVOCATION_RETRY_MIN_MS;
   private readonly unsubscribe: () => void;
   private readonly now: () => number;
   private readonly logger: Pick<Console, "warn">;
@@ -92,6 +103,8 @@ export class CapabilityRevocationPush {
   stop(): void {
     this.stopped = true;
     this.unsubscribe();
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
   }
 
   /** Resolves once queued work has been pushed. */
@@ -120,13 +133,31 @@ export class CapabilityRevocationPush {
       while (!this.stopped && (this.pending.events.length || this.pending.resync)) {
         const work = this.pending;
         this.pending = { events: [], resync: false };
-        try { await this.process(work); }
+        let clean = false;
+        try { clean = await this.process(work); }
         catch { this.counters.readFailures += 1; this.logger.warn("[realtime] capability revocation push failed"); }
+        if (clean) this.retryDelayMs = CAPABILITY_REVOCATION_RETRY_MIN_MS;
+        else this.retryLater();
       }
     })().finally(() => { this.running = null; });
   }
 
-  private async process(work: Pending): Promise<void> {
+  /** The failed pass may have lost events: re-read every owned uplink. */
+  private retryLater(): void {
+    if (this.stopped || this.retryTimer) return;
+    const delay = this.retryDelayMs;
+    this.retryDelayMs = Math.min(CAPABILITY_REVOCATION_RETRY_MAX_MS, delay * 2);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (this.stopped) return;
+      this.pending.resync = true;
+      this.schedule();
+    }, delay);
+    this.retryTimer.unref?.();
+  }
+
+  private async process(work: Pending): Promise<boolean> {
+    if (!this.options.flags.anyEnabled("capabilities")) return true;
     const { flags } = this.options;
     const capabilityEvents = work.events.filter(event => event.kind === CAPABILITY_EPOCH_EVENT_KIND);
     const details = work.events.length
@@ -135,13 +166,13 @@ export class CapabilityRevocationPush {
     this.revokeDeviceCapabilities(capabilityEvents, details);
 
     const uplink = this.options.uplink();
-    if (!uplink) return;
+    if (!uplink) return true;
     const owned = new Map<string, UplinkIdentity>();
     for (const engineInstanceId of uplink.server.ownedEngineInstances()) {
       const identity = uplink.server.session(engineInstanceId)?.identity;
       if (identity && flags.enabled(identity.organizationId, "capabilities")) owned.set(identity.workspaceId, identity);
     }
-    if (!owned.size) return;
+    if (!owned.size) return true;
 
     // Workspace -> earliest event time it has to answer for.
     const due = new Map<string, number>();
@@ -167,19 +198,20 @@ export class CapabilityRevocationPush {
         for (const id of owned.keys()) mark(id, at);
       }
     }
-    for (const { userId, organizationId, at } of byUser.values()) {
-      const candidates = [...owned.values()]
-        .filter(identity => organizationId === null || identity.organizationId === organizationId)
-        .map(identity => identity.workspaceId);
-      if (!candidates.length) continue;
-      for (const workspaceId of await this.options.source.workspacesForUser(userId, organizationId, candidates)) mark(workspaceId, at);
+    if (byUser.size) {
+      const targets = [...byUser.values()].map(({ userId, organizationId }) => ({ userId, organizationId }));
+      for (const row of await this.options.source.workspacesForUsers(targets, [...owned.keys()])) {
+        const entry = byUser.get(`${row.userId}\n${row.organizationId ?? ""}`);
+        if (entry) mark(row.workspaceId, entry.at);
+      }
     }
-    await this.pushAll(uplink, owned, due);
+    return (await this.pushAll(uplink, owned, due)) === 0;
   }
 
   private async pushAll(uplink: NonNullable<ReturnType<CapabilityRevocationPushOptions["uplink"]>>,
-    owned: ReadonlyMap<string, UplinkIdentity>, due: ReadonlyMap<string, number>): Promise<void> {
+    owned: ReadonlyMap<string, UplinkIdentity>, due: ReadonlyMap<string, number>): Promise<number> {
     const queue = [...due];
+    let failures = 0;
     const worker = async () => {
       for (let next = queue.shift(); next && !this.stopped; next = queue.shift()) {
         const [workspaceId, createdAtMs] = next;
@@ -194,10 +226,12 @@ export class CapabilityRevocationPush {
         } catch {
           // The workspace's next auth.sync (reconnect) carries the same state.
           this.counters.snapshotFailures += 1;
+          failures += 1;
         }
       }
     };
     await Promise.all(Array.from({ length: Math.min(this.options.concurrency ?? 8, queue.length) }, worker));
+    return failures;
   }
 
   private revokeDeviceCapabilities(events: readonly RealtimeSecurityEvent[], details: ReadonlyMap<number, CapabilityEventDetail>): void {
@@ -244,6 +278,7 @@ export class CapabilityRevocationPush {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EPOCHS: ReadonlySet<string> = new Set(["me", "ac", "dk", "wa", "wr"]);
+export const CAPABILITY_USER_TARGETS_PER_READ = 500;
 
 export class DatabaseCapabilityRevocationSource implements CapabilityRevocationSource {
   constructor(private readonly pool: pg.Pool) {}
@@ -263,17 +298,24 @@ export class DatabaseCapabilityRevocationSource implements CapabilityRevocationS
     }]));
   }
 
-  async workspacesForUser(userId: string, organizationId: string | null, workspaceIds: readonly string[]): Promise<string[]> {
-    if (!workspaceIds.length) return [];
-    return withSystemTx(this.pool, async tx => (await tx.query<{ id: string }>(`SELECT workspace.id
-      FROM cloud_workspaces workspace
-      WHERE workspace.id = ANY($2::uuid[]) AND ($3::uuid IS NULL OR workspace.org_id = $3)
-        AND (EXISTS (SELECT 1 FROM cloud_workspace_members member WHERE member.workspace_id = workspace.id AND member.user_id = $1)
-          OR EXISTS (SELECT 1 FROM cloud_workspace_guest_grants grant_row WHERE grant_row.workspace_id = workspace.id AND grant_row.user_id = $1)
+  async workspacesForUsers(targets: readonly CapabilityUserTarget[], workspaceIds: readonly string[]):
+    Promise<Array<{ userId: string; organizationId: string | null; workspaceId: string }>> {
+    if (!targets.length || !workspaceIds.length) return [];
+    const rows: Array<{ user_id: string; org_id: string | null; workspace_id: string }> = [];
+    for (let start = 0; start < targets.length; start += CAPABILITY_USER_TARGETS_PER_READ) {
+      const chunk = targets.slice(start, start + CAPABILITY_USER_TARGETS_PER_READ);
+      rows.push(...await withSystemTx(this.pool, async tx => (await tx.query<{ user_id: string; org_id: string | null; workspace_id: string }>(`SELECT target.user_id::text AS user_id, target.org_id::text AS org_id, workspace.id::text AS workspace_id
+        FROM unnest($1::uuid[], $2::uuid[]) AS target(user_id, org_id)
+        JOIN cloud_workspaces workspace ON workspace.id = ANY($3::uuid[])
+          AND (target.org_id IS NULL OR workspace.org_id = target.org_id)
+        WHERE EXISTS (SELECT 1 FROM cloud_workspace_members member WHERE member.workspace_id = workspace.id AND member.user_id = target.user_id)
+          OR EXISTS (SELECT 1 FROM cloud_workspace_guest_grants grant_row WHERE grant_row.workspace_id = workspace.id AND grant_row.user_id = target.user_id)
           OR (workspace.sharing_mode = 'organization' AND EXISTS (SELECT 1 FROM organization_members member
-            WHERE member.org_id = workspace.org_id AND member.user_id = $1))
-          OR EXISTS (SELECT 1 FROM cloud_capability_access_losses loss WHERE loss.workspace_id = workspace.id AND loss.user_id = $1
-            AND loss.lost_at > clock_timestamp() - make_interval(secs => $4::double precision / 1000)))`,
-    [userId, workspaceIds, organizationId, UPLINK_AUTH_REVOCATION_RETENTION_MS])).rows.map(row => row.id));
+            WHERE member.org_id = workspace.org_id AND member.user_id = target.user_id))
+          OR EXISTS (SELECT 1 FROM cloud_capability_access_losses loss WHERE loss.workspace_id = workspace.id AND loss.user_id = target.user_id
+            AND loss.lost_at > clock_timestamp() - make_interval(secs => $4::double precision / 1000))`,
+      [chunk.map(target => target.userId), chunk.map(target => target.organizationId), workspaceIds, UPLINK_AUTH_REVOCATION_RETENTION_MS])).rows));
+    }
+    return rows.map(row => ({ userId: row.user_id, organizationId: row.org_id, workspaceId: row.workspace_id }));
   }
 }
