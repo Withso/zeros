@@ -274,7 +274,7 @@ describe("device stream server", () => {
     catalog.defaultOrganizations = [organizationId];
     subscriber = null;
     flags = { device_stream: true, presence_in_memory: true, authority_cache_shadow: false, authority_cache_enforce: false,
-      capabilities: false, realtime_uplink: false, credential_push: false, relay_over_uplink: false };
+      capabilities: false, realtime_uplink: false, credential_push: false, relay_over_uplink: false, runtime_connect: false };
   });
   afterEach(async () => {
     for (const client of clients.splice(0)) client.stop();

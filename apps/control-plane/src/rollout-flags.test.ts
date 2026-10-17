@@ -38,7 +38,7 @@ describe("rollout flag snapshot", () => {
   it("registers the initial flags and defaults every organization to off", async () => {
     expect(Object.keys(ROLLOUT_FLAGS).sort()).toEqual([
       "authority_cache_enforce", "authority_cache_shadow", "capabilities", "credential_push",
-      "device_stream", "presence_in_memory", "realtime_uplink", "relay_over_uplink",
+      "device_stream", "presence_in_memory", "realtime_uplink", "relay_over_uplink", "runtime_connect",
     ]);
     expect(isRolloutFlagName("capabilities")).toBe(true);
     expect(isRolloutFlagName("toString")).toBe(false);

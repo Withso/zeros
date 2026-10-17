@@ -40,6 +40,7 @@ registered `whileFeedUnavailable` value:
 | `credential_push` | retain | Transport choice; the poll remains as fallback. |
 | `relay_over_uplink` | retain | Transport choice; the existing relay remains. |
 | `presence_in_memory` | retain | Transport choice; database presence remains. |
+| `runtime_connect` | retain | Additive endpoints; while off they answer 404 and clients keep `runtime/admission`. |
 
 `retain` keeps the last loaded value, still corrected by the safety refresh.
 Use `off` for any new flag that relaxes a database check or a security
@@ -53,7 +54,8 @@ on for that same organization, transitively. `realtime_uplink` requires
 `capabilities`: without capability keys and epochs the S2 handshake cannot
 complete, so advertising or accepting the uplink alone would loop engines at
 `auth.sync`. Enabling the uplink for an organization is therefore always the
-pair: `capabilities` first, then `realtime_uplink`.
+pair: `capabilities` first, then `realtime_uplink`. `runtime_connect` also
+requires `capabilities`: its endpoints issue S1 client capabilities.
 
 ## Changing a flag
 

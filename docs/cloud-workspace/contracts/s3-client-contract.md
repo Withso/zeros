@@ -1,7 +1,7 @@
 # S3. Client contract v1 (cloud workspaces)
 
-Status: **FROZEN** · Contract ID `zeros-client` · Version `1.1.0`
-(same-version catalog replacement; see [Changelog](#changelog)) ·
+Status: **FROZEN** · Contract ID `zeros-client` · Version `1.2.0`
+(runtime connect proofs and errors; see [Changelog](#changelog)) ·
 Schemas: [Draft schema: REST API (OpenAPI 3.1)](#draft-schema-rest-api-openapi-31),
 [Draft schema: device stream frames](#draft-schema-device-stream-frames),
 [Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames)
@@ -83,6 +83,34 @@ cheap to re-create).
 `retryAfterMs` are additive and optional. Clients treat an unknown code as
 non-retryable unless the HTTP status is 429, 502, 503 or 504.
 
+### Device proof
+
+Device-bound endpoints carry a single-use proof by the device's registered
+Ed25519 key in the `x-zeros-device-*` headers. The signature covers these
+UTF-8 lines joined with `\n`: `zeros-cloud-device-proof-v1`, the account's
+user id, the device id, the key version, the action, the timestamp in
+milliseconds, the nonce, and the lowercase hex SHA-256 of the payload's
+canonical JSON (object keys sorted, no whitespace). The reference
+implementation is `cloudWorkspaceDeviceProofMessage` in
+`apps/control-plane/src/cloud-workspaces/replicas.ts`. The timestamp must be
+within 5 minutes of the server's clock, and each 24-byte nonce (base64url)
+is accepted once: a replay is `409 workspace_replica_device_proof_replayed`,
+any other bad proof `403 workspace_replica_device_proof_rejected`.
+
+| Endpoint | Action | Payload |
+| --- | --- | --- |
+| `POST /v1/device-sessions` | `device-session.create` | `{ deviceSessionId }`, null for a new device session |
+| `POST …/runtime/connect` | `runtime.connect` | `{ organizationId, workspaceId, deviceSessionId, clientSessionId, routes }` |
+| `POST …/runtime/capabilities` | `runtime.capabilities` | `{ organizationId, workspaceId, deviceSessionId, clientSessionId }` |
+
+`organizationId` and `workspaceId` are the path's ids in lowercase; the
+other fields are the body's, and `routes` keeps the request's order. A proof
+is therefore good for one endpoint, workspace, device session and route set.
+These three endpoints take closed bodies: an unknown field is
+`422 invalid_input`, so a minor version that adds a request field ships on
+servers before clients send it. In the two runtime bodies UUIDs are
+lowercase.
+
 ### Device session
 
 `POST /v1/device-sessions` with device proof headers. Body:
@@ -134,10 +162,41 @@ Request body: `{ "deviceSessionId", "routes": ["direct", "relay"],
 }
 ```
 
-Errors: `409 cloud_workspace_not_running` (new code, with
-`"wakeable": true|false`),
-`403 workspace_role_required`, `409 cloud_workspace_v2_required`,
-`503 capability_issuer_unavailable`, `503 cloud_workspace_runtime_not_configured`.
+`routes` names `direct`, `relay` or both, each once. The response lists the
+requested routes the server can serve now, in priority order: `direct`
+(priority 0) when the running engine's provider endpoint resolves, then
+`relay` (priority 1) when relay is enabled for the organization. A request
+whose route kinds are all unconfigured gets
+`503 cloud_workspace_runtime_not_configured` (`"retryable": false`); one
+whose requested routes are all unavailable for the moment gets
+`503 cloud_workspace_unavailable` (`"retryable": true`).
+
+`POST …/runtime/capabilities` takes `{ "deviceSessionId", "clientSessionId" }`
+and returns `{ "capabilities", "renewAt" }` for the engine running the
+workspace's current generation. The proofs of both endpoints are in
+[Device proof](#device-proof).
+
+Errors, for both endpoints unless noted:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 401 | `capability_expired` | The CP session behind the bearer has ended; sign in again. |
+| 403 | `workspace_replica_device_proof_rejected` | The device proof is missing, stale or does not verify. |
+| 403 | `workspace_role_required` | The caller holds no role on the workspace. |
+| 403 | `capability_revoked` | The bearer's CP session is not active. |
+| 404 | `not_found` | The endpoint is not enabled for the organization; answered like an unknown path, which SDKs read as a server without it. |
+| 404 | `cloud_workspace_not_found` | The workspace does not exist in the organization. |
+| 409 | `cloud_workspace_not_running` | With `wakeable` (boolean). |
+| 409 | `cloud_workspace_v2_required` | The workspace's generation predates this runtime. |
+| 409 | `device_session_expired` | The device session ended or belongs to another device or CP session; create one and retry. |
+| 409 | `workspace_replica_device_proof_replayed` | Sign a new proof. |
+| 413 | | The body is over 4 KiB. |
+| 422 | `invalid_input` | The body does not match its schema. |
+| 429 | `rate_limited` | Over 60 connects or 120 renewals per account per minute; see `Retry-After`. |
+| 503 | `capability_issuer_unavailable` | `"retryable": true`. |
+| 503 | `cloud_workspace_runtime_not_configured` | Connect only; `"retryable": false`. |
+| 503 | `cloud_workspace_unavailable` | `"retryable": true`. |
+
 Connect never wakes a workspace; the SDK calls wake explicitly (user intent)
 and waits for the lifecycle event on the device stream.
 
@@ -410,7 +469,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
 openapi: 3.1.0
 info:
   title: Zeros cloud workspace client contract (S3)
-  version: 1.1.0
+  version: 1.2.0
   description: >-
     FROZEN reference sketch of the REST half of client contract v1 for cloud
     workspaces. Existing endpoints keep their current request and response
@@ -625,9 +684,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConnectResponse'
+        '401':
+          $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
         '409':
+          $ref: '#/components/responses/Error'
+        '413':
+          description: Request body over 4 KiB.
+        '422':
+          $ref: '#/components/responses/Error'
+        '429':
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/Error'
@@ -652,6 +721,7 @@ paths:
             schema:
               type: object
               required: [deviceSessionId, clientSessionId]
+              additionalProperties: false
               properties:
                 deviceSessionId: { $ref: '#/components/schemas/Uuid' }
                 clientSessionId: { $ref: '#/components/schemas/Uuid' }
@@ -669,9 +739,19 @@ paths:
                 properties:
                   capabilities: { $ref: '#/components/schemas/Capabilities' }
                   renewAt: { type: string, format: date-time }
+        '401':
+          $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
         '409':
+          $ref: '#/components/responses/Error'
+        '413':
+          description: Request body over 4 KiB.
+        '422':
+          $ref: '#/components/responses/Error'
+        '429':
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/Error'
@@ -883,6 +963,7 @@ components:
     ContractRange:
       type: object
       required: [min, max]
+      additionalProperties: false
       properties:
         min: { type: integer, minimum: 1 }
         max: { type: integer, minimum: 1 }
@@ -902,6 +983,7 @@ components:
     DeviceSessionRequest:
       type: object
       required: [deviceId, client]
+      additionalProperties: false
       properties:
         deviceId: { $ref: '#/components/schemas/Uuid' }
         deviceSessionId:
@@ -910,6 +992,7 @@ components:
         client:
           type: object
           required: [platform, appVersion, contract]
+          additionalProperties: false
           properties:
             platform: { enum: [macos, windows, linux, ios, ipados, android, web] }
             appVersion: { type: string, minLength: 1, maxLength: 64 }
@@ -958,6 +1041,7 @@ components:
     ConnectRequest:
       type: object
       required: [deviceSessionId, clientSessionId, routes]
+      additionalProperties: false
       properties:
         deviceSessionId: { $ref: '#/components/schemas/Uuid' }
         clientSessionId: { $ref: '#/components/schemas/Uuid' }
@@ -1514,6 +1598,17 @@ is a review aid until freeze; the frozen source of truth will be Zod in
 
 ## Changelog
 
+- **1.2.0** (2026-10-17, documentation of the new endpoints; no response
+  shape change):
+  - [Device proof](#device-proof) gives the signed message and each
+    device-bound endpoint's action and payload. The bodies of
+    `device-sessions`, `runtime/connect` and `runtime/capabilities` are
+    closed (`additionalProperties: false`), as the server enforces.
+  - [Runtime connect](#runtime-connect) gives route selection, the
+    `runtime/capabilities` body and the full error set of both endpoints;
+    their OpenAPI operations list the 401, 404, 413, 422 and 429 answers.
+  - Compatible with 1.0 and 1.1 clients: every request the server accepted
+    before is still accepted.
 - **1.1.0** (2026-10-17, behavior; no schema change):
   - Same-version replacement (S3-Q8, accepted). A `catalog.changed` upsert
     may repeat the `version` a client holds when viewer-specific or derived

@@ -32,6 +32,15 @@ function directUrl(value:string,port:number):boolean {
 }
 export type CloudDirectProviderLookupScope={organizationId:string;workspaceId:string;generation:number;engineInstanceId:string;resourceId:string;remotePort:number};
 export type CloudDirectProviderEndpointLookup=(scope:CloudDirectProviderLookupScope)=>Promise<{url:string;headerName?:string;headerValue?:string}>;
+/** The engine's direct WebSocket URL for a provider endpoint lookup result,
+ * or null unless that result is a bare https origin on the port's Boat host. */
+export function cloudDirectProviderWebSocketUrl(endpoint:{url:string;headerName?:string;headerValue?:string},port:number):string|null {
+  let url:URL;try{url=new URL(endpoint.url);}catch{return null;}
+  if(endpoint.headerName!==undefined||endpoint.headerValue!==undefined||url.protocol!=="https:"||url.pathname!=="/"||url.toString()!==endpoint.url||url.search||url.hash||url.username||url.password)return null;
+  url.protocol="wss:";url.pathname="/ws";
+  const value=url.toString();
+  return directUrl(value,port)?value:null;
+}
 function rejected():never { throw new HttpError(401,"cloud_actor_admission_rejected","Workspace actor admission was rejected"); }
 function clientUpdateRequired():never { throw new HttpError(409,"cloud_workspace_client_update_required","Update Zeros to connect to cloud workspaces."); }
 
@@ -199,11 +208,9 @@ export class DatabaseCloudWorkspaceActorSessionService {
         if(!this.options.directProviderEndpoint)throw new HttpError(503,"cloud_actor_runtime_unavailable","Cloud runtime endpoint is unavailable");
         const endpoint=await this.options.directProviderEndpoint({workspaceId:grant.workspaceId,organizationId:grant.organizationId,generation:grant.generation,
           engineInstanceId:grant.engineInstanceId,resourceId:admitted.resourceId,remotePort:this.options.enginePort});
-        let url:URL;try{url=new URL(endpoint.url);}catch{rejected();}
-        if(endpoint.headerName!==undefined||endpoint.headerValue!==undefined||url.protocol!=="https:"||url.pathname!=="/"||url.toString()!==endpoint.url||url.search||url.hash||url.username||url.password)rejected();
-        url.protocol="wss:";url.pathname="/ws";
-        if(!directUrl(url.toString(),this.options.enginePort))rejected();
-        directProvider={version:1,provider:"boat",url:url.toString()};
+        const url=cloudDirectProviderWebSocketUrl(endpoint,this.options.enginePort);
+        if(!url)rejected();
+        directProvider={version:1,provider:"boat",url};
       }
       // Provider I/O owns no DB locks. Reauthorize the exact original one-use
       // actor grant and boot/writer after that asynchronous boundary.
