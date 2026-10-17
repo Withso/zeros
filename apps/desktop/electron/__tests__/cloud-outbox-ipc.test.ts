@@ -26,6 +26,7 @@ vi.mock("../../src/engine/cloud-workspace-capability", () => ({
   cloudWorkspaceDesktopCapabilityEnabled: () => h.capability,
 }));
 
+import { CloudOutbox } from "../cloud-outbox";
 import {
   __setCloudOutboxSenderForTests,
   cloudWorkspaceOutboxEnqueue,
@@ -107,6 +108,32 @@ describe("cloud workspace outbox IPC", () => {
       cloudWorkspaceOutboxEnqueue({ operation: "wake", organizationId: ORGANIZATION, workspaceId: WORKSPACE }, event),
     ).toThrow(/disabled/);
     await expect(readdir(path.join(h.directory, "cloud-outbox-v1"))).rejects.toThrow();
+  });
+
+  it("resumes commands an earlier process left pending once the account's outbox opens", async () => {
+    const earlier = new CloudOutbox({
+      accountId: userA.accountId,
+      directory: path.join(h.directory, "cloud-outbox-v1"),
+      send: async () => ({ status: 202, replayed: false }),
+    });
+    const entry = earlier.enqueue({ operation: "wake", organizationId: ORGANIZATION, workspaceId: WORKSPACE });
+    earlier.close();
+    cloudWorkspaceOutboxList({}, event);
+    await vi.waitFor(() => expect(h.sent).toEqual([{ id: entry.id, operation: "wake" }]));
+  });
+
+  it("clears a signed-out account's outbox even when this process never opened it", async () => {
+    const directory = path.join(h.directory, "cloud-outbox-v1");
+    const earlier = new CloudOutbox({
+      accountId: userA.accountId,
+      directory,
+      send: async () => ({ status: 202, replayed: false }),
+    });
+    earlier.enqueue({ operation: "wake", organizationId: ORGANIZATION, workspaceId: WORKSPACE });
+    earlier.close();
+    expect(await readdir(directory)).toHaveLength(1);
+    signIn(null);
+    expect(await readdir(directory)).toHaveLength(0);
   });
 
   it("clears the account's outbox on sign-out and on switching away", async () => {

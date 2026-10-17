@@ -5,11 +5,13 @@
 // ──────────────────────────────────────────────────────────
 
 import { app } from "electron";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { CloudRestClient, CloudRestError } from "@zeros/cloud-client";
 import {
   CloudOutbox,
+  cloudOutboxFileName,
   createCloudOutboxIfEnabled,
   type CloudOutboxSender,
 } from "../../cloud-outbox";
@@ -107,7 +109,7 @@ function activeOutbox(): Active {
     open: () =>
       new CloudOutbox({
         accountId,
-        directory: path.join(app.getPath("userData"), "cloud-outbox-v1"),
+        directory: outboxDirectory(),
         send: senderOverride ?? restSender(),
         ...(scheduleOverride !== null ? { schedule: scheduleOverride } : {}),
       }),
@@ -116,7 +118,26 @@ function activeOutbox(): Active {
     throw new Error("Cloud workspaces are disabled on this desktop build.");
   current?.outbox.close();
   current = { accountId, outbox: opened };
+  // Commands an earlier process left pending resume as soon as this
+  // account's outbox opens, not on the next enqueue.
+  void opened.drain();
   return current;
+}
+
+function outboxDirectory(): string {
+  return path.join(app.getPath("userData"), "cloud-outbox-v1");
+}
+
+/** Remove every account file but the signed-in one's, including files this
+ * process never opened and moved-aside corrupt copies. */
+function removeOtherAccountsOutboxes(keepAccountId: string | null): void {
+  const directory = outboxDirectory();
+  if (!existsSync(directory)) return;
+  const keep = keepAccountId === null ? null : cloudOutboxFileName(keepAccountId);
+  for (const name of readdirSync(directory)) {
+    if (keep !== null && (name === keep || name === `${keep}.corrupt`)) continue;
+    rmSync(path.join(directory, name), { force: true });
+  }
 }
 
 /** Sign-out (and switching away) clears that account's outbox (S3-Q5). */
@@ -126,19 +147,26 @@ export function installCloudOutboxLifecycle(): void {
   onMainAuthSessionChanged(() => {
     const previous = current;
     current = null;
-    if (!previous) return;
+    let nextAccount: string | null = null;
     try {
-      let nextAccount: string | null = null;
-      try {
-        nextAccount = getSessionUserForMain()?.accountId ?? getSessionUserForMain()?.sub ?? null;
-      } catch {
-        nextAccount = null;
-      }
-      if (previous.accountId !== nextAccount) previous.outbox.clear();
+      const user = getSessionUserForMain();
+      nextAccount = user?.accountId ?? user?.sub ?? null;
+    } catch {
+      nextAccount = null;
+    }
+    try {
+      if (previous && previous.accountId !== nextAccount) previous.outbox.clear();
     } catch {
       // Outbox cleanup must never block sign-out.
     } finally {
-      previous.outbox.close();
+      previous?.outbox.close();
+    }
+    try {
+      // Accounts this process never opened (an earlier session's sign-in)
+      // leave files behind that clear() above cannot reach.
+      removeOtherAccountsOutboxes(nextAccount);
+    } catch {
+      // Outbox cleanup must never block sign-out.
     }
   });
 }

@@ -92,10 +92,11 @@ export class CloudOutbox {
   private readonly send: CloudOutboxSender;
   private readonly onSettled?: (entry: CloudOutboxEntry) => void;
   private draining: Promise<void> | null = null;
+  private drainRequested = false;
   private closed = false;
 
   constructor(options: CloudOutboxOptions) {
-    this.file = path.join(options.directory, `${createHash("sha256").update(options.accountId).digest("hex")}.json`);
+    this.file = path.join(options.directory, cloudOutboxFileName(options.accountId));
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
     this.schedule = options.schedule ?? ((delayMs, run) => setTimeout(run, delayMs).unref?.());
@@ -132,6 +133,7 @@ export class CloudOutbox {
     OperationSchema.parse(input.operation);
     if (input.operation !== "create" && !input.workspaceId)
       throw new Error("Cloud outbox commands need a workspaceId.");
+    this.pruneExpired();
     this.evictForEnqueue();
     const entry: CloudOutboxEntry = {
       id: randomUUID(),
@@ -149,6 +151,7 @@ export class CloudOutbox {
   }
 
   list(): readonly CloudOutboxEntry[] {
+    this.pruneExpired();
     return this.entries.map((entry) => ({ ...entry }));
   }
 
@@ -170,17 +173,32 @@ export class CloudOutbox {
 
   /** Single-flight pass over pending entries. */
   drain(): Promise<void> {
-    if (this.draining) return this.draining;
-    this.draining = this.drainPending().finally(() => {
+    if (this.draining) {
+      // The in-flight pass may already have looked for work and found none;
+      // without a second pass an entry enqueued now would wait for a restart.
+      this.drainRequested = true;
+      return this.draining;
+    }
+    this.draining = (async () => {
+      do {
+        this.drainRequested = false;
+        await this.drainPending();
+      } while (this.drainRequested && !this.closed);
+    })().finally(() => {
       this.draining = null;
     });
     return this.draining;
   }
 
   private async drainPending(): Promise<void> {
-    for (const entry of this.entries) {
+    this.pruneExpired();
+    // Re-find the oldest pending entry each pass instead of iterating: the
+    // array changes under an awaited send (enqueue, prune, eviction).
+    for (;;) {
       if (this.closed) return;
-      if (entry.state !== "pending") continue;
+      const cutoff = this.now() - this.ttlMs;
+      const entry = this.entries.find((candidate) => candidate.state === "pending" && candidate.createdAt >= cutoff);
+      if (!entry) return;
       try {
         const result = await this.send({ ...entry });
         entry.state = "completed";
@@ -201,6 +219,9 @@ export class CloudOutbox {
           this.schedule(delayMs, () => {
             if (!this.closed) void this.drain();
           });
+          // The scheduled retry covers any drain requested meanwhile; an
+          // immediate second pass would skip the backoff.
+          this.drainRequested = false;
           return; // retry later; later entries wait behind this one
         }
         entry.state = "failed";
@@ -218,6 +239,14 @@ export class CloudOutbox {
     }
   }
 
+  private pruneExpired(): void {
+    const cutoff = this.now() - this.ttlMs;
+    const kept = this.entries.filter((entry) => entry.createdAt >= cutoff);
+    if (kept.length === this.entries.length) return;
+    this.entries = kept;
+    this.persist();
+  }
+
   private evictForEnqueue(): void {
     if (this.entries.length < this.maxEntries) return;
     const settledIndex = this.entries.findIndex((entry) => entry.state !== "pending");
@@ -227,11 +256,21 @@ export class CloudOutbox {
   }
 
   private persist(): void {
+    // A closed instance may still finish an in-flight send after a reopened
+    // instance took over the file; writing its stale array would drop the
+    // newer instance's entries. Its pending entry stays pending on disk and is
+    // resent under the same Idempotency-Key, which the server replays.
+    if (this.closed) return;
     mkdirSync(path.dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${process.pid}.tmp`;
     writeFileSync(temporary, JSON.stringify({ version: 1, entries: this.entries } satisfies z.infer<typeof FileSchema>));
     renameSync(temporary, this.file);
   }
+}
+
+/** The account's outbox file name; the account id itself never touches disk. */
+export function cloudOutboxFileName(accountId: string): string {
+  return `${createHash("sha256").update(accountId).digest("hex")}.json`;
 }
 
 /**

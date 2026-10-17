@@ -100,6 +100,18 @@ describe("CloudOutbox", () => {
     expect(outbox.list().find((candidate) => candidate.id === entry.id)?.state).toBe("completed");
   });
 
+  it("sends an entry enqueued while an empty drain pass is still settling", async () => {
+    const dir = await directory();
+    const h = harness(async () => ({ status: 202, replayed: false }));
+    const outbox = openOutbox(dir, ACCOUNT_A, h);
+    const opening = outbox.drain();
+    const entry = outbox.enqueue({ operation: "wake", organizationId: ORGANIZATION, workspaceId: WORKSPACE });
+    void outbox.drain();
+    await opening;
+    await outbox.whenIdle();
+    expect(h.sent.map((sent) => sent.id)).toEqual([entry.id]);
+  });
+
   it("settles a replayed response exactly once", async () => {
     const dir = await directory();
     const h = harness(async () => ({ status: 202, replayed: true }));
@@ -239,6 +251,39 @@ describe("CloudOutbox", () => {
       now: () => 1_760_000_000_000 + 8 * 24 * 60 * 60 * 1000,
     });
     expect(later.list()).toHaveLength(0);
+  });
+
+  it("never lets a closed instance overwrite the file a reopened instance owns", async () => {
+    const dir = await directory();
+    let release!: () => void;
+    const first = openOutbox(dir, ACCOUNT_A, harness(() => new Promise((resolve) => {
+      release = () => resolve({ status: 202, replayed: false });
+    })));
+    first.enqueue({ operation: "wake", organizationId: ORGANIZATION, workspaceId: WORKSPACE });
+    const inFlight = first.drain();
+    // A session change closes the instance mid-send and opens a fresh one.
+    first.close();
+    const second = openOutbox(dir, ACCOUNT_A, harness(async () => ({ status: 202, replayed: false })));
+    const added = second.enqueue({ operation: "stop", organizationId: ORGANIZATION, workspaceId: WORKSPACE });
+    release();
+    await inFlight;
+    const reopened = openOutbox(dir, ACCOUNT_A, harness(async () => ({ status: 202, replayed: false })));
+    expect(reopened.list().map((entry) => entry.id)).toContain(added.id);
+    expect(reopened.list()).toHaveLength(2);
+  });
+
+  it("expires entries older than 7 days in a long-running process", async () => {
+    const dir = await directory();
+    let now = 1_760_000_000_000;
+    const h = harness(async () => ({ status: 202, replayed: false }));
+    const outbox = new CloudOutbox({ accountId: ACCOUNT_A, directory: dir, send: h.send, now: () => now,
+      schedule: (delayMs, run) => h.timers.push({ delayMs, run }) });
+    outbox.enqueue({ operation: "wake", organizationId: ORGANIZATION, workspaceId: WORKSPACE });
+    now += 8 * 24 * 60 * 60 * 1000;
+    const fresh = outbox.enqueue({ operation: "stop", organizationId: ORGANIZATION, workspaceId: WORKSPACE });
+    expect(outbox.list().map((entry) => entry.id)).toEqual([fresh.id]);
+    await outbox.drain();
+    expect(h.sent.map((entry) => entry.id)).toEqual([fresh.id]);
   });
 
   it("moves a corrupt file aside instead of replaying unknown state", async () => {
