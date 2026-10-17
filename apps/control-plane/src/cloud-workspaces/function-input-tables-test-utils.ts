@@ -39,6 +39,45 @@ export async function functionInputTables(pool: pg.Pool, roots: readonly string[
   return { tables, functions, bodies };
 }
 
+/** Words that can follow a FROM or JOIN item where an alias would stand. */
+const NOT_AN_ALIAS = new Set(["on", "using", "where", "join", "inner", "left", "right", "full", "outer", "cross",
+  "natural", "lateral", "group", "order", "limit", "offset", "having", "window", "union", "except", "intersect",
+  "for", "and", "or", "returning", "set", "tablesample", "with"]);
+
+/** Test support: by table, the columns `bodies` read as `alias.column` or
+ * `table.column`, where a FROM or JOIN item of one of `tables` names the
+ * alias. An alias that several items share counts for each of their tables.
+ * A column read without a qualifier is not seen, so callers should pin a few
+ * columns they know are read. */
+export async function functionColumnReads(pool: pg.Pool, bodies: Iterable<string>, tables: Iterable<string>):
+  Promise<Map<string, Set<string>>> {
+  const add = (map: Map<string, Set<string>>, key: string, value: string) => {
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key)!.add(value);
+  };
+  const columns = new Map<string, Set<string>>();
+  for (const row of (await pool.query<{ table: string; column: string }>(
+    `SELECT relation.relname AS table, attribute.attname AS column
+     FROM pg_attribute attribute JOIN pg_class relation ON relation.oid = attribute.attrelid
+     WHERE relation.relnamespace = 'public'::regnamespace AND relation.relname = ANY($1::text[])
+       AND attribute.attnum > 0 AND NOT attribute.attisdropped`, [[...tables]])).rows) add(columns, row.table, row.column);
+  const reads = new Map<string, Set<string>>();
+  for (const body of bodies) {
+    const code = stripSqlLiterals(body).toLowerCase();
+    const aliases = new Map<string, Set<string>>();
+    for (const [, table, alias] of code.matchAll(
+      /\b(?:from|join)\s+(?:public\.)?([a-z_][a-z0-9_$]*)(?:\s+(?:as\s+)?([a-z_][a-z0-9_$]*))?/g)) {
+      if (!columns.has(table!)) continue;
+      add(aliases, table!, table!);
+      if (alias && !NOT_AN_ALIAS.has(alias)) add(aliases, alias, table!);
+    }
+    for (const [, alias, column] of code.matchAll(/(?<![\w$.])([a-z_][a-z0-9_$]*)\.([a-z_][a-z0-9_$]*)/g)) {
+      for (const table of aliases.get(alias!) ?? []) if (columns.get(table)!.has(column!)) add(reads, table, column!);
+    }
+  }
+  return reads;
+}
+
 /** Removes comments, quoted strings and quoted identifiers' quotes so only
  * SQL code remains; quoted identifiers keep their text. */
 export function stripSqlLiterals(sql: string): string {

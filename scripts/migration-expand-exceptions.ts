@@ -47,6 +47,12 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
   "0145_cloud_computer_named_snapshots.sql": {},
   "0146_cloud_provider_snapshot_recovery.sql": {},
   "0155_cloud_drift_inventory_pacing.sql": {},
+  "0157_cloud_generation_authority_check.sql": {
+    // PUBLIC's default EXECUTE on the function created in the same migration.
+    "privilege-tightening": [
+      "REVOKE ALL ON FUNCTION enqueue_cloud_workspace_generation_authority_check() FROM PUBLIC;",
+    ],
+  },
   "0149_cloud_rollout_flags.sql": {
     // A guard that rejects TRUNCATE cannot truncate.
     "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate
