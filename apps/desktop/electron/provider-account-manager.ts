@@ -10,6 +10,16 @@ import {
 } from "./provider-account-store";
 
 type LoginOptions = Parameters<SubscriptionDriver["login"]>[0];
+function sameSelection(
+  current: ProviderAccountStore,
+  previous: ProviderAccountStore,
+): boolean {
+  return (
+    current.activeId === previous.activeId &&
+    current.method === previous.method &&
+    (current.selectionRevision ?? 0) === (previous.selectionRevision ?? 0)
+  );
+}
 interface Dependencies {
   readStore(): ProviderAccountStore;
   updateStore(
@@ -19,6 +29,7 @@ interface Dependencies {
   read(
     account: StoredProviderAccount | null,
     signal: AbortSignal,
+    mode?: "cli",
   ): Promise<SubscriptionAccount>;
   login(
     account: StoredProviderAccount,
@@ -56,11 +67,11 @@ export class ProviderAccountManager implements SubscriptionDriver {
   async read(signal: AbortSignal): Promise<SubscriptionAccount> {
     const store = this.deps.readStore();
     if (store.method === "cli") {
-      const account = await this.deps.read(null, signal);
+      const account = await this.deps.read(null, signal, "cli");
       signal.throwIfAborted();
       const current = this.deps.readStore();
       return this.snapshot(
-        current.method === "cli" ? account : { state: "disconnected" },
+        sameSelection(current, store) ? account : { state: "disconnected" },
         current,
       );
     }
@@ -72,11 +83,7 @@ export class ProviderAccountManager implements SubscriptionDriver {
     let observedId = selected?.id;
     const next = this.deps.updateStore((current) => {
       // A newer window/operation owns the selection; don't adopt its stale probe.
-      if (
-        current.activeId !== store.activeId ||
-        current.method !== store.method
-      )
-        return current;
+      if (!sameSelection(current, store)) return current;
       if (!selected) {
         if (current.initialized) return current;
         const id = randomUUID();
@@ -99,31 +106,52 @@ export class ProviderAccountManager implements SubscriptionDriver {
     });
     if (JSON.stringify(next) !== JSON.stringify(store))
       await this.deps.changed();
-    if (next.method !== store.method || next.activeId !== observedId)
-      return this.snapshot({ state: "disconnected" }, next);
+    if (
+      (next.selectionRevision ?? 0) !== (store.selectionRevision ?? 0) ||
+      next.method !== store.method ||
+      next.activeId !== observedId
+    )
+      return this.snapshot(
+        (next.method === "account"
+          ? next.accounts.find((a) => a.id === next.activeId)
+          : null) ?? { state: "disconnected" },
+        next,
+      );
     return this.snapshot(account, next);
   }
 
   async login(options: LoginOptions): Promise<SubscriptionAccount> {
     const before = this.deps.readStore();
-    if (before.accounts.length >= 20)
+    const existing = options.accountId
+      ? before.accounts.find((account) => account.id === options.accountId)
+      : undefined;
+    if (options.accountId && !existing)
+      throw new Error("This saved account is no longer available.");
+    if (!existing && before.accounts.length >= 20)
       throw new Error(
         "Up to 20 accounts can be saved. Remove an account before adding another.",
       );
     const draft: StoredProviderAccount = {
-      id: randomUUID(),
+      id: existing?.id ?? randomUUID(),
       state: "disconnected",
     };
-    draft.configDir = await this.deps.createProfile(draft.id);
+    options.signal.throwIfAborted();
+    draft.configDir =
+      existing?.configDir ?? (await this.deps.createProfile(draft.id));
     let committed = false;
+    let nativeCredentialsCommitted = false;
     try {
       options.signal.throwIfAborted();
-      const { account, credential } = await this.deps.login(draft, options);
+      const { account, credential } = await this.deps.login(draft, {
+        ...options,
+        onCredentialsCommitted: () => { nativeCredentialsCommitted = true; },
+      });
       options.signal.throwIfAborted();
       if (account.state !== "connected")
         throw new Error("Sign-in did not connect an account.");
       const saved: StoredProviderAccount = {
         ...draft,
+        revision: (existing?.revision ?? 0) + 1,
         state: account.state,
         email: account.email,
         plan: account.plan,
@@ -133,9 +161,11 @@ export class ProviderAccountManager implements SubscriptionDriver {
       };
       const next = this.deps.updateStore((current) => {
         if (
-          current.activeId !== before.activeId ||
-          current.method !== before.method
+          existing &&
+          !current.accounts.some((account) => account.id === existing.id)
         )
+          throw new Error("This saved account is no longer available.");
+        if (!sameSelection(current, before))
           throw new Error(
             "The selected account changed during sign-in. Try again.",
           );
@@ -145,14 +175,57 @@ export class ProviderAccountManager implements SubscriptionDriver {
           methodSelected: true,
           method: "account",
           activeId: draft.id,
-          accounts: [...current.accounts, saved],
+          selectionRevision: (current.selectionRevision ?? 0) + 1,
+          accounts: existing
+            ? current.accounts.map((account) =>
+                account.id === existing.id
+                  ? { ...saved, revision: (account.revision ?? 0) + 1 }
+                  : account,
+              )
+            : [...current.accounts, saved],
         };
       });
       committed = true;
       await this.deps.changed();
       return this.snapshot(account, next);
     } finally {
-      if (!committed) await this.deps.discard(draft).catch(() => {});
+      if (!committed) {
+        // Preserve a saved profile on cancellation, but a concurrent removal
+        // must also remove credentials written by a late native login.
+        let discard = !existing?.configDir;
+        if (!discard) {
+          try {
+            discard = !this.deps
+              .readStore()
+              .accounts.some((account) => account.id === draft.id);
+          } catch {
+            // An unreadable store is not proof that the account was removed.
+          }
+        }
+        if (!discard && nativeCredentialsCommitted) {
+          // The native profile is already changed, even if its later status
+          // read, cleanup or selection check failed. Publish a generation for
+          // that exact saved profile without changing the newer selection.
+          let advanced = false;
+          this.deps.updateStore((current) => {
+            const saved = current.accounts.find(account => account.id === draft.id);
+            if (!saved) {
+              discard = true;
+              return current;
+            }
+            if (saved.configDir !== draft.configDir) return current;
+            advanced = true;
+            return {
+              ...current,
+              accounts: current.accounts.map(account => account.id === draft.id
+                ? { ...account, revision: (account.revision ?? 0) + 1 }
+                : account),
+            };
+          });
+          if (advanced) await this.deps.changed();
+        }
+        if (discard) await this.deps.discard(draft).catch(() => {});
+      }
     }
   }
 
@@ -166,10 +239,7 @@ export class ProviderAccountManager implements SubscriptionDriver {
     const next = this.deps.updateStore((current) => {
       if (!current.accounts.some((a) => a.id === id))
         throw new Error("This saved account is no longer available.");
-      if (
-        current.activeId !== before.activeId ||
-        current.method !== before.method
-      )
+      if (!sameSelection(current, before))
         throw new Error(
           "The connection changed during account verification. Try again.",
         );
@@ -178,6 +248,7 @@ export class ProviderAccountManager implements SubscriptionDriver {
         methodSelected: true,
         method: "account",
         activeId: id,
+        selectionRevision: (current.selectionRevision ?? 0) + 1,
         accounts: current.accounts.map((a) =>
           a.id === id ? { ...a, ...status } : a,
         ),
@@ -192,6 +263,7 @@ export class ProviderAccountManager implements SubscriptionDriver {
       ...current,
       method,
       methodSelected: true,
+      selectionRevision: (current.selectionRevision ?? 0) + 1,
     }));
     await this.deps.changed();
   }
@@ -203,6 +275,7 @@ export class ProviderAccountManager implements SubscriptionDriver {
       ...current,
       initialized: true,
       activeId: current.activeId === id ? undefined : current.activeId,
+      selectionRevision: (current.selectionRevision ?? 0) + 1,
       accounts: current.accounts.filter((a) => a.id !== id),
     }));
     await this.deps.changed();

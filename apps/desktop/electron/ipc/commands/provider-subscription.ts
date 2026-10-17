@@ -35,7 +35,7 @@ import {
   updateProviderAccounts,
   type StoredProviderAccount,
 } from "../../provider-account-store";
-import { providerProfileDirectory } from "../../provider-profile-directory";
+import { createProviderAccountProfile, isOwnedProviderProfileDirectory } from "../../provider-profile-directory";
 import { readLegacyCursorSubscription } from "../../provider-credentials";
 import { pushProviderCredentialsToEngine } from "../../sidecar";
 import { execFile } from "node:child_process";
@@ -105,11 +105,12 @@ function managerFor(
 ): ProviderAccountManager {
   let manager = managers.get(provider);
   if (manager) return manager;
-  const driverFor = (account: StoredProviderAccount | null) =>
+  const driverFor = (account: StoredProviderAccount | null, mode?: "cli") =>
     createSubscriptionDriver(provider as "claude" | "codex", {
       resolveRuntime: () =>
         resolveRuntime(provider as "claude" | "codex", account?.configDir),
       openBrowser: (url) => shell.openExternal(url),
+      allowApiKey: mode === "cli" && account === null,
     });
   manager = new ProviderAccountManager({
     readStore: () => readProviderAccounts(provider),
@@ -117,9 +118,9 @@ function managerFor(
     createProfile: async (id) =>
       provider === "cursor"
         ? undefined
-        : providerProfileDirectory(provider, id),
-    read: async (account, signal) => {
-      if (provider !== "cursor") return driverFor(account).read(signal);
+        : createProviderAccountProfile(provider, id),
+    read: async (account, signal, mode) => {
+      if (provider !== "cursor") return driverFor(account, mode).read(signal);
       const credential = account?.credential ?? readLegacyCursorSubscription();
       return credential
         ? {
@@ -156,7 +157,7 @@ function managerFor(
     discard: async (account) => {
       if (!account.configDir || provider === "cursor") return;
       // Logout only a main-owned isolated profile; never touch the device CLI.
-      if (account.configDir !== providerProfileDirectory(provider, account.id))
+      if (!isOwnedProviderProfileDirectory(provider, account.id, account.configDir))
         throw new SubscriptionError("failed");
       const runtime = await resolveRuntime(provider, account.configDir);
       try {
@@ -246,7 +247,7 @@ export const providerSubscription: CommandHandler = (args) => {
     case "status":
       return controller.status();
     case "connect":
-      return controller.connect();
+      return controller.connect(request.accountId);
     case "cancel":
       return controller.cancel(request.attemptId);
     case "submit-code":

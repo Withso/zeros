@@ -521,7 +521,7 @@ describe("cloud composer readiness queue", () => {
     expect(h.clear).not.toHaveBeenCalled(); expect(h.failureNotice).not.toHaveBeenCalled();
     expect(h.toasts.error).toHaveBeenCalledExactlyOnceWith("Message wasn't sent", expect.anything());
   });
-  it("suppresses readiness toasts only for cloud queued waits and preserves Local initialization errors", () => {
+  it("keeps readiness failures out of generic agent toasts for every placement", () => {
     const effects: string[] = [];
     function collect(node: ts.Node) {
       if (ts.isBlock(node)) {
@@ -534,14 +534,14 @@ describe("cloud composer readiness queue", () => {
     collect(ast);
     expect(effects).toHaveLength(1);
     expect(effects[0]).toContain("useEffect");
-    expect(effects[0]).toContain("toast.error");
+    expect(effects[0]).toContain("invalidateCloudAgentRegistry");
     const code = ts.transpileModule(`(() => { ${effects[0]!} })();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
     for (const folder of ["cloud://fixture", "/local/personal", "/organization/local"]) {
       const refs: Array<{ current: unknown }> = [];
       let cursor = 0;
       const toast = { error: vi.fn() }, env = { interactive: true, cloudComputerV2: true, isCloudWorkspace,
         chatThread: { folder }, session: { status: "warming", agentId: "codex", cloudSendWait: { state: "waiting" } },
-        isErrorState: false, cloudCatalogGeneration: () => 1, labelForFailure: () => "Agent failed",
+        isErrorState: false, cloudCatalogGeneration: () => 1,
         useRef: (initial: unknown) => refs[cursor++] ?? (refs[cursor - 1] = { current: initial }),
         useEffect: (run: () => void) => run(), isTransportShaped: () => false, agentSessions: {}, toast, chatId: "chat" };
       vm.runInNewContext(code, env);
@@ -550,7 +550,7 @@ describe("cloud composer readiness queue", () => {
       env.isErrorState = true;
       cursor = 0;
       vm.runInNewContext(code, env);
-      expect(toast.error).toHaveBeenCalledTimes(isCloudWorkspace(folder) ? 0 : 1);
+      expect(toast.error).not.toHaveBeenCalled();
     }
   });
 });

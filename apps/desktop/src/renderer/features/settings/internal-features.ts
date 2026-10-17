@@ -4,13 +4,13 @@ import {
   subscribePreferenceCache,
 } from "../../platform/personal-preferences";
 // ──────────────────────────────────────────────────────────
-// Internal features — database-backed staff-only feature flags
+// Internal features — staff and native Local development feature flags
 // ──────────────────────────────────────────────────────────
 //
 // NOT experimental features. Experimental (experimental-features.ts) is
 // visible to every user as an opt-in; Internal is invisible to everyone
 // except accounts whose database row carries a `developer` or `platform_owner`
-// role. These
+// role, or the trusted account-free native Local development launch. These
 // features may never ship to users — they exist for maintainers to debug/dogfood the app
 // (Settings → Internal, gated in settings-page.tsx `availableSections`).
 //
@@ -37,7 +37,8 @@ import {
 //   3. The role is resolved SERVER-side from Postgres against the verified
 //      WorkOS token (apps/control-plane/src/auth.ts `ensureUser` runs per request) and
 //      is never read from a JWT claim, so revoking staff takes effect
-//      immediately rather than at token expiry. Signed out, control plane
+//      immediately rather than at token expiry. Outside native Local development,
+//      signed out, control plane
 //      unconfigured, or fetch not yet landed ⇒ null ⇒ everything internal
 //      is off. Fail-closed in every direction.
 //   4. This is a shipped-app rollout gate, not an authority boundary.
@@ -58,6 +59,7 @@ import {
 // the same render cycle, plus a "storage" listener for multi-window sync.
 
 import { useCallback, useSyncExternalStore } from "react";
+import { isLocalDevelopment } from "../../platform/runtime";
 import {
   AGENT_CONTROL_FEATURES,
   type AgentControlFeature,
@@ -67,14 +69,15 @@ import { getTeamStoreState, useTeams } from "../team/team-store";
 
 // ── Who counts as internal ──────────────────────────────
 
-/** True when the cached `/v1/me` reports a staff role. Synchronous read for
+/** True for trusted native Local development or a cached `/v1/me` staff role. Synchronous read for
  *  non-React call sites; the store is cleared on sign-out, so this cannot
  *  return account A's answer to account B.
  *
- *  Null in every unresolved state — signed out, control plane unconfigured,
+ *  Hosted modes return false in every unresolved state — signed out, control plane unconfigured,
  *  first fetch still in flight — because "not yet known" must behave as
  *  "not internal", never the reverse. */
 export function isInternalUser(): boolean {
+  if (isLocalDevelopment()) return true;
   const role = getTeamStoreState().me?.user.staffRole;
   return role === "developer" || role === "platform_owner";
 }
@@ -86,6 +89,7 @@ export function isInternalUser(): boolean {
 export function useIsInternalUser(): boolean {
   const { me } = useTeams();
   return (
+    isLocalDevelopment() ||
     me?.user.staffRole === "developer" ||
     me?.user.staffRole === "platform_owner"
   );
@@ -113,6 +117,7 @@ const KNOWN: ReadonlySet<string> = new Set<InternalFeature>([
 ]);
 // Staff dogfood these unless they turn them off.
 const ON_BY_DEFAULT: ReadonlySet<string> = new Set<InternalFeature>([
+  "copyLogs",
   "releaseCanaries",
   ...AGENT_CONTROL_FEATURES,
 ]);

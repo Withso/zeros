@@ -83,8 +83,10 @@ retried instead of marking migration complete.
 ## Preference owners
 
 `[preferences]` in user TOML owns appearance, enabled agents, experimental and
-internal switches, terminal-agent definitions/defaults and analytics choices. Internal switches still require the existing
-staff gate. `[models]` and `[providers]` are also user-only TOML sections. Provider
+internal switches, terminal-agent definitions/defaults and analytics choices. Internal switches require the
+staff gate or trusted native Local development mode; eligible flags default on,
+explicit opt-outs persist, and release operations still require platform-owner
+authorization. `[models]` and `[providers]` are also user-only TOML sections. Provider
 authentication method, executable override, and gateway URL belong here; API
 keys remain in the OS secret store. `[github]` account selection and browser
 policy are user-only. Repository and worktree schemas exclude account fields.
@@ -228,7 +230,8 @@ the inline terminal. Browser ceremonies and provider login
 terminals expire after five minutes; bounded renderer IPC waits also recover if a
 native response is lost. New accounts use separate native credential profiles. **Add account** keeps the
 current selection until sign-in succeeds; the account picker selects one saved
-account. CLI uses the separately managed device login. Existing device logins are
+account. Disconnected saved rows expose **Sign in** to renew the same entry, with
+Cancel available throughout the browser ceremony. CLI uses the separately managed device login. Existing device logins are
 retained as a **Device account** for compatibility. Their existing `auth = "cli"`
 setting remains the serialized subscription selection. The native encrypted
 account store owns Account versus CLI selection; the device-local
@@ -263,8 +266,9 @@ Cursor uses the bundled SDK's browser login. Its resulting expiring credential i
 store, in the main-only `provider-accounts-cursor` account. The legacy
 `cursor-subscription` credential remains readable for existing device accounts. Status responses expose
 identity metadata, never that credential. The engine receives provider
-credentials over private stdin at boot and after changes; user/managed auth
-settings select the credential at each launch, including local headless work.
+credentials and the native method selection over private stdin at boot and after
+changes. Native selection overrides stale per-checkout user preferences, while
+managed policy keeps precedence, including local headless work.
 Cursor persists the explicit new choice as `auth = "subscription"`; legacy
 Cursor `cli` values continue to select the prior API-key behavior. Disconnect
 and expiry cannot silently select a different API key. No desktop credential

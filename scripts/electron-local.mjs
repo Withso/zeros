@@ -75,7 +75,6 @@ export function localEnvironment({
     ZEROS_CHANNEL: "dev",
     VITE_ZEROS_CHANNEL: "dev",
     ZEROS_LOCAL_DEVELOPMENT: "1",
-    ZEROS_ISOLATE: "1",
     ZEROS_INSTANCE: identity.slug,
     ZEROS_INSTANCE_NAME: identity.name,
     ZEROS_DEV_NODE_EXECUTABLE: process.execPath,
@@ -85,6 +84,7 @@ export function localEnvironment({
     ELECTRON_RENDERER_URL: `http://localhost:${vitePort}`,
   });
   for (const key of [
+    "ZEROS_ISOLATE",
     "ZEROS_NO_ENGINE_HMR",
     "ZEROS_NO_MAIN_HMR",
     "ZEROS_DEVTOOLS",

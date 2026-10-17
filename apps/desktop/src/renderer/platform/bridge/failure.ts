@@ -143,7 +143,7 @@ export function classifyRpcError(
  *  like a transport-layer disconnect / engine swap — the kind of
  *  "noise" we never want surfaced as a hard "Agent error" toast even
  *  if it slipped past `classifyRpcError` somewhere upstream. Used by
- *  `agent-chat.tsx`'s toast-firing effect as a last-line filter and
+ *  `agent-chat.tsx`'s inline startup notice and authentication refresh and
  *  could be reused on the engine side if future classifiers need to
  *  share the same definition of "transport-shaped" without depending
  *  on `classifyRpcError`'s full machinery. */

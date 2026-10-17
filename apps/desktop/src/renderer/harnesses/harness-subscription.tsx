@@ -53,6 +53,12 @@ const queueSteers = new Map<string, (outcome: string) => void>();
 const queuePrompts: string[] = [];
 const queueBridgeListeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const usageFixture = ids.find((id) => id === params.get("usage"));
+const identityFixture = params.has("identity");
+const cliIdentities = new Map<string, { state: "connected" | "disconnected"; email?: string }>(
+  ids.map(id => [id, { state: "connected", email: "cli@example.test" }]),
+);
+let holdIdentityReads = false;
+const pendingIdentityReads = new Set<() => void>();
 let holdUsage = params.has("holdUsage");
 const pendingUsage = new Set<() => void>();
 const pendingUsageAccounts = new Map<() => void, string | undefined>();
@@ -82,6 +88,7 @@ const statuses = new Map<
   BrowserSubscriptionProvider,
   ProviderSubscriptionStatus
 >();
+const reconnectingAccounts = new Map<BrowserSubscriptionProvider, string>();
 if (usageFixture || queueFixture) {
   for (const [index, provider] of ids.entries()) {
     const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
@@ -136,11 +143,14 @@ const publish = (status: ProviderSubscriptionStatus) => {
 const finishAccountLogin = (
   status: ProviderSubscriptionStatus,
 ): ProviderSubscriptionStatus => {
-  const id = crypto.randomUUID();
+  const reconnectId = reconnectingAccounts.get(status.provider);
+  reconnectingAccounts.delete(status.provider);
+  const existing = status.accounts?.find(account => account.id === reconnectId);
+  const id = existing?.id ?? crypto.randomUUID();
   const email =
-    (status.accounts?.length ?? 0) === 0
+    existing?.email ?? ((status.accounts?.length ?? 0) === 0
       ? "user@example.test"
-      : "second@example.test";
+      : "second@example.test");
   return {
     ...status,
     state: "connected",
@@ -148,7 +158,7 @@ const finishAccountLogin = (
     plan: "Pro",
     error: undefined,
     activeAccountId: id,
-    accounts: [
+    accounts: existing ? status.accounts!.map(account => account.id === id ? { ...account, state: "connected" as const } : account) : [
       ...(status.accounts ?? []),
       { id, state: "connected", email, plan: "Pro" },
     ],
@@ -173,6 +183,7 @@ window.__ZEROS_NATIVE__ = {
   async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
     if (command === "keychain_get")
       return (secrets.get(args?.account as string) ?? null) as T;
+    if (command === "keychain_has") return secrets.has(args?.account as string) as T;
     if (command === "keychain_set") {
       secrets.set(args?.account as string, args?.value as string);
       return undefined as T;
@@ -219,8 +230,25 @@ window.__ZEROS_NATIVE__ = {
         fetchedAt: Date.now(),
       } as T;
     }
-    if (args?.action === "status") counts.reads++;
+    if (args?.action === "status") {
+      counts.reads++;
+      if (identityFixture) {
+        result = {
+          ...status,
+          ...(status.method === "cli" ? cliIdentities.get(provider) : {}),
+          revision: status.revision + 1,
+        };
+        statuses.set(provider, result);
+        showCounts();
+        if (holdIdentityReads) await new Promise<void>(resolve => {
+          const release = () => { pendingIdentityReads.delete(release); resolve(); };
+          pendingIdentityReads.add(release);
+        });
+      }
+    }
     if (args?.action === "connect") {
+      if (typeof args.accountId === "string") reconnectingAccounts.set(provider, args.accountId);
+      else reconnectingAccounts.delete(provider);
       counts.browser++;
       result = {
         ...status,
@@ -245,8 +273,12 @@ window.__ZEROS_NATIVE__ = {
       publish(result);
     }
     if (args?.action === "select-method") {
+      const saved = status.accounts?.find(account => account.id === status.activeAccountId);
       result = {
         ...status,
+        ...(identityFixture && args.method === "cli" ? cliIdentities.get(provider) : {}),
+        ...(identityFixture && args.method === "account" && saved
+          ? { state: saved.state, email: saved.email, plan: saved.plan } : {}),
         method: args.method as ProviderSubscriptionStatus["method"],
         revision: status.revision + 1,
       };
@@ -301,6 +333,21 @@ window.__ZEROS_NATIVE__ = {
     };
   },
 };
+if (identityFixture) Object.assign(window, {
+  __providerIdentity: {
+    setCli(provider: string, state: "connected" | "disconnected", email?: string) {
+      // Changing an external CLI has no native event. The visible UI must probe.
+      cliIdentities.set(provider, { state, email });
+    },
+    hold: () => { holdIdentityReads = true; },
+    pending: () => pendingIdentityReads.size,
+    release: () => {
+      holdIdentityReads = false;
+      for (const release of pendingIdentityReads) release();
+    },
+    counts: () => ({ ...counts }),
+  },
+});
 if (usageFixture && usageObservation) {
   const accountId = (slot: "a" | "b") => {
     const id = statuses.get(usageFixture)?.accounts?.[slot === "a" ? 0 : 1]?.id;
@@ -310,6 +357,7 @@ if (usageFixture && usageObservation) {
   Object.assign(window, {
     __providerUsageObservation: {
       reads: () => counts.usageReads,
+      statusReads: () => counts.reads,
       hold: () => { holdUsage = true; },
       release: (slot: "a" | "b") => {
         for (const release of pendingUsage)
@@ -621,6 +669,11 @@ function Harness() {
           Toggle read-only transcript
         </Button>
         <Button onClick={() => setSettings(false)}>Return to chat</Button>
+        <Button onClick={() => {
+          const status = statuses.get(provider);
+          if (status?.activeAccountId) publish({ ...status, state: "expired", revision: status.revision + 1,
+            accounts: status.accounts?.map(account => account.id === status.activeAccountId ? { ...account, state: "expired" } : account) });
+        }}>Expire selected account</Button>
         <Button onClick={() => requestProviderSettings(provider)}>
           Settings
         </Button>
