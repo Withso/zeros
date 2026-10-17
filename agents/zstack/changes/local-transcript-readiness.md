@@ -33,3 +33,6 @@ Seed the complete session before asserting cold-history presentation, and
 pause a previously advanced browser clock relative to browser time instead
 of the host clock. The Local transcript paint and transcript-row browser
 checks retain the assertions and encode these fixture boundaries.
+Use the locator's literal name matcher for prompt text instead of partial
+regular-expression escaping; the transcript-row smoke retains its literal
+question marks and CodeQL checks the escaping boundary.

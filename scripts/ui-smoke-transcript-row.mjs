@@ -19,7 +19,7 @@ export async function checkEmptyChatTranscriptRow({ page, check, harnessBase, sc
   const pane = page.locator('[data-chat-pane="chat-empty"]');
   const created = pane.getByText("Created", { exact: true });
   const row = pane.getByText("Add chat transcripts", { exact: true });
-  const pill = pane.getByRole("button", { name: new RegExp(`transcript of ${PROMPT.replace(/[?]/g, "\\?")}`) });
+  const pill = pane.getByRole("button", { name: `transcript of ${PROMPT}` });
   const fixture = () => page.evaluate(() => {
     const { summaryReads, firstReadAt, workspaceRowsAt, rowAtFirstRead } = window.transcriptRowFixture;
     return { summaryReads, firstReadAt, workspaceRowsAt, rowAtFirstRead };
