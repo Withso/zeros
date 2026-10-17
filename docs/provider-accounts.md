@@ -25,6 +25,8 @@ terminal or model session. Claude uses `auth status --json`; Codex uses native
 `account/read`. CLI detection also recognizes a native saved API credential;
 browser Account sign-in still requires a subscription. Open terminal remains
 available as an explicit action. Cursor supports Account and API, not CLI.
+The settings card labels this method **Connected via CLI**, without assuming
+that the CLI uses a subscription rather than an API credential.
 The local engine also asks Claude's native status command for its authentication
 verdict. Claude and Codex probes resolve the same configured or bundled runtime
 as chats, so an absent or different global CLI cannot contradict a working

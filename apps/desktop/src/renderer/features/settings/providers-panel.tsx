@@ -920,6 +920,7 @@ function ProviderCard({
                 connected,
                 prefs,
                 agent.id === "claude" ? "Claude" : agent.name,
+                method,
               )}
               {connected && (
                 <Check className="text-green-fg size-4" aria-hidden="true" />

@@ -25,6 +25,7 @@ export async function runProviderIdentitySmoke({ page, check }) {
     } else {
       await dialog.getByRole("button", { name: "CLI", exact: true }).click();
       await expect(dialog.getByRole("status")).toHaveText("cli@example.test is connected");
+      await expect(page.getByRole("button", { name: "Connected via CLI", exact: true, includeHidden: true })).toHaveCount(1);
       await expect(dialog.getByRole("button", { name: "Open terminal", exact: true })).toBeVisible();
       expect((await counts()).terminals).toBe(before.terminals);
       expect((await counts()).browser).toBe(before.browser);
@@ -56,7 +57,7 @@ export async function runProviderIdentitySmoke({ page, check }) {
       await page.clock.fastForward(1000);
       expect((await counts()).reads).toBe(retained.reads);
       await page.getByRole("button", { name: "Toggle retained surface" }).click();
-      await page.getByRole("button", { name: "Connected via subscription", exact: true }).click();
+      await page.getByRole("button", { name: "Connected via CLI", exact: true }).click();
       await expect(dialog.getByRole("status")).toHaveText("revealed@example.test is connected");
 
       await visibility(true);

@@ -17,6 +17,8 @@ Provider connection identity and CLI observation
   the native API account type only in CLI detection, keep browser ceremonies
   subscription-only, and do not request subscription usage without identity.
   Encoded in provider-subscription-drivers and provider-account-manager tests.
+  The card also says Connected via CLI, so it never assigns an API login to a
+  subscription; connection-methods and browser regressions cover that label.
 - Symptom: native login detection and the engine's connected verdict could
   disagree. Cause: Claude's registry used legacy file presence, and command
   probes resolved a global CLI instead of the selected runtime. Rule: local

@@ -34,6 +34,7 @@ export function connectionLabel(
   connected: boolean,
   prefs: ProviderPrefs,
   name = "agent",
+  method?: ConnectionMethod,
 ): string {
   if (!connected) return `Configure ${name}`;
   if (prefs.gatewayBaseUrl) {
@@ -46,6 +47,7 @@ export function connectionLabel(
       /* Legacy invalid URL: keep the configured auth label. */
     }
   }
+  if (method === "cli") return "Connected via CLI";
   return prefs.authMethod === "apiKey"
     ? "Connected via API"
     : "Connected via subscription";
