@@ -1,5 +1,8 @@
+import type pg from "pg";
 import { z } from "zod";
 
+import { withSystemStatement } from "../db.js";
+import { SqlFragment, sql } from "../sql-fragment.js";
 import type { UplinkIdentity } from "./uplink-authority.js";
 import type { UplinkExtension, UplinkSession } from "./uplink-server.js";
 
@@ -13,6 +16,25 @@ const CredAckSchema = z.object({
   code: z.string().min(1).max(64).optional(),
 }).strict();
 export type UplinkCredAck = z.infer<typeof CredAckSchema>;
+
+/** Reads `cloud_agent_boot_bindings.desired_cache_revision`. The table is
+ * FORCE ROW LEVEL SECURITY with system-only policies, so every read must go
+ * through `withSystemStatement`; a raw pool query (the runtime role without
+ * `app.system`) silently sees no row. */
+export class DatabaseUplinkCredentialStore {
+  constructor(private readonly pool: pg.Pool) {}
+
+  /** Current desired agent-controls revision of the engine's live binding,
+   * or null when none is live. */
+  async desiredRevision(engineInstanceId: string): Promise<number | null> {
+    const result = await withSystemStatement<{ desired_cache_revision: string }>(this.pool,
+      sql`SELECT desired_cache_revision FROM cloud_agent_boot_bindings WHERE engine_instance_id=${SqlFragment.uuid(engineInstanceId)} AND retired_at IS NULL`);
+    const row = result.rows[0];
+    if (!row) return null;
+    const revision = Number(row.desired_cache_revision);
+    return Number.isSafeInteger(revision) && revision >= 1 ? revision : null;
+  }
+}
 
 /** Credential-control push (S2: `cred.revision` / `cred.ack`, replacing the
  * engine's 500 ms credential-control poll while the uplink is up). On the

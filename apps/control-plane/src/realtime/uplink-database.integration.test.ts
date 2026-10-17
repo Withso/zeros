@@ -8,6 +8,7 @@ import { AuditUplinkSecurityAlerts } from "./uplink-alerts.js";
 import { DatabaseUplinkAuthority, type UplinkIdentity } from "./uplink-authority.js";
 import { UPLINK_AUTHORITY_CHANNEL, UPLINK_CRED_REVISION_CHANNEL, UPLINK_OWNER_CHANNEL, handleUplinkNotification } from "./uplink-notifications.js";
 import { DatabaseUplinkPresenceStore, type UplinkPresenceSnapshot } from "./uplink-presence.js";
+import { DatabaseUplinkCredentialStore } from "./uplink-cred.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -135,6 +136,37 @@ d("engine uplink database paths", () => {
       await listener.query("UNLISTEN *");
       listener.release();
     }
+  });
+
+  it("reads the desired credential revision through the system statement a raw pool read cannot see", async () => {
+    const writerEpoch = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_local_command_writers
+      (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+    [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+    await pool.query(`INSERT INTO cloud_agent_boot_bindings
+      (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+    [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+    // The table is FORCE ROW LEVEL SECURITY with system-only policies: the
+    // runtime role without app.system sees no row, so a raw pool.query here
+    // (what the gate-time read used to do) silently returns nothing.
+    const probe = await pool.connect();
+    try {
+      await probe.query("BEGIN");
+      await probe.query("SET LOCAL ROLE zeros_app");
+      const hidden = await probe.query(
+        "SELECT desired_cache_revision FROM cloud_agent_boot_bindings WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+      expect(hidden.rows).toEqual([]);
+      await probe.query("ROLLBACK");
+    } finally { probe.release(); }
+    const store = new DatabaseUplinkCredentialStore(pool);
+    await expect(store.desiredRevision(identity.engineInstanceId)).resolves.toBe(1);
+    await pool.query("UPDATE cloud_agent_boot_bindings SET desired_cache_revision=3 WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+    await expect(store.desiredRevision(identity.engineInstanceId)).resolves.toBe(3);
+    await expect(store.desiredRevision(randomUUID())).resolves.toBeNull();
+    await pool.query("UPDATE cloud_agent_boot_bindings SET retired_at=clock_timestamp() WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+    await expect(store.desiredRevision(identity.engineInstanceId)).resolves.toBeNull();
   });
 
   it("notifies a credential-control revision bump and routes it to the push extension", async () => {

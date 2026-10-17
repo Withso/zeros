@@ -68,7 +68,7 @@ import { RolloutFlagSnapshot } from "./rollout-flags.js";
 import { EngineAuthorityCache, installEngineAuthorityCache } from "./cloud-workspaces/engine-authority-cache.js";
 import { CapabilitySigningKeyStore } from "./cloud-workspaces/capability-keys.js";
 import { AuditUplinkSecurityAlerts } from "./realtime/uplink-alerts.js";
-import { UplinkCredentialPush } from "./realtime/uplink-cred.js";
+import { DatabaseUplinkCredentialStore, UplinkCredentialPush } from "./realtime/uplink-cred.js";
 import { uplinkCapabilityAuthority } from "./realtime/uplink-auth-source.js";
 import { DatabaseUplinkAuthority } from "./realtime/uplink-authority.js";
 import { startUplinkNotifications } from "./realtime/uplink-notifications.js";
@@ -863,17 +863,13 @@ const mountEngineUplink = () => {
   uplinkPresence = new UplinkPresenceWriter(presenceStore);
   // Credential-control push (S2 cred channel): the binding's desired
   // revision is read at the gate and on every notified bump. The engine's
-  // exchange re-reads authority; the notification is only a hint.
+  // exchange re-reads authority; the notification is only a hint. The table
+  // is RLS-hidden from the runtime role, so the read goes through the
+  // system-statement store.
+  const uplinkCredStore = new DatabaseUplinkCredentialStore(pool);
   const uplinkCredPush = new UplinkCredentialPush({
     sessionFor: engineInstanceId => cloudEngineUplink?.session(engineInstanceId) ?? null,
-    readRevision: async identity => {
-      const row = (await pool.query<{ desired_cache_revision: string }>(
-        "SELECT desired_cache_revision FROM cloud_agent_boot_bindings WHERE engine_instance_id=$1 AND retired_at IS NULL",
-        [identity.engineInstanceId])).rows[0];
-      if (!row) return null;
-      const revision = Number(row.desired_cache_revision);
-      return Number.isSafeInteger(revision) && revision >= 1 ? revision : null;
-    },
+    readRevision: identity => uplinkCredStore.desiredRevision(identity.engineInstanceId),
   });
   cloudEngineUplink = new CloudEngineUplinkServer({
     authority: new DatabaseUplinkAuthority({ pool, workosEnabled: config.auth.provider === "workos", alerts }),
