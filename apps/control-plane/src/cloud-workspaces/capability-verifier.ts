@@ -191,6 +191,7 @@ type OpenSession = {
   claims: CapabilityClaims;
   context: CapabilityVerifyContext;
   authenticatedAtMs: number;
+  kid: string;
 };
 
 export type CapabilitySessionClosure = Readonly<{ sessionId: string; code: CapabilityErrorCode }>;
@@ -236,9 +237,11 @@ export class CapabilityVerifier {
     this.outage = options.outage ?? new CapabilityOutageMonitor(this.now);
   }
 
-  /** A fetched or pushed set replaces the verifier's set (S1). An invalid
-   * set throws and leaves the current set unchanged. */
-  applyKeys(keys: readonly unknown[]): void {
+  /** A fetched or pushed set replaces the verifier's set (S1); sessions
+   * admitted under a key that left the set close with
+   * `capability_key_unknown`. An invalid set throws and leaves the current
+   * set unchanged. */
+  applyKeys(keys: readonly unknown[]): CapabilitySessionClosure[] {
     if (!Array.isArray(keys) || keys.length > CAPABILITY_MAX_KEYS)
       throw new CapabilityKeySetError(`a capability key set holds at most ${CAPABILITY_MAX_KEYS} keys`);
     const next = new Map<string, KeyObject>();
@@ -252,6 +255,7 @@ export class CapabilityVerifier {
       next.set(key.kid, createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: key.x }, format: "jwk" }));
     }
     this.keys = next;
+    return this.recheck();
   }
 
   keyIds(): string[] { return [...this.keys.keys()]; }
@@ -293,7 +297,7 @@ export class CapabilityVerifier {
   /** Registers a session admitted with `claims` so later raises, revocations
    * and deadlines re-check it. */
   openSession(sessionId: string, verified: CapabilityVerifySuccess, context: CapabilityVerifyContext): void {
-    this.sessions.set(sessionId, { claims: verified.claims, context, authenticatedAtMs: this.now() });
+    this.sessions.set(sessionId, { claims: verified.claims, context, authenticatedAtMs: this.now(), kid: verified.header.kid });
   }
 
   /** In-band renewal swaps the session's token; the session keeps its
@@ -302,6 +306,7 @@ export class CapabilityVerifier {
     const session = this.sessions.get(sessionId);
     if (!session || session.claims.sub !== verified.claims.sub || session.claims.did !== verified.claims.did) return false;
     session.claims = verified.claims;
+    session.kid = verified.header.kid;
     return true;
   }
 
@@ -402,6 +407,7 @@ export class CapabilityVerifier {
   }
 
   private sessionFailure(session: OpenSession, now: number): CapabilityErrorCode | null {
+    if (!this.keys.has(session.kid)) return "capability_key_unknown";
     const { claims } = session;
     const placement = this.placementFailure(claims, session.context);
     if (placement) return placement;

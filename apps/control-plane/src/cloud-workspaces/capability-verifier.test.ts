@@ -161,6 +161,34 @@ describe("capability verifier", () => {
     expect(verifier.recheck()).toEqual([{ sessionId: "s", code: "capability_expired" }]);
     expect(closed).toEqual(["s:capability_expired"]);
   });
+
+  it("closes an open session when its signing key leaves the set", async () => {
+    const onSessionsClosed = vi.fn();
+    const clock = TEST_CAPABILITY_NOW_S * 1000;
+    const verifier = new CapabilityVerifier({ issuer: TEST_CAPABILITY_ISSUER, now: () => clock, onSessionsClosed });
+    verifier.applyKeys([testSigningJwk("cap-2026-10-a"), testSigningJwk("cap-2026-10-b")]);
+    const result = await verifier.verify(client(), CLIENT, proofContext(clock));
+    if (!result.ok) throw new Error(result.code);
+    verifier.openSession("s1", result, base);
+    const closures = verifier.applyKeys([testSigningJwk("cap-2026-10-b")]);
+    expect(closures).toEqual([{ sessionId: "s1", code: "capability_key_unknown" }]);
+    expect(onSessionsClosed.mock.calls[0]?.[0]).toBe(closures);
+    expect(verifier.openSessionIds()).toEqual([]);
+  });
+
+  it("keeps a session that renewed under a key that stays", async () => {
+    const { verifier, now } = setup();
+    verifier.applyKeys([testSigningJwk("cap-2026-10-a"), testSigningJwk("cap-2026-10-b")]);
+    const first = await verifier.verify(client(), CLIENT, proofContext(now()));
+    if (!first.ok) throw new Error(first.code);
+    verifier.openSession("s1", first, base);
+    const renewed = await verifier.verify(signTestCapability({ ...TEST_CAPABILITY_HEADER, kid: "cap-2026-10-b" },
+      testClientClaims({ jti: "EEEEEEEEEEEEEEEEEEEEEE" })), CLIENT, proofContext(now(), { jti: "EEEEEEEEEEEEEEEEEEEEEE" }));
+    if (!renewed.ok) throw new Error(renewed.code);
+    expect(verifier.renewSession("s1", renewed)).toBe(true);
+    expect(verifier.applyKeys([testSigningJwk("cap-2026-10-b")])).toEqual([]);
+    expect(verifier.openSessionIds()).toEqual(["s1"]);
+  });
 });
 
 describe("capability outage monitor", () => {
