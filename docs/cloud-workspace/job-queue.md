@@ -311,6 +311,22 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   scoped binding under `SET LOCAL lock_timeout = '2s'`; a scope that times
   out logs `inventory scope failed` and retries at the next minute, so one
   stuck holder cannot delay the sweep or the hourly audit behind it.
+- **Paid-authority checks follow their inputs.** Updating a column or
+  deleting a row that `cloud_workspace_paid_authority_live` or
+  `cloud_workspace_generation_provider_authority_live` reads queues an
+  immediate check through a trigger (0046, 0047, 0076), and so does moving a
+  running workspace's `current_generation` (0157): the reconciler checks the
+  current generation's provider credential and schedules the next check from
+  its expiry. A row that the workspace's own rows reference through a
+  `RESTRICT` or `NO ACTION` foreign key cannot be deleted while they do, so
+  its table needs no delete trigger.
+  `paid-authority.integration.test.ts` derives the tables and
+  columns from the live function bodies and fails until a new input gains a
+  trigger or a reasoned exemption there (teams, billing epochs, staff Pro
+  benefits and columns that never change after insert). Reaching a future
+  `valid_from` only grants authority, so nothing schedules it. Every running
+  workspace is still re-checked each `recheckIntervalMs` (default 5 minutes),
+  so an exemption gives up only the immediate check.
 - **Triggers, not TypeScript enqueues.** They cover every writer, including
   stored functions and operator repairs, and commit with the domain write.
   Every source table is written only in system transactions, so the
