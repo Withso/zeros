@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ensureUser } from "../auth.js";
 import { createPool } from "../db.js";
+import { publishPendingSecurityEvents } from "../security-events.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   DatabaseRealtimeSecurityEventFeed, DatabaseSecurityEventSource, type RealtimeSecurityEvent, type SecurityEventGapReason,
@@ -33,6 +34,9 @@ const url = process.env.TEST_DATABASE_URL;
       const user = await ensureUser(pool, { provider: "workos", providerSubject: `user_feed_${suffix}`,
         email: `feed-${suffix}@example.test`, displayName: "Feed" });
       const org = (await pool.query("SELECT id FROM organizations WHERE created_by=$1 AND is_personal", [user.id])).rows[0].id;
+      // Creating the account wrote capability epoch events (0158); publish
+      // them before the feed takes its start cursor.
+      await publishPendingSecurityEvents(pool);
       await feed.start();
       await vi.waitFor(() => expect(feed.healthy()).toBe(true));
       const before = feed.cursor();

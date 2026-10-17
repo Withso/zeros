@@ -79,7 +79,9 @@ export type SecurityEventWire = {
     | "organization.access_revoked"
     | "organization.authorization_changed"
     | "organization.data_changed"
-    | "workspace.authorization_changed";
+    | "workspace.authorization_changed"
+    /** Realtime only (0158): never returned to a client feed. */
+    | "capability.epochs_changed";
   organizationId: string | null;
   workspaceId: string | null;
   accountRevision: number | null;
@@ -246,6 +248,7 @@ export async function listSecurityEvents(
               e.created_at
        FROM security_events e
        WHERE e.delivery_sequence > $1 AND e.expires_at > now()
+         AND e.kind::text <> 'capability.epochs_changed'
          AND ($5::boolean OR (e.kind='account.revoked' AND e.user_id=$2)
            OR (e.kind='session.revoked' AND $3::text IS NOT NULL AND e.provider_session_id=$3))
          AND (

@@ -202,6 +202,20 @@ authority supplies keys, epochs and engine tokens
   `repository` push `failed`/`cred_kind_unsupported` without calling its
   handler or recording the revision, so adding the kind later is an
   explicit signal, never a silent swallow.
+- **Revocation push (S-3).** `capability-revocation-push.ts` consumes the
+  process's security-event feed, which it shares with the device stream.
+  Migration 0158 writes a `capability.epochs_changed` row in the same
+  transaction as every epoch bump (member epochs, `users.auth_revision`,
+  device key version or revocation, workspace authority epoch and access
+  revision). Clients never see that kind, because `listSecurityEvents`
+  filters it out. For each event the producer finds the owned uplinks of
+  affected workspaces whose organization has `capabilities` on. It re-reads
+  their current epochs and revocations from `auth.snapshot` (never from the
+  event payload) and pushes `auth.epochs`, so `capability_revocation_push_ms`
+  runs from the event's `created_at`. On a feed `gap` it re-reads every
+  owned uplink. It sends `capability.revoked` to device streams only for
+  epoch events: the device stream already re-checks the account, session,
+  organization and workspace authorization kinds itself.
 - **Lease.** The HTTP heartbeat still owns the engine lease in this release;
   the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
 
