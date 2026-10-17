@@ -481,6 +481,8 @@ CREATE TRIGGER cloud_capability_epoch_invitations
   EXECUTE FUNCTION bump_cloud_capability_invitation_epoch();
 
 -- zeros-expand-exception: privilege-tightening Removes PUBLIC EXECUTE from a function created in this migration
+REVOKE ALL ON FUNCTION preserve_cloud_capability_key() FROM PUBLIC;
+-- zeros-expand-exception: privilege-tightening Removes PUBLIC EXECUTE from a function created in this migration
 REVOKE ALL ON FUNCTION bump_cloud_capability_member_epoch(uuid, uuid) FROM PUBLIC;
 -- zeros-expand-exception: privilege-tightening Removes PUBLIC EXECUTE from a function created in this migration
 REVOKE ALL ON FUNCTION bump_cloud_capability_org_epochs(uuid) FROM PUBLIC;

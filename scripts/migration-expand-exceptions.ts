@@ -20,6 +20,7 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
     ],
     // PUBLIC's default EXECUTE on functions created in the same migration.
     "privilege-tightening": [
+      "preserve_cloud_capability_key()",
       "bump_cloud_capability_member_epoch(uuid, uuid)",
       "bump_cloud_capability_org_epochs(uuid)",
       "bump_cloud_capability_user_epochs(uuid)",

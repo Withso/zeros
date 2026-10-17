@@ -271,6 +271,18 @@ d("capability member epochs with PostgreSQL", () => {
     });
   });
 
+  it("keeps the bump helpers out of reach of the runtime role", async () => {
+    const [org, user, workspace] = [fixture.organizationId, fixture.userId, fixture.workspaceId];
+    for (const [call, values] of [
+      ["bump_cloud_capability_member_epoch($1::uuid,$2::uuid)", [org, user]],
+      ["bump_cloud_capability_org_epochs($1::uuid)", [org]],
+      ["bump_cloud_capability_user_epochs($1::uuid)", [user]],
+      ["record_cloud_capability_access_loss($1::uuid,$2::uuid,$3::uuid)", [workspace, org, user]],
+    ] as const) {
+      await expect(asSystem(`SELECT ${call}`, [...values]), call).rejects.toThrow(/permission denied/);
+    }
+  });
+
   it("puts an epoch bump on every table the role functions read", async () => {
     // Derived from the live function bodies (functionInputTables): a role
     // function that starts reading a new table fails here until the table
