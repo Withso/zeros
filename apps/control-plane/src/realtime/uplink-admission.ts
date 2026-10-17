@@ -17,6 +17,9 @@ export type AdmissionLimits = {
 
 type SourceState = { tokens: number; at: number; unadmitted: number };
 
+/** A full source map is walked for idle buckets at most this often. */
+const PRUNE_INTERVAL_MS = 1_000;
+
 export type AdmissionTicket = { release(): void };
 
 /** Pre-authentication admission for the uplink upgrade. A source can take at
@@ -28,6 +31,7 @@ export class UplinkAdmission {
   private globalTokens: number;
   private globalAt: number;
   private readonly maxSources: number;
+  private prunedAt = -Infinity;
 
   constructor(private readonly limits: AdmissionLimits, private readonly now: () => number = () => performance.now()) {
     this.globalTokens = limits.globalBurst;
@@ -55,7 +59,12 @@ export class UplinkAdmission {
   private source(key: string, now: number): SourceState {
     let state = this.sources.get(key);
     if (state) return state;
-    if (this.sources.size >= this.maxSources) this.prune(now);
+    // The walk is O(sources): during a flood of new sources it runs once a
+    // second rather than once per source, and they share the overflow between.
+    if (this.sources.size >= this.maxSources && now - this.prunedAt >= PRUNE_INTERVAL_MS) {
+      this.prunedAt = now;
+      this.prune(now);
+    }
     state = { tokens: this.limits.sourceBurst, at: now, unadmitted: 0 };
     // Past the bound with every tracked source busy, new sources share one
     // bucket rather than growing the map.

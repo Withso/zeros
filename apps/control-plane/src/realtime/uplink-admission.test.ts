@@ -37,4 +37,25 @@ describe("uplink admission", () => {
     expect(typeof admission.admit("d")).toBe("object");
     expect(admission.admit("e")).toBe("rate_limited");
   });
+
+  it("walks a full source map at most once a second, sharing the overflow bucket in between", () => {
+    let now = 0;
+    const admission = new UplinkAdmission({ globalBurst: 100, globalRefillMs: 1, sourceBurst: 1, sourcePerSecond: 1_000,
+      sourceMaxUnadmitted: 1, maxSources: 3 }, () => now);
+    const release = (ticket: ReturnType<UplinkAdmission["admit"]>) => { if (typeof ticket === "object") ticket.release(); };
+    const [a] = ["a", "b", "c"].map(source => admission.admit(source));
+    // Full of busy sources: the walk reclaims nothing and d takes the overflow bucket.
+    release(admission.admit("d"));
+    release(a);
+    now += 10;
+    // `a` and the overflow are idle again, but the last walk was 10 ms ago, so e shares the overflow.
+    const e = admission.admit("e");
+    expect(typeof e).toBe("object");
+    expect(admission.admit("f")).toBe("capacity");
+    release(e);
+    now += 1_000;
+    // The next walk reclaims both: g gets its own bucket, and h the overflow.
+    expect(typeof admission.admit("g")).toBe("object");
+    expect(typeof admission.admit("h")).toBe("object");
+  });
 });
