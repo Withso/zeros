@@ -134,6 +134,15 @@ With `capabilities` on, the engine command mirror and seal routes
 heartbeat bearer stays the mutation fence in v1, and a request without a
 token keeps today's path so engines that predate engine tokens keep working
 during the rollout. With the flag off nothing changes.
+
+In this release `ServiceCapabilityVerifier` does not run the S1 verifier
+epoch bootstrap: it never loads current epochs or revocations, so step 10
+compares a token only with epochs seen in earlier tokens in the same
+process and step 11 never rejects. On `api` this is defense in depth while
+the heartbeat bearer remains the engine fence. Relay admission on
+`realtime` (track C5) must load the workspace's epochs and revocations
+before it admits a client token.
+
 ## Capability signing keys runbook
 
 S1 signing keys are Ed25519, sealed at rest with the dedicated

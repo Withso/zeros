@@ -352,6 +352,12 @@ registration there is no uplink client at all.
   renewed closes with `capability_expired` at `exp`. The cloud transport
   does not carry the S3 `auth` frames yet, so no session reaches this
   path in this release.
+- **Client admission.** The engine's capability admission
+  (`EngineCapabilityAuth.verifyClient`, `admit` and `handleInBandAuth`) has
+  no caller in this release: direct and relay client sessions keep the
+  client-admission call even with `capabilities` on. It is wired when
+  clients send S3 tokens (track F1) and relay admission verifies them
+  (track C5).
 - **Credential push.** The engine offers `cred.v1`; a pushed `cred.revision`
   runs the same credential-controls exchange the poll runs (coalesced to
   the latest revision per kind while one is in flight) and is answered with
