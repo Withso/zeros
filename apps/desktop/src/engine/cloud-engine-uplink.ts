@@ -440,6 +440,26 @@ export class CloudEngineUplinkClient {
 
   /* ---- connection-facing internals (the only dial/park/count site) ---- */
 
+  /** Auth applications from every connection serialize on this one chain,
+   * in frame order. The sink resolves once durable, so without it an
+   * `auth.applied` could reach the CP (opening its gate) while keys are
+   * still landing, a delta could apply under a slower snapshot, or a dead
+   * connection's late write could land after its replacement's (a key
+   * rotation regressing, the cursor moving backward). Work queued for a
+   * connection that finished before its turn is skipped: the replacement
+   * re-sends keys and the snapshot from the cursor. A link already running
+   * when its connection dies completes, and later links wait for it. A
+   * rejected link must not wedge the chain; the apply methods handle their
+   * own failures (close + redial). */
+  private authChain: Promise<void> = Promise.resolve();
+
+  /** @internal */
+  enqueueAuth(connection: Connection, work: () => Promise<void>): void {
+    this.authChain = this.authChain
+      .then(() => connection.isFinished ? undefined : work())
+      .catch(() => {});
+  }
+
   /** @internal */ now(): number { return this.clock(); }
   /** @internal */ get socketFactory(): NonNullable<CloudEngineUplinkOptions["openSocket"]> { return this.openSocket; }
   /** @internal */ get helloTimeoutMs(): number { return this.helloTimeout; }
@@ -654,6 +674,7 @@ class Connection {
   private lastReceivedAtMs: number;
   private initiated = false;
   private finished = false;
+  get isFinished(): boolean { return this.finished; }
 
   constructor(private readonly uplink: CloudEngineUplinkClient, readonly handoff: boolean) {
     this.openedAtMs = uplink.now();
@@ -836,16 +857,8 @@ class Connection {
     this.livenessTimer.unref?.();
   }
 
-  /** Auth applications serialize per connection in frame order: the sink
-   * resolves once durable, so without a chain an `auth.applied` could reach
-   * the CP (opening its gate) while keys are still landing, or a delta
-   * could apply under a slower snapshot. A rejected link must not wedge the
-   * chain — the apply methods handle failures themselves (close + redial,
-   * which re-sends keys and the snapshot from the cursor). */
-  private authChain: Promise<void> = Promise.resolve();
-
   private enqueueAuth(work: () => Promise<void>): void {
-    this.authChain = this.authChain.then(work).catch(() => {});
+    this.uplink.enqueueAuth(this, work);
   }
 
   private async applyKeys(d: Record<string, unknown>): Promise<void> {

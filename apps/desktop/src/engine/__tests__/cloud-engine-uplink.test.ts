@@ -287,6 +287,59 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("serializes auth applications across connections and skips a finished connection's queued work", async () => {
+    const applied: string[] = [];
+    let resolveOldKeys!: () => void;
+    const oldKeysDurable = new Promise<void>(resolve => { resolveOldKeys = resolve; });
+    let keyWrites = 0;
+    const sink: EngineUplinkAuthSink = {
+      authCursor: () => undefined,
+      applyKeys: async keys => {
+        // The first connection's key write is slow and still in flight when
+        // that connection dies and the next one delivers a rotated set.
+        if (keyWrites++ === 0) await oldKeysDurable;
+        applied.push(`keys:${keys[0]!.kid}`);
+      },
+      applySync: async sync => { applied.push(`sync@${sync.authCursor}`); },
+      applyDelta: async delta => { applied.push(`delta@${delta.authCursor}`); },
+      holdCapability: () => {},
+    };
+    const { client, sockets } = fakeClient({ auth: sink });
+    client.start();
+    await flush();
+    const welcome = (socket: FakeSocket) => socket.frame({ t: "sys.welcome", d: {
+      protocol: 1, connectionId: "c-1", resumeToken: "r1", resumed: false,
+      pingIntervalMs: 20_000, leaseExpiresAtMs: Date.now() + 60_000, serverInstance: "s1", features: [],
+    } });
+    const first = sockets[0]!;
+    welcome(first);
+    await flush();
+    first.frame({ t: "auth.keys", d: { keys: [{ ...KEY, kid: "old" }] } });
+    first.frame({ t: "auth.sync", d: { syncId: "s1", epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: "c-old", complete: true } });
+    await flush();
+    first.fail();
+    await flush();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(sockets).toHaveLength(2);
+    const second = sockets[1]!;
+    welcome(second);
+    await flush();
+    second.frame({ t: "auth.keys", d: { keys: [{ ...KEY, kid: "new" }] } });
+    second.frame({ t: "auth.sync", d: { syncId: "s2", epochs: { wa: 5, wr: 2 }, revocations: [], authCursor: "c-new", complete: true } });
+    await flush();
+    // The new connection waits behind the old in-flight write: nothing of
+    // it may land first and then be overwritten by the older key set.
+    expect(applied).toEqual([]);
+    resolveOldKeys();
+    await flush();
+    // The old write that was already running finishes; the old connection's
+    // queued snapshot is skipped; the new connection applies last.
+    expect(applied).toEqual(["keys:old", "keys:new", "sync@c-new"]);
+    expect(first.ofType("auth.applied")).toHaveLength(0);
+    expect(second.ofType("auth.applied")).toEqual([expect.objectContaining({ d: expect.objectContaining({ syncId: "s2" }) })]);
+    client.stop();
+  });
+
   it("redials when the dial never reaches open (a black-holed TCP/TLS/upgrade)", async () => {
     const sockets: FakeSocket[] = [];
     const { client } = fakeClient({ helloTimeoutMs: 50,
