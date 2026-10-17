@@ -15,7 +15,21 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
     "new-table-privileges": [
       "REVOKE ALL ON cloud_capability_signing_keys FROM PUBLIC, zeros_app;",
       "REVOKE ALL ON cloud_capability_key_changes FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_capability_member_epochs FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_capability_access_losses FROM PUBLIC, zeros_app;",
     ],
+    // PUBLIC's default EXECUTE on functions created in the same migration.
+    "privilege-tightening": [
+      "bump_cloud_capability_member_epoch(uuid, uuid)",
+      "bump_cloud_capability_org_epochs(uuid)",
+      "bump_cloud_capability_user_epochs(uuid)",
+      "record_cloud_capability_access_loss(uuid, uuid, uuid)",
+      "bump_cloud_capability_member_epoch_trigger()",
+      "bump_cloud_capability_writer_slot_epoch()",
+      "bump_cloud_capability_user_epochs_trigger()",
+      "bump_cloud_capability_org_epochs_trigger()",
+      "bump_cloud_capability_invitation_epoch()",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
   },
   "0145_cloud_computer_named_snapshots.sql": {},
   "0146_cloud_provider_snapshot_recovery.sql": {},

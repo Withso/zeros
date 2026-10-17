@@ -15,7 +15,14 @@ Changelog: **1.0.1** (editorial, no wire change) — the "under 1 KiB" size
 budget is reworded to "about 1 KiB": a maximal v1 client token (five epochs,
 four scopes, `ein`, `cnf`) measures 1026 bytes with a 23-character issuer, so
 the budget is guidance and the enforced bound is the 4 KiB ceiling of
-verification step 1, which issuers also apply before emitting a token.
+verification step 1, which issuers also apply before emitting a token. The
+`me` row now names every input of the role functions (team membership, seats,
+writer slots, entitlements, billing scope, team, organization and workspace
+state), not only membership rows; a workspace- or organization-wide input
+bumps `me` for every principal of the organization. Time-based inputs (a
+guest grant's `expires_at`, an entitlement's `valid_from`/`valid_until`
+passing) bump nothing: `exp` is already capped by the guest deadline, and
+any other deadline passing is bounded by the 300 s token lifetime.
 
 This contract defines the signed, workspace-scoped capability that replaces
 per-request authority SQL, actor-confirm renewals, client-authority renewals
@@ -153,7 +160,7 @@ infers a scope from `role`.
 | --- | --- | --- | --- |
 | `wa` | Workspace authority | `cloud_workspaces.authority_epoch` (existing, migration 0026; read by the 0113 authority function) | Stop, wake, failure, delete, generation change (`generation-transitions.ts:180,308,573`, `compute-credit-stop.ts:167,238`, `engine-health.ts:98`) |
 | `wr` | Workspace access | `cloud_workspaces.access_revision` (existing, migration 0077) | Sharing-mode change (`actors.ts:184-186`) |
-| `me` | Membership of `(org, user)` | **New** `cloud_capability_member_epochs(org_id, user_id, epoch)` | Any role, guest, invitation or org-membership change for that user in that org |
+| `me` | Membership of `(org, user)` | **New** `cloud_capability_member_epochs(org_id, user_id, epoch)` | Any role, guest, invitation or org-membership change for that user in that org, and any other change to an input of the role functions that can lower the user's role (team membership, seat, writer slot, account or organization entitlement, billing scope, team, organization or workspace state); time-based inputs are bounded by the token lifetime |
 | `ac` | Account | `users.auth_revision` (existing, migration 0013) | Account disable, revoke or authentication change |
 | `dk` | Device key | `devices.key_version` (existing) | Key rotation (`PATCH /v1/devices/:device/key`) |
 
