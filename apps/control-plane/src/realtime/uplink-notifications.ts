@@ -6,10 +6,29 @@ import type { CloudEngineUplinkServer } from "./uplink-server.js";
 
 export const UPLINK_OWNER_CHANNEL = "zeros_cloud_engine_uplink_owner";
 export const UPLINK_AUTHORITY_CHANNEL = "zeros_cloud_engine_uplink_authority";
+export const UPLINK_CRED_REVISION_CHANNEL = "zeros_cloud_agent_credential_revision";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/** The credential-push surface the listener routes revision bumps to. */
+export interface UplinkCredNotificationSink {
+  revisionChanged(engineInstanceId: string, revision: number): void;
+  /** Re-pushes the current revisions of the given owned engines. */
+  resync?(engineInstanceIds: readonly string[]): Promise<void>;
+}
+
 export function handleUplinkNotification(server: Pick<CloudEngineUplinkServer, "ownerChanged" | "revalidate" | "revalidateWorkspace">,
-  channel: string, payload: string): void {
+  channel: string, payload: string, cred?: UplinkCredNotificationSink): void {
+  if (channel === UPLINK_CRED_REVISION_CHANNEL) {
+    // Exactly `<engine uuid>:<decimal revision>`, as migration 0154's trigger
+    // writes it; anything else is not ours to interpret.
+    const parts = payload.split(":", 3);
+    if (parts.length !== 2) return;
+    const [engineInstanceId, revisionText] = parts as [string, string];
+    const revision = /^[1-9][0-9]{0,15}$/.test(revisionText) ? Number(revisionText) : NaN;
+    if (UUID.test(engineInstanceId) && Number.isSafeInteger(revision))
+      cred?.revisionChanged(engineInstanceId, revision);
+    return;
+  }
   if (channel === UPLINK_OWNER_CHANNEL) {
     const [engineInstanceId, connectionId, connectedAt] = payload.split(":");
     const connectedAtMs = Number(connectedAt);
@@ -24,23 +43,29 @@ export function handleUplinkNotification(server: Pick<CloudEngineUplinkServer, "
   else if (payload.startsWith("w:")) server.revalidateWorkspace(id);
 }
 
-/** Shares the process's LISTEN session. After every (re)connect, owners and
- * authority are re-read for every owned uplink, so a notification lost while
- * the listener was down is repaired rather than trusted. */
+/** Shares the process's LISTEN session. After every (re)connect, owners,
+ * authority and (with `cred`) credential revisions are re-read for every
+ * owned uplink, so a notification lost while the listener was down is
+ * repaired rather than trusted. */
 export function startUplinkNotifications(
   pool: pg.Pool,
   server: CloudEngineUplinkServer,
   presence: Pick<DatabaseUplinkPresenceStore, "owners">,
   logger: Pick<Console, "warn"> = console,
+  cred?: UplinkCredNotificationSink,
 ): () => Promise<void> {
   const listener = postgresNotificationSubscription(pool, {
-    channels: [UPLINK_OWNER_CHANNEL, UPLINK_AUTHORITY_CHANNEL],
-    onNotification: notice => handleUplinkNotification(server, notice.channel, notice.payload ?? ""),
+    channels: [UPLINK_OWNER_CHANNEL, UPLINK_AUTHORITY_CHANNEL, ...(cred ? [UPLINK_CRED_REVISION_CHANNEL] : [])],
+    onNotification: notice => handleUplinkNotification(server, notice.channel, notice.payload ?? "", cred),
     onReady: () => {
       server.revalidate();
       void presence.owners(server.ownedEngineInstances()).then(rows => {
         for (const row of rows) server.ownerChanged(row.engineInstanceId, row.connectionId, row.connectedAtMs);
       }).catch(() => {});
+      // A revision bump lost while the listener was down: engines that
+      // re-gate get the current revision at their gate; already-connected
+      // ones get it here.
+      void cred?.resync?.(server.ownedEngineInstances()).catch(() => {});
     },
     onUnavailable: () => logger.warn("[realtime] uplink notifications unavailable; owners and authority rely on the periodic recheck"),
   });

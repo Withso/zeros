@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 import type { EngineCapabilityResult } from "../../../../control-plane/src/realtime/uplink-auth-source";
+import { UplinkCredentialPush } from "../../../../control-plane/src/realtime/uplink-cred";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "../../../../control-plane/src/realtime/uplink-authority";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "../../../../control-plane/src/realtime/uplink-presence";
 import { UPLINK_PATH } from "../../../../control-plane/src/realtime/uplink-protocol";
@@ -46,10 +47,11 @@ class FakeSocket implements EngineUplinkSocket {
   readonly closeCalls: Array<{ code?: number; reason?: string }> = [];
   terminated = false;
   readyState = 0;
-  constructor() {
-    // Like `ws`, the socket connects on construction.
+  constructor(options: { hang?: boolean } = {}) {
+    // Like `ws`, the socket connects on construction — unless it hangs
+    // (a black-holed TCP/TLS/upgrade never reaches "open").
     queueMicrotask(() => {
-      if (this.readyState !== 0) return;
+      if (this.readyState !== 0 || options.hang) return;
       this.readyState = 1;
       this.emitter.emit("open");
     });
@@ -93,11 +95,11 @@ function fakeClient(extra: Partial<CloudEngineUplinkOptions> & { now?: () => num
 }
 
 /** Plays the server side of the frozen handshake on a fake socket. */
-async function serveHandshake(socket: FakeSocket, options: { resumed?: boolean; token?: string; pingIntervalMs?: number; cursor?: string } = {}) {
+async function serveHandshake(socket: FakeSocket, options: { resumed?: boolean; token?: string; pingIntervalMs?: number; cursor?: string; features?: string[] } = {}) {
   socket.frame({ t: "sys.welcome", d: {
     protocol: 1, connectionId: "c-1", resumeToken: options.token ?? "r1",
     resumed: options.resumed ?? false, pingIntervalMs: options.pingIntervalMs ?? 20_000,
-    leaseExpiresAtMs: Date.now() + 60_000, serverInstance: "s1", features: [],
+    leaseExpiresAtMs: Date.now() + 60_000, serverInstance: "s1", features: options.features ?? ["cred.v1"],
   } });
   await flush();
   socket.frame({ t: "auth.keys", d: { keys: [KEY] } });
@@ -180,6 +182,206 @@ describe("engine uplink client (socket level)", () => {
     expect(sockets[0]!.terminated).toBe(true);
     await vi.advanceTimersByTimeAsync(250); // first backoff (random 0.5)
     expect(sockets).toHaveLength(2);
+    client.stop();
+  });
+
+  it("buffers reliable frames until the connection's gate opens on the first auth.capability", async () => {
+    const { client, sockets } = fakeClient();
+    client.start();
+    await flush();
+    const socket = sockets[0]!;
+    expect(socket.ofType("sys.hello")).toHaveLength(1);
+    // Before sys.welcome a reliable frame must buffer only: the server
+    // closes 4400 frame_before_welcome on anything that early.
+    client.sendReliable("status.ready", { ready: false, phase: "booting" });
+    expect(socket.sent).toHaveLength(1); // only the hello
+    socket.frame({ t: "sys.welcome", d: {
+      protocol: 1, connectionId: "c-1", resumeToken: "r1", resumed: false,
+      pingIntervalMs: 20_000, leaseExpiresAtMs: Date.now() + 60_000, serverInstance: "s1", features: [],
+    } });
+    await flush();
+    // The handshake is not the gate: auth frames may flow, reliable frames may not.
+    socket.frame({ t: "auth.keys", d: { keys: [KEY] } });
+    socket.frame({ t: "auth.sync", d: { syncId: "sync-1", epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: "c-9", complete: true } });
+    await flush();
+    expect(socket.ofType("status.ready")).toHaveLength(0);
+    // The first capability opens the gate; the buffered frame flushes once.
+    socket.frame({ t: "auth.capability", d: { audience: "zeros:api", token: "cap-1", expiresAtMs: Date.now() + 300_000 } });
+    await flush();
+    expect(socket.ofType("status.ready")).toEqual([expect.objectContaining({ s: 1, d: { ready: false, phase: "booting" } })]);
+    // With the gate open, a new reliable frame goes out live.
+    client.sendReliable("status.ready", { ready: true, phase: "ready" });
+    expect(socket.ofType("status.ready")).toHaveLength(2);
+    expect(socket.ofType("status.ready")[1]).toMatchObject({ s: 2 });
+    client.stop();
+  });
+
+  it("runs the step-4 retransmit only on the connection's first capability, not on renewals", async () => {
+    const { client, sockets } = fakeClient({ readiness: () => ({ ready: true, phase: "ready" }) });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    expect(sockets[0]!.ofType("status.ready")).toHaveLength(1); // gate resync
+    client.sendReliable("cred.ack", { kind: "agent-controls", revision: 7 });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(1);
+    // A 60% renewal holds the new token but must not retransmit the unacked
+    // cred.ack or re-send readiness.
+    sockets[0]!.frame({ t: "auth.capability", d: { audience: "zeros:api", token: "cap-2", expiresAtMs: Date.now() + 300_000 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(1);
+    expect(sockets[0]!.ofType("status.ready")).toHaveLength(1);
+    client.stop();
+  });
+
+  it("reports a readiness change when the engine pushes it (track E: hello marks ready)", async () => {
+    let ready = false;
+    const { client, sockets } = fakeClient({ readiness: () => ({ ready, phase: ready ? "ready" : "starting" }) });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    expect(sockets[0]!.ofType("status.ready")).toEqual([expect.objectContaining({ s: 1, d: { ready: false, phase: "starting" } })]);
+    ready = true;
+    client.reportReadiness();
+    expect(sockets[0]!.ofType("status.ready")).toHaveLength(2);
+    expect(sockets[0]!.ofType("status.ready")[1]).toMatchObject({ s: 2, d: { ready: true, phase: "ready" } });
+    client.stop();
+  });
+
+  it("serializes auth applications in frame order; auth.applied waits for keys and the snapshot", async () => {
+    const applied: string[] = [];
+    let resolveKeys!: () => void;
+    const keysDurable = new Promise<void>(resolve => { resolveKeys = resolve; });
+    // A sink whose key write is slow ("resolves once durable"): the track-B
+    // verifier binding will be one. auth.applied must wait for it.
+    const sink: EngineUplinkAuthSink = {
+      authCursor: () => undefined,
+      applyKeys: async () => { await keysDurable; applied.push("keys"); },
+      applySync: async sync => { applied.push(`sync@${sync.authCursor}`); },
+      applyDelta: async delta => { applied.push(`delta@${delta.authCursor}`); },
+      holdCapability: () => {},
+    };
+    const { client, sockets } = fakeClient({ auth: sink });
+    client.start();
+    await flush();
+    const socket = sockets[0]!;
+    socket.frame({ t: "sys.welcome", d: {
+      protocol: 1, connectionId: "c-1", resumeToken: "r1", resumed: false,
+      pingIntervalMs: 20_000, leaseExpiresAtMs: Date.now() + 60_000, serverInstance: "s1", features: [],
+    } });
+    await flush();
+    socket.frame({ t: "auth.keys", d: { keys: [KEY] } });
+    socket.frame({ t: "auth.sync", d: { syncId: "s1", epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: "c-9", complete: true } });
+    socket.frame({ t: "auth.epochs", d: { epochs: { wa: 5 }, revocations: [], authCursor: "c-10" } });
+    await flush();
+    // Keys are still landing: nothing applied out of order, no auth.applied.
+    expect(applied).toEqual([]);
+    expect(socket.ofType("auth.applied")).toHaveLength(0);
+    resolveKeys();
+    await flush();
+    expect(applied).toEqual(["keys", "sync@c-9", "delta@c-10"]);
+    const appliedFrames = socket.ofType("auth.applied");
+    expect(appliedFrames).toHaveLength(2); // one per sync/delta, in order
+    expect(appliedFrames[0]!.d).toMatchObject({ syncId: "s1", authCursor: "c-9" });
+    expect(appliedFrames[1]!.d).toMatchObject({ authCursor: "c-10" });
+    client.stop();
+  });
+
+  it("serializes auth applications across connections and skips a finished connection's queued work", async () => {
+    const applied: string[] = [];
+    let resolveOldKeys!: () => void;
+    const oldKeysDurable = new Promise<void>(resolve => { resolveOldKeys = resolve; });
+    let keyWrites = 0;
+    const sink: EngineUplinkAuthSink = {
+      authCursor: () => undefined,
+      applyKeys: async keys => {
+        // The first connection's key write is slow and still in flight when
+        // that connection dies and the next one delivers a rotated set.
+        if (keyWrites++ === 0) await oldKeysDurable;
+        applied.push(`keys:${keys[0]!.kid}`);
+      },
+      applySync: async sync => { applied.push(`sync@${sync.authCursor}`); },
+      applyDelta: async delta => { applied.push(`delta@${delta.authCursor}`); },
+      holdCapability: () => {},
+    };
+    const { client, sockets } = fakeClient({ auth: sink });
+    client.start();
+    await flush();
+    const welcome = (socket: FakeSocket) => socket.frame({ t: "sys.welcome", d: {
+      protocol: 1, connectionId: "c-1", resumeToken: "r1", resumed: false,
+      pingIntervalMs: 20_000, leaseExpiresAtMs: Date.now() + 60_000, serverInstance: "s1", features: [],
+    } });
+    const first = sockets[0]!;
+    welcome(first);
+    await flush();
+    first.frame({ t: "auth.keys", d: { keys: [{ ...KEY, kid: "old" }] } });
+    first.frame({ t: "auth.sync", d: { syncId: "s1", epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: "c-old", complete: true } });
+    await flush();
+    first.fail();
+    await flush();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(sockets).toHaveLength(2);
+    const second = sockets[1]!;
+    welcome(second);
+    await flush();
+    second.frame({ t: "auth.keys", d: { keys: [{ ...KEY, kid: "new" }] } });
+    second.frame({ t: "auth.sync", d: { syncId: "s2", epochs: { wa: 5, wr: 2 }, revocations: [], authCursor: "c-new", complete: true } });
+    await flush();
+    // The new connection waits behind the old in-flight write: nothing of
+    // it may land first and then be overwritten by the older key set.
+    expect(applied).toEqual([]);
+    resolveOldKeys();
+    await flush();
+    // The old write that was already running finishes; the old connection's
+    // queued snapshot is skipped; the new connection applies last.
+    expect(applied).toEqual(["keys:old", "keys:new", "sync@c-new"]);
+    expect(first.ofType("auth.applied")).toHaveLength(0);
+    expect(second.ofType("auth.applied")).toEqual([expect.objectContaining({ d: expect.objectContaining({ syncId: "s2" }) })]);
+    client.stop();
+  });
+
+  it("redials when the dial never reaches open (a black-holed TCP/TLS/upgrade)", async () => {
+    const sockets: FakeSocket[] = [];
+    const { client } = fakeClient({ helloTimeoutMs: 50,
+      openSocket: () => { const socket = new FakeSocket({ hang: true }); sockets.push(socket); return socket; } });
+    client.start();
+    await flush();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.sent).toHaveLength(0); // never opened, no hello
+    await vi.advanceTimersByTimeAsync(50);    // the hello timeout covers the whole pre-welcome phase
+    await flush();
+    expect(sockets[0]!.terminated).toBe(true);
+    await vi.advanceTimersByTimeAsync(250);   // first backoff (random 0.5)
+    expect(sockets).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(50);
+    await flush();
+    expect(sockets[1]!.terminated).toBe(true);
+    client.stop();
+  });
+
+  it("acks duplicate reliable frames without re-applying them, closing only on a real gap", async () => {
+    const { client, sockets } = fakeClient();
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    const acks = () => sockets[0]!.ofType("sys.ack").map(frame => frame.a);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    await vi.advanceTimersByTimeAsync(250); // ack delay
+    expect(acks()).toEqual([1]);
+    // A replayed duplicate — the drain-handoff case: the frame landed on the
+    // drained socket after the replacement's hello, and the server replays
+    // it on the replacement. Acked again, never re-applied, never a gap.
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    expect(sockets[0]!.closeCalls).toEqual([]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(acks()).toEqual([1, 1]);
+    expect(sockets[0]!.closeCalls).toEqual([]);
+    // A true gap still closes 1000 sequence_gap for the redial-resume.
+    sockets[0]!.frame({ t: "cred.revision", s: 3, d: { revision: 9 } });
+    await flush();
+    expect(sockets[0]!.closeCalls[0]).toMatchObject({ code: 1000, reason: "sequence_gap" });
     client.stop();
   });
 
@@ -301,6 +503,211 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("applies pushed cred.revision coalesced, acks the applied revision, and dedupes re-pushes", async () => {
+    const applied: number[] = [];
+    let release: (() => void) | null = null;
+    const { client, sockets } = fakeClient({
+      onCredentialRevision: async ({ kind, revision }) => {
+        expect(kind).toBe("agent-controls");
+        applied.push(revision);
+        if (revision === 7) await new Promise<void>(resolve => { release = resolve; });
+        return { result: "applied" };
+      },
+    });
+    client.start();
+    await flush();
+    expect(client.established).toBe(false); // gate opens on the first capability
+    await serveHandshake(sockets[0]!);
+    expect(client.established).toBe(true);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    // While 7 is still applying, 8 and 9 arrive: they coalesce into one run.
+    sockets[0]!.frame({ t: "cred.revision", s: 2, d: { kind: "agent-controls", revision: 8 } });
+    sockets[0]!.frame({ t: "cred.revision", s: 3, d: { kind: "agent-controls", revision: 9 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(0); // nothing acked before its apply landed
+    release!();
+    await flush();
+    expect(applied).toEqual([7, 9]); // 8 was superseded mid-flight
+    expect(sockets[0]!.ofType("cred.ack")).toEqual([
+      expect.objectContaining({ s: 1, d: { kind: "agent-controls", revision: 7, result: "applied" } }),
+      expect.objectContaining({ s: 2, d: { kind: "agent-controls", revision: 9, result: "applied" } }),
+    ]);
+    // A re-push of an applied revision (resync) acks without re-applying.
+    sockets[0]!.frame({ t: "cred.revision", s: 4, d: { kind: "agent-controls", revision: 9 } });
+    await flush();
+    expect(applied).toEqual([7, 9]);
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(3);
+    client.stop();
+  });
+
+  it("acks a failed credential apply as failed with cred_fetch_failed, then applies a later push", async () => {
+    const outcomes: string[] = [];
+    let fail = true;
+    const { client, sockets } = fakeClient({
+      onCredentialRevision: async ({ revision }) => {
+        if (fail) throw new Error("exchange unavailable");
+        outcomes.push(`applied:${revision}`);
+        return { result: "applied" as const };
+      },
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")).toEqual([
+      expect.objectContaining({ d: { kind: "agent-controls", revision: 7, result: "failed", code: "cred_fetch_failed" } }),
+    ]);
+    fail = false;
+    sockets[0]!.frame({ t: "cred.revision", s: 2, d: { kind: "agent-controls", revision: 8 } });
+    await flush();
+    expect(outcomes).toEqual(["applied:8"]);
+    expect(sockets[0]!.ofType("cred.ack")[1]).toMatchObject({ d: { revision: 8, result: "applied" } });
+    client.stop();
+  });
+
+  it("acks an unsupported credential kind as failed without applying or recording it", async () => {
+    const calls: number[] = [];
+    const { client, sockets } = fakeClient({
+      onCredentialRevision: async ({ revision }) => { calls.push(revision); return { result: "applied" as const }; },
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "repository", revision: 5 } });
+    await flush();
+    expect(calls).toEqual([]); // the handler never sees a kind the engine does not consume
+    expect(sockets[0]!.ofType("cred.ack")).toEqual([
+      expect.objectContaining({ d: { kind: "repository", revision: 5, result: "failed", code: "cred_kind_unsupported" } }),
+    ]);
+    // Not recorded as applied: a re-push is answered again, never deduped silently.
+    sockets[0]!.frame({ t: "cred.revision", s: 2, d: { kind: "repository", revision: 5 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(2);
+    expect(calls).toEqual([]);
+    client.stop();
+  });
+
+  it("maps a non-contract failure code to cred_fetch_failed on the wire", async () => {
+    const codes = ["ECONNRESET", "42", "x".repeat(65), "Has-Caps"];
+    let index = 0;
+    const { client, sockets } = fakeClient({
+      onCredentialRevision: async () => ({ result: "failed" as const, code: codes[index++] }),
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    for (let revision = 1; revision <= codes.length; revision++) {
+      sockets[0]!.frame({ t: "cred.revision", s: revision, d: { kind: "agent-controls", revision } });
+      await flush();
+    }
+    // Every non-conforming code leaves as cred_fetch_failed: a bad code
+    // would 4400 the connection into a resync re-push loop.
+    expect(sockets[0]!.ofType("cred.ack").map(frame => frame.d))
+      .toEqual(codes.map((_, i) => expect.objectContaining({ revision: i + 1, result: "failed", code: "cred_fetch_failed" })));
+    client.stop();
+  });
+
+  it("passes a contract-conforming failure code through", async () => {
+    const { client, sockets } = fakeClient({
+      onCredentialRevision: async () => ({ result: "failed" as const, code: "engine_authority_rejected" }),
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")[0]).toMatchObject({ d: { revision: 7, result: "failed", code: "engine_authority_rejected" } });
+    client.stop();
+  });
+
+  it("closes 4400 on a malformed cred.revision", async () => {
+    const { client, sockets } = fakeClient({ onCredentialRevision: async () => ({ result: "applied" }) });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: "soon" } });
+    await flush();
+    expect(sockets[0]!.closeCalls[0]).toMatchObject({ code: 4400, reason: "frame_invalid" });
+    client.stop();
+  });
+
+  it("closes 4400 on a welcome with an empty resume token", async () => {
+    const { client, sockets } = fakeClient();
+    client.start();
+    await flush();
+    // An empty token would never be offered back, so a later resumed: false
+    // welcome could not reset the lineage and the old outbox would loop.
+    await serveHandshake(sockets[0]!, { token: "" });
+    expect(sockets[0]!.closeCalls[0]).toMatchObject({ code: 4400, reason: "welcome_invalid" });
+    expect(client.state).not.toBe("connected");
+    client.stop();
+  });
+
+  it("established stays false when cred.v1 was not negotiated", async () => {
+    const changes: boolean[] = [];
+    const { client, sockets } = fakeClient({ onEstablishedChange: established => changes.push(established) });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!, { features: [] }); // an extension list without cred.v1
+    expect(sockets[0]!.ofType("cred.ack")).toHaveLength(0);
+    expect(client.established).toBe(false); // gate open, but no pushes will flow: keep the fast poll
+    expect(changes).toEqual([]);
+    client.stop();
+  });
+
+  it("a failed push drops established until the next successful exchange", async () => {
+    const changes: boolean[] = [];
+    let fail = true;
+    const { client, sockets } = fakeClient({
+      onEstablishedChange: established => changes.push(established),
+      onCredentialRevision: async () => {
+        if (fail) throw new Error("exchange unavailable");
+        return { result: "applied" as const };
+      },
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!);
+    expect(client.established).toBe(true);
+    expect(changes).toEqual([true]);
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 7 } });
+    await flush();
+    expect(sockets[0]!.ofType("cred.ack")[0]).toMatchObject({ d: { revision: 7, result: "failed" } });
+    expect(client.established).toBe(false); // the failed push retries via the fast poll
+    expect(changes).toEqual([true, false]);
+    // A successful fallback poll clears the mark without waiting for a push.
+    client.noteCredentialExchangeSucceeded();
+    expect(client.established).toBe(true);
+    expect(changes).toEqual([true, false, true]);
+    // And a failed push again: a later successful PUSH clears it the same way.
+    sockets[0]!.frame({ t: "cred.revision", s: 2, d: { kind: "agent-controls", revision: 8 } });
+    await flush();
+    expect(client.established).toBe(false);
+    fail = false;
+    sockets[0]!.frame({ t: "cred.revision", s: 3, d: { kind: "agent-controls", revision: 9 } });
+    await flush();
+    expect(client.established).toBe(true);
+    client.stop();
+  });
+
+  it("reports established changes at the gate and on loss", async () => {
+    const changes: boolean[] = [];
+    const { client, sockets } = fakeClient({ onEstablishedChange: established => changes.push(established) });
+    client.start();
+    await flush();
+    expect(client.established).toBe(false);
+    await serveHandshake(sockets[0]!);
+    expect(client.established).toBe(true);
+    expect(changes).toEqual([true]); // gate opened
+    sockets[0]!.fail();
+    await flush();
+    expect(client.established).toBe(false);
+    expect(changes).toEqual([true, false]); // the poll cadence must fall back now, not after 30 s
+    client.stop();
+  });
+
   it("acks in-order reliable CP frames and closes on a sequence gap, then redials", async () => {
     const { client, sockets } = fakeClient({ random: () => 0.5 });
     client.start();
@@ -326,7 +733,10 @@ describe("engine uplink client (socket level)", () => {
     const chunk = Buffer.concat([Buffer.from([0x01, 0x01, 0, 0, 0, 0, 0, 7]), Buffer.from("payload")]);
     sockets[0]!.binary(chunk);
     await flush();
-    expect(sockets[0]!.ofType("sys.error")[0]!.d).toMatchObject({ code: "relay_channel_unknown", channel: 7 });
+    // The frozen sys.error payload is { code, message, fatal }; `channel` is
+    // an additive hint receivers may ignore.
+    expect(sockets[0]!.ofType("sys.error")[0]!.d).toMatchObject({
+      code: "relay_channel_unknown", message: expect.any(String), fatal: false, channel: 7 });
     expect(sockets[0]!.closeCalls).toHaveLength(0);
     client.stop();
   });
@@ -494,6 +904,35 @@ describe("engine uplink client against the real control-plane server", () => {
     expect(metrics.some(([name]) => name === "engine_uplink_auth_apply_ms")).toBe(true);
   });
 
+  it("pushes credential revisions to a cred.v1 engine and receives its cred.ack", async () => {
+    let current: number | null = 7;
+    const acks: Array<Record<string, unknown>> = [];
+    let serverRef: CloudEngineUplinkServer | null = null;
+    const cred = new UplinkCredentialPush({
+      sessionFor: engineInstanceId => serverRef?.session(engineInstanceId) ?? null,
+      readRevision: async () => current,
+      onAck: (_session, ack) => { acks.push({ ...ack }); },
+    });
+    const a = await start({ extensions: [cred] });
+    serverRef = a.uplink;
+    const applied: number[] = [];
+    const client = makeClient({ endpoint: a.url, features: ["cred.v1"],
+      onCredentialRevision: async ({ revision }) => { applied.push(revision); return { result: "applied" }; } });
+    client.start();
+    // The resync push follows the gate; the engine applies and acks it.
+    await until(() => applied.length === 1 && acks.length === 1);
+    expect(applied).toEqual([7]);
+    expect(acks[0]).toMatchObject({ kind: "agent-controls", revision: 7, result: "applied" });
+    // A committed mutation notifies; the owning instance pushes the bump.
+    current = 8;
+    cred.revisionChanged(identity.engineInstanceId, 8);
+    await until(() => applied.length === 2 && acks.length === 2);
+    expect(applied).toEqual([7, 8]);
+    expect(acks[1]).toMatchObject({ kind: "agent-controls", revision: 8, result: "applied" });
+    // An engine without the feature is left to its poll (negotiation).
+    expect(client.established).toBe(true);
+  });
+
   it("resumes after an unannounced loss and offers the applied auth cursor", async () => {
     const a = await start();
     const auth = new RecordingAuth();
@@ -608,6 +1047,8 @@ describe("engine uplink client against the real control-plane server", () => {
     expect(client.state).not.toBe("parked");
     authority.result = { ok: true, accountUserId: "user-1", leaseExpiresAtMs: Date.now() + 60_000 };
     await until(() => a.uplink.counters.admitted === 1);
+    // The server counts the admission before the client reads its welcome.
+    await until(() => client.state === "connected");
     expect(client.state).toBe("connected");
   });
 });

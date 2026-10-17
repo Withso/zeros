@@ -15,7 +15,7 @@ import {
   UPLINK_CLOSE,
   UPLINK_DEFAULT_PING_INTERVAL_MS,
   UPLINK_HELLO_TIMEOUT_MS,
-  UPLINK_MAX_BINARY_FRAME_BYTES,
+  UPLINK_MAX_SOCKET_PAYLOAD_BYTES,
   UPLINK_MAX_CONTROL_FRAME_BYTES,
   UPLINK_PATH,
   UPLINK_SUBPROTOCOL,
@@ -58,8 +58,10 @@ export interface UplinkSession {
 export interface UplinkExtension {
   readonly feature: string;
   onOpen?(session: UplinkSession, resumed: boolean): void;
-  /** True when the reliable frame type belongs to this extension; a thrown
-   * error or `"invalid"` closes the uplink with 4400. */
+  /** True when the frame type belongs to this extension; a thrown error or
+   * `"invalid"` closes the uplink with 4400. Sequenced (reliable) and
+   * unsequenced engine→CP frames both arrive here, in receive order;
+   * unsequenced types are never replayed on a resume. */
   onFrame?(session: UplinkSession, t: string, d: Record<string, unknown>): boolean | "invalid";
   /** True when the relay chunk's channel belongs to this extension; a
    * thrown error closes the uplink with 4400. Unclaimed channels get a
@@ -143,7 +145,7 @@ export class CloudEngineUplinkServer {
   private readonly wss = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
-    maxPayload: UPLINK_MAX_BINARY_FRAME_BYTES,
+    maxPayload: UPLINK_MAX_SOCKET_PAYLOAD_BYTES,
     handleProtocols: protocols => protocols.has(UPLINK_SUBPROTOCOL) ? UPLINK_SUBPROTOCOL : false,
   });
   private readonly all = new Set<UplinkConnection>();
@@ -236,10 +238,15 @@ export class CloudEngineUplinkServer {
       if (connection.identity?.workspaceId === workspaceId) void connection.recheck();
   }
 
-  /** Another realtime instance recorded a newer uplink for this engine. */
+  /** Another realtime instance recorded a newer uplink for this engine.
+   * Replica clocks are NTP-disciplined but not identical, so "newer" is a
+   * deterministic order: the later connect wins, ties (or skew within the
+   * connect gap) break by connection id. */
   ownerChanged(engineInstanceId: string, connectionId: string, connectedAtMs: number): void {
     const local = this.current.get(engineInstanceId);
-    if (!local || local.connectionId === connectionId || !(connectedAtMs > local.connectedAtMs)) return;
+    if (!local || local.connectionId === connectionId) return;
+    if (connectedAtMs < local.connectedAtMs ||
+        (connectedAtMs === local.connectedAtMs && connectionId < local.connectionId)) return;
     if (!local.drained) this.recordSupersede(local.identity!);
     local.supersede();
   }
@@ -463,8 +470,21 @@ class UplinkConnection {
       const createdAt = this.deltaCreatedAt.shift();
       if (!this.authApplied || createdAt === undefined) return this.invalid("auth_applied_unexpected");
       this.server.options.metric?.("capability_revocation_push_ms", Math.max(0, this.now() - createdAt));
+      return;
     }
-    // sys.ack carries only `a`; other unsequenced types are ignored.
+    // sys.ack carries only `a`, applied above. Other unsequenced engine→CP
+    // frames (relay.accept/reject/credit/close, …) belong to the negotiated
+    // extensions; unknown unsequenced types stay ignored (the contract's
+    // unknown-type rule).
+    if (frame.t === "sys.ack") return;
+    for (const extension of this.server.options.extensions) {
+      if (!this.features.has(extension.feature) || !extension.onFrame) continue;
+      try {
+        const handled = extension.onFrame(this.session!, frame.t, d);
+        if (handled === "invalid") return this.invalid("frame_invalid");
+        if (handled) return;
+      } catch { return this.invalid("frame_invalid"); }
+    }
   }
 
   /** Binary frames are relay chunks (contract "Binary relay frame"). Relay
@@ -483,7 +503,10 @@ class UplinkConnection {
         if (extension.onRelayChunk(this.session, chunk)) return;
       } catch { return this.invalid("frame_invalid"); }
     }
-    this.send({ t: "sys.error", d: { code: "relay_channel_unknown", channel: chunk.channel } });
+    this.send({ t: "sys.error", d: {
+      code: "relay_channel_unknown", message: "no negotiated extension claims this relay channel",
+      fatal: false, channel: chunk.channel,
+    } });
   }
 
   private reliable(t: string, d: Record<string, unknown>): "ok" | "invalid" {
@@ -545,15 +568,22 @@ class UplinkConnection {
     this.leaseExpiresAtMs = verified.leaseExpiresAtMs;
     const offered = new Set(hello.features);
     this.features = new Set(options.extensions.map(extension => extension.feature).filter(feature => offered.has(feature)));
-    // A token resumes only with the credential, engine instance and bootId it was issued to.
+    // A token resumes only with the credential, engine instance and bootId
+    // it was issued to — and only when its cursor can be repaired. Peek
+    // first: a cursor the outbox cannot replay (a foreign or confused peer)
+    // falls back to a fresh session without consuming the lineage, so the
+    // real owner can still resume with a valid cursor.
     const key = lineageKey(identity, this.token);
     const observed = this.server.owner(identity.engineInstanceId);
     if (hello.resume) {
-      const taken = this.server.resume.take(hello.resume.token, key);
-      if (taken.resumed && taken.state.outbox.replayAfter(hello.resume.lastReceivedSeq)) {
-        this.lineage = taken.state;
-        this.resumed = true;
-        this.peerLastReceived = hello.resume.lastReceivedSeq;
+      const peeked = this.server.resume.peek(hello.resume.token, key);
+      if (peeked.resumable && peeked.state.outbox.replayableAfter(hello.resume.lastReceivedSeq)) {
+        const taken = this.server.resume.take(hello.resume.token, key);
+        if (taken.resumed) {
+          this.lineage = taken.state;
+          this.resumed = true;
+          this.peerLastReceived = hello.resume.lastReceivedSeq;
+        }
       }
     }
     this.lineage ??= { outbox: new ReliableOutbox(), inbound: new InboundSequence(), ready: false, phase: null, report: null, activity: null };
@@ -594,27 +624,37 @@ class UplinkConnection {
     this.authTimer = null;
     for (const delta of this.pendingDeltas.splice(0)) this.send({ t: "auth.epochs", d: delta });
     await this.issueCapability();
-    if (this.state !== "welcomed" || !this.lineage) return;
-    const frames = this.lineage.outbox.replayAfter(this.peerLastReceived) ?? [];
-    this.flowing = true;
-    for (const frame of frames) this.sendText(frame.text);
-    for (const extension of this.server.options.extensions)
-      if (this.features.has(extension.feature)) extension.onOpen?.(this.session!, this.resumed);
   }
 
-  /** Each engine token is issued by `api` from current authority. */
+  /** Each engine token is issued by `api` from current authority. The gate
+   * opens only on the first successful issue — a transient issuer failure
+   * retries with full-jitter backoff (floored at 100 ms so a zero draw
+   * never spins) while buffered reliable frames keep waiting; an authority
+   * refusal closes 4403. Frozen handshake step 4 order: the capability,
+   * then the resume retransmit, then extension `onOpen`. */
   private async issueCapability(): Promise<void> {
     if (this.capabilityTimer) clearTimeout(this.capabilityTimer);
     this.capabilityTimer = null;
     const options = this.server.options;
     const issued = await options.capabilities.issue(this.identity!).catch(() => ({ ok: false as const, reason: "unavailable" as const }));
-    if (this.state !== "welcomed") return;
-    let nextMs = options.capabilityRetryMs;
+    if (this.state !== "welcomed" || !this.lineage) return;
+    if (!issued.ok && issued.reason === "authority")
+      return this.close(UPLINK_CLOSE.forbidden, "uplink_forbidden", { park: false });
+    let nextMs: number;
     if (issued.ok) {
       this.send({ t: "auth.capability", d: { audience: "zeros:api", token: issued.token, expiresAtMs: issued.expiresAtMs } });
-      nextMs = Math.max(1_000, Math.floor((issued.expiresAtMs - this.now()) * 0.6));
-    } else if (issued.reason === "authority") {
-      return this.close(UPLINK_CLOSE.forbidden, "uplink_forbidden", { park: false });
+      // 60% of the lifetime (300 s cadence per the contract), floored so a
+      // near-past expiry can never drive a reissue loop.
+      nextMs = Math.max(5_000, Math.floor((issued.expiresAtMs - this.now()) * 0.6));
+      if (!this.flowing) {
+        const frames = this.lineage.outbox.replayAfter(this.peerLastReceived) ?? [];
+        this.flowing = true;
+        for (const frame of frames) this.sendText(frame.text);
+        for (const extension of this.server.options.extensions)
+          if (this.features.has(extension.feature)) extension.onOpen?.(this.session!, this.resumed);
+      }
+    } else {
+      nextMs = Math.max(100, Math.floor(options.random() * options.capabilityRetryMs));
     }
     this.capabilityTimer = setTimeout(() => void this.issueCapability(), nextMs);
     this.capabilityTimer.unref?.();

@@ -6,8 +6,10 @@ import { seedReadyCloudWorkspace } from "../cloud-workspaces/test-fixtures.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { AuditUplinkSecurityAlerts } from "./uplink-alerts.js";
 import { DatabaseUplinkAuthority, type UplinkIdentity } from "./uplink-authority.js";
-import { UPLINK_AUTHORITY_CHANNEL, UPLINK_OWNER_CHANNEL, handleUplinkNotification } from "./uplink-notifications.js";
+import { UPLINK_AUTHORITY_CHANNEL, UPLINK_CRED_REVISION_CHANNEL, UPLINK_OWNER_CHANNEL, handleUplinkNotification, startUplinkNotifications } from "./uplink-notifications.js";
 import { DatabaseUplinkPresenceStore, type UplinkPresenceSnapshot } from "./uplink-presence.js";
+import { DatabaseUplinkCredentialStore, UplinkCredentialPush } from "./uplink-cred.js";
+import type { CloudEngineUplinkServer } from "./uplink-server.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -16,6 +18,7 @@ d("engine uplink database paths", () => {
   let pool: pg.Pool;
   let identity: UplinkIdentity;
   let token: string;
+  let ownerUserId: string;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
@@ -25,6 +28,7 @@ d("engine uplink database paths", () => {
       "SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [f.engineInstanceId])).rows[0]!.runtime_boot_id;
     identity = { workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1, engineInstanceId: f.engineInstanceId, bootId: boot };
     token = f.heartbeatToken;
+    ownerUserId = f.userId;
   });
 
   const authority = (alerts?: AuditUplinkSecurityAlerts) =>
@@ -90,6 +94,20 @@ d("engine uplink database paths", () => {
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_engine_uplinks")).rows[0].n).toBe(1);
   });
 
+  it("breaks same-millisecond presence ties by connection id", async () => {
+    const store = new DatabaseUplinkPresenceStore(pool);
+    const at = Date.now();
+    const lower = snapshot({ connectionId: "00000000-0000-4000-8000-000000000001", connectedAtMs: at, lastSeenAtMs: at });
+    const higher = snapshot({ connectionId: "00000000-0000-4000-8000-000000000002", connectedAtMs: at, lastSeenAtMs: at, realtimeInstance: "realtime-b" });
+    await store.write(lower);
+    await store.write(higher);
+    expect(await row()).toMatchObject({ connection_id: higher.connectionId, realtime_instance: "realtime-b" });
+    await store.write({ ...lower, ready: true, phase: "ready" });
+    expect(await row()).toMatchObject({ connection_id: higher.connectionId, ready: false, phase: null });
+    await store.write({ ...higher, ready: true, phase: "ready" }); // the owner itself always re-writes
+    expect(await row()).toMatchObject({ connection_id: higher.connectionId, ready: true, phase: "ready" });
+  });
+
   it("notifies a new owner and authority loss, but not lease renewals", async () => {
     const listener = await pool.connect();
     const notices: { channel: string; payload: string }[] = [];
@@ -115,6 +133,125 @@ d("engine uplink database paths", () => {
       expect(server.ownerChanged).toHaveBeenCalledWith(identity.engineInstanceId, first.connectionId, first.connectedAtMs);
       expect(server.revalidateWorkspace).toHaveBeenCalledWith(identity.workspaceId);
       expect(server.revalidate).toHaveBeenCalledWith([identity.engineInstanceId]);
+    } finally {
+      await listener.query("UNLISTEN *");
+      listener.release();
+    }
+  });
+
+  it("reads the desired credential revision through the system statement a raw pool read cannot see", async () => {
+    const writerEpoch = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_local_command_writers
+      (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+    [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+    await pool.query(`INSERT INTO cloud_agent_boot_bindings
+      (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+    [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+    // The table is FORCE ROW LEVEL SECURITY with system-only policies: the
+    // runtime role without app.system sees no row, so a raw pool.query here
+    // (what the gate-time read used to do) silently returns nothing.
+    const probe = await pool.connect();
+    try {
+      await probe.query("BEGIN");
+      await probe.query("SET LOCAL ROLE zeros_app");
+      const hidden = await probe.query(
+        "SELECT desired_cache_revision FROM cloud_agent_boot_bindings WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+      expect(hidden.rows).toEqual([]);
+      await probe.query("ROLLBACK");
+    } finally { probe.release(); }
+    const store = new DatabaseUplinkCredentialStore(pool);
+    await expect(store.desiredRevision(identity.engineInstanceId)).resolves.toBe(1);
+    await pool.query("UPDATE cloud_agent_boot_bindings SET desired_cache_revision=3 WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+    await expect(store.desiredRevision(identity.engineInstanceId)).resolves.toBe(3);
+    await expect(store.desiredRevision(randomUUID())).resolves.toBeNull();
+    await pool.query("UPDATE cloud_agent_boot_bindings SET retired_at=clock_timestamp() WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+    await expect(store.desiredRevision(identity.engineInstanceId)).resolves.toBeNull();
+  });
+
+  it("reads many engines' desired revisions in one system statement, skipping retired and unknown engines", async () => {
+    const writerEpoch = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_local_command_writers
+      (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+    [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+    await pool.query(`INSERT INTO cloud_agent_boot_bindings
+      (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch, desired_cache_revision)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,1,4)`,
+    [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+    const store = new DatabaseUplinkCredentialStore(pool);
+    const unknown = randomUUID();
+    await expect(store.desiredRevisions([])).resolves.toEqual(new Map());
+    await expect(store.desiredRevisions([identity.engineInstanceId, unknown, identity.engineInstanceId]))
+      .resolves.toEqual(new Map([[identity.engineInstanceId, 4]]));
+    await pool.query("UPDATE cloud_agent_boot_bindings SET retired_at=clock_timestamp() WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+    await expect(store.desiredRevisions([identity.engineInstanceId])).resolves.toEqual(new Map());
+  });
+
+  it("re-pushes the current revision to already-connected cred.v1 uplinks once the listener is ready", async () => {
+    const writerEpoch = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_local_command_writers
+      (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+    [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+    await pool.query(`INSERT INTO cloud_agent_boot_bindings
+      (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch, desired_cache_revision)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,1,6)`,
+    [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+    // An engine whose gate is already open never re-gates, so a bump lost
+    // while the listener was down must be repaired from onReady.
+    const sent: Array<{ t: string; d: Record<string, unknown> }> = [];
+    const session = { connectionId: randomUUID(), identity, features: new Set(["cred.v1"]),
+      sendReliable: (t: string, d: Record<string, unknown>) => { sent.push({ t, d }); return true; } };
+    const store = new DatabaseUplinkCredentialStore(pool);
+    const reads: string[][] = [];
+    const cred = new UplinkCredentialPush({
+      sessionFor: id => id === identity.engineInstanceId ? session : null,
+      readRevision: identity => store.desiredRevision(identity.engineInstanceId),
+      readRevisions: ids => { reads.push([...ids]); return store.desiredRevisions(ids); },
+    });
+    const server = { ownerChanged: vi.fn(), revalidate: vi.fn(), revalidateWorkspace: vi.fn(),
+      ownedEngineInstances: () => [identity.engineInstanceId, randomUUID()] };
+    const listenerPool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1 });
+    const stop = startUplinkNotifications(listenerPool, server as unknown as CloudEngineUplinkServer,
+      { owners: async () => [] }, console, cred);
+    try {
+      for (let i = 0; i < 100 && sent.length < 1; i++) await new Promise(resolve => setTimeout(resolve, 20));
+      expect(sent).toEqual([{ t: "cred.revision", d: { kind: "agent-controls", revision: 6 } }]);
+      // One read for the owned engines that negotiated cred.v1 only.
+      expect(reads).toEqual([[identity.engineInstanceId]]);
+    } finally {
+      await stop();
+      await listenerPool.end();
+    }
+  });
+
+  it("notifies a credential-control revision bump and routes it to the push extension", async () => {
+    const listener = await pool.connect();
+    const notices: { channel: string; payload: string }[] = [];
+    try {
+      listener.on("notification", notice => notices.push({ channel: notice.channel, payload: notice.payload ?? "" }));
+      await listener.query(`LISTEN ${UPLINK_CRED_REVISION_CHANNEL}`);
+      const writerEpoch = randomUUID();
+      await pool.query(`INSERT INTO cloud_workspace_local_command_writers
+        (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+      [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+      await pool.query(`INSERT INTO cloud_agent_boot_bindings
+        (workspace_id, org_id, generation, engine_instance_id, boot_id, writer_epoch, funding_owner_user_id, funding_owner_epoch)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+      [identity.workspaceId, identity.organizationId, identity.generation, identity.engineInstanceId, identity.bootId, writerEpoch, ownerUserId]);
+      // Only a desired-revision bump notifies; other column updates do not.
+      await pool.query("UPDATE cloud_agent_boot_bindings SET credentials_initialized=true WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+      await pool.query("UPDATE cloud_agent_boot_bindings SET desired_cache_revision=desired_cache_revision+1 WHERE engine_instance_id=$1", [identity.engineInstanceId]);
+      for (let i = 0; i < 50 && notices.length < 1; i++) await new Promise(resolve => setTimeout(resolve, 20));
+      expect(notices).toEqual([{ channel: UPLINK_CRED_REVISION_CHANNEL, payload: `${identity.engineInstanceId}:2` }]);
+      const server = { ownerChanged: vi.fn(), revalidate: vi.fn(), revalidateWorkspace: vi.fn() };
+      const cred = { revisionChanged: vi.fn() };
+      handleUplinkNotification(server, UPLINK_CRED_REVISION_CHANNEL, notices[0]!.payload, cred);
+      expect(cred.revisionChanged).toHaveBeenCalledWith(identity.engineInstanceId, 2);
+      expect(server.revalidate).not.toHaveBeenCalled();
     } finally {
       await listener.query("UNLISTEN *");
       listener.release();

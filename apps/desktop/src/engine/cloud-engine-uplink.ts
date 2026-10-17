@@ -183,17 +183,46 @@ export interface EngineUplinkSocket {
   on(event: "error", listener: (error: Error) => void): void;
 }
 
+/** A pushed credential-control revision (S2 cred channel). */
+export type EngineUplinkCredentialRevision = Readonly<{ kind: "agent-controls" | "repository"; revision: number }>;
+/** The outcome the engine reports back in `cred.ack` after its exchange. */
+export type EngineUplinkCredentialAck = Readonly<{ result: "applied" | "failed"; code?: string }>;
+
+/** The S2 `code` shape (`^[a-z][a-z0-9_]{2,63}$`). Any other value maps to
+ * `cred_fetch_failed`: a non-conforming code would 4400 the connection
+ * into a resync re-push loop, so the engine side never emits one. */
+export function sanitizeCredAckCode(code: unknown): string {
+  return typeof code === "string" && /^[a-z][a-z0-9_]{2,63}$/.test(code) ? code : "cred_fetch_failed";
+}
+
 export type CloudEngineUplinkOptions = {
   endpoint: string;
   /** The heartbeat credential; the uplink authenticates with it once per connection. */
   token: string;
   identity: EngineUplinkIdentity;
   runtimeVersion: string;
-  /** Additive feature flags offered in the hello; none in the C2 slice. */
+  /** Additive feature flags offered in the hello; `cred.v1` negotiates the
+   * credential-control push. */
   features?: readonly string[];
   auth: EngineUplinkAuthSink;
   /** Current engine readiness, sent as `status.ready` once the gate opens. */
   readiness?: () => EngineUplinkReadiness;
+  /** Applies a pushed credential-control revision (runs the engine's
+   * credential exchange). Pushes coalesce to the latest revision per kind
+   * while one is in flight; the result is reported as `cred.ack`. */
+  onCredentialRevision?: (revision: EngineUplinkCredentialRevision) => Promise<EngineUplinkCredentialAck>;
+  /** The credential kinds the engine consumes. A push of any other kind is
+   * acked `failed`/`cred_kind_unsupported` without calling the handler and
+   * without recording it applied, so a future `repository` push is an
+   * explicit signal, never silently swallowed. Defaults to
+   * `["agent-controls"]`: the CP has no `repository` revision source yet,
+   * and repository credentials still arrive on the HTTP heartbeat
+   * response. */
+  credentialKinds?: readonly EngineUplinkCredentialRevision["kind"][];
+  /** Reports flips of `established`. The engine drops the credential poll
+   * back to its fast fallback cadence the moment the gate closes instead of
+   * waiting out an armed slow timer. */
+  onEstablishedChange?: (established: boolean) => void;
   /** 4409: re-verify registration authority before the redial (S2 rule 4). */
   onReverifyAuthority?: () => void;
   /** Terminal close: the client parks and never redials (HTTP stays up). */
@@ -239,6 +268,12 @@ export class CloudEngineUplinkClient {
   private outboxSent = 0;
   private outboxAcked = 0;
   private inboundContiguous = 0;
+  /** Credential push: latest queued and latest acked-applied revision per
+   * kind. Survives reconnects — revisions are monotonic per binding, so the
+   * high-water stays valid across a lineage reset. */
+  private readonly credQueue = new Map<string, number>();
+  private readonly credApplied = new Map<string, number>();
+  private credFlight: Promise<void> | null = null;
 
   constructor(options: CloudEngineUplinkOptions) {
     this.options = options;
@@ -265,6 +300,42 @@ export class CloudEngineUplinkClient {
 
   get parkReason(): EngineUplinkParkReason | null { return this.parked; }
 
+  /** True while a connection's gate is open (its first auth.capability
+   * arrived): pushed cred.revision frames flow, so the credential-control
+   * poll can back off to its slow fallback cadence. */
+  get established(): boolean { return this.computeEstablished(); }
+  private lastEstablished = false;
+
+  /** A pushed cred.revision failed to apply. While outstanding, established
+   * stays false so the fallback poll (500 ms) retries what the CP does not
+   * re-push; cleared by the next successful exchange, push or poll. */
+  private credFailedOutstanding = false;
+
+  private computeEstablished(): boolean {
+    const connection = this.connection;
+    return connection?.gateOpen === true
+      && connection.features.has("cred.v1") // no negotiated push channel: poll fast
+      && !this.credFailedOutstanding;
+  }
+
+  /** A credential-control exchange succeeded outside a push (the fallback
+   * poll): clears a failed-push-outstanding mark so `established` recovers
+   * without waiting for the CP to push again. */
+  noteCredentialExchangeSucceeded(): void {
+    if (!this.credFailedOutstanding) return;
+    this.credFailedOutstanding = false;
+    this.noteEstablished();
+  }
+
+  /** @internal Recompute `established` at every input change (gate open,
+   * connection loss, stop) and report a flip exactly once. */
+  noteEstablished(): void {
+    const value = this.computeEstablished();
+    if (value === this.lastEstablished) return;
+    this.lastEstablished = value;
+    this.options.onEstablishedChange?.(value);
+  }
+
   start(): void {
     if (this.started) return;
     this.started = true;
@@ -280,11 +351,16 @@ export class CloudEngineUplinkClient {
     this.handoff?.initiateClose(CLOSE.normal, "engine_stopping");
     this.connection = this.handoff = null;
     this.resume = null;
+    this.noteEstablished();
   }
 
   /** Reliable engine→CP frame (`status.ready`, later `cred.ack`, …). Frames
    * are buffered until acked and retransmitted on a resume; overflow drops
-   * the connection so both sides resync on the next hello. */
+   * the connection so both sides resync on the next hello. A frame leaves
+   * the socket only once the connection's gate is open (its first
+   * auth.capability): anything earlier would hit the server's
+   * frame_before_welcome or cross frozen handshake step 4, so pre-gate
+   * frames buffer and flush with the gate retransmit. */
   sendReliable(t: string, d: Record<string, unknown>): void {
     if (!this.started || this.stopped || this.parked) return;
     const s = this.outboxSent + 1;
@@ -299,10 +375,92 @@ export class CloudEngineUplinkClient {
     this.outbox.push(Object.freeze({ s, text, bytes }));
     this.outboxBytes += bytes;
     this.outboxSent = s;
-    this.connection?.sendRaw(text);
+    if (this.connection?.gateOpen) this.connection.sendRaw(text);
+  }
+
+  /** Pushes the current readiness as `status.ready` (track E: the engine
+   * marks ready when its inputs change, not only at the gate). Safe at any
+   * time: pre-gate the frame buffers and flushes with the gate retransmit;
+   * before start or after park it is a no-op. */
+  reportReadiness(): void {
+    if (!this.options.readiness) return;
+    this.sendReliable("status.ready", { ...this.options.readiness() });
+  }
+
+  /** @internal A validated `cred.revision` arrived on the wire. Applies
+   * coalesce to the latest revision per kind while one is in flight, and
+   * each applied revision is acked exactly once (a re-push of an applied
+   * revision — the resync case — acks without re-running the exchange). */
+  pushCredentialRevision(revision: EngineUplinkCredentialRevision): void {
+    const handler = this.options.onCredentialRevision;
+    if (!handler) return; // nothing consumes pushes yet; the poll keeps working
+    if (!(this.options.credentialKinds ?? ["agent-controls"]).includes(revision.kind)) {
+      this.sendReliable("cred.ack",
+        { kind: revision.kind, revision: revision.revision, result: "failed", code: "cred_kind_unsupported" });
+      return;
+    }
+    if (revision.revision <= (this.credApplied.get(revision.kind) ?? 0)) {
+      this.sendReliable("cred.ack", { kind: revision.kind, revision: revision.revision, result: "applied" });
+      return;
+    }
+    this.credQueue.set(revision.kind, Math.max(revision.revision, this.credQueue.get(revision.kind) ?? 0));
+    this.credFlight ??= this.drainCredentialRevisions(handler)
+      .finally(() => { this.credFlight = null; });
+  }
+
+  private async drainCredentialRevisions(
+    handler: NonNullable<CloudEngineUplinkOptions["onCredentialRevision"]>,
+  ): Promise<void> {
+    for (;;) {
+      const next = this.credQueue.entries().next().value;
+      if (!next) return;
+      const [kind, revision] = next;
+      this.credQueue.delete(kind);
+      let outcome: EngineUplinkCredentialAck;
+      try {
+        outcome = await handler({ kind: kind as EngineUplinkCredentialRevision["kind"], revision });
+      } catch {
+        outcome = { result: "failed", code: "cred_fetch_failed" };
+      }
+      // A failed revision is not recorded: a later re-push retries the
+      // exchange (and the fallback poll converges regardless).
+      if (outcome.result === "applied") {
+        this.credApplied.set(kind, Math.max(revision, this.credApplied.get(kind) ?? 0));
+        if (this.credFailedOutstanding) { this.credFailedOutstanding = false; this.noteEstablished(); }
+      } else {
+        this.credFailedOutstanding = true; // drops the poll to its fast cadence until recovery
+        this.noteEstablished();
+      }
+      this.sendReliable("cred.ack", {
+        kind, revision, result: outcome.result,
+        // Hold the wire to the contract's code shape whatever the handler
+        // returned (a raw error code can be ECONNRESET, a number, …).
+        ...(outcome.result === "failed" ? { code: sanitizeCredAckCode(outcome.code) } : {}),
+      });
+    }
   }
 
   /* ---- connection-facing internals (the only dial/park/count site) ---- */
+
+  /** Auth applications from every connection serialize on this one chain,
+   * in frame order. The sink resolves once durable, so without it an
+   * `auth.applied` could reach the CP (opening its gate) while keys are
+   * still landing, a delta could apply under a slower snapshot, or a dead
+   * connection's late write could land after its replacement's (a key
+   * rotation regressing, the cursor moving backward). Work queued for a
+   * connection that finished before its turn is skipped: the replacement
+   * re-sends keys and the snapshot from the cursor. A link already running
+   * when its connection dies completes, and later links wait for it. A
+   * rejected link must not wedge the chain; the apply methods handle their
+   * own failures (close + redial). */
+  private authChain: Promise<void> = Promise.resolve();
+
+  /** @internal */
+  enqueueAuth(connection: Connection, work: () => Promise<void>): void {
+    this.authChain = this.authChain
+      .then(() => connection.isFinished ? undefined : work())
+      .catch(() => {});
+  }
 
   /** @internal */ now(): number { return this.clock(); }
   /** @internal */ get socketFactory(): NonNullable<CloudEngineUplinkOptions["openSocket"]> { return this.openSocket; }
@@ -320,11 +478,16 @@ export class CloudEngineUplinkClient {
   }
   /** @internal */ get inboundAck(): number { return this.inboundContiguous; }
 
-  /** @internal A reliable CP frame landed in order; returns false on a gap. */
-  acceptInbound(s: number): boolean {
-    if (s !== this.inboundContiguous + 1) return false;
+  /** @internal A reliable CP frame landed. Duplicates after a replay (the
+   * drain-handoff case: a frame in flight on the drained socket also lands
+   * on the replacement's retransmit) are acked again but never re-applied;
+   * only a true gap redials for the retransmit. */
+  acceptInbound(s: number): "new" | "duplicate" | "gap" {
+    if (!Number.isSafeInteger(s) || s < 1) return "gap";
+    if (s <= this.inboundContiguous) return "duplicate";
+    if (s !== this.inboundContiguous + 1) return "gap";
     this.inboundContiguous = s;
-    return true;
+    return "new";
   }
 
   /** @internal */ outboxPending(): boolean { return this.outbox.length > 0; }
@@ -362,11 +525,17 @@ export class CloudEngineUplinkClient {
   welcomed(connection: Connection, resumed: boolean): void {
     this.options.metric?.("engine_uplink_hello_ms", this.clock() - connection.openedAtMs);
     this.resume = null;
-    if (!resumed) this.resetLineage();
+    // A refused resume starts a new lineage: drop the old lineage's unacked
+    // frames (feature modules resync current state instead). Pre-gate
+    // buffered frames on a connection that offered nothing are part of the
+    // fresh lineage — never transmitted, correctly numbered from s=1 — so
+    // they survive to flush at the gate.
+    if (!resumed && connection.offeredResume) this.resetLineage();
     if (connection.handoff) {
       this.handoff = null;
       const old = this.connection;
       this.connection = connection;
+      this.noteEstablished(); // the replacement's gate is closed until its capability lands
       // Drain handoff: the replacement is up; retire the drained uplink.
       if (old && old !== connection) old.initiateClose(CLOSE.normal, "drain_handoff");
     }
@@ -399,6 +568,7 @@ export class CloudEngineUplinkClient {
     }
     if (connection !== this.connection) return;
     this.connection = null;
+    this.noteEstablished(); // the gate is closed from here to the next capability
     if (!this.started || this.stopped || this.parked) return;
     if (connection.draining && code === CLOSE.superseded) {
       // The expected end of a drain handoff: the replacement's resume took
@@ -487,6 +657,14 @@ class Connection {
   welcomed = false;
   welcomedAtMs = 0;
   resumeToken: string | null = null;
+  /** Opens on this connection's first auth.capability (frozen step 4);
+   * reliable engine frames send live only while it is open. */
+  gateOpen = false;
+  /** The welcome's negotiated extension set (`sys.welcome.features`). */
+  features: ReadonlySet<string> = new Set();
+  /** The hello offered a resume token: a `resumed: false` welcome then
+   * means the server lost that lineage, and its unacked frames reset. */
+  offeredResume = false;
   /** Received `sys.drain`: a handoff dial owns this connection's lineage. */
   draining = false;
   private socket: EngineUplinkSocket | null = null;
@@ -498,6 +676,7 @@ class Connection {
   private lastReceivedAtMs: number;
   private initiated = false;
   private finished = false;
+  get isFinished(): boolean { return this.finished; }
 
   constructor(private readonly uplink: CloudEngineUplinkClient, readonly handoff: boolean) {
     this.openedAtMs = uplink.now();
@@ -517,13 +696,18 @@ class Connection {
     }
     this.socket = socket;
     socket.on("error", () => {});
+    // The hello timeout covers the whole pre-welcome phase — TCP/TLS, the
+    // upgrade and the server's welcome — so a black-holed dial (ws applies
+    // no handshake timeout once constructed here) cannot wait forever.
+    this.helloTimer = setTimeout(() => {
+      console.warn("[engine-uplink] no sys.welcome inside the hello timeout; redialing");
+      this.terminate(CLOSE.goingAway);
+    }, this.uplink.helloTimeoutMs);
+    this.helloTimer.unref?.();
     socket.on("open", () => {
       this.lastReceivedAtMs = this.uplink.now();
-      this.helloTimer = setTimeout(() => {
-        console.warn("[engine-uplink] no sys.welcome inside the hello timeout; redialing");
-        this.terminate(CLOSE.goingAway);
-      }, this.uplink.helloTimeoutMs);
-      this.helloTimer.unref?.();
+      const offer = this.uplink.resumeOffer;
+      this.offeredResume = offer !== null;
       this.send({
         t: "sys.hello",
         d: {
@@ -532,7 +716,7 @@ class Connection {
           ...options.identity,
           features: [...(options.features ?? [])],
           lastJournalSeq: 0,
-          ...(this.uplink.resumeOffer ? { resume: this.uplink.resumeOffer } : {}),
+          ...(offer ? { resume: offer } : {}),
           ...(options.auth.authCursor() ? { authCursor: options.auth.authCursor() } : {}),
         },
       });
@@ -592,7 +776,10 @@ class Connection {
       // Relay channels arrive with C4; no channel can exist yet. The
       // contract's non-fatal answer is sys.error relay_channel_unknown.
       if (data.byteLength >= 8 && data[0] === 0x01)
-        this.send({ t: "sys.error", d: { code: "relay_channel_unknown", channel: data.readUInt32BE(4) } });
+        this.send({ t: "sys.error", d: {
+          code: "relay_channel_unknown", message: "no relay channel exists for this chunk",
+          fatal: false, channel: data.readUInt32BE(4),
+        } });
       return;
     }
     if (data.byteLength > MAX_CONTROL_FRAME_BYTES) return this.initiateClose(CLOSE.frameInvalid, "frame_too_large");
@@ -605,10 +792,13 @@ class Connection {
     if (!frame || typeof frame.t !== "string") return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
     if (frame.a !== undefined) this.uplink.ackOutbound(frame.a);
     if (frame.s !== undefined) {
-      // Reliable CP→engine frames are exactly-once across a resume; a gap is
-      // repaired by the server's retransmit, so redial with the token.
-      if (!this.uplink.acceptInbound(frame.s)) return this.initiateClose(CLOSE.normal, "sequence_gap");
+      // Reliable CP→engine frames are exactly-once across a resume. A gap
+      // is repaired by the server's retransmit, so redial with the token;
+      // a duplicate is acked again but never re-applied.
+      const inbound = this.uplink.acceptInbound(frame.s);
+      if (inbound === "gap") return this.initiateClose(CLOSE.normal, "sequence_gap");
       this.scheduleAck();
+      if (inbound === "duplicate") return;
     }
     switch (frame.t) {
       case "sys.welcome":
@@ -621,13 +811,21 @@ class Connection {
         console.warn(`[engine-uplink] sys.error ${String(frame.d?.code ?? "unknown")}${frame.d?.fatal === true ? " (fatal)" : ""}`);
         return;
       case "auth.keys":
-        return void this.applyKeys(frame.d ?? {});
+        return this.enqueueAuth(() => this.applyKeys(frame.d ?? {}));
       case "auth.sync":
-        return void this.applySync(frame.d ?? {});
+        return this.enqueueAuth(() => this.applySync(frame.d ?? {}));
       case "auth.epochs":
-        return void this.applyEpochs(frame.d ?? {});
+        return this.enqueueAuth(() => this.applyEpochs(frame.d ?? {}));
       case "auth.capability":
         return this.onCapability(frame.d ?? {});
+      case "cred.revision": {
+        const d = frame.d ?? {};
+        if ((d.kind !== "agent-controls" && d.kind !== "repository") ||
+            typeof d.revision !== "number" || !Number.isSafeInteger(d.revision) || d.revision < 1)
+          return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
+        this.uplink.pushCredentialRevision({ kind: d.kind, revision: d.revision });
+        return;
+      }
       default:
         // Unknown types on unsequenced channels are ignored; unknown
         // sequenced types are acked and ignored (the ack was scheduled).
@@ -639,11 +837,15 @@ class Connection {
     if (this.welcomed) return this.initiateClose(CLOSE.frameInvalid, "welcome_repeated");
     if (this.helloTimer) clearTimeout(this.helloTimer);
     this.helloTimer = null;
-    if (typeof d.resumeToken !== "string" || typeof d.protocol !== "number" || d.protocol < 1)
+    if (typeof d.resumeToken !== "string" || d.resumeToken.length === 0 || typeof d.protocol !== "number" || d.protocol < 1)
+      return this.initiateClose(CLOSE.frameInvalid, "welcome_invalid");
+    if (d.features !== undefined &&
+        (!Array.isArray(d.features) || d.features.some(feature => typeof feature !== "string")))
       return this.initiateClose(CLOSE.frameInvalid, "welcome_invalid");
     this.welcomed = true;
     this.welcomedAtMs = this.uplink.now();
     this.resumeToken = d.resumeToken;
+    this.features = new Set((d.features as string[] | undefined) ?? []);
     this.pingIntervalMs = clampPingInterval(d.pingIntervalMs);
     this.uplink.welcomed(this, d.resumed === true);
     this.pingTimer = setInterval(() => this.send({ t: "sys.ping", d: { ts: this.uplink.now() } }), this.pingIntervalMs);
@@ -655,6 +857,10 @@ class Connection {
     }, Math.min(5_000, this.pingIntervalMs));
     this.pingTimer.unref?.();
     this.livenessTimer.unref?.();
+  }
+
+  private enqueueAuth(work: () => Promise<void>): void {
+    this.uplink.enqueueAuth(this, work);
   }
 
   private async applyKeys(d: Record<string, unknown>): Promise<void> {
@@ -695,6 +901,11 @@ class Connection {
     if (typeof d.token !== "string" || typeof d.expiresAtMs !== "number" || d.audience !== "zeros:api")
       return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
     this.uplink.config.auth.holdCapability({ token: d.token, expiresAtMs: d.expiresAtMs });
+    // Step 4 (retransmit the unacked outbox, else report readiness) runs on
+    // the connection's FIRST capability; renewals only hold the new token.
+    if (this.gateOpen) return;
+    this.gateOpen = true;
+    this.uplink.noteEstablished();
     if (this.uplink.outboxPending()) {
       this.uplink.retransmit(this);
     } else if (this.uplink.config.readiness) {

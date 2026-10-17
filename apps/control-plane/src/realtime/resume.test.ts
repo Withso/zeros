@@ -56,6 +56,20 @@ describe("resume store", () => {
     expect(store.take(token, identity)).toEqual({ resumed: false, reason: "unknown" });
   });
 
+  it("peeks without consuming, so a rejected cursor never destroys the lineage", () => {
+    vi.useFakeTimers();
+    const store = new ResumeStore<{ outbox: ReliableOutbox }>();
+    const token = store.issue(identity, { outbox: new ReliableOutbox() }, () => {});
+    store.park(token, { outbox: new ReliableOutbox() });
+    expect(store.peek("not-a-token", identity)).toEqual({ resumable: false, reason: "malformed" });
+    expect(store.peek(`${"z".repeat(43)}`, identity)).toEqual({ resumable: false, reason: "unknown" });
+    expect(store.peek(token, "org:other:1:engine:boot")).toEqual({ resumable: false, reason: "identity_mismatch" });
+    const peeked = store.peek(token, identity);
+    expect(peeked.resumable).toBe(true);
+    // A peek never consumes: the same token still takes afterwards.
+    expect(store.take(token, identity).resumed).toBe(true);
+  });
+
   it("forces a full resync after the window, for another identity, or for a token it never issued", () => {
     vi.useFakeTimers();
     const store = new ResumeStore<number>();
