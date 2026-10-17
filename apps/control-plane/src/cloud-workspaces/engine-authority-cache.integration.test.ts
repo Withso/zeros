@@ -81,7 +81,7 @@ d("engine authority cache with PostgreSQL", () => {
   it("puts the invalidation trigger on every table the authority predicate reads", async () => {
     // Identifier-based extraction (functionInputTables) also sees comma
     // joins, LATERAL and EXISTS inputs, not only the first FROM/JOIN item.
-    const closure = await functionInputTables(pool, ["cloud_workspace_engine_authority_current"]);
+    const closure = await functionInputTables(pool, ["cloud_workspace_engine_authority_current", "cloud_workspace_engine_authority_snapshot"]);
     const functions = closure.functions, tables = new Set<string>([...LOADER_TABLES, ...closure.tables]);
     expect(functions).toContain("cloud_workspace_paid_authority_live");
     expect(functions).toContain("cloud_workspace_compute_authority_live");
@@ -122,7 +122,7 @@ d("engine authority cache with PostgreSQL", () => {
     // only as a deadline guarded to move later (entries are bounded by the
     // deadline they loaded), as a column whose predicate the branch itself
     // preserves, or when neither the predicate closure nor the loader reads it.
-    const closure = await functionInputTables(pool, ["cloud_workspace_engine_authority_current"]);
+    const closure = await functionInputTables(pool, ["cloud_workspace_engine_authority_current", "cloud_workspace_engine_authority_snapshot"]);
     const code = [...closure.bodies.values()].flat().map(stripSqlLiterals).join("\n") + "\n" +
       readFileSync(new URL("./engine-authority-cache.ts", import.meta.url), "utf8");
     const notifier = (await pool.query<{ body: string }>(
@@ -147,6 +147,40 @@ d("engine authority cache with PostgreSQL", () => {
           expect(new RegExp(`\\b${column}\\b`).test(code), `${table}.${column} is read by the authority predicate or loader`).toBe(false);
         }
       }
+    }
+  });
+
+  it("loads with the locking predicate's exact body minus its row locks", async () => {
+    const body = async (name: string) => (await pool.query<{ body: string }>(
+      "SELECT prosrc AS body FROM pg_proc WHERE proname=$1 AND pronamespace='public'::regnamespace", [name])).rows[0]!.body;
+    // Drop the two lock statements and turn each `EXECUTE format(... FOR %s,
+    // strength) INTO x USING args` into the same static SELECT ... INTO x
+    // with its $n placeholders bound to those arguments.
+    const unlocked = (await body("cloud_workspace_engine_authority_current"))
+      .replace("  -- Only the lock strength varies between readers and mutators.\n  strength text := CASE WHEN exclusive THEN 'UPDATE' ELSE 'SHARE' END;\n", "")
+      .replace("  PERFORM 1 FROM organizations organization WHERE organization.id = target_org_id FOR SHARE;\n", "")
+      .replace(/EXECUTE format\(\$query\$\n {4}([\s\S]*?)\n {4}FOR %s\$query\$, strength\)\n {2}INTO (\w+) USING ([^;]+);/g,
+        (_match, query: string, into: string, args: string) => {
+          const values = args.split(",").map(value => value.trim());
+          return `${query.replace(/\$(\d+)/g, (_n, index: string) => values[Number(index) - 1]!)}\n  INTO ${into};`;
+        });
+    expect(unlocked).not.toMatch(/strength|FOR SHARE|%s|EXECUTE/);
+    expect(await body("cloud_workspace_engine_authority_snapshot")).toBe(unlocked);
+  });
+
+  it("loads without waiting for a heartbeat that holds the engine row", async () => {
+    const holder = await pool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("UPDATE cloud_workspace_engine_instances SET last_heartbeat_at=clock_timestamp() WHERE id=$1", [scope.engineInstanceId]);
+      const outcome = await Promise.race([
+        loadEngineAuthorityEntry(pool, scope, 30_000).then(entry => entry ? "loaded" : "denied"),
+        new Promise(resolve => setTimeout(() => resolve("blocked"), 1_000)),
+      ]);
+      expect(outcome).toBe("loaded");
+    } finally {
+      await holder.query("ROLLBACK");
+      holder.release();
     }
   });
 

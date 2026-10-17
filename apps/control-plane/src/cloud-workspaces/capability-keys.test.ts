@@ -70,15 +70,19 @@ describe("capability signing key store", () => {
   }
 
   function harness(rows: Row[]) {
-    let current = rows;
-    const load = vi.fn(async () => current);
+    let current = rows, failing = false;
+    const load = vi.fn(async () => {
+      if (failing) throw new Error("connection terminated");
+      return current;
+    });
     let handlers!: { onNotification: () => void; onReady: () => void; onUnavailable: () => void };
     const logger = { warn: vi.fn(), info: vi.fn() };
     const store = new CapabilitySigningKeyStore({
-      keyring, load, logger, refreshMs: 3_600_000,
+      keyring, load, logger, refreshMs: 3_600_000, retryDelaysMs: [5],
       subscribe: next => { handlers = next; return { start: async () => {}, healthy: () => true, stop: async () => {} }; },
     });
-    return { store, load, logger, get handlers() { return handlers; }, set rows(next: Row[]) { current = next; } };
+    return { store, load, logger, get handlers() { return handlers; }, set rows(next: Row[]) { current = next; },
+      set failing(next: boolean) { failing = next; } };
   }
 
   it("publishes next, current and retiring, and signs only with current", async () => {
@@ -108,6 +112,38 @@ describe("capability signing key store", () => {
     h.rows = [row("b", "current"), row("a", "retiring")];
     h.handlers.onNotification();
     await vi.waitFor(() => expect(h.store.signer()?.kid).toBe(kidFor("b")));
+    await h.store.stop();
+  });
+
+  it("stops signing when the reload after a key change fails, and retries until it loads", async () => {
+    const h = harness([row("a", "current")]);
+    await h.store.start();
+    expect(h.store.signer()?.kid).toBe(kidFor("a"));
+    // The hint may be a revocation of "a": keep no stale signer.
+    h.failing = true;
+    h.rows = [row("b", "current")];
+    h.handlers.onNotification();
+    await vi.waitFor(() => expect(h.store.signer()).toBeNull());
+    await vi.waitFor(() => expect(h.load.mock.calls.length).toBeGreaterThanOrEqual(4));
+    h.failing = false;
+    await vi.waitFor(() => expect(h.store.signer()?.kid).toBe(kidFor("b")));
+    const stats = h.store.stats();
+    expect(stats.reloadFailures).toBeGreaterThanOrEqual(2);
+    expect(stats.noCurrentKey).toBe(0);
+    await h.store.stop();
+  });
+
+  it("keeps the signer through a failed safety refresh and counts a missing key separately", async () => {
+    const h = harness([row("a", "current")]);
+    await h.store.start();
+    h.failing = true;
+    await h.store.reload();
+    expect(h.store.signer()?.kid).toBe(kidFor("a"));
+    expect(h.store.stats()).toEqual({ reloadFailures: 1, noCurrentKey: 0 });
+    h.failing = false;
+    h.rows = [row("b", "next")];
+    await vi.waitFor(() => expect(h.store.signer()).toBeNull());
+    expect(h.store.stats().noCurrentKey).toBe(1);
     await h.store.stop();
   });
 });

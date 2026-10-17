@@ -41,13 +41,18 @@ export const ROLLOUT_FLAGS = {
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;
 
-/** The flag is on in `set` and every transitive `requires` is too. */
-function flagEffective(set: ReadonlySet<string> | undefined, flag: string, seen: ReadonlySet<string> = new Set()): boolean {
+/** The flag is on in `set` and every transitive `requires` is too. While
+ * the feed is not current, a flag (or any dependency) whose feed-loss
+ * behavior is "off" reads off, so a dependent flag never outlives the
+ * dependency it requires. */
+export function flagEffective(set: ReadonlySet<string> | undefined, flag: string, feedCurrent = true,
+  definitions: Readonly<Record<string, RolloutFlagDefinition>> = ROLLOUT_FLAGS, seen: ReadonlySet<string> = new Set()): boolean {
   if (!set?.has(flag)) return false;
-  const definition: RolloutFlagDefinition | undefined = (ROLLOUT_FLAGS as Record<string, RolloutFlagDefinition>)[flag];
-  for (const dependency of definition?.requires ?? []) {
+  const definition: RolloutFlagDefinition | undefined = definitions[flag];
+  if (!definition || (!feedCurrent && definition.whileFeedUnavailable === "off")) return false;
+  for (const dependency of definition.requires ?? []) {
     if (seen.has(dependency)) continue;
-    if (!flagEffective(set, dependency, new Set(seen).add(flag))) return false;
+    if (!flagEffective(set, dependency, feedCurrent, definitions, new Set(seen).add(flag))) return false;
   }
   return true;
 }
@@ -187,7 +192,7 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
     if (!this.current && definition.whileFeedUnavailable === "off") return false;
     // Rows are keyed by the canonical lowercase uuid text; callers may carry
     // the id from a route parameter or claim in another casing.
-    return flagEffective(this.values.get(orgId.toLowerCase()), flag);
+    return flagEffective(this.values.get(orgId.toLowerCase()), flag, this.current);
   }
 
   /** True when the snapshot was loaded after the current LISTEN session
@@ -200,7 +205,7 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
     const definition: RolloutFlagDefinition | undefined = ROLLOUT_FLAGS[flag];
     if (!definition) return false;
     if (!this.current && definition.whileFeedUnavailable === "off") return false;
-    for (const flags of this.values.values()) if (flagEffective(flags, flag)) return true;
+    for (const flags of this.values.values()) if (flagEffective(flags, flag, this.current)) return true;
     return false;
   }
 

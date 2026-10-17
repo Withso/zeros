@@ -15,8 +15,12 @@ fence-free reads before then.
 - Key: workspace, organization, generation, engine instance and
   `workosEnabled`. The value carries the authority epoch (`wa`), the account
   user, the heartbeat token hash, enrollment state and the engine lease.
-- An entry is loaded in its own system transaction by calling the same SQL
-  function, so the cache cannot drift from the predicate. Only live, unfenced
+- An entry is loaded in its own system transaction by calling
+  `cloud_workspace_engine_authority_snapshot` (0152): the body of
+  `cloud_workspace_engine_authority_current` with only its row locks removed,
+  a derivation the integration test pins. The cache cannot drift from the
+  predicate, and a load takes no row locks, so it never waits for a heartbeat
+  or makes one wait. Only live, unfenced
   results are stored; every denial and every miss is answered by SQL.
 - Each entry expires at the earliest clock deadline its predicate depends on:
   the engine lease, compute allocation `funded_until`/`provider_expires_at`,

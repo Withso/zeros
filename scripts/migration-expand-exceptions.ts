@@ -36,6 +36,13 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
   BEFORE TRUNCATE ON cloud_capability_key_changes FOR EACH STATEMENT
   EXECUTE FUNCTION reject_cloud_capability_key_change_mutation();`],
   },
+  "0152_cloud_authority_cache_invalidation.sql": {
+    // PUBLIC's default EXECUTE on functions created in the same migration.
+    "privilege-tightening": [
+      "cloud_workspace_engine_authority_snapshot(uuid, uuid, integer, uuid, boolean)",
+      "notify_cloud_authority_cache()",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+  },
   "0145_cloud_computer_named_snapshots.sql": {},
   "0146_cloud_provider_snapshot_recovery.sql": {},
   "0149_cloud_rollout_flags.sql": {

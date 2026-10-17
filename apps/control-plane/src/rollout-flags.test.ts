@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ROLLOUT_FLAGS, ROLLOUT_FLAGS_OFF, RolloutFlagSnapshot, isRolloutFlagName } from "./rollout-flags.js";
+import { ROLLOUT_FLAGS, ROLLOUT_FLAGS_OFF, RolloutFlagSnapshot, flagEffective, isRolloutFlagName } from "./rollout-flags.js";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
@@ -255,5 +255,18 @@ describe("rollout flag snapshot", () => {
     expect(h.snapshot.enabled(ORG, "capabilities")).toBe(false);
     expect(h.snapshot.enabled(ORG, "authority_cache_enforce")).toBe(false);
     expect(h.snapshot.feedCurrent()).toBe(false);
+  });
+});
+
+describe("flagEffective", () => {
+  const definitions = {
+    base: { whileFeedUnavailable: "off", summary: "Dependency that turns off on feed loss" },
+    dependent: { whileFeedUnavailable: "retain", summary: "Retained flag that requires base", requires: ["base"] },
+  } as const;
+  it("turns a retained flag off with a dependency whose feed-loss state is off", () => {
+    const set = new Set(["base", "dependent"]);
+    expect(flagEffective(set, "dependent", true, definitions)).toBe(true);
+    expect(flagEffective(set, "dependent", false, definitions)).toBe(false);
+    expect(flagEffective(new Set(["dependent"]), "dependent", true, definitions)).toBe(false);
   });
 });

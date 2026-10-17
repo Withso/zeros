@@ -107,7 +107,17 @@ export type CapabilitySigningKeyStoreOptions = {
   load?: Load;
   subscribe?: Subscribe;
   refreshMs?: number;
+  /** Backoff for retrying a failed reload, each capped below refreshMs.
+   * Defaults to 1, 2, 4, 8, 15 and 30 s, like the rollout-flag snapshot. */
+  retryDelaysMs?: readonly number[];
   logger?: Pick<Console, "warn" | "info">;
+};
+
+export type CapabilitySigningKeyStoreStats = {
+  /** Load attempts that failed (database error or timeout). */
+  reloadFailures: number;
+  /** Successful loads that found no current key that could be opened. */
+  noCurrentKey: number;
 };
 
 /** In-process view of the capability signing keys. Only `current` signs; the
@@ -121,6 +131,13 @@ export class CapabilitySigningKeyStore {
   private again = false;
   private stopped = false;
   private timer: NodeJS.Timeout | undefined;
+  private retryTimer: NodeJS.Timeout | undefined;
+  private retryAttempt = 0;
+  /** A key change was announced (NOTIFY or LISTEN reconnect) and no load
+   * has succeeded since. */
+  private hinted = false;
+  private readonly counters: CapabilitySigningKeyStoreStats = { reloadFailures: 0, noCurrentKey: 0 };
+  private readonly retryDelaysMs: readonly number[];
   private subscription: PostgresNotificationSubscription | undefined;
   private readonly keyring: CapabilityKeyring;
   private readonly refreshMs: number;
@@ -131,6 +148,8 @@ export class CapabilitySigningKeyStore {
   constructor(options: CapabilitySigningKeyStoreOptions) {
     this.keyring = options.keyring;
     this.refreshMs = options.refreshMs ?? 60_000;
+    this.retryDelaysMs = (options.retryDelaysMs ?? [1_000, 2_000, 4_000, 8_000, 15_000, 30_000])
+      .map(delay => Math.max(1, Math.min(delay, Math.floor(this.refreshMs / 2))));
     this.logger = options.logger ?? console;
     const pool = options.pool;
     this.loadRows = options.load ?? (async () => {
@@ -150,14 +169,16 @@ export class CapabilitySigningKeyStore {
     });
   }
 
-  /** Resolves after the first load attempt; never rejects. A failed load
-   * leaves the previous signer: verifiers drop a revoked kid, so the issuer
-   * retaining it during a database blip cannot extend its life. */
+  /** Resolves after the first load attempt; never rejects. A failed load is
+   * retried with backoff. A failed safety refresh keeps the previous signer,
+   * but a failed load after a key-change hint drops it (issuance fails
+   * closed) until a load succeeds: the hint may be a revocation, and
+   * issuance needs the database anyway. */
   start(): Promise<void> {
     if (this.subscription || this.stopped) return this.reloading ?? Promise.resolve();
     this.subscription = this.subscribe({
-      onNotification: () => { void this.reload(); },
-      onReady: () => { void this.reload(); },
+      onNotification: () => { this.hinted = true; void this.reload(); },
+      onReady: () => { this.hinted = true; void this.reload(); },
       onUnavailable: () => {},
     });
     void this.subscription.start().catch(() => {});
@@ -169,7 +190,8 @@ export class CapabilitySigningKeyStore {
   async stop(): Promise<void> {
     this.stopped = true;
     clearInterval(this.timer);
-    this.timer = undefined;
+    clearTimeout(this.retryTimer);
+    this.timer = this.retryTimer = undefined;
     await this.subscription?.stop();
     await this.reloading;
   }
@@ -185,6 +207,10 @@ export class CapabilitySigningKeyStore {
     return this.published;
   }
 
+  stats(): CapabilitySigningKeyStoreStats {
+    return { ...this.counters };
+  }
+
   reload(): Promise<void> {
     if (this.stopped) return Promise.resolve();
     if (this.reloading) { this.again = true; return this.reloading; }
@@ -192,17 +218,41 @@ export class CapabilitySigningKeyStore {
     return this.reloading;
   }
 
+  private scheduleRetry(): void {
+    if (this.stopped || this.retryTimer) return;
+    const delay = this.retryDelaysMs[Math.min(this.retryAttempt, this.retryDelaysMs.length - 1)]!;
+    this.retryAttempt += 1;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      void this.reload();
+    }, delay);
+    this.retryTimer.unref?.();
+  }
+
   private async run(): Promise<void> {
     do {
       this.again = false;
+      const hinted = this.hinted;
       let rows: readonly Row[];
       try {
         rows = await this.loadRows();
       } catch {
-        this.logger.warn("[capability-keys] reload failed; retaining the last loaded keys");
+        this.counters.reloadFailures += 1;
+        if (hinted && this.current) {
+          this.current = null;
+          this.logger.warn("[capability-keys] reload after a key change failed; not signing until a reload succeeds");
+        } else {
+          this.logger.warn("[capability-keys] reload failed; retrying with backoff");
+        }
+        this.scheduleRetry();
         continue;
       }
       if (this.stopped) return;
+      this.retryAttempt = 0;
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+      // A hint that arrived during this read is served by the next pass.
+      if (!this.again) this.hinted = false;
       const published: CapabilityPublicKeyEntry[] = [];
       let current: { kid: string; key: KeyObject } | null = null;
       for (const row of rows) {
@@ -225,6 +275,7 @@ export class CapabilitySigningKeyStore {
           }
         }
       }
+      if (!current) this.counters.noCurrentKey += 1;
       this.published = published;
       this.current = current;
     } while (this.again && !this.stopped);

@@ -154,3 +154,66 @@ CREATE TRIGGER zz_cloud_authority_cache AFTER INSERT OR UPDATE OR DELETE ON staf
 -- Global input: one provider requirement row applies to every workspace.
 CREATE TRIGGER zz_cloud_authority_cache AFTER INSERT OR UPDATE OR DELETE ON managed_compute_provider_requirements
   FOR EACH ROW EXECUTE FUNCTION notify_cloud_authority_cache('*');
+
+-- The cache loader's read. cloud_workspace_engine_authority_current(...,
+-- false) takes FOR SHARE on the organization, workspace and engine rows,
+-- which writes row locks on a read path and makes every heartbeat UPDATE of
+-- the engine row wait for a concurrent load. This is the same body with
+-- only the row locks removed (engine-authority-cache.integration.test.ts
+-- pins that derivation), so the cache still evaluates the exact predicate.
+-- A load racing a commit is covered by the load-discard rule and the hint
+-- that commit sends, not by row locks.
+CREATE FUNCTION cloud_workspace_engine_authority_snapshot(
+  target_workspace_id uuid, target_org_id uuid, target_generation integer,
+  target_engine_id uuid, require_workos boolean
+) RETURNS TABLE (
+  authority_epoch bigint, account_user_id uuid, heartbeat_token_hash bytea,
+  live boolean, fenced boolean
+) LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  workspace record;
+  engine record;
+  found_rows integer;
+BEGIN
+  SELECT w.current_generation, w.authority_epoch, w.desired_state, w.status
+    FROM cloud_workspaces w
+    WHERE w.id = target_workspace_id AND w.org_id = target_org_id AND w.deleted_at IS NULL
+      AND cloud_workspace_generation_policy_current(w.id, target_generation, w.org_id)
+  INTO workspace;
+  GET DIAGNOSTICS found_rows = ROW_COUNT;
+  IF found_rows <> 1 OR workspace.current_generation <> target_generation
+    OR workspace.desired_state <> 'running' OR workspace.status NOT IN ('setting_up', 'ready', 'busy') THEN
+    RETURN;
+  END IF;
+  SELECT instance.account_user_id, instance.heartbeat_token_hash
+    FROM cloud_workspace_engine_instances instance
+    WHERE instance.id = target_engine_id AND instance.workspace_id = target_workspace_id AND instance.org_id = target_org_id
+      AND instance.generation = target_generation AND instance.state = 'ready'
+      AND instance.lease_expires_at > clock_timestamp()
+      AND cloud_workspace_runtime_authority_live(
+        instance.workspace_id, instance.generation, instance.account_user_id, require_workos)
+  INTO engine;
+  GET DIAGNOSTICS found_rows = ROW_COUNT;
+  IF found_rows <> 1 THEN
+    RETURN;
+  END IF;
+  -- SELECT ... FOR UPDATE may evaluate its predicate before waiting. Recheck
+  -- the deadlines once both scope and engine locks are actually held.
+  RETURN QUERY SELECT workspace.authority_epoch::bigint, engine.account_user_id, engine.heartbeat_token_hash,
+    EXISTS (
+      SELECT 1 FROM cloud_workspace_engine_instances instance
+      WHERE instance.id = target_engine_id AND instance.lease_expires_at > clock_timestamp()
+        AND cloud_workspace_runtime_authority_live(
+          instance.workspace_id, instance.generation, instance.account_user_id, require_workos)
+    ),
+    EXISTS (
+      SELECT 1 FROM cloud_workspace_engine_instances instance
+      WHERE instance.id = target_engine_id AND instance.final_checkpoint_at IS NOT NULL
+    );
+END
+$$;
+-- zeros-expand-exception: privilege-tightening Removes PUBLIC EXECUTE from a function created in this migration
+REVOKE ALL ON FUNCTION cloud_workspace_engine_authority_snapshot(uuid, uuid, integer, uuid, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION cloud_workspace_engine_authority_snapshot(uuid, uuid, integer, uuid, boolean) TO zeros_app;
+-- zeros-expand-exception: privilege-tightening Removes PUBLIC EXECUTE from a function created in this migration
+REVOKE ALL ON FUNCTION notify_cloud_authority_cache() FROM PUBLIC;
