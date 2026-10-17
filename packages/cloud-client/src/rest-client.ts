@@ -4,7 +4,8 @@
  * The operation ids and paths come from the generated contract module — there
  * is no hand-written path string in the caller. Authentication is the control
  * plane's session bearer; runtime/* routes additionally carry the replica's
- * device proof headers (zeros-device-id / zeros-device-session / zeros-device-proof).
+ * device proof headers (x-zeros-device-id, -key-version, -timestamp, -nonce and
+ * -signature).
  */
 import { REST_OPERATIONS, type RestOperationId } from "./generated/rest";
 
@@ -181,7 +182,6 @@ export class CloudRestClient {
       url.searchParams.set(key, String(value));
     const headers: Record<string, string> = {
       authorization: `Bearer ${await this.getAccessToken()}`,
-      "zeros-contract-version": "v1",
     };
     if (options.body !== undefined) headers["content-type"] = "application/json";
     if (options.idempotencyKey !== undefined) headers["idempotency-key"] = options.idempotencyKey;

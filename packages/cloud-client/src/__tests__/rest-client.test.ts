@@ -111,6 +111,35 @@ describe("CloudRestClient", () => {
     expect(body.relayHedgeMs).toBe(400);
     expect(body.routes).toHaveLength(2);
   });
+
+  it("sends only the headers the S3 contract defines", async () => {
+    const seen: Record<string, string>[] = [];
+    const recording = new CloudRestClient({
+      baseUrl: "https://control.invalid",
+      getAccessToken: () => "test-session-token",
+      getDeviceProof: () => DEVICE_HEADERS,
+      fetchImpl: (async (_url: string, init?: RequestInit) => {
+        seen.push({ ...(init?.headers as Record<string, string>) });
+        return new Response(JSON.stringify({}), { status: 201, headers: { "content-type": "application/json" } });
+      }) as typeof fetch,
+    });
+    await recording.invoke("connectCloudWorkspaceRuntime", {
+      pathParams: { organization: ORGANIZATION, workspace: WORKSPACE },
+      body: { deviceSessionId: DEVICE_SESSION, clientSessionId: CLIENT_SESSION, routes: ["direct"] },
+      idempotencyKey: "key-000006",
+      deviceProof: true,
+    });
+    expect(Object.keys(seen[0]!).sort()).toEqual([
+      "authorization",
+      "content-type",
+      "idempotency-key",
+      "x-zeros-device-id",
+      "x-zeros-device-key-version",
+      "x-zeros-device-nonce",
+      "x-zeros-device-signature",
+      "x-zeros-device-timestamp",
+    ]);
+  });
 });
 
 describe("classifyFailure", () => {
