@@ -389,6 +389,24 @@ describe("engine uplink server", () => {
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
   });
 
+  it("resyncs only owned cred.v1 uplinks from one batch read", async () => {
+    const reads: string[][] = [];
+    const cred = new UplinkCredentialPush({
+      sessionFor: engineInstanceId => uplink.session(engineInstanceId),
+      readRevision: async () => null,
+      readRevisions: async ids => { reads.push([...ids]); return new Map(ids.map(id => [id, 11])); },
+    });
+    await start({ extensions: [cred] });
+    const legacyEngine = randomUUID();
+    const legacy = await connect({ engineInstanceId: legacyEngine });
+    const { peer } = await connect({ features: ["cred.v1"] });
+    await cred.resync([...uplink.ownedEngineInstances(), randomUUID()]);
+    expect(reads).toEqual([[identity.engineInstanceId]]);
+    expect(await peer.next("cred.revision")).toMatchObject({ d: { kind: "agent-controls", revision: 11 } });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(legacy.peer.frames.filter(frame => frame.t === "cred.revision")).toEqual([]);
+  });
+
   it("closes 4400 on a cred.ack whose code violates the contract shape", async () => {
     const cred = new UplinkCredentialPush({
       sessionFor: engineInstanceId => uplink.session(engineInstanceId),

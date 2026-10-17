@@ -12,6 +12,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** The credential-push surface the listener routes revision bumps to. */
 export interface UplinkCredNotificationSink {
   revisionChanged(engineInstanceId: string, revision: number): void;
+  /** Re-pushes the current revisions of the given owned engines. */
+  resync?(engineInstanceIds: readonly string[]): Promise<void>;
 }
 
 export function handleUplinkNotification(server: Pick<CloudEngineUplinkServer, "ownerChanged" | "revalidate" | "revalidateWorkspace">,
@@ -37,9 +39,10 @@ export function handleUplinkNotification(server: Pick<CloudEngineUplinkServer, "
   else if (payload.startsWith("w:")) server.revalidateWorkspace(id);
 }
 
-/** Shares the process's LISTEN session. After every (re)connect, owners and
- * authority are re-read for every owned uplink, so a notification lost while
- * the listener was down is repaired rather than trusted. */
+/** Shares the process's LISTEN session. After every (re)connect, owners,
+ * authority and (with `cred`) credential revisions are re-read for every
+ * owned uplink, so a notification lost while the listener was down is
+ * repaired rather than trusted. */
 export function startUplinkNotifications(
   pool: pg.Pool,
   server: CloudEngineUplinkServer,
@@ -55,8 +58,10 @@ export function startUplinkNotifications(
       void presence.owners(server.ownedEngineInstances()).then(rows => {
         for (const row of rows) server.ownerChanged(row.engineInstanceId, row.connectionId, row.connectedAtMs);
       }).catch(() => {});
-      // A revision bump lost while the listener was down is repaired at the
-      // next gate open (the extension pushes the current revision there).
+      // A revision bump lost while the listener was down: engines that
+      // re-gate get the current revision at their gate; already-connected
+      // ones get it here.
+      void cred?.resync?.(server.ownedEngineInstances()).catch(() => {});
     },
     onUnavailable: () => logger.warn("[realtime] uplink notifications unavailable; owners and authority rely on the periodic recheck"),
   });

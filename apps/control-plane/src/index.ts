@@ -870,6 +870,7 @@ const mountEngineUplink = () => {
   const uplinkCredPush = new UplinkCredentialPush({
     sessionFor: engineInstanceId => cloudEngineUplink?.session(engineInstanceId) ?? null,
     readRevision: identity => uplinkCredStore.desiredRevision(identity.engineInstanceId),
+    readRevisions: engineInstanceIds => uplinkCredStore.desiredRevisions(engineInstanceIds),
   });
   cloudEngineUplink = new CloudEngineUplinkServer({
     authority: new DatabaseUplinkAuthority({ pool, workosEnabled: config.auth.provider === "workos", alerts }),

@@ -144,13 +144,18 @@ authority supplies keys, epochs and engine tokens
   notifies every bump, routed to the owning instance over
   `zeros_cloud_agent_credential_revision`. The notification is only a hint:
   the engine's exchange re-reads authority. `cred.ack` (`applied`/`failed`)
-  arrives over the reliable channel; a lost notification while the listener
-  was down is repaired at the next gate open. Only `agent-controls` has a
-  revision source today: no `repository` revision exists on the CP, so the
-  CP never pushes it and the poll path still covers repository controls.
-  The engine acks any `repository` push `failed`/`cred_kind_unsupported`
-  without recording it, so adding the kind later is an explicit signal,
-  never a silent swallow.
+  arrives over the reliable channel. A bump committed while the listener
+  was down never notifies; it is repaired both at the next gate open and,
+  for engines whose gate is already open, when the listener is ready again:
+  `onReady` reads the current revisions of every owned `cred.v1` uplink in
+  one system statement and pushes them (the engine acks a revision it
+  already applied without an exchange). Only `agent-controls` has a
+  revision source today: the CP has no `repository` revision, so it never
+  pushes that kind, and repository credentials keep arriving on the HTTP
+  heartbeat response (`repositoryCredential`) unchanged. The engine acks any
+  `repository` push `failed`/`cred_kind_unsupported` without calling its
+  handler or recording the revision, so adding the kind later is an
+  explicit signal, never a silent swallow.
 - **Lease.** The HTTP heartbeat still owns the engine lease in this release;
   the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
 
