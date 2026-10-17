@@ -145,8 +145,6 @@ export function installCloudOutboxLifecycle(): void {
   if (installed) return;
   installed = true;
   onMainAuthSessionChanged(() => {
-    const previous = current;
-    current = null;
     let nextAccount: string | null = null;
     try {
       const user = getSessionUserForMain();
@@ -154,6 +152,17 @@ export function installCloudOutboxLifecycle(): void {
     } catch {
       nextAccount = null;
     }
+    if (current !== null && current.accountId === nextAccount) {
+      // Same account, new session: the sender reads the current token on every send, so keep the outbox and its scheduled retries.
+      try {
+        removeOtherAccountsOutboxes(nextAccount);
+      } catch {
+        // Outbox cleanup must never block sign-out.
+      }
+      return;
+    }
+    const previous = current;
+    current = null;
     try {
       if (previous && previous.accountId !== nextAccount) previous.outbox.clear();
     } catch {
