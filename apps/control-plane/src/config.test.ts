@@ -356,6 +356,39 @@ describe("database authority configuration", () => {
   });
 });
 
+describe("trace export configuration", () => {
+  it("disables tracing unless an endpoint is configured", () => {
+    const config = loadConfig(baseEnv());
+    expect(config.tracesUrl).toBeUndefined();
+    expect(config.traceSampleRatio).toBe(0);
+    for (const value of ["", "   "])
+      expect(loadConfig({ ...baseEnv(), OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: value }).tracesUrl).toBeUndefined();
+  });
+
+  it("accepts https endpoints and plain http only on private hosts", () => {
+    expect(loadConfig({ ...baseEnv(), OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://tempo.example.com/v1/traces" }).tracesUrl)
+      .toBe("https://tempo.example.com/v1/traces");
+    for (const value of ["http://tempo.railway.internal:4318/v1/traces", "http://localhost:4318/v1/traces"])
+      expect(loadConfig({ ...baseEnv(), OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: value }).tracesUrl).toBe(value);
+  });
+
+  it.each([
+    "http://tempo.example.com/v1/traces",
+    "https://user:pass@tempo.example.com/v1/traces",
+    "https://tempo.example.com/v1/traces?x=1",
+    "not a url",
+  ])("rejects trace endpoint %s", value => {
+    expect(() => loadConfig({ ...baseEnv(), OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: value }))
+      .toThrow(/OTEL_EXPORTER_OTLP_TRACES_ENDPOINT/);
+  });
+
+  it("bounds the trace sample ratio to 0 through 1", () => {
+    expect(loadConfig({ ...baseEnv(), CONTROL_PLANE_TRACE_SAMPLE_RATIO: "0.25" }).traceSampleRatio).toBe(0.25);
+    for (const value of ["1.5", "-0.1"])
+      expect(() => loadConfig({ ...baseEnv(), CONTROL_PLANE_TRACE_SAMPLE_RATIO: value })).toThrow();
+  });
+});
+
 function validEnv(): NodeJS.ProcessEnv {
   return {
     ...baseEnv(),

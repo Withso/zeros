@@ -9,6 +9,7 @@
  */
 import type { DeviceProofRequest } from "./device-proof";
 import { REST_OPERATIONS, type RestOperationId } from "./generated/rest";
+import { createTraceparent, TRACEPARENT_PATTERN } from "./trace-context";
 
 /** The replica device proof headers (same scheme as the desktop engine client). */
 export type DeviceProofHeaders = {
@@ -111,6 +112,8 @@ export type InvokeOptions = {
   /** Attach the replica's device proof headers (runtime/* routes). */
   deviceProof?: boolean;
   signal?: AbortSignal;
+  /** W3C traceparent to continue; the client otherwise starts a trace when tracing is configured. */
+  traceparent?: string;
 };
 
 export interface CloudRestClientOptions {
@@ -118,6 +121,8 @@ export interface CloudRestClientOptions {
   getAccessToken: () => string | Promise<string>;
   getDeviceProof?: (request: DeviceProofRequest) => DeviceProofHeaders | Promise<DeviceProofHeaders>;
   fetchImpl?: typeof fetch;
+  /** Start a W3C trace per request; `sampleRatio` of them are marked sampled. */
+  tracing?: { sampleRatio: number; random?: () => number; randomBytes?: (length: number) => Uint8Array };
 }
 
 export class CloudRestClient {
@@ -125,12 +130,19 @@ export class CloudRestClient {
   private readonly getAccessToken: () => string | Promise<string>;
   private readonly getDeviceProof?: (request: DeviceProofRequest) => DeviceProofHeaders | Promise<DeviceProofHeaders>;
   private readonly fetchImpl: typeof fetch;
+  private readonly tracing?: NonNullable<CloudRestClientOptions["tracing"]>;
 
   constructor(options: CloudRestClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.getAccessToken = options.getAccessToken;
     if (options.getDeviceProof) this.getDeviceProof = options.getDeviceProof;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    if (options.tracing) {
+      const { sampleRatio } = options.tracing;
+      if (!(Number.isFinite(sampleRatio) && sampleRatio >= 0 && sampleRatio <= 1))
+        throw new RangeError("Invalid trace sample ratio");
+      this.tracing = options.tracing;
+    }
   }
 
   /** POST …/cloud-workspaces — Idempotency-Key required. */
@@ -186,11 +198,15 @@ export class CloudRestClient {
     const url = new URL(`${this.baseUrl}${path}`);
     for (const [key, value] of Object.entries(options.query ?? {}))
       url.searchParams.set(key, String(value));
+    if (options.traceparent !== undefined && !TRACEPARENT_PATTERN.test(options.traceparent))
+      throw new TypeError("invalid traceparent");
+    const traceparent = options.traceparent ?? (this.tracing ? createTraceparent({ sampled: (this.tracing.random ?? Math.random)() < this.tracing.sampleRatio, ...(this.tracing.randomBytes ? { randomBytes: this.tracing.randomBytes } : {}) }) : undefined);
     const headers: Record<string, string> = {
       authorization: `Bearer ${await this.getAccessToken()}`,
     };
     if (options.body !== undefined) headers["content-type"] = "application/json";
     if (options.idempotencyKey !== undefined) headers["idempotency-key"] = options.idempotencyKey;
+    if (traceparent !== undefined) headers.traceparent = traceparent;
     if (options.deviceProof) {
       const request = deviceProofRequest(operationId, options);
       if (!this.getDeviceProof) throw new Error(`operation ${operationId} requires a device proof`);

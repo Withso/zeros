@@ -89,6 +89,7 @@ import type { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runti
 import { createCloudRuntimeServiceAuthorityRoutes, createCloudRuntimeServiceRoutes } from "./cloud-workspaces/runtime-service-routes.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming, type RequestCostObserverStatus, type RequestDatabaseCost } from "./request-timing.js";
 import { createDatabaseTimingReporter } from "./database-timing.js";
+import { observeDatabaseTiming, tracingMiddleware } from "./tracing.js";
 import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
   engineLifecycleRequestsPerMinute,
@@ -176,9 +177,12 @@ export function createApp(
   dependencies: CreateAppDependencies = {},
 ): ControlPlaneApp {
   const app: ControlPlaneApp = new Hono();
+  const databaseTimingReporter = createDatabaseTimingReporter();
   const timing = requestTiming({ slowMs: config.slowRequestLogMs ?? DEFAULT_SLOW_REQUEST_LOG_MS,
-    timingObserver: createDatabaseTimingReporter().observe,
+    timingObserver: summary => { databaseTimingReporter.observe(summary); observeDatabaseTiming(summary); },
     ...(dependencies.requestCostObserver ? { costObserver: dependencies.requestCostObserver, databasePool: pool } : {}) });
+  // Tracing wraps request timing so database spans join the request's trace.
+  app.use("*", tracingMiddleware);
   app.use("*", timing);
   if (dependencies.requestCostObserver) {
     Object.defineProperty(app, "requestCostObserverStatus", { value: timing.costObserverStatus });
@@ -534,6 +538,7 @@ export function createApp(
         "content-type",
         "x-zeros-client",
         "idempotency-key",
+        "traceparent",
         "x-zeros-access-credential",
         "x-zeros-runtime-admission",
         "x-zeros-device-id",

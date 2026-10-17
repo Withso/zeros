@@ -9,6 +9,7 @@ import {
   CloudRestError,
   retryDelayMs,
 } from "../rest-client";
+import { TRACEPARENT_PATTERN } from "../trace-context";
 import {
   CLIENT_SESSION,
   DEVICE,
@@ -218,6 +219,63 @@ describe("CloudRestClient", () => {
     ).rejects.toThrow("operation connectCloudWorkspaceRuntime needs an object body for its device proof");
     expect(signed).toEqual([]);
     expect(fetched).toEqual([]);
+  });
+});
+
+describe("CloudRestClient tracing", () => {
+  /** Records the headers of every request; each fetch answers 201 with an empty object. */
+  function clientWith(tracing?: { sampleRatio: number }) {
+    const seen: Record<string, string>[] = [];
+    const client = new CloudRestClient({
+      baseUrl: "https://control.invalid",
+      getAccessToken: () => "test-session-token",
+      ...(tracing ? { tracing } : {}),
+      fetchImpl: (async (_url: string, init?: RequestInit) => {
+        seen.push({ ...(init?.headers as Record<string, string>) });
+        return new Response(JSON.stringify({}), { status: 201, headers: { "content-type": "application/json" } });
+      }) as typeof fetch,
+    });
+    return { client, seen };
+  }
+
+  it("sends no traceparent unless tracing is configured", async () => {
+    const { client, seen } = clientWith();
+    await client.invoke("listCloudWorkspaces");
+    expect(seen[0]).not.toHaveProperty("traceparent");
+  });
+
+  it("starts a sampled trace per request at ratio 1", async () => {
+    const { client, seen } = clientWith({ sampleRatio: 1 });
+    await client.invoke("listCloudWorkspaces");
+    await client.invoke("listCloudWorkspaces");
+    expect(seen[0]!.traceparent).toMatch(TRACEPARENT_PATTERN);
+    expect(seen[0]!.traceparent).toMatch(/-01$/);
+    expect(seen[1]!.traceparent).not.toBe(seen[0]!.traceparent);
+  });
+
+  it("marks traces unsampled at ratio 0", async () => {
+    const { client, seen } = clientWith({ sampleRatio: 0 });
+    await client.invoke("listCloudWorkspaces");
+    expect(seen[0]!.traceparent).toMatch(/-00$/);
+  });
+
+  it("sends a supplied traceparent verbatim, with or without tracing", async () => {
+    const parent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+    for (const tracing of [undefined, { sampleRatio: 0 }]) {
+      const { client, seen } = clientWith(tracing);
+      await client.invoke("listCloudWorkspaces", { traceparent: parent });
+      expect(seen[0]!.traceparent).toBe(parent);
+    }
+  });
+
+  it("refuses a malformed traceparent before any request", async () => {
+    const { client, seen } = clientWith({ sampleRatio: 1 });
+    await expect(client.invoke("listCloudWorkspaces", { traceparent: "00-XYZ" })).rejects.toThrow(TypeError);
+    expect(seen).toEqual([]);
+  });
+
+  it.each([1.5, -1, Number.NaN])("rejects a trace sample ratio of %s", sampleRatio => {
+    expect(() => clientWith({ sampleRatio })).toThrow(RangeError);
   });
 });
 
