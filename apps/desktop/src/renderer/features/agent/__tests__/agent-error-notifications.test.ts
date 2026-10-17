@@ -3,15 +3,21 @@ import vm from "node:vm";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentFailure } from "../../../platform/bridge/failure";
-import { isTransportShaped } from "../../../platform/bridge/failure";
+import { isRecoverable, isTransportShaped } from "../../../platform/bridge/failure";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
+import { turnFailureForCard } from "../turn-failure";
+import { groupMessagesIntoTurns } from "../turn-grouping";
+import { tailTurnInFlight } from "../tail-indicators";
 
 // Execute the actual chat notification effect, with only React scheduling and
 // external sinks supplied. The unrelated editor/native tree is not mounted.
 const source = ts.createSourceFile("agent-chat.tsx", readFileSync(new URL("../agent-chat.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let effectSource = "", labelSource = "";
+let effectSource = "", noticeSource = "", legacyLabelSource = "";
 function visit(node: ts.Node) {
-  if (ts.isFunctionDeclaration(node) && node.name?.text === "labelForFailure") labelSource = node.getText(source);
+  if (ts.isFunctionDeclaration(node) && node.name?.text === "labelForFailure") legacyLabelSource = node.getText(source);
+  if (ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
+    ["preparationTurn", "preparationTurnRead", "preparationTurnFailure", "preparationFailure"].includes(declaration.name.getText(source))))
+    noticeSource += node.getText(source) + "\n";
   if (ts.isBlock(node)) {
     const index = node.statements.findIndex(statement => ts.isVariableStatement(statement) &&
       statement.declarationList.declarations.some(declaration => /^lastError.*Ref$/.test(declaration.name.getText(source))));
@@ -20,12 +26,14 @@ function visit(node: ts.Node) {
   ts.forEachChild(node, visit);
 }
 visit(source);
-if (!effectSource.includes("useEffect") || !effectSource.includes("toast.error")) throw new Error("Chat notification boundary missing");
-const script = new vm.Script(ts.transpileModule(`${labelSource}\n${effectSource}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText);
+if (!effectSource.includes("useEffect")) throw new Error("Chat failure boundary missing");
+// Replay the prior toast implementation too: absence of the inline notice must
+// fail a behavioral assertion, not prevent the regression suite from loading.
+const script = new vm.Script(ts.transpileModule(`${legacyLabelSource}\n${effectSource}\n${noticeSource || "const preparationFailure = null;"}\npreparationFailure;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText);
 const cloud = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const protocol = (detail: string): AgentFailure => ({ kind: "protocol-error", stage: "newSession", agentId: "cursor", message: detail });
 
-function mounted(folder: string) {
+function mounted(folder: string, history?: { status: string; stopReason?: string; readOnly?: boolean }) {
   const refs: Array<{ current: unknown }> = [];
   const toast = { error: vi.fn() }, warn = vi.fn(), localRefresh = vi.fn(), cloudRefresh = vi.fn();
   let session = { agentId: "cursor", agentName: "Cursor", status: "ready", error: null as string | null,
@@ -33,8 +41,17 @@ function mounted(folder: string) {
   const render = (next: Partial<typeof session> = {}, interactive = true, chatId = "chat", account = 1) => {
     session = { ...session, ...next };
     let index = 0;
-    script.runInNewContext({ session, chatId, interactive, chatThread: { folder }, cloudComputerV2: true,
-      isErrorState: ["failed", "auth-required"].includes(session.status), isTransportShaped, isCloudWorkspace,
+    return script.runInNewContext({ session, chatId, interactive, chatThread: { folder }, cloudComputerV2: true,
+      isErrorState: ["failed", "auth-required"].includes(session.status), isTransportShaped, isRecoverable, isCloudWorkspace,
+      readOnly: history?.readOnly ?? false,
+      turns: history ? groupMessagesIntoTurns([
+        { id: "earlier-prompt", kind: "text", role: "user", text: "Earlier request", createdAt: 1 },
+        { id: "earlier-answer", kind: "text", role: "agent", text: "Earlier answer", createdAt: 2 },
+      ]) : [],
+      detachedCloudAdmission: null, provisionalTranscript: false, surfaceActive: interactive,
+      pendingLocalTurnId: null, isStreaming: false, tailTurnInFlight, turnFailureForCard,
+      turnRowCache: {}, turnRowKey: () => "fixture-turn", turnGet: vi.fn(),
+      useCachedRead: () => ({ data: history ?? null }),
       cloudCatalogGeneration: () => account,
       toast, console: { warn },
       useRef: (initial: unknown) => refs[index++] ?? (refs[index - 1] = { current: initial }),
@@ -57,18 +74,47 @@ describe("agent failure notification ownership", () => {
     }
   });
 
-  it.each(["/local/personal", cloud])("reports new failures once, without hiding distinct same-label faults in %s", folder => {
+  it.each(["/local/personal", "/organization/local", cloud])("keeps new startup failures inline without toasts in %s", folder => {
     const view = mounted(folder);
     view.render();
-    view.render({ status: "failed", failure: protocol("synthetic fault A") });
+    expect(view.render({ status: "failed", failure: protocol("synthetic fault A") })?.message).toBe("synthetic fault A");
     view.render();
     view.render({}, false);
     view.render({}, true);
-    expect(view.toast).toHaveBeenCalledOnce();
-    view.render({ failure: protocol("synthetic fault B") });
-    expect(view.toast).toHaveBeenCalledTimes(2);
-    expect(view.toast).toHaveBeenLastCalledWith("Cursor: Agent error", expect.any(Object));
+    expect(view.toast).not.toHaveBeenCalled();
+    expect(view.render({ failure: protocol("synthetic fault B") })?.message).toBe("synthetic fault B");
+    expect(view.toast).not.toHaveBeenCalled();
     expect(view.warn).not.toHaveBeenCalled();
+  });
+
+  describe.each(["/local/personal", "/organization/local", cloud])("startup failure with history in %s", folder => {
+    it.each(["completed", "cancelled"])("shows one explanation after a %s turn", status => {
+      for (const stage of ["initialize", "loadSession"] as const) {
+        const view = mounted(folder, { status, stopReason: status === "cancelled" ? "cancelled" : "end_turn" });
+        const failure = { ...protocol("The provider executable is unavailable."), stage };
+        view.render();
+        expect(view.render({ status: "failed", failure })?.message).toBe(failure.message);
+        expect(view.toast).not.toHaveBeenCalled();
+        expect(turnFailureForCard({ events: [], turnId: "earlier-prompt", fallback: failure, status })).toBeNull();
+        expect(view.render({ status: "ready", failure: null })).toBeNull();
+      }
+    });
+
+    it("leaves an unfinished turn's failure to its existing card", () => {
+      const view = mounted(folder, { status: "failed" });
+      const failure = { ...protocol("The provider could not initialize."), stage: "initialize" as const };
+      expect(view.render({ status: "failed", failure })).toBeNull();
+      expect(turnFailureForCard({ events: [], turnId: "earlier-prompt", fallback: failure, status: "failed" })?.message).toBe(failure.message);
+      expect(view.toast).not.toHaveBeenCalled();
+    });
+
+    it("keeps read-only history and recoverable startup failures quiet", () => {
+      const failure = protocol("Synthetic startup failure");
+      expect(mounted(folder, { status: "completed", readOnly: true }).render({ status: "failed", failure })).toBeNull();
+      for (const kind of ["transport-closed", "lifecycle-superseded", "timeout", "auth-required", "cloud-credentials-unavailable"] as const) {
+        expect(mounted(folder, { status: "completed" }).render({ status: "failed", failure: { ...failure, kind } })).toBeNull();
+      }
+    });
   });
 
   it("does not turn hidden or foreign-owner failure state into a notification", () => {
@@ -85,10 +131,10 @@ describe("agent failure notification ownership", () => {
     view.render();
     view.render({ status: "failed", failure });
     view.render({ failure: { ...failure } });
-    expect(view.toast).toHaveBeenCalledOnce();
+    expect(view.toast).not.toHaveBeenCalled();
     view.render({ status: "warming", failure: null });
     view.render({ status: "failed", failure: { ...failure } });
-    expect(view.toast).toHaveBeenCalledTimes(2);
+    expect(view.toast).not.toHaveBeenCalled();
   });
 
   it("ignores a retained same-chat error across account A to B to A", () => {
@@ -99,10 +145,10 @@ describe("agent failure notification ownership", () => {
     expect(view.toast).not.toHaveBeenCalled();
   });
 
-  it.each(["lifecycle-superseded", "transport-closed"] as const)("keeps %s quiet even if a caller supplied failed status", kind => {
+  it.each(["lifecycle-superseded", "transport-closed", "timeout", "session-expired"] as const)("keeps %s quiet even if a caller supplied failed status", kind => {
     const view = mounted("/local/personal");
     view.render();
-    view.render({ status: "failed", failure: { ...protocol("closed cancellation"), kind } });
+    expect(view.render({ status: "failed", failure: { ...protocol("closed cancellation"), kind } })).toBeNull();
     expect(view.toast).not.toHaveBeenCalled();
   });
 
@@ -128,12 +174,12 @@ describe("agent failure notification ownership", () => {
     expect(view.cloudRefresh).not.toHaveBeenCalled();
   });
 
-  it("leaves a real prompt failure to the transcript and preserves actionable advice", () => {
+  it("leaves prompt failures and their advice to the turn notice", () => {
     const view = mounted("/local/personal");
     view.render();
     view.render({ status: "failed", failure: { ...protocol("prompt fault"), stage: "prompt" } });
     expect(view.toast).not.toHaveBeenCalled();
     view.render({ failure: { ...protocol("prompt fault with action"), stage: "prompt", advice: "Choose another model." } });
-    expect(view.toast).toHaveBeenCalledWith("Cursor: Agent error", expect.objectContaining({ description: "Choose another model." }));
+    expect(view.toast).not.toHaveBeenCalled();
   });
 });

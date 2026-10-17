@@ -45,6 +45,16 @@ registered `whileFeedUnavailable` value:
 Use `off` for any new flag that relaxes a database check or a security
 decision.
 
+## Dependencies
+
+A definition may name `requires` flags; the flag then reads off — in both
+`enabled(orgId, …)` and `anyEnabled(…)` — unless every required flag is also
+on for that same organization, transitively. `realtime_uplink` requires
+`capabilities`: without capability keys and epochs the S2 handshake cannot
+complete, so advertising or accepting the uplink alone would loop engines at
+`auth.sync`. Enabling the uplink for an organization is therefore always the
+pair: `capabilities` first, then `realtime_uplink`.
+
 ## Changing a flag
 
 `pnpm --dir apps/control-plane cloud-rollout-flag:manage` runs

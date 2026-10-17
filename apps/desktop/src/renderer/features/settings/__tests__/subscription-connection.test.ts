@@ -24,6 +24,31 @@ vi.mock("../../../platform/provider-auth-state", () => ({
 vi.mock("../../agent/agents-cache", () => ({ invalidateAgentsCache: vi.fn() }));
 
 describe("shared subscription connection state", () => {
+  it("preserves the selected method while a canceled sign-in is pending", async () => {
+    let emit!: (raw: unknown) => void;
+    deps.listen.mockImplementation(async (_event, callback) => { emit = callback; return () => {}; });
+    const pending = { provider: "claude", state: "connecting", revision: 1,
+      attemptId: "00000000-0000-4000-8000-000000000008" };
+    deps.invoke.mockResolvedValue(pending);
+    const service = await import("../subscription-connection");
+    const work = service.connectSubscription("claude");
+    await vi.waitFor(() => expect(deps.invoke).toHaveBeenCalledWith("provider_subscription", { provider: "claude", action: "connect" }));
+    const beforeCompletion = deps.prefs.mock.calls.length;
+    emit({ ...pending, state: "connected", error: "Sign-in canceled.", revision: 2 });
+    await work;
+    expect(beforeCompletion).toBe(0);
+    expect(deps.prefs).not.toHaveBeenCalled();
+  });
+
+  it("requests sign-in for the exact saved account", async () => {
+    deps.listen.mockResolvedValue(() => {});
+    deps.invoke.mockResolvedValue({ provider: "claude", state: "connected", revision: 1 });
+    const service = await import("../subscription-connection");
+    const accountId = "00000000-0000-4000-8000-000000000009";
+    await service.connectSubscription("claude", accountId);
+    expect(deps.invoke).toHaveBeenCalledWith("provider_subscription", { provider: "claude", action: "connect", accountId });
+  });
+
   afterEach(() => vi.useRealTimers());
 
   it("leaves waiting and cancels the native attempt when completion events are lost", async () => {
@@ -274,13 +299,12 @@ describe("shared subscription connection state", () => {
     });
   });
 
-  it("cancels during preference persistence without opening a browser", async () => {
-    deps.listen.mockResolvedValue(() => {});
-    let flush!: () => void;
-    deps.flush.mockImplementation(
+  it("cancels during native listener setup without opening a browser or changing preferences", async () => {
+    let listening!: (off: () => void) => void;
+    deps.listen.mockImplementation(
       () =>
-        new Promise<void>((resolve) => {
-          flush = resolve;
+        new Promise<() => void>((resolve) => {
+          listening = resolve;
         }),
     );
     deps.invoke.mockResolvedValue({
@@ -290,13 +314,14 @@ describe("shared subscription connection state", () => {
     });
     const service = await import("../subscription-connection");
     const run = service.connectSubscription("claude");
-    await vi.waitFor(() => expect(deps.flush).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(deps.listen).toHaveBeenCalledOnce());
     const cancel = service.cancelSubscription("claude");
-    flush();
+    listening(() => {});
     await cancel;
     expect((await run).error).toContain("canceled");
     expect(
       deps.invoke.mock.calls.some(([, args]) => args.action === "connect"),
     ).toBe(false);
+    expect(deps.prefs).not.toHaveBeenCalled();
   });
 });

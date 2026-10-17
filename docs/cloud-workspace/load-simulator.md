@@ -115,7 +115,12 @@ inventory instead of inspecting each workspace.
   statements are counted client-side; job-queue wake-ups are issued by a
   database trigger, so a LISTEN connection counts their deliveries (identical
   notifications dedupe per transaction, so deliveries equal notifying commits
-  on that channel). PostgreSQL serializes notifying commits at commit time.
+  on that channel). Authority-cache hints (`zeros_cloud_authority_cache`,
+  migration 0152) are counted the same way and included; one commit can
+  carry several scopes, so with them the column is an upper bound.
+  PostgreSQL serializes notifying commits at commit time. `load:db` prints the
+  projected notifying commits at 100, 500 and 1000 active workspaces.
+- **Authority hints/s**: authority-cache hint deliveries alone.
 - **RTT floor**: round trips multiplied by an assumed 5 ms database distance;
   the minimum added latency for a remote database.
 - **CP CPU ms/s**: control-plane process CPU time per wall second.
@@ -131,8 +136,9 @@ inventory instead of inspecting each workspace.
   a deliberate change;
 - statements and round trips per request: `ceil(measured × 1.25)`;
 - steady-state transactions per second: measured × 1.1, rounded up to 0.01;
-- notifying commits per active workspace per second: observed between the
-  quiet and busiest scenario, × 1.1;
+- notifying commits per active workspace per second, and authority-cache
+  hints per active workspace per second: observed between the quiet and
+  busiest scenario, × 1.1;
 - Boat calls per minute are enforced against the provider's 1000
   requests/min/IP rate limit with a two-replica allowance: one paged
   inventory list per minute (`ceil(sandboxes / 100)` calls) plus one inspect
@@ -144,6 +150,22 @@ raise a budget to pass the check without explaining the new cost in the pull
 request. The plan targets (0.5 tx/s quiet and 0.01 tx/s per active workspace)
 are recorded in the file and reported, but not enforced until the hot paths are
 rebuilt.
+
+Capability member-epoch bumps (migration 0153) are event-driven, not
+steady-state, so the scenarios do not exercise them. Their bound per event:
+an organization-wide input (organization, team or entitlement change,
+billing-scope flip, role-relevant workspace change, a seat past the limit)
+writes N + G epoch rows in one statement for an organization with N members
+and G live non-member guests; a per-account input writes one row per
+organization the account belongs to; a membership row change writes one.
+An UPDATE that changes no role input writes none, so a directory sync that
+rewrites unchanged roles costs nothing here.
+
+In the October 2026 re-run (0, 1 and 10 active, 30 s) authority hints were
+0.023 per active workspace per second and all notifying commits 0.047
+(100 active ≈ 4.7/s, 1000 active ≈ 47/s). Before the
+`cloud_workspace_generations.ports_observed_at` exemption, every port-scan
+heartbeat notified: 0.100 hints per active workspace per second.
 
 ## Baseline (October 2026)
 

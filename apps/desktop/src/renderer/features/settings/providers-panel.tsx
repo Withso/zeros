@@ -77,15 +77,13 @@ import {
   cancelSubscription,
   changeSubscriptionAccount,
   isSubscriptionProvider,
-  readSubscription,
-  subscriptionCache,
 } from "./subscription-connection";
+import { useSubscriptionStatus, warmSubscriptionStatus } from "./use-subscription-status";
 import { nativeInvoke, useNativeRuntime } from "../../platform/runtime";
-import { useCachedRead } from "../../state/use-cached-read";
 import { getSetting, setSetting } from "../../platform/settings";
 import {
   deleteSecret,
-  getSecret,
+  hasSecret,
   setSecret,
   SECRET_ACCOUNTS,
 } from "../../platform/secrets";
@@ -570,19 +568,7 @@ function ProviderCard({
   // live value, which diverges from the saved secret while editing.
   const [keyConfigured, setKeyConfigured] = useState(false);
   const native = useNativeRuntime().ready;
-  const subscription = useCachedRead(
-    subscriptionCache,
-    agent.id,
-    readSubscription,
-    {
-      enabled: native && surfaceActive && isSubscriptionProvider(agent.id),
-      maxAgeMs: 15_000,
-    },
-  );
-  useEffect(() => {
-    if (!native || !surfaceActive || !isSubscriptionProvider(agent.id)) return;
-    return subscribeProviderAuth(() => subscriptionCache.invalidate(agent.id));
-  }, [agent.id, native, surfaceActive]);
+  const subscription = useSubscriptionStatus(agent.id, surfaceActive);
   useEffect(() => {
     const confirmedMethod = subscription.data?.method;
     if (
@@ -615,7 +601,8 @@ function ProviderCard({
     !changingMethod &&
     (method === "apiKey"
       ? agent.authenticated === true && keyConfigured
-      : subscription.data?.state === "connected" &&
+      : (!subscription.data?.method || subscription.data.method === method) &&
+        subscription.data?.state === "connected" &&
         agent.authenticated === true);
 
   const [binaryPathDraft, setBinaryPathDraft] = useState(
@@ -645,25 +632,31 @@ function ProviderCard({
   // (readable via DevTools / a shoulder-surf of the password reveal) for no
   // benefit. The input is replace-only: blank until the user types a new key.
   useEffect(() => {
+    if (!surfaceActive) return;
     if (!supportsApiKey || !vendor) {
       setApiKeyLoaded(true);
       return;
     }
     let cancelled = false;
-    (async () => {
+    let revision = 0;
+    const refresh = async () => {
+      const requested = ++revision;
       try {
-        const v = await getSecret(vendor.secretAccount);
-        if (!cancelled) setKeyConfigured(!!v?.trim());
+        const configured = await hasSecret(vendor.secretAccount);
+        if (!cancelled && requested === revision) setKeyConfigured(configured);
       } catch {
-        /* keychain miss — leave blank */
+        /* Retain the last confirmed presence while native storage is unavailable. */
       } finally {
-        if (!cancelled) setApiKeyLoaded(true);
+        if (!cancelled && requested === revision) setApiKeyLoaded(true);
       }
-    })();
+    };
+    void refresh();
+    const unsubscribe = subscribeProviderAuth(() => void refresh());
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [supportsApiKey, vendor]);
+  }, [native, supportsApiKey, vendor, surfaceActive]);
 
   // ── persistence helpers ────────────────────────────────
 
@@ -839,13 +832,10 @@ function ProviderCard({
   const warmConnection = () => {
     if (
       !surfaceActive ||
-      method !== "account" ||
       !isSubscriptionProvider(agent.id)
     )
       return;
-    void subscriptionCache
-      .load(agent.id, () => readSubscription(agent.id), { maxAgeMs: 15_000 })
-      .catch(() => {});
+    warmSubscriptionStatus(agent.id);
   };
 
   return (
@@ -930,6 +920,7 @@ function ProviderCard({
                 connected,
                 prefs,
                 agent.id === "claude" ? "Claude" : agent.name,
+                method,
               )}
               {connected && (
                 <Check className="text-green-fg size-4" aria-hidden="true" />
@@ -950,6 +941,7 @@ function ProviderCard({
             method={method}
             onMethodChange={(next) => void handleAuthMethod(next)}
             connected={connected}
+            connectedIdentity={method !== "apiKey" ? subscription.data?.email : undefined}
             busy={changingMethod || savingApiKey}
           >
             {method === "apiKey" ? (

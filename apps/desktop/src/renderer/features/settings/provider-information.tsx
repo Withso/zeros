@@ -58,7 +58,7 @@ export function ProviderInformation({
     providerAuthRevision,
   );
   const key =
-    connected && method !== "apiKey"
+    connected && method !== "apiKey" && (method === "account" || !!status?.email?.trim())
       ? providerUsageKey(
           provider,
           method,
@@ -230,6 +230,8 @@ export function ProviderInformation({
           <p className="text-fg2 text-xs">
             Subscription limits are not available with an API connection.
           </p>
+        ) : method === "cli" && !status?.email?.trim() ? (
+          <p className="text-fg2 text-xs">Usage is unavailable for this connection.</p>
         ) : null}
       </div>
     </section>

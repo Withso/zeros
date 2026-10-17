@@ -12,6 +12,12 @@ export function seedProviderCredentials(value: unknown): boolean {
   credentials = parsed.data;
   return true;
 }
+
+export function providerAuthenticationMethod(provider: string) {
+  return provider === "claude" || provider === "codex" || provider === "cursor"
+    ? credentials?.authMethods?.[provider]
+    : undefined;
+}
 export function providerCredential(
   provider: string,
   auth: unknown,
@@ -35,6 +41,7 @@ export function providerAccountProfile(
   provider: string,
 ): {
   id: string;
+  revision?: number;
   state: "connected" | "disconnected" | "expired";
   configDir?: string;
 } | null {

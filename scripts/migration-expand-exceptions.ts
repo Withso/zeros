@@ -12,7 +12,37 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
   },
   // 0004's default privileges grant zeros_app writes on every new table.
   "0153_cloud_capability_keys.sql": {
-    "new-table-privileges": ["REVOKE ALL ON cloud_capability_signing_keys FROM PUBLIC, zeros_app;"],
+    "new-table-privileges": [
+      "REVOKE ALL ON cloud_capability_signing_keys FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_capability_key_changes FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_capability_member_epochs FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_capability_access_losses FROM PUBLIC, zeros_app;",
+    ],
+    // PUBLIC's default EXECUTE on functions created in the same migration.
+    "privilege-tightening": [
+      "preserve_cloud_capability_key()",
+      "bump_cloud_capability_member_epoch(uuid, uuid)",
+      "bump_cloud_capability_org_epochs(uuid)",
+      "bump_cloud_capability_user_epochs(uuid)",
+      "record_cloud_capability_access_loss(uuid, uuid, uuid)",
+      "bump_cloud_capability_member_epoch_trigger()",
+      "bump_cloud_capability_writer_slot_epoch()",
+      "bump_cloud_capability_user_epochs_trigger()",
+      "bump_cloud_capability_org_epochs_trigger()",
+      "bump_cloud_capability_invitation_epoch()",
+      "reject_cloud_capability_key_change_mutation()",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+    // A guard that rejects TRUNCATE cannot truncate.
+    "truncate-guard": [`CREATE TRIGGER cloud_capability_key_changes_no_truncate
+  BEFORE TRUNCATE ON cloud_capability_key_changes FOR EACH STATEMENT
+  EXECUTE FUNCTION reject_cloud_capability_key_change_mutation();`],
+  },
+  "0152_cloud_authority_cache_invalidation.sql": {
+    // PUBLIC's default EXECUTE on functions created in the same migration.
+    "privilege-tightening": [
+      "cloud_workspace_engine_authority_snapshot(uuid, uuid, integer, uuid, boolean)",
+      "notify_cloud_authority_cache()",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
   },
   "0145_cloud_computer_named_snapshots.sql": {},
   "0146_cloud_provider_snapshot_recovery.sql": {},

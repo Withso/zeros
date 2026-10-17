@@ -2,15 +2,18 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentGateway } from "../gateway";
+import * as providerEnv from "../../settings/provider-env";
 import type { BoundaryRequest } from "../containment/types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -19,6 +22,60 @@ afterEach(async () => {
 });
 
 describe("AgentGateway provider command probes", () => {
+  it.each(["claude", "codex"])("checks the staged %s runtime even when another CLI is on PATH", async provider => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-probe-staged-"));
+    temporaryDirectories.push(root);
+    const staged = path.join(root, `bundled-${provider}`);
+    const shadow = path.join(root, provider);
+    await writeFile(staged, "#!/bin/sh\nprintf 'staged-status\\n'\n", { mode: 0o755 });
+    await writeFile(shadow, "#!/bin/sh\nprintf 'unrelated-status\\n'\nexit 1\n", { mode: 0o755 });
+    vi.stubEnv(provider === "claude" ? "ZEROS_CLAUDE_CLI_PATH" : "ZEROS_CODEX_CLI_PATH", staged);
+    vi.stubEnv("PATH", `${root}${path.delimiter}${process.env.PATH ?? ""}`);
+    const gateway = new AgentGateway({
+      projectRoot: root,
+      executionBoundary: { ...testExecutionBoundary(), backend: "none" },
+      events: { onSessionUpdate() {}, onPermissionRequest() {}, onQuestionRequest() {}, onAgentStderr() {}, onAgentExit() {} },
+    });
+    const internal = gateway as unknown as {
+      runProviderProbeCommand(provider: string, binary: string, args: string[], options: { timeoutMs: number }): Promise<{ exitCode: number | null; stdout: string }>;
+    };
+    try {
+      await expect(internal.runProviderProbeCommand(provider, provider,
+        provider === "claude" ? ["auth", "status", "--json"] : ["login", "status"],
+        { timeoutMs: 2_000 },
+      )).resolves.toEqual({ exitCode: 0, stdout: "staged-status\n" });
+    } finally {
+      await gateway.dispose();
+    }
+  });
+
+  it.each(["claude", "codex"])("keeps a trusted %s executable override ahead of the staged runtime", async provider => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-probe-override-"));
+    temporaryDirectories.push(root);
+    const staged = path.join(root, "bundled");
+    const override = path.join(root, "custom");
+    await writeFile(staged, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await writeFile(override, "#!/bin/sh\nprintf 'selected-status\\n'\n", { mode: 0o755 });
+    vi.stubEnv(provider === "claude" ? "ZEROS_CLAUDE_CLI_PATH" : "ZEROS_CODEX_CLI_PATH", staged);
+    vi.spyOn(providerEnv, "applyUserProviderConfig").mockImplementation((_cwd, _provider, base) => ({ ...base, cliBinary: override }));
+    const gateway = new AgentGateway({
+      projectRoot: root,
+      executionBoundary: { ...testExecutionBoundary(), backend: "none" },
+      events: { onSessionUpdate() {}, onPermissionRequest() {}, onQuestionRequest() {}, onAgentStderr() {}, onAgentExit() {} },
+    });
+    const internal = gateway as unknown as {
+      runProviderProbeCommand(provider: string, binary: string, args: string[], options: { timeoutMs: number }): Promise<{ exitCode: number | null; stdout: string }>;
+    };
+    try {
+      await expect(internal.runProviderProbeCommand(provider, provider,
+        provider === "claude" ? ["auth", "status", "--json"] : ["login", "status"],
+        { timeoutMs: 2_000 },
+      )).resolves.toEqual({ exitCode: 0, stdout: "selected-status\n" });
+    } finally {
+      await gateway.dispose();
+    }
+  });
+
   it("keeps native provider probes free of Design territory policy", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-probe-native-"));
     temporaryDirectories.push(root);
@@ -171,6 +228,8 @@ describe("AgentGateway provider command probes", () => {
     const binary = path.join(root, "codex");
     await writeFile(binary, "#!/bin/sh\nexit 0\n", "utf8");
     await chmod(binary, 0o755);
+    vi.stubEnv("ZEROS_CODEX_CLI_PATH", binary);
+    vi.stubEnv("ZEROS_CLAUDE_CLI_PATH", binary);
     const previousPath = process.env.PATH;
     process.env.PATH = `${root}${path.delimiter}${previousPath ?? ""}`;
     const gateway = new AgentGateway({
@@ -208,6 +267,8 @@ describe("AgentGateway provider command probes", () => {
     const binary = path.join(root, "codex");
     await writeFile(binary, "#!/bin/sh\nexit 0\n", "utf8");
     await chmod(binary, 0o755);
+    vi.stubEnv("ZEROS_CODEX_CLI_PATH", binary);
+    vi.stubEnv("ZEROS_CLAUDE_CLI_PATH", binary);
     const previousPath = process.env.PATH;
     process.env.PATH = `${root}${path.delimiter}${previousPath ?? ""}`;
     let boundaryUnavailable = false;

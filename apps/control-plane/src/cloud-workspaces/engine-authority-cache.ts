@@ -41,7 +41,9 @@ export type EngineAuthorityMode = { kind: "assert"; transitionRecordSync?: boole
 
 export type EngineAuthorityDecision =
   | { allowed: false }
-  | { allowed: true; authorityEpoch: number; accountUserId: string; leaseExpiresAtMs: number; runtimeBootId: string | null };
+  | { allowed: true; authorityEpoch: number; accountUserId: string; leaseExpiresAtMs: number; runtimeBootId: string | null;
+      /** The cached entry's deadline; a SQL observation carries none. */
+      deadlineMs?: number };
 
 const DENIED: EngineAuthorityDecision = Object.freeze({ allowed: false });
 
@@ -57,7 +59,7 @@ export function decideEngineAuthority(
     (mode.kind === "assert" && mode.transitionRecordSync === true);
   if (!enrolled || (mode.kind === "read" && entry.revoked)) return DENIED;
   return { allowed: true, authorityEpoch: entry.authorityEpoch, accountUserId: entry.accountUserId,
-    leaseExpiresAtMs: entry.leaseExpiresAtMs, runtimeBootId: entry.runtimeBootId };
+    leaseExpiresAtMs: entry.leaseExpiresAtMs, runtimeBootId: entry.runtimeBootId, deadlineMs: entry.deadlineMs };
 }
 
 function sameDecision(left: EngineAuthorityDecision, right: EngineAuthorityDecision): boolean {
@@ -402,8 +404,10 @@ function unindex(map: Map<string, Set<string>>, key: string, id: string): void {
 }
 
 /** Read the committed authority for one key in its own system transaction.
- * It calls the same SQL function as assertCurrentCloudEngineAuthority with
- * shared locks, so the cache can never drift from the predicate. The deadline
+ * It calls cloud_workspace_engine_authority_snapshot, the predicate of
+ * assertCurrentCloudEngineAuthority without its row locks (0152 pins the
+ * derivation), so the cache cannot drift from the predicate and a load never
+ * blocks a heartbeat. The deadline
  * covers every clock-bounded positive condition: the engine lease, compute
  * allocation and credit coverage, a delegated provider credential's
  * 300-second margin, and account and organization entitlement expiry. */
@@ -413,7 +417,7 @@ export async function loadEngineAuthorityEntry(pool: pg.Pool, key: EngineAuthori
     revoked: boolean; setup_enrolled: boolean; runtime_ready: boolean; lease_expires_at: Date; deadline: Date;
     runtime_boot_id: string | null;
   }>(`WITH authority AS MATERIALIZED (
-      SELECT * FROM cloud_workspace_engine_authority_current($1,$2,$3,$4,$5,false))
+      SELECT * FROM cloud_workspace_engine_authority_snapshot($1,$2,$3,$4,$5))
     SELECT authority.authority_epoch, authority.account_user_id, authority.heartbeat_token_hash, authority.live, authority.fenced,
       engine.revoked_at IS NOT NULL AS revoked, engine.setup_run_id IS NOT NULL AS setup_enrolled,
       EXISTS(SELECT 1 FROM cloud_workspace_runtime_enrollments enrollment

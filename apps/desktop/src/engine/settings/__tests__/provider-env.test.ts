@@ -38,6 +38,59 @@ function writeRepo(body: string) {
 const REAL_BIN = process.execPath;
 
 describe("applyUserProviderConfig — user-layer spawn fallback", () => {
+  it.each([
+    ["claude", "ANTHROPIC_API_KEY"],
+    ["codex", "OPENAI_API_KEY"],
+    ["cursor", "CURSOR_API_KEY"],
+  ])("uses the shared native %s API selection over stale checkout settings and renderer keys", (provider, keyVar) => {
+    writeUser(`[providers.${provider}]\nauth = "${provider === "cursor" ? "subscription" : "cli"}"\n`);
+    seedProviderCredentials({
+      claude: null, codex: null, cursor: null, cursorSubscription: null,
+      [provider]: { apiKey: "selected-fixture-key" },
+      authMethods: { [provider]: "apiKey" },
+    });
+    expect(usesProviderApiKey(dir, provider)).toBe(true);
+    expect(applyUserProviderConfig(dir, provider, { env: { [keyVar]: "stale-fixture-key" } }).env?.[keyVar])
+      .toBe("selected-fixture-key");
+  });
+
+  it("does not use a renderer or inherited API key after the selected key is removed", () => {
+    seedProviderCredentials({
+      claude: null, codex: null, cursor: null, cursorSubscription: null,
+      authMethods: { cursor: "apiKey" },
+    });
+    expect(applyUserProviderConfig(dir, "cursor", { env: { CURSOR_API_KEY: "old-fixture-key" } }).env?.CURSOR_API_KEY).toBe("");
+  });
+
+  it("retains managed authentication policy over a shared user selection", () => {
+    writeFileSync(path.join(userDir, "settings.managed.toml"), '[providers.cursor]\nauth = "api-key"\n');
+    seedProviderCredentials({
+      claude: null, codex: null, cursor: { apiKey: "managed-fixture-key" },
+      cursorSubscription: { apiKey: "subscription-fixture-key" },
+      authMethods: { cursor: "account" },
+    });
+    expect(usesProviderApiKey(dir, "cursor")).toBe(true);
+    expect(applyUserProviderConfig(dir, "cursor", { env: {} }).env?.CURSOR_API_KEY).toBe("managed-fixture-key");
+  });
+
+  it("selects the saved subscription in a new worktree without trusting its old API settings", () => {
+    writeUser('[providers.claude]\nauth = "api-key"\n');
+    seedProviderCredentials({
+      claude: { apiKey: "manual-fixture-key" }, codex: null, cursor: null, cursorSubscription: null,
+      authMethods: { claude: "account" },
+      accountProfiles: {
+        claude: { id: "00000000-0000-4000-8000-000000000001", state: "connected", configDir: "/selected-profile" },
+        codex: null, cursor: null,
+      },
+    });
+    expect(usesProviderApiKey(dir, "claude")).toBe(false);
+    expect(applyUserProviderConfig(dir, "claude", { env: {
+      ANTHROPIC_API_KEY: "stale-fixture-key", ANTHROPIC_AUTH_TOKEN: "other-fixture-token", CLAUDE_CODE_OAUTH_TOKEN: "other-fixture-token",
+    } }).env).toMatchObject({
+      CLAUDE_CONFIG_DIR: "/selected-profile", ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", CLAUDE_CODE_OAUTH_TOKEN: "",
+    });
+  });
+
   it("reads the selected auth method only from trusted personal settings", () => {
     writeRepo('[providers.claude]\nauth = "api-key"\n');
     expect(usesProviderApiKey(dir, "claude")).toBe(false);

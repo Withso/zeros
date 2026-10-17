@@ -57,12 +57,39 @@ function capabilityError(c: Context, error: unknown) {
 
 /** The engine-token REST fallback (S1 "Issuance"): while its uplink has been
  * down for at least 30 s the engine may request a token directly with its
- * heartbeat credential and registered boot id, at most once a minute. Behind
- * the `capabilities` rollout flag; unknown organizations get a 404. */
+ * heartbeat credential and registered boot id, at most once a minute. The
+ * budget is per api process: N replicas allow N requests per minute per
+ * engine, which is accepted for a fallback that only fires during a
+ * `realtime` outage. Behind the `capabilities` rollout flag.
+ *
+ * An organization with the flag off gets the same 401 as a bad credential,
+ * without SQL, so an unauthenticated caller cannot use the endpoint as a
+ * flag oracle. Failed attempts (flag off included, for the same reason) are
+ * limited to FAILURE_LIMIT per engine id per minute before any SQL runs;
+ * this bounds credential guessing against one engine and the authority
+ * queries a caller can drive through one id. */
+const FAILURE_LIMIT = 5;
+const WINDOW_MS = 60_000;
+
 export function createCloudCapabilityEngineRoutes(service: CloudCapabilityService): Hono {
   const app = new Hono();
   const issuedAt = new Map<string, number>();
+  const failures = new Map<string, { count: number; since: number }>();
   const now = service.now ?? Date.now;
+  const prune = () => {
+    const cutoff = now() - 2 * WINDOW_MS;
+    if (issuedAt.size > 10_000) for (const [id, at] of issuedAt) if (at < cutoff) issuedAt.delete(id);
+    if (failures.size > 10_000) for (const [id, entry] of failures) if (entry.since < cutoff) failures.delete(id);
+  };
+  const recordFailure = (engineInstanceId: string) => {
+    const entry = failures.get(engineInstanceId);
+    if (!entry || now() - entry.since >= WINDOW_MS) failures.set(engineInstanceId, { count: 1, since: now() });
+    else entry.count += 1;
+  };
+  const rejected = (c: Context, engineInstanceId: string) => {
+    recordFailure(engineInstanceId);
+    return c.json({ error: { code: "engine_authority_rejected" } }, 401);
+  };
   app.use(CLOUD_CAPABILITY_ENGINE_PATH, bodyLimit({ maxSize: 4 * 1024 }));
   app.post(CLOUD_CAPABILITY_ENGINE_PATH, async c => {
     c.header("Cache-Control", "no-store");
@@ -73,15 +100,17 @@ export function createCloudCapabilityEngineRoutes(service: CloudCapabilityServic
     const parsed = EngineCapabilityRequestSchema.safeParse(await c.req.json().catch(() => null));
     if (!heartbeatToken || !parsed.success) return c.json({ error: { code: "capability_missing" } }, 401);
     const request = parsed.data;
-    if (!service.flags.enabled(request.organizationId, "capabilities")) return c.json({ error: { code: "not_found" } }, 404);
-    const last = issuedAt.get(request.engineInstanceId);
-    if (last !== undefined && now() - last < 60_000) {
-      c.header("Retry-After", String(Math.ceil((60_000 - (now() - last)) / 1000)));
+    prune();
+    const failed = failures.get(request.engineInstanceId);
+    if (failed && now() - failed.since < WINDOW_MS && failed.count >= FAILURE_LIMIT) {
+      c.header("Retry-After", String(Math.ceil((WINDOW_MS - (now() - failed.since)) / 1000)));
       return c.json({ error: { code: "capability_issuer_unavailable" } }, 429);
     }
-    if (issuedAt.size > 10_000) {
-      const cutoff = now() - 120_000;
-      for (const [id, at] of issuedAt) if (at < cutoff) issuedAt.delete(id);
+    if (!service.flags.enabled(request.organizationId, "capabilities")) return rejected(c, request.engineInstanceId);
+    const last = issuedAt.get(request.engineInstanceId);
+    if (last !== undefined && now() - last < WINDOW_MS) {
+      c.header("Retry-After", String(Math.ceil((WINDOW_MS - (now() - last)) / 1000)));
+      return c.json({ error: { code: "capability_issuer_unavailable" } }, 429);
     }
     try {
       const issued: IssuedCapability = await withSystemTx(service.pool, async tx => {
@@ -99,8 +128,10 @@ export function createCloudCapabilityEngineRoutes(service: CloudCapabilityServic
       // Only a granted token spends the once-a-minute budget; failures must
       // not lock out a retrying engine.
       issuedAt.set(request.engineInstanceId, now());
+      failures.delete(request.engineInstanceId);
       return c.json({ capability: { token: issued.token, expiresAt: issued.expiresAt.toISOString() } }, 201);
     } catch (error) {
+      if (!(error instanceof CapabilityIssuerUnavailableError)) recordFailure(request.engineInstanceId);
       return capabilityError(c, error);
     }
   });

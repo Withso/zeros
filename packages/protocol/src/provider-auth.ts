@@ -77,7 +77,14 @@ export const providerSubscriptionActionSchema = z.discriminatedUnion("action", [
   z
     .object({
       provider: browserSubscriptionProviderSchema,
-      action: z.enum(["status", "connect"]),
+      action: z.literal("status"),
+    })
+    .strict(),
+  z
+    .object({
+      provider: browserSubscriptionProviderSchema,
+      action: z.literal("connect"),
+      accountId: z.string().uuid().optional(),
     })
     .strict(),
   z
@@ -183,12 +190,23 @@ export const providerCredentialsSchema = z
     codex: credentialSchema.nullable(),
     cursor: credentialSchema.nullable(),
     cursorSubscription: credentialSchema.nullable(),
+    // Device-owned selection travels with its credentials, including to a new
+    // development checkout whose renderer/TOML preferences are still empty.
+    authMethods: z
+      .object({
+        claude: z.enum(["account", "cli", "apiKey"]).optional(),
+        codex: z.enum(["account", "cli", "apiKey"]).optional(),
+        cursor: z.enum(["account", "apiKey"]).optional(),
+      })
+      .strict()
+      .optional(),
     // Main-selected profiles only; never accepted from renderer spawn options.
     accountProfiles: z
       .object({
         claude: z
           .object({
             id: z.string().uuid(),
+            revision: z.number().int().nonnegative().optional(),
             configDir: z.string().min(1).max(4096).optional(),
             state: z.enum(["connected", "disconnected", "expired"]),
           })
@@ -196,6 +214,7 @@ export const providerCredentialsSchema = z
         codex: z
           .object({
             id: z.string().uuid(),
+            revision: z.number().int().nonnegative().optional(),
             configDir: z.string().min(1).max(4096).optional(),
             state: z.enum(["connected", "disconnected", "expired"]),
           })
@@ -203,6 +222,7 @@ export const providerCredentialsSchema = z
         cursor: z
           .object({
             id: z.string().uuid(),
+            revision: z.number().int().nonnegative().optional(),
             state: z.enum(["connected", "disconnected", "expired"]),
           })
           .nullable(),
