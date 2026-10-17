@@ -10,6 +10,7 @@ import {
   CapabilityOutageMonitor,
   CapabilityVerifier,
   capabilityEpochEntries,
+  capabilityEpochSubject,
   capabilityProofMessage,
   type CapabilityVerifyContext,
 } from "./capability-verifier.js";
@@ -160,6 +161,63 @@ describe("capability verifier", () => {
     advance(1);
     expect(verifier.recheck()).toEqual([{ sessionId: "s", code: "capability_expired" }]);
     expect(closed).toEqual(["s:capability_expired"]);
+  });
+
+  it("closes an open session when its signing key leaves the set", async () => {
+    const onSessionsClosed = vi.fn();
+    const clock = TEST_CAPABILITY_NOW_S * 1000;
+    const verifier = new CapabilityVerifier({ issuer: TEST_CAPABILITY_ISSUER, now: () => clock, onSessionsClosed });
+    verifier.applyKeys([testSigningJwk("cap-2026-10-a"), testSigningJwk("cap-2026-10-b")]);
+    const result = await verifier.verify(client(), CLIENT, proofContext(clock));
+    if (!result.ok) throw new Error(result.code);
+    verifier.openSession("s1", result, base);
+    const closures = verifier.applyKeys([testSigningJwk("cap-2026-10-b")]);
+    expect(closures).toEqual([{ sessionId: "s1", code: "capability_key_unknown" }]);
+    expect(onSessionsClosed.mock.calls[0]?.[0]).toBe(closures);
+    expect(verifier.openSessionIds()).toEqual([]);
+  });
+
+  it("keeps a session that renewed under a key that stays", async () => {
+    const { verifier, now } = setup();
+    verifier.applyKeys([testSigningJwk("cap-2026-10-a"), testSigningJwk("cap-2026-10-b")]);
+    const first = await verifier.verify(client(), CLIENT, proofContext(now()));
+    if (!first.ok) throw new Error(first.code);
+    verifier.openSession("s1", first, base);
+    const renewed = await verifier.verify(signTestCapability({ ...TEST_CAPABILITY_HEADER, kid: "cap-2026-10-b" },
+      testClientClaims({ jti: "EEEEEEEEEEEEEEEEEEEEEE" })), CLIENT, proofContext(now(), { jti: "EEEEEEEEEEEEEEEEEEEEEE" }));
+    if (!renewed.ok) throw new Error(renewed.code);
+    expect(verifier.renewSession("s1", renewed)).toBe(true);
+    expect(verifier.applyKeys([testSigningJwk("cap-2026-10-b")])).toEqual([]);
+    expect(verifier.openSessionIds()).toEqual(["s1"]);
+  });
+
+  it("records a first-seen subject without re-checking open sessions", async () => {
+    const { verifier, now, advance } = setup();
+    const result = await verifier.verify(client(), CLIENT, proofContext(now()));
+    if (!result.ok) throw new Error(result.code);
+    verifier.openSession("s1", result, base);
+    advance(300_000);
+    expect(verifier.mergeKnown([["ac:99999999-9999-4999-8999-999999999999", 5]])).toEqual([]);
+    expect(verifier.openSessionIds()).toEqual(["s1"]);
+    expect(verifier.mergeKnown([[capabilityEpochSubject("wa", result.claims)!, 13]])).toEqual([{ sessionId: "s1", code: "capability_expired" }]);
+  });
+
+  it("closes a session when one of its own subjects is raised over the known epoch", async () => {
+    const { verifier, now } = setup();
+    const result = await verifier.verify(client({ ep: { wa: 1, wr: 3, me: 5, ac: 1, dk: 2 } }), CLIENT, proofContext(now()));
+    if (!result.ok) throw new Error(result.code);
+    verifier.openSession("s1", result, base);
+    expect(verifier.mergeKnown([[capabilityEpochSubject("wa", result.claims)!, result.claims.ep.wa + 1]]))
+      .toEqual([{ sessionId: "s1", code: "capability_revoked" }]);
+    expect(verifier.openSessionIds()).toEqual([]);
+  });
+
+  it("an expired revocation stops rejecting at its until", async () => {
+    const { verifier, now, advance } = setup();
+    verifier.revoke("sid", ids.session, now() + 1_000);
+    expect(await verifier.verify(client(), CLIENT, proofContext(now()))).toEqual({ ok: false, code: "capability_revoked", step: 11 });
+    advance(1_000);
+    expect(await verifier.verify(client(), CLIENT, proofContext(now()))).toMatchObject({ ok: true });
   });
 });
 
