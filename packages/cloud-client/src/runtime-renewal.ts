@@ -194,7 +194,7 @@ export class RuntimeRenewal {
     const appliedAtStart = this.applied;
     void this.fetchCapabilities().then(
       (answer) => this.onRestAnswer(appliedAtStart, answer),
-      (error: unknown) => this.onRestFailed(error),
+      (error: unknown) => this.onRestFailed(appliedAtStart, error),
     );
   }
 
@@ -209,7 +209,7 @@ export class RuntimeRenewal {
     this.offer(answer, "rest");
   }
 
-  private onRestFailed(error: unknown): void {
+  private onRestFailed(appliedAtStart: Capabilities, error: unknown): void {
     this.fetching = false;
     if (this.isStopped) return;
     if (error instanceof CloudRestError && !isTransient(error)) {
@@ -217,6 +217,8 @@ export class RuntimeRenewal {
       this.stop();
       return;
     }
+    // A push applied while the fetch was in flight already rescheduled the fallback.
+    if (this.applied !== appliedAtStart) return;
     this.scheduleRetry(error);
   }
 
@@ -228,14 +230,18 @@ export class RuntimeRenewal {
   }
 
   /** Full jitter under an exponential bound, capped at 30 s or at 5 s once the token is
-   * past exp; a Retry-After from the server takes its place when it has one. */
+   * past exp; a Retry-After from the server takes its place when it has one. A retry
+   * scheduled before exp lands at most 5 s past it, so a session in the outage grace
+   * never waits out a 30 s backoff for its first retry. */
   private retryDelayMs(error: unknown): number {
     const appliedExpMs = expiryMs(this.applied);
-    const pastExp = appliedExpMs !== undefined && this.now() >= appliedExpMs;
+    const now = this.now();
+    const pastExp = appliedExpMs !== undefined && now >= appliedExpMs;
     const cap = pastExp ? RUNTIME_RENEWAL_GRACE_RETRY_CAP_MS : RETRY_CAP_MS;
     const retryAfterMs = error instanceof CloudRestError ? error.retryAfterMs : undefined;
-    const delayMs = retryAfterMs ?? Math.floor(this.random() * Math.min(cap, RETRY_BASE_MS * 2 ** this.attempts));
-    return Math.min(cap, delayMs);
+    const delayMs = Math.min(cap, retryAfterMs ?? Math.floor(this.random() * Math.min(cap, RETRY_BASE_MS * 2 ** this.attempts)));
+    return appliedExpMs === undefined || pastExp ? delayMs
+      : Math.min(delayMs, appliedExpMs - now + RUNTIME_RENEWAL_GRACE_RETRY_CAP_MS);
   }
 
   /** The newest of the applied, in-flight and pending capabilities. */

@@ -1,13 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 
 import type { ServerCapabilityRenewed, ServerCapabilityRevoked } from "../generated/device-stream";
 import type { Capabilities } from "../generated/rest";
 import { CloudRestError } from "../rest-client";
 import {
   RuntimeRenewal,
+  type RenewableRuntimeConnection,
   type RuntimeRenewalEvent,
   type RuntimeRenewalOptions,
 } from "../runtime-renewal";
+import type { RuntimeConnection } from "../runtime-session";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
@@ -148,6 +150,10 @@ describe("RuntimeRenewal", () => {
     vi.useRealTimers();
   });
 
+  it("drives a RuntimeConnection", () => {
+    expectTypeOf<RuntimeConnection>().toExtend<RenewableRuntimeConnection>();
+  });
+
   it("runs the REST fallback at 80% of the token lifetime", async () => {
     const { fetchCapabilities } = harness(caps(S0, S0 + 300));
     await advance(239_999);
@@ -265,6 +271,20 @@ describe("RuntimeRenewal", () => {
     expect(delays.slice(8).every((delay) => delay <= 5_000)).toBe(true);
   });
 
+  it("lands a retry scheduled shortly before exp at most 5 s past it", async () => {
+    const { fetchCapabilities } = harness(caps(S0, S0 + 300));
+    const calls: number[] = [];
+    const retryAfters = [40_000, 10_000, 40_000];
+    fetchCapabilities.mockImplementation(() => {
+      calls.push(Date.now() - T0);
+      const retryAfterMs = retryAfters.shift();
+      return Promise.reject(new CloudRestError({ status: 503, code: "unavailable", ...(retryAfterMs ? { retryAfterMs } : {}) }));
+    });
+    await advance(310_000);
+    expect(calls.slice(0, 4)).toEqual([240_000, 270_000, 280_000, 305_000]);
+    expect(calls.slice(4).every((at, index) => at - calls[index + 3]! <= 5_000)).toBe(true);
+  });
+
   it("emits refused and stops on a terminal REST error, leaving the connection open", async () => {
     const { connection, fetchCapabilities, events, renewal } = harness(caps(S0, S0 + 300));
     fetchCapabilities.mockRejectedValueOnce(new CloudRestError({ status: 403, code: "capability_revoked" }));
@@ -355,6 +375,21 @@ describe("RuntimeRenewal", () => {
     answer.resolve(caps(S0 + 240, S0 + 540));
     await advance(0);
     expect(connection.renew).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the rescheduled fallback when a push was applied while a failing fetch was in flight", async () => {
+    const { connection, fetchCapabilities, renewal } = harness(caps(S0, S0 + 300));
+    const answer = settle<Capabilities>();
+    fetchCapabilities.mockReturnValueOnce(answer.promise);
+    await advance(240_000);
+    renewal.handleFrame(renewedFrame(caps(S0 + 241, S0 + 400)));
+    connection.renewals[0].resolve(1_760_000_400_000);
+    await advance(0);
+    answer.reject(new CloudRestError({ status: 503, code: "unavailable" }));
+    await advance(128_199);
+    expect(fetchCapabilities).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(fetchCapabilities).toHaveBeenCalledTimes(2);
   });
 
   it("stop() ends timers, pushes and late fetch results", async () => {
