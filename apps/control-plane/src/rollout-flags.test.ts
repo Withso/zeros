@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ROLLOUT_FLAGS, ROLLOUT_FLAGS_OFF, RolloutFlagSnapshot, isRolloutFlagName } from "./rollout-flags.js";
+import { ROLLOUT_FLAGS, ROLLOUT_FLAGS_OFF, RolloutFlagSnapshot, flagEffective, isRolloutFlagName } from "./rollout-flags.js";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
@@ -230,6 +230,22 @@ describe("rollout flag snapshot", () => {
     await snapshot.stop();
   });
 
+  // C's advertisement and admission check only realtime_uplink; without the
+  // dependency an engine dials and fails at auth.sync (review SHOULD-3).
+  it("reads realtime_uplink off until capabilities is on for the same org (review SHOULD-3)", async () => {
+    const h = harness([{ org_id: ORG, flag: "realtime_uplink" }]);
+    await h.snapshot.start();
+    expect(h.snapshot.enabled(ORG, "realtime_uplink")).toBe(false);
+    expect(h.snapshot.anyEnabled("realtime_uplink")).toBe(false);
+    h.rows = [{ org_id: ORG, flag: "realtime_uplink" }, { org_id: ORG, flag: "capabilities" }];
+    await h.snapshot.reload();
+    expect(h.snapshot.enabled(ORG, "realtime_uplink")).toBe(true);
+    expect(h.snapshot.anyEnabled("realtime_uplink")).toBe(true);
+    // A second org with only the dependency still reads off.
+    expect(h.snapshot.enabled("22222222-2222-4222-8222-222222222222", "realtime_uplink")).toBe(false);
+    await h.snapshot.stop();
+  });
+
   it("reads all-off after stop, including retained flags (review NIT-11)", async () => {
     const h = harness([{ org_id: ORG, flag: "capabilities" }, { org_id: ORG, flag: "authority_cache_enforce" }]);
     await h.snapshot.start();
@@ -239,5 +255,18 @@ describe("rollout flag snapshot", () => {
     expect(h.snapshot.enabled(ORG, "capabilities")).toBe(false);
     expect(h.snapshot.enabled(ORG, "authority_cache_enforce")).toBe(false);
     expect(h.snapshot.feedCurrent()).toBe(false);
+  });
+});
+
+describe("flagEffective", () => {
+  const definitions = {
+    base: { whileFeedUnavailable: "off", summary: "Dependency that turns off on feed loss" },
+    dependent: { whileFeedUnavailable: "retain", summary: "Retained flag that requires base", requires: ["base"] },
+  } as const;
+  it("turns a retained flag off with a dependency whose feed-loss state is off", () => {
+    const set = new Set(["base", "dependent"]);
+    expect(flagEffective(set, "dependent", true, definitions)).toBe(true);
+    expect(flagEffective(set, "dependent", false, definitions)).toBe(false);
+    expect(flagEffective(new Set(["dependent"]), "dependent", true, definitions)).toBe(false);
   });
 });

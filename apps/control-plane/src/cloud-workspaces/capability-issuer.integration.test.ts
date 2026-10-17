@@ -229,6 +229,29 @@ d("capability keys and issuance with PostgreSQL", () => {
     const claims = CapabilityClaimsSchema.parse(decodeJwt(issued.token));
     expect(claims.scp).toEqual(["ws:read"]);
     expect(claims.exp - claims.iat).toBeLessThanOrEqual(121);
+    // NIT-1: renewal happens at 60% of the clamped lifetime, never after exp.
+    expect(issued.renewAt.getTime()).toBeLessThan(claims.exp * 1000);
+    expect(issued.renewAt.getTime()).toBeGreaterThan(claims.iat * 1000);
+    expect(issued.renewAt.getTime() - claims.iat * 1000).toBeLessThanOrEqual(0.61 * (claims.exp - claims.iat) * 1000);
+  });
+
+  // NIT-1: renewAt must track the clamped exp, not the full lifetime. The
+  // session deadline clamps deterministically regardless of billing mode.
+  it("renews at 60% of the clamped lifetime when a deadline caps exp", async () => {
+    const pro = await seedReadyProCloudWorkspace(pool);
+    await activateFirst();
+    const value = await store();
+    await vi.waitFor(() => expect(value.signer()).not.toBeNull());
+    const { deviceId, sessionId } = await deviceAndSession(pro.userId);
+    await pool.query("UPDATE auth_sessions SET provider_session_expires_at=clock_timestamp()+interval '120 seconds' WHERE id=$1", [sessionId]);
+    const issued = await withSystemTx(pool, tx => issueClientCapability(tx, value, ISSUER, {
+      organizationId: pro.organizationId, workspaceId: pro.workspaceId, actorUserId: pro.userId,
+      deviceId, sessionId, audience: "zeros:engine",
+    }));
+    const claims = CapabilityClaimsSchema.parse(decodeJwt(issued.token));
+    expect(claims.exp - claims.iat).toBeLessThanOrEqual(121);
+    expect(issued.renewAt.getTime()).toBeLessThan(issued.expiresAt.getTime());
+    expect(issued.renewAt.getTime()).toBeLessThanOrEqual(claims.iat * 1000 + 0.61 * (claims.exp - claims.iat) * 1000);
   });
 
   it("denies an untrusted device, a missing role and a revoked session", async () => {
@@ -278,8 +301,13 @@ d("capability keys and issuance with PostgreSQL", () => {
         method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: payload,
       });
 
+    // Flag off answers exactly like a bad credential: no flag oracle.
     const dark = createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags(), workosEnabled: false });
-    expect((await post(dark)).status).toBe(404);
+    const darkAnswer = await post(dark), badAnswer = await post(
+      createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags("capabilities"), workosEnabled: false }),
+      `zwh_${"Z".repeat(43)}`);
+    expect([darkAnswer.status, await darkAnswer.json()]).toEqual([badAnswer.status, await badAnswer.json()]);
+    expect(darkAnswer.status).toBe(401);
 
     const app = createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags("capabilities"), workosEnabled: false });
     expect((await post(app, `zwh_${"Z".repeat(43)}`)).status).toBe(401);
@@ -294,6 +322,30 @@ d("capability keys and issuance with PostgreSQL", () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     const afterRevoke = createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags("capabilities"), workosEnabled: false });
     expect((await post(afterRevoke)).status).toBe(401);
+  });
+
+  it("throttles failed engine-token requests per engine id before any SQL", async () => {
+    await activateFirst();
+    const value = await store();
+    await vi.waitFor(() => expect(value.signer()).not.toBeNull());
+    let clock = 1_800_000_000_000;
+    const app = createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags("capabilities"),
+      workosEnabled: false, now: () => clock });
+    const bootId = (await pool.query<{ runtime_boot_id: string }>(
+      "SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0]!.runtime_boot_id;
+    const post = (engineInstanceId: string, token: string) => app.request("/internal/v2/cloud-workspaces/engine/capability", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, generation: 1, engineInstanceId, bootId }),
+    });
+    const guess = `zwh_${"Z".repeat(43)}`;
+    for (let attempt = 0; attempt < 5; attempt++) expect((await post(fixture.engineInstanceId, guess)).status).toBe(401);
+    const throttled = await post(fixture.engineInstanceId, fixture.heartbeatToken);
+    expect(throttled.status).toBe(429);
+    expect(Number(throttled.headers.get("retry-after"))).toBeGreaterThan(0);
+    // Another engine id keeps its own budget.
+    expect((await post(randomUUID(), guess)).status).toBe(401);
+    clock += 60_000;
+    expect((await post(fixture.engineInstanceId, fixture.heartbeatToken)).status).toBe(201);
   });
 
   it("serves the public JWKS document with the published set", async () => {

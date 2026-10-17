@@ -126,14 +126,23 @@ async function main(): Promise<void> {
     const notifyingPerActive = busiest
       ? Math.max(0, busiest.notifyingCommitsPerSecond - (quietScenario?.notifyingCommitsPerSecond ?? 0)) / busiest.activeWorkspaces
       : 0;
+    const authorityHintsPerActive = busiest
+      ? Math.max(0, busiest.authorityCacheNotificationsPerSecond - (quietScenario?.authorityCacheNotificationsPerSecond ?? 0)) / busiest.activeWorkspaces
+      : 0;
     const out = writeReport(report, values.out);
     console.log(formatReport(report));
     console.error(`[load:db] report written to ${out}`);
     if (values["write-budgets"]) {
-      writeFileSync(values["write-budgets"], JSON.stringify(budgetsFromMeasurement(hotPaths, report.projection, budgets.targets, notifyingPerActive), null, 2) + "\n");
+      writeFileSync(values["write-budgets"], JSON.stringify(budgetsFromMeasurement(hotPaths, report.projection, budgets.targets, notifyingPerActive, authorityHintsPerActive), null, 2) + "\n");
       console.error(`[load:db] budgets derived from this run written to ${values["write-budgets"]}`);
     }
-    const violations = checkBudgets(budgets, hotPaths, report.projection, notifyingPerActive);
+    // Every notifying commit holds PostgreSQL's cluster-wide notify lock
+    // through its WAL flush (docs/cloud-workspace/authority-cache.md).
+    console.error(`[load:db] notifying commits per active workspace ${notifyingPerActive.toFixed(3)}/s ` +
+      `(authority-cache hints ${authorityHintsPerActive.toFixed(3)}/s): ` +
+      [100, 500, 1000].map(count =>
+        `${count} active ≈ ${((quietScenario?.notifyingCommitsPerSecond ?? 0) + notifyingPerActive * count).toFixed(1)}/s`).join(", "));
+    const violations = checkBudgets(budgets, hotPaths, report.projection, notifyingPerActive, authorityHintsPerActive);
     for (const violation of violations) {
       console.error(violation.metric === "budget" ? `[load:db] ${violation.subject} has no entry in budgets.json`
         : violation.metric === "measured" ? `[load:db] budgets.json lists ${violation.subject}, which was not measured`

@@ -35,6 +35,7 @@ import { computerTestAccount, computerTestWallet } from "../cloud-workspaces/com
 import { runtimeBase } from "../cloud-workspaces/runtime-test-fixtures.js";
 import { seedReadyCloudWorkspace, withCloudFixtureOwnerTx, type ReadyCloudWorkspaceFixture } from "../cloud-workspaces/test-fixtures.js";
 import { DatabaseCostMeter } from "./instrument.js";
+import { AUTHORITY_CACHE_CHANNEL } from "../cloud-workspaces/engine-authority-cache.js";
 
 const ORIGIN = "https://control.load-sim.test";
 const ENGINE_PORT = 39393;
@@ -136,15 +137,20 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
   const rawApi = createPool(databaseUrl, { workload: "api", applicationName: "zeros-load-sim-api" });
   const rawWorker = createPool(databaseUrl, { workload: "worker", applicationName: "zeros-load-sim-worker" });
   const seed = new pg.Pool({ connectionString: databaseUrl, max: 4, application_name: "zeros-load-sim-seed" });
-  // Job-queue wake-ups are NOTIFYs issued by a database trigger, invisible to
-  // client instrumentation; count deliveries on the jobs channel instead.
-  // Identical notifications dedupe per transaction, so deliveries equal
-  // notifying commits on this channel.
-  const notifications = { count: 0 };
+  // Job-queue wake-ups and authority-cache hints are NOTIFYs issued by
+  // database triggers, invisible to client instrumentation; count deliveries
+  // on their channels instead. Identical job notifications dedupe per
+  // transaction, so job deliveries equal notifying commits on that channel.
+  // One commit can carry several authority scopes (w:, o:, u:), so those
+  // deliveries are an upper bound on its notifying commits.
+  const notifications = { count: 0, authorityCache: 0 };
   const listener = new pg.Client({ connectionString: databaseUrl, application_name: "zeros-load-sim-listen" });
   await listener.connect();
-  listener.on("notification", () => { notifications.count += 1; });
-  await listener.query("LISTEN zeros_control_plane_job_work");
+  listener.on("notification", message => {
+    if (message.channel === AUTHORITY_CACHE_CHANNEL) notifications.authorityCache += 1;
+    else notifications.count += 1;
+  });
+  await listener.query(`LISTEN zeros_control_plane_job_work; LISTEN ${AUTHORITY_CACHE_CHANNEL}`);
   const api = meter.instrument(rawApi);
   const worker = meter.instrument(rawWorker);
   const boat = new FakeBoatProvider();
@@ -346,7 +352,8 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
     seedPool: seed,
     /** The instrumented pools every simulated service uses. */
     pools: { api, worker },
-    /** Job-channel notifications delivered so far (one per notifying commit). */
+    /** Job-channel notifications delivered so far (one per notifying commit)
+     * and authority-cache hints (at least one per notifying commit). */
     notifications,
     async close() {
       listener.removeAllListeners();
