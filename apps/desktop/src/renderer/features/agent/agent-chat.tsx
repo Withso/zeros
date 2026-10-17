@@ -1,4 +1,5 @@
 import { CloudAgentCredentialCards } from "./cloud-agent-credential-cards";
+import { LocalLinksProvider } from "./local-links/provider";
 import { cloudAdmissionForTurn } from "./cloud-admission-failure";
 import { TurnFailureCard } from "./turn-failure-card";
 import { AgentNotice } from "./agent-notice";
@@ -348,7 +349,14 @@ interface AgentChatProps {
   workspaceProvisioning?: boolean;
 }
 
-export function AgentChat({
+export function AgentChat(props: AgentChatProps) {
+  const chat = useChatById(props.chatId);
+  return <LocalLinksProvider cwd={chat?.folder ?? props.session.cwd} active={props.surfaceActive ?? true}>
+    <AgentChatBody {...props} />
+  </LocalLinksProvider>;
+}
+
+function AgentChatBody({
   readOnly = false,
   composerReplacement,
   session,
@@ -530,26 +538,32 @@ export function AgentChat({
   const activity = readOnly ? null : agentActivity(session, pendingLocalTurnId);
   const backgroundContinuationActive = agentFamily(session.agentId) === "claude" && activity !== null && session.status !== "streaming";
   const waitingForBackgroundTasks = activity === "waiting";
+  const untitled = chatThread?.title === "Untitled" || chatThread?.title === "New chat";
+  // Recomputed per streamed chunk, but the request below re-arms only when
+  // the chosen prompt itself changes.
+  const titleCandidate = useMemo(
+    () => (untitled ? settledFirstPromptForTitle({ status: session.status, messages: session.messages }) : null),
+    [untitled, session.status, session.messages],
+  );
+  const titleMessageId = titleCandidate?.messageId ?? null;
+  const titlePrompt = titleCandidate?.prompt ?? null;
+  const seededTitle = chatThread?.title ?? null;
   useEffect(() => {
     if (
       readOnly ||
       !surfaceActive ||
       !chatId ||
-      !chatThread ||
+      !seededTitle ||
       backgroundContinuationActive ||
-      (chatThread.title !== "Untitled" && chatThread.title !== "New chat")
+      !titleMessageId ||
+      !titlePrompt
     )
       return;
-    const candidate = settledFirstPromptForTitle({
-      status: session.status,
-      messages: session.messages,
-    });
-    if (!candidate) return;
     return startChatTitleRequest({
       chatId,
-      messageId: candidate.messageId,
-      prompt: candidate.prompt,
-      expectedTitle: chatThread.title,
+      messageId: titleMessageId,
+      prompt: titlePrompt,
+      expectedTitle: seededTitle,
       dispatch,
     });
   }, [
@@ -557,11 +571,10 @@ export function AgentChat({
     backgroundContinuationActive,
     surfaceActive,
     chatId,
-    chatThread,
+    seededTitle,
     dispatch,
-    session.agentId,
-    session.messages,
-    session.status,
+    titleMessageId,
+    titlePrompt,
   ]);
   const isStreaming =
     !readOnly &&
@@ -3242,13 +3255,14 @@ export function AgentChat({
   ]);
   // Use the footer's exact cached row to decide whether it can present this
   // failure. Completed/cancelled history cannot own a later startup failure.
+  // Local notification turns have a recorded ID without a user prompt.
   // The read is shared with that footer and remains inert on hidden surfaces.
   const preparationTurn = turns.at(-1);
   const preparationTurnRead = useCachedRead(
     turnRowCache,
-    !readOnly && !provisionalTranscript && chatId && preparationTurn?.userPrompt &&
+    !readOnly && !provisionalTranscript && chatId && preparationTurn?.recordedTurnId &&
       session.status === "failed" && session.failure?.stage !== "prompt"
-      ? turnRowKey(chatId, preparationTurn.recordedTurnId ?? preparationTurn.userPrompt.id)
+      ? turnRowKey(chatId, preparationTurn.recordedTurnId)
       : null,
     (key) => {
       const [ownerChatId, turnId] = key.split("\u0000");
@@ -3256,19 +3270,19 @@ export function AgentChat({
     },
     { maxAgeMs: 30_000, enabled: surfaceActive },
   );
-  const preparationTurnFailure = !provisionalTranscript && chatId && preparationTurn?.userPrompt &&
+  const preparationTurnFailure = !provisionalTranscript && chatId && preparationTurn?.recordedTurnId &&
     session.status === "failed" && session.failure?.stage !== "prompt"
     ? turnFailureForCard({
         events: preparationTurn.providerEvents,
-        turnId: preparationTurn.recordedTurnId ?? preparationTurn.userPrompt.id,
+        turnId: preparationTurn.recordedTurnId,
         fallback: session.failure,
-        recoveryFailure: preparationTurn.userPrompt.recoveryFailure,
+        recoveryFailure: preparationTurn.userPrompt?.recoveryFailure,
         status: preparationTurnRead.data?.status,
         stopReason: session.lastStopReason ?? preparationTurnRead.data?.stopReason,
         live: tailTurnInFlight({ sessionStreaming: isStreaming,
-          pendingLocalTurn: pendingLocalTurnId === preparationTurn.userPrompt.id,
+          pendingLocalTurn: pendingLocalTurnId === preparationTurn.userPrompt?.id,
           hasEvents: preparationTurn.events.length > 0 }),
-        retrying: pendingLocalTurnId === preparationTurn.userPrompt.id,
+        retrying: pendingLocalTurnId === preparationTurn.userPrompt?.id,
       }) : null;
   // Keep terminal startup failures in this chat exactly once, while normal
   // reconnects and superseded preparation stay quiet.
@@ -4930,6 +4944,7 @@ export function AgentChat({
                         originalAttachments={turn.userPrompt.attachments}
                         originalSegments={turn.userPrompt.segments}
                         autoAction={turn.userPrompt.autoAction}
+                        localFrom={turn.userPrompt.localFrom}
                         // Auto-sent messages are copy-only because their short
                         // label cannot round-trip. Mid-turn steers are also
                         // copy-only: their reset boundary is the opening
@@ -4937,6 +4952,7 @@ export function AgentChat({
                         onEdit={
                           transcriptReadOnly ||
                           turn.userPrompt.autoAction ||
+                          turn.userPrompt.localFrom ||
                           turn.userPrompt.queued ||
                           turn.isSteer
                             ? undefined
@@ -5028,7 +5044,7 @@ export function AgentChat({
                           // controls until the transcript has validated.
                           !provisionalTranscript &&
                           !authState &&
-                          turn.userPrompt &&
+                          turn.recordedTurnId &&
                           chatId &&
                           ownsProviderFooter ? (
                             <TurnFooter
@@ -5037,21 +5053,21 @@ export function AgentChat({
                               readOnly={readOnly}
                               surfaceActive={surfaceActive}
                               chatId={chatId}
-                              turnId={turn.recordedTurnId ?? turn.userPrompt.id}
+                              turnId={turn.recordedTurnId}
                               failure={isVisualTail ? session.failure : null}
-                              recoveryFailure={turn.userPrompt.recoveryFailure}
+                              recoveryFailure={turn.userPrompt?.recoveryFailure}
                               onRetryNewChatIntent={
-                                interactive && chatThread
+                                interactive && chatThread && turn.userPrompt && !turn.userPrompt.localFrom
                                   ? () => warmRetryTranscript(chatThread, turn.userPrompt!, turn.providerEvents)
                                   : undefined
                               }
                               onRetry={
-                                interactive && isVisualTail
+                                interactive && isVisualTail && turn.userPrompt && !turn.userPrompt.localFrom
                                   ? () => retryTurn(turn.userPrompt!, turn.providerEvents, false)
                                   : undefined
                               }
                               onRetryNewChat={
-                                interactive && isVisualTail && session.agentRole !== "design"
+                                interactive && isVisualTail && turn.userPrompt && !turn.userPrompt.localFrom && session.agentRole !== "design"
                                   ? () => retryTurn(turn.userPrompt!, turn.providerEvents, true)
                                   : undefined
                               }
@@ -5082,19 +5098,19 @@ export function AgentChat({
                               // context). The stop pill / budget card stays on
                               // this turn as history.
                               onContinue={() => void handleSend("Continue")}
-                              onFork={() =>
+                              onFork={turn.userPrompt ? () =>
                                 forkToNewTab(
                                   turn.userPrompt!.id,
                                   turn.userPrompt!.text,
                                   isCloudWorkspace(chatThread?.folder)&&chatThread?.agentId==="codex"&&isVisualTail&&cloudNativeCapabilities?.nativeFork===true,
                                 )
-                              }
-                              onForkIntent={() =>
+                              : undefined}
+                              onForkIntent={turn.userPrompt ? () =>
                                 warmForkToNewTab(
                                   turn.userPrompt!.id,
                                   turn.userPrompt!.text,
                                 )
-                              }
+                              : undefined}
                             />
                           ) : null
                         }

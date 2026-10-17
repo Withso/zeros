@@ -40,6 +40,7 @@ import {
   canForkTurn,
   canPreviewTurnFileDiff,
   isInterruptedTurn,
+  settledTurnFailurePresentation,
   TurnFilePill,
   TurnFooter,
   turnFooterFailureLabel,
@@ -144,6 +145,21 @@ describe("turnFooterFailureLabel", () => {
         message: "internal attestation detail",
       }),
     ).toBe("AGENT STOPPED - DESIGN PROTECTION FAILED");
+  });
+});
+
+describe("settledTurnFailurePresentation", () => {
+  const failure = { kind: "transport-closed", message: "Cursor network failure: socket hang up", newChatAllowed: true };
+  it("shows the failure card, with its recovery actions, on the latest turn", () => {
+    expect(settledTurnFailurePresentation(failure, true)).toEqual({ card: failure, label: null });
+  });
+  it("retires the card to the compact status once the agent works on a newer turn", () => {
+    expect(settledTurnFailurePresentation(failure, false)).toEqual({ card: null, label: "CONNECTION LOST" });
+    expect(settledTurnFailurePresentation({ ...failure, kind: "cloud-admission" }, false))
+      .toEqual({ card: null, label: "AGENT STOPPED" });
+  });
+  it("shows nothing for a turn without a failure", () => {
+    expect(settledTurnFailurePresentation(null, false)).toEqual({ card: null, label: null });
   });
 });
 
@@ -524,7 +540,7 @@ describe("turn footer first paint after a reopen", () => {
     expect(html).not.toContain("AGENT STOPPED");
   });
 
-  it("keeps a historical reason without exposing stale retry actions", () => {
+  it("keeps a historical reason as one compact status, without a banner or stale retry actions", () => {
     turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ status: "failed", stopReason: null }));
     const html = renderFooter({
       recoveryFailure: { kind: "session-expired", message: "Session expired." },
@@ -532,8 +548,22 @@ describe("turn footer first paint after a reopen", () => {
       onRetry: async () => {},
       onRetryNewChat: async () => {},
     });
-    expect(html).toContain("Session expired.");
+    expect(html).toContain("SESSION EXPIRED");
+    expect(html).not.toContain("data-turn-failure-card");
     expect(html).not.toContain("Retry");
+  });
+
+  it("shows the failure card with its actions while the failed turn is the latest", () => {
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ status: "failed", stopReason: null }));
+    const html = renderFooter({
+      recoveryFailure: { kind: "session-expired", message: "Session expired." },
+      isLastTurn: true,
+      onRetry: async () => {},
+      onRetryNewChat: async () => {},
+    });
+    expect(html).toContain("data-turn-failure-card");
+    expect(html).toContain("Session expired.");
+    expect(html).toContain("Retry");
   });
 
   it("paints STOPPED BY USER from the retained row, with no fetch first", () => {

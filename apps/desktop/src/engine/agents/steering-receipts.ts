@@ -7,6 +7,12 @@ export class SteeringReceiptCapacityError extends Error {
   }
 }
 
+/** Identities kept per execution. A retry can arrive at any time (the
+ * composer keeps a lost steer and retries that exact id), so a known identity
+ * is never forgotten; the bound only caps memory. It is far above what one
+ * execution receives, including a coordinating chat steered by many agents. */
+export const STEERING_RECEIPT_CAPACITY = 8_192;
+
 export class SteeringReceipts<T> {
   private readonly executions = new Map<string, Map<string, Promise<T>>>();
 
@@ -26,7 +32,7 @@ export class SteeringReceipts<T> {
     // Keep every accepted identity until execution disposal. Evicting even a
     // settled receipt could turn a delayed retry into a second instruction.
     // At capacity the caller can safely keep NEW input in the normal queue.
-    if (entries.size >= 256)
+    if (entries.size >= STEERING_RECEIPT_CAPACITY)
       return Promise.reject(new SteeringReceiptCapacityError());
     const result = Promise.resolve().then(operation);
     entries.set(messageId, result);

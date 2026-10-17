@@ -20,21 +20,41 @@ export function compactTitlePrompt(prompt: string): string {
     : chars.slice(0, 400).join("") + chars.slice(-100).join("");
 }
 
-/** Select the first real user prompt only after admission and turn teardown
- * have returned the session to ready. A queued placeholder is renderer-local
- * intent, not proof that the provider received anything; generating a title
- * from it made the tab look successful while the actual prompt was stalled. */
+/** Select the chat's first real user prompt once the provider has proved it
+ * received it: the turn settled back to ready, or the agent already answered
+ * it (a coordinator's first turn can run for an hour and go straight into the
+ * next one). A queued placeholder is renderer-local intent, not proof that
+ * the provider received anything; generating a title from it made the tab
+ * look successful while the actual prompt was stalled.
+ *
+ * Only the window's opening message qualifies: a long transcript re-windows
+ * to its tail, whose first user row is a later prompt. A Zeros Local note is
+ * never the user's prompt. */
 export function settledFirstPromptForTitle(input: {
   status: SessionStatus;
   messages: readonly AgentMessage[];
 }): { messageId: string; prompt: string } | null {
-  if (input.status !== "ready") return null;
-  for (const message of input.messages) {
-    if (message.kind !== "text" || message.role !== "user") continue;
-    if (message.queued || !message.text.trim()) return null;
-    return { messageId: message.id, prompt: message.text };
+  // Rows that are not conversation can precede the first prompt: a provider
+  // notice (Codex reports config/deprecation warnings at session start), a
+  // model-fallback announcement, a divider. Anything else first means the
+  // window starts mid-transcript.
+  let index = 0;
+  while (index < input.messages.length) {
+    const message = input.messages[index]!;
+    const preamble =
+      message.kind === "error_notice" ||
+      (message.kind === "text" && (message.role === "system" || message.retracted === true || message.modelFallback !== undefined));
+    if (!preamble) break;
+    index++;
   }
-  return null;
+  const first = input.messages[index];
+  if (!first || first.kind !== "text" || first.role !== "user") return null;
+  if (first.queued || first.localNote || !first.text.trim()) return null;
+  const answered = input.messages
+    .slice(index + 1)
+    .some((m) => m.kind === "tool" || (m.kind === "text" && m.role === "agent" && !m.modelFallback && m.text.trim().length > 0));
+  if (input.status !== "ready" && !answered) return null;
+  return { messageId: first.id, prompt: first.text };
 }
 
 /** Defensive response validation; the backend owns generation and sanitation. */
@@ -58,8 +78,34 @@ export function sanitizeAiTitle(raw: string): string | null {
     : null;
 }
 
-/** One HTTP attempt per chat/message, including remounts. Both the exact owner and
- * seeded title must still match after the response; a manual rename wins. */
+/** A title from the prompt's own opening words, for when the service cannot
+ * name the chat: better than leaving it Untitled for good. */
+export function fallbackChatTitle(prompt: string): string | null {
+  for (const raw of prompt.split(/\r?\n/)) {
+    const words = raw
+      .replace(/\bzeros(?:-alpha|-beta|-dev)?:\/\/\S+/g, " ")
+      .replace(/[`*_#>]/g, "")
+      .split(/\s+/)
+      .filter((word) => /[\p{L}\p{N}]/u.test(word))
+      .slice(0, 6);
+    const title = words.join(" ").replace(/["'“”‘’.!?:;,…]+$/u, "").trim();
+    if (!title) continue;
+    const chars = Array.from(title);
+    return chars.length > 60 ? chars.slice(0, 59).join("") + "…" : title;
+  }
+  return null;
+}
+
+/** Spacing before the second and third request. A transient failure (busy,
+ * unreachable, a timeout, a reply too short to be a title) gets two more tries;
+ * then the prompt names the chat. A 401 waits for a fresh sign-in. */
+const RETRY_DELAYS_MS = [10_000, 60_000] as const;
+
+type TitleTry = "titled" | "retry" | "give-up" | "unauthorized" | "quiet";
+
+/** At most one naming flight per chat/message, including remounts. Both the
+ * exact owner and seeded title must still match after each response; a manual
+ * rename wins, and stops any retry. */
 export function requestAiChatTitle(
   args: {
     chatId: string;
@@ -102,22 +148,18 @@ export function requestAiChatTitle(
   attempts.set(key, entry);
   // Bound the display text before any remote call.
   const prompt = compactTitlePrompt(args.prompt);
-  void (async () => {
+  const once = async (messageId: string): Promise<TitleTry> => {
     try {
       const session = await getSession();
       if (!session?.access_token || attempts.get(key) !== entry || !current())
-        return;
+        return "quiet";
       const response = await controlPlaneFetch(`${CONTROL_PLANE_URL}/v1/chat-titles`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${session.access_token}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
-          chatId: args.chatId,
-          messageId: args.messageId,
-          prompt,
-        }),
+        body: JSON.stringify({ chatId: args.chatId, messageId, prompt }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         redirect: "error",
       }, () => {
@@ -126,18 +168,18 @@ export function requestAiChatTitle(
       });
       if (!response.ok) {
         await response.body?.cancel();
-        return;
+        if (response.status === 401) return "unauthorized";
+        // Busy or down: try again. Any other refusal will not change.
+        return response.status === 429 || response.status >= 500 ? "retry" : "give-up";
       }
       const result: unknown = await response.json();
-      if (
-        !result ||
-        typeof result !== "object" ||
-        !("title" in result) ||
-        typeof result.title !== "string"
-      )
-        return;
-      const title = sanitizeAiTitle(result.title);
-      if (!title || !current()) return;
+      const raw =
+        result && typeof result === "object" && "title" in result && typeof result.title === "string"
+          ? result.title
+          : null;
+      const title = raw === null ? null : sanitizeAiTitle(raw);
+      if (!title) return current() ? "retry" : "quiet";
+      if (!current()) return "quiet";
       const liveSession = await getSession();
       if (
         !liveSession ||
@@ -145,19 +187,49 @@ export function requestAiChatTitle(
         liveSession.user.provider !== session.user.provider ||
         !current()
       )
-        return;
+        return "quiet";
       args.dispatch({
         type: "UPDATE_CHAT_TITLE_IF",
         id: args.chatId,
         title,
         expectedTitle: args.expectedTitle,
       });
+      return "titled";
     } catch {
-      // Cosmetic failure: keep the seeded title. Never log prompt or response.
+      // Cosmetic failure. Never log prompt or response.
+      return entry.requested && current() ? "retry" : "quiet";
+    }
+  };
+  void (async () => {
+    try {
+      for (let index = 0; ; index++) {
+        // A retry asks again under its own id: the service remembers a failed
+        // answer for the original one.
+        const outcome = await once(index === 0 ? args.messageId : `${args.messageId}#${index + 1}`);
+        if (outcome === "give-up") {
+          const title = fallbackChatTitle(args.prompt);
+          if (title && current()) args.dispatch({ type: "UPDATE_CHAT_TITLE_IF", id: args.chatId, title, expectedTitle: args.expectedTitle });
+          return;
+        }
+        if (outcome !== "retry") {
+          // Nothing was paid for (or the session was refused): a later
+          // sign-in may still name the chat.
+          if ((outcome === "quiet" && !entry.requested) || outcome === "unauthorized") entry.requested = false;
+          return;
+        }
+        const delay = RETRY_DELAYS_MS[index];
+        if (delay === undefined) {
+          const title = fallbackChatTitle(args.prompt);
+          if (title && current()) args.dispatch({ type: "UPDATE_CHAT_TITLE_IF", id: args.chatId, title, expectedTitle: args.expectedTitle });
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (attempts.get(key) !== entry || !current()) return;
+      }
     } finally {
       entry.pending = false;
       // Session restoration/sign-in can finish after the first eligible render.
-      // No server request happened, so a later auth event may still name the chat.
+      // No paid request settled the chat, so a later auth event may name it.
       if (!entry.requested && attempts.get(key) === entry) attempts.delete(key);
     }
   })();

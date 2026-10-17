@@ -398,8 +398,14 @@ function relativize(s: string, root: string | undefined): string {
 
 function renderUser(m: AgentTextMessage, depth: Depth = 0): string {
   const head = `${h(2, depth)} User`;
+  // Zeros Local CLI rows carry engine-stamped provenance: another agent's
+  // message or a note are not the user's words.
   const lines = [
-    m.autoAction ? `${head} · sent by Zeros (${m.autoAction})` : head,
+    m.localNote
+      ? `${h(2, depth)} Zeros note`
+      : m.localFrom
+        ? `${h(2, depth)} Agent message · from "${m.localFrom.title}" (${m.localFrom.link})`
+        : m.autoAction ? `${head} · sent by Zeros (${m.autoAction})` : head,
     "",
     clipField(m.text.trimEnd()) || "_(empty message)_",
   ];

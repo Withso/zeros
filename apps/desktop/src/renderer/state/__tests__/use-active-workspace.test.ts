@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "../../platform/git";
+import type { WorkspaceState } from "../store";
+import type { Project } from "../projects-store";
 
 const fixture = vi.hoisted(() => ({
   folder: "/repo/.worktrees/history/src",
@@ -16,15 +18,21 @@ const fixture = vi.hoisted(() => ({
   archived: [] as Workspace[],
   liveResolved: false,
   archivedResolved: false,
+  projectResolved: true,
+  inferredProject: null as Project | null,
+  linked: undefined as WorkspaceState["localLinkNavigation"],
 }));
 vi.mock("react", async (importOriginal) => ({ ...await importOriginal<typeof import("react")>(), useMemo: (fn: () => unknown) => fn() }));
 vi.mock("../store", () => ({
   selectActiveFolder: () => fixture.folder,
-  useWorkspaceStore: (selector: () => unknown) => selector(),
+  useWorkspaceStore: (selector: (state: Partial<WorkspaceState>) => unknown) =>
+    selector({ localLinkNavigation: fixture.linked }),
 }));
 vi.mock("../use-projects", () => ({
   useProjects: () => ({ projects: [fixture.project] }),
-  useProjectForFolder: () => fixture.project,
+  useProjectForFolder: () => fixture.projectResolved
+    ? fixture.inferredProject ?? fixture.project
+    : null,
   useWorkspacesFor: () => ({
     workspaces: fixture.live,
     resolved: fixture.liveResolved,
@@ -61,6 +69,9 @@ beforeEach(() => {
   fixture.liveResolved = false;
   fixture.archivedResolved = false;
   fixture.project.isGitRepository = undefined;
+  fixture.projectResolved = true;
+  fixture.inferredProject = null;
+  fixture.linked = undefined;
 });
 
 describe("active history resolution", () => {
@@ -134,5 +145,39 @@ describe("active history resolution", () => {
     fixture.project.isGitRepository = true;
     fixture.live = [managed];
     expect(useActiveWorkspace().workspace).toBe(managed);
+  });
+
+  it("resolves an adopted worktree from the verified link before path hints exist", () => {
+    const managed = { ...history, id: "ws_adopted", path: "/external/tree", archivedAt: null, present: true };
+    fixture.folder = managed.path;
+    fixture.projectResolved = false;
+    fixture.live = [managed];
+    fixture.liveResolved = true;
+    fixture.linked = { workspace: managed, folder: managed.path, passive: true };
+    expect(useActiveWorkspace()).toMatchObject({
+      project: fixture.project,
+      workspace: managed,
+      loading: false,
+    });
+  });
+
+  it("does not resurrect a linked managed worktree after a confirmed deletion", () => {
+    const managed = { ...history, id: "ws_deleted", path: "/external/deleted", archivedAt: null, present: true };
+    fixture.folder = managed.path;
+    fixture.projectResolved = false;
+    fixture.liveResolved = true;
+    fixture.archivedResolved = true;
+    fixture.linked = { workspace: managed, folder: managed.path, passive: true };
+    expect(useActiveWorkspace().workspace).toBeNull();
+  });
+
+  it("uses verified workspace ownership over an older containing-project hint", () => {
+    const managed = { ...history, id: "ws_nested", path: "/external/tree", archivedAt: null, present: true };
+    fixture.folder = managed.path;
+    fixture.inferredProject = { ...fixture.project, id: "other", repoRoot: "/external", repoSlug: "other" };
+    fixture.live = [managed];
+    fixture.liveResolved = true;
+    fixture.linked = { workspace: managed, folder: managed.path, passive: true };
+    expect(useActiveWorkspace().project).toBe(fixture.project);
   });
 });

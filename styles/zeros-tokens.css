@@ -399,6 +399,11 @@
   --color-brown-900: var(--brown-900); /* #2C2221 — private brown 900 palette step; theme independent */
   --color-brown-950: var(--brown-950); /* #1D1716 — private brown 950 palette step; theme independent */
   /* @generated tokens:utilities-red-50:end */
+
+  /* @generated tokens:utilities-local-links:start */
+  --color-blue-pill-bg: var(--blue-pill-bg); /* #142048 — Workspace link pill fill; Light separates it from the composer surface */
+  --color-blue-pill-hover: var(--blue-pill-hover); /* #1A2B60 — Workspace link pill hover fill */
+  /* @generated tokens:utilities-local-links:end */
 }
 
 /* ── STACKING LAYERS → utilities ──
@@ -626,6 +631,8 @@
   --blue-primary: hsl(205 80% 73%); /* #83C3F1 — info · links · accents */
   --blue-bg: hsl(226 57% 18%); /* #142048 — info container surface */
   --blue-fg: hsl(211 96% 78%); /* #91C5FD — text/icon on --blue-bg */
+  --blue-pill-bg: var(--blue-bg); /* #142048 — Workspace link pill fill; Light separates it from the composer surface */
+  --blue-pill-hover: hsl(226 57% 24%); /* #1A2B60 — Workspace link pill hover fill */
   --violet-primary: hsl(271 80% 73%); /* #BC83F1 — done · merged */
   --violet-bg: hsl(255 21% 18%); /* #292438 — done container surface */
   --violet-fg: hsl(265 66% 77%); /* #BE9EEB — text/icon on --violet-bg */
@@ -866,6 +873,8 @@
   --blue-primary: hsl(221 83% 48.5%); /* #1556E2 — info · links · accents */
   --blue-bg: hsl(214 100% 97%); /* #F0F6FF — info container surface */
   --blue-fg: hsl(224 77% 48%); /* #1C4ED9 — text/icon on --blue-bg */
+  --blue-pill-bg: hsl(214 100% 87%); /* #BDD9FF — Workspace link pill fill; Light separates it from the composer surface */
+  --blue-pill-hover: hsl(214 100% 86.5%); /* #BAD8FF — Workspace link pill hover fill */
   --violet-primary: hsl(271 80% 51%); /* #851EE6 — done · merged */
   --violet-bg: hsl(274 93% 94%); /* #F2E1FE — done container surface */
   --violet-fg: hsl(263 61% 46%); /* #652EBD — text/icon on --violet-bg */

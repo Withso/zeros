@@ -196,6 +196,7 @@ import {
   takePrebindGoalSnapshot,
   takePrebindDirty,
 } from "./session-reload-lifecycle";
+import { queueBehindRunningTurn } from "./busy-turn-queue";
 import {
   trackAgentSessionStarted,
   trackAgentTurnStarted,
@@ -1510,13 +1511,15 @@ export function AgentSessionsProvider({
    * stopped. The engine's close-flight barrier also keeps an immediate manual
    * retry from racing that teardown. */
   const cancelStalledAdmission = useCallback(
-    (agentId: string, chatId: string): void => {
+    (agentId: string, chatId: string, options: { userStop?: true } = {}): void => {
       void bridge
         ?.request<AgentSessionClosedMessage | AgentErrorMessage>(
           {
             type: "AGENT_CLOSE_SESSION",
             agentId,
             chatId,
+            // Only the user's Stop says so; failure cleanup closes do not.
+            ...(options.userStop ? { userStop: true } : {}),
           },
           { timeoutMs: 15_000 },
         )
@@ -2762,6 +2765,9 @@ export function AgentSessionsProvider({
         startedAt: number;
       } | null = null;
       let promptRetryCount = 0;
+      // Set when the engine refused this send because another turn already
+      // runs and the message went back to the queue (queueBehindRunningTurn).
+      let requeuedBehindTurn = false;
       let recoveredLocalExecution: string | null = null;
       let cloudSendOwner: { cwd: string | null; agentId: string | null; sessionId: string | null } | null = null;
       let cloudTerminalFailure: AgentFailure | null = null;
@@ -2972,6 +2978,7 @@ export function AgentSessionsProvider({
             ?.additionalDirectories ?? [];
         const announced = announcedDirsRef.current.get(chatId);
         let dirNotice = "";
+        let announcedNow: string[] = [];
         if (!announced) {
           // First send for this chat (new OR reopened): seed with the current set
           // — already announced by the preamble / present in the resumed history.
@@ -2981,6 +2988,7 @@ export function AgentSessionsProvider({
           if (fresh.length > 0) {
             dirNotice = buildAdditionalDirsSystemInstruction(fresh);
             for (const d of fresh) announced.add(d);
+            announcedNow = fresh;
           }
         }
         const pendingAuth = pendingAuthenticationPrompts(
@@ -3755,6 +3763,35 @@ export function AgentSessionsProvider({
               return;
             }
             if (settleCloudAdmission(resp.error)) return;
+            // Another turn already runs on this session: an agent's message
+            // through the Zeros Local CLI, or another window's send. Nothing
+            // was delivered, so this is not a failure. Queue the message behind
+            // that turn (its terminal turn_state releases the queue) instead
+            // of showing a banner under the other turn's output.
+            if (resp.activeTurn && !cloudSend) {
+              const slot = getStore().sessions[chatId];
+              const queued = slot && queueBehindRunningTurn({
+                messages: slot.messages,
+                bubbleId: userMessage.id,
+                editable: !autoAction && !text.trimStart().startsWith("<from_previous_chat"),
+                activeTurn: resp.activeTurn,
+              });
+              if (queued) {
+                requeuedBehindTurn = true;
+                // The resend announces any directory this attempt claimed.
+                for (const dir of announcedNow) announcedDirsRef.current.get(chatId)?.delete(dir);
+                getStore().patchSession(chatId, queued);
+                if (getStore().pendingLocalTurns[chatId] === userMessage.id) getStore().setPendingLocalTurn(chatId, null);
+                const queue = sendQueueRef.current.get(chatId) ?? [];
+                queue.unshift({
+                  args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction],
+                  bubbleId: userMessage.id,
+                });
+                sendQueueRef.current.set(chatId, queue);
+                if (followUpBehavior === "steer") steerSubmission(userMessage.id);
+                return;
+              }
+            }
             const failure = failureFromAgentError(
               { ...resp, message: resp.error } as unknown as AgentErrorMessage,
               "prompt",
@@ -4035,7 +4072,7 @@ export function AgentSessionsProvider({
           const terminal = getStore().sessions[chatId];
           const stopReason =
             promptResult?.stopReason ?? (ownsTerminalSlot ? terminal?.lastStopReason : undefined) ?? undefined;
-          const cancelled = stopReason === "cancelled" || (!!cloudSendOwner && lifecycleCancelled);
+          const cancelled = stopReason === "cancelled" || (!!cloudSendOwner && lifecycleCancelled) || requeuedBehindTurn;
           const healthy =
             ownsTerminalSlot &&
             !promptInterruptedAfterOutput &&
@@ -4396,7 +4433,7 @@ export function AgentSessionsProvider({
           pendingPermissions: [],
           pendingQuestions: [],
         });
-        cancelStalledAdmission(current.agentId, chatId);
+        cancelStalledAdmission(current.agentId, chatId, { userStop: true });
         return;
       }
       if (!bridge || cancellationAction !== "cancel-session") return;

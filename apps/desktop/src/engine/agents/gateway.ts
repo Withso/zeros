@@ -4728,6 +4728,20 @@ export class AgentGateway {
     return this.agentInitializes.get(agentId) ?? null;
   }
 
+  /** The Local adapter's current metadata. An adapter republishes its catalog
+   * (a model the account refused, newly discovered models) by replacing its
+   * own initialize object, which the cached first read above never sees.
+   * Account-level only: no execution's session catalog is read or published. */
+  async currentAgentInitialize(agentId: string): Promise<InitializeResponse | null> {
+    const adapter = this.adapters.get(agentId);
+    if (!adapter) return this.agentInitializeSnapshot(agentId);
+    const identity = this.providerAuthConfigFingerprint(agentId);
+    const init = advertiseAgentCapabilities(adapter, await adapter.initialize());
+    if (identity !== this.providerAuthConfigFingerprint(agentId) || this.disposed) return null;
+    if (this.agentInitializeIdentities.get(agentId) === identity) this.agentInitializes.set(agentId, init);
+    return init;
+  }
+
   async initializeAgent(agentId: string, executionId?: string): Promise<InitializeResponse> {
     if (executionId !== undefined) {
       const adapter = this.adapters.get(agentId);
@@ -6395,9 +6409,15 @@ export class AgentGateway {
     return sanitized;
   }
 
-  private assertSelectedAccountConnected(agentId: string): void {
+  /** The local gate every session start and prompt applies: a selected
+   * account that is signed out or expired cannot run (an API key can). */
+  selectedAccountConnected(agentId: string): boolean {
     const profile = usesProviderApiKey(this.projectRoot, agentId) ? null : providerAccountProfile(agentId);
-    if (profile && profile.state !== "connected") {
+    return !profile || profile.state === "connected";
+  }
+
+  private assertSelectedAccountConnected(agentId: string): void {
+    if (!this.selectedAccountConnected(agentId)) {
       throw new AgentFailureError({ kind: "auth-required", stage: "prompt", message: "Sign in to this account in Settings before continuing." });
     }
   }

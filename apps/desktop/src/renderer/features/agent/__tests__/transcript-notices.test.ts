@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applyUpdate, type AgentMessage, type AgentToolMessage } from "@zeros/protocol/agent-messages";
-import { isUsageNotice, turnUsageNotice } from "../transcript-notices";
+import { isTransientConnectionNotice, isUsageNotice, turnUsageNotice } from "../transcript-notices";
 import { groupMessagesIntoTurns } from "../turn-grouping";
 import { latestAuthenticationRecoveryTurn } from "../auth-prompt-recovery";
 
@@ -66,4 +66,26 @@ describe("transcript provider status", () => {
       expect(latestAuthenticationRecoveryTurn(idle)).toBe(-1);
     },
   );
+});
+
+describe("transient connection notices", () => {
+  const reconnect = (noticeId: string, code?: string) => applyUpdate([], { sessionId: "s", update: {
+    sessionUpdate: "error_notice", noticeId, severity: "error", recoverable: true,
+    message: "Connection lost — reconnecting…", ...(code ? { code } : {}),
+  } })[0]!;
+
+  it("treats reconnect progress as live status, not a lasting banner", () => {
+    expect(isTransientConnectionNotice(reconnect("cursor-neterr-1", "connection_lost"))).toBe(true);
+    expect(isTransientConnectionNotice(reconnect("retry-1", "api_retry"))).toBe(true);
+    // Rows saved before the code existed keep their engine identity.
+    expect(isTransientConnectionNotice(reconnect("cursor-neterr-legacy"))).toBe(true);
+    expect(isTransientConnectionNotice(reconnect("claude-neterr-legacy"))).toBe(true);
+  });
+
+  it("keeps actionable warnings and failures as they are", () => {
+    expect(isTransientConnectionNotice(reconnect("mcp-oauth-1", "mcp_oauth_failed"))).toBe(false);
+    expect(isTransientConnectionNotice(notice("hourly", "five_hour"))).toBe(false);
+    const child = reconnect("cursor-neterr-2", "connection_lost");
+    expect(isTransientConnectionNotice({ ...child, parentToolId: "agent" } as AgentMessage)).toBe(false);
+  });
 });

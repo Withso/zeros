@@ -25,6 +25,9 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
   - When a subagent's progress feed is quiet for longer than its usual
     cadence, check its session status through the host and send its next
     step. An idle agent is lost capacity.
+  - Sending a step is not idempotent. Read the host's documented reply
+    shape before treating a send as failed, check the transcript before
+    resending, and pass the host's message id flag when it has one.
 - Write the mode, models and the user's instruction into your first progress
   note.
 

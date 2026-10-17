@@ -31,7 +31,7 @@ import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import type { Workspace } from "../../platform/git";
 import { workspaceIsReadOnly } from "../../state/workspace-history";
 import { WorkspaceHistoryBar } from "../workspace-history-bar";
-import { useActivePage } from "../../state/store";
+import { selectActiveFolder, useActivePage, useWorkspaceStore } from "../../state/store";
 import { CloudHistoryRecoveryNotice } from "./cloud-history-recovery-notice";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
@@ -187,6 +187,12 @@ export function ConversationPane({
 } = {}) {
   const readOnly = workspaceIsReadOnly(workspace);
   const surfaceActive = useActivePage() === "workspace";
+  const activateLinkedContext = (event: React.SyntheticEvent) => {
+    if (!event.isTrusted || !surfaceActive) return;
+    const state = useWorkspaceStore.getState();
+    const folder = selectActiveFolder(state);
+    if (folder && state.localLinkNavigation?.passive) state.dispatch({ type: "ACTIVATE_LOCAL_LINK", folder });
+  };
   const workbenchCollapsed = readOnly || requestedWorkbenchCollapsed;
   const emptyHistory =
     readOnly && workspace ? (
@@ -380,6 +386,8 @@ export function ConversationPane({
 
   return (
     <section
+      onPointerDownCapture={activateLinkedContext}
+      onKeyDownCapture={activateLinkedContext}
       ref={sectionRef}
       data-zeros-column-2=""
       {...popoverBoundaryProps}

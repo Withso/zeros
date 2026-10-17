@@ -46,6 +46,7 @@ import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { displayCommand } from "./tool-command";
 import { readLabel, readLineCount } from "./read-output";
 import { toolCompletionUnreported } from "./raw-output";
+import { isTransientConnectionNotice } from "../transcript-notices";
 import {
   browserToolActivity,
   type BrowserToolActivity,
@@ -161,7 +162,7 @@ export function metaForEvent(message: AgentMessage): EventMeta {
     // live it renders as a shimmer row (see
     // EventRowRenderer); once settled this is its static record. The
     // technical message stays inspectable via expand.
-    if (m.code === "api_retry") {
+    if (isTransientConnectionNotice(message)) {
       return {
         Icon: RefreshCw,
         label: "Reconnecting agent",

@@ -620,6 +620,11 @@ export interface AgentCloseSessionMessage extends BaseMessage {
   sessionId?: string;
   executionId?: ExecutionId;
   chatId?: ConversationId;
+  /** The user pressed Stop while the provider was still starting, so there
+   * is no execution to cancel yet. Records the user's Stop like AGENT_CANCEL
+   * (Local CLI agents may not restart the chat until the user writes again).
+   * Cleanup closes (timeouts, tab close) omit it; older engines ignore it. */
+  userStop?: true;
 }
 
 /** Correlated acknowledgement emitted only after cancellation and adapter
@@ -1028,6 +1033,16 @@ export interface AgentPermissionRequestMessage extends BaseMessage {
 /** A permission resolver settled engine-side (response, timeout, or abort).
  * The renderer uses this receipt to evict a card whose resolver no longer
  * exists and advance any concurrently queued helper gate. */
+/** Who answered a card when it was not the person at this chat: another
+ * Local chat's agent, through the Zeros Local CLI. Engine-derived from the
+ * answering execution, never supplied by the agent. */
+export interface CardAnsweredBy {
+  kind: "agent";
+  chatId: ConversationId;
+  title: string;
+  link: string;
+}
+
 export interface AgentPermissionSettledMessage extends BaseMessage {
   type: "AGENT_PERMISSION_SETTLED";
   agentId: string;
@@ -1035,6 +1050,8 @@ export interface AgentPermissionSettledMessage extends BaseMessage {
   sessionId: string;
   executionId?: ExecutionId;
   chatId?: ConversationId;
+  /** Present only when an agent answered (Zeros Local CLI). */
+  answeredBy?: CardAnsweredBy;
 }
 
 /** A blocking user-input question from the agent (twin of
@@ -1062,6 +1079,8 @@ export interface AgentQuestionSettledMessage extends BaseMessage {
   questionId: string;
   outcome: QuestionOutcome;
   chatId?: ConversationId;
+  /** Present only when an agent answered (Zeros Local CLI). */
+  answeredBy?: CardAnsweredBy;
 }
 
 export interface AgentPromptCompleteMessage extends BaseMessage {
@@ -1087,6 +1106,12 @@ export interface AgentPromptFailedMessage extends BaseMessage {
    *  message string. Optional for back-compat with the AGENT_ERROR
    *  envelope, which also carries this field. */
   failure?: BridgeAgentFailure;
+  /** Set when this prompt was not admitted because another turn is already
+   *  running on the session (another window's send, or an agent's message
+   *  through the Zeros Local CLI). Nothing was delivered or persisted; the
+   *  sender may queue the prompt behind this turn. Published only while the
+   *  turn's terminal `turn_state` is still pending, so that update follows. */
+  activeTurn?: { turnId: string; startedAt: number };
 }
 
 export interface AgentAgentStderrMessage extends BaseMessage {

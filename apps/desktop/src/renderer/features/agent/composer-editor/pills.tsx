@@ -26,7 +26,7 @@ import { cn } from "../../../shared/ui/cn";
 import { FileTypeIcon } from "./file-type-icon";
 import { useComposerEditorContext } from "./composer-editor-context";
 // Shared pill chrome; editable pills use their leading icon slot for removal.
-import { PILL_SHELL } from "./pill-views";
+import { PILL_SHELL, COMPOSER_PILL_SPACING } from "./pill-views";
 import {
   HoverCard,
   HoverCardContent,
@@ -99,7 +99,7 @@ export function MentionPill(props: NodeViewProps) {
         data-mention-pill=""
         className={cn(
           PILL_SHELL,
-          "composer-pill mx-[1.5px] gap-2 px-1.5",
+          "composer-pill", COMPOSER_PILL_SPACING,
           props.selected && "ring-highlighted-bright/40 ring-2",
         )}
         contentEditable={false}
@@ -210,7 +210,7 @@ export function AttachmentPill(props: NodeViewProps) {
       onFocus={warmPreview}
       className={cn(
         PILL_SHELL,
-        "composer-pill mx-[1.5px] gap-2 px-1.5",
+        "composer-pill", COMPOSER_PILL_SPACING,
         props.selected && "ring-highlighted-bright/40 ring-2",
         invalid &&
           "border-yellow-icon/40 text-fg2 opacity-85 [&_[data-composer-pill-icon]]:grayscale",

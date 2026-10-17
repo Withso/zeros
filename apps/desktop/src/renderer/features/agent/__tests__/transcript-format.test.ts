@@ -357,6 +357,18 @@ describe("formatTranscript — full", () => {
     expect(out).toContain("Attachments: shot.png (image/png)");
   });
 
+  it("names another agent's message and a Zeros Local note instead of calling them the user's", () => {
+    const from = { chatId: "lead", title: "Lead", agentId: "codex", link: "zeros-dev://chat/lead" };
+    const out = run([
+      text("user", "Write the docs", { localFrom: from }),
+      text("agent", "On it."),
+      text("user", 'Chat "Worker" finished its turn: completed.', { localNote: { ...from, chatId: "w", title: "Worker", link: "zeros-dev://chat/w", event: "done", status: "completed" } }),
+    ]).text;
+    expect(out).toContain('## Agent message · from "Lead" (zeros-dev://chat/lead)');
+    expect(out).toContain('## Zeros note\n\nChat "Worker" finished its turn: completed.');
+    expect(out).not.toContain("## User");
+  });
+
   it("renders an error notice", () => {
     const out = run([
       {

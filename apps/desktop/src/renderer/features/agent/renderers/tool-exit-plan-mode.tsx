@@ -34,6 +34,7 @@ import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import type { Renderer } from "./types";
 import type { AgentToolMessage } from "../use-agent-session";
 import { renderMarkdown } from "../markdown";
+import { LocalLinkHtml } from "../local-links/text";
 import { readPlan } from "./plan-body";
 import { EventRow, type EventMeta } from "./event-row";
 
@@ -97,9 +98,9 @@ export const ExitPlanModeCard: Renderer<AgentToolMessage> = memo(
     // "no bg, only for this tool call's expand view"). Unlike shell output,
     // the plan is the turn's focal document; it reads as answer markdown.
     const detail = planHtml ? (
-      <div
+      <LocalLinkHtml
         className="zeros-agent-md text-fg1 text-sm"
-        dangerouslySetInnerHTML={{ __html: planHtml }}
+        html={planHtml}
       />
     ) : (
       <div className="text-fg2 text-xs">

@@ -55,6 +55,8 @@ export function TerminalDeck() {
   );
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const activePage = useActivePage();
+  const navigationOnly = useWorkspaceStore((state) =>
+    state.localLinkNavigation?.passive && state.localLinkNavigation.folder === activeFolder);
   const layout = usePaneLayout(activeFolder);
   const paneSlots = usePanePortalsStore((s) => s.panes);
   const dispatch = useWorkspaceDispatch();
@@ -115,7 +117,7 @@ export function TerminalDeck() {
             <TerminalSessionView
               sessionId={chat.id}
               cwd={chat.folder}
-              visible={isActive}
+              visible={isActive && !navigationOnly}
               agentId={chat.agentId}
             />
           </div>

@@ -92,6 +92,8 @@ Supplemental metadata and subtle boundary floors are owner-reviewed design decis
 
 | Foreground | On | Needs | Dark (worst) | Light (worst) |
 | --- | --- | --- | --- | --- |
+| `--blue-fg` | blue-pill-bg, blue-pill-hover | 4.5:1 | ✓ 7.45 on blue-pill-hover | ✓ 4.57 on blue-pill-hover |
+| `--highlighted-bright` | blue-pill-bg, blue-pill-hover | 3:1 | ✓ 5.54 on blue-pill-hover | ✓ 3.24 on blue-pill-hover |
 | `--fg1` | @rest | 4.5:1 | ✓ 14.13 on bg2 | ✓ 12.26 on highlighted-bg |
 | `--fg2` | @rest | 4.5:1 | ✓ 8.12 on bg2 | ✓ 7.02 on highlighted-bg |
 | `--fg3` | @rest | 4.5:1 | ✓ 6.23 on bg2 | ✓ 5.65 on highlighted-bg |

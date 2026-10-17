@@ -79,6 +79,14 @@ extraResources:
     filter:
       - "**/*"
       - ".claude-plugin/**/*"
+  # Local orchestration reuses this engine through a namespace-only launcher.
+  - from: apps/desktop/resources/bin
+    to: bin
+  - from: apps/desktop/resources/zeros-local-cli-skill
+    to: zeros-local-cli-skill
+    filter:
+      - "**/*"
+      - ".claude-plugin/**/*"
   # Runtime-safe node-pty copy. On current macOS, the signed spawn-helper is
   # rejected with `posix_spawnp failed` when it lives below app.asar.unpacked,
   # even though the same signed bytes work under Contents/Resources. The host is

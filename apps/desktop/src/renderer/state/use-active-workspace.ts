@@ -26,7 +26,7 @@ import {
   buildLocalMainWorkspace,
   canRestoreFolderWorkspace,
 } from "./local-main-workspace";
-import { type Project } from "./projects-store";
+import { normalizeProjectRoot, type Project } from "./projects-store";
 import { selectActiveFolder, useWorkspaceStore } from "./store";
 import {
   useProjectForFolder,
@@ -50,6 +50,7 @@ export function useActiveWorkspace(): ActiveWorkspaceResolution {
   // persisted `lastWorkspaceFolder` fallback so a fresh boot resolves the
   // workspace the user left even before chats hydrate.
   const folder = useWorkspaceStore(selectActiveFolder);
+  const linked = useWorkspaceStore((state) => state.localLinkNavigation);
 
   // Resolve the owning project from the same list the sidebar uses.
   const inferredProject = useProjectForFolder(folder);
@@ -59,6 +60,13 @@ export function useActiveWorkspace(): ActiveWorkspaceResolution {
     ? findWorkspaceForFolder(folder, archives.workspaces)
     : null;
   const project =
+    (linked?.folder === folder
+      ? projects.find(
+          (row) =>
+            normalizeProjectRoot(row.repoRoot) ===
+            normalizeProjectRoot(linked.workspace.repoRoot),
+        )
+      : null) ??
     inferredProject ??
     (archived
       ? (projects.find((row) => row.repoSlug === archived.repoSlug) ?? null)
@@ -71,6 +79,13 @@ export function useActiveWorkspace(): ActiveWorkspaceResolution {
     const managed = findWorkspaceForFolder(folder, workspaces);
     if (managed) return managed;
     if (archived) return archived;
+    if (
+      linked?.folder === folder &&
+      normalizeProjectRoot(linked.workspace.repoRoot) ===
+        normalizeProjectRoot(project.repoRoot) &&
+      (!resolved || linked.workspace.id.startsWith("local:"))
+    )
+      return linked.workspace;
     // A nested checkout can belong to history even beneath the repo root.
     // Do not briefly mount live agent/workbench effects as "local main" while
     // the exact live or archived ownership snapshot is still loading.
@@ -79,7 +94,7 @@ export function useActiveWorkspace(): ActiveWorkspaceResolution {
     const main = buildLocalMainWorkspace(project);
     if (findWorkspaceForFolder(folder, [main])) return main;
     return null;
-  }, [folder, project, workspaces, archived, resolved, archives.resolved]);
+  }, [folder, project, workspaces, archived, resolved, archives.resolved, linked]);
 
   return {
     workspace,

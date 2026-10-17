@@ -96,14 +96,18 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
     }
     if (m.kind === "text" && m.role === "user") {
       const steeredTurnId = m.steeredTurnId;
+      if (m.localNote && steeredTurnId && current?.recordedTurnId === steeredTurnId) {
+        current.events.push(m);
+        continue;
+      }
       const recordedStartedAt: number =
         steeredTurnId && current?.recordedTurnId === steeredTurnId
           ? current.recordedStartedAt
           : m.createdAt;
       if (current && !isSleepOnlySystemTurn(current)) turns.push(current);
-      const events: AgentMessage[] = [];
+      const events: AgentMessage[] = m.localNote ? [m] : [];
       current = {
-        userPrompt: m,
+        userPrompt: m.localNote ? null : m,
         recordedTurnId: steeredTurnId ?? m.id,
         recordedStartedAt,
         isSteer: steeredTurnId != null,

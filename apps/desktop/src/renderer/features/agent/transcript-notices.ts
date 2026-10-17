@@ -71,3 +71,14 @@ export function isProviderWorkEvent(event: AgentMessage): boolean {
     "model_switch", "mode_switch", "background_task", "compaction", "budget_stop",
   ].includes(event.toolKind ?? "");
 }
+
+/** Reconnect progress ("Connection lost — reconnecting…", provider API
+ *  retries). It is live status while it is the streaming tail and a quiet
+ *  compact row afterwards, never a lasting banner: the agent either resumed
+ *  or the turn's own failure card reports what went wrong. Rows saved before
+ *  the `connection_lost` code keep their engine-minted notice identity. */
+export function isTransientConnectionNotice(event: AgentMessage): boolean {
+  if (event.kind !== "error_notice" || event.parentToolId) return false;
+  return event.code === "api_retry" || event.code === "connection_lost" ||
+    /^notice-(?:cursor|claude)-neterr-/.test(event.id);
+}

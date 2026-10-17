@@ -33,7 +33,7 @@ const script = new vm.Script(ts.transpileModule(`${legacyLabelSource}\n${effectS
 const cloud = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const protocol = (detail: string): AgentFailure => ({ kind: "protocol-error", stage: "newSession", agentId: "cursor", message: detail });
 
-function mounted(folder: string, history?: { status: string; stopReason?: string; readOnly?: boolean }) {
+function mounted(folder: string, history?: { status: string; stopReason?: string; readOnly?: boolean; localNote?: boolean }) {
   const refs: Array<{ current: unknown }> = [];
   const toast = { error: vi.fn() }, warn = vi.fn(), localRefresh = vi.fn(), cloudRefresh = vi.fn();
   let session = { agentId: "cursor", agentName: "Cursor", status: "ready", error: null as string | null,
@@ -45,13 +45,18 @@ function mounted(folder: string, history?: { status: string; stopReason?: string
       isErrorState: ["failed", "auth-required"].includes(session.status), isTransportShaped, isRecoverable, isCloudWorkspace,
       readOnly: history?.readOnly ?? false,
       turns: history ? groupMessagesIntoTurns([
-        { id: "earlier-prompt", kind: "text", role: "user", text: "Earlier request", createdAt: 1 },
+        { id: "earlier-prompt", kind: "text", role: "user", text: "Earlier request", createdAt: 1,
+          ...(history.localNote ? { localNote: {
+            chatId: "worker", title: "Worker", agentId: "codex", link: "zeros-dev://chat/worker",
+            event: "done" as const, status: "completed",
+          } } : {}),
+        },
         { id: "earlier-answer", kind: "text", role: "agent", text: "Earlier answer", createdAt: 2 },
       ]) : [],
       detachedCloudAdmission: null, provisionalTranscript: false, surfaceActive: interactive,
       pendingLocalTurnId: null, isStreaming: false, tailTurnInFlight, turnFailureForCard,
       turnRowCache: {}, turnRowKey: () => "fixture-turn", turnGet: vi.fn(),
-      useCachedRead: () => ({ data: history ?? null }),
+      useCachedRead: (_cache: unknown, key: string | null) => ({ data: key ? history ?? null : null }),
       cloudCatalogGeneration: () => account,
       toast, console: { warn },
       useRef: (initial: unknown) => refs[index++] ?? (refs[index - 1] = { current: initial }),
@@ -106,6 +111,20 @@ describe("agent failure notification ownership", () => {
       expect(view.render({ status: "failed", failure })).toBeNull();
       expect(turnFailureForCard({ events: [], turnId: "earlier-prompt", fallback: failure, status: "failed" })?.message).toBe(failure.message);
       expect(view.toast).not.toHaveBeenCalled();
+    });
+
+    it("leaves a failed Local notification turn's explanation to its footer", () => {
+      const view = mounted(folder, { status: "failed", localNote: true });
+      const failure = { ...protocol("The provider could not initialize."), stage: "initialize" as const };
+      expect(view.render({ status: "failed", failure })).toBeNull();
+      expect(turnFailureForCard({ events: [], turnId: "earlier-prompt", fallback: failure, status: "failed" })?.message).toBe(failure.message);
+      expect(view.toast).not.toHaveBeenCalled();
+    });
+
+    it.each(["completed", "cancelled"])("shows a later startup failure after a %s Local notification turn", status => {
+      const view = mounted(folder, { status, localNote: true });
+      const failure = { ...protocol("The provider could not initialize."), stage: "initialize" as const };
+      expect(view.render({ status: "failed", failure })?.message).toBe(failure.message);
     });
 
     it("keeps read-only history and recoverable startup failures quiet", () => {

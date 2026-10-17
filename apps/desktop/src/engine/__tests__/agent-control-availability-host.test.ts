@@ -14,7 +14,7 @@ interface HostControlInternals {
 }
 
 const REQUEST_ID = "6f1c2a52-3b5e-4f1d-9a51-0c8e2f7d4b10";
-const OPEN = { zerosBrowser: true, computerUse: true, simulators: true };
+const OPEN = { zerosBrowser: true, computerUse: true, simulators: true, localOrchestration: true };
 
 describe("the desktop app's agent control rollout", () => {
   let root: string;
@@ -75,6 +75,7 @@ describe("the desktop app's agent control rollout", () => {
       null,
       { zerosBrowser: false, computerUse: false },
       { ...OPEN, simulators: "no" },
+      { ...OPEN, localOrchestration: "yes" },
     ]) {
       state.handleHostControlLine(
         JSON.stringify({
@@ -87,6 +88,22 @@ describe("the desktop app's agent control rollout", () => {
 
     expect(agentControlAvailability()).toEqual(OPEN);
     expect(frames).toEqual([]);
+  });
+
+  it("applies a push from a renderer that predates the Local CLI and keeps it closed", () => {
+    const { localOrchestration: _omitted, ...older } = OPEN;
+    state.handleHostControlLine(
+      JSON.stringify({
+        type: "host.agentControlAvailability",
+        requestId: REQUEST_ID,
+        availability: older,
+      }),
+    );
+
+    expect(agentControlAvailability()).toEqual({ ...OPEN, localOrchestration: false });
+    expect(frames).toEqual([
+      { type: "engine.agentControlAvailabilityApplied", requestId: REQUEST_ID },
+    ]);
   });
 
   it("applies a push with an unusable request ID without confirming it", () => {

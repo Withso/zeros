@@ -4,17 +4,24 @@ import {
   type AgentTextMessage,
 } from "@zeros/protocol/agent-messages";
 import type { ModelFallbackInfo } from "@zeros/protocol/agent-events";
-import { displayNameForModelValue } from "./model-catalog";
+import type { ChatEffort } from "../../state/store";
+import { displayNameForModelValue, effortLabel } from "./model-catalog";
 
 export function fallbackDisplayText(info: ModelFallbackInfo): string {
-  const label = displayNameForModelValue(info.provider, info.toModel);
   // Use the user's concise narration order (Sol 5.6) while the model picker
   // retains its shared catalog label (GPT-5.6 Sol) and exact native value.
-  const proseLabel =
-    info.provider === "codex"
+  const prose = (model: string) => {
+    const label = displayNameForModelValue(info.provider, model);
+    return info.provider === "codex"
       ? label.replace(/^GPT-([\d.]+)\s+(.+)$/, "$2 $1")
       : label;
-  return modelFallbackText(info, proseLabel);
+  };
+  return modelFallbackText(
+    info,
+    prose(info.toModel),
+    info.fromModel ? prose(info.fromModel) : null,
+    (effort) => effortLabel(info.provider, effort as ChatEffort),
+  );
 }
 
 /** Old persisted model_switch tool rows get the same prose presentation. They

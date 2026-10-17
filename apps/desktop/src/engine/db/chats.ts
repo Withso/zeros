@@ -430,6 +430,24 @@ export function upsertChat(c: ChatRow): void {
   tx();
 }
 
+/** Engine-owned permission posture change (an approved plan returns a chat to
+ * its pre-plan mode). Narrow, so a concurrent provider-identity write is never
+ * rolled back by a stale full-row copy; `updated_at` moves so renderers adopt
+ * it over their older mirror. */
+export function updateChatPermissionMode(
+  id: string,
+  mode: { permissionMode: string; lastModeId: string | null; prePlanModeId: string | null },
+  now = Date.now(),
+): boolean {
+  const db = openZerosDb();
+  const result = db
+    .prepare(
+      "UPDATE chats SET permission_mode = ?, last_mode_id = ?, pre_plan_mode_id = ?, updated_at = ?, rev = ? WHERE id = ?",
+    )
+    .run(mode.permissionMode, mode.lastModeId, mode.prePlanModeId, now, nextRev(), id);
+  return result.changes > 0;
+}
+
 /** Persist a provider resume handle learned after session creation (Claude
  * publishes its native id from the first streamed init event). This narrow
  * engine-owned update avoids round-tripping the whole chat row through the
@@ -825,6 +843,55 @@ export const CHAT_SUMMARIES_SQL = `SELECT chats.id AS chatId, chats.title AS tit
           AND EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.chat_id = chats.id
                         AND cm.kind = 'text' AND json_extract(cm.payload, '$.role') = 'user')
         ORDER BY chats.created_at DESC, chats.rowid DESC`;
+
+/** What names a chat: its first real prompt — a person's message or another
+ * agent's brief, never a Zeros Local note — and whether the agent has
+ * answered it (a reply or a tool call; a model-fallback notice is not one).
+ * The renderer names Untitled chats from this, open or not. */
+export interface ChatTitleSeed {
+  chatId: string;
+  messageId: string;
+  prompt: string;
+  answered: boolean;
+}
+
+const MAX_TITLE_SEED_CHATS = 50;
+
+export function chatTitleSeeds(chatIds: readonly string[]): ChatTitleSeed[] {
+  if (chatIds.length > MAX_TITLE_SEED_CHATS) throw new Error(`Ask for at most ${MAX_TITLE_SEED_CHATS} chats at a time.`);
+  const db = openZerosDb();
+  // Keep the first two predicates in this order and spelling so the partial
+  // index idx_chat_messages_user_text applies (see CHAT_SUMMARIES_SQL).
+  const first = db.prepare(
+    `SELECT cm.msg_id AS messageId, cm.ord AS ord, json_extract(cm.payload, '$.text') AS prompt
+       FROM chat_messages cm
+      WHERE cm.chat_id = ? AND cm.kind = 'text'
+        AND json_extract(cm.payload, '$.role') = 'user'
+        AND json_extract(cm.payload, '$.localNote') IS NULL
+        AND json_extract(cm.payload, '$.text') IS NOT NULL
+      ORDER BY cm.ord ASC LIMIT 1`,
+  );
+  // Answered: the agent replied or used a tool, or the prompt's turn ended
+  // (a failed first turn still names its chat, as it does on screen).
+  const answered = db.prepare(
+    `SELECT (EXISTS (SELECT 1 FROM chat_messages cm
+                      WHERE cm.chat_id = ? AND cm.ord > ?
+                        AND (cm.kind = 'tool'
+                             OR (cm.kind = 'text' AND json_extract(cm.payload, '$.role') = 'agent'
+                                 AND json_extract(cm.payload, '$.modelFallback') IS NULL
+                                 AND length(trim(coalesce(json_extract(cm.payload, '$.text'), ''))) > 0)))
+             OR EXISTS (SELECT 1 FROM turns t WHERE t.chat_id = ? AND t.turn_id = ? AND t.status != 'running')) AS answered`,
+  );
+  const out: ChatTitleSeed[] = [];
+  for (const chatId of new Set(chatIds)) {
+    if (!chatId) continue;
+    const row = first.get(chatId) as { messageId: string; ord: number; prompt: unknown } | undefined;
+    if (!row || typeof row.prompt !== "string" || !row.prompt.trim()) continue;
+    const reply = answered.get(chatId, row.ord, chatId, row.messageId) as { answered: number };
+    out.push({ chatId, messageId: row.messageId, prompt: row.prompt, answered: reply.answered === 1 });
+  }
+  return out;
+}
 
 export function summariesForFolder(
   folder: string,

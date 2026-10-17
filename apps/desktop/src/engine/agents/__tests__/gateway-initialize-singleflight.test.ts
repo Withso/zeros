@@ -187,3 +187,28 @@ describe("gateway agent initialization single-flight", () => {
     expect(initialize).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("the current account catalog", () => {
+  it("re-reads an adapter that republished its models after the cached first read", async () => {
+    let selectable = true;
+    const initialize = vi.fn(async () => ({
+      protocolVersion: 1,
+      _meta: { models: [{ value: "grok-4.7", label: "Grok 4.7", selectable }] },
+    }));
+    const gateway = gatewayWith({ agentId: "cursor-like", initialize, dispose: async () => {} } as unknown as AgentAdapter);
+    gateways.push(gateway);
+    await gateway.initializeAgent("cursor-like");
+    // The account refuses the model; the adapter republishes its catalog.
+    selectable = false;
+    const current = await gateway.currentAgentInitialize("cursor-like");
+    expect(current?._meta?.models?.[0]?.selectable).toBe(false);
+    // The account snapshot other readers use is current too.
+    expect(gateway.agentInitializeSnapshot("cursor-like")?._meta?.models?.[0]?.selectable).toBe(false);
+  });
+
+  it("answers from the snapshot for an agent without a running adapter", async () => {
+    const gateway = gatewayWith({ agentId: "other", initialize: vi.fn(), dispose: async () => {} } as unknown as AgentAdapter);
+    gateways.push(gateway);
+    expect(await gateway.currentAgentInitialize("missing")).toBeNull();
+  });
+});

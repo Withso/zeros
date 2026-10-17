@@ -680,6 +680,56 @@ describe("Claude fallback model persistence", () => {
     expect(emitted.filter((n) => n.update.sessionUpdate === "current_model_update")).toHaveLength(scope === "session" ? 1 : 0);
     await adapter.dispose();
   });
+  it("keeps the curated selection when a session fallback names a model outside the catalog", async () => {
+    const emitted: SessionNotification[] = [];
+    const success = { type: "result", subtype: "success", result: "Done", uuid: "end" };
+    const mock = makeScriptedQuery([
+      [{ type: "system", subtype: "model_refusal_fallback", uuid: "fallback", scope: "session", original_model: "claude-opus-5", fallback_model: "claude-sonnet-4-5-20250929" }, success],
+      [{ ...success, uuid: "end-2" }],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: mock.queryFn as never });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp", env: { ANTHROPIC_MODEL: "claude-opus-5" } });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "First" }] });
+      await tick();
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "Next" }] });
+      expect(mock.captured.at(-1)?.model).toBe("claude-opus-5");
+      expect(emitted.filter((n) => n.update.sessionUpdate === "current_model_update")).toHaveLength(0);
+      // The response still says what ran, as a one-response fallback.
+      expect(emitted.find((n) => n.update.sessionUpdate === "model_fallback")?.update)
+        .toMatchObject({ toModel: "claude-sonnet-4-5-20250929", scope: "local" });
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["initial selection", "manual selection"] as const)(
+    "restores the %s after an uncurated fallback on a persistent query",
+    async (selection) => {
+      const initial = "claude-opus-5-5[1m]";
+      const selected = selection === "manual selection" ? "claude-opus-5" : initial;
+      const emitted: SessionNotification[] = [];
+      const mock = makePushableQuery();
+      const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: mock.queryFn });
+      try {
+        const { session } = await adapter.newSession({ cwd: "/tmp", env: { ANTHROPIC_MODEL: ` ${initial} ` } });
+        const send = () => adapter.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "Continue" }] });
+        const first = send();
+        await vi.waitFor(() => expect(mock.inputsSeen).toHaveLength(1));
+        if (selection === "manual selection") await adapter.setModel({ sessionId: session.sessionId, model: selected });
+        mock.push({ type: "system", subtype: "model_refusal_fallback", uuid: "outside-catalog", scope: "session", original_model: initial, fallback_model: "claude-sonnet-4-5-20250929" });
+        mock.push({ type: "result", subtype: "success", result: "Done", uuid: "first-result" });
+        await first;
+        const second = send();
+        await vi.waitFor(() => expect(mock.inputsSeen).toHaveLength(2));
+        const reassertions = [...mock.control.models];
+        mock.push({ type: "result", subtype: "success", result: "Done", uuid: "second-result" });
+        await second;
+        expect(mock.captured).toHaveLength(1);
+        expect(emitted.find((n) => n.update.sessionUpdate === "model_fallback")?.update).toMatchObject({ scope: "local" });
+        expect(emitted.filter((n) => n.update.sessionUpdate === "current_model_update")).toHaveLength(0);
+        expect(reassertions).toEqual(selection === "manual selection" ? [selected, selected] : [selected]);
+      } finally { await adapter.dispose(); }
+    },
+  );
 });
 
 function codeTerritory(
@@ -7500,6 +7550,10 @@ describe("Claude native MCP identity", () => {
     { server: "zeros_device", registered: true, source: "dynamic", mode: "plan", allowed: false },
     { server: "zeros_device", registered: true, source: "project", mode: "default", allowed: false },
     { server: "zeros_device", registered: false, source: "dynamic", mode: "default", allowed: false },
+    { server: "zeros_local", registered: true, source: "dynamic", mode: "default", allowed: true },
+    { server: "zeros_local", registered: true, source: "dynamic", mode: "plan", allowed: false },
+    { server: "zeros_local", registered: true, source: "project", mode: "default", allowed: false },
+    { server: "zeros_local", registered: false, source: "dynamic", mode: "default", allowed: false },
   ])("runs the engine's control tools without a permission card only from its own registration: %j", async ({ server, registered, source, mode, allowed }) => {
     const perms: PermCapture[] = [];
     const live = makePushableQuery();
@@ -7527,6 +7581,50 @@ describe("Claude native MCP identity", () => {
         await decision;
       }
       live.push(resultOk("browser")); await turn;
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each([
+    { matchedAskRule: { toolName: "mcp__zeros_local__run" } },
+    { defaultToNo: true },
+    { suppressAlwaysAllowRule: true },
+  ])("asks for the Local CLI tool when the user's own rule says so: %j", async (rule) => {
+    const perms: PermCapture[] = [];
+    const live = makePushableQuery();
+    const ctx = makeCtx([], perms);
+    ctx.mcpServers = [{ name: "zeros_local", transport: "http", url: "http://127.0.0.1:9/mcp" }];
+    const adapter = new ClaudeSdkAdapter(ctx, { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Coordinate")] }).catch(() => null);
+      await tick();
+      const callback = live.captured[0].canUseTool as (name: string, input: object, options: object) => Promise<unknown>;
+      const decision = callback("mcp__zeros_local__run", { args: ["whoami"] }, {
+        signal: new AbortController().signal, toolUseID: "local", mcpServer: { name: "zeros_local", source: "dynamic" }, ...rule,
+      });
+      await vi.waitFor(() => expect(perms).toHaveLength(1));
+      adapter.respondToPermission({ permissionId: perms[0].id, response: { outcome: { outcome: "selected", optionId: "reject_once" } } });
+      await decision;
+      live.push(resultOk("local")); await turn;
+    } finally { await adapter.dispose(); }
+  });
+
+  it("gives the SDK the Local CLI tool's own deadline and leaves other servers at the default", async () => {
+    const live = makePushableQuery();
+    const ctx = makeCtx([], []);
+    ctx.mcpServers = [
+      { name: "zeros_local", transport: "http", url: "http://127.0.0.1:9/mcp", toolTimeoutSec: 660 },
+      { name: "zeros_browser", transport: "http", url: "http://127.0.0.1:8/mcp", toolTimeoutSec: 600 },
+    ];
+    const adapter = new ClaudeSdkAdapter(ctx, { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Wait")] }).catch(() => null);
+      await tick();
+      const servers = live.captured[0].mcpServers as Record<string, { timeout?: number }>;
+      expect(servers.zeros_local!.timeout).toBe(660_000);
+      expect(servers.zeros_browser!.timeout).toBeUndefined();
+      live.push(resultOk("wait")); await turn;
     } finally { await adapter.dispose(); }
   });
 

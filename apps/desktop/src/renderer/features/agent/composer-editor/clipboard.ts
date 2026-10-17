@@ -9,6 +9,8 @@ import {
   ATTACHMENT_CLIPBOARD_MIME,
 } from "@zeros/protocol/attachment-policy";
 import type { ComposerAttachment } from "../composer-attachments";
+import { parseLocalLink } from "@zeros/protocol/local-orchestration";
+import { linkNeedsSpaceBefore, textNeedsSpaceAfterLink } from "./local-link-node";
 import { attachmentOwner, sameAttachmentOwner } from "../attachment-owner";
 import { rememberAttachmentClipboardSources } from "../attachment-source-retention";
 import {
@@ -108,8 +110,26 @@ export function clipboardPayload(
     }
     if (node.type === "mention")
       return node.attrs?.token || node.attrs?.label || "";
+    if (node.type === "localLink") return String(node.attrs?.href ?? "");
     if (node.type === "hardBreak") return "\n";
-    return node.text ?? node.content?.map(textOf).join("") ?? "";
+    return node.text ?? (node.content ? joinInline(node.content) : "");
+  };
+  // As on the wire: text never runs into a link atom's URL.
+  const joinInline = (children: JSONContent[]): string => {
+    let out = "";
+    let afterLink = false;
+    for (const child of children) {
+      const part = textOf(child);
+      if (child.type === "localLink") {
+        if (linkNeedsSpaceBefore(out)) out += " ";
+        out += part;
+        afterLink = true;
+        continue;
+      }
+      out += afterLink && textNeedsSpaceAfterLink(part) ? " " + part : part;
+      afterLink = false;
+    }
+    return out;
   };
   const text = slice.content.map(textOf).join("\n");
   return {
@@ -186,6 +206,13 @@ export function prepareClipboardPaste(
   const visit = (node: JSONContent, depth = 0): JSONContent => {
     if (!node || depth > 32 || ++count > 50_000)
       throw new Error("Invalid clipboard document");
+    if (node.type === "localLink") {
+      const href = node.attrs?.href;
+      if (typeof href !== "string" || !parseLocalLink(href)) throw new Error("Invalid Local link");
+      return owner.runtime.startsWith("local")
+        ? { type: "localLink", attrs: { href } }
+        : { type: "text", text: href };
+    }
     if (node.type === "attachment") {
       const a =
         refs.get(node.attrs?.attachmentId) ??

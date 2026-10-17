@@ -48,6 +48,7 @@ import {
   flushStreamingChatMessages,
   searchMessages,
   listChatMessagesSince,
+  listChatMessagesAfterOrd,
   backfillChatMessageRevs,
   clearChatMessages,
   truncateChatMessagesFrom,
@@ -1028,6 +1029,29 @@ describe("Zeros DB (unified engine store)", () => {
       expect(window.map((m) => m.msgId)).toEqual(["u1", "a1"]);
       expect(JSON.parse(window[1].payload).text).toBe(body);
       expect(headRev()).toBe(revBefore + 1);
+    });
+
+    it("paged CLI reads see the latest buffered rows without flushing another chat", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      try {
+        upsertChatMessagesBulk("c1", [text("u1", "go", "user")]);
+        const cursor = rawRows("c1")[0].ord;
+        queueStreamingChatMessages("c1", [text("a1", "partial")]);
+        queueStreamingChatMessages("c1", [text("a1", "latest")]);
+        queueStreamingChatMessages("c2", [text("b1", "another chat")]);
+
+        const page = listChatMessagesAfterOrd("c1", cursor, 1);
+        expect(page.map((row) => row.msgId)).toEqual(["a1"]);
+        expect(JSON.parse(page[0].payload).text).toBe("latest");
+        expect(rawRows("c2")).toEqual([]);
+
+        queueStreamingChatMessages("c1", [text("a1", "updated")]);
+        const updated = listChatMessagesAfterOrd("c1", cursor, 1);
+        expect(updated[0].ord).toBe(page[0].ord);
+        expect(JSON.parse(updated[0].payload).text).toBe("updated");
+      } finally {
+        flushStreamingChatMessages();
+      }
     });
 
     it("keeps first-insert order when an immediate write follows buffered rows", () => {

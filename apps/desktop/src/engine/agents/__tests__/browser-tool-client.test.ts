@@ -42,6 +42,7 @@ describe("Zeros browser tool client", () => {
       zerosBrowser: true,
       computerUse: true,
       simulators: true,
+      localOrchestration: true,
     });
   });
   afterEach(() =>

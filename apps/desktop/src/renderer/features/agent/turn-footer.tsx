@@ -61,7 +61,7 @@ import { useCachedRead } from "@/renderer/state/use-cached-read";
 import { FileTypeIcon } from "./composer-editor/file-type-icon";
 import { partitionTurn } from "./turn-partition";
 import { TurnFailureCard } from "./turn-failure-card";
-import { turnFailureForCard, turnFailureRecovered } from "./turn-failure";
+import { turnFailureForCard, turnFailureRecovered, type TurnFailure } from "./turn-failure";
 import { useSessionsStore } from "./sessions-store";
 import { useAgentSessions } from "./sessions-hooks";
 import type { AgentFailure } from "../../platform/bridge/failure";
@@ -142,6 +142,24 @@ export function turnFooterFailureLabel(
     default:
       return null;
   }
+}
+
+/** Chat banner policy for a settled turn failure. The card, with its recovery
+ *  actions, belongs to the latest turn while nothing newer has started. Once
+ *  the agent works on a newer turn the card retires to the footer's one-line
+ *  status, so history stays honest without stacking banners. */
+export function settledTurnFailurePresentation(
+  failure: TurnFailure | null,
+  isLatestTurn: boolean,
+): { card: TurnFailure | null; label: string | null } {
+  if (!failure) return { card: null, label: null };
+  if (isLatestTurn) return { card: failure, label: null };
+  const label = turnFooterFailureLabel({
+    kind: failure.kind as AgentFailure["kind"],
+    stage: "prompt",
+    message: failure.message,
+  });
+  return { card: null, label: label ?? "AGENT STOPPED" };
 }
 
 /** Recoverable endings that get a one-click Continue on
@@ -624,13 +642,6 @@ export const TurnFooter = memo(function TurnFooter({
   // turns are evaluated independently by the reset service; this only controls
   // the selected-turn warning in the confirmation dialog.
   const hasSnapshot = turn?.preSnapshot != null;
-  const statusLabel = turnFooterStatusLabel(
-    turn,
-    fallbackStopReason,
-    fallbackStatusLabel,
-    retrying,
-    turnFailureRecovered(events, turnId),
-  );
   const cardFailure = turnFailureForCard({
     events,
     turnId,
@@ -641,6 +652,15 @@ export const TurnFooter = memo(function TurnFooter({
     status: turn?.status,
     stopReason: fallbackStopReason ?? turn?.stopReason,
   });
+  // A failure card belongs to the latest turn; older turns keep one line.
+  const settledFailure = settledTurnFailurePresentation(cardFailure, !!isLastTurn);
+  const statusLabel = turnFooterStatusLabel(
+    turn,
+    fallbackStopReason,
+    fallbackStatusLabel ?? settledFailure.label,
+    retrying,
+    turnFailureRecovered(events, turnId),
+  );
   // The below-footer Continue row (last turn only).
   const continueReason =
     !readOnly && isLastTurn && onContinue
@@ -648,16 +668,16 @@ export const TurnFooter = memo(function TurnFooter({
       : null;
   return (
     <>
-      {cardFailure && (
+      {settledFailure.card && (
         <TurnFailureCard
-          failure={cardFailure}
+          failure={settledFailure.card}
           onRetry={!readOnly && isLastTurn ? onRetry : undefined}
           onRetryNewChat={!readOnly && isLastTurn ? onRetryNewChat : undefined}
           onRetryNewChatIntent={onRetryNewChatIntent}
         />
       )}
       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
-        {statusLabel && !cardFailure && (
+        {statusLabel && !settledFailure.card && (
           <div className="basis-full">
             <span className="border-border3 bg-bg1 text-fg1 inline-flex w-fit rounded-sm border px-2 py-0.5 text-xs tracking-wide">
               {statusLabel}

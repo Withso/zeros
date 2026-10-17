@@ -33,6 +33,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { app, shell } from "electron";
+import { formatLocalLink, parseLocalLink } from "@zeros/protocol/local-orchestration";
 import { IS_LOCAL_DEVELOPMENT } from "./runtime-mode";
 import {
   assertIsDirectory,
@@ -40,7 +41,7 @@ import {
   isSystemDir,
   spawnEngine,
 } from "./sidecar";
-import { emitEvent, whenRendererReady } from "./ipc/events";
+import { emitEvent, emitLocalNavigation, whenRendererReady } from "./ipc/events";
 import { channel, schemeForChannel } from "../src/engine/runtime";
 
 // Each release channel registers its OWN URL scheme so macOS LaunchServices
@@ -67,7 +68,8 @@ function scheme(): string {
  *  the beta pack rewrites it to zeros-beta in scripts/electron-after-pack.cjs);
  *  this runtime call is a safety net for dev. */
 export function registerProtocol(): void {
-  if (IS_LOCAL_DEVELOPMENT) return;
+  // Local development also accepts navigation links. Its dev-only scheme
+  // stays separate from installed stable/alpha/beta copies.
   const s = scheme();
   // Electron's helper — on macOS this ultimately updates
   // LaunchServices; on Win/Linux it edits the registry / .desktop file.
@@ -96,24 +98,16 @@ export async function openDesktopAuthBrowser(url: string): Promise<void> {
   await shell.openExternal(url);
 }
 
-/** Parse a zeros:// URL and dispatch. Safe to call before the main
- *  window exists — emitEvent no-ops if mainWindow isn't set yet; the
- *  URL is re-emitted once the window binds (see enqueueBeforeWindow).
+/** Parse a zeros:// URL and dispatch. Local navigation waits for an explicit
+ * renderer subscription, including when every macOS window was closed.
  *
  *  Exported for tests; production callers go through setupDeepLink(). */
 export async function handleUrl(rawUrl: string): Promise<void> {
-  if (IS_LOCAL_DEVELOPMENT) return;
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
   } catch {
-    // SECURITY: never log the raw URL — invite tokens + OAuth/pairing secrets
-    // ride in the query/fragment (mirrors main.ts's argv redaction). Redact
-    // from the first `?` or `#`; a mangled-but-secret-bearing link that fails
-    // new URL() otherwise leaks the full token into the persistent log.
-    console.warn(
-      `[Zeros] deep-link: invalid URL ${rawUrl.replace(/([?#]).*$/, "$1<redacted>")}`,
-    );
+    console.warn("[Zeros] deep-link: invalid URL");
     return;
   }
 
@@ -129,6 +123,17 @@ export async function handleUrl(rawUrl: string): Promise<void> {
   // in `hostname`; falls back to the stripped pathname for exotic
   // forms like `zeros:/open?...`.
   const action = parsed.hostname || parsed.pathname.replace(/^\/+/, "");
+
+  if (action === "chat" || action === "workspace") {
+    const link = parseLocalLink(rawUrl);
+    if (!link || link.scheme !== scheme()) {
+      console.warn("[Zeros] deep-link: invalid Local navigation");
+      return;
+    }
+    emitLocalNavigation(formatLocalLink(link.scheme, link.kind, link.id));
+    return;
+  }
+  if (IS_LOCAL_DEVELOPMENT) return;
 
   // SECURITY: never log the raw URL. The fragment carries short-lived secrets —
   // the sign-in handoff `zeros://auth/callback#ticket=…` and the pairing
