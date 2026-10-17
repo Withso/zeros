@@ -29,7 +29,12 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
       "bump_cloud_capability_user_epochs_trigger()",
       "bump_cloud_capability_org_epochs_trigger()",
       "bump_cloud_capability_invitation_epoch()",
+      "reject_cloud_capability_key_change_mutation()",
     ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+    // A guard that rejects TRUNCATE cannot truncate.
+    "truncate-guard": [`CREATE TRIGGER cloud_capability_key_changes_no_truncate
+  BEFORE TRUNCATE ON cloud_capability_key_changes FOR EACH STATEMENT
+  EXECUTE FUNCTION reject_cloud_capability_key_change_mutation();`],
   },
   "0145_cloud_computer_named_snapshots.sql": {},
   "0146_cloud_provider_snapshot_recovery.sql": {},

@@ -93,6 +93,23 @@ CREATE POLICY cloud_capability_key_changes_owner ON cloud_capability_key_changes
 -- zeros-expand-exception: new-table-privileges Narrows the default grants of a table created in this migration
 REVOKE ALL ON cloud_capability_key_changes FROM PUBLIC, zeros_app;
 
+-- Append-only, as cloud_rollout_flag_changes: the owner role that writes a
+-- receipt cannot rewrite or erase it afterwards.
+CREATE FUNCTION reject_cloud_capability_key_change_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  RAISE EXCEPTION 'cloud_capability_key_changes is append-only' USING ERRCODE = '55000';
+END $$;
+CREATE TRIGGER cloud_capability_key_changes_append_only
+  BEFORE UPDATE OR DELETE ON cloud_capability_key_changes FOR EACH ROW
+  EXECUTE FUNCTION reject_cloud_capability_key_change_mutation();
+-- zeros-expand-exception: truncate-guard this trigger rejects TRUNCATE; it cannot truncate
+CREATE TRIGGER cloud_capability_key_changes_no_truncate
+  BEFORE TRUNCATE ON cloud_capability_key_changes FOR EACH STATEMENT
+  EXECUTE FUNCTION reject_cloud_capability_key_change_mutation();
+-- zeros-expand-exception: privilege-tightening Removes PUBLIC EXECUTE from a function created in this migration
+REVOKE ALL ON FUNCTION reject_cloud_capability_key_change_mutation() FROM PUBLIC;
+
 -- Membership epochs (S1 ep.me), per (organization, user). An absent row reads
 -- as epoch 1; the first bump creates epoch 2 so a bump always lands above
 -- every token issued before it. Bumped in the same transaction by triggers on

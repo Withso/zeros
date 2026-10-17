@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "./test-database.js";
-import { manageCloudCapabilityKey } from "./manage-cloud-capability-key.js";
+import { CAPABILITY_KEY_USAGE, manageCloudCapabilityKey } from "./manage-cloud-capability-key.js";
 import { loadCapabilityKeyring } from "./cloud-workspaces/capability-keyring.js";
 
 const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
@@ -74,6 +74,28 @@ d("manage-cloud-capability-key with PostgreSQL", () => {
       .resolves.toMatchObject({ state: "planned" }); // a plan is safe
     const done = await execute(change, { ...production, productionConfirmed: "true" });
     expect(done.state).toBe("changed");
+  });
+
+  it("keeps key-change receipts append-only, even for the owner", async () => {
+    const change = doc("create", { kid: "cap-2026-10-f1" });
+    await execute(change);
+    await expect(pool.query("UPDATE cloud_capability_key_changes SET reason='Rewritten audit reason text' WHERE operation_id=$1",
+      [change.operationId])).rejects.toThrow(/append-only/);
+    await expect(pool.query("DELETE FROM cloud_capability_key_changes WHERE operation_id=$1", [change.operationId]))
+      .rejects.toThrow(/append-only/);
+    await expect(pool.query("TRUNCATE cloud_capability_key_changes")).rejects.toThrow(/append-only/);
+  });
+
+  it("refuses an approval taken before the actor's account changed", async () => {
+    const change = doc("create", { kid: "cap-2026-10-g1" });
+    const plan = await manageCloudCapabilityKey(pool, change, options());
+    await pool.query("UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1", [operator]);
+    await expect(manageCloudCapabilityKey(pool, change, { ...options(), execute: true, approval: plan.planSha256 }))
+      .rejects.toThrow(/plan changed/);
+  });
+
+  it("documents that activating with no current key skips the publish window", () => {
+    expect(CAPABILITY_KEY_USAGE).toMatch(/no current key[\s\S]*skips the 24 h JWKS publish\s+window/);
   });
 
   it("refuses a Railway environment mismatch and normalizes the channel (review SHOULD-4)", async () => {

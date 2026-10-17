@@ -301,8 +301,13 @@ d("capability keys and issuance with PostgreSQL", () => {
         method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: payload,
       });
 
+    // Flag off answers exactly like a bad credential: no flag oracle.
     const dark = createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags(), workosEnabled: false });
-    expect((await post(dark)).status).toBe(404);
+    const darkAnswer = await post(dark), badAnswer = await post(
+      createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags("capabilities"), workosEnabled: false }),
+      `zwh_${"Z".repeat(43)}`);
+    expect([darkAnswer.status, await darkAnswer.json()]).toEqual([badAnswer.status, await badAnswer.json()]);
+    expect(darkAnswer.status).toBe(401);
 
     const app = createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags("capabilities"), workosEnabled: false });
     expect((await post(app, `zwh_${"Z".repeat(43)}`)).status).toBe(401);
@@ -317,6 +322,30 @@ d("capability keys and issuance with PostgreSQL", () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     const afterRevoke = createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags("capabilities"), workosEnabled: false });
     expect((await post(afterRevoke)).status).toBe(401);
+  });
+
+  it("throttles failed engine-token requests per engine id before any SQL", async () => {
+    await activateFirst();
+    const value = await store();
+    await vi.waitFor(() => expect(value.signer()).not.toBeNull());
+    let clock = 1_800_000_000_000;
+    const app = createCloudCapabilityEngineRoutes({ pool, keyStore: value, issuer: ISSUER, flags: flags("capabilities"),
+      workosEnabled: false, now: () => clock });
+    const bootId = (await pool.query<{ runtime_boot_id: string }>(
+      "SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0]!.runtime_boot_id;
+    const post = (engineInstanceId: string, token: string) => app.request("/internal/v2/cloud-workspaces/engine/capability", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, generation: 1, engineInstanceId, bootId }),
+    });
+    const guess = `zwh_${"Z".repeat(43)}`;
+    for (let attempt = 0; attempt < 5; attempt++) expect((await post(fixture.engineInstanceId, guess)).status).toBe(401);
+    const throttled = await post(fixture.engineInstanceId, fixture.heartbeatToken);
+    expect(throttled.status).toBe(429);
+    expect(Number(throttled.headers.get("retry-after"))).toBeGreaterThan(0);
+    // Another engine id keeps its own budget.
+    expect((await post(randomUUID(), guess)).status).toBe(401);
+    clock += 60_000;
+    expect((await post(fixture.engineInstanceId, fixture.heartbeatToken)).status).toBe(201);
   });
 
   it("serves the public JWKS document with the published set", async () => {

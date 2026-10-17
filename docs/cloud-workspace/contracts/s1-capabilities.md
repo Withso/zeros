@@ -22,7 +22,11 @@ state), not only membership rows; a workspace- or organization-wide input
 bumps `me` for every principal of the organization. Time-based inputs (a
 guest grant's `expires_at`, an entitlement's `valid_from`/`valid_until`
 passing) bump nothing: `exp` is already capped by the guest deadline, and
-any other deadline passing is bounded by the 300 s token lifetime.
+any other deadline passing is bounded by the 300 s token lifetime. A write
+that leaves every role input unchanged (a directory sync rewriting the same
+role) bumps nothing. The engine-token fallback's flag-off answer is the same
+401 as a bad credential, with a per-engine-id failure limit (an error-code
+change on a route no engine calls yet).
 
 This contract defines the signed, workspace-scoped capability that replaces
 per-request authority SQL, actor-confirm renewals, client-authority renewals
@@ -393,7 +397,10 @@ Issued only by the `api` service:
   one directly (proposed `POST /internal/v2/cloud-workspaces/engine/capability`,
   heartbeat credential plus `bootId`, `gen` and `ein`, at most once a minute,
   checked against the current registration exactly like the uplink hello).
-  This grants nothing the heartbeat credential cannot already reach on the
+  An organization without the `capabilities` flag gets the same 401 as a bad
+  credential, and five failures per engine id per minute answer 429 before
+  any SQL, so the route is neither a flag oracle nor an unthrottled
+  credential check. This grants nothing the heartbeat credential cannot already reach on the
   existing engine routes, and keeps history mirroring, credential reads and
   checkpoints working through a `realtime` outage (decision G: a VM is never
   stopped on an unknown error, and a checkpointed stop needs these routes).

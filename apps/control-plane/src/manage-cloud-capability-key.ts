@@ -40,11 +40,32 @@ const OVERLAP_MS = 24 * 3_600_000;
 
 type KeyRow = { kid: string; state: string; created_at: Date; activated_at: Date | null; retire_after: Date | null };
 
+export const CAPABILITY_KEY_USAGE = `Usage: CLOUD_CAPABILITY_KEY_CHANGE_FILE=<change.json> DATABASE_URL=<migration owner>
+  CONTROL_PLANE_CAPABILITY_KEY_CHANNEL=<channel> CLOUD_CAPABILITY_KEYS_JSON=<keyring>
+  manage-cloud-capability-key [--execute]
+
+Actions (the "action" field of the change document):
+  create    adds a key in state next; it is published in the JWKS at once.
+  activate  promotes next to current and demotes current to retiring. With a
+            current key, next must have been published for 24 hours first.
+            With no current key (first key, or after revoking the current
+            one) activation is immediate and skips the 24 h JWKS publish
+            window: verifiers that cached the JWKS before create reject the
+            new key's tokens until they refetch (max-age 300 s). This is the
+            emergency path.
+  retire    retires a retiring key once its 24 h overlap has elapsed.
+  revoke    removes a published key immediately (emergency).
+
+Without --execute the command prints a plan; execute requires
+CLOUD_CAPABILITY_KEY_PLAN_SHA256 set to that plan's planSha256.`;
+
 /** Operator lifecycle for S1 signing keys: create (state next), activate
  * (next -> current, current -> retiring with a 24 h overlap), retire
  * (retiring -> retired once the overlap elapsed) and revoke (emergency,
- * immediate). Dry run by default: the plan hash it returns must be supplied
- * to execute, so a key set that changed in between is refused. */
+ * immediate). Activating with no current key skips the 24 h publish window
+ * (see CAPABILITY_KEY_USAGE). Dry run by default: the plan hash it returns
+ * must be supplied to execute, so a key set or actor that changed in between
+ * is refused. */
 export async function manageCloudCapabilityKey(
   pool: pg.Pool,
   input: unknown,
@@ -77,9 +98,12 @@ export async function manageCloudCapabilityKey(
     if (!authority?.allowed || authority.database !== decodeURIComponent(target.pathname.slice(1))) {
       throw new RolloutFlagManagementError("Capability key changes require the exact database migration owner");
     }
-    // FOR SHARE fences a concurrent demotion of the actor for this transaction.
-    const actor = (await client.query<{ auth_status: string; deleted_at: Date | null; staff_role: string | null }>(
-      "SELECT auth_status,deleted_at,staff_role FROM users WHERE id=$1 FOR SHARE", [request.actorUserId])).rows[0];
+    // FOR SHARE fences a concurrent demotion of the actor for this
+    // transaction; auth_revision in the plan hash refuses an approval taken
+    // before the actor's account changed (a demotion and re-promotion).
+    const actor = (await client.query<{ auth_status: string; deleted_at: Date | null; staff_role: string | null; auth_revision: string }>(
+      "SELECT auth_status,deleted_at,staff_role,auth_revision::text AS auth_revision FROM users WHERE id=$1 FOR SHARE",
+      [request.actorUserId])).rows[0];
     if (!actor || actor.auth_status !== "active" || actor.deleted_at || actor.staff_role !== "platform_owner") {
       throw new RolloutFlagManagementError("Capability key changes require an active platform owner");
     }
@@ -149,7 +173,8 @@ export async function manageCloudCapabilityKey(
       }
     };
     const { transitions } = plan();
-    const planSha256 = hash({ targetSha256, requestSha256, transitions, keyringVersion: options.keyring.currentKeyVersion, principal: authority.principal });
+    const planSha256 = hash({ targetSha256, requestSha256, transitions, keyringVersion: options.keyring.currentKeyVersion, principal: authority.principal,
+      actorAuthRevision: actor.auth_revision });
     if (!transitions.length) {
       await client.query("ROLLBACK");
       return { state: "replayed" as const, planSha256, targetSha256, transitions };
@@ -199,6 +224,10 @@ export async function manageCloudCapabilityKey(
 }
 
 async function main() {
+  if (process.argv.slice(2).some(arg => arg === "--help" || arg === "-h")) {
+    console.log(CAPABILITY_KEY_USAGE);
+    return;
+  }
   const file = process.env.CLOUD_CAPABILITY_KEY_CHANGE_FILE, databaseUrl = process.env.DATABASE_URL;
   // Both channel sources must agree; neither silently wins (the rollout-flag
   // command behaves the same way).
@@ -207,7 +236,7 @@ async function main() {
   const keyring = loadCapabilityKeyring(process.env);
   if (!keyring) throw new RolloutFlagManagementError("Capability key changes require the CLOUD_CAPABILITY_KEYS_JSON keyring");
   const args = process.argv.slice(2);
-  if (args.length > 1 || args.some(arg => arg !== "--execute")) throw new RolloutFlagManagementError("Unsupported operator arguments");
+  if (args.length > 1 || args.some(arg => arg !== "--execute")) throw new RolloutFlagManagementError(`Unsupported operator arguments\n${CAPABILITY_KEY_USAGE}`);
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   let input: unknown;
   try {
