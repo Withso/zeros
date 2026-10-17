@@ -235,6 +235,42 @@ d("capability member epochs with PostgreSQL", () => {
     });
   });
 
+  // AFTER UPDATE OF col fires whenever col is in the SET list. A directory
+  // sync rewriting unchanged roles must not revoke every member's tokens.
+  describe("writes that change no input", () => {
+    it("a WorkOS-style membership upsert with the same role", async () => {
+      await expectBumped(() => asSystem(`INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')
+        ON CONFLICT (org_id,user_id) DO UPDATE SET role=EXCLUDED.role`, [fixture.organizationId, member]), [], [member, fixture.userId]);
+    });
+
+    it("no-op updates on every per-principal input", async () => {
+      const guest = await addUser("Guest"), grantId = randomUUID(), assignment = randomUUID(), invitationId = randomUUID();
+      await pool.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,revision,created_by,expires_at)
+        VALUES($1,$2,$3,$4,'viewer',1,$5,now()+interval '1 day')`, [grantId, fixture.workspaceId, fixture.organizationId, guest, fixture.userId]);
+      await pool.query("INSERT INTO cloud_workspace_writer_slots(workspace_id,slot,assignment_id,user_id) VALUES($1,2,$2,$3)",
+        [fixture.workspaceId, assignment, member]);
+      await pool.query(`INSERT INTO cloud_workspace_invitations(id,workspace_id,org_id,recipient_email_sha256,token_hash,role,invited_by,
+        inviter_fingerprint,expires_at,accepted_at,accepted_by) VALUES($1,$2,$3,$4,$5,'viewer',$6,$7,now()+interval '1 day',now(),$8)`,
+      [invitationId, fixture.workspaceId, fixture.organizationId, randomBytes(32), randomBytes(32), fixture.userId,
+        randomBytes(32).toString("hex"), member]);
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [member]);
+      const everyone = [fixture.userId, member, guest];
+      const noOps: Array<[string, unknown[]]> = [
+        ["UPDATE organization_members SET role=role, org_id=org_id, user_id=user_id WHERE org_id=$1", [fixture.organizationId]],
+        ["UPDATE cloud_workspace_members SET role=role, user_id=user_id WHERE workspace_id=$1", [fixture.workspaceId]],
+        ["UPDATE cloud_workspace_guest_grants SET role=role, revoked_at=revoked_at, expires_at=expires_at WHERE id=$1", [grantId]],
+        ["UPDATE team_members SET team_id=team_id, user_id=user_id WHERE org_id=$1", [fixture.organizationId]],
+        ["UPDATE organization_seat_assignments SET state=state, user_id=user_id WHERE org_id=$1", [fixture.organizationId]],
+        ["UPDATE cloud_workspace_writer_slots SET user_id=user_id, invitation_id=invitation_id WHERE workspace_id=$1", [fixture.workspaceId]],
+        ["UPDATE workspace_billing_epochs SET entitlement_scope=entitlement_scope, org_id=org_id WHERE workspace_id=$1", [fixture.workspaceId]],
+        ["UPDATE cloud_workspace_invitations SET revoked_at=revoked_at, accepted_by=accepted_by WHERE id=$1", [invitationId]],
+      ];
+      for (const [statement, values] of noOps) await expectBumped(() => asSystem(statement, values), [], everyone);
+      await expectBumped(() => pool.query("UPDATE staff_pro_benefits SET valid_from=valid_from, revoked_at=revoked_at WHERE user_id=$1",
+        [member]), [], everyone);
+    });
+  });
+
   it("puts an epoch bump on every table the role functions read", async () => {
     // Derived from the live function bodies (functionInputTables): a role
     // function that starts reading a new table fails here until the table

@@ -114,8 +114,14 @@ REVOKE ALL ON cloud_capability_key_changes FROM PUBLIC, zeros_app;
 --     authority_epoch `wa`, which already end every older token), and an
 --     active seat beyond the seat limit.
 -- Workspace-wide inputs bump `me` per principal instead of `wr` because
--- access_revision also feeds actor fingerprints and funding consents; the
--- fan-out is one row per organization principal on a rare change.
+-- access_revision also feeds actor fingerprints and funding consents.
+-- Fan-out bound: an organization-wide bump writes N + G rows in one INSERT
+-- for an organization with N members and G live guests (who are not
+-- members); a per-user bump writes one row per organization the user
+-- belongs to or holds a live guest grant in; a per-(org, user) bump writes
+-- one row. Every UPDATE trigger fires only when an input column actually
+-- changes value (WHEN ... IS DISTINCT FROM), so a sync or upsert that
+-- rewrites unchanged roles bumps nothing.
 -- Time-based inputs (guest expires_at, entitlement valid_from/valid_until
 -- passing) need no bump: S1 caps exp by the guest deadline, and any other
 -- deadline passing is bounded by the 300 s token lifetime. A pure
@@ -272,20 +278,45 @@ BEGIN
 END $$;
 
 CREATE TRIGGER cloud_capability_epoch_org_members
-  AFTER INSERT OR UPDATE OF role, org_id, user_id OR DELETE ON organization_members
+  AFTER INSERT OR DELETE ON organization_members
   FOR EACH ROW EXECUTE FUNCTION bump_cloud_capability_member_epoch_trigger();
+CREATE TRIGGER cloud_capability_epoch_org_members_changes
+  AFTER UPDATE OF role, org_id, user_id ON organization_members
+  FOR EACH ROW WHEN (ROW(OLD.role, OLD.org_id, OLD.user_id)
+    IS DISTINCT FROM ROW(NEW.role, NEW.org_id, NEW.user_id))
+  EXECUTE FUNCTION bump_cloud_capability_member_epoch_trigger();
 CREATE TRIGGER cloud_capability_epoch_workspace_members
-  AFTER INSERT OR UPDATE OF role, workspace_id, org_id, user_id OR DELETE ON cloud_workspace_members
+  AFTER INSERT OR DELETE ON cloud_workspace_members
   FOR EACH ROW EXECUTE FUNCTION bump_cloud_capability_member_epoch_trigger();
+CREATE TRIGGER cloud_capability_epoch_workspace_members_changes
+  AFTER UPDATE OF role, workspace_id, org_id, user_id ON cloud_workspace_members
+  FOR EACH ROW WHEN (ROW(OLD.role, OLD.workspace_id, OLD.org_id, OLD.user_id)
+    IS DISTINCT FROM ROW(NEW.role, NEW.workspace_id, NEW.org_id, NEW.user_id))
+  EXECUTE FUNCTION bump_cloud_capability_member_epoch_trigger();
 CREATE TRIGGER cloud_capability_epoch_guest_grants
-  AFTER INSERT OR UPDATE OF role, revoked_at, expires_at, workspace_id, org_id, user_id OR DELETE ON cloud_workspace_guest_grants
+  AFTER INSERT OR DELETE ON cloud_workspace_guest_grants
   FOR EACH ROW EXECUTE FUNCTION bump_cloud_capability_member_epoch_trigger();
+CREATE TRIGGER cloud_capability_epoch_guest_grants_changes
+  AFTER UPDATE OF role, revoked_at, expires_at, workspace_id, org_id, user_id ON cloud_workspace_guest_grants
+  FOR EACH ROW WHEN (ROW(OLD.role, OLD.revoked_at, OLD.expires_at, OLD.workspace_id, OLD.org_id, OLD.user_id)
+    IS DISTINCT FROM ROW(NEW.role, NEW.revoked_at, NEW.expires_at, NEW.workspace_id, NEW.org_id, NEW.user_id))
+  EXECUTE FUNCTION bump_cloud_capability_member_epoch_trigger();
 CREATE TRIGGER cloud_capability_epoch_team_members
-  AFTER INSERT OR UPDATE OF team_id, org_id, user_id OR DELETE ON team_members
+  AFTER INSERT OR DELETE ON team_members
   FOR EACH ROW EXECUTE FUNCTION bump_cloud_capability_member_epoch_trigger();
+CREATE TRIGGER cloud_capability_epoch_team_members_changes
+  AFTER UPDATE OF team_id, org_id, user_id ON team_members
+  FOR EACH ROW WHEN (ROW(OLD.team_id, OLD.org_id, OLD.user_id)
+    IS DISTINCT FROM ROW(NEW.team_id, NEW.org_id, NEW.user_id))
+  EXECUTE FUNCTION bump_cloud_capability_member_epoch_trigger();
 CREATE TRIGGER cloud_capability_epoch_seat_assignments
-  AFTER INSERT OR UPDATE OF state, org_id, user_id OR DELETE ON organization_seat_assignments
+  AFTER INSERT OR DELETE ON organization_seat_assignments
   FOR EACH ROW EXECUTE FUNCTION bump_cloud_capability_member_epoch_trigger();
+CREATE TRIGGER cloud_capability_epoch_seat_assignments_changes
+  AFTER UPDATE OF state, org_id, user_id ON organization_seat_assignments
+  FOR EACH ROW WHEN (ROW(OLD.state, OLD.org_id, OLD.user_id)
+    IS DISTINCT FROM ROW(NEW.state, NEW.org_id, NEW.user_id))
+  EXECUTE FUNCTION bump_cloud_capability_member_epoch_trigger();
 
 -- Writer slots carry no org_id; the workspace supplies it. A slot cascading
 -- away with its workspace finds no workspace and is skipped (see above).
@@ -304,8 +335,13 @@ BEGIN
   RETURN NULL;
 END $$;
 CREATE TRIGGER cloud_capability_epoch_writer_slots
-  AFTER INSERT OR UPDATE OF workspace_id, user_id, invitation_id OR DELETE ON cloud_workspace_writer_slots
+  AFTER INSERT OR DELETE ON cloud_workspace_writer_slots
   FOR EACH ROW EXECUTE FUNCTION bump_cloud_capability_writer_slot_epoch();
+CREATE TRIGGER cloud_capability_epoch_writer_slots_changes
+  AFTER UPDATE OF workspace_id, user_id, invitation_id ON cloud_workspace_writer_slots
+  FOR EACH ROW WHEN (ROW(OLD.workspace_id, OLD.user_id, OLD.invitation_id)
+    IS DISTINCT FROM ROW(NEW.workspace_id, NEW.user_id, NEW.invitation_id))
+  EXECUTE FUNCTION bump_cloud_capability_writer_slot_epoch();
 
 -- Per-user inputs shared by every organization (TG_ARGV[0] names the user
 -- column).
@@ -339,8 +375,13 @@ CREATE TRIGGER cloud_capability_epoch_account_entitlement_changes
     OR (NEW.valid_until IS NOT NULL AND (OLD.valid_until IS NULL OR NEW.valid_until < OLD.valid_until)))
   EXECUTE FUNCTION bump_cloud_capability_user_epochs_trigger('user_id');
 CREATE TRIGGER cloud_capability_epoch_staff_pro_benefits
-  AFTER INSERT OR UPDATE OF user_id, valid_from, revoked_at OR DELETE ON staff_pro_benefits
+  AFTER INSERT OR DELETE ON staff_pro_benefits
   FOR EACH ROW EXECUTE FUNCTION bump_cloud_capability_user_epochs_trigger('user_id');
+CREATE TRIGGER cloud_capability_epoch_staff_pro_benefits_changes
+  AFTER UPDATE OF user_id, valid_from, revoked_at ON staff_pro_benefits
+  FOR EACH ROW WHEN (ROW(OLD.user_id, OLD.valid_from, OLD.revoked_at)
+    IS DISTINCT FROM ROW(NEW.user_id, NEW.valid_from, NEW.revoked_at))
+  EXECUTE FUNCTION bump_cloud_capability_user_epochs_trigger('user_id');
 
 -- Organization-wide inputs (TG_ARGV[0] names the organization column).
 CREATE FUNCTION bump_cloud_capability_org_epochs_trigger() RETURNS trigger
@@ -386,8 +427,13 @@ CREATE TRIGGER cloud_capability_epoch_organization_entitlement_changes
     OR (NEW.valid_until IS NOT NULL AND (OLD.valid_until IS NULL OR NEW.valid_until < OLD.valid_until)))
   EXECUTE FUNCTION bump_cloud_capability_org_epochs_trigger('org_id');
 CREATE TRIGGER cloud_capability_epoch_billing_epochs
-  AFTER UPDATE OF workspace_id, billing_epoch, org_id, entitlement_scope OR DELETE ON workspace_billing_epochs
+  AFTER DELETE ON workspace_billing_epochs
   FOR EACH ROW EXECUTE FUNCTION bump_cloud_capability_org_epochs_trigger('org_id');
+CREATE TRIGGER cloud_capability_epoch_billing_epoch_changes
+  AFTER UPDATE OF workspace_id, billing_epoch, org_id, entitlement_scope ON workspace_billing_epochs
+  FOR EACH ROW WHEN (ROW(OLD.workspace_id, OLD.billing_epoch, OLD.org_id, OLD.entitlement_scope)
+    IS DISTINCT FROM ROW(NEW.workspace_id, NEW.billing_epoch, NEW.org_id, NEW.entitlement_scope))
+  EXECUTE FUNCTION bump_cloud_capability_org_epochs_trigger('org_id');
 CREATE TRIGGER cloud_capability_epoch_workspaces
   AFTER UPDATE OF owner_user_id, single_member_mode, pro_sharing_ready, sharing_mode, team_id, org_id,
     deleted_at, current_billing_epoch ON cloud_workspaces
@@ -413,7 +459,9 @@ BEGIN
 END $$;
 CREATE TRIGGER cloud_capability_epoch_invitations
   AFTER UPDATE OF accepted_by, revoked_at ON cloud_workspace_invitations
-  FOR EACH ROW EXECUTE FUNCTION bump_cloud_capability_invitation_epoch();
+  FOR EACH ROW WHEN (OLD.accepted_by IS NOT NULL
+    AND ROW(OLD.accepted_by, OLD.revoked_at) IS DISTINCT FROM ROW(NEW.accepted_by, NEW.revoked_at))
+  EXECUTE FUNCTION bump_cloud_capability_invitation_epoch();
 
 -- zeros-expand-exception: privilege-tightening Removes PUBLIC EXECUTE from a function created in this migration
 REVOKE ALL ON FUNCTION bump_cloud_capability_member_epoch(uuid, uuid) FROM PUBLIC;

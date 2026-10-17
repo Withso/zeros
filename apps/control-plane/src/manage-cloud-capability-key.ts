@@ -83,7 +83,7 @@ export async function manageCloudCapabilityKey(
     if (!actor || actor.auth_status !== "active" || actor.deleted_at || actor.staff_role !== "platform_owner") {
       throw new RolloutFlagManagementError("Capability key changes require an active platform owner");
     }
-    await client.query("SELECT pg_advisory_xact_lock(830741862)");
+    await client.query("SELECT pg_advisory_xact_lock(830741862) /*lock_purpose='capability-key'*/");
     // A receipt means this operation id already ran: replay it verbatim, or
     // refuse an id that now names another change.
     const receipt = (await client.query<{ request_sha256: string; target_sha256: string; plan_sha256: string; transitions: Transition[] }>(
