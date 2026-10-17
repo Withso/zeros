@@ -8,7 +8,7 @@ import pg from "pg";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { withSystemTx, withUserTx, type Tx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
-import { functionInputTables } from "./function-input-tables.js";
+import { functionInputTables } from "./function-input-tables-test-utils.js";
 import { seedReadyProCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
 
 const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;

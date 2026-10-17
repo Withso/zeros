@@ -76,7 +76,7 @@ async function fixture(withGlobalHeads = false) {
   useSessionsStore.getState().setSession(chatId, { ...BLANK, cwd: cloudWorkspaceKey(target), agentId: "codex",
     executionId: routedExecution, sessionId: routedExecution, messages: [live], transcriptState: "resident", status: "streaming", hasTranscript: true });
   const context: Record<string, unknown> = { WorkspaceRuntimeClient, HYDRATE_WINDOW: 200,
-    getStore: useSessionsStore.getState, bridge, persistedMessageRefsRef: { current: new Map() }, pendingHydratesRef: { current: new Set() }, nativeTranscriptSnapshotsRef: { current: new NativeTranscriptSnapshots() } };
+    getStore: useSessionsStore.getState, bridge, pendingHydratesRef: { current: new Set() }, nativeTranscriptSnapshotsRef: { current: new NativeTranscriptSnapshots() } };
   vm.runInNewContext(source, context);
   const stop = onCloudHistoryRestoreHead(context.install as Parameters<typeof onCloudHistoryRestoreHead>[0], true);
   return { bridge, agents, routedExecution, request,

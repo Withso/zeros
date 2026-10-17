@@ -6,7 +6,7 @@ import { createPool, withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import type { RolloutFlagName } from "../rollout-flags.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
-import { functionInputTables, stripSqlLiterals } from "./function-input-tables.js";
+import { functionInputTables, stripSqlLiterals } from "./function-input-tables-test-utils.js";
 import {
   AUTHORITY_CACHE_CHANNEL,
   EngineAuthorityCache,
@@ -268,6 +268,11 @@ d("engine authority cache with PostgreSQL", () => {
       SET actual_micro_usd=10,billable_seconds=60,meter_through=now(),debited_micro_usd=10,updated_at=now() WHERE id=$1`, [reservationId]))).toEqual([]);
     expect(await notificationsDuring(() => pool.query(`UPDATE cloud_workspace_provider_bindings
       SET next_drift_check_at=now()+interval '1 hour',last_observed_at=now(),observed_state='running',updated_at=now() WHERE workspace_id=$1`, [scope.workspaceId]))).toEqual([]);
+    // Inventory sweeps pace bindings and lifecycle events request inspects.
+    expect(await notificationsDuring(() => pool.query(`UPDATE cloud_workspace_provider_bindings
+      SET drift_paced_until=clock_timestamp()+interval '6 hours',drift_inspect_requested=true WHERE workspace_id=$1`, [scope.workspaceId]))).toEqual([]);
+    expect(await notificationsDuring(() => pool.query(`UPDATE cloud_workspace_provider_bindings
+      SET drift_paced_until=NULL,drift_inspect_requested=false WHERE workspace_id=$1`, [scope.workspaceId]))).toEqual([]);
     // A heartbeat that carries a port scan stamps ports_observed_at.
     expect(await notificationsDuring(() => pool.query(
       "UPDATE cloud_workspace_generations SET ports_observed_at=now() WHERE workspace_id=$1", [scope.workspaceId]))).toEqual([]);

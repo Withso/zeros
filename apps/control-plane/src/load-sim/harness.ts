@@ -98,12 +98,12 @@ export class FakeBoatProvider implements CloudWorkspaceProvider, CloudWorkspaceA
   async archive(id: string) { this.count("archive"); return { ...this.resources.get(id)!, state: "archived" as const }; }
   async delete(id: string) { this.count("delete"); this.resources.delete(id); }
   async *listManaged() { this.count("listManaged"); yield* this.resources.values(); }
-  /** The real provider pages GET /sandboxes at 200 per request. */
+  /** The real provider pages GET /sandboxes at 100 per request. */
   async *listInventory(): AsyncIterable<CloudProviderInventoryItem> {
     const all = [...this.resources.values()];
-    for (let offset = 0; offset === 0 || offset < all.length; offset += 200) {
+    for (let offset = 0; offset === 0 || offset < all.length; offset += 100) {
       this.count("listInventoryPage");
-      for (const resource of all.slice(offset, offset + 200))
+      for (const resource of all.slice(offset, offset + 100))
         yield { resourceId: resource.resourceId, state: resource.state,
           computeStopped: resource.computeStopped === true,
           workspaceId: resource.workspaceId, generation: resource.generation };

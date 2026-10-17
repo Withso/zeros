@@ -3,7 +3,10 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { expect } from "@playwright/test";
 import { checkCloudTranscriptPaint } from "./ui-smoke-cloud-transcript-paint.mjs";
+import { checkLocalTranscriptPaint } from "./ui-smoke-local-transcript-paint.mjs";
+import { checkEmptyChatTranscriptRow } from "./ui-smoke-transcript-row.mjs";
 import { checkTranscriptResumePresentation } from "./ui-smoke-transcript-resume.mjs";
+import { checkAgentPreparationFailures } from "./ui-smoke-agent-preparation.mjs";
 
 export async function runComposerSendFailuresSmoke({ page, check, harnessBase }) {
   // Keep toast acknowledgement and screenshots independent of machine load.
@@ -58,10 +61,15 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
 
   await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
   await expect(editor).toBeVisible();
+  await checkAgentPreparationFailures({ page, check });
   await checkTranscriptResumePresentation({ page, check, screenshotDir });
   await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
   await expect(editor).toBeVisible();
   await checkCloudTranscriptPaint({ page, check, screenshotDir });
+  await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
+  await expect(editor).toBeVisible();
+  await checkLocalTranscriptPaint({ page, check, screenshotDir });
+  await checkEmptyChatTranscriptRow({ page, check, harnessBase, screenshotDir });
   await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
   await expect(editor).toBeVisible();
   await checkOptimisticSendPresentation({ page, check, screenshotDir });

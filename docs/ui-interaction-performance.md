@@ -146,6 +146,55 @@ organization-local hydration remain authoritative. Closed cache outcomes/head
 facts and visible-paint/loading durations enter cloud diagnostics without
 content, hashes or durable owner/conversation identifiers.
 
+Local presentation readiness follows the same rule without the cloud fences.
+Local Personal and organization-local chats keep their last confirmed window
+in a bounded Local transcript cache: the exact message objects of chats that
+left the retained deck (memory, at most 16 chats and about 16 MiB) and an
+IndexedDB copy in the purgeable Chromium profile (at most 96 chats and 40 MiB;
+200 rows and 768 KiB per chat, least recently read first out). A cold Local
+chat paints that window as provisional `transcriptPresentation` in its first
+visible frame: ChatView publishes a memory copy from a layout effect, the
+hydrate paints a disk copy as soon as it is read, and the boot chat's copy is
+read before React renders. Provisional rows are read-only and never authorize
+a send, queue drain, edit or completion; the engine window replaces them while
+keeping every unchanged message reference. A chat minted by this renderer is
+known to be empty and starts resident without a read. Minted and
+engine-confirmed empty chats are also remembered across launches (at most 128
+ids in local storage), so after a restart such a chat paints its empty state
+provisionally (`transcriptPresentation.empty`) instead of "Loading
+conversation…" while the engine starts. Any message or history hint removes
+the id synchronously, and the engine read still confirms the paint. Copies are written once
+a turn settles or a window leaves memory, never per streamed chunk; reset,
+delete and the authoritative chat snapshot prune them. Cloud chats never enter
+this cache. A confirmed empty resident window invalidates both cache tiers
+immediately, before eviction or app shutdown can bypass a delayed capture.
+An empty cold or loading slot is not confirmation and cannot erase the cache.
+
+A Local window can begin inside one long turn: the engine snaps a tail window
+back to its opening prompt only within its 1000-row budget. Beyond that, the
+Local engine reports the opening beside the contiguous rows (`turnOpening`),
+and the slot keeps it as `leadingPrompt`, outside `messages`, so paging
+cursors, caps and equality keep their meaning. Every front trim, older-page
+prepend and window replacement re-derives it, editing it cuts every resident
+row, and the turn renders with its prompt, checkpoint and footer. Match the
+front by stable message ID when a live update replaces its object. Explicit
+Retry may use the leading prompt only from a confirmed resident window and
+must revalidate it after each await; a newer inline prompt takes precedence.
+
+An empty chat's provenance block (workspace rows, or "Add chat transcripts"
+when another chat in the folder has a prompt) never waits blank on the
+transcript list. Local folders share one list per folder: every empty chat
+reads the same snapshot and drops itself locally, so a new or returning tab
+paints a list another tab already confirmed, and only the visible empty chat
+reads. The last list per folder is persisted (24 folders, 32 rows, 120-character
+summaries) as paint-only data; the first mount after a restart still asks the
+engine once. A prompt sent from this renderer appears as a pending row at once
+and yields when the engine reports that many prompts or later activity for the
+chat; an unconfirmed row expires after two minutes. With nothing known, the
+workspace rows stand in after a 400 ms grace and the transcript row replaces
+them when the list lands. Cloud folders keep their exact (folder, excluded
+chat) read.
+
 Sending immediately after Stop may race the cancelled command's durable
 retirement. Resume can retry only when the entire revision advance is accounted
 for by the same dispatching commands becoming terminal. A newer Stop, recovery,
@@ -565,6 +614,11 @@ keyboard focus, retained file-tree owners and canvas anchors in Chromium.
 - Settings/repository retention: bounded visited-section decks in `apps/desktop/src/renderer/features/settings/settings-page.tsx` and `apps/desktop/src/renderer/features/repositories/repo-page.tsx`.
 - One-paint transition suppression: `apps/desktop/src/renderer/shared/ui/use-instant-view-switch.ts`.
 - Chat structural sharing: `apps/desktop/src/renderer/features/agent/stable-turns.ts`.
+- Local transcript cache: policy in `apps/desktop/src/renderer/state/local-transcript-cache.ts`, IndexedDB records in `apps/desktop/src/renderer/platform/local-transcript-store.ts`, provisional paint and fresh chats in `apps/desktop/src/renderer/features/agent/local-transcript-presentation.ts`.
+- Empty-chat transcript row: shared Local folder list, persisted paint and pending prompts in `apps/desktop/src/renderer/features/agent/use-chat-transcript-summaries.ts`; the grace in `agent-chat.tsx`.
+- Long-turn opening prompt: `windowChatMessagesPage` in `apps/desktop/src/engine/db/messages.ts` and `apps/desktop/src/renderer/features/agent/transcript-leading-prompt.ts`.
+- Engine start attribution: `apps/desktop/src/engine/boot-phase-timer.ts` names slow phases on the "Engine ready" line.
+- Local streaming transcript writes: "Streaming write coalescing" in `apps/desktop/src/engine/db/messages.ts` buffers each streamed row for 150 ms (newest version wins); every read, write or delete of that chat's rows drains it first, prompts stay write-through, and cloud workers keep write-through persistence.
 
 ## Review checklist
 

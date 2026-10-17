@@ -144,7 +144,9 @@ export interface CloudWorkspaceProvider {
   /** One paged listing of every resource in the provider account, without a
    * per-resource inspect. Providers with a list API implement this; the
    * reconciler then paces per-workspace drift checks from inventory
-   * mismatches instead of polling each workspace. */
+   * mismatches instead of polling each workspace. The listing must be
+   * bounded: the reconciler's sweep ceiling counts only items with a
+   * workspaceId. */
   listInventory?(): AsyncIterable<CloudProviderInventoryItem>;
   /** Exact durable allocation receipt, independent of mutable provider labels.
    * Without this proof, unbound inventory is quarantined, never adopted or

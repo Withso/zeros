@@ -14,10 +14,13 @@ vi.mock("electron", () => ({
   },
 }));
 
-import { createSecretIfAbsent, getSecret, setSecret } from "../secret-store";
+import { createSecretIfAbsent, deleteSecret, getSecret, migrateSecretsIfAbsent, setSecret } from "../secret-store";
 import { localDevCallbackStore } from "../local-dev-callback-store";
 import { WorkOSDevCallbackRelay } from "../workos-dev-callback-relay";
 import { GithubDevCallbackRelay } from "../github-dev-callback-relay";
+import { readProviderAccounts, updateProviderAccounts } from "../provider-account-store";
+import { ProviderAccountManager } from "../provider-account-manager";
+import type { SubscriptionAccount } from "../provider-subscription-controller";
 
 const directories: string[] = [];
 const originalSharedDirectory = process.env.ZEROS_SHARED_SECRETS_DIR;
@@ -42,7 +45,96 @@ async function secretDirectory(): Promise<string> {
   return directory;
 }
 
+it("keeps saved accounts readable by older worktrees while retaining private revisions", async () => {
+  await secretDirectory();
+  const legacy = {
+    version: 1, method: "account", initialized: true, methodSelected: true,
+    activeId: "00000000-0000-4000-8000-000000000001",
+    accounts: [{ id: "00000000-0000-4000-8000-000000000001", state: "connected", configDir: "/private/profile" }],
+  };
+  setSecret("provider-accounts-codex", JSON.stringify(legacy));
+  updateProviderAccounts("codex", store => ({ ...store, selectionRevision: 3,
+    accounts: store.accounts.map(account => ({ ...account, revision: 2 })),
+  }));
+  // The prior v1 reader is strict at both the root and each account.
+  expect(JSON.parse(getSecret("provider-accounts-codex")!)).toEqual(legacy);
+  expect(readProviderAccounts("codex")).toMatchObject({ selectionRevision: 3, accounts: [{ revision: 2 }] });
+  // A status update from an older worktree preserves the companion metadata.
+  setSecret("provider-accounts-codex", JSON.stringify({ ...legacy, accounts: [{ ...legacy.accounts[0], state: "expired" }] }));
+  expect(readProviderAccounts("codex")).toMatchObject({ selectionRevision: 3, accounts: [{ revision: 2, state: "expired" }] });
+});
+
+it.each(["claude", "codex", "cursor"] as const)(
+  "publishes only real account changes after %s store round trips",
+  async (provider) => {
+    await secretDirectory();
+    let nativeAccount: SubscriptionAccount = {
+      state: "connected", email: "account@example.test", plan: "Pro",
+    };
+    const changed = vi.fn();
+    const manager = new ProviderAccountManager({
+      readStore: () => readProviderAccounts(provider),
+      updateStore: update => updateProviderAccounts(provider, update),
+      createProfile: async id => provider === "cursor" ? undefined : `/fixture/profiles/${id}`,
+      read: async () => nativeAccount,
+      login: async () => ({
+        account: nativeAccount,
+        ...(provider === "cursor" ? { credential: { apiKey: "fixture-key", expiresAtMs: 9999999999999 } } : {}),
+      }),
+      discard: async () => {},
+      changed,
+    });
+    const signal = new AbortController().signal;
+    const first = await manager.login({ signal, onCodeRequired() {} });
+    await manager.login({ signal, onCodeRequired() {} });
+    await manager.select(first.activeAccountId!, signal);
+    const keys = [`provider-accounts-${provider}`, `provider-accounts-${provider}:revisions`];
+    const persisted = keys.map(key => getSecret(key));
+    changed.mockClear();
+    for (let read = 0; read < 5; read++) await manager.read(signal);
+    expect(keys.map(key => getSecret(key))).toEqual(persisted);
+    expect(changed).not.toHaveBeenCalled();
+
+    nativeAccount = { ...nativeAccount, state: "expired" };
+    expect((await manager.read(signal)).state).toBe("expired");
+    expect(changed).toHaveBeenCalledOnce();
+    for (let read = 0; read < 5; read++) await manager.read(signal);
+    expect(changed).toHaveBeenCalledOnce();
+  },
+);
+
 describe("encrypted secret store whole-file safety", () => {
+  it("adopts existing Local provider credentials once without overwriting shared choices or importing app sessions", async () => {
+    const directory = await secretDirectory();
+    const legacy = path.join(directory, "old-instance", "secrets.json");
+    const accounts = ["anthropic-api-key", "openai-api-key", "cursor-api-key", "provider-accounts-claude"];
+    createSecretIfAbsent("anthropic-api-key", "legacy-fixture-key", legacy);
+    createSecretIfAbsent("openai-api-key", "legacy-codex-key", legacy);
+    createSecretIfAbsent("auth-session:tokens", "legacy-app-session", legacy);
+    const profile = JSON.stringify({ configDir: "/old-instance/provider-accounts/claude/stable-id" });
+    createSecretIfAbsent("provider-accounts-claude", profile, legacy);
+    setSecret("openai-api-key", "newer-shared-key");
+    migrateSecretsIfAbsent(legacy, accounts, "local-provider-migration:test");
+    expect(getSecret("anthropic-api-key")).toBe("legacy-fixture-key");
+    expect(getSecret("openai-api-key")).toBe("newer-shared-key");
+    expect(getSecret("provider-accounts-claude")).toBe(profile);
+    expect(getSecret("auth-session:tokens")).toBeNull();
+    expect(getSecret("anthropic-api-key", legacy)).toBe("legacy-fixture-key");
+    deleteSecret("anthropic-api-key");
+    migrateSecretsIfAbsent(legacy, accounts, "local-provider-migration:test");
+    expect(getSecret("anthropic-api-key")).toBeNull();
+  });
+
+  it("leaves both stores untouched if the old Local store cannot be read", async () => {
+    const directory = await secretDirectory();
+    const legacy = path.join(directory, "old-secrets.json");
+    await writeFile(legacy, "{invalid");
+    setSecret("cursor-api-key", "shared-fixture-key");
+    await expect(async () => migrateSecretsIfAbsent(legacy, ["cursor-api-key"], "local-provider-migration:test")).rejects.toThrow();
+    expect(getSecret("cursor-api-key")).toBe("shared-fixture-key");
+    expect(getSecret("local-provider-migration:test")).toBeNull();
+  });
+
   it("relays GitHub without admitting account or provider credentials into the shared mailbox", async () => {
     const home = await secretDirectory();
     const nonce = "g".repeat(43);

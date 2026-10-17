@@ -1,7 +1,7 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
-import { functionInputTables, stripSqlLiterals } from "./function-input-tables.js";
+import { functionInputTables, stripSqlLiterals } from "./function-input-tables-test-utils.js";
 
 const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
 

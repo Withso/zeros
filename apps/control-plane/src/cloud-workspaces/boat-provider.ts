@@ -130,9 +130,11 @@ export type BoatWorkspaceProviderOptions = BoatApiClientOptions & {
   now?: () => number;
 };
 
-/** Pages of 200 sandboxes one sweep may follow before a provider pagination
- * bug is assumed; the sweep must never spin against Boat's rate limit. */
-const MAX_INVENTORY_PAGES = 100;
+/** Pages of 100 sandboxes one sweep may follow before a provider pagination
+ * bug is assumed; the sweep must never spin against Boat's rate limit. Twice
+ * the reconciler's 10,000-resource ceiling, so the ceiling's warning, not
+ * this failure, is what a large account meets first. */
+const MAX_INVENTORY_PAGES = 200;
 
 function failure(code: string, retryable = false): CloudProviderError {
   return new CloudProviderError(

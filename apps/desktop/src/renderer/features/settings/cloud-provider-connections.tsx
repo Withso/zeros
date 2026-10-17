@@ -16,7 +16,7 @@ import { useCachedRead } from "../../state/use-cached-read";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
 import { CloudCredentialRemovalDialog } from "./cloud-credential-removal-dialog";
 import { useCloudCredentialRemoval } from "./use-cloud-credential-removal";
-import type { ConnectionMethod } from "./connection-methods";
+import { connectedAccountLabel, type ConnectionMethod } from "./connection-methods";
 import {
   readScopedSettingsSelection,
   writeScopedSettingsSelection,
@@ -189,6 +189,8 @@ function CloudProviderConnection({
   };
   const removal = useCloudCredentialRemoval({ userId, organizationId, active: surfaceActive, onRemoved: refresh });
   const busy = connectionBusy || removal.pending || !surfaceActive;
+  const connected = !!selected && connection?.credentialId === selected.id && connection.connected &&
+    connection.health?.status === "ready" && connection.health.credentialRevision === selected.revision;
   const run = async (action: (current: () => boolean) => Promise<void>) => {
     if (inFlight.current || removal.isPending() || !surfaceActive || !removal.current()) return;
     const epoch = operationEpoch.current;
@@ -420,8 +422,8 @@ function CloudProviderConnection({
           setToken("");
           createIntent.current = null;
         }}
-        connected={!!selected && connection?.credentialId === selected.id && connection.connected &&
-          connection.health?.status === "ready" && connection.health.credentialRevision === selected.revision}
+        connected={connected}
+        connectedIdentity={selected?.displayName}
         busy={busy}
         methodOptions={[
           {
@@ -437,7 +439,11 @@ function CloudProviderConnection({
         ]}
       >
         {selected ? (
-          <p className="text-fg1 text-sm">{selected.displayName}</p>
+          (!connected || method === "account") && (
+            <p className="text-fg1 min-w-0 break-words text-sm" role={connected ? "status" : undefined}>
+              {connected ? connectedAccountLabel(method, selected.displayName) : selected.displayName}
+            </p>
+          )
         ) : (
           <>
             <Input

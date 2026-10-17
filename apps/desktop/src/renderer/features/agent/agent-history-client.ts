@@ -6,7 +6,7 @@
 // transcripts. This module is a thin typed shell over workspace-bridge.ts for
 // the desktop renderer and optional relay clients.
 // The engine persists agent + user messages ON EMIT, so there is no renderer
-// write path for transcripts (appendMessages is a vestigial no-op).
+// write path for transcripts.
 //
 // Per-client UI state (scroll offsets, plan snapshots, policies) lives in
 // device-local.ts, not here. Attachments use the workspace bridge's validated
@@ -18,7 +18,7 @@ import {
   listContextGraph,
   notifyContextGraphChanged,
 } from "../../platform/context-graph";
-import type { AgentMessage } from "./use-agent-session";
+import type { AgentMessage, AgentTextMessage } from "./use-agent-session";
 import type {
   ProviderBinding,
   ProviderMetadata,
@@ -116,16 +116,6 @@ export async function persistAuthenticationPrompt(
     throw new Error("Could not save the message for retry.");
 }
 
-/** Vestigial: the engine persists transcripts on emit (persist-on-emit +
- *  persistUserPrompt), so the renderer no longer writes them. Kept as a no-op so
- *  the sessions-provider flush call stays harmless. */
-export async function appendMessages(
-  _chatId: string,
-  _messages: AgentMessage[],
-): Promise<void> {
-  /* no-op — engine-persists-on-emit owns the transcript */
-}
-
 export async function windowMessages(
   chatId: string,
   limit: number,
@@ -135,10 +125,24 @@ export async function windowMessages(
   return (await windowMessagesSnapshot(chatId, limit, before, onCached ? page => onCached(page.messages) : undefined)).messages;
 }
 
-export type AgentMessageWindow = Omit<MessageWindowSnapshot, "messages" | "source"> & {
+export type AgentMessageWindow = Omit<MessageWindowSnapshot, "messages" | "source" | "turnOpening"> & {
   messages: AgentMessage[];
   source: MessageWindowSnapshot["source"] | "cache";
+  /** Local only: the opening prompt of the turn the window starts inside. */
+  leadingPrompt?: AgentTextMessage;
 };
+
+function leadingPromptFromWire(
+  row: PersistedMessageWire | undefined,
+  messages: readonly AgentMessage[],
+): AgentTextMessage | undefined {
+  if (!row) return undefined;
+  const message = fromPersistedMessage(row);
+  return message?.kind === "text" && message.role === "user" && message.id === row.msgId &&
+    !messages.some((candidate) => candidate.id === message.id)
+    ? message
+    : undefined;
+}
 
 export async function windowMessagesSnapshot(
   chatId: string,
@@ -155,9 +159,12 @@ export async function windowMessagesSnapshot(
     canPaintCached ? window => onCached!({ source: "cache", restoreHead: window.restoreHead,
       messages: window.messages.map(fromPersistedMessage).filter((message): message is AgentMessage => message !== null) }) : undefined,
   );
-  return { ...page, messages: page.messages
+  const { turnOpening, ...rest } = page;
+  const messages = page.messages
     .map(fromPersistedMessage)
-    .filter((m): m is AgentMessage => m !== null) };
+    .filter((m): m is AgentMessage => m !== null);
+  const leadingPrompt = leadingPromptFromWire(turnOpening, messages);
+  return { ...rest, messages, ...(leadingPrompt ? { leadingPrompt } : {}) };
 }
 
 /** Fetch the next page of older messages relative to the oldest

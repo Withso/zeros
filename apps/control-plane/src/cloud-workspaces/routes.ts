@@ -311,7 +311,7 @@ const DeleteWorkspaceSchema = z.object({
 }).strict();
 
 
-type WorkspaceRow = CloudRuntimePinRow & {
+export type WorkspaceRow = CloudRuntimePinRow & {
   admin_creator_user_id: string | null;
   actor_role: string|null;
   sponsor_pro_live: boolean;
@@ -614,7 +614,7 @@ function agentCredentialsDocument(row: WorkspaceRow) {
   return { agentCredentials: parsed.data };
 }
 
-function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|null) {
+export function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|null) {
   const supported = isSupportedCloudWorkspaceProviderBinding({ provider: row.provider, credentialSource: row.credential_source, sandboxClass: row.sandbox_class });
   const executable=supported&&row.supported_generation;
   const canWrite=executable&&["prompter","developer","manager","owner"].includes(row.actor_role??"");
@@ -674,6 +674,64 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
     updatedAt: iso(row.updated_at),
     deletedAt: iso(row.deleted_at),
   };
+}
+
+/** S3 `catalogVersion`: the position of the global catalog sequence that
+ * every workspace document version change draws from (migration 0156), so it
+ * is monotonic per account. Read it before the rows it describes: a change
+ * that commits after the read reaches the device stream as an event. */
+export async function readCatalogVersion(tx: Tx): Promise<number> {
+  const row = (await tx.query<{ last_value: string; is_called: boolean }>(
+    "SELECT last_value, is_called FROM cloud_catalog_version_seq")).rows[0];
+  return row?.is_called ? Number(row.last_value) : 0;
+}
+
+export type CloudWorkspaceCatalogQuery = {
+  orgId: string | null;
+  userId: string;
+  limit: number;
+  cursor: { createdAt: string; id: string } | null;
+  includeDeleted?: boolean;
+  /** Restricts the page to these workspaces (the device stream's targeted
+   * re-read after a change hint). */
+  workspaceIds?: readonly string[];
+};
+
+/** The catalog page query behind `GET /v1/cloud-workspaces`, exported so the
+ * realtime device stream re-reads the exact same access set. */
+export async function queryCloudWorkspaceCatalog(tx: Tx, query: CloudWorkspaceCatalogQuery): Promise<WorkspaceRow[]> {
+  const parameters: unknown[] = [query.orgId, query.userId, query.limit];
+  let cursorSql = "";
+  if (query.cursor) {
+    parameters.push(query.cursor.createdAt, query.cursor.id);
+    cursorSql = `AND (cw.created_at, cw.id) < ($${parameters.length - 1}::timestamptz, $${parameters.length}::uuid)`;
+  }
+  if (query.workspaceIds) {
+    parameters.push([...query.workspaceIds]);
+    cursorSql += ` AND cw.id = ANY($${parameters.length}::uuid[])`;
+  }
+  return (
+    await tx.query<WorkspaceRow>(
+      `${workspaceSelect("cloud_workspace_actor_role(cw.id,$2)","$2")}
+       WHERE ($1::uuid IS NULL OR cw.org_id = $1)
+         AND (cw.owner_user_id=$2 OR cw.org_id IN (SELECT org_id FROM organization_members WHERE user_id=$2)
+           OR cw.id IN (SELECT workspace_id FROM cloud_workspace_guest_grants WHERE user_id=$2 AND revoked_at IS NULL AND expires_at>now()))
+         AND (cloud_workspace_actor_role(cw.id,$2) IS NOT NULL OR (
+           cw.owner_user_id=$2
+           AND EXISTS (SELECT 1 FROM organizations org JOIN organization_members member ON member.org_id=org.id
+             JOIN users account ON account.id=member.user_id
+             WHERE org.id=cw.org_id AND member.user_id=$2 AND org.deleted_at IS NULL AND NOT org.is_personal
+               AND account.auth_status='active' AND account.deleted_at IS NULL)
+           AND EXISTS (SELECT 1 FROM teams team JOIN team_members member ON member.team_id=team.id AND member.org_id=team.org_id
+             WHERE team.id=cw.team_id AND team.org_id=cw.org_id AND team.deleted_at IS NULL AND member.user_id=$2)))
+         ${query.includeDeleted ? "" : "AND cw.status <> 'deleted'"}
+         AND NOT EXISTS (SELECT 1 FROM cloud_computer_builds build WHERE build.workspace_id=cw.id)
+         ${cursorSql}
+       ORDER BY cw.created_at DESC, cw.id DESC
+       LIMIT $3`,
+      parameters,
+    )
+  ).rows;
 }
 
 function setupProgress(row: WorkspaceRow) {
@@ -1008,7 +1066,7 @@ function decodePathCursor(raw: string | undefined): string | null {
   return value;
 }
 
-function deviceProof(c: Context): CloudWorkspaceDeviceProof {
+export function deviceProof(c: Context): CloudWorkspaceDeviceProof {
   const deviceId = c.req.header("x-zeros-device-id") ?? "";
   const rawVersion = c.req.header("x-zeros-device-key-version") ?? "";
   const rawTimestamp = c.req.header("x-zeros-device-timestamp") ?? "";
@@ -1913,42 +1971,20 @@ export function createCloudWorkspaceRoutes(
     }
     const includeDeleted = c.req.query("includeDeleted") === "true";
 
-    const rows = await withSystemTx(pool, async (tx) => {
+    const { rows, catalogVersion } = await withSystemTx(pool, async (tx) => {
       if(orgId!==null)await requireOrganizationMembership(tx, orgId, user.id);
-      const parameters: unknown[] = [orgId, user.id, limit + 1];
-      let cursorSql = "";
-      if (cursor) {
-        parameters.push(cursor.createdAt, cursor.id);
-        cursorSql = "AND (cw.created_at, cw.id) < ($4::timestamptz, $5::uuid)";
-      }
-      return (
-        await tx.query<WorkspaceRow>(
-          `${workspaceSelect("cloud_workspace_actor_role(cw.id,$2)","$2")}
-           WHERE ($1::uuid IS NULL OR cw.org_id = $1)
-             AND (cw.owner_user_id=$2 OR cw.org_id IN (SELECT org_id FROM organization_members WHERE user_id=$2)
-               OR cw.id IN (SELECT workspace_id FROM cloud_workspace_guest_grants WHERE user_id=$2 AND revoked_at IS NULL AND expires_at>now()))
-             AND (cloud_workspace_actor_role(cw.id,$2) IS NOT NULL OR (
-               cw.owner_user_id=$2
-               AND EXISTS (SELECT 1 FROM organizations org JOIN organization_members member ON member.org_id=org.id
-                 JOIN users account ON account.id=member.user_id
-                 WHERE org.id=cw.org_id AND member.user_id=$2 AND org.deleted_at IS NULL AND NOT org.is_personal
-                   AND account.auth_status='active' AND account.deleted_at IS NULL)
-               AND EXISTS (SELECT 1 FROM teams team JOIN team_members member ON member.team_id=team.id AND member.org_id=team.org_id
-                 WHERE team.id=cw.team_id AND team.org_id=cw.org_id AND team.deleted_at IS NULL AND member.user_id=$2)))
-             ${includeDeleted ? "" : "AND cw.status <> 'deleted'"}
-             AND NOT EXISTS (SELECT 1 FROM cloud_computer_builds build WHERE build.workspace_id=cw.id)
-             ${cursorSql}
-           ORDER BY cw.created_at DESC, cw.id DESC
-           LIMIT $3`,
-          parameters,
-        )
-      ).rows;
+      // The version is read before the page: a change published after this
+      // cursor reaches the device stream as an event, so the snapshot never
+      // claims a version whose change it might not contain.
+      const catalogVersion = await readCatalogVersion(tx);
+      return { catalogVersion, rows: await queryCloudWorkspaceCatalog(tx, { orgId, userId: user.id, limit: limit + 1, cursor, includeDeleted }) };
     });
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     return c.json({
       workspaces: page.map(row=>workspaceDocument(row,config)),
       nextCursor: hasMore ? encodeCursor(page[page.length - 1]!) : null,
+      catalogVersion,
     });
   };
   // Read-only admission for the desktop's placement picker. Return only

@@ -51,6 +51,7 @@ import type {
 export * from "@zeros/protocol/agent-messages";
 import type {
   AgentMessage,
+  AgentTextMessage,
   AgentTextMessageAttachment,
   MessageContentSegment,
 } from "@zeros/protocol/agent-messages";
@@ -154,7 +155,8 @@ export interface AgentSessionState {
   /** Verified cloud presentation may paint while authoritative hydration is
    * pending. It never grants admission, completes a turn or drains a queue.
    * Only a CP/cache window carries this proof; native live rows are separate. */
-  transcriptPresentation: { source: "cache" | "control-plane"; restoreHead?: CloudHistoryRestoreFence } | null;
+  /** `empty`: a Local chat known to be empty paints its empty state. */
+  transcriptPresentation: { source: "cache" | "control-plane"; restoreHead?: CloudHistoryRestoreFence; empty?: true } | null;
   /** A durable transcript update arrived while the payload was cold/loading.
    *  Raw streaming deltas are deliberately not folded into an empty array;
    *  reopening performs an exact SQLite window read instead. */
@@ -163,6 +165,11 @@ export interface AgentSessionState {
    *  close/discard and empty-state UI without keeping message objects alive. */
   hasTranscript: boolean;
   messages: AgentMessage[];
+  /** Local only: the opening user prompt of the turn `messages[0]` belongs
+   *  to, when the resident window begins inside that turn (one turn can be
+   *  longer than the window). Presentation only — never a paging cursor or
+   *  an edit baseline. See transcript-leading-prompt.ts. */
+  leadingPrompt?: AgentTextMessage | null;
   /** True while the user has paged older history into memory (scroll-up
    *  auto-load). Suspends the live-append MAX_MESSAGES_PER_CHAT trim so a
    *  streaming event can't yank loaded history out from under the reader;

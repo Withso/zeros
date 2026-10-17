@@ -47,6 +47,7 @@ import {
   useChatSession,
 } from "../../features/agent/sessions-hooks";
 import { useSessionsStore } from "../../features/agent/sessions-store";
+import { paintLocalTranscriptFromMemory } from "../../features/agent/local-transcript-presentation";
 import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { AgentChat } from "../../features/agent/agent-chat";
 import { CloudTranscriptCacheNotice } from "./cloud-transcript-cache-notice";
@@ -466,6 +467,15 @@ function ChatBody({
   // carried over from a previous app run), we ask the provider to resume it
   // instead of creating a new one.
   const sessions = useAgentSessions();
+  // Local: publish a remembered transcript before this view's first visible
+  // paint, so a chat that left the retained deck reopens with its content
+  // instead of a blank frame or "Loading conversation…". Provisional and
+  // read-only; the hydrate below confirms it through the engine.
+  const paintFolder = chat?.folder ?? cwd;
+  useLayoutEffect(() => {
+    // Idempotent: a resident or already painted transcript is left alone.
+    if (surfaceActive || preparing) paintLocalTranscriptFromMemory(chatId, paintFolder);
+  }, [chatId, paintFolder, surfaceActive, preparing]);
   const hasSessionSlot = useSessionsStore((state) => state.sessions[chatId] !== undefined);
   const hasChatMetadata = Boolean(chat);
   // Cloud history belongs to the database, including during stop/wake/setup.

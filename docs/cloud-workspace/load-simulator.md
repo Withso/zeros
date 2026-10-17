@@ -141,7 +141,7 @@ inventory instead of inspecting each workspace.
   busiest scenario, × 1.1;
 - Boat calls per minute are enforced against the provider's 1000
   requests/min/IP rate limit with a two-replica allowance: one paged
-  inventory list per minute (`ceil(sandboxes / 200)` calls) plus one inspect
+  inventory list per minute (`ceil(sandboxes / 100)` calls) plus one inspect
   per fallback-horizon drift run.
 
 Budgets are a ratchet. When a change makes a path cheaper, regenerate them with
@@ -211,7 +211,7 @@ desktop adds 0.67 tx/s; a settled stopped workspace costs 0.0003 tx/s. The
 reconciler's share is the engine-health job cycle (5 transactions every 90 s,
 0.056 tx/s per running workspace); inventory-paced drift and the orphan sweep
 add nothing while the listing confirms the bindings. One replica's Boat calls
-project to 4.4 per minute at 500 workspaces against the enforced 1000
+project to 6.4 per minute at 500 workspaces against the enforced 1000
 requests/min/IP budget (two replicas).
 
 ### Findings

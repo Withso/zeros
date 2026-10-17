@@ -48,7 +48,11 @@ export class DatabaseUplinkPresenceStore implements UplinkPresenceStore {
            protocol = EXCLUDED.protocol, connected = EXCLUDED.connected, ready = EXCLUDED.ready,
            phase = EXCLUDED.phase, connected_at = EXCLUDED.connected_at, last_seen_at = EXCLUDED.last_seen_at,
            disconnected_at = EXCLUDED.disconnected_at, updated_at = clock_timestamp()
-         WHERE current.connection_id = EXCLUDED.connection_id OR current.connected_at < EXCLUDED.connected_at`,
+         -- The writer's own connection always re-writes; across connections
+         -- the same deterministic order as the in-memory owner rule wins:
+         -- later connected_at, ties broken by connection_id.
+         WHERE current.connection_id = EXCLUDED.connection_id
+            OR (current.connected_at, current.connection_id) < (EXCLUDED.connected_at, EXCLUDED.connection_id)`,
         [s.engineInstanceId, s.workspaceId, s.organizationId, s.generation, s.connectionId, s.realtimeInstance,
           s.protocol, s.connected, s.ready, s.phase, s.connectedAtMs, s.lastSeenAtMs, s.disconnectedAtMs],
       );
@@ -101,7 +105,10 @@ export class UplinkPresenceWriter {
 
   enqueue(snapshot: UplinkPresenceSnapshot): void {
     if (this.closed) return;
-    if (!this.pending.has(snapshot.connectionId)) {
+    // Re-inserting moves a re-enqueued connection behind the others: pump()
+    // scans in insertion order, so a hot connection cannot hold a slot.
+    if (this.pending.has(snapshot.connectionId)) this.pending.delete(snapshot.connectionId);
+    else {
       while (this.pending.size >= this.maxPending) {
         const oldest = [...this.pending.keys()].find(key => !this.inFlight.has(key));
         if (oldest === undefined) break;

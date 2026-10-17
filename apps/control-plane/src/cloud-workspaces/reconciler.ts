@@ -127,6 +127,7 @@ export type CloudWorkspaceReconcilerOptions = {
 // it reschedules itself immediately.
 const MAX_CLAIMS_PER_JOB = 20;
 const ORPHAN_SWEEP_INTERVAL_MS = 60_000;
+const SWEEP_LOCK_TIMEOUT_MS = 2_000;
 
 function requestDigest(value: unknown): Buffer {
   return createHash("sha256").update(JSON.stringify(value)).digest();
@@ -411,7 +412,7 @@ export class CloudWorkspaceReconciler {
         // A lifecycle dispatch holds its own intent lease for up to leaseMs.
         timeoutMs: leaseMs,
         backoff: { baseMs: 1_000, maxMs: 5 * 60_000 },
-        handle: job => this.runJob(job),
+        handle: (job, { signal }) => this.runJob(job, signal),
       })),
     });
   }
@@ -452,7 +453,6 @@ export class CloudWorkspaceReconciler {
       stoppedDriftIntervalMs: this.stoppedDriftIntervalMs };
   }
 
-  /** Enqueue any pending deadline that lost its job. */
   /** Hourly maintenance: repair missing or late jobs and purge terminally
    * failed rows, which nothing else ever deletes. */
   async auditJobs(): Promise<Partial<Record<LifecycleWork, number>>> {
@@ -466,7 +466,7 @@ export class CloudWorkspaceReconciler {
 
   /** Run one lifecycle job: claim that workspace's due work of the job's kind
    * through the existing fenced claim, then reschedule at the next due time. */
-  async runJob(job: Pick<ClaimedJob, "kind" | "workspaceId" | "orgId" | "payload">): Promise<void> {
+  async runJob(job: Pick<ClaimedJob, "kind" | "workspaceId" | "orgId" | "payload">, signal?: AbortSignal): Promise<void> {
     const work = lifecycleWorkForJob(job.kind);
     if (!work) return;
     const scope = work === "diagnostics" ? null : job.workspaceId;
@@ -474,20 +474,26 @@ export class CloudWorkspaceReconciler {
     if (work !== "diagnostics" && !scope) return;
     const provider = this.dueScope().provider;
     let processed = 0;
+    // The runner aborts on timeout and lease loss and then frees the slot, so
+    // a run that kept claiming would overlap the next one in this process.
+    const live = () => !this.stopped && !signal?.aborted;
     const drain = async (claim: () => Promise<boolean>) => {
-      while (!this.stopped && processed < MAX_CLAIMS_PER_JOB && await claim()) processed += 1;
+      while (live() && processed < MAX_CLAIMS_PER_JOB && await claim()) processed += 1;
     };
     switch (work) {
       case "paidAuthority": await drain(async () => (await this.paidAuthority.runOnce(scope)) !== null); break;
       case "engineHealth": await drain(() => stopUnavailableCloudEngine(this.pool, provider, scope)); break;
       case "compute": await drain(() => this.computeLeases.runOnce(scope)); break;
       case "lifecycle": await drain(() => this.runOnce(scope)); break;
-      case "drift": if (await this.reconcileDriftOnce(scope)) processed = 1; break;
+      case "drift": if (live() && await this.reconcileDriftOnce(scope)) processed = 1; break;
       // Work still due after a pass is contested (SKIP LOCKED): back off.
       // A productive pass means a publication backlog may remain (256 per
       // pass): reschedule at once instead of backing off.
-      case "diagnostics": processed = await runCloudDiagnosticCleanup(this.pool) > 0 ? 1 : 0; break;
+      case "diagnostics": if (live()) processed = await runCloudDiagnosticCleanup(this.pool) > 0 ? 1 : 0; break;
     }
+    // An aborted run's job already belongs to the runner (failure backoff) or
+    // to whoever reclaimed its lease; moving it earlier would undo either.
+    if (signal?.aborted) return;
     // Completion deletes the job, so it is rescheduled even during shutdown;
     // work a shutdown interrupted is due again now, for another replica.
     await rescheduleLifecycleJob(this.pool, work, job, { ...this.dueScope(), processed: processed > 0 || this.stopped });
@@ -1300,6 +1306,7 @@ export class CloudWorkspaceReconciler {
            AND ($1::text IS NULL OR pb.provider = $1)
            AND ($3::uuid IS NULL OR cw.id = $3)
            AND pb.next_drift_check_at <= clock_timestamp()
+           AND (pb.drift_paced_until IS NULL OR pb.drift_paced_until <= clock_timestamp())
            AND (pb.last_observed_at IS NULL OR
                 pb.last_observed_at < now() - (CASE WHEN (cw.desired_state='stopped' AND cw.status='stopped')
                   OR (cw.desired_state='archived' AND cw.status='archived')
@@ -1436,6 +1443,7 @@ export class CloudWorkspaceReconciler {
              provider_target = coalesce($4, provider_target),
              observed_state = $5, observed_metadata = $6::jsonb,
              last_observed_at = now(), updated_at = now(),
+             drift_inspect_requested = false, drift_paced_until = NULL,
              deletion_verified_at = CASE
                WHEN $5 = 'deleted' THEN now() ELSE NULL
              END
@@ -1595,8 +1603,12 @@ export class CloudWorkspaceReconciler {
         const inventory = new Map<string, CloudProviderInventoryItem>();
         let capped = false;
         for await (const item of scope.provider.listInventory()) {
-          if (observed >= this.maxManagedResourcesPerSweep) { capped = true; break; }
-          observed += 1;
+          // The sweep skips sandboxes the journal cannot place (runtime
+          // images, staging, templates), so they must not use up the ceiling.
+          if (item.workspaceId !== null) {
+            if (observed >= this.maxManagedResourcesPerSweep) { capped = true; break; }
+            observed += 1;
+          }
           inventory.set(item.resourceId, item);
         }
         if (capped) {
@@ -1632,21 +1644,61 @@ export class CloudWorkspaceReconciler {
   }
 
   /** Inventory paces drift. A binding whose resource the provider's list
-   * confirms unchanged keeps its next check pushed one fallback horizon out,
-   * so per-workspace inspects resume only if sweeps stop. A missing or
-   * mismatched resource is forced due now, and the binding trigger turns the
-   * write into that workspace's drift job, which inspects. */
+   * confirms unchanged and in its desired state is paced one fallback
+   * horizon out (drift_paced_until), so per-workspace inspects resume only if
+   * sweeps stop. Any other binding loses its pacing and returns to the
+   * per-interval drift schedule; a listing that contradicts the last
+   * observation also invalidates it, so the next due drift job inspects. */
   private async sweepScopeInventory(
     scope: SweepScope,
     inventory: Map<string, CloudProviderInventoryItem>,
   ): Promise<void> {
     const ids = [...inventory.keys()];
-    await withSystemTx(this.pool, (tx) => tx.query(
-      `WITH inventory(resource_id, state) AS (
-         SELECT * FROM unnest($2::text[], $3::text[])
+    // A settled stopped or archived workspace whose sandbox an inspect
+    // already confirmed gone can never appear in the listing; its absence
+    // matches, or every sweep would force an inspect and defeat the slow
+    // settled cadence.
+    // Matching the last observation is not enough: drift's inspect is also
+    // what corrects a VM that diverges from desired_state (a failed stop
+    // leaves it running and observed running). Only a settled workspace whose
+    // listing already satisfies its desired state, as operationSatisfied
+    // would judge it, may be paced; everything else stays on the inspect path.
+    const matched = `(scoped.steady AND ((scoped.seen_id IS NOT NULL
+        AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state)
+      OR (scoped.seen_id IS NULL AND scoped.settled
+        AND binding.observed_state IN ('absent','deleted'))))`;
+    // A listing that contradicts the last observation invalidates it, so the
+    // claim's last-observed gate (the slow settled cadence included) cannot
+    // hold the inspect back. One that agrees leaves the per-interval schedule.
+    const contradicted = `NOT ((scoped.seen_id IS NOT NULL
+        AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state)
+      OR (scoped.seen_id IS NULL AND binding.observed_state IN ('absent','deleted')))`;
+    await withSystemTx(this.pool, async (tx) => {
+      // The statement row-locks every scoped binding. One stalled holder must
+      // not block the sweep (and the audit queued behind it): fail this scope
+      // and retry at the next minute instead.
+      await tx.query(`SET LOCAL lock_timeout = '${SWEEP_LOCK_TIMEOUT_MS}ms'`);
+      await tx.query(
+      `WITH inventory(resource_id, state, compute_stopped) AS (
+         SELECT * FROM unnest($2::text[], $3::text[], $9::boolean[])
        ), scoped AS (
-         SELECT binding.workspace_id, binding.provider_resource_id,
-                inventory.resource_id AS seen_id, inventory.state AS seen_state
+         SELECT binding.workspace_id, binding.generation, binding.provider_resource_id,
+                inventory.resource_id AS seen_id, inventory.state AS seen_state,
+                ((workspace.desired_state = 'stopped' AND workspace.status = 'stopped')
+                  OR (workspace.desired_state = 'archived' AND workspace.status = 'archived')) AS settled,
+                CASE workspace.desired_state
+                  WHEN 'running' THEN workspace.status IN ('ready','busy')
+                    AND inventory.state = 'running'
+                  WHEN 'stopped' THEN workspace.status = 'stopped'
+                    AND (inventory.resource_id IS NULL
+                      OR inventory.state IN ('stopped','archived','deleted')
+                      OR (inventory.compute_stopped AND inventory.state <> 'failed'))
+                  -- A listed stopped sandbox may or may not have offloaded
+                  -- storage; only an inspect can tell, so it is not paced.
+                  WHEN 'archived' THEN workspace.status = 'archived'
+                    AND (inventory.resource_id IS NULL OR inventory.state IN ('archived','deleted'))
+                  ELSE false
+                END AS steady
          FROM cloud_workspace_provider_bindings binding
          JOIN provider_connections connection
            ON connection.id = binding.provider_connection_id
@@ -1654,12 +1706,15 @@ export class CloudWorkspaceReconciler {
          JOIN cloud_workspaces workspace ON workspace.id = binding.workspace_id
          LEFT JOIN inventory ON inventory.resource_id = binding.provider_resource_id
          WHERE binding.provider = $1 AND binding.provider_resource_id IS NOT NULL
+           -- Only the current generation can be claimed; an old generation's
+           -- row must neither be paced nor move the workspace's drift job.
+           AND binding.generation = workspace.current_generation
            AND workspace.status <> 'deleted'
            -- An active restore incident excludes its workspace from drift
-           -- checks; the sweep must not push its schedule out either, or the
-           -- restore-resolution enqueue would find the check not due and the
-           -- first post-incident inspect (target and metadata refresh) would
-           -- wait out the fallback horizon.
+           -- checks; the sweep must not pace it either. Every incident state
+           -- change requests an inspect (0155), so the first post-incident
+           -- inspect (target and metadata refresh) never waits out a pacing
+           -- horizon set before the incident.
            AND NOT EXISTS (SELECT 1 FROM cloud_workspace_restore_incidents incident
              WHERE incident.workspace_id = workspace.id
                AND incident.source_generation = workspace.current_generation
@@ -1669,39 +1724,57 @@ export class CloudWorkspaceReconciler {
                  AND binding.provider_connection_id = $7::uuid
                  AND binding.provider_connection_version = $8::bigint))
        )
-       , moved AS (
+       -- Pacing never pushes next_drift_check_at: it remains the per-interval
+       -- schedule, the drift claim's lease and any provider backoff, so a
+       -- sweep cannot void an in-flight claim, and a binary that predates
+       -- pacing still finds every binding due on its own cadence.
+       , paced AS (
          UPDATE cloud_workspace_provider_bindings binding
-         SET next_drift_check_at = CASE WHEN scoped.seen_id IS NULL
-               OR scoped.seen_state IS DISTINCT FROM binding.observed_state
-               THEN clock_timestamp()
-               ELSE clock_timestamp() + ($4::bigint * interval '1 millisecond') END,
-             last_observed_at = CASE WHEN scoped.seen_id IS NULL
-               OR scoped.seen_state IS DISTINCT FROM binding.observed_state
-               THEN NULL ELSE binding.last_observed_at END
+         SET drift_paced_until = clock_timestamp() + ($4::bigint * interval '1 millisecond')
          FROM scoped
          WHERE binding.workspace_id = scoped.workspace_id
+           AND binding.generation = scoped.generation
            AND binding.provider = $1
            AND binding.provider_resource_id = scoped.provider_resource_id
-           AND (((scoped.seen_id IS NULL
-                  OR scoped.seen_state IS DISTINCT FROM binding.observed_state)
-                 AND binding.next_drift_check_at > clock_timestamp())
-             OR ((scoped.seen_id IS NOT NULL
-                  AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state)
-                 AND binding.next_drift_check_at < clock_timestamp()
-                   + (($4::bigint - $4::bigint / 12) * interval '1 millisecond')))
-         RETURNING binding.workspace_id, binding.next_drift_check_at,
-           (scoped.seen_id IS NOT NULL
-            AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state) AS matched
+           AND ${matched}
+           -- Re-read under the row lock: an event that committed after this
+           -- statement's snapshot keeps its requested inspect.
+           AND NOT binding.drift_inspect_requested
+           AND (binding.drift_paced_until IS NULL OR binding.drift_paced_until < clock_timestamp()
+                 + (($4::bigint - $4::bigint / 12) * interval '1 millisecond'))
+         RETURNING binding.workspace_id, binding.drift_paced_until
+       ), forced AS (
+         UPDATE cloud_workspace_provider_bindings binding
+         SET drift_paced_until = NULL,
+             last_observed_at = CASE WHEN ${contradicted} THEN NULL ELSE binding.last_observed_at END,
+             -- The settled cadence is hours long, so a contradicted listing
+             -- pulls that schedule in. A value within one claim lease is a
+             -- live claim or a provider backoff: kept, so the claim's fence
+             -- holds and the backoff is honoured. Listing the column also
+             -- fires the binding trigger, which enqueues the drift job at it.
+             next_drift_check_at = CASE WHEN ${contradicted}
+                 AND binding.next_drift_check_at > clock_timestamp() + ($10::bigint * interval '1 millisecond')
+               THEN clock_timestamp() ELSE binding.next_drift_check_at END
+         FROM scoped
+         WHERE binding.workspace_id = scoped.workspace_id
+           AND binding.generation = scoped.generation
+           AND binding.provider = $1
+           AND binding.provider_resource_id = scoped.provider_resource_id
+           AND NOT ${matched}
+           AND (binding.drift_paced_until IS NOT NULL
+             OR (${contradicted} AND binding.last_observed_at IS NOT NULL))
        )
        -- Enqueues only ever move a queued job earlier, so without this the
-       -- workspace's drift job would empty-run every keep-alive margin.
+       -- workspace's drift job would empty-run every keep-alive margin. A job
+       -- already due was made due by an event and must run.
        UPDATE control_plane_jobs job
-       SET run_at = moved.next_drift_check_at, updated_at = clock_timestamp()
-       FROM moved
-       WHERE moved.matched AND job.kind = 'cloud_workspace_drift'
+       SET run_at = paced.drift_paced_until, updated_at = clock_timestamp()
+       FROM paced
+       WHERE job.kind = 'cloud_workspace_drift'
          AND job.state = 'queued'
-         AND job.dedupe_key = 'workspace:' || moved.workspace_id::text
-         AND job.run_at < moved.next_drift_check_at`,
+         AND job.dedupe_key = 'workspace:' || paced.workspace_id::text
+         AND job.run_at > clock_timestamp()
+         AND job.run_at < paced.drift_paced_until`,
       [
         scope.provider.name,
         ids,
@@ -1711,8 +1784,11 @@ export class CloudWorkspaceReconciler {
         scope.organizationId,
         scope.connectionId,
         scope.connectionVersion,
+        ids.map((id) => inventory.get(id)!.computeStopped === true),
+        this.leaseMs,
       ],
-    ));
+      );
+    });
     // Orphan rows clear once a binding claims the resource again; orphan
     // bookkeeping and cleanup cover only inventory no binding claims.
     const bound = await withSystemTx(this.pool, async (tx) => {
@@ -1833,7 +1909,8 @@ export class CloudWorkspaceReconciler {
               `UPDATE cloud_workspace_provider_bindings
                SET provider_resource_id = $3, provider_target = $4,
                    observed_state = $5, observed_metadata = $6::jsonb,
-                   last_observed_at = now(), updated_at = now()
+                   last_observed_at = now(), updated_at = now(),
+                   drift_paced_until = NULL
                WHERE workspace_id = $1 AND generation = $2`,
               [
                 identity.workspaceId,
@@ -1852,7 +1929,8 @@ export class CloudWorkspaceReconciler {
                SET provider_resource_id = $3, provider_target = NULL,
                    observed_state = $4, observed_metadata = '{}'::jsonb,
                    last_observed_at = now(), updated_at = now(),
-                   next_drift_check_at = now()
+                   next_drift_check_at = now(), drift_inspect_requested = true,
+                   drift_paced_until = NULL
                WHERE workspace_id = $1 AND generation = $2`,
               [
                 identity.workspaceId,

@@ -58,10 +58,16 @@ export class ReliableOutbox {
    * it reports. Null means the peer is ahead of us or claims frames we have
    * already discarded as acked; neither can be repaired by replay. */
   replayAfter(lastReceived: number): ReliableFrame[] | null {
-    if (!Number.isSafeInteger(lastReceived) || lastReceived < 0 || lastReceived > this.lastSent) return null;
-    if (lastReceived < this.lastAcked) return null;
+    if (!this.replayableAfter(lastReceived)) return null;
     this.ack(lastReceived);
     return [...this.frames];
+  }
+
+  /** Whether a cursor could be repaired by `replayAfter`, without mutating
+   * the buffer — the admission-time check before a token is consumed. */
+  replayableAfter(lastReceived: number): boolean {
+    return Number.isSafeInteger(lastReceived) && lastReceived >= 0 &&
+      lastReceived <= this.lastSent && lastReceived >= this.lastAcked;
   }
 }
 
@@ -93,6 +99,14 @@ type Entry<State> = {
 export type ResumeTake<State> =
   | { resumed: true; state: State }
   | { resumed: false; reason: "unknown" | "expired" | "identity_mismatch" | "malformed" };
+
+/** The non-destructive read of `take`, so an admission can validate the
+ * rest of the resume request (the replay cursor) before the token — and
+ * the lineage behind it — is consumed. Synchronous, so peek-then-take in
+ * one admission cannot interleave. */
+export type ResumePeek<State> =
+  | { resumable: true; state: State }
+  | { resumable: false; reason: "unknown" | "expired" | "identity_mismatch" | "malformed" };
 
 /** Opaque, single-use resume tokens bound to one connection identity, with
  * their lineage state kept in memory on the issuing instance. A token from
@@ -136,6 +150,17 @@ export class ResumeStore<State> {
     if (entry.timer) clearTimeout(entry.timer);
     entry.timer = setTimeout(() => { if (this.entries.get(key) === entry) this.drop(key); }, this.retentionMs);
     entry.timer.unref?.();
+  }
+
+  /** Reads a token exactly as `take` would resolve it, without consuming
+   * it, superseding the live lineage or touching the expiry. */
+  peek(token: unknown, identity: string): ResumePeek<State> {
+    if (typeof token !== "string" || !RESUME_TOKEN.test(token)) return { resumable: false, reason: "malformed" };
+    const entry = this.entries.get(digest(token));
+    if (!entry) return { resumable: false, reason: "unknown" };
+    if (entry.identity !== identity) return { resumable: false, reason: "identity_mismatch" };
+    if (entry.expiresAtMs !== null && this.now() >= entry.expiresAtMs) return { resumable: false, reason: "expired" };
+    return { resumable: true, state: entry.state };
   }
 
   /** Consumes a token. A live lineage is superseded first, so the newer

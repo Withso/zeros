@@ -202,7 +202,7 @@ import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "./agents/conta
 import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-action-runtime";
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
-import { CloudEngineUplinkClient, EngineUplinkAuthState } from "./cloud-engine-uplink";
+import { CloudEngineUplinkClient, EngineUplinkAuthState, sanitizeCredAckCode, type EngineUplinkReadiness } from "./cloud-engine-uplink";
 import { CloudEventRuntime } from "./cloud-event-runtime";
 import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome, type CloudAgentHistoryRestoreMetadata,
@@ -359,7 +359,13 @@ import {
   type ProviderBinding,
   type ProviderMetadata,
 } from "@zeros/protocol/identities";
-import { upsertChatMessagesBulk, windowChatMessages } from "./db/messages";
+import {
+  flushStreamingChatMessages,
+  queueStreamingChatMessages,
+  upsertChatMessagesBulk,
+  windowChatMessages,
+} from "./db/messages";
+import { BootPhaseTimer } from "./boot-phase-timer";
 import {
   startTurn as startTurnRow,
   finishTurn as finishTurnRow,
@@ -1301,6 +1307,9 @@ export class ZerosEngine {
   private actualPort = 0;
   private framework: Framework = "unknown";
   private running = false;
+  /** Set once stop() begins tearing a running engine down; the uplink then
+   * reports `stopping` rather than `starting`. */
+  private engineStopping = false;
 
   constructor(options?: EngineOptions) {
     this.cloudRuntimeConfig = consumeCloudRuntimeEnvironment();
@@ -2951,6 +2960,7 @@ export class ZerosEngine {
     if (this.running) return;
 
     const startTime = Date.now();
+    const bootPhases = new BootPhaseTimer();
 
     // Recover hard-crash process domains before publishing a renderer token or
     // opening any transport. On macOS a detached, double-forked Seatbelt child
@@ -2988,6 +2998,7 @@ export class ZerosEngine {
     if (swept > 0) {
       console.log(`[Zeros] swept ${swept} crashed session dir(s)`);
     }
+    bootPhases.mark("process-recovery");
 
     if (this.cloudWorker?.version === 4) {
       const recovered = await recoverCloudWorkspaceOwnership(this.cloudWorker, {
@@ -3005,6 +3016,7 @@ export class ZerosEngine {
     // the wrong child generation.
     await this.restoreResidentTerminals();
     this.publishLocalAuthorityToHost();
+    bootPhases.mark("terminals");
 
     // 1. Detect framework
     const detection = detectFramework(this.root);
@@ -3066,6 +3078,7 @@ export class ZerosEngine {
     // disconnect re-connect on the next refresh/restart.
     this.setupHostControlChannel();
     this.setupParentDeathWatchdog();
+    bootPhases.mark("settings");
 
     // 1a. One-time fold-in of the legacy ~/.zeros/state.db (workspaces + meta +
     // detach_state) into the unified zeros.db. Runs before seedFromDisk
@@ -3077,6 +3090,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on migration */
     }
+    bootPhases.mark("legacy-state");
 
     // 1a.2. Finish any create/archive/restore/delete interrupted between Git,
     // filesystem, and SQLite BEFORE any relocation or seed janitor can reinterpret
@@ -3100,6 +3114,7 @@ export class ZerosEngine {
     } catch {
       /* keep startup alive; journals/refs remain for the next retry */
     }
+    bootPhases.mark("lifecycle-recovery");
 
     // Reclaim heavy dependency/build directories staged by an engine that died
     // during archive/delete. Run only AFTER lifecycle recovery: a successfully
@@ -3126,6 +3141,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — temp trash is never startup-critical */
     }
+    bootPhases.mark("trash");
 
     // 1a.5. One-time relocation of worktrees from the hidden ~/.zeros/worktrees
     // to the visible ~/zeros/workspaces. Runs at startup before any
@@ -3138,6 +3154,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on relocation */
     }
+    bootPhases.mark("worktree-relocation");
 
     // 1b. Crash recovery: re-register on-disk worktrees missing from
     // the registry (e.g. after a dev wipe). Idempotent — skips rows that
@@ -3155,6 +3172,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on crash recovery */
     }
+    bootPhases.mark("seed");
 
     // Mode/legacy-permission reconcile. First complete any mode transition a crash
     // interrupted (the durable marker knows the intended direction). Then two
@@ -3202,6 +3220,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — failures are logged per workspace above */
     }
+    bootPhases.mark("design-reconcile");
 
     // Clear any setup_state="running" left over from a previous process (engine
     // quit mid-install) so the Setup tab doesn't spin forever — the in-memory
@@ -3234,6 +3253,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on crash recovery */
     }
+    bootPhases.mark("turn-recovery");
 
     // 1b.1. One-time: move legacy in-worktree `.zeros/workspace.json` seeds to
     // app-data and delete the in-tree `.zeros/`, so Zeros leaves no `.zeros` in
@@ -3246,6 +3266,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on seed migration */
     }
+    bootPhases.mark("seed-migration");
 
     // 1b.3. Repin surviving recovery snapshots without pruning shared archive
     // refs, then clean up stale branch-ownership proofs. Runs after seedFromDisk
@@ -3260,6 +3281,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on retention */
     }
+    bootPhases.mark("archive-refs");
 
     // 1b.5. One-time cleanup of phantom worktree "projects" in the repos table:
     // a stale renderer regex (pre Phase-0 relocation) upserted worktrees under
@@ -3278,6 +3300,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on cleanup */
     }
+    bootPhases.mark("repo-prune");
 
     // 1c. One-time migration of the legacy Electron-main agent-history DB
     // (zeros-agent-history.db) into the unified Zeros DB. Idempotent and
@@ -3290,6 +3313,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on migration */
     }
+    bootPhases.mark("legacy-history");
 
     // 1d. One-time backfill of chats.workspace_id (v11). The column defaults to
     // NULL; this resolves each pre-existing chat's `folder` to its owning
@@ -3311,6 +3335,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on backfill */
     }
+    bootPhases.mark("backfill");
 
     // 2. Build the retired selector index only if its legacy MCP consumer is
     // deliberately restored. The current Design workspace does not consume
@@ -3328,11 +3353,13 @@ export class ZerosEngine {
     await this.local.start();
     this.actualPort = this.local.actualPort;
     this.activityHeartbeat.start();
+    bootPhases.mark("transport");
 
     // MCP gateway: front any auth:"oauth" backends on a localhost
     // endpoint + inject that one server into every agent. Best-effort — a
     // gateway failure must never block engine boot.
     await this.startGateway();
+    bootPhases.mark("gateway");
 
     // 4. Start the retired selector-index watcher only with that subsystem.
     if (LEGACY_DESIGN_SELECTOR_INDEX_ENABLED) {
@@ -3424,6 +3451,7 @@ export class ZerosEngine {
       },
     );
 
+    bootPhases.mark("watchers");
     // 5. Write .zeros/.port file
     this.writePortFile(this.actualPort);
 
@@ -3435,6 +3463,7 @@ export class ZerosEngine {
       if (t !== this.local) await t.start();
     }
 
+    this.engineStopping = false;
     this.running = true;
     try {
       this.cloudStartupPhase = "registration";
@@ -3448,10 +3477,13 @@ export class ZerosEngine {
         cause: error,
       });
     }
+    bootPhases.mark("registration");
     const elapsed = Date.now() - startTime;
     console.log(
       `[Zeros] Engine ready on port ${this.actualPort} (${elapsed}ms)`,
     );
+    const slowBootPhases = bootPhases.slowPhases();
+    if (slowBootPhases) console.log(`[Zeros] slow boot phases: ${slowBootPhases}`);
     // Capture is optional: source tools remain usable without its renderer.
     // Start only after handlers and initial durable registration are ready;
     // the capture host still validates the immutable, attested cloud image.
@@ -3478,6 +3510,8 @@ export class ZerosEngine {
    * Stop the engine gracefully.
    */
   async stop(): Promise<void> {
+    // Streamed transcript rows buffered by a Local engine reach SQLite first.
+    try { flushStreamingChatMessages(); } catch { /* best effort, like persist-on-emit */ }
     this.cloudCheckpointProgress?.reporter.dispose();
     const failures: unknown[] = [];
     if (this.cloudLegacyResidentRetryTimer) clearTimeout(this.cloudLegacyResidentRetryTimer);
@@ -3525,6 +3559,10 @@ export class ZerosEngine {
       return;
     }
     this.running = false;
+    this.engineStopping = true;
+    // The CP records the not-ready transition before the uplink closes
+    // (the uplink itself is stopped a few steps below).
+    this.cloudEngineUplink?.reportReadiness();
     this.cloud?.setHumanServicesPaused(true);
     const humanServicesRetired = settle(() => this.cloudHumanServices?.pause());
     const languageServicesRetired = settle(() => this.cloudLanguageServices?.pause());
@@ -3648,6 +3686,10 @@ export class ZerosEngine {
     }
   }
 
+  private cloudEngineUplinkReadiness(): EngineUplinkReadiness {
+    return { ready: this.running, phase: this.running ? "ready" : this.engineStopping ? "stopping" : "starting" };
+  }
+
   /** S2 engine uplink (contracts/s2-uplink.md): cloud placements only, and
    * only when the control plane advertised an endpoint to this opted-in
    * engine (the organization's `realtime_uplink` rollout flag was on at
@@ -3674,10 +3716,39 @@ export class ZerosEngine {
       // The in-memory S1 verifier state; track B binds the shared verifier
       // (signature and epoch checks) to this state.
       auth: new EngineUplinkAuthState(),
-      readiness: () => ({ ready: this.running, phase: this.running ? "ready" : "starting" }),
+      readiness: () => this.cloudEngineUplinkReadiness(),
+      features: ["cred.v1"],
+      // Credential-control push (P0.10 C01): a pushed revision runs the same
+      // credential-controls exchange the 500 ms poll runs; the poll itself
+      // stays as the fallback (see controlsPollIntervalMs at the boot).
+      onCredentialRevision: async () => {
+        // Only agent-controls reaches here: the uplink acks any other kind
+        // failed/cred_kind_unsupported before calling this handler.
+        const boot = this.cloudAgentBoot;
+        if (!boot) return { result: "applied" as const }; // pre-boot: the activation exchange converges
+        try {
+          // A fresh exchange, never a flight that predates the bump (C3
+          // review SHOULD-3: joining a stale flight acks applied falsely).
+          await boot.refreshCredentialControls();
+          return { result: "applied" as const };
+        } catch (error) {
+          // error.code can be ECONNRESET, a number or arbitrarily long —
+          // none are contract codes; non-conforming values map to
+          // cred_fetch_failed so the CP never 4400s us into a re-push loop.
+          return { result: "failed" as const,
+            code: sanitizeCredAckCode(error && typeof error === "object" && "code" in error ? error.code : undefined) };
+        }
+      },
+      // The moment the gate closes (or never negotiates the push), the
+      // credential poll returns to its fast fallback cadence instead of
+      // waiting out an armed 30 s timer.
+      onEstablishedChange: established => { if (!established) this.cloudAgentBoot?.rescheduleControls(); },
       onReverifyAuthority: () => registration.requestHeartbeatSoon(),
       onParked: reason =>
         console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`),
+      // No engine metrics pipeline exists yet; the durations are per-connect
+      // and per-sync rarities, so the uplink log channel carries them.
+      metric: (name, valueMs) => console.info(`[engine-uplink] metric ${name}=${Math.round(valueMs)}ms`),
     });
     this.cloudEngineUplink = uplink;
     uplink.start();
@@ -4437,6 +4508,13 @@ export class ZerosEngine {
         generation: config.execution.generation, engineInstanceId: config.engine.instanceId },
       supervisor: { onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss() },
       engineLive: () => this.running && !this.cloudRuntimeAuthorityStopping,
+      // While the uplink's gate is open, cred.revision pushes carry control
+      // changes and the poll drops to a 30 s safety net; any uplink loss
+      // returns it to the 500 ms fallback cadence.
+      controlsPollIntervalMs: () => (this.cloudEngineUplink?.established ? 30_000 : 500),
+      // A successful poll clears the uplink's failed-push mark, so a
+      // transient push failure recovers the slow cadence after one poll.
+      controlsExchange: ok => { if (ok) this.cloudEngineUplink?.noteCredentialExchangeSucceeded(); },
       startsAllowed: () => !this.cloudRuntimeHandoffFenced && !this.cloudRuntimeCheckpointQuiescing && !this.cloudLegacyResidentRequiresFreshView,
       isAdmittedCwd: cwd => {
         try {
@@ -9825,7 +9903,9 @@ export class ZerosEngine {
    *  agent after the laptop closes). It folds the chunk with the SAME shared
    *  applyUpdate the renderer uses (no drift), then upserts only the rows that
    *  changed (a streaming text message upserts one growing row; a tool update
-   *  rewrites its row). Best-effort: persistence must NEVER throw into the live
+   *  rewrites its row). A Local engine queues agent output through the
+   *  streaming write coalescer (db/messages.ts), which every read drains.
+   *  Best-effort: persistence must NEVER throw into the live
    *  stream. Only sessions bound to a chat (chatId sent at new/load-session) are
    *  persisted; unbound sessions (e.g. terminal) are skipped. */
   /** Persist the user's prompt to the engine transcript — mirroring the renderer's
@@ -10047,15 +10127,22 @@ export class ZerosEngine {
       this.sessionMessages.set(sessionId, next);
       const changed = next.filter((m) => !prevSet.has(m));
       if (changed.length === 0) return;
-      upsertChatMessagesBulk(
-        chatId,
-        changed.map((m) => ({
-          msgId: m.id,
-          kind: m.kind,
-          payload: JSON.stringify(m),
-          createdAt: m.createdAt,
-        })),
-      );
+      const rows = changed.map((m) => ({
+        msgId: m.id,
+        kind: m.kind,
+        payload: JSON.stringify(m),
+        createdAt: m.createdAt,
+      }));
+      // A Local engine coalesces streamed agent output (db/messages.ts); every
+      // read drains it first. Prompts and cloud history stay write-through.
+      if (
+        this.cloudWorker ||
+        notification.update.sessionUpdate === "user_message_chunk"
+      ) {
+        upsertChatMessagesBulk(chatId, rows);
+      } else {
+        queueStreamingChatMessages(chatId, rows);
+      }
       // Nudge OTHER devices to re-window this chat (debounced). The initiator
       // sees the change live; this catches a passive observer (the chat open on
       // web while the Mac drives it) and is the robust fallback when a live
@@ -10249,6 +10336,8 @@ export class ZerosEngine {
     // persisted on the turn row so the footer's usage popover survives reloads.
     usage: TurnUsage | null = null,
   ): Promise<void> {
+    // A settled turn's transcript is durable before its row reports settled.
+    try { flushStreamingChatMessages(ctx.chatId); } catch { /* persistence never disturbs settle */ }
     try {
       const msgs = this.sessionMessages.get(ctx.sessionId) ?? [];
       const turnMsgs = msgs.slice(ctx.startIndex);
