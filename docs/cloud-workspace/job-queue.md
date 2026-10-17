@@ -206,8 +206,9 @@ transaction before and after every reconciler tick, even when nothing was due.
 
 Source: `src/cloud-workspaces/lifecycle-jobs.ts` (kinds, per-kind due queries,
 reschedule and audit), `CloudWorkspaceReconciler.runJob` in
-`src/cloud-workspaces/reconciler.ts`, migration
-`migrations/0150_cloud_lifecycle_jobs.sql`. Tests:
+`src/cloud-workspaces/reconciler.ts`, migrations
+`migrations/0150_cloud_lifecycle_jobs.sql` and
+`migrations/0155_cloud_drift_inventory_pacing.sql`. Tests:
 `src/cloud-workspaces/lifecycle-jobs.integration.test.ts`,
 `worker-scheduling.test.ts` and `worker-idle.test.ts`.
 
@@ -225,34 +226,77 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   desired and actual state have both settled into `stopped` or `archived`
   re-observes every `stoppedDriftIntervalMs` (default 6 h): both the due
   query and the claim apply the longer cadence, and the release reschedules
-  on the candidate's own cadence. Any trigger enqueue (`next_drift_check_at`,
-  an intent completing) still wakes it at once: enqueues move a queued job
-  only earlier, and the inventory sweep below never moves a job that is
-  already due.
+  on the candidate's own cadence. An intent leaving the active states or a
+  restore incident changing state requests an inspect: it clears inventory
+  pacing (below) and pulls a schedule more than an hour out, which only the
+  settled cadence or its failure backoff writes, in to now, so the binding is
+  due on its current cadence. A nearer schedule stays: it may be a live claim
+  lease (at most an hour), a provider backoff or the 60 s cadence. A claim in
+  flight during the event still releases on the cadence it claimed with, and
+  its observation consumes the request; on Boat the next sweep forces an
+  inspect if the listing contradicts that observation. Enqueues move a
+  queued job only earlier, and the inventory sweep below never moves a job
+  that is already due.
 - **Inventory paces drift for providers with a paged list.** Boat's
   `GET /sandboxes` pages (100 per page; Boat publishes no maximum, and 100 is
   the size the operator inventory already pages with) replace one inspect
   per sandbox per minute: the 60-second managed-resource sweep compares each
-  scoped current-generation binding against the listing. A match pushes the
-  binding's `next_drift_check_at` one fallback horizon out
-  (`inventoryFallbackMs`, default 6 h) and moves that workspace's queued
-  drift job with it, unless the job is already due; a missing or mismatched
-  resource is forced due now, which the binding trigger turns into that
-  workspace's drift job — the only runs that inspect. For a workspace
-  settled `stopped` or `archived` whose sandbox an inspect already observed
-  `absent` or `deleted`, absence from the listing is a match, so it keeps the
-  slow cadence; a sandbox that reappears still mismatches and forces an
-  inspect. If sweeps stop, the fallback horizon expires and per-workspace
-  drift inspects resume on their own. Boat calls drop from one inspect per
+  scoped current-generation binding against the listing. A binding is
+  paced only when its listing agrees with the last observation and already
+  satisfies the workspace's desired state, as `operationSatisfied` would
+  judge it: `drift_paced_until` moves one fallback horizon out
+  (`inventoryFallbackMs`, default 6 h) and that workspace's queued drift job
+  moves with it, unless the job is already due. The due query and the claim
+  both honour the pacing. A failed stop that leaves the VM running is not
+  paced, so drift's inspect still issues the corrective stop. Any other
+  binding loses its pacing and returns to its per-interval schedule. A
+  listing that contradicts the last observation (the resource is missing or
+  in another state) also clears `last_observed_at`, so the next drift job
+  inspects even on the 6 h settled cadence, and pulls a far
+  `next_drift_check_at` in to now, which the binding trigger turns into that
+  workspace's drift job. For a workspace settled `stopped` or `archived`
+  whose sandbox an inspect already observed `absent` or `deleted`, absence
+  from the listing is a match, so it keeps the slow cadence; a sandbox that
+  reappears contradicts and forces an inspect. If sweeps stop, the pacing
+  expires and per-workspace drift inspects resume on their own. Boat calls
+  drop from one inspect per
   workspace per minute to `ceil(sandboxes / 100)` list calls per minute per
   replica, far under the 1000 requests/min/IP rate limit; a provider
   `retryAfterMs` wait floors the job retry (capped at 5 minutes, then
   jittered up to 20 percent).
-- **Keep-alive write volume is deliberate.** A matched binding is rewritten
-  once its deadline falls inside `fallback − fallback/12` (every 30 minutes at
-  the 6 h default), so each binding costs one `UPDATE` plus at most one job
-  `UPDATE` per 30 minutes — about 333 of each per sweep at 10,000 bindings, in
-  one statement and one commit, with notifies deduplicated per channel.
+- **Pacing never moves `next_drift_check_at`.** That column stays the
+  per-interval schedule, the drift claim's lease and any provider backoff, so
+  a sweep cannot void an in-flight claim, and a contradicted listing keeps a
+  value within one claim lease (a live claim or a backoff). A binary rolled
+  back past 0155 ignores `drift_paced_until` and finds every binding due on
+  its own cadence: a rollback costs inspect volume, never drift coverage.
+- **Lifecycle events win over a concurrent sweep.** An intent leaving the
+  active states, a restore incident changing state and an inventory re-bind
+  set `drift_inspect_requested` and clear the pacing
+  (`request_cloud_workspace_drift_inspect`). A sweep re-reads the flag under
+  its row lock and never paces a requested binding, so a sweep whose snapshot
+  predates the event cannot re-pace it; the next drift observation clears
+  both columns. The authority predicate reads neither column, so their writes
+  are exempt from the authority-cache invalidation trigger (0152, extended in
+  0155).
+- **Known inspect costs.** A listing record the provider cannot parse is
+  skipped, so its binding counts as missing: every sweep clears its
+  `last_observed_at` and it is inspected about once a minute, as is any
+  state the list summary and the detail inspect map differently (not yet
+  checked against a real Boat list response). Boat's listing also pages the
+  whole allocation journal (`provider-operation-store.ts`, 200 rows per
+  transaction) on every sweep on every replica: `ceil(journal rows / 200)`
+  transactions per minute per replica on top of the list calls. The load
+  simulator's provider yields identity inline, so `worker.reconcileOrphans`
+  does not price that scan yet.
+- **Keep-alive write volume is deliberate.** A paced binding is rewritten
+  once its `drift_paced_until` falls inside `fallback − fallback/12` (every
+  30 minutes at the 6 h default), so each binding costs one `UPDATE` plus at
+  most one job `UPDATE` per 30 minutes — about 333 of each per sweep at 10,000
+  bindings, in one statement and one commit. Pacing writes neither
+  `next_drift_check_at` nor an authority input, so that commit's only notify
+  is the job queue's empty wake-up hint, which PostgreSQL delivers once per
+  commit.
   Extending from the existing deadline instead would cut that about 11 times
   but let a stalled sweep leave a binding uninspected for up to twice the
   fallback horizon; the bounded horizon wins.
@@ -320,7 +364,10 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
 - **Rollout.** Control-plane internal: the migration backfills one job per
   pending deadline, and older replicas during a deploy keep their own union
   polling and ignore the jobs; both paths claim through the same fenced
-  transactions.
+  transactions. 0155 adds two defaulted binding columns, which older
+  replicas ignore, and two triggers that request an inspect. It replaces
+  only `notify_cloud_authority_cache()`, under a reviewed expand exception
+  that widens 0152's binding exemption by those two columns.
 
 The P0.10 timer inventory also lists idle timers that later become queue- or
 event-driven: **C03** (the mirror idle timer, about 60 empty mirror checks a

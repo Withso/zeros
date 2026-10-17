@@ -46,6 +46,7 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
   },
   "0145_cloud_computer_named_snapshots.sql": {},
   "0146_cloud_provider_snapshot_recovery.sql": {},
+  "0155_cloud_drift_inventory_pacing.sql": {},
   "0149_cloud_rollout_flags.sql": {
     // A guard that rejects TRUNCATE cannot truncate.
     "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate
@@ -72,6 +73,7 @@ const computerNamedPinDigest = "8ec827f17e5dd360032affa81051498682ab39b8c355284f
 const providerRecoveryEvidenceDigest = "e5f93ac17017bc01286ac0e856530ed299bfb0307622f8f2b850d4d0590993ed";
 const authorityDigest = "797f837c345244da5af77d503614c9ddf3abb03048998a0081b98a3c2512ab30";
 const deletedBootPointerDigest = "9cff55a9f31819e2468f331b64d2ba978b0e1dd2bdb39d332dad892fe49fc562";
+const authorityCacheExemptionDigest = "414aa4d5653660ef6eee4300d1e52889ba36e9ca26f325c12b574ad4b0ad86b7";
 
 /** Split only at top-level SQL semicolons. Dollar bodies, nested comments and
  * quoted values remain intact; an annotation inside a function cannot exempt
@@ -146,7 +148,9 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
       (rule === "computer-named-pin" && file === "0145_cloud_computer_named_snapshots.sql" &&
         createHash("sha256").update(statement).digest("hex") === computerNamedPinDigest) ||
       (rule === "provider-recovery-evidence" && file === "0146_cloud_provider_snapshot_recovery.sql" &&
-        createHash("sha256").update(statement).digest("hex") === providerRecoveryEvidenceDigest);
+        createHash("sha256").update(statement).digest("hex") === providerRecoveryEvidenceDigest) ||
+      (rule === "authority-cache-exemption" && file === "0155_cloud_drift_inventory_pacing.sql" &&
+        createHash("sha256").update(statement).digest("hex") === authorityCacheExemptionDigest);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
     return "\n";

@@ -1306,6 +1306,7 @@ export class CloudWorkspaceReconciler {
            AND ($1::text IS NULL OR pb.provider = $1)
            AND ($3::uuid IS NULL OR cw.id = $3)
            AND pb.next_drift_check_at <= clock_timestamp()
+           AND (pb.drift_paced_until IS NULL OR pb.drift_paced_until <= clock_timestamp())
            AND (pb.last_observed_at IS NULL OR
                 pb.last_observed_at < now() - (CASE WHEN (cw.desired_state='stopped' AND cw.status='stopped')
                   OR (cw.desired_state='archived' AND cw.status='archived')
@@ -1442,6 +1443,7 @@ export class CloudWorkspaceReconciler {
              provider_target = coalesce($4, provider_target),
              observed_state = $5, observed_metadata = $6::jsonb,
              last_observed_at = now(), updated_at = now(),
+             drift_inspect_requested = false, drift_paced_until = NULL,
              deletion_verified_at = CASE
                WHEN $5 = 'deleted' THEN now() ELSE NULL
              END
@@ -1638,10 +1640,11 @@ export class CloudWorkspaceReconciler {
   }
 
   /** Inventory paces drift. A binding whose resource the provider's list
-   * confirms unchanged keeps its next check pushed one fallback horizon out,
-   * so per-workspace inspects resume only if sweeps stop. A missing or
-   * mismatched resource is forced due now, and the binding trigger turns the
-   * write into that workspace's drift job, which inspects. */
+   * confirms unchanged and in its desired state is paced one fallback
+   * horizon out (drift_paced_until), so per-workspace inspects resume only if
+   * sweeps stop. Any other binding loses its pacing and returns to the
+   * per-interval drift schedule; a listing that contradicts the last
+   * observation also invalidates it, so the next due drift job inspects. */
   private async sweepScopeInventory(
     scope: SweepScope,
     inventory: Map<string, CloudProviderInventoryItem>,
@@ -1650,8 +1653,7 @@ export class CloudWorkspaceReconciler {
     // A settled stopped or archived workspace whose sandbox an inspect
     // already confirmed gone can never appear in the listing; its absence
     // matches, or every sweep would force an inspect and defeat the slow
-    // settled cadence. Running-desired workspaces keep forcing: their
-    // inspect drives recovery.
+    // settled cadence.
     // Matching the last observation is not enough: drift's inspect is also
     // what corrects a VM that diverges from desired_state (a failed stop
     // leaves it running and observed running). Only a settled workspace whose
@@ -1661,6 +1663,12 @@ export class CloudWorkspaceReconciler {
         AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state)
       OR (scoped.seen_id IS NULL AND scoped.settled
         AND binding.observed_state IN ('absent','deleted'))))`;
+    // A listing that contradicts the last observation invalidates it, so the
+    // claim's last-observed gate (the slow settled cadence included) cannot
+    // hold the inspect back. One that agrees leaves the per-interval schedule.
+    const contradicted = `NOT ((scoped.seen_id IS NOT NULL
+        AND scoped.seen_state IS NOT DISTINCT FROM binding.observed_state)
+      OR (scoped.seen_id IS NULL AND binding.observed_state IN ('absent','deleted')))`;
     await withSystemTx(this.pool, async (tx) => {
       // The statement row-locks every scoped binding. One stalled holder must
       // not block the sweep (and the audit queued behind it): fail this scope
@@ -1699,10 +1707,10 @@ export class CloudWorkspaceReconciler {
            AND binding.generation = workspace.current_generation
            AND workspace.status <> 'deleted'
            -- An active restore incident excludes its workspace from drift
-           -- checks; the sweep must not push its schedule out either, or the
-           -- restore-resolution enqueue would find the check not due and the
-           -- first post-incident inspect (target and metadata refresh) would
-           -- wait out the fallback horizon.
+           -- checks; the sweep must not pace it either. Every incident state
+           -- change requests an inspect (0155), so the first post-incident
+           -- inspect (target and metadata refresh) never waits out a pacing
+           -- horizon set before the incident.
            AND NOT EXISTS (SELECT 1 FROM cloud_workspace_restore_incidents incident
              WHERE incident.workspace_id = workspace.id
                AND incident.source_generation = workspace.current_generation
@@ -1712,36 +1720,57 @@ export class CloudWorkspaceReconciler {
                  AND binding.provider_connection_id = $7::uuid
                  AND binding.provider_connection_version = $8::bigint))
        )
-       , moved AS (
+       -- Pacing never pushes next_drift_check_at: it remains the per-interval
+       -- schedule, the drift claim's lease and any provider backoff, so a
+       -- sweep cannot void an in-flight claim, and a binary that predates
+       -- pacing still finds every binding due on its own cadence.
+       , paced AS (
          UPDATE cloud_workspace_provider_bindings binding
-         SET next_drift_check_at = CASE WHEN NOT ${matched}
-               THEN clock_timestamp()
-               ELSE clock_timestamp() + ($4::bigint * interval '1 millisecond') END,
-             last_observed_at = CASE WHEN NOT ${matched}
-               THEN NULL ELSE binding.last_observed_at END
+         SET drift_paced_until = clock_timestamp() + ($4::bigint * interval '1 millisecond')
          FROM scoped
          WHERE binding.workspace_id = scoped.workspace_id
            AND binding.generation = scoped.generation
            AND binding.provider = $1
            AND binding.provider_resource_id = scoped.provider_resource_id
-           AND ((NOT ${matched} AND binding.next_drift_check_at > clock_timestamp())
-             OR (${matched} AND binding.next_drift_check_at < clock_timestamp()
-                   + (($4::bigint - $4::bigint / 12) * interval '1 millisecond')))
-         RETURNING binding.workspace_id, binding.next_drift_check_at, ${matched} AS matched
+           AND ${matched}
+           -- Re-read under the row lock: an event that committed after this
+           -- statement's snapshot keeps its requested inspect.
+           AND NOT binding.drift_inspect_requested
+           AND (binding.drift_paced_until IS NULL OR binding.drift_paced_until < clock_timestamp()
+                 + (($4::bigint - $4::bigint / 12) * interval '1 millisecond'))
+         RETURNING binding.workspace_id, binding.drift_paced_until
+       ), forced AS (
+         UPDATE cloud_workspace_provider_bindings binding
+         SET drift_paced_until = NULL,
+             last_observed_at = CASE WHEN ${contradicted} THEN NULL ELSE binding.last_observed_at END,
+             -- The settled cadence is hours long, so a contradicted listing
+             -- pulls that schedule in. A value within one claim lease is a
+             -- live claim or a provider backoff: kept, so the claim's fence
+             -- holds and the backoff is honoured. Listing the column also
+             -- fires the binding trigger, which enqueues the drift job at it.
+             next_drift_check_at = CASE WHEN ${contradicted}
+                 AND binding.next_drift_check_at > clock_timestamp() + ($10::bigint * interval '1 millisecond')
+               THEN clock_timestamp() ELSE binding.next_drift_check_at END
+         FROM scoped
+         WHERE binding.workspace_id = scoped.workspace_id
+           AND binding.generation = scoped.generation
+           AND binding.provider = $1
+           AND binding.provider_resource_id = scoped.provider_resource_id
+           AND NOT ${matched}
+           AND (binding.drift_paced_until IS NOT NULL
+             OR (${contradicted} AND binding.last_observed_at IS NOT NULL))
        )
        -- Enqueues only ever move a queued job earlier, so without this the
        -- workspace's drift job would empty-run every keep-alive margin. A job
-       -- already due was made due by an event (an intent completing, a
-       -- restore resolving, an inventory re-bind) and must run, not wait out
-       -- the horizon.
+       -- already due was made due by an event and must run.
        UPDATE control_plane_jobs job
-       SET run_at = moved.next_drift_check_at, updated_at = clock_timestamp()
-       FROM moved
-       WHERE moved.matched AND job.kind = 'cloud_workspace_drift'
+       SET run_at = paced.drift_paced_until, updated_at = clock_timestamp()
+       FROM paced
+       WHERE job.kind = 'cloud_workspace_drift'
          AND job.state = 'queued'
-         AND job.dedupe_key = 'workspace:' || moved.workspace_id::text
+         AND job.dedupe_key = 'workspace:' || paced.workspace_id::text
          AND job.run_at > clock_timestamp()
-         AND job.run_at < moved.next_drift_check_at`,
+         AND job.run_at < paced.drift_paced_until`,
       [
         scope.provider.name,
         ids,
@@ -1752,6 +1781,7 @@ export class CloudWorkspaceReconciler {
         scope.connectionId,
         scope.connectionVersion,
         ids.map((id) => inventory.get(id)!.computeStopped === true),
+        this.leaseMs,
       ],
       );
     });
@@ -1875,7 +1905,8 @@ export class CloudWorkspaceReconciler {
               `UPDATE cloud_workspace_provider_bindings
                SET provider_resource_id = $3, provider_target = $4,
                    observed_state = $5, observed_metadata = $6::jsonb,
-                   last_observed_at = now(), updated_at = now()
+                   last_observed_at = now(), updated_at = now(),
+                   drift_paced_until = NULL
                WHERE workspace_id = $1 AND generation = $2`,
               [
                 identity.workspaceId,
@@ -1894,7 +1925,8 @@ export class CloudWorkspaceReconciler {
                SET provider_resource_id = $3, provider_target = NULL,
                    observed_state = $4, observed_metadata = '{}'::jsonb,
                    last_observed_at = now(), updated_at = now(),
-                   next_drift_check_at = now()
+                   next_drift_check_at = now(), drift_inspect_requested = true,
+                   drift_paced_until = NULL
                WHERE workspace_id = $1 AND generation = $2`,
               [
                 identity.workspaceId,

@@ -66,7 +66,7 @@ const DUE: Record<LifecycleWork, string> = {
             OR (runtime.phase IN ('rolling_back','rollback_enrolling','rollback_checking') AND runtime.rollback_deadline_at>now())))) AS due_at
     FROM managed_compute_allocation_leases lease WHERE ($scope::uuid IS NULL OR lease.workspace_id=$scope) AND lease.state<>'settled'`,
   drift: `
-    SELECT cw.id AS workspace_id, cw.org_id, greatest(pb.next_drift_check_at,pb.last_observed_at+
+    SELECT cw.id AS workspace_id, cw.org_id, greatest(pb.next_drift_check_at,pb.drift_paced_until,pb.last_observed_at+
       (CASE WHEN (cw.desired_state='stopped' AND cw.status='stopped') OR (cw.desired_state='archived' AND cw.status='archived')
         THEN $stopped::bigint ELSE $drift::bigint END)*interval '1 millisecond') AS due_at
     FROM cloud_workspaces cw JOIN cloud_workspace_provider_bindings pb ON pb.workspace_id=cw.id AND pb.generation=cw.current_generation
