@@ -4,6 +4,7 @@ import { z } from "zod";
 import { withSystemStatement } from "../db.js";
 import { SqlFragment, sql } from "../sql-fragment.js";
 import type { UplinkIdentity } from "./uplink-authority.js";
+import { UplinkCodeSchema } from "./uplink-protocol.js";
 import type { UplinkExtension, UplinkSession } from "./uplink-server.js";
 
 /** The negotiated feature for credential-control push (S2 cred channel). */
@@ -13,7 +14,7 @@ const CredAckSchema = z.object({
   kind: z.enum(["agent-controls", "repository"]),
   revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
   result: z.enum(["applied", "failed"]),
-  code: z.string().min(1).max(64).optional(),
+  code: UplinkCodeSchema.optional(),
 }).strict();
 export type UplinkCredAck = z.infer<typeof CredAckSchema>;
 

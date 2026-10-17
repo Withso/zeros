@@ -389,6 +389,24 @@ describe("engine uplink server", () => {
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
   });
 
+  it("closes 4400 on a cred.ack whose code violates the contract shape", async () => {
+    const cred = new UplinkCredentialPush({
+      sessionFor: engineInstanceId => uplink.session(engineInstanceId),
+      readRevision: async () => null,
+      onAck: (_session, ack) => { acks.push(ack); },
+    });
+    const acks: Array<Record<string, unknown>> = [];
+    await start({ extensions: [cred] });
+    const { peer } = await connect({ features: ["cred.v1"] });
+    peer.send({ t: "cred.ack", s: 1, d: { kind: "agent-controls", revision: 2, result: "failed", code: "cred_fetch_failed" } });
+    await until(() => acks.length === 1);
+    expect(acks[0]).toMatchObject({ result: "failed", code: "cred_fetch_failed" });
+    // The engine maps its raw error codes itself; anything else that still
+    // violates ^[a-z][a-z0-9_]{2,63}$ is a malformed frame.
+    peer.send({ t: "cred.ack", s: 2, d: { kind: "agent-controls", revision: 3, result: "failed", code: "ECONNRESET" } });
+    await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
+  });
+
   it("dispatches unsequenced engine frames to extensions and keeps ignoring unknown types", async () => {
     const seen: Array<{ t: string; d: Record<string, unknown> }> = [];
     await start({ extensions: [{ feature: "relay.v1",

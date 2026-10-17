@@ -81,7 +81,9 @@ export const UPLINK_FEATURES = {
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const seq = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const timestampMs = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
-const code = z.string().regex(/^[a-z][a-z0-9_]{2,63}$/);
+/** The contract's machine code shape, shared by every frame that carries one. */
+export const UplinkCodeSchema = z.string().regex(/^[a-z][a-z0-9_]{2,63}$/);
+const code = UplinkCodeSchema;
 
 export const UplinkEnvelopeSchema = z.object({
   t: z.string().regex(/^[a-z][a-z0-9]{0,31}\.[a-z][a-z0-9_]{0,47}$/),
