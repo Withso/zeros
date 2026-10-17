@@ -192,6 +192,11 @@ describe("runtime session helpers", () => {
       jti: ENGINE_JTI,
       exp: 1760000300,
     });
+    expect(
+      decodeCapabilityClaims(
+        testToken({ aud: ENGINE_AUD, wsp: WORKSPACE_ID, jti: ENGINE_JTI, iat: 1760000000, exp: 1760000300 }),
+      ),
+    ).toEqual({ aud: ENGINE_AUD, wsp: WORKSPACE_ID, jti: ENGINE_JTI, exp: 1760000300, iat: 1760000000 });
     expect(decodeCapabilityClaims("a.b")).toBeNull();
     expect(decodeCapabilityClaims(`a.${base64url("not json")}.c`)).toBeNull();
     expect(

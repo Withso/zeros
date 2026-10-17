@@ -69,6 +69,16 @@ export type {
   RuntimeSocketHandlers,
 } from "./runtime-session";
 export {
+  RUNTIME_RENEWAL_FALLBACK_LEAD_MS,
+  RUNTIME_RENEWAL_GRACE_RETRY_CAP_MS,
+  RuntimeRenewal,
+} from "./runtime-renewal";
+export type {
+  RenewableRuntimeConnection,
+  RuntimeRenewalEvent,
+  RuntimeRenewalOptions,
+} from "./runtime-renewal";
+export {
   CloudRestClient,
   CloudRestError,
   classifyFailure,
