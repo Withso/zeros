@@ -240,6 +240,32 @@ describe("contract mock device stream", () => {
     const ready = await stream.nextFrame("ready");
     expect((ready.d as Record<string, unknown>).resumed).toBe(true);
   });
+
+  it("pushes schema-valid frames to ready streams and resumes from a pushed cursor", async () => {
+    const m = await start();
+    const first = await hello(m.ticket);
+    await first.nextFrame("ready");
+    m.pushStreamFrame({
+      t: "catalog.changed",
+      c: "c-2",
+      d: {
+        workspaceId: WORKSPACE,
+        version: 42,
+        catalogVersion: 10,
+        op: "upsert",
+        workspace: { ...WORKSPACE_DOCUMENT, version: 42 },
+      },
+    });
+    await first.nextFrame("catalog.changed");
+    m.closeStreams(1012, "restart");
+    expect(await first.closed).toBe(1012);
+    const second = await hello(m.ticket, { min: 1, max: 1 }, { cursor: "c-2", catalogVersion: 10 });
+    const ready = await second.nextFrame("ready");
+    expect((ready.d as Record<string, unknown>).resumed).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(second.frames.some((frame) => frame.t === "catalog.reset")).toBe(false);
+    expect(() => m.pushStreamFrame({ t: "catalog.changed", c: "c-3", d: {} })).toThrow(/invalid catalog.changed/);
+  });
 });
 
 describe("contract mock runtime auth", () => {

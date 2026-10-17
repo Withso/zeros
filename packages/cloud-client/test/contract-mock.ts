@@ -64,6 +64,11 @@ export interface ContractMock {
     /** A non-JSON body, e.g. a proxy's HTML 404 page. */
     raw?: string;
   }): void;
+  /** Sends a schema-valid server frame to every ready device-stream socket;
+   * its `c`, if any, becomes a cursor a later hello can resume from. */
+  pushStreamFrame(frame: JsonObject): void;
+  /** Closes every ready device-stream socket with `code`. */
+  closeStreams(code: number, reason: string): void;
   close(): Promise<void>;
 }
 
@@ -113,6 +118,17 @@ export async function createContractMock(
     ? new Set(options.flaggedOrganizations)
     : null;
   const sockets = new Set<WebSocket>();
+  const streamSockets = new Set<WebSocket>();
+  const resumable = new Set<string>([cursor]);
+  const serverFrameValidators = new Map<string, (value: unknown) => boolean>();
+  const serverFrameValid = (t: string) => {
+    let valid = serverFrameValidators.get(t);
+    if (!valid) {
+      valid = frameValidator(schemas.deviceStream, `server.${t}`);
+      serverFrameValidators.set(t, valid);
+    }
+    return valid;
+  };
 
   const helloValid = frameValidator(schemas.deviceStream, "client.hello");
   const readyValid = frameValidator(schemas.deviceStream, "server.ready");
@@ -293,7 +309,9 @@ export async function createContractMock(
           return;
         }
         greeted = true;
-        const resumed = d.resume?.cursor === cursor;
+        streamSockets.add(socket);
+        socket.on("close", () => streamSockets.delete(socket));
+        const resumed = d.resume !== undefined && resumable.has(d.resume.cursor);
         send(socket, {
           t: "ready",
           d: {
@@ -392,6 +410,14 @@ export async function createContractMock(
     cursor,
     injectOnce: (fault) => {
       faults.push(fault);
+    },
+    pushStreamFrame: (frame) => {
+      const valid = serverFrameValid(String(frame.t));
+      for (const socket of streamSockets) send(socket, frame, valid);
+      if (typeof frame.c === "string") resumable.add(frame.c);
+    },
+    closeStreams: (code, reason) => {
+      for (const socket of streamSockets) socket.close(code, reason);
     },
     close: () =>
       new Promise<void>((resolve) => {
