@@ -15,6 +15,7 @@ import { Hono, type Context } from "hono";
 import { createCloudGithubWriteRoutes, CLOUD_GITHUB_WRITE_PATH } from "./cloud-workspaces/github-write-routes.js";
 import type { DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
 import type { DatabaseCloudGithubReads } from "./cloud-workspaces/github-read-proxy.js";
+import { createDeviceSessionRoutes, type DeviceSessionRouteOptions } from "./realtime/device-session-routes.js";
 import { CLOUD_GITHUB_READ_PATH, createCloudGithubReadRoutes } from "./cloud-workspaces/github-read-routes.js";
 import { createCloudIdleStopRoutes, CLOUD_IDLE_STOP_PATH, type DatabaseCloudIdleStop } from "./cloud-workspaces/idle-stop.js";
 import {isCustomerCloudPath,publicCloudError} from "./cloud-workspaces/public-contract.js";
@@ -116,6 +117,8 @@ export type CreateAppDependencies = {
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
   cloudWorkspaceEngineUplink?: CloudWorkspaceEngineUplinkAdvertisement;
   cloudCapabilities?: CloudCapabilityService;
+  /** S3 `POST /v1/device-sessions`; mounted only with a realtime origin. */
+  deviceSessions?: DeviceSessionRouteOptions;
   cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
   cloudRuntimeServiceAccess?: DatabaseCloudRuntimeServiceAccess;
   cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver;
@@ -712,6 +715,7 @@ export function createApp(
       dependencies.securityEventBroker ?? new PostgresSecurityEventBroker(pool),
     ),
   );
+  if (dependencies.deviceSessions && !pendingMigration) app.route("/", createDeviceSessionRoutes(pool, dependencies.deviceSessions));
   app.route(
     "/",
     createRoutes(pool, emailConfig, config.cloudWorkspaces, {

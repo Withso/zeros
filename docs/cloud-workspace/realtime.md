@@ -205,6 +205,80 @@ authority supplies keys, epochs and engine tokens
 - **Lease.** The HTTP heartbeat still owns the engine lease in this release;
   the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
 
+## Device stream server
+
+`apps/control-plane/src/realtime/device-stream-server.ts` serves the S3
+device stream (`s3-client-contract.md` Part 2) on `/v1/device-stream`. It
+mounts in `realtime` and `combined` processes once any organization has the
+`device_stream` flag on; until then there is no socket, feed or LISTEN, the
+upgrade answers 404 and clients keep polling. Turning the flag off closes
+every stream with `4404`; the next `POST /v1/device-sessions` answers 404.
+
+- **Tickets.** `POST /v1/device-sessions` (api; device proof action
+  `device-session.create` over `{ deviceSessionId }`, 30/min per account,
+  `Cache-Control: no-store`) issues a `zds_` ticket valid 60 s. Only its
+  SHA-256 is stored, in `cloud_device_sessions` (migration 0156; forced RLS,
+  system only, cascading from the account and the device). The request may
+  name an existing `deviceSessionId`: the same account, CP session and
+  device keep it and get a new ticket, which replaces any outstanding one.
+  Realtime consumes the ticket with one conditional `UPDATE` in the
+  database, so a ticket is single-use across instances; a reused, expired or
+  no-longer-authorized ticket closes `4401`. The device session lives 24 h
+  after its last ticket; at most 20 per account are kept.
+- **Frames.** `hello` within 10 s (else `4408`), a common contract major
+  (else `4426`), then `ready`. Client frames are capped at 4 KiB (hello
+  96 KiB) and 20/s after a burst of 40 (`4429`); an unknown client frame
+  type gets a non-fatal `error frame_unknown`. `heartbeat` every 20 s; a
+  socket that answers no WebSocket ping for 45 s closes `4408`.
+- **Catalog source.** Every `catalog.changed` and `lifecycle.changed` is the
+  diff between a re-read of the account's catalog (the exact
+  `GET /v1/cloud-workspaces` access set) and what that device session was
+  last told. Re-reads are triggered by the `zeros_cloud_workspace_catalog`
+  NOTIFY (migration 0156: every committed `cloud_workspaces.version`
+  change, insert and hard delete) and by the security-event feed:
+  `workspace.authorization_changed` (that workspace),
+  `organization.authorization_changed` and `organization.access_revoked`
+  (the organization's connected accounts), `account.*` (that account).
+  Hints carry ids only. A listener reconnect or a feed gap re-reads every
+  connected account and re-checks every device session. Re-reads are
+  coalesced (25 ms) with four accounts in flight; one read covers up to
+  1,000 workspaces, and a truncated read never infers a removal.
+- **Fan-out.** A workspace's frames go only to device sessions whose last
+  re-read contained it. Losing access (or deletion) sends
+  `capability.revoked { scope: "workspace" }`, then one
+  `catalog.changed { op: "remove" }`, and nothing further for it.
+- **catalogVersion.** The global `cloud_catalog_version_seq` position (read
+  before the rows), so it is monotonic per account; frames carry the
+  maximum seen by that device session. The REST catalog returns the same
+  value. Membership changes do not draw from the sequence.
+- **Resume.** Resumable frames (`catalog.changed`, `lifecycle.changed`,
+  `notification`, `capability.revoked`) carry `c = <lineage>.<seq>` and are
+  kept for 10 minutes per device session (at most 1,000 frames or 1 MiB;
+  `ack` trims, at most once per second). A disconnected device session is
+  parked on this instance for 10 minutes. A resume from a cursor still held
+  replays the missed frames, `capability.revoked` first, then re-reads the
+  catalog. Another lineage (another instance or a restart) gets
+  `ready { resumed: false }` + `catalog.reset instance_changed`; a cursor
+  older than the retained frames gets `resume_expired`.
+- **Authority.** Device sessions are re-checked every 60 s and on
+  `account.*` / `session.revoked`: an expired device session, a revoked
+  account, device or CP session sends `capability.revoked` with scope
+  `session` / `account` / `device`, drops the device session (no resume)
+  and closes `4401`.
+- **Presence.** `presence.set` is held in memory on this instance only and
+  shared as `presence.changed` (latest wins, not resumable, 256 members)
+  with device sessions that hold the workspace, only while the
+  organization's `presence_in_memory` flag is on. Presence is not shared
+  across realtime instances yet.
+- **Producers.** `publishNotification`, `revokeCapabilities` and
+  `pushCapabilityRenewal` (for `attach`ed runtime sessions) are the entry
+  points for notification and capability producers; none is wired in this
+  release, so no `notification` or `capability.renewed` frame is sent yet.
+- **Drain.** The C0 staggered drain sends `drain { reconnectAfterMs }`
+  (0-5 s) and closes `4503`.
+- **Local.** Only cloud workspaces exist in the catalog the stream reads;
+  no desktop code opens the stream
+  (`device-stream-local-boundary.test.ts`).
 ## Engine uplink client
 
 `apps/desktop/src/engine/cloud-engine-uplink.ts` is the engine side of S2.

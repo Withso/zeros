@@ -13,6 +13,8 @@ import {
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
+const DEVICE_ID = "00000000-0000-4000-8000-0000000000f1";
+const DEVICE_SESSION_ID = "00000000-0000-4000-8000-0000000000f2";
 const TIMESTAMP = /"\d{4}-\d{2}-\d{2}T[\d:.]+(?:[+-]\d{2}:\d{2}|Z)"/g;
 
 d("reusable migrated test database", () => {
@@ -85,7 +87,22 @@ d("reusable migrated test database", () => {
     await expect(
       pool.query("DELETE FROM staff_role_changes"),
     ).rejects.toThrow(/append-only/);
-    expect(await snapshot()).not.toEqual(migrated);
+    // A device session (forced RLS, cascading from devices and users) and a
+    // catalog sequence draw from the workspace trigger are both undone.
+    await pool.query(
+      `INSERT INTO devices (id, user_id, label, platform, public_key, key_fingerprint)
+       VALUES ($1, $2, 'Restore', 'linux', $3, $4)`,
+      [DEVICE_ID, fixture.userId, Buffer.alloc(32, 7), Buffer.alloc(32, 8)],
+    );
+    await pool.query(
+      `INSERT INTO cloud_device_sessions (id, user_id, device_id, expires_at)
+       VALUES ($1, $2, $3, now() + interval '1 day')`,
+      [DEVICE_SESSION_ID, fixture.userId, DEVICE_ID],
+    );
+    await pool.query(
+      "UPDATE cloud_workspaces SET version = version + 1 WHERE id = $1",
+      [fixture.workspaceId],
+    );    expect(await snapshot()).not.toEqual(migrated);
 
     await expect(resetMigratedTestDatabase(pool)).resolves.toBe("restored");
     expect(await snapshot()).toEqual(migrated);
