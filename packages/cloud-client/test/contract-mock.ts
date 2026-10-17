@@ -413,7 +413,8 @@ export async function createContractMock(
     },
     pushStreamFrame: (frame) => {
       const valid = serverFrameValid(String(frame.t));
-      for (const socket of streamSockets) send(socket, frame, valid);
+      if (!valid(frame)) throw new Error(`contract mock would send an invalid ${String(frame.t)} frame`);
+      for (const socket of streamSockets) socket.send(JSON.stringify(frame));
       if (typeof frame.c === "string") resumable.add(frame.c);
     },
     closeStreams: (code, reason) => {

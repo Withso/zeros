@@ -243,6 +243,7 @@ describe("contract mock device stream", () => {
 
   it("pushes schema-valid frames to ready streams and resumes from a pushed cursor", async () => {
     const m = await start();
+    expect(() => m.pushStreamFrame({ t: "catalog.changed", c: "c-0", d: {} })).toThrow(/invalid catalog.changed/);
     const first = await hello(m.ticket);
     await first.nextFrame("ready");
     m.pushStreamFrame({
