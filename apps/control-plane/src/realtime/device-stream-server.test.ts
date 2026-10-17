@@ -421,6 +421,25 @@ describe("device stream server", () => {
     expect((await peer.next("catalog.changed")).d).toMatchObject({ workspaceId: held.id, op: "remove" });
   });
 
+  it("finds a member who lost a workspace or organization through what it was told, since the catalog no longer names it", async () => {
+    await start();
+    const member = principal(), stranger = principal(), held = workspace(organizationId), other = workspace(organizationId);
+    catalog.grant(member.accountUserId, held);
+    catalog.grant(member.accountUserId, other);
+    const m = await connect(member), s = await connect(stranger);
+    await Promise.all([m.peer.drainFrames(), s.peer.drainFrames()]);
+    vi.spyOn(catalog, "candidates").mockResolvedValue(new Set<string>());
+    vi.spyOn(catalog, "organizationAccounts").mockResolvedValue(new Set<string>());
+    const reads = vi.spyOn(catalog, "read");
+    catalog.revoke(member.accountUserId, held.id);
+    server.workspaceChanged(held.id);
+    expect((await m.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: held.id, op: "remove" });
+    catalog.revoke(member.accountUserId, other.id);
+    subscriber!.events([event("organization.authorization_changed", { organizationId })]);
+    expect((await m.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: other.id, op: "remove" });
+    expect(reads.mock.calls.filter(([account]) => account === stranger.accountUserId)).toEqual([]);
+  });
+
   it("resumes on this instance, replaying capability.revoked before other missed events", async () => {
     await start();
     const who = principal(), held = workspace(organizationId), other = workspace(organizationId);
@@ -582,6 +601,54 @@ describe("device stream server", () => {
     flags.presence_in_memory = false;
     b.peer.send({ t: "presence.set", d: { workspaceId: held.id, state: "active" } });
     expect((await b.peer.drainFrames()).filter(frame => frame.t === "presence.changed")).toEqual([]);
+  });
+
+  it("keeps a member present until its last connection leaves, and takes it out of only the workspace it loses", async () => {
+    await start();
+    const owner = principal(), member = principal(), held = workspace(organizationId), kept = workspace(organizationId);
+    for (const value of [held, kept]) { catalog.grant(owner.accountUserId, value); catalog.grant(member.accountUserId, value); }
+    const presence = async (peer: Peer) => (await peer.drainFrames()).filter(frame => frame.t === "presence.changed").map(frame => frame.d);
+    const phone = await connect(owner), laptop = await connect(principal(owner.accountUserId)), b = await connect(member);
+    for (const peer of [phone.peer, laptop.peer]) peer.send({ t: "presence.set", d: { workspaceId: held.id, state: "active" } });
+    expect((await b.peer.next("presence.changed")).d).toMatchObject({ workspaceId: held.id, members: [{ userId: owner.accountUserId, state: "active" }] });
+    phone.peer.ws.terminate();
+    await until(() => server.size === 2);
+    expect(await presence(b.peer)).toEqual([]);
+    laptop.peer.ws.terminate();
+    expect((await b.peer.next("presence.changed")).d).toEqual({ workspaceId: held.id, members: [] });
+    const desk = await connect(principal(owner.accountUserId));
+    for (const value of [held, kept]) b.peer.send({ t: "presence.set", d: { workspaceId: value.id, state: "idle" } });
+    await until(() => desk.peer.frames.filter(frame => frame.t === "presence.changed").length === 2);
+    await presence(desk.peer);
+    catalog.revoke(member.accountUserId, held.id);
+    server.workspaceChanged(held.id);
+    expect((await desk.peer.next("presence.changed")).d).toEqual({ workspaceId: held.id, members: [] });
+    expect(await presence(desk.peer)).toEqual([]);
+    desk.peer.send({ t: "presence.set", d: { workspaceId: kept.id, state: "active" } });
+    const shared = (await desk.peer.next("presence.changed")).d as { workspaceId: string; members: { userId: string; state: string }[] };
+    expect(shared.workspaceId).toBe(kept.id);
+    expect(shared.members.map(value => `${value.userId}:${value.state}`).sort())
+      .toEqual([`${member.accountUserId}:idle`, `${owner.accountUserId}:active`].sort());
+  });
+
+  it("revokes by organization only on device sessions holding one of its workspaces", async () => {
+    await start();
+    const other = randomUUID(), member = principal(), outsider = principal();
+    const elsewhere = workspace(other);
+    catalog.grant(member.accountUserId, elsewhere);
+    catalog.grant(outsider.accountUserId, workspace(organizationId));
+    const m = await connect(member), o = await connect(outsider);
+    await Promise.all([m.peer.drainFrames(), o.peer.drainFrames()]);
+    server.revokeCapabilities({ organizationId: other }, "organization", "organization_access_revoked");
+    expect((await m.peer.next("capability.revoked")).d).toEqual({ reason: "organization_access_revoked", scope: "organization" });
+    expect(await o.peer.drainFrames()).toEqual([]);
+    // With its last workspace there gone, the member no longer holds the organization.
+    catalog.revoke(member.accountUserId, elsewhere.id);
+    server.workspaceChanged(elsewhere.id);
+    expect((await m.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: elsewhere.id, op: "remove" });
+    await m.peer.drainFrames();
+    server.revokeCapabilities({ organizationId: other }, "organization", "organization_access_revoked");
+    expect(await m.peer.drainFrames()).toEqual([]);
   });
 
   it("delivers capability.renewed only for an attached runtime session", async () => {
