@@ -102,7 +102,8 @@ d("reusable migrated test database", () => {
     await pool.query(
       "UPDATE cloud_workspaces SET version = version + 1 WHERE id = $1",
       [fixture.workspaceId],
-    );    expect(await snapshot()).not.toEqual(migrated);
+    );
+    expect(await snapshot()).not.toEqual(migrated);
 
     await expect(resetMigratedTestDatabase(pool)).resolves.toBe("restored");
     expect(await snapshot()).toEqual(migrated);
