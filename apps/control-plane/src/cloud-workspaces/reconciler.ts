@@ -412,7 +412,7 @@ export class CloudWorkspaceReconciler {
         // A lifecycle dispatch holds its own intent lease for up to leaseMs.
         timeoutMs: leaseMs,
         backoff: { baseMs: 1_000, maxMs: 5 * 60_000 },
-        handle: job => this.runJob(job),
+        handle: (job, { signal }) => this.runJob(job, signal),
       })),
     });
   }
@@ -466,7 +466,7 @@ export class CloudWorkspaceReconciler {
 
   /** Run one lifecycle job: claim that workspace's due work of the job's kind
    * through the existing fenced claim, then reschedule at the next due time. */
-  async runJob(job: Pick<ClaimedJob, "kind" | "workspaceId" | "orgId" | "payload">): Promise<void> {
+  async runJob(job: Pick<ClaimedJob, "kind" | "workspaceId" | "orgId" | "payload">, signal?: AbortSignal): Promise<void> {
     const work = lifecycleWorkForJob(job.kind);
     if (!work) return;
     const scope = work === "diagnostics" ? null : job.workspaceId;
@@ -474,20 +474,26 @@ export class CloudWorkspaceReconciler {
     if (work !== "diagnostics" && !scope) return;
     const provider = this.dueScope().provider;
     let processed = 0;
+    // The runner aborts on timeout and lease loss and then frees the slot, so
+    // a run that kept claiming would overlap the next one in this process.
+    const live = () => !this.stopped && !signal?.aborted;
     const drain = async (claim: () => Promise<boolean>) => {
-      while (!this.stopped && processed < MAX_CLAIMS_PER_JOB && await claim()) processed += 1;
+      while (live() && processed < MAX_CLAIMS_PER_JOB && await claim()) processed += 1;
     };
     switch (work) {
       case "paidAuthority": await drain(async () => (await this.paidAuthority.runOnce(scope)) !== null); break;
       case "engineHealth": await drain(() => stopUnavailableCloudEngine(this.pool, provider, scope)); break;
       case "compute": await drain(() => this.computeLeases.runOnce(scope)); break;
       case "lifecycle": await drain(() => this.runOnce(scope)); break;
-      case "drift": if (await this.reconcileDriftOnce(scope)) processed = 1; break;
+      case "drift": if (live() && await this.reconcileDriftOnce(scope)) processed = 1; break;
       // Work still due after a pass is contested (SKIP LOCKED): back off.
       // A productive pass means a publication backlog may remain (256 per
       // pass): reschedule at once instead of backing off.
-      case "diagnostics": processed = await runCloudDiagnosticCleanup(this.pool) > 0 ? 1 : 0; break;
+      case "diagnostics": if (live()) processed = await runCloudDiagnosticCleanup(this.pool) > 0 ? 1 : 0; break;
     }
+    // An aborted run's job already belongs to the runner (failure backoff) or
+    // to whoever reclaimed its lease; moving it earlier would undo either.
+    if (signal?.aborted) return;
     // Completion deletes the job, so it is rescheduled even during shutdown;
     // work a shutdown interrupted is due again now, for another replica.
     await rescheduleLifecycleJob(this.pool, work, job, { ...this.dueScope(), processed: processed > 0 || this.stopped });

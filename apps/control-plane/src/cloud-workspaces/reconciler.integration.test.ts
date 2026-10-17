@@ -5,6 +5,7 @@ import pg from "pg";
 import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import type { ClaimedJob } from "../job-queue.js";
 import {
   CloudProviderError,
   type CloudProviderCreateInput,
@@ -2625,6 +2626,30 @@ d("cloud workspace reconciliation", () => {
     for (let i = 0; i < 3; i++) await expect(worker.reconcileOrphansOnce()).resolves.toBe(1);
     expect((await pool.query("SELECT * FROM cloud_workspace_provider_orphans")).rowCount).toBe(2);
     expect(providers.every((provider) => provider.deleteCount === 0)).toBe(true);
+  });
+
+  it("claims nothing and leaves the job alone once the runner aborts its signal", async () => {
+    // A timeout or lost lease frees the runner's slot while the handler may
+    // still run: it must stop claiming, and its reschedule must not undo the
+    // runner's failure backoff.
+    const seeded = await seedWorkspace({ intentState: "queued" });
+    const job = (await pool.query<{ kind: string; workspace_id: string; org_id: string; payload: ClaimedJob["payload"]; run_at: Date }>(
+      `SELECT kind, workspace_id, org_id, payload, run_at FROM control_plane_jobs
+       WHERE kind = 'cloud_lifecycle_intent' AND dedupe_key = $1`, [`workspace:${seeded.workspaceId}`])).rows[0]!;
+    await pool.query(`UPDATE control_plane_jobs SET run_at = now() + interval '1 hour'
+      WHERE kind = 'cloud_lifecycle_intent' AND dedupe_key = $1`, [`workspace:${seeded.workspaceId}`]);
+    const provider = new FakeProvider();
+
+    await reconciler(provider).runJob(
+      { kind: job.kind, workspaceId: job.workspace_id, orgId: job.org_id, payload: job.payload },
+      AbortSignal.abort(),
+    );
+
+    expect((await pool.query("SELECT state, attempt_count FROM cloud_workspace_lifecycle_intents WHERE id = $1",
+      [seeded.intentId])).rows[0]).toEqual({ state: "queued", attempt_count: 0 });
+    expect((await pool.query(`SELECT run_at > now() + interval '50 minutes' AS deferred FROM control_plane_jobs
+      WHERE kind = 'cloud_lifecycle_intent' AND dedupe_key = $1`, [`workspace:${seeded.workspaceId}`])).rows[0])
+      .toEqual({ deferred: true });
   });
 
   it("recovers an unbound known generation and deletes only twice-observed aged true orphans", async () => {
