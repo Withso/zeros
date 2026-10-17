@@ -215,7 +215,9 @@ export type CloudEngineUplinkOptions = {
    * acked `failed`/`cred_kind_unsupported` without calling the handler and
    * without recording it applied, so a future `repository` push is an
    * explicit signal, never silently swallowed. Defaults to
-   * `["agent-controls"]`. */
+   * `["agent-controls"]`: the CP has no `repository` revision source yet,
+   * and repository credentials still arrive on the HTTP heartbeat
+   * response. */
   credentialKinds?: readonly EngineUplinkCredentialRevision["kind"][];
   /** Reports flips of `established`. The engine drops the credential poll
    * back to its fast fallback cadence the moment the gate closes instead of
