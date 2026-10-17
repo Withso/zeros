@@ -191,6 +191,7 @@
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
     "@xterm/xterm": "^6.0.0",
+    "@zeros/cloud-client": "workspace:*",
     "@zeros/design-core": "workspace:*",
     "@zeros/design-web": "workspace:*",
     "@zeros/protocol": "workspace:*",

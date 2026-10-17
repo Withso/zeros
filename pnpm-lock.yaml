@@ -189,6 +189,9 @@ importers:
       '@xterm/xterm':
         specifier: ^6.0.0
         version: 6.0.0
+      '@zeros/cloud-client':
+        specifier: workspace:*
+        version: link:packages/cloud-client
       '@zeros/design-core':
         specifier: workspace:*
         version: link:packages/design-core

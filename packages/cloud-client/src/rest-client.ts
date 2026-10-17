@@ -66,12 +66,24 @@ export function classifyFailure(input: {
   status?: number;
   body?: unknown;
 }): RetryDecision {
+  const body = input.body as { error?: { code?: unknown; retryable?: unknown; retryAfterMs?: unknown } } | undefined;
+  const afterMs =
+    typeof body?.error?.retryAfterMs === "number" && body.error.retryAfterMs >= 0
+      ? body.error.retryAfterMs
+      : undefined;
   if (input.networkError) return { kind: "retry" };
   const status = input.status ?? 0;
-  if (status === 429 || status === 502 || status === 503 || status === 504) return { kind: "retry" };
-  const body = input.body as { error?: { code?: unknown; retryable?: unknown } } | undefined;
+  if (status === 429 || status === 502 || status === 503 || status === 504) {
+    const decision: RetryDecision = { kind: "retry" };
+    if (afterMs !== undefined) decision.afterMs = afterMs;
+    return decision;
+  }
   const code = typeof body?.error?.code === "string" ? body.error.code : "request_failed";
-  if (body?.error?.retryable === true) return { kind: "retry" };
+  if (body?.error?.retryable === true) {
+    const decision: RetryDecision = { kind: "retry" };
+    if (afterMs !== undefined) decision.afterMs = afterMs;
+    return decision;
+  }
   return { kind: "terminal", code };
 }
 

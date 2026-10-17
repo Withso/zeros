@@ -122,6 +122,12 @@ describe("classifyFailure", () => {
     expect(classifyFailure({ status: 500, body: { error: { code: "x_y_z", retryable: true } } }).kind).toBe("retry");
   });
 
+  it("carries the server's retryAfterMs hint on retry decisions", () => {
+    expect(classifyFailure({ status: 429, body: { error: { code: "rate_limited", retryAfterMs: 1500 } } }))
+      .toEqual({ kind: "retry", afterMs: 1500 });
+    expect(classifyFailure({ networkError: true })).toEqual({ kind: "retry" });
+  });
+
   it("treats other 4xx as terminal, reported once", () => {
     for (const status of [400, 401, 403, 404, 409, 422])
       expect(classifyFailure({ status }).kind).toBe("terminal");
