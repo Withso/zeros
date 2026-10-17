@@ -58,13 +58,13 @@ suite("engine uplink and workspace liveness through a database outage", () => {
   // disconnects no one. The fix that flips the two it.fails tests below and
   // deletes the stop test above needs a security decision about renewing a
   // lapsed engine lease.
-  it("after an outage longer than the 90 s engine lease, recovery stops the workspace and refuses its engine (decision G gap)", async () => {
+  it("after an outage longer than the 90 s engine lease, recovery stops the workspace (decision G gap)", async () => {
     await lapseEngineLease();
     expect(await stopUnavailableCloudEngine(pool, null, workspaceId)).toBe(true);
     expect(await desired()).toBe("stopped");
   });
 
-  it("after an outage longer than the 90 s engine lease, recovery stops the workspace and refuses its engine (decision G gap) (uplink)", async () => {
+  it("after an outage longer than the 90 s engine lease, recovery refuses the engine's uplink hello (decision G gap)", async () => {
     await lapseEngineLease();
     await expect(authority(pool).verify(identity, token)).resolves.toEqual({ ok: false, reason: "authority" });
   });

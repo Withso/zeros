@@ -127,7 +127,9 @@ replaces it with its own later schedule. The trigger skips a lease whose row
 another transaction holds, so a workspace write never waits for one; that
 lease is still checked at its scheduled time.
 
-A failed check that carries a provider wait (an HTTP `Retry-After` or Boat's body wait, capped at five minutes) is not retried sooner, but an active allocation is still re-checked before its checkpoint and stop margin.
+A failed check that carries a provider wait (an HTTP `Retry-After` or
+Boat's body wait, capped at five minutes) is not retried sooner, but an
+active allocation is still re-checked before its checkpoint and stop margin.
 
 ## Configuration and rollout
 
