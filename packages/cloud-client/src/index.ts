@@ -41,6 +41,34 @@ export {
   type RuntimeAuthParseResult,
 } from "./runtime-auth";
 export {
+  CAPABILITY_POP_DOMAIN,
+  capabilityProofMessage,
+  connectRuntime,
+  decodeCapabilityClaims,
+  defaultNonce,
+  relayHedgeDelayMs,
+  RUNTIME_AUTH_CONTRACT,
+  RUNTIME_AUTH_TIMEOUT_MS,
+  RUNTIME_CONNECT_TIMEOUT_MS,
+  RUNTIME_LEGACY_SUBPROTOCOL,
+  RUNTIME_RELAY_HEDGE_MAX_MS,
+  RUNTIME_RELAY_HEDGE_MIN_MS,
+  RUNTIME_RENEW_TIMEOUT_MS,
+  RUNTIME_SUBPROTOCOL,
+  RuntimeConnectError,
+  RuntimeConnection,
+} from "./runtime-session";
+export type {
+  CapabilityProofFields,
+  RuntimeAttemptFailure,
+  RuntimeConnectResult,
+  RuntimeRouteKind,
+  RuntimeSessionOptions,
+  RuntimeSocket,
+  RuntimeSocketFactory,
+  RuntimeSocketHandlers,
+} from "./runtime-session";
+export {
   CloudRestClient,
   CloudRestError,
   classifyFailure,
