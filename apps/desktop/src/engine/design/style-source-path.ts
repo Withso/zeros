@@ -18,6 +18,16 @@ export function designStyleSourcePathError(value: string): string | null {
   return null;
 }
 
+/** A Sass source's entry: the same rule with a .scss or .sass file. */
+export function designSassSourcePathError(value: string): string | null {
+  const lower = value.toLowerCase();
+  if (!lower.endsWith(".scss") && !lower.endsWith(".sass")) {
+    return value ? "A Sass source names a .scss or .sass file." : "Path must be 1-1024 characters.";
+  }
+  const error = designStyleSourcePathError(`${value.slice(0, -5)}.css`);
+  return error === "Only .css files can be imported." ? null : error;
+}
+
 /** Private, locally excluded folder for build-source outputs, so a build
  * writes nothing Git would show. */
 export const DESIGN_STYLE_BUILD_DIRECTORY = ".zeros/design-styles";

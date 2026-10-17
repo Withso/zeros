@@ -96,7 +96,15 @@ describe("the transcript summaries read the block waits on", () => {
     const src = hook();
     expect(src).toContain("KeyedAsyncCache");
     expect(src).toContain("useCachedRead(");
-    expect(src).toContain("loaded: key !== null && !read.loading,");
+    expect(src).toContain("loaded: key !== null && (!read.loading ||");
+  });
+
+  it("never leaves an empty chat blank while its list is slow", () => {
+    // The block waits for the first answer, but only briefly: a busy or
+    // starting engine falls back to the workspace rows.
+    const chat = source("apps/desktop/src/renderer/features/agent/agent-chat.tsx");
+    expect(chat).toContain("TRANSCRIPT_LIST_GRACE_MS");
+    expect(chat).toContain("transcriptWaitExpiredFor === chatId");
   });
 
   it("uses a structured collision-free key without a literal NUL byte", () => {

@@ -614,6 +614,8 @@ async function main() {
   };
   const styleMutationSources: string[] = [];
   const designShortcutOperations: string[] = [];
+  const designThemeUpdates: Array<{ id: string; label: string; base?: boolean }> = [];
+  let designStyleRefreshes = 0;
   let reviewStaged = false;
   let reviewCommitted = false;
   let reviewCaptured = false;
@@ -634,6 +636,15 @@ async function main() {
       __zerosHarnessDesignShortcutOperations?: string[];
     }
   ).__zerosHarnessDesignShortcutOperations = designShortcutOperations;
+  (
+    window as Window & {
+      __zerosHarnessDesignThemeUpdates?: typeof designThemeUpdates;
+      __zerosHarnessDesignStyleRefreshes?: () => number;
+    }
+  ).__zerosHarnessDesignThemeUpdates = designThemeUpdates;
+  (
+    window as Window & { __zerosHarnessDesignStyleRefreshes?: () => number }
+  ).__zerosHarnessDesignStyleRefreshes = () => designStyleRefreshes;
   const layoutUndo: Array<{
     source: string;
     snapshot: typeof currentWorkspaceSnapshot;
@@ -1478,6 +1489,28 @@ async function main() {
           throw new Error("The harness foundation is unavailable.");
         }
         return { type: "WORKSPACE_RESPONSE", result: foundation };
+      }
+      if (message.op === "design.themes.update") {
+        // Upsert one theme name, as the engine does; a new default clears the old one.
+        const theme = message.params?.theme as { id: string; label: string; base?: boolean };
+        designThemeUpdates.push(theme);
+        const existing = currentWorkspaceSnapshot.themes ?? [];
+        const named = (id: string, label: string, base: boolean) => ({ id, label, ...(base ? { base: true as const } : {}) });
+        const themes = existing.some((entry) => entry.id === theme.id)
+          ? existing.map((entry) =>
+              entry.id === theme.id
+                ? named(entry.id, theme.label, theme.base === true || entry.base === true)
+                : named(entry.id, entry.label, theme.base !== true && entry.base === true))
+          : [
+              ...existing.map((entry) => named(entry.id, entry.label, theme.base !== true && entry.base === true)),
+              named(theme.id, theme.label, theme.base === true),
+            ];
+        currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, themes };
+        return { type: "WORKSPACE_RESPONSE", result: { themes, snapshot: currentWorkspaceSnapshot } };
+      }
+      if (message.op === "design.styles.refresh") {
+        designStyleRefreshes += 1;
+        return { type: "WORKSPACE_RESPONSE", result: { ok: true } };
       }
       if (message.op === "design.snapshot") {
         if ((window as unknown as { __zerosHarnessDesignSnapshotFailure?: boolean }).__zerosHarnessDesignSnapshotFailure)

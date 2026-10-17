@@ -352,7 +352,7 @@ import {
 import { headRev, tombstonesSince } from "../db/sync";
 import {
   WINDOW_MAX_ROWS,
-  windowChatMessages,
+  windowChatMessagesPage,
   windowOlderChatMessages,
   upsertChatMessagesBulk,
   searchMessages,
@@ -605,6 +605,7 @@ const WRITE_OPS = new Set<string>([
   // Starts and idles the person's own Design style builds, the same
   // repository-task controls as Run.
   "design.styleBuilds.presence",
+  "design.styles.refresh",
   // These mutate only the engine-owned MCP vault/authorization flight. OAuth
   // tokens never leave the engine; begin/complete carries only the short-lived
   // authorization URL/code over the authenticated cloud bridge.
@@ -636,6 +637,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.page.create",
   "design.page.rename",
   "design.page.delete",
+  "design.themes.update",
   "git.reviewHunk",
   "git.resolveConflict",
   "design.capture",
@@ -783,6 +785,7 @@ const DESIGN_DOCUMENT_MUTATIONS = new Set<string>([
   "design.page.create",
   "design.page.rename",
   "design.page.delete",
+  "design.themes.update",
   "design.transaction.apply",
   "design.review.resolve",
   "design.history.undo",
@@ -4107,22 +4110,24 @@ export class WorkspaceService {
         const chatId = reqStr(params, "chatId");
         const limit = Math.min(optNum(params, "limit") ?? 200, WINDOW_MAX_ROWS);
         const before = optNum(params, "before");
-        const messages = windowChatMessages(chatId, limit, before);
-        const needsImageMigration = messages.some((row) =>
+        const page = windowChatMessagesPage(chatId, limit, before);
+        // A Local turn longer than the row budget reports its opening prompt
+        // beside the contiguous window. Cloud workers keep their existing
+        // wire shape: their history carries its own projection contract.
+        const opening = opts.cloudWorker ? undefined : page.turnOpening;
+        const rows = opening ? [opening, ...page.messages] : page.messages;
+        const needsImageMigration = rows.some((row) =>
           payloadNeedsLegacyImageMigration(row.payload),
         );
         const folder = needsImageMigration
           ? this.legacyImageMigrationCwd(chatId)
           : null;
-        return {
-          messages: folder
-            ? await externalizeLegacyMessageImages({
-                cwd: folder,
-                chatId,
-                rows: messages,
-              })
-            : messages,
-        };
+        const migrated = folder
+          ? await externalizeLegacyMessageImages({ cwd: folder, chatId, rows })
+          : rows;
+        return opening
+          ? { messages: migrated.slice(1), turnOpening: migrated[0] }
+          : { messages: migrated };
       }
       case "messages.windowOlder": {
         const chatId = reqStr(params, "chatId");

@@ -16,7 +16,7 @@ gates: `pnpm typecheck`, `pnpm lint`, `pnpm check:ui`,
 | Touched | Also run |
 |---|---|
 | Renderer UI, styling or tokens | `pnpm check:ui`; after a token or contrast change, `pnpm design:docs` |
-| Frames in `Zeros - Design/` | `design validate` and `design capture` from the frame context, then inspect the PNG. Add `--theme light` to capture Light; the default is the Base (Dark) theme. |
+| Frames in `Zeros - Design/` | `design validate` and `design capture` from the frame context, then inspect the PNG. Add `--theme light` to capture Light; the default is the Dark theme. |
 | Composer, overlay, focus or popover | `pnpm test:ui-smoke`. Label the PR `ci:ui-smoke`. |
 | Performance-sensitive UI | exact-key and race tests, `pnpm build:ui` |
 | Electron IPC or preload | `pnpm check:preload` and the relevant Electron tests |
@@ -110,3 +110,17 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   Playwright-backed Design suites also need `npx playwright install chromium`.
   Before blaming your diff for a red local run, rerun the failing files in a
   clean checkout of your base commit.
+- `pnpm test:ui-smoke` stops at the first scenario that throws, so one base
+  failure hides every later scenario. Confirm the failure on the base commit,
+  then run the rest from an untracked copy of `scripts/` without that scenario
+  (registry and partition), with the affected scenarios in one shard; delete
+  the copy afterwards.
+- `pnpm check:runtime-skew` reads its pinned commits from local Git objects
+  with `git --no-lazy-fetch`, which needs Git 2.44 or later. A shallow clone,
+  or Git 2.43 (Ubuntu 24.04), reports `runtime_skew_source_unavailable`. Fetch
+  full history and check `git --version` before suspecting the pins.
+- Database-backed control-plane suites skip without `TEST_DATABASE_URL`. Give
+  each concurrent agent its own PostgreSQL 18 server, not only its own
+  database: migration 0004 creates the cluster-wide `zeros_app` role with a
+  check-then-create race. Without Docker or sudo, signature-verified PGDG
+  packages unpacked with `dpkg -x` run as an unprivileged user.

@@ -134,10 +134,11 @@ receipt, since that kill also terminates the engine. A quiet shell does not waiv
 the final empty proof.
 Live actor/authority guards and checkpoint barriers remain mandatory.
 
-Cloud retains API authoring for now as instruction and API policy, not an
-OS-enforced Design filesystem restriction. Local Personal and organization-local
-workspaces retain their normal provider tools, permissions, native Code/Design
-editing and Host lifecycle. Chromium and iframe sandboxing protect browser
+Cloud agents author Design natively in the VM checkout, as Local agents do; the
+Design API remains an optional helper. People's Files-editor and Git writes to
+Design paths in a cloud workspace remain refused (`assertNoDesignPathWrites`).
+Local Personal and organization-local workspaces retain their normal provider
+tools, permissions, native Code/Design editing and Host lifecycle. Chromium and iframe sandboxing protect browser
 content independently of the provider execution model.
 
 ## VM and bootstrap requirements

@@ -585,6 +585,53 @@ nor a pass, and the original failed run stays red. Review this record with the
 owner's startup-fix merge; there is no reset variable, generic error-text bypass,
 deleted history or fabricated old receipt.
 
+The fixture device that signed run 11's receipt was lost with its host. On
+2026-10-16 the owner approved a password reset, a new device enrollment and one
+reviewed chain restart, pinned in `scripts/zeros-dev/chain-restart.mjs`. When
+the first receipt-bearing predecessor is **exactly** that run, attempt, source,
+artifact ID and digest, the planner returns a bootstrap plan carrying
+`chainRestart` instead of `previous`. Any other run that shares one of those
+identifiers fails closed with `chain_restart_mismatch`. The workflow still
+restores the retired receipt, and the runner checks its pinned `receipt.json`
+SHA-256 without importing or authenticating it. A credential that still uses
+the retired device ID is refused with `chain_restart_device_retired` before any
+checkpoint. The first new-chain receipt signs the record. Later runs chain to
+that receipt normally and never apply the restart again. Its carried workspaces
+are dropped from the chain but not from the product account: `prior_cleanup`
+keeps reporting `cleanup_pending` until the owner deletes every old fixture
+workspace through the product. Before the first restart run, replace the
+fixture secret with the new device and delete any cleanup handoff signed by the
+retired device. A run refused before its first checkpoint uploads no receipt,
+and the planner cannot cross that run.
+
+The planner reads one page of the newest 100 runs of this workflow on main and
+refuses with `artifact_invalid` when its walk leaves that page. The restart
+therefore applies only while run 11 stays within those 100 runs. Dispatch the
+first restart run promptly after the merge and the secret replacement. If it
+must wait, disable the workflow so skipped scheduled runs stop accumulating,
+and re-enable it just before dispatching.
+
+Never rerun run 38737559526 or any run created before this change merged. A
+rerun executes its original commit, whose planner chains to run 11. With the
+new device, that run fails authentication before its first checkpoint and
+leaves a failure the planner cannot cross. Keep `ZEROS_DEV_E2E_ENABLED`,
+`ZEROS_DEV_INFRASTRUCTURE_ENABLED` and `ZEROS_DEV_GATE0_ENABLED` unset or false
+until the change is on main and the fixture secret holds the new device. Use
+the `infrastructure` profile for the first restart run, because its budget
+tolerates setup time.
+
+Before the first restart run, confirm through the product that every workspace
+listed in run 11's receipt is deleted and that no `zd-` cloud agent credential
+remains. The restart drops the carried runs whose cleanup would otherwise have
+deleted and revoked them.
+
+Soak reports trust one device public key. A soak window that spans the restart
+reports its pre-restart attempts as incomplete.
+
+`chainRestart` appears only in the first new-chain receipt. The old chain's
+`prestartRecovery`, `handoff` and `cleanupRecovery` records are not carried.
+This is safe because the planner never walks past the first receipt it finds.
+
 After that, the scenario creates one `zd-` workspace, proves its Git checkout
 and writes a harmless marker, sends one minimal prompt to each agent, then
 stops and resumes. It checks the marker and hashes of the three durable chat

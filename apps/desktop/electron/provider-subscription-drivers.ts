@@ -1,4 +1,5 @@
 import { normalizeCodexUsage, type ProviderUsageData } from "./provider-usage";
+import { stripVTControlCharacters } from "node:util";
 import {
   providerUsageIdentity,
   type BrowserSubscriptionProvider,
@@ -28,6 +29,9 @@ interface Dependencies {
   resolveRuntime(): Promise<SubscriptionRuntime>;
   openBrowser(url: string): Promise<void>;
   spawn?: typeof spawnStdioAgent;
+  /** Device CLI detection also accepts its native API credential. Browser
+   * account ceremonies and usage reads still require a subscription. */
+  allowApiKey?: boolean;
   /** Cloud import uses an isolated profile and the native device ceremony. */
   onDeviceCode?: (code: { verificationUrl: "https://auth.openai.com/codex/device"; userCode: string }) => void;
 }
@@ -146,7 +150,7 @@ export function createSubscriptionDriver(
     signal.throwIfAborted();
   };
 
-  const readClaude = (runtime: SubscriptionRuntime, signal: AbortSignal) =>
+  const readClaude = (runtime: SubscriptionRuntime, signal: AbortSignal, allowApiKey = false) =>
     withProcess(
       runtime,
       ["auth", "status", "--json"],
@@ -165,6 +169,8 @@ export function createSubscriptionDriver(
         if (result.error || result.signal || overflow)
           throw new SubscriptionError("status");
         const status = JSON.parse(output) as Record<string, unknown>;
+        if (allowApiKey && status.loggedIn === true && status.authMethod === "api_key")
+          return { state: "connected" };
         if (status.loggedIn !== true || status.authMethod !== "claude.ai")
           return { state: "disconnected" };
         return {
@@ -198,10 +204,12 @@ export function createSubscriptionDriver(
     });
   const readCodex = async (
     rpc: JsonRpcStdioClient,
+    allowApiKey = false,
   ): Promise<SubscriptionAccount> => {
     const { account } = await rpc.request<GetAccountResponse>("account/read", {
       refreshToken: true,
     });
+    if (allowApiKey && account?.type === "apiKey") return { state: "connected" };
     if (account?.type !== "chatgpt") return { state: "disconnected" };
     return {
       state: "connected",
@@ -236,10 +244,10 @@ export function createSubscriptionDriver(
     read: (signal) =>
       withRuntime(signal, (runtime) =>
         provider === "claude"
-          ? readClaude(runtime, signal)
-          : withCodex(runtime, signal, readCodex),
+          ? readClaude(runtime, signal, deps.allowApiKey)
+          : withCodex(runtime, signal, rpc => readCodex(rpc, deps.allowApiKey)),
       ),
-    login: ({ signal, onCodeRequired }) =>
+    login: ({ signal, onCodeRequired, onCredentialsCommitted }) =>
       withRuntime(signal, async (runtime) => {
         if (provider === "claude") {
           await withProcess(
@@ -247,22 +255,26 @@ export function createSubscriptionDriver(
             ["auth", "login", "--claudeai"],
             signal,
             async (proc) => {
-              let tail = "";
+              const tails = { stdout: "", stderr: "" };
               let opened: Promise<void> | undefined;
               let codeReady = false;
               let fail!: (error: unknown) => void;
               const failed = new Promise<never>((_, reject) => {
                 fail = reject;
               });
-              const onData = (chunk: Buffer) => {
+              const onData = (stream: "stdout" | "stderr", chunk: Buffer) => {
                 // Parse only complete URL tokens; stdout may split PKCE parameters
                 // across chunks. Neither raw output nor authorization URLs leave main.
-                tail = (tail + chunk.toString()).slice(-16_384);
+                tails[stream] = (tails[stream] + chunk.toString()).slice(-16_384);
+                const tail = stripVTControlCharacters(tails[stream]);
                 if (!opened) {
-                  const match = /https:\/\/[^\s<>"']+(?=[\s<>"'])/.exec(tail);
-                  if (match) {
+                  for (const match of tail.matchAll(/https:\/\/[^\s<>"']+(?=[\s<>"'])/g)) {
+                    // Help/update links are not authorization URLs. Ignore them
+                    // without ending the real native sign-in ceremony.
+                    try { subscriptionBrowserUrl(provider, match[0]); } catch { continue; }
                     opened = openBrowser(match[0], signal);
                     void opened.catch(fail);
+                    break;
                   }
                 }
                 if (
@@ -279,10 +291,19 @@ export function createSubscriptionDriver(
                   });
                 }
               };
-              proc.child.stdout?.on("data", onData);
-              proc.child.stderr?.on("data", onData);
+              const onStdout = (chunk: Buffer) => onData("stdout", chunk);
+              const onStderr = (chunk: Buffer) => onData("stderr", chunk);
+              proc.child.stdout?.on("data", onStdout);
+              proc.child.stderr?.on("data", onStderr);
+              // Observe native completion even when cancellation wins the
+              // process race. A successful exit precedes our status/cleanup.
+              const exited = proc.exited.then((result) => {
+                if (opened && result.code === 0 && !result.error && !result.signal)
+                  onCredentialsCommitted?.();
+                return result;
+              });
               try {
-                const result = await Promise.race([proc.exited, failed]);
+                const result = await Promise.race([exited, failed]);
                 if (
                   !opened ||
                   result.code !== 0 ||
@@ -292,9 +313,9 @@ export function createSubscriptionDriver(
                   throw new SubscriptionError("failed");
                 await opened;
               } finally {
-                proc.child.stdout?.off("data", onData);
-                proc.child.stderr?.off("data", onData);
-                tail = "";
+                proc.child.stdout?.off("data", onStdout);
+                proc.child.stderr?.off("data", onStderr);
+                tails.stdout = tails.stderr = "";
               }
             },
           );
@@ -319,6 +340,10 @@ export function createSubscriptionDriver(
               settle = resolve;
             },
           );
+          const complete = (result: AccountLoginCompletedNotification) => {
+            if (result.success) onCredentialsCommitted?.();
+            settle(result);
+          };
           const early = new Map<string, AccountLoginCompletedNotification>();
           rpc.onNotification("account/login/completed", (raw) => {
             const result = raw as AccountLoginCompletedNotification;
@@ -327,7 +352,7 @@ export function createSubscriptionDriver(
               typeof result.success !== "boolean"
             )
               return;
-            if (result.loginId === loginId) settle(result);
+            if (result.loginId === loginId) complete(result);
             else if (!loginId && early.size < 8)
               early.set(result.loginId, result);
           });
@@ -344,7 +369,7 @@ export function createSubscriptionDriver(
             if (signal.aborted) cancel();
             const existing = early.get(loginId);
             early.clear();
-            if (existing) settle(existing);
+            if (existing) complete(existing);
             if (response.type === "chatgptDeviceCode") {
               // The pinned native runtime supplies only a public verification
               // URL and one-time code. Never accept arbitrary browser targets.

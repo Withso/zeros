@@ -18,7 +18,8 @@ import { closedError, diagnosticEvidence, ZerosDevError, type ErrorCode } from "
 import { controlPlaneHealth } from "./health";
 import { HourlyCredentials } from "./hourly-credentials";
 import { runHourly, recoverHourlyRun, HOURLY_CLEANUP_MS, HOURLY_TOTAL_MS } from "./hourly";
-import { ExecutionSchema, PrestartRecoverySchema, type PrestartRecovery, importHourlyArtifact, exportHourlyArtifact } from "./hourly-artifact";
+import { ExecutionSchema, PrestartRecoverySchema, ChainRestartSchema, type PrestartRecovery, type ChainRestart, importHourlyArtifact,
+  exportHourlyArtifact, verifyRetiredReceipt } from "./hourly-artifact";
 import { actionsProfile, hourlyContext } from "./hourly-actions.mjs";
 import { runGate0, productGate0Probe } from "./gate0";
 import { GATE0_TOTAL_MS } from "./gate0-contract";
@@ -33,7 +34,7 @@ const PIN_KEYS = ["ZEROS_DEV_PASSWORD", "ZEROS_DEV_WORKOS_SUBJECT", "ZEROS_DEV_A
   "ZEROS_DEV_REPOSITORY", "ZEROS_DEV_REPOSITORY_ID", "ZEROS_DEV_GITHUB_INSTALLATION_ID", "ZEROS_DEV_DEVICE_PRIVATE_KEY_B64"] as const;
 const profileSchema = z.enum(["hourly", "gate0", "infrastructure"]);
 const planSchema = z.object({ execution: ExecutionSchema, profile: profileSchema.default("hourly"),
-  prestartRecovery: PrestartRecoverySchema.optional(),
+  prestartRecovery: PrestartRecoverySchema.optional(), chainRestart: ChainRestartSchema.optional(),
   bootstrap: z.boolean(), previous: ExecutionSchema.nullable(), artifactId: z.string().regex(/^[1-9][0-9]{0,19}$/).nullable() }).strict();
 
 function maskActionsSecrets(env: Readonly<Record<string, string | undefined>>): void {
@@ -138,14 +139,14 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
   let execution: z.infer<typeof ExecutionSchema> | undefined, artifact: string | undefined;
   let profile: z.infer<typeof profileSchema> | undefined;
   let handoff: CleanupHandoffReference | undefined, cleanup: CleanupSummary | undefined, prestartRecovery: PrestartRecovery | undefined;
-  let cleanupRecovery: CleanupRecoveryReference | undefined, sourceArtifactSha256: string | undefined;
+  let cleanupRecovery: CleanupRecoveryReference | undefined, sourceArtifactSha256: string | undefined, chainRestart: ChainRestart | undefined;
   try {
     execution = ExecutionSchema.parse(hourlyContext(env));
     profile = profileSchema.parse(actionsProfile(env));
     const plan = planSchema.parse(JSON.parse(env.ZEROS_DEV_E2E_PLAN ?? ""));
     prestartRecovery = plan.prestartRecovery;
-    if (plan.profile !== profile || JSON.stringify(plan.execution) !== JSON.stringify(execution) || plan.bootstrap !== (plan.previous === null) || plan.bootstrap !== (plan.artifactId === null))
-      throw new ZerosDevError("artifact_invalid");
+    if (plan.profile !== profile || JSON.stringify(plan.execution) !== JSON.stringify(execution) || plan.bootstrap !== (plan.previous === null) || plan.bootstrap !== (plan.artifactId === null) ||
+      plan.chainRestart && !plan.bootstrap) throw new ZerosDevError("artifact_invalid");
     const started = Number(env.ZEROS_DEV_E2E_START_MS), wall = Date.now(), anchor = performance.now();
     // The workflow starts this budget before dependency installation. Anchor
     // its remainder once so a wall-clock adjustment cannot extend the run.
@@ -157,6 +158,13 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
     const credentialsFile = await initializeActionsFixture(root, env), values = (await credentialsFile.read()).values;
     const fixture = parseFixture(values);
     credential = parseCloudReplicaDeviceCredential(JSON.parse(Buffer.from(values.ZEROS_DEV_DEVICE_PRIVATE_KEY_B64!, "base64").toString("utf8")));
+    if (plan.chainRestart) {
+      // Refuse before any checkpoint: a retired-device signature must not
+      // extend the old chain with a record that drops its carried runs.
+      if (credential.deviceId === plan.chainRestart.retiredDeviceId) throw new ZerosDevError("chain_restart_device_retired");
+      await verifyRetiredReceipt(path.join(temporary, "zeros-dev-previous", "receipt.json"), plan.chainRestart);
+      chainRestart = plan.chainRestart;
+    }
     const output = path.join(temporary, "zeros-dev-output"); await ownedDirectory(output); artifact = path.join(output, "receipt.json");
     const context = path.join(root, ".context"); await ownedDirectory(context);
     store = new RunStore(path.join(context, "zeros-dev"), fixture, credential);
@@ -170,19 +178,19 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
     const uncertain = { runId, success: false, code: "command_uncertain" as const };
     // An initial checkpoint precedes authentication or any product write. All
     // subsequent intent saves atomically replace only this signed execution.
-    await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { handoff, profile, prestartRecovery, cleanupRecovery });
+    await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { handoff, profile, prestartRecovery, cleanupRecovery, chainRestart });
     historyVerified = true;
     if (env.ZEROS_DEV_CLEANUP_HANDOFF_B64) {
       ({ handoff, cleanupRecovery } = await importCleanupInput(env.ZEROS_DEV_CLEANUP_HANDOFF_B64, runs, device,
         { sourceArtifactSha256, handoff, cleanupRecovery }));
-      await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff, profile, prestartRecovery, cleanupRecovery });
+      await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff, profile, prestartRecovery, cleanupRecovery, chainRestart });
     }
     let checkpoints = Promise.resolve();
     const withRun = <T>(id: string, source: Source | null, work: (handle: RunHandle) => Promise<T>) => runs.withRun(id, source, async handle => {
       const save = handle.save;
       handle.save = async () => {
         await save();
-        const checkpoint = checkpoints.then(async () => { await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff, profile, prestartRecovery, cleanupRecovery }); });
+        const checkpoint = checkpoints.then(async () => { await exportHourlyArtifact(outputFile, runs, device, identity, uncertain, { replace: true, handoff, profile, prestartRecovery, cleanupRecovery, chainRestart }); });
         checkpoints = checkpoint.catch(() => {}); await checkpoint;
       };
       return work(handle);
@@ -257,7 +265,7 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
       catch (error) { fail(error); }
     }
     if (historyVerified && store && credential && execution && artifact) {
-      try { cleanup = await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code, ...diagnostic }, { replace: true, handoff, profile, prestartRecovery, cleanupRecovery }); }
+      try { cleanup = await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code, ...diagnostic }, { replace: true, handoff, profile, prestartRecovery, cleanupRecovery, chainRestart }); }
       catch { code ??= "artifact_invalid"; }
     }
     write({ schema: profile === "infrastructure" ? "zeros.dev-infrastructure-result/v1" : "zeros.dev-hourly-result/v1",

@@ -115,6 +115,7 @@ import {
   bridgeDesignCreateFrame,
   bridgeDesignCreatePage,
   bridgeDesignRenamePage,
+  bridgeDesignUpdateTheme,
   bridgeDesignDeletePage,
   bridgeDesignSelectPage,
   bridgeDesignApplyTransaction,
@@ -135,6 +136,7 @@ import {
   bridgeDesignSetRuntimeAudit,
   bridgeDesignSetSelection,
   bridgeDesignStyleBuildPresence,
+  bridgeDesignRefreshStyles,
   bridgeDesignSnapshot,
   bridgeDesignTokens,
   bridgeDesignUpdateToken,
@@ -194,6 +196,7 @@ export type {
   DesignScreenshotInputWire,
   DesignSelectionInputWire,
   DesignStyleSourceWire,
+  DesignThemeWire,
   DesignTokenWire,
   DesignTokenMutationWire,
   DesignWorkspaceSnapshotWire,
@@ -611,6 +614,10 @@ export async function designSetScreenshot(
   );
 }
 
+export async function designRefreshStyles(workspaceId: string): Promise<void> {
+  await bridgeDesignRefreshStyles(requireBridge("update design styles"), workspaceId);
+}
+
 export async function designStyleBuildPresence(
   workspaceId: string,
   present: boolean,
@@ -643,6 +650,10 @@ export async function designCreatePage(workspaceId: string, title?: string) {
 
 export async function designRenamePage(workspaceId: string, pageId: string, title: string) {
   return bridgeDesignRenamePage(requireBridge("rename a design page"), workspaceId, pageId, title);
+}
+
+export async function designUpdateTheme(workspaceId: string, theme: { id: string; label: string; base?: boolean }) {
+  return bridgeDesignUpdateTheme(requireBridge("name a design theme"), workspaceId, theme);
 }
 
 export async function designDeletePage(workspaceId: string, pageId: string, expectedFrameIds: readonly string[]) {

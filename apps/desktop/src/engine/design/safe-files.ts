@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { open, realpath, stat, type FileHandle } from "node:fs/promises";
+import { lstat, open, realpath, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 export interface SafeRegularFileMetadata {
@@ -91,6 +91,34 @@ async function openVerifiedRegularFile(
     await handle.close().catch(() => {});
     return null;
   }
+}
+
+/** Why the safe reader returned nothing for a path. */
+export type SafeRegularFileProblem = "missing" | "outside" | "link" | "too-large" | "unreadable";
+
+/** Explain a refused read for status messages; never reads file contents.
+ * "outside" covers links whose real location escapes the root, such as a
+ * package linked from elsewhere or a shared package store. */
+export async function diagnoseSafeRegularFile(
+  root: string,
+  target: string,
+  maxBytes: number,
+): Promise<SafeRegularFileProblem> {
+  const resolvedTarget = path.resolve(target);
+  if (!within(path.resolve(root), resolvedTarget)) return "outside";
+  const info = await stat(resolvedTarget).catch(() => null);
+  if (!info) return "missing";
+  const [canonicalRoot, canonicalTarget, entry] = await Promise.all([
+    realpath(root).catch(() => null),
+    realpath(resolvedTarget).catch(() => null),
+    lstat(resolvedTarget).catch(() => null),
+  ]);
+  if (!canonicalRoot || !canonicalTarget) return "unreadable";
+  if (!within(canonicalRoot, canonicalTarget)) return "outside";
+  // The reader never follows a link in the file's own name.
+  if (entry?.isSymbolicLink()) return "link";
+  if (!info.isFile()) return "unreadable";
+  return info.size > maxBytes ? "too-large" : "unreadable";
 }
 
 export async function inspectSafeRegularFile(

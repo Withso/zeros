@@ -73,6 +73,8 @@ import { subscribeToLiveChatDrafts, liveChatDraftEntries } from "../features/age
 import { liveEditDraftEntries, subscribeToLiveEditDrafts, pruneLiveEditDrafts } from "../features/agent/edit-live-drafts";
 import { onNativeBeforeQuit } from "../platform/runtime";
 import { startAttachmentSourceMaintenance } from "../features/agent/attachment-sources";
+import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fresh-local-chats";
+import { localTranscriptCache } from "./local-transcript-cache";
 import { loadProjects } from "./projects-store";
 import { DEFAULT_REPO_MODE_VIEWS, repoPageModeForView } from "./repo-page-mode";
 import {
@@ -2268,13 +2270,30 @@ export interface WorkspaceStore extends WorkspaceState {
   dispatch: (action: Action) => void;
 }
 
-export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
+/** Transcript side effects of renderer-originated chat lifecycle actions.
+ * ADD_CHAT is only ever a chat this renderer just created (engine rows arrive
+ * through HYDRATE/MERGE), so its transcript is known to be empty; DELETE_CHAT
+ * must not leave a cached copy behind. Local chats only. */
+function noteChatTranscriptLifecycle(state: WorkspaceState, action: Action): void {
+  if (action.type === "ADD_CHAT") {
+    const chat = action.chat;
+    if (chat.kind !== "terminal" && !state.chats.some((known) => known.id === chat.id)) {
+      markFreshLocalChat(chat.id, chat.folder);
+    }
+  } else if (action.type === "DELETE_CHAT") {
+    forgetFreshLocalChat(action.id);
+    localTranscriptCache.forget(action.id);
+  }
+}
+
+export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
   ...initialState,
   // rememberActiveFolder keeps `lastWorkspaceFolder` in sync with the live
   // workspace after every action; rememberActiveChatForFolder records the
   // active chat per workspace folder so switching back restores the user's
   // place (a no-op reducer result stays a no-op through both).
-  dispatch: (action) =>
+  dispatch: (action) => {
+    noteChatTranscriptLifecycle(get(), action);
     set((s) => {
       const next = rememberActiveChatForFolder(rememberActiveFolder(reducer(s, action)));
       if (action.type === "HYDRATE_CHATS" || next === s) return next;
@@ -2282,8 +2301,19 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
         next.activeChatId !== s.activeChatId || next.newAgentFolder !== s.newAgentFolder ||
         next.lastWorkspaceFolder !== s.lastWorkspaceFolder;
       return navigated ? { ...next, navigationVersion: (s.navigationVersion ?? 0) + 1 } : next;
-    }),
+    });
+  },
 }));
+
+// Start reading the boot chat's Local transcript copy before React renders, so
+// the first frames after launch paint it while the engine is still starting.
+{
+  const boot = useWorkspaceStore.getState();
+  const active = boot.chats.find((chat) => chat.id === boot.activeChatId);
+  if (active && !active.archived && active.kind !== "terminal") {
+    localTranscriptCache.prefetch([active.id]);
+  }
+}
 
 /** Record one deliberate action without subscribing the caller to the store.
  * Selection-only surfaces must never call this helper. */

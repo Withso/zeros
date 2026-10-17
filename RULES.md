@@ -319,7 +319,7 @@ Zeros runs the same product against two runtimes. Handle both on every change.
      one non-root user, `zeros-engine` (VM UID/GID 10003), without an agent sandbox,
      in the real checkout with normal VM egress. Per-conversation directories
      provide state separation, not a security boundary.
-     Cloud retains API authoring for now as policy, not OS-enforced Design protection.
+     Cloud agents author Design natively in that checkout, as Local agents do.
    - Actor roles (prompter, developer, manager, owner) gate actions on the
      server, not only in the UI.
    - Several devices attach at once and must converge.

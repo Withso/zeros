@@ -5,7 +5,8 @@ import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCloudReplicaDeviceCredential } from "../../apps/desktop/src/engine/cloud-replica-device";
 import { RunStore } from "../zeros-dev/receipts";
-import { exportHourlyArtifact, importHourlyArtifact, verifyPublicHourlyArtifact } from "../zeros-dev/hourly-artifact";
+import { exportHourlyArtifact, importHourlyArtifact, verifyPublicHourlyArtifact, verifyRetiredReceipt } from "../zeros-dev/hourly-artifact";
+import { CHAIN_RESTART } from "../zeros-dev/chain-restart.mjs";
 import type { Fixture } from "../zeros-dev/config";
 import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
 import { PRESTART_RECOVERY } from "../zeros-dev/prestart-recovery.mjs";
@@ -13,11 +14,11 @@ import { initialInfrastructure } from "../zeros-dev/infrastructure-contract";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
-async function fixture() {
+async function fixture(deviceId: string = randomUUID()) {
   const root = await mkdtemp(path.join(os.tmpdir(), "zd-artifact-")); roots.push(root);
   const accountId = randomUUID(), fixture: Fixture = { subject: "user_fixture", accountId, email: "fixture@example.test", organizationId: randomUUID(),
     repository: { id: "123", owner: "fixture", name: "fixture", installationId: randomUUID() } };
-  const credential = { ...createCloudReplicaDeviceCredential(accountId), deviceId: randomUUID() };
+  const credential = { ...createCloudReplicaDeviceCredential(accountId), deviceId };
   const store = new RunStore(path.join(root, "runs"), fixture, credential), runId = randomUUID();
   const execution = { workflowRunId: "17", attempt: 1, sourceSha: "a".repeat(40) };
   await store.withRun(runId, { revision: execution.sourceSha, dirty: false }, async h => {
@@ -62,6 +63,48 @@ describe("cross-run signed Actions receipts", () => {
       { prestartRecovery: { ...PRESTART_RECOVERY, attempt: 2 } } as never)).rejects.toThrow("zeros_dev_artifact_invalid");
     raw.payload.prestartRecovery.jobId = "17";
     expect(() => verifyPublicHourlyArtifact(raw, { deviceId: f.credential.deviceId, publicKey: f.credential.publicKey }, f.execution)).toThrow("zeros_dev_artifact_invalid");
+  });
+  it("signs the exact reviewed chain restart for its successor without letting it be inherited", async () => {
+    const f = await fixture(), result = { code: "command_uncertain" as const, success: false, runId: f.runId };
+    const trust = { deviceId: f.credential.deviceId, publicKey: f.credential.publicKey };
+    await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, result, { chainRestart: CHAIN_RESTART });
+    const raw = JSON.parse(await readFile(f.file, "utf8"));
+    expect(raw.payload.chainRestart).toEqual(CHAIN_RESTART);
+    expect(verifyPublicHourlyArtifact(raw, trust, f.execution)).toMatchObject({ chainRestart: CHAIN_RESTART });
+    const next = new RunStore(path.join(f.root, "next"), f.fixture, f.credential);
+    expect(await importHourlyArtifact(f.file, next, f.credential, f.execution)).toEqual({});
+    expect((await next.read(f.runId)).runId).toBe(f.runId);
+    await expect(exportHourlyArtifact(f.file, f.store, f.credential, f.execution, result, { replace: true }))
+      .rejects.toThrow("zeros_dev_artifact_invalid");
+    expect(JSON.parse(await readFile(f.file, "utf8"))).toEqual(raw);
+    for (const [index, changed] of [{ ...CHAIN_RESTART, attempt: 2 }, { ...CHAIN_RESTART, receiptSha256: "0".repeat(64) },
+      { ...CHAIN_RESTART, approvedBy: "synthetic" }, { ...CHAIN_RESTART, reason: undefined }].entries())
+      await expect(exportHourlyArtifact(path.join(f.root, "output", `changed-${index}.json`), f.store, f.credential, f.execution, result,
+        { chainRestart: changed } as never)).rejects.toThrow("zeros_dev_artifact_invalid");
+    const key = createPrivateKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: f.credential.publicKey, d: f.credential.privateKey } });
+    const edits: ((record: Record<string, unknown>) => void)[] = [record => { record.retiredDeviceId = randomUUID(); },
+      record => { record.artifactDigest = `sha256:${"0".repeat(64)}`; }, record => { record.extra = true; }, record => { delete record.approvedOn; }];
+    for (const edit of edits) {
+      // Re-sign each edit so only the strict record contract can reject it.
+      const copy = structuredClone(raw); edit(copy.payload.chainRestart);
+      copy.signature = sign(null, Buffer.from(JSON.stringify(copy.payload)), key).toString("base64url");
+      expect(() => verifyPublicHourlyArtifact(copy, trust, f.execution)).toThrow("zeros_dev_artifact_invalid");
+    }
+  });
+  it("refuses a chain restart signed by the retired device it replaces", async () => {
+    const f = await fixture(CHAIN_RESTART.retiredDeviceId), result = { code: "command_uncertain" as const, success: false, runId: f.runId };
+    await expect(exportHourlyArtifact(f.file, f.store, f.credential, f.execution, result, { chainRestart: CHAIN_RESTART }))
+      .rejects.toThrow("zeros_dev_artifact_invalid");
+    await expect(readFile(f.file)).rejects.toMatchObject({ code: "ENOENT" });
+    await exportHourlyArtifact(f.file, f.store, f.credential, f.execution, result);
+  });
+  it("checks the retired receipt only by its pinned bytes and never follows an alias", async () => {
+    const f = await fixture(), file = path.join(f.root, "retired.json"), link = path.join(f.root, "retired-link.json");
+    await writeFile(file, "{}\n", { mode: 0o600 }); await symlink(file, link);
+    await expect(verifyRetiredReceipt(file, CHAIN_RESTART)).rejects.toThrow("zeros_dev_chain_restart_mismatch");
+    await expect(verifyRetiredReceipt(link, CHAIN_RESTART)).rejects.toThrow("zeros_dev_artifact_invalid");
+    await expect(verifyRetiredReceipt(path.join(f.root, "missing.json"), CHAIN_RESTART)).rejects.toThrow("zeros_dev_artifact_invalid");
+    await expect(verifyRetiredReceipt(file, { ...CHAIN_RESTART, receiptSha256: "0".repeat(64) } as never)).rejects.toThrow("zeros_dev_artifact_invalid");
   });
   it("uses a separate infrastructure signature domain even for its initial uncertain checkpoint", async () => {
     const f = await fixture();

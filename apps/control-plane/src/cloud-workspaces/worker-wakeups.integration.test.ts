@@ -47,7 +47,9 @@ d("commit-bound worker wakeups", () => {
   it("rearms an idle worker for an earlier future deadline and claims it within one second", async () => {
     const fixture = await seedReadyCloudWorkspace(pool);
     await pool.query("DELETE FROM cloud_workspace_outbox");
-    const sink = { deliver: vi.fn(async () => {}) };
+    // Like a real sink, delivery finishes after the call is observed. The
+    // worker records success in a separate transaction after that.
+    const sink = { deliver: vi.fn(async () => { await new Promise(resolve => setTimeout(resolve, 50)); }) };
     const worker = new CloudWorkspaceOutboxWorker(pool, sink);
     const stop = worker.start();
     const connected = vi.fn();
@@ -64,7 +66,8 @@ d("commit-bound worker wakeups", () => {
       await vi.waitFor(() => expect(sink.deliver).toHaveBeenCalledOnce(), { timeout: 1_150, interval: 10 });
       expect(Date.now()).toBeGreaterThanOrEqual(row.due_at.getTime());
       expect(Date.now() - row.due_at.getTime()).toBeLessThan(1_000);
-      expect((await pool.query("SELECT state FROM cloud_workspace_outbox WHERE id=$1", [id])).rows[0].state).toBe("succeeded");
+      await vi.waitFor(async () => expect((await pool.query<{ state: string }>("SELECT state FROM cloud_workspace_outbox WHERE id=$1", [id]))
+        .rows[0]!.state).toBe("succeeded"), { timeout: 1_000, interval: 10 });
     } finally { await stopNotices(); await stop(); }
   });
 

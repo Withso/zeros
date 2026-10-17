@@ -183,6 +183,7 @@ import {
   createDesignTextNodeId,
 } from "./design-text-editing";
 import { DesignThemeEditor } from "./design-theme-editor";
+import { designThemeView, effectiveDesignTheme } from "./design-themes";
 import { DesignToolbarButton } from "./design-inspector-kit";
 import { CloudDesignImageUpload } from "./cloud-design-image-upload";
 import { designRuntimeLayerLabel } from "./design-layer-label";
@@ -452,6 +453,13 @@ export function DesignCanvas({
     (state) => state.setActiveTheme,
   );
   const setViewport = useDesignWorkspaceUiStore((state) => state.setViewport);
+  // Frames show the chosen theme, else the named default theme (whose id
+  // style sources may map); a directory without names keeps plain Base.
+  const baseThemeId = useMemo(
+    () => designThemeView(snapshot?.themes).baseId,
+    [snapshot?.themes],
+  );
+  const frameTheme = effectiveDesignTheme(view.activeTheme, baseThemeId);
   const selectedFrame =
     snapshot?.frames.find((frame) => frame.file === view.selectedFrame) ??
     snapshot?.frames[0] ??
@@ -590,7 +598,7 @@ export function DesignCanvas({
     peerGeometryState.selectionOwner === peerGeometrySelectionOwner
       ? peerGeometryState.details
       : EMPTY_NODE_DETAILS;
-  const childGeometrySelectionOwner = `${selectedFrame?.file ?? ""}\u0000${layoutOwnerId ?? ""}\u0000${view.activeTheme ?? ""}`;
+  const childGeometrySelectionOwner = `${selectedFrame?.file ?? ""}\u0000${layoutOwnerId ?? ""}\u0000${frameTheme ?? ""}`;
   const childGeometryOwner = `${childGeometrySelectionOwner}\u0000${selectedFrame?.sourceVersion ?? ""}`;
   const [childGeometryState, setChildGeometryState] = useState<{
     owner: string;
@@ -761,12 +769,19 @@ export function DesignCanvas({
     [snapshot?.styleSources, snapshot?.tokens],
   );
 
+  const themeView = useMemo(
+    () => designThemeView(snapshot?.themes, [...availableThemes]),
+    [availableThemes, snapshot?.themes],
+  );
+
   useEffect(() => {
     if (!workspaceId || !snapshot || !view.activeTheme) return;
-    if (availableThemes.has(view.activeTheme)) return;
+    // Validate against the picker catalog, including themes without token
+    // overrides. The default theme is shown by choosing none.
+    if (themeView.others.includes(view.activeTheme)) return;
     setActiveTheme(workspaceId, null);
   }, [
-    availableThemes,
+    themeView,
     setActiveTheme,
     snapshot,
     view.activeTheme,
@@ -6779,7 +6794,7 @@ export function DesignCanvas({
                       selected ? view.selectedNodeIds : EMPTY_NODE_IDS
                     }
                     live={liveFrameFiles.has(frame.file)}
-                    theme={view.activeTheme}
+                    theme={frameTheme}
                     highResolutionTile={
                       highResolutionTiles.get(frame.file) ?? null
                     }
@@ -7524,7 +7539,7 @@ export function DesignCanvas({
               ref={themeEditorTriggerRef}
               data-design-theme-trigger
               label="Open theme editor"
-              tooltip={`Themes · ${view.activeTheme ?? "Base"}`}
+              tooltip={`Themes · ${themeView.label(view.activeTheme)}`}
               shortcut="⌥T"
               tooltipSide="right"
               disabled={!workspaceId || !selectedFrame}
@@ -7552,12 +7567,15 @@ export function DesignCanvas({
 
         <DesignThemeEditor
           workspaceId={workspaceId}
+          workspaceFolder={folder}
+          directory={snapshot?.directory ?? null}
           frame={selectedFrame}
           tokens={snapshot?.tokens ?? []}
           tokenSourceVersion={snapshot?.tokenSourceVersion ?? null}
           styleSources={snapshot?.styleSources}
           styleSourceErrors={snapshot?.styleSourceErrors}
-          activeTheme={view.activeTheme}
+          themeNames={snapshot?.themes}
+          activeTheme={view.activeTheme === baseThemeId ? null : view.activeTheme}
           active={active}
           open={themeEditorOpen}
           returnFocusRef={themeEditorTriggerRef}

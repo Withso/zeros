@@ -62,6 +62,8 @@ export async function runProviderUsageObservationSmoke({ page, check }) {
       });
       const reads = () =>
         probe.evaluate(() => window.__providerUsageObservation.reads());
+      const statusReads = () =>
+        probe.evaluate(() => window.__providerUsageObservation.statusReads());
       const timers = () => probe.evaluate(() => window.__usageTimers.count());
       const pending = (slot) =>
         probe.evaluate(
@@ -73,11 +75,15 @@ export async function runProviderUsageObservationSmoke({ page, check }) {
           (slot) => window.__providerUsageObservation.release(slot),
           slot,
         );
-      await expect(info).toContainText("user@example.test");
+      // A cold hidden window has no confirmed native account yet. Neither
+      // identity discovery nor usage observation should start until reveal.
+      await expect(info).not.toContainText("user@example.test");
+      expect(await statusReads()).toBe(0);
       expect(await reads()).toBe(0);
       expect(await timers()).toBe(0);
       await probe.evaluate(() => window.dispatchEvent(new Event("focus")));
       await probe.clock.fastForward(31 * 60_000);
+      expect(await statusReads()).toBe(0);
       expect(await reads()).toBe(0);
       expect(await timers()).toBe(0);
       check(
@@ -90,6 +96,7 @@ export async function runProviderUsageObservationSmoke({ page, check }) {
         window.dispatchEvent(new Event("focus"));
       });
       await expect.poll(() => pending("a")).toBe(1);
+      await expect(info).toContainText("user@example.test");
       expect(await reads()).toBe(1);
       await release("a");
       await expect(info.getByRole("progressbar").first()).toHaveAttribute(

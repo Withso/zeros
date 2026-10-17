@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT = join(ROOT, "apps/desktop/src/engine/design/generated/tailwind-stylesheets.ts");
 export const DESIGN_TAILWIND_STYLESHEET_NAMES = ["index.css", "preflight.css", "theme.css", "utilities.css"];
+// Official plugins the engine bundles; the status names their versions.
+export const DESIGN_TAILWIND_BUNDLED_PLUGINS = ["@tailwindcss/forms", "@tailwindcss/typography", "tailwindcss-animate"];
 
 export function renderDesignTailwindStylesheets(root = ROOT) {
   const require = createRequire(join(root, "package.json"));
@@ -27,6 +29,11 @@ export function renderDesignTailwindStylesheets(root = ROOT) {
     "// Tailwind CSS is copyright Tailwind Labs, Inc. and licensed under the",
     `// ${license} license; see THIRD-PARTY-LICENSES.txt.`,
     `export const DESIGN_TAILWIND_VERSION = ${JSON.stringify(version)};`,
+    "export const DESIGN_TAILWIND_PLUGIN_VERSIONS: Readonly<Record<string, string>> = Object.freeze({",
+    ...DESIGN_TAILWIND_BUNDLED_PLUGINS.map(
+      (name) => `  ${JSON.stringify(name)}: ${JSON.stringify(JSON.parse(readFileSync(require.resolve(`${name}/package.json`), "utf8")).version)},`,
+    ),
+    "});",
     "export const DESIGN_TAILWIND_STYLESHEETS: Readonly<Record<string, string>> = Object.freeze({",
     ...DESIGN_TAILWIND_STYLESHEET_NAMES.map(
       (name) => `  ${JSON.stringify(name)}: ${JSON.stringify(readFileSync(join(dirname(manifest), name), "utf8"))},`,

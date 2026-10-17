@@ -7,6 +7,9 @@
 
 // --- IMPORTS ---
 
+import { takeDesignSyncAgentRequest } from "../../state/design-sync-intent";
+import { designSyncBrief } from "./design-agent-brief";
+import { useAskDesignAgent } from "./design-agent-sync";
 import {
   useCallback,
   useEffect,
@@ -109,6 +112,16 @@ export function DesignWorkspaceColumn({
   );
   // Keeps the person's style builds live while this Design tab is showing.
   useDesignStyleBuildPresence(workspaceId, surfaceActive);
+  // "Create and ask agent to sync styles": once the new directory has loaded,
+  // a new chat with the person's default agent sets up syncing.
+  const askAgent = useAskDesignAgent(folder);
+  const loadedDirectory = snapshot.data?.directory ?? null;
+  const loadedSources = snapshot.data?.styleSources;
+  useEffect(() => {
+    if (!workspaceId || !surfaceActive || !loadedDirectory) return;
+    if (!takeDesignSyncAgentRequest(workspaceId)) return;
+    askAgent(designSyncBrief(loadedDirectory, loadedSources ?? []));
+  }, [askAgent, loadedDirectory, loadedSources, surfaceActive, workspaceId]);
   useDesignLifecycleFeedback(
     workspaceId,
     surfaceActive,

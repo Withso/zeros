@@ -2,7 +2,7 @@
 name: zeros-design
 description: Author, verify and implement from Zeros Design directories — the registered folders of HTML/CSS frames that the Zeros Design tab renders on its canvas. Use for any task that creates or edits Design frames, pages, tokens, themes, style sources, components or assets, verifies a frame, or implements application code from a frame.
 license: MIT
-compatibility: Zeros desktop on macOS (Local workspaces) and Linux cloud workspaces. Local agents author with their normal file tools; cloud workers author through the Design API tools.
+compatibility: Zeros desktop on macOS (Local workspaces) and Linux cloud workspaces. Local and cloud agents author with their normal file tools.
 ---
 
 # Zeros Design
@@ -18,8 +18,8 @@ Zeros injects the facts for the current conversation. Read them before acting:
 - **Composer mode.** `Design` means the user wants Design source edited by default. `Code` means an attached frame is a reference for implementing application code; edit Design source only when the user asks.
 - **Active Design directory** (path relative to the workspace) and its registration ID.
 - **Pages** (`id`, `title`, `folder`) and the page the user is viewing. Add new frames to that page unless the user says otherwise.
-- **Native verification command** and a URL for `design list|validate|capture|preview` (see Verify).
-- **Authoring method.** Local workspaces: use normal Read/Write/Edit/patch/shell tools. Cloud workers: author through the Design API tools (`design_transaction_apply`, `design_frame_create`, …); never fall back to native writes there.
+- **Native verification command** and a URL for `design list|styles|validate|capture|preview` (see Verify).
+- **Authoring method.** Local and cloud workspaces both use the normal Read/Write/Edit/patch/shell tools. A cloud workspace runs in its own VM; the context says so.
 
 Provider permissions and Plan mode still apply. Saving never stages or commits; Git is a separate, explicit action.
 
@@ -28,9 +28,9 @@ Provider permissions and Plan mode still apply. Saving never stages or commits; 
 ```
 <Repo name> - Design/
   meta/design.toml          registration: format, version 3, stable directory ID (engine-owned)
-  meta/canvas.json          pages, frames, geometry, foundation metadata, style sources
+  meta/canvas.json          pages, frames, geometry, foundation metadata, style sources, themes, fonts
   rules.md                  generated rules, then project guidance appended below them
-  tokens.css                manual tokens and themes (the theme editor's table)
+  tokens.css                Design-only tokens (the theme editor's Manual source)
   components/<name>.html    reusable components
   assets/                   images used by frames
   <page-folder>/<frame>.html
@@ -96,12 +96,29 @@ To create a frame:
 
 ## Styling
 
-A frame can use any combination of the directory's manual tokens, its imported style sources, and its own `<style>`. The theme editor in the Design tab shows each source with its status.
+A frame can use any combination of the application's imported style sources, the directory's manual tokens, and its own `<style>`. The theme editor in the Design tab shows each source with its status.
+
+Prefer the application's own styles: sync them (below) rather than recreating tokens. Imported sources are read live from the checkout, so saved changes to the application's stylesheets, including uncommitted ones on this branch, update frames.
+
+### Themes (`meta/canvas.json` `themes`)
+
+A theme id is a lowercase letter, then letters, digits, `_` or `-`. Name the themes and choose the default:
+
+```json
+"themes": [
+  { "id": "dark", "label": "Dark", "base": true },
+  { "id": "light", "label": "Light" }
+]
+```
+
+- The default theme (`"base": true`, at most one) is what frames show when no other theme is chosen. Its values are `:root`, and frames also carry `data-zd-theme="<id>"` for it, so rules a source maps to that id apply.
+- Themes a source maps or `tokens.css` declares but the list omits still appear, labelled from their id. People rename themes in the theme editor; keep ids stable.
+- The canvas Themes menu applies a theme by setting `data-zd-theme` on every frame root. Do not author `data-zd-theme` or a theme switch yourself.
 
 ### Manual tokens (`tokens.css`)
 
-- `:root` holds the Base theme. A named theme is a `[data-zd-theme="<name>"]` rule (name: lowercase letter first, then letters, digits, `_` or `-`).
-- The canvas Themes menu applies a theme by setting `data-zd-theme` on every frame root. Do not author `data-zd-theme` or a theme switch yourself.
+- `tokens.css` holds Design-only tokens: values the application lacks. A new directory starts with none; never add placeholder tokens that duplicate the application's.
+- `:root` holds the default theme's values; another theme is a `[data-zd-theme="<id>"]` rule. A manual token overrides an imported one with the same name (the theme editor marks it).
 - Use `var(--token)` whenever a matching token exists. Add a typed `@property` declaration before introducing a new token.
 - The theme editor edits this same file. Some projects generate it; follow the directory's `rules.md`.
 
@@ -117,25 +134,45 @@ Style sources import a stylesheet from elsewhere in the repository, so frames us
 ]
 ```
 
-- `path` is repository-relative and must be a regular `.css` file inside the checkout, outside `.git` and `.zeros` (no symlinks, no `..`, at most 2 MiB). Declare at most 16 sources.
-- `kind: "tailwind"` names the application's Tailwind CSS v4 entry, the stylesheet with `@import "tailwindcss"`. Zeros compiles it with its own bundled Tailwind (the theme editor names the version) for the classes each frame and its components use, so frames can use the application's utilities, `@theme` tokens, `@utility` rules and custom variants: `<main class="bg-bg2 p-3 rounded-md">`. CSS `@import`s inside the repository are followed, relative or from `node_modules` packages, including their fonts. `@plugin` and `@config` are not run, because they execute JavaScript; what they add is missing. `@source` is ignored: frames supply their own classes. Tailwind's preflight applies, as in the application.
+- `path` is repository-relative and must be a regular file inside the checkout, outside `.git` and `.zeros` (no symlinks, no `..`, at most 32 MiB). Declare at most 16 sources.
+- `kind: "tailwind"` names the application's Tailwind CSS v4 entry, the stylesheet with `@import "tailwindcss"`. Zeros compiles it with its own bundled Tailwind (the theme editor names the version) for the classes each frame and its components use, so frames can use the application's utilities, `@theme` tokens, `@utility` rules and custom variants: `<main class="bg-bg2 p-3 rounded-md">`. CSS `@import`s inside the repository are followed, relative or from `node_modules` packages, including their fonts (up to 1,024 files and 64 MiB). Zeros runs its own copies of `@tailwindcss/typography`, `@tailwindcss/forms` and `tailwindcss-animate` for `@plugin`; other plugins and `@config` are not run, because they execute repository JavaScript, and what they add is missing. `@source` is ignored: frames supply their own classes. Tailwind's preflight applies, as in the application.
 - With a Tailwind source, a class name that is also a Tailwind utility (`container`, `hidden`, `border`, `grid`) gets that utility. Use the application's utilities rather than inventing look-alike class names. Tailwind's rules are layered, so a frame's own unlayered CSS still overrides them.
+- `kind: "sass"` names a `.scss` or `.sass` entry. Zeros compiles it with its own bundled Dart Sass; `@use`, `@forward` and `@import` resolve to partials inside the repository and to packages in `node_modules` (`pkg:`, bare names and webpack's `~name`). Nothing outside the checkout is read and no repository code runs.
 - `kind: "css"` reads the file as plain CSS; nothing in the repository runs. `@import` rules and build-tool directives (`@tailwind`, `@source`, `@plugin`, `@config`, `@apply`, …) are skipped, and the theme editor notes what was skipped. Comments are dropped. Custom properties declared in Tailwind `@theme` blocks become ordinary `:root` tokens.
-- **Fonts.** `@font-face` rules are kept, and the `.woff2`, `.woff`, `.ttf` or `.otf` files their `src` references (relative to the stylesheet, inside the repository) are embedded, up to 4 MiB per source. A package stylesheet works once dependencies are installed, for example `"path": "node_modules/@fontsource-variable/geist/index.css"`. Remote font URLs never load. Every frame using the source carries its fonts, so prefer one family's needed subsets.
+- **Fonts in sources.** `@font-face` rules are kept, and the `.woff2`, `.woff`, `.ttf` or `.otf` files their `src` references (relative to the stylesheet, inside the repository) are embedded, up to 16 MiB per source. A package stylesheet works once dependencies are installed, for example `"path": "node_modules/@fontsource-variable/geist/index.css"`. A Google Fonts `@import` (`fonts.googleapis.com`) is downloaded once and embedded through App fonts; other remote URLs never load.
 - A `css` source does not follow `@import`. To use a file it pulls in, such as a font package, declare that file as its own source, or use a `tailwind` source for a Tailwind entry.
-- `themes` maps a Design theme name to the selector the stylesheet uses for it, for example `[data-theme="light"]` or `.dark`. Rules using that selector apply when the canvas shows that theme.
+- `themes` maps a Design theme id to how the stylesheet expresses it: a selector such as `[data-theme="light"]` or `.dark`, or `@media (prefers-color-scheme: dark)` (or `light`) for a stylesheet that follows the system setting. Rules using it apply when the canvas shows that theme.
+- **Each frame receives only what it uses.** A frame gets the rules whose selectors its classes, ids and elements can match, plus every custom property block, theme rule and other statement; font faces only for families its kept CSS names and only for the characters it shows; and keyframes only when named. A rule a frame needs must therefore match the frame's own HTML: classes that application JavaScript would add do not exist in a frame.
 - **Which frames.** Every frame receives every declared source, in declaration order. A frame record may list `"styles": ["app"]` to choose its own sources, or `[]` for none.
 - **Precedence.** Imported styles come first in the frame, so the frame's own `<link>` and `<style>` rules override them.
-- `kind: "build"` imports the CSS file a build command writes, for stylesheets Zeros cannot compile itself (Sass, Less, PostCSS plugins, Tailwind v3 or Tailwind with `@plugin`/`@config`, CSS-in-JS extraction). Write the output to `.zeros/design-styles/<id>.css`, which Zeros keeps out of Git in every worktree. The declaration carries the command (`"command"`, plus `"watch": true` or `"inputs"`), so every worktree, cloud workspace and teammate builds it automatically while the Design tab is open; builds stop 5 minutes after it is left, wait for a new worktree's setup to finish, and frames always show the last output meanwhile. A person can override the command for themselves, or turn repository builds off, in their own settings. The theme editor shows each build's state (live, building, waiting for setup, paused, or failed with its error) and whether its command came from `meta/canvas.json` or the person's settings.
+- `kind: "build"` imports the CSS file a build command writes, for stylesheets Zeros cannot compile itself (Less, PostCSS plugins, Tailwind v3 or Tailwind with other `@plugin`s or `@config`, CSS-in-JS extraction, token pipelines such as Style Dictionary). Write the output to `.zeros/design-styles/<id>.css`, which Zeros keeps out of Git in every worktree. The declaration carries the command (`"command"`, plus `"watch": true` or `"inputs"`), so every worktree, cloud workspace and teammate builds it automatically while the Design tab is open; builds stop 5 minutes after it is left, wait for a new worktree's setup to finish, and frames always show the last output meanwhile. A person can override the command for themselves, or turn repository builds off, in their own settings. The theme editor shows each build's state (live, building, waiting for setup, paused, or failed with its error) and whether its command came from `meta/canvas.json` or the person's settings.
 - **Trust.** Opening Design runs the command a repository declares, as running its dev scripts would, including commands other people commit. Keep a declared command to the project's own build tool (`pnpm exec sass …`, `npx tailwindcss …`, a `package.json` script): no downloads, network calls, `curl | sh`, or writes outside the checkout. When a change you make, review or pull alters a declared command, tell the person.
+
+### App fonts (`meta/canvas.json` `fonts`)
+
+Fonts the application loads in code, such as `next/font/google` or `next/font/local` in a Next.js layout, are declared so frames get the same family and variable:
+
+```json
+"fonts": [
+  { "family": "Geist", "provider": "google", "variable": "--font-geist-sans", "weights": "100..900" },
+  { "family": "Geist Mono", "provider": "google", "variable": "--font-geist-mono", "weights": "100..900", "subsets": ["latin"] },
+  { "family": "Brand", "provider": "local", "path": "src/fonts/Brand.woff2", "variable": "--font-brand", "weight": "400 700" }
+]
+```
+
+- `provider: "google"` takes `weights` (`"400;700"` or a variable range `"100..900"`), `italic`, `subsets` (default `latin`) and `fallback`. Zeros downloads it once from `fonts.googleapis.com` and `fonts.gstatic.com` only, into one cache shared by every workspace on this machine (each cloud VM keeps its own), and embeds it. Frames show the fallback font until it arrives; Update retries a failed download.
+- `provider: "local"` names a `.woff2`, `.woff`, `.ttf` or `.otf` file inside the repository, with optional `weight` and `style`.
+- `variable` sets the same custom property the application sets (next/font's `variable` option), so its Tailwind theme or CSS resolves unchanged. When the application applies a font with next/font's `className` instead, frames have no such class: give the font a `variable` and add `body { font-family: var(--font-…); }` to `tokens.css`. Frames carry a font only when their CSS names it.
+- The theme editor lists them, with Google Fonts imported by sources, as **App fonts**. At most 32 fonts.
 
 ### Sync the application's styles
 
-When the person asks you to sync, connect or use the application's styles, set it up end to end; their request is the go-ahead, and they should not need to run anything afterwards.
+When the person asks you to sync, connect or use the application's styles, or Zeros sends "Set up style syncing", set it up end to end; their request is the go-ahead, and they should not need to run anything afterwards. Syncing is configuration in this repository's files: there is no sync API, and nothing syncs until a source is declared.
 
-1. **Find the stylesheets.** Read `package.json` (scripts and dependencies), the files the application entry imports (`main.tsx`, `index.tsx`, `app/layout.tsx`, `_app.tsx`, …), and any `tailwind.config.*`, `postcss.config.*`, `vite.config.*` or Sass/Less entry.
+1. **Find the stylesheets, themes and fonts.** Read `package.json` (scripts and dependencies), the files the application entry imports (`main.tsx`, `index.tsx`, `app/layout.tsx`, `_app.tsx`, …), any `tailwind.config.*`, `postcss.config.*`, `vite.config.*`, Sass/Less entry or token pipeline, how the application switches themes (a `class`, a `data-` attribute or the system setting), and the fonts the layout loads.
 2. **Choose a kind per stylesheet, preferring no build.**
-   - Tailwind v4 entry (`@import "tailwindcss"`): `tailwind`. If frames need what its `@plugin` or `@config` adds, use `build` with the project's Tailwind CLI instead.
+   - Tailwind v4 entry (`@import "tailwindcss"`): `tailwind`. If frames need what another `@plugin` or `@config` adds, use `build` with the project's Tailwind CLI instead.
+   - Sass entry: `sass`.
    - Plain CSS, including token files: `css`.
    - Anything that needs the project's own tool to produce CSS: `build`.
 3. **For a `build` source, prefer the tool's watch mode** so changes appear without re-running a command: `sass --watch`, `tailwindcss --watch`, `postcss --watch`. Use the project's own binary (`pnpm exec`, `npx`, `yarn`), never a global one. Without a watch mode, use a one-shot command with `inputs` (the files or folders it reads).
@@ -149,10 +186,14 @@ When the person asks you to sync, connect or use the application's styles, set i
      "themes": { "light": "[data-theme=\"light\"]" } }
    ```
 
-   For a one-shot command, drop `watch` and list what it reads in `"inputs": ["src/styles"]`; `"timeoutSeconds"` (1–600, default 120) bounds each run. Map each theme selector the stylesheet uses in `themes`. The command receives `ZEROS_DESIGN_STYLE_OUTPUT` (the output path) and runs in the checkout after the workspace setup has installed dependencies.
-5. **Personal overrides only.** A `[[design.style_builds]]` entry with the same `output` in the person's own settings (`~/.zeros/settings.toml` or the repository's `.zeros/settings.local.toml`) replaces the declared command for them. `[design] repository_style_builds = false` turns declared builds off while their own entries still run; a managed policy can enforce it. Write these only when the person asks.
-6. **Verify.** Open a frame that uses the styles, check the theme editor's source status, then validate and capture it, including the themes you mapped.
-7. **Report** which sources you declared, which kinds you chose and why, and the build command. Add or change a build command only when the person asked you to set up or change styles: once committed, it runs in everyone's checkouts.
+   For a one-shot command, drop `watch` and list what it reads in `"inputs": ["src/styles"]`; `"timeoutSeconds"` (1–600, default 120) bounds each run. The command receives `ZEROS_DESIGN_STYLE_OUTPUT` (the output path) and runs in the checkout after the workspace setup has installed dependencies. For a token pipeline (JSON to CSS), prefer a command that writes only the CSS to `.zeros/design-styles/` rather than regenerating tracked files.
+5. **Map the themes and fonts.** Map each theme the stylesheet expresses in the source's `themes`, name the themes and the default in the `themes` list (the default is the theme `:root` holds, such as `"Dark"`), and declare the fonts the application loads in code in `fonts`.
+6. **Keep `tokens.css` for Design-only values.** Do not copy the application's tokens into it.
+7. **Personal overrides only.** A `[[design.style_builds]]` entry with the same `output` in the person's own settings (`~/.zeros/settings.toml` or the repository's `.zeros/settings.local.toml`) replaces the declared command for them. `[design] repository_style_builds = false` turns declared builds off while their own entries still run; a managed policy can enforce it. Write these only when the person asks.
+8. **Check.** Run `<engine-command> design styles --url <url>`: it lists every source with its status, themes, token count and messages, and exits non-zero on errors. Fix every error and every message that asks for a declaration change; a package that is not installed yet resolves once the workspace setup finishes. Then validate and capture a frame that uses the styles in each theme you mapped.
+9. **Report** which sources, themes and fonts you declared, which kinds you chose and why, the build command, and anything the person must decide (for example a plugin Zeros does not run). Add or change a build command only when the person asked you to set up or change styles: once committed, it runs in everyone's checkouts.
+
+After syncing, the theme editor's **Update** re-reads every source from disk, reruns builds and retries font downloads, for changes Zeros cannot see (a package installed from a terminal, a failed build or download). A source whose declaration no longer matches the repository (a moved file, a theme selector the stylesheet no longer uses) shows **Ask agent to fix**, which sends you that source's status: correct its declaration, run `design styles`, and report.
 
 ## Components
 
@@ -172,9 +213,9 @@ When the person asks you to sync, connect or use the application's styles, set i
 | --- | --- |
 | HTML and CSS, flex, grid, custom properties | `<script>`, inline event handlers, JavaScript, JSX or TSX |
 | CSS `@keyframes` animations and transitions (represent states visually) | `<iframe>`, `<object>`, `<embed>`, `<base>` |
-| Raster images and font files from the Design directory or a style source | Network requests: remote images, fonts, stylesheets or APIs |
+| Raster images and font files from the Design directory or a style source; Google Fonts, downloaded once and embedded | Network requests from frames: remote images, stylesheets or APIs |
 | Inline SVG | SVG or video files; `javascript:` and non-raster `data:` URLs |
-| Manual tokens, themes and declared style sources, including the application's Tailwind utilities | CSS `@import` in Design CSS; Tailwind `@plugin` and `@config` |
+| Manual tokens, themes and declared style sources: CSS, Sass, the application's Tailwind utilities, build outputs | CSS `@import` in Design CSS; Tailwind `@config` and plugins other than typography, forms and tailwindcss-animate |
 | Components (`<zd-name>`) | Live application components (planned as separate Code layers) |
 
 Represent controls as visual states (default, hover, pressed, focus, disabled) in separate frames or labelled rows. Generate source with shell, Node or Python if useful; the output must still be HTML and CSS.
@@ -185,18 +226,20 @@ Use the exact command and URL from your context:
 
 ```sh
 <engine-command> design list     --url <url>
+<engine-command> design styles   --url <url>
 <engine-command> design validate --url <url> --frame <page.folder>/<name>.html
 <engine-command> design capture  --url <url> --frame <page.folder>/<name>.html --output <png-path> [--theme <name>]
 <engine-command> design preview  --url <url> --frame <page.folder>/<name>.html [--theme <name>]
 ```
 
+- `styles` reports every style source, App fonts and the themes list with status and messages, and exits non-zero on errors.
 - `validate` reports file and line diagnostics and exits non-zero on errors. Fix every error.
 - `capture` writes a PNG with animations stopped, scaled into 2048 × 2048 at most. Open the PNG and look at it: a capture is not a visual review.
-- Without `--theme`, capture and preview show the Base theme (`:root`). `--theme <name>` shows a theme the canvas Themes menu offers — one tokens.css declares or an imported style source maps — by setting `data-zd-theme` on the frame's `<html>`, as the canvas does. Capture every theme the design supports. An unknown name fails and lists the available themes. The revision stays the same: a theme is a view of the same source.
+- Without `--theme`, capture and preview show the default theme. `--theme <id>` shows a theme the canvas Themes menu offers — one the `themes` list names, tokens.css declares or an imported style source maps — by setting `data-zd-theme` on the frame's `<html>`, as the canvas does. Capture every theme the design supports. An unknown id fails and lists the available themes. The revision stays the same: a theme is a view of the same source.
 - `preview` returns an HTTP URL for a browser your provider actually offers. Never use `file://`.
 - Add `--revision <rev>` to require the exact revision you validated. URLs expire 30 minutes after the context was issued; ask for fresh context when one expires.
 
-The optional Design API (`design_capabilities`, `design_document_open`, `design_lint`, `design_render`, `design_capture`, `design_transaction_apply`, …) inspects and edits the same files; local authoring does not need it.
+The optional Design API (`design_capabilities`, `design_document_open`, `design_lint`, `design_render`, `design_capture`, `design_transaction_apply`, …) inspects and edits the same files; native authoring, Local or cloud, does not need it.
 
 ## Implementing application code from a frame
 
@@ -210,6 +253,7 @@ A frame is a reference, not code to copy. Implement it with the application's ow
 | Text file (HTML, CSS, metadata) | 2 MiB each, 16 MiB total |
 | Stylesheets linked by one frame | 128 |
 | Rendered frame after inlining | 15 MiB, including 12 MiB of images |
+| Style sources | 16 per directory; 32 MiB per file, 64 MiB and 1,024 files per compiled source, 16 MiB of fonts per source. Frames receive only the rules, faces and characters they use. |
 | Live frames on the canvas | 12 (others show a still image) |
 | Capture | 2048 × 2048 PNG, 20-second deadline, one at a time |
 
@@ -222,7 +266,9 @@ A frame is a reference, not code to copy. Implement it with the application's ow
 ## Troubleshooting
 
 - **Frame missing from the canvas:** its ID is not in `frames` and in exactly one page's `frames` array, or its `source` is outside that page's folder.
-- **Unstyled frame:** the `<link>` path is wrong for the file's location (page frames use `../tokens.css`), or a style source has an error in the theme editor.
+- **Unstyled frame:** the `<link>` path is wrong for the file's location (page frames use `../tokens.css`), or a style source has an error in the theme editor (`design styles` lists it).
+- **One rule or font missing:** the frame's HTML does not use the class, id or element the rule's selector needs, or no kept rule names the font family; frames receive only what they use.
+- **Fallback font instead of a Google font:** the download is pending or failed; the theme editor says which, and Update retries.
 - **Theme has no effect:** the token is missing from that `[data-zd-theme]` block, or the style source's `themes` selector does not match its CSS.
 - **A declared build never runs:** the Design tab must be open; the theme editor says whether it is waiting for setup, failed, or turned off by `repository_style_builds = false`. In cloud workspaces only developers and above start builds.
 - **Pages unavailable:** `meta/canvas.json` is unreadable or conflicted. Repair it with normal tools and keep its IDs; do not recreate registration.

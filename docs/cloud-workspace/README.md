@@ -47,6 +47,8 @@ migration, publication, adoption and acceptance gates.
 - [Warm pool and reliability follow-ups](warm-pool.md): accounted prebooted capacity,
   broader inbox/outbox recovery, outbound VM transport, one multiplexed client↔backend channel,
   incremental transcript feeds and Mac send outbox with acks.
+- [Draft contracts](contracts/README.md): proposed, not yet frozen or implemented
+  capability (S1), VM uplink (S2) and client (S3) contracts for cloud workspaces.
 
 ## Behavior guides
 
@@ -58,7 +60,7 @@ migration, publication, adoption and acceptance gates.
 | Cloud Computer | [Template builds](computer-template-builds.md), [durable named snapshots](computer-named-snapshots.md), [runtime images](runtime-images.md), [template forks](template-forks.md), [template retention](computer-template-retention.md), [Computer tools](computer-tools.md), [environment/setup](computer-environment.md) |
 | Native agents and customization | [Authentication/language tools](agent-authentication-and-language-tools.md), [bounded repo configuration](agent-authentication-and-language-tools.md#repository-instructions-and-configuration), [MCP and skills](mcp-and-skills.md), [provider background work](provider-background-work.md) |
 | Runtime and updates | [Runtime bundles](runtime-bundles.md), [live runtime updates](live-runtime-updates.md), [runtime lifecycle acceptance](runtime-lifecycle-acceptance.md), [runtime skew gate](runtime-skew-gate.md), [release worker retirement and cleanup](release-worker-qualification.md) |
-| Operations | [Provider contract](provider-contract.md), [lifecycle diagnostics](lifecycle-diagnostics.md), [infrastructure and operations](infrastructure-and-operations.md), [database qualification](database-qualification.md) |
+| Operations | [Provider contract](provider-contract.md), [lifecycle diagnostics](lifecycle-diagnostics.md), [infrastructure and operations](infrastructure-and-operations.md), [database qualification](database-qualification.md), [control-plane job queue](job-queue.md) |
 | Security and deployment seams | [Security](security.md), [enterprise/self-hosting](enterprise-and-self-hosting.md) |
 
 ## Documentation policy

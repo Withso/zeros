@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { watch as watchPaths, type FSWatcher } from "chokidar";
 import type { RepoTaskBoundaryFactory } from "../agents/containment/types";
@@ -15,6 +15,11 @@ import { DESIGN_STYLE_BUILD_DIRECTORY } from "./style-source-path";
 // keeps running and rebuilds by itself; a one-shot command runs when Design
 // opens and again when its `inputs` change. Leaving Design starts a 5-minute
 // idle timer that stops them; returning before then finds them still running.
+//
+// Memory: a one-shot build holds no process between runs and no watcher of
+// its own. The engine's worktree watcher reports input changes
+// (designStyleInputChanged), and the canvas refreshes only when a run changed
+// the output or the build's state.
 // Commands run like setup scripts: in the checkout, inside the repository task
 // boundary, with the scrubbed environment.
 
@@ -50,6 +55,8 @@ export interface DesignStyleBuildHost {
   /** Null when the checkout is ready; otherwise settles when its workspace
    * setup (usually the dependency install) finishes. */
   whenReady?(workspacePath: string): Promise<void> | null;
+  /** The checkout's workspace setup state, for status wording only. */
+  setupState?(workspacePath: string): DesignWorkspaceSetupState;
   /** Test overrides for the timers below. */
   idleMs?: number;
   presenceExpiryMs?: number;
@@ -57,6 +64,8 @@ export interface DesignStyleBuildHost {
 }
 
 export type DesignStyleBuildState = "waiting" | "starting" | "building" | "live" | "failed" | "stopped";
+/** A workspace setup run's state; null when none ran or the checkout has no row. */
+export type DesignWorkspaceSetupState = "running" | "passed" | "failed" | "stopped" | null;
 
 /** What the theme editor reports for one build. */
 export interface DesignStyleBuildStatus {
@@ -81,6 +90,10 @@ interface LiveBuild extends DesignStyleBuildStatus {
   proveStopped: (() => Promise<void>) | null;
   /** A one-shot input changed during its run. */
   again: boolean;
+  /** An input change is settling before the next one-shot run. */
+  inputPending: boolean;
+  /** The output's size:mtime after the last announced run. */
+  outputSignature: string | null;
   restarts: number;
   /** Set when a stopped command's boundary could not be proven stopped. */
   teardownError?: unknown;
@@ -103,6 +116,15 @@ const sessions = new Map<string, Session>();
 /** The engine supplies its repository task boundary and change broadcast. */
 export function configureDesignStyleBuilds(next: DesignStyleBuildHost | null): void {
   host = next;
+}
+
+/** Whether the checkout's setup is installing dependencies, failed or done. */
+export function designWorkspaceSetupState(workspacePath: string): DesignWorkspaceSetupState {
+  try {
+    return host?.setupState?.(path.resolve(workspacePath)) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** The person's own style build entries and whether repository-declared
@@ -250,10 +272,25 @@ async function runCommand(session: Session, build: LiveBuild, signal: AbortSigna
   );
 }
 
+async function outputSignature(session: Session, build: LiveBuild): Promise<string> {
+  const info = await stat(path.join(session.root, ...build.setting.output.split("/"))).catch(() => null);
+  return info ? `${info.size}:${info.mtimeMs}` : "missing";
+}
+
+/** A one-shot run refreshes the canvas only if it changed something visible:
+ * its output, or its state or error in the theme editor. */
+async function settleOneShot(session: Session, build: LiveBuild, before: { state: DesignStyleBuildState; error: string | null }): Promise<void> {
+  const signature = await outputSignature(session, build);
+  if (signature === build.outputSignature && build.state === before.state && build.error === before.error) return;
+  build.outputSignature = signature;
+  announce(session);
+}
+
 function launch(session: Session, build: LiveBuild): void {
   if (build.running || build.stopping || build.teardownError !== undefined || !isLive(session, build)) return;
   const stop = new AbortController();
   const started = performance.now();
+  const before = { state: build.state, error: build.error };
   build.stop = stop;
   build.state = build.setting.watch ? "starting" : "building";
   build.stderr = [];
@@ -290,7 +327,8 @@ function launch(session: Session, build: LiveBuild): void {
         build.proveStopped = null;
         if (stop.signal.aborted) build.state = "stopped";
       }
-      announce(session);
+      if (build.setting.watch) announce(session);
+      else void settleOneShot(session, build, before);
       if (build.again && !stop.signal.aborted && isLive(session, build)) {
         build.again = false;
         launch(session, build);
@@ -298,10 +336,12 @@ function launch(session: Session, build: LiveBuild): void {
     });
 }
 
-/** Watch the output (and a one-shot build's inputs). Resolves once the output
- * watcher is ready, so a command's first write is never missed; an input
- * folder's initial scan is not awaited. */
+/** A watch build writes its output whenever it likes, so its output is
+ * watched. Resolves once that watcher is ready, so a first write is never
+ * missed. One-shot builds need no watcher: the engine knows when each run
+ * ends, and its worktree watcher reports their input changes. */
 async function watchFiles(session: Session, build: LiveBuild): Promise<void> {
+  if (!build.setting.watch) return;
   const { root } = session;
   const output = path.join(root, ...build.setting.output.split("/"));
   // The watcher only sees files in folders that exist when it starts.
@@ -316,7 +356,7 @@ async function watchFiles(session: Session, build: LiveBuild): Promise<void> {
     });
   });
   outputWatcher.on("all", () => {
-    if (build.setting.watch && build.running) {
+    if (build.running) {
       build.state = "live";
       build.restarts = 0;
     }
@@ -324,30 +364,32 @@ async function watchFiles(session: Session, build: LiveBuild): Promise<void> {
   });
   outputWatcher.on("error", () => undefined);
   build.watchers.push(outputWatcher);
-  if (build.setting.watch || build.setting.inputs.length === 0) return ready;
-  let pending = false;
-  const inputs = watchPaths(
-    build.setting.inputs.map((input) => path.join(root, ...input.split("/"))),
-    {
-      ignoreInitial: true,
-      persistent: false,
-      // Never re-run for the build's own output or dependency trees.
-      ignored: (candidate: string) =>
-        candidate === output || candidate.split(path.sep).some((part) => part === "node_modules" || part === ".git"),
-    },
-  );
-  inputs.on("all", () => {
-    if (pending) return;
-    pending = true;
+  return ready;
+}
+
+/** A file in a checkout changed. One-shot builds whose inputs contain it run
+ * again shortly, while their session is live (Design open, or within the idle
+ * time after leaving). Called for every worktree content event, so cheap. */
+export function designStyleInputChanged(workspacePath: string, changedPath: string): void {
+  const session = sessions.get(path.resolve(workspacePath));
+  if (!session) return;
+  const changed = path.resolve(changedPath);
+  for (const build of session.builds.values()) {
+    if (build.setting.watch || build.setting.inputs.length === 0 || build.stopping || build.state === "stopped") continue;
+    if (changed === path.join(session.root, ...build.setting.output.split("/"))) continue;
+    const affected = build.setting.inputs.some((input) => {
+      const target = path.join(session.root, ...input.split("/"));
+      return changed === target || changed.startsWith(`${target}${path.sep}`);
+    });
+    if (!affected || build.inputPending) continue;
+    build.inputPending = true;
     later(build, INPUT_SETTLE_MS, () => {
-      pending = false;
+      build.inputPending = false;
+      if (!isLive(session, build) || build.stopping) return;
       if (build.running) build.again = true;
       else launch(session, build);
     });
-  });
-  inputs.on("error", () => undefined);
-  build.watchers.push(inputs);
-  return ready;
+  }
 }
 
 function stopBuild(build: LiveBuild): Promise<void> {
@@ -356,6 +398,7 @@ function stopBuild(build: LiveBuild): Promise<void> {
     for (const timer of build.timers) clearTimeout(timer);
     build.timers.clear();
     build.again = false;
+    build.inputPending = false;
     build.stop?.abort();
     await Promise.all(build.watchers.splice(0).map((watcher) => watcher.close().catch(() => undefined)));
     await build.running;
@@ -410,6 +453,8 @@ async function startBuild(session: Session, setting: DesignStyleBuildSetting, en
     stopping: null,
     proveStopped: null,
     again: false,
+    inputPending: false,
+    outputSignature: null,
     restarts: 0,
     watchers: [],
     timers: new Set(),
@@ -484,6 +529,31 @@ export async function setDesignStyleBuildPresence(
       }),
     ...settings.map((setting) => startBuild(owner, setting, entering)),
   ]);
+}
+
+/** The theme editor's Update: Design is open, so keep builds live, run every
+ * one-shot build now and restart a watch build that failed. A running
+ * one-shot build runs once more when it finishes. */
+export async function refreshDesignStyleBuilds(
+  workspacePath: string,
+  settings: readonly DesignStyleBuildSetting[],
+): Promise<void> {
+  await setDesignStyleBuildPresence(workspacePath, true, settings);
+  const session = sessions.get(path.resolve(workspacePath));
+  if (!session) return;
+  for (const build of session.builds.values()) {
+    if (build.stopping || build.teardownError !== undefined) continue;
+    if (build.setting.watch) {
+      if (build.state === "failed" && !build.running) {
+        build.restarts = 0;
+        launch(session, build);
+      }
+    } else if (build.running) {
+      build.again = true;
+    } else {
+      launch(session, build);
+    }
+  }
 }
 
 /** Stop the builds of every checkout `owns` accepts and prove their

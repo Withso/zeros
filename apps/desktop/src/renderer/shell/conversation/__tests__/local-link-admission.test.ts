@@ -64,6 +64,7 @@ vi.mock("../../../features/agent/sessions-hooks", () => ({
     hydrateChat: harness.hydrate,
     getSession: () => ({ messages: [], status: harness.sessionStatus }),
     loadIntoChat: harness.load,
+    listAgents: async () => [],
   }),
   useChatSession: () => ({
     hydrateChat: harness.hydrate,
@@ -73,8 +74,10 @@ vi.mock("../../../features/agent/sessions-hooks", () => ({
   }),
 }));
 vi.mock("../../../features/agent/sessions-store", () => ({
-  useSessionsStore: (selector: (state: unknown) => unknown) =>
-    selector({ sessions: {} }),
+  useSessionsStore: Object.assign(
+    (selector: (state: unknown) => unknown) => selector({ sessions: {} }),
+    { getState: () => ({ sessions: {} }) },
+  ),
 }));
 vi.mock("../../../features/agent/model-catalog", () => ({
   envForChat: () => ({}),

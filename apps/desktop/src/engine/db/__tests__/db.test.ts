@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -37,12 +37,18 @@ import {
   WINDOW_MAX_ROWS,
   TURN_START_ORD_SQL,
   TURN_START_ORD_ANY_USER_SQL,
+  TURN_OPENING_ORD_SQL,
+  TURN_OPENING_ANY_USER_ORD_SQL,
   upsertChatMessage,
   upsertChatMessagesBulk,
   windowChatMessages,
+  windowChatMessagesPage,
   windowOlderChatMessages,
+  queueStreamingChatMessages,
+  flushStreamingChatMessages,
   searchMessages,
   listChatMessagesSince,
+  listChatMessagesAfterOrd,
   backfillChatMessageRevs,
   clearChatMessages,
   truncateChatMessagesFrom,
@@ -991,6 +997,112 @@ describe("Zeros DB (unified engine store)", () => {
   // at an arbitrary row, so without snapping, a tail window can open in the
   // middle of a turn and the renderer (which derives turns by splitting on user
   // rows) shows that turn with no prompt bubble, no footer and no checkpoint.
+  // Streaming rows are rewritten per provider chunk; a Local engine buffers
+  // them. The buffer must be invisible: every read sees the newest version,
+  // order follows first insert, and deletes can never be undone by it.
+  describe("chat_messages: coalesced streaming writes", () => {
+    const text = (id: string, body: string, role = "agent") => ({
+      msgId: id,
+      kind: "text",
+      payload: JSON.stringify({ id, kind: "text", role, text: body }),
+      createdAt: 1,
+    });
+    const rawRows = (chatId: string) =>
+      openZerosDb()
+        .prepare("SELECT msg_id, ord, payload FROM chat_messages WHERE chat_id = ? ORDER BY ord")
+        .all(chatId) as { msg_id: string; ord: number; payload: string }[];
+
+    it("writes one row version per flush however many chunks streamed, and reads see the newest", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [text("u1", "go", "user")]);
+      const revBefore = headRev();
+      let body = "";
+      for (let i = 0; i < 300; i++) {
+        body += "chunk ";
+        queueStreamingChatMessages("c1", [text("a1", body)]);
+      }
+      // Buffered: SQLite has not been touched yet.
+      expect(rawRows("c1").map((r) => r.msg_id)).toEqual(["u1"]);
+      expect(headRev()).toBe(revBefore);
+      // Any read drains first and sees the newest version.
+      const window = windowChatMessages("c1", 10);
+      expect(window.map((m) => m.msgId)).toEqual(["u1", "a1"]);
+      expect(JSON.parse(window[1].payload).text).toBe(body);
+      expect(headRev()).toBe(revBefore + 1);
+    });
+
+    it("paged CLI reads see the latest buffered rows without flushing another chat", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      try {
+        upsertChatMessagesBulk("c1", [text("u1", "go", "user")]);
+        const cursor = rawRows("c1")[0].ord;
+        queueStreamingChatMessages("c1", [text("a1", "partial")]);
+        queueStreamingChatMessages("c1", [text("a1", "latest")]);
+        queueStreamingChatMessages("c2", [text("b1", "another chat")]);
+
+        const page = listChatMessagesAfterOrd("c1", cursor, 1);
+        expect(page.map((row) => row.msgId)).toEqual(["a1"]);
+        expect(JSON.parse(page[0].payload).text).toBe("latest");
+        expect(rawRows("c2")).toEqual([]);
+
+        queueStreamingChatMessages("c1", [text("a1", "updated")]);
+        const updated = listChatMessagesAfterOrd("c1", cursor, 1);
+        expect(updated[0].ord).toBe(page[0].ord);
+        expect(JSON.parse(updated[0].payload).text).toBe("updated");
+      } finally {
+        flushStreamingChatMessages();
+      }
+    });
+
+    it("keeps first-insert order when an immediate write follows buffered rows", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      queueStreamingChatMessages("c1", [text("a1", "answer")]);
+      queueStreamingChatMessages("c1", [text("t1", "tool")]);
+      upsertChatMessagesBulk("c1", [text("u2", "next prompt", "user")]);
+      expect(rawRows("c1").map((r) => r.msg_id)).toEqual(["a1", "t1", "u2"]);
+    });
+
+    it("drains before a clear or truncate, so nothing reappears afterwards", () => {
+      vi.useFakeTimers();
+      try {
+        setZerosDbPathForTesting(tmpDbFile());
+        upsertChatMessagesBulk("c1", [text("u1", "go", "user")]);
+        queueStreamingChatMessages("c1", [text("a1", "partial")]);
+        expect(truncateChatMessagesFrom("c1", "u1")).toBe(2);
+        vi.advanceTimersByTime(1_000);
+        expect(rawRows("c1")).toEqual([]);
+
+        queueStreamingChatMessages("c2", [text("a2", "partial")]);
+        expect(clearChatMessages("c2")).toBe(1);
+        vi.advanceTimersByTime(1_000);
+        expect(rawRows("c2")).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("flushes on its own timer and on demand, per chat or for all", () => {
+      vi.useFakeTimers();
+      try {
+        setZerosDbPathForTesting(tmpDbFile());
+        queueStreamingChatMessages("c1", [text("a1", "one")]);
+        queueStreamingChatMessages("c2", [text("b1", "two")]);
+        flushStreamingChatMessages("c1");
+        expect(rawRows("c1")).toHaveLength(1);
+        expect(rawRows("c2")).toHaveLength(0);
+        vi.advanceTimersByTime(200);
+        expect(rawRows("c2")).toHaveLength(1);
+        // Search and delta pulls drain every chat first.
+        queueStreamingChatMessages("c3", [text("c1", "needle")]);
+        expect(searchMessages("needle").map((hit) => hit.msgId)).toEqual(["c1"]);
+        queueStreamingChatMessages("c3", [text("c2", "later")]);
+        expect(listChatMessagesSince(0).some((row) => row.msgId === "c2")).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe("chat_messages: a tail window never begins mid-turn", () => {
     const user = (id: string) => ({
       msgId: id,
@@ -1148,6 +1260,88 @@ describe("Zeros DB (unified engine store)", () => {
       expect(windowChatMessages("c1", WINDOW_MAX_ROWS)).toHaveLength(
         WINDOW_MAX_ROWS,
       );
+    });
+
+    // A long autonomous run (hours of tool calls, background tasks) easily
+    // exceeds the contiguous row budget. The window stays contiguous for the
+    // older-page cursor, so the prompt that opened that turn travels beside it
+    // instead of being dropped — otherwise the reader sees a turn with no
+    // prompt and concludes their message was lost.
+    it("reports the opening prompt of a turn longer than the row budget beside the window", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      const tools = Array.from({ length: WINDOW_MAX_ROWS + 100 }, (_, i) =>
+        tool(`t${i}`),
+      );
+      upsertChatMessagesBulk("c1", [
+        user("u0"),
+        agent("a0"),
+        user("u1"),
+        ...tools,
+        agent("a1"),
+      ]);
+
+      const page = windowChatMessagesPage("c1", 200);
+      expect(page.messages).toHaveLength(200);
+      expect(page.messages[0].msgId).toBe(tools[tools.length - 199].msgId);
+      expect(page.messages.at(-1)?.msgId).toBe("a1");
+      expect(page.turnOpening?.msgId).toBe("u1");
+      expect(JSON.parse(page.turnOpening!.payload).role).toBe("user");
+      // The contiguous rows are exactly the plain tail window.
+      expect(page.messages).toEqual(windowChatMessages("c1", 200));
+    });
+
+    it("reports the real opening, not a mid-turn steer, for an over-budget turn", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        steer("s1", "u1"),
+        ...Array.from({ length: WINDOW_MAX_ROWS + 100 }, (_, i) =>
+          tool(`t${i}`),
+        ),
+      ]);
+
+      const page = windowChatMessagesPage("c1", 200);
+      expect(page.messages[0].msgId).not.toBe("s1");
+      expect(page.turnOpening?.msgId).toBe("u1");
+    });
+
+    it("reports no opening when the window already starts on a prompt or is a page", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [
+        user("u1"),
+        tool("t1"),
+        agent("a1"),
+        user("u2"),
+        agent("a2"),
+      ]);
+
+      // Snapped (or naturally aligned) windows carry their prompt in-line.
+      expect(windowChatMessagesPage("c1", 2)).toEqual({
+        messages: windowChatMessages("c1", 2),
+      });
+      expect(windowChatMessagesPage("c1", 1).messages[0].msgId).toBe("u2");
+      expect(windowChatMessagesPage("c1", 1).turnOpening).toBeUndefined();
+      // An older page is anchored to rows the caller already holds.
+      expect(windowChatMessagesPage("c1", 1, 4).turnOpening).toBeUndefined();
+      expect(windowChatMessagesPage("nope", 10)).toEqual({ messages: [] });
+    });
+
+    // The opening lookup exists for turns thousands of rows long. Walking
+    // idx_chat_messages_chat_ord backwards would parse every row's JSON in that
+    // turn; the partial user-prompt index visits prompts only.
+    it("the over-budget opening lookup reads only the user-prompt index", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      upsertChatMessagesBulk("c1", [user("u1"), tool("t1")]);
+      for (const sql of [TURN_OPENING_ORD_SQL, TURN_OPENING_ANY_USER_ORD_SQL]) {
+        const details = (
+          openZerosDb()
+            .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+            .all("c1", 2) as { detail: string }[]
+        ).map((r) => r.detail);
+        expect(details.some((d) => d.includes("USING INDEX idx_chat_messages_user_text"))).toBe(true);
+        expect(details.some((d) => d.includes("idx_chat_messages_chat_ord"))).toBe(false);
+        expect(details.some((d) => /SCAN chat_messages\b(?! USING)/.test(d))).toBe(false);
+      }
     });
 
     // This lookup runs on every chat open, and the difference between a bounded

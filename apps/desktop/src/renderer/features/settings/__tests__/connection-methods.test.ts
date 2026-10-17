@@ -11,6 +11,10 @@ import {
 } from "../connection-methods";
 
 describe("provider connection choices", () => {
+  it("labels a native CLI connection without assuming it uses a subscription", () => {
+    expect(connectionLabel(true, { authMethod: "cli" }, "Claude", "cli")).toBe("Connected via CLI");
+    expect(connectionLabel(false, { authMethod: "cli" }, "Claude", "cli")).toBe("Configure Claude");
+  });
   it("keeps Account/CLI entry choices separate from persisted subscription/API authentication", () => {
     rememberConnectionMethod("claude", "cli");
     expect(connectionMethod("claude", { authMethod: "cli" })).toBe("cli");

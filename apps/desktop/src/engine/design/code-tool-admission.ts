@@ -2,7 +2,7 @@ import { createDesignCaptureRenderer } from "./capture-client";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { composerModeInstruction } from "@zeros/protocol/composer-mode";
+import { CLOUD_EXECUTION_NOTICE, composerModeInstruction } from "@zeros/protocol/composer-mode";
 import { wrapSystemInstruction } from "@zeros/protocol/system-instructions";
 import type {
   AgentSessionToolFactory,
@@ -153,7 +153,7 @@ export class DesignCodeToolAdmissions {
   private unavailable(input: AgentSessionToolInput, reason: string, nativeAllowed = false, assertOwner: () => void = () => {}): AgentSessionTools | null {
     const mode = this.options.mode?.(input);
     if (!mode) return null;
-    nativeAllowed = nativeAllowed && !this.options.cloudWorker;
+    // Local and cloud author natively; the API is an optional helper.
     let revoked = false;
     return {
       env: {},
@@ -172,7 +172,8 @@ export class DesignCodeToolAdmissions {
         };
         const context = nativeAllowed ? await designPromptContext(() => (this.options.resolveTarget ?? ((value) => resolveCodeDesignTarget(value, this.options)))(input), snapshot.mode, assertCurrent) : reason;
         assertCurrent();
-        return wrapSystemInstruction(`${composerModeInstruction(snapshot.mode, snapshot.revision, this.options.cloudWorker ? "api" : "native")} ${context} Design API tools are unavailable in this execution. Select modes with the composer. ${reason}`);
+        const notice = this.options.cloudWorker ? ` ${CLOUD_EXECUTION_NOTICE}` : "";
+        return wrapSystemInstruction(`${composerModeInstruction(snapshot.mode, snapshot.revision, "native")}${notice} ${context} Design API tools are unavailable in this execution. Select modes with the composer. ${reason}`);
       },
       revoke: () => { revoked = true; },
       dispose: async () => { revoked = true; },
@@ -236,9 +237,9 @@ export class DesignCodeToolAdmissions {
         },
         assertOwner,
         resolveTarget,
-        authoringMethod: this.options.cloudWorker ? "api" : "native",
-        // Read-only shell verification is independent of API-only authoring.
-        ...(this.options.cloudWorker ? { nativeVerification: true } : {}),
+        // Cloud workers author like Local ones, in their VM checkout.
+        authoringMethod: "native",
+        ...(this.options.cloudWorker ? { executionNotice: CLOUD_EXECUTION_NOTICE } : {}),
         renderer: createDesignCaptureRenderer(workspacePath),
         onChanged: () => this.options.onChanged?.(workspaceId),
         workspaceTools,

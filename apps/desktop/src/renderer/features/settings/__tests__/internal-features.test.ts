@@ -72,6 +72,31 @@ beforeEach(() => {
 });
 
 describe("isInternalUser — the staff gate", () => {
+  it("exposes local Internal controls in the native account-free development app", async () => {
+    installLocalStorageStub();
+    vi.stubGlobal("window", { __ZEROS_NATIVE__: { localDevelopment: true }, addEventListener: vi.fn() });
+    const store = await freshStore();
+    expect(store.isInternalUser()).toBe(true);
+    for (const feature of ["copyLogs", "zerosBrowser", "computerUse", "simulators"] as const) {
+      expect(store.isInternalFeatureActive(feature)).toBe(true);
+      store.setInternalFeatureEnabled(feature, false);
+      expect(store.isInternalFeatureActive(feature)).toBe(false);
+    }
+    // Local development never grants hosted platform-owner powers.
+    expect(store.isInternalFeatureActive("releaseCanaries")).toBe(false);
+    vi.stubGlobal("window", { __ZEROS_NATIVE__: {}, addEventListener: vi.fn() });
+    expect(store.isInternalUser()).toBe(false);
+  });
+
+  it("enables every eligible Internal flag by default for authorized staff", async () => {
+    installLocalStorageStub();
+    const store = await freshStore();
+    signedInAs("developer");
+    for (const feature of ["copyLogs", "zerosBrowser", "computerUse", "simulators"] as const)
+      expect(store.isInternalFeatureActive(feature)).toBe(true);
+    signedOut();
+    expect(store.isInternalFeatureActive("copyLogs")).toBe(false);
+  });
   it("is true for owners and developers, not a legacy support capability", async () => {
     const store = await freshStore();
 
@@ -151,10 +176,10 @@ describe("internal feature flags", () => {
       simulators: false,
     });
   });
-  it("defaults off, flips on, and persists to localStorage", async () => {
+  it("defaults on, preserves explicit opt-outs, and persists to localStorage", async () => {
     const backing = installLocalStorageStub();
     const store = await freshStore();
-    expect(store.isInternalFeatureEnabled("copyLogs")).toBe(false);
+    expect(store.isInternalFeatureEnabled("copyLogs")).toBe(true);
 
     store.setInternalFeatureEnabled("copyLogs", true);
     expect(store.isInternalFeatureEnabled("copyLogs")).toBe(true);
@@ -174,13 +199,14 @@ describe("internal feature flags", () => {
 
     backing.set("zeros.internalFeatures", "not-json{{");
     store = await freshStore();
-    expect(store.isInternalFeatureEnabled("copyLogs")).toBe(false);
+    expect(store.isInternalFeatureEnabled("copyLogs")).toBe(true);
   });
 
-  it("degrades to off when localStorage is unavailable", async () => {
+  it("retains defaults without granting access when localStorage is unavailable", async () => {
     // No stub installed — node env genuinely lacks localStorage.
     const store = await freshStore();
-    expect(store.isInternalFeatureEnabled("copyLogs")).toBe(false);
+    expect(store.isInternalFeatureEnabled("copyLogs")).toBe(true);
+    expect(store.isInternalFeatureActive("copyLogs")).toBe(false);
     // Writes must not throw either.
     expect(() =>
       store.setInternalFeatureEnabled("copyLogs", true),
@@ -195,6 +221,7 @@ describe("isInternalFeatureActive — the effective gate", () => {
     signedInAs("developer");
 
     // Flag off: nobody, not even staff.
+    store.setInternalFeatureEnabled("copyLogs", false);
     expect(store.isInternalFeatureActive("copyLogs")).toBe(false);
 
     store.setInternalFeatureEnabled("copyLogs", true);

@@ -1,5 +1,6 @@
 import { escapeText, insertDesignHeadMarkup } from "./source";
 import { FRAME_SEED, TEXT_FRAME_SEED } from "./document-seeds";
+import { readDesignStyleSourceCatalog } from "./style-sources";
 import {
   designLayerCount,
   designNodeRecords,
@@ -138,7 +139,15 @@ export async function createDesignFrame(
           textSeed.fixedSize,
           folder ? "../tokens.css" : "./tokens.css",
         )
-      : FRAME_SEED(title, oid, geometry.w, geometry.h, folder ? "../tokens.css" : "./tokens.css");
+      : FRAME_SEED(
+          title,
+          oid,
+          geometry.w,
+          geometry.h,
+          folder ? "../tokens.css" : "./tokens.css",
+          // With synced app styles the frame shows the app's page background.
+          readDesignStyleSourceCatalog(canvas).declarations.length > 0,
+        );
     canvas.frames[file] = geometry;
     canvas.frame_info[file] = { id: `frame_${randomUUID().replace(/-/g, "")}`, title, kind: textSeed ? "text" : "frame" };
     await writeCanvas(workspacePath, canvas, [

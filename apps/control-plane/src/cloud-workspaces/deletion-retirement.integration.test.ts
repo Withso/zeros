@@ -113,6 +113,16 @@ suite("authenticated compute retirement during storage deletion", () => {
     await pool.query("UPDATE cloud_workspaces SET status='deleted',deleted_at=now() WHERE id=$1", [fixture.workspaceId]);
   }
 
+  // The reconciler's claim and retryable release (reconciler.ts claimIntent and
+  // recordFailure): every poll of a blocked storage deletion re-claims the
+  // same accepted delete, about once per 4 minutes until Boat finishes.
+  const claimPoll = () => pool.query(`UPDATE cloud_workspace_lifecycle_intents SET state='dispatching',
+    attempt_count=attempt_count+1,lease_owner='control-plane:retirement-test',lease_expires_at=now()+interval '10 minutes',
+    dispatched_at=coalesce(dispatched_at,now()),updated_at=now(),error_code=NULL,error_message=NULL WHERE id=$1`, [intentId]);
+  const releaseBlockedPoll = () => pool.query(`UPDATE cloud_workspace_lifecycle_intents SET state='observing',
+    lease_owner=NULL,lease_expires_at=NULL,next_attempt_at=now()+interval '256 seconds',error_code='provider_deletion_blocked',
+    error_message='Boat workspace operation requires reconciliation',updated_at=now() WHERE id=$1`, [intentId]);
+
   function deletionWorker() {
     const objects = new DatabaseCloudWorkspaceBlobService({ pool, objectStore: new MemoryCloudWorkspaceObjectStore(),
       encryptionKeyV1: randomBytes(32).toString("base64url"), workosEnabled: false });
@@ -293,6 +303,32 @@ suite("authenticated compute retirement during storage deletion", () => {
     const reading = read();
     await barrier.reached;
     try { await physicallyDelete(); }
+    finally { barrier.release(); }
+    expect((await reading).status).toBe(409);
+  });
+
+  it.each(["claim", "release"] as const)("keeps one observation across a reconciler poll %s of the same blocked delete", async edge => {
+    await claimPoll();
+    if (edge === "claim") await releaseBlockedPoll();
+    const barrier = providerBarrier();
+    const reading = read();
+    await barrier.reached;
+    try { await (edge === "claim" ? claimPoll() : releaseBlockedPoll()); }
+    finally { barrier.release(); }
+    const response = await reading;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "compute_retired_storage_pending", deletionConfirmed: false,
+      deleteIntentId: intentId, generations: [{ generation: 1, status: "compute_retired_storage_pending" }] });
+    expect(observe).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refuses when the same delete leaves the poll cycle during provider I/O", async () => {
+    await claimPoll();
+    await releaseBlockedPoll();
+    const barrier = providerBarrier();
+    const reading = read();
+    await barrier.reached;
+    try { await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now(),updated_at=now() WHERE id=$1", [intentId]); }
     finally { barrier.release(); }
     expect((await reading).status).toBe(409);
   });

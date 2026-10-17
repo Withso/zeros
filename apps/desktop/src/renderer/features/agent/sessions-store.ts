@@ -68,6 +68,7 @@ import {
 } from "./chat-scroll-anchor";
 import { isPlanReviewRequest } from "./renderers/plan-body";
 import { retainMessageReferences } from "./message-persistence-tracker";
+import { settleLeadingPrompt } from "./transcript-leading-prompt";
 import { settledTurnStatus } from "./session-reload-lifecycle";
 import { loadPolicies, savePolicies, type PolicyRule } from "./policies";
 import { effortAdoptedEnvKey } from "./model-catalog";
@@ -243,6 +244,30 @@ export const MAX_MESSAGES_PER_CHAT = 1000;
 function capMessages(messages: AgentMessage[]): AgentMessage[] {
   if (messages.length <= MAX_MESSAGES_PER_CHAT) return messages;
   return messages.slice(-MAX_MESSAGES_PER_CHAT);
+}
+
+/** Keep a Local slot's leading prompt consistent with the front of its window
+ *  through every trim, prepend and replacement (transcript-leading-prompt.ts).
+ *  `proposed` is an explicit value from a window read; undefined derives it.
+ *  Cloud slots never carry one. O(1) unless the window's first row changed. */
+function settleSlotLeadingPrompt(
+  chatId: string,
+  previous: AgentSessionState | undefined,
+  next: AgentSessionState,
+  proposed: AgentSessionState["leadingPrompt"],
+): AgentSessionState {
+  if (parseCloudScopedId(chatId) || isCloudWorkspace(next.cwd)) {
+    return next.leadingPrompt == null ? next : { ...next, leadingPrompt: null };
+  }
+  const leadingPrompt = settleLeadingPrompt(
+    previous?.messages ?? [],
+    previous?.leadingPrompt,
+    next.messages,
+    proposed,
+  );
+  return (next.leadingPrompt ?? null) === leadingPrompt
+    ? next
+    : { ...next, leadingPrompt };
 }
 
 function hasDurableMessages(messages: AgentMessage[]): boolean {
@@ -637,6 +662,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           normalized.transcriptPresentation === previous.transcriptPresentation) {
         normalized = { ...normalized, transcriptPresentation: null };
       }
+      normalized = settleSlotLeadingPrompt(chatId, previous, normalized, slot.leadingPrompt);
       if (
         previous &&
         (previous.executionId ?? previous.sessionId) !== executionId &&
@@ -672,6 +698,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       }
       let updated = { ...existing, ...normalizedPatch };
       if (updated.transcriptState === "cold") updated = { ...updated, transcriptPresentation: null };
+      if (patch.messages !== undefined || patch.leadingPrompt !== undefined) {
+        updated = settleSlotLeadingPrompt(chatId, state.sessions[chatId], updated, patch.leadingPrompt);
+      }
       const executionId =
         patch.executionId !== undefined
           ? patch.executionId
@@ -755,6 +784,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
             transcriptDirty: false,
             hasTranscript,
             messages: [],
+            leadingPrompt: null,
             historyExpanded: false,
             stderrLog: [],
           },
@@ -767,12 +797,18 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     set((state) => {
       const slot = state.sessions[chatId];
       if (!slot) return state;
-      const cutIndex = slot.messages.findIndex((m) => m.id === fromMsgId);
+      // Editing or resetting the turn the window starts inside cuts every
+      // resident row: they all follow its off-window opening prompt.
+      const cutsLeadingTurn = slot.leadingPrompt?.id === fromMsgId;
+      const cutIndex = cutsLeadingTurn
+        ? 0
+        : slot.messages.findIndex((m) => m.id === fromMsgId);
       if (cutIndex < 0) return state;
       const truncated = slot.messages.slice(0, cutIndex);
       const updated: AgentSessionState = {
         ...slot,
         messages: truncated,
+        leadingPrompt: cutsLeadingTurn ? null : slot.leadingPrompt,
         // Pending permission may have been bound to a tool the user
         // is now removing — clear it so the inline cluster doesn't
         // dangle. Plan stays since the user's intent is "edit this
@@ -1311,13 +1347,13 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       return {
         sessions: {
           ...state.sessions,
-          [chatId]: {
+          [chatId]: settleSlotLeadingPrompt(chatId, slot, {
             ...slot,
             messages: nextMessages,
             transcriptPresentation: null,
             hasTranscript:
               slot.hasTranscript || hasDurableMessages(nextMessages),
-          },
+          }, undefined),
         },
       };
     });

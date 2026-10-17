@@ -12,7 +12,8 @@ import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
 import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
-import { configureDesignStyleBuilds, hasRunningDesignStyleBuilds, stopDesignStyleBuilds } from "./design/style-builds";
+import { configureDesignStyleBuilds, designStyleInputChanged, hasRunningDesignStyleBuilds, stopDesignStyleBuilds } from "./design/style-builds";
+import { configureDesignFonts } from "./design/style-fonts";
 import type { DesignCaptureService } from "./design/capture-service";
 // ──────────────────────────────────────────────────────────
 // ZerosEngine — The heart of Zeros V2
@@ -61,7 +62,7 @@ import {
   seedUserSettingsFromLegacyRoot,
 } from "./settings/files";
 import { startSettingsWatcher, type SettingsWatcher } from "./settings/watch";
-import { startGitWatcher, type GitWatcher } from "./git/watch";
+import { onWorktreeContentChange, startGitWatcher, type GitWatcher } from "./git/watch";
 import { invalidateWorkspaceChangeProbes } from "./git/workspace-change-probe";
 import { LocalTransport } from "./transport/local";
 import { CloudTransport, parseCloudTransportPort } from "./transport/cloud";
@@ -378,7 +379,14 @@ import {
   type ProviderBinding,
   type ProviderMetadata,
 } from "@zeros/protocol/identities";
-import { clearChatMessages, upsertChatMessagesBulk, windowChatMessages } from "./db/messages";
+import {
+  clearChatMessages,
+  flushStreamingChatMessages,
+  queueStreamingChatMessages,
+  upsertChatMessagesBulk,
+  windowChatMessages,
+} from "./db/messages";
+import { BootPhaseTimer } from "./boot-phase-timer";
 import {
   startTurn as startTurnRow,
   finishTurn as finishTurnRow,
@@ -893,6 +901,8 @@ export class ZerosEngine {
   private watcher: FileWatcher;
   private settingsWatcher: SettingsWatcher | null = null;
   private gitWatcher: GitWatcher | null = null;
+  /** Forwards worktree content events to live one-shot style builds. */
+  private stopStyleBuildInputs: (() => void) | null = null;
   /** Coalesce filesystem invalidations behind one authority-reconciliation
    * lane. Settings and Git watchers can fire together for one checkout; this
    * prevents overlapping session retirement/territory publication. */
@@ -1496,6 +1506,11 @@ export class ZerosEngine {
         const workspaceId = getWorkspaceByPath(workspacePath)?.id;
         return workspaceId ? this.setup.whenSettled(workspaceId) : null;
       },
+      // Status wording only: a missing package is "waiting" while setup runs.
+      setupState: (workspacePath) => {
+        const workspaceId = getWorkspaceByPath(workspacePath)?.id;
+        return workspaceId ? this.setup.info(workspaceId).state : null;
+      },
       // Only Design re-reads; Files and Changes ignore a rebuilt output.
       changed: (workspacePath) => {
         const workspaceId = getWorkspaceByPath(workspacePath)?.id;
@@ -1505,6 +1520,21 @@ export class ZerosEngine {
             source: "engine",
             kinds: ["designStyles"],
             ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
+          }),
+        );
+      },
+    });
+    // A Google font finished downloading: canvases showing its fallback
+    // re-read their styles.
+    configureDesignFonts({
+      onReady: (roots) => {
+        const workspaceIds = roots.flatMap((root) => getWorkspaceByPath(root)?.id ?? []);
+        this.broadcast(
+          createMessage({
+            type: "DB_CHANGED",
+            source: "engine",
+            kinds: ["designStyles"],
+            ...(workspaceIds.length ? { workspaceIds } : {}),
           }),
         );
       },
@@ -2990,6 +3020,7 @@ export class ZerosEngine {
     stripInheritedLocalCliEnv(process.env);
 
     const startTime = Date.now();
+    const bootPhases = new BootPhaseTimer();
 
     // Recover hard-crash process domains before publishing a renderer token or
     // opening any transport. On macOS a detached, double-forked Seatbelt child
@@ -3027,6 +3058,7 @@ export class ZerosEngine {
     if (swept > 0) {
       console.log(`[Zeros] swept ${swept} crashed session dir(s)`);
     }
+    bootPhases.mark("process-recovery");
 
     if (this.cloudWorker?.version === 4) {
       const recovered = await recoverCloudWorkspaceOwnership(this.cloudWorker, {
@@ -3044,6 +3076,7 @@ export class ZerosEngine {
     // the wrong child generation.
     await this.restoreResidentTerminals();
     this.publishLocalAuthorityToHost();
+    bootPhases.mark("terminals");
 
     // 1. Detect framework
     const detection = detectFramework(this.root);
@@ -3105,6 +3138,7 @@ export class ZerosEngine {
     // disconnect re-connect on the next refresh/restart.
     this.setupHostControlChannel();
     this.setupParentDeathWatchdog();
+    bootPhases.mark("settings");
 
     // 1a. One-time fold-in of the legacy ~/.zeros/state.db (workspaces + meta +
     // detach_state) into the unified zeros.db. Runs before seedFromDisk
@@ -3116,6 +3150,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on migration */
     }
+    bootPhases.mark("legacy-state");
 
     // 1a.2. Finish any create/archive/restore/delete interrupted between Git,
     // filesystem, and SQLite BEFORE any relocation or seed janitor can reinterpret
@@ -3139,6 +3174,7 @@ export class ZerosEngine {
     } catch {
       /* keep startup alive; journals/refs remain for the next retry */
     }
+    bootPhases.mark("lifecycle-recovery");
 
     // Reclaim heavy dependency/build directories staged by an engine that died
     // during archive/delete. Run only AFTER lifecycle recovery: a successfully
@@ -3165,6 +3201,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — temp trash is never startup-critical */
     }
+    bootPhases.mark("trash");
 
     // 1a.5. One-time relocation of worktrees from the hidden ~/.zeros/worktrees
     // to the visible ~/zeros/workspaces. Runs at startup before any
@@ -3177,6 +3214,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on relocation */
     }
+    bootPhases.mark("worktree-relocation");
 
     // 1b. Crash recovery: re-register on-disk worktrees missing from
     // the registry (e.g. after a dev wipe). Idempotent — skips rows that
@@ -3194,6 +3232,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on crash recovery */
     }
+    bootPhases.mark("seed");
 
     // Mode/legacy-permission reconcile. First complete any mode transition a crash
     // interrupted (the durable marker knows the intended direction). Then two
@@ -3241,6 +3280,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — failures are logged per workspace above */
     }
+    bootPhases.mark("design-reconcile");
 
     // Clear any setup_state="running" left over from a previous process (engine
     // quit mid-install) so the Setup tab doesn't spin forever — the in-memory
@@ -3289,6 +3329,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on crash recovery */
     }
+    bootPhases.mark("turn-recovery");
 
     // 1b.1. One-time: move legacy in-worktree `.zeros/workspace.json` seeds to
     // app-data and delete the in-tree `.zeros/`, so Zeros leaves no `.zeros` in
@@ -3301,6 +3342,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on seed migration */
     }
+    bootPhases.mark("seed-migration");
 
     // 1b.3. Repin surviving recovery snapshots without pruning shared archive
     // refs, then clean up stale branch-ownership proofs. Runs after seedFromDisk
@@ -3315,6 +3357,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on retention */
     }
+    bootPhases.mark("archive-refs");
 
     // 1b.5. One-time cleanup of phantom worktree "projects" in the repos table:
     // a stale renderer regex (pre Phase-0 relocation) upserted worktrees under
@@ -3333,6 +3376,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on cleanup */
     }
+    bootPhases.mark("repo-prune");
 
     // 1c. One-time migration of the legacy Electron-main agent-history DB
     // (zeros-agent-history.db) into the unified Zeros DB. Idempotent and
@@ -3345,6 +3389,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on migration */
     }
+    bootPhases.mark("legacy-history");
 
     // 1d. One-time backfill of chats.workspace_id (v11). The column defaults to
     // NULL; this resolves each pre-existing chat's `folder` to its owning
@@ -3366,6 +3411,7 @@ export class ZerosEngine {
     } catch {
       /* best-effort — never block startup on backfill */
     }
+    bootPhases.mark("backfill");
 
     // 2. Build the retired selector index only if its legacy MCP consumer is
     // deliberately restored. The current Design workspace does not consume
@@ -3383,11 +3429,13 @@ export class ZerosEngine {
     await this.local.start();
     this.actualPort = this.local.actualPort;
     this.activityHeartbeat.start();
+    bootPhases.mark("transport");
 
     // MCP gateway: front any auth:"oauth" backends on a localhost
     // endpoint + inject that one server into every agent. Best-effort — a
     // gateway failure must never block engine boot.
     await this.startGateway();
+    bootPhases.mark("gateway");
 
     // 4. Start the retired selector-index watcher only with that subsystem.
     if (LEGACY_DESIGN_SELECTOR_INDEX_ENABLED) {
@@ -3426,6 +3474,9 @@ export class ZerosEngine {
     // bypass bridge writes. Watch worktree content (create/change/delete) and
     // stat-poll tiny git-dir state (stage/commit/checkout), then broadcast one
     // workspaces invalidation so File / All Files / Changes re-pull together.
+    // One-shot Design style builds re-run on their inputs from this watcher,
+    // rather than each running a watcher of its own.
+    this.stopStyleBuildInputs = onWorktreeContentChange(designStyleInputChanged);
     this.gitWatcher = startGitWatcher(
       () => this.cloudRuntimeHandoffFenced ? [] : this.workspace.gitWatchTargets(),
       (change) => {
@@ -3476,6 +3527,7 @@ export class ZerosEngine {
       },
     );
 
+    bootPhases.mark("watchers");
     // 5. Write .zeros/.port file
     this.writePortFile(this.actualPort);
 
@@ -3499,10 +3551,13 @@ export class ZerosEngine {
         cause: error,
       });
     }
+    bootPhases.mark("registration");
     const elapsed = Date.now() - startTime;
     console.log(
       `[Zeros] Engine ready on port ${this.actualPort} (${elapsed}ms)`,
     );
+    const slowBootPhases = bootPhases.slowPhases();
+    if (slowBootPhases) console.log(`[Zeros] slow boot phases: ${slowBootPhases}`);
     // Capture is optional: source tools remain usable without its renderer.
     // Start only after handlers and initial durable registration are ready;
     // the capture host still validates the immutable, attested cloud image.
@@ -3529,6 +3584,8 @@ export class ZerosEngine {
    * Stop the engine gracefully.
    */
   async stop(): Promise<void> {
+    // Streamed transcript rows buffered by a Local engine reach SQLite first.
+    try { flushStreamingChatMessages(); } catch { /* best effort, like persist-on-emit */ }
     this.cloudCheckpointProgress?.reporter.dispose();
     const failures: unknown[] = [];
     if (this.cloudLegacyResidentRetryTimer) clearTimeout(this.cloudLegacyResidentRetryTimer);
@@ -3598,6 +3655,7 @@ export class ZerosEngine {
     await settle(() => this.cloudLocalWriterLifecycle?.close());
     await settle(() => stopDesignVerification());
     configureDesignStyleBuilds(null);
+    configureDesignFonts({ onReady: null });
     const captureService = this.designCaptureService;
     this.designCaptureService = undefined;
     if (captureService) {
@@ -3680,6 +3738,8 @@ export class ZerosEngine {
     if (settingsWatcher) await settle(() => settingsWatcher.stop());
     const gitWatcher = this.gitWatcher;
     this.gitWatcher = null;
+    this.stopStyleBuildInputs?.();
+    this.stopStyleBuildInputs = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
@@ -9863,7 +9923,9 @@ export class ZerosEngine {
    *  agent after the laptop closes). It folds the chunk with the SAME shared
    *  applyUpdate the renderer uses (no drift), then upserts only the rows that
    *  changed (a streaming text message upserts one growing row; a tool update
-   *  rewrites its row). Best-effort: persistence must NEVER throw into the live
+   *  rewrites its row). A Local engine queues agent output through the
+   *  streaming write coalescer (db/messages.ts), which every read drains.
+   *  Best-effort: persistence must NEVER throw into the live
    *  stream. Only sessions bound to a chat (chatId sent at new/load-session) are
    *  persisted; unbound sessions (e.g. terminal) are skipped. */
   /** Persist the user's prompt to the engine transcript — mirroring the renderer's
@@ -10128,15 +10190,22 @@ export class ZerosEngine {
       this.sessionMessages.set(sessionId, next);
       const changed = next.filter((m) => !prevSet.has(m));
       if (changed.length === 0) return;
-      upsertChatMessagesBulk(
-        chatId,
-        changed.map((m) => ({
-          msgId: m.id,
-          kind: m.kind,
-          payload: JSON.stringify(m),
-          createdAt: m.createdAt,
-        })),
-      );
+      const rows = changed.map((m) => ({
+        msgId: m.id,
+        kind: m.kind,
+        payload: JSON.stringify(m),
+        createdAt: m.createdAt,
+      }));
+      // A Local engine coalesces streamed agent output (db/messages.ts); every
+      // read drains it first. Prompts and cloud history stay write-through.
+      if (
+        this.cloudWorker ||
+        notification.update.sessionUpdate === "user_message_chunk"
+      ) {
+        upsertChatMessagesBulk(chatId, rows);
+      } else {
+        queueStreamingChatMessages(chatId, rows);
+      }
       // Nudge OTHER devices to re-window this chat (debounced). The initiator
       // sees the change live; this catches a passive observer (the chat open on
       // web while the Mac drives it) and is the robust fallback when a live
@@ -10330,6 +10399,8 @@ export class ZerosEngine {
     // persisted on the turn row so the footer's usage popover survives reloads.
     usage: TurnUsage | null = null,
   ): Promise<void> {
+    // A settled turn's transcript is durable before its row reports settled.
+    try { flushStreamingChatMessages(ctx.chatId); } catch { /* persistence never disturbs settle */ }
     try {
       const msgs = this.sessionMessages.get(ctx.sessionId) ?? [];
       const turnMsgs = msgs.slice(ctx.startIndex);

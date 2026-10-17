@@ -1,8 +1,11 @@
 import { expect } from "@playwright/test";
 import { runProviderUsageObservationSmoke } from "./ui-smoke-provider-usage-observation.mjs";
+import { runProviderIdentitySmoke } from "./ui-smoke-provider-identity.mjs";
 
 export async function runSubscriptionSmoke({ page, check }) {
   const base = new URL(page.url()).origin;
+  await runProviderIdentitySmoke({ page, check });
+  await runProviderKeyRefreshSmoke({ page, check });
   await runQueueSmoke({ page, check });
   await page.goto(
     `${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html?disconnected=claude`,
@@ -139,7 +142,7 @@ export async function runSubscriptionSmoke({ page, check }) {
         .getByLabel("Claude sign-in code")
         .fill("fixture-code#fixture-state");
       await dialog.getByRole("button", { name: "Submit code" }).click();
-      await expect(dialog.getByRole("status")).toContainText("Connected");
+      await expect(dialog.getByRole("status")).toContainText("is connected");
       await page.keyboard.press("Escape");
     } else {
       await dialog.getByRole("button", { name: "Cancel sign-in" }).click();
@@ -265,12 +268,27 @@ export async function runSubscriptionSmoke({ page, check }) {
     await firstAccount.click();
     await expect(firstAccount).toBeChecked();
     await expect(dialog.getByRole("status")).toHaveText(
-      "Connected as user@example.test · Pro",
+      "user@example.test is connected",
     );
     await secondAccount.click();
     await expect(secondAccount).toBeChecked();
     const secondId = (await counts()).selectedAccount;
     await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Expire selected account", exact: true }).click();
+    await page.getByRole("button", { name: `Configure ${provider === "claude" ? "Claude" : names[provider]}`, exact: true }).click();
+    await expect(dialog.getByText(/second@example.test.*Sign in required/)).toBeVisible();
+    const beforeReconnect = (await counts()).browser;
+    await dialog.getByRole("button", { name: "Sign in to second@example.test", exact: true }).click();
+    await expect.poll(async () => (await counts()).browser).toBe(beforeReconnect + 1);
+    await expect(dialog.getByRole("button", { name: "Cancel sign-in", exact: true })).toBeEnabled();
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Complete browser login", exact: true }).click();
+    await page.getByRole("button", { name: "Connected via subscription", exact: true }).click();
+    await expect(accountPicker.getByRole("radio")).toHaveCount(2);
+    await expect(secondAccount).toBeChecked();
+    await expect(dialog.getByRole("status")).toHaveText("second@example.test is connected");
+    await page.keyboard.press("Escape");
+    check(`${provider}: saved-account Sign in opens the browser and renews the same entry`, true);
     await page
       .getByRole("button", { name: "Return to chat", exact: true })
       .click();
@@ -314,7 +332,7 @@ export async function runSubscriptionSmoke({ page, check }) {
     await expect(firstAccount).not.toBeChecked();
     await firstAccount.click();
     await expect(dialog.getByRole("status")).toHaveText(
-      "Connected as user@example.test · Pro",
+      "user@example.test is connected",
     );
     await page.keyboard.press("Escape");
     await page
@@ -450,6 +468,29 @@ export async function runUsageSmoke({ page, check }) {
   expect((await counts()).usageReads).toBe(hiddenReads);
   check("Usage refreshes every 30 minutes while visible and pauses while hidden", true);
   await runProviderUsageObservationSmoke({ page, check });
+}
+
+export async function runProviderKeyRefreshSmoke({ page, check }) {
+  const base = new URL(page.url()).origin;
+  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-subscription.html?usage=cursor`);
+  await page.getByRole("button", { name: "Connected via subscription", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "API", exact: true }).click();
+  const configured = dialog.getByText("Cursor API key configured", { exact: true });
+  // Another retained surface/window changes the native slot. The open form
+  // must revalidate presence without reading the secret into the renderer.
+  const updateKey = async (present) => page.evaluate(async (present) => {
+    const { nativeInvoke } = await import("/apps/desktop/src/renderer/platform/runtime.ts");
+    const { providerAuthChanged } = await import("/apps/desktop/src/renderer/platform/provider-auth-state.ts");
+    await nativeInvoke(present ? "keychain_set" : "keychain_delete", { account: "cursor-api-key", value: "fixture-api-key" });
+    providerAuthChanged();
+  }, present);
+  await updateKey(true);
+  await expect(configured).toBeVisible();
+  await expect(dialog.getByLabel("Cursor API key")).toHaveValue("");
+  await updateKey(false);
+  await expect(configured).toHaveCount(0);
+  check("Provider key presence follows shared credential updates without populating the secret input", true);
 }
 
 export async function runQueueSmoke({ page, check }) {

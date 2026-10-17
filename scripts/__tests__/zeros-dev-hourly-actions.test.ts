@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { planHourly, hourlyContext, actionsProfile, hourlySnapshot, decideHourlyGate, lifecycleJob } from "../zeros-dev/hourly-actions.mjs";
+import { planHourly, planMain, planOutputs, hourlyContext, actionsProfile, hourlySnapshot, decideHourlyGate, lifecycleJob } from "../zeros-dev/hourly-actions.mjs";
+import { CHAIN_RESTART, reviewedChainRestart } from "../zeros-dev/chain-restart.mjs";
 
 const run = (id: number, overrides = {}) => ({ id, run_number: id, run_attempt: 1, path: ".github/workflows/zeros-dev-e2e.yml", name: "Zeros dev E2E",
   head_sha: "a".repeat(40), head_branch: "main", event: "schedule", status: "completed", conclusion: "success",
@@ -103,6 +104,105 @@ describe("hourly Actions predecessor and gate policy", () => {
         steps: [{ name: "Execute Alpha product lifecycle", status: "completed", conclusion: change === "executed" ? "success" : "failure" },
           { name: "Save signed cleanup receipt", status: "completed", conclusion: change === "upload" ? "success" : "failure" }] })] } : original(url));
     await expect(planHourly(f, context)).rejects.toThrow("zeros_dev_artifact_invalid");
+  });
+  const restartRun = (overrides = {}) => run(38737559526, { run_number: 11, event: "workflow_dispatch", conclusion: "failure",
+    head_sha: "a57a361d35275279dea209f85f9df9aaec8805b2", ...overrides });
+  const restartArtifact = (previous: ReturnType<typeof run>, overrides = {}) => ({ id: 11977255852, name: `zeros-dev-receipt-${previous.id}-${previous.run_attempt}`,
+    expired: false, size_in_bytes: 12919, digest: "sha256:dedd838cf5e53c4a9146331f11a794a983153792d59350c3a173b5fe54e8bee4",
+    workflow_run: { id: previous.id, head_sha: previous.head_sha }, ...overrides });
+  function restartApi(rows: ReturnType<typeof run>[], artifacts: (id: number) => unknown[], jobs: (id: number) => unknown = () => completedJob()) {
+    const f = api(rows), original = f.get.getMockImplementation()!;
+    f.get.mockImplementation(async url => {
+      const id = Number(/\/runs\/([0-9]+)\//.exec(url)?.[1]);
+      if (url.includes("/artifacts")) { const rows = artifacts(id); return { total_count: rows.length, artifacts: rows }; }
+      return url.includes("/jobs") ? { total_count: 1, jobs: [jobs(id)] } : original(url);
+    });
+    return f;
+  }
+  it("restarts the chain only from the exact owner-reviewed receipt of the lost device", async () => {
+    const previous = restartRun(), f = restartApi([run(17, { status: "in_progress", conclusion: null }), previous], () => [restartArtifact(previous)]);
+    expect(await planHourly(f, context)).toEqual({ execution: context, bootstrap: true, previous: null, artifactId: null, chainRestart: CHAIN_RESTART });
+    expect(CHAIN_RESTART).toEqual({ version: 1, workflowRunId: "38737559526", attempt: 1, sourceSha: "a57a361d35275279dea209f85f9df9aaec8805b2",
+      artifactId: "11977255852", artifactDigest: "sha256:dedd838cf5e53c4a9146331f11a794a983153792d59350c3a173b5fe54e8bee4",
+      receiptSha256: "2a2abb9eb07b460ae07a21719aaf4229b36e589f606a100746d7f5f5fef9c5c3", retiredDeviceId: "d5d457f9-86e6-4611-a757-88e0ad2df64a",
+      approvedOn: "2026-10-16", reason: "fixture device key lost with its host; owner-approved restart" });
+    expect(Object.isFrozen(CHAIN_RESTART)).toBe(true);
+    expect(planOutputs({ ...await planHourly(f, context), profile: "infrastructure" }))
+      .toMatch(/\nprevious_run=38737559526\nartifact_id=11977255852\n$/);
+  });
+  it("crosses only product-skipped scheduled runs between the restart receipt and the first new-chain run", async () => {
+    const previous = restartRun(), skipped = [16, 15, 14, 13, 12].map(id => run(id, { conclusion: "skipped" }));
+    const f = restartApi([run(17, { status: "in_progress", conclusion: null }), ...skipped, previous], id => id === previous.id ? [restartArtifact(previous)] : [],
+      () => completedJob({ name: infrastructureExpression, conclusion: "skipped", steps: [] }));
+    expect(await planHourly(f, context)).toEqual({ execution: context, bootstrap: true, previous: null, artifactId: null, chainRestart: CHAIN_RESTART });
+  });
+  it("never restarts across a newer executed run that left no receipt", async () => {
+    const previous = restartRun(), failed = run(16, { event: "workflow_dispatch", conclusion: "failure" });
+    const f = restartApi([run(17, { status: "in_progress", conclusion: null }), failed, previous], id => id === previous.id ? [restartArtifact(previous)] : [],
+      () => completedJob({ name: "infrastructure", conclusion: "failure", steps: ["Execute Alpha product lifecycle", "Save signed cleanup receipt"]
+        .map(name => ({ name, status: "completed", conclusion: "failure" })) }));
+    await expect(planHourly(f, context)).rejects.toThrow("zeros_dev_artifact_invalid");
+    expect(f.get.mock.calls.some(([url]) => url.includes(`/runs/${previous.id}/`))).toBe(false);
+  });
+  it("refuses the pinned receipt once its artifact has expired", async () => {
+    const previous = restartRun(), f = restartApi([run(17, { status: "in_progress", conclusion: null }), previous],
+      () => [restartArtifact(previous, { expired: true })]);
+    await expect(planHourly(f, context)).rejects.toThrow("zeros_dev_artifact_invalid");
+  });
+  it("selects the restart record directly only for the exact pinned run and artifact", () => {
+    const exact = restartRun(), artifact = restartArtifact(exact);
+    expect(reviewedChainRestart(exact, artifact)).toEqual(CHAIN_RESTART);
+    expect(reviewedChainRestart(exact, artifact)).not.toBe(CHAIN_RESTART);
+    const unrelated = run(16, { event: "workflow_dispatch", conclusion: "failure" });
+    expect(reviewedChainRestart(unrelated, { id: 99, name: "zeros-dev-receipt-16-1", digest: `sha256:${"c".repeat(64)}`,
+      workflow_run: { id: 16, head_sha: "a".repeat(40) } })).toBeNull();
+    const changes: [string, object, object][] = [
+      ["attempt", { run_attempt: 2 }, {}], ["head_sha", { head_sha: "f".repeat(40) }, {}], ["event", { event: "schedule" }, {}],
+      ["status", { status: "in_progress" }, {}], ["conclusion", { conclusion: "success" }, {}],
+      ["artifact id", {}, { id: 11977255853 }], ["artifact name", {}, { name: "zeros-dev-receipt-38737559526-2" }],
+      ["digest", {}, { digest: `sha256:${"d".repeat(64)}` }], ["workflow_run.id", {}, { workflow_run: { id: 38737559527, head_sha: exact.head_sha } }],
+      ["workflow_run.head_sha", {}, { workflow_run: { id: exact.id, head_sha: "f".repeat(40) } }],
+    ];
+    for (const [change, runChange, artifactChange] of changes)
+      expect(() => reviewedChainRestart({ ...exact, ...runChange }, { ...artifact, ...artifactChange }), change)
+        .toThrow("zeros_dev_chain_restart_mismatch");
+  });
+  it.each([
+    { change: "attempt", run: { run_attempt: 2 }, artifact: {} },
+    { change: "source", run: { head_sha: "f".repeat(40) }, artifact: {} },
+    { change: "event", run: { event: "schedule" }, artifact: {} },
+    { change: "conclusion", run: { conclusion: "success" }, artifact: {} },
+    { change: "artifact id", run: {}, artifact: { id: 11977255853 } },
+    { change: "artifact digest", run: {}, artifact: { digest: `sha256:${"d".repeat(64)}` } },
+    { change: "run with the pinned artifact", run: { id: 38737559527 }, artifact: {} },
+    { change: "run with the pinned digest", run: { id: 38737559527 }, artifact: { id: 11977255853 } },
+  ])("fails closed instead of bootstrapping when only the $change differs", async ({ run: changes, artifact }) => {
+    const previous = restartRun(changes), f = restartApi([run(17, { status: "in_progress", conclusion: null }), previous],
+      () => [restartArtifact(previous, artifact)]);
+    await expect(planHourly(f, context)).rejects.toThrow("zeros_dev_chain_restart_mismatch");
+  });
+  it("names a partial restart match in the planner's closed error without writing a plan", async () => {
+    const previous = restartRun(), f = restartApi([run(17, { status: "in_progress", conclusion: null }), previous],
+      () => [restartArtifact(previous, { digest: `sha256:${"d".repeat(64)}` })]);
+    const errors: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => { const target = new URL(url); return Response.json(await f.get(target.pathname + target.search)); }));
+    vi.spyOn(process.stderr, "write").mockImplementation(chunk => { errors.push(String(chunk)); return true; });
+    try {
+      expect(await planMain({ GITHUB_ACTIONS: "true", GITHUB_REPOSITORY: "Withso/zeros", GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "schedule",
+        GITHUB_WORKFLOW_REF: "Withso/zeros/.github/workflows/zeros-dev-e2e.yml@refs/heads/main", GITHUB_RUN_ID: "17", GITHUB_RUN_ATTEMPT: "1",
+        GITHUB_SHA: "a".repeat(40), GITHUB_TOKEN: "synthetic-token", GITHUB_OUTPUT: "/nonexistent/zeros-dev-output" })).toBe(1);
+      expect(errors).toEqual(['{"schema":"zeros.dev-error/v1","code":"chain_restart_mismatch"}\n']);
+    } finally { vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+  });
+  it("chains normally to the first new-chain receipt and never applies the restart again", async () => {
+    const restart = restartRun(), first = run(16, { event: "workflow_dispatch", conclusion: "failure" });
+    const f = restartApi([run(17, { status: "in_progress", conclusion: null }), first, restart],
+      id => id === restart.id ? [restartArtifact(restart)] : id === 16 ? [{ id: 99, name: "zeros-dev-receipt-16-1", expired: false, size_in_bytes: 100,
+        digest: `sha256:${"c".repeat(64)}`, workflow_run: { id: 16, head_sha: "a".repeat(40) } }] : []);
+    const plan = await planHourly(f, context);
+    expect(plan).toEqual({ execution: context, bootstrap: false, previous: { workflowRunId: "16", attempt: 1, sourceSha: "a".repeat(40) }, artifactId: "99" });
+    expect(f.get.mock.calls.some(([url]) => url.includes(`/runs/${restart.id}/`))).toBe(false);
+    expect(planOutputs({ ...plan, profile: "hourly" })).toMatch(/\nprevious_run=16\nartifact_id=99\n$/);
   });
   it.each(["lifecycle", skippedExpression])("can start after a disabled schedule with job name %s only when the product never ran", async name => {
     const current = run(17, { status: "in_progress", conclusion: null }), skipped = run(16, { conclusion: "skipped" });

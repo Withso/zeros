@@ -85,8 +85,10 @@ or cloud transport.
 Provider CLI credentials are separate from a Zeros account. Real agents still
 need their normal provider authentication, and provider/GitHub CLI operations
 may use the network when requested. Native provider settings and PAT credentials
-can be configured in Local's own profile. Hosted GitHub App integration and
-staff/account-authorized internal features require the complete hosted app.
+can be configured in Local's own profile. Settings → Internal is available by
+default in this trusted native development mode, with eligible features enabled
+unless explicitly turned off. Hosted GitHub App integration and owner-only
+release operations still require the complete hosted app and its authorization.
 
 The organization selection continues to use the persisted compatibility key
 `local-personal` (the existing Personal/Local entry). Its workspace ownership is
@@ -106,7 +108,8 @@ suffix so identically named folders can be distinguished.
 
 | State on macOS                                                  | Location                                                                  |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| SQLite, native settings, isolated secrets, single-instance lock | `~/Library/Application Support/com.zeros.local.<identity>/`               |
+| SQLite, native settings, single-instance lock                  | `~/Library/Application Support/com.zeros.local.<identity>/`               |
+| Shared encrypted provider credentials and account profiles     | `~/Library/Application Support/com.zeros.local/`                          |
 | Chromium cache, cookies and renderer storage                    | `~/Library/Caches/com.zeros.local.<identity>/`                            |
 | Native logs                                                     | The existing per-identity log location under `com.zeros.local.<identity>` |
 | User settings, default-project sentinel and engine state        | `~/.zeros-local/instances/<identity>/`                                    |
@@ -117,6 +120,19 @@ Local never migrates hosted Dev/packaged secrets or Chromium state into its
 profile. It also starts with its own user settings instead of seeding them from
 the installed app. Stopping the command does not remove SQLite or workspace
 data. Local profiles are not pruned by the hosted Dev launcher.
+
+Local provider authentication is shared across checkouts by default. API keys,
+saved subscription accounts and the selected method persist independently of
+each checkout's database and renderer preferences. Hosted Dev similarly shares
+its own `com.zeros.dev` store; Local, Dev and packaged channels remain separate.
+`ZEROS_ISOLATE=1 pnpm electron:local` explicitly keeps a checkout's secrets private.
+
+On the first shared launch from an older Local checkout, only its provider
+credentials migrate into missing shared slots. Existing shared values win. The
+old store remains recoverable, and a migration marker prevents deleted keys
+from returning. Migrated Claude/Codex profiles retain their original path because
+native Keychain entries depend on it; keep those profile directories when
+removing an old checkout's data. See [provider accounts](provider-accounts.md).
 
 To delete an old profile, stop its launcher first and remove its identity's
 directories: `~/Library/Application Support/com.zeros.local.<identity>/`,

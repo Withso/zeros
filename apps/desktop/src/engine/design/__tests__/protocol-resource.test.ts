@@ -90,7 +90,7 @@ describe("design protocol resources", () => {
     });
     expect(css.status).toBe(200);
     expect(css.mimeType).toContain("text/css");
-    expect(css.body.toString("utf8")).toContain("@property --bg1");
+    expect(css.body.toString("utf8")).toContain("@layer reset");
     expect(css.body.toString("utf8")).toContain(
       `url("./assets/pixel.png?v=${identity.sourceVersion}")`,
     );

@@ -4,9 +4,10 @@
 //
 // The engine persists agent messages here AS IT STREAMS them (the persist hook
 // in apps/desktop/src/engine/zeros-engine.ts folds chunks with the shared applyUpdate coalescer and
-// upserts the changed messages). It's the source — works even when no client is
-// attached (for example, after a relay disconnects). Clients read them over the
-// bridge (`messages.window`).
+// upserts the changed messages; a Local engine buffers streamed rows for a few
+// milliseconds, see "Streaming write coalescing" below). It's the source —
+// works even when no client is attached (for example, after a relay
+// disconnects). Clients read them over the bridge (`messages.window`).
 //
 // Wire shape = PersistedMessage (mirrors the renderer's PersistedMessageWire:
 // msgId / kind / payload=JSON(AgentMessage) / createdAt). Storage/ordering mirror
@@ -118,6 +119,12 @@ function extractContent(payload: string): string {
  *  — the message half of delta sync, mirroring chats. */
 export function upsertChatMessage(chatId: string, m: PersistedMessage): void {
   if (!chatId || !m?.msgId) return;
+  // Buffered streaming rows are older than this write: keep their order.
+  flushStreamingChatMessages(chatId);
+  writeChatMessage(chatId, m);
+}
+
+function writeChatMessage(chatId: string, m: PersistedMessage): void {
   const db = openZerosDb();
   const content = extractContent(m.payload);
   const existing = db
@@ -155,11 +162,77 @@ export function upsertChatMessagesBulk(
   messages: PersistedMessage[],
 ): void {
   if (!chatId || messages.length === 0) return;
+  flushStreamingChatMessages(chatId);
+  writeChatMessages(chatId, messages);
+}
+
+function writeChatMessages(chatId: string, messages: PersistedMessage[]): void {
   const db = openZerosDb();
   const tx = db.transaction((items: PersistedMessage[]) => {
-    for (const m of items) upsertChatMessage(chatId, m);
+    for (const m of items) if (m?.msgId) writeChatMessage(chatId, m);
   });
   tx(messages);
+}
+
+// ── Streaming write coalescing ──────────────────────────────
+//
+// A streaming text, thinking or tool row is rewritten on EVERY provider chunk:
+// the whole payload plus its full-text reindex, ~0.5–1 ms of synchronous
+// SQLite work per chunk that grows with the message (a 32 KB answer is ~1.5 s),
+// and it blocks every other engine request meanwhile. A Local engine buffers
+// those rows per chat and writes only the newest version of each row on a
+// short timer. Correctness does not depend on the timer: every read or write
+// of a chat's rows through this module drains that chat's buffer first, so a
+// reader never observes a superseded row and first-insert order (`ord`) is
+// preserved; deletes drain first so nothing can reappear after them. A crash
+// can lose at most the last STREAM_WRITE_DELAY_MS of streamed output; prompts
+// are never buffered.
+
+const STREAM_WRITE_DELAY_MS = 150;
+const streamingRows = new Map<string, Map<string, PersistedMessage>>();
+let streamingTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Buffer streamed rows for a chat (newest version of each row wins). */
+export function queueStreamingChatMessages(
+  chatId: string,
+  messages: PersistedMessage[],
+): void {
+  if (!chatId || messages.length === 0) return;
+  let rows = streamingRows.get(chatId);
+  if (!rows) {
+    rows = new Map();
+    streamingRows.set(chatId, rows);
+  }
+  // Map keeps a row's first-queued position, which is its first-insert order.
+  for (const m of messages) if (m?.msgId) rows.set(m.msgId, m);
+  if (!streamingTimer) {
+    streamingTimer = setTimeout(() => {
+      streamingTimer = null;
+      try {
+        flushStreamingChatMessages();
+      } catch {
+        // Persistence must never disturb the live stream; the next queued
+        // version of each row retries it.
+      }
+    }, STREAM_WRITE_DELAY_MS);
+    streamingTimer.unref?.();
+  }
+}
+
+/** Write buffered streaming rows now — one chat's, or every chat's. */
+export function flushStreamingChatMessages(chatId?: string): void {
+  if (streamingRows.size === 0) return;
+  const chats = chatId === undefined ? [...streamingRows.keys()] : [chatId];
+  for (const id of chats) {
+    const rows = streamingRows.get(id);
+    if (!rows) continue;
+    streamingRows.delete(id);
+    writeChatMessages(id, [...rows.values()]);
+  }
+  if (streamingRows.size === 0 && streamingTimer) {
+    clearTimeout(streamingTimer);
+    streamingTimer = null;
+  }
 }
 
 /** Ceiling on the rows one window read may return, so `windowChatMessages`
@@ -286,24 +359,104 @@ function snapToTurnStart(chatId: string, rows: MsgDbRow[]): MsgDbRow[] {
   return rows.concat(fill);
 }
 
+/** The newest turn-opening prompt before `ord`, for a turn longer than the
+ *  snap budget. A backward walk of idx_chat_messages_chat_ord would parse the
+ *  JSON of every row in that turn — thousands of rows on exactly the chats this
+ *  path exists for — so this reads idx_chat_messages_user_text (migration 25,
+ *  user prompts only, ~3% of rows) instead. Its WHERE must stay byte-compatible
+ *  with that partial index's predicate; db.test.ts pins the plan. Exported as
+ *  text only for that test. */
+export const TURN_OPENING_ORD_SQL = `SELECT ord FROM chat_messages INDEXED BY idx_chat_messages_user_text
+        WHERE chat_id = ? AND kind = 'text' AND json_extract(payload, '$.role') = 'user'
+          AND ord < ? AND json_extract(payload, '$.steeredTurnId') IS NULL
+        ORDER BY ord DESC LIMIT 1`;
+
+/** Fallback for TURN_OPENING_ORD_SQL when no unsteered prompt precedes the
+ *  window (legacy steers carry no `steeredTurnId`): any user boundary. */
+export const TURN_OPENING_ANY_USER_ORD_SQL = `SELECT ord FROM chat_messages INDEXED BY idx_chat_messages_user_text
+        WHERE chat_id = ? AND kind = 'text' AND json_extract(payload, '$.role') = 'user'
+          AND ord < ?
+        ORDER BY ord DESC LIMIT 1`;
+
+/** The prompt that opened the turn `oldest` belongs to, when a turn is longer
+ *  than the contiguous row budget (snapToTurnStart gave up). Prefers the real
+ *  opening over a mid-turn steer, exactly like the snap. */
+function turnOpeningRow(chatId: string, oldest: MsgDbRow): MsgDbRow | undefined {
+  if (isUserTextRow(oldest)) return undefined;
+  const db = openZerosDb();
+  const start = (db.prepare(TURN_OPENING_ORD_SQL).get(chatId, oldest.ord) ??
+    db.prepare(TURN_OPENING_ANY_USER_ORD_SQL).get(chatId, oldest.ord)) as
+    | { ord: number }
+    | undefined;
+  if (!start) return undefined;
+  return db
+    .prepare(`${WINDOW_COLUMNS} WHERE chat_id = ? AND ord = ? LIMIT 1`)
+    .get(chatId, start.ord) as MsgDbRow | undefined;
+}
+
+function persisted(row: MsgDbRow): PersistedMessage {
+  return {
+    msgId: row.msg_id,
+    kind: row.kind,
+    payload: row.payload,
+    createdAt: row.created_at,
+  };
+}
+
+/** A tail window plus, when it still begins inside a turn, that turn's
+ *  opening prompt. The opening is NOT part of the contiguous rows: the
+ *  renderer's older-page cursor stays `messages[0]`, and the gap between the
+ *  opening and the window is reachable by ordinary scroll-up paging. */
+export interface ChatMessageWindow {
+  messages: PersistedMessage[];
+  turnOpening?: PersistedMessage;
+}
+
 /** Last `limit` messages for a chat, oldest-first — extended back to the prompt
  *  that opened the turn the window landed in (see snapToTurnStart), so a tail
- *  read never hands the renderer a headless turn. `before` (an ord) paginates
- *  older history and is returned unsnapped: a page walking backwards is already
- *  anchored to rows the caller holds. Mirrors the retired electron/db.ts windowMessages. */
+ *  read never hands the renderer a headless turn. When that turn is longer than
+ *  the row budget, its opening prompt is reported beside the window instead.
+ *  `before` (an ord) paginates older history and is returned unsnapped: a page
+ *  walking backwards is already anchored to rows the caller holds. */
+export function windowChatMessagesPage(
+  chatId: string,
+  limit: number,
+  before?: number,
+): ChatMessageWindow {
+  flushStreamingChatMessages(chatId);
+  const rows = newestRows(chatId, limit, before);
+  const windowed = before ? rows : snapToTurnStart(chatId, rows);
+  const oldest = windowed[windowed.length - 1];
+  const opening = before || !oldest ? undefined : turnOpeningRow(chatId, oldest);
+  const chronological = windowed.reverse();
+  if (!opening) {
+    return {
+      messages: annotateLegacySteers(chatId, chronological).map(persisted),
+    };
+  }
+  // Annotate together so a legacy steer is classified the same way whether it
+  // arrives as the opening or later inside the window.
+  const [annotatedOpening, ...annotated] = annotateLegacySteers(chatId, [
+    opening,
+    ...chronological,
+  ]);
+  return {
+    messages: annotated.map(persisted),
+    turnOpening: persisted(annotatedOpening),
+  };
+}
+
+/** Rows-only form of windowChatMessagesPage. Mirrors the retired electron/db.ts
+ *  windowMessages. */
 export function windowChatMessages(
   chatId: string,
   limit: number,
   before?: number,
 ): PersistedMessage[] {
+  flushStreamingChatMessages(chatId);
   const rows = newestRows(chatId, limit, before);
   const windowed = before ? rows : snapToTurnStart(chatId, rows);
-  return annotateLegacySteers(chatId, windowed.reverse()).map((r) => ({
-    msgId: r.msg_id,
-    kind: r.kind,
-    payload: r.payload,
-    createdAt: r.created_at,
-  }));
+  return annotateLegacySteers(chatId, windowed.reverse()).map(persisted);
 }
 
 /** A page of older messages before a known message id (renderer scroll-up). */
@@ -312,6 +465,7 @@ export function windowOlderChatMessages(
   limit: number,
   beforeMsgId: string,
 ): PersistedMessage[] {
+  flushStreamingChatMessages(chatId);
   const db = openZerosDb();
   const cursor = db
     .prepare(
@@ -326,6 +480,7 @@ export function windowOlderChatMessages(
  *  in sync. Returns the number of rows removed. */
 export function clearChatMessages(chatId: string): number {
   if (!chatId) return 0;
+  flushStreamingChatMessages(chatId);
   const db = openZerosDb();
   let changes = 0;
   const tx = db.transaction(() => {
@@ -348,6 +503,7 @@ export function truncateChatMessagesFrom(
   fromMsgId: string,
 ): number {
   if (!chatId || !fromMsgId) return 0;
+  flushStreamingChatMessages(chatId);
   const db = openZerosDb();
   const cursor = db
     .prepare(
@@ -390,6 +546,7 @@ export function getChatMessagesFrom(
   untilMsgId?: string | null,
 ): { cutOrd: number; rows: PersistedMessageRow[] } | null {
   if (!chatId || !fromMsgId) return null;
+  flushStreamingChatMessages(chatId);
   const db = openZerosDb();
   const ordOf = db.prepare(
     "SELECT ord FROM chat_messages WHERE chat_id = ? AND msg_id = ? LIMIT 1",
@@ -433,6 +590,7 @@ export function listChatMessagesAfterOrd(
   limit: number,
 ): PersistedMessageRow[] {
   if (!chatId) return [];
+  flushStreamingChatMessages(chatId);
   const rows = openZerosDb()
     .prepare(
       "SELECT msg_id, ord, kind, payload, created_at FROM chat_messages WHERE chat_id = ? AND ord > ? ORDER BY ord ASC LIMIT ?",
@@ -451,6 +609,7 @@ export function listChatMessagesAfterOrd(
  *  to confirm the truncated tail is still free before re-inserting at exact ords. */
 export function maxChatMessageOrd(chatId: string): number {
   if (!chatId) return 0;
+  flushStreamingChatMessages(chatId);
   const row = openZerosDb()
     .prepare("SELECT MAX(ord) AS max FROM chat_messages WHERE chat_id = ?")
     .get(chatId) as { max: number | null };
@@ -466,6 +625,7 @@ export function reinsertChatMessages(
   rows: PersistedMessageRow[],
 ): void {
   if (!chatId || rows.length === 0) return;
+  flushStreamingChatMessages(chatId);
   const db = openZerosDb();
   const stmt = db.prepare(
     "INSERT OR REPLACE INTO chat_messages (chat_id, msg_id, ord, kind, payload, created_at, content, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -507,6 +667,7 @@ export function searchMessages(
   limit = 50,
   scope?: { chatId?: string; folder?: string },
 ): MessageSearchHit[] {
+  flushStreamingChatMessages();
   const tokens = query
     .trim()
     .split(/\s+/)
@@ -561,6 +722,7 @@ export function listChatMessagesSince(
   since: number,
   limit = CHAT_MESSAGE_DELTA_CAP,
 ): ChatMessageDelta[] {
+  flushStreamingChatMessages();
   const rows = openZerosDb()
     .prepare(
       `SELECT chat_id, msg_id, ord, kind, payload, created_at, rev
