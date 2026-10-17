@@ -53,6 +53,12 @@ const queueSteers = new Map<string, (outcome: string) => void>();
 const queuePrompts: string[] = [];
 const queueBridgeListeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const usageFixture = ids.find((id) => id === params.get("usage"));
+const identityFixture = params.has("identity");
+const cliIdentities = new Map<string, { state: "connected" | "disconnected"; email?: string }>(
+  ids.map(id => [id, { state: "connected", email: "cli@example.test" }]),
+);
+let holdIdentityReads = false;
+const pendingIdentityReads = new Set<() => void>();
 let holdUsage = params.has("holdUsage");
 const pendingUsage = new Set<() => void>();
 const pendingUsageAccounts = new Map<() => void, string | undefined>();
@@ -224,7 +230,22 @@ window.__ZEROS_NATIVE__ = {
         fetchedAt: Date.now(),
       } as T;
     }
-    if (args?.action === "status") counts.reads++;
+    if (args?.action === "status") {
+      counts.reads++;
+      if (identityFixture) {
+        result = {
+          ...status,
+          ...(status.method === "cli" ? cliIdentities.get(provider) : {}),
+          revision: status.revision + 1,
+        };
+        statuses.set(provider, result);
+        showCounts();
+        if (holdIdentityReads) await new Promise<void>(resolve => {
+          const release = () => { pendingIdentityReads.delete(release); resolve(); };
+          pendingIdentityReads.add(release);
+        });
+      }
+    }
     if (args?.action === "connect") {
       if (typeof args.accountId === "string") reconnectingAccounts.set(provider, args.accountId);
       else reconnectingAccounts.delete(provider);
@@ -252,8 +273,12 @@ window.__ZEROS_NATIVE__ = {
       publish(result);
     }
     if (args?.action === "select-method") {
+      const saved = status.accounts?.find(account => account.id === status.activeAccountId);
       result = {
         ...status,
+        ...(identityFixture && args.method === "cli" ? cliIdentities.get(provider) : {}),
+        ...(identityFixture && args.method === "account" && saved
+          ? { state: saved.state, email: saved.email, plan: saved.plan } : {}),
         method: args.method as ProviderSubscriptionStatus["method"],
         revision: status.revision + 1,
       };
@@ -308,6 +333,21 @@ window.__ZEROS_NATIVE__ = {
     };
   },
 };
+if (identityFixture) Object.assign(window, {
+  __providerIdentity: {
+    setCli(provider: string, state: "connected" | "disconnected", email?: string) {
+      // Changing an external CLI has no native event. The visible UI must probe.
+      cliIdentities.set(provider, { state, email });
+    },
+    hold: () => { holdIdentityReads = true; },
+    pending: () => pendingIdentityReads.size,
+    release: () => {
+      holdIdentityReads = false;
+      for (const release of pendingIdentityReads) release();
+    },
+    counts: () => ({ ...counts }),
+  },
+});
 if (usageFixture && usageObservation) {
   const accountId = (slot: "a" | "b") => {
     const id = statuses.get(usageFixture)?.accounts?.[slot === "a" ? 0 : 1]?.id;
@@ -317,6 +357,7 @@ if (usageFixture && usageObservation) {
   Object.assign(window, {
     __providerUsageObservation: {
       reads: () => counts.usageReads,
+      statusReads: () => counts.reads,
       hold: () => { holdUsage = true; },
       release: (slot: "a" | "b") => {
         for (const release of pendingUsage)

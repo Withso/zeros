@@ -10,7 +10,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "../../shared/ui/primitives/dialog";
-import type { ConnectionMethod } from "./connection-methods";
+import { connectedAccountLabel, type ConnectionMethod } from "./connection-methods";
 
 export function ProviderConnectionDialog({
   provider,
@@ -20,6 +20,7 @@ export function ProviderConnectionDialog({
   method,
   onMethodChange,
   connected,
+  connectedIdentity,
   busy,
   children,
   methodOptions,
@@ -31,6 +32,7 @@ export function ProviderConnectionDialog({
   method: ConnectionMethod;
   onMethodChange: (method: ConnectionMethod) => void;
   connected: boolean;
+  connectedIdentity?: string;
   busy: boolean;
   children: React.ReactNode;
   methodOptions?: Array<{ id: ConnectionMethod; label: string; description: string }>;
@@ -101,7 +103,11 @@ export function ProviderConnectionDialog({
                 {method === entry.id && (
                   <div className="border-border1 flex min-w-0 flex-col gap-3 border-t p-4">
                     {entry.id !== "account" && (
-                      <p className="text-fg2 text-xs">{entry.description}</p>
+                      connected ? (
+                        <p className="text-fg1 min-w-0 break-words text-sm" role="status">
+                          {connectedAccountLabel(method, connectedIdentity)}
+                        </p>
+                      ) : <p className="text-fg2 text-xs">{entry.description}</p>
                     )}
                     {children}
                   </div>

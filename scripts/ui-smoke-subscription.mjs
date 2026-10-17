@@ -1,8 +1,10 @@
 import { expect } from "@playwright/test";
 import { runProviderUsageObservationSmoke } from "./ui-smoke-provider-usage-observation.mjs";
+import { runProviderIdentitySmoke } from "./ui-smoke-provider-identity.mjs";
 
 export async function runSubscriptionSmoke({ page, check }) {
   const base = new URL(page.url()).origin;
+  await runProviderIdentitySmoke({ page, check });
   await runProviderKeyRefreshSmoke({ page, check });
   await runQueueSmoke({ page, check });
   await page.goto(
@@ -140,7 +142,7 @@ export async function runSubscriptionSmoke({ page, check }) {
         .getByLabel("Claude sign-in code")
         .fill("fixture-code#fixture-state");
       await dialog.getByRole("button", { name: "Submit code" }).click();
-      await expect(dialog.getByRole("status")).toContainText("Connected");
+      await expect(dialog.getByRole("status")).toContainText("is connected");
       await page.keyboard.press("Escape");
     } else {
       await dialog.getByRole("button", { name: "Cancel sign-in" }).click();
@@ -266,7 +268,7 @@ export async function runSubscriptionSmoke({ page, check }) {
     await firstAccount.click();
     await expect(firstAccount).toBeChecked();
     await expect(dialog.getByRole("status")).toHaveText(
-      "Connected as user@example.test · Pro",
+      "user@example.test is connected",
     );
     await secondAccount.click();
     await expect(secondAccount).toBeChecked();
@@ -284,7 +286,7 @@ export async function runSubscriptionSmoke({ page, check }) {
     await page.getByRole("button", { name: "Connected via subscription", exact: true }).click();
     await expect(accountPicker.getByRole("radio")).toHaveCount(2);
     await expect(secondAccount).toBeChecked();
-    await expect(dialog.getByRole("status")).toHaveText("Connected as second@example.test · Pro");
+    await expect(dialog.getByRole("status")).toHaveText("second@example.test is connected");
     await page.keyboard.press("Escape");
     check(`${provider}: saved-account Sign in opens the browser and renews the same entry`, true);
     await page
@@ -330,7 +332,7 @@ export async function runSubscriptionSmoke({ page, check }) {
     await expect(firstAccount).not.toBeChecked();
     await firstAccount.click();
     await expect(dialog.getByRole("status")).toHaveText(
-      "Connected as user@example.test · Pro",
+      "user@example.test is connected",
     );
     await page.keyboard.press("Escape");
     await page

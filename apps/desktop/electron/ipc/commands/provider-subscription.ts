@@ -105,11 +105,12 @@ function managerFor(
 ): ProviderAccountManager {
   let manager = managers.get(provider);
   if (manager) return manager;
-  const driverFor = (account: StoredProviderAccount | null) =>
+  const driverFor = (account: StoredProviderAccount | null, mode?: "cli") =>
     createSubscriptionDriver(provider as "claude" | "codex", {
       resolveRuntime: () =>
         resolveRuntime(provider as "claude" | "codex", account?.configDir),
       openBrowser: (url) => shell.openExternal(url),
+      allowApiKey: mode === "cli" && account === null,
     });
   manager = new ProviderAccountManager({
     readStore: () => readProviderAccounts(provider),
@@ -118,8 +119,8 @@ function managerFor(
       provider === "cursor"
         ? undefined
         : createProviderAccountProfile(provider, id),
-    read: async (account, signal) => {
-      if (provider !== "cursor") return driverFor(account).read(signal);
+    read: async (account, signal, mode) => {
+      if (provider !== "cursor") return driverFor(account, mode).read(signal);
       const credential = account?.credential ?? readLegacyCursorSubscription();
       return credential
         ? {

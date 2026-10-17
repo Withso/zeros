@@ -35,6 +35,18 @@ function fixture() {
 const signal = () => new AbortController().signal;
 const options = () => ({ signal: signal(), onCodeRequired: vi.fn() });
 describe("saved subscription accounts", () => {
+  it("reads the existing CLI authentication without replacing or relabeling a saved account", async () => {
+    const f = fixture();
+    await f.manager.login(options());
+    const saved = structuredClone(f.store().accounts);
+    const logins = f.login.mock.calls.length;
+    await f.manager.setMethod("cli");
+    const status = await f.manager.read(signal());
+    expect(status).toMatchObject({ state: "connected", method: "cli", email: "device@example.test" });
+    expect(f.read).toHaveBeenLastCalledWith(null, expect.any(AbortSignal), "cli");
+    expect(f.store().accounts).toEqual(saved);
+    expect(f.login).toHaveBeenCalledTimes(logins);
+  });
   it("does not publish saved-account identity as a newer CLI connection", async () => {
     const f = fixture();
     await f.manager.login(options());
@@ -128,7 +140,7 @@ describe("saved subscription accounts", () => {
     );
     f.manager.setMethod("cli");
     await f.manager.read(signal());
-    expect(f.read).toHaveBeenLastCalledWith(null, expect.any(AbortSignal));
+    expect(f.read).toHaveBeenLastCalledWith(null, expect.any(AbortSignal), "cli");
     f.manager.setMethod("account");
     expect((await f.manager.read(signal())).activeAccountId).toBe(
       a.activeAccountId,

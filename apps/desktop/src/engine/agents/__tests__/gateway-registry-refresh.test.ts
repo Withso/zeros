@@ -6,6 +6,50 @@ import * as providerEnv from "../../settings/provider-env";
 import * as credentials from "../provider-credentials";
 
 describe("provider registry authentication refresh", () => {
+  it.each([true, false])("uses Claude's native CLI verdict (%s), not legacy credential-file presence", async loggedIn => {
+    vi.spyOn(probes, "probeCliInstalled").mockResolvedValue(new Set(["claude"]));
+    vi.spyOn(probes, "probeCliVersion").mockResolvedValue(null);
+    vi.spyOn(providerEnv, "usesProviderApiKey").mockReturnValue(false);
+    vi.spyOn(providerEnv, "applyUserProviderConfig").mockReturnValue({ env: {} });
+    vi.spyOn(credentials, "providerAccountProfile").mockReturnValue(null);
+    vi.spyOn(probes, "evaluateAuthProbe").mockImplementation(async probe =>
+      probe.kind === "command" && probe.args.join(" ") === "auth status --json" ? loggedIn : !loggedIn,
+    );
+    const gateway = new AgentGateway({
+      projectRoot: "/tmp/zeros-registry-refresh",
+      executionBoundary: { ...testExecutionBoundary(), backend: "none" },
+      events: { onSessionUpdate() {}, onPermissionRequest() {}, onQuestionRequest() {}, onAgentStderr() {}, onAgentExit() {} },
+    });
+    try {
+      expect((await gateway.refreshRegistry()).find(agent => agent.id === "claude")?.authenticated).toBe(loggedIn);
+    } finally {
+      await gateway.dispose();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("leaves cloud registry authentication on its own existing probe path", async () => {
+    vi.spyOn(probes, "probeCliInstalled").mockResolvedValue(new Set(["claude"]));
+    vi.spyOn(probes, "probeCliVersion").mockResolvedValue(null);
+    vi.spyOn(providerEnv, "usesProviderApiKey").mockReturnValue(false);
+    vi.spyOn(providerEnv, "applyUserProviderConfig").mockReturnValue({ env: {} });
+    vi.spyOn(credentials, "providerAccountProfile").mockReturnValue(null);
+    const probe = vi.spyOn(probes, "evaluateAuthProbe").mockResolvedValue(true);
+    const gateway = new AgentGateway({
+      projectRoot: "/tmp/zeros-registry-refresh",
+      executionBoundary: { ...testExecutionBoundary(), backend: "cloud-worker" },
+      events: { onSessionUpdate() {}, onPermissionRequest() {}, onQuestionRequest() {}, onAgentStderr() {}, onAgentExit() {} },
+    });
+    try {
+      await gateway.refreshRegistry();
+      expect(probe.mock.calls.some(([value]) => value.kind === "any-of")).toBe(true);
+      expect(probe.mock.calls.some(([value]) => value.kind === "command" && value.args.includes("auth"))).toBe(false);
+    } finally {
+      await gateway.dispose();
+      vi.restoreAllMocks();
+    }
+  });
+
   it("keeps credential change fingerprints private to one gateway lifetime", async () => {
     vi.spyOn(providerEnv, "usesProviderApiKey").mockReturnValue(true);
     const config = vi

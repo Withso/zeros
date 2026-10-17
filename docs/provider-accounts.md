@@ -2,7 +2,7 @@
 
 Settings → Providers supports Account, CLI, and API for Claude and Codex, and
 Account and API for Cursor. Selecting a method is configuration, not evidence of
-authentication. The connection row requires both the native subscription status
+authentication. The connection row requires both the native connection status
 and the engine's authentication verdict. A real provider rejection survives an
 ordinary refresh; another account's CLI credential change cannot clear it.
 
@@ -13,6 +13,29 @@ saved account verifies that exact profile; removing the selected account leaves
 the method unconnected rather than selecting another account automatically.
 Expired or disconnected entries offer **Sign in**, which renews that saved entry
 without adding another row. Cancellation leaves the current selection intact.
+
+Connected methods show one sentence: **email is connected** when that exact
+connection supplies an email. Credentials without identity metadata use
+**CLI is connected**, **API key is connected**, or **Account is connected**.
+API mode never borrows an email from a saved subscription. Cloud connections
+use their own selected credential's name; device identity is never substituted.
+
+Selecting CLI reads the existing device authentication without starting a login,
+terminal or model session. Claude uses `auth status --json`; Codex uses native
+`account/read`. CLI detection also recognizes a native saved API credential;
+browser Account sign-in still requires a subscription. Open terminal remains
+available as an explicit action. Cursor supports Account and API, not CLI.
+The local engine also asks Claude's native status command for its authentication
+verdict. Claude and Codex probes resolve the same configured or bundled runtime
+as chats, so an absent or different global CLI cannot contradict a working
+connection. Cloud workers keep their own existing probe and credential path.
+
+Visible connection surfaces share status reads. Returning from an external
+terminal or revealing the window revalidates the native identity, including
+logout and account changes. An invalidation during a slow read gets a catch-up
+read; hiding Settings retires queued work without marking skipped reads fresh.
+Hidden surfaces start no probes. CLI connections without a confirmed email
+cannot request or restore another account's subscription usage.
 
 ## Storage and isolation
 

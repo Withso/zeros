@@ -29,6 +29,7 @@ interface Dependencies {
   read(
     account: StoredProviderAccount | null,
     signal: AbortSignal,
+    mode?: "cli",
   ): Promise<SubscriptionAccount>;
   login(
     account: StoredProviderAccount,
@@ -66,7 +67,7 @@ export class ProviderAccountManager implements SubscriptionDriver {
   async read(signal: AbortSignal): Promise<SubscriptionAccount> {
     const store = this.deps.readStore();
     if (store.method === "cli") {
-      const account = await this.deps.read(null, signal);
+      const account = await this.deps.read(null, signal, "cli");
       signal.throwIfAborted();
       const current = this.deps.readStore();
       return this.snapshot(

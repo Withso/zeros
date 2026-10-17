@@ -14,14 +14,13 @@ import type { BrowserSubscriptionProvider } from "@zeros/protocol/provider-auth"
 import { Button, Input } from "../../shared/ui";
 import { DialogBody, DialogFooter } from "../../shared/ui/primitives/dialog";
 import { useNativeRuntime } from "../../platform/runtime";
-import { useCachedRead } from "../../state/use-cached-read";
+import { connectedAccountLabel } from "./connection-methods";
+import { useSubscriptionStatus } from "./use-subscription-status";
 import {
   cancelSubscription,
   changeSubscriptionAccount,
   connectSubscription,
-  readSubscription,
   submitSubscriptionCode,
-  subscriptionCache,
 } from "./subscription-connection";
 
 export const SUBSCRIPTION_NAMES = {
@@ -46,10 +45,7 @@ export function SubscriptionConnectionPanel({
   const Actions = dialogFooter ? DialogFooter : "div";
   const Body = dialogFooter ? DialogBody : "div";
   const native = useNativeRuntime().ready;
-  const read = useCachedRead(subscriptionCache, provider, readSubscription, {
-    enabled: native && surfaceActive,
-    maxAgeMs: 15_000,
-  });
+  const read = useSubscriptionStatus(provider, surfaceActive);
   const status = read.data;
   const name = SUBSCRIPTION_NAMES[provider];
   const codeId = React.useId();
@@ -92,12 +88,6 @@ export function SubscriptionConnectionPanel({
     }
   };
   const notified = useRef<string>();
-  useEffect(() => {
-    if (!native || !surfaceActive) return;
-    const refresh = () => subscriptionCache.invalidate(provider);
-    window.addEventListener("focus", refresh);
-    return () => window.removeEventListener("focus", refresh);
-  }, [native, provider, surfaceActive]);
   useEffect(() => {
     if (
       !surfaceActive ||
@@ -152,7 +142,7 @@ export function SubscriptionConnectionPanel({
       <Body className="flex flex-col gap-3">
         <p className="text-fg1 text-sm" role="status">
           {status?.state === "connected"
-            ? `Connected${status.email ? ` as ${status.email}` : ` to ${name}`}${status.plan ? ` · ${status.plan}` : ""}`
+            ? connectedAccountLabel("account", status.email)
             : status?.state === "connecting"
               ? provider === "claude" && status.canSubmitCode
                 ? "If the browser gives you a sign-in code, paste it here. Sign-in expires after 5 minutes."

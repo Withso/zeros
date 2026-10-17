@@ -31,6 +31,65 @@ function processFixture() {
 }
 
 describe("provider browser authorization boundary", () => {
+  it.each(["claude", "codex"] as const)(
+    "detects an existing %s CLI subscription without starting login or a model session",
+    async provider => {
+      const server = processFixture();
+      const methods: string[] = [];
+      server.child.stdin.on("data", chunk => {
+        const request = JSON.parse(chunk.toString());
+        methods.push(request.method);
+        if (request.id) queueMicrotask(() => server.child.stdout.write(JSON.stringify({
+          id: request.id,
+          result: request.method === "account/read"
+            ? { account: { type: "chatgpt", email: "cli@example.test", planType: "pro" } } : {},
+        }) + "\n"));
+      });
+      const spawn = vi.fn(() => server.proc);
+      const openBrowser = vi.fn();
+      const driver = createSubscriptionDriver(provider, {
+        resolveRuntime: async () => ({ command: `/bundled/${provider}`, cwd: "/auth", env: {}, cleanup: async () => {} }),
+        spawn, openBrowser,
+      });
+      const result = driver.read(AbortSignal.timeout(2000));
+      if (provider === "claude") {
+        await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+        expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ args: ["auth", "status", "--json"] }));
+        server.child.stdout.write(JSON.stringify({ loggedIn: true, authMethod: "claude.ai", email: "cli@example.test" }));
+        server.exit({ code: 0, signal: null });
+      }
+      expect(await result).toMatchObject({ state: "connected", email: "cli@example.test" });
+      expect(methods).not.toContain("account/login/start");
+      expect(methods).not.toContain("thread/start");
+      expect(openBrowser).not.toHaveBeenCalled();
+      expect(server.proc.stop).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    ["claude", true], ["claude", false], ["codex", true], ["codex", false],
+  ] as const)("recognizes %s's own API credential only in CLI mode (allow=%s)", async (provider, allowApiKey) => {
+    const server = processFixture();
+    server.child.stdin.on("data", chunk => {
+      const request = JSON.parse(chunk.toString());
+      if (request.id) queueMicrotask(() => server.child.stdout.write(JSON.stringify({
+        id: request.id, result: request.method === "account/read" ? { account: { type: "apiKey" } } : {},
+      }) + "\n"));
+    });
+    const spawn = vi.fn(() => server.proc);
+    const driver = createSubscriptionDriver(provider, {
+      resolveRuntime: async () => ({ command: `/bundled/${provider}`, cwd: "/auth", env: {}, cleanup: async () => {} }),
+      spawn, openBrowser: vi.fn(), allowApiKey,
+    });
+    const result = driver.read(AbortSignal.timeout(2000));
+    if (provider === "claude") {
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+      server.child.stdout.write(JSON.stringify({ loggedIn: true, authMethod: "api_key" }));
+      server.exit({ code: 0, signal: null });
+    }
+    expect(await result).toEqual({ state: allowApiKey ? "connected" : "disconnected" });
+  });
+
   it("uses Codex's native device flow without opening a callback server URL", async () => {
     const server = processFixture(), opened = vi.fn(), code = vi.fn();
     const requests: Array<{ method: string; params: unknown }> = [];

@@ -29,6 +29,9 @@ interface Dependencies {
   resolveRuntime(): Promise<SubscriptionRuntime>;
   openBrowser(url: string): Promise<void>;
   spawn?: typeof spawnStdioAgent;
+  /** Device CLI detection also accepts its native API credential. Browser
+   * account ceremonies and usage reads still require a subscription. */
+  allowApiKey?: boolean;
   /** Cloud import uses an isolated profile and the native device ceremony. */
   onDeviceCode?: (code: { verificationUrl: "https://auth.openai.com/codex/device"; userCode: string }) => void;
 }
@@ -147,7 +150,7 @@ export function createSubscriptionDriver(
     signal.throwIfAborted();
   };
 
-  const readClaude = (runtime: SubscriptionRuntime, signal: AbortSignal) =>
+  const readClaude = (runtime: SubscriptionRuntime, signal: AbortSignal, allowApiKey = false) =>
     withProcess(
       runtime,
       ["auth", "status", "--json"],
@@ -166,6 +169,8 @@ export function createSubscriptionDriver(
         if (result.error || result.signal || overflow)
           throw new SubscriptionError("status");
         const status = JSON.parse(output) as Record<string, unknown>;
+        if (allowApiKey && status.loggedIn === true && status.authMethod === "api_key")
+          return { state: "connected" };
         if (status.loggedIn !== true || status.authMethod !== "claude.ai")
           return { state: "disconnected" };
         return {
@@ -199,10 +204,12 @@ export function createSubscriptionDriver(
     });
   const readCodex = async (
     rpc: JsonRpcStdioClient,
+    allowApiKey = false,
   ): Promise<SubscriptionAccount> => {
     const { account } = await rpc.request<GetAccountResponse>("account/read", {
       refreshToken: true,
     });
+    if (allowApiKey && account?.type === "apiKey") return { state: "connected" };
     if (account?.type !== "chatgpt") return { state: "disconnected" };
     return {
       state: "connected",
@@ -237,8 +244,8 @@ export function createSubscriptionDriver(
     read: (signal) =>
       withRuntime(signal, (runtime) =>
         provider === "claude"
-          ? readClaude(runtime, signal)
-          : withCodex(runtime, signal, readCodex),
+          ? readClaude(runtime, signal, deps.allowApiKey)
+          : withCodex(runtime, signal, rpc => readCodex(rpc, deps.allowApiKey)),
       ),
     login: ({ signal, onCodeRequired }) =>
       withRuntime(signal, async (runtime) => {

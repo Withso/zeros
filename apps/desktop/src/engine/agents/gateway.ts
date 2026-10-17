@@ -102,6 +102,8 @@ import {
   type AuthProbe,
 } from "./registry";
 import { removeSessionDir, sessionsRoot } from "./session-paths";
+import { resolveClaudeCli } from "./adapters/claude-sdk/binary-resolver";
+import { resolveCodexBinary } from "./adapters/codex/binary-resolver";
 import {
   buildCodeAgentDesignTerritoryNotice,
   buildDesignAgentNotice,
@@ -4328,7 +4330,12 @@ export class AgentGateway {
                       }).env?.[keyVar] ?? process.env[keyVar],
                     )
                   : await evaluateAuthProbe(
-                      m.authProbe,
+                      // The CLI owns its current login, including API keys and
+                      // custom config roots. Legacy files/keychain entries are
+                      // change hints, not proof of a usable device connection.
+                      m.id === "claude" && this.executionBoundary.backend !== "cloud-worker"
+                        ? { kind: "command", binary: m.cliBinary, args: ["auth", "status", "--json"] }
+                        : m.authProbe,
                       this.providerProbeRunner(m.id),
                     );
               this.lastConfirmedAuthentication.set(m.id, confirmed);
@@ -4478,10 +4485,18 @@ export class AgentGateway {
       });
       const env = configured.env ?? ambientEnv;
       const manifestBinary = findAgent(providerId)?.cliBinary;
-      const requestedBinary =
+      let requestedBinary =
         configured.cliBinary && binary === manifestBinary
           ? configured.cliBinary
           : binary;
+      if (binary === manifestBinary && this.executionBoundary.backend !== "cloud-worker") {
+        // Probe the same selected runtime that executes local chats. A global
+        // CLI can be absent, outdated or use a different credential format.
+        if (providerId === "claude")
+          requestedBinary = resolveClaudeCli({ override: configured.cliBinary }).path ?? "";
+        else if (providerId === "codex")
+          requestedBinary = (await resolveCodexBinary({ override: configured.cliBinary })).path;
+      }
       const executable = resolveProviderExecutable(requestedBinary, env);
       if (!executable) {
         throw new Error("provider command probe executable is unavailable");

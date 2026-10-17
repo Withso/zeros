@@ -77,11 +77,9 @@ import {
   cancelSubscription,
   changeSubscriptionAccount,
   isSubscriptionProvider,
-  readSubscription,
-  subscriptionCache,
 } from "./subscription-connection";
+import { useSubscriptionStatus, warmSubscriptionStatus } from "./use-subscription-status";
 import { nativeInvoke, useNativeRuntime } from "../../platform/runtime";
-import { useCachedRead } from "../../state/use-cached-read";
 import { getSetting, setSetting } from "../../platform/settings";
 import {
   deleteSecret,
@@ -570,19 +568,7 @@ function ProviderCard({
   // live value, which diverges from the saved secret while editing.
   const [keyConfigured, setKeyConfigured] = useState(false);
   const native = useNativeRuntime().ready;
-  const subscription = useCachedRead(
-    subscriptionCache,
-    agent.id,
-    readSubscription,
-    {
-      enabled: native && surfaceActive && isSubscriptionProvider(agent.id),
-      maxAgeMs: 15_000,
-    },
-  );
-  useEffect(() => {
-    if (!native || !surfaceActive || !isSubscriptionProvider(agent.id)) return;
-    return subscribeProviderAuth(() => subscriptionCache.invalidate(agent.id));
-  }, [agent.id, native, surfaceActive]);
+  const subscription = useSubscriptionStatus(agent.id, surfaceActive);
   useEffect(() => {
     const confirmedMethod = subscription.data?.method;
     if (
@@ -615,7 +601,8 @@ function ProviderCard({
     !changingMethod &&
     (method === "apiKey"
       ? agent.authenticated === true && keyConfigured
-      : subscription.data?.state === "connected" &&
+      : (!subscription.data?.method || subscription.data.method === method) &&
+        subscription.data?.state === "connected" &&
         agent.authenticated === true);
 
   const [binaryPathDraft, setBinaryPathDraft] = useState(
@@ -845,13 +832,10 @@ function ProviderCard({
   const warmConnection = () => {
     if (
       !surfaceActive ||
-      method !== "account" ||
       !isSubscriptionProvider(agent.id)
     )
       return;
-    void subscriptionCache
-      .load(agent.id, () => readSubscription(agent.id), { maxAgeMs: 15_000 })
-      .catch(() => {});
+    warmSubscriptionStatus(agent.id);
   };
 
   return (
@@ -956,6 +940,7 @@ function ProviderCard({
             method={method}
             onMethodChange={(next) => void handleAuthMethod(next)}
             connected={connected}
+            connectedIdentity={method !== "apiKey" ? subscription.data?.email : undefined}
             busy={changingMethod || savingApiKey}
           >
             {method === "apiKey" ? (

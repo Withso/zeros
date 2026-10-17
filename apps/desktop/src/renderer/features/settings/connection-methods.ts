@@ -4,6 +4,13 @@ import type { ProviderPrefs } from "./provider-prefs";
 export type ConnectionMethod = "account" | "cli" | "apiKey";
 const ENTRY_KEY = "providers:subscription-entry:";
 
+/** Identity must come from this exact connection, never a different method's
+ * saved account. API credentials do not necessarily disclose an email. */
+export function connectedAccountLabel(method: ConnectionMethod, identity?: string): string {
+  const account = identity?.trim();
+  return `${account || (method === "apiKey" ? "API key" : method === "cli" ? "CLI" : "Account")} is connected`;
+}
+
 // Preserve auth="cli" / Cursor auth="subscription" serialization. This is a
 // synchronous UI fallback until the native account store confirms its method.
 // Native state selects isolated Account profiles versus the device CLI store.
