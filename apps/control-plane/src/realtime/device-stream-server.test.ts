@@ -446,6 +446,30 @@ describe("device stream server", () => {
     expect(server.counters.resumed).toBe(1);
   });
 
+  it("never hands a resuming client a cursor past a replayed frame it has not received", async () => {
+    await start();
+    const who = principal(), held = workspace(organizationId), other = workspace(organizationId);
+    catalog.grant(who.accountUserId, held);
+    catalog.grant(who.accountUserId, other);
+    const first = await connect(who);
+    first.peer.ws.terminate();
+    await until(() => server.size === 0);
+    server.publishNotification({ id: randomUUID(), kind: "turn.failed", workspaceId: held.id, title: "Failed", createdAt: new Date().toISOString() });
+    server.revokeCapabilities({ workspaceId: other.id }, "workspace", "membership_changed");
+    const start0 = String(first.ready.d.cursor);
+    const second = await connect(who, { cursor: start0 });
+    // `ready` and the revocation replayed ahead of order both name the resume position.
+    expect(second.ready.d).toMatchObject({ resumed: true, cursor: start0 });
+    const revoked = await second.peer.next();
+    expect(revoked).toMatchObject({ t: "capability.revoked", c: start0 });
+    // Dropping right after the revocation and resuming from it still replays the notification.
+    second.peer.ws.terminate();
+    await until(() => server.size === 0);
+    const third = await connect(who, { cursor: revoked.c! });
+    expect(third.ready.d.resumed).toBe(true);
+    expect((await third.peer.next("notification")).d).toMatchObject({ workspaceId: held.id, kind: "turn.failed" });
+  });
+
   it("answers ready resumed:false and catalog.reset for another lineage or an acknowledged-away cursor", async () => {
     await start();
     const who = principal(), held = workspace(organizationId);

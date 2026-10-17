@@ -267,7 +267,10 @@ streams with `4404` without resume and drops its parked device sessions.
   `ack` trims, at most once per second). A disconnected device session is
   parked on this instance for 10 minutes. A resume from a cursor still held
   replays the missed frames, `capability.revoked` first, then re-reads the
-  catalog. Another lineage (another instance or a restart) gets
+  catalog. Its `ready.cursor` is the resume position, and revocations sent
+  ahead of their order carry that position as `c`, so a client that drops
+  mid-replay and resumes from the last `c` it received gets the rest again.
+  Another lineage (another instance or a restart) gets
   `ready { resumed: false }` + `catalog.reset instance_changed`; a cursor
   older than the retained frames gets `resume_expired`.
 - **Authority.** Device sessions are re-checked every 60 s and on

@@ -339,15 +339,21 @@ export class DeviceStreamServer {
     const previous = this.records.get(principal.deviceSessionId);
     let resumed = false;
     let reset: CatalogResetReason | null = null;
-    let replay: BufferedFrame[] = [];
+    let replay: string[] = [];
+    let position: string | null = null;
     if (resume) {
       const cursor = decodeDeviceStreamCursor(resume.cursor);
       if (previous && cursor && cursor.lineage === previous.lineage) {
         if (cursor.sequence <= previous.seq && cursor.sequence >= previous.floor) {
           resumed = true;
+          const resumedAt = encodeDeviceStreamCursor(previous.lineage, cursor.sequence);
+          position = resumedAt;
           const missed = previous.buffer.filter(frame => frame.seq > cursor.sequence);
-          // S3: replayed revocations go first, then everything else in order.
-          replay = [...missed.filter(frame => frame.revocation), ...missed.filter(frame => !frame.revocation)];
+          // S3: replayed revocations go first. Sent ahead of their order they
+          // carry the resume position, as `ready` does, so a client that keeps
+          // the last cursor it saw never holds one past a frame still to come.
+          replay = [...missed.filter(frame => frame.revocation).map(frame => restamp(frame.text, resumedAt)),
+            ...missed.filter(frame => !frame.revocation).map(frame => frame.text)];
         } else reset = "resume_expired";
       } else reset = "instance_changed";
     }
@@ -378,11 +384,11 @@ export class DeviceStreamServer {
     if (resumed) this.counters.resumed += 1;
     if (reset) this.counters.reset[reset] = (this.counters.reset[reset] ?? 0) + 1;
     connection.sendFrame("ready", {
-      deviceSessionId: principal.deviceSessionId, cursor: encodeDeviceStreamCursor(record.lineage, record.seq), resumed,
+      deviceSessionId: principal.deviceSessionId, cursor: position ?? encodeDeviceStreamCursor(record.lineage, record.seq), resumed,
       heartbeatIntervalMs: this.options.heartbeatIntervalMs, contract: DEVICE_STREAM_CONTRACT,
     });
     if (reset) connection.sendFrame("catalog.reset", { reason: reset });
-    for (const frame of replay) connection.sendText(frame.text);
+    for (const text of replay) connection.sendText(text);
     // Changes while parked, or while the baseline read ran, arrive as diffs.
     this.scheduleAccount(principal.accountUserId, null);
   }
@@ -709,6 +715,11 @@ export class DeviceStreamServer {
     timer.unref?.();
     return timer;
   }
+}
+
+function restamp(text: string, cursor: string): string {
+  const { t, d } = JSON.parse(text) as { t: string; d: unknown };
+  return JSON.stringify({ t, d, c: cursor });
 }
 
 function known(workspace: DeviceStreamWorkspace): Known {
