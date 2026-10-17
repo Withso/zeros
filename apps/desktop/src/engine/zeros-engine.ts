@@ -3688,7 +3688,9 @@ export class ZerosEngine {
         const boot = this.cloudAgentBoot;
         if (!boot) return { result: "applied" as const }; // pre-boot: the activation exchange converges
         try {
-          await boot.pollCredentialControls();
+          // A fresh exchange, never a flight that predates the bump (C3
+          // review SHOULD-3: joining a stale flight acks applied falsely).
+          await boot.refreshCredentialControls();
           return { result: "applied" as const };
         } catch (error) {
           const code = error && typeof error === "object" && "code" in error ? String(error.code) : "cred_fetch_failed";

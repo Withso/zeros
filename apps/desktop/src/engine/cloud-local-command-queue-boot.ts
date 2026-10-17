@@ -355,6 +355,15 @@ export class CloudLocalAgentBootRuntime {
     void task.finally(() => { if (this.controlsFlight === task) this.controlsFlight = null; this.flights.delete(task); this.scheduleControls(); }).catch(() => {});
     return task;
   }
+  /** A pushed credential revision must not join a flight that started before
+   * the bump committed (it could return the old controls and the push would
+   * be acked applied against them). Await any in-flight exchange, then run
+   * one that starts now; concurrent pushes coalesce onto that new flight. */
+  async refreshCredentialControls(): Promise<void> {
+    const inFlight = this.controlsFlight;
+    if (inFlight) await inFlight.catch(() => {});
+    await this.pollCredentialControls();
+  }
   private scheduleControls(): void {
     if (this.controlsTimer) clearTimeout(this.controlsTimer);
     if (!this.active) return;

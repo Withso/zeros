@@ -473,6 +473,24 @@ describe("engine boot-mode orchestration", () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(f.controls).toHaveBeenCalledTimes(5);
   });
+  it("a pushed revision runs a fresh exchange instead of joining an in-flight poll", async () => {
+    const f = await fixture();
+    await f.boot.initialize();
+    let release: (() => void) | null = null;
+    // Hold a timer-started flight open: it began before the push's bump
+    // committed, so joining it would ack applied against stale controls.
+    f.controls.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { version: 1 as const, mode: "boot-owner-v1" as const, controls: [] as unknown[] };
+    });
+    const stale = f.boot.pollCredentialControls();
+    await Promise.resolve();
+    expect(f.controls).toHaveBeenCalledTimes(1);
+    const pushed = f.boot.refreshCredentialControls();
+    release!();
+    await Promise.all([stale, pushed]);
+    expect(f.controls).toHaveBeenCalledTimes(2); // a second exchange ran after the push
+  });
   it.each(["Local Personal", "organization-local"])("keeps %s off the cloud boot path", async _owner => {
     const registration = { localCommandsNegotiated: vi.fn(() => true) }, restore = vi.fn();
     await engineMethods.initializeCloudAgentBoot.call({ cloudWorker: null, cloudRuntimeRegistration: registration,
