@@ -1277,6 +1277,109 @@ suite("managed compute lifecycle admission", () => {
     expect(failing.state).not.toBe("settled");
     expect(Number(failing.from_now)).toBeGreaterThan(12);
   });
+  it("re-checks a healthy running allocation at its renewal point instead of every 15 s", async () => {
+    await ready();
+    await age();
+    provider.inspect.mockResolvedValue(resource(800));
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    // The provider deadline is 800 s away; its renewal point, 450 s before it, is 350 s away.
+    const at = Number((await nextCheck()).from_now);
+    expect(at).toBeGreaterThan(345);
+    expect(at).toBeLessThan(355);
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+  });
+  it("never schedules a healthy running re-check more than 10 minutes ahead", async () => {
+    coordinator = new CloudWorkspaceComputeLeaseCoordinator({pool,providerResolver:resolver(),workosEnabled:false,policy:{...policy,maximumTtlSeconds:3600}});
+    // A 3500 s deadline needs more than the default 2000 s grant, and ready() cannot add
+    // one: its grant has different period bounds, which the ledger rejects as an overlap.
+    await ledger.grant({organizationId:f.organizationId,userId:f.userId,startsAt:new Date(Date.now()-3600_000),endsAt:new Date(Date.now()+7200_000),amountMicroUsd:40_000,policyId:"seat-credit-v1",idempotencyKey:randomUUID()});
+    const next = await coordinator.allocate(input, asProvider(), null);
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$2 WHERE workspace_id=$1", [f.workspaceId, next.resourceId]);
+    await age();
+    provider.inspect.mockResolvedValue(resource(3500));
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    const at = Number((await nextCheck()).from_now);
+    expect(at).toBeGreaterThan(595);
+    expect(at).toBeLessThan(605);
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+  });
+  it("keeps the 15 s floor when the renewal point is close", async () => {
+    coordinator = new CloudWorkspaceComputeLeaseCoordinator({pool,providerResolver:resolver(),workosEnabled:false,policy:{...policy,maximumTtlSeconds:600}});
+    await ready();
+    await age();
+    // 320 s to the deadline is past the 300 s renewal point, so no renewal yet.
+    provider.inspect.mockResolvedValue(resource(320));
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    const at = Number((await nextCheck()).from_now);
+    expect(at).toBeGreaterThan(10);
+    expect(at).toBeLessThan(20);
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+  });
+  it("re-checks a renewed allocation from its new deadline", async () => {
+    await ready();
+    await age();
+    provider.inspect.mockResolvedValue(resource(200));
+    provider.renewComputeLease.mockImplementationOnce(async () => ({ expiresAt: new Date(Date.now() + 900_000).toISOString() }));
+    expect(await coordinator.runOnce()).toBe(true);
+    expect(provider.renewComputeLease).toHaveBeenCalledTimes(1);
+    // The renewed deadline is 900 s away, so its renewal point is 450 s away.
+    const at = Number((await nextCheck()).from_now);
+    expect(at).toBeGreaterThan(445);
+    expect(at).toBeLessThan(455);
+  });
+  it("re-checks unsettled leases at once when the workspace lifecycle changes", async () => {
+    await ready();
+    const jobKey = `workspace:${f.workspaceId}`;
+    // The workspace projection trigger needs a row for any generation it moves to.
+    await pool.query(`INSERT INTO cloud_workspace_generations (workspace_id,generation,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,source_commit,
+        created_by,provider_connection_id,runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version)
+      SELECT workspace_id,2,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,source_commit,
+        created_by,provider_connection_id,runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version
+      FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1`, [f.workspaceId]);
+    // Each change runs in a transaction that is rolled back, starting from a
+    // lease and its compute job that are both an hour away.
+    const change = async (statement: string, settle = false) => {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("UPDATE control_plane_jobs SET run_at=clock_timestamp()+interval '1 hour' WHERE kind='cloud_compute_lease' AND dedupe_key=$1 AND state IN ('queued','running')", [jobKey]);
+        await client.query("UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp()+interval '1 hour' WHERE id=$1", [input.intentId]);
+        if (settle) await client.query("UPDATE managed_compute_allocation_leases SET state='settled',settled_at=clock_timestamp() WHERE id=$1", [input.intentId]);
+        await client.query(statement, [f.workspaceId]);
+        return (await client.query<{ lease_due: boolean; job_due: boolean }>(
+          `SELECT (SELECT next_check_at<=clock_timestamp() FROM managed_compute_allocation_leases WHERE id=$1) AS lease_due,
+            (SELECT run_at<=clock_timestamp() FROM control_plane_jobs WHERE kind='cloud_compute_lease' AND dedupe_key=$2 AND state IN ('queued','running')) AS job_due`,
+          [input.intentId, jobKey],
+        )).rows[0];
+      } finally {
+        await client.query("ROLLBACK");
+        client.release();
+      }
+    };
+    expect(await change("UPDATE cloud_workspaces SET desired_state='stopped' WHERE id=$1")).toEqual({ lease_due: true, job_due: true });
+    expect(await change("UPDATE cloud_workspaces SET current_generation=current_generation+1 WHERE id=$1")).toEqual({ lease_due: true, job_due: true });
+    expect(await change("UPDATE cloud_workspaces SET status='failed' WHERE id=$1")).toEqual({ lease_due: true, job_due: true });
+    expect(await change("UPDATE cloud_workspaces SET status='busy' WHERE id=$1")).toEqual({ lease_due: false, job_due: false });
+    expect(await change("UPDATE cloud_workspaces SET desired_state=desired_state WHERE id=$1")).toEqual({ lease_due: false, job_due: false });
+    expect(await change("UPDATE cloud_workspaces SET desired_state='stopped' WHERE id=$1", true)).toEqual({ lease_due: false, job_due: false });
+  });
+  it("re-checks an unsettled previous allocation at once when a start is refused for it", async () => {
+    await ready();
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp()+interval '1 hour' WHERE id=$1", [input.intentId]);
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [input.intentId]);
+    const next = randomUUID();
+    await pool.query(
+      `INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256)
+      VALUES ($1,$2,1,$3,$4,'wake',$5,$6)`,
+      [next, f.workspaceId, f.organizationId, f.userId, randomUUID(), randomBytes(32)],
+    );
+    await expect(coordinator.allocate({ ...input, intentId: next, idempotencyKey: next }, asProvider(), null))
+      .rejects.toMatchObject({ code: "compute_previous_lease_pending" });
+    expect((await pool.query("SELECT next_check_at<=clock_timestamp() AS due FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0]).toEqual({ due: true });
+  });
   it("wakes only a start that was refused for the unsettled allocation", async () => {
     await ready();
     await age();

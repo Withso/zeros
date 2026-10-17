@@ -120,6 +120,10 @@ const STOP_MARGIN_MS = 15_000;
 // Reserve the full checkpoint deadline plus the existing stop margin. Retry
 // backoff must never sleep past this boundary, even during a lasting outage.
 const PROVIDER_RETRY_SAFETY_MARGIN_MS = MAX_CHECKPOINT_DEADLINE_MS + STOP_MARGIN_MS;
+// A healthy running lease is next checked at its renewal point, but never
+// later than this, so a change that no trigger reports is still observed.
+const RUNNING_LEASE_CHECK_CEILING_MS = 10 * 60_000;
+const REGULAR_RECHECK_MS = 15_000;
 
 /** Owns spending authority around provider calls. It never accepts an engine's
  * CPU meter as compute billing, and a failed request never releases a hold. */
@@ -288,6 +292,16 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       )).rows[0];
       if (!claimed) throw failure("compute_lease_busy", true);
       return claimed;
+    }).catch(async (error: unknown) => {
+      // The refused start waits for this lease to settle, which a long healthy cadence would otherwise delay.
+      if (error instanceof CloudProviderError && error.code === "compute_previous_lease_pending")
+        await withRetryableSystemTx(this.options.pool, (tx) => tx.query(
+          `UPDATE managed_compute_allocation_leases SET next_check_at=clock_timestamp()
+        WHERE workspace_id=$1 AND generation=$2 AND state<>'settled'
+          AND lifecycle_intent_id IS DISTINCT FROM $3 AND next_check_at>clock_timestamp()`,
+          [input.workspaceId, input.generation, input.intentId],
+        )).catch(() => undefined);
+      throw error;
     });
   }
 
@@ -855,6 +869,15 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     return true;
   }
 
+  /** When a healthy running allocation whose provider deadline is `expiryMs`
+   * is next checked: at its renewal point, early enough that a failed check
+   * still leaves the checkpoint and stop margin, within the regular cadence
+   * and the ceiling. */
+  private runningRecheckAt(expiryMs: number, nowMs: number, renewWhenMs: number): Date {
+    const due = expiryMs - Math.max(renewWhenMs, PROVIDER_RETRY_SAFETY_MARGIN_MS);
+    return new Date(Math.max(nowMs + REGULAR_RECHECK_MS, Math.min(nowMs + RUNNING_LEASE_CHECK_CEILING_MS, due)));
+  }
+
   /** Returns when a just-stopped allocation can next settle, or null to keep
    * the regular cadence. */
   private async reconcile(lease: Lease, phase: (phase: CloudDiagnosticPhase, site?: ComputeFailureSite) => void): Promise<Date | null> {
@@ -1073,7 +1096,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     );
     // A failed inspect/meter/renew skipped lease maintenance. Renew on the
     // first complete recovery pass instead of waiting for the half-TTL mark.
-    if (expiry - observed.now.getTime() > renewWhenMs && !lease.last_error_code?.startsWith("provider_")) return null;
+    if (expiry - observed.now.getTime() > renewWhenMs && !lease.last_error_code?.startsWith("provider_")) return this.runningRecheckAt(expiry, observed.now.getTime(), renewWhenMs);
     phase("ledger_commit", "renewal_plan");
     const plan = await this.plan(lease);
     if (!plan) {
@@ -1094,7 +1117,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     )
       throw failure("compute_lease_superseded");
     // The request cannot shorten an already confirmed funded lease.
-    if (observed.now.getTime() + plan.ttlSeconds * 1000 <= expiry) return null;
+    if (observed.now.getTime() + plan.ttlSeconds * 1000 <= expiry) return this.runningRecheckAt(expiry, observed.now.getTime(), renewWhenMs);
     phase("provider_renew");
     const renewed = await provider.renewComputeLease(
       resource.resourceId,
@@ -1116,7 +1139,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         [lease.id, this.workerId, new Date(deadline)],
       ),
     );
-    return null;
+    return this.runningRecheckAt(deadline, now, renewWhenMs);
   }
 
   /** The generation's bound allocation, which the lease may not have recorded

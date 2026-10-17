@@ -111,6 +111,18 @@ initial policy meters allocated compute. Provider snapshot/storage/network
 charges and Zeros durable-object costs require separate operational budgets;
 they are not silently debited as compute seconds.
 
+### Lease check cadence
+
+A healthy running lease is checked at its renewal point: half the maximum TTL
+before the provider deadline, but never closer than the 315-second checkpoint
+and stop margin. Checks are at most 10 minutes apart and at least 15 seconds
+apart. A failing check keeps its backoff. Migration
+`0159_cloud_compute_lease_recheck.sql` re-checks every unsettled lease of a
+workspace at once when its desired state, generation, owner, billing epoch or
+deletion changes, or when its status moves into or out of `failed` or the
+serving statuses `ready` and `busy`. A start refused with
+`compute_previous_lease_pending` re-checks the previous lease at once.
+
 ## Configuration and rollout
 
 Managed Boat requires `BOAT_COMPUTE_POLICY_ID` and
