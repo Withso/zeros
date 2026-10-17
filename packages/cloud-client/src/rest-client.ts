@@ -7,6 +7,7 @@
  * device proof headers (x-zeros-device-id, -key-version, -timestamp, -nonce and
  * -signature).
  */
+import type { DeviceProofRequest } from "./device-proof";
 import { REST_OPERATIONS, type RestOperationId } from "./generated/rest";
 
 /** The replica device proof headers (same scheme as the desktop engine client). */
@@ -115,14 +116,14 @@ export type InvokeOptions = {
 export interface CloudRestClientOptions {
   baseUrl: string;
   getAccessToken: () => string | Promise<string>;
-  getDeviceProof?: () => DeviceProofHeaders | Promise<DeviceProofHeaders>;
+  getDeviceProof?: (request: DeviceProofRequest) => DeviceProofHeaders | Promise<DeviceProofHeaders>;
   fetchImpl?: typeof fetch;
 }
 
 export class CloudRestClient {
   private readonly baseUrl: string;
   private readonly getAccessToken: () => string | Promise<string>;
-  private readonly getDeviceProof?: () => DeviceProofHeaders | Promise<DeviceProofHeaders>;
+  private readonly getDeviceProof?: (request: DeviceProofRequest) => DeviceProofHeaders | Promise<DeviceProofHeaders>;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: CloudRestClientOptions) {
@@ -191,8 +192,9 @@ export class CloudRestClient {
     if (options.body !== undefined) headers["content-type"] = "application/json";
     if (options.idempotencyKey !== undefined) headers["idempotency-key"] = options.idempotencyKey;
     if (options.deviceProof) {
+      const request = deviceProofRequest(operationId, options);
       if (!this.getDeviceProof) throw new Error(`operation ${operationId} requires a device proof`);
-      const proof = await this.getDeviceProof();
+      const proof = await this.getDeviceProof(request);
       headers["x-zeros-device-id"] = proof.deviceId;
       headers["x-zeros-device-key-version"] = String(proof.keyVersion);
       headers["x-zeros-device-timestamp"] = String(proof.timestampMs);
@@ -248,4 +250,30 @@ async function readJson(response: Response): Promise<unknown> {
   } catch {
     return undefined;
   }
+}
+
+/** The action and payload a device-proved operation signs (S3 "Device proof"). */
+function deviceProofRequest(operationId: RestOperationId, options: InvokeOptions): DeviceProofRequest {
+  if (operationId === "createDeviceSession") {
+    const body = deviceProofBody(operationId, options.body);
+    return { action: "device-session.create", payload: { deviceSessionId: body.deviceSessionId ?? null } };
+  }
+  if (operationId === "connectCloudWorkspaceRuntime" || operationId === "renewCloudWorkspaceCapabilities") {
+    const body = deviceProofBody(operationId, options.body);
+    return {
+      action: operationId === "connectCloudWorkspaceRuntime" ? "runtime.connect" : "runtime.capabilities",
+      payload: {
+        organizationId: (options.pathParams?.organization ?? "").toLowerCase(),
+        workspaceId: (options.pathParams?.workspace ?? "").toLowerCase(),
+        ...body,
+      },
+    };
+  }
+  throw new Error(`operation ${operationId} has no device proof action`);
+}
+
+function deviceProofBody(operationId: RestOperationId, body: unknown): Record<string, unknown> {
+  if (typeof body !== "object" || body === null || Array.isArray(body))
+    throw new Error(`operation ${operationId} needs an object body for its device proof`);
+  return body as Record<string, unknown>;
 }

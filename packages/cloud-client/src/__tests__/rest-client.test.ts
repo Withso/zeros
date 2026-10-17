@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createContractMock, type ContractMock } from "../../test/contract-mock";
+import type { DeviceProofRequest } from "../device-proof";
 import { CloudOrgFlagCache, probeFromConnectFailure } from "../feature-probe";
 import {
   classifyFailure,
@@ -140,6 +141,84 @@ describe("CloudRestClient", () => {
       "x-zeros-device-timestamp",
     ]);
   });
+
+  it("signs runtime connect with its body and the path ids in lowercase", async () => {
+    const signed: DeviceProofRequest[] = [];
+    const { client } = recordingClient(signed);
+    await client.invoke("connectCloudWorkspaceRuntime", {
+      pathParams: { organization: "ABCDEF01-2345-4678-89AB-CDEF01234567", workspace: "FEDCBA98-7654-4321-8FED-CBA987654321" },
+      body: { deviceSessionId: DEVICE_SESSION, clientSessionId: CLIENT_SESSION, routes: ["direct"] },
+      deviceProof: true,
+    });
+    expect(signed).toEqual([
+      {
+        action: "runtime.connect",
+        payload: {
+          organizationId: "abcdef01-2345-4678-89ab-cdef01234567",
+          workspaceId: "fedcba98-7654-4321-8fed-cba987654321",
+          deviceSessionId: DEVICE_SESSION,
+          clientSessionId: CLIENT_SESSION,
+          routes: ["direct"],
+        },
+      },
+    ]);
+  });
+
+  it("signs capability renewal as runtime.capabilities with its body", async () => {
+    const signed: DeviceProofRequest[] = [];
+    const { client } = recordingClient(signed);
+    await client.invoke("renewCloudWorkspaceCapabilities", {
+      pathParams: { organization: ORGANIZATION, workspace: WORKSPACE },
+      body: { deviceSessionId: DEVICE_SESSION, clientSessionId: CLIENT_SESSION },
+      deviceProof: true,
+    });
+    expect(signed).toEqual([
+      {
+        action: "runtime.capabilities",
+        payload: {
+          organizationId: ORGANIZATION,
+          workspaceId: WORKSPACE,
+          deviceSessionId: DEVICE_SESSION,
+          clientSessionId: CLIENT_SESSION,
+        },
+      },
+    ]);
+  });
+
+  it("signs a device session with a null id unless it reuses one", async () => {
+    const signed: DeviceProofRequest[] = [];
+    const { client } = recordingClient(signed);
+    const body = { deviceId: DEVICE, client: { platform: "macos", appVersion: "1.2.3", contract: { min: 1, max: 1 } } };
+    await client.invoke("createDeviceSession", { body, deviceProof: true });
+    await client.invoke("createDeviceSession", { body: { ...body, deviceSessionId: DEVICE_SESSION }, deviceProof: true });
+    expect(signed).toEqual([
+      { action: "device-session.create", payload: { deviceSessionId: null } },
+      { action: "device-session.create", payload: { deviceSessionId: DEVICE_SESSION } },
+    ]);
+  });
+
+  it("refuses a device proof for an operation without a proof action before any request", async () => {
+    const signed: DeviceProofRequest[] = [];
+    const { client, fetched } = recordingClient(signed);
+    await expect(client.invoke("listCloudWorkspaces", { deviceProof: true })).rejects.toThrow(
+      "operation listCloudWorkspaces has no device proof action",
+    );
+    expect(signed).toEqual([]);
+    expect(fetched).toEqual([]);
+  });
+
+  it("refuses a device proof without an object body before any request", async () => {
+    const signed: DeviceProofRequest[] = [];
+    const { client, fetched } = recordingClient(signed);
+    await expect(
+      client.invoke("connectCloudWorkspaceRuntime", {
+        pathParams: { organization: ORGANIZATION, workspace: WORKSPACE },
+        deviceProof: true,
+      }),
+    ).rejects.toThrow("operation connectCloudWorkspaceRuntime needs an object body for its device proof");
+    expect(signed).toEqual([]);
+    expect(fetched).toEqual([]);
+  });
 });
 
 describe("classifyFailure", () => {
@@ -270,4 +349,22 @@ describe("CloudOrgFlagCache (per-org flag discovery, decision 1)", () => {
 
 async function createClientPair(options: Parameters<typeof createContractMock>[0] = {}) {
   return client(options);
+}
+
+/** Records each signed request and fetched URL; every fetch answers 201 with an empty object. */
+function recordingClient(signed: DeviceProofRequest[]) {
+  const fetched: string[] = [];
+  const client = new CloudRestClient({
+    baseUrl: "https://control.invalid",
+    getAccessToken: () => "test-session-token",
+    getDeviceProof: (request) => {
+      signed.push(request);
+      return DEVICE_HEADERS;
+    },
+    fetchImpl: (async (url: string) => {
+      fetched.push(url);
+      return new Response(JSON.stringify({}), { status: 201, headers: { "content-type": "application/json" } });
+    }) as typeof fetch,
+  });
+  return { client, fetched };
 }
