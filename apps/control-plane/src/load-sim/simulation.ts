@@ -141,8 +141,11 @@ export type ScenarioResult = {
   transactionsPerSecond: number;
   statementsPerSecond: number;
   roundTripsPerSecond: number;
-  /** Commits carrying a NOTIFY per second; the database serializes them. */
+  /** Commits carrying a NOTIFY per second; the database serializes them.
+   * Includes authority-cache hints, counted per delivery, so an upper bound. */
   notifyingCommitsPerSecond: number;
+  /** Authority-cache invalidation hints delivered per second (0152 triggers). */
+  authorityCacheNotificationsPerSecond: number;
   /** Client-measured database wall time per second (loopback). */
   clientDbMsPerSecond: number;
   /** Control-plane process CPU (user+system), simulator included. */
@@ -208,7 +211,7 @@ export async function runScenario(sim: Simulator, options: {
   await new Promise(resolve => setTimeout(resolve, options.warmupMs));
   const close = options.server ? await options.server.begin() : null;
   const providerBefore = new Map(sim.boat.calls);
-  const notificationsBefore = sim.notifications.count;
+  const notificationsBefore = sim.notifications.count, authorityNotificationsBefore = sim.notifications.authorityCache;
   const before = sim.meter.snapshot();
   const cpuBefore = process.cpuUsage();
   const started = performance.now();
@@ -240,8 +243,11 @@ export async function runScenario(sim: Simulator, options: {
     statementsPerSecond: totals.statements / seconds,
     roundTripsPerSecond: totals.roundTrips / seconds,
     // Client-visible pg_notify commits (e.g. checkpoint hints) plus
-    // trigger-issued job-channel wake-ups counted by the listener.
-    notifyingCommitsPerSecond: (totals.notifyingCommits + sim.notifications.count - notificationsBefore) / seconds,
+    // trigger-issued job wake-ups and authority-cache hints counted by the
+    // listener.
+    notifyingCommitsPerSecond: (totals.notifyingCommits + sim.notifications.count - notificationsBefore +
+      sim.notifications.authorityCache - authorityNotificationsBefore) / seconds,
+    authorityCacheNotificationsPerSecond: (sim.notifications.authorityCache - authorityNotificationsBefore) / seconds,
     clientDbMsPerSecond: totals.clientDbMs / seconds,
     processCpuMsPerSecond: (cpu.user + cpu.system) / 1000 / seconds,
     operations: [...costs].filter(([, cost]) => cost.roundTrips || cost.calls).map(([operation, cost]) => ({

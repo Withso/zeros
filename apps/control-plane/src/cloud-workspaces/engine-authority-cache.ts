@@ -41,7 +41,9 @@ export type EngineAuthorityMode = { kind: "assert"; transitionRecordSync?: boole
 
 export type EngineAuthorityDecision =
   | { allowed: false }
-  | { allowed: true; authorityEpoch: number; accountUserId: string; leaseExpiresAtMs: number; runtimeBootId: string | null };
+  | { allowed: true; authorityEpoch: number; accountUserId: string; leaseExpiresAtMs: number; runtimeBootId: string | null;
+      /** The cached entry's deadline; a SQL observation carries none. */
+      deadlineMs?: number };
 
 const DENIED: EngineAuthorityDecision = Object.freeze({ allowed: false });
 
@@ -57,7 +59,7 @@ export function decideEngineAuthority(
     (mode.kind === "assert" && mode.transitionRecordSync === true);
   if (!enrolled || (mode.kind === "read" && entry.revoked)) return DENIED;
   return { allowed: true, authorityEpoch: entry.authorityEpoch, accountUserId: entry.accountUserId,
-    leaseExpiresAtMs: entry.leaseExpiresAtMs, runtimeBootId: entry.runtimeBootId };
+    leaseExpiresAtMs: entry.leaseExpiresAtMs, runtimeBootId: entry.runtimeBootId, deadlineMs: entry.deadlineMs };
 }
 
 function sameDecision(left: EngineAuthorityDecision, right: EngineAuthorityDecision): boolean {

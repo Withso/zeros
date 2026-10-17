@@ -1,10 +1,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPool, withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import type { RolloutFlagName } from "../rollout-flags.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { functionInputTables, stripSqlLiterals } from "./function-input-tables.js";
 import {
   AUTHORITY_CACHE_CHANNEL,
   EngineAuthorityCache,
@@ -77,30 +79,10 @@ d("engine authority cache with PostgreSQL", () => {
   }
 
   it("puts the invalidation trigger on every table the authority predicate reads", async () => {
-    const functions = new Set<string>(), tables = new Set<string>(LOADER_TABLES);
-    const publicFunctions = new Set((await pool.query<{ name: string }>(`SELECT proname AS name FROM pg_proc
-      WHERE pronamespace='public'::regnamespace`)).rows.map(row => row.name));
-    const publicTables = new Set((await pool.query<{ name: string }>(`SELECT relname AS name FROM pg_class
-      WHERE relnamespace='public'::regnamespace AND relkind IN ('r','p')`)).rows.map(row => row.name));
-    const queue = ["cloud_workspace_engine_authority_current"];
-    while (queue.length) {
-      const name = queue.pop()!;
-      if (functions.has(name)) continue;
-      functions.add(name);
-      const definitions = (await pool.query<{ body: string }>(`SELECT pg_get_functiondef(oid) AS body FROM pg_proc
-        WHERE proname=$1 AND pronamespace='public'::regnamespace`, [name])).rows;
-      expect(definitions.length).toBeGreaterThan(0);
-      for (const { body } of definitions) {
-        for (const match of body.matchAll(/\b([a-z_][a-z0-9_]*)\s*\(/gi)) {
-          const called = match[1]!.toLowerCase();
-          if (publicFunctions.has(called) && called !== name && !called.startsWith("app_")) queue.push(called);
-        }
-        for (const match of body.matchAll(/\b(?:FROM|JOIN)\s+(?:public\.)?([a-z_][a-z0-9_]*)/gi)) {
-          const table = match[1]!.toLowerCase();
-          if (publicTables.has(table)) tables.add(table);
-        }
-      }
-    }
+    // Identifier-based extraction (functionInputTables) also sees comma
+    // joins, LATERAL and EXISTS inputs, not only the first FROM/JOIN item.
+    const closure = await functionInputTables(pool, ["cloud_workspace_engine_authority_current"]);
+    const functions = closure.functions, tables = new Set<string>([...LOADER_TABLES, ...closure.tables]);
     expect(functions).toContain("cloud_workspace_paid_authority_live");
     expect(functions).toContain("cloud_workspace_compute_authority_live");
     // Every clock comparison in the predicate either only becomes true over
@@ -131,6 +113,40 @@ d("engine authority cache with PostgreSQL", () => {
       const column = await pool.query(`SELECT 1 FROM pg_attribute WHERE attrelid=$1::regclass AND attname=$2 AND atttypid='uuid'::regtype`,
         [table, args[1]]);
       expect(column.rowCount, `${table}.${args[1]}`).toBe(1);
+    }
+  });
+
+  it("exempts from invalidation only columns that cannot lower a cached authority", async () => {
+    // Each extension-only branch of notify_cloud_authority_cache lists the
+    // columns an UPDATE may change without a hint. A listed column is safe
+    // only as a deadline guarded to move later (entries are bounded by the
+    // deadline they loaded), as a column whose predicate the branch itself
+    // preserves, or when neither the predicate closure nor the loader reads it.
+    const closure = await functionInputTables(pool, ["cloud_workspace_engine_authority_current"]);
+    const code = [...closure.bodies.values()].flat().map(stripSqlLiterals).join("\n") + "\n" +
+      readFileSync(new URL("./engine-authority-cache.ts", import.meta.url), "utf8");
+    const notifier = (await pool.query<{ body: string }>(
+      "SELECT prosrc AS body FROM pg_proc WHERE proname='notify_cloud_authority_cache'")).rows[0]!.body;
+    const branches = [...notifier.matchAll(/TG_TABLE_NAME = '([a-z_]+)'\s+AND \(new_row - ARRAY\[([^\]]*)\]\)/g)]
+      .map(match => ({ table: match[1]!, columns: [...match[2]!.matchAll(/'([a-z_]+)'/g)].map(column => column[1]!) }));
+    expect(branches.map(branch => branch.table).sort()).toEqual([
+      "cloud_workspace_engine_instances", "cloud_workspace_generations", "cloud_workspace_provider_bindings",
+      "managed_compute_allocation_leases", "managed_compute_credit_reservations"]);
+    const deadlines = new Set(["lease_expires_at", "funded_until", "provider_expires_at", "covered_until"]);
+    const preserved: Record<string, string> = {
+      reserved_micro_usd: "((new_row ->> 'reserved_micro_usd')::numeric > 0) = ((old_row ->> 'reserved_micro_usd')::numeric > 0)",
+    };
+    for (const { table, columns } of branches) {
+      for (const column of columns) {
+        if (deadlines.has(column)) {
+          expect(notifier, `${table}.${column} may only move later`)
+            .toContain(`(new_row ->> '${column}')::timestamptz >= (old_row ->> '${column}')::timestamptz`);
+        } else if (preserved[column]) {
+          expect(notifier, `${table}.${column} keeps its predicate`).toContain(preserved[column]);
+        } else {
+          expect(new RegExp(`\\b${column}\\b`).test(code), `${table}.${column} is read by the authority predicate or loader`).toBe(false);
+        }
+      }
     }
   });
 
@@ -218,6 +234,9 @@ d("engine authority cache with PostgreSQL", () => {
       SET actual_micro_usd=10,billable_seconds=60,meter_through=now(),debited_micro_usd=10,updated_at=now() WHERE id=$1`, [reservationId]))).toEqual([]);
     expect(await notificationsDuring(() => pool.query(`UPDATE cloud_workspace_provider_bindings
       SET next_drift_check_at=now()+interval '1 hour',last_observed_at=now(),observed_state='running',updated_at=now() WHERE workspace_id=$1`, [scope.workspaceId]))).toEqual([]);
+    // A heartbeat that carries a port scan stamps ports_observed_at.
+    expect(await notificationsDuring(() => pool.query(
+      "UPDATE cloud_workspace_generations SET ports_observed_at=now() WHERE workspace_id=$1", [scope.workspaceId]))).toEqual([]);
 
     // A shortened deadline, a state change or an authority-relevant column
     // change still invalidates.
@@ -226,6 +245,12 @@ d("engine authority cache with PostgreSQL", () => {
        provider_expires_at=provider_expires_at-interval '10 minutes' WHERE id=$1`, [leaseId]))).toEqual([`w:${scope.workspaceId}`]);
     expect(await notificationsDuring(() => pool.query(
       "UPDATE managed_compute_credit_reservations SET covered_until=covered_until-interval '30 minutes' WHERE id=$1", [reservationId]))).toEqual([`w:${scope.workspaceId}`]);
+    // The predicate requires reserved_micro_usd > 0: exhausting the
+    // reservation ends compute authority with no deadline involved.
+    expect(await notificationsDuring(() => pool.query(
+      "UPDATE managed_compute_credit_reservations SET reserved_micro_usd=0,updated_at=now() WHERE id=$1", [reservationId]))).toEqual([`w:${scope.workspaceId}`]);
+    expect(await notificationsDuring(() => pool.query(
+      "UPDATE managed_compute_credit_reservations SET reserved_micro_usd=1000,updated_at=now() WHERE id=$1", [reservationId]))).toEqual([`w:${scope.workspaceId}`]);
     expect(await notificationsDuring(() => pool.query(
       "UPDATE managed_compute_credit_reservations SET state='final',final_reason='period_ended',reserved_micro_usd=0 WHERE id=$1", [reservationId]))).toEqual([`w:${scope.workspaceId}`]);
     expect(await notificationsDuring(() => pool.query(

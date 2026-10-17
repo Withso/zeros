@@ -50,13 +50,24 @@ BEGIN
       RETURN NULL;
     END IF;
     -- Credit top-ups and usage metering move money columns and extend
-    -- covered_until, but the authority predicate reads only state and
-    -- covered_until, so these writes cannot revive authority either. A state
-    -- change or a shortened covered_until still notifies.
+    -- covered_until. Of these the authority predicate reads covered_until
+    -- (a deadline the entry is bounded by) and reserved_micro_usd > 0, so the
+    -- write is skipped only while covered_until moves later and the
+    -- reservation stays funded. A state change, a shortened covered_until or
+    -- an exhausted reservation still notifies.
     IF TG_TABLE_NAME = 'managed_compute_credit_reservations'
        AND (new_row - ARRAY['covered_until', 'meter_through', 'authorized_micro_usd', 'reserved_micro_usd', 'actual_micro_usd', 'debited_micro_usd', 'exposure_micro_usd', 'billable_seconds', 'updated_at'])
          = (old_row - ARRAY['covered_until', 'meter_through', 'authorized_micro_usd', 'reserved_micro_usd', 'actual_micro_usd', 'debited_micro_usd', 'exposure_micro_usd', 'billable_seconds', 'updated_at'])
-       AND (new_row ->> 'covered_until')::timestamptz >= (old_row ->> 'covered_until')::timestamptz THEN
+       AND (new_row ->> 'covered_until')::timestamptz >= (old_row ->> 'covered_until')::timestamptz
+       AND ((new_row ->> 'reserved_micro_usd')::numeric > 0) = ((old_row ->> 'reserved_micro_usd')::numeric > 0) THEN
+      RETURN NULL;
+    END IF;
+    -- A heartbeat carrying a port scan stamps ports_observed_at (UI
+    -- metadata, unread by the predicate). Notifying here would cost one
+    -- notifying commit per active workspace every heartbeat and flush the
+    -- workspace's entries each time.
+    IF TG_TABLE_NAME = 'cloud_workspace_generations'
+       AND (new_row - ARRAY['ports_observed_at']) = (old_row - ARRAY['ports_observed_at']) THEN
       RETURN NULL;
     END IF;
     -- Drift bookkeeping columns on provider bindings are not read by the

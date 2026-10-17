@@ -23,6 +23,10 @@ fence-free reads before then.
   credit `covered_until`, a delegated credential's expiry minus 300 s, and
   account or organization entitlement `valid_until`; capped at 30 s.
 - At most 10 000 entries; the oldest is evicted first.
+- An enforced fence-free read reports `confirmedUntilMs` as the earliest of
+  now + 10 s, the engine lease and the entry's deadline. No hint fires when a
+  funding, credential or entitlement deadline passes, so a caller must not be
+  told the authority holds beyond it.
 
 ## Invalidation
 
@@ -33,6 +37,25 @@ invalidation removes every entry in that scope.
 
 - A heartbeat that only extends the engine lease does not notify: an entry is
   already bounded by the shorter lease it loaded. A shortened lease does.
+- Credit metering and top-ups on `managed_compute_credit_reservations` do not
+  notify while `covered_until` moves later and `reserved_micro_usd > 0` keeps
+  its truth value; the predicate reads both. A state change, a shortened
+  `covered_until` or an exhausted reservation notifies.
+- A port-scan heartbeat stamping `cloud_workspace_generations.ports_observed_at`
+  (UI metadata the predicate does not read) does not notify. Before this
+  exemption every such heartbeat cost one notifying commit per active
+  workspace and flushed that workspace's entries.
+- The derived coverage test also checks that every column an exemption skips
+  is either unread by the predicate or covered by such a guard.
+- Every notifying commit takes PostgreSQL's cluster-wide notify queue lock and
+  holds it through its commit WAL flush, so notifying commits serialize across
+  the whole database, not per channel. Identical hints dedupe within a
+  transaction, and the triggers skip writes that cannot change a decision for
+  that reason. `pnpm load:db`
+  counts authority hints separately ("Authority hints/s"), includes them in
+  "Notify commits/s", projects notifying commits at 100, 500 and 1000 active
+  workspaces, and enforces
+  `authorityCacheNotificationsPerActiveWorkspacePerSecond` in `budgets.json`.
 - A load is discarded if any hint for its workspace, organization or user,
   or a flush, arrives while it runs, so a read taken before a commit is never
   stored after that commit's hint.
