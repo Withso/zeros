@@ -113,6 +113,42 @@ describe("engine uplink client (socket level)", () => {
   beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] }));
   afterEach(() => vi.useRealTimers());
 
+  it("ignores frames that still arrive on a connection whose close it initiated (drain handoff, resumed: false)", async () => {
+    // Like ws, close() only starts the handshake: frames already on the wire
+    // keep arriving until the peer's close frame is read.
+    class SlowClose extends FakeSocket {
+      close(code?: number, reason?: string): void { this.closeCalls.push({ code, reason }); this.readyState = 2; }
+    }
+    const applied: number[] = [];
+    const sockets: FakeSocket[] = [];
+    const client = new CloudEngineUplinkClient({
+      endpoint: "wss://cp.example/v1/uplink", token: "t", identity, runtimeVersion: "4.0.0-test",
+      auth: new EngineUplinkAuthState(), features: ["cred.v1"], random: () => 0.5,
+      onCredentialRevision: async revision => { applied.push(revision.revision); return { result: "applied" }; },
+      openSocket: () => { const socket = new SlowClose(); sockets.push(socket); return socket; },
+    });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!, { token: "r1" });
+    sockets[0]!.frame({ t: "sys.drain", d: { reconnectAfterMs: 0, deadlineMs: 30_000 } });
+    await flush();
+    expect(sockets).toHaveLength(2);
+    // The replacement landed on another instance: a fresh lineage.
+    sockets[1]!.frame({ t: "sys.welcome", d: { protocol: 1, resumeToken: "r2", resumed: false, pingIntervalMs: 20_000, features: ["cred.v1"] } });
+    await flush();
+    expect(sockets[0]!.closeCalls).toEqual([{ code: 1000, reason: "drain_handoff" }]);
+    // A frame the drained instance had already written arrives late.
+    sockets[0]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 5 } });
+    sockets[1]!.frame({ t: "auth.keys", d: { keys: [KEY] } });
+    sockets[1]!.frame({ t: "auth.sync", d: { syncId: "s2", epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: "c", complete: true } });
+    await flush();
+    sockets[1]!.frame({ t: "auth.capability", d: { audience: "zeros:api", token: "cap2", expiresAtMs: Date.now() + 300_000 } });
+    sockets[1]!.frame({ t: "cred.revision", s: 1, d: { kind: "agent-controls", revision: 9 } });
+    await flush(20);
+    expect(applied).toEqual([9]);
+    client.stop();
+  });
+
   it("floors full-jitter backoff at 100 ms when random() draws 0", async () => {
     const { client, sockets } = fakeClient({ random: () => 0 });
     client.start();
@@ -836,7 +872,7 @@ describe("engine uplink client against the real control-plane server", () => {
     const uplink = new CloudEngineUplinkServer({
       authority, realtimeInstance: "realtime-test",
       flags: {
-        enabled: (orgId, flag) => enabled && flag === "realtime_uplink" && orgId === identity.organizationId,
+        enabled: (orgId, flag) => enabled && (flag === "realtime_uplink" || flag === "credential_push") && orgId === identity.organizationId,
         anyEnabled: flag => enabled && flag === "realtime_uplink",
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
