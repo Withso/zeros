@@ -80,6 +80,7 @@ describe("Local checkout identity and environment", () => {
     });
     expect(env.ZEROS_INSTANCE).toBe(identity.slug);
     expect(env.ZEROS_LOCAL_DEVELOPMENT).toBe("1");
+    expect(env.ZEROS_ISOLATE).toBeUndefined();
     expect(env.ZEROS_CHANNEL).toBe("dev");
     expect(env.ZEROS_DATA_DIR).toBeUndefined();
     expect(env.ZEROS_SHARED_SECRETS_DIR).toBeUndefined();

@@ -235,6 +235,20 @@ describe("engine authority reads with the cache installed", () => {
     expect(h.cache.stats().enforcedHits).toBe(1);
   });
 
+  it("never confirms an enforced read past the deadline the entry was loaded with", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(NOW);
+      const h = harness({ flags: ["authority_cache_enforce"], value: entry({ deadlineMs: NOW + 2_000 }) });
+      installEngineAuthorityCache(h.cache);
+      h.handlers.onReady();
+      h.cache.ensure(KEY);
+      await settle(h.cache);
+      const read = await readCurrentCloudEngineAuthority(noSql, input);
+      expect(read.confirmedUntilMs).toBeLessThanOrEqual(NOW + 2_000);
+    } finally { vi.useRealTimers(); }
+  });
+
   it.each([
     ["shadow only", ["authority_cache_shadow"] as RolloutFlagName[]],
     ["the enforce flag with a lost feed", ["authority_cache_enforce"] as RolloutFlagName[]],

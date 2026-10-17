@@ -3,14 +3,11 @@ import {
   subscriptionAccountSchema,
   type BrowserSubscriptionProvider,
 } from "@zeros/protocol/provider-auth";
-import {
-  createSecretIfAbsent,
-  getSecret,
-  hasSecret,
-  replaceSecretIfUnchanged,
-} from "./secret-store";
+import { readSecretValues, updateSecretValues } from "./secret-store";
 
 const storedAccountSchema = subscriptionAccountSchema.extend({
+  // Private credential generation, not public account identity or metadata.
+  revision: z.number().int().nonnegative().optional(),
   // Missing configDir is the existing device CLI account, migrated in place.
   configDir: z.string().min(1).max(4096).optional(),
   credential: z
@@ -28,6 +25,7 @@ const storeSchema = z
     activeId: z.string().uuid().optional(),
     initialized: z.boolean().optional(),
     methodSelected: z.boolean().optional(),
+    selectionRevision: z.number().int().nonnegative().optional(),
     accounts: z.array(storedAccountSchema).max(20),
   })
   .strict();
@@ -41,52 +39,84 @@ const empty = (): ProviderAccountStore => ({
   method: "account",
   accounts: [],
 });
+// Keep the strict v1 account record readable by older development worktrees.
+// Private generations live in a companion encrypted entry, committed atomically.
+const revisionsSchema = z
+  .object({
+    selection: z.number().int().nonnegative().optional(),
+    accounts: z.record(z.string().uuid(), z.number().int().nonnegative()),
+  })
+  .strict();
+const revisionKey = (provider: BrowserSubscriptionProvider) =>
+  `${providerAccountStoreKey(provider)}:revisions`;
 
-export function readProviderAccounts(
+function decodeAccounts(
   provider: BrowserSubscriptionProvider,
+  values: Record<string, string | null>,
 ): ProviderAccountStore {
-  const key = providerAccountStoreKey(provider);
-  const raw = getSecret(key);
-  if (!raw) {
-    if (hasSecret(key))
-      throw new Error("Saved accounts could not be unlocked.");
-    return empty();
-  }
+  const raw = values[providerAccountStoreKey(provider)];
+  const metadata = values[revisionKey(provider)];
   try {
-    return storeSchema.parse(JSON.parse(raw));
+    const store = raw ? storeSchema.parse(JSON.parse(raw)) : empty();
+    if (!metadata) return store;
+    const revisions = revisionsSchema.parse(JSON.parse(metadata));
+    // Reads and mutations must use the same schema ordering: the manager
+    // compares snapshots before publishing credential-change invalidations.
+    return storeSchema.parse({
+      ...store,
+      selectionRevision: revisions.selection,
+      accounts: store.accounts.map((account) => ({
+        ...account,
+        revision: revisions.accounts[account.id],
+      })),
+    });
   } catch {
     throw new Error("Saved accounts could not be read.");
   }
 }
 
-/** Merge under the existing cross-process secret-store CAS. A second app
+export function readProviderAccounts(
+  provider: BrowserSubscriptionProvider,
+): ProviderAccountStore {
+  return decodeAccounts(
+    provider,
+    readSecretValues([
+      providerAccountStoreKey(provider),
+      revisionKey(provider),
+    ]),
+  );
+}
+
+/** Merge under the existing cross-process secret-store lock. A second app
  * instance cannot overwrite a newly-added account with its older snapshot. */
 export function updateProviderAccounts(
   provider: BrowserSubscriptionProvider,
   update: (current: ProviderAccountStore) => ProviderAccountStore,
 ): ProviderAccountStore {
   const key = providerAccountStoreKey(provider);
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const raw = getSecret(key);
-    if (!raw && hasSecret(key))
-      throw new Error("Saved accounts could not be unlocked.");
-    let current: ProviderAccountStore;
-    try {
-      current = raw ? storeSchema.parse(JSON.parse(raw)) : empty();
-    } catch {
-      throw new Error("Saved accounts could not be read.");
-    }
-    const next = storeSchema.parse(update(current));
-    const encoded = JSON.stringify(next);
-    if (encoded === raw) return next;
-    if (
-      raw
-        ? replaceSecretIfUnchanged(key, raw, encoded)
-        : createSecretIfAbsent(key, encoded)
-    )
-      return next;
-  }
-  throw new Error("Accounts changed in another window. Refresh and try again.");
+  const metadata = revisionKey(provider);
+  let next!: ProviderAccountStore;
+  updateSecretValues([key, metadata], (values) => {
+    next = storeSchema.parse(update(decodeAccounts(provider, values)));
+    const { selectionRevision, accounts, ...legacy } = next;
+    return {
+      [key]: JSON.stringify({
+        ...legacy,
+        accounts: accounts.map(
+          ({ revision: _revision, ...account }) => account,
+        ),
+      }),
+      [metadata]: JSON.stringify({
+        selection: selectionRevision,
+        accounts: Object.fromEntries(
+          accounts
+            .filter((account) => account.revision !== undefined)
+            .map((account) => [account.id, account.revision]),
+        ),
+      }),
+    };
+  });
+  return next;
 }
 
 export function selectedProviderAccount(

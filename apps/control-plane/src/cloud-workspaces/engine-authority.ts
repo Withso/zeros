@@ -86,7 +86,9 @@ export async function readCurrentCloudEngineAuthority(
       cache.recordEnforcedHit();
       return { version: 1, workspaceId: input.workspaceId, organizationId: input.organizationId, generation: input.generation,
         authorityEpoch: cached.authorityEpoch, accountUserId: cached.accountUserId, engineInstanceId: input.engineInstanceId,
-        confirmedUntilMs: Math.min(Date.now() + 10_000, cached.leaseExpiresAtMs),
+        // Never past the funding, credential or entitlement deadline the
+        // entry was loaded with: no hint fires when that deadline passes.
+        confirmedUntilMs: Math.min(Date.now() + 10_000, cached.leaseExpiresAtMs, cached.deadlineMs ?? Number.POSITIVE_INFINITY),
         leaseExpiresAtMs: cached.leaseExpiresAtMs, runtimeBootId: cached.runtimeBootId };
     }
   }

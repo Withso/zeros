@@ -25,7 +25,7 @@ const baseBudgets = (perRequest: LoadBudgets["perRequest"]): LoadBudgets => ({
   policy: BUDGET_POLICY,
   targets: { quietTransactionsPerSecond: 0.5, perActiveWorkspaceTransactionsPerSecond: 0.01, boatCallsPerMinute: 1000 },
   steadyState: { perActiveWorkspaceTransactionsPerSecond: 10, perRunningEngineTransactionsPerSecond: 10, perStoppedWorkspaceTransactionsPerSecond: 1,
-    notifyingCommitsPerActiveWorkspacePerSecond: 0.5 },
+    notifyingCommitsPerActiveWorkspacePerSecond: 0.5, authorityCacheNotificationsPerActiveWorkspacePerSecond: 0.25 },
   perRequest,
 });
 
@@ -45,6 +45,14 @@ describe("checkBudgets", () => {
       { subject: "steadyState", metric: "notifyingCommitsPerActiveWorkspacePerSecond", measured: 1, budget: 0.5 },
     ]);
     expect(checkBudgets(budgets, [], baseProjection(), 0.5)).toEqual([]);
+  });
+
+  it("flags authority-cache hints per active workspace above the budget", () => {
+    const budgets = baseBudgets({});
+    expect(checkBudgets(budgets, [], baseProjection(), 0.4, 0.3)).toEqual([
+      { subject: "steadyState", metric: "authorityCacheNotificationsPerActiveWorkspacePerSecond", measured: 0.3, budget: 0.25 },
+    ]);
+    expect(checkBudgets(budgets, [], baseProjection(), 0.4, 0.25)).toEqual([]);
   });
 
   it("flags a budgeted operation that was not measured", () => {

@@ -8,7 +8,7 @@ import { seedReadyProCloudWorkspace, type ReadyCloudWorkspaceFixture } from "../
 import { loadCapabilityKeyring } from "../cloud-workspaces/capability-keyring.js";
 import { CapabilitySigningKeyStore } from "../cloud-workspaces/capability-keys.js";
 import { manageCloudCapabilityKey } from "../manage-cloud-capability-key.js";
-import { DatabaseUplinkAuthSource, UplinkEngineCapabilityIssuer, UPLINK_AUTH_REVOCATION_RETENTION_MS } from "./uplink-auth-source.js";
+import { DatabaseUplinkAuthSource, UplinkEngineCapabilityIssuer, UplinkSnapshotTooLargeError, UPLINK_AUTH_REVOCATION_RETENTION_MS } from "./uplink-auth-source.js";
 import { CapabilityClaimsSchema } from "../cloud-workspaces/capability-contract.js";
 import { decodeProtectedHeader, decodeJwt } from "jose";
 
@@ -110,6 +110,59 @@ d("uplink auth source with PostgreSQL", () => {
     await pool.query("DELETE FROM cloud_workspace_members WHERE workspace_id=$1 AND user_id=$2", [fixture.workspaceId, member]);
     const afterRemoval = await source.snapshot(identity(), undefined);
     expect(afterRemoval.epochs.members?.[member]).toBeGreaterThan(epoch!);
+  });
+
+  // S1 snapshot scope: nothing about other workspaces' members reaches W's
+  // VM (review SHOULD-1).
+  it("omits a principal whose epoch moved but who never had access to this workspace", async () => {
+    // Private workspace: organization membership alone grants no access.
+    await pool.query("UPDATE cloud_workspaces SET sharing_mode='private' WHERE id=$1", [fixture.workspaceId]);
+    const outsider = randomUUID();
+    await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Outsider')", [outsider, `${outsider}@example.test`]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [fixture.organizationId, outsider]);
+    // A role change bumps the (org, user) membership epoch in the committing
+    // transaction, exactly like a role change in another workspace would.
+    await pool.query("UPDATE organization_members SET role='admin' WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, outsider]);
+    const snapshot = await source.snapshot(identity(), undefined);
+    expect(snapshot.epochs.members?.[outsider]).toBeUndefined();
+    expect(snapshot.epochs.accounts?.[outsider]).toBeUndefined();
+  });
+
+  // Removing an org member fans the loss out to the org's shared workspaces
+  // in the committing transaction (the fixture workspace is shared).
+  it("lists a removed organization member of a shared workspace with the raised epoch", async () => {
+    const member = randomUUID();
+    await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Member')", [member, `${member}@example.test`]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [fixture.organizationId, member]);
+    const withMember = await source.snapshot(identity(), undefined);
+    expect(withMember.epochs.members?.[member]).toBeGreaterThanOrEqual(1);
+    await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, member]);
+    const after = await source.snapshot(identity(), undefined);
+    expect(after.epochs.members?.[member]).toBeGreaterThan(withMember.epochs.members![member]!);
+  });
+
+  it("omits a member removed from the workspace longer ago than the retention window", async () => {
+    await pool.query("UPDATE cloud_workspaces SET sharing_mode='private' WHERE id=$1", [fixture.workspaceId]);
+    const member = randomUUID();
+    await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Member')", [member, `${member}@example.test`]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [fixture.organizationId, member]);
+    await pool.query("INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,'developer')", [fixture.workspaceId, fixture.organizationId, member]);
+    await pool.query("DELETE FROM cloud_workspace_members WHERE workspace_id=$1 AND user_id=$2", [fixture.workspaceId, member]);
+    // Age the recorded loss beyond the revocation retention window.
+    await pool.query(`UPDATE cloud_capability_access_losses SET lost_at=clock_timestamp()-interval '40 minutes'
+      WHERE workspace_id=$1 AND user_id=$2`, [fixture.workspaceId, member]);
+    const snapshot = await source.snapshot(identity(), undefined);
+    expect(snapshot.epochs.members?.[member]).toBeUndefined();
+  });
+
+  // An oversize snapshot is refused before a frame is written; the server's
+  // catch parks the engine instead of reconnect-looping it (review SHOULD-2).
+  it("refuses an oversize snapshot and counts the refusal", async () => {
+    const guarded = new DatabaseUplinkAuthSource({ pool, keyStore, flags, maxSnapshotBytes: 64 });
+    await expect(guarded.snapshot(identity(), undefined)).rejects.toThrow(UplinkSnapshotTooLargeError);
+    expect(guarded.counters.oversizeSnapshots).toBe(1);
+    // The production bound answers the same workspace.
+    await expect(source.snapshot(identity(), undefined)).resolves.toMatchObject({ complete: true });
   });
 
   it("issues the engine token from current authority and reports revocation as authority loss", async () => {

@@ -86,6 +86,8 @@ type Element = ReactElement<{
   children?: ReactNode;
   disabled?: boolean;
   open?: boolean;
+  connected?: boolean;
+  connectedIdentity?: string;
   "aria-label"?: string;
   onClick?: () => void;
   onChange?: (event: { target: { value: string } }) => void;
@@ -183,6 +185,31 @@ function selectedCodex(status: CloudAgentConnectionHealth["status"] = "expired")
 }
 
 describe("selected cloud account health and reconnect", () => {
+  it.each(["claude", "codex", "cursor"])("uses only %s's selected cloud identity for connected feedback", provider => {
+    f.provider = provider;
+    const saved = f.snapshot.data!.credentials[0]!;
+    saved.kind = `${provider}-api-key`;
+    saved.connectionMethod = "account";
+    saved.displayName = "cloud@example.test";
+    Object.assign(f.snapshot.data!.connections[0]!, { provider, health: selectedHealth("ready") });
+    action("Configure").props.onClick!();
+    expect(dialog().props.connected).toBe(true);
+    expect(dialog().props.connectedIdentity).toBe("cloud@example.test");
+    expect(text(dialog().props.children)).toContain("cloud@example.test is connected");
+
+    dialog().props.onMethodChange!("apiKey");
+    expect(dialog().props.connected).toBe(false);
+    expect(dialog().props.connectedIdentity).toBeUndefined();
+    expect(text(dialog().props.children)).not.toContain("cloud@example.test");
+  });
+
+  it("supplies the selected cloud API credential's name instead of any device account", () => {
+    f.snapshot.data!.credentials[0]!.displayName = "Cloud automation";
+    f.snapshot.data!.connections[0]!.health = selectedHealth("ready");
+    action("Configure").props.onClick!();
+    expect(dialog().props.connected).toBe(true);
+    expect(dialog().props.connectedIdentity).toBe("Cloud automation");
+  });
   it.each(["expired", "expiring"] as const)("shows %s instead of Connected and starts a fresh native ceremony", async status => {
     selectedCodex(status);
     // A stale legacy flag must not override the exact health observation.

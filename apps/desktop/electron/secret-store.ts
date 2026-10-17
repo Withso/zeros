@@ -195,6 +195,73 @@ export function createSecretIfAbsent(account: string, value: string, file = file
   }, file);
 }
 
+function selectedSecretValues(data: Record<string, string>, accounts: readonly string[]): Record<string, string | null> {
+  return Object.fromEntries(accounts.map(account => {
+    if (!(account in data)) return [account, null];
+    try {
+      return [account, safeStorage.decryptString(Buffer.from(data[account], "base64"))];
+    } catch {
+      throw new SecretStoreReadError("Saved credentials could not be unlocked.");
+    }
+  }));
+}
+
+/** One exact snapshot for related private entries; unreadable is never absent. */
+export function readSecretValues(accounts: readonly string[]): Record<string, string | null> {
+  return selectedSecretValues(readAll(), accounts);
+}
+
+/** Commit related private entries under one existing cross-process lock. A
+ * callback must be synchronous; no provider I/O belongs inside this mutation. */
+export function updateSecretValues(
+  accounts: readonly string[],
+  update: (values: Record<string, string | null>) => Record<string, string | null>,
+): void {
+  ensureEncryptionAvailable();
+  withSecretsLock(() => {
+    const data = readAll();
+    const before = selectedSecretValues(data, accounts);
+    const next = update(before);
+    let changed = false;
+    for (const account of accounts) {
+      if (before[account] === next[account]) continue;
+      if (next[account] == null) delete data[account];
+      else data[account] = safeStorage.encryptString(next[account]).toString("base64");
+      changed = true;
+    }
+    if (changed) writeAll(data);
+  });
+}
+
+/** Adopt selected entries from an older store encrypted by the same channel.
+ * The original remains recoverable. One locked marker prevents a later launch
+ * from resurrecting keys the user removed after migration. Shared entries win. */
+export function migrateSecretsIfAbsent(
+  sourceFile: string,
+  accounts: readonly string[],
+  migrationKey: string,
+): void {
+  const destination = filePath();
+  if (path.resolve(sourceFile) === path.resolve(destination)) return;
+  if (hasSecret(migrationKey, destination)) return;
+  const source = readAll(sourceFile);
+  if (!accounts.some((account) => account in source)) return;
+  ensureEncryptionAvailable();
+  withSecretsLock(() => {
+    const current = readAll(destination);
+    if (migrationKey in current) return;
+    for (const account of accounts) {
+      if (!(account in source) || account in current) continue;
+      // Verify the source is unlockable before publishing any part of a move.
+      // Never replace an unreadable existing destination with an older value.
+      const value = safeStorage.decryptString(Buffer.from(source[account], "base64"));
+      current[account] = safeStorage.encryptString(value).toString("base64");
+    }
+    current[migrationKey] = safeStorage.encryptString("1").toString("base64");
+    writeAll(current, destination);
+  }, destination);
+}
+
 export function getSecret(account: string, file = filePath()): string | null {
   const data = readAll(file);
   const b64 = data[account];
@@ -214,8 +281,8 @@ export function getSecret(account: string, file = filePath()): string | null {
  *  from "stored but unreadable" (getSecret null after a decrypt failure,
  *  hasSecret true) — the case a read-modify-write editor must treat as an
  *  error, not an empty value. */
-export function hasSecret(account: string): boolean {
-  const b64 = readAll()[account];
+export function hasSecret(account: string, file = filePath()): boolean {
+  const b64 = readAll(file)[account];
   return typeof b64 === "string" && b64.length > 0;
 }
 

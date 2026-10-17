@@ -10,7 +10,7 @@
 // But a HEADLESS / relay / cron spawn has no renderer and no localStorage, so
 // those couriered values are absent. This module makes the resolved USER
 // settings the authoritative FALLBACK: it fills only the gaps, layered UNDER
-// whatever the caller already set — a couriered value ALWAYS wins. In the
+// whatever the caller already set for executable/gateway configuration. In the
 // normal desktop path the TOML mirror holds the same values, so this is a no-op.
 //
 // SECURITY — `providers` is a USER-ONLY settings key (schema USER_ONLY_KEYS), so
@@ -23,7 +23,8 @@
 // degrades to the default resolution instead of failing the spawn.
 //
 // Electron supplies an in-memory credential projection over the private parent
-// pipe. This module selects it from trusted auth preferences for headless work
+// pipe. Its explicit selection overrides stale per-checkout user auth settings
+// and couriered credentials; managed policy keeps precedence. This applies to headless work
 // as well as interactive spawns; it never opens the encrypted store itself.
 // ──────────────────────────────────────────────────────────
 
@@ -33,6 +34,7 @@ import { opSettingsResolve } from "./ops";
 import {
   providerCredential,
   providerAccountProfile,
+  providerAuthenticationMethod,
 } from "../agents/provider-credentials";
 
 /** agentId → the env var its gateway base_url maps to. Mirror of the renderer's
@@ -55,6 +57,16 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+function selectedAuthentication(agentId: string, configured: unknown, source: string | undefined) {
+  const method = source !== "managed" ? providerAuthenticationMethod(agentId) : undefined;
+  return {
+    native: method !== undefined,
+    auth: method
+      ? method === "apiKey" ? "api-key" : agentId === "cursor" ? "subscription" : "cli"
+      : source && TRUSTED_PROVIDER_LAYERS.includes(source) ? configured : undefined,
+  };
+}
+
 /** Registry probes must inspect the selected method, just like a spawn. A
  * repository cannot select a personal credential or influence this verdict. */
 export function usesProviderApiKey(cwd: string, agentId: string): boolean {
@@ -62,19 +74,16 @@ export function usesProviderApiKey(cwd: string, agentId: string): boolean {
     const resolved = opSettingsResolve(cwd);
     const source = resolved.sources[`providers.${agentId}.auth`];
     const providers = resolved.effective.providers;
-    return (
-      source !== undefined &&
-      TRUSTED_PROVIDER_LAYERS.includes(source) &&
-      isPlainObject(providers) &&
-      isPlainObject(providers[agentId]) &&
-      providers[agentId].auth === "api-key"
-    );
+    const configured = isPlainObject(providers) && isPlainObject(providers[agentId])
+      ? providers[agentId].auth : undefined;
+    return selectedAuthentication(agentId, configured, source).auth === "api-key";
   } catch {
     return false;
   }
 }
 
-/** Fill spawn gaps from the user's resolved `[providers.<agentId>]` settings —
+/** Apply native authentication selection and fill other spawn gaps from the
+ * user's resolved `[providers.<agentId>]` settings —
  *  the durable TOML fallback for spawns the renderer didn't courier (headless /
  *  relay / cron). Applied UNDER `base`: a value the caller already set wins; the
  *  TOML only fills what's missing. Never throws — on any failure `base` is
@@ -106,9 +115,8 @@ export function applyUserProviderConfig(
   };
 
   const env = { ...(base.env ?? {}) };
-  const profile = !(
-    cfg.auth === "api-key" && trusted(`providers.${agentId}.auth`)
-  )
+  const selection = selectedAuthentication(agentId, cfg.auth, resolved.sources[`providers.${agentId}.auth`]);
+  const profile = selection.auth !== "api-key"
     ? providerAccountProfile(agentId)
     : null;
   // Account profiles are an explicit exception to ambient config pass-through.
@@ -127,7 +135,7 @@ export function applyUserProviderConfig(
 
   const credential = providerCredential(
     agentId,
-    trusted(`providers.${agentId}.auth`) ? cfg.auth : undefined,
+    selection.auth,
   );
   const keyVar = (
     {
@@ -139,22 +147,28 @@ export function applyUserProviderConfig(
   if (
     agentId !== "cursor" &&
     keyVar &&
-    cfg.auth === "cli" &&
-    trusted(`providers.${agentId}.auth`)
+    selection.auth === "cli"
   ) {
     env[keyVar] = "";
     if (agentId === "claude") {
-      if ("ANTHROPIC_AUTH_TOKEN" in env) env.ANTHROPIC_AUTH_TOKEN = "";
-      if ("CLAUDE_CODE_OAUTH_TOKEN" in env) env.CLAUDE_CODE_OAUTH_TOKEN = "";
+      env.ANTHROPIC_AUTH_TOKEN = "";
+      env.CLAUDE_CODE_OAUTH_TOKEN = "";
     }
   } else if (
     agentId === "cursor" &&
-    cfg.auth === "subscription" &&
-    trusted("providers.cursor.auth")
+    selection.auth === "subscription"
   ) {
     // An explicit subscription choice must not silently fall back to an
     // inherited API key after sign-out or expiry.
     env.CURSOR_API_KEY = credential?.apiKey ?? "";
+  } else if (keyVar && selection.native && selection.auth === "api-key") {
+    // A stale renderer or inherited shell key cannot replace the selected
+    // native key, including after its explicit removal.
+    env[keyVar] = credential?.apiKey ?? "";
+    if (agentId === "claude") {
+      env.ANTHROPIC_AUTH_TOKEN = "";
+      env.CLAUDE_CODE_OAUTH_TOKEN = "";
+    }
   } else if (keyVar && !env[keyVar] && credential)
     env[keyVar] = credential.apiKey;
 

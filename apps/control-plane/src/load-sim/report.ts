@@ -44,12 +44,12 @@ export function formatReport(report: LoadSimulationReport): string {
       return [row.operation, fixed(empty?.perCall.transactions), fixed(one?.perCall.transactions), fixed(row.perCall.transactions), fixed(row.perCall.statements)];
     })));
   sections.push("## Real-time scenarios\n\n" + table(
-    ["Scenario", "Active", "Seconds", "Tx/s", "Tx/s per active", "Statements/s", "Round trips/s", "Notify commits/s", "Client DB ms/s", "CP CPU ms/s", "Server tx/s", "Server exec ms/s", "Failures"],
+    ["Scenario", "Active", "Seconds", "Tx/s", "Tx/s per active", "Statements/s", "Round trips/s", "Notify commits/s", "Authority hints/s", "Client DB ms/s", "CP CPU ms/s", "Server tx/s", "Server exec ms/s", "Failures"],
     report.scenarios.map(row => {
       const quiet = report.scenarios.find(item => item.activeWorkspaces === 0 && item.background === row.background);
       const perActive = row.activeWorkspaces ? (row.transactionsPerSecond - (quiet?.transactionsPerSecond ?? 0)) / row.activeWorkspaces : null;
       return [row.name, String(row.activeWorkspaces), fixed(row.durationSeconds, 1), fixed(row.transactionsPerSecond), fixed(perActive),
-        fixed(row.statementsPerSecond), fixed(row.roundTripsPerSecond), fixed(row.notifyingCommitsPerSecond, 3), fixed(row.clientDbMsPerSecond), fixed(row.processCpuMsPerSecond),
+        fixed(row.statementsPerSecond), fixed(row.roundTripsPerSecond), fixed(row.notifyingCommitsPerSecond, 3), fixed(row.authorityCacheNotificationsPerSecond, 3), fixed(row.clientDbMsPerSecond), fixed(row.processCpuMsPerSecond),
         fixed(row.server?.transactionsPerSecond), fixed(row.server?.execMsPerSecond), String(Object.values(row.failures).reduce((a, b) => a + b, 0))];
     })));
   const largest = report.scenarios.at(-1);

@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 const fixture = vi.hoisted(() => ({ reads: 0 }));
-vi.mock("../secret-store", () => ({
-  getSecret: (key: string) => {
+vi.mock("../secret-store", () => {
+  const read = (key: string) => {
     if (key !== "provider-accounts-cursor") return null;
     fixture.reads++;
     const id =
@@ -21,12 +21,16 @@ vi.mock("../secret-store", () => ({
         },
       ],
     });
-  },
-  hasSecret: () => false,
-  setSecret: vi.fn(),
-  deleteSecret: vi.fn(),
-  secretsFilePath: () => "/private/fixture/secrets.json",
-}));
+  };
+  return {
+    getSecret: read,
+    readSecretValues: (keys: string[]) => Object.fromEntries(keys.map(key => [key, read(key)])),
+    hasSecret: () => false,
+    setSecret: vi.fn(),
+    deleteSecret: vi.fn(),
+    secretsFilePath: () => "/private/fixture/secrets.json",
+  };
+});
 import { readProviderCredentialsForEngine } from "../provider-credentials";
 
 it("projects a Cursor credential and account identity from the same native snapshot", () => {

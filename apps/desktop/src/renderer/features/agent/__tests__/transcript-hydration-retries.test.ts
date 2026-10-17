@@ -172,3 +172,13 @@ describe("transcript hydration after a workspace connection failure", () => {
     expect(retry.mock.calls[1][1]()).toBe(true);
   });
 });
+
+it("reports a parked Local read until it is deleted", () => {
+  const retries = new TranscriptHydrationRetries(async () => {});
+  expect(retries.has("chat-local")).toBe(false);
+  retries.add("chat-local");
+  expect(retries.has("chat-local")).toBe(true);
+  retries.delete("chat-local");
+  expect(retries.has("chat-local")).toBe(false);
+  retries.clear();
+});

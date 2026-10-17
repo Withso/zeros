@@ -35,10 +35,12 @@ export class NativeTranscriptSnapshots {
 }
 
 /** Display readiness is deliberately weaker than transcript authority. Only
- * the exact eligible cloud window can bypass a loading presentation. */
+ * an eligible cached window (cloud restore or Local) or a Local chat known to
+ * be empty can bypass a loading presentation. */
 export function hasTranscriptPresentation(slot: AgentSessionState | undefined): boolean {
   return !!slot && (slot.transcriptState === "resident" || slot.transcriptState === "loading" &&
-    !!slot.transcriptPresentation && slot.messages.some(message => message.kind !== "text" || !message.queued));
+    !!slot.transcriptPresentation && (slot.transcriptPresentation.empty === true && slot.messages.length === 0 ||
+      slot.messages.some(message => message.kind !== "text" || !message.queued)));
 }
 
 /** A turn can start and finish during one history read. Ready → ready does

@@ -61,16 +61,26 @@ export function readProviderCredentialsForEngine(): ProviderCredentials {
     codex: key("openai-api-key"),
     cursor: key("cursor-api-key"),
     cursorSubscription: readCursorSubscription(stores.cursor),
+    authMethods: Object.fromEntries(
+      (["claude", "codex", "cursor"] as const)
+        .filter((provider) => stores[provider].methodSelected)
+        .map((provider) => [provider, stores[provider].method]),
+    ) as ProviderCredentials["authMethods"],
     accountProfiles: Object.fromEntries(
       (["claude", "codex", "cursor"] as const).map((provider) => {
         const store = stores[provider];
         const account = store.accounts.find((a) => a.id === store.activeId);
-        if (store.method !== "account" || !store.initialized)
+        if (
+          store.method !== "account" ||
+          !store.initialized ||
+          (!store.methodSelected && !account)
+        )
           return [provider, null];
         return [
           provider,
           {
             id: account?.id ?? "00000000-0000-4000-8000-000000000000",
+            revision: account?.revision ?? 0,
             state: account?.state ?? "disconnected",
             ...(provider !== "cursor"
               ? {

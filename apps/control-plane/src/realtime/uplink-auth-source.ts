@@ -32,14 +32,40 @@ export interface EngineCapabilityIssuer {
 /** S1 keeps a revocation entry for max token lifetime + outage grace + skew. */
 export const UPLINK_AUTH_REVOCATION_RETENTION_MS = 36 * 60 * 1000;
 
+/** auth.sync travels in one S2 control frame, whose bound is 64 KiB
+ * (uplink-protocol). The guard stays below it so the frame envelope always
+ * fits; a snapshot that cannot fit is refused, never sent — an engine that
+ * had to reject an oversize frame would close 1009 and reconnect in a loop,
+ * while a refused snapshot parks it with `internal_error` until membership
+ * or the window changes. The real fix (omitting unchanged principals, or a
+ * chunked sync) is a contract minor. */
+export const UPLINK_AUTH_SYNC_MAX_BYTES = 60 * 1024;
+
+/** The encoded snapshot would exceed the control-frame bound. */
+export class UplinkSnapshotTooLargeError extends Error {
+  constructor(readonly bytes: number, readonly maxBytes: number) {
+    super(`auth.sync snapshot is ${bytes} bytes, over the ${maxBytes}-byte bound`);
+    this.name = "UplinkSnapshotTooLargeError";
+  }
+}
+
+/** Encoded-size guard shared by the database source and its tests. */
+export function assertUplinkSnapshotSize(snapshot: UplinkAuthSnapshot, maxBytes: number): void {
+  const bytes = Buffer.byteLength(JSON.stringify(snapshot), "utf8");
+  if (bytes > maxBytes) throw new UplinkSnapshotTooLargeError(bytes, maxBytes);
+}
+
 /** The snapshot scope of one workspace (S1 "Snapshot scope"): every principal
- * who currently has access, plus every principal of the same organization
- * whose membership epoch moved inside the revocation retention window (a
- * removed member's old token must meet a raised `me`). Devices, account
- * epochs and revocations are listed for those principals only. Every snapshot
- * is complete: the epoch counters have no per-field timestamps, so a delta
- * cannot be derived honestly; the verifier's maximum merge makes a full
- * snapshot cheap and safe. */
+ * who currently has access, plus every principal who lost access to this
+ * workspace inside the revocation retention window (a removed member's old
+ * token must meet a raised `me`). A bumped principal who still has access is
+ * already in the current set; a bumped principal who never had access is
+ * another workspace's member and is never sent to this VM.
+ * `cloud_capability_access_losses` records the loss in the committing
+ * transaction (0153). Devices, account epochs and revocations are listed for
+ * those principals only. Every snapshot is complete: the epoch counters have
+ * no per-field timestamps, so a delta cannot be derived honestly; the
+ * verifier's maximum merge makes a full snapshot cheap and safe. */
 const SNAPSHOT_SQL = `
 WITH workspace_row AS (
   SELECT authority_epoch, access_revision FROM cloud_workspaces
@@ -56,8 +82,8 @@ WITH workspace_row AS (
   JOIN cloud_workspaces workspace ON workspace.id=$1 AND workspace.sharing_mode='organization'
   WHERE member.org_id=$2
   UNION
-  SELECT epoch_row.user_id FROM cloud_capability_member_epochs epoch_row
-  WHERE epoch_row.org_id=$2 AND epoch_row.updated_at>clock_timestamp()-make_interval(secs=>$3::double precision/1000)
+  SELECT loss.user_id FROM cloud_capability_access_losses loss
+  WHERE loss.workspace_id=$1 AND loss.lost_at>clock_timestamp()-make_interval(secs=>$3::double precision/1000)
 ), member_epochs AS (
   SELECT epoch_row.user_id, epoch_row.epoch FROM cloud_capability_member_epochs epoch_row
   WHERE epoch_row.org_id=$2 AND epoch_row.user_id IN (SELECT user_id FROM principals)
@@ -87,11 +113,19 @@ SELECT
  * capability tables. Every read re-checks the `capabilities` flag so a
  * flag-off organization stays inert even on a mounted server. */
 export class DatabaseUplinkAuthSource implements UplinkAuthSource {
+  /** Oversize refusals since start; an operator alert threshold, not a log. */
+  readonly counters = { oversizeSnapshots: 0 };
+  private readonly maxSnapshotBytes: number;
+
   constructor(private readonly options: {
     pool: pg.Pool;
     keyStore: CapabilitySigningKeyStore;
     flags: RolloutFlagSnapshot;
-  }) {}
+    /** Test seam for the frame bound; production uses UPLINK_AUTH_SYNC_MAX_BYTES. */
+    maxSnapshotBytes?: number;
+  }) {
+    this.maxSnapshotBytes = options.maxSnapshotBytes ?? UPLINK_AUTH_SYNC_MAX_BYTES;
+  }
 
   keys(): Promise<readonly UplinkJwk[]> {
     return Promise.resolve(this.options.keyStore.publicKeySet());
@@ -109,7 +143,7 @@ export class DatabaseUplinkAuthSource implements UplinkAuthSource {
     if (!row?.workspace) throw new Error("workspace not found");
     const numbers = (entries: Record<string, string>) => Object.fromEntries(
       Object.entries(entries).map(([key, value]) => [key, Number(value)]));
-    return {
+    const snapshot: UplinkAuthSnapshot = {
       epochs: {
         wa: Number(row.workspace.authority_epoch), wr: Number(row.workspace.access_revision),
         members: numbers(row.members), accounts: numbers(row.accounts), devices: numbers(row.devices),
@@ -118,6 +152,13 @@ export class DatabaseUplinkAuthSource implements UplinkAuthSource {
       authCursor: `t${Date.now()}`,
       complete: true,
     };
+    try {
+      assertUplinkSnapshotSize(snapshot, this.maxSnapshotBytes);
+    } catch (error) {
+      if (error instanceof UplinkSnapshotTooLargeError) this.counters.oversizeSnapshots += 1;
+      throw error;
+    }
+    return snapshot;
   }
 }
 

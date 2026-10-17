@@ -174,6 +174,9 @@ import {
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import { persistWorkspaceChatCache } from "./state/cloud-chat-cache";
+import { localTranscriptCache } from "./state/local-transcript-cache";
+import { retainTranscriptSummaries } from "./features/agent/use-chat-transcript-summaries";
+import { retainKnownEmptyLocalChats } from "./features/agent/fresh-local-chats";
 /** Engine-session prewarm claim.
  *
  *  This lives in agent-prewarm-singleflight's renderer-global state—not merely
@@ -587,6 +590,15 @@ function ChatsPersistence() {
         // still present and keep theirs). Guarded inside pruneScrollPositions
         // against an empty list so a transient hiccup can't wipe the doc.
         pruneScrollPositions(new Set(reconciled.chats.map((chat) => chat.id)));
+        // The Local transcript cache follows the same authoritative list once
+        // Local has confirmed it: deleted chats (here or on another device)
+        // and removed repositories leave no cached transcript behind.
+        if (snapshot.confirmedLocalChats !== false) {
+          const known = new Set(reconciled.chats.map((chat) => chat.id));
+          localTranscriptCache.retain((chatId) => known.has(chatId));
+          retainTranscriptSummaries((chatId) => known.has(chatId));
+          retainKnownEmptyLocalChats((chatId) => known.has(chatId));
+        }
       },
     });
   }, [bridge, dispatch, pushRowsToEngine]);
