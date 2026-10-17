@@ -779,6 +779,41 @@ describe("WorkspaceService", () => {
     expect(fs.existsSync(missingFolder)).toBe(false);
   });
 
+  it("reports an over-budget turn's opening prompt on Local tail windows only", async () => {
+    const { upsertChatMessagesBulk } = await import("../../db/messages");
+    const chatId = "long-turn";
+    const row = (id: string, kind: string, extra: Record<string, unknown>) => ({
+      msgId: id,
+      kind,
+      payload: JSON.stringify({ id, kind, createdAt: 1, ...extra }),
+      createdAt: 1,
+    });
+    upsertChatMessagesBulk(chatId, [
+      row("u1", "text", { role: "user", text: "ship it" }),
+      ...Array.from({ length: 1_200 }, (_, i) =>
+        row(`t${i}`, "tool", { toolCallId: `t${i}`, title: "Read" }),
+      ),
+    ]);
+
+    const local = (await svc.handle("messages.window", {
+      chatId,
+      limit: 200,
+    })) as { messages: Array<{ msgId: string }>; turnOpening?: { msgId: string } };
+    expect(local.messages).toHaveLength(200);
+    expect(local.messages[0].msgId).toBe("t1000");
+    expect(local.turnOpening?.msgId).toBe("u1");
+
+    // Cloud workers keep their existing wire shape; their history has its own
+    // projection/restore contract.
+    const cloud = (await svc.handle(
+      "messages.window",
+      { chatId, limit: 200 },
+      { cloudWorker: true },
+    )) as Record<string, unknown>;
+    expect(cloud.turnOpening).toBeUndefined();
+    expect((cloud.messages as unknown[]).length).toBe(200);
+  });
+
   it("registers transcript-window migrations with the owning workspace barrier", async () => {
     const { upsertChat } = await import("../../db/chats");
     upsertChat({

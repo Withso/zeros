@@ -5,9 +5,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cloudScopedId, parseCloudScopedId, isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { BLANK, mergeWindowedTail, useSessionsStore } from "../sessions-store";
 import { reconcileHistoryMessages } from "../history-message-identity";
-import { messageSnapshotsEqual, seedPersistedMessageRefs } from "../message-persistence-tracker";
+import { messageSnapshotsEqual, retainMessageReferences } from "../message-persistence-tracker";
 import { canApplyTranscriptRead, isCurrentTranscriptRequest, releaseTranscriptRequest, NativeTranscriptSnapshots } from "../transcript-retention";
 import type { AgentMessage } from "../use-agent-session";
+import { localTranscriptCache } from "../../../state/local-transcript-cache";
+import { presentCachedLocalTranscript, presentKnownEmptyLocalTranscript, takeFreshLocalChat } from "../local-transcript-presentation";
 import { cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, type CloudHistoryRestoreFence } from "../../../platform/cloud-transcript-cache-contract";
 const ast = ts.createSourceFile("sessions-provider.tsx", readFileSync(new URL("../sessions-provider.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let callback = "", reconcileCallback = "";
@@ -43,13 +45,14 @@ function harness(chatId = cloudId, native = false, source = native ? "native" : 
   const repair = vi.fn(async () => {});
   const retry = vi.fn(async () => {});
   const context: Record<string, unknown> = { console: { warn: vi.fn() }, BLANK, parseCloudScopedId, isCloudWorkspace, cloudComputerV2: true,
-    HYDRATE_WINDOW: 200, reconcileHistoryMessages, messageSnapshotsEqual, seedPersistedMessageRefs, isCurrentTranscriptRequest, releaseTranscriptRequest,
+    HYDRATE_WINDOW: 200, reconcileHistoryMessages, messageSnapshotsEqual, retainMessageReferences, isCurrentTranscriptRequest, releaseTranscriptRequest,
     canApplyTranscriptRead, mergeWindowedTail, canBackgroundSyncCloudWorkspace: () => true, reconcileInFlightRef: { current: new Map() },
     getStore: useSessionsStore.getState, bridge: { status: "connected" }, reconcileChatMessages: vi.fn(), persistWindowMessages: history,
     persistMessageWindow: snapshotHistory,
     cloudHistoryRestoreHead: () => restoreHead, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, cloudHasNativeTranscript: () => native,
     hydrateCloudSendRef: { current: repair }, reconcileChatMessagesRef: { current: retry }, nativeTranscriptSnapshotsRef,
-    hydrateInFlightRef: { current: requests }, pendingHydratesRef: { current: new Set() }, persistedMessageRefsRef: { current: new Map() } };
+    hydrateInFlightRef: { current: requests }, pendingHydratesRef: { current: new Set() },
+    localTranscriptCache, presentCachedLocalTranscript, presentKnownEmptyLocalTranscript, takeFreshLocalChat };
   vm.runInNewContext(code, context);
   return { resolve: (rows: AgentMessage[], head?: CloudHistoryRestoreFence) => { responseHead = head; resolve(rows); },
     requests, history, repair, retry, hydrate: context.hydrate as (id: string) => Promise<void>, reconcile: context.reconcile as (id: string) => Promise<void>, chatId,

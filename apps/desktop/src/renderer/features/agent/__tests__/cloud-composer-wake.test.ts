@@ -98,10 +98,12 @@ function harness(cloud = true, status = "stopped", resident = true) {
     redactLogSecrets: (s: string) => s, crypto: { randomUUID: () => `message-${++sequence}` },
     capUserAppend: (messages: unknown[], message: unknown) => [...messages, message], evictUnretainedTranscripts: vi.fn(),
     hasPromptAttachmentReferences: () => false, refreshPromptAttachments: vi.fn(), toast: toasts, drainOrDropQueue: vi.fn(), persistAuthPrompt: vi.fn(),
-    HYDRATE_WINDOW: 100, hydrateInFlightRef: { current: new Map() }, pendingHydratesRef: { current: new Set() }, persistedMessageRefsRef: { current: new Map() },
+    HYDRATE_WINDOW: 100, hydrateInFlightRef: { current: new Map() }, pendingHydratesRef: { current: new Set() },
+    takeFreshLocalChat: () => false, localTranscriptCache: { peek: () => null, read: async () => null },
+    presentCachedLocalTranscript: vi.fn(), presentKnownEmptyLocalTranscript: () => false, retainMessageReferences: (_current: unknown[], next: unknown[]) => next,
     persistMessageWindow: vi.fn(async () => ({ source: "control-plane", messages: [{ id: "past", kind: "text", role: "user", text: "History" }] })),
     reconcileHistoryMessages: (messages: unknown[]) => messages, messageSnapshotsEqual: (a: unknown[], b: unknown[]) => JSON.stringify(a) === JSON.stringify(b),
-    seedPersistedMessageRefs: vi.fn(), reconcileChatMessages: vi.fn(),
+    reconcileChatMessages: vi.fn(),
   };
   vm.runInNewContext(providerCode, provider);
   provider.beginCloudSendWaitRef.current = provider.actions.beginCloudSendWait;
