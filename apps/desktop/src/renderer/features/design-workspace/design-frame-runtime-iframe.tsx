@@ -34,6 +34,10 @@ import {
   reconcileDesignWorkspaceRuntimeAudit,
   refreshDesignWorkspaceSnapshot,
 } from "./state/design-workspace-cache";
+import {
+  useDesignAgentStylesheetPreviews,
+  type DesignAgentStylesheetPreview,
+} from "./state/design-agent-drafts";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 // --- TYPES ---
@@ -59,6 +63,9 @@ interface DesignFrameRuntimeIframeProps {
   theme: string | null;
   /** Last confirmed pixels cover unavoidable structural document navigation. */
   transitionCover: { sourceVersion: string; dataUrl: string } | null;
+  /** The Design directory the canvas shows; an agent's in-flight edits of
+   * its linked stylesheets apply to this frame live. */
+  designDirectory?: string;
 }
 
 // --- WORKFLOWS ---
@@ -97,6 +104,8 @@ interface DesignFrameDocumentBufferProps {
   selectedNodeIds: readonly string[];
   autoCapture: boolean;
   theme: string | null;
+  /** An agent's in-flight text per linked stylesheet of this directory. */
+  stylesheetPreviews: ReadonlyMap<string, DesignAgentStylesheetPreview>;
   onSnapshot: (snapshot: DesignRuntimeSnapshot) => void;
   onConnection: (
     documentSourceVersion: string,
@@ -127,6 +136,7 @@ function DesignFrameDocumentBuffer({
   selectedNodeIds,
   autoCapture,
   theme,
+  stylesheetPreviews,
   onSnapshot,
   onConnection,
   onReady,
@@ -148,6 +158,7 @@ function DesignFrameDocumentBuffer({
     selectedNodeIds,
     autoCapture,
     theme,
+    stylesheetPreviews,
   });
   latestRef.current = {
     folder,
@@ -157,7 +168,68 @@ function DesignFrameDocumentBuffer({
     selectedNodeIds,
     autoCapture,
     theme,
+    stylesheetPreviews,
   };
+  // Stylesheet previews this document shows, per connection: a new document
+  // generation starts from its own saved text.
+  const appliedSheetsRef = useRef<{
+    connection: DesignFrameRuntimeConnection | null;
+    sheets: Map<string, DesignAgentStylesheetPreview>;
+  }>({ connection: null, sheets: new Map() });
+  const sheetSyncRef = useRef<Promise<void> | null>(null);
+  const sheetSyncAgainRef = useRef(false);
+  /** The document the next sync serves: a reload mid-sync is served next. */
+  const sheetSyncTargetRef = useRef<DesignFrameRuntimeConnection | null>(null);
+
+  /** Bring the document's linked stylesheets in line with the agent's latest
+   * drafts. A saved stylesheet's text is the saved text, so it stays until
+   * the saved generation replaces this document; a discarded one restores the
+   * document's own text. Serialized: the latest drafts and the newest
+   * document always win, and a caller's promise settles after both. */
+  const syncStylesheetPreviews = useCallback(
+    (connection: DesignFrameRuntimeConnection): Promise<void> => {
+      sheetSyncTargetRef.current = connection;
+      if (sheetSyncRef.current) {
+        sheetSyncAgainRef.current = true;
+        return sheetSyncRef.current;
+      }
+      const run = (async () => {
+        do {
+          sheetSyncAgainRef.current = false;
+          const target = sheetSyncTargetRef.current;
+          if (!target || !target.supports("previewStylesheet")) continue;
+          if (appliedSheetsRef.current.connection !== target)
+            appliedSheetsRef.current = { connection: target, sheets: new Map() };
+          const applied = appliedSheetsRef.current.sheets;
+          const previews = latestRef.current.stylesheetPreviews;
+          try {
+            for (const [file, preview] of previews) {
+              if (applied.get(file)?.css !== preview.css) {
+                const result = await target.previewStylesheet(file, preview.css);
+                onSnapshot(result.snapshot);
+              }
+              applied.set(file, preview);
+            }
+            for (const [file, preview] of [...applied]) {
+              if (previews.has(file)) continue;
+              applied.delete(file);
+              if (preview.saved) continue;
+              const result = await target.previewStylesheet(file, null);
+              onSnapshot(result.snapshot);
+            }
+          } catch {
+            // A preview is advisory and a replaced document rejects it; the
+            // saved generation is authoritative. The next document still syncs.
+          }
+        } while (sheetSyncAgainRef.current);
+      })().finally(() => {
+        sheetSyncRef.current = null;
+      });
+      sheetSyncRef.current = run;
+      return run;
+    },
+    [onSnapshot],
+  );
   const protocolSource = nativeRuntime.ready
     ? designProtocolFrameUrl({
         workspaceId,
@@ -270,6 +342,9 @@ function DesignFrameDocumentBuffer({
             .setTheme(latestRef.current.theme)
             .then(async (themedSnapshot) => {
               onSnapshot(themedSnapshot);
+              // An agent's in-flight stylesheet shows before this generation
+              // is revealed, so a reload never flashes the saved styles.
+              await syncStylesheetPreviews(connection);
               await settleDesignSelectionDetails(
                 workspaceId,
                 frame.file,
@@ -294,6 +369,7 @@ function DesignFrameDocumentBuffer({
     onConnection,
     onReady,
     onSnapshot,
+    syncStylesheetPreviews,
     workspaceId,
     watchHandshake,
   ]);
@@ -347,6 +423,13 @@ function DesignFrameDocumentBuffer({
         // A replacement buffer applies the latest theme before it is revealed.
       });
   }, [onSnapshot, runtimeActive, theme]);
+
+  useEffect(() => {
+    if (!runtimeActive) return;
+    const connection = connectionRef.current;
+    // Before its handshake a connection supports nothing; readiness syncs.
+    if (connection) void syncStylesheetPreviews(connection);
+  }, [runtimeActive, stylesheetPreviews, syncStylesheetPreviews]);
 
   const fallback = useDesignFrameDocument(
     workspaceId,
@@ -419,7 +502,12 @@ function DesignFrameRuntimeSession({
   autoCapture,
   theme,
   transitionCover,
+  designDirectory,
 }: DesignFrameRuntimeIframeProps) {
+  const stylesheetPreviews = useDesignAgentStylesheetPreviews(
+    workspaceId,
+    designDirectory,
+  );
   // A style-only generation advances the displayed connection in place. A
   // structural generation instead preloads an immutable incoming iframe while
   // the outgoing iframe continues to supply exact live text pixels.
@@ -669,6 +757,7 @@ function DesignFrameRuntimeSession({
           selectedNodeIds={selectedNodeIds}
           autoCapture={autoCapture}
           theme={theme}
+          stylesheetPreviews={stylesheetPreviews}
           onSnapshot={handleSnapshot}
           onConnection={handleConnection}
           onReady={handleDocumentReady}

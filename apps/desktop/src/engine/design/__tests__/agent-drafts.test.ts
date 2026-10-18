@@ -158,6 +158,65 @@ describe("Design agent activity", () => {
     ]);
   });
 
+  it("sends the frames an in-flight canvas Write registers as they fully arrive", async () => {
+    const { activity, published, compose } = harness();
+    const canvasPath = "/work/app/App - Design/meta/canvas.json";
+    const canvas = JSON.stringify({
+      version: 2,
+      pages: [{ id: "page_1", title: "Page 1", folder: "page-1", frames: ["card"] }],
+      frames: { card: { kind: "html", source: "page-1/card.html", title: "Card", x: 1600, y: 40, width: 390, height: 844 } },
+    });
+    const input = JSON.stringify({ file_path: canvasPath, content: canvas });
+    activity.observeToolInput("exec", { nativeToolId: "toolu_c", toolCallId: "tc", name: "Write", phase: "start" });
+    // Up to the card's width: its geometry is not complete yet.
+    const cut = input.indexOf('\\"width\\"');
+    activity.observeToolInput("exec", { nativeToolId: "toolu_c", name: "Write", phase: "delta", chunk: input.slice(0, cut) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(published.at(-1)).toMatchObject({ file: "meta/canvas.json", phase: "writing" });
+    expect(published.at(-1)!.registrations).toEqual([]);
+    activity.observeToolInput("exec", { nativeToolId: "toolu_c", name: "Write", phase: "delta", chunk: input.slice(cut) });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(published.at(-1)!.registrations).toEqual([
+      { file: "page-1/card.html", x: 1600, y: 40, width: 390, height: 844, title: "Card" },
+    ]);
+    const sent = published.length;
+    // Unchanged placements are not resent; the phase still advances.
+    activity.observeToolInput("exec", { nativeToolId: "toolu_c", name: "Write", phase: "stop" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(published.slice(sent).map((draft) => [draft.phase, draft.registrations])).toEqual([
+      ["saving", undefined],
+    ]);
+    expect(compose).not.toHaveBeenCalled();
+  });
+
+  it("reads a canvas Edit only once its replacement is whole", async () => {
+    const saved = JSON.stringify({
+      version: 2,
+      pages: [{ id: "page_1", title: "Page 1", folder: "page-1", frames: ["home"] }],
+      frames: { home: { kind: "html", source: "page-1/home.html", title: "Home", x: 0, y: 0, width: 1440, height: 900 } },
+    });
+    const { activity, published } = harness({ readSource: async () => saved });
+    const anchor = '"frames":{';
+    const added = '"card":{"kind":"html","source":"page-1/card.html","title":"Card","x":2000,"y":0,"width":390,"height":844},';
+    const input = JSON.stringify({
+      file_path: "/work/app/App - Design/meta/canvas.json",
+      old_string: anchor,
+      new_string: `${anchor}${added}`,
+    });
+    activity.observeToolInput("exec", { nativeToolId: "toolu_e", toolCallId: "te", name: "Edit", phase: "start" });
+    // Mid-replacement, "x":20 of 2000 would splice into the saved tail.
+    const cut = input.indexOf("2000") + 2;
+    activity.observeToolInput("exec", { nativeToolId: "toolu_e", name: "Edit", phase: "delta", chunk: input.slice(0, cut) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(published.every((draft) => draft.registrations === undefined)).toBe(true);
+    activity.observeToolInput("exec", { nativeToolId: "toolu_e", name: "Edit", phase: "delta", chunk: input.slice(cut) });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(published.at(-1)!.registrations).toEqual([
+      { file: "page-1/card.html", x: 2000, y: 0, width: 390, height: 844, title: "Card" },
+      { file: "page-1/home.html", x: 0, y: 0, width: 1440, height: 900, title: "Home" },
+    ]);
+  });
+
   it("previews streamed Edit replacements against the saved source", async () => {
     const { activity, published } = harness();
     activity.observeToolInput("exec", { nativeToolId: "toolu_7", toolCallId: "t7", name: "Edit", phase: "start" });
@@ -183,6 +242,109 @@ describe("Design agent activity", () => {
     expect(published.filter((draft) => draft.phase === "discarded")).toHaveLength(2);
     activity.endExecution("exec");
     expect(published.filter((draft) => draft.phase === "discarded")).toHaveLength(2);
+  });
+
+  it("previews a Codex patch from the session stream before it is applied", async () => {
+    const { activity, published, compose } = harness();
+    const listPath = "/work/app/App - Design/page-1/list.html";
+    // item/started: an added frame, an updated frame, a deletion and a Code file.
+    activity.observeSessionUpdate("exec", {
+      sessionUpdate: "tool_call",
+      toolCallId: "cx1",
+      kind: "edit",
+      status: "in_progress",
+      rawInput: {
+        changes: [
+          { path: listPath, kind: { type: "add" }, diff: "<main><h1>List</h1></main>" },
+          { path: framePath, kind: { type: "update", move_path: null }, diff: "@@ -1 +1 @@\n-<main><h1>Old title</h1><p>Body</p></main>\n+<main><h1>New title</h1><p>Body</p></main>\n" },
+          { path: "/work/app/App - Design/page-1/gone.html", kind: { type: "delete" }, diff: "<main/>" },
+          { path: "/work/app/src/app.ts", kind: { type: "add" }, diff: "export {};" },
+        ],
+      },
+    } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(compose).toHaveBeenCalledTimes(2);
+    const byFile = new Map(published.map((draft) => [draft.file, draft]));
+    expect([...byFile.keys()].sort()).toEqual(["page-1/card.html", "page-1/list.html"]);
+    expect(byFile.get("page-1/list.html")).toMatchObject({ operation: "write", phase: "saving" });
+    expect(byFile.get("page-1/list.html")!.preview!.srcDoc).toContain("<h1>List</h1>");
+    expect(byFile.get("page-1/card.html")).toMatchObject({ operation: "edit", phase: "saving" });
+    expect(byFile.get("page-1/card.html")!.preview!.srcDoc).toContain("<h1>New title</h1>");
+    // An unchanged snapshot (patchUpdated) renders nothing new.
+    const sent = published.length;
+    activity.observeSessionUpdate("exec", { sessionUpdate: "tool_call_update", toolCallId: "cx1", status: "in_progress", rawInput: { changes: [{ path: listPath, kind: { type: "add" }, diff: "<main><h1>List</h1></main>" }] } } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(published).toHaveLength(sent);
+    activity.observeSessionUpdate("exec", { sessionUpdate: "tool_call_update", toolCallId: "cx1", status: "completed" } as never);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(published.slice(sent).map((draft) => [draft.file, draft.phase]).sort()).toEqual([
+      ["page-1/card.html", "saved"],
+      ["page-1/list.html", "saved"],
+    ]);
+  });
+
+  it("shows only the status of a file a provider names without its content", async () => {
+    const { activity, published, compose, saved } = harness();
+    // Cursor reports `{ path }` while editing and the diff only after writing.
+    activity.observeSessionUpdate("exec", { sessionUpdate: "tool_call", toolCallId: "cu1", kind: "edit", status: "in_progress", rawInput: { path: framePath } } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(compose).not.toHaveBeenCalled();
+    expect(published.map((draft) => [draft.file, draft.phase, draft.preview])).toEqual([
+      ["page-1/card.html", "writing", undefined],
+    ]);
+    activity.observeSessionUpdate("exec", { sessionUpdate: "tool_call_update", toolCallId: "cu1", status: "completed", rawOutput: {} } as never);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(published.at(-1)).toMatchObject({ phase: "saved" });
+    expect(saved).toEqual(["ws_local"]);
+  });
+
+  it("previews a Claude call from its stream only, never again from its session updates", async () => {
+    const { activity, published } = harness();
+    activity.observeToolInput("exec", { nativeToolId: "toolu_s", toolCallId: "ts", name: "Write", phase: "start" });
+    activity.observeToolInput("exec", { nativeToolId: "toolu_s", name: "Write", phase: "delta", chunk: JSON.stringify({ file_path: framePath, content: "<main>streamed</main>" }) });
+    await vi.advanceTimersByTimeAsync(0);
+    activity.observeSessionUpdate("exec", { sessionUpdate: "tool_call_update", toolCallId: "ts", kind: "edit", status: "in_progress", rawInput: { file_path: framePath, content: "<main>streamed</main>" } } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(new Set(published.map((draft) => draft.id)).size).toBe(1);
+  });
+
+  it("streams a stylesheet rewrite over its saved rules, then the finished file alone", async () => {
+    const savedCss = ":root { --accent: red; }\n.card { padding: 4px; }";
+    const composeStylesheet = vi.fn(async (_target: DesignAgentTarget, _file: string, css: string) => `/*processed*/${css}`);
+    const { activity, published } = harness({ readSource: async () => savedCss, composeStylesheet });
+    const css = ":root { --accent: blue; }\n.card { padding: 8px; }";
+    const input = JSON.stringify({ file_path: "/work/app/App - Design/tokens.css", content: css });
+    activity.observeToolInput("exec", { nativeToolId: "toolu_css", toolCallId: "tcss", name: "Write", phase: "start" });
+    // Up to the middle of the second rule.
+    const cut = input.indexOf("8px");
+    activity.observeToolInput("exec", { nativeToolId: "toolu_css", name: "Write", phase: "delta", chunk: input.slice(0, cut) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(composeStylesheet).toHaveBeenLastCalledWith(target, "tokens.css", `${savedCss}\n:root { --accent: blue; }`);
+    expect(published.at(-1)).toMatchObject({ file: "tokens.css", phase: "writing", stylesheet: { css: `/*processed*/${savedCss}\n:root { --accent: blue; }` } });
+    activity.observeToolInput("exec", { nativeToolId: "toolu_css", name: "Write", phase: "delta", chunk: input.slice(cut) });
+    activity.observeToolInput("exec", { nativeToolId: "toolu_css", name: "Write", phase: "stop" });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(published.at(-1)).toMatchObject({ phase: "saving", stylesheet: { css: `/*processed*/${css}` } });
+  });
+
+  it("asks the host to check the directory after other tools that may write files", async () => {
+    const toolSettled = vi.fn();
+    const { activity, saved } = harness({ toolSettled });
+    const complete = (toolCallId: string, kind: string | undefined, rawInput: unknown = {}) => {
+      activity.observeSessionUpdate("exec", { sessionUpdate: "tool_call", toolCallId, ...(kind ? { kind } : {}), status: "in_progress", rawInput } as never);
+      activity.observeSessionUpdate("exec", { sessionUpdate: "tool_call_update", toolCallId, status: "completed" } as never);
+    };
+    complete("sh", "execute", { command: "python3 build_frames.py" });
+    complete("other", "other");
+    complete("unknown", undefined);
+    // Reads cannot write, and edits outside the Design directory are not Design.
+    complete("read", "read", { file_path: framePath });
+    complete("search", "search");
+    complete("code", "edit", { file_path: "/work/app/src/app.ts" });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(toolSettled).toHaveBeenCalledTimes(3);
+    expect(toolSettled).toHaveBeenCalledWith(target);
+    expect(saved).toEqual([]);
   });
 });
 

@@ -452,7 +452,25 @@ export type DesignRuntimeMethod =
   | "clearPreviewText"
   | "previewMotion"
   | "clearPreviewStyles"
-  | "captureScreenshot";
+  | "captureScreenshot"
+  /** Opt-in: advertised only to a host whose handshake requests it. */
+  | "previewStylesheet";
+
+/** Methods a runtime advertises only when the host's handshake lists them
+ * in `features`, so a host that predates them still accepts the runtime's
+ * capabilities. */
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet"] as const;
+
+/** Largest in-flight stylesheet text `previewStylesheet` applies. */
+export const MAX_DESIGN_RUNTIME_PREVIEW_STYLESHEET_CHARS = 4 * 1024 * 1024;
+
+/** A linked Design stylesheet's in-flight text, applied in place of its
+ * inlined copy in this document generation. */
+export interface DesignRuntimeStylesheetPreviewResult {
+  /** Inlined copies of the stylesheet this document links (0 when none). */
+  applied: number;
+  snapshot: DesignRuntimeSnapshot;
+}
 
 export interface DesignRuntimeCapabilities {
   methods: DesignRuntimeMethod[];
@@ -498,6 +516,7 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "previewMotion",
   "clearPreviewStyles",
   "captureScreenshot",
+  "previewStylesheet",
 ]);
 
 export interface DesignRuntimeHostRequest {
@@ -515,6 +534,8 @@ export interface DesignRuntimeHostHandshake {
   version: typeof DESIGN_RUNTIME_VERSION;
   type: "handshake";
   sourceVersion: string;
+  /** Opt-in methods this host understands; older runtimes ignore it. */
+  features?: Array<(typeof DESIGN_RUNTIME_OPT_IN_METHODS)[number]>;
 }
 
 export interface DesignRuntimeHostCancel {
@@ -934,6 +955,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     "setNodeVisibility", "setTheme", "previewStyles", "previewGeometry", "getLayoutTargets", "previewLayout", "restoreGeneration", "commitStyles", "previewText", "clearPreviewText", "previewMotion", "clearPreviewStyles",
     "captureScreenshot"
   ];
+  // Advertised only to a host whose handshake asks for them, so a host that
+  // predates a method still accepts these capabilities.
+  var OPT_IN_METHODS = ["previewStylesheet"];
+  var enabledOptInMethods = [];
+  var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
   // the full STYLE_PROPERTIES catalog belongs to the inspector, not the pointer.
   var GEOMETRY_STYLE_PROPERTIES = [
@@ -964,6 +990,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var committedKeyframeRulesByName = new Map();
   var committedTokenRulesByKey = new Map();
   var lastSnapshot = null;
+  // Inlined linked stylesheets showing an agent's in-flight text, with the
+  // generation's own text to restore.
+  var previewStylesheetTexts = new Map();
   var authoredStylePropertiesCache = new WeakMap();
   var authoredStylesCache = new WeakMap();
   var authoredStyleRuleMetadata = null;
@@ -1075,7 +1104,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function capabilities() {
     return {
-      methods: METHODS.slice(),
+      methods: METHODS.concat(enabledOptInMethods),
       cancellation: true,
       typedErrors: true,
       sourcePinned: true,
@@ -2599,6 +2628,44 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return snapshot();
   }
 
+  /** Show a linked Design stylesheet's in-flight text in place of its inlined
+   * copy (data-zeros-source), or restore the generation's text with null.
+   * Only this document changes; the saved generation replaces it. */
+  function previewStylesheet(file, css) {
+    if (typeof file !== "string" || !file || file.length > 1024) {
+      throw new Error("file must be a Design stylesheet path.");
+    }
+    if (css !== null && (typeof css !== "string" || css.length > MAX_PREVIEW_STYLESHEET_CHARS)) {
+      throw new Error("css must be null or bounded stylesheet text.");
+    }
+    var sheets = Array.prototype.filter.call(
+      document.querySelectorAll("style[data-zeros-source]"),
+      function (element) { return element.getAttribute("data-zeros-source") === file; }
+    );
+    var applied = 0;
+    var changed = false;
+    withoutObservedMutations(function () {
+      sheets.forEach(function (element) {
+        applied += 1;
+        if (css === null) {
+          if (!previewStylesheetTexts.has(element)) return;
+          element.textContent = previewStylesheetTexts.get(element);
+          previewStylesheetTexts.delete(element);
+          changed = true;
+          return;
+        }
+        if (!previewStylesheetTexts.has(element)) previewStylesheetTexts.set(element, element.textContent);
+        if (element.textContent === css) return;
+        element.textContent = css;
+        changed = true;
+      });
+    });
+    if (!changed) return { applied: applied, snapshot: lastSnapshot || snapshot() };
+    suspendAuthoredMotion();
+    revision += 1;
+    return { applied: applied, snapshot: styleOnlySnapshot() };
+  }
+
   function applyPreviewStyles(element, oid, styles) {
     if (!styles || typeof styles !== "object" || Array.isArray(styles)) {
       throw new Error("styles must be an object.");
@@ -3948,6 +4015,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         return clearPreviewStyles(args.nodeId);
       case "captureScreenshot":
         return captureScreenshot(args);
+      case "previewStylesheet":
+        if (enabledOptInMethods.indexOf("previewStylesheet") < 0) {
+          throw new Error("Unknown design runtime method: previewStylesheet");
+        }
+        return previewStylesheet(args.file, args.css === null ? null : args.css);
       default:
         throw new Error("Unknown design runtime method: " + method);
     }
@@ -4099,6 +4171,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     // handshake first, then pin its exact parent origin for this document.
     if (trustedParentOrigin === null) trustedParentOrigin = messageEvent.origin;
     if (messageEvent.origin !== trustedParentOrigin) return;
+    enabledOptInMethods = Array.isArray(message.features)
+      ? OPT_IN_METHODS.filter(function (method) { return message.features.indexOf(method) >= 0; })
+      : [];
     parentPort = messageEvent.ports[0];
     parentPort.onmessage = receivePortMessage;
     parentPort.start();

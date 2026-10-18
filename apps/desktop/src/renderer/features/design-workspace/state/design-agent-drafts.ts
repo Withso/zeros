@@ -9,6 +9,7 @@
 // transient: nothing is persisted, and the saved file stays authoritative.
 // Cloud workspaces never receive drafts; their keys are ignored here.
 
+import { useMemo } from "react";
 import { create } from "zustand";
 import {
   designAgentDraftSchema,
@@ -25,6 +26,10 @@ export interface DesignAgentDraftEntry {
   draft: DesignAgentDraft;
   /** The newest preview, retained across later preview-less phase updates. */
   preview: DesignAgentDraft["preview"] | null;
+  /** A canvas document's newest frame placements, retained the same way. */
+  registrations: NonNullable<DesignAgentDraft["registrations"]> | null;
+  /** A stylesheet's newest processed text, retained the same way. */
+  stylesheet: NonNullable<DesignAgentDraft["stylesheet"]> | null;
   updatedAt: number;
   /** When the tool reported success; the canvas then hands the draft off. */
   savedAt: number | null;
@@ -51,7 +56,7 @@ export const useDesignAgentDraftStore = create<DesignAgentDraftState>(() => ({
 let sweepTimer: ReturnType<typeof setTimeout> | null = null;
 
 function previewChars(entry: DesignAgentDraftEntry): number {
-  return entry.preview?.srcDoc.length ?? 0;
+  return (entry.preview?.srcDoc.length ?? 0) + (entry.stylesheet?.css.length ?? 0);
 }
 
 /** Bound workspaces (least recently updated first), drafts per workspace and
@@ -87,7 +92,7 @@ function bound(
       budget -= size;
       continue;
     }
-    next[workspaceId]![id] = { ...entry, preview: null };
+    next[workspaceId]![id] = { ...entry, preview: null, stylesheet: null };
   }
   return next;
 }
@@ -152,6 +157,8 @@ export function receiveDesignAgentDraft(
     nextDrafts[draft.id] = {
       draft,
       preview: draft.preview ?? existing?.preview ?? null,
+      registrations: draft.registrations ?? existing?.registrations ?? null,
+      stylesheet: draft.stylesheet ?? existing?.stylesheet ?? null,
       updatedAt: now,
       savedAt:
         draft.phase === "saved" ? (existing?.savedAt ?? now) : (existing?.savedAt ?? null),
@@ -202,6 +209,102 @@ export function designAgentDraftsByFile(
   return byFile;
 }
 
+/** Design-root-relative canvas documents an agent may write (legacy layouts
+ * keep `canvas.json` at the root). */
+export function isDesignAgentCanvasDraftFile(file: string): boolean {
+  return file === "meta/canvas.json" || file === "canvas.json";
+}
+
+/** Where the directory's newest in-flight canvas document places each frame,
+ * keyed by Design file. Empty when no canvas draft has placed any. */
+export function designAgentDraftPlacements(
+  drafts: Readonly<Record<string, DesignAgentDraftEntry>>,
+  directory: string | null | undefined,
+): Map<string, NonNullable<DesignAgentDraftEntry["registrations"]>[number]> {
+  const placements = new Map<
+    string,
+    NonNullable<DesignAgentDraftEntry["registrations"]>[number]
+  >();
+  let newest: DesignAgentDraftEntry | null = null;
+  for (const entry of designAgentDraftsByFile(drafts, directory).values()) {
+    if (!isDesignAgentCanvasDraftFile(entry.draft.file) || !entry.registrations) continue;
+    if (!newest || entry.updatedAt > newest.updatedAt) newest = entry;
+  }
+  for (const registration of newest?.registrations ?? [])
+    placements.set(registration.file, registration);
+  return placements;
+}
+
+export interface DesignAgentStylesheetPreview {
+  css: string;
+  /** The tool saved it: the saved text is this text, so a live document that
+   * already shows it keeps it until the saved generation loads. */
+  saved: boolean;
+}
+
+const EMPTY_STYLESHEET_PREVIEWS: ReadonlyMap<string, DesignAgentStylesheetPreview> = new Map();
+
+/** In-flight stylesheet text per Design file of one directory, newest draft
+ * per file. Entries without text yet are omitted. */
+export function designAgentStylesheetPreviews(
+  drafts: Readonly<Record<string, DesignAgentDraftEntry>>,
+  directory: string | null | undefined,
+): Map<string, DesignAgentStylesheetPreview> {
+  const previews = new Map<string, DesignAgentStylesheetPreview>();
+  for (const [file, entry] of designAgentDraftsByFile(drafts, directory)) {
+    if (!entry.stylesheet) continue;
+    previews.set(file, { css: entry.stylesheet.css, saved: entry.savedAt !== null });
+  }
+  return previews;
+}
+
+/** The stylesheet previews a live frame of this directory applies. The
+ * reference changes only when a stylesheet draft does, so frame drafts
+ * streaming beside it never re-run a frame's effects. */
+export function useDesignAgentStylesheetPreviews(
+  workspaceId: string | null | undefined,
+  directory: string | null | undefined,
+): ReadonlyMap<string, DesignAgentStylesheetPreview> {
+  // A primitive identity of every stylesheet draft (revisions change with
+  // their text), so the store comparison stays cheap.
+  const identity = useDesignAgentDraftStore((state) => {
+    const drafts = workspaceId ? state.byWorkspace[workspaceId] : undefined;
+    if (!drafts || !directory) return "";
+    let key = "";
+    for (const [file, entry] of designAgentDraftsByFile(drafts, directory)) {
+      if (entry.stylesheet)
+        key += `${file}\0${entry.draft.id}\0${entry.draft.revision}\0${entry.savedAt !== null}\n`;
+    }
+    return key;
+  });
+  return useMemo(
+    () =>
+      identity && workspaceId
+        ? designAgentStylesheetPreviews(
+            useDesignAgentDraftStore.getState().byWorkspace[workspaceId] ?? EMPTY_DRAFTS,
+            directory,
+          )
+        : EMPTY_STYLESHEET_PREVIEWS,
+    [directory, identity, workspaceId],
+  );
+}
+
+/** Whether the canvas follows the agent's newest draft, per workspace. In
+ * memory only: following is a viewing choice for this session. */
+export const useDesignAgentFollowStore = create<{ following: Record<string, true> }>(() => ({
+  following: {},
+}));
+
+export function setDesignAgentFollowing(workspaceId: string, following: boolean): void {
+  useDesignAgentFollowStore.setState((state) => {
+    if (Boolean(state.following[workspaceId]) === following) return state;
+    const next = { ...state.following };
+    if (following) next[workspaceId] = true;
+    else delete next[workspaceId];
+    return { following: next };
+  });
+}
+
 let eventsStarted = false;
 
 /** Listen once per renderer. Local engines send drafts only to the trusted
@@ -226,4 +329,5 @@ export function resetDesignAgentDraftsForTests(): void {
   if (sweepTimer) clearTimeout(sweepTimer);
   sweepTimer = null;
   useDesignAgentDraftStore.setState({ byWorkspace: {} });
+  useDesignAgentFollowStore.setState({ following: {} });
 }

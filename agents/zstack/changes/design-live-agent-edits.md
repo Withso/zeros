@@ -33,3 +33,21 @@
   stubs only those run functions, and prove the base failure. Do not edit
   renderer files while a smoke run's Vite server is live: hot reload mixes
   states and produces false failures.
+- Design frame runtime capabilities are validated as a closed set: a host
+  rejects a ready payload naming any method it does not know. Adding a
+  runtime method is therefore a breaking change for older desktops paired
+  with newer engines (cloud VMs upgrade independently). Rule: a new runtime
+  method is opt-in — the host lists it in the handshake's `features`, and the
+  runtime advertises and accepts it only then (`DESIGN_RUNTIME_OPT_IN_METHODS`,
+  `previewStylesheet`). Encoded in
+  `design-runtime-stylesheet-preview.test.ts` and the bridge handshake test.
+- Packaged engines must never arm a native file watcher (Bun's compiled
+  runtime deadlocks once FSEvents is armed). Faster feedback comes from
+  stat-polling only what a Design tab shows (style-build presence plus the
+  directory the canvas last read), bounded in files, plus an immediate check
+  when an agent tool that may write finishes (`engine/design/change-poller.ts`).
+- Before building a provider's live preview, pin what its SDK actually
+  delivers: Codex sends a whole patch at `item/started` (no deltas), and
+  Cursor's SDK 1.0.37 drops edit content until after the write. Read
+  normalized session updates first; add an adapter hook only for data the
+  updates do not already carry.

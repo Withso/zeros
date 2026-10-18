@@ -1,8 +1,22 @@
+import path from "node:path";
 import { parse } from "parse5";
-import { MAX_DESIGN_AGENT_DRAFT_PREVIEW_BYTES } from "@zeros/protocol/design-agent-drafts";
-import { readBoundedDesignFrameSource, readCanvas } from "./document-storage";
+import {
+  MAX_DESIGN_AGENT_DRAFT_PREVIEW_BYTES,
+  MAX_DESIGN_AGENT_DRAFT_STYLESHEET_CHARS,
+} from "@zeros/protocol/design-agent-drafts";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import {
+  designDirectory,
+  readBoundedDesignFrameSource,
+  readCanvas,
+} from "./document-storage";
+import { MAX_DESIGN_TEXT_BYTES } from "./render-budget";
+import { readSafeRegularFile } from "./safe-files";
 import { readFrameMeta } from "./frame-metadata";
-import { prepareFrameRenderSource } from "./render-preparation";
+import {
+  prepareDesignStylesheetPreview,
+  prepareFrameRenderSource,
+} from "./render-preparation";
 import { insertDesignHeadMarkup } from "./source";
 
 /** A draft document runs no script at all: no Zeros runtime, no authored code.
@@ -40,10 +54,43 @@ export async function composeDesignAgentDraftPreview(
   return { srcDoc, ...viewport, title: meta.title };
 }
 
-/** The saved frame an in-flight Edit applies to. Call inside the lease. */
+/** In-flight stylesheet text as live frames render it: rebased for a page
+ * folder's frames (every page folder sits one level deep) and with local
+ * assets inlined. Null when it is unrenderable or over the draft bound. Call
+ * inside the lease. */
+export async function composeDesignAgentStylesheetPreview(
+  workspacePath: string,
+  file: string,
+  css: string,
+): Promise<string | null> {
+  const canvas = await readCanvas(workspacePath).catch(() => undefined);
+  const folder = canvas?.pages?.find((page) => page.folder)?.folder;
+  const entry = folder ? `${folder}/zeros-draft.html` : "zeros-draft.html";
+  const processed = await prepareDesignStylesheetPreview(workspacePath, file, css, entry);
+  if (processed === null || processed.length > MAX_DESIGN_AGENT_DRAFT_STYLESHEET_CHARS)
+    return null;
+  return processed;
+}
+
+/** The saved Design text file an in-flight Edit applies to: a frame, a
+ * stylesheet or the canvas document, bounded like frame sources. Call inside
+ * the lease. */
 export async function readDesignAgentDraftBase(
   workspacePath: string,
   file: string,
 ): Promise<string | null> {
-  return readBoundedDesignFrameSource(workspacePath, file).catch(() => null);
+  // isDesignFrameFile narrows its argument; keep the declared path type.
+  const relative: string = file;
+  if (isDesignFrameFile(file))
+    return readBoundedDesignFrameSource(workspacePath, file).catch(() => null);
+  const parts = relative.split("/");
+  if (!/\.(?:css|json)$/i.test(relative) || parts.some((part) => !part || part === "." || part === ".."))
+    return null;
+  const directory = designDirectory(workspacePath);
+  const safe = await readSafeRegularFile(
+    directory,
+    path.join(directory, ...parts),
+    MAX_DESIGN_TEXT_BYTES,
+  ).catch(() => null);
+  return safe ? safe.body.toString("utf8") : null;
 }

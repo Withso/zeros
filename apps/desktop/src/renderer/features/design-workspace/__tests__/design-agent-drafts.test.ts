@@ -9,15 +9,22 @@ import {
   DESIGN_AGENT_DRAFT_IDLE_MS,
   DESIGN_AGENT_DRAFT_SAVED_MS,
   designAgentDraftsByFile,
+  designAgentStylesheetPreviews,
   receiveDesignAgentDraft,
   resetDesignAgentDraftsForTests,
   retireDesignAgentDraft,
+  setDesignAgentFollowing,
   sweepDesignAgentDrafts,
   useDesignAgentDraftStore,
+  useDesignAgentFollowStore,
 } from "../state/design-agent-drafts";
 import {
+  designAgentDraftLabel,
+  designAgentDraftRetireAt,
   designAgentDraftThemeDocument,
+  designAgentGhostLayout,
   designAgentGhostRects,
+  designAgentRevealTarget,
 } from "../design-agent-drafts";
 
 const draft = (overrides: Record<string, unknown> = {}) => ({
@@ -136,5 +143,138 @@ describe("Design agent draft presentation helpers", () => {
       { x: 2650, y: 0, width: 800, height: 600 },
     ]);
     expect(designAgentGhostRects([], [{ width: 10, height: 10 }])).toEqual([{ x: 0, y: 0, width: 10, height: 10 }]);
+  });
+
+  it("places a ghost where the in-flight canvas registers it, and keeps that through later phases", () => {
+    const pages = [{ id: "page_1", title: "Page 1", folder: "page-1", frameFiles: ["page-1/home.html"] }] as never;
+    const frames = [{ x: 0, y: 0, width: 1440, height: 900 }];
+    receiveDesignAgentDraft("ws_local", draft({ id: "card", file: "page-1/card.html" }), 1_000);
+    receiveDesignAgentDraft("ws_local", draft({ id: "list", file: "page-1/list.html" }), 2_000);
+    receiveDesignAgentDraft(
+      "ws_local",
+      draft({
+        id: "canvas",
+        file: "meta/canvas.json",
+        operation: "edit",
+        preview: undefined,
+        registrations: [{ file: "page-1/card.html", x: 2000, y: 300, width: 400, height: 800, title: "Checkout card" }],
+      }),
+      3_000,
+    );
+    // A preview-less phase update keeps the placements it already sent.
+    receiveDesignAgentDraft("ws_local", draft({ id: "canvas", file: "meta/canvas.json", operation: "edit", phase: "saving", revision: 2, preview: undefined }), 4_000);
+    const layout = designAgentGhostLayout(drafts(), "App - Design", pages, "page_1", frames);
+    expect(layout.map(({ entry, rect, title }) => ({ file: entry.draft.file, rect, title }))).toEqual([
+      { file: "page-1/card.html", rect: { x: 2000, y: 300, width: 400, height: 800 }, title: "Checkout card" },
+      // Unplaced ghosts follow the frames and the placed ghosts.
+      { file: "page-1/list.html", rect: { x: 2560, y: 0, width: 390, height: 844 }, title: "Card" },
+    ]);
+    // Another directory's canvas never places this directory's ghosts.
+    expect(designAgentGhostLayout(drafts(), "Other - Design", pages, "page_1", frames)).toEqual([]);
+  });
+});
+
+describe("Design agent activity chip", () => {
+  const pages = [
+    { id: "page_1", title: "Page 1", folder: "page-1", frameFiles: ["page-1/home.html", "page-1/card.html"] },
+    { id: "page_2", title: "Checkout", folder: "checkout", frameFiles: ["checkout/pay.html"] },
+  ] as never;
+  const frames = [
+    { file: "page-1/home.html", title: "Home", x: 0, y: 0, width: 1440, height: 900 },
+    { file: "page-1/card.html", title: "Card", x: 1600, y: 0, width: 390, height: 844 },
+  ];
+  const entry = (overrides: Record<string, unknown>, savedAt: number | null = null) => ({
+    draft: draft(overrides) as never,
+    preview: null,
+    registrations: null,
+    stylesheet: null,
+    updatedAt: 1,
+    savedAt,
+    ...("registrations" in overrides ? { registrations: overrides.registrations as never } : {}),
+  });
+  const ghost = {
+    entry: entry({ file: "page-1/new.html" }),
+    rect: { x: 2100, y: 0, width: 390, height: 844 },
+    title: "New card",
+  };
+  const context = { pages, activePageId: "page_1", frames, ghosts: [ghost] };
+
+  it("shows a frame on its page, a ghost where it sits, and a stylesheet's frames", () => {
+    const placements = new Map([
+      ["page-1/new.html", { file: "page-1/new.html", x: 2100, y: 0, width: 390, height: 844 }],
+      ["checkout/more.html", { file: "checkout/more.html", x: 0, y: 0, width: 10, height: 10 }],
+    ]);
+    expect(designAgentRevealTarget(entry({ file: "page-1/card.html" }), context, placements)).toEqual({
+      pageId: "page_1",
+      files: ["page-1/card.html"],
+      rects: [],
+    });
+    // A frame registered on another page switches to that page.
+    expect(designAgentRevealTarget(entry({ file: "checkout/pay.html" }), context, placements)).toEqual({
+      pageId: "page_2",
+      files: ["checkout/pay.html"],
+      rects: [],
+    });
+    expect(designAgentRevealTarget(entry({ file: "page-1/new.html" }), context, placements)).toEqual({
+      pageId: "page_1",
+      files: [],
+      rects: [ghost.rect],
+    });
+    // tokens.css affects the active page; a page stylesheet, its own page.
+    expect(designAgentRevealTarget(entry({ file: "tokens.css" }), context, placements)).toEqual({
+      pageId: "page_1",
+      files: ["page-1/home.html", "page-1/card.html"],
+      rects: [],
+    });
+    expect(designAgentRevealTarget(entry({ file: "checkout/page.css" }), context, placements)?.pageId).toBe("page_2");
+    // The canvas document shows the frames it places on this page.
+    expect(designAgentRevealTarget(entry({ file: "meta/canvas.json" }), context, placements)).toEqual({
+      pageId: "page_1",
+      files: [],
+      rects: [{ file: "page-1/new.html", x: 2100, y: 0, width: 390, height: 844 }],
+    });
+    expect(designAgentRevealTarget(entry({ file: "rules.md" }), context, placements)).toBeNull();
+    expect(designAgentRevealTarget(entry({ file: "page-1/unknown.html" }), context, placements)).toBeNull();
+  });
+
+  it("names drafts as the canvas does", () => {
+    expect(designAgentDraftLabel(entry({ file: "page-1/card.html" }), context)).toBe("Card");
+    expect(designAgentDraftLabel(entry({ file: "page-1/new.html" }), context)).toBe("New card");
+    expect(designAgentDraftLabel(entry({ file: "meta/canvas.json" }), context)).toBe("Canvas layout");
+    expect(designAgentDraftLabel(entry({ file: "tokens.css" }), context)).toBe("tokens.css");
+  });
+
+  it("retires saved drafts nothing on this canvas hands off, and only those", () => {
+    // Streaming drafts and this page's frames and ghosts hand off themselves.
+    expect(designAgentDraftRetireAt(entry({ file: "tokens.css" }), context)).toBeNull();
+    expect(designAgentDraftRetireAt(entry({ file: "page-1/card.html" }, 1_000), context)).toBeNull();
+    expect(designAgentDraftRetireAt(entry({ file: "page-1/new.html" }, 1_000), context)).toBeNull();
+    // Stylesheets, other files and other pages' frames linger briefly.
+    expect(designAgentDraftRetireAt(entry({ file: "tokens.css" }, 1_000), context)).toBe(2_500);
+    expect(designAgentDraftRetireAt(entry({ file: "rules.md" }, 1_000), context)).toBe(2_500);
+    expect(designAgentDraftRetireAt(entry({ file: "checkout/pay.html" }, 1_000), context)).toBe(2_500);
+    // The canvas document waits until every frame it placed is registered.
+    const placing = entry({ file: "meta/canvas.json", registrations: [{ file: "page-1/new.html", x: 0, y: 0, width: 1, height: 1 }] }, 1_000);
+    expect(designAgentDraftRetireAt(placing, context)).toBe(7_000);
+    const registered = { ...context, pages: [{ ...(pages as never as Array<Record<string, unknown>>)[0], frameFiles: ["page-1/home.html", "page-1/new.html"] }] as never };
+    expect(designAgentDraftRetireAt(placing, registered)).toBe(2_500);
+  });
+
+  it("keeps each stylesheet's newest text and whether it was saved", () => {
+    receiveDesignAgentDraft("ws_local", draft({ id: "css", file: "tokens.css", preview: undefined, stylesheet: { css: ":root{--a:1}" } }), 1_000);
+    receiveDesignAgentDraft("ws_local", draft({ id: "css", file: "tokens.css", phase: "saved", revision: 2, preview: undefined }), 2_000);
+    receiveDesignAgentDraft("ws_local", draft({ id: "frame", file: "page-1/card.html" }), 3_000);
+    expect([...designAgentStylesheetPreviews(drafts(), "App - Design")]).toEqual([
+      ["tokens.css", { css: ":root{--a:1}", saved: true }],
+    ]);
+    expect(designAgentStylesheetPreviews(drafts(), "Other - Design").size).toBe(0);
+  });
+
+  it("follows per workspace, in memory", () => {
+    setDesignAgentFollowing("ws_local", true);
+    setDesignAgentFollowing("ws_local", true);
+    expect(useDesignAgentFollowStore.getState().following).toEqual({ ws_local: true });
+    setDesignAgentFollowing("ws_local", false);
+    expect(useDesignAgentFollowStore.getState().following).toEqual({});
   });
 });

@@ -12,7 +12,8 @@ import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
 import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
-import { configureDesignStyleBuilds, designStyleInputChanged, hasRunningDesignStyleBuilds, stopDesignStyleBuilds } from "./design/style-builds";
+import { configureDesignStyleBuilds, designStyleInputChanged, hasRunningDesignStyleBuilds, presentDesignStyleBuildRoots, stopDesignStyleBuilds } from "./design/style-builds";
+import { DesignChangePoller, designSnapshotDirectory } from "./design/change-poller";
 import { configureDesignFonts } from "./design/style-fonts";
 import { fenceDesignSnapshotReads } from "./design/snapshot-epoch";
 import type { DesignCaptureService } from "./design/capture-service";
@@ -170,6 +171,7 @@ import {
 } from "./design/agent-drafts";
 import {
   composeDesignAgentDraftPreview,
+  composeDesignAgentStylesheetPreview,
   readDesignAgentDraftBase,
 } from "./design/agent-draft-preview";
 import {
@@ -917,6 +919,9 @@ export class ZerosEngine {
   /** Live canvas feedback for Local agents' native Design edits. Never
    * constructed for a cloud worker. */
   private designAgentActivity: DesignAgentActivity | null = null;
+  /** Packaged Local engines poll the Design directory a Design tab shows on
+   * a short interval; see design/change-poller.ts. */
+  private designChangePoller: DesignChangePoller | null = null;
   /** Coalesce filesystem invalidations behind one authority-reconciliation
    * lane. Settings and Git watchers can fire together for one checkout; this
    * prevents overlapping session retirement/territory publication. */
@@ -3505,6 +3510,12 @@ export class ZerosEngine {
     // rather than each running a watcher of its own.
     this.stopStyleBuildInputs = onWorktreeContentChange(designStyleInputChanged);
     if (!this.cloudWorker) this.designAgentActivity = this.createDesignAgentActivity();
+    // Development engines receive native file events within ~120 ms; the
+    // packaged engine's worktree poll below runs every 1.5 s.
+    if (!this.cloudWorker && !isDevRuntime()) {
+      this.designChangePoller = this.createDesignChangePoller();
+      this.designChangePoller.start();
+    }
     this.gitWatcher = startGitWatcher(
       () => this.cloudRuntimeHandoffFenced ? [] : this.workspace.gitWatchTargets(),
       (change) => {
@@ -3770,6 +3781,8 @@ export class ZerosEngine {
     this.stopStyleBuildInputs = null;
     this.designAgentActivity?.dispose();
     this.designAgentActivity = null;
+    this.designChangePoller?.stop();
+    this.designChangePoller = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
@@ -11361,6 +11374,10 @@ export class ZerosEngine {
         withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
           composeDesignAgentDraftPreview(target.workspacePath, file, html),
         ),
+      composeStylesheet: (target, file, css) =>
+        withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+          composeDesignAgentStylesheetPreview(target.workspacePath, file, css),
+        ),
       readSource: (target, file) =>
         withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
           readDesignAgentDraftBase(target.workspacePath, file),
@@ -11373,17 +11390,36 @@ export class ZerosEngine {
       // The same Design-only revalidation a rebuilt style output uses, ahead
       // of the worktree watcher (a 1.5 s stat poll in packaged builds).
       saved: (target) => {
-        fenceDesignSnapshotReads(target.workspacePath);
-        this.broadcast(
-          createMessage({
-            type: "DB_CHANGED",
-            source: "engine",
-            kinds: ["designStyles"],
-            workspaceIds: [target.workspaceId],
-          }),
-        );
+        this.refreshDesignCanvas(target.workspacePath, target.workspaceId);
+        // That refresh covers these files: the poller must not repeat it.
+        void this.designChangePoller?.absorb(target.workspacePath);
       },
+      // A shell command or script may have written Design files itself.
+      toolSettled: (target) => void this.designChangePoller?.check(target.workspacePath),
     });
+  }
+
+  private createDesignChangePoller(): DesignChangePoller {
+    return new DesignChangePoller({
+      presentRoots: presentDesignStyleBuildRoots,
+      directory: (root) => designSnapshotDirectory(root) ?? activeDesignDirectoryNameFor(root) ?? null,
+      changed: (root) => this.refreshDesignCanvas(root, getWorkspaceByPath(root)?.id),
+    });
+  }
+
+  /** Re-read one checkout's Design canvas now: the Design-only revalidation
+   * a rebuilt style output uses, ahead of the worktree watcher. A checkout
+   * without a workspace row (the main checkout) refreshes every canvas. */
+  private refreshDesignCanvas(workspacePath: string, workspaceId: string | undefined): void {
+    fenceDesignSnapshotReads(workspacePath);
+    this.broadcast(
+      createMessage({
+        type: "DB_CHANGED",
+        source: "engine",
+        kinds: ["designStyles"],
+        ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
+      }),
+    );
   }
 
   /** Publish prompt lifecycle independently of the request/response socket.

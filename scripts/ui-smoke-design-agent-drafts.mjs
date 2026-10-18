@@ -162,4 +162,158 @@ export async function runDesignAgentDraftsSmoke({ page, check }) {
   await send({ id: "draftCard", file: "card.html", revision: 2, phase: "discarded" });
   await ghost.waitFor({ state: "detached", timeout: 5_000 });
   check("a discarded unsaved draft leaves the canvas", (await ghost.count()) === 0);
+
+  await runDesignAgentActivitySmoke({ page, check, send });
+  await runDesignAgentStylesheetSmoke({ page, check });
+}
+
+/** The chip names what the agent writes, places new frames where the canvas
+ * document puts them, shows them on request and can follow the agent. */
+async function runDesignAgentActivitySmoke({ page, check, send }) {
+  const chip = page.locator("[data-design-agent-activity]");
+  const label = chip.locator("[data-design-agent-activity-label]");
+  await send({ id: "draftList", file: "list.html", revision: 1, text: "List draft", width: 390, height: 844, title: "List" });
+  await chip.waitFor({ timeout: 5_000 });
+  check(
+    "the activity chip names the file the agent is writing",
+    (await label.innerText()) === "Writing List" &&
+      (await chip.locator("[data-design-agent-activity-show]").isEnabled()),
+  );
+  const listGhost = page.locator('[data-design-agent-draft-ghost="list.html"]');
+  await listGhost.waitFor({ state: "attached", timeout: 5_000 });
+  // The canvas document streams in after the HTML: the ghost moves to where
+  // the agent registers it, under the registered title.
+  await send({
+    id: "draftCanvas",
+    file: "meta/canvas.json",
+    operation: "edit",
+    revision: 1,
+    registrations: [{ file: "list.html", x: 6000, y: 2400, width: 400, height: 800, title: "Checkout list" }],
+  });
+  await page.waitForFunction(() => {
+    const element = document.querySelector('[data-design-agent-draft-ghost="list.html"]');
+    return element?.style.left === "6000px" && element.style.top === "2400px";
+  });
+  check(
+    "a ghost starts where the in-flight canvas document registers it",
+    (await listGhost.evaluate((element) => element.style.width)) === "400px" &&
+      (await listGhost.innerText()).includes("Checkout list"),
+  );
+  check(
+    "several drafts list in the chip's menu",
+    (await label.innerText()) === "Writing Canvas layout" &&
+      (await chip.locator("[data-design-agent-activity-more]").count()) === 1,
+  );
+  const inView = (selector) =>
+    page.evaluate((target) => {
+      const element = document.querySelector(target);
+      const viewport = document.querySelector("[data-design-canvas-viewport]");
+      if (!element || !viewport) return false;
+      const a = element.getBoundingClientRect();
+      const b = viewport.getBoundingClientRect();
+      return a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom;
+    }, selector);
+  const ghostSelector = '[data-design-agent-draft-ghost="list.html"]';
+  const before = await inView(ghostSelector);
+  await chip.locator("[data-design-agent-activity-show]").click();
+  await page.waitForFunction((target) => {
+    const element = document.querySelector(target);
+    const viewport = document.querySelector("[data-design-canvas-viewport]");
+    if (!element || !viewport) return false;
+    const a = element.getBoundingClientRect();
+    const b = viewport.getBoundingClientRect();
+    return a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom;
+  }, ghostSelector, { timeout: 5_000 });
+  check("Show brings the placed ghost into view", before === false && (await inView(ghostSelector)));
+
+  // Following: each new draft is revealed once, without selecting it.
+  await chip.locator("[data-design-agent-activity-follow]").click();
+  check(
+    "Follow is a pressed toggle",
+    (await chip.locator("[data-design-agent-activity-follow]").getAttribute("aria-pressed")) === "true",
+  );
+  const pricingSelector = '[data-design-frame="pricing.html"]';
+  if (await inView(pricingSelector)) {
+    // Park the camera on the ghost so the pricing frame starts out of view.
+    await chip.locator("[data-design-agent-activity-show]").click();
+  }
+  const pricingBefore = await inView(pricingSelector);
+  await send({ id: "draftPricing", file: "pricing.html", revision: 1, text: "Pricing draft", width: 1440, height: 900, title: "Pricing" });
+  await page.waitForFunction((target) => {
+    const element = document.querySelector(target);
+    const viewport = document.querySelector("[data-design-canvas-viewport]");
+    if (!element || !viewport) return false;
+    const a = element.getBoundingClientRect();
+    const b = viewport.getBoundingClientRect();
+    return a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom;
+  }, pricingSelector, { timeout: 5_000 });
+  check("Following reveals the frame the agent starts writing", pricingBefore === false);
+  await chip.locator("[data-design-agent-activity-follow]").click();
+  for (const [id, file] of [["draftList", "list.html"], ["draftCanvas", "meta/canvas.json"], ["draftPricing", "pricing.html"]])
+    await send({ id, file, revision: 9, phase: "discarded" });
+  await chip.waitFor({ state: "detached", timeout: 5_000 });
+  check("the chip leaves with the agent's last draft", (await chip.count()) === 0);
+}
+
+/** An in-flight linked stylesheet restyles the live frames that link it in
+ * place, and a discarded one restores their saved styles. */
+async function runDesignAgentStylesheetSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  await page.goto(
+    `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens`,
+    { waitUntil: "networkidle" },
+  );
+  const frame = page.locator('[data-design-frame="home.html"]');
+  await frame
+    .locator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]')
+    .first()
+    .waitFor({ timeout: 10_000 });
+  const titleColor = () =>
+    page
+      .frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]')
+      .locator('[data-oid="home-heading"]')
+      .evaluate((element) => getComputedStyle(element).color);
+  const saved = await titleColor();
+  const send = (draft) =>
+    page.evaluate(async (value) => {
+      const drafts = await import(
+        "/apps/desktop/src/renderer/features/design-workspace/state/design-agent-drafts.ts"
+      );
+      const harness = window.__zerosHarnessAgentDrafts;
+      harness.useDirectory();
+      drafts.receiveDesignAgentDraft(harness.workspaceId, {
+        id: "draftTokens",
+        chatId: "chat-smoke",
+        directory: harness.directory,
+        file: "tokens.css",
+        operation: "write",
+        ...value,
+      });
+    }, draft);
+  await send({
+    phase: "writing",
+    revision: 1,
+    stylesheet: { css: ":root { --brand: green; }\n.title { color: var(--brand); }" },
+  });
+  let previewed = "";
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    previewed = await titleColor();
+    if (previewed === "rgb(0, 128, 0)") break;
+    await page.waitForTimeout(100);
+  }
+  check(
+    "an in-flight tokens.css restyles the live frame in place, without reloading it",
+    saved !== previewed &&
+      previewed === "rgb(0, 128, 0)" &&
+      (await frame.locator("iframe[data-design-document-buffer]").count()) === 1 &&
+      (await page.locator("[data-design-agent-activity-label]").innerText()) === "Writing tokens.css",
+  );
+  await send({ phase: "discarded", revision: 2 });
+  let restored = "";
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    restored = await titleColor();
+    if (restored === saved) break;
+    await page.waitForTimeout(100);
+  }
+  check("a discarded stylesheet draft restores the frame's saved styles", restored === saved);
 }

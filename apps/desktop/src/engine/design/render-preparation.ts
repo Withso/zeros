@@ -250,6 +250,23 @@ async function linkLocalStylesheets(
   return { html: applyDesignSourceEdits(source, edits), sheets, assetBytes };
 }
 
+/** In-flight text of a linked Design stylesheet, processed exactly as its
+ * saved form renders for frames beside `entryFile`: references rebased and
+ * local assets inlined. Null when nothing renderable remains. */
+export async function prepareDesignStylesheetPreview(
+  workspacePath: string,
+  cssFile: string,
+  css: string,
+  entryFile: string,
+): Promise<string | null> {
+  const directory = designDirectory(workspacePath);
+  const resolved = path.join(directory, ...cssFile.split("/"));
+  const prepared = await prepareStylesheet(directory, resolved, cssFile, entryFile, {
+    [cssFile]: css,
+  });
+  return prepared?.css ?? null;
+}
+
 /** Put each sheet's CSS inside its empty placeholder. Sanitizing edits the
  * skeleton by source location, so placeholders survive byte for byte. */
 function spliceStylesheets(skeleton: string, sheets: readonly LinkedStylesheet[]): string {

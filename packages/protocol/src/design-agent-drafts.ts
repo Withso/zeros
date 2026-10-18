@@ -24,6 +24,27 @@ export type DesignAgentDraftPhase = (typeof DESIGN_AGENT_DRAFT_PHASES)[number];
 
 /** Largest preview document a draft may carry (sanitized HTML plus CSS). */
 export const MAX_DESIGN_AGENT_DRAFT_PREVIEW_BYTES = 8 * 1024 * 1024;
+/** Most frames one in-flight canvas document may place. */
+export const MAX_DESIGN_AGENT_DRAFT_REGISTRATIONS = 256;
+/** Largest processed stylesheet text a draft may carry. */
+export const MAX_DESIGN_AGENT_DRAFT_STYLESHEET_CHARS = 4 * 1024 * 1024;
+
+/** A frame an in-flight `meta/canvas.json` registers: where the agent is
+ * placing a file the saved canvas may not list yet. */
+export const designAgentDraftRegistrationSchema = z
+  .object({
+    /** Design-root-relative frame file, such as `page-1/card.html`. */
+    file: z.string().min(1).max(1024),
+    x: z.number().finite().min(-1_000_000).max(1_000_000),
+    y: z.number().finite().min(-1_000_000).max(1_000_000),
+    width: z.number().finite().min(1).max(16_384),
+    height: z.number().finite().min(1).max(16_384),
+    title: z.string().max(120).optional(),
+  })
+  .strict();
+export type DesignAgentDraftRegistration = z.infer<
+  typeof designAgentDraftRegistrationSchema
+>;
 
 export const designAgentDraftSchema = z
   .object({
@@ -46,6 +67,18 @@ export const designAgentDraftSchema = z
         title: z.string().max(200).optional(),
       })
       .strict()
+      .optional(),
+    /** For a linked Design stylesheet: the CSS live frames apply in place of
+     * its saved text, processed as the saved form renders (rebased and with
+     * local assets inlined). */
+    stylesheet: z
+      .object({ css: z.string().max(MAX_DESIGN_AGENT_DRAFT_STYLESHEET_CHARS) })
+      .strict()
+      .optional(),
+    /** For a canvas document: the frames it registers so far, in order. */
+    registrations: z
+      .array(designAgentDraftRegistrationSchema)
+      .max(MAX_DESIGN_AGENT_DRAFT_REGISTRATIONS)
       .optional(),
   })
   .strict();

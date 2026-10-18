@@ -247,9 +247,11 @@ import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 import { DesignFrameRenderSurface } from "./design-frame-render-surface";
 import {
+  DesignAgentActivityChip,
   DesignAgentDraftFrameOverlay,
   DesignAgentDraftGhosts,
   useDesignAgentDraftFrameFiles,
+  type DesignAgentRevealTarget,
 } from "./design-agent-drafts";
 import { errorMessage } from "./design-workspace-error";
 import {
@@ -1358,6 +1360,64 @@ export function DesignCanvas({
     // Only a change of frame reveals; the camera and size are read at it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, liveFrameOwner, selectedFrame?.file, workspaceId]);
+
+  /** Show what an agent is writing without selecting it: one frame comes
+   * into view like a Layers selection, several are fitted, and a frame on
+   * another page switches to that page first. */
+  const pendingAgentRevealRef = useRef<DesignAgentRevealTarget | null>(null);
+  const revealAgentRects = useCallback(
+    (rects: readonly { x: number; y: number; width: number; height: number }[]) => {
+      if (!workspaceId || rects.length === 0) return;
+      if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
+      const bounds = viewportRef.current?.getBoundingClientRect();
+      if (!bounds) return;
+      const size = { width: bounds.width, height: bounds.height };
+      const insets = measureDesignCanvasInsets(viewportRef.current);
+      const current = wheelViewportRef.current ?? view;
+      const next =
+        rects.length === 1
+          ? designRevealRectViewport(current, size, rects[0]!, undefined, insets)
+          : fitDesignRects([...rects], size, undefined, insets);
+      if (!next) return;
+      cancelPendingWheelGesture();
+      paintDesignCanvasCamera(worldRef.current, next, false);
+      setViewport(workspaceId, next, canvasPageOwner);
+    },
+    [cancelPendingWheelGesture, canvasPageOwner, setViewport, view, workspaceId],
+  );
+  const agentRevealRects = useCallback(
+    (target: DesignAgentRevealTarget) => [
+      ...(snapshot?.frames ?? [])
+        .filter((frame) => target.files.includes(frame.file))
+        .map((frame) => ({ x: frame.x, y: frame.y, width: frame.width, height: frame.height })),
+      ...target.rects,
+    ],
+    [snapshot?.frames],
+  );
+  const revealAgentTarget = useCallback(
+    (target: DesignAgentRevealTarget) => {
+      if (!workspaceId) return;
+      if (target.pageId && view.activePageId && target.pageId !== view.activePageId) {
+        pendingAgentRevealRef.current = target;
+        useDesignWorkspaceUiStore
+          .getState()
+          .setActivePage(workspaceId, target.pageId, canvasDirectoryId);
+        return;
+      }
+      pendingAgentRevealRef.current = null;
+      revealAgentRects(agentRevealRects(target));
+    },
+    [agentRevealRects, canvasDirectoryId, revealAgentRects, view.activePageId, workspaceId],
+  );
+  // The switched-to page's frames arrive with its projection.
+  useLayoutEffect(() => {
+    const pending = pendingAgentRevealRef.current;
+    if (!active || !pending || pending.pageId !== view.activePageId) return;
+    const rects = agentRevealRects(pending);
+    if (rects.length === 0) return;
+    pendingAgentRevealRef.current = null;
+    revealAgentRects(rects);
+  }, [active, agentRevealRects, revealAgentRects, view.activePageId]);
 
   useLayoutEffect(() => {
     if (!active) return;
@@ -6814,6 +6874,7 @@ export function DesignCanvas({
                     highResolutionDisabled={
                       inlineTextEdit?.frame === frame.file
                     }
+                    designDirectory={snapshot.directory}
                   />
                 ) : (
                   <div className="bg-bg2 text-muted-fg flex size-full items-center justify-center text-xs">
@@ -7599,6 +7660,19 @@ export function DesignCanvas({
             </DesignToolbarButton>
           </Toolbar>
         </div>
+
+        {workspaceId && snapshot ? (
+          <DesignAgentActivityChip
+            workspaceId={workspaceId}
+            directory={snapshot.directory}
+            pages={snapshot.pages}
+            activePageId={view.activePageId}
+            frames={snapshot.frames}
+            active={active}
+            motionOpen={motionTimelineOpen}
+            onReveal={revealAgentTarget}
+          />
+        ) : null}
 
         <DesignThemeEditor
           workspaceId={workspaceId}

@@ -1,7 +1,7 @@
 # Design mode: architecture, implementation, and roadmap
 
 **Status: shared-session HTML/CSS v1 and Design directory Pages implemented;
-later feature phases remain planned. Updated 2026-10-17.** This is the single
+later feature phases remain planned. Updated 2026-10-18.** This is the single
 Design engineering reference: current product behavior, source formats,
 ownership, compatibility, resource limits, qualification, and the remaining
 roadmap. Code, schemas, and
@@ -916,7 +916,7 @@ a new frame plus its registration, an in-place patch, an edited page-folder or
 root stylesheet, a new page folder with a frame inside it, and `canvas.json`
 replaced in place or by rename.
 
-Three Local mechanisms keep an agent's progress visible
+These Local mechanisms keep an agent's progress visible
 (`engine/design/agent-drafts.ts`; cloud workers construct none of them):
 
 - **Saved steps.** When any provider reports an `edit`/`delete`/`move` tool call
@@ -926,6 +926,18 @@ Three Local mechanisms keep an agent's progress visible
   coalesce). `designStyles` is the Design-only revalidation kind: Files and
   Changes still follow the watcher. Paths come from tool locations, diff
   content and `file_path`/`path`/`changes` inputs, never from titles.
+- **Prompt refresh for other writes.** Packaged engines poll, per Design tab,
+  the Design directory it shows (`engine/design/change-poller.ts`): while
+  style-build presence says a tab shows a checkout, the directory its canvas
+  last read is signed every 300 ms (each regular file's path, size, mtime and
+  inode; dotfiles and `*.zeros-tmp` ignored; at most 2,000 files and 8
+  checkouts), and a changed signature refreshes that canvas like a saved
+  step. Any other completed tool that may write files (a shell command, a
+  script; reads and searches excluded) asks for an immediate check. Edits made
+  in a person's own editor, Git checkouts and agents' scripts therefore appear
+  within about 0.3 s instead of the worktree watcher's 1.5 s poll. The poller
+  only stats: Bun's compiled runtime deadlocks once a native FSEvents watcher
+  is armed. Development engines skip it (native events arrive in ~120 ms).
 - **Read fences.** A shared in-flight snapshot read is joined only within the
   fence epoch it started in (`engine/design/snapshot-epoch.ts`). The watcher
   fences a checkout when it observes a raw change, before its debounce, and
@@ -946,8 +958,35 @@ Three Local mechanisms keep an agent's progress visible
   (`router.broadcastLocal`; never journaled, replayed or relayed). Phases are
   `writing`, `saving` (input complete, tool running or awaiting permission),
   `saved` and `discarded` (failure, refusal, Stop or turn end while unsaved).
-  Non-frame Design files (tokens, CSS, `meta/canvas.json`) carry no preview.
   Measured: 10–55 ms per render for a 14 KB frame, with or without Tailwind.
+  - Other providers draft from the session stream. Codex reports a whole
+    patch at `item/started`, before approval and before writing (it streams
+    no patch text): an added file previews its content and an update applies
+    its unified diff hunks to the saved source; deletions and moves are not
+    drafted. A provider reporting complete Write/Edit input or standard diff
+    content previews it the same way. Cursor's SDK (1.0.37) drops edit
+    content until after the write and reports only `{ path }`, so its frames
+    show status only. A Claude call that streams is never drafted twice.
+  - A Design stylesheet (`tokens.css`, a page stylesheet) sends its CSS,
+    processed exactly as linked sheets are (`prepareDesignStylesheetPreview`:
+    references rebased, local assets inlined; 4 MiB bound). While a Write
+    streams, the preview is the saved file followed by the new text's
+    complete top-level rules (`agent-draft-css.ts`), so a rule being written
+    never applies and rules not reached yet keep their saved form; finished
+    input is the new file alone. An Edit applies once its replacement is
+    whole. Live frames that link the file apply it in place through the
+    runtime's opt-in `previewStylesheet` (no reload, no incoming buffer); a
+    newly loaded generation applies it before it is revealed; a discarded
+    draft restores the generation's own text, and a saved one stays until the
+    saved generation replaces the document. Raster (non-live) frames update
+    when the file saves.
+  - A canvas document (`meta/canvas.json`, legacy root `canvas.json`) sends
+    the frames it registers so far (`agent-draft-canvas.ts`): a frame counts
+    once its source path and all four numbers have fully arrived; an Edit is
+    read once its replacement is whole, because a partial one splices into
+    the saved tail and can cut a number. A ghost then starts at its
+    registered position, size and title instead of right of the page's
+    frames, so it never jumps when the registration saves.
   The renderer store (`state/design-agent-drafts.ts`) keeps the newest revision
   per draft, 6 drafts per workspace, 8 workspaces and 24 MiB of previews,
   ignores `cloud://` keys, and drops a draft whose engine goes quiet for 2
@@ -962,6 +1001,18 @@ Three Local mechanisms keep an agent's progress visible
   frame, with a 6 s bound, so the hand-off never shows the old version or a
   blank buffer. A saved ghost whose turn ends unregistered leaves after 3 s.
   Inactive retained canvases render no drafts.
+- **Activity chip.** Bottom centre of the canvas (above an open Motion
+  timeline), a chip names what the agent is writing: the newest draft's
+  frame title, ghost title, file name or "Canvas layout", with a menu listing
+  every drafted file and its status. Show reveals a frame like a Layers
+  selection (switching pages first when it is registered on another page),
+  fits a stylesheet's page frames or the canvas document's placed frames,
+  and is disabled for files with no place on the canvas. Follow (in memory,
+  per workspace) reveals each new draft once without selecting it; the camera
+  stays the person's between drafts. Saved drafts nothing on the canvas hands
+  off (stylesheets, other files, frames on other pages) leave 1.5 s after
+  their save; a canvas document stays until the saved canvas registers every
+  frame it placed, at most 6 s.
 
 New `tokens.css` defaults preserve normal inline and flex behavior and never
 select every `data-oid` to change its layout. Existing authored stylesheets are
@@ -2338,37 +2389,28 @@ Code Restriction and designer-only workspaces remain separate deferred product
 work. A permanent private authored store and separate specialist sessions are
 not reintroduced by these follow-ups.
 
-#### Proposal: the rest of live agent edits
+#### Live agent edits: what remains
 
-The implemented slice (saved-step refresh, read fences and Claude drafts; see
-[Native edit and refresh behavior](#native-edit-and-refresh-behavior)) covers
-Local workspaces. Each item below keeps the same rules: drafts are transient,
-the saved file wins, previews use the saved form's sanitizer with no script,
-and nothing re-enters the transcript or its replay.
+Local live editing is implemented as described in
+[Native edit and refresh behavior](#native-edit-and-refresh-behavior). The
+items below keep the same rules: drafts are transient, the saved file wins,
+previews use the saved form's sanitizer with no script, and nothing re-enters
+the transcript or its replay.
 
-1. **Other providers.** Codex streams `apply_patch` and file-change items and
-   Cursor streams edit calls with their own identities. Each adapter reports
-   the same `AgentToolInputEvent` (native id, phase, chunk) once its delivery
-   shapes are pinned by native-event fixtures; patch hunks apply to the saved
-   source the way Edit previews do. Saved-step refresh already covers them.
-2. **Shared stylesheets.** While `tokens.css` or a page stylesheet streams,
-   re-render the drafted CSS into the visible frames that link it (bounded to
-   the live set) instead of only naming the file.
-3. **Canvas metadata.** Read a streaming `meta/canvas.json` with the same
-   tolerant reader to place ghosts at their registered geometry and titles
-   before the save, and show a new page's ghost in the page picker.
-4. **Follow and reveal.** An activity chip in the canvas chrome naming each
-   drafted file, with Show to center a draft or ghost without changing the
-   selection, and an opt-in follow mode; never move the camera automatically.
-5. **Faster external saves.** Packaged builds stat-poll at 1.5 s because the
-   compiled engine cannot arm native FSEvents. A Design-scoped watcher with a
-   shorter interval (bounded file count) would shorten edits made outside
-   agents, such as a person's own editor.
-6. **Cloud workspaces.** Out of scope by product decision for now. A cloud
+1. **Cursor content.** Cursor's SDK (1.0.37) carries the native protocol's
+   streamed edit text (`args_text_delta`, `stream_content`) but drops it when
+   converting updates, so Cursor drafts show status only. Preview its content
+   once a pinned SDK exposes it, through the same `AgentToolInputEvent` hook.
+2. **Codex streaming.** Codex (0.162.1) reports a patch only once complete
+   (`item/started`); preview it while the model writes it if the app-server
+   ever forwards the patch input's deltas.
+3. **New pages.** A canvas document that adds a page could show that page's
+   ghost in the page picker before it saves.
+4. **Cloud workspaces.** Out of scope by product decision for now. A cloud
    design needs a non-durable live channel, because the control plane's event
    stream is a durable replay log with a closed type list and 256 KiB frames;
    saved-step refresh would also need the VM engine's tool completions to reach
-   devices before its watcher.
+   devices before its watcher, and the cloud engine's watcher polls as well.
 
 ## 2. Target architecture
 

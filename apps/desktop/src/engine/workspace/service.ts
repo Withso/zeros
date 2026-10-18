@@ -302,6 +302,7 @@ import {
 } from "../design/directory-registry";
 import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
 import { designSnapshotReadEpoch } from "../design/snapshot-epoch";
+import { noteDesignSnapshotDirectory } from "../design/change-poller";
 import { readDirectoryDesignLayout } from "../design/metadata";
 import { designRegistryAtGitRef } from "../design/metadata-git";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
@@ -2221,6 +2222,8 @@ export class WorkspaceService {
       const snapshot = await readDesignWorkspaceSnapshot(root, {
         writeBack,
       });
+      // The directory this desktop's canvas shows, for prompt change polling.
+      if (!remote) noteDesignSnapshotDirectory(root, designDirectory);
       return {
         ...snapshot,
         directoryId: designDirectoryEntry(root, designDirectory)?.id,
