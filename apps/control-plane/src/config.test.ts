@@ -1097,12 +1097,23 @@ describe("cloud workspace backend configuration", () => {
         enginePort: 39_393,
         engineHeartbeatIntervalMs: 10_000,
         intervalMs: 1_000,
+        concurrency: 2,
         timeoutSeconds: 1_800,
         leaseMs: 60_000,
         admissionTtlSeconds: 120,
         engineUplinkEndpoint: null,
       },
     });
+  });
+
+  it.each([1, 2, 8])("bounds setup execution concurrency at %i", concurrency => {
+    expect(loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_SETUP_CONCURRENCY: String(concurrency) })
+      .cloudWorkspaces?.setupExecution?.concurrency).toBe(concurrency);
+  });
+
+  it.each(["0", "9", "1.5", "NaN", "Infinity"])("rejects invalid setup concurrency %s", concurrency => {
+    expect(() => loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_SETUP_CONCURRENCY: concurrency }))
+      .toThrow("Invalid cloud workspace setup environment");
   });
 
   it("advertises the uplink only from an explicit credential-free realtime origin", () => {

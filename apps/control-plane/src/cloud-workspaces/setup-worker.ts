@@ -145,6 +145,8 @@ export type CloudWorkspaceSetupWorkerOptions = {
   /** Required secret/output redaction boundary before any text reaches SQL. */
   sanitizeLog: (value: string) => string;
   intervalMs?: number;
+  /** Per-process execution slots; claims remain short, serialized transactions. */
+  concurrency?: number;
   leaseMs?: number;
   heartbeatMs?: number;
   executionTimeoutMs?: number;
@@ -166,6 +168,10 @@ type ClaimDecision =
   | { kind: "none" }
   | { kind: "processed" }
   | { kind: "claimed"; setup: ClaimedSetup };
+
+type DispatchDecision =
+  | { kind: "none" | "processed" }
+  | { kind: "executing"; completion: Promise<void> };
 
 type SafeSetupFailure = {
   timings?: SetupTimings | undefined;
@@ -329,6 +335,7 @@ export class CloudWorkspaceSetupWorker {
   private readonly executor: CloudWorkspaceSetupExecutor;
   private readonly sanitizeLog: (value: string) => string;
   private readonly intervalMs: number;
+  private readonly concurrency: number;
   private readonly leaseMs: number;
   private readonly heartbeatMs: number;
   private readonly executionTimeoutMs: number;
@@ -339,6 +346,8 @@ export class CloudWorkspaceSetupWorker {
   private readonly workosEnabled: boolean;
   private readonly recoveryConfig: CloudWorkspaceBackendConfig | null;
   private readonly activeControllers = new Set<AbortController>();
+  private readonly activeExecutions = new Map<string, Promise<void>>();
+  private dispatching: Promise<DispatchDecision> | null = null;
   private readonly scheduler: CloudWorkerScheduler;
   private stopped = false;
   private ticking = false;
@@ -348,6 +357,7 @@ export class CloudWorkspaceSetupWorker {
     this.executor = options.executor;
     this.sanitizeLog = options.sanitizeLog;
     this.intervalMs = options.intervalMs ?? 60_000;
+    this.concurrency = options.concurrency ?? 2;
     this.leaseMs = options.leaseMs ?? 60_000;
     this.heartbeatMs = options.heartbeatMs ?? Math.floor(this.leaseMs / 3);
     this.executionTimeoutMs = options.executionTimeoutMs ?? 30 * 60_000;
@@ -359,6 +369,7 @@ export class CloudWorkspaceSetupWorker {
     this.recoveryConfig = options.recoveryConfig ?? null;
 
     safeInteger(this.intervalMs, "intervalMs", 100, 60_000);
+    safeInteger(this.concurrency, "concurrency", 1, 8);
     safeInteger(this.leaseMs, "leaseMs", 1_000, 60 * 60_000);
     safeInteger(this.heartbeatMs, "heartbeatMs", 250, this.leaseMs - 1);
     safeInteger(
@@ -388,6 +399,10 @@ export class CloudWorkspaceSetupWorker {
     this.stopped = true;
     for (const controller of this.activeControllers) controller.abort();
     await this.scheduler.stop();
+    // An explicit runOnce may also be awaiting its claim. A claim that finishes
+    // after stop is retired below without starting an external command.
+    await this.dispatching?.catch(() => undefined);
+    await Promise.allSettled(this.activeExecutions.values());
   }
 
   private async tick(): Promise<void> {
@@ -395,7 +410,9 @@ export class CloudWorkspaceSetupWorker {
     this.ticking = true;
     try {
       let processed = 0;
-      while (!this.stopped && processed < 10 && (await this.runOnce())) {
+      while (!this.stopped && processed < 10) {
+        const decision = await this.dispatch();
+        if (decision.kind === "none") break;
         processed += 1;
       }
     } finally {
@@ -404,12 +421,17 @@ export class CloudWorkspaceSetupWorker {
   }
 
   private async readNextDelayMs(): Promise<number | null> {
+    // Completion wakes the scheduler when a slot opens. Reading an already-due
+    // queue while full would otherwise arm a useless 100ms claim loop.
+    if (this.stopped || this.activeExecutions.size >= this.concurrency) return null;
     return withSystemTx(this.pool, async tx => {
       const started = Date.now();
       const result = await tx.query<{ delay_ms: string | null }>(
         `SELECT extract(epoch FROM (min(due_at) - now())) * 1000 AS delay_ms FROM (
-         SELECT CASE WHEN sr.state = 'queued'
-             THEN sr.next_attempt_at ELSE sr.lease_expires_at END AS due_at
+         SELECT greatest(CASE WHEN sr.state = 'queued'
+             THEN sr.next_attempt_at ELSE sr.lease_expires_at END,
+             (SELECT max(held.lease_expires_at) FROM cloud_workspace_setup_runs held
+              WHERE held.workspace_id = cw.id AND held.org_id = cw.org_id AND held.state = 'running')) AS due_at
          FROM cloud_workspace_setup_runs sr
          JOIN cloud_workspaces cw ON cw.id = sr.workspace_id AND cw.org_id = sr.org_id
            AND cw.current_generation = sr.generation
@@ -420,13 +442,14 @@ export class CloudWorkspaceSetupWorker {
          JOIN users account ON account.id = cw.owner_user_id AND account.deleted_at IS NULL AND account.auth_status = 'active'
          JOIN cloud_workspace_provider_bindings pb ON pb.workspace_id = cw.id AND pb.generation = cw.current_generation
          WHERE sr.state IN ('queued', 'running')
+           AND NOT (cw.id = ANY($3::uuid[]))
            AND cw.desired_state = 'running' AND cw.status = 'setting_up' AND cw.deleted_at IS NULL
            AND pb.observed_state = 'running' AND pb.provider_resource_id IS NOT NULL
            AND cloud_workspace_generation_policy_current(cw.id, cw.current_generation, cw.org_id)
            AND cloud_workspace_runtime_authority_live(cw.id, cw.current_generation, cw.owner_user_id, $1)
          UNION ALL SELECT due_at FROM (${recoveryWorkDeadlines}) recovery WHERE $2::boolean
          ) work`,
-        [this.workosEnabled, this.recoveryConfig !== null],
+        [this.workosEnabled, this.recoveryConfig !== null, [...this.activeExecutions.keys()]],
       );
       const delay = result.rows[0]?.delay_ms;
       return delay == null ? null : Number(delay) - (Date.now() - started);
@@ -463,6 +486,7 @@ export class CloudWorkspaceSetupWorker {
            ON pb.workspace_id = cw.id
           AND pb.generation = cw.current_generation
          WHERE cw.desired_state = 'running'
+           AND NOT (cw.id = ANY($2::uuid[]))
            AND cw.status = 'setting_up'
            AND cw.deleted_at IS NULL
            AND pb.observed_state = 'running'
@@ -472,6 +496,11 @@ export class CloudWorkspaceSetupWorker {
            )
            AND cloud_workspace_runtime_authority_live(
              cw.id, cw.current_generation, cw.owner_user_id, $1
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM cloud_workspace_setup_runs held
+             WHERE held.workspace_id = cw.id AND held.org_id = cw.org_id
+               AND held.state = 'running' AND held.lease_expires_at > now()
            )
            AND EXISTS (
              SELECT 1 FROM cloud_workspace_setup_runs sr
@@ -483,6 +512,9 @@ export class CloudWorkspaceSetupWorker {
                )
            )
          ORDER BY (
+           SELECT count(*) FROM cloud_workspace_setup_runs held
+           WHERE held.org_id = cw.org_id AND held.state = 'running' AND held.lease_expires_at > now()
+         ), (
            SELECT min(
              CASE WHEN sr.state = 'queued'
                   THEN sr.next_attempt_at ELSE sr.lease_expires_at END
@@ -497,11 +529,14 @@ export class CloudWorkspaceSetupWorker {
          ), cw.id
          FOR UPDATE OF cw SKIP LOCKED
          LIMIT 1`,
-        [this.workosEnabled],
+        [this.workosEnabled, [...this.activeExecutions.keys()]],
       );
       const workspace = candidate.rows[0];
       if (!workspace) return { kind: "none" };
 
+      // The candidate statement may have started before a competing claim
+      // committed. Recheck live leases in a fresh snapshot under the workspace
+      // lock before choosing any queued attempt.
       const selected = await tx.query<CloudRuntimePinRow & {
         id: string;
         attempt: number;
@@ -545,6 +580,11 @@ export class CloudWorkspaceSetupWorker {
           AND pb.org_id = sr.org_id
          WHERE sr.workspace_id = $1 AND sr.org_id = $2
            AND sr.generation = $3
+           AND NOT EXISTS (
+             SELECT 1 FROM cloud_workspace_setup_runs held
+             WHERE held.workspace_id = $1 AND held.org_id = $2
+               AND held.state = 'running' AND held.lease_expires_at > now()
+           )
            AND (
              (sr.state = 'queued' AND sr.next_attempt_at <= now())
              OR (sr.state = 'running' AND sr.lease_expires_at <= now())
@@ -1292,6 +1332,10 @@ export class CloudWorkspaceSetupWorker {
   }
 
   private async execute(setup: ClaimedSetup): Promise<void> {
+    if (this.stopped) {
+      await this.recordFailure(setup, { code: "setup_worker_stopped", retryable: true });
+      return;
+    }
     const controller = new AbortController();
     this.activeControllers.add(controller);
     let failure: SafeSetupFailure | null = null;
@@ -1345,12 +1389,14 @@ export class CloudWorkspaceSetupWorker {
     // Admission expiry and the execution fence make a late ignored command
     // unable to publish readiness after this bounded side wins the race.
     const execution = Promise.resolve().then(async () => {
+      if (controller.signal.aborted) throw SETUP_EXECUTION_ABORTED;
       await withSystemTx(this.pool, async tx => {
         await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [setup.organizationId]);
         await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [setup.workspaceId, setup.organizationId]);
         const supported = await requireSupportedCloudWorkspaceGeneration(tx, setup);
         await requirePinnedCloudRuntime(tx, supported.runtimePin, cloudRuntimeQualificationMode());
       });
+      if (controller.signal.aborted) throw SETUP_EXECUTION_ABORTED;
       return this.executor.execute(setup, controller.signal);
     });
     try {
@@ -1394,11 +1440,33 @@ export class CloudWorkspaceSetupWorker {
     }
   }
 
-  async runOnce(): Promise<boolean> {
-    if (this.recoveryConfig && await advanceCloudAutomaticRecovery(this.pool, this.recoveryConfig, this.workosEnabled)) return true;
+  private dispatch(): Promise<DispatchDecision> {
+    if (this.stopped || this.dispatching || this.activeExecutions.size >= this.concurrency) {
+      return Promise.resolve({ kind: "none" });
+    }
+    this.dispatching = this.claimAndStart().finally(() => { this.dispatching = null; });
+    return this.dispatching;
+  }
+
+  private async claimAndStart(): Promise<DispatchDecision> {
+    if (this.recoveryConfig && await advanceCloudAutomaticRecovery(this.pool, this.recoveryConfig, this.workosEnabled)) return { kind: "processed" };
     const decision = await this.claim();
+    if (decision.kind !== "claimed") return decision;
+    const completion = this.execute(decision.setup).finally(() => {
+      this.activeExecutions.delete(decision.setup.workspaceId);
+      this.scheduler.notify();
+    });
+    this.activeExecutions.set(decision.setup.workspaceId, completion);
+    // Background executions have the same result/lease handling as runOnce,
+    // but must not leave an unhandled rejection if SQL publication fails.
+    void completion.catch(() => this.logger.error("[cloud-workspace] setup execution failed; will retry"));
+    return { kind: "executing", completion };
+  }
+
+  async runOnce(): Promise<boolean> {
+    const decision = await this.dispatch();
     if (decision.kind === "none") return false;
-    if (decision.kind === "claimed") await this.execute(decision.setup);
+    if (decision.kind === "executing") await decision.completion;
     return true;
   }
 }

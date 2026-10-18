@@ -121,6 +121,7 @@ d("cloud workspace setup worker", () => {
   let organizationId: string;
   let teamId: string;
   let ownerId: string;
+  const setupPrerequisites = new Map<string, Awaited<ReturnType<typeof seedCanonicalCloudWorkspacePrerequisites>>>();
 
   beforeAll(() => {
     pool = new pg.Pool({ connectionString: url, max: 8 });
@@ -131,6 +132,7 @@ d("cloud workspace setup worker", () => {
   });
 
   beforeEach(async () => {
+    setupPrerequisites.clear();
     await resetMigratedTestDatabase(pool);
     await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     ownerId = randomUUID();
@@ -175,15 +177,17 @@ d("cloud workspace setup worker", () => {
     executionFence?: number;
     leaseOwner?: string | null;
     leaseExpired?: boolean;
-  }) => {
+  }, scope = { organizationId, teamId, ownerId }) => {
+    const { organizationId, teamId, ownerId } = scope;
     if (input?.v4) await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     const workspaceId = randomUUID();
     const settingsSnapshot = { schemaVersion: 1, values: {} };
     const result = await withSystemTx(pool, async (tx) => {
-      const canonical = await seedCanonicalCloudWorkspacePrerequisites(tx, {
+      const canonical = setupPrerequisites.get(organizationId) ?? await seedCanonicalCloudWorkspacePrerequisites(tx, {
         organizationId,
         ownerUserId: ownerId,
       });
+      setupPrerequisites.set(organizationId, canonical);
       await tx.query(
         `INSERT INTO cloud_workspaces (
            id, org_id, team_id, created_by, display_name,
@@ -400,6 +404,9 @@ d("cloud workspace setup worker", () => {
       maxClaims?: number;
       leaseMs?: number;
       heartbeatMs?: number;
+      concurrency?: number;
+      intervalMs?: number;
+      retryBaseMs?: number;
       sanitizeLog?: (value: string) => string;
       pool?: pg.Pool;
     } = {},
@@ -410,11 +417,12 @@ d("cloud workspace setup worker", () => {
       sanitizeLog:
         input.sanitizeLog ??
         ((value) => value.replaceAll("secret-value", "[redacted]")),
-      intervalMs: 1_000,
+      intervalMs: input.intervalMs ?? 1_000,
+      ...(input.concurrency === undefined ? {} : { concurrency: input.concurrency }),
       leaseMs: input.leaseMs ?? 10_000,
       heartbeatMs: input.heartbeatMs ?? 4_000,
       executionTimeoutMs: 30_000,
-      retryBaseMs: 1_000,
+      retryBaseMs: input.retryBaseMs ?? 1_000,
       maxClaims: input.maxClaims ?? 3,
       workerId: input.workerId ?? `setup-worker-${randomUUID()}`,
       logger: { info() {}, warn() {}, error() {} },
@@ -478,6 +486,246 @@ d("cloud workspace setup worker", () => {
 
   const installerSuccess = { schema: "zeros.diagnostic/v1", component: "installer", stage: "done", ok: true,
     exitCode: 0, timedOut: false, failedChecks: [] };
+
+  describe("bounded execution concurrency", () => {
+    it("fills two slots and refills a completed slot while the first setup remains blocked", async () => {
+      const seeded = [await seedSetup(), await seedSetup(), await seedSetup()];
+      const releases = seeded.map(() => new Deferred<CloudWorkspaceSetupResult>());
+      const executor = new FakeExecutor(releases.map(release => async () => release.promise));
+      const current = worker(executor, { intervalMs: 60_000 });
+      const stop = current.start();
+      try {
+        await vi.waitFor(() => expect(executor.calls).toHaveLength(2));
+        expect(new Set(executor.calls.map(call => call.workspaceId)).size).toBe(2);
+        for (let index = 0; index < 20; index++) current.notify();
+        expect(await current.runOnce()).toBe(false);
+        expect(executor.calls).toHaveLength(2);
+        releases[1]!.resolve(await registeredSuccessfulSetup(executor.calls[1]!, "second ready"));
+        await vi.waitFor(() => expect(executor.calls).toHaveLength(3));
+        expect(executor.signals[0]!.aborted).toBe(false);
+        expect(new Set(executor.calls.map(call => call.workspaceId))).toEqual(new Set(seeded.map(row => row.workspaceId)));
+      } finally {
+        await stop();
+        for (const [index, release] of releases.entries()) {
+          if (executor.calls[index]) release.resolve(successfulSetup(executor.calls[index]!, "late result"));
+        }
+      }
+    });
+
+    it("claims a newly queued workspace from a notification while another execution is held", async () => {
+      await seedSetup();
+      const release = new Deferred<CloudWorkspaceSetupResult>();
+      const executor = new FakeExecutor([async () => release.promise, async () => release.promise]);
+      const current = worker(executor, { intervalMs: 60_000 });
+      const stop = current.start();
+      try {
+        await vi.waitFor(() => expect(executor.calls).toHaveLength(1));
+        const arriving = await seedSetup();
+        current.notify(); current.notify();
+        await vi.waitFor(() => expect(executor.calls).toHaveLength(2));
+        expect(executor.calls[1]!.workspaceId).toBe(arriving.workspaceId);
+        expect(executor.signals.every(signal => !signal.aborted)).toBe(true);
+      } finally {
+        await stop();
+        if (executor.calls[0]) release.resolve(successfulSetup(executor.calls[0], "late result"));
+      }
+    });
+
+    it("does not claim a second queued attempt while another replica owns the workspace lease", async () => {
+      const seeded = await seedSetup();
+      await pool.query(`UPDATE cloud_workspace_setup_runs SET state='running',claim_count=1,execution_fence=1,
+        lease_owner='another-replica',last_heartbeat_at=now(),started_at=now(),lease_expires_at=now()+interval '1 minute'
+        WHERE id=$1`, [seeded.setupRunId]);
+      await pool.query(`INSERT INTO cloud_workspace_setup_runs(workspace_id,generation,org_id,attempt)
+        VALUES ($1,1,$2,2)`, [seeded.workspaceId, organizationId]);
+      const executor = new FakeExecutor([async execution => successfulSetup(execution, "must not launch")]);
+      const current = worker(executor);
+      expect(await current.runOnce()).toBe(false);
+      expect(executor.calls).toHaveLength(0);
+      const next = await (current as unknown as { readNextDelayMs(): Promise<number | null> }).readNextDelayMs();
+      expect(next).toBeGreaterThan(0);
+    });
+
+    it("rechecks workspace exclusion after a stale candidate snapshot acquires its row lock", async () => {
+      const seeded = await seedSetup();
+      await pool.query(`INSERT INTO cloud_workspace_setup_runs(workspace_id,generation,org_id,attempt)
+        VALUES ($1,1,$2,2)`, [seeded.workspaceId, organizationId]);
+      const barrierKey = 791035;
+      const blocker = await pool.connect();
+      await blocker.query("SELECT pg_advisory_lock($1)", [barrierKey]);
+      const delayedPool = { connect: async () => {
+        const client = await pool.connect();
+        return new Proxy(client, { get(target, property) {
+          if (property === "query") return async (sql: string, ...args: unknown[]) => {
+            // Freeze the candidate statement's snapshot before the first claim
+            // commits, without locking the workspace until the barrier opens.
+            const statement = sql.includes("SELECT cw.id, cw.org_id, cw.owner_user_id, cw.current_generation")
+              ? `WITH claim_snapshot AS MATERIALIZED (SELECT pg_advisory_xact_lock(${barrierKey})) ` +
+                sql.replace("FROM cloud_workspaces cw", "FROM cloud_workspaces cw CROSS JOIN claim_snapshot") : sql;
+            return (target.query as (...values: unknown[]) => Promise<unknown>).call(target, statement, ...args);
+          };
+          const value = Reflect.get(target, property);
+          return typeof value === "function" ? value.bind(target) : value;
+        } });
+      } } as unknown as pg.Pool;
+      const contenderExecutor = new FakeExecutor([async execution => successfulSetup(execution, "must not launch")]);
+      const contender = worker(contenderExecutor, { pool: delayedPool });
+      const competing = contender.runOnce();
+      const entered = new Deferred<void>(), release = new Deferred<CloudWorkspaceSetupResult>();
+      const executor = new FakeExecutor([async () => { entered.resolve(); return release.promise; }]);
+      const current = worker(executor);
+      let first: Promise<boolean> | undefined;
+      try {
+        await vi.waitFor(async () => expect((await pool.query(`SELECT count(*)::int AS n FROM pg_locks
+          WHERE locktype='advisory' AND classid=0 AND objid=$1 AND NOT granted`, [barrierKey])).rows[0].n).toBe(1));
+        first = current.runOnce(); await entered.promise;
+        await blocker.query("SELECT pg_advisory_unlock($1)", [barrierKey]);
+        await competing;
+        expect(contenderExecutor.calls).toHaveLength(0);
+        expect((await pool.query(`SELECT state FROM cloud_workspace_setup_runs WHERE workspace_id=$1 AND attempt=2`, [seeded.workspaceId])).rows[0].state).toBe("queued");
+      } finally {
+        await blocker.query("SELECT pg_advisory_unlock($1)", [barrierKey]); blocker.release();
+        await current.stop(); await contender.stop(); await Promise.all([first, competing]);
+        if (executor.calls[0]) release.resolve(successfulSetup(executor.calls[0], "late result"));
+      }
+    });
+
+    it("never starts an executor after shutdown begins during its claim", async () => {
+      const seeded = await seedSetup();
+      const executor = new FakeExecutor([async execution => successfulSetup(execution, "must not launch")]);
+      const current = worker(executor);
+      const claimEntered = new Deferred<void>(), releaseClaim = new Deferred<void>();
+      const target = current as unknown as { claim(): Promise<unknown> };
+      const originalClaim = target.claim.bind(current);
+      const claim = vi.spyOn(target, "claim").mockImplementation(async () => {
+        const result = await originalClaim();
+        claimEntered.resolve(); await releaseClaim.promise;
+        return result;
+      });
+      const running = current.runOnce();
+      await claimEntered.promise;
+      const stopping = current.stop();
+      releaseClaim.resolve();
+      try {
+        await Promise.all([running, stopping]);
+        expect(executor.calls).toHaveLength(0);
+        const row = (await pool.query("SELECT state,error_code,lease_owner FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0];
+        expect(row).toEqual({ state: "queued", error_code: "setup_worker_stopped", lease_owner: null });
+      } finally { claim.mockRestore(); await current.stop(); }
+    });
+
+    it("prefers another organization over the active organization's older backlog", async () => {
+      await seedSetup();
+      const entered = new Deferred<void>(), release = new Deferred<CloudWorkspaceSetupResult>();
+      const executor = new FakeExecutor([async () => { entered.resolve(); return release.promise; }, async () => release.promise]);
+      const current = worker(executor);
+      const first = current.runOnce(); await entered.promise;
+      let second: Promise<boolean> | undefined;
+      try {
+        await seedSetup();
+        const scope = await withSystemTx(pool, async tx => {
+          const otherOrg = randomUUID(), otherTeam = randomUUID();
+          await tx.query(`INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed)
+            VALUES ($1,$2,'Other Setup Org',$3,false,true)`, [otherOrg, `setup-${otherOrg}`, ownerId]);
+          await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [otherOrg, ownerId]);
+          await tx.query(`INSERT INTO teams(id,org_id,slug,name,is_default,created_by)
+            VALUES ($1,$2,'default','Default',true,$3)`, [otherTeam, otherOrg, ownerId]);
+          await tx.query("INSERT INTO team_members(team_id,org_id,user_id,role) VALUES($1,$2,$3,'maintainer')", [otherTeam, otherOrg, ownerId]);
+          return { organizationId: otherOrg, teamId: otherTeam, ownerId };
+        });
+        const other = await seedSetup(undefined, scope);
+        second = current.runOnce();
+        await vi.waitFor(() => expect(executor.calls).toHaveLength(2));
+        expect(executor.calls[1]!.workspaceId).toBe(other.workspaceId);
+        expect(executor.calls[1]!.organizationId).toBe(scope.organizationId);
+      } finally {
+        await current.stop(); await Promise.all([first, second]);
+        release.resolve(successfulSetup(executor.calls[0]!, "late result"));
+      }
+    });
+
+    it("refills after a retryable failure without pulling its future retry deadline forward", async () => {
+      await seedSetup(); await seedSetup(); await seedSetup();
+      const release = new Deferred<CloudWorkspaceSetupResult>();
+      const executor = new FakeExecutor([
+        async () => release.promise,
+        async () => { throw new CloudWorkspaceSetupError("setup_provider_rate_limited", "closed retry", true); },
+        async () => release.promise,
+        async execution => registeredSuccessfulSetup(execution, "retried"),
+      ]);
+      const current = worker(executor, { intervalMs: 60_000, retryBaseMs: 30_000 });
+      const stop = current.start();
+      try {
+        await vi.waitFor(() => expect(executor.calls).toHaveLength(3));
+        const failed = executor.calls[1]!;
+        expect((await pool.query(`SELECT state,claim_count,next_attempt_at>now() AS waiting
+          FROM cloud_workspace_setup_runs WHERE id=$1`, [failed.setupRunId])).rows[0])
+          .toEqual({ state: "queued", claim_count: 1, waiting: true });
+        // Free both live slots. Their deliberately invalid proofs must not make
+        // the rate-limited workspace eligible before its durable retry time.
+        release.resolve(successfulSetup(executor.calls[0]!, "unregistered proof"));
+        await vi.waitFor(async () => expect((await pool.query(`SELECT count(*)::int AS n FROM cloud_workspace_setup_runs
+          WHERE state='running'`)).rows[0].n).toBe(0));
+        expect(await current.runOnce()).toBe(false);
+        expect(executor.calls).toHaveLength(3);
+        await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now()-interval '1 second' WHERE id=$1", [failed.setupRunId]);
+        current.notify();
+        await vi.waitFor(async () => expect((await pool.query("SELECT state FROM cloud_workspace_setup_runs WHERE id=$1", [failed.setupRunId])).rows[0].state).toBe("succeeded"));
+        expect(executor.calls).toHaveLength(4);
+        expect(executor.calls[3]!.executionFence).toBe(2);
+      } finally { await stop(); if (executor.calls[0]) release.resolve(successfulSetup(executor.calls[0], "late result")); }
+    });
+
+    it("does not reclaim its own expired execution while another replica may fence it", async () => {
+      const seeded = await seedSetup();
+      const entered = new Deferred<void>(), release = new Deferred<CloudWorkspaceSetupResult>();
+      const executor = new FakeExecutor([async () => { entered.resolve(); return release.promise; }]);
+      const current = worker(executor);
+      const running = current.runOnce(); await entered.promise;
+      try {
+        await pool.query(`UPDATE cloud_workspace_setup_runs SET lease_expires_at=now()-interval '1 second',
+          last_heartbeat_at=now()-interval '2 seconds' WHERE id=$1`, [seeded.setupRunId]);
+        expect(await current.runOnce()).toBe(false);
+        const contender = worker(new FakeExecutor([async execution => registeredSuccessfulSetup(execution, "new owner")]));
+        expect(await contender.runOnce()).toBe(true);
+        release.resolve(successfulSetup(executor.calls[0]!, "late old owner"));
+        await running;
+        expect((await pool.query("SELECT state,claim_count,log_excerpt FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0])
+          .toEqual({ state: "succeeded", claim_count: 2, log_excerpt: "new owner" });
+        expect(executor.calls).toHaveLength(1);
+      } finally { await current.stop(); await running; release.resolve(successfulSetup(executor.calls[0]!, "late result")); }
+    });
+
+    it.each(["stop", "delete"] as const)("cancels one active setup for %s without aborting its neighbor", async operation => {
+      await seedSetup(); await seedSetup();
+      const releases = [new Deferred<CloudWorkspaceSetupResult>(), new Deferred<CloudWorkspaceSetupResult>()];
+      const executor = new FakeExecutor(releases.map(release => async () => release.promise));
+      const current = worker(executor, { intervalMs: 60_000 });
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      const stop = current.start();
+      try {
+        await vi.waitFor(() => expect(executor.calls).toHaveLength(2));
+        const cancelled = executor.calls[0]!, neighbor = executor.calls[1]!;
+        await withSystemTx(pool, async tx => {
+          await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [cancelled.workspaceId]);
+          await tx.query(`UPDATE cloud_workspaces SET desired_state=$2,status=$3 WHERE id=$1`,
+            [cancelled.workspaceId, operation === "delete" ? "deleted" : "stopped", operation === "delete" ? "deleting" : "stopping"]);
+          await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId: cancelled.workspaceId, organizationId,
+            reason: operation === "delete" ? "workspace_delete_requested" : "workspace_stop_requested" });
+        });
+        await vi.advanceTimersByTimeAsync(4_000);
+        await vi.waitFor(() => expect(executor.signals[0]!.aborted).toBe(true));
+        expect(executor.signals[1]!.aborted).toBe(false);
+        releases[1]!.resolve(await registeredSuccessfulSetup(neighbor, "neighbor ready"));
+        await vi.waitFor(async () => expect((await pool.query("SELECT state FROM cloud_workspace_setup_runs WHERE id=$1", [neighbor.setupRunId])).rows[0].state).toBe("succeeded"));
+        releases[0]!.resolve(successfulSetup(cancelled, "stale cancellation result"));
+        expect((await pool.query("SELECT state FROM cloud_workspace_setup_runs WHERE id=$1", [cancelled.setupRunId])).rows[0].state).toBe("cancelled");
+      } finally {
+        await stop(); vi.useRealTimers();
+        for (const [index, release] of releases.entries()) if (executor.calls[index]) release.resolve(successfulSetup(executor.calls[index]!, "late result"));
+      }
+    });
+  });
   const admissionEndpoint = "https://control.example.test/internal/v1/cloud-workspaces/setup/admission";
   const linuxSetupOptions = (admissionBroker: CloudWorkspaceSetupAdmissionBroker, commandRunner: CloudWorkspaceCommandRunner) => ({
     admissionBroker, commandRunner, diagnosticPool: pool,
