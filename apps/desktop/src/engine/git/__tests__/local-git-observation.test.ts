@@ -7,6 +7,15 @@ import * as credentialBroker from "../credential-broker";
 
 let directory: string;
 beforeEach(async () => { directory = await mkdtemp(path.join(tmpdir(), "zeros-engine-git-observation-")); });
+
+/** A copied shim is recognized by its exact size without being opened. Pad a
+ * fixture script with a trailing comment to the real Git shim's byte length. */
+function asCopiedShim(script: string): string {
+  const size = Buffer.byteLength(credentialBroker.credentialShimScriptsForTesting().git, "utf8");
+  const padding = size - Buffer.byteLength(script, "utf8") - 2;
+  if (padding < 0) throw new Error("fixture script is larger than the shim");
+  return `${script}#${"x".repeat(padding)}\n`;
+}
 afterEach(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); await rm(directory, { recursive: true, force: true }); });
 
 describe("Local engine Git observations", () => {
@@ -34,7 +43,7 @@ describe("Local engine Git observations", () => {
     expect(engineGitBinary()).toBe(change === "created" ? second : first);
     if (change === "created") await writeFile(first, binary, { mode: 0o700 });
     else if (change === "unexecutable") await chmod(first, 0o600);
-    else await writeFile(first, '#!/bin/sh\nreal="${ZEROS_REAL_GIT_PATH:?}"\nexec "$real" "$@"\n');
+    else await writeFile(first, asCopiedShim('#!/bin/sh\nreal="${ZEROS_REAL_GIT_PATH:?}"\nexec "$real" "$@"\n'));
     expect(engineGitBinary()).toBe(change === "created" ? first : second);
   });
 
@@ -60,7 +69,7 @@ describe("Local engine Git observations", () => {
     const source = '#!/bin/sh\nreal="${ZEROS_REAL_GIT_PATH:?}"\nprintf "shim-health\\n" >> "$ZEROS_TEST_SPAWN_LOG"\nexec "$real" "$@"\n';
     await writeFile(path.join(shim, "git"), source, { mode: 0o700 });
     if (kind === "alias") await symlink(shim, alias);
-    if (kind === "copied") { await mkdir(alias); await writeFile(path.join(alias, "git"), source, { mode: 0o700 }); }
+    if (kind === "copied") { await mkdir(alias); await writeFile(path.join(alias, "git"), asCopiedShim(source), { mode: 0o700 }); }
     const env = { ...process.env, PATH: `${kind === "directory" ? shim : alias}${path.delimiter}${bin}`, ZEROS_REAL_GIT_PATH: path.join(bin, "git"), ZEROS_TEST_SPAWN_LOG: log };
     expect((await runFile("git", ["--version"], { env })).stdout).toBe("fixture\n");
     for (const [key, value] of Object.entries(env)) {

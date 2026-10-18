@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import fs from "node:fs";
+import { execFileSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as outerBroker from "../credential-broker";
@@ -89,6 +92,25 @@ describe("credential shim executable resolution", () => {
     expect(inner.ZEROS_REAL_GIT_PATH).toBe(path.join(binaryDirectory, "git"));
     expect(inner.ZEROS_REAL_GH_PATH).toBe(path.join(binaryDirectory, "gh"));
     if (kind === "directory symlink") expect(inner.PATH!.split(path.delimiter)).not.toContain(alias);
+  });
+
+  it("never opens PATH candidates, so a FIFO named git cannot block shell preparation", async () => {
+    const fifoDirectory = path.join(directory, "fifo");
+    await mkdir(fifoDirectory);
+    execFileSync("mkfifo", ["-m", "755", path.join(fifoDirectory, "git")]);
+    const open = vi.spyOn(fs, "openSync").mockImplementation(() => {
+      throw new Error("a PATH candidate was opened");
+    });
+    syncBuiltinESMExports();
+    try {
+      const prepared = await innerBroker.prepareGitCredentialShellEnvironment(
+        "inner", `${fifoDirectory}${path.delimiter}${binaryDirectory}${path.delimiter}${process.env.PATH ?? ""}`);
+      expect(prepared).not.toBeNull();
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      open.mockRestore();
+      syncBuiltinESMExports();
+    }
   });
 
   it.each(["git", "gh"])("rejects a self-referencing %s even after the broker dies", async (name) => {

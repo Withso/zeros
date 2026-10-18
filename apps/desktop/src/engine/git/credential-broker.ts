@@ -15,7 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { accessSync, closeSync, constants as fsConstants, fstatSync, openSync, readSync, realpathSync } from "node:fs";
+import { accessSync, constants as fsConstants, realpathSync, statSync } from "node:fs";
 import { chmod, chown, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -275,24 +275,30 @@ function withoutCredentialShimDirectories(pathValue: string): string {
   }).join(path.delimiter);
 }
 
-/** Inspect a bounded prefix as well as the resolved directory: a terminal may
- * inherit an older broker's shim through a symlink or a copied executable. */
+/** A terminal may inherit an older broker's shim directly, through a
+ * symlinked directory or executable, or as a copy. Resolve it and recognize
+ * the broker's own directory, or a regular file of exactly a shim script's
+ * size (Git binaries are megabytes). Nothing is opened, so a FIFO or device on
+ * PATH cannot block this synchronous check; a shim this misses is still
+ * refused by its own recursion guard. */
 function isCredentialShim(candidate: string): boolean {
   const resolved = realpathSync(candidate);
   if (isCredentialShimDirectory(path.dirname(resolved))) return true;
-  // Read-only open of the already-resolved executable, validated through its
-  // own descriptor. Whoever can swap or plant files in a PATH directory
-  // already chooses the Git this engine runs, so no stronger flag adds a
-  // boundary here.
-  const fd = openSync(resolved, "r");
-  try {
-    if (!fstatSync(fd).isFile()) return true;
-    const prefix = Buffer.alloc(1024);
-    const length = readSync(fd, prefix, 0, prefix.length, 0);
-    return /real="\$\{ZEROS_REAL_(?:GIT|GH)_PATH[:?]/.test(prefix.toString("utf8", 0, length));
-  } finally {
-    closeSync(fd);
-  }
+  const info = statSync(resolved);
+  return info.isFile() && credentialShimSizes().has(info.size);
+}
+
+/** Test seam: the exact shim scripts this engine version writes. */
+export function credentialShimScriptsForTesting(): { git: string; gh: string } {
+  return { git: GIT_SHIM_SCRIPT, gh: GH_SHIM_SCRIPT };
+}
+
+let shimSizes: ReadonlySet<number> | undefined;
+function credentialShimSizes(): ReadonlySet<number> {
+  return (shimSizes ??= new Set([
+    Buffer.byteLength(GIT_SHIM_SCRIPT, "utf8"),
+    Buffer.byteLength(GH_SHIM_SCRIPT, "utf8"),
+  ]));
 }
 
 function findExecutable(name: string, pathValue: string, skipCredentialShims = false): string | null {
