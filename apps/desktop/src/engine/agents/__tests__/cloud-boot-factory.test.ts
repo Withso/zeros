@@ -388,13 +388,18 @@ describe("genuine boot execution factory", () => {
   it("surviving background descendants retain the selected warm authority and run provenance until retirement", async () => {
     vi.useFakeTimers();
     const f = await fixture(), factory = f.register(f.create()), prepared = await f.prepare(factory);
+    expect(factory.hasActorWork(f.provenance.actorSessionId)).toBe(false);
     const first = factory.reserveBootTurn(prepared.execution, prepared.selection); factory.markNativeHandoff(prepared.execution, first);
+    expect(factory.hasActorWork(f.provenance.actorSessionId)).toBe(true);
     await factory.settleBootTurn(prepared.execution, first);
+    expect(factory.hasActorWork(f.provenance.actorSessionId)).toBe(false);
     await f.publish(2, { ...f.provider, authorityExpiresAt: new Date(1_791_468_001_000).toISOString() });
     const next = factory.selectBoot(f.input), turn = factory.reserveBootTurn(prepared.execution, next);
     factory.markNativeHandoff(prepared.execution, turn);
     vi.spyOn(prepared.execution.coordinator, "hasBackgroundServers").mockResolvedValue(true);
     await factory.settleBootTurn(prepared.execution, turn);
+    expect(factory.hasActorWork(f.provenance.actorSessionId)).toBe(true);
+    expect(factory.hasActorWork(randomUUID())).toBe(false);
     executionModule.cloudBootNativeAuthority(next).lifetime.assertLive();
     expect(factory.bootScopeActivity([])).toMatchObject({ background: 1, scopes: [
       { phase: "background", credentialRun: { cacheRevision: 2, credentialId: f.provider.credentialId } },
@@ -403,6 +408,7 @@ describe("genuine boot execution factory", () => {
     await vi.waitFor(() => expect(prepared.domain.stopAndProve).toHaveBeenCalled());
     expect(executionModule.cloudExecutionLifetime(prepared.execution).signal.reason).toMatchObject({ code: "cloud_agent_credential_expired" });
     await vi.waitFor(() => expect(factory.bootScopeActivity([]).scopes).toHaveLength(0));
+    expect(factory.hasActorWork(f.provenance.actorSessionId)).toBe(false);
   });
   it("whole-session Stop proves this host only and leaves sibling authority and boot cache live", async () => {
     const f = await fixture(), factory = f.register(f.create()), first = await f.prepare(factory);

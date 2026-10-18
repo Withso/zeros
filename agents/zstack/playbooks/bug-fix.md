@@ -72,6 +72,10 @@
    For periodic disconnects, inspect client retirement timers before blaming
    server idle limits. Test real server closure, reconnect acknowledgement,
    durable replay and bounded backoff; distinguish planned rotation in logs.
+   For actor cleanup, count shared sockets, pending admissions, durable commands and
+   unproved native work. Fence old confirmation and context flights before
+   releasing registry capacity; test more historical sessions than the live
+   cap, final-release timer cleanup and same-session readmission races.
    For redundant lifecycle writes, test explicit destination navigation with
    admission held across idle drain. Selected-row input alone misses a
    different-row or programmatic open, and joining a retiring flight can

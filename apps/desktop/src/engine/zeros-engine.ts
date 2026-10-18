@@ -4972,7 +4972,7 @@ export class ZerosEngine {
     if (!admission || registration !== this.cloudRuntimeRegistration) return null;
     if (registration.localCommandsNegotiated()) {
       if (!boot || boot !== this.cloudAgentBoot || !boot.active || this.cloudRuntimeAuthorityStopping) return null;
-      try { await boot.confirmAdmission(admission); }
+      try { await boot.confirmAdmission(admission, renew); }
       catch (error) {
         if (renew && registration === this.cloudRuntimeRegistration && boot === this.cloudAgentBoot && boot.active &&
             !this.cloudRuntimeAuthorityStopping && isTransientCloudAgentAuthorityError(error))
@@ -12872,6 +12872,8 @@ export class ZerosEngine {
    *  terminals are NOT torn down here — they're engine-owned and persist for the
    *  other devices (see the note at the end of this method). */
   private handleDisconnect(client: TransportClient): void {
+    if (this.cloudWorker && client.kind === "cloud" && client.cloudActor)
+      this.cloudAgentBoot?.releaseActor(client.cloudActor.sessionId, client.id);
     this.residentReplay.release(client);
     if (this.cloudWorker) this.cloudUserPresence.release(client);
     void this.cloudLanguageServices?.release(client.id).catch(()=>this.handleCloudRuntimeAuthorityLoss());
@@ -12954,7 +12956,10 @@ export class ZerosEngine {
     // it; local (loopback) clients get it as before.
     let cloudLocalCommands;
     if (client.kind === "cloud" && client.cloudActor && client.authorized?.() && !this.cloudRuntimeAuthorityStopping && this.cloudAgentBoot?.active) {
-      try { cloudLocalCommands = this.cloudAgentBoot.metadataFor(client.cloudActor.sessionId); } catch { /* No unconfirmed peer advertisement. */ }
+      try {
+        if (this.cloudWorker) this.cloudAgentBoot.attachActor(client.cloudActor.sessionId, client.id);
+        cloudLocalCommands = this.cloudAgentBoot.metadataFor(client.cloudActor.sessionId);
+      } catch { /* No unconfirmed peer advertisement. */ }
     }
     client.send(
       createMessage({
