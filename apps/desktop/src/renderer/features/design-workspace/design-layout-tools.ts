@@ -1,4 +1,5 @@
 import type { DesignCanvasRect } from "./design-canvas-math";
+import type { DesignRuntimeCoordinateSpace } from "@zeros/protocol/design-runtime";
 
 /** Geometry for the canvas's direct layout tools — padding bands, gap
  * gutters, grid tracks, constraint runs and the size badge — in the selection
@@ -875,6 +876,34 @@ export function designConstraintReferenceRect(
     y: parent.y + border.top,
     width: Math.max(0, parent.width - border.left - border.right),
     height: Math.max(0, parent.height - border.top - border.bottom),
+  };
+}
+
+export function designConstraintReferenceGeometry(parent: {
+  rect: DesignCanvasRect;
+  styles: Record<string, string>;
+  box?: { width: number; height: number };
+  borderCoordinateSpace?: DesignRuntimeCoordinateSpace | null;
+}) {
+  if (parent.borderCoordinateSpace === null) return null;
+  if (!parent.borderCoordinateSpace || !parent.box) {
+    const rect = designConstraintReferenceRect(parent.rect, parent.styles);
+    return { rect, width: rect.width, height: rect.height, matrix: [1, 0, 0, 1, rect.x, rect.y] as DesignRuntimeCoordinateSpace };
+  }
+  const [a, b, c, d, e, f] = parent.borderCoordinateSpace;
+  if (Math.abs(a * d - b * c) < 0.000001) return null;
+  const { border } = designLayoutBoxEdges(parent.styles);
+  const width = Math.max(0, parent.box.width - border.left - border.right);
+  const height = Math.max(0, parent.box.height - border.top - border.bottom);
+  const x = e + a * border.left + c * border.top;
+  const y = f + b * border.left + d * border.top;
+  const xs = [0, a * width, c * height, a * width + c * height];
+  const ys = [0, b * width, d * height, b * width + d * height];
+  return {
+    matrix: [a, b, c, d, x, y] as DesignRuntimeCoordinateSpace,
+    width,
+    height,
+    rect: { x: x + Math.min(...xs), y: y + Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) },
   };
 }
 

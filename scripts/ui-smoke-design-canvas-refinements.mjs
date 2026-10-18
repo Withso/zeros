@@ -529,7 +529,55 @@ export async function runDesignPanDirectoryReplacementSmoke({ page, check }) {
   );
 }
 
+export async function runDesignLayoutAffineCameraSmoke({ page, check }) {
+  await openCanvasFixture(page);
+  await page.evaluate(async () => {
+    const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+    const { updateDesignNodeStylesCached } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    const runtime = designFrameRuntime("ws_design_harness", "home.html");
+    await updateDesignNodeStylesCached("ws_design_harness", {
+      frame: "home.html", sourceVersion: runtime.sourceVersion, nodeId: "home-heading",
+      styles: { position: "absolute", left: "100px", top: "50px", margin: "5px 7px 9px 20px" },
+    });
+  });
+  await page.locator('[data-design-layer-id="home-heading"]').click();
+  const overlay = page.locator('[data-design-element-overlay="home-heading"]');
+  await expect(overlay).toHaveCount(1);
+  const runtime = page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]');
+  const child = runtime.locator('[data-oid="home-heading"]');
+  const parent = runtime.locator('[data-oid="home-hero"]');
+  const local = (locator) => locator.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  });
+  const original = await local(child);
+  const parentOriginal = await local(parent);
+  const screen = await child.boundingBox();
+  const start = { x: screen.x + screen.width / 2, y: screen.y + screen.height / 2 };
+  const writes = await transactionWrites(page);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 40, start.y + 20, { steps: 5 });
+  await expect.poll(() => local(child)).toMatchObject({ x: original.x + 80, y: original.y + 40 });
+  await page.evaluate(async () => {
+    const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+    useDesignWorkspaceUiStore.getState().setViewport("ws_design_harness", { zoom: 0.5, panX: 50, panY: 120 });
+  });
+  await page.mouse.move(start.x + 41, start.y + 20);
+  await expect.poll(async () => {
+    const current = await child.boundingBox();
+    return Math.hypot(current.x - screen.x - 41, current.y - screen.y - 20);
+  }).toBeLessThan(0.5);
+  expect(await local(parent)).toEqual(parentOriginal);
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await expect.poll(() => local(child)).toEqual(original);
+  expect(await transactionWrites(page)).toBe(writes);
+  check("structural movement preserves margins and the world grab anchor across a live camera pan; cancellation restores source", true);
+}
+
 export async function runDesignCanvasRefinementsSmoke(options) {
+  await runDesignLayoutAffineCameraSmoke(options);
   await runDesignFramePointerOwnershipSmoke(options);
   await runDesignNodeResizeCaptureSmoke(options);
   await runDesignGroupResizePointerOwnershipSmoke(options);

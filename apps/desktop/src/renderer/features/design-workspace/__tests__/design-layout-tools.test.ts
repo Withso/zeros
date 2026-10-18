@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  designConstraintReferenceGeometry,
   designConstraintGuidesApply,
   designConstraintReferenceRect,
   designFlexGaps,
@@ -20,6 +21,23 @@ import {
   designSpacingDragValue,
   designSpacingModifiers,
 } from "../design-layout-tools";
+
+describe("affine constraint references", () => {
+  it("projects padding edges through scale and reflection instead of adding local borders to world bounds", () => {
+    const reference = designConstraintReferenceGeometry({
+      rect: { x: 72, y: 72, width: 600, height: 480 },
+      box: { width: 300, height: 240 },
+      borderCoordinateSpace: [2, 0, 0, 2, 72, 72],
+      styles: { borderLeftWidth: "10px", borderTopWidth: "10px", borderRightWidth: "10px", borderBottomWidth: "10px" },
+    });
+    expect(reference).toEqual({ matrix: [2, 0, 0, 2, 92, 92], width: 280, height: 220, rect: { x: 92, y: 92, width: 560, height: 440 } });
+    const turned = designConstraintReferenceGeometry({ rect: { x: 0, y: 0, width: 100, height: 200 }, box: { width: 100, height: 50 }, borderCoordinateSpace: [0, 2, -2, 0, 100, 0], styles: { borderLeftWidth: "5px", borderTopWidth: "10px" } });
+    expect(turned).toEqual({ matrix: [0, 2, -2, 0, 80, 10], width: 95, height: 40, rect: { x: 0, y: 10, width: 80, height: 190 } });
+  });
+  it("does not invent an editable reference for a non-invertible parent", () => {
+    expect(designConstraintReferenceGeometry({ rect: { x: 0, y: 0, width: 10, height: 10 }, borderCoordinateSpace: null, styles: {} })).toBeNull();
+  });
+});
 
 const styles = (overrides: Record<string, string> = {}) => ({
   display: "flex",

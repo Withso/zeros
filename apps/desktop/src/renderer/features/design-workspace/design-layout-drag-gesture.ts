@@ -13,6 +13,7 @@ import { createDesignDragPresentation } from "./design-drag-presentation";
 import type { DesignOperation } from "@zeros/design-core";
 import { designBackgroundWork } from "./state/design-background-work";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
+import { DESIGN_MOVE_ACTIVATION_PIXELS } from "./design-movement-geometry";
 
 const dragOwners = new WeakMap<object, object>();
 
@@ -220,14 +221,14 @@ export function startDesignLayoutDrag(input: {
           grab.x = (start.x - bounds.left) / initialZoom - current.rect.x;
           grab.y = (start.y - bounds.top) / initialZoom - current.rect.y;
         }
-        resolveDrop = createDesignLayoutDropResolver(details, targets);
+        resolveDrop = createDesignLayoutDropResolver(details, targets, { zoom: input.zoom, preserveFreePosition: !!input.details.relocationContext });
         if (moved && !stopped) schedule();
       }));
   const move = (pointer: PointerEvent) => {
     if (pointer.pointerId !== event.pointerId || stopped) return;
     if (
       !moved &&
-      Math.hypot(pointer.clientX - start.x, pointer.clientY - start.y) < 3
+      Math.hypot(pointer.clientX - start.x, pointer.clientY - start.y) < DESIGN_MOVE_ACTIVATION_PIXELS
     )
       return;
     moved = true;
@@ -239,9 +240,10 @@ export function startDesignLayoutDrag(input: {
           input.failed(error);
         }
       });
+    const currentBounds = article.getBoundingClientRect();
     point = {
-      x: details.rect.x + grab.x + (pointer.clientX - start.x) / input.zoom(),
-      y: details.rect.y + grab.y + (pointer.clientY - start.y) / input.zoom(),
+      x: (pointer.clientX - currentBounds.left) / input.zoom(),
+      y: (pointer.clientY - currentBounds.top) / input.zoom(),
     };
     if (!targets) input.paint({ rect: { ...details.rect, ...origin() } });
     // The external visual follows every pointer, even while the source port

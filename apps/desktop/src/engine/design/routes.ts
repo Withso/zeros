@@ -1,4 +1,5 @@
 import { designContextReferenceSchema } from "@zeros/protocol/design-context";
+import { designRelocationSchema } from "@zeros/protocol/design-relocation";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
 import { designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
 import { selectDesignPageHint } from "./page-selection";
@@ -1393,6 +1394,7 @@ export async function handleDesignWorkspaceRoute(
         ...(params.styles
           ? { styles: designMutationStyles(params.styles) }
           : {}),
+        ...(params.relocation !== undefined ? { relocation: designRelocationSchema.parse(params.relocation) } : {}),
         geometry: {
           x: reqNum(params, "x"),
           y: reqNum(params, "y"),

@@ -810,6 +810,7 @@ export function commitDesignMetadata(
   sourceChanges: DesignStorageChange[] = [],
   expected?: DesignMetadataSnapshot,
   restoredId?: string,
+  options?: { rollbackOnFailure?: boolean },
 ): string[] {
   assertDesignWriteAuthorized();
   if (sanitizeDesignDirectoryName(directory) !== directory)
@@ -1023,7 +1024,21 @@ export function commitDesignMetadata(
     journalName(directory),
     source,
   );
-  applyStorageChanges(workspace, directory, changes);
+  try {
+    applyStorageChanges(workspace, directory, changes);
+  } catch (error) {
+    if (!options?.rollbackOnFailure) throw error;
+    const inverse = [...changes].reverse().map(({ file, before, after }) => ({ file, before: after, after: before }));
+    try {
+      writePrivateDesignState(workspace, journalName(directory), JSON.stringify({ version: 1, workspace: path.resolve(workspace), directory, changes: inverse }));
+      applyStorageChanges(workspace, directory, inverse);
+      unlinkSync(journal);
+      syncDirectory(path.dirname(journal));
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], "The Design edit failed and rollback needs recovery. Reopen the workspace before retrying.");
+    }
+    throw error;
+  }
   unlinkSync(journal);
   syncDirectory(path.dirname(journal));
   for (const folder of migrating.values()) rememberManifest(workspace, folder);

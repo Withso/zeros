@@ -86,6 +86,8 @@ import { legacyFrameId } from "./canvas-file";
 import { isDeepStrictEqual } from "node:util";
 import { assertDesignFrameRestorePage, designFramePage, designPageForWrite, designPageFrameFiles } from "./pages";
 import { designTitleSlug } from "./design-naming";
+import type { DesignRelocation } from "@zeros/protocol/design-relocation";
+import { assertDesignRelocationSource, designRelocationRootStyles } from "./relocation-source";
 
 export async function createDesignFrame(
   workspacePath: string,
@@ -669,6 +671,7 @@ export async function restoreDesignFrame(
 async function applyDesignFrameChangesUnlocked(
   workspacePath: string,
   changes: readonly DesignFrameChange[],
+  sourceVersions?: ReadonlyMap<string, string>,
 ): Promise<void> {
   if (changes.length < 1 || changes.length > 2)
     throw new Error("Invalid frame transfer size.");
@@ -723,9 +726,17 @@ async function applyDesignFrameChangesUnlocked(
   }
   if (Object.keys(canvas.frames).length > MAX_FRAME_COUNT)
     throw new Error("The canvas has too many frames.");
+  for (const change of changes) {
+    const before = change.before;
+    const expected = before && sourceVersions?.get(before.file);
+    if (!before || !expected) continue;
+    const identity = await readDesignFrameRenderIdentityFromSource(workspacePath, before.file, before.source);
+    if (identity.sourceVersion !== expected)
+      throw new Error("The frame or its stylesheet dependencies changed before the layer move.");
+  }
   // The metadata journal publishes both source files and geometry as one
   // recoverable Design storage transaction. No half-detached layer is visible.
-  await writeCanvas(workspacePath, canvas, sourceChanges);
+  await writeCanvas(workspacePath, canvas, sourceChanges, { rollbackOnFailure: true });
 }
 
 export async function restoreDesignFrameChanges(
@@ -755,6 +766,7 @@ export async function transferDesignNode(
     parentId?: string;
     beforeId?: string | null;
     styles?: Record<string, string | null>;
+    relocation?: DesignRelocation;
     geometry: DesignFrameGeometry;
   },
 ): Promise<{ frame: string; nodeId: string; changes: DesignFrameChange[] }> {
@@ -764,14 +776,19 @@ export async function transferDesignNode(
       workspacePath,
       input.frame,
     );
-    const identity = await readDesignFrameRenderIdentityFromSource(
+    const relocationStyles = input.relocation ? designRelocationRootStyles(input.relocation) : null;
+    const prepared = input.relocation
+      ? await prepareFrameRenderSourceForFile(workspacePath, from.file, from.source)
+      : null;
+    const identity = prepared ?? await readDesignFrameRenderIdentityFromSource(
       workspacePath,
       from.file,
       from.source,
     );
     if (identity.sourceVersion !== input.sourceVersion)
       throw new Error("The source frame changed before the layer move.");
-    if (input.destinationFrame === from.file)
+    if (prepared) assertDesignRelocationSource(prepared.sanitized, input.nodeId);
+    if (input.destinationFrame === from.file && !relocationStyles)
       throw new Error("Use a node move for layers in the same frame.");
     const fromSource = healDesignOids(from.source).html;
     const sourceDocument = parse(fromSource, { sourceCodeLocationInfo: true });
@@ -781,6 +798,16 @@ export async function transferDesignNode(
     const span = record?.element.sourceCodeLocation;
     if (!record || !span)
       throw new Error("The layer has no movable source span.");
+    if (input.destinationFrame === from.file && relocationStyles) {
+      if (input.destinationSourceVersion !== input.sourceVersion)
+        throw new Error("The destination frame changed before the layer move.");
+      const moved = mutateDesignNodeMoveSource(fromSource, input.nodeId, input.parentId ?? "::zeros-document-body", input.beforeId ?? null);
+      const state = createDesignWebDocumentState({ documentId: "transfer", entryFile: from.file, files: { [from.file]: moved } });
+      const source = mutateDesignNodeStyles(state, { nodeId: input.nodeId, styles: relocationStyles, scope: "inline" }).files[from.file]!;
+      const changes = [{ before: from, after: { ...from, source } }];
+      await applyDesignFrameChangesUnlocked(workspacePath, changes, new Map([[from.file, input.sourceVersion]]));
+      return { frame: from.file, nodeId: input.nodeId, changes };
+    }
     let fragment = fromSource.slice(span.startOffset, span.endOffset);
     const root = record.element.attrs.some(
       (attribute) => attribute.name === "data-zeros-frame-root",
@@ -822,6 +849,13 @@ export async function transferDesignNode(
       );
       if (destinationIdentity.sourceVersion !== input.destinationSourceVersion)
         throw new Error("The destination frame changed before the layer move.");
+      if (prepared) {
+        const target = await prepareFrameRenderSourceForFile(workspacePath, destination.file, destination.source);
+        assertDesignRelocationSource(target.sanitized);
+        const sheets = (source: string) => elementRecords(parse(source)).filter(({ element }) => element.tagName === "style").map(({ element }) => element.childNodes.map((node) => "value" in node ? node.value : "").join(""));
+        if (!isDeepStrictEqual(sheets(prepared.sanitized), sheets(target.sanitized)))
+          throw new Error("These frames use different stylesheets and cannot be combined safely. Move the layer into an independent frame instead.");
+      }
       const destinationSource = healDesignOids(destination.source).html;
       const destinationIds = new Set(
         designNodeRecords(parse(destinationSource)).map(
@@ -918,7 +952,7 @@ export async function transferDesignNode(
         metadata: { id: `frame_${randomUUID().replace(/-/g, "")}`, title: "Frame", kind: "frame" },
       };
     }
-    const styles = input.destinationFrame
+    const styles = relocationStyles ?? (input.destinationFrame
       ? (input.styles ?? {})
       : {
           ...input.styles,
@@ -932,7 +966,7 @@ export async function transferDesignNode(
           "flex-grow": "0",
           "flex-shrink": "0",
           "flex-basis": "auto",
-        };
+        });
     if (Object.keys(styles).length) {
       const state = createDesignWebDocumentState({
         documentId: "transfer",
@@ -949,7 +983,10 @@ export async function transferDesignNode(
       { before: from, after: remaining },
       { before: destination, after },
     ];
-    await applyDesignFrameChangesUnlocked(workspacePath, changes);
+    await applyDesignFrameChangesUnlocked(workspacePath, changes, new Map([
+      [from.file, input.sourceVersion],
+      ...(destination ? [[destination.file, input.destinationSourceVersion!] as const] : []),
+    ]));
     return { frame: after.file, nodeId: input.nodeId, changes };
   });
 }

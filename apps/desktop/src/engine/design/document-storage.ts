@@ -307,6 +307,7 @@ export async function writeCanvas(
   workspacePath: string,
   canvas: CanvasDocument,
   sourceChanges: DesignStorageChange[] = [],
+  options?: { rollbackOnFailure?: boolean },
 ): Promise<string[]> {
   const directory = designDirectoryNameFor(workspacePath);
   if (readDirectoryDesignLayout(workspacePath, directory)?.canvasVersion === 2) {
@@ -383,6 +384,8 @@ export async function writeCanvas(
     source,
     sourceChanges,
     canvas[canvasReadSnapshot],
+    undefined,
+    options,
   );
 }
 

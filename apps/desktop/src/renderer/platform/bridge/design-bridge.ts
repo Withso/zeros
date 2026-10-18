@@ -4,6 +4,7 @@
 // semantics still go through its shared workspaceOp helper, while the design
 // wire vocabulary remains cohesive and cheap for the design shell to import.
 
+import type { DesignRelocation } from "@zeros/protocol/design-relocation";
 import {
   designFoundationManifestSchema,
   designTransactionSchema,
@@ -908,6 +909,7 @@ export interface DesignNodeTransferInput {
   parentId?: string;
   beforeId?: string | null;
   styles?: Record<string, string | null>;
+  relocation?: DesignRelocation;
   x: number;
   y: number;
   w: number;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
-import { designLayoutDrop } from "../design-layout-drag";
+import { createDesignLayoutDropResolver, designLayoutDrop } from "../design-layout-drag";
 
 function node(
   oid: string,
@@ -47,6 +47,30 @@ const a = node("a", "root", 0, 0);
 const b = node("b", "root", 110, 0);
 const c = node("c", "root", 220, 0);
 describe("canvas layout drop intent", () => {
+  it.each([0.5, 1, 8])("uses the moved center and screen-space boundary hysteresis at zoom %s", (zoom) => {
+    const outer = node("outer", null, 0, 0, 900, 700);
+    const inner = node("inner", "outer", 100, 100, 200, 200);
+    const child = { ...node("child", "inner", 150, 150, 20, 20), styles: { position: "absolute", width: "20px", height: "20px" } };
+    const resolve = createDesignLayoutDropResolver(child, [outer, inner, child], { zoom: () => zoom });
+    expect(resolve({ x: 890, y: 690 }, { x: 150, y: 150 })?.parentId).toBe("inner");
+    expect(resolve({ x: 0, y: 0 }, { x: 290 + 7 / zoom, y: 150 })?.parentId).toBe("inner");
+    expect(resolve({ x: 0, y: 0 }, { x: 290 + 9 / zoom, y: 150 })?.parentId).toBe("outer");
+  });
+
+  it("does not treat the empty corner of a rotated parent AABB as a containing parent", () => {
+    const outer = node("outer", null, 0, 0, 500, 500);
+    const parent = { ...node("diamond", "outer", 100, 0, 200, 200), box: { width: 100, height: 100 }, borderCoordinateSpace: [1, 1, -1, 1, 200, 0] } as DesignRuntimeNodeDetails;
+    const child = { ...node("child", "diamond", 180, 80, 10, 10), styles: { position: "absolute" } };
+    const resolve = createDesignLayoutDropResolver(child, [outer, parent, child], { zoom: () => 1 });
+    expect(resolve({ x: 110, y: 10 }, { x: 105, y: 5 })?.parentId).toBe("outer");
+  });
+
+  it("retains free positioning when entering a flex container", () => {
+    const outer = node("outer", null, 0, 0, 900, 700);
+    const child = { ...a, layout: { ...a.layout!, parentId: "outer" }, styles: { ...a.styles, position: "absolute" } };
+    const resolve = createDesignLayoutDropResolver(child, [outer, root, child], { zoom: () => 1, preserveFreePosition: true });
+    expect(resolve({ x: 400, y: 200 }, { x: 400, y: 200 })?.styles.position).toBe("absolute");
+  });
   it("reorders in a flow instead of adding offsets or nesting into a sibling", () => {
     const drop = designLayoutDrop(
       a,

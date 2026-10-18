@@ -7,6 +7,8 @@
 // speaks to it. Authored design files remain HTML/CSS-only: the script below is
 // app-owned, nonce-gated, and removed from every screenshot clone.
 
+import { DESIGN_RELOCATION_INHERITED_PROPERTIES, type DesignRuntimeRelocationContext } from "./design-relocation";
+
 export const DESIGN_RUNTIME_PROTOCOL = "zeros-design-runtime";
 export const DESIGN_RUNTIME_VERSION = 2;
 /** Mirrors design-core's document-scoped style/append target. Never emitted as
@@ -165,6 +167,9 @@ export interface DesignRuntimeNodeDetails {
   /** Affine map from the children's padding-box coordinates to frame space.
    * Includes ancestor transforms, reflections, borders, and container scroll. */
   childCoordinateSpace?: [number, number, number, number, number, number];
+  borderCoordinateSpace?: DesignRuntimeCoordinateSpace | null;
+  parentCoordinateSpace?: DesignRuntimeCoordinateSpace | null;
+  relocationContext?: DesignRuntimeRelocationContext;
   styles: Record<string, string>;
   /** Computed-style keys with a direct active declaration on this element.
    * Omitted by older runtimes; inspector chrome treats omission as unknown. */
@@ -205,9 +210,17 @@ export interface DesignRuntimeNodeGeometry {
   oid: string;
   rect: DesignRuntimeRect;
   box: DesignRuntimeNodeBox;
+  borderCoordinateSpace?: DesignRuntimeCoordinateSpace | null;
+  parentCoordinateSpace?: DesignRuntimeCoordinateSpace | null;
   styles: Record<string, string>;
   /** Populated only when the caller asked for children (gap affordances). */
   children: DesignRuntimeChildGeometry[];
+}
+
+export type DesignRuntimeCoordinateSpace = [number, number, number, number, number, number];
+
+export function isDesignRuntimeCoordinateSpace(value: unknown): value is DesignRuntimeCoordinateSpace {
+  return Array.isArray(value) && value.length === 6 && value.every((entry) => typeof entry === "number" && Number.isFinite(entry));
 }
 
 /** Children one geometry response may describe. Gap handles are drawn between
@@ -580,6 +593,14 @@ function isRuntimeChildrenLayout(
   );
 }
 
+export function isDesignRuntimeRelocationContext(value: unknown): value is DesignRuntimeRelocationContext {
+  return isRecord(value) && isRecord(value.inheritedStyles) &&
+    Object.keys(value.inheritedStyles).length <= 64 &&
+    Object.entries(value.inheritedStyles).every(([key, style]) => key.length <= 128 && typeof style === "string" && style.length <= 2048) &&
+    Array.isArray(value.unsupported) && value.unsupported.length <= 8 &&
+    value.unsupported.every((reason) => typeof reason === "string" && reason.length <= 256);
+}
+
 function isRuntimeNodeDetails(
   value: unknown,
 ): value is DesignRuntimeNodeDetails {
@@ -608,6 +629,9 @@ function isRuntimeNodeDetails(
       (Array.isArray(value.childCoordinateSpace) &&
         value.childCoordinateSpace.length === 6 &&
         value.childCoordinateSpace.every(isFiniteNumber))) &&
+    (value.borderCoordinateSpace === undefined || value.borderCoordinateSpace === null || isDesignRuntimeCoordinateSpace(value.borderCoordinateSpace)) &&
+    (value.parentCoordinateSpace === undefined || value.parentCoordinateSpace === null || isDesignRuntimeCoordinateSpace(value.parentCoordinateSpace)) &&
+    (value.relocationContext === undefined || isDesignRuntimeRelocationContext(value.relocationContext)) &&
     Object.keys(value.styles).length <= DESIGN_RUNTIME_STYLE_SNAPSHOT_LIMIT &&
     Object.values(value.styles).every((style) => typeof style === "string") &&
     (value.authoredStyleProperties === undefined ||
@@ -1237,6 +1261,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     ) {
       depth += 1;
       var computed = getComputedStyle(node);
+      if ((computed.perspective && computed.perspective !== "none") || (computed.zoom && computed.zoom !== "1" && computed.zoom !== "normal")) return null;
       // Transforms do not apply to non-replaced inline boxes.
       if (computed.display === "inline") continue;
       var own = ownLinearOf(computed);
@@ -1601,16 +1626,30 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     };
   }
 
-  function childCoordinateSpaceOf(element, computed, rect) {
+  function borderCoordinateSpaceOf(element, computed, rect) {
     var size = borderBoxSizeOf(computed);
     var matrix = size ? accumulatedLinearOf(element) : null;
-    if (!matrix || Math.abs(matrix[0] * matrix[3] - matrix[1] * matrix[2]) < 0.000001) return undefined;
+    if (!matrix || Math.abs(matrix[0] * matrix[3] - matrix[1] * matrix[2]) < 0.000001) return null;
+    var a = matrix[0], b = matrix[1], c = matrix[2], d = matrix[3];
+    return [a, b, c, d,
+      rect.x - Math.min(0, a * size.width, c * size.height, a * size.width + c * size.height),
+      rect.y - Math.min(0, b * size.width, d * size.height, b * size.width + d * size.height)];
+  }
+
+  function childCoordinateSpaceOf(element, computed, rect) {
+    var matrix = borderCoordinateSpaceOf(element, computed, rect);
+    if (!matrix) return undefined;
     var a = matrix[0], b = matrix[1], c = matrix[2], d = matrix[3];
     var x = (parseFloat(computed.borderLeftWidth) || 0) - element.scrollLeft;
     var y = (parseFloat(computed.borderTopWidth) || 0) - element.scrollTop;
     return [a, b, c, d,
-      rect.x - Math.min(0, a * size.width, c * size.height, a * size.width + c * size.height) + a * x + c * y,
-      rect.y - Math.min(0, b * size.width, d * size.height, b * size.width + d * size.height) + b * x + d * y];
+      matrix[4] + a * x + c * y,
+      matrix[5] + b * x + d * y];
+  }
+
+  function parentCoordinateSpaceOf(element) {
+    var parent = element.parentElement;
+    return parent ? childCoordinateSpaceOf(parent, getComputedStyle(parent), rectOf(parent)) || null : [1, 0, 0, 1, 0, 0];
   }
 
   function childConstraintOf(element, computed, authored, axis) {
@@ -1652,7 +1691,39 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return result;
   }
 
-  function detailsOf(element, layoutOnly) {
+  function relocationContextOf(element) {
+    var inheritedStyles = {};
+    var unsupported = new Set();
+    var computed = getComputedStyle(element);
+    ${JSON.stringify(DESIGN_RELOCATION_INHERITED_PROPERTIES)}.forEach(function (property) {
+      var value = computed.getPropertyValue(property);
+      if (value.toLowerCase().includes("url(")) unsupported.add("inherited asset reference");
+      if (value.length > 2048) unsupported.add("inherited style size");
+      else if (value) inheritedStyles[property] = value;
+    });
+    Array.from(computed).filter(function (property) { return property.startsWith("--"); }).forEach(function (property) {
+      var value = computed.getPropertyValue(property);
+      if (value.toLowerCase().includes("url(")) unsupported.add("inherited asset reference");
+      if (Object.keys(inheritedStyles).length >= 64 || property.length > 128 || value.length > 2048) unsupported.add("inherited style size");
+      else inheritedStyles[property] = value;
+    });
+    for (var ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      var style = getComputedStyle(ancestor);
+      if (Number(style.opacity) !== 1 || style.filter !== "none" || style.backdropFilter !== "none" || style.mixBlendMode !== "normal" || style.maskImage !== "none" || style.clipPath !== "none" || style.textDecorationLine !== "none") unsupported.add("ancestor compositing");
+    }
+    var descendants = element.querySelectorAll("*");
+    if (descendants.length > 256) unsupported.add("subtree size");
+    var inspect = [element].concat(Array.from(descendants).slice(0, 256));
+    inspect.forEach(function (node) {
+      var style = getComputedStyle(node);
+      if (!(node instanceof HTMLElement) || style.position === "fixed" || style.position === "sticky" || style.display === "contents" || node.scrollTop || node.scrollLeft) unsupported.add("unsupported subtree layout");
+      if (style.animationName !== "none" || node.getAnimations().length) unsupported.add("active animation");
+    });
+    if (!borderCoordinateSpaceOf(element, computed, rectOf(element))) unsupported.add("unsupported transform");
+    return { inheritedStyles: inheritedStyles, unsupported: Array.from(unsupported) };
+  }
+
+  function detailsOf(element, layoutOnly, relocation) {
     var oid = targetOidOf(element);
     if (!oid) throw new Error("The selected element has no stable data-oid.");
     var escaped = window.CSS && typeof window.CSS.escape === "function"
@@ -1677,10 +1748,13 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       layout: layoutOf(element, computed),
       childrenLayout: layoutOnly ? undefined : childrenLayoutOf(element, computed),
       childCoordinateSpace: childCoordinateSpaceOf(element, computed, rect),
-      styles: layoutOnly ? Object.fromEntries(["display", "position", "width", "height", "boxSizing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "flexDirection", "flexWrap", "direction", "order", "gridColumnStart", "gridColumnEnd", "gridRowStart", "gridRowEnd"].map(function (key) { return [key, computed[key] || ""]; })) : stylesOf(computed, authoredStyleProperties),
+      borderCoordinateSpace: borderCoordinateSpaceOf(element, computed, rect),
+      parentCoordinateSpace: parentCoordinateSpaceOf(element),
+      styles: layoutOnly ? Object.fromEntries(["display", "position", "width", "height", "boxSizing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "marginTop", "marginRight", "marginBottom", "marginLeft", "flexDirection", "flexWrap", "direction", "order", "gridColumnStart", "gridColumnEnd", "gridRowStart", "gridRowEnd"].map(function (key) { return [key, computed[key] || ""]; })) : stylesOf(computed, authoredStyleProperties),
       authoredStyleProperties: authoredStyleProperties
     };
     if (textEditable && !layoutOnly) result.textSizing = textSizingOf(element);
+    if (relocation) result.relocationContext = relocationContextOf(element);
     return result;
   }
 
@@ -2249,6 +2323,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       oid: oid,
       rect: rect,
       box: box,
+      borderCoordinateSpace: borderCoordinateSpaceOf(element, computed, rect),
+      parentCoordinateSpace: parentCoordinateSpaceOf(element),
       styles: geometryStylesOf(computed),
       children: children
     };
@@ -3437,7 +3513,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           typeof args.scopeNodeId === "string" && args.scopeNodeId ? args.scopeNodeId : null
         );
       case "getNodeDetails":
-        return detailsOf(elementForOid(args.nodeId));
+        return detailsOf(elementForOid(args.nodeId), false, args.relocation === true);
       case "getMatchedStyles":
         return getMatchedStyles(args.nodeId, args.property);
       case "setNodeVisibility":
