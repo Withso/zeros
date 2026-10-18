@@ -1,0 +1,9 @@
+{
+  "id": "immediate-merge-without-queue",
+  "kind": "replay",
+  "area": "ci-merge-safety",
+  "fixedBy": "pr:580",
+  "symptom": "An immediate-only landing authorization could not use the mandatory merge wrapper, whose only mode armed auto-merge; removing the high-level CLI auto flag can still admit a merge queue.",
+  "rule": "Use an explicit immediate mode with fresh fail-closed snapshots, a synchronous expected-head-guarded merge and matching merged-SHA confirmation. Refuse queue, auto-armed and bypass-capable states without cancelling existing work; preserve the legacy default and all shared policy protections.",
+  "check": "pnpm exec vitest run --config vitest.config.ts scripts/__tests__/agent-merge.test.ts scripts/__tests__/agent-merge-immediate.test.ts"
+}
