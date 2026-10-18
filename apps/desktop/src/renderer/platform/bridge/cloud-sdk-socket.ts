@@ -2,6 +2,7 @@ import { capabilityProofMessage, connectRuntime, RuntimeConnectError, RuntimeRen
   type RuntimeConnection, type RuntimeSocketFactory } from "@zeros/cloud-client";
 import { CloudSdkCapabilityProofFieldsSchema, type CloudSdkRuntimeTarget } from "../../../../shared/cloud-sdk-contract";
 import { renewCloudSdkRuntimeCapabilities, signCloudSdkRuntimeProof } from "../cloud-sdk-runtime";
+import { subscribeCloudSdkRuntimeRenewals } from "../cloud-sdk-stream";
 import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
 import type { RuntimeTransportSocket } from "./runtime-client";
 
@@ -90,6 +91,11 @@ export class CloudSdkSocket implements RuntimeTransportSocket {
         }, onEvent: event => {
           if (event.type === "refused") { this.cloudFailure = new CloudRuntimeAccessError(event); this.close(4403); }
         } });
+      void subscribeCloudSdkRuntimeRenewals(this.target, capabilities => {
+        if (!this.stop.signal.aborted) this.renewal?.handleFrame({ t: "capability.renewed", d: {
+          workspaceId: this.target.workspaceId, clientSessionId: this.target.clientSessionId, capabilities,
+        } });
+      }).then(off => { if (this.stop.signal.aborted) off(); else this.subscriptions.push(off); }).catch(() => {});
       this.readyState = 1;
       this.onopen?.(new Event("open"));
       if (this.stop.signal.aborted) return;

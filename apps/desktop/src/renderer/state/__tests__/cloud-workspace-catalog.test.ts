@@ -26,6 +26,8 @@ import {
   cloudWorkspaceOperation,
   refreshCloudWorkspaceCatalog,
   refreshCloudWorkspace,
+  applyCloudWorkspaceStreamCatalog,
+  cloudCatalogGeneration,
   cloudWorkspaceDetails,
   subscribeCloudWorkspaces,
   subscribeCloudWorkspaceRows,
@@ -74,6 +76,69 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.projects.mockReturnValue([]);
 });
+
+describe("catalog stream races", () => {
+  it("keeps a tombstone over an older aggregate response, including a row absent when the read started", async () => {
+    let finish!: (rows: CloudWorkspaceDocument[]) => void;
+    api.list.mockReturnValueOnce(new Promise<CloudWorkspaceDocument[]>(resolve => { finish = resolve; }));
+    const read = refreshCloudWorkspaceCatalog();
+    applyCloudWorkspaceStreamCatalog({ t: "catalog.changed", c: "remove", d: { workspaceId: target.workspaceId, version: 6, catalogVersion: 12, op: "remove" } });
+    finish([doc(6)]); await read;
+    expect(cloudWorkspaceDocument(target)).toBeUndefined(); expect(getCloudWorkspaceRows()).toEqual([]);
+  });
+
+  it("refuses a late detail response after a remove/re-add at the same document version", async () => {
+    acceptCloudWorkspaceDocument(doc(6));
+    let finish!: (row: CloudWorkspaceDocument) => void;
+    api.read.mockReturnValueOnce(new Promise<CloudWorkspaceDocument>(resolve => { finish = resolve; }));
+    const read = refreshCloudWorkspace(target); void read.catch(() => {});
+    applyCloudWorkspaceStreamCatalog({ t: "catalog.changed", c: "remove", d: { workspaceId: target.workspaceId, version: 6, catalogVersion: 12, op: "remove" } });
+    const next = { ...doc(6), capabilities: { ...doc(6).capabilities, canWrite: false } };
+    applyCloudWorkspaceStreamCatalog({ t: "catalog.changed", c: "readd", d: { workspaceId: target.workspaceId, version: 6, catalogVersion: 11, op: "upsert", workspace: next } });
+    finish(doc(6)); await expect(read).rejects.toThrow(/removed/);
+    expect(cloudWorkspaceDocument(target)?.capabilities.canWrite).toBe(false);
+  });
+
+  it("ignores lower versions and retired-account events while preserving references for unchanged pushes", () => {
+    acceptCloudWorkspaceDocument(doc(6)); const rows = getCloudWorkspaceRows(), generation = cloudCatalogGeneration();
+    const frame = { t: "catalog.changed" as const, c: "upsert", d: { workspaceId: target.workspaceId, version: 6, catalogVersion: 12, op: "upsert" as const, workspace: doc(6) } };
+    applyCloudWorkspaceStreamCatalog(frame); expect(getCloudWorkspaceRows()).toBe(rows);
+    applyCloudWorkspaceStreamCatalog({ ...frame, d: { ...frame.d, version: 5, workspace: doc(5, "stopped") } });
+    expect(cloudWorkspaceDocument(target)?.status).toBe("ready");
+    clearCloudWorkspaceCatalog(); applyCloudWorkspaceStreamCatalog(frame, generation);
+    expect(getCloudWorkspaceRows()).toEqual([]);
+  });
+
+  it("retains a same-version access update while an older detail response is pending", async () => {
+    const initial = doc(6); acceptCloudWorkspaceDocument(initial);
+    let finish!: (row: CloudWorkspaceDocument) => void;
+    api.read.mockReturnValueOnce(new Promise<CloudWorkspaceDocument>(resolve => { finish = resolve; }));
+    const read = refreshCloudWorkspace(target);
+    acceptCloudWorkspaceDocument({ ...initial, capabilities: { ...initial.capabilities, canWrite: false } });
+    finish(initial); await read;
+    expect(cloudWorkspaceDocument(target)?.capabilities.canWrite).toBe(false);
+  });
+
+  it("retains a same-version access update delivered while an aggregate read is pending", async () => {
+    const initial = doc(6); acceptCloudWorkspaceDocument(initial);
+    let finish!: (rows: CloudWorkspaceDocument[]) => void;
+    api.list.mockReturnValueOnce(new Promise<CloudWorkspaceDocument[]>(resolve => { finish = resolve; }));
+    const read = refreshCloudWorkspaceCatalog();
+    const revoked = { ...initial, capabilities: { ...initial.capabilities, canWrite: false, canManage: false } };
+    acceptCloudWorkspaceDocument(revoked);
+    finish([initial]); await read;
+    expect(cloudWorkspaceDocument(target)?.capabilities.canWrite).toBe(false);
+  });
+
+  it("does not replace a confirmed newer document with a lower-version snapshot", async () => {
+    acceptCloudWorkspaceDocument(doc(8, "stopped"));
+    api.list.mockResolvedValueOnce([doc(7, "ready")]);
+    await refreshCloudWorkspaceCatalog();
+    expect(cloudWorkspaceDocument(target)?.status).toBe("stopped");
+    expect(cloudWorkspaceDocument(target)?.version).toBe(8);
+  });
+});
+
 describe("cloud lifecycle observation", () => {
   beforeEach(() => {
     vi.useFakeTimers();

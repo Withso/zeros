@@ -51,6 +51,7 @@ import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
 import { clearCloudLatencySpans, pruneCloudLatencySpans } from "./cloud-workspace-latency";
 import { clearWorkbenchConnectionFailure, recordWorkbenchConnectionFailure } from "./workbench-availability";
 import { CloudWorkspaceInteraction } from "./cloud-workspace-interaction";
+import { createCloudWorkspaceStream } from "./cloud-workspace-stream";
 
 function recordCloudOpenFailure(key: string, error: unknown): void {
   const target = parseCloudWorkspaceKey(key), doc = target ? cloudWorkspaceDocument(target) : undefined;
@@ -95,6 +96,16 @@ function ActiveCloudWorkspaceLifecycle() {
     let installed = false;
     let restored = false;
     let cached = loadCloudChatCache();
+    let stream: ReturnType<typeof createCloudWorkspaceStream> | undefined;
+    const syncStream = () => {
+      const target = parseCloudWorkspaceKey(selectActiveFolder(useWorkspaceStore.getState()));
+      const visible = document.visibilityState !== "hidden";
+      const eligible = alive && enabled && account && isElectron() && target && canReadCloudWorkspace(cloudWorkspaceDocument(target))
+        ? { organizationId: target.organizationId, workspaceId: target.workspaceId } : null;
+      if (eligible && visible && !stream) stream = createCloudWorkspaceStream();
+      stream?.select(eligible, visible);
+    };
+    const offStreamSelection = isElectron() ? useWorkspaceStore.subscribe(syncStream) : () => {};
     const pruneChats = (all: boolean) => {
       const state = useWorkspaceStore.getState();
       const activeFolder = selectActiveFolder(state);
@@ -182,7 +193,7 @@ function ActiveCloudWorkspaceLifecycle() {
     };
     // Local create/lifecycle receipts can change the cadence before the next
     // fallback. Anchor it to the read start so unrelated events cannot defer it.
-    const offRefreshSchedule = subscribeCloudWorkspaces(scheduleRefresh);
+    const offRefreshSchedule = subscribeCloudWorkspaces(() => { scheduleRefresh(); syncStream(); });
     const offCatalog = subscribeCloudWorkspaceRows((change) => {
       pruneCloudLatencySpans();
       forgetRemovedCloudTranscriptWorkspaces(change.removedWorkspaceIds);
@@ -194,6 +205,7 @@ function ActiveCloudWorkspaceLifecycle() {
         notifyWorkspacesChanged(slug, change.workspaceIds);
     });
     const clear = (preservePendingTarget = false) => {
+      stream?.dispose(); stream = undefined;
       clearCloudLatencySpans();
       setCloudTranscriptCacheOwner(null);
       setCloudChatCacheOwner(null);
@@ -237,12 +249,14 @@ function ActiveCloudWorkspaceLifecycle() {
       cached = loadCloudChatCache();
       refresh();
       setCloudCreationModeOwner(next);
+      syncStream();
     };
     const offAuth = onAuthStateChange((session) => {
       authVersion++;
       install(session);
     });
     const visibility = () => {
+      syncStream();
       if (document.visibilityState === "hidden") {
         const bridge = getActiveBridge();
         if (bridge instanceof WorkspaceRuntimeClient) bridge.cancelSpeculativeWarmups();
@@ -261,12 +275,14 @@ function ActiveCloudWorkspaceLifecycle() {
         if (!alive) return;
         enabled = capability.enabled;
         refresh();
+        syncStream();
       })
       .catch(() => {});
     document.addEventListener("visibilitychange", visibility);
     window.addEventListener("focus", refresh);
     return () => {
       alive = false;
+      offStreamSelection(); stream?.dispose();
       offCatalog();
       offRefreshSchedule();
       offAuth();

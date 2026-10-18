@@ -132,7 +132,7 @@ import {
   cloudWorkspaceTunnelStart,
 } from "./cloud-workspace-access";
 import { cloudWorkspaceSdkRuntimeOpen, cloudWorkspaceSdkRuntimeRefresh, cloudWorkspaceSdkRuntimeLegacy,
-  cloudWorkspaceSdkRuntimeProof, cloudWorkspaceSdkRuntimeCapabilities } from "./cloud-sdk-runtime";
+  cloudWorkspaceSdkRuntimeProof, cloudWorkspaceSdkRuntimeCapabilities, cloudWorkspaceSdkStream } from "./cloud-sdk-runtime";
 import {
   cloudWorkspaceOutboxEnqueue,
   cloudWorkspaceOutboxList,
@@ -213,6 +213,7 @@ export function registerAllCommands(): void {
   setCommand("cloud_workspace_sdk_runtime_legacy", cloudWorkspaceSdkRuntimeLegacy);
   setCommand("cloud_workspace_sdk_runtime_proof", cloudWorkspaceSdkRuntimeProof);
   setCommand("cloud_workspace_sdk_runtime_capabilities", cloudWorkspaceSdkRuntimeCapabilities);
+  setCommand("cloud_workspace_sdk_stream", cloudWorkspaceSdkStream);
   // Durable per-account lifecycle outbox (S3-Q5): every cloud workspace
   // command enters here before the network; sign-out clears it.
   setCommand("cloud_workspace_outbox_enqueue", cloudWorkspaceOutboxEnqueue);

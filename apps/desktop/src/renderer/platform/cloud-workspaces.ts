@@ -231,27 +231,41 @@ function organizationPath(organizationId: string): string {
 export async function listCloudWorkspaceDocuments(): Promise<
   CloudWorkspaceDocument[]
 > {
+  return (await listCloudWorkspaceCatalogSnapshot()).workspaces;
+}
+
+export interface CloudWorkspaceCatalogSnapshot {
+  workspaces: CloudWorkspaceDocument[];
+  /** A resume hint, never an event cutoff or a transaction snapshot point. */
+  catalogVersion: number | null;
+}
+export async function listCloudWorkspaceCatalogSnapshot(): Promise<CloudWorkspaceCatalogSnapshot> {
   const rows: CloudWorkspaceDocument[] = [];
   let cursor: string | null = null;
+  let watermark = 0, complete = true;
   const seen = new Set<string>();
   do {
     const page: {
       workspaces: CloudWorkspaceDocument[];
       nextCursor: string | null;
+      catalogVersion?: number;
     } = await request(
       `/v1/cloud-workspaces?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
       z.object({
         workspaces: z.array(CloudWorkspaceDocumentSchema).max(100),
         nextCursor: z.string().nullable(),
+        catalogVersion: z.number().int().nonnegative().safe().optional(),
       }),
     );
     rows.push(...page.workspaces);
+    if (page.catalogVersion === undefined) complete = false;
+    else watermark = Math.max(watermark, page.catalogVersion);
     cursor = page.nextCursor;
     if (cursor && (seen.has(cursor) || rows.length >= 2_000))
       throw new Error("Cloud workspace list exceeded its page limit");
     if (cursor) seen.add(cursor);
   } while (cursor);
-  return rows;
+  return { workspaces: rows, catalogVersion: complete ? watermark : null };
 }
 
 export async function getCloudWorkspaceDocument(

@@ -501,6 +501,22 @@ starts. Account and organization APIs used by signed-in organization-local
 workspaces (`/v1/me`, organizations, teams, settings, `/v1/auth/events`) are
 not part of this contract and do not change.
 
+### Desktop implementation
+
+The desktop implementation keeps the device stream in Electron main, sharing
+the registered device and device session with runtime admission. It connects
+only to the control plane's advertised stream URL. The closed
+`cloud_workspace_sdk_stream` command controls a replaceable renderer lease;
+tickets, resume cursors and capability registration stay native. Events on
+`cloud-workspace-sdk-stream` carry native sequence and coverage revisions.
+
+The renderer starts this lease lazily for a readable cloud selection. It
+retains confirmed exact-key documents during catch-up, fences stale account
+and snapshot results, and releases a hidden stream after 30 seconds. Native
+capability pushes are registered before delivery to the exact runtime socket.
+Legacy catalog, lifecycle and presence polling remains active until its
+separate rollout gate has fixture and owner-organization conformance evidence.
+
 ## Open questions
 
 | # | Question | Recommendation | Answer (freeze review) |

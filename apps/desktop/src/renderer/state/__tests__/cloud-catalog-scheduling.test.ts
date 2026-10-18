@@ -18,6 +18,9 @@ const h = vi.hoisted(() => ({
   dispatch: vi.fn(),
   workspacesChanged: vi.fn(),
   folder: "/local-personal",
+  access: false,
+  selection: new Set<() => void>(),
+  stream: vi.fn(), streamSelect: vi.fn(), streamDispose: vi.fn(),
 }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
@@ -25,7 +28,7 @@ vi.mock("react", async (original) => ({
 }));
 vi.mock("../../features/team/cloud-workspace-account-access", () => ({
   useCloudWorkspaceAccountAccess: () => false,
-  hasCloudWorkspaceAccountAccess: () => false,
+  hasCloudWorkspaceAccountAccess: () => h.access,
 }));
 vi.mock("../../features/auth/auth-store", () => ({
   getSession: h.session,
@@ -35,6 +38,7 @@ vi.mock("../../features/auth/auth-store", () => ({
   },
 }));
 vi.mock("../../platform/cloud-workspace-access", () => ({ cloudWorkspaceCapability: h.capability }));
+vi.mock("../cloud-workspace-stream", () => ({ createCloudWorkspaceStream: h.stream }));
 // The lifecycle and catalog are real. Replace their I/O boundaries, including
 // the API module's catalog -> GitHub -> API import cycle, not the scheduler.
 vi.mock("../../platform/cloud-workspaces", () => ({
@@ -50,6 +54,7 @@ vi.mock("../store", async (original) => ({
   selectActiveFolder: () => h.folder,
   useWorkspaceStore: Object.assign(() => h.folder, {
     getState: () => ({ chats: [], activeChatId: h.activeChatId, dispatch: h.dispatch }),
+    subscribe: (listener: () => void) => { h.selection.add(listener); return () => { h.selection.delete(listener); }; },
   }),
 }));
 vi.mock("../use-projects", () => ({
@@ -132,6 +137,8 @@ beforeEach(() => {
   h.effects.length = 0;
   h.auth.clear();
   h.folder = "/local-personal";
+  h.access = false; h.selection.clear();
+  h.stream.mockReturnValue({ select: h.streamSelect, dispose: h.streamDispose });
   h.activeChatId = undefined;
   h.cache.mockReset().mockReturnValue([]);
   h.readCached.mockReset().mockResolvedValue(null);
@@ -159,6 +166,25 @@ afterEach(() => {
 });
 
 describe("cloud catalog timer ownership", () => {
+  it.each(["/local-personal", "/organization-local"])("constructs no stream for the native %s selection", async selected => {
+    Object.assign(browser, { __ZEROS_NATIVE__: {} }); h.access = true; h.folder = selected;
+    await mount(); await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.stream).not.toHaveBeenCalled(); expect(h.list).toHaveBeenCalledTimes(3);
+  });
+
+  it("owns a lazy stream across cloud selection, visibility and account changes while retaining fallback polls", async () => {
+    Object.assign(browser, { __ZEROS_NATIVE__: {} }); h.access = true;
+    await mount(); expect(h.stream).not.toHaveBeenCalled();
+    h.folder = folder; for (const changed of h.selection) changed();
+    expect(h.stream).toHaveBeenCalledOnce(); expect(h.streamSelect).toHaveBeenLastCalledWith(target, true);
+    visibility("hidden"); expect(h.streamSelect).toHaveBeenLastCalledWith(target, false);
+    visibility("visible"); expect(h.stream).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(30_000); expect(h.list).toHaveBeenCalledTimes(2);
+    h.folder = "/organization-local"; for (const changed of h.selection) changed();
+    expect(h.streamSelect).toHaveBeenLastCalledWith(null, true);
+    auth(null); expect(h.streamDispose).toHaveBeenCalledOnce();
+  });
+
   it.each(["hidden", "signed out", "empty account", "disabled", "Local development"])(
     "has no passive timer or list request while %s", async (state) => {
       if (state === "hidden") page.visibilityState = "hidden";

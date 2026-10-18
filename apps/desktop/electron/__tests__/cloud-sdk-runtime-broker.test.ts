@@ -65,6 +65,58 @@ function identity(runtime: CloudSdkRuntimeTarget) { const { organizationId, work
   return { organizationId, workspaceId, runtimeId, generation, authorityEpoch, engineInstanceId, connectionSequence }; }
 
 describe("native SDK runtime authority", () => {
+  it("shares the runtime device session with a single-use stream ticket and refreshes only the ticket", async () => {
+    const f = fixture(), runtime = await open(f);
+    const first = await f.broker.openStreamSession(null);
+    expect(first).toEqual({ deviceSessionId: runtime.deviceSessionId, url: sessionResponse().stream.url, ticket: sessionResponse().stream.ticket });
+    expect(f.fetch).toHaveBeenCalledTimes(2);
+    await f.broker.openStreamSession(first.deviceSessionId);
+    expect(f.fetch).toHaveBeenCalledTimes(3);
+    const body = JSON.parse(String(f.fetch.mock.calls[2]![1]!.body));
+    expect(body.deviceSessionId).toBe(runtime.deviceSessionId);
+    expect(f.broker.owns(runtime.runtimeId)).toBe(true);
+  });
+
+  it("rotates a superseded stream session without reusing its ticket or keeping its runtime handles", async () => {
+    const f = fixture(), runtime = await open(f);
+    await f.broker.openStreamSession(null);
+    f.fetch.mockResolvedValueOnce(Response.json({ ...sessionResponse(), deviceSessionId: uuid(71) }, { status: 201 }));
+    const replacement = await f.broker.openStreamSession(null);
+    expect(replacement.deviceSessionId).toBe(uuid(71));
+    expect(JSON.parse(String(f.fetch.mock.calls[2]![1]!.body))).not.toHaveProperty("deviceSessionId");
+    expect(f.broker.owns(runtime.runtimeId)).toBe(false);
+    expect(f.onRetired).toHaveBeenCalledWith([runtime.runtimeId]);
+  });
+
+  it("fences a delayed stream ticket when the account incarnation changes", async () => {
+    const f = fixture(), pending = deferred<Response>(); f.fetch.mockReturnValueOnce(pending.promise);
+    const ticket = f.broker.openStreamSession(null); void ticket.catch(() => {});
+    await vi.waitFor(() => expect(f.fetch).toHaveBeenCalledOnce());
+    f.account("account-b/session-2"); pending.resolve(Response.json(sessionResponse(), { status: 201 }));
+    await expect(ticket).rejects.toMatchObject({ code: "cloud_workspace_access_superseded" });
+    expect(f.broker.runtimeTargets()).toEqual([]);
+  });
+
+  it("refuses a runtime admission that finishes after the stream rotated its device session", async () => {
+    const f = fixture(); await open(f); await f.broker.openStreamSession(null);
+    const pending = deferred<Response>(); f.fetch.mockReturnValueOnce(pending.promise);
+    const opening = f.broker.open(target); const rejected = expect(opening).rejects.toMatchObject({ code: "cloud_workspace_access_superseded" });
+    await vi.waitFor(() => expect(f.fetch).toHaveBeenCalledTimes(3));
+    f.fetch.mockResolvedValueOnce(Response.json({ ...sessionResponse(), deviceSessionId: uuid(71) }, { status: 201 }));
+    await f.broker.openStreamSession(null);
+    pending.resolve(Response.json(connectResponse(), { status: 201 })); await rejected;
+    expect(f.broker.runtimeTargets()).toEqual([]);
+  });
+
+  it("publishes only current native runtime targets for stream attachment and detaches retired handles", async () => {
+    const f = fixture(), changed = vi.fn(), off = f.broker.subscribeRuntimeTargets(changed);
+    const runtime = await open(f);
+    expect(f.broker.runtimeTargets()).toEqual([runtime]); expect(changed).toHaveBeenCalledOnce();
+    f.broker.close(runtime.runtimeId);
+    expect(f.broker.runtimeTargets()).toEqual([]); expect(changed).toHaveBeenCalledTimes(2);
+    off(); await open(f); expect(changed).toHaveBeenCalledTimes(2);
+  });
+
   it("does no device, SDK REST or secret work while the desktop capability is disabled", async () => {
     const f = fixture(); f.enabled(false);
     await expect(f.broker.open(target)).rejects.toMatchObject({ code: "signed_out" });

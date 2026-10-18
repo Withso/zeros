@@ -72,6 +72,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "cloud_workspace_sdk_runtime_legacy",
   "cloud_workspace_sdk_runtime_proof",
   "cloud_workspace_sdk_runtime_capabilities",
+  "cloud_workspace_sdk_stream",
   "cloud_workspace_ssh_copy",
   "cloud_workspace_ssh_ide",
   "cloud_workspace_ssh_terminal",
