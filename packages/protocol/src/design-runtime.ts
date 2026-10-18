@@ -3940,10 +3940,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     clone.style.overflow = "hidden";
     var serialized = new XMLSerializer().serializeToString(clone);
     var svg =
-      "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + crop.width +
-      "\" height=\"" + crop.height + "\" viewBox=\"0 0 " + crop.width +
-      " " + crop.height + "\"><foreignObject x=\"" + (-documentX) +
-      "\" y=\"" + (-documentY) + "\" width=\"" + viewportWidth +
+      "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + viewportWidth +
+      "\" height=\"" + viewportHeight + "\" viewBox=\"0 0 " + viewportWidth +
+      " " + viewportHeight + "\"><foreignObject x=\"0\" y=\"0\" width=\"" + viewportWidth +
       "\" height=\"" + viewportHeight + "\">" + serialized +
       "</foreignObject></svg>";
     // A blob URL makes Chromium mark a foreignObject canvas as origin-unclean.
@@ -3967,7 +3966,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           canvas.height = outputHeight;
           var context = canvas.getContext("2d");
           if (!context) throw new Error("Canvas capture is unavailable.");
-          context.drawImage(image, 0, 0, outputWidth, outputHeight);
+          context.drawImage(
+            image, documentX, documentY, crop.width, crop.height,
+            0, 0, outputWidth, outputHeight
+          );
           encodeCanvasPng(canvas, function (dataUrl) {
             resolve({
               sourceVersion: captureSourceVersion,

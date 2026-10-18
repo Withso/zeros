@@ -1892,6 +1892,8 @@ repository-wide server-state and retained-surface rules.
 At deep zoom, the authoritative iframe stays mounted while a bounded visible
 crop is rerasterized for device fidelity. Captures are exact-camera-keyed,
 decoded before publication, serialized per frame, latest-wins, and memory-only.
+The capture SVG keeps the frame's logical viewport; cropping happens during
+the bounded raster draw so media queries and viewport units do not relayout.
 A prior decoded crop may stay geometrically pinned until its replacement is
 ready; the editor must not flash a blank or stale-position layer.
 
