@@ -367,6 +367,7 @@ import {
   type AgentMessage,
   type AgentTextMessage,
 } from "@zeros/protocol/agent-messages";
+import { LocalSessionUpdateBatcher } from "./agents/local-session-update-batcher";
 import {
   PTY_AGENT_AUTH_CWD,
   type AgentPromptBubble,
@@ -1118,6 +1119,8 @@ export class ZerosEngine {
    *  shared applyUpdate folds chunks into, so the engine upserts only the rows
    *  that changed on each chunk. */
   private readonly sessionMessages = new Map<string, AgentMessage[]>();
+  private readonly sessionUpdateBatcher = new LocalSessionUpdateBatcher((agentId, notification) =>
+    this.deliverSessionUpdate(agentId, notification));
   /** Agent sessionIds with a user cancel in flight. Set by AGENT_CANCEL (and
    *  the remote-client-drop relay cancel) BEFORE the cancel is dispatched,
    *  consumed by the AGENT_PROMPT catch: a cancel that tears down the
@@ -1893,6 +1896,7 @@ export class ZerosEngine {
         );
         for (const { sessionId, ended } of endedAgents) {
           if (!ended) continue;
+          this.sessionUpdateBatcher.flush(sessionId);
           const conversationId = this.sessionChat.get(sessionId);
           this.router.clearOwner(sessionId);
           this.sessionAgent.delete(sessionId);
@@ -2597,26 +2601,7 @@ export class ZerosEngine {
             }
           }
           if (notification.update.sessionUpdate !== "turn_usage_update") this.touchActivePrompt(executionId);
-          this.routeSessionScoped(
-            executionId,
-            createMessage({
-              type: "AGENT_SESSION_UPDATE",
-              source: "engine",
-              agentId,
-              executionId,
-              notification: normalizedNotification as never,
-              // Engine-authoritative routing: stamp the chat this session is
-              // bound to so the renderer never drops an update on a stale
-              // sessionId index (force-respawn / create-load / an adapter that
-              // emits before the renderer has stored the sessionId). Same map
-              // persistSessionUpdate uses below.
-              ...(this.sessionChat.get(executionId)
-                ? { chatId: this.sessionChat.get(executionId) }
-                : {}),
-            }),
-          );
-          // Persist the transcript as it streams; the engine is the source.
-          if (notification.update.sessionUpdate !== "turn_usage_update") this.persistSessionUpdate(executionId, normalizedNotification);
+          this.sessionUpdateBatcher.push(agentId, normalizedNotification, !this.cloudWorker);
         },
         onPermissionRequest: (
           agentId: string,
@@ -2624,6 +2609,7 @@ export class ZerosEngine {
           request: RequestPermissionRequest,
         ) => {
           const sessionId = request.sessionId;
+          this.sessionUpdateBatcher.flush(sessionId);
           this.touchActivePrompt(sessionId);
           this.pendingPermissionRequests.set(permissionId, {
             agentId,
@@ -2680,6 +2666,7 @@ export class ZerosEngine {
           request: QuestionRequest,
         ) => {
           const sessionId = request.sessionId;
+          this.sessionUpdateBatcher.flush(sessionId);
           this.touchActivePrompt(sessionId);
           this.pendingQuestionRequests.set(questionId, { agentId, request });
           const claim = this.cloudLocalNativePump?.claimForExecution(sessionId);
@@ -2770,6 +2757,7 @@ export class ZerosEngine {
         ) => {
           if (sessionId && this.retiringCloudExecutions.has(sessionId) &&
               (!this.activePromptContexts.has(sessionId) || this.cancelRequested.has(sessionId))) return;
+          this.sessionUpdateBatcher.flush(sessionId ?? undefined);
           const exited = createMessage({
             type: "AGENT_AGENT_EXITED",
             source: "engine",
@@ -3585,6 +3573,7 @@ export class ZerosEngine {
    * Stop the engine gracefully.
    */
   async stop(): Promise<void> {
+    this.sessionUpdateBatcher?.flush();
     // Streamed transcript rows buffered by a Local engine reach SQLite first.
     try { flushStreamingChatMessages(); } catch { /* best effort, like persist-on-emit */ }
     this.cloudCheckpointProgress?.reporter.dispose();
@@ -6614,6 +6603,7 @@ export class ZerosEngine {
     chatId?: string;
     workspaceId?: string | null;
   }): void {
+    this.sessionUpdateBatcher?.flush(input.executionId);
     this.router.setOwner(input.executionId, input.ownerId);
     this.sessionAgent.set(input.executionId, input.agentId);
     if (input.chatId) {
@@ -6632,6 +6622,7 @@ export class ZerosEngine {
     executionId: string,
     opts: { preservePrompt?: boolean } = {},
   ): void {
+    this.sessionUpdateBatcher?.flush(executionId);
     const conversationId = this.sessionChat.get(executionId);
     this.steeringReceipts.delete(executionId);
     this.router.clearOwner(executionId);
@@ -7524,6 +7515,7 @@ export class ZerosEngine {
                 superseded.push(priorSessionId);
             }
             for (const priorSessionId of superseded) {
+              this.sessionUpdateBatcher.flush(priorSessionId);
               const priorAgentId =
                 this.sessionAgent.get(priorSessionId) ?? msg.agentId;
               this.router.clearOwner(priorSessionId);
@@ -7774,6 +7766,7 @@ export class ZerosEngine {
             );
             return;
           }
+          this.sessionUpdateBatcher.flush(msg.sessionId);
           this.router.setOwner(msg.sessionId, client.id);
           const promptReceivedAt = Date.now();
           // Everything from here to the `agents.prompt` handoff below is Zeros'
@@ -8359,6 +8352,7 @@ export class ZerosEngine {
             );
             for (const [index, execution] of executions.entries()) {
               const { executionId, conversationId } = execution;
+              this.sessionUpdateBatcher.flush(executionId);
               this.router.clearOwner(executionId);
               this.sessionAgent.delete(executionId);
               this.sessionChat.delete(executionId);
@@ -9117,6 +9111,7 @@ export class ZerosEngine {
                 });
               }
             }
+            this.sessionUpdateBatcher.flush(liveExecution);
             this.router.setOwner(liveExecution, client.id);
             this.sessionAgent.set(liveExecution, msg.agentId);
             if (msg.chatId) {
@@ -9924,6 +9919,16 @@ export class ZerosEngine {
 
   // ── Transcripts (engine persists on emit) ───────────────
 
+  private deliverSessionUpdate(agentId: string, notification: SessionNotification): void {
+    const executionId = notification.executionId ?? notification.sessionId;
+    this.routeSessionScoped(executionId, createMessage({
+      type: "AGENT_SESSION_UPDATE", source: "engine", agentId, executionId,
+      notification: notification as never,
+      ...(this.sessionChat.get(executionId) ? { chatId: this.sessionChat.get(executionId) } : {}),
+    }));
+    if (notification.update.sessionUpdate !== "turn_usage_update") this.persistSessionUpdate(executionId, notification);
+  }
+
   /** Persist a streaming session update to the unified DB AS IT EMITS. The
    *  engine is the source — this runs even when no client is attached (a cloud
    *  agent after the laptop closes). It folds the chunk with the SAME shared
@@ -9953,6 +9958,7 @@ export class ZerosEngine {
     /** Original renderer send time, already bounded at the engine boundary. */
     startedAt?: number,
   ): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     // Continue after authentication reuses the original turn ID. Keep its DB
     // row throughout reconnection/cancellation, then replace that exact tail
     // bubble on admission instead of coalescing the prompt text a second time.
@@ -10092,6 +10098,7 @@ export class ZerosEngine {
     userMessageId?: string,
     steeredTurnId?: string,
   ): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     const chatId = this.sessionChat.get(sessionId);
     if (!chatId) return;
     const text =
@@ -10143,6 +10150,7 @@ export class ZerosEngine {
     createdAt: number,
     steeredTurnId?: string,
   ): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     const chatId = this.sessionChat.get(sessionId);
     const presentation = this.localPresentations.get(messageId);
     this.localPresentations.delete(messageId);
@@ -10405,6 +10413,7 @@ export class ZerosEngine {
     // persisted on the turn row so the footer's usage popover survives reloads.
     usage: TurnUsage | null = null,
   ): Promise<void> {
+    this.sessionUpdateBatcher?.flush(ctx.sessionId);
     // A settled turn's transcript is durable before its row reports settled.
     try { flushStreamingChatMessages(ctx.chatId); } catch { /* persistence never disturbs settle */ }
     try {
@@ -10781,6 +10790,7 @@ export class ZerosEngine {
       // stays readable during a Design territory transition.
       const startedAt = Date.now();
       const dispatchBody = async () => {
+        if (!this.cloudWorker && (op.startsWith("messages.") || op.startsWith("chats."))) this.sessionUpdateBatcher?.flush();
         if (client.cloudActor && client.authorized?.()!==true) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
         if(op==="cloudLsp.request"){
           if(!this.cloudLanguageServices||!client.cloudActor||client.authorized?.()!==true||
@@ -11312,6 +11322,7 @@ export class ZerosEngine {
     state: "running" | "completed" | "failed" | "cancelled",
     stopReason: StopReason | null = null,
   ): void {
+    this.sessionUpdateBatcher?.flush(prompt.sessionId);
     this.routeSessionScoped(
       prompt.sessionId,
       createMessage({
@@ -11425,7 +11436,10 @@ export class ZerosEngine {
     });
     const server = new LocalOrchestrationServer(
       registry,
-      (scope, body, signal) => service.call(scope, body, signal),
+      (scope, body, signal) => {
+        this.sessionUpdateBatcher.flush();
+        return service.call(scope, body, signal);
+      },
       () => ports.engineId(),
     );
     // A sandboxed shell cannot open the endpoint; it reaches the same
@@ -11615,6 +11629,7 @@ export class ZerosEngine {
    *  the settle deadline so the turn cannot stay "live" if the adapter never
    *  comes back. */
   private markCancelIntent(sessionId: string): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     this.cancelRequested.add(sessionId);
     const prompt = this.activePromptContexts.get(sessionId);
     if (!prompt) return;
