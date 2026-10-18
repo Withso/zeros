@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudLocalAgentBootRuntime } from "../cloud-local-command-queue-boot";
 import { testCloudBootFixture } from "../agents/__tests__/helpers/test-cloud-boot";
-import { isCloudBootAgentExecutionFactory, isCloudBootAgentSelection, type CloudBootAgentExecutionFactory } from "../agents/cloud-provider-execution";
+import { cloudBootNativeAuthority, isCloudBootAgentExecutionFactory, isCloudBootAgentSelection, type CloudBootAgentExecutionFactory } from "../agents/cloud-provider-execution";
 import type { CloudLocalCommandQueue } from "../cloud-local-command-queue";
 import { CloudRuntimeRegistration, type CloudCheckpointDirective } from "../cloud-runtime-registration";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
@@ -18,12 +18,16 @@ import { openSqlite } from "../db/sqlite";
 import ts from "typescript";
 import { ZerosEngine } from "../zeros-engine";
 import { CloudTransport } from "../transport/cloud";
+import type { TransportClient } from "../transport/types";
+import { CloudBootCommandClaimSchema } from "@zeros/protocol/cloud-commands";
 
 type Readiness = ReturnType<CloudRuntimeRegistration["readiness"]>;
 const engineMethods = ZerosEngine.prototype as unknown as {
   cloudRuntimeReadiness(this: unknown): Readiness;
   verifyCloudActorClient(this: unknown, token: string, renew?: boolean): Promise<unknown>;
   initializeCloudAgentBoot(this: unknown): Promise<void>;
+  handleConnect(this: unknown, client: TransportClient): Promise<void>;
+  handleDisconnect(this: unknown, client: TransportClient): void;
 };
 /** Exercise the actual transport callback without starting a native engine. */
 function internalReadiness(engine: unknown): () => Readiness {
@@ -82,6 +86,291 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
     expireAuthorityAt: (at: number) => { authorityExpiresAt = at; },
     unnegotiate: () => { negotiated = false; }, retire: () => { live = false; } };
 }
+
+function actorSockets(f: Awaited<ReturnType<typeof fixture>>) {
+  const engine = { root: f.f.input.cwd, cloudWorker: { version: 4 }, cloudAgentBoot: f.boot, cloudRuntimeAuthorityStopping: false,
+    framework: "unknown", actualPort: 1234, residentReplay: { release: vi.fn() }, cloudUserPresence: { release: vi.fn() },
+    router: { sessionsOwnedBy: () => [], unregister: vi.fn() }, isHostRelayClient: () => false,
+    recentlyLocalOwned: new Map(), sessionAgent: new Map(), permissionOwner: new Map(), questionOwner: new Map(),
+    clientAccount: new Map(), clientAccountNames: new Map(), clientTokenExp: new Map() };
+  return {
+    engine,
+    async connect(admission = f.admission) {
+      const client: TransportClient = { id: randomUUID(), kind: "cloud", accountUserId: admission.accountUserId,
+        authorityEpoch: admission.authorityEpoch, cloudActor: admission.actor, authorized: () => true, send: vi.fn(), close: vi.fn() };
+      await engineMethods.handleConnect.call(engine, client);
+      return client;
+    },
+    disconnect(client: TransportClient) { engineMethods.handleDisconnect.call(engine, client); },
+  };
+}
+
+function enqueueActorWork(f: Awaited<ReturnType<typeof fixture>>) {
+  const commandId = randomUUID(), conversationId = f.f.input.conversationId;
+  const payload = { agentId: "cursor", model: f.f.input.model, permissionMode: "auto", modeRevision: 0,
+    userMessageId: randomUUID(), prompt: [{ type: "text", text: "held work" }] };
+  f.boot.queue.handle({ kind: "mutate", admissionError: null, mutation: { conversationId,
+    operationId: randomUUID(), expectedRevision: 0, action: { kind: "enqueue", commandId, payload } } },
+  { writerEpoch: f.f.scope.writerEpoch, actorSessionId: f.admission.actor.sessionId });
+  return { commandId, conversationId, payload };
+}
+
+describe("cloud actor socket lifetime", () => {
+  it("admits more than 256 historical sessions after their last sockets disconnect", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (operation, input) => operation === "actor-confirm"
+      ? { version: 1, mode: "boot-owner-v1", provenance: { ...f.f.provenance,
+        actorSessionId: (input as { actorSessionId: string }).actorSessionId, confirmedUntilMs: Date.now() + 8_000 } }
+      : original(operation, input));
+    for (let index = 0; index < 257; index++) {
+      const admission = { ...f.admission, actor: { ...f.admission.actor, sessionId: randomUUID() } };
+      await expect(f.boot.confirmAdmission(admission), `historical session ${index + 1}`).resolves.toBeUndefined();
+      const client = await sockets.connect(admission);
+      expect(client.close).not.toHaveBeenCalled();
+      sockets.disconnect(client);
+    }
+  });
+
+  it("stops actor confirmation requests and timers when the final socket disconnects", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f), idleTimers = vi.getTimerCount();
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    f.request.mockClear(); sockets.disconnect(client);
+    expect(vi.getTimerCount()).toBe(idleTimers);
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(f.request.mock.calls.filter(([operation]) => operation === "actor-confirm")).toHaveLength(0);
+    expect(() => f.boot.authorizeActor(f.admission.actor.sessionId, "read")).toThrow();
+  });
+
+  it("keeps a shared actor until its last socket closes and ignores duplicate releases", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission);
+    const first = await sockets.connect(), second = await sockets.connect();
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run");
+    sockets.disconnect(first); sockets.disconnect(first);
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(4_000);
+    expect(actor.signal.aborted).toBe(false);
+    expect(f.request.mock.calls.filter(([operation]) => operation === "actor-confirm")).toHaveLength(1);
+    sockets.disconnect(second);
+    expect(actor.signal.aborted).toBe(true);
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(8_000);
+    expect(f.request.mock.calls.filter(([operation]) => operation === "actor-confirm")).toHaveLength(0);
+  });
+
+  it("holds queued and dispatching work after disconnect, then releases on durable settlement", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    await f.boot.observeConversation(f.admission.actor.sessionId, f.f.input.conversationId);
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run"), { commandId } = enqueueActorWork(f);
+    sockets.disconnect(client); f.request.mockClear();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(actor.signal.aborted).toBe(false);
+    expect(f.request.mock.calls.some(([operation]) => operation === "actor-confirm")).toBe(true);
+    const claim = CloudBootCommandClaimSchema.parse(f.boot.queue.handle({ kind: "claim", conversationId: f.f.input.conversationId,
+      claimId: randomUUID(), executionId: randomUUID() }, { writerEpoch: f.f.scope.writerEpoch }));
+    expect(claim.dispatchAllowed).toBe(true);
+    expect(f.boot.queue.authorizeClaim(claim)).toBe(actor);
+    // Disconnect is not revocation: the original recorded actor still passes
+    // the real claim-time reauthorization and context readiness checks.
+    f.boot.queue.handle({ kind: "settle", result: { commandId, claimId: claim.claimId, state: "cancelled", resultCode: null } },
+      { writerEpoch: f.f.scope.writerEpoch });
+    await f.boot.releaseClaim(claim);
+    expect(actor.signal.aborted).toBe(true);
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(12_000);
+    expect(f.request.mock.calls.filter(([operation]) => operation === "actor-confirm" || operation === "warm-context")).toHaveLength(0);
+  });
+
+  it("fences an old confirmation across disconnect and readmission of the same session", async () => {
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    const oldActor = f.boot.authorizeActor(f.admission.actor.sessionId, "run"), original = f.request.getMockImplementation()!;
+    let release!: () => void, confirms = 0;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.request.mockImplementation(async (operation, input) => {
+      if (operation === "actor-confirm" && ++confirms === 1) await held;
+      return original(operation, input);
+    });
+    const stale = f.boot.confirmAdmission(f.admission, true).then(() => "accepted", () => "rejected");
+    try {
+      sockets.disconnect(client);
+      await f.boot.confirmAdmission(f.admission); const replacement = await sockets.connect();
+      const freshActor = f.boot.authorizeActor(f.admission.actor.sessionId, "run");
+      expect(freshActor).not.toBe(oldActor); expect(oldActor.signal.aborted).toBe(true);
+      release(); expect(await stale).toBe("rejected");
+      expect(f.boot.authorizeActor(f.admission.actor.sessionId, "run")).toBe(freshActor);
+      expect(freshActor.signal.aborted).toBe(false); sockets.disconnect(replacement);
+    } finally { release(); await stale; }
+  });
+
+  it("retires an admission that never reaches a connected socket without starting a confirm loop", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await fixture(); await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "read");
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(12_000);
+    expect(f.request.mock.calls.filter(([operation]) => operation === "actor-confirm")).toHaveLength(0);
+    expect(actor.signal.aborted).toBe(true);
+  });
+
+  it("keeps native work after a terminal receipt until its exact scope retires", async () => {
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    await f.boot.observeConversation(f.admission.actor.sessionId, f.f.input.conversationId);
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run"), work = enqueueActorWork(f);
+    const claim = CloudBootCommandClaimSchema.parse(f.boot.queue.handle({ kind: "claim", conversationId: work.conversationId,
+      claimId: randomUUID(), executionId: randomUUID() }, { writerEpoch: f.f.scope.writerEpoch }));
+    const selection = f.boot.selectClaim(claim), authority = cloudBootNativeAuthority(selection);
+    sockets.disconnect(client);
+    f.boot.queue.handle({ kind: "settle", result: { commandId: work.commandId, claimId: claim.claimId,
+      state: "succeeded", resultCode: null } }, { writerEpoch: f.f.scope.writerEpoch });
+    await f.boot.releaseClaim(claim);
+    expect(actor.signal.aborted).toBe(false);
+    expect(() => authority.lifetime.assertLive()).not.toThrow();
+    await authority.lifetime.close();
+    expect(actor.signal.aborted).toBe(true);
+  });
+
+  it.each(["remove", "edit"] as const)("releases the old actor after another actor commits a queued %s", async kind => {
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run"), work = enqueueActorWork(f);
+    sockets.disconnect(client);
+    const other = { ...f.admission, actor: { ...f.admission.actor, sessionId: randomUUID() } }, original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (operation, input) => operation === "actor-confirm"
+      ? { version: 1, mode: "boot-owner-v1", provenance: { ...f.f.provenance,
+        actorSessionId: (input as { actorSessionId: string }).actorSessionId, confirmedUntilMs: Date.now() + 8_000 } }
+      : original(operation, input));
+    await f.boot.confirmAdmission(other); await sockets.connect(other);
+    const mutate = (expectedRevision: number) => f.boot.queue.handle({ kind: "mutate", admissionError: null,
+      mutation: { conversationId: work.conversationId, operationId: randomUUID(), expectedRevision,
+        action: kind === "edit" ? { kind, commandId: work.commandId, payload: work.payload } : { kind, commandId: work.commandId } } },
+    { writerEpoch: f.f.scope.writerEpoch, actorSessionId: other.actor.sessionId });
+    expect(() => mutate(0)).toThrow("command_conflict"); expect(actor.signal.aborted).toBe(false);
+    mutate(1); expect(actor.signal.aborted).toBe(true);
+    expect(() => f.boot.authorizeActor(other.actor.sessionId, "run")).not.toThrow();
+  });
+
+  it("refuses a transport renewal whose token verification finishes after disconnect", async () => {
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const verify = vi.fn(async () => { await held; return f.admission; });
+    const engine = { ...sockets.engine, cloudLocalHistoryRestored: true, cloudLocalEvents: {},
+      cloudRuntimeRegistration: { ...f.options.registration, verifyClientAdmission: verify } };
+    const result = engineMethods.verifyCloudActorClient.call(engine, "synthetic-renewal", true).catch(error => error);
+    try {
+      await vi.waitFor(() => expect(verify).toHaveBeenCalledOnce());
+      sockets.disconnect(client); f.request.mockClear(); release();
+      expect(await result).toMatchObject({ code: "cloud_actor_authority_rejected" });
+      expect(f.request).not.toHaveBeenCalled();
+    } finally { release(); await result; }
+  });
+
+  it("cancels warming interests and fences a late warm reply after disconnect", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; }), original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (operation, input) => {
+      if (operation === "warm-context") await held;
+      return original(operation, input);
+    });
+    const warming = f.boot.observeConversation(f.admission.actor.sessionId, f.f.input.conversationId).catch(error => error);
+    try {
+      await vi.waitFor(() => expect(f.request.mock.calls.some(([op]) => op === "warm-context")).toBe(true));
+      sockets.disconnect(client); release(); expect(await warming).toBeInstanceOf(Error);
+      f.request.mockClear(); await vi.advanceTimersByTimeAsync(12_000);
+      expect(f.request.mock.calls.filter(([op]) => op === "actor-confirm" || op === "warm-context")).toHaveLength(0);
+    } finally { release(); await warming; }
+  });
+
+  it("warms a readmitted actor independently of a retired actor's held context request", async () => {
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    let release!: () => void, requests = 0;
+    const held = new Promise<void>(resolve => { release = resolve; }), original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (operation, input) => {
+      if (operation === "warm-context" && ++requests === 1) await held;
+      return original(operation, input);
+    });
+    const oldWarm = f.boot.observeConversation(f.admission.actor.sessionId, f.f.input.conversationId).catch(error => error);
+    let newWarm: Promise<unknown> | undefined;
+    try {
+      await vi.waitFor(() => expect(requests).toBe(1)); sockets.disconnect(client);
+      await f.boot.confirmAdmission(f.admission); await sockets.connect();
+      newWarm = f.boot.observeConversation(f.admission.actor.sessionId, f.f.input.conversationId).catch(error => error);
+      await vi.waitFor(() => expect(requests).toBe(2), { timeout: 500 });
+      expect(await newWarm).toBeUndefined(); release(); expect(await oldWarm).toBeInstanceOf(Error);
+      const work = enqueueActorWork(f);
+      const claim = CloudBootCommandClaimSchema.parse(f.boot.queue.handle({ kind: "claim", conversationId: work.conversationId,
+        claimId: randomUUID(), executionId: randomUUID() }, { writerEpoch: f.f.scope.writerEpoch }));
+      expect(claim.dispatchAllowed).toBe(true);
+    } finally { release(); await oldWarm; await newWarm; }
+  });
+
+  it("does not discard a fresh socket admission when the previous last socket disconnects", async () => {
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run"), original = f.request.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.request.mockImplementation(async (operation, input) => { if (operation === "actor-confirm") await held; return original(operation, input); });
+    const admission = f.boot.confirmAdmission(f.admission);
+    try {
+      sockets.disconnect(client); expect(actor.signal.aborted).toBe(false);
+      release(); await admission; const next = await sockets.connect();
+      expect(f.boot.authorizeActor(f.admission.actor.sessionId, "run")).toBe(actor);
+      sockets.disconnect(next); expect(actor.signal.aborted).toBe(true);
+    } finally { release(); await admission; }
+  });
+
+  it("retains a pending socket after its sibling admission connects and disconnects", async () => {
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await Promise.all([f.boot.confirmAdmission(f.admission), f.boot.confirmAdmission(f.admission)]);
+    expect(f.request.mock.calls.filter(([operation]) => operation === "actor-confirm")).toHaveLength(1);
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run");
+    const first = await sockets.connect(); sockets.disconnect(first);
+    expect(actor.signal.aborted).toBe(false);
+    const second = await sockets.connect();
+    expect(f.boot.authorizeActor(f.admission.actor.sessionId, "run")).toBe(actor);
+    sockets.disconnect(second); expect(actor.signal.aborted).toBe(true);
+  });
+
+  it("retains an actor when pending-work inspection fails and retries from its existing timer", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await fixture(); await f.boot.initialize(); const sockets = actorSockets(f);
+    await f.boot.confirmAdmission(f.admission); const client = await sockets.connect();
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run");
+    vi.spyOn(f.boot.queue, "pendingActorSessions").mockImplementationOnce(() => { throw new Error("synthetic unavailable ledger"); });
+    sockets.disconnect(client); expect(actor.signal.aborted).toBe(false);
+    f.request.mockClear(); await vi.advanceTimersByTimeAsync(4_000);
+    expect(actor.signal.aborted).toBe(true);
+    expect(f.request.mock.calls.some(([op]) => op === "actor-confirm")).toBe(false);
+  });
+
+  it("cleans an abandoned admission even when the timer runs after its authority expires", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await fixture(); await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    vi.setSystemTime(Date.now() + 10_000); f.request.mockClear(); await vi.advanceTimersByTimeAsync(4_000);
+    await expect(f.boot.confirmAdmission(f.admission, true)).rejects.toMatchObject({ code: "cloud_actor_authority_rejected" });
+    expect(f.request.mock.calls.some(([op]) => op === "actor-confirm")).toBe(false);
+  });
+
+  it("keeps the Local and organization-local runtime outside actor lifetime management", async () => {
+    const f = await fixture(), sockets = actorSockets(f);
+    const engine = { ...sockets.engine, cloudWorker: null };
+    const attach = vi.spyOn(f.boot, "attachActor"), release = vi.spyOn(f.boot, "releaseActor");
+    const client: TransportClient = { id: randomUUID(), kind: "local", send: vi.fn(), close: vi.fn() };
+    await engineMethods.handleConnect.call(engine, client); engineMethods.handleDisconnect.call(engine, client);
+    expect(attach).not.toHaveBeenCalled(); expect(release).not.toHaveBeenCalled();
+    expect(f.request).not.toHaveBeenCalled();
+  });
+});
 
 describe("engine boot-mode orchestration", () => {
   it.each(["new", "same", "unsealed", "unsealed-lost-ack"])("activates the fresh engine writer with a %s VM boot after a stop retains its FULL ledger", async vmBoot => {
@@ -155,6 +444,7 @@ describe("engine boot-mode orchestration", () => {
   it.each([100, 5_000])("shares actor confirmation across sockets and a background renewal delayed by %ims without sharing token admission", async delay => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
     const f = await fixture(); await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    const sockets = actorSockets(f); await sockets.connect(); await sockets.connect();
     const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run");
     const original = f.request.getMockImplementation()!;
     let release!: () => void;
@@ -212,6 +502,7 @@ describe("engine boot-mode orchestration", () => {
     "does not background-retry an actor confirmation rejected with %s", async category => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
       const f = await fixture(); await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+      await actorSockets(f).connect();
       const original = f.request.getMockImplementation()!;
       f.request.mockClear().mockImplementation(async (operation, input) => {
         if (operation === "actor-confirm") throw new CloudAgentExecutionError(category, "validation");

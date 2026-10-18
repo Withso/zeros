@@ -80,6 +80,8 @@ type Options = { file: string; scope: CloudLocalCommandWriter; actors: ActorAuth
     payload: CloudBootCommandClaim["payload"]; actor: CloudAuthorizedActor; candidateExecutionId: string }):
     { executionId: string; credentialRun?: CloudAgentCredentialRunInfo } | null;
   selectionRolledBack?(claimId: string): void;
+  /** Runs only after committed changes to the durable pending actor holds. */
+  pendingActorsChanged?(): void;
   now?(): number; limits?: Partial<Limits> };
 
 /** At-most-once dispatch within an immutable, CP-negotiated boot writer.
@@ -128,6 +130,8 @@ export class CloudLocalCommandQueue {
           created_at TEXT NOT NULL,updated_at TEXT NOT NULL,history TEXT,mirror_history_head TEXT,credential_run_info TEXT,mirror_dirty INTEGER NOT NULL DEFAULT 0,
           UNIQUE(conversation_id,position),UNIQUE(conversation_id,user_message_id));
         CREATE INDEX IF NOT EXISTS local_commands_queue ON local_commands(conversation_id,state,position);
+        CREATE INDEX IF NOT EXISTS local_commands_pending_actors ON local_commands(writer_epoch,state)
+          WHERE state IN ('queued','dispatching');
         CREATE TABLE IF NOT EXISTS local_command_operations(
           id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,request_sha256 TEXT NOT NULL,
           actor_sha256 TEXT NOT NULL,revision INTEGER NOT NULL);
@@ -251,7 +255,11 @@ export class CloudLocalCommandQueue {
     if (value.kind === "claim" && !this.accepting) return null;
     if (value.kind === "mutate" && !this.accepting) throw new CloudCommandRuntimeError("cloud_command_writer_retired");
     if (value.kind === "claim") return this.claim(value);
-    if (value.kind === "settle") return this.settle(value.result);
+    if (value.kind === "settle") {
+      const result = this.settle(value.result);
+      this.options.pendingActorsChanged?.();
+      return result;
+    }
     if (value.kind === "confirm-goal") return this.confirmGoal(value);
     const input = value.kind === "mutate" ? { kind: value.kind, mutation: value.mutation } : value;
     const parsed = CloudBootCommandClientRequestSchema.safeParse(input);
@@ -271,7 +279,18 @@ export class CloudLocalCommandQueue {
     if (request.kind === "stop") return this.stop(request.conversationId,request.operationId,actor);
     if (value.kind !== "mutate" || ![null,"command_context_changed","command_not_found"].includes(value.admissionError))
       throw new CloudCommandRuntimeError("invalid_command");
-    return this.mutate(request.mutation,actor,value.admissionError);
+    const result = this.mutate(request.mutation,actor,value.admissionError);
+    this.options.pendingActorsChanged?.();
+    return result;
+  }
+
+  /** The bounded durable queue, not connection state or an in-memory claim
+   * cache, owns detached work's actor references. Terminal receipts do not. */
+  pendingActorSessions(): ReadonlySet<string> {
+    this.live();
+    const rows = this.db.prepare("SELECT actor FROM local_commands WHERE writer_epoch=? AND state IN ('queued','dispatching')")
+      .all(this.scope.writerEpoch) as Array<{ actor: string }>;
+    return new Set(rows.map(row => CloudActorProvenanceSchema.parse(JSON.parse(row.actor)).actorSessionId));
   }
 
   private control(conversationId: string): ControlRow {
@@ -1126,6 +1145,7 @@ export class CloudLocalCommandQueue {
       }
       this.materializeDirty();
     });
+    this.options.pendingActorsChanged?.();
   }
   durability(): { journalMode: "wal"; synchronous: "full" } {
     const journal = this.db.prepare("PRAGMA journal_mode").get() as { journal_mode: string };

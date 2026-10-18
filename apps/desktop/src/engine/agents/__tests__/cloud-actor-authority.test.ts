@@ -364,4 +364,19 @@ describe("verified detached actor and funding-grant authorization for the negoti
     expect(() => f.registry.confirm(f.admission)).toThrow();
     expect(() => f.registry.authorizeCurrent(f.admission.actorSessionId, "run")).toThrow();
   });
+
+  it("releases an unused lifetime without reviving its old principal or clearing explicit revocation", () => {
+    const f = fixture(1);
+    try {
+      const first = f.registry.confirm(f.admission);
+      f.registry.release(f.admission.actorSessionId);
+      expect(first.signal.aborted).toBe(true);
+      expect(() => first.assertLive()).toThrow();
+      const next = { ...f.admission, actorSessionId: randomUUID() };
+      const second = f.registry.confirm(next);
+      expect(() => first.assertLive()).toThrow(); expect(second.signal.aborted).toBe(false);
+      f.registry.revoke(next.actorSessionId); f.registry.release(next.actorSessionId);
+      expect(() => f.registry.confirm(next)).toThrow(expect.objectContaining({ code: "cloud_validation_access_denied" }));
+    } finally { f.registry.dispose(); }
+  });
 });
