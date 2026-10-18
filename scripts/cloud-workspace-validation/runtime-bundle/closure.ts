@@ -92,12 +92,13 @@ export const SOURCE_SLICES = [
   "scripts/cloud-workspace-validation/lib",
   "third_party",
 ];
-// The unbundled engine smoke imports the same public channel policy as the
-// bundled CLI. These are source dependencies outside apps/desktop/src, not a
-// reason to copy the control plane's entire source tree into the runtime.
+// Unbundled source probes need the engine's public channel policy and
+// capability verifier, including their transitive source dependencies.
 export const SOURCE_FILES = [
   "apps/desktop/shared/cloud-workspace-channel.ts",
   "apps/control-plane/src/cloud-workspace-channels.json",
+  "apps/control-plane/src/cloud-workspaces/capability-contract.ts",
+  "apps/control-plane/src/cloud-workspaces/capability-verifier.ts",
 ];
 const CLOUD_HOST_MODULES = [
   "host-process-supervisor.mjs",
