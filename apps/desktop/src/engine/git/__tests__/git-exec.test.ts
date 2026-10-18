@@ -339,7 +339,7 @@ describe("runFile — Bun native subprocess boundary", () => {
 
     expect(spawn).toHaveBeenCalledOnce();
     const [command, options] = spawn.mock.calls[0]!;
-    expect(command).toEqual(["git", "status", "--short"]);
+    expect(command).toEqual([expect.stringMatching(/\/git$/), "status", "--short"]);
     expect(options).toMatchObject({
       cwd: "/tmp/example",
       env: { PATH: "/usr/bin" },
@@ -497,7 +497,7 @@ describe("runGit — transient lock retry", () => {
     expect(res.stdout).toBe("");
   });
 
-  it("keeps background read-only status from rewriting the shared index", async () => {
+  it("keeps explicit and legacy Local status reads from rewriting the shared index", async () => {
     const indexPath = path.join(repo, ".git", "index");
     const before = await readFile(indexPath);
     const future = new Date(Date.now() + 10_000);
@@ -506,9 +506,11 @@ describe("runGit — transient lock retry", () => {
     await runGit(repo, ["status", "--short"], { readOnly: true });
 
     expect(await readFile(indexPath)).toEqual(before);
-    // Prove this fixture really would refresh the stat cache without the
-    // read-only option; otherwise the equality above would be vacuous.
     await runGit(repo, ["status", "--short"]);
+    expect(await readFile(indexPath)).toEqual(before);
+    // Prove native Git would refresh this fixture without the engine's
+    // observation boundary; otherwise the equality above would be vacuous.
+    await execFileAsync("git", ["status", "--short"], { cwd: repo, env: { ...process.env, GIT_OPTIONAL_LOCKS: "1" } });
     expect(await readFile(indexPath)).not.toEqual(before);
   });
 
