@@ -68,6 +68,7 @@ import { runGit } from "./git-exec";
 import { DESIGN_CANVAS_FILE } from "../design/directory-registry";
 import { DESIGN_CANVAS_FILE as PUBLIC_DESIGN_CANVAS_FILE } from "../design/canvas-file";
 import { isDesignMetadataRepoPath } from "../design/metadata";
+import { fenceDesignSnapshotReads } from "../design/snapshot-epoch";
 import {
   invalidateWorkspaceChangeProbes,
   invalidateWorkspaceChangeProbesForRoot,
@@ -586,6 +587,9 @@ export function startGitWatcher(
     invalidateWorkspaceChangeProbes(
       target?.workspaceId ? [target.workspaceId] : undefined,
     );
+    // Likewise, an in-flight Design snapshot read may predate this save; the
+    // refresh this event triggers must start a new read instead of joining it.
+    fenceDesignSnapshotReads(target?.root ?? null);
     if (target) pendingWorktreeTargets.set(target.root, target);
     else pendingWorktreeCoarse = true;
     if (designRecognitionChanged) {

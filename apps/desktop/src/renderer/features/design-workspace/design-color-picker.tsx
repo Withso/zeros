@@ -861,6 +861,11 @@ interface DesignColorFieldProps extends DesignColorCallbacks {
   swatch?: React.ReactNode;
   /** The CSS property this color edits, exposed for tooling and tests. */
   property?: string;
+  /** A design token the winning declaration reads, shown in place of the hex
+   * while the field is unfocused and unedited. */
+  tokenName?: string;
+  /** Token, declaring source and resolved value, for hover and assistive tech. */
+  tokenDescription?: string;
 }
 
 function colorInputKey(value: string): string {
@@ -874,12 +879,21 @@ export function DesignColorValueInputs({
   value,
   label,
   disabled = false,
+  tokenName,
+  tokenDescription,
   onPreview,
   onCommit,
 }: Pick<
   DesignColorFieldProps,
-  "value" | "label" | "disabled" | "onPreview" | "onCommit"
+  | "value"
+  | "label"
+  | "disabled"
+  | "tokenName"
+  | "tokenDescription"
+  | "onPreview"
+  | "onCommit"
 >) {
+  const [hexFocused, setHexFocused] = useState(false);
   const [acceptedValue, setAcceptedValue] = useState(value);
   const confirmedValueRef = useRef(value);
   const pendingRef = useRef<Array<{ id: number; value: string; key: string }>>(
@@ -1004,25 +1018,47 @@ export function DesignColorValueInputs({
       }
     };
 
+  // A token reads as the color only while nothing is being edited, including
+  // a picker change that has not been confirmed yet.
+  const tokenShown =
+    Boolean(tokenName) &&
+    !hexFocused &&
+    hexDraft === displayHex &&
+    acceptedValue === value;
   return (
     <>
       <input
         ref={hexRef}
-        value={hexDraft}
+        value={tokenShown ? tokenName!.replace(/^--/, "") : hexDraft}
         disabled={disabled}
         spellCheck={false}
         autoComplete="off"
         aria-label={label}
-        className={cn("pl-1.5", parsed && "uppercase")}
+        aria-description={tokenShown ? tokenDescription : undefined}
+        title={tokenShown ? tokenDescription : undefined}
+        data-design-style-token={tokenShown ? tokenName : undefined}
+        className={cn("pl-1.5", parsed && !tokenShown && "uppercase")}
         onChange={(event) => {
           hexDirtyRef.current = true;
           setHexDraft(event.currentTarget.value);
         }}
         onFocus={(event) => {
+          const replacesToken = tokenShown;
+          setHexFocused(true);
           hexDirtyRef.current = false;
           event.currentTarget.select();
+          // The hex replaces the token name on the next render; select it then.
+          if (replacesToken) {
+            const input = event.currentTarget;
+            requestAnimationFrame(() => {
+              if (document.activeElement === input) input.select();
+            });
+          }
         }}
-        onBlur={commitHex}
+        onBlur={() => {
+          setHexFocused(false);
+          commitHex();
+        }}
         onKeyDown={keyDown(() => setHexDraft(displayHex))}
       />
       {parsed ? (
@@ -1061,6 +1097,8 @@ export function DesignColorField({
   className,
   swatch,
   property,
+  tokenName,
+  tokenDescription,
   onPreview,
   onCancelPreview,
   onCommit,
@@ -1088,6 +1126,8 @@ export function DesignColorField({
         value={value}
         label={label}
         disabled={disabled}
+        tokenName={tokenName}
+        tokenDescription={tokenDescription}
         onPreview={onPreview}
         onCommit={onCommit}
       />

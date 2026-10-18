@@ -1,13 +1,18 @@
 /* Design-only tokens for this Design directory.
    Product tokens are not copied here: frames import the app's own
    styles/zeros-tokens.css and styles/semantic-tokens.css as style sources
-   (meta/canvas.json `styles`), so they follow this checkout's files, and a
-   token preview rebuilds from styles/tokens/ while the Design tab is open.
+   (meta/canvas.json `styles`), so they follow this checkout's files; a token
+   edit in styles/tokens/ shows once `pnpm design:docs` regenerates the CSS.
    Dark is the default theme and Light is under Themes. Change product values
    in styles/tokens/*.tokens.json; this file only names Design-only values and
-   must not redeclare a product token, which would override the app's. */
+   must not redeclare a product token, which would override the app's.
 
-@layer reset {
+   The reset shares Tailwind's `base` layer, as Preflight does in the app, so
+   utilities still win. In a later layer (it used to be `reset`, declared after
+   Tailwind's layers) it overrode every text, colour and margin utility on
+   buttons, inputs, headings and paragraphs. */
+
+@layer base {
   *, *::before, *::after { box-sizing: border-box; }
   html, body {
     min-height: 100%;

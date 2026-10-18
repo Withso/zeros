@@ -90,7 +90,7 @@ To create a frame:
 ## Pages
 
 - Add a page by appending `{ "id", "title", "folder", "frames": [] }` to `pages` and creating the folder.
-- Folder rules: 1–64 letters, digits, `.`, `_` or `-`; starts with a letter or digit; no trailing dot; unique case-insensitively; never `meta`, `assets` or `components`. A lowercase slug is best.
+- Folder rules: 1–64 letters, digits, `.`, `_` or `-`; starts with a letter or digit; no trailing dot; unique case-insensitively; never `meta`, `assets` or `components`. A lowercase slug is best. A page titled "Components" therefore needs another folder, such as `components-2` (the folder Zeros page creation chooses for that title).
 - Renaming a page changes its title only; the folder never moves. Each frame belongs to exactly one page and its source stays in that page's folder.
 - 1–64 pages and at most 256 frames across the whole directory.
 

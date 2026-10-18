@@ -4110,6 +4110,8 @@ export class AgentGateway {
     this.publishedEvents = opts.events;
     this.events = opts.cloudAgentExecutionFactory || opts.executionBoundary?.backend === "cloud-worker" ? {
       ...opts.events,
+      // Streamed, unredacted tool arguments only feed Local engine observers.
+      onToolInput: undefined,
       onSessionUpdate: (agentId, notification) => {
         const execution = cloudProviderExecution(this.executionBoundaries.get(notification.sessionId)), redactor = execution?.redactor;
         if(execution && cloudExecutionLifetime(execution).signal.aborted)return;

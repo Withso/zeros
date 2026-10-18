@@ -51,9 +51,5 @@ generated into `apps/marketing/src/index.css` by both `pnpm design:docs` and
 art-direction tokens and selectors kept hand-written.
 
 The repository's Design directory has no generated copy: it imports
-`styles/zeros-tokens.css` and `styles/semantic-tokens.css` as style sources.
-While the Design tab is open, `node scripts/design-system/build-tokens.mjs
---preview .zeros/design-styles/zeros-tokens.css` renders the token declarations
-from these JSON files into that private, Git-excluded file whenever
-`styles/tokens/` changes, writing only when the output changed, so frames show
-a token edit before `pnpm design:docs` regenerates the tracked CSS.
+`styles/zeros-tokens.css` and `styles/semantic-tokens.css` as style sources,
+so frames show a token edit once `pnpm design:docs` regenerates the tracked CSS.
