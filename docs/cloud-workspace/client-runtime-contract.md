@@ -858,6 +858,24 @@ is no caller URL, query bearer or reused grant. Electron freezes the descriptor;
 the renderer requires both authenticated actor confirmation and matching
 `ENGINE_READY.cloudLocalCommands` before sending queued work.
 
+S3-capable desktop callers use the separate native `cloud_workspace_sdk_runtime_*`
+IPC surface. Electron owns the device session, exact-workspace rollout decision,
+runtime ID and connection sequence. Its broker validates S3 1.3 boot metadata,
+capability scope and route placement before returning a connection descriptor.
+Missing metadata or an explicitly disabled/absent S3 route selects the existing
+admission once; malformed metadata, denied access and transient failures never
+select a weaker path. The existing runtime-open IPC keeps its legacy behavior.
+
+Device private keys remain in native storage. Proof signing accepts only closed
+fields for a currently admitted native handle and a capability issued by that
+broker. Renewal and signing recheck account incarnation, device/key and exact
+connection identity after asynchronous work; retirement aborts pending network
+requests. Renderer account changes also fence late IPC delivery. Runtime grants
+and the bounded rollout cache remain in memory, and account retirement clears
+them. Local Personal and organization-local routing constructs neither an SDK
+client nor a device stream. S3 adoption still requires the renderer's matching
+`ENGINE_READY.cloudLocalCommands` gate before commands or forwarding become ready.
+
 Admission failures carry a closed `error.phase`: `grant`, `provider_endpoint`,
 `provider_host_key`, or `engine_reach`. The current public admission route only
 performs the first two; it does not claim to have reached the engine or checked

@@ -1,5 +1,6 @@
 import { createPublicKey, randomUUID, verify } from "node:crypto";
 import { cloudReplicaDeviceProofMessage } from "../../src/engine/cloud-replica-device";
+import { capabilityProofMessage, type DeviceProofRequest } from "@zeros/cloud-client";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -47,6 +48,51 @@ function memoryStore(): CloudReplicaDeviceSecretStore {
 }
 
 describe("main cloud access device authority", () => {
+  it("signs the three S3 device actions with fresh proofs and no key export", async () => {
+    const accountId = randomUUID(), deviceId = randomUUID(), store = memoryStore();
+    const pending = store.ensure(accountId);
+    store.bindRegistration({ accountUserId: accountId, deviceId, keyVersion: 1, publicKey: pending.active.publicKey });
+    const authority = new CloudAccessDeviceAuthority({ capabilityEnabled: () => true, store,
+      getSession: async () => ({ provider: "workos", accountId, accessToken: "current-token", sub: "fixture",
+        email: "fixture@example.test", name: null, clientKind: "desktop" }), register: vi.fn() });
+    const key = createPublicKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: pending.active.publicKey } });
+    const payload = { organizationId: randomUUID(), workspaceId: randomUUID(), deviceSessionId: randomUUID(), clientSessionId: randomUUID() };
+    const requests: DeviceProofRequest[] = [
+      { action: "device-session.create", payload: { deviceSessionId: null } },
+      { action: "runtime.connect", payload: { ...payload, routes: ["direct", "relay"] } },
+      { action: "runtime.capabilities", payload },
+    ];
+    const nonces = new Set<string>();
+    for (const request of requests) {
+      const proof = await authority.signSdkDeviceRequest("current-token", request);
+      expect(verify(null, cloudReplicaDeviceProofMessage({ ...proof, accountUserId: accountId, ...request }),
+        key, Buffer.from(proof.signature, "base64url"))).toBe(true);
+      expect(proof).not.toHaveProperty("privateKey");
+      nonces.add(proof.nonce);
+    }
+    expect(nonces.size).toBe(requests.length);
+    await expect(authority.signSdkDeviceRequest("old-token", requests[0]!)).rejects.toThrow(/session changed/);
+  });
+
+  it("signs a structured S3 capability proof only for the current device and account", async () => {
+    const accountId = randomUUID(), deviceId = randomUUID(), store = memoryStore();
+    const pending = store.ensure(accountId);
+    store.bindRegistration({ accountUserId: accountId, deviceId, keyVersion: 1, publicKey: pending.active.publicKey });
+    let enabled = true;
+    const authority = new CloudAccessDeviceAuthority({ capabilityEnabled: () => enabled, store,
+      getSession: async () => ({ provider: "workos", accountId, accessToken: "current-token", sub: "fixture",
+        email: "fixture@example.test", name: null, clientKind: "desktop" }), register: vi.fn() });
+    const fields = { aud: "zeros:engine", wsp: randomUUID(), jti: "a".repeat(22), timestampMs: Date.now(), nonce: "b".repeat(22), route: "direct" as const };
+    const signature = await authority.signSdkCapabilityProof("current-token", { deviceId, keyVersion: 1 }, fields);
+    const key = createPublicKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: pending.active.publicKey } });
+    expect(verify(null, Buffer.from(capabilityProofMessage(fields)), key, Buffer.from(signature, "base64url"))).toBe(true);
+    await expect(authority.signSdkCapabilityProof("old-token", { deviceId, keyVersion: 1 }, fields)).rejects.toThrow(/session changed/);
+    await expect(authority.signSdkCapabilityProof("current-token", { deviceId: randomUUID(), keyVersion: 1 }, fields)).rejects.toThrow(/identity changed/);
+    await expect(authority.signSdkCapabilityProof("current-token", { deviceId, keyVersion: 2 }, fields)).rejects.toThrow(/identity changed/);
+    enabled = false;
+    await expect(authority.signSdkCapabilityProof("current-token", { deviceId, keyVersion: 1 }, fields)).rejects.toThrow(/not enabled/);
+  });
+
   it("binds native services to their own action, exact port, TTL and request identity", async () => {
     const accountId = randomUUID(), deviceId = randomUUID(), store = memoryStore();
     const pending = store.ensure(accountId);

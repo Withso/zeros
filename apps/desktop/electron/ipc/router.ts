@@ -100,6 +100,11 @@ const commandTable: Record<string, CommandHandler> = {
     3,
   ),
   cloud_workspace_runtime_close: notImpl("cloud_workspace_runtime_close", 3),
+  cloud_workspace_sdk_runtime_open: notImpl("cloud_workspace_sdk_runtime_open", 3),
+  cloud_workspace_sdk_runtime_refresh: notImpl("cloud_workspace_sdk_runtime_refresh", 3),
+  cloud_workspace_sdk_runtime_legacy: notImpl("cloud_workspace_sdk_runtime_legacy", 3),
+  cloud_workspace_sdk_runtime_proof: notImpl("cloud_workspace_sdk_runtime_proof", 3),
+  cloud_workspace_sdk_runtime_capabilities: notImpl("cloud_workspace_sdk_runtime_capabilities", 3),
   cloud_workspace_outbox_enqueue: notImpl("cloud_workspace_outbox_enqueue", 3),
   cloud_workspace_outbox_list: notImpl("cloud_workspace_outbox_list", 3),
 
