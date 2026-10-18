@@ -6,6 +6,7 @@ import path from "node:path";
 import type { BoatApiClient } from "./boat-client.js";
 import { BoatBootstrapDialog, type BoatBootstrapFrameHandler } from "./boat-bootstrap-dialog.js";
 import { CloudProviderError, type CloudWorkspaceCommandRunner } from "./provider.js";
+import { measureSetupPerformance, type SetupPerformanceRecorder } from "./setup-performance.js";
 
 const HOST_KEY_COMMAND = "/usr/bin/sudo -n /usr/bin/cat /etc/ssh/ssh_host_ed25519_key.pub";
 const PRIVATE_ADDRESSES = new BlockList();
@@ -398,6 +399,8 @@ export type BoatPinnedSshOptions = {
   client: Pick<BoatApiClient, "request">;
   maxOutputBytes: number;
   openChannel?: (signal: AbortSignal) => Promise<BoatBootstrapChannel>;
+  /** Selected only by v4 setup; never sent through the provider or SSH. */
+  performance?: SetupPerformanceRecorder;
 };
 
 /** Fixed commands only. Public key material uses the provider API; private
@@ -408,21 +411,21 @@ export async function executeBoatPinnedSsh(
   signal: AbortSignal,
   prepare?: () => Promise<void>,
 ): Promise<CommandResult> {
-    const channel = await (options.openChannel?.(signal) ??
-      openBoatBootstrapChannel(options.maxOutputBytes, signal));
+    const channel = await measureSetupPerformance(options.performance, "channel_open", () => options.openChannel?.(signal) ??
+      openBoatBootstrapChannel(options.maxOutputBytes, signal), signal);
     let installed = false;
     let result: CommandResult | undefined;
     let failure: CloudProviderError | undefined;
     try {
-      await prepare?.();
-      const key = await options.client.request(
+      await measureSetupPerformance(options.performance, "prepare", async () => { await prepare?.(); }, signal);
+      const key = await measureSetupPerformance(options.performance, "host_key", () => options.client.request(
         `/sandboxes/${input.resourceId}/commands`,
         {
           method: "POST",
           body: { command: HOST_KEY_COMMAND, timeoutSeconds: 15 },
           signal,
         },
-      );
+      ), signal);
       if (
         key.success !== true ||
         key.exitCode !== 0 ||
@@ -432,10 +435,10 @@ export async function executeBoatPinnedSsh(
         throw invalidAccess();
       const hostPublicKey = parseBoatHostKey(key.stdout);
       parseBoatHostKey(channel.publicKey);
-      const access = await options.client.request(
+      const access = await measureSetupPerformance(options.performance, "endpoint", () => options.client.request(
         `/sandboxes/${input.resourceId}`,
         { signal },
-      );
+      ), signal);
       const sandbox = access.sandbox as
         | { id?: unknown; ip?: unknown; sshEndpoint?: unknown }
         | undefined;
@@ -443,7 +446,7 @@ export async function executeBoatPinnedSsh(
       const endpoint = parseBoatSshEndpoint(sandbox);
       const command = `/usr/bin/sudo -n /usr/bin/timeout --signal=TERM --kill-after=5s ${input.timeoutSeconds}s ${input.command}`;
       installed = true;
-      const restricted = await options.client.request(
+      const restricted = await measureSetupPerformance(options.performance, "key_install", () => options.client.request(
         `/sandboxes/${input.resourceId}/commands`,
         {
           method: "POST",
@@ -456,7 +459,7 @@ export async function executeBoatPinnedSsh(
           },
           signal,
         },
-      );
+      ), signal);
       if (
         restricted.success !== true ||
         restricted.exitCode !== 0 ||
@@ -465,7 +468,7 @@ export async function executeBoatPinnedSsh(
         restricted.stdout !== "restricted\n"
       )
         throw invalidAccess();
-      result = await channel.execute(
+      result = await measureSetupPerformance(options.performance, "ssh_command", () => channel.execute(
         {
           resourceId: input.resourceId,
           ...endpoint,
@@ -476,7 +479,7 @@ export async function executeBoatPinnedSsh(
           ...(input.onFrame ? { onFrame: input.onFrame } : {}),
         },
         signal,
-      );
+      ), signal);
     } catch (error) {
       failure =
         error instanceof CloudProviderError
@@ -489,7 +492,7 @@ export async function executeBoatPinnedSsh(
     } finally {
       try {
         if (installed) {
-          const revoked = await options.client.request(
+          const revoked = await measureSetupPerformance(options.performance, "key_revoke", () => options.client.request(
             `/sandboxes/${input.resourceId}/commands`,
             {
               method: "POST",
@@ -499,7 +502,7 @@ export async function executeBoatPinnedSsh(
               },
               signal: AbortSignal.timeout(20_000),
             },
-          );
+          ));
           if (
             revoked.success !== true ||
             revoked.exitCode !== 0 ||
@@ -517,7 +520,7 @@ export async function executeBoatPinnedSsh(
         );
       } finally {
         try {
-          await channel.dispose();
+          await measureSetupPerformance(options.performance, "channel_dispose", () => channel.dispose());
         } catch {
           failure = new CloudProviderError(
             "provider_bootstrap_cleanup_unconfirmed",

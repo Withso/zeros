@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { mergeSetupTimings, parseSetupTimings, setupTimingClock, type SetupTimings } from "./setup-timings.js";
+import { mergeSetupPerformance, type SetupPerformance, type SetupPerformanceObserver } from "./setup-performance.js";
 import { parseSetupObservations } from "./setup-observations.js";
 import { parseCloudWorkspaceSetupHookLog } from "./setup-log.js";
 import { ClosedDiagnosticSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES, type RuntimeDescriptor } from "./runtime-contract.js";
@@ -580,6 +581,25 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
     execution: CloudWorkspaceSetupExecution,
     signal: AbortSignal,
   ): Promise<CloudWorkspaceSetupResult> {
+    let performance: SetupPerformance | undefined;
+    let closed = false;
+    const observe: SetupPerformanceObserver | undefined = execution.runtime ? value => {
+      if (!closed) performance = mergeSetupPerformance(performance, value);
+    } : undefined;
+    try {
+      const result = await this.executeObserved(execution, signal, observe);
+      return performance ? { ...result, performance } : result;
+    } catch (error) {
+      if (performance && error instanceof CloudWorkspaceSetupError) error.performance = performance;
+      throw error;
+    } finally { closed = true; }
+  }
+
+  private async executeObserved(
+    execution: CloudWorkspaceSetupExecution,
+    signal: AbortSignal,
+    onPerformance: SetupPerformanceObserver | undefined,
+  ): Promise<CloudWorkspaceSetupResult> {
     if (signal.aborted) {
       throw setupError(
         "setup_execution_aborted",
@@ -607,7 +627,8 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       const readinessFinished = clock?.start("bootstrap_probe");
       try {
         await commandRunner.awaitReadiness({ resourceId: execution.provider.resourceId,
-          runtimeBaseCompatibilityId: execution.runtime.baseCompatibilityId, timeoutSeconds: this.timeoutSeconds }, signal);
+          runtimeBaseCompatibilityId: execution.runtime.baseCompatibilityId, timeoutSeconds: this.timeoutSeconds,
+          ...(onPerformance ? { onPerformance } : {}) }, signal);
         readinessFinished?.();
       } catch (error) {
         readinessFinished?.(signal.aborted ? "cancelled" : "failed");
@@ -683,6 +704,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
           env: { [SETUP_REQUEST_ENV]: encoded },
           ...(execution.runtime ? { runtimeBaseCompatibilityId: execution.runtime.baseCompatibilityId } : {}),
           timeoutSeconds: this.timeoutSeconds,
+          ...(onPerformance ? { onPerformance } : {}),
         },
         signal,
       );

@@ -271,6 +271,41 @@ explicit. Final successful clocks are available in current code; the historical
 runs lack them. They do not independently isolate Node/SQLite/registration HTTP.
 Never subtract timestamps from independent machine clock epochs.
 
+### Control-plane performance aggregates
+
+V4 Boat setup also retains a separate optional `performance` version 1 object
+in the existing `setup_succeeded`, `setup_claim_failed` and
+`setup_publish_rejected` audit subjects. It is internal evidence, outside the
+helper wire, attestation proof, public setup-evidence response and immutable
+`stage_timings` contract. Collection adds no database query, provider request,
+retry, timer or background loop. The existing run/generation/execution-fence
+checks protect persistence; late callbacks cannot update a closed execution.
+
+The `readiness` group measures the **pre-admission** wait. The `transport`
+group measures the later post-admission preparation and pinned SSH execution.
+Each separates `status_request` duration from `sleep`, with closed counters
+for host-stopped, provider boot-pending, retryable server failures, status
+timeouts and definitive responses. A definitive response can still be refused
+by the ordinary validation; neither a response count nor a passed request
+metric grants readiness. The transport also measures channel creation,
+preparation, host-key and endpoint reads, key installation, the SSH command,
+key revocation and local disposal. SSH command time encloses remote installer,
+helper and engine work; it is not a network-only measurement.
+
+Each stage stores only `count`, `totalMs`, `maxMs` and `lastOutcome`, with fixed
+source/stage labels. Durations use the local monotonic clock. Counts saturate
+at 4,096 and durations at one hour, setting `truncated`; the document permits
+at most six groups, 64 distinct stage entries and 8 KiB. Repeated waits
+coalesce in constant space. Unknown fields/labels, malformed data and observer
+failures cannot replace an execution failure or make setup succeed. No raw
+provider response, output, command, path, endpoint or credential is retained.
+
+Keep enclosing totals and nested stages separate. The second status probe does
+not explain the earlier pre-admission wait, even though both call the same
+helper. These terminal observations can be missing after an abrupt worker exit;
+absence is not a zero-duration measurement. They do not yet isolate runtime
+cache verification, host restart or qualification subprobes inside the VM.
+
 ## Closed attester refusals
 
 The v4 helper retains the attester's fixed stage and failed-check names when the

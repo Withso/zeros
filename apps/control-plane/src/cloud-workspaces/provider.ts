@@ -4,6 +4,7 @@
 // resource ids stay behind this interface and may change on a new generation.
 
 import type { SetupTimings } from "./setup-timings.js";
+import type { SetupPerformanceObserver } from "./setup-performance.js";
 
 export const CLOUD_WORKSPACE_PROVIDER_NAMES = ["boat"] as const;
 export type CloudWorkspaceProviderName =
@@ -36,6 +37,8 @@ export interface CloudWorkspaceCommandRunner {
       /** Coordinator-only v4 base pin; never sent in provider command text. */
       runtimeBaseCompatibilityId?: string;
       timeoutSeconds: number;
+      /** Internal observation callback, never part of the helper input/proof. */
+      onPerformance?: SetupPerformanceObserver;
     },
     signal: AbortSignal,
   ): Promise<{
@@ -47,7 +50,7 @@ export interface CloudWorkspaceCommandRunner {
   /** Optional secret-free wait for a restoring v4 base, run before any setup
    * admission or artifact capability is minted. It never reports readiness. */
   awaitReadiness?(
-    input: { resourceId: string; runtimeBaseCompatibilityId: string; timeoutSeconds: number },
+    input: { resourceId: string; runtimeBaseCompatibilityId: string; timeoutSeconds: number; onPerformance?: SetupPerformanceObserver },
     signal: AbortSignal,
   ): Promise<void>;
 }
