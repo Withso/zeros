@@ -55,11 +55,14 @@ interface Box {
   directory: LocalDirectory;
   identity: Stats;
   scope: LocalCallerScope;
-  active: Set<string>;
+  active: Map<string, Promise<void>>;
   closed: boolean;
   controller: AbortController;
   watcher: FSWatcher | null;
-  timer: ReturnType<typeof setInterval>;
+  timer: ReturnType<typeof setInterval> | null;
+  orphanTimer: ReturnType<typeof setTimeout> | null;
+  sweeping: Promise<void> | null;
+  dirty: boolean;
   responses: Map<string, number>;
 }
 
@@ -116,26 +119,71 @@ export class LocalDropbox {
       directory,
       identity: await directory.handle.stat(),
       scope,
-      active: new Set(),
+      active: new Map(),
       closed: false,
       controller: new AbortController(),
       watcher: null,
-      timer: setInterval(() => void this.sweep(box), this.options.sweepMs ?? SWEEP_MS),
+      timer: null,
+      orphanTimer: null,
+      sweeping: null,
+      dirty: false,
       responses: new Map(),
     };
-    box.timer.unref?.();
     try {
-      // The sweep alone is enough; the watcher only shortens the first reply.
-      box.watcher = watch(directory.path, () => void this.sweep(box));
+      box.watcher = watch(directory.path, () => this.requestSweep(box));
       box.watcher.on("error", () => {
         box.watcher?.close();
         box.watcher = null;
+        this.startFallbackSweep(box);
       });
     } catch {
       box.watcher = null;
+      this.startFallbackSweep(box);
     }
     this.boxes.add(box);
+    // Close the watch-installation race before exposing the folder to a CLI.
+    await this.sweep(box);
     return { dir, close: () => this.close(box) };
+  }
+
+  /** A healthy directory watcher is push-driven. Keep the established 100 ms
+   * fallback only if the OS cannot supply notifications for this folder. */
+  private startFallbackSweep(box: Box): void {
+    if (box.closed || box.timer) return;
+    box.timer = setInterval(() => this.requestSweep(box), this.options.sweepMs ?? SWEEP_MS);
+    box.timer.unref?.();
+  }
+
+  private requestSweep(box: Box): void {
+    if (box.closed) return;
+    box.dirty = true;
+    if (box.sweeping) return;
+    box.sweeping = Promise.resolve().then(async () => {
+      do {
+        box.dirty = false;
+        await this.sweep(box);
+      } while (box.dirty && !box.closed);
+    }).catch(() => {
+      // An unavailable directory is not an engine failure. The next event or
+      // fallback read revalidates its identity before touching any request.
+    }).finally(() => {
+      box.sweeping = null;
+      if (box.dirty) this.requestSweep(box);
+      this.scheduleOrphanSweep(box);
+    });
+  }
+
+  private scheduleOrphanSweep(box: Box): void {
+    if (box.orphanTimer) clearTimeout(box.orphanTimer);
+    box.orphanTimer = null;
+    if (box.closed || box.responses.size === 0) return;
+    let oldest = Infinity;
+    for (const at of box.responses.values()) oldest = Math.min(oldest, at);
+    box.orphanTimer = setTimeout(() => {
+      box.orphanTimer = null;
+      this.requestSweep(box);
+    }, Math.max(1_000, oldest + ORPHAN_MS + 1 - Date.now()));
+    box.orphanTimer.unref?.();
   }
 
   async closeAll(): Promise<void> {
@@ -148,7 +196,9 @@ export class LocalDropbox {
     this.boxes.delete(box);
     box.controller.abort();
     box.watcher?.close();
-    clearInterval(box.timer);
+    if (box.timer) clearInterval(box.timer);
+    if (box.orphanTimer) clearTimeout(box.orphanTimer);
+    box.responses.clear();
     try {
       // The protocol owns flat files only. Never recurse through a directory
       // an agent may have replaced with a link while cleanup is in flight.
@@ -188,9 +238,20 @@ export class LocalDropbox {
   private async sweep(box: Box): Promise<void> {
     if (box.closed) return;
     const directory = await this.directoryFor(box);
-    if (!directory) return;
+    if (!directory) {
+      box.responses.clear();
+      return;
+    }
     try {
+      const priorResponses = new Map(box.responses);
       const names = await readdir(directory.path);
+      const present = new Set(names);
+      // Completed CLI exchanges remove their response immediately. Keep only
+      // receipts for files still awaiting collection, without dropping one
+      // published after this directory read began.
+      for (const [id, at] of priorResponses) {
+        if (!present.has(id + LOCAL_DROPBOX_RESPONSE) && box.responses.get(id) === at) box.responses.delete(id);
+      }
       const now = Date.now();
       for (const name of names) {
         if (box.closed) return;
@@ -205,9 +266,18 @@ export class LocalDropbox {
         }
         if (!name.endsWith(LOCAL_DROPBOX_REQUEST)) continue;
         const id = name.slice(0, -LOCAL_DROPBOX_REQUEST.length);
-        if (!LOCAL_DROPBOX_ID.test(id) || box.active.has(id) || box.active.size >= MAX_ACTIVE_PER_BOX) continue;
-        box.active.add(id);
-        void this.serve(box, id).finally(() => box.active.delete(id));
+        if (!LOCAL_DROPBOX_ID.test(id) || box.active.has(id)) continue;
+        // Drain this directory listing as capacity becomes available. Retrying
+        // the entire listing after every completion would spin forever on a
+        // request the filesystem refuses to claim.
+        while (!box.closed && box.active.size >= MAX_ACTIVE_PER_BOX) {
+          await Promise.race(box.active.values());
+        }
+        if (box.closed || box.active.has(id)) continue;
+        const serving = this.serve(box, id).catch(() => {
+          // A disappearing directory is retried only on a new observation.
+        }).finally(() => box.active.delete(id));
+        box.active.set(id, serving);
       }
     } catch {
       /* A removed or redirected directory has no readable requests. */
@@ -263,6 +333,7 @@ export class LocalDropbox {
       if (box.closed) return;
       await rename(temporary, path.join(directory, id + LOCAL_DROPBOX_RESPONSE));
       box.responses.set(id, Date.now());
+      this.scheduleOrphanSweep(box);
     } catch {
       /* Publication cannot follow agent-created files or redirected parents. */
     } finally {

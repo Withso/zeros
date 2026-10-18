@@ -110,9 +110,9 @@ describe("Local CLI drop folder", () => {
     const box = await dropbox.open(scope);
     const liveBox = [...dropbox["boxes"]][0]!;
     const id = "c".repeat(24);
-    liveBox.active.add(id);
     fs.writeFileSync(path.join(box.dir, `${id}.req`), JSON.stringify({ token, body: { command: "whoami", args: {} } }));
     const serving = dropbox["serve"](liveBox, id);
+    liveBox.active.set(id, serving);
     try {
       await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
       await box.close();
@@ -143,8 +143,8 @@ describe("Local CLI drop folder", () => {
     const liveBox = [...dropbox["boxes"]][0]!;
     // Drive one claim directly so completion is observable without a timer race.
     fs.writeFileSync(path.join(box.dir, `${id}.req`), JSON.stringify({ protocol: 1, token, body: { command: "whoami", args: {} } }));
-    liveBox.active.add(id);
     const serving = dropbox["serve"](liveBox, id);
+    liveBox.active.set(id, serving);
     try {
       await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
       fs.renameSync(box.dir, original);
