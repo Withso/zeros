@@ -1,0 +1,9 @@
+{
+  "id": "design-capture-logical-viewport",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pr:572",
+  "symptom": "Deep-zoom crops and selected-node screenshots changed responsive CSS colors and viewport-unit layout even though the live frame kept its authored viewport.",
+  "rule": "agents/zstack/changes/design-capture-logical-viewport.md: preserve the SVG document's logical viewport and apply the crop only during the bounded raster draw; test media queries and viewport units as well as output dimensions.",
+  "check": "pnpm test:git packages/protocol/src/__tests__/design-runtime-capture-viewport.test.ts packages/protocol/src/__tests__/design-runtime.test.ts"
+}

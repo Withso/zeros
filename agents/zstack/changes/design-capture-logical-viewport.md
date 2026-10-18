@@ -8,4 +8,5 @@
   only when drawing into the bounded output raster. Check both responsive CSS
   and viewport units, not only absolute-positioned shapes or output dimensions.
 - **Encoded in.** `packages/protocol/src/__tests__/design-runtime-capture-viewport.test.ts`
-  and the existing tiny-crop high-resolution test in `design-runtime.test.ts`.
+  and the existing tiny-crop high-resolution test in `design-runtime.test.ts`;
+  eval case `design-capture-logical-viewport`.
