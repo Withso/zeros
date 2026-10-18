@@ -3,7 +3,7 @@
   "kind": "replay",
   "area": "engine-local-orchestration",
   "fixedBy": "pending",
-  "symptom": "Each idle Local command dropbox scanned its directory every 100 milliseconds despite having no new command to process.",
-  "rule": "The bug-fix playbook requires fake-clock scheduler tests that assert no work after the queue drains. Count scans and timers, then exercise watcher failure and pending-flight arrivals in the adjacent suite.",
-  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/local-orchestration/__tests__/dropbox-idle.test.ts -t 'does no periodic directory reads'"
+  "symptom": "Each idle Local command dropbox scanned every 100 milliseconds; removing its safety sweep could instead stall requests when an armed native watcher stayed silent.",
+  "rule": "The bug-fix playbook requires fake-clock scheduler tests that bound idle work without removing recovery. Back off the safety sweep to two seconds, reset it to 100 milliseconds on activity, and prove a silent watcher still answers a request.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/local-orchestration/__tests__/dropbox-idle.test.ts -t 'backs off to the safety interval while idle and still answers with a silent watcher'"
 }

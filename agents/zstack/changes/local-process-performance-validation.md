@@ -15,6 +15,10 @@ concurrency limit must not delay the selected workspace behind tab fan-out.
 Periodic Local dropbox scans and focus-triggered updater checks kept doing
 work without a changed input. Fake-clock tests count scans, active timers,
 consumed receipts and native checks, including failed watches and slow checks.
+An armed native watcher is not proof of notification delivery in the packaged
+runtime. Keep a slow safety sweep while idle, reset to the fast cadence on
+activity, and test a watcher that silently drops every notification. Counting
+zero idle scans alone would miss a CLI transport that no longer answers.
 Drain each observed directory listing once: unconditionally rescanning on
 completion can turn a failed claim into a busy loop. Keep sparse built-in
 memory history for leak diagnosis, coalesced with requested samples; this
