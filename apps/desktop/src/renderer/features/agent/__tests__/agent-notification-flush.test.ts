@@ -468,3 +468,36 @@ describe("agent stderr", () => {
     expect(slot(cloud.chat).stderrLog).toEqual([]);
   });
 });
+
+const order = (chatId: string) => slot(chatId).messages.map((m) => m.kind === "text" ? `${m.role}:${m.text}` : m.kind);
+
+describe("Local fast-path flush ordering", () => {
+  it.each(placements)("$owner keeps a recorded user row before the reply that follows it in the same frame", async (placement) => {
+    open(placement);
+    useSessionsStore.getState().applyBridgeUpdate({ sessionId: placement.route, chatId: placement.chat,
+      update: { sessionUpdate: "agent_message_chunk", messageId: "previous", content: { type: "text", text: "Earlier answer" } } } as never);
+    const h = start();
+    h.emit("AGENT_SESSION_UPDATE", { agentId: "claude", chatId: placement.chat, notification: { sessionId: placement.route, update: {
+      sessionUpdate: "user_message_recorded",
+      message: { id: "cli-1", kind: "text", role: "user", text: "Message from another agent", createdAt: 1 },
+    } } });
+    h.emit("AGENT_SESSION_UPDATE", chunk(placement, "Reply", { messageId: "reply" }));
+    await Promise.resolve();
+    h.frame();
+    expect(order(placement.chat)).toEqual(["agent:Earlier answer", "user:Message from another agent", "agent:Reply"]);
+  });
+
+  it.each(placements)("$owner keeps a model-fallback notice before the reply in a hidden window", async (placement) => {
+    open(placement);
+    const h = start();
+    h.visibility("hidden");
+    h.emit("AGENT_SESSION_UPDATE", { agentId: "claude", notification: { sessionId: placement.route, update: {
+      sessionUpdate: "model_fallback", noticeId: "n1", provider: "claude", fromModel: "a", toModel: "b", scope: "turn", reason: "overloaded",
+    } } });
+    h.emit("AGENT_SESSION_UPDATE", chunk(placement, "Reply", { messageId: "reply" }));
+    await Promise.resolve();
+    vi.advanceTimersByTime(AGENT_UPDATE_FLUSH_DEADLINE_MS);
+    expect(order(placement.chat).map((entry) => entry.split(":")[0] + (entry.includes("Reply") ? ":reply" : ""))).toEqual(["agent", "agent:reply"]);
+    expect(slot(placement.chat).messages[0]?.kind === "text" && (slot(placement.chat).messages[0] as { modelFallback?: unknown }).modelFallback).toBeTruthy();
+  });
+});

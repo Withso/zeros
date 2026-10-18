@@ -917,11 +917,20 @@ export function AgentSessionsProvider({
       if (onlyChatId && (!state.sessions[onlyChatId]?.cwd || isCloudWorkspace(state.sessions[onlyChatId].cwd))) return;
       const local: SessionNotification[] = [];
       const remaining: SessionNotification[] = [];
+      // Take only each chat's leading run of batchable content. An earlier
+      // non-batchable update for the same chat (a recorded user row, a model
+      // fallback notice) drains first on the ordinary schedule, and everything
+      // after it waits with it so the transcript keeps its arrival order.
+      const held = new Set<string>();
       for (const notification of updateBuffer) {
         const chatId = (notification as SessionNotification & { chatId?: string }).chatId ??
           state.executionToChatId[notification.executionId ?? notification.sessionId];
-        if ((!onlyChatId || chatId === onlyChatId) && canBatchLocalTranscriptUpdate(state, notification)) local.push(notification);
-        else remaining.push(notification);
+        if ((!onlyChatId || chatId === onlyChatId) && !(chatId && held.has(chatId)) &&
+            canBatchLocalTranscriptUpdate(state, notification)) local.push(notification);
+        else {
+          if (chatId) held.add(chatId);
+          remaining.push(notification);
+        }
       }
       updateBuffer.length = 0;
       updateBuffer.push(...remaining);
