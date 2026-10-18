@@ -195,6 +195,7 @@ PostgreSQL 18.6 on loopback, Node 24, 4 CPUs, WorkOS authority on.
 | `engine.uplinkLeaseRenewal` (2026-10-18) | 1 | 7 | 5 | 3.3 | 25 |
 | `engine.uplinkCheckpointSweep`, one uplink (2026-10-18) | 1 | 5 | 1 | 0.6 | 5 |
 | `engine.checkpointHintWait`, one read (2026-10-18) | 1 | 5 | 3 | 0.9 | 15 |
+| `engine.uplinkIdleStopRequest`, declined (2026-10-18) | 1 | 6 | 4 | 2.9 | 20 |
 | `engine.credentialControls` | 1 | 10 | 8 | 4.6 | 40 |
 | `engine.actorConfirm` | 1 | 11 | 9 | 10.1 | 45 |
 | `client.renew` | 1 | 12 | 10 | 9.7 | 50 |

@@ -6,6 +6,8 @@ import type { TransportClient } from "./transport/types";
 export const CLOUD_IDLE_STOP_MS = 10 * 60_000;
 const PRESENCE_INTERVAL_MS = 60_000;
 const PRESENCE_LEASE_MS = 90_000;
+/** A delegated stop's own quiet check tolerates one report's transit. */
+const DELEGATED_IDLE_SLACK_MS = 5_000;
 
 /** Any admitted device can keep an open, used workspace awake. Receipt time
  * is monotonic and server-owned. A presence message never acquires compute;
@@ -59,6 +61,8 @@ export class CloudUserPresence {
     }
     return this.clients.size > 0;
   }
+  /** Admitted clients whose presence lease is live (`activity.report.clients`). */
+  count(): number { this.active(); return this.clients.size; }
 }
 
 /** PR discovery updates cached workspace metadata during ordinary polling.
@@ -99,11 +103,19 @@ export class CloudIdleStopScheduler {
     observed?(state: { busy: boolean; quietSeconds: number }): void;
     failed?(): void;
     blocked?(state: { code: "idle_stop_blocked"; reason: "record_sync" | "checkpoint_or_transport" | "workload_or_checkpoint"; quietSeconds: number; retrySeconds: number }): void;
+    /** True while the control plane decides idle stops (`idle.v1`): the
+     * scheduler keeps observing and never initiates. */
+    delegated?(): boolean;
+    /** Activity or an observation changed what `readActivity` returns. */
+    changed?(): void;
   }) {
     this.now = options.now ?? (() => performance.now());
     this.lastActivity = this.now();
   }
-  activity(): void { this.lastActivity = this.now(); this.revision++; this.attempts = 0; this.nextAttempt = 0; }
+  activity(): void {
+    this.lastActivity = this.now(); this.revision++; this.attempts = 0; this.nextAttempt = 0;
+    try { this.options.changed?.(); } catch { /* reporting cannot interrupt lifecycle checks */ }
+  }
   recordSync(state: "ready" | "pending" | "failed"): void { this.syncState = state; }
   /** A read cannot renew activity, consume an idle attempt or stop the VM. */
   readActivity(): { revision: number; quietForMs: number; recordSync: "ready" | "pending" | "failed" } {
@@ -146,6 +158,8 @@ export class CloudIdleStopScheduler {
     }
     if (busy) { this.wasBusy = true; this.activity(); return; }
     if (this.wasBusy) { this.wasBusy = false; this.activity(); return; }
+    try { this.options.changed?.(); } catch { /* reporting cannot interrupt lifecycle checks */ }
+    if (this.options.delegated?.()) return;
     if (this.now() - this.lastActivity < CLOUD_IDLE_STOP_MS || this.now() < this.nextAttempt) return;
     const revision = this.revision;
     const stillIdle = () => !this.closed && this.revision === revision && !this.options.busy();
@@ -165,6 +179,24 @@ export class CloudIdleStopScheduler {
       try { this.options.blocked?.({ code: "idle_stop_blocked", reason: this.syncState !== "ready" ? "record_sync" : failed ? "checkpoint_or_transport" : "workload_or_checkpoint",
         quietSeconds: Math.floor((this.now() - this.lastActivity) / 1000), retrySeconds }); } catch { /* diagnostic only */ }
     });
+  }
+  /** `idle.v1`: a stop the control plane decided. Same single flight and
+   * stillIdle guard as an own attempt, and only after this engine's own
+   * quiet interval; resolves true only when the stop completed. */
+  delegate(stop: (stillIdle: () => boolean) => Promise<void | boolean>): Promise<boolean> {
+    if (this.closed || this.active || this.completed || this.wasBusy || this.options.busy() ||
+        this.now() - this.lastActivity < CLOUD_IDLE_STOP_MS - DELEGATED_IDLE_SLACK_MS) return Promise.resolve(false);
+    const revision = this.revision;
+    const stillIdle = () => !this.closed && this.revision === revision && !this.options.busy();
+    let completed = false;
+    const run = Promise.resolve().then(() => stop(stillIdle)).then(result => {
+      completed = result === true;
+      if (completed) this.completed = true;
+    }, () => {
+      try { this.options.failed?.(); } catch { /* diagnostic only */ }
+    }).finally(() => { this.active = null; });
+    this.active = run;
+    return run.then(() => completed);
   }
   async settled(): Promise<void> { await this.inspection; await this.active; }
   async close(): Promise<void> { this.closed = true; if (this.timer) clearInterval(this.timer); this.timer = null; this.authority = null; await this.settled(); }

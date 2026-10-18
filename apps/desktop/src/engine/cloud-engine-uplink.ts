@@ -33,6 +33,8 @@ const BACKOFF_RESET_AFTER_MS = 60_000;
 const MAX_PINGS_IN_FLIGHT = 4;
 const OUTBOX_MAX_BYTES = 2 * 1024 * 1024;
 const OUTBOX_MAX_FRAMES = 2_000;
+const ACTIVITY_REPORT_INTERVAL_MS = 60_000;
+const ACTIVITY_WINDOW_SLACK_MS = 5_000;
 
 const CLOSE = {
   normal: 1000,
@@ -202,6 +204,8 @@ export type EngineUplinkCredentialAck = Readonly<{ result: "applied" | "failed";
 
 /** A pushed checkpoint request (S2 `checkpoint.request`): a timing hint only. */
 export type EngineUplinkCheckpointRequest = Readonly<{ requestId: string; reason: string; deadlineAtMs: number }>;
+/** `activity.report` (S2): `windowMs` is the engine's continuous quiet time. */
+export type EngineUplinkActivity = { clients: number; runningTurns: number; liveTerminals: number; windowMs: number };
 
 const CHECKPOINT_REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const UPLINK_CODE = /^[a-z][a-z0-9_]{2,63}$/;
@@ -247,6 +251,9 @@ export type CloudEngineUplinkOptions = {
    * hello, or a ping of that connection), which bounds what the control
    * plane can have granted. */
   onLease?: (leaseExpiresAtMs: number, sentAtMs: number) => void;
+  /** `idle.v1`: the engine's activity, reported at the gate, every 60 s and
+   * on an edge (`reportActivity`). */
+  activity?: () => EngineUplinkActivity;
   /** `checkpoint.v1`: a pushed checkpoint request. The engine answers it
    * with one heartbeat, which delivers, fences and acknowledges the
    * directive; the frame itself grants nothing. */
@@ -287,6 +294,8 @@ export class CloudEngineUplinkClient {
   private failures = 0;
   private dialTimer: ReturnType<typeof setTimeout> | null = null;
   private handoffTimer: ReturnType<typeof setTimeout> | null = null;
+  private activityTimer: ReturnType<typeof setInterval> | null = null;
+  private lastActivity: { quiet: boolean; windowMs: number; atMs: number } | null = null;
   private connection: Connection | null = null;
   /** Set while a drain handoff dial is in flight beside `connection`. */
   private handoff: Connection | null = null;
@@ -357,6 +366,32 @@ export class CloudEngineUplinkClient {
     return connection?.welcomed === true && connection.gateOpen && connection.features.has("lease.v1");
   }
 
+  /** True while the current connection negotiated `idle.v1` and its gate
+   * is open: the control plane decides idle stops. */
+  get idleActive(): boolean {
+    const connection = this.connection;
+    return connection?.welcomed === true && connection.gateOpen && connection.features.has("idle.v1");
+  }
+
+  /** Sends `activity.report` on an `idle.v1` connection with an open gate:
+   * always when `force`, else only on an edge (quiet began or ended, or a
+   * quiet window restarted). */
+  reportActivity(force = false): void {
+    const read = this.options.activity, connection = this.connection;
+    if (!read || this.stopped || this.parked || !connection?.gateOpen || !connection.features.has("idle.v1")) return;
+    const next = read(), now = this.clock(), last = this.lastActivity;
+    const quiet = next.clients === 0 && next.runningTurns === 0 && next.liveTerminals === 0 && next.windowMs > 0;
+    const edge = !last || last.quiet !== quiet ||
+      (quiet && next.windowMs + ACTIVITY_WINDOW_SLACK_MS < last.windowMs + (now - last.atMs));
+    if (!force && !edge) return;
+    this.lastActivity = { quiet, windowMs: next.windowMs, atMs: now };
+    const bound = (value: number, max: number) => Math.max(0, Math.min(max, Math.floor(value)));
+    this.sendReliable("activity.report", {
+      clients: bound(next.clients, 10_000), runningTurns: bound(next.runningTurns, 10_000),
+      liveTerminals: bound(next.liveTerminals, 10_000), windowMs: bound(next.windowMs, 3_600_000),
+    });
+  }
+
   /** True while the current connection negotiated `checkpoint.v1` and its
    * gate is open: the control plane pushes queued checkpoint requests, so
    * the engine needs no checkpoint-hint wait. */
@@ -392,6 +427,10 @@ export class CloudEngineUplinkClient {
   start(): void {
     if (this.started) return;
     this.started = true;
+    if (this.options.activity) {
+      this.activityTimer = setInterval(() => this.reportActivity(true), ACTIVITY_REPORT_INTERVAL_MS);
+      this.activityTimer.unref?.();
+    }
     this.dial(0, false);
   }
 
@@ -400,6 +439,8 @@ export class CloudEngineUplinkClient {
     this.stopped = true;
     for (const timer of [this.dialTimer, this.handoffTimer]) if (timer) clearTimeout(timer);
     this.dialTimer = this.handoffTimer = null;
+    if (this.activityTimer) clearInterval(this.activityTimer);
+    this.activityTimer = null;
     this.connection?.initiateClose(CLOSE.normal, "engine_stopping");
     this.handoff?.initiateClose(CLOSE.normal, "engine_stopping");
     this.connection = this.handoff = null;
@@ -1010,6 +1051,7 @@ class Connection {
     } else if (this.uplink.config.readiness) {
       this.uplink.sendReliable("status.ready", { ...this.uplink.config.readiness() });
     }
+    this.uplink.reportActivity(true);
   }
 
   private onPong(d: Record<string, unknown>): void {

@@ -202,7 +202,7 @@ import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "./agents/conta
 import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-action-runtime";
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
-import { CloudEngineUplinkClient, sanitizeCredAckCode, type EngineUplinkReadiness } from "./cloud-engine-uplink";
+import { CloudEngineUplinkClient, sanitizeCredAckCode, type EngineUplinkActivity, type EngineUplinkReadiness } from "./cloud-engine-uplink";
 import {
   EngineCapabilityAuth,
   capabilitySessionClose,
@@ -1240,6 +1240,8 @@ export class ZerosEngine {
   private cloudFinalCheckpointReconciliationTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly cloudIdleStop = new CloudIdleStopScheduler({
     busy: () => this.cloudIdleBusy(),
+    delegated: () => this.cloudEngineUplink?.idleActive === true,
+    changed: () => this.cloudEngineUplink?.reportActivity(),
     retireIdleWorkloads: async () => {
       await this.retireObservedIdleCloudBootAgents();
       await this.retireObservedLegacyResident();
@@ -2132,7 +2134,7 @@ export class ZerosEngine {
           },
           onDurableRecordConnected: () => this.cloudCommands?.wakePending(),
           onCheckpointRequested: (directive, authority) =>
-            this.handleCloudCheckpointRequest(directive, authority),
+            this.routeCloudCheckpointRequest(directive, authority),
           readRepositoryCredentialRefresh: () =>
             readCloudGithubCredentialRefreshRequest(),
           installRepositoryCredential: (document) => {
@@ -3705,6 +3707,17 @@ export class ZerosEngine {
     return { ready: this.running, phase: this.running ? "ready" : this.engineStopping ? "stopping" : "starting" };
   }
 
+  /** `activity.report`: counts the control plane can read, plus the
+   * scheduler's own quiet time, which already folds in every busy guard. */
+  private cloudEngineUplinkActivity(): EngineUplinkActivity {
+    return {
+      clients: this.cloudUserPresence.count(),
+      runningTurns: this.activeAgentExecutionCount() + this.activePromptContexts.size,
+      liveTerminals: (this.pty.hasRecentInput() ? 1 : 0) + (this.residentTerminals?.hasRecentInput() === true ? 1 : 0),
+      windowMs: this.cloudIdleStop.readActivity().quietForMs,
+    };
+  }
+
   /** S2 engine uplink (contracts/s2-uplink.md): cloud placements only, and
    * only when the control plane advertised an endpoint to this opted-in
    * engine (the organization's `realtime_uplink` rollout flag was on at
@@ -3748,7 +3761,8 @@ export class ZerosEngine {
       runtimeVersion: VERSION,
       auth: capabilityAuth,
       readiness: () => this.cloudEngineUplinkReadiness(),
-      features: ["cred.v1", "lease.v1", "checkpoint.v1"],
+      activity: () => this.cloudEngineUplinkActivity(),
+      features: ["cred.v1", "lease.v1", "checkpoint.v1", "idle.v1"],
       // Credential-control push (P0.10 C01): a pushed revision runs the same
       // credential-controls exchange the 500 ms poll runs; the poll itself
       // stays as the fallback (see controlsPollIntervalMs at the boot).
@@ -4084,7 +4098,7 @@ export class ZerosEngine {
     return hasCloudUserProcesses({inspect:()=>this.cloudWorkloads!.inspect()});
   }
 
-  private async stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void> {
+  private async stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean, delegated?: CloudCheckpointDirective): Promise<void> {
     const runtime = this.cloudRuntimeRegistration;
     if (!runtime || this.cloudRuntimeCheckpointQuiescing || this.cloudRuntimeHandoffFenced || !stillIdle()) return;
     this.cloudRuntimeCheckpointQuiescing = true;
@@ -4108,7 +4122,7 @@ export class ZerosEngine {
         await this.joinCloudPreservedWorkloads(this.cloudWorkloadIdleFence, this.cloudResidentIdleFence);
       }
       if (!stillIdle() || await this.cloudIdleUserProcesses() || !stillIdle()) return;
-      const directive = await runtime.idleStopRequest({ kind: "request", attemptId: randomUUID() });
+      const directive = delegated ?? await runtime.idleStopRequest({ kind: "request", attemptId: randomUUID() });
       if (!directive) return;
       await this.handleCloudCheckpointRequest(directive, authority);
     } finally {
@@ -4117,6 +4131,21 @@ export class ZerosEngine {
         await this.resumeCloudCheckpointAdmission();
       }
     }
+  }
+
+  /** `idle.v1`: an idle directive the control plane created runs the
+   * engine's own idle preparation; one the engine cannot prove idle is
+   * cancelled (`workspace_active`). Everything else, including every idle
+   * directive once the uplink is gone, keeps today's path. */
+  private routeCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void> {
+    if (!directive.idleStop || this.cloudIdleReservation !== null || this.cloudIdleCheckpoint?.id === directive.id ||
+        this.cloudEngineUplink?.idleActive !== true) return this.handleCloudCheckpointRequest(directive, authority);
+    return this.cloudIdleStop.delegate(async stillIdle => {
+      await this.stopIdleCloudWorkspace(authority, stillIdle, directive);
+      return this.cloudRuntimeCheckpointQuiescing && this.cloudIdleReservation === null;
+    }).then(async completed => {
+      if (!completed) await this.cloudRuntimeRegistration?.idleStopRequest({ kind: "cancel", requestId: directive.id }).catch(() => undefined);
+    });
   }
 
   private handleCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void> {

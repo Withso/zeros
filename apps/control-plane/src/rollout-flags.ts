@@ -43,6 +43,9 @@ export const ROLLOUT_FLAGS = {
   // back to 90 s while the engine skips its periodic heartbeat.
   engine_lease_over_uplink: { whileFeedUnavailable: "retain", summary: "Renew the engine lease over the uplink (lease.v1)", requires: ["realtime_uplink"] },
   checkpoint_push: { whileFeedUnavailable: "retain", summary: "Push checkpoint requests over the uplink (checkpoint.v1)", requires: ["realtime_uplink"] },
+  // The engine still proves idleness before any checkpoint, and unknown
+  // activity or a lost uplink never stops a workspace (decision G).
+  cp_idle_stop: { whileFeedUnavailable: "retain", summary: "Decide idle stops in the control plane from uplink activity (idle.v1)", requires: ["realtime_uplink"] },
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;

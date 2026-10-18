@@ -10,6 +10,7 @@ import { InboundSequence, ReliableOutbox, ResumeStore } from "./resume.js";
 import type { UplinkSecurityAlerts } from "./uplink-alerts.js";
 import type { EngineCapabilityIssuer, UplinkAuthSource } from "./uplink-auth-source.js";
 import type { UplinkAuthority, UplinkIdentity } from "./uplink-authority.js";
+import { UPLINK_IDLE_STOP_MS, UplinkIdleDecision, type UplinkIdleStopResult, type UplinkIdleStopStore } from "./uplink-idle.js";
 import { UPLINK_ENGINE_LEASE_MS, type UplinkLeaseStore } from "./uplink-lease.js";
 import type { UplinkPhase, UplinkPresenceSnapshot, UplinkPresenceWriter } from "./uplink-presence.js";
 import {
@@ -115,6 +116,11 @@ export type UplinkServerOptions = {
   /** Renews the engine lease of `lease.v1` uplinks; negotiated only while
    * `engine_lease_over_uplink` is on for the organization. */
   lease?: UplinkLeaseStore;
+  /** Requests the idle stop of `idle.v1` uplinks; negotiated only while
+   * `cp_idle_stop` is on for the organization. */
+  idle?: UplinkIdleStopStore;
+  /** Reported quiet time before an `idle.v1` uplink's stop is requested. */
+  idleStopMs?: number;
   extensions?: readonly UplinkExtension[];
   metric?: (name: UplinkMetric, valueMs: number) => void;
   pingIntervalMs?: number;
@@ -148,8 +154,8 @@ export type UplinkServerOptions = {
   random?: () => number;
 };
 
-type ResolvedOptions = Required<Omit<UplinkServerOptions, "presence" | "alerts" | "lease" | "metric" | "resumeRetentionMs">> &
-  Pick<UplinkServerOptions, "presence" | "alerts" | "lease" | "metric">;
+type ResolvedOptions = Required<Omit<UplinkServerOptions, "presence" | "alerts" | "lease" | "idle" | "metric" | "resumeRetentionMs">> &
+  Pick<UplinkServerOptions, "presence" | "alerts" | "lease" | "idle" | "metric">;
 
 export type UplinkCounters = {
   admitted: number;
@@ -164,7 +170,7 @@ const CHURN_WINDOW_MS = 10 * 60_000;
 const CHURN_LIMIT = 3;
 
 /** Server side of the S2 engine uplink (docs/cloud-workspace/contracts/s2-uplink.md,
- * 1.1.0). Liveness, readiness and activity live in memory; presence
+ * 1.2.0). Liveness, readiness and activity live in memory; presence
  * reaches the database only on transitions plus a coarse watermark. */
 export class CloudEngineUplinkServer {
   private readonly wss = new WebSocketServer({
@@ -218,6 +224,7 @@ export class CloudEngineUplinkServer {
       now: Date.now,
       random: Math.random,
       extensions: [],
+      idleStopMs: UPLINK_IDLE_STOP_MS,
       ...options,
     };
     if (!/^[A-Za-z0-9:._-]{1,128}$/.test(this.options.realtimeInstance)) throw new Error("invalid realtime instance id");
@@ -242,7 +249,7 @@ export class CloudEngineUplinkServer {
   }
 
   /** The extensions both sides offer whose rollout flag (if any) is on,
-   * plus `lease.v1` when this server renews leases and the flag is on. */
+   * plus `lease.v1` and `idle.v1` when this server has their store and the flag is on. */
   negotiate(organizationId: string, offered: ReadonlySet<string>): Set<string> {
     const features = new Set(this.options.extensions
       .filter(extension => offered.has(extension.feature) &&
@@ -250,6 +257,8 @@ export class CloudEngineUplinkServer {
       .map(extension => extension.feature));
     if (this.options.lease && offered.has(UPLINK_FEATURES.lease) &&
         this.options.flags.enabled(organizationId, "engine_lease_over_uplink")) features.add(UPLINK_FEATURES.lease);
+    if (this.options.idle && offered.has(UPLINK_FEATURES.idle) &&
+        this.options.flags.enabled(organizationId, "cp_idle_stop")) features.add(UPLINK_FEATURES.idle);
     return features;
   }
 
@@ -489,6 +498,9 @@ class UplinkConnection {
   private rechecking = false;
   private recheckAgain = false;
   private leaseRenewing = false;
+  private idle: UplinkIdleDecision | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private idleRequesting = false;
 
   constructor(
     private readonly server: CloudEngineUplinkServer,
@@ -628,6 +640,7 @@ class UplinkConnection {
       const activity = UplinkActivityReportSchema.safeParse(d);
       if (!activity.success) return "invalid";
       lineage.activity = activity.data;
+      if (this.idle) this.scheduleIdle(this.idle.report(activity.data, this.now()));
       return "ok";
     }
     for (const extension of this.server.options.extensions) {
@@ -667,6 +680,7 @@ class UplinkConnection {
     this.leaseExpiresAtMs = verified.leaseExpiresAtMs;
     this.offered = new Set(hello.features);
     this.features = this.server.negotiate(identity.organizationId, this.offered);
+    if (this.features.has(UPLINK_FEATURES.idle)) this.idle = new UplinkIdleDecision(options.idleStopMs);
     // A token resumes only with the credential, engine instance and bootId
     // it was issued to — and only when its cursor can be repaired. Peek
     // first: a cursor the outbox cannot replay (a foreign or confused peer)
@@ -759,6 +773,7 @@ class UplinkConnection {
         // A redial within one watermark of the last renewal (a drain or a
         // deploy) keeps that lease until the next tick.
         if (this.leaseExpiresAtMs - this.now() <= UPLINK_ENGINE_LEASE_MS - options.watermarkIntervalMs) void this.renewLease();
+        if (this.idle) this.scheduleIdle(this.idle.dueAtMs());
       }
     } else {
       nextMs = Math.max(100, Math.floor(options.random() * options.capabilityRetryMs));
@@ -837,6 +852,34 @@ class UplinkConnection {
       if (renewed.ok) this.leaseExpiresAtMs = Math.max(this.leaseExpiresAtMs, renewed.leaseExpiresAtMs);
       else if (renewed.reason === "authority") this.close(UPLINK_CLOSE.forbidden, "uplink_forbidden", { park: false });
     } finally { this.leaseRenewing = false; }
+  }
+
+  /** `idle.v1`: the quiet time the engine reported elapsed on this open
+   * uplink. One request in flight. The store's transaction re-checks
+   * authority, engine age and durable work, and the engine still proves
+   * idleness before its checkpoint, cancelling the request if it is not. */
+  private async requestIdleStop(): Promise<void> {
+    const store = this.server.options.idle, identity = this.identity, idle = this.idle;
+    if (!store || !identity || !idle || this.state !== "welcomed" || !this.flowing || this.idleRequesting) return;
+    const due = idle.dueAtMs();
+    if (due === null || due > this.now()) return this.scheduleIdle(due);
+    this.idleRequesting = true;
+    let result: UplinkIdleStopResult;
+    try {
+      result = await store.request(identity, this.token, randomUUID()).catch(() => "unavailable" as const);
+    } finally { this.idleRequesting = false; }
+    if (this.state !== "welcomed") return;
+    idle.attempted(this.now(), result);
+    if (result === "authority") void this.recheck();
+    this.scheduleIdle(idle.dueAtMs());
+  }
+
+  private scheduleIdle(dueAtMs: number | null): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    if (dueAtMs === null || !Number.isFinite(dueAtMs) || this.state !== "welcomed") return;
+    this.idleTimer = setTimeout(() => { this.idleTimer = null; void this.requestIdleStop(); }, Math.max(0, dueAtMs - this.now()));
+    this.idleTimer.unref?.();
   }
 
   /** Readiness writes are bounded per uplink (a burst, then one per
@@ -971,10 +1014,10 @@ class UplinkConnection {
   }
 
   private stopTimers(): void {
-    for (const timer of [this.helloTimer, this.authTimer, this.ackTimer, this.capabilityTimer, this.presenceTimer, ...this.drainTimers])
+    for (const timer of [this.helloTimer, this.authTimer, this.ackTimer, this.capabilityTimer, this.presenceTimer, this.idleTimer, ...this.drainTimers])
       if (timer) clearTimeout(timer);
     for (const timer of [this.livenessTimer, this.watermarkTimer, this.authorityTimer]) if (timer) clearInterval(timer);
-    this.helloTimer = this.authTimer = this.ackTimer = this.capabilityTimer = this.presenceTimer = null;
+    this.helloTimer = this.authTimer = this.ackTimer = this.capabilityTimer = this.presenceTimer = this.idleTimer = null;
     this.livenessTimer = this.watermarkTimer = this.authorityTimer = null;
     this.drainTimers = [];
   }

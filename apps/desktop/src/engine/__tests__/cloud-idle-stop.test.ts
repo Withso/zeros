@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CloudIdleStopScheduler, hasCloudUserProcesses, isCloudIdleMaintenance } from "../cloud-idle-stop";
+import { CloudIdleStopScheduler, CLOUD_IDLE_STOP_MS, hasCloudUserProcesses, isCloudIdleMaintenance } from "../cloud-idle-stop";
 import type { CloudDurabilityAuthority } from "../cloud-durability-runtime";
 const authority = {} as CloudDurabilityAuthority;
 const inspection=(workloadPids:number[]=[])=>({complete:true,pendingLaunches:0,failedRetirements:0,workloadPids,infrastructurePids:[]});
@@ -212,5 +212,44 @@ describe("cloud idle stop", () => {
     expect(await hasCloudUserProcesses({inspect:async()=>({...inspection(),failedRetirements:1})})).toBe(true);
     expect(await hasCloudUserProcesses({inspect:async()=>{throw new Error('unreadable');}})).toBe(true);
     expect(await hasCloudUserProcesses({inspect:async()=>inspection()})).toBe(false);
+  });
+});
+describe("control-plane idle decision (idle.v1)", () => {
+  const authority = {} as CloudDurabilityAuthority;
+  it("keeps observing but never initiates while the control plane decides", async () => {
+    let now = 0, delegated = true;
+    const stop = vi.fn(async () => true), changed = vi.fn();
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => false, delegated: () => delegated, changed, stop });
+    now = CLOUD_IDLE_STOP_MS;
+    scheduler.consider(authority);
+    await scheduler.settled();
+    expect(stop).not.toHaveBeenCalled();
+    expect(changed).toHaveBeenCalled();
+    delegated = false;
+    scheduler.consider(authority);
+    await scheduler.settled();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+  it("runs a delegated stop only after its own quiet interval and never while busy", async () => {
+    let now = 0, busy = false;
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => busy, stop: async () => false });
+    const run = vi.fn(async () => true);
+    now = CLOUD_IDLE_STOP_MS - 6_000;
+    expect(await scheduler.delegate(run)).toBe(false);
+    now = CLOUD_IDLE_STOP_MS;
+    busy = true;
+    expect(await scheduler.delegate(run)).toBe(false);
+    busy = false;
+    expect(await scheduler.delegate(run)).toBe(true);
+    expect(run).toHaveBeenCalledOnce();
+    expect(await scheduler.delegate(run)).toBe(false); // completed
+  });
+  it("reports a failed delegated stop as not completed", async () => {
+    let now = 0;
+    const failed = vi.fn();
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => false, failed, stop: async () => false });
+    now = CLOUD_IDLE_STOP_MS;
+    expect(await scheduler.delegate(async () => { throw new Error("transport"); })).toBe(false);
+    expect(failed).toHaveBeenCalledOnce();
   });
 });

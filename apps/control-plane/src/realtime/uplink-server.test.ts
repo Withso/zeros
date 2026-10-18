@@ -9,6 +9,7 @@ import type { EngineCapabilityResult } from "./uplink-auth-source.js";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "./uplink-authority.js";
 import { UplinkCheckpointPush, type UplinkCheckpointRequest } from "./uplink-checkpoint.js";
 import { UplinkCredentialPush } from "./uplink-cred.js";
+import type { UplinkIdleStopResult, UplinkIdleStopStore } from "./uplink-idle.js";
 import { UPLINK_ENGINE_LEASE_MS, type UplinkLeaseRenewal, type UplinkLeaseStore } from "./uplink-lease.js";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "./uplink-presence.js";
 import { UPLINK_CLOSE, UPLINK_MAX_BINARY_FRAME_BYTES, UPLINK_PATH, UPLINK_SUBPROTOCOL } from "./uplink-protocol.js";
@@ -69,6 +70,14 @@ class FakeLease implements UplinkLeaseStore {
     return token === TOKEN || token === OTHER_TOKEN ? this.result : { ok: false, reason: "authority" };
   }
 }
+class FakeIdle implements UplinkIdleStopStore {
+  readonly calls: [UplinkIdentity, string][] = [];
+  result: UplinkIdleStopResult = "requested";
+  async request(identity: UplinkIdentity, token: string): Promise<UplinkIdleStopResult> {
+    this.calls.push([identity, token]);
+    return this.result;
+  }
+}
 describe("engine uplink server", () => {
   let http: Server;
   let uplink: CloudEngineUplinkServer;
@@ -84,6 +93,8 @@ describe("engine uplink server", () => {
   let checkpointPush: boolean;
   let leaseFlag: boolean;
   let lease: FakeLease;
+  let idleFlag: boolean;
+  let idle: FakeIdle;
   const flagListeners = new Set<() => void>();
   const peers: Peer[] = [];
   let identity: UplinkIdentity;
@@ -96,7 +107,8 @@ describe("engine uplink server", () => {
       flags: {
         enabled: (orgId, flag) => orgId === identity.organizationId &&
           (flag === "realtime_uplink" ? enabled : flag === "credential_push" ? credentialPush :
-            flag === "engine_lease_over_uplink" ? leaseFlag : flag === "checkpoint_push" ? checkpointPush : false),
+            flag === "engine_lease_over_uplink" ? leaseFlag : flag === "checkpoint_push" ? checkpointPush :
+            flag === "cp_idle_stop" ? idleFlag : false),
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
       authSource: {
@@ -138,7 +150,7 @@ describe("engine uplink server", () => {
 
   beforeEach(() => {
     authority = new FakeAuthority(); writes = []; alerts = []; metrics = []; enabled = true; credentialPush = true; authFails = false;
-    lease = new FakeLease(); leaseFlag = true; checkpointPush = true;
+    lease = new FakeLease(); leaseFlag = true; idle = new FakeIdle(); idleFlag = true; checkpointPush = true;
     capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 300_000 };
     identity = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 3, engineInstanceId: randomUUID(), bootId: randomUUID() };
   });
@@ -932,6 +944,76 @@ describe("engine uplink server", () => {
       leaseFlag = false;
       for (const listener of flagListeners) listener();
       await expect(on.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.goingAway, reason: "features_changed" });
+    });
+  });
+
+  describe("control-plane idle stop (idle.v1)", () => {
+    const IDLE = ["idle.v1"];
+    const report = (peer: Peer, s: number, d: Record<string, number>) =>
+      peer.send({ t: "activity.report", s, d: { clients: 0, runningTurns: 0, liveTerminals: 0, windowMs: 0, ...d } });
+    const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+    it.each([
+      ["offered, configured and on for the organization", true, true, true, IDLE],
+      ["not offered", false, true, true, []],
+      ["off for the organization", true, false, true, []],
+      ["offered to a server without an idle store", true, true, false, []],
+    ] as const)("negotiates idle.v1 only when %s", async (_name, offered, flag, configured, features) => {
+      idle.result = "declined";
+      idleFlag = flag;
+      await start(configured ? { idle, idleStopMs: 100 } : { idleStopMs: 100 });
+      const { peer, welcome } = await connect(offered ? { features: IDLE } : {});
+      expect(welcome.d!.features).toEqual(features);
+      report(peer, 1, { windowMs: 100 });
+      await wait(150);
+      expect(idle.calls).toHaveLength(features.length);
+    });
+
+    it("requests the stop with the uplink's identity and token once the reported quiet time elapses", async () => {
+      await start({ idle, idleStopMs: 300 });
+      const { peer } = await connect({ features: IDLE });
+      report(peer, 1, { windowMs: 100 });
+      await wait(100);
+      expect(idle.calls).toEqual([]);
+      await until(() => idle.calls.length === 1);
+      expect(idle.calls).toEqual([[identity, TOKEN]]);
+      await wait(150);
+      expect(idle.calls).toHaveLength(1); // requested: the next try waits a full interval
+    });
+
+    it.each([
+      ["no report (unknown activity)", []],
+      ["a client, a turn or a terminal active", [{ windowMs: 150, clients: 1 }, { windowMs: 150, runningTurns: 1 }, { windowMs: 150, liveTerminals: 1 }]],
+    ] as [string, Record<string, number>[]][])("never requests a stop with %s", async (_name, reports) => {
+      await start({ idle, idleStopMs: 100 });
+      const { peer } = await connect({ features: IDLE });
+      reports.forEach((d, i) => report(peer, i + 1, d));
+      await wait(250);
+      expect(idle.calls).toEqual([]);
+    });
+
+    it("drops a pending request on a busy report or a closed uplink", async () => {
+      await start({ idle, idleStopMs: 300 });
+      const first = await connect({ features: IDLE });
+      report(first.peer, 1, { windowMs: 100 });
+      report(first.peer, 2, { windowMs: 0, runningTurns: 1 });
+      await wait(350);
+      expect(idle.calls).toEqual([]);
+      report(first.peer, 3, { windowMs: 100 });
+      first.peer.ws.close();
+      await until(() => uplink.size === 0);
+      await wait(350);
+      expect(idle.calls).toEqual([]);
+    });
+
+    it("re-checks authority when the store refuses it and closes 4403 when authority is gone", async () => {
+      idle.result = "authority";
+      await start({ idle, idleStopMs: 50 });
+      const { peer } = await connect({ features: IDLE });
+      authority.result = { ok: false, reason: "authority" };
+      report(peer, 1, { windowMs: 50 });
+      expect((await peer.closed).code).toBe(UPLINK_CLOSE.forbidden);
+      expect(idle.calls).toHaveLength(1);
     });
   });
 

@@ -269,6 +269,20 @@ authority supplies keys, epochs and engine tokens
   through its heartbeat as before, so the push writes nothing and a
   foreign or stale frame costs one heartbeat. Without `checkpoint.v1` the
   engine keeps its checkpoint-hint long-poll on `api`.
+- **Idle stop (`idle.v1`).** `uplink-idle.ts` decides an idle stop for an
+  uplink that negotiated `idle.v1` (S2 1.2.0), selected while the
+  organization's `cp_idle_stop` flag is on ([rollout flags](rollout-flags.md))
+  and the server has an idle store. `UplinkIdleDecision` takes each
+  `activity.report`: with all three counts 0 and `windowMs > 0` the quiet
+  start is the receipt time minus `windowMs`, and the request is due 10 min
+  after it. A busy report, a restarted quiet window, a closed uplink or no
+  report at all cancels or prevents it, so unknown activity never stops a
+  workspace. `DatabaseUplinkIdleStopStore` runs the HTTP idle-stop
+  transaction (`DatabaseCloudIdleStop.request`) with the uplink's own
+  identity and token, one call in flight, and maps the outcome to
+  `requested`, `declined`, `unavailable` or `authority`. Declined or
+  unavailable retries back off 15 s, doubling to 120 s; requested waits one
+  full interval; authority re-checks the uplink and stops retrying.
 
 ## Device stream server
 
@@ -506,6 +520,17 @@ registration there is no uplink client at all.
   (`uplinkCheckpointPushChanged`), and it re-checks every 30 s regardless,
   so the long-poll resumes, with a fresh backoff, as soon as the uplink is
   lost.
+- **Idle stop (`idle.v1`).** The engine also offers `idle.v1`. While
+  `idleActive` holds (current connection welcomed, gate open, `idle.v1`
+  negotiated), `reportActivity` sends `activity.report` when the gate opens,
+  every 60 s and on an edge (quiet began or ended, or a quiet window
+  restarted), with the counts clamped to the schema. The scheduler keeps
+  observing but never initiates (`delegated`). An idle directive delivered
+  with no engine idle reservation runs `CloudIdleStopScheduler.delegate`,
+  which refuses unless the engine has itself been quiet for 10 min (5 s
+  slack) and is not busy; a refused or failed delegated stop cancels the
+  request. Once the uplink is gone, the scheduler initiates on its next
+  15 s tick.
 
 ## Railway configuration (planned)
 

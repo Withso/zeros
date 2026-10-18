@@ -21,6 +21,7 @@ import { DatabaseCloudWorkspaceDurableRecordService } from "../cloud-workspaces/
 import { CloudEngineCheckpointHints } from "../cloud-workspaces/engine-checkpoint-hints.js";
 import { DatabaseCloudWorkspaceEngineClientAdmissionService } from "../cloud-workspaces/engine-client-admission.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "../cloud-workspaces/engine-protocol-version.js";
+import { DatabaseCloudIdleStop } from "../cloud-workspaces/idle-stop.js";
 import { LIFECYCLE_JOB_KINDS } from "../cloud-workspaces/lifecycle-jobs.js";
 import { runDueLifecycleJobs } from "../cloud-workspaces/lifecycle-job-test-utils.js";
 import { claimJobs } from "../job-queue.js";
@@ -36,6 +37,7 @@ import { computerTestAccount, computerTestWallet } from "../cloud-workspaces/com
 import { runtimeBase } from "../cloud-workspaces/runtime-test-fixtures.js";
 import { seedReadyCloudWorkspace, withCloudFixtureOwnerTx, type ReadyCloudWorkspaceFixture } from "../cloud-workspaces/test-fixtures.js";
 import { DatabaseUplinkCheckpointStore } from "../realtime/uplink-checkpoint.js";
+import { DatabaseUplinkIdleStopStore } from "../realtime/uplink-idle.js";
 import { DatabaseUplinkLeaseStore } from "../realtime/uplink-lease.js";
 import { DatabaseCostMeter } from "./instrument.js";
 import { AUTHORITY_CACHE_CHANNEL } from "../cloud-workspaces/engine-authority-cache.js";
@@ -203,6 +205,7 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
   // `realtime` runs the lease.v1 renewals and checkpoint.v1 reads; the API
   // pool measures them the same.
   const leases = new DatabaseUplinkLeaseStore({ pool: api, workosEnabled });
+  const idleStops = new DatabaseUplinkIdleStopStore(new DatabaseCloudIdleStop(api, workosEnabled));
   const checkpointQueue = new DatabaseUplinkCheckpointStore(api);
   // A zero-length wait is exactly one of the reads a held wait repeats.
   const checkpointHints = new CloudEngineCheckpointHints(api, { waitMs: 0 });
@@ -300,6 +303,14 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
       const renewed = await leases.renew({ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
         engineInstanceId: w.engine.engineInstanceId, bootId: w.runtimeBootId }, w.engine.heartbeatToken);
       if (!renewed.ok) throw new Error(`uplink lease renewal was refused (${renewed.reason})`);
+    },
+    // S2 idle.v1: one stop request `realtime` makes after 10 quiet minutes.
+    // The simulated engine is younger than 10 min, so this measures the
+    // declined path and creates no lifecycle intent.
+    "engine.uplinkIdleStopRequest": async (w: SimulatedWorkspace) => {
+      const result = await idleStops.request({ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
+        engineInstanceId: w.engine.engineInstanceId, bootId: w.runtimeBootId }, w.engine.heartbeatToken, randomUUID());
+      if (result !== "declined") throw new Error(`uplink idle stop request answered ${result}`);
     },
     // S2 checkpoint.v1: one uplink's read of queued checkpoint requests.
     "engine.uplinkCheckpointSweep": async (w: SimulatedWorkspace) => {
