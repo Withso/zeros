@@ -26,12 +26,14 @@
 // custom 1.6s ease-in-out infinite opacity pulse.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useContext, useEffect, useRef, useState } from "react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { isElementActuallyVisible } from "@/renderer/shared/lib/element-visibility";
 
 import { startLoaderRun } from "./loader-loop";
+import { ActivityScope } from "./activity-scope";
+import { startElapsedDisplay } from "./elapsed-display";
 
 // Shared utility classes — kept as module constants so consumers
 // composing their own className don't have to redefine the base.
@@ -48,13 +50,22 @@ export const LiveDuration = memo(function LiveDuration({
   startedAt,
   className,
 }: LiveDurationProps) {
+  const scope = useContext(ActivityScope);
   // 1 Hz tick. Sub-second precision in the display would just thrash
   // React with no informational gain — what users want to know is
   // "is this still running" and "is it taking a long time", both
   // answered fine at 1s granularity.
-  const [tick, setTick] = useState(0);
+  const [tick, setTick] = useState<string | number>(() => scope === undefined ? 0 : formatElapsed(Date.now() - startedAt));
   const elRef = useRef<HTMLSpanElement | null>(null);
+  const localStartedAt = scope === undefined ? undefined : startedAt;
   useEffect(() => {
+    if (scope !== undefined) {
+      const host = elRef.current;
+      if (!scope || !host) return;
+      return startElapsedDisplay({ host, startedAt: localStartedAt!, precision: elapsed => elapsed >= 3_600_000 ? 60_000 : 1_000,
+        format: formatElapsed, changed: setTick,
+        activity: active => { host.style.animationPlayState = active ? "" : "paused"; } });
+    }
     const id = window.setInterval(() => {
       // Retained-but-hidden chat decks keep this component mounted
       // (visibility:hidden), and N streaming tool cards across those decks
@@ -63,16 +74,16 @@ export const LiveDuration = memo(function LiveDuration({
       // ticks cost nothing: the first visible tick shows the correct total.
       const el = elRef.current;
       if (el && !isElementActuallyVisible(el)) return;
-      setTick((t) => t + 1);
+      setTick((t) => typeof t === "number" ? t + 1 : 0);
     }, 1000);
     return () => window.clearInterval(id);
-  }, []);
+  }, [scope, localStartedAt]);
   // tick is read only to satisfy the linter — the increment alone is
   // what schedules a re-render.
   void tick;
   const elapsedMs = Math.max(0, Date.now() - startedAt);
   return (
-    <span ref={elRef} className={cn(LIVE_DURATION_CLS, className)}>
+    <span ref={elRef} className={cn(LIVE_DURATION_CLS, className)} style={scope === false ? { animationPlayState: "paused" } : undefined}>
       {formatElapsed(elapsedMs)}
     </span>
   );
@@ -87,17 +98,20 @@ export const WorkingDuration = memo(function WorkingDuration({
   startedAt,
   className,
 }: LiveDurationProps) {
+  const scope = useContext(ActivityScope);
   const elRef = useRef<HTMLSpanElement | null>(null);
   const [text, setText] = useState(() => formatWorkingElapsed(Date.now() - startedAt));
   useEffect(() => {
     const el = elRef.current;
-    if (!el) return;
+    if (!el || scope === false) return;
+    if (scope === true) return startElapsedDisplay({ host: el, startedAt, precision: () => 100,
+      format: formatWorkingElapsed, changed: setText });
     return startLoaderRun({
       host: el,
       // Same text, same state: React skips the render.
       tick: () => setText(formatWorkingElapsed(Date.now() - startedAt)),
     });
-  }, [startedAt]);
+  }, [startedAt, scope]);
   return (
     <span ref={elRef} aria-live="off" className={cn("text-3xxs tabular-nums text-fg2", className)}>
       {text}
