@@ -627,6 +627,8 @@ export function createCloudWorkspaceInternalRoutes(
       // An older reader ignores this header; a new helper emits timed results
       // only after a supporting control plane acknowledges it.
       if (input.runtime && c.req.header("x-zeros-setup-timings") === "1") c.header("x-zeros-setup-timings", "1");
+      if (input.runtime && c.req.header("x-zeros-setup-timings") === "1" && c.req.header("x-zeros-setup-observations") === "1")
+        c.header("x-zeros-setup-observations", "1");
       return c.json(material);
     } catch (error) {
       if (!(error instanceof CloudWorkspaceSetupMaterialError)) throw error;

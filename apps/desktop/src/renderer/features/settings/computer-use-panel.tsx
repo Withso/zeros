@@ -16,6 +16,7 @@ import { Button } from "../../shared/ui/primitives/button";
 import { Switch } from "../../shared/ui/primitives/switch";
 import { toast } from "../../shared/ui/primitives/elements";
 import { nativeInvoke } from "../../platform/runtime";
+import { pollWhileForeground } from "../../shared/lib/element-activity";
 import {
   useNativeAppIcon,
   useNativeAppName,
@@ -195,14 +196,7 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
   // so poll while the panel is visible and refresh when the window refocuses.
   useEffect(() => {
     if (!surfaceActive) return;
-    void refreshStatus();
-    const interval = setInterval(() => void refreshStatus(), 5000);
-    const onFocus = () => void refreshStatus();
-    window.addEventListener("focus", onFocus);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener("focus", onFocus);
-    };
+    return pollWhileForeground(() => void refreshStatus(), 5000);
   }, [refreshStatus, surfaceActive]);
 
   // A write updates the layer cache immediately, while the resolved cache is

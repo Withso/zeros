@@ -216,7 +216,7 @@ import {
   selectDesignNode,
   selectDesignNodeAtLocation,
   selectDesignNodes,
-  selectDesignNodesInRect,
+  selectDesignTargetsInRect,
   toggleDesignNodeSelection,
 } from "./state/design-selection";
 import { createDesignSerialQueue } from "./state/design-serial-queue";
@@ -239,6 +239,7 @@ import {
 import {
   designWorkspaceView,
   isCurrentDesignPageOwner,
+  captureDesignPageOwner,
   useDesignWorkspaceUiStore,
   useDesignWorkspaceView,
 } from "./state/design-workspace-ui";
@@ -246,6 +247,13 @@ import { useDesignFoundation } from "./state/use-design-foundation";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 import { DesignFrameRenderSurface } from "./design-frame-render-surface";
+import {
+  DesignAgentActivityChip,
+  DesignAgentDraftFrameOverlay,
+  DesignAgentDraftGhosts,
+  useDesignAgentDraftFrameFiles,
+  type DesignAgentRevealTarget,
+} from "./design-agent-drafts";
 import { errorMessage } from "./design-workspace-error";
 import {
   DESIGN_RESIZE_HANDLES,
@@ -443,8 +451,8 @@ export function DesignCanvas({
 }: DesignCanvasProps) {
   const view = useDesignWorkspaceView(workspaceId);
   const canvasDirectoryId = snapshot?.directoryId ?? view.directoryId;
-  const canvasPageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: canvasDirectoryId, pageId: view.activePageId } : undefined,
-    [workspaceId, canvasDirectoryId, view.activePageId]);
+  const canvasPageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: canvasDirectoryId, pageId: view.activePageId, revision: view.ownerRevision ?? 0 } : undefined,
+    [workspaceId, canvasDirectoryId, view.activePageId, view.ownerRevision]);
   const canvasDocumentOwner = `${workspaceId ?? ""}\0${canvasDirectoryId ?? ""}\0${view.activePageId ?? ""}`;
   const canvasDocumentOwnerRef = useRef(canvasDocumentOwner);
   canvasDocumentOwnerRef.current = canvasDocumentOwner;
@@ -528,6 +536,7 @@ export function DesignCanvas({
       });
     }),
   );
+  const selectionRuntimeFrames = useDesignRuntimeStore(state => workspaceId ? state.byWorkspace[workspaceId]?.frames : undefined);
   const selectedRuntimeTree = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame) return EMPTY_DESIGN_TREE;
     return (
@@ -1041,12 +1050,20 @@ export function DesignCanvas({
   // Layers reads each open frame's runtime tree, so an open frame is a demand
   // for a live runtime exactly like the selection is.
   const layerDisclosures = useDesignWorkspaceDisclosure(workspaceId);
+  // A frame an agent is drafting ranks the same way: once the tool saves,
+  // its live document paints the result in place under the draft.
+  const agentDraftFiles = useDesignAgentDraftFrameFiles(
+    workspaceId,
+    snapshot?.directory,
+  );
   const layersOpenFiles = useMemo(
-    () =>
-      Object.entries(layerDisclosures)
+    () => [
+      ...Object.entries(layerDisclosures)
         .filter(([, disclosure]) => disclosure.treeExpanded)
         .map(([file]) => file),
-    [layerDisclosures],
+      ...agentDraftFiles,
+    ],
+    [agentDraftFiles, layerDisclosures],
   );
   const liveFrameFiles = useMemo(() => {
     const previous =
@@ -1153,7 +1170,7 @@ export function DesignCanvas({
   const publishSelection = useCallback(
     (
       frame: DesignCanvasFrameWire | null,
-      options?: { selected?: boolean; reveal?: boolean },
+      options?: { selected?: boolean; reveal?: boolean; explicit?: boolean; additive?: boolean },
     ) => {
       if (!workspaceId) return;
       void selectDesignFrame(workspaceId, frame, { ...options, owner: canvasPageOwner }).catch(
@@ -1173,7 +1190,7 @@ export function DesignCanvas({
   useEffect(() => {
     if (!active || !snapshot) return;
     if (view.selectedNodeId) return;
-    publishSelection(selectedFrame, { selected: view.frameSelected });
+    publishSelection(selectedFrame, { selected: view.frameSelected, explicit: false });
   }, [
     active,
     publishSelection,
@@ -1345,6 +1362,64 @@ export function DesignCanvas({
     // Only a change of frame reveals; the camera and size are read at it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, liveFrameOwner, selectedFrame?.file, workspaceId]);
+
+  /** Show what an agent is writing without selecting it: one frame comes
+   * into view like a Layers selection, several are fitted, and a frame on
+   * another page switches to that page first. */
+  const pendingAgentRevealRef = useRef<DesignAgentRevealTarget | null>(null);
+  const revealAgentRects = useCallback(
+    (rects: readonly { x: number; y: number; width: number; height: number }[]) => {
+      if (!workspaceId || rects.length === 0) return;
+      if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
+      const bounds = viewportRef.current?.getBoundingClientRect();
+      if (!bounds) return;
+      const size = { width: bounds.width, height: bounds.height };
+      const insets = measureDesignCanvasInsets(viewportRef.current);
+      const current = wheelViewportRef.current ?? view;
+      const next =
+        rects.length === 1
+          ? designRevealRectViewport(current, size, rects[0]!, undefined, insets)
+          : fitDesignRects([...rects], size, undefined, insets);
+      if (!next) return;
+      cancelPendingWheelGesture();
+      paintDesignCanvasCamera(worldRef.current, next, false);
+      setViewport(workspaceId, next, canvasPageOwner);
+    },
+    [cancelPendingWheelGesture, canvasPageOwner, setViewport, view, workspaceId],
+  );
+  const agentRevealRects = useCallback(
+    (target: DesignAgentRevealTarget) => [
+      ...(snapshot?.frames ?? [])
+        .filter((frame) => target.files.includes(frame.file))
+        .map((frame) => ({ x: frame.x, y: frame.y, width: frame.width, height: frame.height })),
+      ...target.rects,
+    ],
+    [snapshot?.frames],
+  );
+  const revealAgentTarget = useCallback(
+    (target: DesignAgentRevealTarget) => {
+      if (!workspaceId) return;
+      if (target.pageId && view.activePageId && target.pageId !== view.activePageId) {
+        pendingAgentRevealRef.current = target;
+        useDesignWorkspaceUiStore
+          .getState()
+          .setActivePage(workspaceId, target.pageId, canvasDirectoryId);
+        return;
+      }
+      pendingAgentRevealRef.current = null;
+      revealAgentRects(agentRevealRects(target));
+    },
+    [agentRevealRects, canvasDirectoryId, revealAgentRects, view.activePageId, workspaceId],
+  );
+  // The switched-to page's frames arrive with its projection.
+  useLayoutEffect(() => {
+    const pending = pendingAgentRevealRef.current;
+    if (!active || !pending || pending.pageId !== view.activePageId) return;
+    const rects = agentRevealRects(pending);
+    if (rects.length === 0) return;
+    pendingAgentRevealRef.current = null;
+    revealAgentRects(rects);
+  }, [active, agentRevealRects, revealAgentRects, view.activePageId]);
 
   useLayoutEffect(() => {
     if (!active) return;
@@ -2457,6 +2532,10 @@ export function DesignCanvas({
       event.stopPropagation();
       // Labels move the whole frame; body drags retain scoped marquee.
       viewportRef.current?.focus({ preventScroll: true });
+      if (event.shiftKey && mode === "move") {
+        publishSelection(frame, { selected: true, reveal: true, additive: true });
+        return;
+      }
       publishSelection(frame, { selected: true, reveal: true });
       const element = event.currentTarget.closest<HTMLElement>(
         "[data-design-frame]",
@@ -6237,6 +6316,7 @@ export function DesignCanvas({
         y: event.clientY - viewportBounds.top,
       };
       const additive = event.shiftKey;
+      const owner = captureDesignPageOwner(workspaceId);
       let latest = start;
       let moved = false;
       event.preventDefault();
@@ -6279,6 +6359,7 @@ export function DesignCanvas({
       };
       const finish = () => {
         cleanup();
+        if (!isCurrentDesignPageOwner(owner)) return;
         if (!moved) {
           if (options?.onClick) options.onClick();
           else if (!additive) publishSelection(selectedFrame);
@@ -6297,49 +6378,18 @@ export function DesignCanvas({
           width: screenRect.width / camera.zoom,
           height: screenRect.height / camera.zoom,
         };
-        const overlapArea = (frame: DesignCanvasFrameWire) => {
-          const left = Math.max(worldRect.x, frame.x);
-          const top = Math.max(worldRect.y, frame.y);
-          const right = Math.min(
-            worldRect.x + worldRect.width,
-            frame.x + frame.width,
-          );
-          const bottom = Math.min(
-            worldRect.y + worldRect.height,
-            frame.y + frame.height,
-          );
-          return Math.max(0, right - left) * Math.max(0, bottom - top);
-        };
-        const frame =
-          options?.frame ??
-          [...(snapshot?.frames ?? [])]
-            .map((candidate) => ({ candidate, area: overlapArea(candidate) }))
-            .filter(({ area }) => area > 0)
-            .sort(
-              (left, right) =>
-                Number(right.candidate.file === selectedFrame?.file) -
-                  Number(left.candidate.file === selectedFrame?.file) ||
-                right.area - left.area,
-            )[0]?.candidate;
-        if (!frame) {
-          if (!additive) publishSelection(selectedFrame);
-          return;
-        }
         const scopeNodeId =
-          frame.file === selectedFrame?.file && view.selectedNodeId
+          options?.frame?.file === selectedFrame?.file && view.selectedNodeId
             ? designLayerParentId(selectedRuntimeTree, view.selectedNodeId)
             : null;
-        void selectDesignNodesInRect({
+        void selectDesignTargetsInRect({
           workspaceId,
           folder,
-          frame,
+          frames: snapshot?.frames ?? [],
+          startFrame: options?.frame,
           additive,
-          rect: {
-            x: worldRect.x - frame.x,
-            y: worldRect.y - frame.y,
-            width: worldRect.width,
-            height: worldRect.height,
-          },
+          owner,
+          rect: worldRect,
           scopeNodeId,
         })
           .catch((selectionError) => {
@@ -6524,7 +6574,10 @@ export function DesignCanvas({
             // Frame chrome follows the semantic selection shared by body,
             // label, Layers, and keyboard navigation.
             const frameSelectedOnly =
-              selected && view.frameSelected && !selectedElement;
+              view.selectedTargets.some(target => target.frame === frame.file && !target.nodeId);
+            const secondaryElements = view.selectedTargets.filter(target => target.frame === frame.file && target.nodeId &&
+              !selectedElements.some(details => details.oid === target.nodeId)).map(target => selectionRuntimeFrames?.[frame.file]?.detailsByNode[target.nodeId!])
+              .filter((details): details is DesignRuntimeNodeDetails => Boolean(details && details.sourceVersion === frame.sourceVersion));
             // Guides and Option/Alt measurements anchor on the primary
             // selection's parent; a root-level selection measures against the
             // frame itself. Null while a nested parent's rect is still loading.
@@ -6651,6 +6704,7 @@ export function DesignCanvas({
                           ? "deepest"
                           : "plain",
                       additive: pointer.shiftKey,
+                      owner: canvasPageOwner,
                     });
                     void selection
                       .then((details) => {
@@ -6801,12 +6855,30 @@ export function DesignCanvas({
                     highResolutionDisabled={
                       inlineTextEdit?.frame === frame.file
                     }
+                    designDirectory={snapshot.directory}
                   />
                 ) : (
                   <div className="bg-bg2 text-muted-fg flex size-full items-center justify-center text-xs">
                     Preparing {frame.title}…
                   </div>
                 )}
+
+                {workspaceId && frame.kind !== "text" ? (
+                  <DesignAgentDraftFrameOverlay
+                    workspaceId={workspaceId}
+                    directory={snapshot.directory}
+                    frame={frame}
+                    live={liveFrameFiles.has(frame.file)}
+                    active={active}
+                    theme={frameTheme}
+                  />
+                ) : null}
+
+                {secondaryElements.map(details => (
+                  <div key={details.oid} data-design-secondary-selection={details.oid}
+                    className="zd-design-selection-outline pointer-events-none absolute z-1 outline"
+                    style={{ ...designSelectionOverlayStyle(designSelectionOverlayFrame(designSelectionBox(details))), outlineWidth: designCanvasScreenPixels(2) }} />
+                ))}
 
                 {multiSelectionBounds ? (
                   <div
@@ -7263,6 +7335,17 @@ export function DesignCanvas({
               </article>
             );
           })}
+          {workspaceId && snapshot ? (
+            <DesignAgentDraftGhosts
+              workspaceId={workspaceId}
+              directory={snapshot.directory}
+              pages={snapshot.pages}
+              activePageId={view.activePageId}
+              frames={snapshot.frames}
+              active={active}
+              theme={frameTheme}
+            />
+          ) : null}
           {inlineTextEdit?.kind === "new" &&
           inlineTextEdit.owner === "canvas" &&
           !inlineTextEdit.frame ? (
@@ -7564,6 +7647,19 @@ export function DesignCanvas({
             </DesignToolbarButton>
           </Toolbar>
         </div>
+
+        {workspaceId && snapshot ? (
+          <DesignAgentActivityChip
+            workspaceId={workspaceId}
+            directory={snapshot.directory}
+            pages={snapshot.pages}
+            activePageId={view.activePageId}
+            frames={snapshot.frames}
+            active={active}
+            motionOpen={motionTimelineOpen}
+            onReveal={revealAgentTarget}
+          />
+        ) : null}
 
         <DesignThemeEditor
           workspaceId={workspaceId}

@@ -130,6 +130,7 @@ import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import { ComposerDesignTag } from "./composer-design-tag";
 import { ComposerDesignFrame, useComposerDesignFrame } from "./composer-design-frame";
 import { prepareDesignFrameAttachments } from "./design-frame-attachment";
+import { hasDesignFrameAttachmentSelection } from "./design-frame-selection";
 import { setComposerMode } from "./composer-mode";
 import {
   Conversation,
@@ -272,6 +273,8 @@ import {
   isTailProviderTurnSegment,
   turnKey,
 } from "./turn-container";
+import { useLocalLiveTextSource } from "./local-live-text";
+import { ActivityScope } from "@/renderer/shared/ui/loading/activity-scope";
 import {
   TranscriptTurn,
   type TranscriptTurnActions,
@@ -323,6 +326,8 @@ const PLAN_MODE_RX = /plan|read.?only/i;
 const NO_PENDING_QUESTION_TOOL_CALL_IDS = new Set<string>();
 
 interface AgentChatProps {
+  /** The session hook keeps append-only Local prose in its live message. */
+  liveTextUpdates?: boolean;
   /** Saved workspace history shares the transcript, with all writing disabled. */
   readOnly?: boolean;
   composerReplacement?: React.ReactNode;
@@ -350,12 +355,16 @@ interface AgentChatProps {
 
 export function AgentChat(props: AgentChatProps) {
   const chat = useChatById(props.chatId);
-  return <LocalLinksProvider cwd={chat?.folder ?? props.session.cwd} active={props.surfaceActive ?? true}>
-    <AgentChatBody {...props} />
+  const cwd = chat?.folder ?? props.session.cwd;
+  return <LocalLinksProvider cwd={cwd} active={props.surfaceActive ?? true}>
+    <ActivityScope.Provider value={cwd && !isCloudWorkspace(cwd) ? props.surfaceActive ?? true : undefined}>
+      <AgentChatBody {...props} />
+    </ActivityScope.Provider>
   </LocalLinksProvider>;
 }
 
 function AgentChatBody({
+  liveTextUpdates = false,
   readOnly = false,
   composerReplacement,
   session,
@@ -385,6 +394,8 @@ function AgentChatBody({
   // the authoritative read is pending. It is read-only presentation until then.
   const provisionalTranscript = session.transcriptState === "loading" && !!session.transcriptPresentation;
   const transcriptReadOnly = readOnly || provisionalTranscript;
+  const liveTextSource = useLocalLiveTextSource(liveTextUpdates && !transcriptReadOnly, chatId,
+    session.cwd, session.executionId ?? session.sessionId);
   // A Local chat known to be empty shows its empty state while the engine
   // confirms it (e.g. right after a restart), never a blank pane.
   const emptyStateReady = session.transcriptState === "resident" ||
@@ -422,7 +433,7 @@ function AgentChatBody({
     text: string;
     attachments: ComposerAttachment[];
     json: object | null;
-    designFrame?: import("./design-frame-attachment").DesignFrameAttachmentTarget | null;
+    designFrame?: import("./design-frame-attachment").DesignFrameAttachmentSelection | null;
   }>({
     text: seededDraft?.text ?? "",
     attachments: seededDraft?.attachments ?? [],
@@ -873,6 +884,7 @@ function AgentChatBody({
       previewImage: previewImageThroughRef,
       attachmentCwd: chatThread?.folder ?? session.cwd ?? null,
       attachmentImagesActive: surfaceActive,
+      liveTextSource,
       openFile: openFileThroughRef,
       warmFile: warmFileThroughRef,
       openPrUrl: readOnly ? undefined : openPrUrlThroughRef,
@@ -901,6 +913,7 @@ function AgentChatBody({
       chatThread?.folder,
       session.cwd,
       surfaceActive,
+      liveTextSource,
       readOnly,
       transcriptReadOnly,
       openFileThroughRef,
@@ -957,7 +970,7 @@ function AgentChatBody({
     active: interactive && !readOnly,
     intent: chatThread?.composerMode ?? "code",
     initialFrame: seededDraft?.designFrame,
-    onPin: useCallback((target: import("./design-frame-attachment").DesignFrameAttachmentTarget | null | undefined) => {
+    onPin: useCallback((target: import("./design-frame-attachment").DesignFrameAttachmentSelection | null | undefined) => {
       composerLiveRef.current.designFrame = target;
       if (chatId && !readOnly) setLiveChatDraft(chatId, { ...composerLiveRef.current });
     }, [chatId, readOnly]),
@@ -1910,7 +1923,7 @@ function AgentChatBody({
     insertTextAttachment: stageTextAttachment,
     removeAttachmentBySourceKey: unstageAttachment,
     stagedSourceKeys,
-    clear: clearComposer,
+    clear: clearComposerEditor,
     setContent: setComposerContent,
     appendText: appendComposerText,
     focus: focusComposer,
@@ -1921,6 +1934,9 @@ function AgentChatBody({
     dragActive,
     dragHandlers,
   } = composer;
+  const clearComposer = () => { clearComposerEditor(); designFrameContext.clear(); };
+  const composerHasContent = !composerEmpty || designFrameContext.hasContext;
+  const queuedEditHasContent = !composerEmpty || Boolean(editingQueuedId && cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.getQueuedDraft?.(editingQueuedId)?.prepareAdditional);
   composerFocusRef.current = focusComposer;
   // The composer stays editable in EVERY session state. `failed` /
   // `auth-required` used to flip the editor read-only here (mirroring the old
@@ -3163,7 +3179,7 @@ function AgentChatBody({
     if (readOnly || !chatId) return;
     const s = serializeComposerState();
     if (!s || s.isEmpty) {
-      composerLiveRef.current = { text: "", attachments: [], json: null };
+      composerLiveRef.current = { text: "", attachments: [], json: null, designFrame: composerLiveRef.current.designFrame };
       setLiveChatDraft(chatId, composerLiveRef.current);
       return;
     }
@@ -3180,7 +3196,7 @@ function AgentChatBody({
   const persistComposerDraft = useCallback(() => {
     if (readOnly || !chatId) return;
     const { text, attachments: atts, json, designFrame } = composerLiveRef.current;
-    if (text.trim() === "" && atts.length === 0) {
+    if (text.trim() === "" && atts.length === 0 && designFrame === undefined) {
       dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
       return;
     }
@@ -3199,7 +3215,7 @@ function AgentChatBody({
       // live persistence.
       if (editingQueuedRef.current) return false;
       const current = serializeComposerState();
-      if (current && !current.isEmpty) return false;
+      if (current && !current.isEmpty || hasDesignFrameAttachmentSelection(composerLiveRef.current.designFrame)) return false;
       setComposerContent({
         json: draft.json ?? (draft.text.trim() ? textToDoc(draft.text) : null),
         attachments: draft.attachments,
@@ -3634,7 +3650,7 @@ function AgentChatBody({
     !runtimeUpgradeRequired &&
     (session.transcriptState === "resident" || cloudComputerV2 && isCloudWorkspace(chatThread?.folder)) &&
     !composerStreaming &&
-    !composerEmpty;
+    composerHasContent;
   // Keep blocked Send focusable for its tooltip and explicit attempt feedback.
   // Stop and queued editing retain their existing controls while agents run.
   const runtimeSendBlocked = runtimeUpgradeRequired && !composerStreaming && !sendPreparing && !editingQueuedId;
@@ -3676,7 +3692,7 @@ function AgentChatBody({
     const snapshot = override === undefined ? serializeComposerState() : null;
     const action = unreadableTranscriptSendAction({
       hasPayload: snapshot
-        ? !snapshot.isEmpty
+        ? !snapshot.isEmpty || hasDesignFrameAttachmentSelection(composerLiveRef.current.designFrame)
         : (override ?? "").trim().length > 0,
       payloadInComposer: snapshot !== null,
       alreadyRetried: transcriptParkedChatRef.current === parkChatId,
@@ -3756,7 +3772,8 @@ function AgentChatBody({
     // — happens further down, so awaiting here (or at the session rebuild below)
     // opens a window in which a second Enter re-enters, snapshots the same
     // composer state, and sends it again.
-    const submittedDesignFrame = override === undefined ? designFrameContext.capture() : null;
+    const capturedDesignFrame = override === undefined ? designFrameContext.capture() : null;
+    const submittedDesignFrame = hasDesignFrameAttachmentSelection(capturedDesignFrame) ? capturedDesignFrame : null;
     const cloudSubmission = cloudComputerV2 && !!chatId && isCloudWorkspace(chatThread?.folder);
     const sendGeneration = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
     const hydrateNeeded = !cloudSubmission && session.transcriptState !== "resident";
@@ -3849,7 +3866,7 @@ function AgentChatBody({
       (extras?.extraAttachments?.length ?? 0) +
       (extras?.stagedAttachments?.length ?? 0);
     const commandHasAttachments =
-      localAttachments.length > 0 || importCount > 0 || extraAttachCount > 0;
+      localAttachments.length > 0 || importCount > 0 || extraAttachCount > 0 || submittedDesignFrame !== null;
     const bareCommand = displayText.match(/^\/([A-Za-z0-9_-]+)$/);
     const inlineCommand = bareInlineSlashCommand(
       session.agentId ?? chatThread?.agentId,
@@ -3867,7 +3884,8 @@ function AgentChatBody({
       displayText.length === 0 &&
       localAttachments.length === 0 &&
       importCount === 0 &&
-      extraAttachCount === 0
+      extraAttachCount === 0 &&
+      !submittedDesignFrame
     ) {
       return;
     }
@@ -3898,7 +3916,7 @@ function AgentChatBody({
       await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent, extras?.followUpBehavior ?? getFollowUpBehavior());
       const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
       if (unchanged) {
-        clearComposer(); designFrameContext.pin(undefined);
+        clearComposerEditor(); designFrameContext.consume(submittedDesignFrame);
       }
       if (override !== undefined || unchanged)
         dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
@@ -3919,7 +3937,7 @@ function AgentChatBody({
         text: snapshot.displayText,
         attachments: snapshot.attachments,
         json: snapshot.json,
-        designFrame: submittedDesignFrame,
+        designFrame: composerLiveRef.current.designFrame,
       };
       composerLiveRef.current = draft;
       dispatch({ type: "SET_CHAT_DRAFT", chatId, draft });
@@ -4141,8 +4159,8 @@ function AgentChatBody({
     const submittedDraftUnchanged = override === undefined && snapshot &&
       isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
     if (submittedDraftUnchanged) {
-      clearComposer();
-      designFrameContext.pin(undefined);
+      clearComposerEditor();
+      designFrameContext.consume(submittedDesignFrame);
     }
     // Drop any stashed draft for this chat —
     // the user just sent it. Defensive against the cleanup-on-unmount
@@ -4278,8 +4296,8 @@ function AgentChatBody({
     const s = serializeComposerState();
     const displayText = (s?.displayText ?? "").trim();
     const localAttachments = s?.attachments ?? [];
-    // Nothing to save — the tick is disabled; Esc cancels, Delete removes.
-    if (displayText.length === 0 && localAttachments.length === 0) return false;
+    const prepareAdditional = cloudComputerV2 && isCloudWorkspace(chatThread?.folder) ? session.getQueuedDraft?.(id)?.prepareAdditional : undefined;
+    if (displayText.length === 0 && localAttachments.length === 0 && !prepareAdditional) return false;
     queueSaveInFlightRef.current = true;
     try {
       const wireText = expandMentionsInText(
@@ -4288,7 +4306,7 @@ function AgentChatBody({
       );
       if (cloudComputerV2 && chatId && s && isCloudWorkspace(chatThread?.folder)) {
         const queued = cloudQueuedPrompt({ cwd: chatThread!.folder, chatId, agentId: session.agentId,
-          text: wireText, displayText, snapshot: s, prepareAdditional: session.getQueuedDraft?.(id)?.prepareAdditional });
+          text: wireText, displayText, snapshot: s, prepareAdditional });
         session.editQueued?.(id, queued);
         exitQueuedEdit(releaseQueue); return true;
       }
@@ -4582,7 +4600,7 @@ function AgentChatBody({
       queuedContentSeenRef.current = false;
       return;
     }
-    if (!composerEmpty) {
+    if (composerHasContent) {
       queuedContentSeenRef.current = true;
       return;
     }
@@ -4590,7 +4608,7 @@ function AgentChatBody({
       dispatch({ type: "CONSUME_AUTO_SEND", chatId });
       queuedContentSeenRef.current = false;
     }
-  }, [chatId, composerEmpty, dispatch, pendingAutoSend, readOnly]);
+  }, [chatId, composerHasContent, dispatch, pendingAutoSend, readOnly]);
 
   // Prepared-workspace hand-off: the dispatcher can seed this composer, or the
   // user can type and press Send while checkout is still running. Once the
@@ -4610,7 +4628,7 @@ function AgentChatBody({
         status: session.status,
         provisioning: workspaceProvisioning,
         hasPermissionGate: !!session.pendingPermission,
-        composerEmpty,
+        composerEmpty: !composerHasContent,
         // Don't retire the intent into a send that handleSend would drop
         // because another one is mid-preparation; this effect re-runs when
         // that clears.
@@ -4669,7 +4687,7 @@ function AgentChatBody({
     session.status,
     session.pendingPermission,
     chatId,
-    composerEmpty,
+    composerHasContent,
     sendPreparing,
   ]);
 
@@ -5229,7 +5247,7 @@ function AgentChatBody({
             onSelect={setQueueSelectedId}
             onEdit={startQueuedEdit}
             onSaveEdit={() => void saveQueuedEdit()}
-            saveDisabled={composerEmpty}
+            saveDisabled={!queuedEditHasContent}
             onDelete={deleteQueued}
             onSendNow={(id) => void sendNowQueued(id)}
             steeringSupported={steeringSupported}
@@ -5517,7 +5535,7 @@ function AgentChatBody({
                               : sendPreparing
                                 ? true
                                 : editingQueuedId
-                                  ? composerEmpty
+                                  ? !queuedEditHasContent
                                   : !runtimeSendBlocked && !canSend
                           }
                           className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-8 disabled:opacity-100"
@@ -5537,7 +5555,7 @@ function AgentChatBody({
                           <Button
                             type="button"
                             onClick={() => void saveQueuedEdit()}
-                            disabled={composerEmpty}
+                            disabled={!queuedEditHasContent}
                             aria-label="Save queued message"
                             className="disabled:bg-bg2-hover disabled:text-fg2 size-8 shrink-0 rounded-sm p-0 disabled:opacity-100"
                           >

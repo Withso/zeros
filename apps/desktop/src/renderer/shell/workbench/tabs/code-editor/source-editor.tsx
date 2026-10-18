@@ -18,6 +18,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Save } from "lucide-react";
 
 import { CodeEditor } from "./index";
+import { isCloudWorkspace } from "@/renderer/platform/bridge/cloud-workspace-key";
 import {
   writeWorkspaceFile,
   type WriteFileResult,
@@ -317,6 +318,7 @@ export function SourceEditor({
       )}
       <div className="min-h-0 flex-1">
         <CodeEditor
+          tokenCacheScope={cwd && !isCloudWorkspace(cwd) ? "local" : undefined}
           value={displayed}
           filePath={path}
           onChange={changeDraft}

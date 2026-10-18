@@ -18,9 +18,10 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    // Same incremental cache as tsconfig.typecheck.json, outside source.
+    // Same incremental cache as tsconfig.typecheck.json, outside source, and
+    // likewise named for the native compiler.
     "incremental": true,
-    "tsBuildInfoFile": "../../../node_modules/.cache/zeros-typecheck/electron.tsbuildinfo",
+    "tsBuildInfoFile": "../../../node_modules/.cache/zeros-typecheck/electron.native.tsbuildinfo",
     "rootDir": "..",
     // The base config compiles to CommonJS (tsup's emit target). For TYPE
     // CHECKING we override to ESM module settings so the shared engine code this

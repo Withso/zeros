@@ -231,6 +231,36 @@ describe("CloudWorkspaceLinuxSetupExecutor", () => {
     expect(JSON.stringify(malformed.timings)).not.toContain("private");
     expect(malformed.timings?.clocks.map(clock => clock.source)).toEqual(["control_plane"]);
   });
+  it.each([true, false])("retains closed preparation and readiness observations without changing the proof (success=%s)", async success => {
+    const f = v4();
+    const observations = { version: 1, preparation: "key_changed", readiness: success ? "ready" : "transport_error" };
+    const output = { version: 5, audience: "zeros-cloud-workspace-setup-result-v1", timings: { version: 1, clocks: [] }, observations,
+      ...(success ? { outcome: "ready", readiness: readiness(f.input) } : {
+        outcome: "error", code: "engine_readiness_failed", diagnostic: { version: 1, phase: "engine_readiness" },
+      }) };
+    vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: success ? 0 : 1, outputTruncated: false,
+      output: JSON.stringify(output) + "\n" + JSON.stringify({ ...f.installerDiagnostic,
+        ...(success ? {} : { stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] }) }) + "\n" });
+    const result = await f.executor.execute(f.input, new AbortController().signal).catch(error => error);
+    expect(result.observations).toEqual(observations);
+    if (success) expect(result.readiness).toEqual(readiness(f.input));
+    else expect(result).toMatchObject({ code: "setup_engine_readiness_failed", retryable: true });
+  });
+
+  it("drops malformed observations and still rejects an invalid readiness proof", async () => {
+    const f = v4();
+    const output = { version: 5, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "ready",
+      readiness: readiness(f.input), timings: { version: 1, clocks: [] }, observations: { version: 1, preparation: "synthetic-private-value" } };
+    const respond = () => vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 0, outputTruncated: false,
+      output: JSON.stringify(output) + "\n" + JSON.stringify(f.installerDiagnostic) + "\n" });
+    respond();
+    const result = await f.executor.execute(f.input, new AbortController().signal);
+    expect(result.readiness).toEqual(readiness(f.input)); expect(result.observations).toBeUndefined();
+    output.readiness.workspaceId = randomUUID();
+    respond();
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_readiness_invalid" });
+  });
+
   it("never returns artifact URLs in setup logs or errors", async () => {
     const f = v4();
     vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 1, output: f.artifactUrl, outputTruncated: false });

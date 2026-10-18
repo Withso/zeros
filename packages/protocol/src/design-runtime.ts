@@ -14,6 +14,9 @@ export const DESIGN_RUNTIME_VERSION = 2;
 export const DESIGN_RUNTIME_DOCUMENT_BODY_ID = "::zeros-document-body";
 /** Shared renderer/engine bound for one additive design selection. */
 export const DESIGN_SELECTION_NODE_LIMIT = 32;
+export const DESIGN_RUNTIME_AUDIT_WARNING_LIMIT = 128;
+export const DESIGN_RUNTIME_TREE_NODE_LIMIT = 20000;
+export const DESIGN_RUNTIME_TREE_DEPTH_LIMIT = 32;
 /** Reserve one operation for the container in a 256-operation transaction. */
 export const DESIGN_LAYOUT_CHILD_LIMIT = 255;
 /** Computed snapshots mirror a fixed, app-owned style catalog. Leave bounded
@@ -166,6 +169,101 @@ export interface DesignRuntimeNodeDetails {
   /** Computed-style keys with a direct active declaration on this element.
    * Omitted by older runtimes; inspector chrome treats omission as unknown. */
   authoredStyleProperties?: string[];
+  /** The cascade's winning declaration for each authored property, as written
+   * (`var(--primary-button-bg)`), where it comes from, and the tokens it reads.
+   * Omitted by older runtimes and for any property whose winner is ambiguous
+   * (for example a shorthand partly overridden by a longhand); the inspector
+   * then shows the computed value, as before. */
+  authoredStyles?: Record<string, DesignRuntimeAuthoredStyle>;
+}
+
+/** Where a winning declaration lives in the rendered frame document. */
+export interface DesignRuntimeStyleOrigin {
+  /** `source`: an imported style source; `linked`: a Design stylesheet the
+   * frame links (tokens.css, a page stylesheet); `frame`: the frame's own
+   * `<style>`; `inline`: the element's `style` attribute. */
+  origin: "source" | "linked" | "frame" | "inline";
+  /** Imported style source id, for `source`. */
+  sourceId?: string;
+  /** Design-root-relative stylesheet, for `linked`. */
+  file?: string;
+}
+
+/** A custom property a winning value reads, with its resolved value and the
+ * winning declaration on the nearest element that sets it. */
+export interface DesignRuntimeStyleToken extends Partial<DesignRuntimeStyleOrigin> {
+  name: string;
+  value: string;
+}
+
+export interface DesignRuntimeAuthoredStyle extends DesignRuntimeStyleOrigin {
+  value: string;
+  important?: boolean;
+  tokens?: DesignRuntimeStyleToken[];
+}
+
+export const DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS = {
+  properties: 128,
+  value: 1024,
+  tokensPerValue: 8,
+  tokenValue: 256,
+} as const;
+
+const STYLE_ORIGINS = new Set(["source", "linked", "frame", "inline"]);
+
+function isRuntimeStyleOrigin(
+  value: Record<string, unknown>,
+  required: boolean,
+): boolean {
+  if (value.origin === undefined) return !required;
+  return (
+    typeof value.origin === "string" &&
+    STYLE_ORIGINS.has(value.origin) &&
+    (value.sourceId === undefined ||
+      (typeof value.sourceId === "string" && value.sourceId.length <= 64)) &&
+    (value.file === undefined ||
+      (typeof value.file === "string" && value.file.length <= 256))
+  );
+}
+
+/** Validate `DesignRuntimeNodeDetails.authoredStyles` at a trust boundary. */
+export function isDesignRuntimeAuthoredStyles(
+  value: unknown,
+): value is Record<string, DesignRuntimeAuthoredStyle> {
+  return isRuntimeAuthoredStyles(value);
+}
+
+function isRuntimeAuthoredStyles(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const entries = Object.entries(value);
+  if (entries.length > DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.properties)
+    return false;
+  return entries.every(([property, style]) => {
+    if (
+      property.length > 64 ||
+      !/^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property) ||
+      !isRecord(style) ||
+      typeof style.value !== "string" ||
+      style.value.length > DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value ||
+      (style.important !== undefined && typeof style.important !== "boolean") ||
+      !isRuntimeStyleOrigin(style, true)
+    )
+      return false;
+    if (style.tokens === undefined) return true;
+    return (
+      Array.isArray(style.tokens) &&
+      style.tokens.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokensPerValue &&
+      style.tokens.every(
+        (token) =>
+          isRecord(token) &&
+          typeof token.name === "string" &&
+          /^--[A-Za-z0-9_-]{1,126}$/.test(token.name) &&
+          typeof token.value === "string" &&
+          token.value.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokenValue &&
+          isRuntimeStyleOrigin(token, false),
+      )
+    );
+  });
 }
 
 /** Direct children a gesture measures alongside their container. */
@@ -357,7 +455,25 @@ export type DesignRuntimeMethod =
   | "clearPreviewText"
   | "previewMotion"
   | "clearPreviewStyles"
-  | "captureScreenshot";
+  | "captureScreenshot"
+  /** Opt-in: advertised only to a host whose handshake requests it. */
+  | "previewStylesheet";
+
+/** Methods a runtime advertises only when the host's handshake lists them
+ * in `features`, so a host that predates them still accepts the runtime's
+ * capabilities. */
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet"] as const;
+
+/** Largest in-flight stylesheet text `previewStylesheet` applies. */
+export const MAX_DESIGN_RUNTIME_PREVIEW_STYLESHEET_CHARS = 4 * 1024 * 1024;
+
+/** A linked Design stylesheet's in-flight text, applied in place of its
+ * inlined copy in this document generation. */
+export interface DesignRuntimeStylesheetPreviewResult {
+  /** Inlined copies of the stylesheet this document links (0 when none). */
+  applied: number;
+  snapshot: DesignRuntimeSnapshot;
+}
 
 export interface DesignRuntimeCapabilities {
   methods: DesignRuntimeMethod[];
@@ -403,6 +519,7 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "previewMotion",
   "clearPreviewStyles",
   "captureScreenshot",
+  "previewStylesheet",
 ]);
 
 export interface DesignRuntimeHostRequest {
@@ -420,6 +537,8 @@ export interface DesignRuntimeHostHandshake {
   version: typeof DESIGN_RUNTIME_VERSION;
   type: "handshake";
   sourceVersion: string;
+  /** Opt-in methods this host understands; older runtimes ignore it. */
+  features?: Array<(typeof DESIGN_RUNTIME_OPT_IN_METHODS)[number]>;
 }
 
 export interface DesignRuntimeHostCancel {
@@ -612,7 +731,9 @@ function isRuntimeNodeDetails(
         value.authoredStyleProperties.length <= 128 &&
         value.authoredStyleProperties.every(
           (property) => typeof property === "string" && property.length <= 64,
-        )))
+        ))) &&
+    (value.authoredStyles === undefined ||
+      isRuntimeAuthoredStyles(value.authoredStyles))
   );
 }
 
@@ -780,14 +901,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   // Viewport captures live only in renderer memory — the persisted-thumbnail
   // wire cap below does not apply to them.
   var MAX_VIEWPORT_CAPTURE_PIXELS = 9000000;
-  var MAX_AUDIT_WARNINGS = 128;
+  var MAX_AUDIT_WARNINGS = ${DESIGN_RUNTIME_AUDIT_WARNING_LIMIT};
   var MAX_MATCHED_DECLARATIONS = 256;
   var MAX_ACTIVE_REQUESTS = 128;
   var MAX_STYLE_SNAPSHOT_PROPERTIES = 256;
-  var MAX_TREE_NODES = 20000;
+  var MAX_TREE_NODES = ${DESIGN_RUNTIME_TREE_NODE_LIMIT};
   // Keep structured-clone payload nesting well below Chromium's IPC depth
   // ceiling; the outer protocol envelope adds several more object levels.
-  var MAX_TREE_DEPTH = 32;
+  var MAX_TREE_DEPTH = ${DESIGN_RUNTIME_TREE_DEPTH_LIMIT};
   var MAX_AUDIT_ELEMENTS = 5000;
   // Keep worst-case RGBA → PNG base64 within the engine's 12 MB wire cap.
   var MAX_CAPTURE_PIXELS = 2000000;
@@ -837,6 +958,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     "setNodeVisibility", "setTheme", "previewStyles", "previewGeometry", "getLayoutTargets", "previewLayout", "restoreGeneration", "commitStyles", "previewText", "clearPreviewText", "previewMotion", "clearPreviewStyles",
     "captureScreenshot"
   ];
+  // Advertised only to a host whose handshake asks for them, so a host that
+  // predates a method still accepts these capabilities.
+  var OPT_IN_METHODS = ["previewStylesheet"];
+  var enabledOptInMethods = [];
+  var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
   // the full STYLE_PROPERTIES catalog belongs to the inspector, not the pointer.
   var GEOMETRY_STYLE_PROPERTIES = [
@@ -867,7 +993,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var committedKeyframeRulesByName = new Map();
   var committedTokenRulesByKey = new Map();
   var lastSnapshot = null;
+  // Inlined linked stylesheets showing an agent's in-flight text, with the
+  // generation's own text to restore.
+  var previewStylesheetTexts = new Map();
   var authoredStylePropertiesCache = new WeakMap();
+  var authoredStylesCache = new WeakMap();
   var authoredStyleRuleMetadata = null;
   var oidStyleRuleIndex = null;
   var elementMapStale = true;
@@ -977,7 +1107,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function capabilities() {
     return {
-      methods: METHODS.slice(),
+      methods: METHODS.concat(enabledOptInMethods),
       cancellation: true,
       typedErrors: true,
       sourcePinned: true,
@@ -1481,6 +1611,397 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return result.slice();
   }
 
+  // ── Winning authored declarations ─────────────────────────
+  // The inspector shows what an author wrote (var(--primary-button-bg)), not
+  // only the computed color. For each authored property this finds the
+  // cascade's winner among the element's style attribute and the active rules
+  // that match it: importance, then the style attribute, then cascade layers
+  // (reversed for !important), then specificity, then order of appearance.
+  // Nesting and element-dependent conditions are conservative candidates:
+  // if one can set the property, fall back to the browser's computed value.
+
+  function styleOriginOf(sheet) {
+    var node = sheet && sheet.ownerNode;
+    if (!node || typeof node.getAttribute !== "function") return { origin: "frame" };
+    var sourceId = node.getAttribute("data-zeros-style-source");
+    if (sourceId) return { origin: "source", sourceId: sourceId.slice(0, 64) };
+    var file = node.getAttribute("data-zeros-source");
+    if (file) return { origin: "linked", file: file.slice(0, 256) };
+    return { origin: "frame" };
+  }
+
+  function splitTopLevel(text, separator) {
+    var parts = [];
+    var depth = 0;
+    var quote = "";
+    var start = 0;
+    for (var index = 0; index < text.length; index += 1) {
+      var character = text[index];
+      if (character === "\\") { index += 1; continue; }
+      if (quote) { if (character === quote) quote = ""; continue; }
+      if (character === '"' || character === "'") { quote = character; continue; }
+      if (character === "(" || character === "[") depth += 1;
+      else if (character === ")" || character === "]") depth = Math.max(0, depth - 1);
+      else if (character === separator && depth === 0) {
+        parts.push(text.slice(start, index));
+        start = index + 1;
+      }
+    }
+    parts.push(text.slice(start));
+    return parts.map(function (part) { return part.trim(); }).filter(Boolean);
+  }
+
+  function identifierEnd(text, index) {
+    while (index < text.length) {
+      var code = text.charCodeAt(index);
+      if (text[index] === "\\") { index += 2; continue; }
+      if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 45 || code === 95 || code >= 128) {
+        index += 1;
+        continue;
+      }
+      break;
+    }
+    return index;
+  }
+
+  function closingIndex(text, index, open, close) {
+    var depth = 0;
+    var quote = "";
+    for (var cursor = index; cursor < text.length; cursor += 1) {
+      var character = text[cursor];
+      if (character === "\\") { cursor += 1; continue; }
+      if (quote) { if (character === quote) quote = ""; continue; }
+      if (character === '"' || character === "'") { quote = character; continue; }
+      if (character === open) depth += 1;
+      else if (character === close) {
+        depth -= 1;
+        if (depth === 0) return cursor;
+      }
+    }
+    return text.length - 1;
+  }
+
+  function compareSpecificity(left, right) {
+    for (var index = 0; index < 3; index += 1) {
+      if (left[index] !== right[index]) return left[index] > right[index] ? 1 : -1;
+    }
+    return 0;
+  }
+
+  function maxListSpecificity(list) {
+    var best = [0, 0, 0];
+    splitTopLevel(list, ",").forEach(function (selector) {
+      var specificity = selectorSpecificity(selector);
+      if (compareSpecificity(specificity, best) > 0) best = specificity;
+    });
+    return best;
+  }
+
+  /** Selectors Level 4 specificity of one complex selector. */
+  function selectorSpecificity(selector) {
+    var text = String(selector);
+    var a = 0, b = 0, c = 0;
+    var index = 0;
+    while (index < text.length) {
+      var character = text[index];
+      if (character === "#") { a += 1; index = identifierEnd(text, index + 1); continue; }
+      if (character === ".") { b += 1; index = identifierEnd(text, index + 1); continue; }
+      if (character === "[") { b += 1; index = closingIndex(text, index, "[", "]") + 1; continue; }
+      if (character === ":") {
+        var pseudoElement = text[index + 1] === ":";
+        var start = index + (pseudoElement ? 2 : 1);
+        var end = identifierEnd(text, start);
+        var name = text.slice(start, end).toLowerCase();
+        var argument = null;
+        index = end;
+        if (text[index] === "(") {
+          var close = closingIndex(text, index, "(", ")");
+          argument = text.slice(index + 1, close);
+          index = close + 1;
+        }
+        if (pseudoElement || name === "before" || name === "after" || name === "first-line" || name === "first-letter") { c += 1; continue; }
+        if (name === "where") continue;
+        if (name === "is" || name === "not" || name === "has" || name === "matches" || name === "-webkit-any") {
+          var inner = maxListSpecificity(argument || "");
+          a += inner[0]; b += inner[1]; c += inner[2];
+          continue;
+        }
+        b += 1;
+        if ((name === "nth-child" || name === "nth-last-child") && argument) {
+          var ofIndex = argument.toLowerCase().indexOf(" of ");
+          if (ofIndex >= 0) {
+            var filtered = maxListSpecificity(argument.slice(ofIndex + 4));
+            a += filtered[0]; b += filtered[1]; c += filtered[2];
+          }
+        }
+        continue;
+      }
+      var code = text.charCodeAt(index);
+      if ((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95 || code >= 128 || character === "\\") {
+        var typeEnd = identifierEnd(text, index);
+        // A namespace prefix (ns|type) contributes only its type.
+        if (text[typeEnd] !== "|") c += 1;
+        index = typeEnd;
+        continue;
+      }
+      index += 1;
+    }
+    return [a, b, c];
+  }
+
+  var cascadeRuleIndex = null;
+  var longhandsByShorthand = new Map();
+
+  /** Every active style rule in document order with its layer position,
+   * origin and declared property names. Custom-property declarations are
+   * indexed by name so token lookups touch only the rules that set them. */
+  function cascadeRules() {
+    if (cascadeRuleIndex) return cascadeRuleIndex;
+    var rules = [];
+    var customRules = new Map();
+    var siblingsByParent = new Map();
+    var anonymousLayers = 0;
+    function layerPosition(parentKey, parentPath, dottedName) {
+      var key = parentKey;
+      var path = parentPath.slice();
+      dottedName.split(".").forEach(function (segment) {
+        var siblings = siblingsByParent.get(key);
+        if (!siblings) { siblings = new Map(); siblingsByParent.set(key, siblings); }
+        if (!siblings.has(segment)) siblings.set(segment, siblings.size);
+        path.push(siblings.get(segment));
+        key = key + "\u0000" + segment;
+      });
+      return { key: key, path: path };
+    }
+    function visit(list, active, layer, origin, uncertain, nested) {
+      for (var index = 0; index < list.length; index += 1) {
+        var rule = list[index];
+        var kind = rule.constructor && rule.constructor.name;
+        if ((rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) || (nested && kind === "CSSNestedDeclarations" && rule.style)) {
+          var declared = declarationProperties(rule.style);
+          // A nested selector is relative to its parent, so element.matches()
+          // cannot establish applicability or specificity. Keep its property
+          // footprint rather than silently selecting a losing outer rule.
+          var entry = { rule: rule, selector: nested ? null : rule.selectorText, uncertain: uncertain || nested, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared };
+          rules.push(entry);
+          declared.forEach(function (property) {
+            if (property.indexOf("--") !== 0) return;
+            var list = customRules.get(property);
+            if (!list) { list = []; customRules.set(property, list); }
+            list.push(entry);
+          });
+          if (rule.cssRules) visit(rule.cssRules, active, layer, origin, uncertain, true);
+        } else if (kind === "CSSLayerStatementRule" && rule.nameList) {
+          for (var name = 0; name < rule.nameList.length; name += 1) layerPosition(layer.key, layer.path, rule.nameList[name]);
+        } else if (kind === "CSSLayerBlockRule") {
+          anonymousLayers += 1;
+          visit(rule.cssRules || [], active, layerPosition(layer.key, layer.path, rule.name || "\u0001" + anonymousLayers), origin, uncertain, nested);
+        } else if (rule.cssRules) {
+          // Media/supports are document-wide. Container queries, scopes and
+          // other groups need evidence this resolver does not have per element.
+          var knownCondition = rule.type === CSSRule.MEDIA_RULE || rule.type === CSSRule.SUPPORTS_RULE;
+          visit(rule.cssRules, active && conditionalRuleActive(rule), layer, origin, uncertain || !knownCondition, nested);
+        }
+      }
+    }
+    for (var sheetIndex = 0; sheetIndex < document.styleSheets.length; sheetIndex += 1) {
+      var sheet = document.styleSheets[sheetIndex];
+      try {
+        visit(sheet.cssRules || [], true, { key: "", path: [] }, styleOriginOf(sheet), false, false);
+      } catch (_error) {
+        // Inaccessible sheets cannot provide trustworthy provenance.
+      }
+    }
+    cascadeRuleIndex = { rules: rules, customRules: customRules };
+    return cascadeRuleIndex;
+  }
+
+  /** Positive when left's layer outranks right's for normal declarations.
+   * Unlayered styles follow every sublayer of their parent. */
+  function compareLayers(left, right) {
+    for (var index = 0; ; index += 1) {
+      var leftIndex = index < left.length ? left[index] : Infinity;
+      var rightIndex = index < right.length ? right[index] : Infinity;
+      if (leftIndex !== rightIndex) return leftIndex > rightIndex ? 1 : -1;
+      if (leftIndex === Infinity) return 0;
+    }
+  }
+
+  function specificityFor(element, entry) {
+    var best = null;
+    splitTopLevel(entry.selector, ",").forEach(function (selector) {
+      var matches = false;
+      try { matches = element.matches(selector); } catch (_error) { matches = false; }
+      if (!matches) return;
+      var specificity = selectorSpecificity(selector);
+      if (!best || compareSpecificity(specificity, best) > 0) best = specificity;
+    });
+    return best || maxListSpecificity(entry.selector);
+  }
+
+  function matchingEntries(element, entries) {
+    var result = [];
+    for (var index = 0; index < entries.length; index += 1) {
+      var entry = entries[index];
+      if (!entry.active) continue;
+      var matches = entry.selector === null;
+      try { if (!matches) matches = element.matches(entry.selector); } catch (_error) { matches = false; }
+      if (matches) result.push({ entry: entry, specificity: null });
+    }
+    return result;
+  }
+
+  function longhandsOf(property) {
+    if (property.indexOf("--") === 0) return [];
+    var cached = longhandsByShorthand.get(property);
+    if (cached) return cached;
+    var probe = document.createElement("div").style;
+    var longhands = [];
+    try {
+      probe.setProperty(property, "inherit");
+      for (var index = 0; index < probe.length; index += 1) {
+        if (probe[index] !== property) longhands.push(probe[index]);
+      }
+    } catch (_error) {
+      longhands = [];
+    }
+    longhandsByShorthand.set(property, longhands);
+    return longhands;
+  }
+
+  function outranks(candidate, current, element) {
+    if (candidate.important !== current.important) return candidate.important;
+    if (!!candidate.inline !== !!current.inline) return !!candidate.inline;
+    if (candidate.inline) return false;
+    var layers = compareLayers(candidate.match.entry.layer, current.match.entry.layer);
+    if (layers !== 0) return candidate.important ? layers < 0 : layers > 0;
+    if (!candidate.match.specificity) candidate.match.specificity = specificityFor(element, candidate.match.entry);
+    if (!current.match.specificity) current.match.specificity = specificityFor(element, current.match.entry);
+    var specificity = compareSpecificity(candidate.match.specificity, current.match.specificity);
+    if (specificity !== 0) return specificity > 0;
+    return candidate.match.entry.order > current.match.entry.order;
+  }
+
+  function declarationValue(style, property, declared) {
+    var value = style.getPropertyValue(property);
+    var important = style.getPropertyPriority(property) === "important";
+    if (!value) {
+      // CSSOM leaves a var()-based shorthand's longhands empty, including in
+      // style attributes. Its unknown value still competes in the cascade.
+      var shorthand = (declared || declarationProperties(style)).filter(function (name) {
+        return name !== property && longhandsOf(name).indexOf(property) >= 0 && style.getPropertyValue(name).indexOf("var(") >= 0;
+      })[0];
+      if (!shorthand) return null;
+      value = null;
+      important = style.getPropertyPriority(shorthand) === "important";
+    }
+    return { value: value === null ? null : value.trim(), important: important };
+  }
+
+  /** The winning declaration of one property. A rule that sets it through a
+   * var()-based shorthand competes with an unknown value, so the inspector
+   * never claims a value the browser could not expand. */
+  function winningDeclaration(element, property, matches) {
+    var inline = declarationValue(element.style, property, null);
+    var best = inline ? { inline: true, value: inline.value, important: inline.important } : null;
+    for (var index = 0; index < matches.length; index += 1) {
+      var match = matches[index];
+      var declaration = declarationValue(match.entry.rule.style, property, match.entry.declared);
+      if (!declaration) continue;
+      var candidate = { match: match, value: declaration.value, important: declaration.important };
+      if (match.entry.uncertain) {
+        candidate.value = null;
+        return candidate;
+      }
+      if (!best || outranks(candidate, best, element)) best = candidate;
+    }
+    return best;
+  }
+
+  function originOfWinner(winner) {
+    if (winner.inline) return { origin: "inline" };
+    var origin = winner.match.entry.origin;
+    var result = { origin: origin.origin };
+    if (origin.sourceId) result.sourceId = origin.sourceId;
+    if (origin.file) result.file = origin.file;
+    return result;
+  }
+
+  function sameWinner(left, right) {
+    if (!left || !right) return false;
+    if (left.inline || right.inline) return !!left.inline && !!right.inline;
+    return left.match.entry === right.match.entry;
+  }
+
+  /** The nearest element (this one or an ancestor) whose winning declaration
+   * sets a custom property, and where that declaration lives. */
+  function tokenOrigin(element, name, index) {
+    var entries = index.customRules.get(name) || [];
+    for (var current = element; current && current.nodeType === 1; current = current.parentElement) {
+      var winner = winningDeclaration(current, name, matchingEntries(current, entries));
+      // An uncertain local override also prevents attributing the token to an
+      // ancestor. The computed token value is still available to the inspector.
+      if (winner) return winner.value === null ? null : originOfWinner(winner);
+    }
+    return null;
+  }
+
+  function authoredStylesOf(element, properties) {
+    // Cached like authoredStylePropertiesOf: one rule scan per element and
+    // generation; theme and style changes start a new generation.
+    var key = element.style.cssText + "\u0000" + properties.join(",");
+    var cached = authoredStylesCache.get(element);
+    if (cached && cached.key === key) return cached.styles;
+    var styles = authoredStylesUncached(element, properties);
+    authoredStylesCache.set(element, { key: key, styles: styles });
+    return styles;
+  }
+
+  function authoredStylesUncached(element, properties) {
+    var index = cascadeRules();
+    var matches = matchingEntries(element, index.rules);
+    var computed = getComputedStyle(element);
+    var result = {};
+    var count = 0;
+    var budget = 32768;
+    var origins = new Map();
+    for (var propertyIndex = 0; propertyIndex < properties.length && count < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.properties}; propertyIndex += 1) {
+      var property = properties[propertyIndex];
+      var winner = winningDeclaration(element, property, matches);
+      if (!winner || winner.value === null || !winner.value) continue;
+      if (winner.value.length > ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value} || winner.value.length > budget) continue;
+      var longhands = longhandsOf(property);
+      // A shorthand is authoritative only while none of its longhands has a
+      // different winner, such as a later utility that sets one side.
+      if (longhands.length > 0 && longhands.some(function (longhand) {
+        return !sameWinner(winningDeclaration(element, longhand, matches), winner);
+      })) continue;
+      var style = originOfWinner(winner);
+      style.value = winner.value;
+      if (winner.important) style.important = true;
+      var tokens = [];
+      var pattern = /var\(\s*(--[A-Za-z0-9_-]{1,126})/g;
+      for (var found = pattern.exec(winner.value); found && tokens.length < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokensPerValue}; found = pattern.exec(winner.value)) {
+        var name = found[1];
+        if (tokens.some(function (token) { return token.name === name; })) continue;
+        if (!origins.has(name)) origins.set(name, tokenOrigin(element, name, index));
+        var token = { name: name, value: computed.getPropertyValue(name).trim().slice(0, ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokenValue}) };
+        var origin = origins.get(name);
+        if (origin) {
+          token.origin = origin.origin;
+          if (origin.sourceId) token.sourceId = origin.sourceId;
+          if (origin.file) token.file = origin.file;
+        }
+        tokens.push(token);
+      }
+      if (tokens.length > 0) style.tokens = tokens;
+      result[property] = style;
+      budget -= winner.value.length;
+      count += 1;
+    }
+    return result;
+  }
+
   /** Rebuild the oid → element map. Callers that only need to resolve a node
    * should use ensureElementMap: a full document walk per request is 1-3 walks
    * per gesture frame, and the observer already knows when the DOM changed. */
@@ -1678,7 +2199,17 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       authoredStyleProperties: authoredStyleProperties
     };
     if (textEditable && !layoutOnly) result.textSizing = textSizingOf(element);
+    if (!layoutOnly) attachAuthoredStyles(result, element, authoredStyleProperties);
     return result;
+  }
+
+  /** Provenance is advisory: a failure leaves the computed-only details. */
+  function attachAuthoredStyles(result, element, properties) {
+    try {
+      result.authoredStyles = authoredStylesOf(element, properties);
+    } catch (_error) {
+      // Older-runtime behavior: the inspector shows computed values.
+    }
   }
 
   function frameDetailsOf(element) {
@@ -1703,6 +2234,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       styles: stylesOf(computed, authoredStyleProperties),
       authoredStyleProperties: authoredStyleProperties
     };
+    attachAuthoredStyles(result, element, authoredStyleProperties);
     return result;
   }
 
@@ -1853,7 +2385,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     // A snapshot is the semantic cache generation. Theme changes and observed
     // DOM/style mutations both arrive through this boundary.
     authoredStylePropertiesCache = new WeakMap();
+    authoredStylesCache = new WeakMap();
     authoredStyleRuleMetadata = null;
+    cascadeRuleIndex = null;
     oidStyleRuleIndex = null;
     refreshElementMap();
     var roots = [];
@@ -1871,7 +2405,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       }
     }
     var warnings = auditWarnings();
-    if (treeBudget.truncated && warnings.length < MAX_AUDIT_WARNINGS) {
+    if (treeBudget.truncated) {
       warnings.unshift({
         ruleId: "layer-tree-limit",
         oid: oidOf(frameElement()) || "frame",
@@ -1900,7 +2434,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function styleOnlySnapshot() {
     if (!lastSnapshot) return snapshot();
     authoredStylePropertiesCache = new WeakMap();
+    authoredStylesCache = new WeakMap();
     authoredStyleRuleMetadata = null;
+    cascadeRuleIndex = null;
     oidStyleRuleIndex = null;
     ensureElementMap();
     var result = {
@@ -2112,6 +2648,44 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     suspendAuthoredMotion();
     revision += 1;
     return snapshot();
+  }
+
+  /** Show a linked Design stylesheet's in-flight text in place of its inlined
+   * copy (data-zeros-source), or restore the generation's text with null.
+   * Only this document changes; the saved generation replaces it. */
+  function previewStylesheet(file, css) {
+    if (typeof file !== "string" || !file || file.length > 1024) {
+      throw new Error("file must be a Design stylesheet path.");
+    }
+    if (css !== null && (typeof css !== "string" || css.length > MAX_PREVIEW_STYLESHEET_CHARS)) {
+      throw new Error("css must be null or bounded stylesheet text.");
+    }
+    var sheets = Array.prototype.filter.call(
+      document.querySelectorAll("style[data-zeros-source]"),
+      function (element) { return element.getAttribute("data-zeros-source") === file; }
+    );
+    var applied = 0;
+    var changed = false;
+    withoutObservedMutations(function () {
+      sheets.forEach(function (element) {
+        applied += 1;
+        if (css === null) {
+          if (!previewStylesheetTexts.has(element)) return;
+          element.textContent = previewStylesheetTexts.get(element);
+          previewStylesheetTexts.delete(element);
+          changed = true;
+          return;
+        }
+        if (!previewStylesheetTexts.has(element)) previewStylesheetTexts.set(element, element.textContent);
+        if (element.textContent === css) return;
+        element.textContent = css;
+        changed = true;
+      });
+    });
+    if (!changed) return { applied: applied, snapshot: lastSnapshot || snapshot() };
+    suspendAuthoredMotion();
+    revision += 1;
+    return { applied: applied, snapshot: styleOnlySnapshot() };
   }
 
   function applyPreviewStyles(element, oid, styles) {
@@ -3369,10 +3943,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     clone.style.overflow = "hidden";
     var serialized = new XMLSerializer().serializeToString(clone);
     var svg =
-      "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + crop.width +
-      "\" height=\"" + crop.height + "\" viewBox=\"0 0 " + crop.width +
-      " " + crop.height + "\"><foreignObject x=\"" + (-documentX) +
-      "\" y=\"" + (-documentY) + "\" width=\"" + viewportWidth +
+      "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + viewportWidth +
+      "\" height=\"" + viewportHeight + "\" viewBox=\"0 0 " + viewportWidth +
+      " " + viewportHeight + "\"><foreignObject x=\"0\" y=\"0\" width=\"" + viewportWidth +
       "\" height=\"" + viewportHeight + "\">" + serialized +
       "</foreignObject></svg>";
     // A blob URL makes Chromium mark a foreignObject canvas as origin-unclean.
@@ -3396,7 +3969,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           canvas.height = outputHeight;
           var context = canvas.getContext("2d");
           if (!context) throw new Error("Canvas capture is unavailable.");
-          context.drawImage(image, 0, 0, outputWidth, outputHeight);
+          context.drawImage(
+            image, documentX, documentY, crop.width, crop.height,
+            0, 0, outputWidth, outputHeight
+          );
           encodeCanvasPng(canvas, function (dataUrl) {
             resolve({
               sourceVersion: captureSourceVersion,
@@ -3463,6 +4039,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         return clearPreviewStyles(args.nodeId);
       case "captureScreenshot":
         return captureScreenshot(args);
+      case "previewStylesheet":
+        if (enabledOptInMethods.indexOf("previewStylesheet") < 0) {
+          throw new Error("Unknown design runtime method: previewStylesheet");
+        }
+        return previewStylesheet(args.file, args.css === null ? null : args.css);
       default:
         throw new Error("Unknown design runtime method: " + method);
     }
@@ -3614,6 +4195,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     // handshake first, then pin its exact parent origin for this document.
     if (trustedParentOrigin === null) trustedParentOrigin = messageEvent.origin;
     if (messageEvent.origin !== trustedParentOrigin) return;
+    enabledOptInMethods = Array.isArray(message.features)
+      ? OPT_IN_METHODS.filter(function (method) { return message.features.indexOf(method) >= 0; })
+      : [];
     parentPort = messageEvent.ports[0];
     parentPort.onmessage = receivePortMessage;
     parentPort.start();

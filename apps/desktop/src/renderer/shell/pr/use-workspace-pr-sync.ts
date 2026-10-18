@@ -26,6 +26,8 @@ import { notifyWorkspacesChanged } from "../../state/use-projects";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 import { registerPrWorkspaceCacheForget } from "./pr-cache-forget";
+import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
+import { documentIsForeground, pollWhileForeground } from "../../shared/lib/element-activity";
 
 /** Last probe per workspace id. Switching INTO a PR-less worktree re-runs the
  *  effect with an unchanged refresh generation — pure navigation, so a recent
@@ -105,12 +107,14 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
   const id = workspace?.id ?? null;
   const repoSlug = workspace?.repoSlug ?? null;
   const eligible = isWorkspacePrSyncEligible(workspace);
+  const local = !!workspace && !isCloudWorkspace(workspace.id) && !isCloudWorkspace(workspace.path) && !parseCloudScopedId(workspace.id);
 
   const probe = useCallback(
     (reason: "refresh" | "resume" | "poll") => {
       // Only DETECT while unrecorded — once the row has a prNumber, Review's
       // live store owns freshness. Local-main has no PR branch.
       if (!eligible || !id || !repoSlug) return;
+      if (local && !documentIsForeground()) return;
       if (inflightProbes.has(id)) return;
       const now = Date.now();
       if (!shouldProbeWorkspacePr(lastProbe.get(id), refreshKey, now, reason)) {
@@ -132,7 +136,7 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
         });
       inflightProbes.set(id, request);
     },
-    [eligible, id, repoSlug, refreshKey],
+    [eligible, id, repoSlug, refreshKey, local],
   );
 
   useEffect(() => {
@@ -144,6 +148,9 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
   // active workspace remains visible, bounded to one call per minute.
   useEffect(() => {
     if (!eligible || !id || !repoSlug) return;
+    // Local discovery has no work while the window is away. The existing
+    // exact-workspace age and in-flight guards coalesce return events.
+    if (local) return pollWhileForeground(() => probe("resume"), PROBE_FRESH_MS);
     const onResume = () => {
       if (document.visibilityState === "visible") probe("resume");
     };
@@ -157,5 +164,5 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
       document.removeEventListener("visibilitychange", onResume);
       window.removeEventListener("focus", onResume);
     };
-  }, [eligible, id, repoSlug, probe]);
+  }, [eligible, id, repoSlug, probe, local]);
 }

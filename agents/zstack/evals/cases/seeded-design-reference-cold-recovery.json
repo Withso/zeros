@@ -1,0 +1,9 @@
+{
+  "id": "seeded-design-reference-cold-recovery",
+  "kind": "seeded",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:573",
+  "symptom": "A valid reference-only draft loses its promised auto-send arm or live snapshot when payload consumers inspect only editor text and attachments.",
+  "rule": "Share a validated reference-aware payload predicate across persistence and recovery, while null and invalid references do not arm sends; see changes/design-selection-composer-contract.md.",
+  "check": "pnpm test:git apps/desktop/src/renderer/state/__tests__/persist-composer-drafts.test.ts"
+}

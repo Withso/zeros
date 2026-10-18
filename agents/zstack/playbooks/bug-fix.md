@@ -29,6 +29,10 @@
    serial requests and a final owner-ID comparison alone do not fence A → B → A.
    Let a held read observe hidden state before the visibility event runs; retiring
    that read must still leave one catch-up for a quick reveal.
+   For a scoped gate, drive the real request dispatcher for every op it names;
+   calling the gate helper directly cannot show that dispatch never selects it.
+   A suspension holds prompt preparation until it resumes; Stop still ends the
+   wait.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
    For worker failures, retain the first closed diagnostic before cleanup and
@@ -68,6 +72,10 @@
    For periodic disconnects, inspect client retirement timers before blaming
    server idle limits. Test real server closure, reconnect acknowledgement,
    durable replay and bounded backoff; distinguish planned rotation in logs.
+   For actor cleanup, count shared sockets, pending admissions, durable commands and
+   unproved native work. Fence old confirmation and context flights before
+   releasing registry capacity; test more historical sessions than the live
+   cap, final-release timer cleanup and same-session readmission races.
    For redundant lifecycle writes, test explicit destination navigation with
    admission held across idle drain. Selected-row input alone misses a
    different-row or programmatic open, and joining a retiring flight can
@@ -109,6 +117,11 @@
    proof and a post-I/O authority recheck; preserve storage debt and the D1 gate.
    Test the actual record purge so a signed carry can later retire from positive
    retained proof, never from a missing row or a provider 404 alone.
+   Drive the real provider adapter and reconciler from an archiving binding
+   through stopped compute with a pending/failed snapshot and a storage-blocked
+   DELETE. Retain positive compute evidence only under its live claim and exact
+   authority/binding, without inventing a resumable snapshot; then exercise the
+   retirement endpoint. A fixture seeded already stopped hides this failure.
    For a failed delete followed by a fresh accepted retry, bind cleanup to the
    successor without rewriting the failed intent. Replay the older key after
    the successor and after its job fails; neither replay may rebind or reset

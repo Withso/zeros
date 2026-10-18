@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DESIGN_CATALOG_READ_CAPABILITY,
   DESIGN_CATALOG_READ_OPERATION,
+  designCatalogBatchSchema,
   type DesignCatalogBatch,
   type DesignCatalogOwner,
   type DesignCatalogRead,
@@ -96,6 +97,56 @@ function packet(
     coverage: offset === 0 && count === total ? "complete" : "partial",
     nextCursor: offset + count === total ? null : `opaque-${offset + count}`,
   };
+}
+
+interface RetainedCatalogTask {
+  header: Pick<
+    DesignCatalogBatch,
+    "owner" | "binding" | "revision" | "pages"
+  > | null;
+  frames: readonly Readonly<DesignCatalogBatch["frames"][number]>[];
+  sources: ReadonlySet<string>;
+  cursors: ReadonlySet<string>;
+  reserved: boolean;
+}
+
+function retainedTasks(
+  adapter: DesignCatalogReadAdapter,
+): RetainedCatalogTask[] {
+  return [...(adapter as unknown as { work: Set<RetainedCatalogTask> }).work];
+}
+
+function retainedPayloadBytes(task: RetainedCatalogTask): number {
+  const dataBytes = task.header
+    ? JSON.stringify({
+        kind: "coherent-design-catalog",
+        owner: task.header.owner,
+        binding: task.header.binding,
+        revision: task.header.revision,
+        pages: task.header.pages,
+        frames: task.frames,
+      }).length * 2
+    : 0;
+  return (
+    dataBytes +
+    [...task.sources, ...task.cursors].reduce(
+      (bytes, value) => bytes + value.length * 2,
+      0,
+    )
+  );
+}
+
+function longSourcePacket(
+  owner: DesignCatalogOwner,
+  total: number,
+  offset: number,
+  count: number,
+  intent: number,
+): DesignCatalogBatch {
+  const reply = packet(owner, total, offset, count, intent);
+  for (const frame of reply.frames)
+    frame.source = `page-1/${"A".repeat(3950)}-${owner.directoryId}-${frame.id.toUpperCase()}.html`;
+  return designCatalogBatchSchema.parse(reply);
 }
 
 async function fixture(
@@ -600,6 +651,171 @@ describe("coherent Design catalog read adapter", () => {
     expect(f.calls).toHaveLength(2);
     last.resolve(packet(f.owner, 2, 1, 1));
     await vi.waitFor(() => expect(adapter.getUsage().reads).toBe(0));
+    expect(adapter.getUsage()).toEqual({
+      owners: 0,
+      reads: 0,
+      retiredReads: 0,
+      descriptors: 0,
+      bytes: 0,
+    });
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "charges normalized source strings through retired callback %s settlement",
+    async (settlement) => {
+      const f = await fixture();
+      const a = lifetime(f.owner);
+      const adapter = new DesignCatalogReadAdapter(f.client);
+      const last = held<unknown>();
+      const first = longSourcePacket(f.owner, 120, 0, 60, 1);
+      const final = longSourcePacket(f.owner, 120, 60, 60, 1);
+      f.setHandler(async (input) => (input.cursor ? last.promise : first));
+      const reading = adapter.read(a.authority, 1);
+      const ownerBytes = adapter.getUsage().bytes - 2 * 1024 * 1024;
+      try {
+        await vi.waitFor(() => expect(f.calls).toHaveLength(2));
+        const [task] = retainedTasks(adapter);
+        expect(task).toBeDefined();
+        expect(task!.frames.map((frame) => frame.source)).toEqual(
+          first.frames.map((frame) => frame.source),
+        );
+        expect([...task!.sources]).toEqual(
+          first.frames.map((frame) => frame.source.toLowerCase()),
+        );
+        expect(
+          [...task!.sources].every(
+            (key, index) => key !== task!.frames[index]!.source,
+          ),
+        ).toBe(true);
+        const charged = adapter.getUsage();
+        expect(charged.bytes).toBe(
+          ownerBytes + retainedPayloadBytes(task!) + 2 * 1024 * 1024,
+        );
+        a.retire();
+        expect(await reading).toEqual({
+          status: "unavailable",
+          reason: "retired",
+        });
+        expect(adapter.getUsage()).toEqual({ ...charged, retiredReads: 1 });
+        expect(task!.sources.size).toBe(60);
+        if (settlement === "resolve") last.resolve(final);
+        else last.reject(new Error("Retire normalized source payload"));
+        await vi.waitFor(() => expect(adapter.getUsage().reads).toBe(0));
+        expect(task!.sources.size).toBe(0);
+        expect(adapter.getUsage()).toEqual({
+          owners: 0,
+          reads: 0,
+          retiredReads: 0,
+          descriptors: 0,
+          bytes: 0,
+        });
+      } finally {
+        a.retire();
+        last.resolve(final);
+        await reading;
+        await vi.waitFor(() => expect(adapter.getUsage().reads).toBe(0));
+      }
+    },
+  );
+
+  it.each(["maxSnapshotBytes", "maxBytes"] as const)(
+    "prices normalized keys before %s admission",
+    async (limit) => {
+      const f = await fixture();
+      const a = lifetime(f.owner);
+      const reply = longSourcePacket(f.owner, 60, 0, 60, 1);
+      const adapter = new DesignCatalogReadAdapter(f.client, {
+        [limit]: limit === "maxBytes" ? 2 * 1024 * 1024 + 700_000 : 700_000,
+      });
+      f.setHandler(async () => reply);
+      expect(await adapter.read(a.authority, 1)).toEqual({
+        status: "unavailable",
+        reason: "too-large",
+      });
+      expect(f.calls).toHaveLength(1);
+      expect(adapter.peek(a.authority)).toBeNull();
+      expect(adapter.getUsage().reads).toBe(0);
+    },
+  );
+
+  it("releases temporary normalized keys rather than transferring them to confirmed ownership", async () => {
+    const f = await fixture();
+    const a = lifetime(f.owner);
+    const adapter = new DesignCatalogReadAdapter(f.client);
+    const last = held<unknown>();
+    const first = longSourcePacket(f.owner, 120, 0, 60, 1);
+    const final = longSourcePacket(f.owner, 120, 60, 60, 1);
+    f.setHandler(async (input) => (input.cursor ? last.promise : first));
+    const reading = adapter.read(a.authority, 1);
+    const ownerBytes = adapter.getUsage().bytes - 2 * 1024 * 1024;
+    try {
+      await vi.waitFor(() => expect(f.calls).toHaveLength(2));
+      const [task] = retainedTasks(adapter);
+      expect(task!.sources.size).toBe(60);
+      last.resolve(final);
+      const result = await reading;
+      if (result.status !== "coherent")
+        throw new Error(
+          "Long authored paths must remain accepted within budget",
+        );
+      expect(result.catalog.frames.map((frame) => frame.source)).toEqual(
+        [...first.frames, ...final.frames].map((frame) => frame.source),
+      );
+      expect(task!.sources.size).toBe(0);
+      expect(adapter.getUsage().bytes).toBe(
+        ownerBytes + JSON.stringify(result.catalog).length * 2,
+      );
+    } finally {
+      last.resolve(final);
+      await reading;
+      a.retire();
+    }
+  });
+
+  it("keeps four-owner long-source staging within independently priced default byte budgets", async () => {
+    const f = await fixture();
+    const adapter = new DesignCatalogReadAdapter(f.client);
+    const authorities = Array.from({ length: 4 }, (_, index) =>
+      lifetime({ ...f.owner, directoryId: `design_keys_${index}` }),
+    );
+    const offsets = new Map<string, number>();
+    const observations: {
+      charged: number;
+      lowerBound: number;
+      stages: number[];
+    }[] = [];
+    f.setHandler(async (input) => {
+      const tasks = retainedTasks(adapter);
+      const stages = tasks.map(retainedPayloadBytes);
+      observations.push({
+        charged: adapter.getUsage().bytes,
+        lowerBound:
+          stages.reduce((sum, bytes) => sum + bytes, 0) +
+          tasks.filter((task) => task.reserved).length * 2 * 1024 * 1024,
+        stages,
+      });
+      const offset = offsets.get(input.directoryId) ?? 0;
+      const count = Math.min(60, 1000 - offset);
+      const owner = { ...f.owner, directoryId: input.directoryId };
+      offsets.set(input.directoryId, offset + count);
+      return longSourcePacket(owner, 1000, offset, count, input.intent);
+    });
+    try {
+      await Promise.all(
+        authorities.map((a, index) => adapter.read(a.authority, index + 1)),
+      );
+      expect(observations.length).toBeGreaterThan(4);
+      for (const observation of observations) {
+        expect(observation.charged).toBeGreaterThanOrEqual(
+          observation.lowerBound,
+        );
+        expect(observation.lowerBound).toBeLessThanOrEqual(32 * 1024 * 1024);
+        for (const stage of observation.stages)
+          expect(stage).toBeLessThanOrEqual(8 * 1024 * 1024);
+      }
+    } finally {
+      authorities.forEach((a) => a.retire());
+    }
     expect(adapter.getUsage()).toEqual({
       owners: 0,
       reads: 0,

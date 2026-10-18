@@ -30,7 +30,7 @@ const edits=new Set([
   "codeReview.create", "codeReview.reply", "codeReview.setResolved",
   "git.reviewHunk", "git.resolveConflict",
   "design.capture","design.review.capture","design.transaction.apply","design.review.resolve","design.history.undo","design.history.redo",
-  "design.context.create","design.verification.open","design.token.update","design.lint","design.selection.set","design.screenshot.set","design.runtime.audit",
+  "design.context.create","design.context.capture","design.verification.open","design.token.update","design.lint","design.selection.set","design.screenshot.set","design.runtime.audit",
   // Runs the person's own style build in the checkout, like a Run action.
   "design.styleBuilds.presence",
   // Update re-reads sources and runs the same builds as presence.

@@ -4,15 +4,10 @@ import {
   liveChatDraftEntries,
   subscribeToLiveChatDrafts,
 } from "../features/agent/composer-live-drafts";
-import type { ChatThread, ComposerDraft } from "./store";
+import type { ChatThread } from "./store";
 import { useWorkspaceStore } from "./workspace-store";
 import { folderIsWithinRoot } from "./workspace-resolution";
-
-function hasContent(draft: ComposerDraft | null | undefined): boolean {
-  return (
-    !!draft && (draft.attachments.length > 0 || draft.text.trim().length > 0)
-  );
-}
+import { composerDraftHasPayload } from "./composer-draft-payload";
 
 function editChatIds(): Set<string> {
   // Persisted edit keys use the existing `${chatId}:${messageId}` contract.
@@ -28,7 +23,7 @@ let editedChats = editChatIds();
 function chatHasDraft(chatId: string): boolean {
   return (
     editedChats.has(chatId) ||
-    hasContent(
+    composerDraftHasPayload(
       getLiveChatDraft(chatId) ??
         useWorkspaceStore.getState().chatComposerDrafts[chatId],
     )

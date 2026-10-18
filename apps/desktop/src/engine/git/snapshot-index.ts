@@ -13,6 +13,7 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 import { runGit } from "./git-exec";
+import { readLocalHead } from "./local-head";
 import { writeGitTemporaryFile } from "./git-temporary";
 
 const MAX_INDEX_BYTES = 16 * 1024 * 1024;
@@ -87,10 +88,9 @@ async function context(
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
       throw error;
     }),
-    runGit(cwd, ["rev-parse", "--verify", "HEAD"]).then(
-      (result) => result.stdout.trim(),
-      () => "",
-    ),
+    readLocalHead(gitDir).then((head) => head ?? runGit(cwd, ["rev-parse", "--verify", "HEAD"]).then(
+      (result) => result.stdout.trim(), () => "",
+    )),
   ]);
   const config = new Map(
     configuration.stdout

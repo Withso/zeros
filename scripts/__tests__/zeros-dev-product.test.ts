@@ -9,6 +9,7 @@ import { computerBuild, computerState } from "../../apps/desktop/src/renderer/fe
 import { createCloudWorkspaceRoutes } from "../../apps/control-plane/src/cloud-workspaces/routes";
 import { HttpError } from "../../apps/control-plane/src/authz";
 import { fixtureRetirement, retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
+import { fixtureSetupEvidence } from "./zeros-dev-setup-fixture";
 
 const fixture=parseFixture({ZEROS_DEV_WORKOS_SUBJECT:"user_fixture",ZEROS_DEV_ACCOUNT_ID:"11111111-1111-4111-8111-111111111111",ZEROS_DEV_EMAIL:"fixture@example.test",
   ZEROS_DEV_ORGANIZATION_ID:"22222222-2222-4222-8222-222222222222",ZEROS_DEV_REPOSITORY:"test-owner/test-repo",ZEROS_DEV_REPOSITORY_ID:"1234",ZEROS_DEV_GITHUB_INSTALLATION_ID:"33333333-3333-4333-8333-333333333333"});
@@ -114,11 +115,22 @@ describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
     else await expect(f.api.waitComputer(f.handle.run, undefined, target)).resolves.toMatchObject({ runtimePin: "confirmed" });
   });
 
+  it("captures exact-workspace setup clocks before cleanup without changing readiness", async () => {
+    const f = setup(); await f.api.createWorkspace(f.handle);
+    const evidence = fixtureSetupEvidence(workspace().id), original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => String(url).includes("setupProgress=true") ? Response.json({
+      workspace: workspace(), setupProgress: { generation: 1, attempt: 1, claimCount: 1, state: "succeeded", errorCode: null }, setupEvidence: evidence,
+    }) : original(url, init));
+    const observe = vi.fn();
+    await f.api.waitWorkspace(f.handle, "running", undefined, observe);
+    expect(observe).toHaveBeenLastCalledWith({ attempt: 1, claimCount: 1, state: "succeeded", errorCode: null, evidence });
+  });
+
   it("keeps the 180 second resume deadline and carries the observed setup attempt in its closed error",async()=>{
     let elapsed=0;const f=setup(fixture,{now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
     await f.api.createWorkspace(f.handle);f.setWorkspace({...workspace(),status:"setting_up"});
     const original=f.fetcher.getMockImplementation()!;
-    f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("?setupProgress=true")?Response.json({
+    f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("?setupProgress=true&setupEvidence=true")?Response.json({
       workspace:{...workspace(),status:"setting_up"},setupProgress:{generation:1,attempt:2,claimCount:3,state:"running",errorCode:"setup_engine_readiness_failed"},
     }):original(url,init));
     await expect(f.api.waitWorkspace(f.handle,"running")).rejects.toMatchObject({code:"deadline",setup:{attempt:2,claimCount:3,state:"running",errorCode:"setup_engine_readiness_failed"}});
@@ -128,7 +140,7 @@ describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
   it.each(["unknown-error","stale-generation","missing","malformed"])("keeps %s setup diagnostics closed and does not extend the deadline",async mode=>{
     let elapsed=0;const f=setup(fixture,{now:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
     await f.api.createWorkspace(f.handle);const original=f.fetcher.getMockImplementation()!;
-    f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("?setupProgress=true")?Response.json({
+    f.fetcher.mockImplementation(async(url,init)=>String(url).endsWith("?setupProgress=true&setupEvidence=true")?Response.json({
       workspace:{...workspace(),status:"setting_up"},...(mode==="missing"?{}:{setupProgress:{generation:mode==="stale-generation"?2:1,
         attempt:2,claimCount:3,state:mode==="malformed"?"synthetic-private-state":"running",errorCode:"synthetic-private-error"}}),
     }):original(url,init));
@@ -143,7 +155,7 @@ describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
     await f.api.createWorkspace(f.handle);const original=f.fetcher.getMockImplementation()!;let reads=0;
     const controller=new AbortController();
     f.fetcher.mockImplementation(async(url,init)=>{
-      if(!String(url).endsWith("?setupProgress=true"))return original(url,init);
+      if(!String(url).endsWith("?setupProgress=true&setupEvidence=true"))return original(url,init);
       if(reads++){controller.abort();return Response.json({});}
       return Response.json({workspace:{...workspace(),status:"setting_up"},setupProgress:{generation:1,
         attempt:2,claimCount:1,state:"running",errorCode:null}});
@@ -168,7 +180,7 @@ describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
       return "synthetic-account-access";
     };
     f.fetcher.mockImplementation(async (url, init) => {
-      if (!String(url).endsWith("?setupProgress=true")) return original(url, init);
+      if (!String(url).endsWith("?setupProgress=true&setupEvidence=true")) return original(url, init);
       statusReads++;
       return Response.json({ workspace: { ...workspace(), status: "setting_up" }, setupProgress: progress });
     });

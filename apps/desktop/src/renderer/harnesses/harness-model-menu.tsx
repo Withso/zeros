@@ -161,7 +161,7 @@ async function main() {
     value: "claude-haiku-5-5", label: "Haiku", effortLevels: liveEfforts === "none" ? [] : liveEfforts.split(","), supportsFast: false,
   }] } };
   const { pickAgentForNewChat } = await import("../features/settings/default-agent");
-  const initialAgent = (policyCase ? pickAgentForNewChat(registryOverride ?? agents) : agents[0]) as WorkspaceRegistryAgent | null;
+  const initialAgent = (policyCase ? pickAgentForNewChat<WorkspaceRegistryAgent>(registryOverride ?? agents) : agents[0]) as WorkspaceRegistryAgent | null;
   const initialAgentId = initialAgent?.id ?? "claude";
   const born = newChatBornDefaults(initialAgentId, initialAgent?.cloudModels);
   const initialModel = query.has("haiku") ? "claude-haiku-5-5" : born.model;

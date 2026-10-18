@@ -94,7 +94,11 @@ underlying awaited bridge callback settles. Abort and timeout are not disposal.
 
 `getUsage()` reports those owned estimated payload costs and callback counts.
 String estimates use two bytes per UTF-16 code unit, including serialized headers,
-records and remembered opaque cursors. Descriptor/container counts are bounded
+records, retained normalized source-comparison keys and remembered opaque cursors.
+Normalized keys are priced before both staged and shared admission, remain charged
+through actual callback settlement, and are released when the temporary uniqueness
+set is cleared; they are not transferred into confirmed catalog ownership.
+Authored case-sensitive source paths are preserved. Descriptor/container counts are bounded
 separately. These are not JS-heap, browser-process or driver-memory guarantees:
 container overhead, caller-held returned values, authority callback closures and
 temporary validation/transport allocations are not a measured whole-process

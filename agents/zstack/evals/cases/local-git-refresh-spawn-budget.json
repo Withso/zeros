@@ -1,0 +1,9 @@
+{
+  "id": "local-git-refresh-spawn-budget",
+  "kind": "replay",
+  "area": "engine-git",
+  "fixedBy": "pr:583",
+  "symptom": "Simultaneous Local workspace status and badge refreshes independently repeated status, graph and comparison commands, increasing process pressure while agents edited files.",
+  "rule": "The bug-fix playbook requires measurement at the real producer. Count native Git launches across simultaneous consumers, preserve each comparison's result and keep foreground admission independent of background fan-out.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/git/__tests__/local-change-snapshot.test.ts -t 'shares exact comparisons across one four-workspace refresh'"
+}

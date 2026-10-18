@@ -21,6 +21,7 @@ import { CLOUD_WORKSPACE_V2_REQUIRED } from "./supported-generation.js";
 import { ensureWorkspaceDeletionJob } from "./workspace-deletion-job.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Hono, type Context } from "hono";
+import { readCloudWorkspaceSetupEvidence } from "./setup-evidence.js";
 import { bodyLimit } from "hono/body-limit";
 import type pg from "pg";
 import { z } from "zod";
@@ -343,7 +344,7 @@ type WorkspaceRow = CloudRuntimePinRow & {
   last_error_code: string | null;
   last_error_message: string | null;
   diagnostic_incident: { id: string; reason: string; stopReason?: unknown } | null;
-  setup_run: { state: string; attempt: number; claimCount: number; code: string | null; hasLog: boolean } | null;
+  setup_run: { id: string; executionFence: number; state: string; attempt: number; claimCount: number; code: string | null; hasLog: boolean } | null;
   last_observed_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -490,7 +491,7 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
          cw.repository_forge, cw.repository_owner, cw.repository_name,
          cw.repository_revision, cw.status, cw.desired_state,
          cw.current_generation, cw.version, cw.last_error_code,
-         (SELECT jsonb_build_object('state',setup.state,'attempt',setup.attempt,'claimCount',setup.claim_count,
+         (SELECT jsonb_build_object('id',setup.id,'executionFence',setup.execution_fence,'state',setup.state,'attempt',setup.attempt,'claimCount',setup.claim_count,
            'code',setup.error_code,'hasLog',btrim(setup.log_excerpt)<>'')
           FROM cloud_workspace_setup_runs setup WHERE setup.workspace_id=cw.id AND setup.org_id=cw.org_id
             AND setup.generation=cw.current_generation ORDER BY setup.attempt DESC LIMIT 1) AS setup_run,
@@ -681,6 +682,11 @@ function setupProgress(row: WorkspaceRow) {
   if (!setup) return null;
   return { generation: row.current_generation, attempt: setup.attempt, claimCount: setup.claimCount,
     state: setup.state, errorCode: setup.code === null ? null : diagnosticCode(setup.code) };
+}
+
+function setupEvidence(tx: Tx, row: WorkspaceRow) {
+  return row.setup_run ? readCloudWorkspaceSetupEvidence(tx, { organizationId: row.org_id, workspaceId: row.id,
+    generation: row.current_generation, setupRunId: row.setup_run.id, executionFence: row.setup_run.executionFence }) : null;
 }
 
 function intentDocument(row: IntentRow) {
@@ -2004,6 +2010,7 @@ export function createCloudWorkspaceRoutes(
       const row=await loadWorkspace(tx,scope.org_id,workspaceId,userId);
       const live=(await tx.query<{role:string|null}>("SELECT cloud_workspace_actor_role($1,$2) AS role",[workspaceId,userId])).rows[0]!;
       return {workspace:workspaceDocument(row,config),access:{role:live.role??"owner",computeEligible:live.role!==null},path:`/workspace/${workspaceId}`,
+        ...(c.req.query("setupEvidence")==="true"?{setupEvidence:await setupEvidence(tx,row)}:{}),
         ...(c.req.query("setupProgress")==="true"?{setupProgress:setupProgress(row)}:{})};
     });
     return c.json(result);
@@ -2014,11 +2021,13 @@ export function createCloudWorkspaceRoutes(
     const orgId = uuidParam(c.req.param("organization"));
     const workspaceId = uuidParam(c.req.param("workspace"));
     c.header("Cache-Control","no-store");
-    const row = await withSystemTx(pool, (tx) =>
-      loadWorkspace(tx, orgId, workspaceId, user.id),
-    );
-    return c.json({ workspace: workspaceDocument(row,config),
-      ...(c.req.query("setupProgress")==="true"?{setupProgress:setupProgress(row)}:{}) });
+    const result = await withSystemTx(pool, async tx => {
+      const row = await loadWorkspace(tx, orgId, workspaceId, user.id);
+      return { workspace: workspaceDocument(row,config),
+        ...(c.req.query("setupEvidence")==="true"?{setupEvidence:await setupEvidence(tx,row)}:{}),
+        ...(c.req.query("setupProgress")==="true"?{setupProgress:setupProgress(row)}:{}) };
+    });
+    return c.json(result);
   });
 
   app.get(`${base}/:workspace/detected-ports`, async (c) => {

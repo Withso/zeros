@@ -1,0 +1,265 @@
+/* Components page — sheet chrome shared by every frame on this page.
+
+   Tokens only: every value below is a product token from the imported app
+   styles (--bg1, --fg2, --text-xs, --radius-md, …) or a Design-only token
+   from ../tokens.css (--space-*). The specimens inside .doc-cell are not
+   styled here: they are the app's own React primitives rendered to HTML,
+   so they carry the exact Tailwind classes the app ships. */
+
+body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-10);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: var(--text-xs--line-height);
+}
+
+/* ── Sheet header ─────────────────────────────────────────── */
+.doc-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+}
+.doc-eyebrow {
+  color: var(--muted-fg);
+  font-size: var(--text-2xxs);
+  font-weight: var(--weight-medium);
+}
+.doc-title {
+  color: var(--fg1);
+  font-size: var(--text-lg);
+  line-height: var(--text-lg--line-height);
+  font-weight: var(--weight-medium);
+}
+.doc-lede {
+  max-width: calc(var(--space-12) * 14);
+  color: var(--fg2);
+}
+.doc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  color: var(--muted-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xxs);
+}
+
+/* ── Sections ─────────────────────────────────────────────── */
+.doc-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--border1);
+}
+.doc-section-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+}
+.doc-section-title {
+  color: var(--fg1);
+  font-weight: var(--weight-medium);
+}
+.doc-section-note {
+  color: var(--fg3);
+}
+
+/* ── Variant × state grid ─────────────────────────────────── */
+.doc-grid {
+  display: grid;
+  grid-template-columns:
+    calc(var(--space-12) * 4.5)
+    repeat(var(--doc-cols, 4), minmax(0, 1fr));
+  gap: var(--space-2) var(--space-4);
+  align-items: center;
+}
+.doc-col {
+  color: var(--muted-fg);
+  font-size: var(--text-2xxs);
+  font-weight: var(--weight-medium);
+}
+.doc-row-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  padding: var(--space-2) 0;
+}
+.doc-name {
+  color: var(--fg1);
+  font-weight: var(--weight-medium);
+}
+.doc-code {
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xxs);
+}
+.doc-used {
+  color: var(--muted-fg);
+  font-size: var(--text-2xxs);
+}
+.doc-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--space-12);
+}
+.doc-cell-empty {
+  color: var(--muted-fg);
+}
+
+/* ── Free-form specimen rows ──────────────────────────────── */
+.doc-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-8);
+}
+.doc-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.doc-item-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+}
+
+/* A specimen on the surface it lives on in the app. */
+.doc-stage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border1);
+  border-radius: var(--radius-lg);
+  background: var(--bg1);
+}
+.doc-stage[data-surface="raised"] {
+  background: var(--bg2);
+}
+.doc-stage[data-surface="sidebar"] {
+  background: var(--sidebar-bg);
+}
+.doc-stage[data-surface="highlight"] {
+  background: var(--bg1-highlight);
+}
+.doc-stage[data-surface="scrim"] {
+  background: var(--scrim);
+}
+.doc-stage[data-layout="column"] {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* ── Spec table (pills, comparisons) ──────────────────────── */
+.doc-table {
+  display: grid;
+  grid-template-columns: var(--doc-table-columns);
+  gap: 0 var(--space-4);
+  align-items: center;
+}
+.doc-table > * {
+  min-width: 0;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border1);
+}
+.doc-th {
+  color: var(--muted-fg);
+  font-size: var(--text-2xxs);
+  font-weight: var(--weight-medium);
+}
+.doc-td-text {
+  color: var(--fg2);
+}
+.doc-td-mono {
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xxs);
+}
+
+/* ── Specs and notes ──────────────────────────────────────── */
+.doc-specs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.doc-spec {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  padding: var(--space-0-5) var(--space-2);
+  border: 1px solid var(--border1);
+  border-radius: var(--radius-sm);
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xxs);
+}
+.doc-spec-key {
+  color: var(--muted-fg);
+}
+.doc-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.doc-note {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  color: var(--fg3);
+}
+.doc-note::before {
+  content: "";
+  flex: none;
+  width: var(--space-1-5);
+  height: var(--space-1-5);
+  border-radius: 50%;
+  background: var(--yellow-icon);
+  transform: translateY(calc(var(--space-0-5) * -1));
+}
+
+/* ── Index ────────────────────────────────────────────────── */
+.doc-index {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-6) var(--space-8);
+}
+.doc-index-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.doc-index-title {
+  color: var(--fg1);
+  font-weight: var(--weight-medium);
+}
+.doc-index-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.doc-index-item {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  color: var(--fg2);
+}
+.doc-index-count {
+  color: var(--muted-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xxs);
+}

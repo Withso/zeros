@@ -5497,12 +5497,14 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   await page.mouse.up();
   check(
-    "marquee resolves rendered siblings through the frame runtime",
+    "an outer marquee selects its intersecting scene frame without flattening its children",
     await waitFor(
       async () =>
+        (await page.locator('[data-design-frame-row="home.html"][aria-selected="true"]').count()) === 1 &&
+        (await page.locator('[data-design-frame-row][aria-selected="true"]').count()) === 1 &&
         (await page
           .locator('[data-design-layer-id][aria-selected="true"]')
-          .count()) >= 2,
+          .count()) === 0,
       "design-marquee-selection",
     ),
   );
@@ -5548,6 +5550,10 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
           .count()) >= 2,
       "design-in-frame-marquee-selection",
     ),
+  );
+  check(
+    "marquee resolves rendered siblings through the frame runtime",
+    (await page.locator('[data-design-layer-id][aria-selected="true"]').count()) >= 2,
   );
   await page.locator('[data-design-layer-id="home-heading"]').click();
   const selectedAfterScopedMarqueeReset = page.locator(

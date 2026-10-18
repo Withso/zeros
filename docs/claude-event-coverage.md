@@ -55,7 +55,7 @@ the table and native fixtures whenever the pinned SDK changes.
 | `system/files_persisted` | handled | Failure produces a generic session-file persistence explanation. Successful cloud file IDs, private filenames and diagnostics are not displayed or treated as local artifacts. |
 | `tool_use_summary` | intentionally ignored | Optional summary duplicates the existing native tool feed. It cannot settle or replace those tools. |
 | `system/memory_recall` | intentionally ignored | Internal personal/team/organization memory hydration, including private contents, is not transcript narration. No memory-inspection feature is implied. |
-| `rate_limit_event` | handled | Typed `claude-rate-limit:<budget>` limit/extra-usage/recovery notice, deduplicated across results and background replies. The renderer selects one current status at the provider turn's tail. Preserve included-usage versus extra-usage availability; never fail or authenticate a turn from this status alone. |
+| `rate_limit_event` | handled | Typed `claude-rate-limit:<budget>` limit/extra-usage/recovery notice, deduplicated across results and background replies. The renderer shows each change of the provider turn's status inline, in the working feed where it arrived. Preserve included-usage versus extra-usage availability; never fail or authenticate a turn from this status alone. |
 | `system/elicitation_complete` | handled | Plain external-request completion feedback keyed by server/request identity. Does not answer an approval or settle a pending question automatically. |
 | `system/permission_denied` | handled | Preserve native explanation beside the exact owning tool/child feed. Unknown or ambiguous native tool ownership stays deferred. Native tool results still own tool success/failure. |
 | `prompt_suggestion` | unsupported | Optional predicted follow-up suggestions are not enabled and have no product surface; never auto-submit them. |
@@ -176,10 +176,10 @@ Feedback uses existing `agent_message_chunk` commentary and parent-binding
 updates, with typed `error_notice` events for usage status. Stable native message
 IDs permit commentary replacement; native UUIDs suppress replay across
 results/query replacement. Usage notices are immutable: changed states receive
-new IDs, and their stable budget code selects the current display. Repeated
+new IDs, and their stable budget code identifies the budget. Repeated
 identical states remain deduplicated across intermediate results until the next
 user turn. Older commentary is recognized by its persisted `messageId`, not the
-renderer row ID, and shares the one tail notice without a storage migration.
+renderer row ID, and shares the same inline projection without a storage migration.
 Text is capped at 8,000 characters,
 active keyed notices at 256, deferred tool notices at 64 and replay IDs at 4,000.
 Unknown ownership cannot borrow a sibling row. Stop/disposal clears deferred

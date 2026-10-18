@@ -440,12 +440,11 @@ references, not as a template.
   ([imported style sources](design-mode-roadmap.md#imported-style-sources)),
   read live from the checkout: `styles/zeros-tokens.css` as a `tailwind`
   source, compiled for each frame's classes (Tailwind emits the font, type and
-  radius scales a frame reads with `var()`), `styles/semantic-tokens.css` as a
-  `css` source, and `tokens-live`, a one-shot `build` source that runs the
-  preview mode of `scripts/design-system/build-tokens.mjs` into the private
-  `<workspace>/.zeros/design-styles/` folder when `styles/tokens/` changes while the Design
-  tab is open. Frames therefore use the app's utilities (`bg-bg2`, `p-3`,
-  `rounded-md`, `text-xs`) and its tokens, including uncommitted edits.
+  radius scales a frame reads with `var()`), and `styles/semantic-tokens.css`
+  as a `css` source. Frames therefore use the app's utilities (`bg-bg2`, `p-3`,
+  `rounded-md`, `text-xs`) and its tokens, including uncommitted edits. An edit
+  to `styles/tokens/*.json` reaches frames once `pnpm design:docs` regenerates
+  `styles/zeros-tokens.css`.
 - `Zeros - Design/meta/canvas.json` names the themes: Dark is the default theme (`dark`,
   whose values are `:root`) and Light is `light`; the app source maps
   `[data-theme="dark"]` and `[data-theme="light"]` onto them.

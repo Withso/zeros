@@ -37,6 +37,20 @@ afterEach(() => {
 });
 
 describe("composer draft presence", () => {
+  it.each(["legacy", "grouped"])("retains presence for a %s reference-only draft and clears it after removal", shape => {
+    const target = { workspaceId: "local", directoryId: "design", frame: "home.html", intent: "code" as const };
+    const draft = { text: "", attachments: [], designFrame: shape === "legacy" ? target : [target, { ...target, frame: "pricing.html" }] };
+    live("reference", draft);
+    expect(hasDraft("reference")).toBe(true);
+    live("reference", null);
+    useWorkspaceStore.setState({ chatComposerDrafts: { reference: draft } });
+    expect(hasDraft("reference")).toBe(true);
+    live("reference", { ...draft, designFrame: null });
+    expect(hasDraft("reference")).toBe(false);
+    live("reference", { ...draft, designFrame: [] });
+    expect(hasDraft("reference")).toBe(false);
+  });
+
   it("restores text and attachment-only drafts, but ignores whitespace", () => {
     useWorkspaceStore.setState({
       chatComposerDrafts: {

@@ -181,4 +181,41 @@ describe("editable canvas.json", () => {
       expect(() => decodeCanvasFile(JSON.stringify(value))).toThrow();
     },
   );
+
+  it.each([
+    ["components", /"components" is reserved.*"components-2"/],
+    ["Assets", /"Assets" is reserved.*"assets-2"/],
+    ["META", /"META" is reserved.*"meta-2"/],
+  ])(
+    "names the reserved page folder %s and a valid replacement instead of an opaque schema error",
+    (folder, message) => {
+      const value = {
+        ...pagedCanvas,
+        pages: [
+          ...pagedCanvas.pages,
+          { id: "components_page", title: "Components", folder, frames: [] },
+        ],
+      };
+      expect(() => decodeCanvasFile(JSON.stringify(value))).toThrow(message);
+      expect(() => decodeCanvasFile(JSON.stringify(value))).not.toThrow(
+        /frame geometry|Invalid input/,
+      );
+    },
+  );
+
+  it.each(["../outside", ".hidden", "trailing.", "two/segments", ""])(
+    "explains the portable page folder rule for %j",
+    (folder) => {
+      const value = {
+        ...pagedCanvas,
+        pages: [
+          ...pagedCanvas.pages,
+          { id: "other", title: "Other", folder, frames: [] },
+        ],
+      };
+      expect(() => decodeCanvasFile(JSON.stringify(value))).toThrow(
+        /page folder .* must be one portable segment/,
+      );
+    },
+  );
 });

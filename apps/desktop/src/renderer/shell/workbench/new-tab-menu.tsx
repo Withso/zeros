@@ -7,7 +7,7 @@ import { File, Globe, Plus, Smartphone, Terminal } from "lucide-react";
 import { addWorkbenchTerminal, openWorkbenchTerminal } from "./open-terminal";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { prefetchSettingsForRepo } from "../../features/settings/use-settings";
-import { warmSimulatorHub } from "../../features/simulators/simulator-hub-store";
+import { warmSimulatorTab } from "../../features/simulators/simulator-tab";
 import { reusableSimulatorTab } from "../../features/simulators/simulator-tab-model";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { useAgentControlFeatureActive } from "../../features/settings/agent-control-rollout";
@@ -258,7 +258,7 @@ export function WorkbenchNewTabMenu({
             setSelection(value);
             if (value !== "environment") setEnvironmentOpen(false);
             if (SIMULATOR_ITEMS.some((item) => item.value === value)) {
-              warmSimulatorHub();
+              void warmSimulatorTab(scope).catch(() => {});
             }
           }}
           className="min-h-0 rounded-none [&_[data-slot=command-input-wrapper]]:h-10 [&_[data-slot=command-input-wrapper]]:shrink-0 [&_[data-slot=command-input-wrapper]_svg]:size-3.5"
@@ -309,7 +309,7 @@ export function WorkbenchNewTabMenu({
                       key={value}
                       value={value}
                       onSelect={() => addSimulator(platform)}
-                      onPointerEnter={warmSimulatorHub}
+                      onPointerEnter={() => { void warmSimulatorTab(scope).catch(() => {}); }}
                     >
                       <Smartphone className="size-3.5" />
                       <span>{simulatorPlatformLabel(platform)}</span>

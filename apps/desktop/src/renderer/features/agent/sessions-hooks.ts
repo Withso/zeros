@@ -17,7 +17,8 @@
 // Identity stable across mutations — safe to put in useEffect deps.
 // ──────────────────────────────────────────────────────────
 
-import { useCallback, useContext, useSyncExternalStore } from "react";
+import { useCallback, useContext, useMemo, useSyncExternalStore } from "react";
+import { createChatRenderSnapshot } from "./local-live-text";
 
 import type {
   AgentSessionControls,
@@ -39,6 +40,7 @@ import {
 export function useChatSession(
   chatId: string,
   liveUpdates = true,
+  isolateLiveText = false,
 ): AgentSessionState &
   AgentSessionControls & {
     ensureSession(
@@ -72,10 +74,10 @@ export function useChatSession(
     },
     [chatId, liveUpdates],
   );
-  const getSnapshot = useCallback(
-    () => useSessionsStore.getState().sessions[chatId] ?? BLANK,
-    [chatId],
-  );
+  const getSnapshot = useMemo(() => {
+    const select = isolateLiveText && liveUpdates ? createChatRenderSnapshot() : (slot: AgentSessionState) => slot;
+    return () => select(useSessionsStore.getState().sessions[chatId] ?? BLANK);
+  }, [chatId, isolateLiveText, liveUpdates]);
   const slot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   const stopBackgroundTask = useCallback(
     (taskId: string) => ctx.stopBackgroundTask(chatId, taskId),

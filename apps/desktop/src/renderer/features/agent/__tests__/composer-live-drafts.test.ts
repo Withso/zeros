@@ -54,4 +54,12 @@ describe("live composer draft restoration", () => {
     expect(getLiveChatDraft("chat-restore")).toEqual(newerDraft);
     unregister();
   });
+
+  it.each(["legacy", "grouped"])("does not overwrite a newer %s reference-only draft", shape => {
+    const target = { workspaceId: "local", directoryId: "design", frame: "home.html", intent: "code" as const };
+    const draft = { text: "", attachments: [], designFrame: shape === "legacy" ? target : [target, { ...target, frame: "pricing.html" }] };
+    setLiveChatDraft("chat-restore", draft);
+    expect(tryRestoreLiveChatDraft("chat-restore", restoredDraft)).toBe(false);
+    expect(getLiveChatDraft("chat-restore")).toEqual(draft);
+  });
 });

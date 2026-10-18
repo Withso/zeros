@@ -34,6 +34,11 @@ import type {
  *  inside renderer files. Extend by adding fields here, never by
  *  reaching into globals. */
 export interface RendererContext {
+  /** Local live prose has its own leaf subscription; all other messages and
+   * cloud renderers keep the ordinary immutable props contract. */
+  liveTextSource?: import("../local-live-text").LiveAgentTextSource;
+  /** Already paced by the Local leaf observer; never pace the same text twice. */
+  liveTextPresentation?: { text: string; pending: boolean };
   /** Provisional cached rows carry no authority to mutate a native turn.
    * Included in memo comparisons so old action closures cannot outlive it. */
   transcriptReadOnly?: boolean;

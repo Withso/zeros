@@ -735,6 +735,44 @@
   opacity: 0.4;
 }
 
+/* The agent activity chip: what a Local agent is writing on this canvas.
+ * Bottom centre of the space beside the panel, clear of the 40px tool rail
+ * on both sides, and above an open Motion timeline. */
+.zd-design-agent-activity {
+  bottom: 8px;
+  left: calc((100% - var(--zd-design-panel-inset)) / 2);
+  max-width: calc(100% - var(--zd-design-panel-inset) - 112px);
+  height: 40px;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 12px;
+  transform: translateX(-50%);
+  transition: bottom 160ms ease-out;
+}
+
+.zd-design-agent-activity[data-motion-open] {
+  bottom: calc(var(--zeros-design-motion-height, 240px) + 16px);
+}
+
+.zd-design-agent-activity-status {
+  display: inline-flex;
+  min-width: 0;
+  height: 32px;
+  align-items: center;
+  gap: 6px;
+  padding-inline: 8px;
+  color: var(--fg2);
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+}
+
+.zd-design-agent-activity-status > svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--fg3);
+}
+
 /* The Layers + Inspector panel: one raised column at the right edge. */
 .zd-design-floating-panel {
   top: 8px;
@@ -792,6 +830,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .zd-design-tools-rail,
+  .zd-design-agent-activity,
   .zd-design-directory-trigger,
   .zd-design-layers-split::before {
     transition: none;

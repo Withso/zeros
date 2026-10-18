@@ -104,6 +104,7 @@ interface ReadTask {
   sources: Set<string>;
   cursors: Set<string>;
   cursorBytes: number;
+  sourceKeyBytes: number;
   dataBytes: number;
   reserved: boolean;
 }
@@ -196,6 +197,7 @@ export class DesignCatalogReadAdapter {
       bytes +=
         task.dataBytes +
         task.cursorBytes +
+        task.sourceKeyBytes +
         (task.reserved ? RESPONSE_RESERVE : 0);
     }
     return {
@@ -324,6 +326,7 @@ export class DesignCatalogReadAdapter {
       sources: new Set(),
       cursors: new Set(),
       cursorBytes: 0,
+      sourceKeyBytes: 0,
       dataBytes: 0,
       reserved: true,
     };
@@ -451,18 +454,37 @@ export class DesignCatalogReadAdapter {
         const cursorBytes = reply.nextCursor?.length
           ? reply.nextCursor.length * 2
           : 0;
+        const sources = reply.frames.map((frame) =>
+          portableDesignName(frame.source),
+        );
+        const sourceKeyBytes = sources.reduce(
+          (bytes, source) => bytes + source.length * 2,
+          0,
+        );
         if (
           task.frames.length + reply.frames.length >
             DESIGN_CATALOG_DESCRIPTOR_LIMIT ||
-          task.dataBytes + task.cursorBytes + base + added + cursorBytes >
+          task.dataBytes +
+            task.cursorBytes +
+            task.sourceKeyBytes +
+            base +
+            added +
+            cursorBytes +
+            sourceKeyBytes >
             this.limits.maxSnapshotBytes ||
-          !this.fits(base + added + cursorBytes, reply.frames.length, 0, entry)
+          !this.fits(
+            base + added + cursorBytes + sourceKeyBytes,
+            reply.frames.length,
+            0,
+            entry,
+          )
         ) {
           this.cancel(task, "too-large");
           return;
         }
-        for (const frame of reply.frames) {
-          const source = portableDesignName(frame.source);
+        task.sourceKeyBytes += sourceKeyBytes;
+        for (const [index, frame] of reply.frames.entries()) {
+          const source = sources[index]!;
           if (task.ids.has(frame.id) || task.sources.has(source)) {
             this.cancel(task, "invalid");
             return;
@@ -538,13 +560,14 @@ export class DesignCatalogReadAdapter {
       task.stop();
       if (task.timer !== null) clearTimeout(task.timer);
       task.timer = null;
-      this.work.delete(task);
-      if (entry.active === task) entry.active = null;
       task.frames = [];
       task.header = null;
       task.ids.clear();
       task.sources.clear();
+      task.sourceKeyBytes = 0;
       task.cursors.clear();
+      this.work.delete(task);
+      if (entry.active === task) entry.active = null;
     }
   }
 }

@@ -4,6 +4,42 @@ import { EngineActivityHeartbeat } from "../engine-activity-heartbeat";
 afterEach(() => vi.useRealTimers());
 
 describe("private engine activity heartbeat", () => {
+  it("removes the Local heartbeat timer while idle without delaying activity", async () => {
+    vi.useFakeTimers();
+    const publish = vi.fn();
+    let activeTurns = 0;
+    const heartbeat = new EngineActivityHeartbeat({
+      instance: "local", publish, activeTurns: () => activeTurns, stopWhenIdle: true,
+    });
+    heartbeat.start();
+    publish.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    console.info("Local heartbeat synthetic idle minute", JSON.stringify({ frames: publish.mock.calls.length, timers: vi.getTimerCount() }));
+    expect(publish.mock.calls.length).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    activeTurns = 1;
+    heartbeat.refresh();
+    expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({ activeTurns: 1 }));
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(publish).toHaveBeenCalledTimes(4);
+    activeTurns = 0;
+    heartbeat.refresh();
+    expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({ activeTurns: 0 }));
+    expect(vi.getTimerCount()).toBe(0);
+    heartbeat.stop();
+  });
+
+  it("keeps the default cloud heartbeat cadence even while idle", async () => {
+    vi.useFakeTimers();
+    const publish = vi.fn();
+    const heartbeat = new EngineActivityHeartbeat({ instance: "cloud", publish, activeTurns: () => 0 });
+    heartbeat.start(); publish.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(publish).toHaveBeenCalledTimes(20);
+    expect(vi.getTimerCount()).toBe(1);
+    heartbeat.stop();
+  });
+
   it("publishes only boot identity and bounded activity metadata", async () => {
     vi.useFakeTimers();
     const publish = vi.fn();

@@ -8,6 +8,8 @@
   publication and actual resource settlement are different contracts. Reusing a
   whole catalog object across new intents could revive an old publication even
   when the descriptor contents were unchanged.
+  Serialized records also omitted separately retained normalized source keys,
+  allowing valid long uppercase paths to exceed staged/shared payload budgets.
 - **Rule.** Begin at zero and validate contiguous ranges, stable headers,
   cross-packet uniqueness and opaque cursor progress before publishing a
   distinct coherent type. Retain exact-key presentation during refresh, but
@@ -16,6 +18,8 @@
   descriptor/page arrays, and keep cancellation ownership exact on cached hits.
   Keep retired producers
   and their staged payloads/reservations charged until their callback settles.
+  Price normalized comparison-key strings before admission in both byte budgets;
+  retain their charge until the uniqueness set clears, not in confirmed data.
 - **Encoded in.** The catalog adapter suite exercises the real passive workspace
   facade with Local Personal, organization-local and cloud-shaped owners, held
   ABA/cancellation replies, malformed coverage and explicit resource limits.

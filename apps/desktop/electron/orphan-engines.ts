@@ -98,7 +98,7 @@ export function processHasEnvironmentAssignment(
  *               alone: a transient `ps` failure is not proof of orphanhood,
  *               and the walk + host verification can route around the listener.
  *
- * Engine HOSTS (pty-host.cjs / cursor-host.cjs — the Node subprocesses the
+ * Engine HOSTS (pty-host.cjs / cursor-host.cjs / watch-host.cjs — the Node subprocesses the
  * engine forks) matter here too: they inherit the engine's LISTENING socket,
  * so when the engine is SIGKILLed they keep the port alive with nobody
  * accepting — the "bound but black-holed" port behind the beta.82 respawn
@@ -114,7 +114,9 @@ export function shouldReapRangeListener(opts: {
     (command.includes("bun") && command.includes("apps/desktop/src/cli.ts"));
   if (looksLikeEngine) return ppid === 1;
   const looksLikeEngineHost =
-    command.includes("pty-host.cjs") || command.includes("cursor-host.cjs");
+    command.includes("pty-host.cjs") ||
+    command.includes("cursor-host.cjs") ||
+    command.includes("watch-host.cjs");
   if (looksLikeEngineHost) return ppid === 1;
   return false;
 }

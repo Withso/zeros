@@ -46,7 +46,7 @@ import { readableTextFromArray } from "./renderers/raw-output";
 import { fallbackProse } from "./model-fallback";
 import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 import { pendingChecksMessage } from "./renderers/tool-pending-checks";
-import { isUsageNotice, turnUsageNotice } from "./transcript-notices";
+import { isUsageNotice, usageStatusChanges } from "./transcript-notices";
 import { isTurnFailureNotice, turnFailureForCard } from "./turn-failure";
 import { authenticationTurn, authenticationTurnOutput, authenticationTurnState, latestAuthenticationRecoveryTurn } from "./auth-prompt-recovery";
 
@@ -681,10 +681,13 @@ export function formatTranscript(
   }
 
   const ctx: Ctx = { children, root: meta?.folder?.trim() || undefined };
-  // Match the product's one tail status. Native retry receipts stay stored,
-  // but copying a recovered turn must not resurrect its obsolete error UI or
-  // attribute provider usage feedback to the assistant.
+  // Match the product's inline usage status. Native retry receipts stay
+  // stored, but copying a recovered turn must not resurrect its obsolete error
+  // UI or attribute provider usage feedback to the assistant.
   const recoveredAt = latestAuthenticationRecoveryTurn(turns);
+  // A provider turn's tail segment holds every steer segment's events.
+  const usage = new Map(turns.flatMap((turn, index) =>
+    isProviderTurnTail(turns, index) ? [...usageStatusChanges(turn.providerEvents)] : []));
   const projected = turns.flatMap((turn, index) => {
     const turnId = turn.recordedTurnId;
     const ownsTail = isProviderTurnTail(turns, index);
@@ -694,14 +697,15 @@ export function formatTranscript(
       id: `authentication-status-${turnId ?? index}`, kind: "text", role: "system",
       createdAt: turn.recordedStartedAt, text: auth === "signed-in" ? "Signed in" : "Sign-in required",
     } : null;
-    const usage = ownsTail ? turnUsageNotice(turn.providerEvents) : null;
     const failure = ownsTail && turnId && !auth ? turnFailureForCard({ events: turn.providerEvents, turnId }) : null;
     const terminal = failure && turnId ? turn.providerEvents.slice().reverse().find(event => isTurnFailureNotice(event, turnId)) : undefined;
     const events = auth ? authenticationTurnOutput(turn.events) : turn.events;
     return [
       ...(turn.userPrompt ? [turn.userPrompt] : []),
-      ...events.filter(event => !isUsageNotice(event) && !(turnId && isTurnFailureNotice(event, turnId))),
-      ...(usage ? [usage] : []),
+      ...events.flatMap(event => {
+        const row = isUsageNotice(event) ? usage.get(event.id) : event;
+        return !row || (turnId && isTurnFailureNotice(row, turnId)) ? [] : [row];
+      }),
       ...(authStatus ? [authStatus] : []),
       ...(failure && terminal?.kind === "error_notice" ? [{ ...terminal, message: failure.message }] : []),
     ];

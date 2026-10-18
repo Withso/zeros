@@ -27,9 +27,9 @@
 //   node scripts/smoke-engine.mjs
 // ──────────────────────────────────────────────────────────
 
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -153,11 +153,13 @@ function probeHealth(port) {
 /** Exercise the exact bridge operations whose UI surfaces all fail together
  * when the packaged engine's event loop is wedged. The repository, DB, visible
  * worktree root, and token are all throwaway values inside the smoke sandbox. */
-async function smokeWorkspaceLifecycle({ port, token, root }) {
+async function smokeWorkspaceLifecycle({ port, token, root, enginePid }) {
   const ws = new WebSocket(
     `ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`,
   );
   const pending = new Map();
+  /** Exact-workspace invalidations, with their receive times. */
+  const invalidations = [];
   let readyResolve;
   let readyReject;
   const ready = new Promise((resolveReady, rejectReady) => {
@@ -189,6 +191,10 @@ async function smokeWorkspaceLifecycle({ port, token, root }) {
     try {
       msg = JSON.parse(data.toString());
     } catch {
+      return;
+    }
+    if (msg.type === "DB_CHANGED" && Array.isArray(msg.workspaceIds)) {
+      invalidations.push({ at: Date.now(), workspaceIds: msg.workspaceIds });
       return;
     }
     if (msg.type === "ENGINE_READY") {
@@ -274,6 +280,56 @@ async function smokeWorkspaceLifecycle({ port, token, root }) {
     ) {
       throw new Error("workspace.create did not publish a usable checkout");
     }
+
+    // A packaged Local engine on macOS watches through its Node watch host,
+    // not a stat poller in its own bun process. The host starts when the
+    // watcher adopts its first root (the new checkout), on its Git-state tick.
+    if (process.platform === "darwin") {
+      const engineHosts = () =>
+        execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" })
+          .split("\n")
+          .filter((line) => line.includes("watch-host.cjs"))
+          .filter((line) => Number(line.trim().split(/\s+/)[1]) === enginePid);
+      const hostDeadline = Date.now() + 15_000;
+      let hosts = engineHosts();
+      while (hosts.length === 0 && Date.now() < hostDeadline) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+        hosts = engineHosts();
+      }
+      if (hosts.length !== 1) {
+        throw new Error(`expected one engine watch host, found ${hosts.length}`);
+      }
+      console.log("[smoke-engine] packaged engine watches worktrees through its watch host");
+    }
+
+    // An edit made outside the bridge (an agent's shell, an editor) must reach
+    // clients as an exact-workspace invalidation. Let the create's own
+    // broadcasts drain first, so the next invalidation can only come from the
+    // worktree watcher; then keep writing until one edit is observed.
+    const forWorkspace = (entry) => entry.workspaceIds.includes(created.workspaceId);
+    const quietDeadline = Date.now() + 10_000;
+    for (;;) {
+      const last = invalidations.filter(forWorkspace).at(-1)?.at ?? 0;
+      if (Date.now() - last >= 1_500 || Date.now() >= quietDeadline) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    }
+    const deadline = Date.now() + 20_000;
+    let observed = null;
+    for (let attempt = 0; !observed && Date.now() < deadline; attempt += 1) {
+      const writtenAt = Date.now();
+      writeFileSync(join(created.path, `packaged-watch-smoke-${attempt}.txt`), "watch\n");
+      while (!observed && Date.now() - writtenAt < 2_000) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+        const hit = invalidations.find((entry) => entry.at >= writtenAt && forWorkspace(entry));
+        if (hit) observed = { latencyMs: hit.at - writtenAt, attempt };
+      }
+    }
+    if (!observed) {
+      throw new Error("a worktree edit never invalidated its workspace (20s)");
+    }
+    console.log(
+      `[smoke-engine] worktree edit invalidated its workspace after ${observed.latencyMs} ms (write ${observed.attempt + 1})`,
+    );
 
     await request("workspace.archive", {
       workspaceId: created.workspaceId,
@@ -377,6 +433,11 @@ const child = spawn(
       ZEROS_USER_SETTINGS_DIR: join(sandbox, "settings"),
       ZEROS_CONTROL_FD: "3",
       ZEROS_REQUIRE_ACCOUNT: "0",
+      // Electron hands the packaged engine a Node runtime for its helper
+      // hosts. This Node stands in for it, so the watch host runs as shipped.
+      ZEROS_PTY_HOST_RUNTIME: process.execPath,
+      ZEROS_PTY_HOST_RUNTIME_ELECTRON: "",
+      ZEROS_WATCH_HOST_SCRIPT: join(repoRoot, "apps/desktop/src/engine/git/watch-host.cjs"),
     },
   },
 );
@@ -504,7 +565,7 @@ if (!localToken) {
 }
 
 try {
-  await smokeWorkspaceLifecycle({ port, token: localToken, root });
+  await smokeWorkspaceLifecycle({ port, token: localToken, root, enginePid: child.pid });
 } catch (error) {
   cleanup();
   fail(

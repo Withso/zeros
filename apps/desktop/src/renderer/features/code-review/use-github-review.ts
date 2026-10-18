@@ -8,6 +8,9 @@ import {
 } from "@/renderer/platform/github-review";
 import { onActiveBridgeConnected } from "@/renderer/platform/bridge/active-bridge";
 import { useCachedRead } from "@/renderer/state/use-cached-read";
+import { useDocumentActive } from "@/renderer/state/use-document-active";
+import { isCloudWorkspace, parseCloudScopedId } from "@/renderer/platform/bridge/cloud-workspace-key";
+import { documentIsForeground } from "@/renderer/shared/lib/element-activity";
 import {
   githubReviewCache,
   githubReviewKey,
@@ -63,9 +66,12 @@ export function useGithubReview({
 }) {
   const key =
     workspaceId && prNumber ? githubReviewKey(workspaceId, prNumber) : null;
+  const local = !!cwd && !isCloudWorkspace(cwd) && !isCloudWorkspace(workspaceId) && !parseCloudScopedId(workspaceId);
+  const foreground = useDocumentActive(local && active, true);
+  const observing = local ? foreground : active;
   const [documentVisible, setDocumentVisible] = useState(visible);
   const snapshot = useCachedRead(githubReviewCache, key, readKey, {
-    enabled: active && documentVisible,
+    enabled: observing && (local || documentVisible),
     maxAgeMs: FRESH_MS,
   });
   const loadedHeadSha = snapshot.data?.headSha;
@@ -78,18 +84,19 @@ export function useGithubReview({
     [snapshot.data, key],
   );
   useEffect(() => {
-    if (!key || !active) return;
-    setDocumentVisible(visible());
+    if (!key || !observing) return;
+    if (!local) setDocumentVisible(visible());
     const read = (maxAgeMs: number) => {
-      if (visible())
+      if (local ? documentIsForeground() : visible())
         void githubReviewCache
           .load(key, () => readKey(key), { maxAgeMs })
           .catch(() => {});
     };
     const resume = () => {
-      setDocumentVisible(visible());
+      if (!local) setDocumentVisible(visible());
       read(2_000);
     };
+    if (local) read(2_000);
     const timer = setInterval(() => read(FRESH_MS), 30_000);
     window.addEventListener("focus", resume);
     document.addEventListener("visibilitychange", resume);
@@ -103,12 +110,12 @@ export function useGithubReview({
       document.removeEventListener("visibilitychange", resume);
       unsubscribe();
     };
-  }, [key, active, cwd]);
+  }, [key, observing, cwd, local]);
   useEffect(() => {
     if (
       !key ||
-      !active ||
-      !visible() ||
+      !observing ||
+      !(local ? documentIsForeground() : visible()) ||
       !confirmedHeadSha ||
       !confirmedBaseSha ||
       !loadedHeadSha ||
@@ -120,7 +127,8 @@ export function useGithubReview({
       .catch(() => {});
   }, [
     key,
-    active,
+    observing,
+    local,
     confirmedHeadSha,
     confirmedBaseSha,
     loadedHeadSha,

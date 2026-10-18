@@ -126,16 +126,22 @@ describe("simulator hub store", () => {
 });
 
 describe("following the hub", () => {
+  let focused = true;
+  let page: EventTarget & { visibilityState: string; hasFocus: () => boolean };
   const refreshes = () =>
     native.invoke.mock.calls.filter(([command]) => command === "simulator_hub_refresh").length;
 
   beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal("window", new EventTarget());
+    focused = true;
+    page = Object.assign(new EventTarget(), { visibilityState: "visible", hasFocus: () => focused });
+    vi.stubGlobal("document", page);
     native.invoke.mockImplementation(async () => snapshot());
   });
 
   afterEach(() => {
+    resetSimulatorHubForTests();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -178,5 +184,38 @@ describe("following the hub", () => {
     await vi.advanceTimersByTimeAsync(SIMULATOR_HUB_FOLLOW_MS * 2);
     expect(refreshes()).toBe(2);
     release();
+  });
+
+  it.each(["hidden", "blurred"])("does no native scans or timers while %s", async mode => {
+    if (mode === "hidden") page.visibilityState = "hidden";
+    else focused = false;
+    const release = followSimulatorHub();
+    await vi.advanceTimersByTimeAsync(60_000);
+    console.info(JSON.stringify({ mode, elapsedMs: 60_000, nativeScans: refreshes(), timers: vi.getTimerCount() }));
+    expect(refreshes()).toBe(0); expect(vi.getTimerCount()).toBe(0);
+    release();
+  });
+
+  it("stops on blur, retains the confirmed snapshot, and refreshes once on return", async () => {
+    await loadSimulatorHub(); const confirmed = simulatorHubState().snapshot;
+    const release = followSimulatorHub(); await vi.advanceTimersByTimeAsync(0);
+    focused = false; window.dispatchEvent(new Event("blur")); native.invoke.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(refreshes()).toBe(0); expect(vi.getTimerCount()).toBe(0);
+    expect(simulatorHubState().snapshot).toBe(confirmed);
+    focused = true; window.dispatchEvent(new Event("focus"));
+    expect(refreshes()).toBe(1); expect(vi.getTimerCount()).toBe(1);
+    release(); window.dispatchEvent(new Event("focus"));
+    expect(refreshes()).toBe(1); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("shares a slow native scan across ticks and focus without overlapping work", async () => {
+    const reply = deferred<unknown>(); native.invoke.mockReturnValue(reply.promise);
+    const release = followSimulatorHub();
+    await vi.advanceTimersByTimeAsync(60_000);
+    window.dispatchEvent(new Event("focus"));
+    expect(refreshes()).toBe(1);
+    release(); reply.resolve(snapshot()); await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0); expect(refreshes()).toBe(1);
   });
 });

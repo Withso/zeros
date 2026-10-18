@@ -3744,9 +3744,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
             "[zeros] Codex auto-approval telemetry emit failed",
           );
         }
-        console.info(
-          `[codex] auto-approved ${request.method} in mode=auto-edit`,
-        );
+        // Local receipts above already describe every decision. Duplicating
+        // each command in the console adds disk I/O throughout long turns.
+        if (cloudProviderExecution(session.executionBoundary)) {
+          console.info(`[codex] auto-approved ${request.method} in mode=auto-edit`);
+        }
         return;
       }
     }

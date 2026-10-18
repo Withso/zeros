@@ -31,6 +31,7 @@ import { useShallow } from "zustand/react/shallow";
 import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import type { Workspace } from "../../platform/git";
 import type { DesignCanvasFrameWire } from "../../platform/bridge/design-bridge";
+import type { DesignSelectionTarget } from "./design-selected-targets";
 
 import {
   hoverDesignNode,
@@ -314,6 +315,8 @@ function OwnedDesignWorkspaceSidebarPanels({
         EMPTY_SELECTED_NODE_IDS)
       : EMPTY_SELECTED_NODE_IDS,
   );
+  const selectedTargets = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.selectedTargets : undefined);
+  const targetSelected = (frame: string, nodeId?: string) => selectedTargets?.some((target: DesignSelectionTarget) => target.frame === frame && target.nodeId === nodeId) ?? false;
   const frameSelected = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.frameSelected ?? false)
@@ -824,9 +827,9 @@ function OwnedDesignWorkspaceSidebarPanels({
   };
 
   /** Selection publication is immediate locally; engine/runtime reads finish off-path. */
-  const chooseFrame = (frame: DesignCanvasFrameWire) => {
+  const chooseFrame = (frame: DesignCanvasFrameWire, additive = false) => {
     if (!workspaceId) return;
-    void selectDesignFrame(workspaceId, frame, { selected: true }).catch(
+    void selectDesignFrame(workspaceId, frame, { selected: true, additive, reveal: true }).catch(
       (error) => {
         toast.error("Couldn't select the design frame", {
           description: errorMessage(error),
@@ -1105,8 +1108,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                   // the canvas selection target — merely showing its tree is
                   // not selection, mirroring Figma's frame rows.
                   const frameRowSelected =
-                    activeFrame &&
-                    ((frameSelected && !selectedNodeId) || rootSelected);
+                    targetSelected(frame.file) || (activeFrame && rootSelected);
                   return (
                     <Tooltip
                       key={row.key}
@@ -1141,7 +1143,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                             toggleFrameTree(frame);
                             return;
                           }
-                          chooseFrame(frame);
+                          chooseFrame(frame, event.shiftKey);
                         }}
                         onKeyDown={(event) => handleRowKeyDown(event, rowIndex)}
                       >
@@ -1183,7 +1185,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                 const { frame, layer } = row;
                 const activeFrame = selectedFrame?.file === frame.file;
                 const selectedLayer =
-                  activeFrame && selectedNodeIds.includes(layer.node.oid);
+                  targetSelected(frame.file, layer.node.oid);
                 // Descendants of the selection carry a softer tint; a selected
                 // frame owns its whole tree. Ancestors stay untouched —
                 // selection never bleeds upward.

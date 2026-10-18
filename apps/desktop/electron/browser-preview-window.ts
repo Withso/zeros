@@ -25,6 +25,7 @@ import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
 import { setCommand } from "./ipc/router";
 import { isOwnedMainRendererFrame } from "./preview-frame-ipc-authority";
 import { previewFrameAuthorizations } from "./preview-frame-authorizations";
+import { rendererProcessOwners } from "./renderer-process-owners";
 
 export const BROWSER_PREVIEW_KEY_PATTERN = /^zeros-browser-[A-Za-z0-9._:-]{1,300}$/;
 export const MAX_BROWSER_PREVIEW_WINDOWS = 12;
@@ -213,6 +214,7 @@ function createPreviewWindow(request: ParsedRequest): BrowserWindow {
       navigateOnDragDrop: false,
     },
   });
+  rendererProcessOwners.track(win.webContents, "Browser preview");
   hardenContents(win.webContents);
   win.webContents.on("page-title-updated", (event, title) => {
     event.preventDefault();

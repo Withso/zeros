@@ -28,7 +28,7 @@ function fixture() {
     authorityEpoch: 1, cloudActor: { sessionId, deviceId: randomUUID(), role: "owner", fingerprint: "a".repeat(64) },
     authorized: () => true, send: vi.fn(), close: vi.fn() };
   const boot = { active: true, metadataFor: vi.fn((session: string) => { if (session !== sessionId) throw new Error("foreign actor"); return metadata; }),
-    observeConversation: vi.fn(async () => {}) };
+    observeConversation: vi.fn(async () => {}), attachActor: vi.fn() };
   const engine = { root, cloudWorker: { version: 4 }, cloudAgentBoot: boot, cloudCommands: { handle: vi.fn(async () => ({ conversationId: "chat", revision: 0, paused: false, pending: [], receipts: [] })) },
     cloudRuntimeAuthorityStopping: false, actualPort: 1234, framework: "unknown", validateCloudCommand: methods.validateCloudCommand,
     workspace: { workspaceIdForCwd: () => "local-main" }, broadcast: vi.fn() };
