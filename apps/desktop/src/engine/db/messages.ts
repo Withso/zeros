@@ -124,14 +124,20 @@ export function upsertChatMessage(chatId: string, m: PersistedMessage): void {
   writeChatMessage(chatId, m);
 }
 
-function writeChatMessage(chatId: string, m: PersistedMessage): void {
+function writeChatMessage(chatId: string, m: PersistedMessage, skipUnchanged = false): void {
   const db = openZerosDb();
-  const content = extractContent(m.payload);
-  const existing = db
+  // Local streaming flushes already have the newest serialized row. Compare
+  // inside SQLite before parsing or indexing it again; retain no payload cache.
+  // Write-through consumers (including cloud) keep their revision semantics.
+  const existing = skipUnchanged ? db.prepare(
+    "SELECT ord, kind = ? AND payload = ? AND created_at = ? AS unchanged FROM chat_messages WHERE chat_id = ? AND msg_id = ? LIMIT 1",
+  ).get(m.kind, m.payload, m.createdAt, chatId, m.msgId) as { ord: number; unchanged: number } | undefined : db
     .prepare(
       "SELECT ord FROM chat_messages WHERE chat_id = ? AND msg_id = ? LIMIT 1",
     )
-    .get(chatId, m.msgId) as { ord: number } | undefined;
+    .get(chatId, m.msgId) as { ord: number; unchanged?: number } | undefined;
+  if (existing?.unchanged) return;
+  const content = extractContent(m.payload);
   if (existing) {
     db.prepare(
       "UPDATE chat_messages SET kind = ?, payload = ?, created_at = ?, content = ?, rev = ? WHERE chat_id = ? AND msg_id = ?",
@@ -166,10 +172,10 @@ export function upsertChatMessagesBulk(
   writeChatMessages(chatId, messages);
 }
 
-function writeChatMessages(chatId: string, messages: PersistedMessage[]): void {
+function writeChatMessages(chatId: string, messages: PersistedMessage[], skipUnchanged = false): void {
   const db = openZerosDb();
   const tx = db.transaction((items: PersistedMessage[]) => {
-    for (const m of items) if (m?.msgId) writeChatMessage(chatId, m);
+    for (const m of items) if (m?.msgId) writeChatMessage(chatId, m, skipUnchanged);
   });
   tx(messages);
 }
@@ -227,7 +233,7 @@ export function flushStreamingChatMessages(chatId?: string): void {
     const rows = streamingRows.get(id);
     if (!rows) continue;
     streamingRows.delete(id);
-    writeChatMessages(id, [...rows.values()]);
+    writeChatMessages(id, [...rows.values()], true);
   }
   if (streamingRows.size === 0 && streamingTimer) {
     clearTimeout(streamingTimer);
