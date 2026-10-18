@@ -1459,8 +1459,8 @@ export class CloudWorkspaceReconciler {
       }
       if (!(await tx.query(
         `SELECT 1 FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2
-         AND next_drift_check_at=$3 FOR UPDATE`,
-        [candidate.workspaceId,candidate.generation,candidate.driftLeaseUntil],
+         AND next_drift_check_at=$3 AND provider_resource_id IS NOT DISTINCT FROM $4::text FOR UPDATE`,
+        [candidate.workspaceId,candidate.generation,candidate.driftLeaseUntil,candidate.providerResourceId],
       )).rowCount) return;
       const observedState =
         resource?.state ??
@@ -1556,11 +1556,31 @@ export class CloudWorkspaceReconciler {
 
       const intentId = randomUUID();
       const key = `system:drift:${randomUUID()}`;
+      let drainIntentId: string | null = null;
+      if (operation === "wake" && resource && ["stopped", "archived"].includes(resource.state)) {
+        const source = (await tx.query<{ id: string }>(`SELECT binding.id
+          FROM cloud_workspaces workspace JOIN cloud_agent_boot_bindings binding
+            ON binding.id=workspace.agent_boot_id AND binding.workspace_id=workspace.id AND binding.org_id=workspace.org_id
+          WHERE workspace.id=$1 AND workspace.org_id=$2 AND binding.generation=$3 AND binding.retired_at IS NULL`,
+        [candidate.workspaceId, candidate.orgId, candidate.generation])).rows[0];
+        if (source) {
+          // Drift revoked engine access without committing source retirement.
+          // Complete the provider access drain before resuming so
+          // authenticated history recovery can use the exact retired source.
+          drainIntentId = randomUUID();
+          await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents (
+              id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,affects_workspace
+            ) VALUES ($1,$2,$3,$4,NULL,'stop',$5,$6,false)`,
+          [drainIntentId, candidate.workspaceId, candidate.generation, candidate.orgId, `system:drift-stop:${intentId}`,
+            requestDigest({ operation: "stop", workspaceId: candidate.workspaceId, generation: candidate.generation,
+              providerResourceId: resource.resourceId, sourceBindingId: source.id, reason: "provider_drift" })]);
+        }
+      }
       await tx.query(
         `INSERT INTO cloud_workspace_lifecycle_intents (
            id, workspace_id, generation, org_id, requested_by, operation,
-           idempotency_key, request_sha256
-         ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7)`,
+           idempotency_key, request_sha256, resume_after_intent_id
+         ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8)`,
         [
           intentId,
           candidate.workspaceId,
@@ -1574,6 +1594,7 @@ export class CloudWorkspaceReconciler {
             desiredState: workspace.desired_state,
             reason: "provider_drift",
           }),
+          drainIntentId,
         ],
       );
       await tx.query(
@@ -1591,6 +1612,7 @@ export class CloudWorkspaceReconciler {
         intentId,
         desiredState: workspace.desired_state,
         providerState: observedState,
+        ...(drainIntentId ? { drainIntentId } : {}),
       });
     });
     return true;

@@ -1933,6 +1933,78 @@ d("cloud workspace reconciliation", () => {
     );
     expect(workspace.rows[0]).toEqual({ status: "setting_up" });
   });
+
+  it.each([
+    { state: "archived", stopFails: false }, { state: "archived", stopFails: true },
+    { state: "stopped", stopFails: false }, { state: "stopped", stopFails: true },
+  ] as const)("requires source retirement before resuming $state drift (stop failure=$stopFails)", async ({ state, stopFails }) => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    const scope = { organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
+      generation: 1, engineInstanceId: fixture.engineInstanceId };
+    const engine = { ...scope, heartbeatToken: fixture.heartbeatToken };
+    await pool.query("UPDATE cloud_workspace_engine_instances SET cloud_local_commands_version=1 WHERE id=$1", [fixture.engineInstanceId]);
+    const execution = new DatabaseCloudAgentExecutionService(pool, { currentKeyVersion: 1,
+      keys: { 1: randomBytes(32).toString("base64url") } }, false);
+    const boot = CloudAgentBootCredentialResponseSchema.parse(await execution.boot(engine, "bootstrap", { ...scope, version: 1, mode: "boot-owner-v1" }));
+    await execution.boot(engine, "activate", { ...scope, version: 1, mode: "boot-owner-v1",
+      bootId: boot.bootId, writerEpoch: boot.writerEpoch, expectedCacheRevision: boot.cacheRevision });
+    const binding = (await pool.query(`UPDATE cloud_workspace_provider_bindings
+      SET last_observed_at=now()-interval '1 hour',next_drift_check_at=now()
+      WHERE workspace_id=$1 AND generation=1 RETURNING provider_resource_id`, [fixture.workspaceId])).rows[0];
+    const provider = new FakeProvider();
+    provider.resources.set(binding.provider_resource_id, provider.make(scope, state, binding.provider_resource_id));
+    if (stopFails) provider.stopFailure = new CloudProviderError("fixture_stop_unconfirmed", "Synthetic stop unconfirmed", false);
+    const custody = async () => (await pool.query(`SELECT writer.state,writer.seal,writer.seal_ack,
+        binding.retired_at IS NOT NULL AS binding_retired
+      FROM cloud_workspace_local_command_writers writer JOIN cloud_agent_boot_bindings binding
+        ON binding.workspace_id=writer.workspace_id AND binding.org_id=writer.org_id AND binding.writer_epoch=writer.writer_epoch
+      WHERE writer.workspace_id=$1 AND writer.writer_epoch=$2`, [fixture.workspaceId, boot.writerEpoch])).rows[0];
+    const atStart: unknown[] = [], start = provider.start.bind(provider);
+    provider.start = async resourceId => {
+      atStart.push({ ...await custody(), providerStops: provider.stopCount });
+      return start(resourceId);
+    };
+    const worker = new CloudWorkspaceReconciler({ pool, provider, intervalMs: 1_000 });
+    expect(await worker.reconcileDriftOnce()).toBe(true);
+    const intents = (await pool.query(`SELECT id,operation,affects_workspace,resume_after_intent_id
+      FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1`, [fixture.workspaceId])).rows;
+    const drain = intents.find(intent => intent.operation === "stop"), wake = intents.find(intent => intent.operation === "wake");
+    expect(intents).toHaveLength(2);
+    expect(drain).toMatchObject({ affects_workspace: false, resume_after_intent_id: null });
+    expect(wake).toMatchObject({ affects_workspace: true, resume_after_intent_id: drain.id });
+    expect(await custody()).toMatchObject({ state: "active", binding_retired: false });
+    expect(await worker.reconcileDriftOnce()).toBe(false);
+    // The existing DB prerequisite also refuses a previous worker that does
+    // not filter resume_after_intent_id when it selects its next claim.
+    await expect(pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='dispatching' WHERE id=$1", [wake.id]))
+      .rejects.toMatchObject({ code: "40001" });
+    // Permit the finite stop -> wake chain, without advancing failed claims or
+    // allocating a substitute resource. Observe custody at the real dispatch.
+    for (let step = 0; step < 3; step++) if (!await worker.runOnce()) break;
+    expect(atStart).toEqual(stopFails ? [] : [{ state: "retired", seal: null, seal_ack: null,
+      binding_retired: true, providerStops: 1 }]);
+    expect(provider.createCount).toBe(0);
+    expect(await custody()).toMatchObject({ state: stopFails ? "active" : "retired",
+      binding_retired: !stopFails, seal: null, seal_ack: null });
+  });
+
+  it("discards cold drift observed before its provider binding was replaced", async () => {
+    const seeded = await seedWorkspace({ status: "ready", intentState: "succeeded",
+      providerResourceId: "source-resource", observedState: "running" });
+    const provider = new FakeProvider();
+    provider.inspect = async () => {
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='replacement-resource' WHERE workspace_id=$1", [seeded.workspaceId]);
+      return provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, "archived", "source-resource");
+    };
+    expect(await reconciler(provider).reconcileDriftOnce()).toBe(true);
+    expect((await pool.query("SELECT provider_resource_id,observed_state FROM cloud_workspace_provider_bindings WHERE workspace_id=$1", [seeded.workspaceId])).rows)
+      .toEqual([{ provider_resource_id: "replacement-resource", observed_state: "running" }]);
+    expect((await pool.query("SELECT operation FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1", [seeded.workspaceId])).rows)
+      .toEqual([{ operation: "create" }]);
+    expect(provider.startCount).toBe(0);
+    expect(provider.stopCount).toBe(0);
+  });
+
   it("reconciles customer-provider drift independently of the managed default", async () => {
     const seeded = await seedWorkspace({ status: "ready", intentState: "succeeded", providerResourceId: "customer-resource", observedState: "running" });
     const customer = new FakeProvider();

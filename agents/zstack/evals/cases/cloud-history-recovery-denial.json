@@ -1,0 +1,9 @@
+{
+  "id": "cloud-history-recovery-denial",
+  "kind": "replay",
+  "area": "cloud-setup-diagnostics",
+  "fixedBy": "pending",
+  "symptom": "Setup spent five engine attempts on an explicit history-recovery authorization denial that fresh enrollment could not repair.",
+  "rule": "Keep an explicit history-recovery denial terminal without replacing its first diagnostic or clocks during cleanup; retain retries for transport, timeout, server and rate-limit failures. See changes/provider-drift-history-retirement.md.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/linux-setup-executor.test.ts -t 'does not retry a proven history-recovery access denial'"
+}

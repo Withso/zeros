@@ -729,6 +729,38 @@ describe("CloudWorkspaceLinuxSetupExecutor", () => {
     expect(JSON.stringify(error)).not.toContain("canary");
   });
 
+  it.each([false, true])("does not retry a proven history-recovery access denial (cleanup failure=%s)", async cleanupFails => {
+    const f = v4();
+    const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+      phase: "history_restore", name: "CloudAgentExecutionError", code: "cloud_validation_access_denied", errno: null } };
+    const timings = { version: 1, clocks: [{ source: "setup", clockId: randomUUID(), startedAt: new Date(NOW).toISOString(),
+      spans: [{ stage: "engine_readiness", startMs: 33_700, endMs: 123_700, outcome: "failed" }] }] };
+    vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 1, outputTruncated: false,
+      output: JSON.stringify({ version: 4, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error",
+        code: "engine_readiness_failed", diagnostic, timings }) + "\n" + JSON.stringify({ ...f.installerDiagnostic,
+        stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] }) });
+    if (cleanupFails) vi.mocked(f.broker.revoke).mockRejectedValue(new Error("synthetic-private-cleanup"));
+    const error = await f.executor.execute(f.input, new AbortController().signal).catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: "setup_engine_readiness_failed", retryable: false,
+      diagnostic: expect.objectContaining(diagnostic), timings: { clocks: expect.arrayContaining(timings.clocks) } });
+    if (cleanupFails) expect(error).toMatchObject({ cleanupDiagnostic: expect.objectContaining({ code: "setup_admission_revoke_failed" }) });
+    expect(JSON.stringify(error)).not.toContain("synthetic-private-cleanup");
+  });
+
+  it.each(["cloud_validation_authority_transport", "cloud_validation_authority_timeout",
+    "cloud_validation_authority_http_5xx", "cloud_validation_rate_limited"])(
+    "keeps transient history-recovery failure %s retryable", async code => {
+      const f = v4();
+      const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: {
+        phase: "history_restore", name: "CloudAgentExecutionError", code, errno: null } };
+      vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 1, outputTruncated: false,
+        output: JSON.stringify({ version: 2, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error",
+          code: "engine_readiness_failed", diagnostic }) + "\n" + JSON.stringify({ ...f.installerDiagnostic,
+          stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] }) });
+      await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({
+        code: "setup_engine_readiness_failed", retryable: true, diagnostic: expect.objectContaining(diagnostic) });
+    });
+
   it.each(["credential_control_authority_rejected", "credential_control_conflict", "credential_control_invalid",
     "credential_control_limit", "credential_control_storage_unavailable"])(
     "does not retry a proven engine credential-fence %s failure", async code => {
