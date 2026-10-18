@@ -1,5 +1,6 @@
 import { CloudProviderError } from "./provider.js";
 import type { CloudProviderCreateRejectionCode } from "./provider-operation-store.js";
+import { startBoatSpan } from "../tracing.js";
 
 export type BoatApiClientOptions = {
   apiKey: string;
@@ -131,6 +132,17 @@ export class BoatBootPendingError extends CloudProviderError {
 
 /** Credentials are sent only to the provider's pinned API origin. Redirects,
  * response bodies and vendor error text never enter coordinator diagnostics. */
+type BoatRequestInput = {
+  method?: "GET" | "POST" | "PATCH" | "DELETE" | "PUT";
+  body?: unknown;
+  idempotencyKey?: string;
+  confirmDelete?: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  /** Complete snapshot trees are larger than ordinary API documents. */
+  maxResponseBytes?: number;
+};
+
 export class BoatApiClient {
   private readonly fetcher: typeof fetch;
   constructor(private readonly options: BoatApiClientOptions) {
@@ -168,18 +180,22 @@ export class BoatApiClient {
     } catch { /* diagnostics are best effort */ }
   }
 
-  async request(
+  async request(path: string, input: BoatRequestInput = {}): Promise<Record<string, unknown>> {
+    const span = startBoatSpan(input.method ?? "GET", path);
+    try {
+      const value = await this.send(path, input, span ? status => span.status(status) : undefined);
+      span?.end();
+      return value;
+    } catch (error) {
+      span?.end(error);
+      throw error;
+    }
+  }
+
+  private async send(
     path: string,
-    input: {
-      method?: "GET" | "POST" | "PATCH" | "DELETE" | "PUT";
-      body?: unknown;
-      idempotencyKey?: string;
-      confirmDelete?: string;
-      signal?: AbortSignal;
-      timeoutMs?: number;
-      /** Complete snapshot trees are larger than ordinary API documents. */
-      maxResponseBytes?: number;
-    } = {},
+    input: BoatRequestInput,
+    onStatus?: (status: number) => void,
   ): Promise<Record<string, unknown>> {
     if (
       !/^\/[a-zA-Z0-9/_-]+(?:\?[a-zA-Z0-9_=&%.-]+)?$/.test(path) ||
@@ -224,6 +240,7 @@ export class BoatApiClient {
           ? { body: JSON.stringify(input.body) }
           : {}),
       });
+      onStatus?.(response.status);
       const chunks: Uint8Array[] = [];
       let bytes = 0;
       const reader = response.body?.getReader();
@@ -312,4 +329,6 @@ export class BoatApiClient {
       );
     }
   }
+
+
 }

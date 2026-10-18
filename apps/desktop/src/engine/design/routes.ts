@@ -3,6 +3,8 @@ import {
   designMovementGuardSchema,
   designRelocationSchema,
 } from "@zeros/protocol/design-relocation";
+import { designCatalogReadSchema, type DesignCatalogRead, type DesignCatalogReply } from "@zeros/protocol/design-catalog";
+import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
 import { designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
 import { selectDesignPageHint } from "./page-selection";
@@ -183,6 +185,7 @@ export interface DesignReadWorkspace {
   designDirectory: string;
 }
 export interface DesignWorkspaceRouteHost {
+  readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission, cloud: boolean): Promise<DesignCatalogReply>;
   resolveDesignWorkspace(workspaceId: string, remote: boolean): Workspace;
   resolveReadCwd(workspaceId: string, remote: boolean): string;
   withDesignReadWorkspace<T>(
@@ -221,6 +224,7 @@ export interface DesignWorkspaceRouteHost {
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
 }
 const DESIGN_WORKSPACE_ROUTES = new Set([
+  "design.catalog.read",
   "design.capture",
   "design.styleBuilds.presence",
   "design.styles.refresh",
@@ -285,11 +289,15 @@ export async function handleDesignWorkspaceRoute(
   host: DesignWorkspaceRouteHost,
   op: string,
   params: Params,
-  options: { remote: boolean; hostLocalResources: boolean; actor?: DesignActor; primaryRepositoryRoot?: string; cloudFiles?: QualifiedCloudFilePolicy },
+  options: { remote: boolean; hostLocalResources: boolean; actor?: DesignActor; primaryRepositoryRoot?: string; cloudFiles?: QualifiedCloudFilePolicy; catalogAdmission?: DesignCatalogAdmission; cloudCatalog?: boolean },
 ): Promise<unknown> {
   const { remote, hostLocalResources } = options;
   const applyDesktopDesignOperation = applyHumanDesignOperation.bind(null, options.actor ?? { kind: "human", id: "desktop" });
   switch (op) {
+    case "design.catalog.read": {
+      if (!options.catalogAdmission) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Design catalog requires a live connection." });
+      return host.readDesignCatalog(designCatalogReadSchema.parse(params), remote, options.catalogAdmission, options.cloudCatalog === true);
+    }
     case "design.capture": {
       const input = designWorkspaceCaptureSchema.parse(params);
       return host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) => captureWorkspaceDesign(root, input));

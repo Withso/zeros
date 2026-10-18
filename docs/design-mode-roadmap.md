@@ -1,7 +1,7 @@
 # Design mode: architecture, implementation, and roadmap
 
 **Status: shared-session HTML/CSS v1 and Design directory Pages implemented;
-later feature phases remain planned. Updated 2026-10-05.** This is the single
+later feature phases remain planned. Updated 2026-10-18.** This is the single
 Design engineering reference: current product behavior, source formats,
 ownership, compatibility, resource limits, qualification, and the remaining
 roadmap. Code, schemas, and
@@ -833,8 +833,12 @@ make Code files read-only.
 - `ConversationDesignTools` lazily binds the active registered directory. A
   missing directory can be created and then used through the same MCP connection.
   Local directory transitions suspend and revoke document grants, then permit
-  a fresh capability read; they preserve the provider and MCP endpoint. Existing
-  cloud execution-boundary transitions retain their separate lifecycle policy.
+  a fresh capability read; they preserve the provider and MCP endpoint. A
+  managed workspace's archive, delete, restore or recover suspends only that
+  workspace's grants; registry-wide owner changes suspend every workspace's.
+  Prompt and steer preparation waits for suspended grants to resume instead of
+  failing; Stop and disposal still end the wait. Existing cloud
+  execution-boundary transitions retain their separate lifecycle policy.
 - API writes retain the existing owner/directory checks, document CAS,
   durable request receipts, journal recovery, and actor-local undo. An
   execution configured for API-only authoring (none is, today) cannot apply a
@@ -952,6 +956,119 @@ semantic edits remain available. Native edits invalidate incompatible semantic
 undo history; they do not gain API receipts merely because a watcher saw them.
 Semantic undo remains exact-revision, session-local and tip-only. Native undo
 uses normal provider history or explicitly authorized Git operations.
+
+Measured on macOS (2026-10-17, engine fixtures and the browser harness): the
+worktree watcher reports a save after ~120 ms in development (native events,
+75 ms trailing debounce, 30 ms write settle) but ~0.9–1.6 s in packaged builds,
+whose compiled engine must stat-poll at 1.5 s. A small directory's aggregate
+snapshot reads in 10–20 ms, and a refreshed live frame paints its new
+generation 80–190 ms later without a blank buffer. Every case was observed:
+a new frame plus its registration, an in-place patch, an edited page-folder or
+root stylesheet, a new page folder with a frame inside it, and `canvas.json`
+replaced in place or by rename.
+
+These Local mechanisms keep an agent's progress visible
+(`engine/design/agent-drafts.ts`; cloud workers construct none of them):
+
+- **Saved steps.** When any provider reports an `edit`/`delete`/`move` tool call
+  completed for a path inside the session workspace's active Design directory,
+  the engine fences snapshot reads for that checkout and broadcasts
+  `DB_CHANGED { kinds: ["designStyles"] }` at once (completions within 20 ms
+  coalesce). `designStyles` is the Design-only revalidation kind: Files and
+  Changes still follow the watcher. Paths come from tool locations, diff
+  content and `file_path`/`path`/`changes` inputs, never from titles.
+- **Prompt refresh for other writes.** Packaged engines poll, per Design tab,
+  the Design directory it shows (`engine/design/change-poller.ts`): while
+  style-build presence says a tab shows a checkout, the directory its canvas
+  last read is signed every 300 ms (each regular file's path, size, mtime and
+  inode; dotfiles and `*.zeros-tmp` ignored; at most 2,000 files and 8
+  checkouts), and a changed signature refreshes that canvas like a saved
+  step. Any other completed tool that may write files (a shell command, a
+  script; reads and searches excluded) asks for an immediate check. Edits made
+  in a person's own editor, Git checkouts and agents' scripts therefore appear
+  within about 0.3 s instead of the worktree watcher's 1.5 s poll. The poller
+  only stats: Bun's compiled runtime deadlocks once a native FSEvents watcher
+  is armed. Development engines skip it (native events arrive in ~120 ms).
+- **Read fences.** A shared in-flight snapshot read is joined only within the
+  fence epoch it started in (`engine/design/snapshot-epoch.ts`). The watcher
+  fences a checkout when it observes a raw change, before its debounce, and
+  style-build outputs and font downloads fence before their `designStyles`
+  broadcast, so a request made after a save never receives an older read. In
+  the renderer, a frame-ready audit reconcile reads the aggregate directly; it
+  never publishes over a newer invalidation or publication.
+- **Drafts.** While a Claude `Write`, `Edit` or `MultiEdit` that targets the
+  directory is still streaming its arguments (`input_json_delta`, observed
+  through the translator's optional `onToolInput`; nothing is persisted and the
+  transcript keeps its complete-input contract), the engine reads the
+  arguments so far (`partial-json.ts`; a path counts only once its closing
+  quote arrives, and an Edit applies only once its search text is complete and
+  found in the saved source). At most every 250 ms it renders the frame through
+  `prepareFrameRenderSource` — the saved form's stylesheets, imported sources,
+  components and sanitizer — with a script-free CSP and no runtime, then sends
+  `DESIGN_AGENT_DRAFT` to trusted local desktop clients only
+  (`router.broadcastLocal`; never journaled, replayed or relayed). Phases are
+  `writing`, `saving` (input complete, tool running or awaiting permission),
+  `saved` and `discarded` (failure, refusal, Stop or turn end while unsaved).
+  Measured: 10–55 ms per render for a 14 KB frame, with or without Tailwind.
+  - Other providers draft from the session stream. Codex reports a whole
+    patch at `item/started`, before approval and before writing (it streams
+    no patch text): an added file previews its content and an update applies
+    its unified diff hunks to the saved source; deletions and moves are not
+    drafted. A provider reporting complete Write/Edit input or standard diff
+    content previews it the same way. Cursor's SDK (1.0.37) drops edit
+    content until after the write and reports only `{ path }`, so its frames
+    show status only. A Claude call that streams is never drafted twice.
+  - A Design stylesheet (`tokens.css`, a page stylesheet) sends its CSS,
+    processed exactly as linked sheets are (`prepareDesignStylesheetPreview`:
+    references rebased, local assets inlined; 4 MiB bound). While a Write
+    streams, the preview is the saved file followed by the new text's
+    complete top-level rules (`agent-draft-css.ts`), so a rule being written
+    never applies and rules not reached yet keep their saved form; finished
+    input is the new file alone. An Edit applies once its replacement is
+    whole. Live frames that link the file apply it in place through the
+    runtime's opt-in `previewStylesheet` (no reload, no incoming buffer); a
+    newly loaded generation applies unsaved text before it is revealed. A
+    discarded draft restores the generation's own text. A saved draft stays
+    only in a document that predates that draft; it never replays into a new
+    generation while its activity chip lingers. If a generation inherited an
+    unsaved preview before the tool's success event, success restores that
+    generation's own CSS. Draft identity distinguishes successive edits of the
+    same file. Raster (non-live) frames update when the file saves.
+  - A canvas document (`meta/canvas.json`, legacy root `canvas.json`) sends
+    the frames it registers so far (`agent-draft-canvas.ts`): a frame counts
+    once its source path and all four numbers have fully arrived; an Edit is
+    read once its replacement is whole, because a partial one splices into
+    the saved tail and can cut a number. A ghost then starts at its
+    registered position, size and title instead of right of the page's
+    frames, so it never jumps when the registration saves.
+  The renderer store (`state/design-agent-drafts.ts`) keeps the newest revision
+  per draft, 6 drafts per workspace, 8 workspaces and 24 MiB of preview text.
+  Status metadata excludes preview payloads; the budget owns the only retained
+  HTML/CSS fields, so eviction releases their text across phase updates. It
+  ignores `cloud://` keys, and drops a draft whose engine goes quiet for 2
+  minutes or whose save is not handed off within a minute. The canvas shows a
+  draft over its registered frame, or as a dashed ghost right of the active
+  page's frames while the file is not in `meta/canvas.json`, in a scriptless
+  `sandbox=""` iframe double-buffered like live frames (a revision paints in
+  15–25 ms). A screen-sized badge reads Agent writing, Saving or Saved. A
+  drafted frame ranks with the selection for one of the 12 live runtimes. After
+  `saved`, the draft stays until that frame's displayed buffer has painted a
+  newer generation (or the frame first appeared after the save), then one more
+  frame, with a 6 s bound, so the hand-off never shows the old version or a
+  blank buffer. A saved ghost whose turn ends unregistered leaves after 3 s.
+  Inactive retained canvases render no drafts.
+- **Activity chip.** Bottom centre of the canvas (above an open Motion
+  timeline), a chip names what the agent is writing: the newest draft's
+  frame title, ghost title, file name or "Canvas layout", with a menu listing
+  every drafted file and its status. Show reveals a frame like a Layers
+  selection (switching pages first when it is registered on another page),
+  fits a stylesheet's page frames or the canvas document's placed frames,
+  and is disabled for files with no place on the canvas. Follow (in memory,
+  per workspace) reveals each new draft once without selecting it; the camera
+  stays the person's between drafts. Saved drafts nothing on the canvas hands
+  off (stylesheets, other files, frames on other pages) leave 1.5 s after
+  their save; a canvas document stays until the saved canvas registers every
+  frame it placed, at most 6 s.
 
 New `tokens.css` defaults preserve normal inline and flex behavior and never
 select every `data-oid` to change its layout. Existing authored stylesheets are
@@ -1073,8 +1190,22 @@ records pass unknown fields through:
   record lists `styles` (an ordered list of IDs, or `[]` for none). Imported
   `<style data-zeros-style-source>` blocks are inserted at the start of `head`
   by `prepareFrameRenderSource`, so the frame's own stylesheets override them.
+  They are preceded by `<style data-zeros-layer-order>@layer reset;</style>`:
+  the seeded `tokens.css` puts its reset in `@layer reset`, and a cascade
+  layer declared after an imported source's layers (Tailwind's `theme, base,
+  components, utilities`) would outrank them, zeroing heading margins and
+  replacing utility type on form controls. Naming `reset` first keeps it the
+  weakest layer for directories created before and after this ordering,
+  without rewriting their `tokens.css`. Frames that receive no source are
+  unchanged.
   The render generation hashes the result, so an edit to a source file gives
   its frames new generations through the ordinary worktree event.
+- Lint's `unknown-token` warning counts a frame's `var(--name)` as known when
+  `tokens.css`, Design-folder CSS, the frame's own styles or any source the
+  frame receives (its `styles` list, App fonts included) declares it. A
+  source's tokens are the custom properties its own files declare, Tailwind
+  `@theme` included; Tailwind's stock theme and package defaults are not the
+  application's tokens and still warn (`document.ts`, `designKnownTokens`).
 - The workspace snapshot adds optional `styleSources` (status, messages,
   themes and tokens, without CSS) and `styleSourceErrors`. The theme editor
   lists Manual (`tokens.css`, editable) and each source with its status; an
@@ -1298,6 +1429,12 @@ or renderer owners.
   responsive, and state-specific values remain distinguishable. The inspector
   must not present a computed value as authored source or invent cascade
   certainty.
+- Runtime authored-style provenance is optional evidence. Inline `var()`
+  shorthands compete even when CSSOM cannot expand their longhands. Nested
+  declarations and element-dependent container queries make affected winners
+  uncertain; omit that provenance and keep the browser's computed value in the
+  inspector. Unaffected declarations retain provenance. An uncertain custom
+  property override also prevents attribution to an ancestor's token source.
 - Base responsive/default interaction state is the only generally authorable
   context in Foundation v1. Breakpoint and pseudo-state writes fail closed
   until an adapter can identify their exact at-rule and selector target.
@@ -1557,6 +1694,35 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   confirmed value on blur. Authored-versus-computed state, shorthands, logical
   properties, priority, and source target remain explicit; an unauthored
   (computed) value renders one text tier quieter than an authored one.
+- **Tokens and provenance:** the frame runtime reports, for each authored
+  property, the cascade's winning declaration as written, where it lives and
+  the tokens it reads (optional `DesignRuntimeNodeDetails.authoredStyles`;
+  older runtimes omit it, so `DESIGN_RUNTIME_VERSION` stays 2). The winner is
+  chosen by importance, then the `style` attribute, then cascade layers
+  (reversed for `!important`; unlayered styles follow their parent's
+  sublayers), then Selectors 4 specificity (`:where()` adds none; `:is()`,
+  `:not()`, `:has()` add their most specific argument), then order. A
+  shorthand is reported only while none of its longhands has another winner,
+  and a longhand set by a var()-based shorthand is not reported. Origins are
+  `source` (an imported style source id), `linked` (a Design stylesheet such
+  as `tokens.css`), `frame` and `inline`; each token carries its resolved
+  value and the winning declaration on the nearest element that sets it.
+  Bounds: 128 properties, 1,024-character values, 32 KiB per node, 8 tokens per
+  value, 256-character token values; one rule scan per element and generation,
+  reset with the existing authored-property cache. The renderer drops a
+  malformed field at the frame boundary rather than failing the details. The
+  CSS panel shows the written value (`background-color:
+  var(--primary-button-bg)`) and, after the line, the computed value when it
+  differs and the source of an imported or linked winner ("rgb(44, 40, 38) ·
+  App styles"), drawn with CSS so it is never editable or copied. Fill, text
+  color and stroke colors, and generic value fields such as type size, line
+  height and letter spacing (not the weight and font menus), show a token's
+  name in place of the value while unfocused and
+  unedited (`var(--a, var(--b))` shows the first token that resolves); the
+  title and accessible description add the source — the style source's title,
+  "Manual" for `tokens.css`, "Frame styles" or "Inline style" — and the
+  resolved value. Focusing a field edits its value exactly as before. A token
+  picker is a follow-up.
 - **Inspector UI:** one geometry for every Design surface — 28px fields on
   quiet `bg2` fills, 36px section headers, 13px values, 12px in-field labels,
   14px glyphs (`design-workspace-ui.css`, "Design UI standard v1", and
@@ -1773,6 +1939,8 @@ repository-wide server-state and retained-surface rules.
 At deep zoom, the authoritative iframe stays mounted while a bounded visible
 crop is rerasterized for device fidelity. Captures are exact-camera-keyed,
 decoded before publication, serialized per frame, latest-wins, and memory-only.
+The capture SVG keeps the frame's logical viewport; cropping happens during
+the bounded raster draw so media queries and viewport units do not relayout.
 A prior decoded crop may stay geometrically pinned until its replacement is
 ready; the editor must not flash a blank or stale-position layer.
 
@@ -2018,6 +2186,77 @@ These are local durable artifacts. They do not create a replicated job database,
 a process-wide disk quota across all workspaces, or a guarantee that a deleted
 cloud workspace can be recovered. Source parsing remains engine work; the
 admission limits are not OS CPU/RSS/GPU quotas.
+
+### Negotiated metadata-only catalog reads
+
+`design.catalog.read.v1` is an additive engine capability for the distinct
+`design.catalog.read` operation. It is **not** a large-directory admission
+capability: production canvas admission and stacking bounds remain 256.
+Authored canvas v1/v2, registration, source paths and internal canvas v3 do not
+change. Increasing frame count does not by itself require a public canvas v3.
+
+Requests specify `version: 1`, the exact `workspaceId` and `directoryId`, a
+nonnegative monotonic `intent`, and optionally `cursor` and `limit` (1–256).
+The caller owns the intent: advance it when activating a new semantic owner,
+including an away-and-back transition. It is ephemeral within the connection,
+not authored state or a new selection store. The bridge helper requires the
+advertised capability, verifies the expected owner/intent, and uses only a
+connected passive request; it never wakes or reconnects a cloud workspace.
+Through the workspace facade, both capability lookup and dispatch use the exact
+already-connected owning peer, independent of the Local socket. Replies are
+fenced against peer, account, generation and execution-identity replacement;
+an absent, retired or incompatible cloud peer never falls back to Local.
+
+Replies use a distinct `kind: "design-catalog"` envelope. Ready replies contain
+the exact owner, an opaque root binding, metadata revision, page counts and a
+bounded ordered descriptor range. Descriptors contain saved IDs, sources,
+titles and geometry; `preparation: "unprepared"` explicitly means they provide
+no composed source version, node tree, asset bytes or lint result. Missing HTML
+does not erase registered membership. Catalog reads use public registered
+canvas v1/v2 metadata only; inline/source-discovered legacy layouts report
+`unsupported-layout` rather than silently guessing complete membership.
+
+Each response contains at most 256 descriptors and 256 KiB of encoded JSON,
+with headroom for typed cloud identity mapping. `coverage: "complete"` means
+this response contains the entire directory. The final fragment of a multi-batch
+read still says `partial`, with `nextCursor: null`. Assemble and validate one
+revision before pruning selections or authorizing whole-page operations. Never
+feed these batches into the complete-snapshot cache, boot mirror or existing
+mutation APIs. Existing small-directory full snapshots remain unchanged; their
+wire validator refuses pagination/coverage fields.
+
+Authenticated cursors bind the retained revision, connection/account authority,
+workspace/root, directory, intent and position. Continuations revalidate current
+metadata and root identity. Changed revisions return `stale`; retired, evicted
+or expired cursors cannot continue. Reads retain at most 16 sessions, an 8-MiB
+encoded-string estimate per snapshot and 32 MiB in total, with at most four
+concurrent reads and no wait queue. The 60-second deadline starts at admission
+and never extends while paging. These are retained-payload budgets, not RSS
+guarantees. Disconnect retires the connection's sessions and held publications.
+Retired snapshots remain charged until their last executing read releases them,
+including eviction, supersession and expiry. If executing leases prevent freeing
+enough bytes, a new read returns `busy` without queuing or freeing producer slots.
+Local sign-out and actual owner changes advance a separate account-binding
+lifetime, so account A→B→A cannot revive an old cursor or held publication.
+Unchanged-account reverification and unavailable claims preserve that lifetime;
+unsigned/offline Local reads remain supported.
+
+The read path neither enters the mutation lane nor composes/lints frame source.
+Pending metadata, page-layout or semantic journals return `unsettled`; this
+read-only API does not recover, migrate or rewrite them. Existing lifecycle
+recovery owns settlement. Cloud replies map only their typed owner to the
+admitted `cloud://` identity, retain server role checks, expose no native root
+or resource capability, and never authorize writes through a local replica.
+
+Renderer catalog consumption, coherent group geometry/history, negotiated
+mutation receipts and larger admission are separate integration layers. Before
+raising admission, update every lifecycle/order/undo/checkpoint guard and reject
+unnegotiated prospective-large writes **before** committing. Keep resource
+budgets independent: Foundation's 1,024 files/16 MiB bound one entry/dependency
+snapshot, semantic journals have a 32-MiB ceiling, metadata lifecycle journals
+have a 64-MiB/2,052-path ceiling, and page-layout migration uses an 8-MiB journal
+with separate payloads. A 10k metadata-helper fixture does not prove a registered
+10k directory, lifecycle recovery, rendered fidelity or pan/zoom performance.
 
 ### Performance and safety ceilings
 
@@ -2284,6 +2523,29 @@ These are deferred enhancements, not prerequisites for Phase 2:
 Code Restriction and designer-only workspaces remain separate deferred product
 work. A permanent private authored store and separate specialist sessions are
 not reintroduced by these follow-ups.
+
+#### Live agent edits: what remains
+
+Local live editing is implemented as described in
+[Native edit and refresh behavior](#native-edit-and-refresh-behavior). The
+items below keep the same rules: drafts are transient, the saved file wins,
+previews use the saved form's sanitizer with no script, and nothing re-enters
+the transcript or its replay.
+
+1. **Cursor content.** Cursor's SDK (1.0.37) carries the native protocol's
+   streamed edit text (`args_text_delta`, `stream_content`) but drops it when
+   converting updates, so Cursor drafts show status only. Preview its content
+   once a pinned SDK exposes it, through the same `AgentToolInputEvent` hook.
+2. **Codex streaming.** Codex (0.162.1) reports a patch only once complete
+   (`item/started`); preview it while the model writes it if the app-server
+   ever forwards the patch input's deltas.
+3. **New pages.** A canvas document that adds a page could show that page's
+   ghost in the page picker before it saves.
+4. **Cloud workspaces.** Out of scope by product decision for now. A cloud
+   design needs a non-durable live channel, because the control plane's event
+   stream is a durable replay log with a closed type list and 256 KiB frames;
+   saved-step refresh would also need the VM engine's tool completions to reach
+   devices before its watcher, and the cloud engine's watcher polls as well.
 
 ## 2. Target architecture
 

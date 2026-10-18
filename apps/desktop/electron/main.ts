@@ -15,6 +15,7 @@ if (LOCAL_DEVELOPMENT_BUILD_ERROR) {
 
 import { hydrateShellPath } from "./shell-path";
 import { desktopUserPresence } from "./desktop-user-presence";
+import { rendererProcessOwners } from "./renderer-process-owners";
 import { handleSharedCloudAccessSessionChange } from "./cloud-workspace-access-runtime";
 import { startElectronDesignCapture } from "./design-capture";
 import { setDesignCaptureEnvironment } from "./sidecar";
@@ -138,6 +139,7 @@ import { installIframeHeaderStripping } from "./iframe-headers";
 import { registerAllCommands } from "./ipc/commands";
 import { stopProviderSubscriptions } from "./ipc/commands/provider-subscription";
 import { stopCloudProviderAuth } from "./ipc/commands/cloud-provider-auth";
+import { startProcessMetricsLogging } from "./ipc/commands/process-metrics";
 import {
   readPersistedAppearanceMode,
   readPersistedWindowBackground,
@@ -794,43 +796,6 @@ function setupLogFile(): void {
 
 setupLogFile();
 
-// Attributable memory telemetry. The engine self-logs `[Zeros mem]` for its OWN
-// rss, but nothing logged the RENDERER / GPU / utility processes — so when the
-// process tree spiked (the reported ~6 GB) there was no way to tell which
-// process grew. app.getAppMetrics() is a built-in that returns per-process
-// memory for THIS app's whole Chromium tree with NO subprocess spawn; we roll it
-// up per type every 10 min so the next spike is decomposable straight from
-// main.log. (Sibling engine/vite/tsup processes are separate programs and don't
-// show here — `pnpm doctor` covers the full cross-process census.)
-function startProcessMetricsLogger(): void {
-  const emit = (): void => {
-    try {
-      const metrics = app.getAppMetrics();
-      let totalMb = 0;
-      const byType = new Map<string, { n: number; mb: number }>();
-      for (const m of metrics) {
-        const mb = (m.memory?.workingSetSize ?? 0) / 1024; // KB → MB
-        totalMb += mb;
-        const t = m.type || "unknown";
-        const cur = byType.get(t) ?? { n: 0, mb: 0 };
-        cur.n += 1;
-        cur.mb += mb;
-        byType.set(t, cur);
-      }
-      const parts = [...byType.entries()]
-        .sort((a, b) => b[1].mb - a[1].mb)
-        .map(([t, v]) => `${t}=${v.n}/${v.mb.toFixed(0)}MB`)
-        .join(" ");
-      console.log(`[Zeros procmem] total=${totalMb.toFixed(0)}MB ${parts}`);
-    } catch {
-      /* getAppMetrics can throw very early / during teardown — best-effort */
-    }
-  };
-  emit();
-  const id = setInterval(emit, 600_000);
-  if (typeof id.unref === "function") id.unref();
-}
-
 // Pinned to the Mac-app Vite port (see vite.config.ts). Must NOT be
 // 5173 — that's the default Vite port other Zeros workspace projects
 // (apps/marketing, etc.) inherit. If those were running first, a
@@ -924,6 +889,8 @@ function createMainWindow(): BrowserWindow {
         : {}),
     },
   });
+
+  rendererProcessOwners.track(win.webContents, "Main window");
 
   // Finish the reopen-as-closed restore: the discrete states can't be
   // constructor options. macOS fullscreen (the green button / its own
@@ -1287,6 +1254,7 @@ function setupDockBrand(): void {
 
 
 app.whenReady().then(async () => {
+  app.once("will-quit", startProcessMetricsLogging());
   if (IS_LOCAL_DEVELOPMENT && process.env.ZEROS_SHARED_SECRETS_DIR) {
     try {
       migrateLocalProviderSecrets(app.getPath("userData"));
@@ -1733,6 +1701,7 @@ app.whenReady().then(async () => {
               path.join(__dirname, "agent-control-preload.cjs"),
             ),
           });
+          rendererProcessOwners.track(panelWindow.webContents, "Agent-control overlay");
           // Above the controlled app's own floating panels, below its menus.
           panelWindow.setAlwaysOnTop(true, "status");
           panelWindow.setContentProtection(true);
@@ -2069,8 +2038,6 @@ app.whenReady().then(async () => {
     app.on("will-quit", () => disposeSecretsWatch());
   }
 
-  // Roll up per-process memory into main.log so a future spike is attributable.
-  startProcessMetricsLogger();
   // User-created preview/design browser tabs remain renderer iframes and use
   // these cache/cookie commands. Conversation-owned agent Browser tabs use the
   // separate isolated WebContentsView service registered above.

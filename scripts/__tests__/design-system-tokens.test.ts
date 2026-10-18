@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, rmSync, utimesSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,8 +9,6 @@ import {
   readTokenSources,
   renderMarketingTokenCss,
   renderTokenCss,
-  renderTokenPreviewCss,
-  writeTokenPreview,
 } from "../design-system/build-tokens.mjs";
 import {
   declarations,
@@ -445,67 +443,6 @@ describe("marketing token generation", () => {
   it("keeps the repository marketing regions fresh and exports only the intended subset", () => {
     const css = readFileSync(join(ROOT, "apps/marketing/src/index.css"), "utf8");
     expect(renderMarketingTokenCss(ROOT) === css, "Marketing token regions must be fresh").toBe(true);
-  });
-});
-
-describe("Design token preview", () => {
-  it("renders the token declarations alone, as the app stylesheet has them", () => {
-    const { root } = fixture();
-    const css = renderTokenPreviewCss(root);
-    expect(extractBlock(css, ":root")).toContain("--bg: hsl(0 0% 7%);");
-    expect(extractBlock(css, ":root")).toContain("--pane: var(--bg);");
-    expect(extractBlock(css, '[data-theme="light"]')).toContain("--bg: hsl(0 0% 100%);");
-    expect(css).not.toMatch(/@import|@theme|--color-bg/);
-  });
-
-  it("writes only to the private build folder, and only when the preview changed", () => {
-    const { root, base, save } = fixture();
-    const output = ".zeros/design-styles/zeros-tokens.css";
-    expect(writeTokenPreview(root, output)).toBe(true);
-    const file = join(root, output);
-    // Read each snapshot from one opened file, including its identity: a
-    // rewritten path must not supply metadata for different contents.
-    const snapshot = () => {
-      const descriptor = openSync(file, "r");
-      try {
-        const source = readFileSync(descriptor, "utf8");
-        const { mtimeMs, ino } = fstatSync(descriptor);
-        return { source, mtimeMs, ino };
-      } finally {
-        closeSync(descriptor);
-      }
-    };
-    const first = snapshot().source;
-    const past = new Date(Date.now() - 60_000);
-    utimesSync(file, past, past);
-    // Filesystems round utimes differently; compare the stored timestamp
-    // before and after the no-op, not the requested JavaScript precision.
-    const unchanged = snapshot();
-    expect(writeTokenPreview(root, output)).toBe(false);
-    expect(snapshot()).toEqual(unchanged);
-    base.tokens.bg.$value = { colorSpace: "hsl", components: [0, 0, 9] };
-    save("base.tokens.json", base);
-    expect(writeTokenPreview(root, output)).toBe(true);
-    const changed = snapshot().source;
-    expect(changed).not.toBe(first);
-    expect(changed).toContain("--bg: hsl(0 0% 9%);");
-    for (const bad of ["styles/zeros-tokens.css", ".zeros/design-styles/../x.css", ".zeros/design-styles/x.scss", "/tmp/x.css"]) {
-      expect(() => writeTokenPreview(root, bad), bad).toThrow(/\.zeros\/design-styles/);
-    }
-    expect(existsSync(join(root, "styles/zeros-tokens.css.tmp"))).toBe(false);
-  });
-
-  it("previews the same declarations the repository stylesheet holds when it is fresh", () => {
-    const preview = renderTokenPreviewCss(ROOT);
-    const css = readFileSync(join(ROOT, "styles/zeros-tokens.css"), "utf8");
-    // The stylesheet spreads some values over lines; the preview keeps one.
-    const oneLine = (value?: string) => value?.replace(/\s+/g, " ").replace(/\(\s+/g, "(").replace(/\s+\)/g, ")").trim();
-    for (const selector of [":root", '[data-theme="light"]']) {
-      const previewed = declarations(extractBlock(preview, selector));
-      const app = declarations(extractBlock(css, selector));
-      expect(previewed.size).toBeGreaterThan(40);
-      for (const [name, value] of previewed) expect(oneLine(app.get(name)), `${selector} --${name}`).toBe(oneLine(value));
-    }
   });
 });
 

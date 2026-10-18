@@ -42,6 +42,7 @@ function fixture({ start = 0, target = 10_000, height = 12_000 } = {}) {
   const targetTopFor = (id: string) => positions.get(id) ?? null;
   const recompute = vi.fn(), setActiveIndex = vi.fn();
   const context = { scrollEl, cancelSettleRef, checkpointBottomSpacer, bottomSpacerRef, pinnedIdRef, navigatingRef,
+    local: false, publishedIndexRef: { current: 0 },
     spacerForIdRef: { current: null as string | null }, targetTopFor, recompute, setActiveIndex,
     checkpointsRef: { current: [{ id: 'target' }, { id: 'next' }] },
     flushSync: (action: () => void) => action(), onBottomSpacerChange: (size: number) => {

@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runDesignSavedEditingSmoke } from "./ui-smoke-design-saved-editing.mjs";
 
 async function openCanvasFixture(page, query = "layoutGestures") {
   const origin = new URL(page.url()).origin;
@@ -752,13 +753,17 @@ export async function runDesignFreeRelocationSmoke({ page, check }) {
 }
 
 export async function runDesignCanvasRefinementsSmoke(options) {
+  await runDesignSavedEditingSmoke(options);
   await runDesignFrameLiveCameraSmoke(options);
   await runDesignFramePendingSaveSmoke(options);
+  await runDesignColdFrameSaveSmoke(options);
+  await runDesignCompletedNudgeRuntimeSmoke(options);
   await runDesignFlowPendingSaveSmoke(options);
   await runDesignMixedParentMovementSmoke(options);
   await runDesignGroupDetachmentRefusalSmoke(options);
   await runDesignFreeRelocationSmoke(options);
   await runDesignWorldNudgeSmoke(options);
+  await runDesignRelativePinnedMovementSmoke(options);
   await runDesignLayoutAffineCameraSmoke(options);
   await runDesignFramePointerOwnershipSmoke(options);
   await runDesignNodeResizeCaptureSmoke(options);
@@ -862,6 +867,144 @@ export async function runDesignFramePendingSaveSmoke({ page, check }) {
         : "a second scene drag waits for its known predecessor and preserves both world movements",
       true,
     );
+  }
+}
+
+export async function runDesignColdFrameSaveSmoke({ page, check }) {
+  for (const cancelled of [false, true]) {
+    await openCanvasFixture(page, "layoutGestures&coldFoundation");
+    const frame = page.locator('[data-design-frame="home.html"]');
+    const before = await frameGeometry(frame);
+    await page.keyboard.down("Control");
+    for (let index = 0; index < 2; index += 1) {
+      const label = await frame.locator("[data-design-frame-label]").boundingBox();
+      const x = label.x + label.width / 2;
+      const y = label.y + label.height / 2;
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(x + 40, y + 20, { steps: 4 });
+      if (cancelled && index === 1) await page.keyboard.press("Escape");
+      await page.mouse.up();
+      if (index === 0)
+        await expect.poll(() => page.evaluate(() => window.__zerosHarnessFoundation.reads.length)).toBeGreaterThan(0);
+    }
+    await page.keyboard.up("Control");
+    const count = cancelled ? 1 : 2;
+    expect(await frameGeometry(frame)).toMatchObject({ x: before.x + 80 * count, y: before.y + 40 * count });
+    expect(await transactionWrites(page)).toBe(0);
+    await page.evaluate(() => window.__zerosHarnessFoundation.release());
+    await expect.poll(() => transactionWrites(page)).toBe(count);
+    await expect.poll(() => page.evaluate(async () => {
+      const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+      const current = designWorkspaceSnapshotCache.peekSnapshot("ws_design_harness").data.frames.find((item) => item.file === "home.html");
+      return { x: current.x, y: current.y };
+    })).toEqual({ x: before.x + 80 * count, y: before.y + 40 * count });
+    expect(await page.locator("[data-sonner-toast]").allTextContents()).toEqual([]);
+    check(cancelled ? "cancelling a successor before Foundation admission retains its completed scene predecessor" : "two completed scene drags survive cold Foundation admission in order", true);
+  }
+}
+
+export async function runDesignRelativePinnedMovementSmoke({ page, check }) {
+  for (const direction of ["rtl", "ltr"]) {
+    await openCanvasFixture(page);
+    await page.evaluate(async (direction) => {
+      const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+      const { updateDesignNodeStylesCached } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+      for (const [nodeId, styles] of [["home-hero", { direction }], ["home-heading", { position: "relative", left: "auto", right: "10px" }], ["home-copy", { position: "relative", left: "auto", right: "10px" }]]) {
+        await updateDesignNodeStylesCached("ws_design_harness", { frame: "home.html", sourceVersion: designFrameRuntime("ws_design_harness", "home.html").sourceVersion, nodeId, styles });
+      }
+    }, direction);
+    for (const grouped of [false, true]) {
+      await page.locator('[data-design-layer-id="home-heading"]').click();
+      if (grouped) await page.locator('[data-design-layer-id="home-copy"]').click({ modifiers: ["Shift"] });
+      await page.getByLabel("Design canvas", { exact: true }).focus();
+      const ids = grouped ? ["home-heading", "home-copy"] : ["home-heading"];
+      const read = () => page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]').locator("body").evaluate((body, ids) => ids.map((id) => {
+        const node = body.querySelector(`[data-oid="${id}"]`);
+        return { x: node.getBoundingClientRect().x, right: parseFloat(getComputedStyle(node).right) };
+      }), ids);
+      for (const [key, delta] of [["ArrowRight", 1], ["Shift+ArrowRight", 8]]) {
+        const before = await read();
+        const writes = await transactionWrites(page);
+        await page.keyboard.press(key);
+        await expect.poll(() => transactionWrites(page)).toBe(writes + 1);
+        await expect.poll(async () => (await read()).map((node, index) => Math.round((node.x - before[index].x) * 100) / 100)).toEqual(ids.map(() => delta));
+        const after = await read();
+        for (const [index, node] of after.entries()) expect(node.right).toBeCloseTo(before[index].right - delta, 3);
+        check(`${direction} ${grouped ? "group" : "single"} relative end-offset movement paints ${delta} world pixels in one transaction`, true);
+      }
+    }
+  }
+}
+
+export async function runDesignCompletedNudgeRuntimeSmoke({ page, check }) {
+  for (const action of ["none", "same-selection", "new-gesture", "directory-ABA", "page-ABA", "physical-same-revision", "physical-new-revision"]) {
+    await openCanvasFixture(page, "layoutGestures&coldFoundation");
+    if (action === "page-ABA") await page.evaluate(async () => {
+      const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+      useDesignWorkspaceUiStore.getState().setActivePage("ws_design_harness", "page_1");
+    });
+    await page.locator('[data-design-layer-id="home-heading"]').click();
+    await page.getByLabel("Design canvas", { exact: true }).focus();
+    await page.keyboard.press("ArrowRight");
+    await expect.poll(() => page.evaluate(() => window.__zerosHarnessFoundation.reads.length)).toBeGreaterThan(0);
+    const replacement = await page.evaluate(async (action) => {
+      const { designFrameRuntime, connectDesignFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+      const { useDesignWorkspaceUiStore, designWorkspaceView } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+      const { useDesignRuntimeStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-runtime-store.ts");
+      const workspaceId = "ws_design_harness", file = "home.html";
+      const old = designFrameRuntime(workspaceId, file);
+      const state = useDesignRuntimeStore.getState();
+      const snapshot = state.byWorkspace[workspaceId].frames[file].snapshot;
+      const folder = state.byWorkspace[workspaceId].folder;
+      if (action === "same-selection") useDesignWorkspaceUiStore.getState().setSelection(workspaceId, file, "home-heading");
+      if (action === "directory-ABA") {
+        const before = designWorkspaceView(workspaceId).directoryId;
+        useDesignWorkspaceUiStore.getState().bindDirectory(workspaceId, "design_replacement");
+        useDesignWorkspaceUiStore.getState().bindDirectory(workspaceId, before);
+      }
+      if (action === "page-ABA") {
+        const before = designWorkspaceView(workspaceId).activePageId;
+        useDesignWorkspaceUiStore.getState().setActivePage(workspaceId, "page_2");
+        useDesignWorkspaceUiStore.getState().setActivePage(workspaceId, before);
+      }
+      if (action.startsWith("physical")) {
+        const original = document.querySelector('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]');
+        const fresh = original.cloneNode(false);
+        fresh.srcdoc = original.srcdoc;
+        const loaded = new Promise((resolve) => fresh.addEventListener("load", resolve, { once: true }));
+        original.parentElement.append(fresh);
+        await loaded;
+        await new Promise((resolve) => connectDesignFrameRuntime(workspaceId, file, old.sourceVersion, fresh, {
+          onSnapshot: (next) => useDesignRuntimeStore.getState().publishSnapshot(workspaceId, folder, file, next, old.sourceVersion),
+          onReady: resolve,
+        }));
+        original.remove();
+        if (action === "physical-new-revision") useDesignRuntimeStore.getState().publishSnapshot(workspaceId, folder, file, { ...snapshot, revision: snapshot.revision + 1 }, old.sourceVersion);
+      }
+      return { active: old.isActive(), same: old === designFrameRuntime(workspaceId, file), before: snapshot.revision, after: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[file]?.snapshot?.revision };
+    }, action);
+    if (action === "physical-same-revision") expect(replacement).toMatchObject({ active: false, same: false, after: replacement.before });
+    if (action === "new-gesture") {
+      const label = await page.locator('[data-design-frame="home.html"] [data-design-frame-label]').boundingBox();
+      const x = label.x + label.width / 2, y = label.y + label.height / 2;
+      await page.keyboard.down("Control");
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(x + 20, y + 10, { steps: 3 });
+    }
+    await page.evaluate(async () => {
+      window.__zerosHarnessFoundation.release();
+      const { waitForPendingDesignEdits } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+      await waitForPendingDesignEdits("ws_design_harness");
+    });
+    expect(await transactionWrites(page)).toBe(["none", "same-selection", "new-gesture"].includes(action) ? 1 : 0);
+    if (action === "new-gesture") {
+      await page.keyboard.press("Escape");
+      await page.mouse.up();
+      await page.keyboard.up("Control");
+    }
+    check(`completed keyboard admission preserves the captured runtime and owner: ${action}`, true);
   }
 }
 

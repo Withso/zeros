@@ -40,10 +40,34 @@ export const DESIGN_RELOCATION_INHERITED_PROPERTIES = [
   "orphans",
   "widows",
   "color-scheme",
+  "border-collapse",
+  "border-spacing",
+  "caption-side",
+  "empty-cells",
   "-webkit-text-fill-color",
   "-webkit-text-stroke-color",
   "-webkit-text-stroke-width",
 ] as const;
+
+const relocationDefaults = {
+  position: "absolute",
+  inset: "0 auto auto 0",
+  left: "0px",
+  top: "0px",
+  margin: "0",
+  width: "0px",
+  height: "0px",
+  "box-sizing": "border-box",
+  "min-width": "0",
+  "min-height": "0",
+  "max-width": "none",
+  "max-height": "none",
+  transform: "none",
+  "transform-origin": "0 0",
+  rotate: "none",
+  scale: "none",
+  translate: "none",
+};
 
 const inherited = new Set<string>(DESIGN_RELOCATION_INHERITED_PROPERTIES);
 const coordinate = z.number().finite().min(-1_000_000).max(1_000_000);
@@ -68,7 +92,7 @@ export const designRelocationSchema = z
       .record(z.string(), z.string().max(2048))
       .refine(
         (styles) =>
-          Object.keys(styles).length <= 64 &&
+          Object.keys({ ...styles, ...relocationDefaults }).length <= 64 &&
           Object.keys(styles).every(
             (key) => inherited.has(key) || /^--[A-Za-z0-9_-]{1,126}$/.test(key),
           ),
@@ -82,35 +106,16 @@ export type DesignRelocation = z.infer<typeof designRelocationSchema>;
 export function designRelocationStyles(
   relocation: DesignRelocation,
 ): Record<string, string> {
-  return {
+  const styles = {
     ...relocation.inheritedStyles,
-    position: "absolute",
-    inset: "0 auto auto 0",
-    left: "0px",
-    top: "0px",
-    right: "auto",
-    bottom: "auto",
-    margin: "0",
-    "margin-top": "0",
-    "margin-right": "0",
-    "margin-bottom": "0",
-    "margin-left": "0",
+    ...relocationDefaults,
     width: `${relocation.width}px`,
     height: `${relocation.height}px`,
-    "box-sizing": "border-box",
-    "min-width": "0",
-    "min-height": "0",
-    "max-width": "none",
-    "max-height": "none",
     transform: `matrix(${relocation.matrix.join(",")})`,
-    "transform-origin": "0 0",
-    rotate: "none",
-    scale: "none",
-    translate: "none",
-    "flex-grow": "0",
-    "flex-shrink": "0",
-    "flex-basis": "auto",
   };
+  if (Object.keys(styles).length > 64)
+    throw new Error("The complete relocation styles must contain at most 64 properties.");
+  return styles;
 }
 
 export const designMovementGuardSchema = z

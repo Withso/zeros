@@ -46,6 +46,7 @@ export function startDesignLayoutDrag(input: {
   finished: () => void;
   clicked: () => void;
   failed: (error: unknown) => void;
+  saving?: (save: Promise<void>) => void;
   isCurrent?: () => boolean;
   detach?: (
     origin: { x: number; y: number },
@@ -576,6 +577,7 @@ export function startDesignLayoutDrag(input: {
       presentation?.remove();
     })();
     pendingSaves.set(saveKey, save);
+    input.saving?.(save);
     void save
       .catch(async (error) => {
         stopped = true;

@@ -114,6 +114,13 @@ export default defineConfig({
     // ones (initial `git init` + first commit can run long on cold
     // CI).
     testTimeout: 20_000,
+    // Agents re-run a few suites after every edit. Reusing transformed modules
+    // across runs (keyed by content and config, stored under node_modules)
+    // removes most transform time from those reruns. CI keeps transforming
+    // every module from scratch.
+    experimental: {
+      fsModuleCache: !process.env.CI,
+    },
   },
   resolve: {
     alias: {

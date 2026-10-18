@@ -644,15 +644,22 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   Settings navigation or a cached connected hint alone cannot resolve it.
   Legacy raw authentication prose remains stored but does not appear as a second
   error or an assistant answer. Copied transcripts retain the explicit status.
-- Claude usage limits are one plain inbetween status message below the provider
-  turn's latest output, before the next prompt, including across steering and
-  autonomous background replies. Align it with transcript text: no tinted banner,
-  border, horizontal inset or action button. Keep actual blocked-turn failures
-  in their existing action notice. Keep each budget's latest native state and
-  prioritize any remaining limit warning over
-  another budget's recovery. Typed notices and legacy native feedback IDs share
-  this projection; ordinary model quotations keep their prose. Status changes
-  use new immutable notice IDs, while the stable code selects the current state.
+- Claude usage limits are plain inbetween status messages in the working feed,
+  where they arrived: later tool calls render after the notice, and it folds
+  into the working summary with that work once the turn settles. Never pin it
+  to the turn's tail. A notice appears only where it changes the provider
+  turn's status, so repeated receipts across results, steering and autonomous
+  background replies add no row. Align it with transcript text: no tinted
+  banner, border, horizontal inset or action button. Keep actual blocked-turn
+  failures in their existing action notice. Keep each budget's latest native
+  state and prioritize any remaining limit warning over another budget's
+  recovery; that recovery restates the remaining warning. Typed notices and
+  legacy native feedback IDs share this projection, as do copied transcripts;
+  ordinary model quotations keep their prose. Status changes use new immutable
+  notice IDs, while the stable code identifies the budget.
+  Each steer segment projects against the provider history through that
+  segment, even after later steers move the tail. Regressions cover at least
+  two steers, independent budget recovery, and unchanged earlier render references.
 - Claude's native `verification_required` and `cloud_credential_error` remain
   distinct from a Claude sign-in failure, model unavailability and transport
   failure. Preserve the provider's explanation, credential/provider name and
@@ -786,8 +793,8 @@ Edit/Write tools onto models that do not advertise them.
 
 For Claude, keep the [installed SDK event inventory](claude-event-coverage.md)
 and its exhaustive regression map current. Meaningful hook, permission, plugin,
-and runtime feedback uses bounded, replay-safe inbetween messages; usage limits
-use the one plain tail message described above. Keep
+and runtime feedback, including usage limits, uses bounded, replay-safe
+inbetween messages as described above. Keep
 child notices under authoritative native ownership, omit private login output
 and routine diagnostic logs, and never turn advisory feedback into a tool or
 successful result. Thinking estimates indicate activity and steering consumption,
@@ -940,3 +947,13 @@ contracts above. Keep Design-specific labels, catalog limits, authoring modes
 and UI scope in the [canonical Design tool contract](design-mode-roadmap.md#native-authoring-and-optional-tools).
 Native file edits retain their provider's ordinary presentation; an unqualified
 Design-looking tool name or foreign MCP server never selects trusted Design UI.
+
+Claude's streamed tool arguments (`input_json_delta`) may also feed the Local
+Design canvas's transient drafts through the translator's optional
+`onToolInput` observer, keyed by native tool id. That observer never creates,
+retitles or settles a transcript row, ignores stream replays, and is dropped
+for cloud workers; rows keep the complete-input rules above. Other providers'
+drafts read only the normalized session updates every row already receives
+(Codex's `rawInput.changes`, complete input, diff content or a bare path);
+they add no adapter hook and change no row. See
+[Native edit and refresh behavior](design-mode-roadmap.md#native-edit-and-refresh-behavior).

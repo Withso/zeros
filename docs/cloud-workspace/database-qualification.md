@@ -105,8 +105,8 @@ timeouts from thirty to five seconds, and acquire timeouts from ten to one
 second. An explicit `DATABASE_POOL_MAX` still controls API capacity, but does
 not restore the old timeouts. Review each channel's overrides before release.
 
-`CONTROL_PLANE_PROCESS_ROLE` selects `api`, `worker` or `combined` (the
-compatibility default). API replicas own HTTP/WebSocket requests, account
+`CONTROL_PLANE_PROCESS_ROLE` selects `api`, `worker`, `realtime` or `combined`
+(the compatibility default; `realtime` is described in [realtime](realtime.md)). API replicas own HTTP/WebSocket requests, account
 security subscriptions and engine checkpoint waits. Worker replicas own
 WorkOS/account deletion, security publication, GitHub DB expiry and all enabled
 cloud queues, including retention, setup and runtime qualification. They expose

@@ -60,6 +60,12 @@ type ControlRow = { conversation_id: string; revision: number; paused: number; n
 export type CloudLocalCommandChange = SharedChange;
 export type CloudLocalCommandMirrorBatch = SharedBatch;
 export type CloudLocalCommandMirrorAck = SharedAck;
+export type CloudLocalTurnState = "started" | "completed" | "failed" | "needs_attention" | "interrupted";
+export type CloudLocalTurnJournalEntry = Readonly<{ journalSeq: number; chatId: string; turnId: string;
+  state: CloudLocalTurnState; atMs: number; actorUserId?: string }>;
+type TurnJournalRow = { seq: number; chat_id: string; turn_id: string; state: CloudLocalTurnState; at_ms: number; actor_user_id: string | null };
+const SETTLED_TURN_STATE = { succeeded: "completed", failed: "failed", cancelled: "interrupted" } as const;
+const MAX_TURN_JOURNAL_READ = 256;
 
 type Options = { file: string; scope: CloudLocalCommandWriter; actors: ActorAuthority; engineLive(): boolean;
   /** Must return a locally committed transcript/terminal watermark, never a CP
@@ -80,6 +86,10 @@ type Options = { file: string; scope: CloudLocalCommandWriter; actors: ActorAuth
     payload: CloudBootCommandClaim["payload"]; actor: CloudAuthorizedActor; candidateExecutionId: string }):
     { executionId: string; credentialRun?: CloudAgentCredentialRunInfo } | null;
   selectionRolledBack?(claimId: string): void;
+  /** Called after a commit that appended turn journal entries. */
+  turnJournalChanged?(): void;
+  /** Runs only after committed changes to the durable pending actor holds. */
+  pendingActorsChanged?(): void;
   now?(): number; limits?: Partial<Limits> };
 
 /** At-most-once dispatch within an immutable, CP-negotiated boot writer.
@@ -98,6 +108,7 @@ export class CloudLocalCommandQueue {
   private readonly now: () => number;
   private closed = false;
   private claimsPaused = false;
+  private turnJournalPending = false;
 
   constructor(private readonly options: Options) {
     this.scope = Object.freeze(WriterSchema.parse(options.scope));
@@ -128,12 +139,17 @@ export class CloudLocalCommandQueue {
           created_at TEXT NOT NULL,updated_at TEXT NOT NULL,history TEXT,mirror_history_head TEXT,credential_run_info TEXT,mirror_dirty INTEGER NOT NULL DEFAULT 0,
           UNIQUE(conversation_id,position),UNIQUE(conversation_id,user_message_id));
         CREATE INDEX IF NOT EXISTS local_commands_queue ON local_commands(conversation_id,state,position);
+        CREATE INDEX IF NOT EXISTS local_commands_pending_actors ON local_commands(writer_epoch,state)
+          WHERE state IN ('queued','dispatching');
         CREATE TABLE IF NOT EXISTS local_command_operations(
           id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,request_sha256 TEXT NOT NULL,
           actor_sha256 TEXT NOT NULL,revision INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS local_command_journal(
           sequence INTEGER NOT NULL,writer_epoch TEXT NOT NULL,document TEXT NOT NULL,bytes INTEGER NOT NULL,
           PRIMARY KEY(writer_epoch,sequence));
+        CREATE TABLE IF NOT EXISTS local_turn_journal(
+          seq INTEGER NOT NULL,writer_epoch TEXT NOT NULL,chat_id TEXT NOT NULL,turn_id TEXT NOT NULL,
+          state TEXT NOT NULL,at_ms INTEGER NOT NULL,actor_user_id TEXT,PRIMARY KEY(writer_epoch,seq));
         CREATE TABLE IF NOT EXISTS local_command_mirror_batches(
           writer_epoch TEXT PRIMARY KEY,batch_id TEXT NOT NULL,after_sequence INTEGER NOT NULL,through_sequence INTEGER NOT NULL,
           document TEXT NOT NULL);
@@ -165,10 +181,12 @@ export class CloudLocalCommandQueue {
             throw new CloudCommandRuntimeError("engine_authority_rejected");
           if (writer.writerEpoch === this.scope.writerEpoch && this.metadata("sealedWriter") === this.scope.writerEpoch)
             throw new CloudCommandRuntimeError("cloud_command_writer_retired");
+          if (writer.writerEpoch !== this.scope.writerEpoch) this.carryTurnJournal(writer.writerEpoch);
           // No process-start flag or self-reported checkpoint head is accepted
           // as continuity proof. Both queued and dispatching rows may be stale.
           const inherited = this.db.prepare("SELECT * FROM local_commands WHERE state IN ('queued','dispatching') ORDER BY conversation_id,position").all() as CommandRow[];
           for (const row of inherited) {
+            if (row.state === "dispatching") this.appendTurn(row, "interrupted");
             const history = this.incompleteHistory(row, "recovery_uncertain");
             this.db.prepare("UPDATE local_commands SET state='uncertain',payload=NULL,result_code=?,history=?,updated_at=?,mirror_dirty=1 WHERE id=?")
               .run(row.state === "dispatching" ? "engine_interrupted" : "queue_recovery_required", canonicalCloudLocalCommandHistoryJson(history.history), this.timestamp(), row.id);
@@ -207,6 +225,38 @@ export class CloudLocalCommandQueue {
   private setMetadata(key: string, value: string): void {
     this.db.prepare("INSERT INTO local_command_metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key,value);
   }
+  private turnJournalHead(): number {
+    return (this.db.prepare("SELECT coalesce(max(seq),0) AS head FROM local_turn_journal WHERE writer_epoch=?")
+      .get(this.scope.writerEpoch) as { head: number }).head;
+  }
+  private turnJournalAckFor(writerEpoch: string): number {
+    const value = this.metadata("turnJournalAck");
+    if (!value) return 0;
+    try {
+      const parsed = JSON.parse(value) as { writerEpoch?: unknown; seq?: unknown };
+      return parsed.writerEpoch === writerEpoch && Number.isSafeInteger(parsed.seq) && (parsed.seq as number) > 0 ? parsed.seq as number : 0;
+    } catch { return 0; }
+  }
+  private appendTurn(row: Pick<CommandRow, "conversation_id" | "user_message_id" | "actor">, state: CloudLocalTurnState): void {
+    let actorUserId: string | null = null;
+    try { const value: unknown = JSON.parse(row.actor)?.actor?.userId; if (uuid.safeParse(value).success) actorUserId = value as string; }
+    catch { /* omitted from the entry */ }
+    this.db.prepare("INSERT INTO local_turn_journal(seq,writer_epoch,chat_id,turn_id,state,at_ms,actor_user_id) VALUES(?,?,?,?,?,?,?)")
+      .run(this.turnJournalHead() + 1, this.scope.writerEpoch, row.conversation_id, row.user_message_id, state, this.now(), actorUserId);
+    this.turnJournalPending = true;
+  }
+  /** The control plane keys the journal by engine instance and boot, so a
+   * predecessor's sequence can never be sent again: its unacknowledged
+   * entries are renumbered into this writer's journal. */
+  private carryTurnJournal(previousEpoch: string): void {
+    const rows = this.db.prepare("SELECT * FROM local_turn_journal WHERE writer_epoch=? AND seq>? ORDER BY seq")
+      .all(previousEpoch, this.turnJournalAckFor(previousEpoch)) as TurnJournalRow[];
+    const insert = this.db.prepare("INSERT INTO local_turn_journal(seq,writer_epoch,chat_id,turn_id,state,at_ms,actor_user_id) VALUES(?,?,?,?,?,?,?)");
+    let head = this.turnJournalHead();
+    for (const row of rows) insert.run(head += 1, this.scope.writerEpoch, row.chat_id, row.turn_id, row.state, row.at_ms, row.actor_user_id);
+    this.db.prepare("DELETE FROM local_turn_journal WHERE writer_epoch<>?").run(this.scope.writerEpoch);
+    if (rows.length) this.turnJournalPending = true;
+  }
   private readHistoryRevision(): number {
     const value = this.metadata("historyReadRevision");
     if (value !== null && !/^(?:0|[1-9][0-9]*)$/.test(value))
@@ -219,8 +269,18 @@ export class CloudLocalCommandQueue {
   }
   private timestamp(): string { return new Date(this.now()).toISOString(); }
   private transaction<T>(fn: () => T): T {
-    try { return this.db.transaction(fn)(); }
-    catch (error) { if (error instanceof CloudCommandRuntimeError) throw error; throw new CloudCommandRuntimeError("command_storage_unavailable"); }
+    let value: T;
+    try { value = this.db.transaction(fn)(); }
+    catch (error) {
+      if (!this.db.inTransaction) this.turnJournalPending = false;
+      if (error instanceof CloudCommandRuntimeError) throw error; throw new CloudCommandRuntimeError("command_storage_unavailable");
+    }
+    if (this.turnJournalPending && !this.db.inTransaction) {
+      this.turnJournalPending = false;
+      const listener = this.options.turnJournalChanged;
+      if (listener) queueMicrotask(() => { if (!this.closed) try { listener(); } catch { /* an observer never fails a commit */ } });
+    }
+    return value;
   }
   private live(): void {
     if (this.closed || !this.options.engineLive()) throw new CloudCommandRuntimeError("engine_authority_rejected");
@@ -251,7 +311,11 @@ export class CloudLocalCommandQueue {
     if (value.kind === "claim" && !this.accepting) return null;
     if (value.kind === "mutate" && !this.accepting) throw new CloudCommandRuntimeError("cloud_command_writer_retired");
     if (value.kind === "claim") return this.claim(value);
-    if (value.kind === "settle") return this.settle(value.result);
+    if (value.kind === "settle") {
+      const result = this.settle(value.result);
+      this.options.pendingActorsChanged?.();
+      return result;
+    }
     if (value.kind === "confirm-goal") return this.confirmGoal(value);
     const input = value.kind === "mutate" ? { kind: value.kind, mutation: value.mutation } : value;
     const parsed = CloudBootCommandClientRequestSchema.safeParse(input);
@@ -271,7 +335,18 @@ export class CloudLocalCommandQueue {
     if (request.kind === "stop") return this.stop(request.conversationId,request.operationId,actor);
     if (value.kind !== "mutate" || ![null,"command_context_changed","command_not_found"].includes(value.admissionError))
       throw new CloudCommandRuntimeError("invalid_command");
-    return this.mutate(request.mutation,actor,value.admissionError);
+    const result = this.mutate(request.mutation,actor,value.admissionError);
+    this.options.pendingActorsChanged?.();
+    return result;
+  }
+
+  /** The bounded durable queue, not connection state or an in-memory claim
+   * cache, owns detached work's actor references. Terminal receipts do not. */
+  pendingActorSessions(): ReadonlySet<string> {
+    this.live();
+    const rows = this.db.prepare("SELECT actor FROM local_commands WHERE writer_epoch=? AND state IN ('queued','dispatching')")
+      .all(this.scope.writerEpoch) as Array<{ actor: string }>;
+    return new Set(rows.map(row => CloudActorProvenanceSchema.parse(JSON.parse(row.actor)).actorSessionId));
   }
 
   private control(conversationId: string): ControlRow {
@@ -456,6 +531,7 @@ export class CloudLocalCommandQueue {
       this.bump(input.conversationId);
       const claimed = this.row(row.id)!;
       this.journal(input.conversationId,claimed);
+      if (principal) this.appendTurn(claimed, "started");
       return this.claimView(claimed);
     }); } catch (error) {
       if (selectedClaimId) this.options.selectionRolledBack?.(selectedClaimId);
@@ -486,6 +562,26 @@ export class CloudLocalCommandQueue {
       if (!claim.dispatchAllowed || !isDeepStrictEqual(principal.provenance.actor, claim.actor)) throw new Error("Actor changed");
       return principal;
     } catch { throw new CloudCommandRuntimeError("cloud_actor_authority_rejected"); }
+  }
+  /** This writer's turn transitions after `afterSeq`, in order. */
+  turnJournal(afterSeq: number, limit: number): CloudLocalTurnJournalEntry[] {
+    if (this.closed || !Number.isSafeInteger(afterSeq) || afterSeq < 0 || !Number.isSafeInteger(limit) || limit < 1) return [];
+    const rows = this.db.prepare("SELECT * FROM local_turn_journal WHERE writer_epoch=? AND seq>? ORDER BY seq LIMIT ?")
+      .all(this.scope.writerEpoch, afterSeq, Math.min(limit, MAX_TURN_JOURNAL_READ)) as TurnJournalRow[];
+    return rows.map(row => ({ journalSeq: row.seq, chatId: row.chat_id, turnId: row.turn_id, state: row.state, atMs: row.at_ms,
+      ...(row.actor_user_id ? { actorUserId: row.actor_user_id } : {}) }));
+  }
+  /** The persisted `turns.ack` watermark of this writer. */
+  turnJournalAcked(): number { return this.closed ? 0 : this.turnJournalAckFor(this.scope.writerEpoch); }
+  /** Persists a higher ack within the head and prunes the entries below it;
+   * the acked entry stays as the sequence head. */
+  acknowledgeTurnJournal(journalSeq: number): void {
+    if (this.closed || !Number.isSafeInteger(journalSeq) || journalSeq < 1) return;
+    this.transaction(() => {
+      if (journalSeq <= this.turnJournalAckFor(this.scope.writerEpoch) || journalSeq > this.turnJournalHead()) return;
+      this.setMetadata("turnJournalAck", canonical({ writerEpoch: this.scope.writerEpoch, seq: journalSeq }));
+      this.db.prepare("DELETE FROM local_turn_journal WHERE writer_epoch=? AND seq<?").run(this.scope.writerEpoch, journalSeq);
+    });
   }
   private settle(input: CloudCommandResult): CloudBootCommandSnapshot {
     const parsed = z.object({ commandId: uuid, claimId: uuid, state: z.enum(["succeeded","failed","cancelled"]),
@@ -519,6 +615,7 @@ export class CloudLocalCommandQueue {
           canonicalCloudLocalCommandHistoryJson(publication.mirrorHead),this.timestamp(),row.id);
       this.bump(row.conversation_id);
       this.journal(row.conversation_id,this.row(row.id)!,true);
+      this.appendTurn(row, SETTLED_TURN_STATE[result.state]);
       return { ...this.snapshot(row.conversation_id), replayed: false };
     });
   }
@@ -1126,6 +1223,7 @@ export class CloudLocalCommandQueue {
       }
       this.materializeDirty();
     });
+    this.options.pendingActorsChanged?.();
   }
   durability(): { journalMode: "wal"; synchronous: "full" } {
     const journal = this.db.prepare("PRAGMA journal_mode").get() as { journal_mode: string };

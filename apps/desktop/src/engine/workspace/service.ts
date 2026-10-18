@@ -9,6 +9,9 @@ import type { CodeReviewAgentScope } from "../agents/code-review-tools";
 import { isGitReviewOperation } from "@zeros/protocol/git-review-actions";
 import { handleGitReviewOperation } from "../git/review-actions";
 import { assertDesignCheckoutReadable, readDesignCheckoutStatus } from "../design/checkout-status";
+import { DesignCatalogReader, DesignCatalogError, type DesignCatalogAdmission } from "../design/catalog";
+import { inspectDesignCatalog, readDesignCatalogMetadata } from "../design/catalog-storage";
+import type { DesignCatalogRead, DesignCatalogOwner } from "@zeros/protocol/design-catalog";
 import {
   reqStr,
   reqNum,
@@ -301,6 +304,8 @@ import {
   withDesignDirectoryNameLease,
 } from "../design/directory-registry";
 import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
+import { designSnapshotReadEpoch } from "../design/snapshot-epoch";
+import { noteDesignSnapshotDirectory } from "../design/change-poller";
 import { readDirectoryDesignLayout } from "../design/metadata";
 import { designRegistryAtGitRef } from "../design/metadata-git";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
@@ -1346,7 +1351,9 @@ interface DesignTerritoryTransitionTarget {
 
 export class WorkspaceService {
   private readonly resourceUsageSampler = new WorkspaceResourceUsageSampler();
+  private readonly catalogReader = new DesignCatalogReader();
   private readonly designRouteHost: DesignWorkspaceRouteHost = {
+    readDesignCatalog: (input, remote, admission, cloud) => this.readDesignCatalog(input, remote, admission, cloud),
     resolveDesignWorkspace: (workspaceId, remote) =>
       this.resolveDesignWorkspace(workspaceId, remote),
     resolveReadCwd: (workspaceId, remote) =>
@@ -1453,6 +1460,13 @@ export class WorkspaceService {
   private readonly designSnapshotRequestFlights = new Map<
     string,
     Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>
+  >();
+  /** The snapshot-read fence epoch each in-flight read started in. A request
+   * made after the watcher (or an agent edit) fenced the checkout never joins
+   * an older flight; see `design/snapshot-epoch.ts`. */
+  private readonly designSnapshotFlightEpochs = new WeakMap<
+    Promise<unknown>,
+    string
   >();
   /** One bounded workspace-wide ordering layer sits above DesignApi's
    * per-frame stacks. It lets Command-Z restore a deleted frame even when the
@@ -2109,15 +2123,23 @@ export class WorkspaceService {
     const registered = designDirectoryNameFor(workspace.path);
     const hasLiveMarker = (directory: string) =>
       fs.existsSync(designDocumentMetadataPath(workspace.path, directory));
-    const discovered = await discoverDesignDirectories(workspace.path);
+    // A live selected document wins over discovery below. Local snapshot and
+    // Foundation reads need only re-read that document, not walk every other
+    // directory in the repository. Explicit listing/selection still discovers
+    // new documents; cloud keeps its current admission sequence.
+    const selectedLocalDirectory = !this.options.primaryDesignWorkspace && workspace.placement !== "cloud"
+      ? pointer.configured && hasLiveMarker(pointer.directory) ? pointer.directory
+        : hasLiveMarker(registered) ? registered : null
+      : null;
+    const discovered = selectedLocalDirectory ? [] : await discoverDesignDirectories(workspace.path);
     const designDirectory =
-      pointer.configured && hasLiveMarker(pointer.directory)
+      selectedLocalDirectory ?? (pointer.configured && hasLiveMarker(pointer.directory)
         ? pointer.directory
         : hasLiveMarker(registered)
           ? registered
           : discovered.length === 1
             ? discovered[0]!
-            : null;
+            : null);
     if (!designDirectory) {
       throw new GitError({
         code: "VALIDATION_FAILED",
@@ -2205,12 +2227,16 @@ export class WorkspaceService {
     // can point synchronous document readers at different Design documents
     // under the same workspace root.
     const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}`;
+    const epoch = designSnapshotReadEpoch(root);
     const current = this.designSnapshotFlights.get(key);
-    if (current && !options.fresh) return current;
+    if (current && !options.fresh && this.joinsDesignSnapshotFlight(current, epoch))
+      return current;
     const request = (async () => {
       const snapshot = await readDesignWorkspaceSnapshot(root, {
         writeBack,
       });
+      // The directory this desktop's canvas shows, for prompt change polling.
+      if (!remote) noteDesignSnapshotDirectory(root, designDirectory);
       return {
         ...snapshot,
         directoryId: designDirectoryEntry(root, designDirectory)?.id,
@@ -2221,6 +2247,7 @@ export class WorkspaceService {
           : null,
       };
     })();
+    this.designSnapshotFlightEpochs.set(request, epoch);
     this.designSnapshotFlights.set(key, request);
     try {
       return await request;
@@ -2229,6 +2256,12 @@ export class WorkspaceService {
         this.designSnapshotFlights.delete(key);
       }
     }
+  }
+
+  /** Share an in-flight snapshot only within the fence epoch it started in. */
+  private joinsDesignSnapshotFlight(flight: Promise<unknown>, epoch: string): boolean {
+    const started = this.designSnapshotFlightEpochs.get(flight);
+    return started === undefined || started === epoch;
   }
 
   private async readDesignSnapshotRequest(
@@ -2240,8 +2273,9 @@ export class WorkspaceService {
     const key = `${workspace.id}\u0000${nodePath.resolve(workspace.path)}\u0000read\u0000${designDirectoryNameFor(workspace.path)}\u0000${
       hostLocalResources ? "host-resources" : "bridge-resources"
     }`;
+    const epoch = designSnapshotReadEpoch(workspace.path);
     const current = this.designSnapshotRequestFlights.get(key);
-    if (current) return current;
+    if (current && this.joinsDesignSnapshotFlight(current, epoch)) return current;
     const request = this.withDesignReadWorkspace(
       workspaceId,
       remote,
@@ -2253,6 +2287,7 @@ export class WorkspaceService {
           hostLocalResources,
         }),
     );
+    this.designSnapshotFlightEpochs.set(request, epoch);
     this.designSnapshotRequestFlights.set(key, request);
     try {
       return await request;
@@ -2261,6 +2296,30 @@ export class WorkspaceService {
         this.designSnapshotRequestFlights.delete(key);
       }
     }
+  }
+
+  retireDesignCatalog(connectionId: string): void {
+    this.catalogReader.retire(connectionId);
+  }
+
+  private readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission, cloud: boolean) {
+    const owner = (workspace: Workspace): DesignCatalogOwner => {
+      if (cloud && !admission.cloudOrganizationId) throw new DesignCatalogError("authority-lost");
+      return { workspaceId: workspace.id, directoryId: input.directoryId,
+        placement: cloud ? "cloud" : "local", organizationId: cloud ? admission.cloudOrganizationId! : workspace.organizationId ?? null };
+    };
+    return this.catalogReader.read(input, admission, {
+      open: () => this.withDesignReadWorkspace(input.workspaceId, remote, async ({ workspace, root, designDirectory }) => {
+        const metadata = await readDesignCatalogMetadata(root, designDirectory);
+        if (metadata.directoryId !== input.directoryId) throw new DesignCatalogError("stale");
+        return { ...metadata, owner: owner(workspace) };
+      }),
+      validate: snapshot => this.withDesignReadWorkspace(input.workspaceId, remote, async ({ workspace, root, designDirectory }) => {
+        const current = inspectDesignCatalog(root, designDirectory);
+        return current.layout.manifest.id === input.directoryId && current.binding === snapshot.binding &&
+          current.revision === snapshot.revision && JSON.stringify(owner(workspace)) === JSON.stringify(snapshot.owner);
+      }),
+    });
   }
 
   /** Canonicalize a pty/agent cwd token to its managed workspace id. The token
@@ -2467,6 +2526,7 @@ export class WorkspaceService {
       hostLocalResources?: boolean;
       gitMutationAdmitted?: boolean;
       designDirectoryResolved?: boolean;
+      catalogAdmission?: DesignCatalogAdmission;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
@@ -2661,6 +2721,7 @@ export class WorkspaceService {
         hostLocalResources,
         ...(humanActor ? { actor: humanActor, primaryRepositoryRoot: this.root } : {}),
         ...(cloudFiles ? { cloudFiles } : {}),
+        ...(opts.catalogAdmission ? { catalogAdmission: opts.catalogAdmission, cloudCatalog: cloudDesign } : {}),
       });
       if (op === "design.asset.upload") {
         if (!cloudDesign || !cloudFiles) throw new Error("Image upload requires the admitted cloud workspace.");

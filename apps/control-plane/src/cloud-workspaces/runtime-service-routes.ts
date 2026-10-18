@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
-import { isIP } from "node:net";
 import { HttpError } from "../authz.js";
+import { clientAddress } from "../client-address.js";
 import { rateLimit } from "../ratelimit.js";
 import { CloudWorkspaceAuthorizationError } from "./authorization.js";
 import { previewRequestFromEdge } from "./access.js";
@@ -13,10 +13,7 @@ import { CLOUD_RUNTIME_SERVICE_PATH, runtimeServiceToken, type DatabaseCloudRunt
 export function createCloudRuntimeServiceAuthorityRoutes(service: Pick<DatabaseCloudRuntimeServiceAccess, "check">): Hono {
   const routes = new Hono();
   routes.use(`${CLOUD_RUNTIME_SERVICE_PATH}/*`, async (c, next) => { c.header("Cache-Control", "no-store"); await next(); });
-  routes.use(`${CLOUD_RUNTIME_SERVICE_PATH}/*`, rateLimit("cloud-service-authority", 600, 60_000, c => {
-    const ip = c.req.header("X-Real-IP")?.trim() ?? c.req.header("CF-Connecting-IP")?.trim() ?? "";
-    return isIP(ip) ? ip : "unknown";
-  }));
+  routes.use(`${CLOUD_RUNTIME_SERVICE_PATH}/*`, rateLimit("cloud-service-authority", 600, 60_000, c => clientAddress(name => c.req.header(name))));
   routes.get(`${CLOUD_RUNTIME_SERVICE_PATH}/:kind/:grant`, async c => {
     if (!runtimeServiceToken(c.req.raw.headers)) return c.body(null, 401);
     const expiresAtMs = await service.check(previewRequestFromEdge(c.req.raw));

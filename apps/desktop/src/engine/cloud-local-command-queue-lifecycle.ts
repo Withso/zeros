@@ -4,6 +4,7 @@ import type Sqlite from "better-sqlite3";
 import { isDeepStrictEqual } from "node:util";
 import { canonicalCloudLocalCommandHistoryJson, canonicalCloudLocalCommandWriterSealDescriptor, CloudLocalCommandWriterSealSchema, CloudLocalCommandWriterSealAckSchema,
   cloudLocalCommandWriterSealAckMatchesSeal, type CloudLocalCommandWriterSeal, type CloudLocalCommandWriterSealAck } from "@zeros/protocol/cloud-local-mirror";
+import { CloudCheckpointSealRefusalSchema, type CloudCheckpointSealRefusal } from "@zeros/protocol/cloud-checkpoint-progress";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { isCloudLocalCommandQueue, type CloudLocalCommandQueue } from "./cloud-local-command-queue";
 import { openSqlite } from "./db/sqlite";
@@ -187,6 +188,7 @@ export class CloudLocalCommandWriterLifecycle {
     retireNative(): Promise<void>; waitForWork(): Promise<void>; freezeNormal(): void;
     request(seal: CloudLocalCommandWriterSeal, signal: AbortSignal): Promise<unknown>; timeoutMs?: number;
     onStage?(stage: "mirror_flush" | "seal_create" | "normal_freeze" | "seal_ack"): void;
+    onSealRefusal?(refusal: CloudCheckpointSealRefusal): void;
     onDeadline?(): void }): Promise<void> {
     this.begin();
     const timeoutMs = options.timeoutMs ?? 30_000;
@@ -231,9 +233,29 @@ export class CloudLocalCommandWriterLifecycle {
       options.freezeNormal(); this.frozenSealHash = seal.sha256;
       if (!this.acknowledged) {
         stage("seal_ack");
-        const reply = CloudLocalCommandWriterSealAckSchema.parse(await wait(options.request(seal,controller.signal)));
-        this.assertFrozenHead(seal);
-        this.acknowledge(reply);
+        let site: CloudCheckpointSealRefusal["site"] = "request";
+        try {
+          const result = await wait(options.request(seal,controller.signal));
+          site = "response";
+          const reply = CloudLocalCommandWriterSealAckSchema.parse(result);
+          site = "frozen_head";
+          this.assertFrozenHead(seal);
+          site = "ack_persistence";
+          this.acknowledge(reply);
+        } catch (error) {
+          let code: CloudCheckpointSealRefusal["code"] = site === "response" ? "command_response_invalid" : "unknown";
+          let httpClass: CloudCheckpointSealRefusal["httpClass"] = site === "request" ? "none" : "2xx";
+          try {
+            const parsed = CloudCheckpointSealRefusalSchema.shape.code.safeParse((error as { code?: unknown } | null)?.code);
+            if (parsed.success) code = parsed.data;
+            if (site === "request" && error instanceof CloudCommandRuntimeError) httpClass = error.httpClass;
+          } catch { /* Hostile error properties never escape into diagnostics. */ }
+          try {
+            options.onSealRefusal?.(CloudCheckpointSealRefusalSchema.parse({ version: 1,
+              site: code === "command_response_invalid" ? "response" : site, code, httpClass }));
+          } catch { /* Keep the original seal failure and all custody fences. */ }
+          throw error;
+        }
       }
     } finally { clearTimeout(timer); }
   }

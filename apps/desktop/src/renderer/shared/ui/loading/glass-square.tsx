@@ -50,6 +50,7 @@ import {
 } from "./glass-motion";
 import { LOADER_GRID as N } from "./loader-frame";
 import { startLoaderRun } from "./loader-loop";
+import { ActivityScope } from "./activity-scope";
 
 type GradientEnds = readonly [number, number, number, number];
 type GradientStop = { offset: number; color: string };
@@ -109,6 +110,7 @@ export function GlassTiles({
   reducedMotion: boolean;
   cell: number;
 }) {
+  const activityScope = React.useContext(ActivityScope);
   // The model outlives every effect run; React draws its starting square.
   const [flow] = React.useState(() => new GlassFlow(motion));
   const [start] = React.useState(() => ({
@@ -135,7 +137,7 @@ export function GlassTiles({
   React.useEffect(() => {
     const defs = defsRef.current;
     const host = glassRef.current;
-    if (reducedMotion || !defs || !host) return;
+    if (reducedMotion || !defs || !host || activityScope === false) return;
     const find = <T extends Element>(selector: string) => defs.querySelector<T>(selector);
     // Per layer, per tile: its group, holding the tile and its twin.
     const groups = LAYERS.map((k) => Array.from(find(`[data-glass-tiles="${k}"]`)?.children ?? []) as SVGGElement[]);
@@ -231,8 +233,20 @@ export function GlassTiles({
     };
 
     flow.start(performance.now());
+    const settle = () => {
+      flights.forEach(({ land }) => land());
+      timers.forEach((timer) => window.clearTimeout(timer));
+      timers.clear();
+      joints.forEach((holder) => holder?.replaceChildren());
+      if (activityScope === true) for (const glint of glints)
+        for (const animation of glint.getAnimations()) animation.cancel();
+    };
     const stop = startLoaderRun({
       host,
+      local: activityScope === true,
+      onActivity: activityScope === true ? active => {
+        if (active) flow.start(performance.now()); else settle();
+      } : undefined,
       tick: (now) => {
         const step = flow.step(now);
         if (step.swapped) swap();
@@ -243,11 +257,9 @@ export function GlassTiles({
     return () => {
       stop();
       // Land every tile where the model has it, so a later run resumes.
-      flights.forEach(({ land }) => land());
-      timers.forEach((timer) => window.clearTimeout(timer));
-      joints.forEach((holder) => holder?.replaceChildren());
+      settle();
     };
-  }, [flow, reducedMotion, cell]);
+  }, [flow, reducedMotion, cell, activityScope]);
 
   return (
     <>

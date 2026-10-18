@@ -153,7 +153,8 @@ d("cloud workspace setup material redemption", () => {
     await pool.end();
   });
 
-  async function seedMaterials(v4 = true, template = true, templateEnvironment: Record<string, string> = {}, repositorySettings?: Record<string, unknown>, checkoutSource: unknown = null, resumeExistingEnabled = false) {
+  type Canary = boolean | "other-account" | "other-organization" | "unconfigured";
+  async function seedMaterials(v4 = true, template = true, templateEnvironment: Record<string, string> = {}, repositorySettings?: Record<string, unknown>, checkoutSource: unknown = null, resumeExistingEnabled = false, canary: Canary = false) {
     await resetMigratedTestDatabase(pool);
     await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     // These tests isolate setup authority; funded compute leases have their
@@ -174,7 +175,9 @@ d("cloud workspace setup material redemption", () => {
       setupCommands: [{ command: "node --version", timeoutSeconds: 30 }],
     };
     await pool.query(`INSERT INTO users(id,email,display_name,staff_role)
-      VALUES ($1,$2,'Setup Materials Owner','developer')`, [accountUserId, accountEmail]);
+      VALUES ($1,$2,'Setup Materials Owner',$3)`, [accountUserId, accountEmail, canary ? null : "developer"]);
+    if (canary) await pool.query(`INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source)
+      VALUES($1,'pro','active',true,'operator')`, [accountUserId]);
     const setup: CloudWorkspaceSetupExecution = await withSystemTx(pool, async (tx) => {
 
       await tx.query(
@@ -261,6 +264,11 @@ d("cloud workspace setup material redemption", () => {
           canonical.repositoryId,
         ],
       );
+      if (canary) await tx.query(`INSERT INTO workspace_billing_epochs (
+        workspace_id,billing_epoch,org_id,billing_owner_user_id,
+        entitlement_scope,entitlement_plan,entitlement_revision,created_by)
+        SELECT $1,1,$2,$3,'account','pro',revision,$3 FROM cloud_workspace_pro_entitlement($3)`,
+        [workspaceId, organizationId, accountUserId]);
       await seedCanonicalCloudWorkspaceAuthority(tx, {
         workspaceId,
         organizationId,
@@ -436,6 +444,10 @@ d("cloud workspace setup material redemption", () => {
     service = new DatabaseCloudWorkspaceSetupMaterialService({
       pool,
       resumeExistingEnabled,
+      ...(canary && canary !== "unconfigured" ? { resumeExistingCanary: {
+        accountUserId: canary === "other-account" ? randomUUID() : accountUserId,
+        organizationId: canary === "other-organization" ? randomUUID() : organizationId,
+      } } : {}),
       setupAudience: SETUP_AUDIENCE,
       engineRegistrationAudience: ENGINE_AUDIENCE,
       engineHeartbeatAudience: HEARTBEAT_AUDIENCE,
@@ -493,16 +505,19 @@ d("cloud workspace setup material redemption", () => {
     await seedMaterials(true, true);
     const disabled = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness, resumeExistingVersion: 1 });
     expect(disabled).not.toHaveProperty("resume");
+    expect((await pool.query("SELECT subject->>'reuseDecision' AS decision FROM audit_log WHERE action='cloud_workspace.setup_materials_redeemed'")).rows).toEqual([{ decision: "disabled" }]);
     await seedMaterials(true, true, {}, undefined, null, true);
     const legacy = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
     expect(legacy).not.toHaveProperty("resume");
+    expect((await pool.query("SELECT subject->>'reuseDecision' AS decision FROM audit_log WHERE action='cloud_workspace.setup_materials_redeemed'")).rows).toEqual([{ decision: "not_negotiated" }]);
     await seedMaterials(true, true, {}, undefined, null, true);
     const first = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness, resumeExistingVersion: 1 });
     expect(first.resume).toEqual({ version: 1, mode: "prepare_generation", keySha256: expect.stringMatching(/^[a-f0-9]{64}$/), proofEpoch: null });
+    expect((await pool.query("SELECT subject->>'reuseDecision' AS decision FROM audit_log WHERE action='cloud_workspace.setup_materials_redeemed'")).rows).toEqual([{ decision: "no_completed_epoch" }]);
   });
 
-  async function completedResume() {
-    await seedMaterials(true, true, {}, undefined, null, true);
+  async function completedResume(canary: Canary = false) {
+    await seedMaterials(true, true, {}, undefined, null, true, canary);
     const prior = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness, resumeExistingVersion: 1 });
     await service.registerEngine({ token: prior.engine.registration.token, ...prior.execution,
       engineInstanceId: prior.engine.instanceId, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2,
@@ -537,6 +552,30 @@ d("cloud workspace setup material redemption", () => {
   }
 
   const resumeInput = () => ({ ...redemptionInput(), materialVersion: 2 as const, runtime: { ...runtimeWitness, supervisorSessionId: randomUUID() }, resumeExistingVersion: 1 as const });
+
+  it("reuses completed preparation for the pinned non-staff canary without granting staff authority", async () => {
+    const prior = await completedResume(true);
+    const next = await service.redeem(resumeInput());
+    expect(next.resume).toEqual({ ...prior.resume, mode: "resume_existing", proofEpoch: prior.engine.instanceId });
+    expect(prior.resume?.mode).toBe("prepare_generation");
+    expect(next.engine.instanceId).not.toBe(prior.engine.instanceId);
+    expect(next.engine.registration.token === prior.engine.registration.token).toBe(false);
+    expect((await pool.query("SELECT subject->>'reuseDecision' AS decision FROM audit_log WHERE action='cloud_workspace.setup_materials_redeemed' ORDER BY created_at,id")).rows).toEqual([{ decision: "no_completed_epoch" }, { decision: "candidate" }]);
+    expect((await pool.query("SELECT staff_role FROM users WHERE id=$1", [seed.execution.authority.accountUserId])).rows[0].staff_role).toBeNull();
+  });
+
+  it.each(["other-account", "other-organization", "unconfigured"] as const)("keeps non-staff preparation reuse closed for %s canaries", async canary => {
+    const prior = await completedResume(canary);
+    expect(prior).not.toHaveProperty("resume");
+    expect(await service.redeem(resumeInput())).not.toHaveProperty("resume");
+    expect((await pool.query("SELECT subject->>'reuseDecision' AS decision FROM audit_log WHERE action='cloud_workspace.setup_materials_redeemed' ORDER BY created_at,id")).rows).toEqual([{ decision: "ineligible" }, { decision: "ineligible" }]);
+  });
+
+  it.each(["disabled", "legacy"] as const)("keeps the %s reuse gate for the pinned non-staff canary", async gate => {
+    await seedMaterials(true, true, {}, undefined, null, gate !== "disabled", true);
+    expect(await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness,
+      ...(gate === "legacy" ? {} : { resumeExistingVersion: 1 as const }) })).not.toHaveProperty("resume");
+  });
 
   it("uses HU's completed epoch while enrolling a fresh engine and rejecting a duplicate wake", async () => {
     const prior = await completedResume();
@@ -574,10 +613,11 @@ d("cloud workspace setup material redemption", () => {
       return mint(input);
     });
     expect(await service.redeem(resumeInput())).not.toHaveProperty("resume");
+    expect((await pool.query("SELECT subject->>'reuseDecision' AS decision FROM audit_log WHERE action='cloud_workspace.setup_preparation_changed'")).rows).toEqual([{ decision: "changed_during_redemption" }]);
   });
 
-  it.each(["owner", "entitlement", "fence", "cancelled"])("never exchanges cached preparation for current %s authority", async change => {
-    await completedResume();
+  it.each(["owner", "entitlement", "fence", "cancelled"].flatMap(change => [false, true].map(canary => ({ change, canary }))))("never exchanges cached preparation for current $change authority (canary=$canary)", async ({ change, canary }) => {
+    await completedResume(canary);
     if (change === "owner") await pool.query("DELETE FROM team_members WHERE user_id=$1", [seed.execution.authority.accountUserId]);
     if (change === "entitlement") await pool.query("UPDATE organizations SET cloud_workspaces_allowed=false WHERE id=$1", [seed.execution.organizationId]);
     if (change === "fence") await pool.query("UPDATE cloud_workspace_setup_runs SET execution_fence=execution_fence+1 WHERE id=$1", [seed.execution.setupRunId]);
@@ -1038,6 +1078,42 @@ d("cloud workspace setup material redemption", () => {
       engineInstanceId: materials.engine.instanceId,
     })).rejects.toMatchObject({ code: "engine_heartbeat_rejected" });
     expect((await pool.query("SELECT lease_expires_at<now() AS expired FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0].expired).toBe(true);
+  });
+
+  it("never shortens a longer uplink-renewed lease with an HTTP heartbeat", async () => {
+    const materials = await service.redeem(redemptionInput());
+    const registration = await service.registerEngine({
+      actorProtocolVersion: 2, agentRuntime: { ...runtimeWitness, profile: "zeros-cloud-worker-v4" }, agentCustomizationVersion: 3,
+      token: materials.engine.registration.token,
+      workspaceId: seed.execution.workspaceId,
+      organizationId: seed.execution.organizationId,
+      generation: seed.execution.generation,
+      setupRunId: seed.execution.setupRunId,
+      executionFence: seed.execution.executionFence,
+      engineInstanceId: materials.engine.instanceId,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+    });
+    const beat = () => service.heartbeat({
+      token: registration.heartbeat.token,
+      workspaceId: seed.execution.workspaceId,
+      organizationId: seed.execution.organizationId,
+      generation: seed.execution.generation,
+      engineInstanceId: materials.engine.instanceId,
+    });
+    const lease = async () => (await pool.query<{ lease: Date }>(
+      "SELECT lease_expires_at AS lease FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0]!.lease.getTime();
+    // An uplink renewal (lease.v1) left the lease 30 minutes out.
+    await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp()+interval '30 minutes' WHERE id=$1",
+      [materials.engine.instanceId]);
+    const longer = await lease();
+    await expect(beat()).resolves.toMatchObject({ leaseExpiresAtMs: longer });
+    expect(await lease()).toBe(longer);
+    // A lease shorter than the HTTP lease still renews to 90 s.
+    await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp()+interval '5 seconds' WHERE id=$1",
+      [materials.engine.instanceId]);
+    const renewed = await beat();
+    expect(renewed.leaseExpiresAtMs).toBeGreaterThan(Date.now() + 80_000);
+    expect(renewed.leaseExpiresAtMs).toBeLessThan(Date.now() + 95_000);
   });
 
   it("persists local-command opt-in only with an attested supported registration",async()=>{

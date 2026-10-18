@@ -38,6 +38,8 @@ const REQUEST_LANES = Object.freeze({
   "ci:control-plane-db": ["control-plane", "control-plane-db"],
   "ci:packaging": ["packaging"],
   "ci:web": ["web"],
+  "ci:cloud-chaos": ["cloud-chaos"],
+  "ci:cloud-scale": ["cloud-scale"],
 });
 export const CI_LABELS = Object.freeze(Object.keys(REQUEST_LANES).sort());
 

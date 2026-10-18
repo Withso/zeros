@@ -201,6 +201,19 @@ malformed row
 });
 
 describe("ProcessMetricsTracker", () => {
+  it("attributes each renderer to its native owner without changing process identity", () => {
+    const owners = ["Main window", "Browser tab", "Browser preview", "Design capture", "Agent-control overlay"];
+    const input = captureInput(10_000, { main: 0, renderer: 0, sidecar: 0, terminal: 0, terminalChild: 0 });
+    input.electronProcesses = owners.map((owner, i) => Object.assign({
+      pid: 600 + i, type: "Tab", creationTime: 2_000 + i, workingSetBytes: 200 * KB,
+    }, { rendererOwner: owner }));
+    const snapshot = new ProcessMetricsTracker().capture(input);
+    const renderers = snapshot.processes.filter((row) => row.kind === "renderer");
+    console.info("Renderer attribution fixture", { attributed: renderers.filter((row) => row.name !== "Renderer").length });
+    expect(renderers.map((row) => row.name)).toEqual(owners.map((owner) => `Renderer — ${owner}`));
+    expect(renderers.map((row) => row.id)).toEqual(owners.map((_, i) => `${600 + i}:${2_000 + i}`));
+  });
+
   it("accounts for the exact app tree, logical Electron parents, PTY subtrees, and sampled peaks", () => {
     const tracker = new ProcessMetricsTracker();
     const first = tracker.capture(

@@ -251,6 +251,14 @@ import { useDesignFoundation } from "./state/use-design-foundation";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 import { DesignFrameRenderSurface } from "./design-frame-render-surface";
+import { useDesignSavedEditing } from "./design-saved-editing";
+import {
+  DesignAgentActivityChip,
+  DesignAgentDraftFrameOverlay,
+  DesignAgentDraftGhosts,
+  useDesignAgentDraftFrameFiles,
+  type DesignAgentRevealTarget,
+} from "./design-agent-drafts";
 import { errorMessage } from "./design-workspace-error";
 import {
   DESIGN_RESIZE_HANDLES,
@@ -973,6 +981,7 @@ export function DesignCanvas({
         owner: ReturnType<typeof captureDesignPageOwner>;
         selectionEvent: number | undefined;
         lifetime: number;
+        canvasLifetime: number;
         retired: boolean;
         runtime: ReturnType<typeof designFrameRuntime>;
         runtimeRevision: number | undefined;
@@ -982,6 +991,8 @@ export function DesignCanvas({
     | null
   >(null);
   const nudgeLifetimeRef = useRef(0);
+  const { session: savedEditingSession, state: savedEditingState, nativePixels } = useDesignSavedEditing();
+  const canvasLifetimeRef = useRef(0);
   const nudgeCommitRef = useRef<Promise<void> | null>(null);
   const [nudgeCommitVersion, setNudgeCommitVersion] = useState(0);
   const queuedNudgeRef = useRef<{
@@ -1072,12 +1083,20 @@ export function DesignCanvas({
   // Layers reads each open frame's runtime tree, so an open frame is a demand
   // for a live runtime exactly like the selection is.
   const layerDisclosures = useDesignWorkspaceDisclosure(workspaceId);
+  // A frame an agent is drafting ranks the same way: once the tool saves,
+  // its live document paints the result in place under the draft.
+  const agentDraftFiles = useDesignAgentDraftFrameFiles(
+    workspaceId,
+    snapshot?.directory,
+  );
   const layersOpenFiles = useMemo(
-    () =>
-      Object.entries(layerDisclosures)
+    () => [
+      ...Object.entries(layerDisclosures)
         .filter(([, disclosure]) => disclosure.treeExpanded)
         .map(([file]) => file),
-    [layerDisclosures],
+      ...agentDraftFiles,
+    ],
+    [agentDraftFiles, layerDisclosures],
   );
   const liveFrameFiles = useMemo(() => {
     const previous =
@@ -1376,6 +1395,64 @@ export function DesignCanvas({
     // Only a change of frame reveals; the camera and size are read at it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, liveFrameOwner, selectedFrame?.file, workspaceId]);
+
+  /** Show what an agent is writing without selecting it: one frame comes
+   * into view like a Layers selection, several are fitted, and a frame on
+   * another page switches to that page first. */
+  const pendingAgentRevealRef = useRef<DesignAgentRevealTarget | null>(null);
+  const revealAgentRects = useCallback(
+    (rects: readonly { x: number; y: number; width: number; height: number }[]) => {
+      if (!workspaceId || rects.length === 0) return;
+      if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
+      const bounds = viewportRef.current?.getBoundingClientRect();
+      if (!bounds) return;
+      const size = { width: bounds.width, height: bounds.height };
+      const insets = measureDesignCanvasInsets(viewportRef.current);
+      const current = wheelViewportRef.current ?? view;
+      const next =
+        rects.length === 1
+          ? designRevealRectViewport(current, size, rects[0]!, undefined, insets)
+          : fitDesignRects([...rects], size, undefined, insets);
+      if (!next) return;
+      cancelPendingWheelGesture();
+      paintDesignCanvasCamera(worldRef.current, next, false);
+      setViewport(workspaceId, next, canvasPageOwner);
+    },
+    [cancelPendingWheelGesture, canvasPageOwner, setViewport, view, workspaceId],
+  );
+  const agentRevealRects = useCallback(
+    (target: DesignAgentRevealTarget) => [
+      ...(snapshot?.frames ?? [])
+        .filter((frame) => target.files.includes(frame.file))
+        .map((frame) => ({ x: frame.x, y: frame.y, width: frame.width, height: frame.height })),
+      ...target.rects,
+    ],
+    [snapshot?.frames],
+  );
+  const revealAgentTarget = useCallback(
+    (target: DesignAgentRevealTarget) => {
+      if (!workspaceId) return;
+      if (target.pageId && view.activePageId && target.pageId !== view.activePageId) {
+        pendingAgentRevealRef.current = target;
+        useDesignWorkspaceUiStore
+          .getState()
+          .setActivePage(workspaceId, target.pageId, canvasDirectoryId);
+        return;
+      }
+      pendingAgentRevealRef.current = null;
+      revealAgentRects(agentRevealRects(target));
+    },
+    [agentRevealRects, canvasDirectoryId, revealAgentRects, view.activePageId, workspaceId],
+  );
+  // The switched-to page's frames arrive with its projection.
+  useLayoutEffect(() => {
+    const pending = pendingAgentRevealRef.current;
+    if (!active || !pending || pending.pageId !== view.activePageId) return;
+    const rects = agentRevealRects(pending);
+    if (rects.length === 0) return;
+    pendingAgentRevealRef.current = null;
+    revealAgentRects(rects);
+  }, [active, agentRevealRects, revealAgentRects, view.activePageId]);
 
   useLayoutEffect(() => {
     if (!active) return;
@@ -2299,7 +2376,7 @@ export function DesignCanvas({
         return true;
       }
       const runtimeState = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[selectedFrame.file];
-      const context = { owner: captureDesignPageOwner(workspaceId), selectionEvent: selection.selectionEvent, lifetime: nudgeLifetimeRef.current, retired: false, runtime, runtimeRevision: runtimeState?.snapshot?.revision, theme: selection.activeTheme };
+      const context = { owner: captureDesignPageOwner(workspaceId), selectionEvent: selection.selectionEvent, lifetime: nudgeLifetimeRef.current, canvasLifetime: canvasLifetimeRef.current, retired: false, runtime, runtimeRevision: runtimeState?.snapshot?.revision, theme: selection.activeTheme };
       if (roots.some((target) => !target.nodeId)) {
         const element = viewportRef.current?.querySelector<HTMLElement>(`[data-design-frame="${CSS.escape(selectedFrame.file)}"]`);
         if (!element) return false;
@@ -2429,6 +2506,7 @@ export function DesignCanvas({
               owner: captureDesignPageOwner(workspaceId),
               selectionEvent: designWorkspaceView(workspaceId).selectionEvent,
               lifetime: nudgeLifetimeRef.current,
+              canvasLifetime: canvasLifetimeRef.current,
               retired: false,
               runtime: designFrameRuntime(workspaceId, selectedFrame.file),
               runtimeRevision: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[selectedFrame.file]?.snapshot?.revision,
@@ -2467,10 +2545,12 @@ export function DesignCanvas({
       setSelectionOverlaySuppressed(false);
       return;
     }
-    gesture.retired ||= cancelled || designWorkspaceView(workspaceId).selectionEvent !== gesture.selectionEvent;
-    const isCurrent = () => !gesture.retired && gesture.lifetime === nudgeLifetimeRef.current &&
+    gesture.retired ||= cancelled || gesture.lifetime !== nudgeLifetimeRef.current || designWorkspaceView(workspaceId).selectionEvent !== gesture.selectionEvent;
+    const isCurrent = () => !gesture.retired && gesture.canvasLifetime === canvasLifetimeRef.current &&
       isCurrentDesignPageOwner(gesture.owner) &&
       designWorkspaceView(workspaceId).activeTheme === gesture.theme &&
+      gesture.runtime?.isActive?.() === true &&
+      designFrameRuntime(workspaceId, gesture.frame.file) === gesture.runtime &&
       useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[gesture.frame.file]?.snapshot?.revision === gesture.runtimeRevision;
     const frameKey = `${canvasDocumentOwner}\0${gesture.frame.file}`;
     const restore = async () => {
@@ -2518,7 +2598,8 @@ export function DesignCanvas({
       setNudgeCommitVersion((version) => version + 1);
     });
     nudgeCommitRef.current = pending;
-  }, [workspaceId, canvasDocumentOwner]);
+    savedEditingSession?.retain(pending);
+  }, [workspaceId, canvasDocumentOwner, savedEditingSession]);
 
   useEffect(() => {
     const queued = queuedNudgeRef.current;
@@ -2580,11 +2661,16 @@ export function DesignCanvas({
       const pageOwner = captureDesignPageOwner(workspaceId);
       const selectionEvent = designWorkspaceView(workspaceId).selectionEvent;
       const lifetime = ++nudgeLifetimeRef.current;
+      const canvasLifetime = canvasLifetimeRef.current;
+      const theme = designWorkspaceView(workspaceId).activeTheme;
+      let completed = false;
       const ownerIsCurrent = () =>
         canvasDocumentOwnerRef.current === canvasDocumentOwner &&
         designWorkspaceView(workspaceId).directoryId === canvasDirectoryId &&
-        isCurrentDesignPageOwner(pageOwner) && nudgeLifetimeRef.current === lifetime &&
-        designWorkspaceView(workspaceId).selectionEvent === selectionEvent;
+        isCurrentDesignPageOwner(pageOwner) && canvasLifetimeRef.current === canvasLifetime &&
+        designWorkspaceView(workspaceId).activeTheme === theme &&
+        (completed || (nudgeLifetimeRef.current === lifetime &&
+          designWorkspaceView(workspaceId).selectionEvent === selectionEvent));
       const previousPreview = frameGeometryPreviewsRef.current.get(previewKey);
       const start = previousPreview?.geometry ?? frameGeometry(frame);
       const preview: FrameGeometryPreview = { geometry: start, settled: false };
@@ -2924,7 +3010,9 @@ export function DesignCanvas({
           if (ownerIsCurrent() && element.isConnected)
             paintFrameGeometry(element, geometry);
         };
+        completed = true;
         preview.commit = persist();
+        savedEditingSession?.retain(preview.commit);
         void preview.commit
           .then((confirmed) => settle(confirmed ? frameGeometry(confirmed) : latest))
           .catch((geometryError) => {
@@ -2990,6 +3078,7 @@ export function DesignCanvas({
       folder,
       liveDesignZoom,
       publishSelection,
+      savedEditingSession,
       snapshot?.frames,
       workspaceId,
     ],
@@ -4589,6 +4678,7 @@ export function DesignCanvas({
           gestureCancelRef.current?.();
           const lifetime = ++nudgeLifetimeRef.current;
           const cancel = startDesignLayoutDrag({
+            saving: (save) => savedEditingSession?.retain(save),
             event,
             workspaceId,
             frame,
@@ -5085,6 +5175,7 @@ export function DesignCanvas({
       liveDesignZoom,
       parentOutlineDetails,
       peerGeometryDetails,
+      savedEditingSession,
       selectedNodeDetailsList,
       snapshot?.frames,
       selectedFrameHasFlow,
@@ -5560,6 +5651,7 @@ export function DesignCanvas({
       inlineTextPreviewRef.current.pending = null;
       renameSettledRef.current = true;
       hitStackGenerationRef.current += 1;
+      canvasLifetimeRef.current += 1;
       nudgeLifetimeRef.current += 1;
       finishNodeNudge(true);
       setInlineTextEdit(null);
@@ -6943,8 +7035,9 @@ export function DesignCanvas({
                       highResolutionTiles.get(frame.file) ?? null
                     }
                     highResolutionDisabled={
-                      inlineTextEdit?.frame === frame.file
+                      inlineTextEdit?.frame === frame.file || savedEditingState > 0 && nativePixels
                     }
+                    designDirectory={snapshot.directory}
                   />
                 ) : (
                   <div className="bg-bg2 text-muted-fg flex size-full items-center justify-center text-xs">
@@ -6952,11 +7045,23 @@ export function DesignCanvas({
                   </div>
                 )}
 
+                {workspaceId && frame.kind !== "text" ? (
+                  <DesignAgentDraftFrameOverlay
+                    workspaceId={workspaceId}
+                    directory={snapshot.directory}
+                    frame={frame}
+                    live={liveFrameFiles.has(frame.file)}
+                    active={active}
+                    theme={frameTheme}
+                  />
+                ) : null}
+
                 {secondaryElements.map(details => (
                   <div key={details.oid} data-design-secondary-selection={details.oid}
                     className="zd-design-selection-outline pointer-events-none absolute z-1 outline"
                     style={{ ...designSelectionOverlayStyle(designSelectionOverlayFrame(designSelectionBox(details))), outlineWidth: designCanvasScreenPixels(2) }} />
                 ))}
+
                 {multiSelectionBounds ? (
                   <div
                     data-design-multi-selection=""
@@ -7415,6 +7520,17 @@ export function DesignCanvas({
               </article>
             );
           })}
+          {workspaceId && snapshot ? (
+            <DesignAgentDraftGhosts
+              workspaceId={workspaceId}
+              directory={snapshot.directory}
+              pages={snapshot.pages}
+              activePageId={view.activePageId}
+              frames={snapshot.frames}
+              active={active}
+              theme={frameTheme}
+            />
+          ) : null}
           {inlineTextEdit?.kind === "new" &&
           inlineTextEdit.owner === "canvas" &&
           !inlineTextEdit.frame ? (
@@ -7716,6 +7832,19 @@ export function DesignCanvas({
             </DesignToolbarButton>
           </Toolbar>
         </div>
+
+        {workspaceId && snapshot ? (
+          <DesignAgentActivityChip
+            workspaceId={workspaceId}
+            directory={snapshot.directory}
+            pages={snapshot.pages}
+            activePageId={view.activePageId}
+            frames={snapshot.frames}
+            active={active}
+            motionOpen={motionTimelineOpen}
+            onReveal={revealAgentTarget}
+          />
+        ) : null}
 
         <DesignThemeEditor
           workspaceId={workspaceId}

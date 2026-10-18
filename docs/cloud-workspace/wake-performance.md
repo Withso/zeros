@@ -85,8 +85,13 @@ ownership repair is part of readiness and cannot be deferred as optional work.
 
 `CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED` defaults true only when
 `RAILWAY_ENVIRONMENT_NAME` resolves to Alpha. Explicit false disables it;
-enabling it elsewhere is rejected. Materials still require a live staff account,
-Boat, qualified v4 pin and negotiated `X-Zeros-Resume-Existing: 1`. Old material
+enabling it elsewhere is rejected. The rollout admits live staff accounts and
+the exact configured Alpha zeros-dev account plus organization. The canary is
+deliberately non-staff and still needs ordinary Pro admission; the exception
+grants no staff authority and admits no other non-staff account or organization.
+Move the general rollout to per-organization flags when that control-plane
+rollout mechanism lands. Materials still require Boat, a qualified v4 pin and
+negotiated `X-Zeros-Resume-Existing: 1`. Old material
 negotiation uses full preparation. Code default is not proof of a deployed value.
 
 The preparation key binds organization/workspace/generation/account, provider/
@@ -117,6 +122,27 @@ restored bytes. Future qualification caching needs exact signed/root-controlled
 artifact/base/profile evidence, revocation/expiry and tested invalidation.
 Preparation reuse is already implemented; qualification reuse remains a
 [follow-up](warm-pool.md), not permission to skip launch confinement.
+
+### Retained setup evidence
+
+An authorized status read may opt into `setupEvidence=true`. It returns the
+current generation, setup run/fence, runtime ID, queue/start/completion times,
+and at most five claim receipts. Longer histories retain the first failed claim
+and the latest four, with `truncated=true`. Each receipt can include bounded
+stage clocks, the control-plane reuse decision, the helper's closed preparation
+miss and last readiness probe, a closed startup failure, and engine-row creation
+and registration timestamps. The evidence is observational; registration alone
+does not establish readiness, and row creation does not establish process spawn.
+
+Success and failure audits retain clocks before setup rows are purged. The
+zeros-dev harness captures the opt-in document in its signed receipt before
+deletion. Clocks keep their source and monotonic offsets; UTC correlates clocks
+but does not synchronize them. Attester spans overlap their parent setup span
+and must not be added to it. Old helpers keep the previous envelope; a new helper
+emits version 5 only after `X-Zeros-Setup-Observations: 1` and timings have both
+been acknowledged. Malformed optional telemetry is discarded without changing
+the readiness predicate. Existing runtime pins need an ordinary qualified runtime
+upgrade to gain the helper observations.
 
 ## Desktop and scheduler behavior
 

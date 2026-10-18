@@ -200,6 +200,7 @@ export function isDesignWorkspaceSnapshotWire(
 ): value is DesignWorkspaceSnapshotWire {
   const snapshot = value as DesignWorkspaceSnapshotWire | undefined;
   if (!snapshot || !validProtocolCapability(snapshot)) return false;
+  if (Object.hasOwn(snapshot, "nextCursor") || Object.hasOwn(snapshot, "coverage")) return false;
   if (snapshot.pages !== undefined) {
     if (!designPageCatalogSchema.safeParse(snapshot.pages).success) return false;
     const files = new Set<string>();

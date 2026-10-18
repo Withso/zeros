@@ -130,4 +130,22 @@ describe("stabilizeTurns", () => {
     const previous: Turn[] = [turn(null, [event])];
     expect(stabilizeTurns(previous, [turn(null, [event])])).toBe(previous);
   });
+
+  it("retains earlier steer segments and their history when another steer and streamed output arrive", () => {
+    const opening = { ...text("opening", "Request"), role: "user" as const };
+    const firstSteer = { ...text("steer-1", "First steer"), role: "user" as const, steeredTurnId: opening.id };
+    const secondSteer = { ...text("steer-2", "Second steer"), role: "user" as const, steeredTurnId: opening.id };
+    const messages = [opening, text("first", "First work"), firstSteer, text("second", "Second work")];
+    const previous = groupMessagesIntoTurns(messages);
+    const steered = stabilizeTurns(previous, groupMessagesIntoTurns([...messages, secondSteer]));
+    const streamed = stabilizeTurns(steered, groupMessagesIntoTurns([...messages, secondSteer, text("third", "New work")]));
+
+    for (const next of [steered, streamed]) {
+      expect(next[0]).toBe(previous[0]);
+      expect(next[1]).toBe(previous[1]);
+      expect(next[1].providerEvents).toBe(previous[1].providerEvents);
+    }
+    expect(previous[1].providerEvents.map(event => event.id)).toEqual(["first", "second"]);
+    expect(streamed[2].providerEvents.map(event => event.id)).toEqual(["first", "second", "third"]);
+  });
 });

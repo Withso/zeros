@@ -40,18 +40,21 @@ export function designNodeMovementStyles(
     if (Number.isFinite(value)) return value;
     return relative ? -(parseFloat(details.styles[end] ?? "0") || 0) : 0;
   };
-  return preserveDesignLayoutPins(
-    details,
-    {
-      position:
-        details.styles.position === "static"
-          ? "relative"
-          : details.styles.position || "relative",
-      left: `${offset("left", "right") + local.x}px`,
-      top: `${offset("top", "bottom") + local.y}px`,
-    },
-    true,
-  );
+  const styles: Record<string, string> = {
+    position:
+      details.styles.position === "static"
+        ? "relative"
+        : details.styles.position || "relative",
+    left: `${offset("left", "right") + local.x}px`,
+    top: `${offset("top", "bottom") + local.y}px`,
+  };
+  if (relative) {
+    for (const [property, delta] of [["right", local.x], ["bottom", local.y]] as const) {
+      const value = parseFloat(details.styles[property] ?? "");
+      if (Number.isFinite(value)) styles[property] = `${value - delta}px`;
+    }
+  }
+  return preserveDesignLayoutPins(details, styles, true);
 }
 
 function matrix(value: DesignRuntimeCoordinateSpace | null) {

@@ -952,6 +952,54 @@ d("cloud workspace API contracts", () => {
     return { response, body, key };
   };
 
+  it("retains bounded exact-generation setup clocks and failure receipts only on an authorized evidence read", async () => {
+    await seedV4(); await seedTemplate();
+    const created = await createWorkspace(), id = created.body.workspace.id, runId = randomUUID();
+    const timings = { version: 1, clocks: [{ source: "setup", clockId: randomUUID(), startedAt: "2026-10-06T00:00:00.000Z",
+      spans: [{ stage: "engine_readiness", startMs: 10, endMs: 90_010, outcome: "failed" }] }] };
+    const observations = { version: 1, preparation: "key_changed", readiness: "not_ready" };
+    await withSystemTx(pool, async tx => {
+      await tx.query(`INSERT INTO cloud_workspace_setup_runs(id,workspace_id,generation,org_id,attempt,state,claim_count,execution_fence,
+        lease_owner,lease_expires_at,started_at,last_heartbeat_at) VALUES($1,$2,1,$3,2,'running',2,2,'fixture',now()+interval '5 minutes',now(),now())`, [runId,id,orgId]);
+      for (const scope of [{ workspaceId: id, generation: 1 }, { workspaceId: id, generation: 2 }, { workspaceId: randomUUID(), generation: 1 }])
+        await tx.query(`INSERT INTO audit_log(org_id,action,subject) VALUES($1,'cloud_workspace.setup_claim_failed',$2)`, [orgId, JSON.stringify({
+          ...scope, setupRunId: runId, executionFence: 1, claimCount: 1, timings, observations,
+          diagnostic: { code: "setup_engine_readiness_failed", phase: "engine_readiness", retryable: true, errorClass: "unknown",
+            setup: { version: 1, phase: "engine_readiness", engineStartup: { phase: "boot_durability", name: "Error", code: "EIO", errno: -5 } } },
+          private: "synthetic-private-diagnostic",
+        })]);
+    });
+    expect((await (await request(`/v1/cloud-workspaces/${id}?setupProgress=true`)).json()).setupEvidence).toBeUndefined();
+    const response = await request(`/v1/cloud-workspaces/${id}?setupProgress=true&setupEvidence=true`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.setupEvidence).toMatchObject({ version: 1, workspaceId: id, generation: 1, setupRunId: runId,
+      attempt: 2, claimCount: 2, executionFence: 2, truncated: false, claims: [
+        { executionFence: 1, claimCount: 1, outcome: "failed", timings, observations, failure: {
+          code: "setup_engine_readiness_failed", phase: "engine_readiness", retryable: true,
+          engineStartup: { phase: "boot_durability", name: "Error", code: "EIO", errno: -5 },
+        } }, { executionFence: 2, claimCount: 2, outcome: "started" },
+      ] });
+    expect(JSON.stringify(body)).not.toContain("synthetic-private");
+    expect((await (await request(`/v1/organizations/${orgId}/cloud-workspaces/${id}?setupProgress=true&setupEvidence=true`)).json()).setupEvidence).toEqual(body.setupEvidence);
+    await withSystemTx(pool, async tx => {
+      await tx.query("UPDATE cloud_workspace_setup_runs SET execution_fence=8,claim_count=8 WHERE id=$1", [runId]);
+      for (let fence = 3; fence < 8; fence++) await tx.query(`INSERT INTO audit_log(org_id,action,subject)
+        VALUES($1,'cloud_workspace.setup_claim_failed',$2)`, [orgId, JSON.stringify({ workspaceId: id, generation: 1,
+          setupRunId: runId, executionFence: fence, claimCount: fence,
+          diagnostic: { code: "setup_engine_readiness_failed", phase: "engine_readiness", retryable: true, errorClass: "unknown" },
+        })]);
+      const { readCloudWorkspaceSetupEvidence } = await import("./setup-evidence.js");
+      expect(await readCloudWorkspaceSetupEvidence(tx, { organizationId: orgId, workspaceId: id, generation: 1, setupRunId: runId, executionFence: 2 })).toBeNull();
+    });
+    const bounded = (await (await request(`/v1/cloud-workspaces/${id}?setupEvidence=true`)).json()).setupEvidence;
+    expect(bounded.truncated).toBe(true);
+    expect(bounded.claims.map((claim: { executionFence: number }) => claim.executionFence)).toEqual([1,5,6,7,8]);
+    expect(bounded.claims[0]).toMatchObject({ timings, observations, failure: body.setupEvidence.claims[0].failure });
+    actor = outsider;
+    expect((await request(`/v1/cloud-workspaces/${id}?setupEvidence=true`)).status).toBe(404);
+  });
+
   it("adds closed current-generation setup progress only on an authorized opt-in status read",async()=>{
     await seedV4();await seedTemplate();
     const created=await createWorkspace();expect(created.response.status).toBe(202);
@@ -1539,6 +1587,7 @@ d("cloud workspace API contracts", () => {
     await expect(listed.json()).resolves.toEqual({
       workspaces: [],
       nextCursor: null,
+      catalogVersion: expect.any(Number),
     });
 
     const direct = await request(

@@ -2155,6 +2155,90 @@ describe("design workspace cache", () => {
     ).toEqual([]);
   });
 
+  it("never lets a runtime audit's direct read replace a newer agent save", async () => {
+    // A frame becomes ready, so its audit reconciles with a direct aggregate
+    // read. While that read is in flight an agent saves another file and the
+    // watcher invalidates the snapshot. The older read must not publish over
+    // that invalidation, or the saved step stays invisible until a later event.
+    const workspaceId = "ws_design";
+    const current = snapshot();
+    designWorkspaceSnapshotCache.setData(workspaceId, current);
+    const audited = current.frames[0]!;
+    let finishRead!: (value: DesignWorkspaceSnapshotWire) => void;
+    platformMocks.setRuntimeAudit.mockResolvedValue(undefined);
+    platformMocks.readSnapshot.mockImplementationOnce(
+      () =>
+        new Promise<DesignWorkspaceSnapshotWire>((resolve) => {
+          finishRead = resolve;
+        }),
+    );
+    const reconcile = reconcileDesignWorkspaceRuntimeAudit({
+      workspaceId,
+      frame: audited.file,
+      sourceVersion: audited.sourceVersion,
+      warnings: [],
+    });
+    await vi.waitFor(() =>
+      expect(platformMocks.readSnapshot).toHaveBeenCalledTimes(1),
+    );
+    applyDesignWorkspaceRefreshVersion(workspaceId, 1);
+    applyDesignWorkspaceRefreshVersion(workspaceId, 2);
+    // The read began before the save, so it lacks the agent's new frame.
+    finishRead(snapshot());
+    await reconcile;
+
+    const saved = snapshot([{ file: "home.html" }, { file: "card.html" }]);
+    platformMocks.readSnapshot.mockResolvedValueOnce(saved);
+    const revalidated = await designWorkspaceSnapshotCache.load(
+      workspaceId,
+      () => fetchDesignWorkspaceSnapshot(workspaceId),
+      { maxAgeMs: 10_000 },
+    );
+    expect(platformMocks.readSnapshot).toHaveBeenCalledTimes(2);
+    expect(revalidated.frames.map((frame) => frame.file)).toEqual([
+      "home.html",
+      "card.html",
+    ]);
+  });
+
+  it("re-reads instead of publishing an audit read older than a published reply", async () => {
+    const workspaceId = "ws_design";
+    const current = snapshot();
+    designWorkspaceSnapshotCache.setData(workspaceId, current);
+    const audited = current.frames[0]!;
+    let finishRead!: (value: DesignWorkspaceSnapshotWire) => void;
+    platformMocks.setRuntimeAudit.mockResolvedValue(undefined);
+    platformMocks.readSnapshot.mockImplementationOnce(
+      () =>
+        new Promise<DesignWorkspaceSnapshotWire>((resolve) => {
+          finishRead = resolve;
+        }),
+    );
+    const reconcile = reconcileDesignWorkspaceRuntimeAudit({
+      workspaceId,
+      frame: audited.file,
+      sourceVersion: audited.sourceVersion,
+      warnings: [],
+    });
+    await vi.waitFor(() =>
+      expect(platformMocks.readSnapshot).toHaveBeenCalledTimes(1),
+    );
+    // A confirmed reply publishes a newer aggregate while the read runs.
+    const published = snapshot([{ file: "home.html" }, { file: "card.html" }]);
+    designWorkspaceSnapshotCache.setData(workspaceId, published);
+    const invalidation =
+      designWorkspaceSnapshotCache.getSnapshot(workspaceId).invalidationVersion;
+    finishRead(snapshot());
+    await reconcile;
+
+    const after = designWorkspaceSnapshotCache.getSnapshot(workspaceId);
+    expect(after.data?.frames.map((frame) => frame.file)).toEqual([
+      "home.html",
+      "card.html",
+    ]);
+    expect(after.invalidationVersion).toBe(invalidation + 1);
+  });
+
   it("does not reuse tokens from another token source generation or theme value", () => {
     const previous = snapshot();
     const next = snapshot();

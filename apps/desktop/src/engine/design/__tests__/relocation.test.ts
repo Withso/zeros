@@ -1,15 +1,18 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as storage from "../metadata-storage";
 import * as transactions from "../document-transactions";
+import * as preparation from "../render-preparation";
+import { recoverWorkspaceDesignMetadata } from "../metadata";
 import {
   captureDesignFrameRestorePoint,
   commitDesignWebDocumentState,
   createDesignFrame,
   DESIGN_DIRECTORY_NAME,
+  designTransactionJournalPath,
   listDesignFrames,
   readDesignFrameRenderIdentity,
   readDesignWebDocumentState,
@@ -149,6 +152,105 @@ describe("bounded source-preserving relocation", () => {
     expect(await listDesignFrames(workspace)).toHaveLength(1);
   });
 
+  it.each(["linked", "imported"])("refuses a %s dependency changed while preparing the semantic admission journal", async (kind) => {
+    const { source, file, input } = await fixture();
+    const css = path.join(workspace, ...(kind === "linked" ? [DESIGN_DIRECTORY_NAME] : []), "context.css");
+    const linked = kind === "linked" ? source.replace("<head>", '<head><link rel="stylesheet" href="../context.css">') : source;
+    if (kind === "imported") {
+      const canvasFile = path.join(workspace, DESIGN_DIRECTORY_NAME, "meta/canvas.json");
+      const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+      canvas.styles = [{ id: "context", kind: "css", path: "context.css" }];
+      await writeFile(canvasFile, JSON.stringify(canvas));
+    }
+    await writeFile(css, ".child{color:red}");
+    await writeFile(file, linked);
+    const current = await readDesignWebDocumentState(workspace, input.frame);
+    const identity = await readDesignFrameRenderIdentity(workspace, input.frame);
+    const next = createDesignWebDocumentState({ ...current, files: { ...current.files, [input.frame]: linked.replace("margin:20px", "margin:21px") } });
+    const write = storage.writePrivateDesignState;
+    let injected = false;
+    vi.spyOn(storage, "writePrivateDesignState").mockImplementation((...args) => {
+      if (!injected && args[1] === path.basename(designTransactionJournalPath(workspace))) {
+        const options = args[3];
+        return write(args[0], args[1], args[2], {
+          temporaryToken: "b".repeat(32),
+          ...options,
+          afterPrepare: () => {
+            options?.afterPrepare?.();
+            injected = true;
+            writeFileSync(css, ".child{color:blue}");
+          },
+        });
+      }
+      return write(...args);
+    });
+    await expect(commitDesignWebDocumentState(workspace, input.frame, current.revision, next, { movementGuard: { sourceVersion: identity.sourceVersion } })).rejects.toThrow();
+    expect(injected).toBe(true);
+    expect(await readFile(file, "utf8")).toBe(linked);
+    expect(existsSync(designTransactionJournalPath(workspace))).toBe(false);
+  });
+
+  it.each(["between-files", "before-publish"])("retains a concurrent source save at the %s publication boundary", async (boundary) => {
+    const { source, file, input } = await fixture();
+    const concurrent = `${source}<!-- legitimate-concurrent-editor-save -->`;
+    const write = storage.atomicWriteDesignStorageFile;
+    let injected = false;
+    vi.spyOn(storage, "atomicWriteDesignStorageFile").mockImplementation((...args) => {
+      if (boundary === "before-publish" && !injected && args[0] === workspace && args[1] === `${DESIGN_DIRECTORY_NAME}/${input.frame}`) {
+        const options = args[4];
+        return write(args[0], args[1], args[2], args[3], {
+          temporaryToken: "a".repeat(32),
+          ...options,
+          afterPrepare: () => {
+            options?.afterPrepare?.();
+            injected = true;
+            writeFileSync(file, concurrent);
+          },
+        });
+      }
+      const result = write(...args);
+      if (boundary === "between-files" && !injected && args[0] === workspace && args[1].endsWith("/canvas.json")) {
+        injected = true;
+        writeFileSync(file, concurrent);
+      }
+      return result;
+    });
+    await expect(transferDesignNode(workspace, input)).rejects.toThrow(/rollback needs recovery/);
+    expect(injected).toBe(true);
+    expect(await readFile(file, "utf8")).toBe(concurrent);
+    const root = storage.designPrivateStorageDirectory(workspace);
+    const journals = (await readdir(root)).filter((name) => /^metadata-[a-f0-9]+\.json$/.test(name));
+    expect(journals).toHaveLength(1);
+    const inverse = await readFile(path.join(root, journals[0]!), "utf8");
+    expect(JSON.parse(inverse).changes).toEqual(expect.arrayContaining([expect.objectContaining({ after: source })]));
+    expect(() => recoverWorkspaceDesignMetadata(workspace)).toThrow(/retained recovery record/);
+    expect(await readFile(file, "utf8")).toBe(concurrent);
+    expect(await readFile(path.join(root, journals[0]!), "utf8")).toBe(inverse);
+  });
+
+  it("retains the guarded inverse when a failed second write meets a concurrent edit", async () => {
+    const { source, file, input } = await fixture();
+    const write = storage.atomicWriteDesignStorageFile;
+    const concurrent = `${source}<!-- concurrent-after-first-source-write -->`;
+    let writes = 0;
+    vi.spyOn(storage, "atomicWriteDesignStorageFile").mockImplementation((...args) => {
+      if (args[0] === workspace && args[1].endsWith(".html") && ++writes === 2) {
+        writeFileSync(file, concurrent);
+        throw new Error("Injected destination write failure");
+      }
+      return write(...args);
+    });
+    await expect(transferDesignNode(workspace, input)).rejects.toThrow(/rollback needs recovery/);
+    expect(await readFile(file, "utf8")).toBe(concurrent);
+    const root = storage.designPrivateStorageDirectory(workspace);
+    const journals = (await readdir(root)).filter((name) => /^metadata-[a-f0-9]+\.json$/.test(name));
+    expect(journals).toHaveLength(1);
+    const inverse = await readFile(path.join(root, journals[0]!), "utf8");
+    expect(JSON.parse(inverse).changes).toEqual(expect.arrayContaining([expect.objectContaining({ after: source })]));
+    expect(() => recoverWorkspaceDesignMetadata(workspace)).toThrow(/retained recovery record/);
+    expect(await readFile(path.join(root, journals[0]!), "utf8")).toBe(inverse);
+  });
+
   it("rechecks stylesheet identity after preparing all source changes", async () => {
     const { source, file, input } = await fixture();
     const linked = source.replace("<head>", '<head><link rel="stylesheet" href="../tokens.css">');
@@ -166,5 +268,74 @@ describe("bounded source-preserving relocation", () => {
     expect(changed).toBe(true);
     expect(await readFile(file, "utf8")).toBe(linked);
     expect(await listDesignFrames(workspace)).toHaveLength(1);
+  });
+
+  it.each([1, 2])("rejects a source dependency changed at destination identity read %s", async (injectAt) => {
+    const from = await createDesignFrame(workspace);
+    const to = await createDesignFrame(workspace);
+    const source = '<!doctype html><html><head><link rel="stylesheet" href="../from.css"></head><body style="margin:0"><main data-oid="source-root" style="position:relative;width:600px;height:400px"><div data-oid="child" class="child" style="position:absolute;left:20px;top:30px;width:100px;height:80px">Keep</div></main></body></html>';
+    const target = '<!doctype html><html><head><link rel="stylesheet" href="../to.css"></head><body style="margin:0"><main data-oid="target-root" style="position:relative;width:600px;height:400px"></main></body></html>';
+    const directory = path.join(workspace, DESIGN_DIRECTORY_NAME);
+    const css = path.join(directory, "from.css");
+    await writeFile(path.join(directory, from.file), source);
+    await writeFile(path.join(directory, to.file), target);
+    await writeFile(css, ".child{color:red}");
+    await writeFile(path.join(directory, "to.css"), ".child{color:red}");
+    const fromIdentity = await readDesignFrameRenderIdentity(workspace, from.file);
+    const toIdentity = await readDesignFrameRenderIdentity(workspace, to.file);
+    const fromPoint = await captureDesignFrameRestorePoint(workspace, from.file);
+    const toPoint = await captureDesignFrameRestorePoint(workspace, to.file);
+    const prepare = preparation.prepareFrameRenderSource;
+    let reads = 0, injected = false;
+    vi.spyOn(preparation, "prepareFrameRenderSource").mockImplementation(async (...args) => {
+      const result = await prepare(...args);
+      if (args[1] === target && args[7]?.identityOnly && ++reads === injectAt) {
+        injected = true;
+        await writeFile(css, ".child{color:blue}");
+      }
+      return result;
+    });
+    await expect(transferDesignNode(workspace, {
+      frame: from.file, sourceVersion: fromIdentity.sourceVersion, nodeId: "child",
+      destinationFrame: to.file, destinationSourceVersion: toIdentity.sourceVersion, parentId: "target-root",
+      relocation: { width: 100, height: 80, matrix: [1, 0, 0, 1, 20, 30], inheritedStyles: { color: "red" } },
+      movementGuard: { sourceVersion: fromIdentity.sourceVersion, geometry: fromPoint.geometry },
+      destinationMovementGuard: { sourceVersion: toIdentity.sourceVersion, geometry: toPoint.geometry },
+      geometry: toPoint.geometry,
+    })).rejects.toThrow(/changed/);
+    expect(injected).toBe(true);
+    expect(await readFile(path.join(directory, from.file), "utf8")).toBe(source);
+    expect(await readFile(path.join(directory, to.file), "utf8")).toBe(target);
+    expect(await readFile(css, "utf8")).toBe(".child{color:blue}");
+  });
+
+  it("rechecks cached dependencies at the lifecycle journal publication boundary", async () => {
+    const { source, file, input } = await fixture();
+    const css = path.join(workspace, DESIGN_DIRECTORY_NAME, "context.css");
+    const linked = source.replace("<head>", '<head><link rel="stylesheet" href="../context.css">');
+    await writeFile(css, ".child{color:red}");
+    await writeFile(file, linked);
+    const identity = await readDesignFrameRenderIdentity(workspace, input.frame);
+    const write = storage.writePrivateDesignState;
+    let injected = false;
+    vi.spyOn(storage, "writePrivateDesignState").mockImplementation((...args) => {
+      if (!injected && /^metadata-[a-f0-9]+\.json$/.test(args[1])) {
+        const options = args[3];
+        return write(args[0], args[1], args[2], {
+          temporaryToken: "c".repeat(32),
+          ...options,
+          afterPrepare: () => {
+            options?.afterPrepare?.();
+            injected = true;
+            writeFileSync(css, ".child{color:tan}");
+          },
+        });
+      }
+      return write(...args);
+    });
+    await expect(transferDesignNode(workspace, { ...input, sourceVersion: identity.sourceVersion })).rejects.toThrow(/changed/);
+    expect(injected).toBe(true);
+    expect(await readFile(file, "utf8")).toBe(linked);
+    expect((await readdir(storage.designPrivateStorageDirectory(workspace))).filter((name) => /^metadata-[a-f0-9]+\.json$/.test(name))).toEqual([]);
   });
 });

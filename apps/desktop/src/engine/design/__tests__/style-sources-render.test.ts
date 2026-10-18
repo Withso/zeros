@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DESIGN_DIRECTORY_NAME,
   initializeDesignDocument,
+  lintDesignDocument,
   readDesignFrameRenderIdentity,
   readDesignFrameRenderIdentityFromSource,
   readDesignFrameRenderSourceFromSource,
@@ -180,6 +181,65 @@ describe("imported style sources in rendered frames", () => {
     expect(identity.sourceVersion).toBe(rendered!.sourceVersion);
     const restyled = source.replace("p-3", "p-4");
     expect((await readDesignFrameRenderIdentityFromSource(root, frame, restyled)).sourceVersion).not.toBe(identity.sourceVersion);
+  });
+
+  it("counts tokens the frame's imported Tailwind and CSS sources declare as known", async () => {
+    await writeFile(
+      path.join(root, "styles/app.css"),
+      '@import "tailwindcss" source(none); @theme inline { --color-brand: var(--brand); --radius-card: 6px; --text-tiny--line-height: 1.2; } :root { --fg1: black; --brand: red; } [data-theme="light"] { --fg1: white; }',
+    );
+    await writeFile(
+      path.join(root, "styles/semantic.css"),
+      ':root { --switch-on-bg: var(--fg1); } [data-theme="light"] { --switch-thumb: white; }',
+    );
+    const uses = [
+      "--fg1",
+      "--radius-card",
+      "--text-tiny--line-height",
+      "--switch-on-bg",
+      "--switch-thumb",
+      // Tailwind's stock theme: the application never declares it.
+      "--shadow-xl",
+      "--made-up",
+    ];
+    const source = `<!doctype html><html><head><style>main { ${uses
+      .map((name, index) => `--use-${index}: var(${name});`)
+      .join(" ")} }</style></head><body><main data-oid="main">Hi</main></body></html>`;
+    await writeFile(path.join(folder, frame), source);
+    await writeFile(path.join(folder, "page-1/opted-out.html"), source);
+    await writeCanvas((canvas) => {
+      canvas.styles = [
+        { id: "app", title: "App", kind: "tailwind", path: "styles/app.css", themes: { light: '[data-theme="light"]' } },
+        { id: "semantic", title: "Semantic", kind: "css", path: "styles/semantic.css", themes: { light: '[data-theme="light"]' } },
+      ];
+      canvas.frames.opted = {
+        kind: "html",
+        source: "page-1/opted-out.html",
+        title: "Opted out",
+        x: 500,
+        y: 0,
+        width: 390,
+        height: 844,
+        styles: ["semantic"],
+      };
+      canvas.pages[0].frames.push("opted");
+    });
+    const unknown = (report: Awaited<ReturnType<typeof lintDesignDocument>>, file: string) =>
+      report.violations
+        .filter((violation) => violation.ruleId === "unknown-token" && violation.file === file)
+        .map((violation) => /"(--[^"]+)"/.exec(violation.message)?.[1]);
+    const report = await lintDesignDocument(root, undefined, { healOids: false });
+    expect(unknown(report, frame)).toEqual(["--shadow-xl", "--made-up"]);
+    // A frame that receives only the CSS source does not see Tailwind's tokens.
+    expect(unknown(report, "page-1/opted-out.html")).toEqual([
+      "--fg1",
+      "--radius-card",
+      "--text-tiny--line-height",
+      "--shadow-xl",
+      "--made-up",
+    ]);
+    const single = await lintDesignDocument(root, frame, { healOids: false });
+    expect(unknown(single, frame)).toEqual(["--shadow-xl", "--made-up"]);
   });
 
   it.each(["selection", "render"] as const)("reads %s identity without compiling a frame's Tailwind CSS", async (kind) => {

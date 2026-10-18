@@ -116,7 +116,20 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   cannot run the `/proc`-based portable cloud fixtures at all.
 - `pnpm typecheck` keeps incremental state in `node_modules/.cache/zeros-typecheck`.
   An error in a file you did not touch may be stale state: confirm with
-  `tsc --noEmit -p tsconfig.typecheck.json --incremental false` before chasing it.
+  `pnpm exec tsgo --noEmit -p tsconfig.typecheck.json --incremental false` before chasing it.
+  `typecheck:app` and `typecheck:electron` run the native TypeScript 7 compiler
+  (`tsgo`); editors, ESLint and compiler-API scripts stay on `typescript` 5.x,
+  so keep code valid under both. Its DOM types are narrower (for example
+  `WebSocket.readyState` is `0 | 1 | 2 | 3`): re-read state after an `await`
+  through a method instead of a narrowed property.
+- On macOS the default `TMPDIR` (`/var/folders/…`) is reached through the
+  `/var` symlink, so path-safety suites fail with `zstack_source_unsafe`,
+  `zstack_receipt_unsafe` or "not canonical". Rerun them with `TMPDIR` set to a
+  directory under `/private/tmp`; Linux-only cloud fixtures still fail on macOS.
+- Outside CI, Vitest reuses transformed modules from
+  `node_modules/.experimental-vitest-cache` between runs. If a rerun behaves
+  differently from a fresh checkout, clear it with `pnpm exec vitest --clearCache`
+  before chasing the difference.
 - `pnpm test:ui-smoke` stops at the first scenario that throws, so one base
   failure hides every later scenario. Confirm the failure on the base commit,
   then run the rest from an untracked copy of `scripts/` without that scenario
@@ -131,3 +144,11 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   database: migration 0004 creates the cluster-wide `zeros_app` role with a
   check-then-create race. Without Docker or sudo, signature-verified PGDG
   packages unpacked with `dpkg -x` run as an unprivileged user.
+- CI's PostgreSQL runs in a service container in another PID namespace, so a
+  test cannot signal or inspect the server's processes. Reproduce connection
+  races at the protocol layer, for example an in-test TCP relay that holds
+  client bytes, and assert that the race window was actually open.
+- Adding or renaming a file under an audited directory such as `docs/` also
+  needs the expected list in `scripts/__tests__/repository-layout.test.ts`.
+  `pnpm ci:plan` only selects the lane, so run that test before pushing. When
+  two open PRs each add a document, the second to merge adds both.

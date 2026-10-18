@@ -1,0 +1,9 @@
+{
+  "id": "design-background-work-lifetime",
+  "kind": "replay",
+  "area": "renderer scheduling",
+  "fixedBy": "pr:576",
+  "symptom": "Reset released the optional producer slot before its callback settled, and retired pause or idle callbacks could admit work in a newer lifetime.",
+  "rule": "agents/zstack/changes/design-preview-resource-lifetimes.md: keep the producer callback slot until settlement and fence leases and idle admission by lifetime; latest-in-flight result retirement is opt-in so legacy PNG export remains compatible.",
+  "check": "pnpm test:git apps/desktop/src/renderer/features/design-workspace/__tests__/design-background-work-lifecycle.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-background-work.test.ts"
+}

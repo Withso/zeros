@@ -388,6 +388,7 @@ function ChatBody({
   const session = useChatSession(
     chatId,
     surfaceActive || (!readOnly && (preparing || pendingAutoSend)),
+    !readOnly,
   );
   const [historyError, setHistoryError] = useState<string | null>(null);
   // Keep only this persistence-critical scalar live while the expensive
@@ -831,6 +832,7 @@ function ChatBody({
         </p>
       )}
       <AgentChat
+        liveTextUpdates={!readOnly}
         readOnly={readOnly}
         composerReplacement={composerReplacement}
         session={session}

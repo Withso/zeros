@@ -79,7 +79,42 @@ function withDesignRuntime(source: string, sourceVersion: string): string {
 const layoutGestureHarness = new URLSearchParams(window.location.search).has(
   "layoutGestures",
 );
-const homeSource = new URLSearchParams(window.location.search).has("mixedParents")
+// `?designTokens`: the home frame is styled by an imported source and the
+// linked tokens.css, as a composed document carries them, so the inspector
+// can name tokens and their sources.
+const designTokensHarness = new URLSearchParams(window.location.search).has(
+  "designTokens",
+);
+const DESIGN_TOKENS_HOME_SOURCE = `<!doctype html>
+<html>
+  <head>
+    <style data-zeros-layer-order="">@layer reset;</style>
+    <style data-zeros-style-source="app">
+      @layer theme, utilities;
+      @layer theme { :root { --primary-button-bg: darkslategray; --primary-button-fg: white; } }
+      @layer utilities {
+        .bg-primary-button-bg { background-color: var(--primary-button-bg); }
+        .text-primary-button-fg { color: var(--primary-button-fg); }
+      }
+    </style>
+    <style data-zeros-source="tokens.css">
+      :root { --brand: rebeccapurple; }
+      .title { color: var(--brand); }
+    </style>
+    <style>body { margin: 0; } main { padding: 72px; } button { border: 0; padding: 8px 12px; }</style>
+  </head>
+  <body>
+    <main data-oid="home-main" data-zeros-frame-root>
+      <h1 data-oid="home-heading" class="title">Make the next move unmistakable.</h1>
+      <div data-oid="home-cta" class="bg-primary-button-bg">
+        <button data-oid="home-button" class="text-primary-button-fg">Save</button>
+      </div>
+    </main>
+  </body>
+</html>`;
+const homeSource = designTokensHarness
+  ? DESIGN_TOKENS_HOME_SOURCE
+  : new URLSearchParams(window.location.search).has("mixedParents")
   ? `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0}</style></head><body><main data-oid="home-main" data-zeros-frame-root style="position:relative;display:block;width:100%;height:100vh;background:white"><div data-oid="home-hero" style="position:absolute;left:80px;top:80px;width:200px;height:200px;transform:scale(2,1.5);transform-origin:0 0"><div data-oid="home-heading" style="position:absolute;left:20px;top:20px;width:80px;height:60px;background:red"></div></div><div data-oid="home-panel" style="position:absolute;left:640px;top:80px;width:200px;height:200px;transform:scale(-1,1)"><div data-oid="home-copy" style="position:absolute;left:20px;top:20px;width:80px;height:60px;background:blue"></div></div></main></body></html>`
   : new URLSearchParams(window.location.search).has("freeRelocation")
   ? `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0;font-family:system-ui}</style></head><body><main data-oid="home-main" data-zeros-frame-root style="position:relative;display:block;width:100%;height:100vh;background:white;color:navy;font-size:30px;--accent:red"><div data-oid="home-hero" style="position:absolute;left:80px;top:80px;width:120px;height:80px;margin:5px 7px 9px 20px;transform:matrix(1,0.2,0.25,1,0,0);background:var(--accent)"><span data-oid="home-heading">Move</span></div></main></body></html>`
@@ -333,7 +368,12 @@ async function main() {
     tokenSourceVersion: "tokens-source-version-1",
     ...(styleSourcesHarness
       ? { styleSources: HARNESS_STYLE_SOURCES, styleSourceErrors: [] }
-      : {}),
+      : designTokensHarness
+        ? {
+            styleSources: [{ ...HARNESS_STYLE_SOURCES![0]!, title: "App styles", status: "ready" as const, messages: [] }],
+            styleSourceErrors: [],
+          }
+        : {}),
     assets: [],
     lint: {
       workspacePath,
@@ -653,6 +693,55 @@ async function main() {
   (
     window as Window & { __zerosHarnessDesignStyleRefreshes?: () => number }
   ).__zerosHarnessDesignStyleRefreshes = () => designStyleRefreshes;
+  // Agent-draft smoke: report the directory name an engine snapshot carries,
+  // and land a new home.html generation the way an agent's Write saves before
+  // any watcher event (the smoke then sends the Design-only refresh).
+  (
+    window as Window & {
+      __zerosHarnessAgentDrafts?: {
+        workspaceId: string;
+        directory: string;
+        useDirectory(): void;
+        save(source: string, sourceVersion: string): void;
+      };
+    }
+  ).__zerosHarnessAgentDrafts = {
+    workspaceId,
+    directory: "North One - Design",
+    useDirectory() {
+      currentWorkspaceSnapshot = {
+        ...currentWorkspaceSnapshot,
+        directory: "North One - Design",
+      };
+      designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+    },
+    save(source, sourceVersion) {
+      const previousVersion = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "home.html")?.sourceVersion;
+      const previousFoundation = previousVersion ? foundationReplies.get(designFoundationKey(workspaceId, "home.html", previousVersion)) : undefined;
+      if (previousFoundation) {
+        const revision = `harness:${sourceVersion}`;
+        publishFoundation(designFoundationKey(workspaceId, "home.html", sourceVersion), {
+          ...previousFoundation,
+          summary: {
+            ...previousFoundation.summary,
+            revision,
+            lastValidRevision: revision,
+            history: { ...previousFoundation.summary.history, revision },
+          },
+          foundation: { ...previousFoundation.foundation, revision },
+        });
+      }
+      currentHomeSource = source;
+      currentWorkspaceSnapshot = {
+        ...currentWorkspaceSnapshot,
+        frames: currentWorkspaceSnapshot.frames.map((frame) =>
+          frame.file === "home.html"
+            ? { ...frame, sourceVersion, modifiedAt: Date.now() }
+            : frame,
+        ),
+      };
+    },
+  };
   const layoutUndo: Array<{
     source: string;
     snapshot: typeof currentWorkspaceSnapshot;
@@ -1544,7 +1633,7 @@ async function main() {
           throw new Error("Design snapshot temporarily unavailable");
         return {
           type: "WORKSPACE_RESPONSE",
-          result: { snapshot: workbenchHarness ? { ...currentWorkspaceSnapshot, lint: { ...currentWorkspaceSnapshot.lint, workspacePath: workspaces.find((row) => row.id === message.params?.workspaceId)?.path ?? workspacePath } } : currentWorkspaceSnapshot },
+          result: { snapshot: workbenchHarness || message.params?.workspaceId !== workspaceId ? { ...currentWorkspaceSnapshot, lint: { ...currentWorkspaceSnapshot.lint, workspacePath: workspaces.find((row) => row.id === message.params?.workspaceId)?.path ?? workspacePath } } : currentWorkspaceSnapshot },
         };
       }
       if (message.op === "design.frame") {
@@ -1803,19 +1892,44 @@ async function main() {
   };
 
   function Harness() {
+    const [ownerId, setOwnerId] = React.useState(workspaceId);
+    const [rootPath, setRootPath] = React.useState(workspacePath);
+    const [surfaceActive, setSurfaceActive] = React.useState(true);
+    React.useLayoutEffect(() => {
+      const controls = {
+        owner(id: string) {
+          if (id !== workspaceId) {
+            const ownerPath = `${workspacePath}-${id}`;
+            if (!workspaces.some((row) => row.id === id)) workspaces.push({ ...workspace, id, path: ownerPath });
+            designWorkspaceSnapshotCache.setData(id, {
+              ...structuredClone(currentWorkspaceSnapshot),
+              lint: { ...currentWorkspaceSnapshot.lint, workspacePath: ownerPath },
+            });
+          }
+          setOwnerId(id);
+        },
+        root(replaced: boolean) { setRootPath(replaced ? `${workspacePath}-replacement` : workspacePath); },
+        active: setSurfaceActive,
+      };
+      const target = window as Window & { __zerosHarnessDesignSurface?: typeof controls };
+      target.__zerosHarnessDesignSurface = controls;
+      return () => { delete target.__zerosHarnessDesignSurface; };
+    }, []);
+    const visibleWorkspace = ownerId === workspaceId && rootPath === workspacePath ? workspace :
+      { ...workspace, id: ownerId, path: ownerId === workspaceId ? rootPath : `${rootPath}-${ownerId}` };
     return (
       <ActionsCtx.Provider value={new Proxy({
         setRetainedChatIds: () => {}, getSession: () => undefined, getCloseActivity: () => ({ running: false, queuedCount: 0 }),
         hydrateChat: async () => {}, listAgents: async () => [],
       }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => Promise.resolve() }) as unknown as import("../features/agent/sessions-context").SessionsCtx}>
       <TooltipProvider delayDuration={300} skipDelayDuration={0}>
-        <main className="bg-bg1 flex h-screen min-h-0 overflow-hidden">
+        <main data-harness-design-root={rootPath} className="bg-bg1 flex h-screen min-h-0 overflow-hidden">
           {WorkbenchPane && ConversationPane ? <><ConversationPane workspace={workspace} /><WorkbenchPane surfaceActive onToggleWorkbench={() => {}} /></> : <>
           {ReferenceFixture && <ReferenceFixture folder={workspacePath} />}
           <DesignWorkspaceColumn
-            workspace={workspace}
-            folder={workspacePath}
-            surfaceActive
+            workspace={visibleWorkspace}
+            folder={visibleWorkspace.path}
+            surfaceActive={surfaceActive}
           />
           </>}
         </main>

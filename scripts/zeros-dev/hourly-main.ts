@@ -24,7 +24,7 @@ import { actionsProfile, hourlyContext } from "./hourly-actions.mjs";
 import { runGate0, productGate0Probe } from "./gate0";
 import { GATE0_TOTAL_MS } from "./gate0-contract";
 import { importCleanupInput } from "./cleanup-recovery";
-import type { CleanupHandoffReference, CleanupSummary } from "./cleanup-contract";
+import { MAX_PENDING_AGE_MS, MAX_PENDING_STORAGE_MIB, MAX_PENDING_WORKSPACES, type CleanupHandoffReference, type CleanupSummary } from "./cleanup-contract";
 import type { CleanupRecoveryReference } from "./cleanup-recovery-contract";
 import { runInfrastructure } from "./infrastructure";
 import { InfrastructureNative } from "./infrastructure-native";
@@ -268,6 +268,15 @@ export async function runActions(env = process.env, options: ActionsOptions = {}
       try { cleanup = await exportHourlyArtifact(artifact, store, credential, execution, { runId, success: code === null, code, ...diagnostic }, { replace: true, handoff, profile, prestartRecovery, cleanupRecovery, chainRestart }); }
       catch { code ??= "artifact_invalid"; }
     }
+    // An annotation keeps retained storage visible even on a green lifecycle.
+    // Only counts/timestamps from the signed summary enter the workflow command;
+    // it does not change the result, the carry chain or physical-deletion proof.
+    if (cleanup && cleanup.pendingWorkspaces > 0) process.stdout.write(
+      `::warning title=Zeros dev cleanup backlog::Last confirmed storage backlog: ${cleanup.pendingWorkspaces} workspace(s), ` +
+      `${cleanup.pendingGenerations} generation(s), ${cleanup.reservedStorageMiB} MiB reserved. ` +
+      `Oldest delete: ${cleanup.oldestRequestedAt}. Unconfirmed workspaces: ${cleanup.unconfirmedWorkspaces}. ` +
+      `Admission limits: ${MAX_PENDING_WORKSPACES} workspace(s), ${MAX_PENDING_STORAGE_MIB} MiB, ${MAX_PENDING_AGE_MS / 3_600_000} hours.\n`,
+    );
     write({ schema: profile === "infrastructure" ? "zeros.dev-infrastructure-result/v1" : "zeros.dev-hourly-result/v1",
       ...(profile === "infrastructure" ? { coverage: OWNER_SECTION7_COVERAGE } : {}),
       runId, success: code === null, code, ...diagnostic, ...(cleanup ? { cleanup } : {}) });

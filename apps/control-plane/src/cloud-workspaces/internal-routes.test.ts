@@ -61,16 +61,19 @@ function harness(overrides: Partial<CloudWorkspaceInternalSetupService> = {}) {
 describe("cloud workspace internal setup routes", () => {
   it("negotiates timing output outside the immutable setup material only after successful v4 redemption", async () => {
     const { app, service } = harness();
-    const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json", "x-zeros-setup-timings": "1" };
+    const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json", "x-zeros-setup-timings": "1", "x-zeros-setup-observations": "1" };
     const input = { ...body, materialVersion: 2, runtime: runtimeWitness };
     const response = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers, body: JSON.stringify(input) });
     expect(response.headers.get("x-zeros-setup-timings")).toBe("1");
+    expect(response.headers.get("x-zeros-setup-observations")).toBe("1");
     expect(await response.json()).toEqual({ version: 1, material: "secret" });
     const legacy = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers, body: JSON.stringify(body) });
     expect(legacy.headers.get("x-zeros-setup-timings")).toBeNull();
+    expect(legacy.headers.get("x-zeros-setup-observations")).toBeNull();
     vi.mocked(service.redeem).mockRejectedValueOnce(new CloudWorkspaceSetupMaterialError("setup_admission_rejected", "closed", false));
     const rejected = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers, body: JSON.stringify(input) });
     expect(rejected.headers.get("x-zeros-setup-timings")).toBeNull();
+    expect(rejected.headers.get("x-zeros-setup-observations")).toBeNull();
   });
   it("passes strict v4 redemption and registration witnesses to the generation-bound service", async () => {
     const { app, service } = harness();
@@ -104,6 +107,44 @@ describe("cloud workspace internal setup routes", () => {
     expect(registerEngine.mock.calls[0]![0]).toMatchObject({cloudLocalCommandsVersion:1});
     expect(await response.json()).toEqual({version:1,durableRecordConnected:true});
   });
+  it("advertises the uplink endpoint only to opted-in engines of flagged organizations", async () => {
+    let flagOn = true;
+    const flagReads: string[] = [];
+    const registered = { version: 1, durableRecordConnected: true };
+    const service = {
+      registerEngine: vi.fn(async () => registered),
+      registerTransitionEngine: vi.fn(async () => registered),
+    } as unknown as CloudWorkspaceInternalSetupService;
+    const app = createCloudWorkspaceInternalRoutes(service, { engineUplink: {
+      endpoint: "wss://realtime.example.test/v1/uplink",
+      flags: { enabled: (orgId, flag) => { flagReads.push(`${orgId}:${flag}`); return flagOn && flag === "realtime_uplink"; } },
+    } });
+    const { expected: _expected, ...binding } = body;
+    const payload = { ...binding, engineInstanceId: "44444444-4444-4444-8444-444444444444",
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION };
+    for (const path of [CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH, CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH]) {
+      const post = (headers: Record<string, string>) => app.request(path, { method: "POST",
+        headers: { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json", ...headers },
+        body: JSON.stringify(payload) });
+      // No opt-in header: the strict legacy document never gains a member.
+      expect(await (await post({})).json()).toEqual(registered);
+      flagOn = true;
+      expect(await (await post({ "x-zeros-cloud-engine-uplink": "1" })).json())
+        .toEqual({ ...registered, uplink: { endpoint: "wss://realtime.example.test/v1/uplink" } });
+      // The flag read uses the organization's canonical id from the body.
+      expect(flagReads).toContain(`${body.organizationId}:realtime_uplink`);
+      flagOn = false;
+      expect(await (await post({ "x-zeros-cloud-engine-uplink": "1" })).json()).toEqual(registered);
+    }
+    // Without a configured endpoint there is nothing to advertise.
+    const bare = createCloudWorkspaceInternalRoutes(service);
+    const { expected: _e, ...b2 } = body;
+    const response = await bare.request(CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH, { method: "POST",
+      headers: { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json", "x-zeros-cloud-engine-uplink": "1" },
+      body: JSON.stringify({ ...b2, engineInstanceId: "44444444-4444-4444-8444-444444444444", protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION }) });
+    expect(await response.json()).toEqual(registered);
+  });
+
   it.each([
     [CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,"local"],[CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,"legacy"],
     [CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,"local"],[CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,"legacy"],

@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { mergeSetupTimings, parseSetupTimings, setupTimingClock, type SetupTimings } from "./setup-timings.js";
+import { parseSetupObservations } from "./setup-observations.js";
 import { parseCloudWorkspaceSetupHookLog } from "./setup-log.js";
 import { ClosedDiagnosticSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES, type RuntimeDescriptor } from "./runtime-contract.js";
 import type { CloudRuntimePin } from "./runtime-selection.js";
@@ -84,12 +85,13 @@ export type CloudWorkspaceLinuxSetupExecutorOptions = {
 };
 
 type SetupHelperReady = {
-  version: 1 | 4;
+  version: 1 | 4 | 5;
   audience: typeof SETUP_RESULT_AUDIENCE;
   outcome: "ready";
   readiness: CloudWorkspaceSetupReadiness;
   logExcerpt?: string;
   timings?: unknown;
+  observations?: unknown;
 };
 
 const HELPER_FAILURES: Readonly<
@@ -340,7 +342,8 @@ function parseReadyResponse(
   const value = parsed as Partial<SetupHelperReady>;
   const expectedKeys = [
     "audience",
-    ...(value.version === 4 ? ["timings"] : []),
+    ...(value.version === 4 || value.version === 5 ? ["timings"] : []),
+    ...(value.version === 5 ? ["observations"] : []),
     ...(value.logExcerpt === undefined ? [] : ["logExcerpt"]),
     "outcome",
     "readiness",
@@ -348,7 +351,7 @@ function parseReadyResponse(
   ];
   if (
     !exactKeys(parsed, expectedKeys) ||
-    !(value.version === 1 || value.version === 4 && execution.runtime?.profile === "zeros-cloud-worker-v4") ||
+    !(value.version === 1 || (value.version === 4 || value.version === 5) && execution.runtime?.profile === "zeros-cloud-worker-v4") ||
     value.audience !== SETUP_RESULT_AUDIENCE ||
     value.outcome !== "ready" ||
     !value.readiness ||
@@ -367,7 +370,8 @@ function parseReadyResponse(
   }
   return {
     readiness: value.readiness,
-    ...(value.version === 4 ? { timings: parseSetupTimings(value.timings) } : {}),
+    ...(value.version === 4 || value.version === 5 ? { timings: parseSetupTimings(value.timings) } : {}),
+    ...(value.version === 5 ? { observations: parseSetupObservations(value.observations) } : {}),
     ...(value.logExcerpt !== undefined ? { logExcerpt: value.logExcerpt } : {}),
     logTruncated: false,
   };
@@ -419,13 +423,13 @@ function helperFailure(
 ): CloudWorkspaceSetupError {
   try {
     const parsed = JSON.parse(output) as Record<string, unknown>;
-    // A v4 envelope carries optional telemetry around the unchanged closed
+    // A v4/v5 envelope carries optional telemetry around the unchanged closed
     // v1/v2/v3 failure. Parse it independently; it cannot alter rejection.
-    if (parsed.version === 4 && execution.runtime?.profile === "zeros-cloud-worker-v4" &&
-      exactKeys(parsed, ["version", "audience", "outcome", "code", "diagnostic", "timings", ...(parsed.hookLog === undefined ? [] : ["hookLog"])])) {
-      const { timings, ...legacy } = parsed;
+    if ((parsed.version === 4 || parsed.version === 5) && execution.runtime?.profile === "zeros-cloud-worker-v4" &&
+      exactKeys(parsed, ["version", "audience", "outcome", "code", "diagnostic", "timings", ...(parsed.version === 5 ? ["observations"] : []), ...(parsed.hookLog === undefined ? [] : ["hookLog"])])) {
+      const { timings, observations, ...legacy } = parsed;
       return Object.assign(helperFailure(JSON.stringify({ ...legacy, version: parsed.hookLog === undefined ? 2 : 3 }), execution),
-        { timings: parseSetupTimings(timings) });
+        { timings: parseSetupTimings(timings), observations: parseSetupObservations(observations) });
     }
     if (
       ((parsed.version === 1 && exactKeys(parsed, ["audience", "code", "outcome", "version"])) ||
@@ -701,7 +705,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       );
       // V4 installer output is a closed diagnostic boundary. The helper sees
       // only its nested payload, but never persist arbitrary installer stdout.
-      if (execution.runtime) result = { readiness: result.readiness, logTruncated: false, timings: result.timings };
+      if (execution.runtime) result = { readiness: result.readiness, logTruncated: false, timings: result.timings, observations: result.observations };
       disposition = "completed";
     } catch (error) {
       commandFinished?.(signal.aborted ? "cancelled" : "failed");
@@ -725,6 +729,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       const primary = failure ?? revokeFailure;
       if (failure && revokeFailure.failureDiagnostic) primary.cleanupDiagnostic = revokeFailure.failureDiagnostic;
       primary.timings = mergeSetupTimings(result?.timings ?? failure?.timings, transportTimings, clock?.snapshot());
+      primary.observations = result?.observations ?? failure?.observations;
       throw primary;
     }
     if (failure) {

@@ -12,8 +12,10 @@ import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
 import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
-import { configureDesignStyleBuilds, designStyleInputChanged, hasRunningDesignStyleBuilds, stopDesignStyleBuilds } from "./design/style-builds";
+import { configureDesignStyleBuilds, designStyleInputChanged, hasRunningDesignStyleBuilds, presentDesignStyleBuildRoots, stopDesignStyleBuilds } from "./design/style-builds";
+import { DesignChangePoller, designSnapshotDirectory } from "./design/change-poller";
 import { configureDesignFonts } from "./design/style-fonts";
+import { fenceDesignSnapshotReads } from "./design/snapshot-epoch";
 import type { DesignCaptureService } from "./design/capture-service";
 // ──────────────────────────────────────────────────────────
 // ZerosEngine — The heart of Zeros V2
@@ -46,6 +48,7 @@ import { ResidentTerminalReplay } from "./pty/resident-replay";
 import type { ResidentPtyFrame, ResidentPtySession } from "./pty/resident-protocol";
 
 type CloudResidentFence = { readonly owner: ResidentTerminalService; readonly ticket: ResidentWorkloadFence; released?: boolean };
+import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION } from "@zeros/protocol/design-catalog";
 import {
   personalRepoRoot,
   personalWorkspaceRoot,
@@ -63,6 +66,7 @@ import {
 } from "./settings/files";
 import { startSettingsWatcher, type SettingsWatcher } from "./settings/watch";
 import { onWorktreeContentChange, startGitWatcher, type GitWatcher } from "./git/watch";
+import { createLocalWatchHost, type WatchHostClient } from "./git/watch-host-client";
 import { invalidateWorkspaceChangeProbes } from "./git/workspace-change-probe";
 import { LocalTransport } from "./transport/local";
 import { CloudTransport, parseCloudTransportPort } from "./transport/cloud";
@@ -159,8 +163,19 @@ import { codeReviewAgentActor, codeReviewProfileName } from "./code-review/actor
 import { CodeReviewError } from "./code-review/errors";
 import {
   DESIGN_CANVAS_FILE,
+  activeDesignDirectoryNameFor,
   designDirectoryNameFor,
+  withDesignDirectoryNameLease,
 } from "./design/directory-registry";
+import {
+  DesignAgentActivity,
+  type DesignAgentTarget,
+} from "./design/agent-drafts";
+import {
+  composeDesignAgentDraftPreview,
+  composeDesignAgentStylesheetPreview,
+  readDesignAgentDraftBase,
+} from "./design/agent-draft-preview";
 import {
   discoverDesignDirectories,
   resolveDesignDirectoryPointerState,
@@ -223,6 +238,16 @@ import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "./agents/conta
 import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-action-runtime";
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
+import { CloudEngineUplinkClient, sanitizeCredAckCode, type EngineUplinkActivity, type EngineUplinkReadiness } from "./cloud-engine-uplink";
+import {
+  EngineCapabilityAuth,
+  capabilitySessionClose,
+  fileCapabilityAuthStore,
+  jwksFetcher,
+  type CapabilityActorAdmission,
+  type CapabilityRoute,
+  type EngineClientAuth,
+} from "./cloud-capability-auth";
 import { CloudEventRuntime } from "./cloud-event-runtime";
 import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome, type CloudAgentHistoryRestoreMetadata,
@@ -341,6 +366,7 @@ import {
   CloudClientAuthorityTransientError,
   consumeCloudRuntimeEnvironment,
   type CloudCheckpointDirective,
+  type CloudRuntimeClientAdmission,
   type CloudRuntimeConfig,
 } from "./cloud-runtime-registration";
 import {
@@ -367,6 +393,7 @@ import {
   type AgentMessage,
   type AgentTextMessage,
 } from "@zeros/protocol/agent-messages";
+import { LocalSessionUpdateBatcher } from "./agents/local-session-update-batcher";
 import {
   PTY_AGENT_AUTH_CWD,
   type AgentPromptBubble,
@@ -901,8 +928,16 @@ export class ZerosEngine {
   private watcher: FileWatcher;
   private settingsWatcher: SettingsWatcher | null = null;
   private gitWatcher: GitWatcher | null = null;
+  /** Native worktree watching for a packaged Local engine (watch-host.cjs). */
+  private watchHost: WatchHostClient | null = null;
   /** Forwards worktree content events to live one-shot style builds. */
   private stopStyleBuildInputs: (() => void) | null = null;
+  /** Live canvas feedback for Local agents' native Design edits. Never
+   * constructed for a cloud worker. */
+  private designAgentActivity: DesignAgentActivity | null = null;
+  /** Packaged Local engines poll the Design directory a Design tab shows on
+   * a short interval; see design/change-poller.ts. */
+  private designChangePoller: DesignChangePoller | null = null;
   /** Coalesce filesystem invalidations behind one authority-reconciliation
    * lane. Settings and Git watchers can fire together for one checkout; this
    * prevents overlapping session retirement/territory publication. */
@@ -1109,6 +1144,9 @@ export class ZerosEngine {
    * immutable-boundary handoff. Native sessions never stop or change backend
    * for this set. */
   private readonly designTerritoryTransitions = new Set<string>();
+  /** Settles when an owner leaves designTerritoryTransitions. */
+  private designTerritoryOwnerRelease: Promise<void> | null = null;
+  private wakeDesignTerritoryOwnerWaiters: (() => void) | null = null;
   /** Serializes changes to the app-wide Design owner map and tool authority.
    * Only cloud Code process admission depends on this count. */
   private globalDesignTerritoryTransitionCount = 0;
@@ -1118,6 +1156,8 @@ export class ZerosEngine {
    *  shared applyUpdate folds chunks into, so the engine upserts only the rows
    *  that changed on each chunk. */
   private readonly sessionMessages = new Map<string, AgentMessage[]>();
+  private readonly sessionUpdateBatcher = new LocalSessionUpdateBatcher((agentId, notification) =>
+    this.deliverSessionUpdate(agentId, notification));
   /** Agent sessionIds with a user cancel in flight. Set by AGENT_CANCEL (and
    *  the remote-client-drop relay cancel) BEFORE the cancel is dispatched,
    *  consumed by the AGENT_PROMPT catch: a cancel that tears down the
@@ -1203,8 +1243,13 @@ export class ZerosEngine {
    *  connects (then relay clients are fail-closed as owner-unknown). */
   private ownerAccountSub: string | null = null;
   private ownerAccountName: string | null = null;
+  private localCatalogBindingEpoch?: number;
   private readonly cloudRuntimeConfig: CloudRuntimeConfig | null;
   private readonly cloudRuntimeRegistration: CloudRuntimeRegistration | null;
+  /** S2 uplink client; null on Local placements and whenever the control
+   * plane did not advertise an endpoint (rollout flag off or older CP). */
+  private cloudEngineUplink: CloudEngineUplinkClient | null = null;
+  private cloudCapabilityAuth: EngineCapabilityAuth | null = null;
   private readonly cloudDurabilityRuntime: CloudWorkspaceDurabilityRuntime | null;
   private readonly cloudRecordRuntime: CloudWorkspaceRecordRuntime | null;
   private readonly cloudCheckpointScheduler: CloudCheckpointScheduler | null;
@@ -1280,6 +1325,8 @@ export class ZerosEngine {
   private cloudFinalCheckpointReconciliationTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly cloudIdleStop = new CloudIdleStopScheduler({
     busy: () => this.cloudIdleBusy(),
+    delegated: () => this.cloudEngineUplink?.idleActive === true,
+    changed: () => this.cloudEngineUplink?.reportActivity(),
     retireIdleWorkloads: async () => {
       await this.retireObservedIdleCloudBootAgents();
       await this.retireObservedLegacyResident();
@@ -1358,6 +1405,9 @@ export class ZerosEngine {
   private actualPort = 0;
   private framework: Framework = "unknown";
   private running = false;
+  /** Set once stop() begins tearing a running engine down; the uplink then
+   * reports `stopping` rather than `starting`. */
+  private engineStopping = false;
 
   constructor(options?: EngineOptions) {
     this.cloudRuntimeConfig = consumeCloudRuntimeEnvironment();
@@ -1514,6 +1564,9 @@ export class ZerosEngine {
       // Only Design re-reads; Files and Changes ignore a rebuilt output.
       changed: (workspacePath) => {
         const workspaceId = getWorkspaceByPath(workspacePath)?.id;
+        // Outputs live in ignored .zeros/design-styles/, so no watcher event
+        // fences an aggregate read that began before this rebuild.
+        fenceDesignSnapshotReads(workspacePath);
         this.broadcast(
           createMessage({
             type: "DB_CHANGED",
@@ -1529,6 +1582,7 @@ export class ZerosEngine {
     configureDesignFonts({
       onReady: (roots) => {
         const workspaceIds = roots.flatMap((root) => getWorkspaceByPath(root)?.id ?? []);
+        for (const root of roots) fenceDesignSnapshotReads(root);
         this.broadcast(
           createMessage({
             type: "DB_CHANGED",
@@ -1615,7 +1669,7 @@ export class ZerosEngine {
         ? { agentAuthIdentity: { uid: cloudWorker.uid, gid: cloudWorker.gid } }
         : undefined,
     );
-    // Warm the login-shell PATH probe (`$SHELL -ilc 'echo $PATH'`) off the
+    // Warm the login-shell PATH probe (`$SHELL -ilc 'printf …'`) off the
     // critical path. It's cached process-wide and every one-shot command shell
     // — Setup script, Run action — awaits it before spawning; resolving it here
     // keeps that from showing up as a stall on the FIRST Run of a session.
@@ -1893,6 +1947,7 @@ export class ZerosEngine {
         );
         for (const { sessionId, ended } of endedAgents) {
           if (!ended) continue;
+          this.sessionUpdateBatcher.flush(sessionId);
           const conversationId = this.sessionChat.get(sessionId);
           this.router.clearOwner(sessionId);
           this.sessionAgent.delete(sessionId);
@@ -2124,6 +2179,7 @@ export class ZerosEngine {
     this.transports = [this.local];
     this.activityHeartbeat = new EngineActivityHeartbeat({
       instance: this.local.instanceNonce,
+      stopWhenIdle: !this.cloudWorker,
       publish: (frame) =>
         this.publishPrivateHostControl(`${JSON.stringify(frame)}\n`),
       activeTurns: () => this.activeAgentExecutionCount(),
@@ -2169,7 +2225,7 @@ export class ZerosEngine {
           },
           onDurableRecordConnected: () => this.cloudCommands?.wakePending(),
           onCheckpointRequested: (directive, authority) =>
-            this.handleCloudCheckpointRequest(directive, authority),
+            this.routeCloudCheckpointRequest(directive, authority),
           readRepositoryCredentialRefresh: () =>
             readCloudGithubCredentialRefreshRequest(),
           installRepositoryCredential: (document) => {
@@ -2258,6 +2314,8 @@ export class ZerosEngine {
               },
               verifyToken: (token: string) => this.verifyCloudActorClient(token),
               renewToken: (token: string) => this.verifyCloudActorClient(token, true),
+              // S3 Part 3 direct route; null until an advertised uplink starts the verifier.
+              capabilityAuth: () => this.cloudCapabilityAuth,
               verifyServiceAccess: (token: string) => this.cloudRuntimeCheckpointQuiescing || this.cloudLegacyResidentRequiresFreshView
                 ? Promise.resolve(null) : this.cloudRuntimeRegistration!.verifyServiceAccess(token),
               resolveAgentPreviewTarget: (target) => this.agents.resolveNativePreviewTarget(target),
@@ -2410,6 +2468,11 @@ export class ZerosEngine {
               quota,
             }),
           );
+        },
+        onToolInput: (agentId, sessionId, event) => {
+          // Local Design drafts only; a cloud worker never constructs this.
+          if (this.sessionAgent.get(sessionId) !== agentId) return;
+          this.designAgentActivity?.observeToolInput(sessionId, event);
         },
         onSessionUpdate: (
           agentId: string,
@@ -2597,26 +2660,11 @@ export class ZerosEngine {
             }
           }
           if (notification.update.sessionUpdate !== "turn_usage_update") this.touchActivePrompt(executionId);
-          this.routeSessionScoped(
-            executionId,
-            createMessage({
-              type: "AGENT_SESSION_UPDATE",
-              source: "engine",
-              agentId,
-              executionId,
-              notification: normalizedNotification as never,
-              // Engine-authoritative routing: stamp the chat this session is
-              // bound to so the renderer never drops an update on a stale
-              // sessionId index (force-respawn / create-load / an adapter that
-              // emits before the renderer has stored the sessionId). Same map
-              // persistSessionUpdate uses below.
-              ...(this.sessionChat.get(executionId)
-                ? { chatId: this.sessionChat.get(executionId) }
-                : {}),
-            }),
-          );
-          // Persist the transcript as it streams; the engine is the source.
-          if (notification.update.sessionUpdate !== "turn_usage_update") this.persistSessionUpdate(executionId, normalizedNotification);
+          // A finished Design edit refreshes the Local canvas now, and a
+          // streaming draft settles; see design/agent-drafts.ts.
+          if (executionAgentId === agentId)
+            this.designAgentActivity?.observeSessionUpdate(executionId, normalizedNotification.update);
+          this.sessionUpdateBatcher.push(agentId, normalizedNotification, !this.cloudWorker);
         },
         onPermissionRequest: (
           agentId: string,
@@ -2624,6 +2672,7 @@ export class ZerosEngine {
           request: RequestPermissionRequest,
         ) => {
           const sessionId = request.sessionId;
+          this.sessionUpdateBatcher.flush(sessionId);
           this.touchActivePrompt(sessionId);
           this.pendingPermissionRequests.set(permissionId, {
             agentId,
@@ -2680,6 +2729,7 @@ export class ZerosEngine {
           request: QuestionRequest,
         ) => {
           const sessionId = request.sessionId;
+          this.sessionUpdateBatcher.flush(sessionId);
           this.touchActivePrompt(sessionId);
           this.pendingQuestionRequests.set(questionId, { agentId, request });
           const claim = this.cloudLocalNativePump?.claimForExecution(sessionId);
@@ -2770,6 +2820,7 @@ export class ZerosEngine {
         ) => {
           if (sessionId && this.retiringCloudExecutions.has(sessionId) &&
               (!this.activePromptContexts.has(sessionId) || this.cancelRequested.has(sessionId))) return;
+          this.sessionUpdateBatcher.flush(sessionId ?? undefined);
           const exited = createMessage({
             type: "AGENT_AGENT_EXITED",
             source: "engine",
@@ -3478,6 +3529,33 @@ export class ZerosEngine {
     // One-shot Design style builds re-run on their inputs from this watcher,
     // rather than each running a watcher of its own.
     this.stopStyleBuildInputs = onWorktreeContentChange(designStyleInputChanged);
+    if (!this.cloudWorker) this.designAgentActivity = this.createDesignAgentActivity();
+    // A packaged Local engine on macOS cannot arm FSEvents itself (see the
+    // options below). Its Node watch host can, with one recursive watch per
+    // root instead of Chokidar's poller per file. Cloud workers, Linux and dev
+    // keep exactly the watcher they had; a missing host keeps polling.
+    // Development engines, and a packaged engine with its native watch host,
+    // receive file events within ~120 ms; a packaged engine without the host
+    // (or whose host gave up) stat-polls its worktrees every 1.5 s below, so
+    // it also polls the Design directory a Design tab shows.
+    let watchHost: WatchHostClient | null = null;
+    const startDesignChangePoller = () => {
+      // Only for the engine's current host: stop() releases it first.
+      if (this.cloudWorker || isDevRuntime() || this.designChangePoller || this.watchHost !== watchHost) return;
+      this.designChangePoller = this.createDesignChangePoller();
+      this.designChangePoller.start();
+    };
+    watchHost = createLocalWatchHost({
+      devRuntime: isDevRuntime(),
+      cloudWorker: this.cloudWorker !== null,
+      platform: process.platform,
+      onUnavailable: startDesignChangePoller,
+    });
+    this.watchHost = watchHost;
+    if (!this.cloudWorker && !isDevRuntime() && !watchHost) {
+      this.designChangePoller = this.createDesignChangePoller();
+      this.designChangePoller.start();
+    }
     this.gitWatcher = startGitWatcher(
       () => this.cloudRuntimeHandoffFenced ? [] : this.workspace.gitWatchTargets(),
       (change) => {
@@ -3518,13 +3596,18 @@ export class ZerosEngine {
       // Bun's macOS --compile runtime deadlocks its main event loop after
       // Chokidar arms a native FSEvents watcher: the process keeps a LISTEN
       // socket and completes TCP handshakes but never services HTTP/WS. Dev
-      // runs Bun from source and is unaffected. Packaged/stable-mode engines
-      // use Chokidar's stat-poll backend instead; its target set is bounded and
-      // the watcher already coalesces changes. A 1.5s interval keeps packaged
-      // idle CPU bounded while retaining prompt external-edit invalidation.
+      // runs Bun from source and is unaffected. A packaged Local engine on
+      // macOS hands native watching to its Node watch host (above). Other
+      // packaged engines, and any root whose host is unavailable, use
+      // Chokidar's stat-poll backend; its target set is bounded and the watcher
+      // already coalesces changes. A 1.5s interval keeps that polling's idle
+      // CPU bounded while retaining prompt external-edit invalidation.
       {
-        usePolling: !isDevRuntime(),
+        usePolling: !isDevRuntime() && !watchHost,
         worktreePollIntervalMs: 1_500,
+        ...(watchHost
+          ? { nativeWatcher: (root: string) => watchHost.watch(root) }
+          : {}),
       },
     );
 
@@ -3540,10 +3623,12 @@ export class ZerosEngine {
       if (t !== this.local) await t.start();
     }
 
+    this.engineStopping = false;
     this.running = true;
     try {
       this.cloudStartupPhase = "registration";
       await this.cloudRuntimeRegistration?.start();
+      this.startCloudEngineUplink();
       this.cloudEvents?.start();
       await this.initializeCloudAgentBoot();
     } catch (error) {
@@ -3585,6 +3670,8 @@ export class ZerosEngine {
    * Stop the engine gracefully.
    */
   async stop(): Promise<void> {
+    this.sessionUpdateBatcher?.flush();
+    if (!this.cloudWorker) this.slowWorkspaceOperations?.dispose();
     // Streamed transcript rows buffered by a Local engine reach SQLite first.
     try { flushStreamingChatMessages(); } catch { /* best effort, like persist-on-emit */ }
     this.cloudCheckpointProgress?.reporter.dispose();
@@ -3634,6 +3721,10 @@ export class ZerosEngine {
       return;
     }
     this.running = false;
+    this.engineStopping = true;
+    // The CP records the not-ready transition before the uplink closes
+    // (the uplink itself is stopped a few steps below).
+    this.cloudEngineUplink?.reportReadiness();
     if (this.localOrchestration) {
       this.localOrchestration.registry.clear();
       await settle(() => this.localOrchestration?.server.stop());
@@ -3663,6 +3754,11 @@ export class ZerosEngine {
       setDesignCaptureConfig(undefined);
       await settle(() => captureService.stop());
     }
+    const cloudEngineUplink = this.cloudEngineUplink;
+    this.cloudEngineUplink = null;
+    if (cloudEngineUplink) await settle(() => cloudEngineUplink.stop());
+    this.cloudCapabilityAuth?.stop();
+    this.cloudCapabilityAuth = null;
     if (this.cloudRuntimeRegistration && !this.cloudLegacyResidentRequiresFreshView) {
       await settle(() => this.cloudRuntimeRegistration!.stop());
     }
@@ -3741,7 +3837,16 @@ export class ZerosEngine {
     this.gitWatcher = null;
     this.stopStyleBuildInputs?.();
     this.stopStyleBuildInputs = null;
+    // Release the watch host before the Design poller, so a host that gives
+    // up during teardown cannot start a replacement poller.
+    const watchHost = this.watchHost;
+    this.watchHost = null;
+    this.designAgentActivity?.dispose();
+    this.designAgentActivity = null;
+    this.designChangePoller?.stop();
+    this.designChangePoller = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
+    if (watchHost) await settle(() => watchHost.dispose());
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
       await settle(() => transport.stop());
@@ -3757,6 +3862,125 @@ export class ZerosEngine {
     if (failures.length > 0) {
       throw new AggregateError(failures, "Zeros engine teardown failed");
     }
+  }
+
+  private cloudEngineUplinkReadiness(): EngineUplinkReadiness {
+    return { ready: this.running, phase: this.running ? "ready" : this.engineStopping ? "stopping" : "starting" };
+  }
+
+  /** `activity.report`: counts the control plane can read, plus the
+   * scheduler's own quiet time, which already folds in every busy guard. */
+  private cloudEngineUplinkActivity(): EngineUplinkActivity {
+    return {
+      clients: this.cloudUserPresence.count(),
+      runningTurns: this.activeAgentExecutionCount() + this.activePromptContexts.size,
+      liveTerminals: (this.pty.hasRecentInput() ? 1 : 0) + (this.residentTerminals?.hasRecentInput() === true ? 1 : 0),
+      windowMs: this.cloudIdleStop.readActivity().quietForMs,
+    };
+  }
+
+  /** S2 engine uplink (contracts/s2-uplink.md): cloud placements only, and
+   * only when the control plane advertised an endpoint to this opted-in
+   * engine (the organization's `realtime_uplink` rollout flag was on at
+   * registration). The uplink carries push traffic and presence, renews the
+   * engine lease when `lease.v1` is negotiated (the HTTP heartbeat stays the
+   * fallback renewal), and parks without redialing when the control plane
+   * definitively refuses it. */
+  private startCloudEngineUplink(): void {
+    const registration = this.cloudRuntimeRegistration;
+    const config = this.cloudRuntimeConfig;
+    if (!registration || !config) return;
+    const advertised = registration.engineUplink();
+    if (!advertised) return;
+    // The durable S1 verifier state. An advertised uplink means the
+    // organization's realtime_uplink flag, which requires capabilities.
+    const capabilityAuth = new EngineCapabilityAuth({
+      identity: {
+        workspaceId: config.execution.workspaceId,
+        organizationId: config.execution.organizationId,
+        generation: config.execution.generation,
+        engineInstanceId: config.engine.instanceId,
+      },
+      issuer: advertised.controlPlaneOrigin,
+      store: fileCapabilityAuthStore(path.join(engineRuntimeDir(this.root), "cloud-capability-auth.json")),
+      fetchKeys: jwksFetcher(advertised.controlPlaneOrigin),
+      requestEngineCapability: () => registration.requestEngineCapability(),
+      admitActor: (client, route) => this.admitCloudCapabilityActor(client, route),
+      onSessionsClosed: closures => this.cloud?.closeCapabilitySessions(closures.map(capabilitySessionClose)),
+    });
+    this.cloudCapabilityAuth = capabilityAuth;
+    const uplink = new CloudEngineUplinkClient({
+      endpoint: advertised.endpoint,
+      token: advertised.token,
+      identity: {
+        workspaceId: config.execution.workspaceId,
+        organizationId: config.execution.organizationId,
+        generation: config.execution.generation,
+        engineInstanceId: config.engine.instanceId,
+        bootId: registration.runtimeBootId,
+      },
+      runtimeVersion: VERSION,
+      auth: capabilityAuth,
+      readiness: () => this.cloudEngineUplinkReadiness(),
+      activity: () => this.cloudEngineUplinkActivity(),
+      features: ["cred.v1", "lease.v1", "checkpoint.v1", "idle.v1", "turns.v1"],
+      // Credential-control push (P0.10 C01): a pushed revision runs the same
+      // credential-controls exchange the 500 ms poll runs; the poll itself
+      // stays as the fallback (see controlsPollIntervalMs at the boot).
+      onCredentialRevision: async () => {
+        // Only agent-controls reaches here: the uplink acks any other kind
+        // failed/cred_kind_unsupported before calling this handler.
+        const boot = this.cloudAgentBoot;
+        if (!boot) return { result: "applied" as const }; // pre-boot: the activation exchange converges
+        try {
+          // A fresh exchange, never a flight that predates the bump (C3
+          // review SHOULD-3: joining a stale flight acks applied falsely).
+          await boot.refreshCredentialControls();
+          return { result: "applied" as const };
+        } catch (error) {
+          // error.code can be ECONNRESET, a number or arbitrarily long —
+          // none are contract codes; non-conforming values map to
+          // cred_fetch_failed so the CP never 4400s us into a re-push loop.
+          return { result: "failed" as const,
+            code: sanitizeCredAckCode(error && typeof error === "object" && "code" in error ? error.code : undefined) };
+        }
+      },
+      // The moment the gate closes (or never negotiates the push), the
+      // credential poll returns to its fast fallback cadence instead of
+      // waiting out an armed 30 s timer.
+      onEstablishedChange: established => {
+        capabilityAuth.uplinkEstablished(established);
+        if (!established) this.cloudAgentBoot?.rescheduleControls();
+      },
+      onLease: (leaseExpiresAtMs, sentAtMs) => registration.adoptUplinkLease(leaseExpiresAtMs, sentAtMs),
+      // The boot's journal reads stay valid through the final drain; before
+      // activation they read empty and the activation note sends them.
+      turns: {
+        read: (afterSeq, limit) => this.cloudAgentBoot?.turnJournal?.turnJournal(afterSeq, limit) ?? [],
+        acked: () => this.cloudAgentBoot?.turnJournal?.turnJournalAcked() ?? 0,
+        ack: journalSeq => this.cloudAgentBoot?.turnJournal?.acknowledgeTurnJournal(journalSeq),
+      },
+      onCheckpointRequest: () => registration.checkpointRequested(),
+      onCheckpointPushChange: () => registration.uplinkCheckpointPushChanged(),
+      onReverifyAuthority: () => registration.requestHeartbeatSoon(),
+      onParked: reason => {
+        console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`);
+        // A refused credential or identity may mean lost authority: verify it
+        // over HTTP now rather than on the next beat the lease would allow.
+        if (reason === "unauthenticated" || reason === "forbidden") registration.requestHeartbeatSoon();
+      },
+      // No engine metrics pipeline exists yet; the durations are per-connect
+      // and per-sync rarities, so the uplink log channel carries them.
+      metric: (name, valueMs) => console.info(`[engine-uplink] metric ${name}=${Math.round(valueMs)}ms`),
+    });
+    this.cloudEngineUplink = uplink;
+    registration.attachUplinkLease(() => this.cloudEngineUplink === uplink && uplink.leaseActive);
+    registration.attachUplinkCheckpointPush(() => this.cloudEngineUplink === uplink && uplink.checkpointPushActive);
+    // The hello offers the last durable cursor; an unreadable file starts
+    // from a complete snapshot.
+    void capabilityAuth.restore().catch(() => undefined).then(() => {
+      if (this.cloudEngineUplink === uplink) uplink.start();
+    });
   }
 
   private handleCloudRuntimeAuthorityLoss(): void {
@@ -4042,7 +4266,7 @@ export class ZerosEngine {
     return hasCloudUserProcesses({inspect:()=>this.cloudWorkloads!.inspect()});
   }
 
-  private async stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void> {
+  private async stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean, delegated?: CloudCheckpointDirective): Promise<void> {
     const runtime = this.cloudRuntimeRegistration;
     if (!runtime || this.cloudRuntimeCheckpointQuiescing || this.cloudRuntimeHandoffFenced || !stillIdle()) return;
     this.cloudRuntimeCheckpointQuiescing = true;
@@ -4066,7 +4290,7 @@ export class ZerosEngine {
         await this.joinCloudPreservedWorkloads(this.cloudWorkloadIdleFence, this.cloudResidentIdleFence);
       }
       if (!stillIdle() || await this.cloudIdleUserProcesses() || !stillIdle()) return;
-      const directive = await runtime.idleStopRequest({ kind: "request", attemptId: randomUUID() });
+      const directive = delegated ?? await runtime.idleStopRequest({ kind: "request", attemptId: randomUUID() });
       if (!directive) return;
       await this.handleCloudCheckpointRequest(directive, authority);
     } finally {
@@ -4075,6 +4299,21 @@ export class ZerosEngine {
         await this.resumeCloudCheckpointAdmission();
       }
     }
+  }
+
+  /** `idle.v1`: an idle directive the control plane created runs the
+   * engine's own idle preparation; one the engine cannot prove idle is
+   * cancelled (`workspace_active`). Everything else, including every idle
+   * directive once the uplink is gone, keeps today's path. */
+  private routeCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void> {
+    if (!directive.idleStop || this.cloudIdleReservation !== null || this.cloudIdleCheckpoint?.id === directive.id ||
+        this.cloudEngineUplink?.idleActive !== true) return this.handleCloudCheckpointRequest(directive, authority);
+    return this.cloudIdleStop.delegate(async stillIdle => {
+      await this.stopIdleCloudWorkspace(authority, stillIdle, directive);
+      return this.cloudRuntimeCheckpointQuiescing && this.cloudIdleReservation === null;
+    }).then(async completed => {
+      if (!completed) await this.cloudRuntimeRegistration?.idleStopRequest({ kind: "cancel", requestId: directive.id }).catch(() => undefined);
+    });
   }
 
   private handleCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void> {
@@ -4513,6 +4752,14 @@ export class ZerosEngine {
         generation: config.execution.generation, engineInstanceId: config.engine.instanceId },
       supervisor: { onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss() },
       engineLive: () => this.running && !this.cloudRuntimeAuthorityStopping,
+      // While the uplink's gate is open, cred.revision pushes carry control
+      // changes and the poll drops to a 30 s safety net; any uplink loss
+      // returns it to the 500 ms fallback cadence.
+      controlsPollIntervalMs: () => (this.cloudEngineUplink?.established ? 30_000 : 500),
+      // A successful poll clears the uplink's failed-push mark, so a
+      // transient push failure recovers the slow cadence after one poll.
+      controlsExchange: ok => { if (ok) this.cloudEngineUplink?.noteCredentialExchangeSucceeded(); },
+      turnJournalChanged: () => this.cloudEngineUplink?.noteTurnJournal(),
       startsAllowed: () => !this.cloudRuntimeHandoffFenced && !this.cloudRuntimeCheckpointQuiescing && !this.cloudLegacyResidentRequiresFreshView,
       isAdmittedCwd: cwd => {
         try {
@@ -4814,6 +5061,7 @@ export class ZerosEngine {
       freezeNormal: sealZerosDbForRuntimeHandoff,
       request: (seal,signal) => registration.localCommandSealRequest(seal,signal),
       onStage: stage => progress?.stage(stage),
+      onSealRefusal: refusal => progress?.sealRefusal(refusal),
       onDeadline: () => progress?.fail(undefined, "deadline"),
     }).then(async () => {
       progress?.stage("checkpoint_capture");
@@ -4909,7 +5157,13 @@ export class ZerosEngine {
     } catch { return null; }
   }
 
-  private async verifyCloudActorClient(token: string, renew = false) {
+  /** Redeems a client's credential behind this engine's admission gates: a
+   * grant token (renewed with `renew`), or the control plane's admission of
+   * a verified capability's actor. */
+  private async verifyCloudActorClient(
+    credential: string | ((registration: CloudRuntimeRegistration) => Promise<CloudRuntimeClientAdmission | null>),
+    renew = false,
+  ) {
     if (this.cloudLegacyResidentRequiresFreshView) return null;
     const registration = this.cloudRuntimeRegistration;
     if (!registration) return null;
@@ -4922,11 +5176,12 @@ export class ZerosEngine {
       if (registration !== this.cloudRuntimeRegistration || boot !== this.cloudAgentBoot || !boot.active ||
           !this.cloudLocalEvents || this.cloudRuntimeAuthorityStopping) return null;
     }
-    const admission = await registration.verifyClientAdmission(token, renew);
+    const admission = typeof credential === "string"
+      ? await registration.verifyClientAdmission(credential, renew) : await credential(registration);
     if (!admission || registration !== this.cloudRuntimeRegistration) return null;
     if (registration.localCommandsNegotiated()) {
       if (!boot || boot !== this.cloudAgentBoot || !boot.active || this.cloudRuntimeAuthorityStopping) return null;
-      try { await boot.confirmAdmission(admission); }
+      try { await boot.confirmAdmission(admission, renew); }
       catch (error) {
         if (renew && registration === this.cloudRuntimeRegistration && boot === this.cloudAgentBoot && boot.active &&
             !this.cloudRuntimeAuthorityStopping && isTransientCloudAgentAuthorityError(error))
@@ -4937,6 +5192,29 @@ export class ZerosEngine {
           this.cloudRuntimeAuthorityStopping) return null;
     }
     return admission;
+  }
+
+  /** S3 Part 3 direct route: the control plane admits the actor of a
+   * capability this engine verified, behind the same gates as a redeemed
+   * grant. Only the control plane refuses (null, a 4403 close); anything
+   * this engine cannot answer yet is transient, so the client retries. */
+  private async admitCloudCapabilityActor(client: EngineClientAuth, route: CapabilityRoute): Promise<CapabilityActorAdmission | null> {
+    const outcome: { admitted?: CapabilityActorAdmission; refused?: true } = {};
+    let admission: CloudRuntimeClientAdmission | null;
+    try {
+      admission = await this.verifyCloudActorClient(async registration => {
+        const admitted = await registration.admitCapabilityClient(client, route);
+        if (admitted) outcome.admitted = admitted;
+        else outcome.refused = true;
+        return admitted?.admission ?? null;
+      });
+    } catch (error) {
+      if (isTransientCloudAgentAuthorityError(error)) throw new CloudClientAuthorityTransientError();
+      throw error;
+    }
+    if (admission && outcome.admitted) return outcome.admitted;
+    if (outcome.refused) return null;
+    throw new CloudClientAuthorityTransientError();
   }
 
   private async handleCloudCommandOperation(op: string, params: Record<string, unknown>,client:TransportClient): Promise<unknown> {
@@ -5746,9 +6024,7 @@ export class ZerosEngine {
         try { return await mutation(); } finally { resumeTools.forEach((resume) => resume()); }
       } finally {
         release();
-        for (const target of validated) {
-          this.designTerritoryTransitions.delete(target.workspaceId);
-        }
+        this.releaseDesignTerritoryOwners(validated);
       }
     }
     const validated: typeof ordered = [];
@@ -5873,10 +6149,27 @@ export class ZerosEngine {
       for (const workspaceRoot of suspendedUtilityRoots) {
         this.agents.resumePooledUtilityWorkspaceTerritory(workspaceRoot);
       }
-      for (const target of validated) {
-        this.designTerritoryTransitions.delete(target.workspaceId);
-      }
+      this.releaseDesignTerritoryOwners(validated);
     }
+  }
+
+  private designTerritoryOwnerReleased(): Promise<void> {
+    this.designTerritoryOwnerRelease ??= new Promise<void>((resolve) => {
+      this.wakeDesignTerritoryOwnerWaiters = resolve;
+    });
+    return this.designTerritoryOwnerRelease;
+  }
+
+  private releaseDesignTerritoryOwners(
+    targets: readonly { workspaceId: string }[],
+  ): void {
+    for (const target of targets) {
+      this.designTerritoryTransitions.delete(target.workspaceId);
+    }
+    const wake = this.wakeDesignTerritoryOwnerWaiters;
+    this.designTerritoryOwnerRelease = null;
+    this.wakeDesignTerritoryOwnerWaiters = null;
+    wake?.();
   }
 
   /** Qualified-cloud Code authority is creation-time state. The local desktop
@@ -6614,6 +6907,7 @@ export class ZerosEngine {
     chatId?: string;
     workspaceId?: string | null;
   }): void {
+    this.sessionUpdateBatcher?.flush(input.executionId);
     this.router.setOwner(input.executionId, input.ownerId);
     this.sessionAgent.set(input.executionId, input.agentId);
     if (input.chatId) {
@@ -6632,6 +6926,7 @@ export class ZerosEngine {
     executionId: string,
     opts: { preservePrompt?: boolean } = {},
   ): void {
+    this.sessionUpdateBatcher?.flush(executionId);
     const conversationId = this.sessionChat.get(executionId);
     this.steeringReceipts.delete(executionId);
     this.router.clearOwner(executionId);
@@ -7524,6 +7819,7 @@ export class ZerosEngine {
                 superseded.push(priorSessionId);
             }
             for (const priorSessionId of superseded) {
+              this.sessionUpdateBatcher.flush(priorSessionId);
               const priorAgentId =
                 this.sessionAgent.get(priorSessionId) ?? msg.agentId;
               this.router.clearOwner(priorSessionId);
@@ -7774,6 +8070,7 @@ export class ZerosEngine {
             );
             return;
           }
+          this.sessionUpdateBatcher.flush(msg.sessionId);
           this.router.setOwner(msg.sessionId, client.id);
           const promptReceivedAt = Date.now();
           // Everything from here to the `agents.prompt` handoff below is Zeros'
@@ -8359,6 +8656,7 @@ export class ZerosEngine {
             );
             for (const [index, execution] of executions.entries()) {
               const { executionId, conversationId } = execution;
+              this.sessionUpdateBatcher.flush(executionId);
               this.router.clearOwner(executionId);
               this.sessionAgent.delete(executionId);
               this.sessionChat.delete(executionId);
@@ -9117,6 +9415,7 @@ export class ZerosEngine {
                 });
               }
             }
+            this.sessionUpdateBatcher.flush(liveExecution);
             this.router.setOwner(liveExecution, client.id);
             this.sessionAgent.set(liveExecution, msg.agentId);
             if (msg.chatId) {
@@ -9924,6 +10223,16 @@ export class ZerosEngine {
 
   // ── Transcripts (engine persists on emit) ───────────────
 
+  private deliverSessionUpdate(agentId: string, notification: SessionNotification): void {
+    const executionId = notification.executionId ?? notification.sessionId;
+    this.routeSessionScoped(executionId, createMessage({
+      type: "AGENT_SESSION_UPDATE", source: "engine", agentId, executionId,
+      notification: notification as never,
+      ...(this.sessionChat.get(executionId) ? { chatId: this.sessionChat.get(executionId) } : {}),
+    }));
+    if (notification.update.sessionUpdate !== "turn_usage_update") this.persistSessionUpdate(executionId, notification);
+  }
+
   /** Persist a streaming session update to the unified DB AS IT EMITS. The
    *  engine is the source — this runs even when no client is attached (a cloud
    *  agent after the laptop closes). It folds the chunk with the SAME shared
@@ -9953,6 +10262,7 @@ export class ZerosEngine {
     /** Original renderer send time, already bounded at the engine boundary. */
     startedAt?: number,
   ): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     // Continue after authentication reuses the original turn ID. Keep its DB
     // row throughout reconnection/cancellation, then replace that exact tail
     // bubble on admission instead of coalescing the prompt text a second time.
@@ -10092,6 +10402,7 @@ export class ZerosEngine {
     userMessageId?: string,
     steeredTurnId?: string,
   ): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     const chatId = this.sessionChat.get(sessionId);
     if (!chatId) return;
     const text =
@@ -10143,6 +10454,7 @@ export class ZerosEngine {
     createdAt: number,
     steeredTurnId?: string,
   ): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     const chatId = this.sessionChat.get(sessionId);
     const presentation = this.localPresentations.get(messageId);
     this.localPresentations.delete(messageId);
@@ -10405,6 +10717,7 @@ export class ZerosEngine {
     // persisted on the turn row so the footer's usage popover survives reloads.
     usage: TurnUsage | null = null,
   ): Promise<void> {
+    this.sessionUpdateBatcher?.flush(ctx.sessionId);
     // A settled turn's transcript is durable before its row reports settled.
     try { flushStreamingChatMessages(ctx.chatId); } catch { /* persistence never disturbs settle */ }
     try {
@@ -10746,6 +11059,7 @@ export class ZerosEngine {
       }
     }
 
+    const finishLoopObservation = this.cloudWorker ? null : this.slowWorkspaceOperations?.beginEventLoopObservation?.();
     try {
       // Keep the original NORMAL rows and FULL head in one read snapshot across
       // image migration and the outer dispatch awaits. A changed writer or head
@@ -10781,6 +11095,7 @@ export class ZerosEngine {
       // stays readable during a Design territory transition.
       const startedAt = Date.now();
       const dispatchBody = async () => {
+        if (!this.cloudWorker && (op.startsWith("messages.") || op.startsWith("chats."))) this.sessionUpdateBatcher?.flush();
         if (client.cloudActor && client.authorized?.()!==true) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
         if(op==="cloudLsp.request"){
           if(!this.cloudLanguageServices||!client.cloudActor||client.authorized?.()!==true||
@@ -10794,7 +11109,16 @@ export class ZerosEngine {
         const reviewUserName = reviewUserId && this.clientAccount.get(client.id) === reviewUserId
           ? this.clientAccountNames.get(client.id)
           : client.kind === "local" && reviewUserId === this.ownerAccountSub ? this.ownerAccountName ?? undefined : undefined;
+        const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION
+          ? JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.cloudActor, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]) : "";
         const handleWorkspaceRequest=()=>this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay||client.cloudActor!==undefined,cloudWorker:!!this.cloudWorker,
+          ...(op === DESIGN_CATALOG_READ_OPERATION ? { catalogAdmission: {
+            connectionId: client.id,
+            authority: catalogAuthority,
+            authorized: () => this.router.getClient(client.id) === client && (client.kind === "local" || client.authorized?.() === true) && !this.cloudRuntimeAuthorityStopping &&
+              catalogAuthority === JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.cloudActor, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]),
+            ...(this.cloudRuntimeConfig ? { cloudOrganizationId: this.cloudRuntimeConfig.execution.organizationId } : {}),
+          } } : {}),
           ...(op.startsWith("codeReview.") ? { reviewUserId, reviewUserName } : {}),
           ...(client.cloudActor && client.accountUserId ? { cloudActorIdentity: { userId: client.accountUserId, deviceId: client.cloudActor.deviceId, sessionId: client.cloudActor.sessionId },
             cloudFileActor: { role: client.cloudActor.role, authorized: () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping } } : {})});
@@ -10927,9 +11251,15 @@ export class ZerosEngine {
         ) {
           return null;
         }
-        if (!lifecycleMutationWorkspaceId) return null;
+        // These lifecycles own the barrier that lifecycleMutationWorkspaceId
+        // feeds, so it is always null for them; their exact owner is the
+        // request's workspaceId. The global gate would suspend Design tools in
+        // every workspace's chats. A rowless owner (the cloud primary checkout)
+        // keeps the global gate.
+        const workspaceId = params.workspaceId;
+        if (typeof workspaceId !== "string" || !workspaceId) return null;
         try {
-          return getWorkspaceById(lifecycleMutationWorkspaceId);
+          return getWorkspaceById(workspaceId);
         } catch {
           return null;
         }
@@ -11016,15 +11346,29 @@ export class ZerosEngine {
         }
       }
       const operation = managedLifecycleRegistryTarget
-        ? this.withDesignTerritoryTransition(
-            [
-              {
-                workspaceId: managedLifecycleRegistryTarget.id,
-                designDirectory: designDirOf(managedLifecycleRegistryTarget),
-              },
-            ],
-            dispatch,
-          )
+        ? (async () => {
+            // A repeat or follow-up lifecycle for this owner (another window,
+            // archive then restore) queues behind its transition, as it did
+            // behind the app-wide gate, instead of failing the owner check.
+            // Lifecycles never run inside a transition, so this cannot wait on
+            // itself.
+            while (
+              this.designTerritoryTransitions.has(
+                managedLifecycleRegistryTarget.id,
+              )
+            ) {
+              await this.designTerritoryOwnerReleased();
+            }
+            return this.withDesignTerritoryTransition(
+              [
+                {
+                  workspaceId: managedLifecycleRegistryTarget.id,
+                  designDirectory: designDirOf(managedLifecycleRegistryTarget),
+                },
+              ],
+              dispatch,
+            );
+          })()
         : changesDesignOwnerRegistry
           ? this.withGlobalDesignTerritoryTransition(dispatch)
           : recognitionMutationTarget
@@ -11102,7 +11446,7 @@ export class ZerosEngine {
         invalidateWorkspaceChangeProbes(workspaceIds);
       }
       const elapsedMs = Date.now() - startedAt;
-      this.slowWorkspaceOperations.observe(op, elapsedMs);
+      this.slowWorkspaceOperations.observe(op, elapsedMs, finishLoopObservation?.());
       client.send(
         createMessage({
           type: "WORKSPACE_RESPONSE",
@@ -11247,6 +11591,8 @@ export class ZerosEngine {
       // Forward to error tracking (gap A) — scrubbed metadata; skips expected
       // git control-flow codes. Covers every git/file/workspace op, all surfaces.
       this.reportEngineError(client, `workspace:${op}`, err);
+    } finally {
+      finishLoopObservation?.();
     }
   }
 
@@ -11303,6 +11649,88 @@ export class ZerosEngine {
     );
   }
 
+  /** The Local managed workspace and active Design directory an agent
+   * execution writes into, or null. Cloud workers never ask. */
+  private designAgentTarget(executionId: string): DesignAgentTarget | null {
+    if (this.cloudWorker) return null;
+    const chatId = this.sessionChat.get(executionId);
+    if (!chatId) return null;
+    let cwd: string | undefined;
+    try {
+      cwd = getChat(chatId)?.folder;
+    } catch {
+      return null;
+    }
+    if (!cwd) return null;
+    const workspaceId = this.workspace.workspaceIdForCwd(cwd);
+    if (!workspaceId || workspaceId === LOCAL_MAIN_WORKSPACE_ID) return null;
+    let workspace: ReturnType<typeof getWorkspaceById>;
+    try {
+      workspace = getWorkspaceById(workspaceId);
+    } catch {
+      return null;
+    }
+    if (!workspace || workspace.archivedAt != null) return null;
+    const directory = activeDesignDirectoryNameFor(workspace.path);
+    if (!directory) return null;
+    return { workspaceId, workspacePath: workspace.path, cwd, directory, chatId };
+  }
+
+  private createDesignAgentActivity(): DesignAgentActivity {
+    return new DesignAgentActivity({
+      target: (executionId) => this.designAgentTarget(executionId),
+      compose: (target, file, html) =>
+        withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+          composeDesignAgentDraftPreview(target.workspacePath, file, html),
+        ),
+      composeStylesheet: (target, file, css) =>
+        withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+          composeDesignAgentStylesheetPreview(target.workspacePath, file, css),
+        ),
+      readSource: (target, file) =>
+        withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+          readDesignAgentDraftBase(target.workspacePath, file),
+        ),
+      // Drafts carry authored content: only the trusted local desktop gets them.
+      publish: (workspaceId, draft) =>
+        this.router.broadcastLocal(
+          createMessage({ type: "DESIGN_AGENT_DRAFT", source: "engine", workspaceId, draft }),
+        ),
+      // The same Design-only revalidation a rebuilt style output uses, ahead
+      // of the worktree watcher (a 1.5 s stat poll in packaged builds).
+      saved: (target) => {
+        this.refreshDesignCanvas(target.workspacePath, target.workspaceId);
+        // That refresh covers these files: the poller must not repeat it.
+        void this.designChangePoller?.absorb(target.workspacePath);
+      },
+      // A shell command or script may have written Design files itself.
+      toolSettled: (target) => void this.designChangePoller?.check(target.workspacePath),
+    });
+  }
+
+  private createDesignChangePoller(): DesignChangePoller {
+    return new DesignChangePoller({
+      presentRoots: presentDesignStyleBuildRoots,
+      directory: (root) => designSnapshotDirectory(root) ?? activeDesignDirectoryNameFor(root) ?? null,
+      changed: (root) => this.refreshDesignCanvas(root, getWorkspaceByPath(root)?.id),
+    });
+  }
+
+  /** Re-read one checkout's Design canvas now: the Design-only revalidation
+   * a rebuilt style output uses, ahead of the worktree watcher. A checkout
+   * without a workspace row (the main checkout) refreshes every canvas. */
+  private refreshDesignCanvas(workspacePath: string, workspaceId: string | undefined): void {
+    fenceDesignSnapshotReads(workspacePath);
+    this.broadcast(
+      createMessage({
+        type: "DB_CHANGED",
+        source: "engine",
+        kinds: ["designStyles"],
+        ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
+      }),
+    );
+  }
+
   /** Publish prompt lifecycle independently of the request/response socket.
    * The current owner may be a renderer that adopted the session after the
    * prompt began, which is precisely why the original RPC response is not
@@ -11312,6 +11740,8 @@ export class ZerosEngine {
     state: "running" | "completed" | "failed" | "cancelled",
     stopReason: StopReason | null = null,
   ): void {
+    this.sessionUpdateBatcher?.flush(prompt.sessionId);
+    if (state !== "running") this.designAgentActivity?.endExecution(prompt.sessionId);
     this.routeSessionScoped(
       prompt.sessionId,
       createMessage({
@@ -11425,7 +11855,10 @@ export class ZerosEngine {
     });
     const server = new LocalOrchestrationServer(
       registry,
-      (scope, body, signal) => service.call(scope, body, signal),
+      (scope, body, signal) => {
+        this.sessionUpdateBatcher.flush();
+        return service.call(scope, body, signal);
+      },
       () => ports.engineId(),
     );
     // A sandboxed shell cannot open the endpoint; it reaches the same
@@ -11615,6 +12048,7 @@ export class ZerosEngine {
    *  the settle deadline so the turn cannot stay "live" if the adapter never
    *  comes back. */
   private markCancelIntent(sessionId: string): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     this.cancelRequested.add(sessionId);
     const prompt = this.activePromptContexts.get(sessionId);
     if (!prompt) return;
@@ -11818,6 +12252,8 @@ export class ZerosEngine {
           `[Zeros] engine owner account changed ${this.ownerAccountSub.slice(0, 8)}… → ${next?.slice(0, 8) ?? "∅"}…`,
         );
       }
+      if (next !== this.ownerAccountSub)
+        this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
       this.ownerAccountSub = next;
       if (sub) this.ownerAccountName = verifiedName ?? null;
       return;
@@ -11920,6 +12356,7 @@ export class ZerosEngine {
    *  drop would be pointless reconnect churn. We still forget the owner in either
    *  mode so a later flip to required-mode starts from a clean slate. */
   private clearOwnerBinding(): void {
+    this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
     this.ownerAccountSub = nextOwnerAccount(this.ownerAccountSub, {
       kind: "signed-out",
     });
@@ -12708,6 +13145,9 @@ export class ZerosEngine {
    *  terminals are NOT torn down here — they're engine-owned and persist for the
    *  other devices (see the note at the end of this method). */
   private handleDisconnect(client: TransportClient): void {
+    this.workspace.retireDesignCatalog(client.id);
+    if (this.cloudWorker && client.kind === "cloud" && client.cloudActor)
+      this.cloudAgentBoot?.releaseActor(client.cloudActor.sessionId, client.id);
     this.residentReplay.release(client);
     if (this.cloudWorker) this.cloudUserPresence.release(client);
     void this.cloudLanguageServices?.release(client.id).catch(()=>this.handleCloudRuntimeAuthorityLoss());
@@ -12790,7 +13230,10 @@ export class ZerosEngine {
     // it; local (loopback) clients get it as before.
     let cloudLocalCommands;
     if (client.kind === "cloud" && client.cloudActor && client.authorized?.() && !this.cloudRuntimeAuthorityStopping && this.cloudAgentBoot?.active) {
-      try { cloudLocalCommands = this.cloudAgentBoot.metadataFor(client.cloudActor.sessionId); } catch { /* No unconfirmed peer advertisement. */ }
+      try {
+        if (this.cloudWorker) this.cloudAgentBoot.attachActor(client.cloudActor.sessionId, client.id);
+        cloudLocalCommands = this.cloudAgentBoot.metadataFor(client.cloudActor.sessionId);
+      } catch { /* No unconfirmed peer advertisement. */ }
     }
     client.send(
       createMessage({
@@ -12803,7 +13246,7 @@ export class ZerosEngine {
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
         ...(cloudLocalCommands ? { cloudLocalCommands } : {}),
-        ...(this.cloudCommands ? { capabilities: ["cloud.commands.v1", ...(cloudLocalCommands ? ["cloud.localCommands.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig ? ["workspace.resourceUsage.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig && !this.cloudRuntimeAuthorityStopping && this.cloudAgentTurnTimings?.active ? ["cloud.turnTimings.v1"] : []), ...(this.cloudEvents ? ["cloud.events.v1"] : []), ...(this.cloudActions ? ["cloud.actions.v1"] : []), ...(this.cloud?.supportsNativeServices ? ["cloud.services.v1"] : [])] } : {}),
+        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, ...(this.cloudCommands ? ["cloud.commands.v1", ...(cloudLocalCommands ? ["cloud.localCommands.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig ? ["workspace.resourceUsage.v1"] : []), ...(this.cloudWorker && this.cloudRuntimeConfig && !this.cloudRuntimeAuthorityStopping && this.cloudAgentTurnTimings?.active ? ["cloud.turnTimings.v1"] : []), ...(this.cloudEvents ? ["cloud.events.v1"] : []), ...(this.cloudActions ? ["cloud.actions.v1"] : []), ...(this.cloud?.supportsNativeServices ? ["cloud.services.v1"] : [])] : [])],
       }),
     );
   }

@@ -120,6 +120,9 @@ critical browser entry; it does not authorize substituting full composer smoke.
 
 | Lane                     | Ownership or selection                                                                    |
 | ------------------------ | ----------------------------------------------------------------------------------------- |
+| `cloud-chaos`            | Control-plane chaos scenarios (advisory; `ci:cloud-chaos` or its path rule)               |
+| `cloud-client`           | `packages/cloud-client/**` SDK and conformance suites (advisory)                          |
+| `cloud-scale`            | Load-simulator 10×/100× budget scenarios (advisory; `ci:cloud-scale` or load-sim paths)   |
 | `docs-only`              | Modified documentation in the audited allowlist                                           |
 | `ci-config`              | CI definitions; shared invalidators select the full PR set                                |
 | `web`                    | Web hub, handoff, Functions, and shared web inputs                                        |
@@ -186,6 +189,27 @@ and contributes to the macOS workload floor. The reserved critical-composer
 entry has no executable suite yet and is advisory; it never substitutes for
 `composer-full`. These execution-owner annotations do not add workflow steps.
 
+Four advisory cloud-program jobs (`local-untouched`, `cloud-chaos`,
+`cloud-scale`, `cloud-client`) run in `ci.yml` outside the trusted job
+inventory. Each lane-gated job reads its lane bit from the scope ledger and
+skips green while the trusted base policy lacks the lane, so the introducing
+change cannot wedge itself; each workload passes empty until its track lands
+the test files. They sit under `zeros/ci-gate` with tolerated results, so a
+failure shows on the PR without blocking it, until the owner promotes a lane
+into the required selection. `local-untouched` runs on every PR: it fails a
+cloud-program change that touches Local-only files (per
+`docs/cloud-workspace/local-seams.json`, judged by the base commit's copy so a
+PR cannot weaken its own gate; the manifest is itself a CI-definition path, so
+editing it needs an owner merge, and a PR whose head copy does not parse or
+validate fails) without the `local-seams-sign-off`
+label, or that crosses a shared seam (engine core, renderer bridge, protocol,
+account auth) while the Local test lanes are unselected. Only the owner
+applies `local-seams-sign-off`; agents never add it — the label is the owner's
+explicit sign-off, and agents act with the owner's GitHub identity. The load-simulator
+budget check itself runs in the control-plane database lane on every CP
+change; `cloud-scale` adds the 10×/100× scenario suite by label or load-sim
+path, with a nightly promotion deferred to the track G rollout.
+
 ## Local preview and additive labels
 
 Run before the final push:
@@ -217,9 +241,13 @@ It does not provide an immutable merge request or an App-owned merge gate.
 | `ci:control-plane-db` | Control-plane static and database suites       |
 | `ci:packaging`        | Packaging, with dependent execution predicates |
 | `ci:web`              | Offline web verification                       |
+| `ci:cloud-chaos`      | Advisory cloud chaos lane                      |
+| `ci:cloud-scale`      | Advisory 10×/100× load-budget lane             |
 
 The vocabulary is closed. An unknown `ci:*` label fails with the supported list;
-ordinary labels have no effect. `LABELS_JSON` accepts a JSON array of strings or
+ordinary labels have no effect. `local-seams-sign-off` is not a `ci:*` label
+and selects nothing; it only satisfies `local-untouched`, and only the owner
+applies it; agents never add it. `LABELS_JSON` accepts a JSON array of strings or
 GitHub label objects with `name`. Preview requests with:
 
 ```sh
@@ -358,8 +386,10 @@ CI-definition PRs need an owner merge. Agents must not auto-merge changes to the
 paths recognized by `scripts/ci/ci-definition.mjs`: workflows/actions,
 `.github/actionlint.yaml`, `.github/CODEOWNERS`, `scripts/ci/**`, `scripts/agent-runtime/**`, `scripts/check-*`,
 the explicit Vitest runner, composer entry and `scripts/ui-smoke/**`, release
-scripts, root Vitest/ESLint configs, root package/lock/workspace files, and the
-control-plane/web package and lockfiles.
+scripts, root Vitest/ESLint configs, root package/lock/workspace files, the
+control-plane/web package and lockfiles, and the Local seams manifest
+`docs/cloud-workspace/local-seams.json` (the `local-untouched` gate trusts the
+base copy, so an unreviewed edit would let the next PR cross a weakened seam).
 
 List definition paths in a committed diff with:
 
@@ -371,12 +401,87 @@ The command lists sorted paths, including both sides of renames and deletions.
 A failed comparison exits nonzero so an unreadable diff cannot authorize an
 automatic merge. This is a definition detector, not a repository merge action.
 
-## Agent auto-merge
+## Agent merge wrapper
 
 Agents must arm merges with `pnpm agent:merge <pr-number>`. The wrapper uses
 the workspace's own `gh` identity, reads the complete PR diff and open-PR list,
 and queries GitHub's required checks. Use `pnpm agent:merge <pr-number> --dry-run`
 to print the decision without changing GitHub state. A refusal exits non-zero.
+The default remains auto-merge for existing callers. When authorization permits
+only an immediate merge, explicitly select that mode:
+
+```sh
+pnpm agent:merge <pr-number> --immediate --dry-run
+pnpm agent:merge <pr-number> --immediate
+```
+
+Immediate mode either performs one synchronous squash merge or refuses; it
+never enables auto-merge, admits a merge queue, disables an existing request,
+dequeues a PR, retargets its base, or retries a write. It calls GraphQL
+`mergePullRequest` with `expectedHeadOid` and the checked PR title/body, not
+`gh pr merge`: that CLI can enable auto-merge or enqueue on a merge-queue branch
+even without `--auto`. The dry-run prints the actual mode and expected head and
+performs only reads. Success requires both the mutation's merged result and a
+fresh matching readback, and prints the merge commit SHA. An unconfirmed outcome
+exits non-zero; inspect GitHub before deciding whether to retry.
+
+Immediate mode binds the REST `/user` human to the effective GraphQL viewer by
+login, node ID and database ID. Every GraphQL read, including each open-PR page
+and the final readback, must identify that same principal. The REST identity is
+also refreshed before the final preflight. GraphQL's `User` typename alone does
+not prove a human: bot accounts can have that typename. The mutation and readback
+receipts must identify the qualified human as the actual `mergedBy` actor.
+Missing, changed or mismatched principals refuse; an unconfirmed post-write
+actor cannot count as success. The wrapper retains the ordinary workspace `gh`
+transport and never substitutes credentials or changes authentication settings.
+A connection that supplies different REST and GraphQL principals is unsupported:
+even its immediate dry-run refuses, rather than claiming that it can land PRs.
+
+An eligible immediate run reads the effective author from normal
+`git var GIT_AUTHOR_IDENT`, pins its email across preflight and supplies the
+supported GraphQL `authorEmail` field explicitly. Both the mutation result and
+readback must show that exact `mergeCommit.author.email` before success is
+reported. Missing, malformed or changed local authorship refuses before the
+write; rejected or unconfirmed server authorship never falls back to a default
+or retries. The dry-run validates this metadata without printing the address.
+Configure and verify the actual workspace Git identity before invoking the
+command; saved config alone may differ from the effective identity.
+
+Author email is commit metadata, not authentication or a permission grant. It
+does not replace the independent human-principal checks. No personal address is
+hard-coded, and the wrapper does not change the workspace's authentication or
+author environment. GitHub controls generated committer metadata; the API has
+no corresponding committer-email input, and local Git config does not control
+that server-generated identity. The legacy mode remains unchanged and does not
+provide these immediate-mode authorship guarantees.
+
+Immediate mode preserves all shared guards below and additionally requires
+`MERGEABLE` / `CLEAN`, successful nonempty required CI, no pending/failed/unknown
+checks, and a satisfied GitHub review decision (`APPROVED`, or no review
+requirement). Optional checks accept the CLI's `skipping/SKIPPED` and
+`skipping/NEUTRAL` pairs; required checks must be `pass/SUCCESS`. Unknown or
+malformed pairs, including `pass/NEUTRAL`, refuse. It does not invent a writer-approval requirement when repository
+policy requires none. Independent engineering review and merge authorization
+remain separate operator responsibilities.
+
+Two complete preflights refresh the head, base, diff, checks, identity and
+open-PR guard, including a final PR read after each batch and after the live
+hourly gate. Changed heads, bases,
+titles, bodies or labels refuse rather than silently qualifying a different
+request. GitHub enforces the expected head and current branch protections at
+the write boundary. There is no expected-base CAS in this API: a base update
+after the final read is subject to GitHub's current protection policy, not an
+immutable base lease. The wrapper never changes the PR's existing base, including
+an ordinary branch-based stack; unsupported GitHub native-stack merges refuse
+without falling back to another API or queue.
+
+Merge-queue branches, any queued or auto-armed open PR (including the target),
+unavailable safety metadata and viewers with administrator bypass capability
+are unsupported in immediate mode and refuse without cancelling existing work.
+This keeps a check/review race from implicitly using a policy bypass. Immediate
+mode rejects `--force`, `--admin`, auto/queue flags and branch-deletion flags.
+The repository-wide one-armed-PR guard is still a snapshot, not an atomic lock
+across workspaces; serialize authorized landing attempts.
 
 CI-definition PRs require the owner to review and merge them. The shared
 `scripts/ci/ci-definition.mjs` policy must export `isCiDefinitionPath(path)`;
@@ -384,7 +489,7 @@ the wrapper refuses to arm a merge when that policy is unavailable. Renamed
 files are checked under both paths. Drafts, forks, closed PRs, changes to
 `.github/ci-incidents/*.json` (including removals), skip markers in PR titles or
 bodies, and failed or cancelled required checks are also refused. Pending checks
-may wait for GitHub's normal auto-merge requirements.
+may wait for GitHub's normal auto-merge requirements in the default mode only.
 
 Only one open PR may have auto-merge enabled. Only a human may override this
 guard: first document the justification in a comment on the target PR using the
@@ -394,7 +499,7 @@ the comment's author and PR. This flag cannot override any other guard. Agents
 must never supply `--force`. The open-PR guard reads a snapshot; avoid concurrent
 arming from separate workspaces.
 
-The merge request uses `gh pr merge --auto --squash --match-head-commit` with the
+The default merge request uses `gh pr merge --auto --squash --match-head-commit` with the
 checked head SHA and explicit checked PR title and body. This keeps GitHub's
 squash-message defaults or later PR text changes from introducing a skip marker.
 Do not call `gh pr merge` or the bot merge command directly.

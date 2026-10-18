@@ -1,4 +1,5 @@
 import { warmDesignWorkspaceSnapshot } from "../../features/design-workspace/state/design-workspace-cache";
+import { warmSimulatorTab } from "../../features/simulators/simulator-tab";
 // ──────────────────────────────────────────────────────────
 // Workbench Tab Strip — inline tab strip for Workbench's header band
 // ──────────────────────────────────────────────────────────
@@ -181,7 +182,10 @@ export function WorkbenchTabStrip({
                     ? terminalIndicators[tab.terminalId]
                     : undefined
                 }
-                onIntent={() => { if (tab.type === "design" && workspaceId) warmDesignWorkspaceSnapshot(workspaceId); }}
+                onIntent={() => {
+                  if (tab.type === "design" && workspaceId) warmDesignWorkspaceSnapshot(workspaceId);
+                  if (tab.type === "simulator") void warmSimulatorTab(scope).catch(() => {});
+                }}
                 onActivate={() => handleActivate(tab.id)}
                 onClose={(e, browserSessionId) =>
                   handleClose(e, tab, browserSessionId)

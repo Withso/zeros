@@ -80,8 +80,20 @@ checkpoint cap plus 15 seconds for stopping. Backoff cannot cross that boundary.
 The first successful recovery pass attempts provider TTL renewal even before the
 normal half-TTL renewal threshold. Funding alone never clears a failed renewal's
 error clock. An exhausted outage runway requests a checkpoint stop, escalating
-to the existing direct-stop fallback below 45 seconds; it never invents usage
+to the existing direct-stop fallback at 45 seconds; it never invents usage
 or releases an unsettled reservation.
+
+While a draining lease still lacks positive stopped proof, both ordinary
+polling and failure backoff stop at its earlier pending checkpoint deadline or
+the 45-second force boundary. The worker requests due escalation before
+provider inspection, using the current claim and generation. After that
+attempt, retries keep the normal 15-second cadence within the remaining
+provider/funding TTL and cannot cross its expiry. Once the finite window is
+past, failures keep normal backoff instead of repeatedly scheduling an expired
+deadline. A positively stopped allocation awaiting final metering keeps its
+coverage delay and normal settlement backoff throughout; `draining` alone does
+not mean a stop is still needed. None of these deadlines prove provider
+retirement, extend funding or release an unsettled hold.
 
 A ready/busy workspace must also have a live current-generation engine before
 its compute lease can renew. Expired engine authority stops compute even when

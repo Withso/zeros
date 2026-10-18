@@ -30,9 +30,9 @@ d("cloud workspace directory live updates",()=>{
       await tx.query("DELETE FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId]);
     });
     await publishCloudWorkspaceDirectoryChanges(pool);
-    expect((await pool.query("SELECT count(*)::int AS n FROM security_events WHERE user_id IS NOT NULL")).rows[0].n).toBeLessThanOrEqual(100);
+    expect((await pool.query("SELECT count(*)::int AS n FROM security_events WHERE user_id IS NOT NULL AND kind='organization.data_changed'")).rows[0].n).toBeLessThanOrEqual(100);
     await publishCloudWorkspaceDirectoryChanges(pool);
-    expect((await pool.query("SELECT count(DISTINCT user_id)::int AS n FROM security_events WHERE user_id IS NOT NULL")).rows[0].n).toBe(101);
+    expect((await pool.query("SELECT count(DISTINCT user_id)::int AS n FROM security_events WHERE user_id IS NOT NULL AND kind='organization.data_changed'")).rows[0].n).toBe(101);
     expect((await pool.query("SELECT 1 FROM cloud_workspace_directory_outbox WHERE workspace_id=$1",[fixture.workspaceId])).rowCount).toBe(0);
   });
   it.each(["organization","workspace"])("skips a busy %s without delaying another tenant",async(kind)=>{

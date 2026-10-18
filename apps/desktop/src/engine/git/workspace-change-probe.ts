@@ -24,6 +24,55 @@ interface ProbeFlight<T> extends ProbeIdentity {
 // and, after invalidation, at most one follow-up for the latest requested state.
 const activeFlights = new Set<ProbeIdentity>();
 
+export function workspaceChangeKey(workspace: Workspace, remote: string): string {
+  return JSON.stringify([
+    workspace.id, workspace.path, workspace.repoRoot, workspace.branch,
+    workspace.baseBranch, remote, workspace.createdAt, workspace.archivedAt,
+    workspace.present, workspace.organizationId ?? null, workspace.placement ?? "local",
+  ]);
+}
+
+/** All consumers of a Local refresh lease the same lazy snapshot. Hold it
+ * through their comparisons, not just through the initial porcelain read.
+ * An invalidated generation keeps serving only the readers it already has. */
+export function createWorkspaceChangeSnapshot<T>(
+  create: (workspace: Workspace, remote: string) => T,
+  canJoin: (snapshot: T) => boolean = () => true,
+) {
+  interface Snapshot extends ProbeIdentity {
+    value: T;
+    initialRevision: number;
+    readers: number;
+  }
+  const snapshots = new Map<string, Snapshot>();
+  return async function readSnapshot<R>(workspace: Workspace, remote: string, read: (snapshot: T) => Promise<R>): Promise<R> {
+    const key = workspaceChangeKey(workspace, remote);
+    let entry = snapshots.get(key);
+    // After an invalidation the next reader starts a new generation at once.
+    // Waiting for the old readers to finish could queue a foreground read
+    // behind background work held in the bounded summary lane. A slow existing
+    // reader likewise cannot keep lending an old observation to newly mounted
+    // or refreshing consumers.
+    if (entry && (entry.initialRevision !== entry.revision || !canJoin(entry.value))) entry = undefined;
+    if (!entry) {
+      entry = { workspaceId: workspace.id, root: path.resolve(workspace.path), revision: 0,
+        initialRevision: 0, readers: 0, value: create(workspace, remote) };
+      snapshots.set(key, entry);
+      activeFlights.add(entry);
+    }
+    entry.readers += 1;
+    try {
+      return await read(entry.value);
+    } finally {
+      entry.readers -= 1;
+      if (entry.readers === 0) {
+        if (snapshots.get(key) === entry) snapshots.delete(key);
+        activeFlights.delete(entry);
+      }
+    }
+  };
+}
+
 function startProbe<T>(
   flights: Map<string, ProbeFlight<T>>,
   key: string,
@@ -56,19 +105,7 @@ export function createWorkspaceChangeProbe<T>(): (
   return (workspace, remote, read) => {
     // Resolve this identity for every caller, before sharing: a replacement
     // checkout or changed comparison target must never inherit an older read.
-    const key = JSON.stringify([
-      workspace.id,
-      workspace.path,
-      workspace.repoRoot,
-      workspace.branch,
-      workspace.baseBranch,
-      remote,
-      workspace.createdAt,
-      workspace.archivedAt,
-      workspace.present,
-      workspace.organizationId ?? null,
-      workspace.placement ?? "local",
-    ]);
+    const key = workspaceChangeKey(workspace, remote);
     const existing = flights.get(key);
     if (existing) {
       if (existing.queued) {

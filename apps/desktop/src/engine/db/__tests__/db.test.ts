@@ -1031,6 +1031,34 @@ describe("Zeros DB (unified engine store)", () => {
       expect(headRev()).toBe(revBefore + 1);
     });
 
+    it("skips identical Local row flushes without advancing revisions or rebuilding search", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      const row = text("a1", "unchanged");
+      upsertChatMessagesBulk("c1", [row]);
+      const revBefore = headRev();
+      for (let index = 0; index < 100; index += 1) {
+        queueStreamingChatMessages("c1", [{ ...row }]);
+        flushStreamingChatMessages("c1");
+      }
+      expect(headRev() - revBefore).toBe(0);
+      expect(rawRows("c1")).toHaveLength(1);
+      expect(searchMessages("unchanged")).toHaveLength(1);
+      queueStreamingChatMessages("c1", [text("a1", "changed")]);
+      flushStreamingChatMessages("c1");
+      expect(headRev() - revBefore).toBe(1);
+      expect(searchMessages("unchanged")).toHaveLength(0);
+      expect(searchMessages("changed")).toHaveLength(1);
+    });
+
+    it("preserves write-through revisions used by cloud transcripts", () => {
+      setZerosDbPathForTesting(tmpDbFile());
+      const row = text("a1", "unchanged");
+      upsertChatMessagesBulk("c1", [row]);
+      const revBefore = headRev();
+      for (let index = 0; index < 100; index += 1) upsertChatMessagesBulk("c1", [{ ...row }]);
+      expect(headRev() - revBefore).toBe(100);
+    });
+
     it("paged CLI reads see the latest buffered rows without flushing another chat", () => {
       setZerosDbPathForTesting(tmpDbFile());
       try {

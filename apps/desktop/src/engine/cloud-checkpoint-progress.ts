@@ -1,5 +1,6 @@
 import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, CloudCheckpointProgressSchema,
-  type CloudCheckpointProgress } from "@zeros/protocol/cloud-checkpoint-progress";
+  CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER, CloudCheckpointSealRefusalSchema,
+  type CloudCheckpointProgress, type CloudCheckpointSealRefusal } from "@zeros/protocol/cloud-checkpoint-progress";
 import type { CloudDurabilityAuthority } from "./cloud-durability-runtime";
 import type { CloudCheckpointDirective } from "./cloud-runtime-registration";
 
@@ -21,6 +22,7 @@ export class CloudCheckpointProgressReporter {
   private flight: { controller: AbortController; timer: ReturnType<typeof setTimeout> } | null = null;
   private stopped = false;
   private terminal = false;
+  private refusal: CloudCheckpointSealRefusal | null = null;
 
   constructor(private readonly options: {
     authority: CloudDurabilityAuthority;
@@ -47,6 +49,14 @@ export class CloudCheckpointProgressReporter {
     if (this.terminal) return;
     this.activeStage = stage;
     this.publish("running", "none");
+  }
+
+  sealRefusal(value: unknown): void {
+    if (this.terminal || this.refusal || this.activeStage !== "seal_ack" || !this.current()) return;
+    try {
+      const parsed = CloudCheckpointSealRefusalSchema.safeParse(value);
+      if (parsed.success) this.refusal = Object.freeze(parsed.data);
+    } catch { /* Optional closed evidence cannot change checkpoint execution. */ }
   }
 
   fail(error: unknown, reason = checkpointFailureReason(error, this.activeStage)): void {
@@ -120,7 +130,9 @@ export class CloudCheckpointProgressReporter {
     try {
       const response = await (this.options.requestFetch ?? fetch)(this.endpoint!, {
         method: "POST", redirect: "error", signal: flight.controller.signal,
-        headers: { "content-type": "application/json", authorization: `Bearer ${this.authority.heartbeatToken}` },
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.authority.heartbeatToken}`,
+          ...(body.state === "failed" && body.stage === "seal_ack" && this.refusal
+            ? { [CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER]: JSON.stringify(this.refusal) } : {}) },
         body: JSON.stringify(body),
       });
       // No response body is needed, trusted, parsed, logged or allowed to keep

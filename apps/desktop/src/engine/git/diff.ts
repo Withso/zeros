@@ -13,11 +13,13 @@ import path from "node:path";
 import { resolveRepoForGitOp } from "./worktree";
 import { runGit, runGitRead, assertSafeGitRef } from "./git-exec";
 import { resolveRepoGit } from "../settings/repo-git";
-import { isConflictEntry, parsePorcelainZ } from "./porcelain";
+import { isConflictEntry, parsePorcelainZ, type PorcelainEntry } from "./porcelain";
 import { getInProgressState } from "./repo";
 import { GitError } from "./errors";
 import { mapBounded } from "./bounded-parallel";
-import { createWorkspaceChangeProbe, shareWorkspaceChangeProbe } from "./workspace-change-probe";
+import { createWorkspaceChangeSnapshot, shareWorkspaceChangeProbe } from "./workspace-change-probe";
+import { readLocalGitGraph } from "./local-git-graph";
+import { GitReadLane, isBackgroundGitRead, withBackgroundGitReads, withGitReadLane } from "./git-read-lane";
 import type {
   Commit,
   FileChange,
@@ -136,12 +138,21 @@ function parsePorcelain(out: string): {
   untracked: string[];
   conflicted: FileChange[];
 } {
+  return bucketPorcelain(parsePorcelainZ(out));
+}
+
+function bucketPorcelain(entries: PorcelainEntry[]): {
+  staged: FileChange[];
+  unstaged: FileChange[];
+  untracked: string[];
+  conflicted: FileChange[];
+} {
   const staged: FileChange[] = [];
   const unstaged: FileChange[] = [];
   const untracked: string[] = [];
   const conflicted: FileChange[] = [];
 
-  for (const e of parsePorcelainZ(out)) {
+  for (const e of entries) {
     if (e.x === "?" && e.y === "?") {
       untracked.push(e.path);
       continue;
@@ -187,8 +198,6 @@ interface ChangeSummaryInputs {
   resolvedFloor: string | null;
 }
 
-const shareLocalChangeSummaryInputs = createWorkspaceChangeProbe<ChangeSummaryInputs>();
-
 function changeSummaryInputs(ws: Workspace, remote: string): Promise<ChangeSummaryInputs> {
   const read = async (): Promise<ChangeSummaryInputs> => {
     const [{ stdout }, resolvedFloor] = await Promise.all([
@@ -197,11 +206,156 @@ function changeSummaryInputs(ws: Workspace, remote: string): Promise<ChangeSumma
     ]);
     return { parsed: parsePorcelain(stdout), resolvedFloor };
   };
-  // Local badges, scope counts and line totals often refresh together. Share
-  // their identical inputs only while running; settled data is never cached.
-  // Watcher/mutation invalidation fences every kind of summary together, and
-  // each caller still applies its own filter and exact Git comparison below.
-  return ws.placement === "cloud" ? read() : shareLocalChangeSummaryInputs(ws, remote, read);
+  return read();
+}
+
+interface LocalStatus {
+  parsed: ReturnType<typeof parsePorcelain>;
+  head: string | null;
+  branch: string | null;
+  tracking: { ahead: number | null; behind: number | null; upstream: string | null };
+  trackingMeasured: boolean;
+}
+
+/** Porcelain v2 includes branch identity and upstream counts in the same
+ * process as file discovery. Paths remain NUL-delimited, including renames. */
+function parseLocalStatus(output: string, trackingMeasured: boolean): LocalStatus {
+  const result: LocalStatus = { parsed: bucketPorcelain([]), head: null, branch: null,
+    tracking: { ahead: null, behind: null, upstream: null }, trackingMeasured };
+  const entries: PorcelainEntry[] = [];
+  const records = output.split("\0");
+  let sawAheadBehind = false;
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!;
+    if (record.startsWith("# branch.oid ")) {
+      const oid = record.slice(13);
+      result.head = oid === "(initial)" ? null : oid;
+    } else if (record.startsWith("# branch.head ")) {
+      const branch = record.slice(14);
+      result.branch = branch === "(detached)" ? null : branch;
+    } else if (record.startsWith("# branch.upstream ")) {
+      result.tracking.upstream = record.slice(18);
+    } else if (record.startsWith("# branch.ab ")) {
+      sawAheadBehind = true;
+      const counts = /^# branch\.ab \+(\d+) -(\d+)$/.exec(record);
+      if (counts) {
+        result.tracking.ahead = Number(counts[1]);
+        result.tracking.behind = Number(counts[2]);
+      }
+    } else if (record.startsWith("? ")) {
+      entries.push({ x: "?", y: "?", path: record.slice(2) });
+    } else if (/^[12u] /.test(record)) {
+      const fields = record.split(" ");
+      const xy = fields[1]!;
+      const prefix = fields[0] === "1" ? 8 : fields[0] === "2" ? 9 : 10;
+      entries.push({ x: xy[0] === "." ? " " : xy[0]!, y: xy[1] === "." ? " " : xy[1]!,
+        path: fields.slice(prefix).join(" "),
+        ...(fields[0] === "2" ? { oldPath: records[++index] ?? "" } : {}) });
+    }
+  }
+  // Git names a configured upstream even after its ref is gone (a merged PR
+  // branch deleted and pruned) and then omits the counts line. Report it the
+  // way `@{upstream}` resolution does: no upstream.
+  if (trackingMeasured && !sawAheadBehind) result.tracking.upstream = null;
+  result.parsed = bucketPorcelain(entries);
+  return result;
+}
+
+function parseRawNumstat(output: string): { files: FileChange[]; numstat: string } {
+  const records = output.split("\0");
+  const names: string[] = [];
+  let index = 0;
+  while (records[index]?.startsWith(":")) {
+    const code = records[index]!.split(" ").at(-1)!;
+    names.push(code, records[index + 1] ?? "");
+    index += 2;
+    if (code[0] === "R" || code[0] === "C") names.push(records[index++] ?? "");
+  }
+  return { files: parseNameStatusZ(names.join("\0")), numstat: records.slice(index).join("\0") };
+}
+
+/** Lazy fields keep badge-only reads cheap. Consumers in the same generation
+ * share each exact comparison, and a combined raw/numstat read is requested
+ * only when a line-total consumer has joined before that comparison starts. */
+class LocalChangeSnapshot {
+  readonly readLane = new GitReadLane(isBackgroundGitRead());
+  private statusFlight?: Promise<LocalStatus>;
+  private statusSettledAt?: number;
+  private floorFlight?: Promise<string | null>;
+  private trackingRequested = false;
+  private linesRequested = false;
+  private readonly comparisons = new Map<string, Promise<{ files: FileChange[]; numstat?: string }>>();
+  private readonly numstats = new Map<string, Promise<string>>();
+
+  constructor(private readonly workspace: Workspace, private readonly remote: string) {}
+
+  requestLines() { this.linesRequested = true; }
+
+  canJoin() {
+    if (this.statusSettledAt === undefined) return true;
+    const age = Date.now() - this.statusSettledAt;
+    return age >= 0 && age <= 250;
+  }
+
+  readStatus(tracking = false): Promise<LocalStatus> {
+    if (tracking) this.trackingRequested = true;
+    return this.statusFlight ??= Promise.resolve().then(async () => {
+      const trackingMeasured = this.trackingRequested;
+      const { stdout } = await runGitRead(this.workspace.path, ["status", "--porcelain=v2", "-z", "-uall", "--branch",
+        ...(!trackingMeasured ? ["--no-ahead-behind"] : [])]);
+      this.statusSettledAt = Date.now();
+      return parseLocalStatus(stdout, trackingMeasured);
+    });
+  }
+
+  async head(): Promise<string> {
+    return (await this.readStatus()).head ?? await headOrEmptyTree(this.workspace.path);
+  }
+
+  async inputs(): Promise<ChangeSummaryInputs> {
+    const observed = await this.readStatus();
+    this.floorFlight ??= workspaceForkPoint(this.workspace, this.workspace.baseBranch, this.remote, observed);
+    return { parsed: observed.parsed, resolvedFloor: await this.floorFlight };
+  }
+
+  comparison(range: readonly string[], all = false): Promise<{ files: FileChange[]; numstat?: string }> {
+    const key = JSON.stringify(range);
+    let flight = this.comparisons.get(key);
+    if (!flight) {
+      flight = Promise.resolve().then(async () => {
+        if (!all || !this.linesRequested) return { files: await diffNameStatus(this.workspace.path, range) };
+        const { stdout } = await runGitRead(this.workspace.path, ["-c", "core.quotePath=false", "diff", "--no-color", "--raw", "--numstat", "-z", ...range]);
+        return parseRawNumstat(stdout);
+      });
+      this.comparisons.set(key, flight);
+    }
+    return flight;
+  }
+
+  async numstat(range: readonly string[]): Promise<string> {
+    const combined = await this.comparison(range, true);
+    if (combined.numstat !== undefined) return combined.numstat;
+    const key = JSON.stringify(range);
+    let flight = this.numstats.get(key);
+    if (!flight) {
+      flight = runGitRead(this.workspace.path, ["-c", "core.quotePath=false", "diff", "--no-color", "--numstat", "-z", ...range]).then(({ stdout }) => stdout);
+      this.numstats.set(key, flight);
+    }
+    return flight;
+  }
+}
+
+const leaseLocalChangeSnapshot = createWorkspaceChangeSnapshot(
+  (workspace, remote) => new LocalChangeSnapshot(workspace, remote),
+  (snapshot) => snapshot.canJoin(),
+);
+
+function withLocalChangeSnapshot<T>(workspace: Workspace, remote: string, read: (snapshot: LocalChangeSnapshot) => Promise<T>): Promise<T> {
+  const foreground = !isBackgroundGitRead();
+  return leaseLocalChangeSnapshot(workspace, remote, (snapshot) => {
+    if (foreground) snapshot.readLane.promote();
+    return withGitReadLane(snapshot.readLane, () => read(snapshot));
+  });
 }
 
 export async function status(
@@ -209,6 +363,27 @@ export async function status(
   options: StatusOptions = {},
 ): Promise<StatusResult> {
   const ws = await resolveRepoForGitOp(workspaceId);
+  if (ws.placement !== "cloud" && options.paths === undefined) {
+    // A status answers "what is on disk now": the Changes list and the
+    // destructive Reset/Clean guards read it. Never join a shared summary
+    // snapshot that may predate a file the caller can already see; run one
+    // fresh porcelain v2 read, in the foreground lane.
+    const { remote } = resolveRepoGit(ws.repoRoot);
+    const snapshot = new LocalChangeSnapshot(ws, remote);
+    return withGitReadLane(new GitReadLane(false), async () => {
+      const observed = await snapshot.readStatus(options.includeTracking !== false);
+      const tracking = options.includeTracking === false ? { ahead: null, behind: null, upstream: null }
+        : observed.trackingMeasured ? observed.tracking : await upstreamAheadBehind(ws.path);
+      const conflictState = await getInProgressState(ws.path).catch(() => null);
+      return {
+        staged: observed.parsed.staged.filter((entry) => !isInternal(entry.path)),
+        unstaged: observed.parsed.unstaged.filter((entry) => !isInternal(entry.path)),
+        untracked: observed.parsed.untracked.filter((entry) => !isInternal(entry)),
+        conflicted: observed.parsed.conflicted.filter((entry) => !isInternal(entry.path)),
+        conflictState, ...tracking,
+      };
+    });
+  }
   // `-z` means NUL-delimited, byte-exact paths. `-uall` lists every
   // untracked file individually (not collapsed to the dir) so the
   // Changes tab can stage them one by one.
@@ -322,41 +497,44 @@ export async function changeCounts(
 ): Promise<ChangeCounts> {
   const ws = await resolveRepoForGitOp(workspaceId);
   const { remote } = resolveRepoGit(ws.repoRoot);
-  const { parsed, resolvedFloor } = await changeSummaryInputs(ws, remote);
-  const head = resolvedFloor ? "HEAD" : await headOrEmptyTree(ws.path);
-  const floor = resolvedFloor ?? head;
-  const [allTracked, uncommittedTracked, stagedTracked, unstagedTracked] =
-    await Promise.all([
-      diffNameStatus(ws.path, [floor]),
-      diffNameStatus(ws.path, [head]),
-      diffNameStatus(ws.path, ["--cached"]),
-      diffNameStatus(ws.path, []),
-    ]);
+  const read = async (snapshot?: LocalChangeSnapshot): Promise<ChangeCounts> => {
+    const { parsed, resolvedFloor } = await (snapshot ? snapshot.inputs() : changeSummaryInputs(ws, remote));
+    const head = snapshot ? await snapshot.head() : resolvedFloor ? "HEAD" : await headOrEmptyTree(ws.path);
+    const floor = resolvedFloor ?? head;
+    const [allTracked, uncommittedTracked, stagedTracked, unstagedTracked] =
+      await Promise.all([
+        snapshot ? snapshot.comparison([floor], true).then(result => result.files) : diffNameStatus(ws.path, [floor]),
+        snapshot ? snapshot.comparison([head]).then(result => result.files) : diffNameStatus(ws.path, [head]),
+        snapshot ? snapshot.comparison(["--cached"]).then(result => result.files) : diffNameStatus(ws.path, ["--cached"]),
+        snapshot ? snapshot.comparison([]).then(result => result.files) : diffNameStatus(ws.path, []),
+      ]);
 
-  const conflicts = new Set<string>();
-  addVisibleChanges(conflicts, parsed.conflicted, includePath);
+    const conflicts = new Set<string>();
+    addVisibleChanges(conflicts, parsed.conflicted, includePath);
 
-  const all = new Set(conflicts);
-  addVisibleChanges(all, allTracked, includePath);
-  addVisiblePaths(all, parsed.untracked, includePath);
+    const all = new Set(conflicts);
+    addVisibleChanges(all, allTracked, includePath);
+    addVisiblePaths(all, parsed.untracked, includePath);
 
-  const uncommitted = new Set(conflicts);
-  addVisibleChanges(uncommitted, uncommittedTracked, includePath);
-  addVisiblePaths(uncommitted, parsed.untracked, includePath);
+    const uncommitted = new Set(conflicts);
+    addVisibleChanges(uncommitted, uncommittedTracked, includePath);
+    addVisiblePaths(uncommitted, parsed.untracked, includePath);
 
-  const staged = new Set(conflicts);
-  addVisibleChanges(staged, stagedTracked, includePath);
+    const staged = new Set(conflicts);
+    addVisibleChanges(staged, stagedTracked, includePath);
 
-  const unstaged = new Set(conflicts);
-  addVisibleChanges(unstaged, unstagedTracked, includePath);
-  addVisiblePaths(unstaged, parsed.untracked, includePath);
+    const unstaged = new Set(conflicts);
+    addVisibleChanges(unstaged, unstagedTracked, includePath);
+    addVisiblePaths(unstaged, parsed.untracked, includePath);
 
-  return {
-    all: all.size,
-    uncommitted: uncommitted.size,
-    staged: staged.size,
-    unstaged: unstaged.size,
+    return {
+      all: all.size,
+      uncommitted: uncommitted.size,
+      staged: staged.size,
+      unstaged: unstaged.size,
+    };
   };
+  return ws.placement === "cloud" ? read() : withLocalChangeSnapshot(ws, remote, read);
 }
 
 // ── change line counts ───────────────────────────────────
@@ -483,6 +661,10 @@ async function numstatTotals(
     "-z",
     ...rangeArgs,
   ]);
+  return sumNumstat(stdout, includePath, skipPaths);
+}
+
+function sumNumstat(stdout: string, includePath: ChangePathFilter, skipPaths: ReadonlySet<string>): ChangeLineCounts {
   const tokens = stdout.split("\0");
   let additions = 0;
   let deletions = 0;
@@ -523,24 +705,28 @@ export async function changeLineCounts(
 ): Promise<ChangeLineCounts> {
   const ws = await resolveRepoForGitOp(workspaceId);
   const { remote } = resolveRepoGit(ws.repoRoot);
-  const { parsed, resolvedFloor } = await changeSummaryInputs(ws, remote);
-  const conflicted = new Set(parsed.conflicted.map((entry) => entry.path));
-  const untracked = parsed.untracked.filter(
-    (untrackedPath) => !isInternal(untrackedPath) && includePath(untrackedPath),
-  );
-  const [tracked, untrackedLines] = await Promise.all([
-    numstatTotals(
-      ws.path,
-      [resolvedFloor ?? (await headOrEmptyTree(ws.path))],
-      includePath,
-      conflicted,
-    ),
-    untrackedAdditions(ws.path, untracked),
-  ]);
-  return {
-    additions: tracked.additions + untrackedLines,
-    deletions: tracked.deletions,
+  const read = async (snapshot?: LocalChangeSnapshot): Promise<ChangeLineCounts> => {
+    snapshot?.requestLines();
+    const { parsed, resolvedFloor } = await (snapshot ? snapshot.inputs() : changeSummaryInputs(ws, remote));
+    const conflicted = new Set(parsed.conflicted.map((entry) => entry.path));
+    const untracked = parsed.untracked.filter(
+      (untrackedPath) => !isInternal(untrackedPath) && includePath(untrackedPath),
+    );
+    const [tracked, untrackedLines] = await Promise.all([
+      snapshot ? snapshot.numstat([resolvedFloor ?? await snapshot.head()]).then(output => sumNumstat(output, includePath, conflicted)) : numstatTotals(
+        ws.path,
+        [resolvedFloor ?? (await headOrEmptyTree(ws.path))],
+        includePath,
+        conflicted,
+      ),
+      untrackedAdditions(ws.path, untracked),
+    ]);
+    return {
+      additions: tracked.additions + untrackedLines,
+      deletions: tracked.deletions,
+    };
   };
+  return ws.placement === "cloud" ? read() : withBackgroundGitReads(() => withLocalChangeSnapshot(ws, remote, read));
 }
 
 /** Exact "anything worth a PR?" probe — the single signal shared by the
@@ -554,17 +740,17 @@ export async function hasWorkspaceChanges(
   try {
     const ws = await resolveRepoForGitOp(workspaceId);
     const { remote } = resolveRepoGit(ws.repoRoot);
-    return await shareWorkspaceChangeProbe(ws, remote, async () => {
-      const { parsed, resolvedFloor } = await changeSummaryInputs(ws, remote);
-      const tracked = await diffNameStatus(ws.path, [
-        resolvedFloor ?? (await headOrEmptyTree(ws.path)),
-      ]);
+    const read = async (snapshot?: LocalChangeSnapshot) => {
+      const { parsed, resolvedFloor } = await (snapshot ? snapshot.inputs() : changeSummaryInputs(ws, remote));
+      const range = [resolvedFloor ?? (snapshot ? await snapshot.head() : await headOrEmptyTree(ws.path))];
+      const tracked = snapshot ? (await snapshot.comparison(range, true)).files : await diffNameStatus(ws.path, range);
       return (
         tracked.some((change) => !isInternal(change.path)) ||
         parsed.conflicted.some((change) => !isInternal(change.path)) ||
         parsed.untracked.some((filePath) => !isInternal(filePath))
       );
-    });
+    };
+    return ws.placement === "cloud" ? await shareWorkspaceChangeProbe(ws, remote, read) : await withLocalChangeSnapshot(ws, remote, read);
   } catch {
     return false;
   }
@@ -586,7 +772,8 @@ export async function stampChangeState(
       if (w.archivedAt != null || w.present === false || w.repoSlug === "") {
         return { ...w, hasChanges: false };
       }
-      return { ...w, hasChanges: await hasWorkspaceChanges(w.id) };
+      return { ...w, hasChanges: await (w.placement === "cloud"
+        ? hasWorkspaceChanges(w.id) : withBackgroundGitReads(() => hasWorkspaceChanges(w.id))) };
     },
   );
 }
@@ -878,6 +1065,7 @@ async function resolveBaseRef(
   worktreePath: string,
   base: string,
   remote: string,
+  failed?: () => void,
 ): Promise<string | null> {
   // Only trust `base` as a candidate if it's a safe, non-empty ref name (no
   // leading "-" = no flag injection into the argv); else lean on the trunk.
@@ -909,6 +1097,7 @@ async function resolveBaseRef(
       ]);
       return ref;
     } catch {
+      failed?.();
       /* not resolvable — try the next candidate */
     }
   }
@@ -919,11 +1108,13 @@ async function resolveBaseRef(
 async function gitTry(
   worktreePath: string,
   args: string[],
+  failed?: () => void,
 ): Promise<string | null> {
   try {
     const { stdout } = await runGitRead(worktreePath, args);
     return stdout.trim() || null;
   } catch {
+    failed?.();
     return null;
   }
 }
@@ -933,6 +1124,7 @@ async function isAncestor(
   worktreePath: string,
   ancestor: string,
   descendant: string,
+  failed?: () => void,
 ): Promise<boolean> {
   try {
     await runGitRead(worktreePath, [
@@ -943,6 +1135,7 @@ async function isAncestor(
     ]);
     return true;
   } catch {
+    failed?.();
     return false;
   }
 }
@@ -961,6 +1154,7 @@ async function bestMergeBase(
   resolved: string,
   base: string,
   remote: string,
+  failed?: () => void,
 ): Promise<string | null> {
   const variants = new Set<string>([resolved]);
   if (base && !base.startsWith("-") && !base.includes("\0")) {
@@ -972,9 +1166,9 @@ async function bestMergeBase(
   }
   let best: string | null = null;
   for (const ref of variants) {
-    const mb = await gitTry(worktreePath, ["merge-base", ref, "HEAD"]);
+    const mb = await gitTry(worktreePath, ["merge-base", ref, "HEAD"], failed);
     if (!mb || mb === best) continue;
-    if (!best || (await isAncestor(worktreePath, best, mb))) best = mb;
+    if (!best || (await isAncestor(worktreePath, best, mb, failed))) best = mb;
   }
   return best;
 }
@@ -996,18 +1190,20 @@ async function forkPoint(
   worktreePath: string,
   base: string,
   remote: string,
+  observed?: Pick<LocalStatus, "head" | "branch">,
+  failed?: () => void,
 ): Promise<string | null> {
-  const resolved = await resolveBaseRef(worktreePath, base, remote);
+  const resolved = await resolveBaseRef(worktreePath, base, remote, failed);
   if (!resolved) return null;
-  const head = await gitTry(worktreePath, ["rev-parse", "HEAD"]);
+  const head = observed ? observed.head : await gitTry(worktreePath, ["rev-parse", "HEAD"], failed);
   if (!head) return null;
-  let floor = await bestMergeBase(worktreePath, resolved, base, remote);
+  let floor = await bestMergeBase(worktreePath, resolved, base, remote, failed);
   if (!floor || floor === head) {
-    const branch = await gitTry(worktreePath, [
+    const branch = observed ? observed.branch : await gitTry(worktreePath, [
       "rev-parse",
       "--abbrev-ref",
       "HEAD",
-    ]);
+    ], failed);
     // The reflog fallback recovers an already-MERGED branch's contribution. It
     // must never fire when the checkout IS the base branch itself (the "Local
     // main" trunk workspace, or a worktree the user switched onto the base):
@@ -1034,7 +1230,7 @@ async function forkPoint(
         "show",
         "--format=%H%x09%gs",
         branch,
-      ]);
+      ], failed);
       const oldest = rl?.split("\n").filter(Boolean).pop();
       const tab = oldest?.indexOf("\t") ?? -1;
       const created = tab > 0 ? oldest!.slice(0, tab) : undefined;
@@ -1049,6 +1245,16 @@ async function forkPoint(
     }
   }
   return floor && floor !== head ? floor : null;
+}
+
+function workspaceForkPoint(workspace: Workspace, base: string, remote: string, observed?: Pick<LocalStatus, "head" | "branch">): Promise<string | null> {
+  if (workspace.placement === "cloud") return forkPoint(workspace.path, base, remote);
+  return readLocalGitGraph({ ...workspace, baseBranch: base }, remote,
+    observed ?? { head: null, branch: workspace.branch }, async () => {
+      let complete = true;
+      const value = await forkPoint(workspace.path, base, remote, observed, () => { complete = false; });
+      return { value, complete };
+    });
 }
 
 const HUNK_HEADER_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
@@ -1158,21 +1364,21 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
   if (mode === "refs" && opts.base) {
     rangeOpts = {
       ...opts,
-      base: (await forkPoint(ws.path, opts.base, remote)) ?? opts.base,
+      base: (await workspaceForkPoint(ws, opts.base, remote)) ?? opts.base,
     };
   } else if (mode === "base") {
     if (!(await gitTry(ws.path, ["rev-parse", "--verify", "HEAD"]))) {
       return { hunks: [], ...(opts.rawPatch ? { patch: "" } : {}) };
     }
     baseBranch =
-      (await forkPoint(ws.path, comparisonBase, remote)) ?? comparisonBase;
+      (await workspaceForkPoint(ws, comparisonBase, remote)) ?? comparisonBase;
   } else if (mode === "worktree-vs-base") {
     // Anchor at the fork point and diff it against the WORKING TREE, so "All
     // changes" lists this branch's whole contribution — committed AND
     // uncommitted — in one pass. Before the first commit, the empty tree is
     // the baseline. A fresh branch with commits uses its current HEAD.
     baseBranch =
-      (await forkPoint(ws.path, comparisonBase, remote)) ??
+      (await workspaceForkPoint(ws, comparisonBase, remote)) ??
       (await headOrEmptyTree(ws.path));
   } else if (mode === "worktree-vs-head") {
     baseBranch = await headOrEmptyTree(ws.path);
@@ -1426,7 +1632,7 @@ export async function log(opts: LogOptions): Promise<Commit[]> {
   }
   if (opts.base) {
     return logRange(
-      ws.path,
+      ws,
       opts.base,
       limit,
       resolveRepoGit(ws.repoRoot).remote,
@@ -1463,7 +1669,7 @@ const LOG_FORMAT = ["%H", "%an", "%ae", "%at", "%P", "%B"].join(LOG_FIELD_SEP);
 /** `git log base..HEAD` → only the commits this branch added on top of `base`
  *  (reachable from HEAD, not from base), newest first. */
 async function logRange(
-  worktreePath: string,
+  workspace: Workspace,
   base: string,
   limit: number,
   remote: string,
@@ -1471,11 +1677,12 @@ async function logRange(
   skip = 0,
   ref = "HEAD",
 ): Promise<Commit[]> {
+  const worktreePath = workspace.path;
   // Anchor to the worktree's FORK POINT (the commit it diverged from its base),
   // recovered robustly even when the base is remote-only, was deleted, or has
   // since absorbed this branch — that's what lets the list show the commits this
   // worktree added regardless of how/where the base moved. null = nothing added.
-  const floor = await forkPoint(worktreePath, base, remote);
+  const floor = await workspaceForkPoint(workspace, base, remote);
   if (!floor) return [];
   assertSafeGitRef(ref, "log.ref");
   const args = [

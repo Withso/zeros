@@ -1,0 +1,9 @@
+{
+  "id": "compute-drain-deadline-backoff",
+  "kind": "replay",
+  "area": "control-plane-lifecycle",
+  "fixedBy": "pr:593",
+  "symptom": "A draining compute lease backed off past its finite force boundary, and escalation waited behind provider inspection.",
+  "rule": "The bug-fix playbook requires deadline-bounded draining retries and due escalation before provider I/O, with current claim/generation fences and separate stopped-settlement and expired-budget controls.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/compute-leases.integration.test.ts"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "login-shell-path-backslash-entry",
+  "kind": "replay",
+  "area": "engine-environment",
+  "fixedBy": "pr:578",
+  "symptom": "A PATH entry holding a literal backslash-n (one mistyped /etc/paths.d line) made the login-shell probe return only the text after it, so Design build style sources and other repository scripts failed with \"node: command not found\" (exit 127) until Zeros restarted.",
+  "rule": "Print a probed value with printf '%s\\n', never echo: zsh, dash and macOS /bin/sh expand backslash sequences. Run the real probe command through the shells each placement meets (zsh and /bin/sh on macOS, bash and dash on Linux) without startup files. See the login-shell-path-printf change fragment.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/agents/adapters/shared/__tests__/login-shell-path.test.ts"
+}

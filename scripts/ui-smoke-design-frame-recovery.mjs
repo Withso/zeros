@@ -1,6 +1,14 @@
+import { runDesignAgentDraftsSmoke } from "./ui-smoke-design-agent-drafts.mjs";
+
 // Chromium exercises the real opaque iframe/MessagePort lifecycle. Only the
 // host protocol is mapped to HTTP here; Electron's proxy has its own tests.
 export async function runDesignFrameRecoverySmoke({ page, check }) {
+  await runDesignFrameReloadRecoverySmoke({ page, check });
+  // Agent edits reach the same frame documents while they are still streaming.
+  await runDesignAgentDraftsSmoke({ page, check });
+}
+
+async function runDesignFrameReloadRecoverySmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   const nativePattern = "**/platform/runtime.ts*";
   const protocolPattern = "**/platform/bridge/design-protocol-url.ts*";

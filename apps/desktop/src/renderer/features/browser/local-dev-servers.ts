@@ -6,11 +6,12 @@
 // inside that folder and outside the registered workspaces nested in it, which
 // are sent as `exclude`. Cloud and folderless scopes never probe.
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { z } from "zod";
 
 import { nativeInvoke, useNativeRuntime } from "../../platform/runtime";
 import { registeredLocalWorkspaceFolders } from "./local-workspace-folders";
+import { documentIsForeground, pollWhileForeground } from "../../shared/lib/element-activity";
 
 export const LOCAL_DEV_SERVERS_STORAGE_KEY = "zeros:browser-dev-servers:v2";
 export const LOCAL_DEV_SERVERS_HISTORY_LIMIT = 24;
@@ -485,39 +486,21 @@ export function localDevServersPollingEnabled(input: {
   return input.active && input.nativeReady && input.documentVisible && isLocalWorkspaceFolder(input.scope);
 }
 
-function documentVisible(): boolean {
-  return typeof document === "undefined" || document.visibilityState !== "hidden";
-}
-
 export function useLocalDevServers(
   input: { scope: string; active: boolean },
   store: LocalDevServerStore = localDevServers,
 ) {
   const nativeReady = useNativeRuntime().ready;
-  const [visible, setVisible] = useState(documentVisible);
   const { scope, active } = input;
   const available = isLocalWorkspaceFolder(scope);
   useEffect(() => {
-    if (!active || !available || typeof document === "undefined") return;
-    const change = () => setVisible(documentVisible());
-    change();
-    document.addEventListener("visibilitychange", change);
-    return () => document.removeEventListener("visibilitychange", change);
-  }, [active, available]);
-  const enabled = localDevServersPollingEnabled({ scope, active, nativeReady, documentVisible: visible });
-  useEffect(() => {
-    if (!enabled) return;
-    const refresh = () => void store.refresh(scope);
-    refresh();
-    const timer = setInterval(() => {
-      if (documentVisible()) refresh();
-    }, LOCAL_DEV_SERVERS_POLL_MS);
-    window.addEventListener("focus", refresh);
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener("focus", refresh);
+    if (!active || !available || !nativeReady) return;
+    const refresh = () => {
+      if (localDevServersPollingEnabled({ scope, active, nativeReady, documentVisible: documentIsForeground() }))
+        void store.refresh(scope);
     };
-  }, [enabled, store, scope]);
+    return pollWhileForeground(refresh, LOCAL_DEV_SERVERS_POLL_MS);
+  }, [active, available, nativeReady, store, scope]);
   const getState = useCallback(() => store.getState(scope), [store, scope]);
   const state = useSyncExternalStore(store.subscribe, getState, getState);
   const filter = useSyncExternalStore(store.subscribe, store.getFilter, store.getFilter);

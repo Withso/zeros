@@ -61,13 +61,15 @@ import {
   sep,
 } from "node:path";
 
-import chokidar, { type ChokidarOptions, type FSWatcher } from "chokidar";
+import chokidar, { type ChokidarOptions } from "chokidar";
 
 import { runGit } from "./git-exec";
+import type { WorktreeWatcher } from "./watch-host-client";
 
 import { DESIGN_CANVAS_FILE } from "../design/directory-registry";
 import { DESIGN_CANVAS_FILE as PUBLIC_DESIGN_CANVAS_FILE } from "../design/canvas-file";
 import { isDesignMetadataRepoPath } from "../design/metadata";
+import { fenceDesignSnapshotReads } from "../design/snapshot-epoch";
 import {
   invalidateWorkspaceChangeProbes,
   invalidateWorkspaceChangeProbesForRoot,
@@ -212,6 +214,10 @@ export interface GitWatcherOptions {
   /** Test/host fallback for environments whose native watcher pool is full. */
   usePolling?: boolean;
   worktreePollIntervalMs?: number;
+  /** A native recursive watcher for one root, run outside this process (see
+   * watch-host-client.ts). Used instead of Chokidar whenever a root is not
+   * polled; a root whose native watcher fails falls back to polling. */
+  nativeWatcher?: (root: string) => WorktreeWatcher;
 }
 
 /** One filesystem root and the opaque engine workspace it belongs to. Repo
@@ -586,6 +592,9 @@ export function startGitWatcher(
     invalidateWorkspaceChangeProbes(
       target?.workspaceId ? [target.workspaceId] : undefined,
     );
+    // Likewise, an in-flight Design snapshot read may predate this save; the
+    // refresh this event triggers must start a new read instead of joining it.
+    fenceDesignSnapshotReads(target?.root ?? null);
     if (target) pendingWorktreeTargets.set(target.root, target);
     else pendingWorktreeCoarse = true;
     if (designRecognitionChanged) {
@@ -639,7 +648,7 @@ export function startGitWatcher(
     passesRemaining: number;
   };
   type RootWatcher = {
-    watcher: FSWatcher;
+    watcher: WorktreeWatcher;
     target: GitWatchTarget;
     polling: boolean;
     settlingDirectories: Map<string, SettlingDirectory>;
@@ -894,10 +903,15 @@ export function startGitWatcher(
   ): Promise<void> => {
     const key = rootKey(target.root);
     const ignoredDirectories = new Set<string>();
-    const native = chokidar.watch(
-      target.root,
-      watcherOptions(target.root, polling, ignoredDirectories),
-    );
+    // A native host watches the whole root recursively; the "all" handler
+    // below filters Git-ignored folders for it exactly as for Chokidar.
+    const native: WorktreeWatcher =
+      !polling && options.nativeWatcher
+        ? options.nativeWatcher(target.root)
+        : chokidar.watch(
+            target.root,
+            watcherOptions(target.root, polling, ignoredDirectories),
+          );
     const entry: RootWatcher = {
       watcher: native,
       target,
@@ -955,6 +969,16 @@ export function startGitWatcher(
     });
     native.on("all", (_event, filePath) => {
       if (rootWatchers.get(key) !== entry) return;
+      // Chokidar applies these exclusions through `ignored`; a native host
+      // watches the whole root, so apply the same rules to each event here.
+      if (
+        !entry.polling &&
+        options.nativeWatcher !== undefined &&
+        (WORKTREE_IGNORED_PATHS.some((pattern) => pattern.test(filePath)) ||
+          isInsideNestedToolWorktree(entry.target.root, filePath))
+      ) {
+        return;
+      }
       // Churn inside a Git-ignored folder changes no Git view; an unwatch can
       // trail a few already-queued callbacks.
       if (isInsideAny(filePath, entry.ignoredDirectories)) return;
@@ -997,11 +1021,16 @@ export function startGitWatcher(
       const code = (error as NodeJS.ErrnoException).code;
       // Native fs.watch can exhaust a host's watcher pool (EMFILE/ENOSPC) on a
       // very large repo or a machine running many dev tools. Fall back only
-      // this exact root to stat polling; unrelated workspaces stay live.
+      // this exact root to stat polling; unrelated workspaces stay live. A
+      // native host root that cannot be watched any more (the host is
+      // unavailable, or the root vanished) is retained the same way.
       if (
         !stopped &&
         !entry.polling &&
-        (code === "EMFILE" || code === "ENOSPC")
+        (code === "EMFILE" ||
+          code === "ENOSPC" ||
+          // Every non-polled root is a native host root when one is configured.
+          options.nativeWatcher !== undefined)
       ) {
         console.warn(
           `[git-watch] native watcher unavailable (${code}); falling back to polling`,

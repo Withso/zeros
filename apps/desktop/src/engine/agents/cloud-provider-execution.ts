@@ -247,7 +247,8 @@ export class CloudAgentContextCache{
   private readonly controller=new AbortController();
   private readonly records=new Map<string,AgentContextRecord>();
   private readonly current=new Map<string,AgentContextRecord>();
-  private readonly pending=new Map<string,Promise<CloudAuthorizedAgentContext>>();
+  private readonly pending=new Map<string,{actor:CloudAuthorizedActor;flight:Promise<CloudAuthorizedAgentContext>}>();
+  private readonly pendingFlights=new Set<Promise<CloudAuthorizedAgentContext>>();
   private readonly revoked=new Set<string>();
   private disposed=false;
   private readonly maxContexts:number;
@@ -324,8 +325,10 @@ export class CloudAgentContextCache{
   warm(input:CloudAgentContextInput,signal:AbortSignal=this.controller.signal):Promise<CloudAuthorizedAgentContext>{
     let key:string;
     try{key=this.inputKey(input);}catch(error){return Promise.reject(contextCause(error));}
-    const pending=this.pending.get(key);if(pending)return pending;
-    if(this.pending.size>=16)return Promise.reject(contextFailure("execution_limit"));
+    // A fresh admission can have identical provenance after normal retirement.
+    // It cannot join the aborted predecessor's warming flight.
+    const pending=this.pending.get(key);if(pending?.actor===input.actor)return pending.flight;
+    if(this.pendingFlights.size>=16)return Promise.reject(contextFailure("execution_limit"));
     const warming=(async()=>{
       const requestSignal=AbortSignal.any([signal,this.controller.signal,input.actor.signal]);
       if(requestSignal.aborted)throw contextFailure("lifecycle_superseded");
@@ -387,8 +390,11 @@ export class CloudAgentContextCache{
       if(previous)this.retire(previous,contextFailure("lifecycle_superseded"));
       this.assertRecord(record);return context;
     })().catch(error=>{throw contextCause(error);});
-    this.pending.set(key,warming);
-    void warming.finally(()=>{if(this.pending.get(key)===warming)this.pending.delete(key);}).catch(()=>{});
+    this.pending.set(key,{actor:input.actor,flight:warming});this.pendingFlights.add(warming);
+    void warming.finally(()=>{
+      if(this.pending.get(key)?.flight===warming)this.pending.delete(key);
+      this.pendingFlights.delete(warming);
+    }).catch(()=>{});
     return warming;
   }
   revokeContext(contextId:string):void{
@@ -492,6 +498,8 @@ export interface CloudBootAgentExecutionFactory extends CloudAgentExecutionFacto
    * A selected/reserved/entered next turn or retained background blocks it. */
   retireIdleBootExecution(execution:CloudProviderExecution):Promise<boolean>;
   bootScopeActivity(selectors:readonly CloudBootCredentialSelector[]):CloudBootScopeActivity;
+  /** Includes unproved native work after its foreground command settles. */
+  hasActorWork(actorSessionId:string):boolean;
   retireBootCredentials(selectors:readonly CloudBootCredentialSelector[]):Promise<void>;
   disposeBoot():Promise<void>;
 }
@@ -574,6 +582,7 @@ export function createCloudBootAgentExecutionFactory(options:{
    * this is never an observational callback or a renderer-supplied boolean. */
   canStart(runInfo:CloudAgentCredentialRunInfo):boolean;
   maxScopes?:number;
+  actorWorkChanged?():void;
   onRepositoryMcpNotice?(context:{executionId:string;conversationId:string;provider:CloudAgentExecutionAdmission["provider"];notice:CloudRepositoryMcpNotice}):void;
 }):CloudBootAgentExecutionFactory{
   if(!isCloudAgentCredentialCache(options.credentials)||!isCloudActorAuthorityRegistry(options.registry)||
@@ -608,7 +617,7 @@ export function createCloudBootAgentExecutionFactory(options:{
       await record.rawLifetime.invalidate(record.cause);
       const children=[...active].filter(child=>child.parent===record);
       await Promise.all(children.map(child=>closeRecord(child,record.cause)));
-      record.proved=true;record.detach();active.delete(record);
+      record.proved=true;record.detach();active.delete(record);options.actorWorkChanged?.();
     })();
     record.closing=closing;
     void closing.finally(()=>{if(record.closing===closing)record.closing=null;}).catch(()=>{});
@@ -864,6 +873,7 @@ export function createCloudBootAgentExecutionFactory(options:{
         // a terminal foreground result is not an empty descendant proof.
         turn.owner.backgroundTurn=turn;turn.selection.phase="background";
       }else if(turn.selection!==turn.owner){turn.selection.reservation=null;await closeRecord(turn.selection);}
+      options.actorWorkChanged?.();
     },
     idleBootExecutions(){
       assertEngine();
@@ -877,6 +887,10 @@ export function createCloudBootAgentExecutionFactory(options:{
       // A concurrent next selection cannot revive or reserve this old host.
       // Failed positive group proof propagates and remains in the inventory.
       return closeRecord(record).then(()=>true);
+    },
+    hasActorWork(actorSessionId){
+      return [...active].some(record=>!record.proved&&record.selection.actor.provenance.actorSessionId===actorSessionId&&
+        (record.phase!=="idle"||record.reservation!==null));
     },
     bootScopeActivity(selectors){
       if(!validSelectors(selectors))return {complete:false,foreground:0,reservedLaunches:0,background:0,idleHosts:0,scopes:[]};

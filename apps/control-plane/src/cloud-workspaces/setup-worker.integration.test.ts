@@ -588,15 +588,19 @@ d("cloud workspace setup worker", () => {
 
   it.each([true, false])("persists closed stage timings for a current setup claim (success=%s)", async success => {
     const seeded = await seedSetup({ v4: true });
+    const observations = { version: 1 as const, preparation: "reused" as const, readiness: success ? "ready" as const : "transport_error" as const };
     const timings = { version: 1, clocks: [{ source: "setup", clockId: randomUUID(), startedAt: "2026-10-06T00:00:00.000Z",
       spans: [{ stage: "repository", startMs: 10, endMs: 25, outcome: success ? "passed" : "failed" }] }] };
     const executor = new FakeExecutor([async execution => {
-      if (!success) throw Object.assign(new CloudWorkspaceSetupError("setup_command_failed", "closed", false), { timings });
-      return { ...await registeredSuccessfulSetup(execution, ""), timings };
+      if (!success) throw Object.assign(new CloudWorkspaceSetupError("setup_command_failed", "closed", false), { timings, observations });
+      return { ...await registeredSuccessfulSetup(execution, ""), timings, observations };
     }]);
     await worker(executor).runOnce();
     const stored = (await pool.query("SELECT stage_timings FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0];
     expect(stored.stage_timings).toEqual(timings);
+    const receipts = (await pool.query(`SELECT subject FROM audit_log WHERE org_id=$1 AND subject->>'setupRunId'=$2
+      AND action=$3`, [organizationId, seeded.setupRunId, success ? "cloud_workspace.setup_succeeded" : "cloud_workspace.setup_claim_failed"])).rows;
+    expect(receipts).toEqual([{ subject: expect.objectContaining({ timings, observations, executionFence: 1 }) }]);
     for (const invalid of [{ ...timings, text: "private" }, { version: 1, clocks: [{ ...timings.clocks[0], source: "private" }] },
       { version: 1, clocks: [{ ...timings.clocks[0], spans: [{ stage: "repository", startMs: 25, endMs: 10, outcome: "passed" }] }] }]) {
       await expect(pool.query("UPDATE cloud_workspace_setup_runs SET stage_timings=$2 WHERE id=$1", [seeded.setupRunId, invalid])).rejects.toMatchObject({ code: "23514" });
@@ -1223,6 +1227,8 @@ d("cloud workspace setup worker", () => {
       claimed,
       "revoked readiness must not publish",
     );
+    result.timings = { version: 1, clocks: [] };
+    result.observations = { version: 1, preparation: "reused", readiness: "ready" };
     await withSystemTx(pool, (tx) =>
       tx.query(
         `DELETE FROM team_members
@@ -1251,6 +1257,11 @@ d("cloud workspace setup worker", () => {
       engine_state: "revoked",
       attestation_count: "0",
     });
+    expect((await pool.query(`SELECT subject FROM audit_log WHERE action='cloud_workspace.setup_publish_rejected'
+      AND subject->>'setupRunId'=$1`, [seeded.setupRunId])).rows).toEqual([{ subject: expect.objectContaining({
+      executionFence: 1, timings: result.timings, observations: result.observations,
+      failure: { code: "setup_publish_ineligible", phase: "authority_check", retryable: false },
+    }) }]);
   });
 
   it("publishes without deadlocking membership retirement on grant and engine locks", async () => {

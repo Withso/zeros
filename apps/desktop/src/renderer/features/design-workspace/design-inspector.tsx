@@ -85,6 +85,13 @@ import { DesignPagePicker } from "./design-page-picker";
 import { restoreDesignPageHistorySelection } from "./state/design-page-history";
 import { DesignComputedCssEditor } from "./design-computed-css-editor";
 import {
+  DesignStyleOriginLabelContext,
+  designStyleTokenDescription,
+  designStyleTokenDisplay,
+  useDesignStyleOriginLabel,
+  type DesignStyleOriginLabel,
+} from "./design-style-provenance";
+import {
   InspectorGlyph,
   InspectorSection,
   InspectorSelect,
@@ -206,6 +213,11 @@ interface InspectorEditFieldProps {
    * on the nearest allowed value instead of failing on commit. */
   range?: { min: number; max: number };
   compact?: boolean;
+  /** A design token the winning declaration reads, shown in place of the
+   * value while the field is unfocused and unedited. */
+  tokenName?: string;
+  /** Token, declaring source and resolved value, for hover and assistive tech. */
+  tokenDescription?: string;
   motion?: {
     modeActive: boolean;
     trackActive: boolean;
@@ -266,6 +278,8 @@ function InspectorEditField({
   whole = false,
   range,
   compact = false,
+  tokenName,
+  tokenDescription,
   motion,
   onInspect,
   onPreview,
@@ -273,6 +287,7 @@ function InspectorEditField({
   onCommit,
 }: InspectorEditFieldProps) {
   const id = useId();
+  const [focused, setFocused] = useState(false);
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const baselineRef = useRef(String(value));
@@ -457,7 +472,11 @@ function InspectorEditField({
       : compact && percentage
         ? "%"
         : null);
-  const showUnit = !compact && Boolean(presentation.unit) && unitOptions.length > 0;
+  // A token reads as the value only while nothing is being edited.
+  const tokenShown =
+    Boolean(tokenName) && !focused && draft === String(value);
+  const showUnit =
+    !compact && !tokenShown && Boolean(presentation.unit) && unitOptions.length > 0;
   const motionPersistent = Boolean(motion?.trackActive);
 
   return (
@@ -570,7 +589,10 @@ function InspectorEditField({
           ref={inputRef}
           id={id}
           aria-label={label}
-          value={presentation.text}
+          aria-description={tokenShown ? tokenDescription : undefined}
+          title={tokenShown ? tokenDescription : undefined}
+          data-design-style-token={tokenShown ? tokenName : undefined}
+          value={tokenShown ? tokenName!.replace(/^--/, "") : presentation.text}
           placeholder={placeholder}
           disabled={disabled}
           spellCheck={false}
@@ -578,9 +600,10 @@ function InspectorEditField({
           className={cn(
             "h-full min-w-0 flex-1 rounded-none border-0 bg-transparent py-0 pl-0 font-sans text-xs shadow-none focus-visible:border-transparent",
             applied ? "text-fg1" : "text-fg2",
-            suffix || showUnit || hint ? "pr-1" : "pr-2",
+            (suffix && !tokenShown) || showUnit || hint ? "pr-1" : "pr-2",
           )}
           onFocus={() => {
+            setFocused(true);
             baselineRef.current = String(value);
             focusValueRef.current = String(value);
             onInspect?.();
@@ -615,6 +638,7 @@ function InspectorEditField({
             setPresentedDraft(text);
           }}
           onBlur={(event) => {
+            setFocused(false);
             if (
               unitMenuOpenRef.current ||
               fieldRef.current?.contains(event.relatedTarget)
@@ -660,7 +684,7 @@ function InspectorEditField({
             }
           }}
         />
-        {suffix ? <span className="zd-field-suffix">{suffix}</span> : null}
+        {suffix && !tokenShown ? <span className="zd-field-suffix">{suffix}</span> : null}
         {showUnit ? (
           <Select
             value={presentation.unit!}
@@ -773,6 +797,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   computedValue,
   options,
   details,
+  originLabel,
   onLayoutAction,
   onPreviewLayoutAction,
   disabled,
@@ -795,6 +820,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   computedValue: string;
   options?: DesignLayoutFieldOptions;
   details?: DesignRuntimeNodeDetails;
+  originLabel?: DesignStyleOriginLabel;
   onLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
   onPreviewLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
   disabled?: boolean;
@@ -868,6 +894,13 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   }
   if (options?.sizing && liveValue === undefined)
     displayedValue = options.sizing === "hug" ? "Hug" : "Fill";
+  // Measured geometry and sizing modes show what the canvas resolves, never a
+  // token; a live preview shows its own value.
+  const token =
+    !options?.geometry && !options?.sizing && !options?.percentage &&
+    liveValue === undefined && originLabel
+      ? designStyleTokenDisplay(details, property, originLabel)
+      : null;
   const styleUpdate = (next: string): Record<string, string | null> => {
     const value =
       options?.percentage && next.trim()
@@ -897,6 +930,8 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       styleProperty={property}
       whole={options?.whole}
       compact={options?.compact}
+      tokenName={token?.name}
+      tokenDescription={token ? designStyleTokenDescription(token) : undefined}
       disabled={disabled}
       applied={applied}
       hint={hint}
@@ -970,6 +1005,7 @@ function DesignInspectorContent({
   previewAccess,
 }: DesignInspectorProps & { previewAccess?: { enabled: boolean; allowed: boolean; account: number } }) {
   const cloudPreview = isCloudWorkspace(workspaceId);
+  const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
   const cloudPreviewsEnabled = previewAccess?.enabled === true;
   const previewAllowed = !cloudPreview || previewAccess?.allowed === true;
   const previewAccount = previewAccess?.account ?? 0;
@@ -2143,6 +2179,7 @@ function DesignInspectorContent({
         computedValue={value}
         options={options}
         details={elementDetails ?? undefined}
+        originLabel={styleOriginLabel}
         onLayoutAction={commitLayoutAction}
         onPreviewLayoutAction={previewLayoutAction}
         disabled={!active || pendingHistoryActions > 0}
@@ -2323,6 +2360,7 @@ function DesignInspectorContent({
           <DesignComputedCssEditor
             key={`${styleOwner.key}:css`}
             details={elementDetails}
+            originLabel={styleOriginLabel}
             disabled={!active || pendingHistoryActions > 0}
             onPreviewStyles={previewSelectedStyles}
             onCancelStylePreview={clearSelectedStylePreview}
@@ -2346,32 +2384,34 @@ function DesignInspectorContent({
             ) : null}
 
             {styleContext && elementDetails ? (
-              <DesignStyleEditor
-                key={styleOwner.key}
-                details={elementDetails}
-                livePreviewOwner={
-                  styleContext
-                    ? {
-                        workspaceId: styleContext.workspaceId,
-                        frame: styleContext.frame.file,
-                        nodeId: styleContext.nodeId,
-                      }
-                    : undefined
-                }
-                renderField={styleField}
-                onLayoutAction={commitLayoutAction}
-                frameSelected={
-                  frameStyleTarget || elementDetails.oid === layoutRootId
-                }
-                layoutParents={layoutParents}
-                disabled={!active || pendingHistoryActions > 0}
-                onPreviewStyles={previewSelectedStyles}
-                onCancelStylePreview={clearSelectedStylePreview}
-                onCommitStyles={commitSelectedStyles}
-                motionTimelineOpen={motionTimelineOpen}
-                motionProperties={motionProperties}
-                onOpenMotionTimeline={onOpenMotionTimeline}
-              />
+              <DesignStyleOriginLabelContext.Provider value={styleOriginLabel}>
+                <DesignStyleEditor
+                  key={styleOwner.key}
+                  details={elementDetails}
+                  livePreviewOwner={
+                    styleContext
+                      ? {
+                          workspaceId: styleContext.workspaceId,
+                          frame: styleContext.frame.file,
+                          nodeId: styleContext.nodeId,
+                        }
+                      : undefined
+                  }
+                  renderField={styleField}
+                  onLayoutAction={commitLayoutAction}
+                  frameSelected={
+                    frameStyleTarget || elementDetails.oid === layoutRootId
+                  }
+                  layoutParents={layoutParents}
+                  disabled={!active || pendingHistoryActions > 0}
+                  onPreviewStyles={previewSelectedStyles}
+                  onCancelStylePreview={clearSelectedStylePreview}
+                  onCommitStyles={commitSelectedStyles}
+                  motionTimelineOpen={motionTimelineOpen}
+                  motionProperties={motionProperties}
+                  onOpenMotionTimeline={onOpenMotionTimeline}
+                />
+              </DesignStyleOriginLabelContext.Provider>
             ) : workspaceId && !frameSelected && !selectedNodeId ? (
               <DesignCanvasBackgroundEditor
                 key={activePageId ?? "legacy"}

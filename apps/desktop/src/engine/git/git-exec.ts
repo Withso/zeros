@@ -25,6 +25,7 @@ import { redactSensitive } from "@zeros/protocol/scrub";
 import { GitError, type GitErrorCode } from "./errors";
 import {
   prepareGitCredentialInvocation,
+  findLocalGitExecutable,
   refreshGitCredentialAfterAuthenticationFailure,
   type GitCredentialRequest,
 } from "./credential-broker";
@@ -33,6 +34,7 @@ import { pruneLauncherScriptEnv } from "../env/launcher-env";
 import { gitExecutionIdentity, gitProcessOptions } from "./git-execution-identity";
 import { withoutLocalDevelopment } from "../env/local-development";
 import { scopedCloudGitAuthorEnvironment } from "./cloud-git-author";
+import { currentGitReadLane, type GitReadLane } from "./git-read-lane";
 export { gitExecutionIdentity } from "./git-execution-identity";
 
 const execFileAsync = promisify(execFile);
@@ -74,14 +76,15 @@ export function runGitProbeSync(
 ): string {
   if (!cwd) throw new GitError({ code: "VALIDATION_FAILED", message: "Managed Git probe requires a checkout." });
   try {
-    return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
+    const processOptions = gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" });
+    return execFileSync(processOptions.uid === undefined ? engineGitBinary() : "git", ["-c", "core.fsmonitor=false", ...args], {
       cwd,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
       timeout: options.timeoutMs ?? 10_000,
       maxBuffer: options.maxBufferBytes ?? 1024 * 1024,
       ...(options.input !== undefined ? { input: options.input } : {}),
-      ...gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }),
+      ...processOptions,
     });
   } catch (error) {
     if (options.expectedExitCodes?.includes((error as { status: number }).status)) return "";
@@ -225,10 +228,18 @@ export async function runFile(
   }
   if (path.basename(command) === "git") {
     const { uid, gid, env } = gitProcessOptions(opts.env, opts.identity);
+    if (uid === undefined && command === "git") {
+      // Resolve once per effective PATH, excluding broker scripts and aliases.
+      // Explicit shim paths (shell/credential tests) and cloud keep their path.
+      const effectivePath = (env.PATH ?? "/usr/bin:/bin").split(path.delimiter)
+        .map((directory) => path.resolve(opts.cwd ?? process.cwd(), directory || "."))
+        .join(path.delimiter);
+      command = engineExecutable("git", effectivePath);
+    }
     opts = {
       ...opts,
       ...(uid !== undefined && gid !== undefined ? { identity: { uid, gid } } : {}),
-      env,
+      env: uid === undefined && isGitObservation(args) ? { ...env, GIT_OPTIONAL_LOCKS: "0" } : env,
     };
   }
   if (opts.signal?.aborted) {
@@ -713,6 +724,26 @@ function subcommandIndex(args: string[]): number {
     return i;
   }
   return -1;
+}
+
+const GIT_OBSERVATIONS = new Set([
+  "status", "diff", "diff-index", "diff-files", "diff-tree", "log", "show", "rev-parse",
+  "merge-base", "ls-files", "ls-tree", "cat-file", "for-each-ref", "check-ignore", "check-attr",
+  "rev-list", "shortlog", "blame", "name-rev", "describe", "count-objects", "ls-remote", "show-ref",
+]);
+
+/** Apply at the subprocess boundary so legacy read callers (Design, Files,
+ * turns and worktree discovery) cannot accidentally refresh the real index. */
+function isGitObservation(args: string[]): boolean {
+  const index = subcommandIndex(args);
+  if (index < 0) return false;
+  const command = args[index];
+  const rest = args.slice(index + 1);
+  if (GIT_OBSERVATIONS.has(command)) return true;
+  if (command === "worktree") return rest[0] === "list";
+  if (command === "remote") return rest[0] === "get-url" || rest[0] === "show";
+  if (command === "config") return rest[0] === "get" || rest[0] === "list" || rest.some((arg) => ["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "--get-color", "--get-colorbool"].includes(arg));
+  return command === "symbolic-ref" && !rest.includes("--delete") && !rest.includes("-d") && rest.filter((arg) => !arg.startsWith("-")).length === 1;
 }
 
 const ENGINE_GIT_BUILTINS = new Set([
@@ -1257,21 +1288,75 @@ interface EngineGitPolicyCacheEntry {
   refreshAfter: number;
 }
 
-const engineExecutableCache = new Map<string, string>();
+interface EngineExecutableCacheEntry {
+  binary: string;
+  localSelection?: { candidate: string; paths: string[]; fingerprint: string };
+}
 
-function engineExecutable(name: string): string {
-  const enginePath = process.env.PATH ?? "";
-  const cacheKey = `${name}\0${enginePath}`;
+const engineExecutableCache = new Map<string, EngineExecutableCacheEntry>();
+
+/** Local installations can replace symlinks, change execute permission, or
+ * create an earlier PATH candidate while the app remains open. Metadata is
+ * cheap to recheck and avoids reopening executable contents on every spawn. */
+function executableSelectionFingerprint(paths: readonly string[]): string | null {
+  const stamps: string[] = [];
+  for (const file of paths) {
+    try {
+      const link = lstatSync(file);
+      const target = link.isSymbolicLink() ? statSync(file) : link;
+      stamps.push([link.dev, link.ino, link.size, link.mode, link.mtimeMs, link.ctimeMs,
+        target.dev, target.ino, target.size, target.mode, target.mtimeMs, target.ctimeMs].join(":"));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return null;
+      stamps.push("missing");
+    }
+  }
+  return stamps.join("\0");
+}
+
+function localExecutableSelectionUnchanged(cached: EngineExecutableCacheEntry): boolean {
+  const selection = cached.localSelection;
+  if (!selection) return false;
+  try {
+    return realpathSync(selection.candidate) === cached.binary &&
+      executableSelectionFingerprint(selection.paths) === selection.fingerprint;
+  } catch {
+    return false;
+  }
+}
+
+function engineExecutable(name: string, enginePath = process.env.PATH ?? ""): string {
+  const localGit = name === "git" && !gitExecutionIdentity();
+  if (localGit) enginePath = enginePath.split(path.delimiter).filter(Boolean).map((directory) => path.resolve(directory)).join(path.delimiter);
+  const cacheKey = `${name}\0${localGit}\0${enginePath}`;
   const cached = engineExecutableCache.get(cacheKey);
-  if (cached) return cached;
-  for (const directory of enginePath.split(path.delimiter)) {
-    if (!directory) continue;
-    const candidate = path.join(directory, name);
+  if (cached && (!localGit || localExecutableSelectionUnchanged(cached))) {
+    engineExecutableCache.delete(cacheKey);
+    engineExecutableCache.set(cacheKey, cached);
+    return cached.binary;
+  }
+  engineExecutableCache.delete(cacheKey);
+  const localBinary = localGit ? findLocalGitExecutable(enginePath) : null;
+  const candidates = localGit ? (localBinary ? [localBinary] : []) : enginePath.split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, name));
+  for (const candidate of candidates) {
     try {
       accessSync(candidate, fsConstants.X_OK);
       const resolved = realpathSync(candidate);
       if (statSync(resolved).isFile()) {
-        engineExecutableCache.set(cacheKey, resolved);
+        const entry: EngineExecutableCacheEntry = { binary: resolved };
+        if (localGit) {
+          const paths: string[] = [];
+          for (const directory of enginePath.split(path.delimiter)) {
+            paths.push(directory, path.join(directory, name));
+            if (path.join(directory, name) === candidate) break;
+          }
+          paths.push(resolved);
+          const fingerprint = executableSelectionFingerprint(paths);
+          if (fingerprint !== null) entry.localSelection = { candidate, paths, fingerprint };
+        }
+        if (!localGit || entry.localSelection) engineExecutableCache.set(cacheKey, entry);
+        while (engineExecutableCache.size > 128) engineExecutableCache.delete(engineExecutableCache.keys().next().value!);
         return resolved;
       }
     } catch {
@@ -1969,12 +2054,59 @@ export async function runGit(
 
 /** Engine-owned Git observation with optional index writes disabled. Keep this
  * explicit at read call sites: mutations retain runGit's lock/retry semantics. */
-export function runGitRead(
+export async function runGitRead(
   cwd: string,
   args: string[],
   opts: Omit<RunGitOptions, "readOnly"> = {},
 ): Promise<RunGitResult> {
-  return runGit(cwd, args, { ...opts, readOnly: true });
+  const read = () => runGit(cwd, args, { ...opts, readOnly: true });
+  // Only summary fan-out uses the bounded lane. Interactive diff/log/history
+  // reads must start immediately even when slow background reads fill it.
+  const lane = currentGitReadLane();
+  return !lane?.background || gitExecutionIdentity(opts.identity) ? read() : queueLocalGitRead(read, lane, opts.signal);
+}
+
+const LOCAL_GIT_READ_CONCURRENCY = 4;
+let activeLocalGitReads = 0;
+const waitingLocalGitReads: Array<() => void> = [];
+
+function queueLocalGitRead(read: () => Promise<RunGitResult>, lane: GitReadLane, signal?: AbortSignal): Promise<RunGitResult> {
+  return new Promise((resolve, reject) => {
+    const cancelled = () => new GitError({ code: "GIT_COMMAND_FAILED", message: "Git observation was cancelled." });
+    if (signal?.aborted) { reject(cancelled()); return; }
+    let removePromotion = () => {};
+    const onAbort = () => {
+      const index = waitingLocalGitReads.indexOf(start);
+      if (index < 0) return;
+      waitingLocalGitReads.splice(index, 1);
+      signal?.removeEventListener("abort", onAbort);
+      removePromotion();
+      reject(cancelled());
+    };
+    const start = () => {
+      signal?.removeEventListener("abort", onAbort);
+      removePromotion();
+      const background = lane.background;
+      if (background) activeLocalGitReads += 1;
+      void Promise.resolve().then(read).then(resolve, reject).finally(() => {
+        if (background) {
+          activeLocalGitReads -= 1;
+          waitingLocalGitReads.shift()?.();
+        }
+      });
+    };
+    if (activeLocalGitReads < LOCAL_GIT_READ_CONCURRENCY) start();
+    else {
+      waitingLocalGitReads.push(start);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      removePromotion = lane.onPromotion(() => {
+        const index = waitingLocalGitReads.indexOf(start);
+        if (index < 0) return;
+        waitingLocalGitReads.splice(index, 1);
+        start();
+      });
+    }
+  });
 }
 
 /** Best-effort classification of git's stderr into structured outcomes.

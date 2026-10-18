@@ -2,12 +2,13 @@ import { Hono, type MiddlewareHandler } from "hono";
 import {createCloudAgentExecutionRoutes} from "./agent-credential-routes.js";
 import type {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import { HttpError } from "../authz.js";
-import { CLOUD_ACTOR_ADMISSION_PATH, CLOUD_ACTOR_TOKEN_PATTERN } from "./actor-sessions.js";
+import { CLOUD_ACTOR_ADMISSION_PATH, CLOUD_ACTOR_TOKEN_PATTERN, CLOUD_CAPABILITY_ACTOR_ADMISSION_PATH } from "./actor-sessions.js";
 import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { CloudRuntimeWitnessSchema, CloudAgentRuntimeSchema } from "./runtime-contract.js";
 import { createCloudCommandRoutes } from "./command-routes.js";
+import type { EngineCapabilityGate, EngineClientCapabilityGate } from "./capability-service-verifier.js";
 import type { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { createCloudEventRoutes } from "./event-routes.js";
 import type { DatabaseCloudWorkspaceEventService } from "./event-streams.js";
@@ -56,7 +57,9 @@ import {
   type DatabaseCloudRuntimeAccessAdmissionService,
 } from "./runtime-access-admission.js";
 import { CloudEngineCheckpointHintRejected, type CloudEngineCheckpointHintInput } from "./engine-checkpoint-hints.js";
-import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, CloudCheckpointProgressSchema } from "./checkpoint-progress-contract.js";
+import type { RolloutFlagReader } from "../rollout-flags.js";
+import { CLOUD_WORKSPACE_ENGINE_CHECKPOINT_PROGRESS_PATH, CloudCheckpointProgressSchema,
+  CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER, parseCloudCheckpointSealRefusal } from "./checkpoint-progress-contract.js";
 import { CloudEngineCheckpointProgressRejected, CloudEngineCheckpointProgressUnavailable, type CloudEngineCheckpointProgressInput } from "./checkpoint-progress.js";
 
 export const CLOUD_WORKSPACE_SETUP_ADMISSION_PATH =
@@ -84,6 +87,18 @@ export const CLOUD_WORKSPACE_USAGE_PATH =
   "/internal/v1/cloud-workspaces/engine/usage";
 export const CLOUD_WORKSPACE_SETUP_RECOVERY_PATH =
   "/internal/v1/cloud-workspaces/setup/recovery";
+
+/** Registration-time uplink advertisement (S2): the response gains
+ * `uplink.endpoint` only for an engine that opted in with
+ * `x-zeros-cloud-engine-uplink: 1` while its organization's
+ * `realtime_uplink` flag is on. Older engines never send the header and
+ * never see the member, so their strict document parsing is untouched. */
+export const CLOUD_ENGINE_UPLINK_OPT_IN_HEADER = "x-zeros-cloud-engine-uplink";
+export type CloudWorkspaceEngineUplinkAdvertisement = {
+  /** Public `wss` endpoint engines dial (`CLOUD_WORKSPACE_REALTIME_URL` + `/v1/uplink`). */
+  endpoint: string;
+  flags: RolloutFlagReader;
+};
 
 const UUID = z.string().uuid();
 const POSITIVE_INTEGER = z.number().int().safe().positive();
@@ -181,6 +196,24 @@ const EngineClientAdmissionBody = z
     engineInstanceId: UUID,
     grantToken: z.string().regex(SETUP_TOKEN_PATTERN),
     renew: z.boolean().optional(),
+  })
+  .strict();
+
+/** The S3 runtime `auth` frame's `zeros:engine` capability and proof, as
+ * the engine received them, and the route they arrived on. */
+const CapabilityActorAdmissionBody = z
+  .object({
+    workspaceId: UUID,
+    organizationId: UUID,
+    generation: POSITIVE_INTEGER,
+    engineInstanceId: UUID,
+    capability: z.string().min(32).max(4096).regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/),
+    proof: z.object({
+      timestampMs: z.number().int().nonnegative().safe(),
+      nonce: z.string().regex(/^[A-Za-z0-9_-]{22}$/),
+      signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/),
+    }).strict(),
+    route: z.enum(["direct", "relay"]),
   })
   .strict();
 
@@ -384,6 +417,7 @@ export interface CloudWorkspaceInternalSetupService {
   reportCheckpointProgress?(input: CloudEngineCheckpointProgressInput): Promise<void>;
   admitEngineClient?: DatabaseCloudWorkspaceEngineClientAdmissionService["consume"];
   admitActorClient?: DatabaseCloudWorkspaceEngineClientAdmissionService["consumeActor"];
+  admitCapabilityActor?: DatabaseCloudWorkspaceEngineClientAdmissionService["admitCapabilityActor"];
   admitRuntimeAccess?: DatabaseCloudRuntimeAccessAdmissionService["admit"];
   appendRecord?: DatabaseCloudWorkspaceDurableRecordService["append"];
   readRecordHead?: DatabaseCloudWorkspaceDurableRecordService["headForEngine"];
@@ -578,8 +612,16 @@ export const cloudWorkspaceInternalResponseHeaders: MiddlewareHandler = async (c
 
 export function createCloudWorkspaceInternalRoutes(
   service: CloudWorkspaceInternalSetupService,
+  options?: { engineUplink?: CloudWorkspaceEngineUplinkAdvertisement; engineCapabilities?: EngineCapabilityGate;
+    clientCapabilities?: EngineClientCapabilityGate },
 ): Hono {
   const routes = new Hono();
+  /** The additive `uplink` member, only for an opted-in engine of an
+   * organization whose `realtime_uplink` flag is on. */
+  const withUplinkAdvertisement = (body: Record<string, unknown>, organizationId: string, optedIn: boolean) =>
+    options?.engineUplink && optedIn && options.engineUplink.flags.enabled(organizationId, "realtime_uplink")
+      ? { ...body, uplink: { endpoint: options.engineUplink.endpoint } }
+      : body;
   const authenticateBlobIngress: MiddlewareHandler = async (c, next) => {
     if (c.req.method !== "POST") return next();
     const token = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);
@@ -594,7 +636,8 @@ export function createCloudWorkspaceInternalRoutes(
     return next();
   };
   for (const path of CLOUD_WORKSPACE_INTERNAL_PATHS) routes.use(path, cloudWorkspaceInternalResponseHeaders);
-  if (service.commands) routes.route("/", createCloudCommandRoutes(service.commands));
+  if (service.commands) routes.route("/", createCloudCommandRoutes(service.commands,
+    options?.engineCapabilities ? { capabilities: options.engineCapabilities } : {}));
   if (service.events) routes.route("/", createCloudEventRoutes(service.events));
   if (service.actions) routes.route("/", createCloudActionRoutes(service.actions));
   if (service.agentExecutions) routes.route("/",createCloudAgentExecutionRoutes(service.agentExecutions));
@@ -606,6 +649,7 @@ export function createCloudWorkspaceInternalRoutes(
     CLOUD_WORKSPACE_ENGINE_CHECKPOINT_HINT_PATH,
     CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH,
     CLOUD_ACTOR_ADMISSION_PATH,
+    CLOUD_CAPABILITY_ACTOR_ADMISSION_PATH,
   ]) {
     routes.use(path, bodyLimit({ maxSize: INTERNAL_BODY_BYTES }));
   }
@@ -627,6 +671,8 @@ export function createCloudWorkspaceInternalRoutes(
       // An older reader ignores this header; a new helper emits timed results
       // only after a supporting control plane acknowledges it.
       if (input.runtime && c.req.header("x-zeros-setup-timings") === "1") c.header("x-zeros-setup-timings", "1");
+      if (input.runtime && c.req.header("x-zeros-setup-timings") === "1" && c.req.header("x-zeros-setup-observations") === "1")
+        c.header("x-zeros-setup-observations", "1");
       return c.json(material);
     } catch (error) {
       if (!(error instanceof CloudWorkspaceSetupMaterialError)) throw error;
@@ -665,7 +711,8 @@ export function createCloudWorkspaceInternalRoutes(
         c.header("x-zeros-cloud-agent-journal",journal.data);
       }
       const metadata=z.record(z.unknown()).safeParse(registered);
-      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;return c.json(legacy);}
+      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
+        return c.json(withUplinkAdvertisement(legacy,input.organizationId,c.req.header(CLOUD_ENGINE_UPLINK_OPT_IN_HEADER)==="1"));}
       return c.json(registered);
     } catch (error) {
       if (!(error instanceof CloudWorkspaceSetupMaterialError)) throw error;
@@ -702,7 +749,8 @@ export function createCloudWorkspaceInternalRoutes(
         c.header("x-zeros-cloud-agent-journal",journal.data);
       }
       const metadata=z.record(z.unknown()).safeParse(registered);
-      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;return c.json(legacy);}
+      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;
+        return c.json(withUplinkAdvertisement(legacy,input.organizationId,c.req.header(CLOUD_ENGINE_UPLINK_OPT_IN_HEADER)==="1"));}
       return c.json(registered);
     } catch {
       return c.json({error:{code:"engine_registration_rejected",retryable:false}},403);
@@ -760,8 +808,10 @@ export function createCloudWorkspaceInternalRoutes(
       if (!token) return c.json({ error: { code: "invalid_capability" } }, 401);
       const input = await strictJson(c.req, CloudCheckpointProgressSchema);
       if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
+      const sealRefusal = input.stage === "seal_ack" && input.state === "failed"
+        ? parseCloudCheckpointSealRefusal(c.req.header(CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER)) : undefined;
       try {
-        await service.reportCheckpointProgress!({ ...input, token });
+        await service.reportCheckpointProgress!({ ...input, token, ...(sealRefusal ? { sealRefusal } : {}) });
         return c.json({ version: 1, accepted: true }, 202);
       } catch (error) {
         if (error instanceof CloudEngineCheckpointProgressUnavailable) return c.json({ error: { code: error.code } }, 503);
@@ -783,6 +833,32 @@ export function createCloudWorkspaceInternalRoutes(
         return c.json(await service.admitActorClient!({...scope,token:grantToken,heartbeatToken,
           ...(renew===undefined?{}:{renew})}));
       } catch (error) {
+        if (!(error instanceof HttpError) && !(error instanceof CloudWorkspaceEngineAuthorityError) && !(error instanceof CloudWorkspaceEngineClientAdmissionError)) throw error;
+        return c.json({error:{code:"cloud_actor_admission_rejected"}},401);
+      }
+    });
+  }
+  const clientCapabilities = options?.clientCapabilities;
+  if (service.admitCapabilityActor && clientCapabilities) {
+    routes.post(CLOUD_CAPABILITY_ACTOR_ADMISSION_PATH, async c => {
+      c.header("Cache-Control","no-store");
+      const heartbeatToken=bearerToken(c.req.header("authorization"),HEARTBEAT_TOKEN_PATTERN);
+      if (!heartbeatToken) return c.json({error:{code:"invalid_capability"}},401);
+      const input=await strictJson(c.req,CapabilityActorAdmissionBody);
+      if (!input) return c.json({error:{code:"invalid_request"}},422);
+      // An organization with the flag off gets the answer a rejected
+      // admission gets, before any SQL.
+      if (!clientCapabilities.flags.enabled(input.organizationId,"capabilities"))
+        return c.json({error:{code:"cloud_actor_admission_rejected"}},401);
+      const {capability,proof,route,...scope}=input;
+      const verified=await clientCapabilities.verifier.verify(capability,
+        {workspaceId:scope.workspaceId,organizationId:scope.organizationId,route,proof,scope:"ws:read"});
+      if (!verified.ok) return c.json({error:{code:verified.code}},
+        verified.code==="capability_issuer_unavailable"?503:verified.code==="capability_scope_denied"?403:401);
+      try {
+        return c.json(await service.admitCapabilityActor!({...scope,heartbeatToken,claims:verified.claims}));
+      } catch (error) {
+        if (error instanceof HttpError && error.status===429) return c.json({error:{code:error.code}},429);
         if (!(error instanceof HttpError) && !(error instanceof CloudWorkspaceEngineAuthorityError) && !(error instanceof CloudWorkspaceEngineClientAdmissionError)) throw error;
         return c.json({error:{code:"cloud_actor_admission_rejected"}},401);
       }

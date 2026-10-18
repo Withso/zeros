@@ -751,13 +751,20 @@ function applyStorageChanges(
       );
   }
   for (const change of changes) {
-    if (readDesignStorageFile(workspace, change.file) === change.after)
+    const assertCurrent = () => {
+      const current = readDesignStorageFile(workspace, change.file);
+      if (current !== change.before && current !== change.after)
+        throw new Error("Design metadata or source changed during migration. Review the retained recovery record before retrying.");
+      return current;
+    };
+    if (assertCurrent() === change.after)
       continue;
     if (change.after === null) {
       const target = assertSafeDesignStoragePath(workspace, change.file);
+      if (assertCurrent() === null) continue;
       unlinkSync(target);
       syncDirectory(path.dirname(target));
-    } else atomicWrite(workspace, change.file, change.after);
+    } else atomicWrite(workspace, change.file, change.after, undefined, { beforePublish: assertCurrent });
   }
 }
 /** Lifecycle snapshots must include the completed source/metadata pair, even
@@ -810,7 +817,7 @@ export function commitDesignMetadata(
   sourceChanges: DesignStorageChange[] = [],
   expected?: DesignMetadataSnapshot,
   restoredId?: string,
-  options?: { rollbackOnFailure?: boolean },
+  options?: { rollbackOnFailure?: boolean; assertInputs?: () => void },
 ): string[] {
   assertDesignWriteAuthorized();
   if (sanitizeDesignDirectoryName(directory) !== directory)
@@ -1028,13 +1035,19 @@ export function commitDesignMetadata(
   // Repository configuration is repaired before starting a document write.
   // A higher-priority nested exclusion must not produce a successful save
   // whose metadata is hidden. The ignore edit stays reviewable on failure.
+  options?.assertInputs?.();
   const ignoreChanges: string[] = [];
   if (ignoreAfter !== ignoreBefore) {
     if (readDesignStorageFile(workspace, ".gitignore") !== ignoreBefore)
       throw new Error(
         "Git ignore rules changed while preparing Design metadata.",
       );
-    atomicWrite(workspace, ".gitignore", ignoreAfter);
+    atomicWrite(workspace, ".gitignore", ignoreAfter, undefined, {
+      beforePublish: () => {
+        if (readDesignStorageFile(workspace, ".gitignore") !== ignoreBefore)
+          throw new Error("Git ignore rules changed while preparing Design metadata.");
+      },
+    });
     ignoreChanges.push(".gitignore");
   }
   assertDesignFilesNotIgnored(workspace, visibleFiles);
@@ -1043,6 +1056,7 @@ export function commitDesignMetadata(
     workspace,
     journalName(directory),
     source,
+    { beforePublish: () => { options?.assertInputs?.(); assertDesignWriteAuthorized(); } },
   );
   try {
     applyStorageChanges(workspace, directory, changes);

@@ -39,6 +39,7 @@ export interface DescribeProcessInput {
 const ZEROS_HOST_SCRIPTS: ReadonlyMap<string, ProcessRole> = new Map([
   ["host-process-supervisor.mjs", { name: "Agent supervisor", kind: "helper" }],
   ["pty-host.cjs", { name: "Terminal host", kind: "helper" }],
+  ["watch-host.cjs", { name: "Watch host", kind: "helper" }],
   ["cursor-host.cjs", { name: "Cursor", kind: "agent" }],
 ]);
 

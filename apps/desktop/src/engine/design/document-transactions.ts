@@ -1,6 +1,7 @@
 import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { TOKENS_SEED } from "./document-seeds";
 import { MAX_DESIGN_TEXT_BYTES, utf8Bytes } from "./render-budget";
+import { captureDesignDependencies } from "./dependency-read-set";
 import { elementRecords } from "./source";
 import {
   assertDesignWriteAuthorized,
@@ -1106,33 +1107,36 @@ export async function commitDesignWebDocumentState(
     // revoked while validation awaited I/O must not publish a new journal.
     // Once admitted, recovery finishes that transaction even after revocation.
     options.assertAuthorized?.();
+    let movementDependencies: Awaited<ReturnType<typeof captureDesignDependencies>> | undefined;
     if (options.movementGuard) {
       const guard = options.movementGuard;
-      const source = await readBoundedDesignFrameSource(workspacePath, file);
-      const render = await readDesignFrameRenderIdentityFromSource(
-        workspacePath,
-        file,
-        source,
-      );
-      const latest = await readDesignWebDocumentStateUnlocked(
-        workspacePath,
-        file,
-      );
-      const geometry = latest.frames[file];
-      if (
-        render.sourceVersion !== guard.sourceVersion ||
-        latest.revision !== expectedRevision ||
-        (guard.geometry &&
-          (!geometry ||
-            geometry.x !== guard.geometry.x ||
-            geometry.y !== guard.geometry.y ||
-            geometry.width !== guard.geometry.w ||
-            geometry.height !== guard.geometry.h ||
-            geometry.z !== guard.geometry.z))
-      )
-        throw new Error(
-          "The source or frame geometry changed after this movement was measured.",
+      movementDependencies = await captureDesignDependencies(async () => {
+        const source = await readBoundedDesignFrameSource(workspacePath, file);
+        const render = await readDesignFrameRenderIdentityFromSource(
+          workspacePath,
+          file,
+          source,
         );
+        const latest = await readDesignWebDocumentStateUnlocked(
+          workspacePath,
+          file,
+        );
+        const geometry = latest.frames[file];
+        if (
+          render.sourceVersion !== guard.sourceVersion ||
+          latest.revision !== expectedRevision ||
+          (guard.geometry &&
+            (!geometry ||
+              geometry.x !== guard.geometry.x ||
+              geometry.y !== guard.geometry.y ||
+              geometry.width !== guard.geometry.w ||
+              geometry.height !== guard.geometry.h ||
+              geometry.z !== guard.geometry.z))
+        )
+          throw new Error(
+            "The source or frame geometry changed after this movement was measured.",
+          );
+      });
       options.assertAuthorized?.();
     }
     assertDesignWriteAuthorized();
@@ -1140,6 +1144,11 @@ export async function commitDesignWebDocumentState(
       workspacePath,
       path.basename(designTransactionJournalPath(workspacePath)),
       journalSource,
+      { beforePublish: () => {
+        options.assertAuthorized?.();
+        movementDependencies?.assertCurrent();
+        assertDesignWriteAuthorized();
+      } },
     );
     try {
       await recoverPendingDesignTransactionUnlocked(workspacePath);

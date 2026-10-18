@@ -216,13 +216,18 @@ replaced during the read are refused.
 
 Lifecycle waits are bounded at three minutes, Computer builds at fifteen,
 agent observation at five, and an invocation at thirty. A workspace wait uses
-the existing status request with `setupProgress=true`; default desktop reads
+the existing status request with `setupProgress=true&setupEvidence=true`; default desktop reads
 keep their response shape. Deadline/failure evidence names `workspace_create_wait`,
 `workspace_resume_wait`, `workspace_stop_wait` or `workspace_delete_wait` and, when
 available, the last observed current-generation setup attempt, claim count,
-state and closed error code. Unknown codes become `unknown`; raw logs and
-provider fields are refused. An older CP or stale/malformed progress supplies
-no setup evidence. The product's longer retry loop does not extend this wait,
+state and closed error code. Optional setup evidence retains the exact run/fence,
+runtime ID, at most five claim clocks, engine creation/registration times and
+closed reuse/readiness reasons in the signed receipt before fixture deletion.
+Long histories retain the first failure and mark truncation. Nested attester
+spans overlap setup spans; never add durations across their independent clocks.
+Unknown codes become `unknown`; raw logs and provider fields are refused. An older
+CP supplies ordinary progress; stale or malformed evidence is dropped independently.
+The product's longer retry loop does not extend this wait,
 and no new diagnostic request runs after its deadline. Standalone workspace
 commands retain their run for iteration. `scenario run smoke --agent <agent>
 --model <model>` creates a throwaway, verifies the repo through a terminal,
@@ -295,6 +300,12 @@ erasure or measured disk usage. Ordinary CLI cleanup still waits for physical
 deletion. A positive physical completion receipt can retire carried work after
 content purge; a missing row or 404 cannot.
 
+Actions also emits one `Zeros dev cleanup backlog` warning from the final signed
+summary whenever storage remains pending, including on a green run. It reports
+the last confirmed counts, reserved storage, oldest delete, unconfirmed workspace
+count and admission limits. Product failures keep their original result; the
+warning does not turn unknown compute into an admissible backlog.
+
 Before allocation, the runner rereads every carried retirement and compares it
 with the complete organization workspace and pending-deletion inventories. It
 does this again after Computer preparation. Proof must remain within 60 seconds
@@ -312,6 +323,10 @@ hours of reconciliation. New observations or provider estimates never reset
 that clock. `cleanup_backlog_exceeded` blocks another allocation; old debt is
 never evicted to make room. The signed artifact carries at most nine run
 records, including a failed current attempt, within its existing 1 MiB bound.
+Boat's [14-day stopped-disk retention](https://docs.boat.dev/snapshots) does not
+extend this eight-hour limit or prove a requested deletion completed. Automatic
+snapshots are included in Boat's pricing; the reserved MiB limit still bounds
+cleanup debt and unavailable capacity, rather than estimating a storage bill.
 Readers retain v1's physical-deletion success rule; new writers emit
 `zeros.dev-hourly/v2` so the two outcomes cannot be confused.
 

@@ -6,7 +6,7 @@
 // ============================================
 
 // --- IMPORTS ---
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useContext, useEffect, useRef, useState } from "react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 
@@ -14,6 +14,8 @@ import { GIBBERISH_THINKING_MS, gibberishThinking } from "./gibberish-thinking";
 import { WorkingDuration } from "./live-duration";
 import { startLoaderRun } from "./loader-loop";
 import { ZerosSpinner } from "./zeros-spinner";
+import { ActivityScope } from "./activity-scope";
+import { startElapsedDisplay } from "./elapsed-display";
 
 // --- TYPES ---
 export interface ActivityShimmerProps {
@@ -37,21 +39,31 @@ const thinkingStep = (startedAt: number) =>
  *  so each phrase shimmers once and changes as the light leaves it. 13px.
  *  Decorative: screen readers hear "Agent working", not nonsense. */
 const GibberishThinking = memo(function GibberishThinking({ startedAt }: { startedAt: number }) {
+  const scope = useContext(ActivityScope);
   const elRef = useRef<HTMLSpanElement | null>(null);
   const [step, setStep] = useState(() => thinkingStep(startedAt));
   const [delay] = useState(() => -Math.round(Math.max(0, Date.now() - startedAt) % GIBBERISH_THINKING_MS));
   useEffect(() => {
     const el = elRef.current;
-    if (!el) return;
+    if (!el || scope === false) return;
+    if (scope === true) return startElapsedDisplay({ host: el, startedAt, precision: () => GIBBERISH_THINKING_MS,
+      format: elapsed => Math.floor(elapsed / GIBBERISH_THINKING_MS), changed: setStep,
+      activity: active => {
+        el.style.animationPlayState = active ? "" : "paused";
+        // The phrase catches up to wall time on reveal. Resume its sweep at
+        // that same phase instead of showing a new phrase mid-sweep.
+        if (active) for (const animation of el.getAnimations())
+          animation.currentTime = Math.max(0, Date.now() - startedAt + delay);
+      } });
     // Same step, same state: React skips the render.
     return startLoaderRun({ host: el, tick: () => setStep(thinkingStep(startedAt)) });
-  }, [startedAt]);
+  }, [startedAt, scope, delay]);
   return (
     <span
       ref={elRef}
       aria-hidden="true"
       className="zeros-gibberish-thinking text-xs whitespace-nowrap"
-      style={{ animationDelay: `${delay}ms` }}
+      style={{ animationDelay: `${delay}ms`, animationPlayState: scope === false ? "paused" : undefined }}
     >
       {gibberishThinking(startedAt, step)}
     </span>

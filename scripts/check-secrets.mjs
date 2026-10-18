@@ -156,6 +156,32 @@ const tracked = execFileSync("git", ["ls-files"], { encoding: "utf8" })
   .split("\n")
   .filter(Boolean);
 
+// One global copy per rule, compiled once. No rule's body can contain a
+// newline, so scanning a file's whole text finds exactly the matches a
+// line-by-line scan would; offsets map back to their 1-based line numbers.
+const GLOBAL_RULES = RULES.map((rule, index) => ({
+  ...rule,
+  index,
+  global: new RegExp(rule.re.source, "g"),
+}));
+const JWT_RULE_INDEX = RULES.length;
+
+function lineIndex(text) {
+  const starts = [0];
+  for (let at = text.indexOf("\n"); at !== -1; at = text.indexOf("\n", at + 1))
+    starts.push(at + 1);
+  return (offset) => {
+    let low = 0;
+    let high = starts.length - 1;
+    while (low < high) {
+      const middle = (low + high + 1) >> 1;
+      if (starts[middle] <= offset) low = middle;
+      else high = middle - 1;
+    }
+    return { line: low + 1, start: starts[low], end: starts[low + 1] ?? text.length + 1 };
+  };
+}
+
 const secretFindings = [];
 
 for (const file of tracked) {
@@ -166,23 +192,41 @@ for (const file of tracked) {
     continue; // unreadable
   }
   if (text.includes("\0")) continue; // skip binary
-  text.split("\n").forEach((line, i) => {
-    for (const rule of RULES) {
-      // Inspect every occurrence: an example earlier on a line must never
-      // hide a real credential later on that line.
-      for (const m of line.matchAll(new RegExp(rule.re.source, "g"))) {
-        if (!looksLikePlaceholder(m[0]) && !rule.isFixture?.(m[0]))
-          secretFindings.push({ file, line: i + 1, rule: rule.name });
-      }
+  let locate = null;
+  const at = (offset) => (locate ??= lineIndex(text))(offset);
+  const fileFindings = [];
+  for (const rule of GLOBAL_RULES) {
+    // Inspect every occurrence: an example earlier on a line must never
+    // hide a real credential later on that line.
+    rule.global.lastIndex = 0;
+    for (let m; (m = rule.global.exec(text)) !== null; ) {
+      if (!looksLikePlaceholder(m[0]) && !rule.isFixture?.(m[0]))
+        fileFindings.push({ file, line: at(m.index).line, rule: rule.name, order: rule.index, offset: m.index });
     }
-    const role = line.includes("eyJ") ? supabaseJwtRole(line) : null;
-    if (role)
-      secretFindings.push({
-        file,
-        line: i + 1,
-        rule: `Supabase JWT (role=${role})`,
-      });
-  });
+  }
+  // A line reports the first Supabase-shaped JWT it contains, as before.
+  if (text.includes("eyJ")) {
+    const checkedLines = new Set();
+    JWT_RE.lastIndex = 0;
+    for (let m; (m = JWT_RE.exec(text)) !== null; ) {
+      const location = at(m.index);
+      if (checkedLines.has(location.line)) continue;
+      checkedLines.add(location.line);
+      const role = supabaseJwtRole(text.slice(location.start, location.end - 1));
+      JWT_RE.lastIndex = location.end;
+      if (role)
+        fileFindings.push({
+          file,
+          line: location.line,
+          rule: `Supabase JWT (role=${role})`,
+          order: JWT_RULE_INDEX,
+          offset: m.index,
+        });
+    }
+  }
+  fileFindings.sort((a, b) => a.line - b.line || a.order - b.order || a.offset - b.offset);
+  for (const { file: path, line, rule } of fileFindings)
+    secretFindings.push({ file: path, line, rule });
 }
 
 const bullet = (f) => console.error(`  • ${f.file}:${f.line} — ${f.rule}`);

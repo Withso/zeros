@@ -21,6 +21,7 @@ import { CLOUD_WORKSPACE_V2_REQUIRED } from "./supported-generation.js";
 import { ensureWorkspaceDeletionJob } from "./workspace-deletion-job.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Hono, type Context } from "hono";
+import { readCloudWorkspaceSetupEvidence } from "./setup-evidence.js";
 import { bodyLimit } from "hono/body-limit";
 import type pg from "pg";
 import { z } from "zod";
@@ -311,7 +312,7 @@ const DeleteWorkspaceSchema = z.object({
 }).strict();
 
 
-type WorkspaceRow = CloudRuntimePinRow & {
+export type WorkspaceRow = CloudRuntimePinRow & {
   admin_creator_user_id: string | null;
   actor_role: string|null;
   sponsor_pro_live: boolean;
@@ -343,7 +344,7 @@ type WorkspaceRow = CloudRuntimePinRow & {
   last_error_code: string | null;
   last_error_message: string | null;
   diagnostic_incident: { id: string; reason: string; stopReason?: unknown } | null;
-  setup_run: { state: string; attempt: number; claimCount: number; code: string | null; hasLog: boolean } | null;
+  setup_run: { id: string; executionFence: number; state: string; attempt: number; claimCount: number; code: string | null; hasLog: boolean } | null;
   last_observed_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -490,7 +491,7 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
          cw.repository_forge, cw.repository_owner, cw.repository_name,
          cw.repository_revision, cw.status, cw.desired_state,
          cw.current_generation, cw.version, cw.last_error_code,
-         (SELECT jsonb_build_object('state',setup.state,'attempt',setup.attempt,'claimCount',setup.claim_count,
+         (SELECT jsonb_build_object('id',setup.id,'executionFence',setup.execution_fence,'state',setup.state,'attempt',setup.attempt,'claimCount',setup.claim_count,
            'code',setup.error_code,'hasLog',btrim(setup.log_excerpt)<>'')
           FROM cloud_workspace_setup_runs setup WHERE setup.workspace_id=cw.id AND setup.org_id=cw.org_id
             AND setup.generation=cw.current_generation ORDER BY setup.attempt DESC LIMIT 1) AS setup_run,
@@ -614,7 +615,7 @@ function agentCredentialsDocument(row: WorkspaceRow) {
   return { agentCredentials: parsed.data };
 }
 
-function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|null) {
+export function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|null) {
   const supported = isSupportedCloudWorkspaceProviderBinding({ provider: row.provider, credentialSource: row.credential_source, sandboxClass: row.sandbox_class });
   const executable=supported&&row.supported_generation;
   const canWrite=executable&&["prompter","developer","manager","owner"].includes(row.actor_role??"");
@@ -676,11 +677,76 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
   };
 }
 
+/** S3 `catalogVersion`: the position of the global catalog sequence that
+ * every workspace document version change draws from (migration 0154), so it
+ * is monotonic per account. Read it before the rows it describes: a change
+ * that commits after the read reaches the device stream as an event.
+ * Sequences are not transactional, so the position can include a change that
+ * has not committed yet: it is a watermark, never a reason to skip an event. */
+export async function readCatalogVersion(tx: Tx): Promise<number> {
+  const row = (await tx.query<{ last_value: string; is_called: boolean }>(
+    "SELECT last_value, is_called FROM cloud_catalog_version_seq")).rows[0];
+  return row?.is_called ? Number(row.last_value) : 0;
+}
+
+export type CloudWorkspaceCatalogQuery = {
+  orgId: string | null;
+  userId: string;
+  limit: number;
+  cursor: { createdAt: string; id: string } | null;
+  includeDeleted?: boolean;
+  /** Restricts the page to these workspaces (the device stream's targeted
+   * re-read after a change hint). */
+  workspaceIds?: readonly string[];
+};
+
+/** The catalog page query behind `GET /v1/cloud-workspaces`, exported so the
+ * realtime device stream re-reads the exact same access set. */
+export async function queryCloudWorkspaceCatalog(tx: Tx, query: CloudWorkspaceCatalogQuery): Promise<WorkspaceRow[]> {
+  const parameters: unknown[] = [query.orgId, query.userId, query.limit];
+  let cursorSql = "";
+  if (query.cursor) {
+    parameters.push(query.cursor.createdAt, query.cursor.id);
+    cursorSql = `AND (cw.created_at, cw.id) < ($${parameters.length - 1}::timestamptz, $${parameters.length}::uuid)`;
+  }
+  if (query.workspaceIds) {
+    parameters.push([...query.workspaceIds]);
+    cursorSql += ` AND cw.id = ANY($${parameters.length}::uuid[])`;
+  }
+  return (
+    await tx.query<WorkspaceRow>(
+      `${workspaceSelect("cloud_workspace_actor_role(cw.id,$2)","$2")}
+       WHERE ($1::uuid IS NULL OR cw.org_id = $1)
+         AND (cw.owner_user_id=$2 OR cw.org_id IN (SELECT org_id FROM organization_members WHERE user_id=$2)
+           OR cw.id IN (SELECT workspace_id FROM cloud_workspace_guest_grants WHERE user_id=$2 AND revoked_at IS NULL AND expires_at>now()))
+         AND (cloud_workspace_actor_role(cw.id,$2) IS NOT NULL OR (
+           cw.owner_user_id=$2
+           AND EXISTS (SELECT 1 FROM organizations org JOIN organization_members member ON member.org_id=org.id
+             JOIN users account ON account.id=member.user_id
+             WHERE org.id=cw.org_id AND member.user_id=$2 AND org.deleted_at IS NULL AND NOT org.is_personal
+               AND account.auth_status='active' AND account.deleted_at IS NULL)
+           AND EXISTS (SELECT 1 FROM teams team JOIN team_members member ON member.team_id=team.id AND member.org_id=team.org_id
+             WHERE team.id=cw.team_id AND team.org_id=cw.org_id AND team.deleted_at IS NULL AND member.user_id=$2)))
+         ${query.includeDeleted ? "" : "AND cw.status <> 'deleted'"}
+         AND NOT EXISTS (SELECT 1 FROM cloud_computer_builds build WHERE build.workspace_id=cw.id)
+         ${cursorSql}
+       ORDER BY cw.created_at DESC, cw.id DESC
+       LIMIT $3`,
+      parameters,
+    )
+  ).rows;
+}
+
 function setupProgress(row: WorkspaceRow) {
   const setup = row.setup_run;
   if (!setup) return null;
   return { generation: row.current_generation, attempt: setup.attempt, claimCount: setup.claimCount,
     state: setup.state, errorCode: setup.code === null ? null : diagnosticCode(setup.code) };
+}
+
+function setupEvidence(tx: Tx, row: WorkspaceRow) {
+  return row.setup_run ? readCloudWorkspaceSetupEvidence(tx, { organizationId: row.org_id, workspaceId: row.id,
+    generation: row.current_generation, setupRunId: row.setup_run.id, executionFence: row.setup_run.executionFence }) : null;
 }
 
 function intentDocument(row: IntentRow) {
@@ -787,6 +853,13 @@ async function loadWorkspace(
     catch(error) { if(error instanceof HttpError)throw new HttpError(404,"not_found","Cloud workspace not found");throw error; }
   }
   return row;
+}
+
+/** The workspace document as `GET …/cloud-workspaces/{workspace}` authorizes
+ * and projects it for this user; 404 not_found when the user may not read it. */
+export async function readCloudWorkspaceDocument(tx: Tx, input: { organizationId: string; workspaceId: string; userId: string },
+  config: CloudWorkspaceBackendConfig | null) {
+  return workspaceDocument(await loadWorkspace(tx, input.organizationId, input.workspaceId, input.userId), config);
 }
 
 async function loadIntentByKey(
@@ -1008,7 +1081,7 @@ function decodePathCursor(raw: string | undefined): string | null {
   return value;
 }
 
-function deviceProof(c: Context): CloudWorkspaceDeviceProof {
+export function deviceProof(c: Context): CloudWorkspaceDeviceProof {
   const deviceId = c.req.header("x-zeros-device-id") ?? "";
   const rawVersion = c.req.header("x-zeros-device-key-version") ?? "";
   const rawTimestamp = c.req.header("x-zeros-device-timestamp") ?? "";
@@ -1913,42 +1986,20 @@ export function createCloudWorkspaceRoutes(
     }
     const includeDeleted = c.req.query("includeDeleted") === "true";
 
-    const rows = await withSystemTx(pool, async (tx) => {
+    const { rows, catalogVersion } = await withSystemTx(pool, async (tx) => {
       if(orgId!==null)await requireOrganizationMembership(tx, orgId, user.id);
-      const parameters: unknown[] = [orgId, user.id, limit + 1];
-      let cursorSql = "";
-      if (cursor) {
-        parameters.push(cursor.createdAt, cursor.id);
-        cursorSql = "AND (cw.created_at, cw.id) < ($4::timestamptz, $5::uuid)";
-      }
-      return (
-        await tx.query<WorkspaceRow>(
-          `${workspaceSelect("cloud_workspace_actor_role(cw.id,$2)","$2")}
-           WHERE ($1::uuid IS NULL OR cw.org_id = $1)
-             AND (cw.owner_user_id=$2 OR cw.org_id IN (SELECT org_id FROM organization_members WHERE user_id=$2)
-               OR cw.id IN (SELECT workspace_id FROM cloud_workspace_guest_grants WHERE user_id=$2 AND revoked_at IS NULL AND expires_at>now()))
-             AND (cloud_workspace_actor_role(cw.id,$2) IS NOT NULL OR (
-               cw.owner_user_id=$2
-               AND EXISTS (SELECT 1 FROM organizations org JOIN organization_members member ON member.org_id=org.id
-                 JOIN users account ON account.id=member.user_id
-                 WHERE org.id=cw.org_id AND member.user_id=$2 AND org.deleted_at IS NULL AND NOT org.is_personal
-                   AND account.auth_status='active' AND account.deleted_at IS NULL)
-               AND EXISTS (SELECT 1 FROM teams team JOIN team_members member ON member.team_id=team.id AND member.org_id=team.org_id
-                 WHERE team.id=cw.team_id AND team.org_id=cw.org_id AND team.deleted_at IS NULL AND member.user_id=$2)))
-             ${includeDeleted ? "" : "AND cw.status <> 'deleted'"}
-             AND NOT EXISTS (SELECT 1 FROM cloud_computer_builds build WHERE build.workspace_id=cw.id)
-             ${cursorSql}
-           ORDER BY cw.created_at DESC, cw.id DESC
-           LIMIT $3`,
-          parameters,
-        )
-      ).rows;
+      // Read before the page. The position may include a change that has not
+      // committed yet, so the page need not contain every change up to it;
+      // such a change reaches the device stream as an event when it commits.
+      const catalogVersion = await readCatalogVersion(tx);
+      return { catalogVersion, rows: await queryCloudWorkspaceCatalog(tx, { orgId, userId: user.id, limit: limit + 1, cursor, includeDeleted }) };
     });
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     return c.json({
       workspaces: page.map(row=>workspaceDocument(row,config)),
       nextCursor: hasMore ? encodeCursor(page[page.length - 1]!) : null,
+      catalogVersion,
     });
   };
   // Read-only admission for the desktop's placement picker. Return only
@@ -2004,6 +2055,7 @@ export function createCloudWorkspaceRoutes(
       const row=await loadWorkspace(tx,scope.org_id,workspaceId,userId);
       const live=(await tx.query<{role:string|null}>("SELECT cloud_workspace_actor_role($1,$2) AS role",[workspaceId,userId])).rows[0]!;
       return {workspace:workspaceDocument(row,config),access:{role:live.role??"owner",computeEligible:live.role!==null},path:`/workspace/${workspaceId}`,
+        ...(c.req.query("setupEvidence")==="true"?{setupEvidence:await setupEvidence(tx,row)}:{}),
         ...(c.req.query("setupProgress")==="true"?{setupProgress:setupProgress(row)}:{})};
     });
     return c.json(result);
@@ -2014,11 +2066,13 @@ export function createCloudWorkspaceRoutes(
     const orgId = uuidParam(c.req.param("organization"));
     const workspaceId = uuidParam(c.req.param("workspace"));
     c.header("Cache-Control","no-store");
-    const row = await withSystemTx(pool, (tx) =>
-      loadWorkspace(tx, orgId, workspaceId, user.id),
-    );
-    return c.json({ workspace: workspaceDocument(row,config),
-      ...(c.req.query("setupProgress")==="true"?{setupProgress:setupProgress(row)}:{}) });
+    const result = await withSystemTx(pool, async tx => {
+      const row = await loadWorkspace(tx, orgId, workspaceId, user.id);
+      return { workspace: workspaceDocument(row,config),
+        ...(c.req.query("setupEvidence")==="true"?{setupEvidence:await setupEvidence(tx,row)}:{}),
+        ...(c.req.query("setupProgress")==="true"?{setupProgress:setupProgress(row)}:{}) };
+    });
+    return c.json(result);
   });
 
   app.get(`${base}/:workspace/detected-ports`, async (c) => {

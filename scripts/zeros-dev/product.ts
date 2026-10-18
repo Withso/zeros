@@ -14,7 +14,7 @@ import { DeletionRetirementSchema, MAX_PENDING_WORKSPACES, RETIREMENT_FRESH_MS, 
 import { cleanupDeleteKey, cleanupOutcome, requireCleanupCapacity, retirementMatchesRun } from "./cleanup-state";
 
 const document=z.object({workspace:CloudWorkspaceDocumentSchema});
-const observedDocument=document.extend({setupProgress:z.unknown().optional()});
+const observedDocument=document.extend({setupProgress:z.unknown().optional(),setupEvidence:z.unknown().optional()});
 const pendingDeletion=z.object({truncated:z.boolean(),pendingDeletion:z.array(z.object({workspaceId:z.string().uuid(),generation:z.number().int().positive(),
   state:z.string().optional(),reserved:z.object({cpuMillicores:z.number().int().nonnegative().safe(),memoryMiB:z.number().int().nonnegative().safe(),storageMiB:z.number().int().nonnegative().safe()}).optional(),
 })).max(500)});
@@ -219,10 +219,10 @@ export class ProductApi {
       const pending=handle.run.lifecycle.at(-1);
       const result=handle.run.create?.result;if(!result)throw new ZerosDevError("receipt_missing");
       const fixture=await this.session.fixture();
-      const observation=await this.request(`/v1/cloud-workspaces/${result.id}?setupProgress=true`,observedDocument,{signal:bound});
+      const observation=await this.request(`/v1/cloud-workspaces/${result.id}?setupProgress=true&setupEvidence=true`,observedDocument,{signal:bound});
       const row=observation.workspace;
       this.assertWorkspace(row,fixture,handle.run,pending?.operation==="wake"&&!pending.confirmed);
-      setup=readSetupProgress(observation.setupProgress,row.generation.number);
+      setup=readSetupProgress(observation.setupProgress,row.generation.number,observation.setupEvidence,row.id);
       observeSetup?.(setup);
       if(row.status==="failed"&&target!=="deleted")throw new ZerosDevError("workspace_failed");
       if(target==="running"?!["ready","busy"].includes(row.status):row.status!==target)return null;

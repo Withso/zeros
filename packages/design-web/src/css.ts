@@ -357,6 +357,7 @@ function mutateInlineStyles(
   source: string,
   nodeId: string,
   styles: ReadonlyMap<string, DesignStyleMutationValue>,
+  appendOverrides = false,
 ): string {
   if (nodeId === DESIGN_DOCUMENT_BODY_ID)
     source = withExplicitDesignBody(source);
@@ -410,6 +411,12 @@ function mutateInlineStyles(
       (item) => item.property === property,
     );
     const existing = matchesForProperty.at(-1);
+    if (appendOverrides) {
+      for (const match of matchesForProperty)
+        edits.push({ start: match.start, end: match.end, text: "" });
+      if (value !== null) additions.push([property, `${value}${existing?.important ? " !important" : ""}`]);
+      continue;
+    }
     if (!existing) {
       if (value !== null) additions.push([property, value]);
       continue;
@@ -887,6 +894,7 @@ export function mutateDesignNodeStyles(
     scope?: "auto" | "inline" | "rule" | "component" | "instance";
     responsiveContext?: string;
     stateContext?: string;
+    appendInlineOverrides?: boolean;
   },
 ): {
   files: Readonly<Record<string, string>>;
@@ -1018,6 +1026,7 @@ export function mutateDesignNodeStyles(
       files[state.entryFile]!,
       input.nodeId,
       inlineMutations,
+      input.appendInlineOverrides,
     );
   }
   return { files, decisions };

@@ -273,6 +273,8 @@ import {
   isTailProviderTurnSegment,
   turnKey,
 } from "./turn-container";
+import { useLocalLiveTextSource } from "./local-live-text";
+import { ActivityScope } from "@/renderer/shared/ui/loading/activity-scope";
 import {
   TranscriptTurn,
   type TranscriptTurnActions,
@@ -324,6 +326,8 @@ const PLAN_MODE_RX = /plan|read.?only/i;
 const NO_PENDING_QUESTION_TOOL_CALL_IDS = new Set<string>();
 
 interface AgentChatProps {
+  /** The session hook keeps append-only Local prose in its live message. */
+  liveTextUpdates?: boolean;
   /** Saved workspace history shares the transcript, with all writing disabled. */
   readOnly?: boolean;
   composerReplacement?: React.ReactNode;
@@ -351,12 +355,16 @@ interface AgentChatProps {
 
 export function AgentChat(props: AgentChatProps) {
   const chat = useChatById(props.chatId);
-  return <LocalLinksProvider cwd={chat?.folder ?? props.session.cwd} active={props.surfaceActive ?? true}>
-    <AgentChatBody {...props} />
+  const cwd = chat?.folder ?? props.session.cwd;
+  return <LocalLinksProvider cwd={cwd} active={props.surfaceActive ?? true}>
+    <ActivityScope.Provider value={cwd && !isCloudWorkspace(cwd) ? props.surfaceActive ?? true : undefined}>
+      <AgentChatBody {...props} />
+    </ActivityScope.Provider>
   </LocalLinksProvider>;
 }
 
 function AgentChatBody({
+  liveTextUpdates = false,
   readOnly = false,
   composerReplacement,
   session,
@@ -386,6 +394,8 @@ function AgentChatBody({
   // the authoritative read is pending. It is read-only presentation until then.
   const provisionalTranscript = session.transcriptState === "loading" && !!session.transcriptPresentation;
   const transcriptReadOnly = readOnly || provisionalTranscript;
+  const liveTextSource = useLocalLiveTextSource(liveTextUpdates && !transcriptReadOnly, chatId,
+    session.cwd, session.executionId ?? session.sessionId);
   // A Local chat known to be empty shows its empty state while the engine
   // confirms it (e.g. right after a restart), never a blank pane.
   const emptyStateReady = session.transcriptState === "resident" ||
@@ -874,6 +884,7 @@ function AgentChatBody({
       previewImage: previewImageThroughRef,
       attachmentCwd: chatThread?.folder ?? session.cwd ?? null,
       attachmentImagesActive: surfaceActive,
+      liveTextSource,
       openFile: openFileThroughRef,
       warmFile: warmFileThroughRef,
       openPrUrl: readOnly ? undefined : openPrUrlThroughRef,
@@ -902,6 +913,7 @@ function AgentChatBody({
       chatThread?.folder,
       session.cwd,
       surfaceActive,
+      liveTextSource,
       readOnly,
       transcriptReadOnly,
       openFileThroughRef,

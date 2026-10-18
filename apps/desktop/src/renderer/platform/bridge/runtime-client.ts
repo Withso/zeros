@@ -478,7 +478,7 @@ export class RuntimeClient {
   }
 
   private engineCapabilities = new Set<string>();
-  supportsEngineCapability(capability: string): boolean {
+  supportsEngineCapability(capability: string, _workspaceId?: string): boolean {
     return this._status === "connected" && this.isOpen() && this.engineCapabilities.has(capability);
   }
 
@@ -572,8 +572,9 @@ export class RuntimeClient {
     }
     if (this._disposed || targetEpoch !== this.connectionTargetEpoch) return;
     // Re-check after the async hop — another connect() could have won
-    // the race and we'd duplicate.
-    if (this.ws?.readyState === 1) return;
+    // the race and we'd duplicate. Read through a method: the early return
+    // above would otherwise narrow `this.ws.readyState` across the awaits.
+    if (this.socketIsOpen()) return;
     if (this.pendingWs) return;
 
     this.setStatus("connecting");
@@ -1032,6 +1033,12 @@ export class RuntimeClient {
     if (this.diagnostics.counts[event]++ >= 8) { this.diagnostics.suppressed++; return; }
     this.environment.logger.warn("[Zeros cloud bridge] " + JSON.stringify({ event, ...scope, ...data, suppressed: this.diagnostics.suppressed }));
     this.diagnostics.suppressed = 0;
+  }
+
+  /** True when the current socket has finished its WebSocket open, before
+   *  the engine handshake. */
+  private socketIsOpen(): boolean {
+    return this.ws?.readyState === 1;
   }
 
   /** True when the local socket is ready to send. */

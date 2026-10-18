@@ -15,6 +15,8 @@ import { Hono, type Context } from "hono";
 import { createCloudGithubWriteRoutes, CLOUD_GITHUB_WRITE_PATH } from "./cloud-workspaces/github-write-routes.js";
 import type { DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
 import type { DatabaseCloudGithubReads } from "./cloud-workspaces/github-read-proxy.js";
+import { createDeviceSessionRoutes, type DeviceSessionRouteOptions } from "./realtime/device-session-routes.js";
+import { createCloudRuntimeConnectRoutes, type CloudRuntimeConnectOptions } from "./cloud-workspaces/runtime-connect-routes.js";
 import { CLOUD_GITHUB_READ_PATH, createCloudGithubReadRoutes } from "./cloud-workspaces/github-read-routes.js";
 import { createCloudIdleStopRoutes, CLOUD_IDLE_STOP_PATH, type DatabaseCloudIdleStop } from "./cloud-workspaces/idle-stop.js";
 import {isCustomerCloudPath,publicCloudError} from "./cloud-workspaces/public-contract.js";
@@ -31,6 +33,7 @@ import { createReleaseIdentityRoutes } from "./release-identity.js";
 import { ClientCompatibility, createClientCompatibilityMiddleware } from "./client-compatibility.js";
 import { createAuthMiddleware } from "./auth.js";
 import { rateLimit } from "./ratelimit.js";
+import { clientAddress } from "./client-address.js";
 import { createChatTitleRoutes } from "./chat-titles.js";
 import { createRoutes } from "./routes.js";
 import { HttpError } from "./authz.js";
@@ -63,6 +66,7 @@ import {
   CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
   CLOUD_WORKSPACE_INTERNAL_PATHS,
   cloudWorkspaceInternalResponseHeaders,
+  type CloudWorkspaceEngineUplinkAdvertisement,
   type CloudWorkspaceInternalSetupService,
 } from "./cloud-workspaces/internal-routes.js";
 import { previewRequestFromEdge, type CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
@@ -85,6 +89,7 @@ import type { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runti
 import { createCloudRuntimeServiceAuthorityRoutes, createCloudRuntimeServiceRoutes } from "./cloud-workspaces/runtime-service-routes.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming, type RequestCostObserverStatus, type RequestDatabaseCost } from "./request-timing.js";
 import { createDatabaseTimingReporter } from "./database-timing.js";
+import { observeDatabaseTiming, tracingMiddleware } from "./tracing.js";
 import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
   engineLifecycleRequestsPerMinute,
@@ -95,6 +100,13 @@ import { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService, 
 import { createReleaseCanaryAdmissionRoutes, createReleaseCanaryDesignationRoutes } from "./cloud-workspaces/release-canary-routes.js";
 import { cloudAgentCredentialKeys } from "./cloud-workspaces/agent-credentials.js";
 import { createRuntimePublicationRoutes, createRuntimeStaffRoutes, RUNTIME_STAFF_PATH, type RuntimePublicationDependencies } from "./cloud-workspaces/runtime-publication-routes.js";
+import {
+  CLOUD_CAPABILITY_ENGINE_PATH,
+  createCloudCapabilityEngineRoutes,
+  createCloudCapabilityKeyRoutes,
+  type CloudCapabilityService,
+} from "./cloud-workspaces/capability-routes.js";
+import { createEngineCapabilityGate, createEngineClientCapabilityGate } from "./cloud-workspaces/capability-service-verifier.js";
 
 export type CreateAppDependencies = {
   zerosDevAuth?: ZerosDevAuthDependencies;
@@ -107,6 +119,12 @@ export type CreateAppDependencies = {
   cloudGithubReads?: DatabaseCloudGithubReads;
   cloudIdleStop?: DatabaseCloudIdleStop;
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
+  cloudWorkspaceEngineUplink?: CloudWorkspaceEngineUplinkAdvertisement;
+  cloudCapabilities?: CloudCapabilityService;
+  /** S3 `POST /v1/device-sessions`; mounted only with a realtime origin. */
+  deviceSessions?: DeviceSessionRouteOptions;
+  /** S3 `runtime/connect` and `runtime/capabilities`; mounted only with an S1 issuer. */
+  cloudRuntimeConnect?: CloudRuntimeConnectOptions;
   cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
   cloudRuntimeServiceAccess?: DatabaseCloudRuntimeServiceAccess;
   cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver;
@@ -159,9 +177,12 @@ export function createApp(
   dependencies: CreateAppDependencies = {},
 ): ControlPlaneApp {
   const app: ControlPlaneApp = new Hono();
+  const databaseTimingReporter = createDatabaseTimingReporter();
   const timing = requestTiming({ slowMs: config.slowRequestLogMs ?? DEFAULT_SLOW_REQUEST_LOG_MS,
-    timingObserver: createDatabaseTimingReporter().observe,
+    timingObserver: summary => { databaseTimingReporter.observe(summary); observeDatabaseTiming(summary); },
     ...(dependencies.requestCostObserver ? { costObserver: dependencies.requestCostObserver, databasePool: pool } : {}) });
+  // Tracing wraps request timing so database spans join the request's trace.
+  app.use("*", tracingMiddleware);
   app.use("*", timing);
   if (dependencies.requestCostObserver) {
     Object.defineProperty(app, "requestCostObserverStatus", { value: timing.costObserverStatus });
@@ -173,6 +194,11 @@ export function createApp(
   }
   // Readiness stays public even during maintenance; /healthz remains liveness.
   app.route("/", createReleaseIdentityRoutes(config, pool, dependencies));
+  // The S1 key set is public and served from memory; verifiers must reach it
+  // whenever this process serves anything.
+  if (dependencies.cloudCapabilities) {
+    app.route("/", createCloudCapabilityKeyRoutes(dependencies.cloudCapabilities.keyStore));
+  }
   if (config.databaseMaintenanceMode) {
     // A restored database may contain deliverable outboxes and live sessions.
     // Do not even assemble provider/auth routers while fencing its writers.
@@ -192,9 +218,10 @@ export function createApp(
     });
     return app;
   }
-  if (config.processRole === "worker") {
+  if (config.processRole === "worker" || config.processRole === "realtime") {
     // Worker replicas publish health/readiness but never serve user or engine
     // requests. Their two query slots remain available to the queues they own.
+    // Realtime replicas serve only WebSocket upgrades (index.ts) besides this.
     app.get("/healthz", async c => {
       c.header("Cache-Control", "no-store");
       try { await pool.query("SELECT 1"); return c.json({ ok: true }); }
@@ -268,16 +295,9 @@ export function createApp(
       "cloud-preview-preauth",
       600,
       60_000,
-      (c) => {
-        // Railway supplies X-Real-IP. A direct Cloudflare Tunnel strips that
-        // header and supplies CF-Connecting-IP instead, so do not collapse all
-        // protected preview clients into the shared anonymous bucket.
-        const clientIp =
-          c.req.header("X-Real-IP")?.trim() ??
-          c.req.header("CF-Connecting-IP")?.trim() ??
-          "";
-        return isIP(clientIp) ? clientIp : "unknown";
-      },
+      // A direct Cloudflare Tunnel supplies CF-Connecting-IP instead of
+      // X-Real-IP, so protected preview clients keep their own buckets.
+      (c) => clientAddress((name) => c.req.header(name)),
     );
     app.use("*", async (c, next) => {
       const access = dependencies.cloudWorkspaceAccessService!;
@@ -419,13 +439,7 @@ export function createApp(
     // qualification tunnel supplies CF-Connecting-IP. Prefer Railway's header
     // when both are present, validate either value, and collapse missing or
     // attacker-controlled garbage into one bounded bucket.
-    const internalClientIp = (c: Context) => {
-      const clientIp =
-        c.req.header("X-Real-IP")?.trim() ??
-        c.req.header("CF-Connecting-IP")?.trim() ??
-        "";
-      return isIP(clientIp) ? clientIp : "unknown";
-    };
+    const internalClientIp = (c: Context) => clientAddress((name) => c.req.header(name));
     const internalPreAuthLimit = rateLimit(
       "cloud-workspace-internal-preauth",
       600,
@@ -495,8 +509,19 @@ export function createApp(
       "/",
       createCloudWorkspaceInternalRoutes(
         dependencies.cloudWorkspaceInternalSetupService,
+        {
+          ...(dependencies.cloudWorkspaceEngineUplink ? { engineUplink: dependencies.cloudWorkspaceEngineUplink } : {}),
+          ...(dependencies.cloudCapabilities ? { engineCapabilities: createEngineCapabilityGate(dependencies.cloudCapabilities),
+            clientCapabilities: createEngineClientCapabilityGate(dependencies.cloudCapabilities) } : {}),
+        },
       ),
     );
+    // The engine-token REST fallback shares the internal surface's response
+    // headers and pre-auth rate limit (path-based middleware above).
+    if (dependencies.cloudCapabilities) {
+      app.use(CLOUD_CAPABILITY_ENGINE_PATH, cloudWorkspaceInternalResponseHeaders);
+      app.route("/", createCloudCapabilityEngineRoutes(dependencies.cloudCapabilities, { clientAddress: internalClientIp }));
+    }
   }
 
   // CORS: the callers are the Electron renderer (localhost dev origin /
@@ -513,6 +538,7 @@ export function createApp(
         "content-type",
         "x-zeros-client",
         "idempotency-key",
+        "traceparent",
         "x-zeros-access-credential",
         "x-zeros-runtime-admission",
         "x-zeros-device-id",
@@ -688,6 +714,8 @@ export function createApp(
       dependencies.securityEventBroker ?? new PostgresSecurityEventBroker(pool),
     ),
   );
+  if (dependencies.deviceSessions && !pendingMigration) app.route("/", createDeviceSessionRoutes(pool, dependencies.deviceSessions));
+  if (dependencies.cloudRuntimeConnect && !pendingMigration) app.route("/", createCloudRuntimeConnectRoutes(dependencies.cloudRuntimeConnect));
   app.route(
     "/",
     createRoutes(pool, emailConfig, config.cloudWorkspaces, {

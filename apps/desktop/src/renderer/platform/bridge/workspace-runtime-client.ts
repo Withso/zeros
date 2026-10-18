@@ -823,6 +823,42 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return cloudIncoming(entry!.scope, response as unknown as WireRecord) as unknown as BridgeMessage;
   }
 
+  private passivePeer(target: CloudWorkspaceTarget): PeerEntry | null {
+    const entry = this.peers.get(cloudWorkspaceKey(target));
+    if (this.closed || !entry || entry.retired || entry.epoch !== this.accountEpoch ||
+        entry.identity !== this.identity(target) || entry.client.status !== "connected" ||
+        this.routing.canAccess?.(target) === false) return null;
+    const execution = entry.client.executionIdentity;
+    if (execution && (execution.kind !== "cloud" || execution.organizationId !== target.organizationId ||
+        execution.workspaceId !== target.workspaceId ||
+        entry.generation !== undefined && entry.generation !== execution.generation)) return null;
+    return entry;
+  }
+
+  override supportsEngineCapability(capability: string, workspaceId?: string): boolean {
+    const target = parseCloudWorkspaceKey(workspaceId);
+    if (!target) return super.supportsEngineCapability(capability);
+    return this.passivePeer(target)?.client.supportsEngineCapability(capability) === true;
+  }
+
+  override async requestConnected<T extends BridgeMessage = BridgeMessage>(
+    message: Message,
+    options: number | RequestOptions = 5000,
+  ): Promise<T> {
+    const target = cloudRequestTarget(message as unknown as WireRecord);
+    if (!target) return super.requestConnected<T>(message, options);
+    const entry = this.passivePeer(target);
+    if (!entry) throw new Error("Cloud workspace is disconnected");
+    const execution = JSON.stringify(entry.client.executionIdentity);
+    const response = await entry.client.requestConnected(
+      cloudOutgoing(entry.scope, message as unknown as WireRecord) as Message,
+      options,
+    );
+    if (this.passivePeer(target) !== entry || JSON.stringify(entry.client.executionIdentity) !== execution)
+      throw new Error("Cloud connection changed while the request was running");
+    return cloudIncoming(entry.scope, response as unknown as WireRecord) as unknown as T;
+  }
+
   /** Renderer-only shell continuity. Admission IDs change on reconnect; only
    * a different engine instance proves that the old PTY registry was reset. */
   cloudEngineInstanceId(folder: string): string | undefined {

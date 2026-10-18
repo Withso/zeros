@@ -39,6 +39,8 @@
     "./design-context": "./src/design-context.ts",
     "./design-path": "./src/design-path.ts",
     "./design-pages": "./src/design-pages.ts",
+    "./design-catalog": "./src/design-catalog.ts",
+    "./design-agent-drafts": "./src/design-agent-drafts.ts",
     "./design-review": "./src/design-review.ts",
     "./design-capture": "./src/design-capture.ts",
     "./system-instructions": "./src/system-instructions/index.ts",
@@ -69,7 +71,8 @@
     "./crypto": "./src/crypto/index.ts",
     "./reliable": "./src/reliable.ts",
     "./cloud-agent-tools": "./src/cloud-agent-tools.ts",
-    "./cloud-lsp": "./src/cloud-lsp.ts"
+    "./cloud-lsp": "./src/cloud-lsp.ts",
+    "./cloud-capabilities": "./src/cloud-capabilities.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
@@ -81,6 +84,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "jose": "^6.0.0",
     "typescript": "^5.7.3"
   }
 }

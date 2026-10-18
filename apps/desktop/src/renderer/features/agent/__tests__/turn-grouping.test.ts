@@ -239,4 +239,19 @@ describe("groupMessagesIntoTurns — mid-turn steering", () => {
       "between-steers",
     ]);
   });
+
+  it("keeps each segment's provider history through that segment and resets at the next prompt", () => {
+    const turns = groupMessagesIntoTurns([
+      user("u1", "initial request"), event("first"),
+      user("u2", "first steer", "u1"), event("second"),
+      user("u3", "second steer", "u1"), event("third"),
+      user("u4", "next request"), event("next"),
+    ]);
+    expect(turns.map(turn => turn.providerEvents.map(message => message.id))).toEqual([
+      ["first"], ["first", "second"], ["first", "second", "third"], ["next"],
+    ]);
+    expect(turns.map(turn => turn.events.map(message => message.id))).toEqual([
+      ["first"], ["second"], ["third"], ["next"],
+    ]);
+  });
 });

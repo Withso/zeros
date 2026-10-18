@@ -31,9 +31,10 @@ type StartupObservation = { phase: CloudEngineStartupPhase; outcome: "start" | "
 
 type Reference = Pick<CloudAgentBootScope, "organizationId" | "workspaceId" | "generation" | "engineInstanceId">;
 type Conversation = { provider: "claude" | "codex" | "cursor"; model: string; cwd: string };
-type Interest = Conversation & { conversationId: string; sessionId: string; timer: ReturnType<typeof setTimeout> | null;
+type Interest = Conversation & { key: string; conversationId: string; sessionId: string; timer: ReturnType<typeof setTimeout> | null;
   flight: Promise<void> | null; proof: { contextId: string; confirmedUntilMs: number } | null; confirmedUntilMs: number };
-type Actor = { admission: CloudRuntimeClientAdmission; confirmedUntilMs: number; timer: ReturnType<typeof setTimeout> | null };
+type Actor = { admission: CloudRuntimeClientAdmission; confirmedUntilMs: number; timer: ReturnType<typeof setTimeout> | null;
+  sockets: Set<string>; pendingAdmissions: number; controller: AbortController; confirmations: Map<string, Promise<void>> };
 type Options = {
   file: string; scope: Reference; runtimeBootId: string;
   predecessor?: CloudLocalCommandPredecessor | null;
@@ -57,6 +58,17 @@ type Options = {
   startsAllowed?(): boolean;
   /** Closed, content-free evidence only; never readiness or admission. */
   observeStartup?(observation: StartupObservation): void;
+  /** Credential-control poll cadence, read at every schedule. The engine
+   * wires 500 ms while the S2 uplink is down (today's behavior, the
+   * fallback) and a slow safety cadence once the uplink's cred push carries
+   * revisions (P0.10 C01). Defaults to 500 ms. */
+  controlsPollIntervalMs?(): number;
+  /** The outcome of each credential-control exchange. The engine clears its
+   * failed-push-outstanding mark on a poll success so the uplink's
+   * `established` recovers without waiting for the CP to push again. */
+  controlsExchange?(ok: boolean): void;
+  /** The queue committed turn journal entries, or the boot activated. */
+  turnJournalChanged?(): void;
 };
 
 /** Registration establishes a candidate; only an exact activation response
@@ -79,7 +91,7 @@ export class CloudLocalAgentBootRuntime {
   private queueValue: CloudLocalCommandQueue | null = null;
   private fencesValue: CloudCredentialStartFences | null = null;
   private readonly actors = new Map<string, Actor>();
-  private readonly actorConfirmations = new Map<string, Promise<void>>();
+  private readonly actorConfirmations = new Set<Promise<void>>();
   private readonly interests = new Map<string, Interest>();
   private readonly flights = new Set<Promise<unknown>>();
   private cacheTimer: ReturnType<typeof setTimeout> | null = null;
@@ -118,8 +130,41 @@ export class CloudLocalAgentBootRuntime {
     return this.factory;
   }
   revokeActor(sessionId: string): void {
-    const record = this.actors.get(sessionId); if (record?.timer) clearTimeout(record.timer);
-    this.actors.delete(sessionId); this.registry?.revoke(sessionId);
+    const record = this.actors.get(sessionId);
+    if (record) this.retireActor(sessionId, record, true);
+    else this.registry?.revoke(sessionId);
+  }
+  attachActor(sessionId: string, socketId: string): void {
+    this.authorizeActor(sessionId, "read");
+    const record = this.actors.get(sessionId)!;
+    if (!record.sockets.has(socketId) && record.pendingAdmissions > 0) record.pendingAdmissions--;
+    record.sockets.add(socketId);
+  }
+  releaseActor(sessionId: string, socketId: string): void {
+    if (!this.actors.get(sessionId)?.sockets.delete(socketId)) return;
+    this.releaseUnusedActors();
+  }
+  private releaseUnusedActors(): void {
+    if (!this.live() || ![...this.actors.values()].some(record => !record.pendingAdmissions && !record.sockets.size)) return;
+    let pending: ReadonlySet<string>;
+    try { pending = this.queueValue!.pendingActorSessions(); }
+    catch { return; } // Unavailable durable state never proves there is no work.
+    for (const [sessionId, record] of this.actors) {
+      if (!record.pendingAdmissions && !record.sockets.size && !pending.has(sessionId) && !this.factory?.hasActorWork(sessionId))
+        this.retireActor(sessionId, record);
+    }
+  }
+  private retireActor(sessionId: string, record: Actor, revoked = false): void {
+    if (this.actors.get(sessionId) !== record) return;
+    this.actors.delete(sessionId); record.controller.abort();
+    if (record.timer) clearTimeout(record.timer);
+    for (const [key, interest] of this.interests) {
+      if (interest.sessionId !== sessionId) continue;
+      if (interest.timer) clearTimeout(interest.timer);
+      this.interests.delete(key);
+    }
+    if (revoked) this.registry?.revoke(sessionId);
+    else this.registry?.release(sessionId);
   }
   get queue(): CloudLocalCommandQueue {
     if (!this.active || !this.queueValue) throw new CloudCommandRuntimeError("cloud_commands_unavailable");
@@ -129,6 +174,8 @@ export class CloudLocalAgentBootRuntime {
     if (!this.active || !this.fencesValue) throw new CloudCommandRuntimeError("cloud_commands_unavailable");
     return this.fencesValue;
   }
+  /** Readable while final replication is still permitted, unlike `queue`. */
+  get turnJournal(): CloudLocalCommandQueue | null { return this.authorityActive ? this.queueValue ?? null : null; }
   private reference() {
     const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...reference } = this.scope;
     return { ...reference, version: 1 as const, mode: "boot-owner-v1" as const };
@@ -248,8 +295,10 @@ export class CloudLocalAgentBootRuntime {
         synchronize: () => this.credentials!.synchronize(this.controller.signal) });
       this.factory = createCloudBootAgentExecutionFactory({ legacy: this.options.legacy, registry: this.registry,
         credentials: this.credentials, contexts: this.contexts, engineLive: () => this.live(), supervisor: this.options.supervisor,
+        actorWorkChanged: () => this.releaseUnusedActors(),
         canStart: run => !this.sealing && (this.options.startsAllowed?.() ?? true) && this.fencesValue!.canStart(run) });
       this.queueValue = new CloudLocalCommandQueue({ file: this.options.file, scope: this.scope, actors: this.registry,
+        pendingActorsChanged: () => this.releaseUnusedActors(),
         ...(this.options.captureHistory ? { captureHistory: this.options.captureHistory } : {}),
         engineLive: () => this.live(), history: () => this.options.history(), ready: (payload, provenance, conversationId) => {
           const material = this.credentials!.readiness(payload.agentId, payload.model);
@@ -284,7 +333,7 @@ export class CloudLocalAgentBootRuntime {
         }, selectionRolledBack: claimId => {
           const record = this.selections.get(claimId);
           if (record) { this.closeUnused(record.lifetime); this.selections.delete(claimId); }
-        } });
+        }, turnJournalChanged: () => this.options.turnJournalChanged?.() });
     }
     this.enterStartupPhase("boot_credentials");
     const credentials = this.credentials, metadata = credentials.metadata;
@@ -315,7 +364,7 @@ export class CloudLocalAgentBootRuntime {
     this.enterStartupPhase("boot_install");
     await this.options.install(this.factory!, this.queueValue!);
     this.startupRemainingMs();
-    this.activated = true; this.scheduleCache(); this.scheduleControls(); this.options.changed(); return true;
+    this.activated = true; this.scheduleCache(); this.scheduleControls(); this.options.changed(); this.options.turnJournalChanged?.(); return true;
   }
   /** Independent of Send and socket lifetime. The FULL ACK is retained until
    * the entire strict current-scope exchange succeeds; unknown HTTP responses
@@ -339,7 +388,9 @@ export class CloudLocalAgentBootRuntime {
       // refresh or native retirement. No later control is hidden behind I/O.
       await Promise.all(response.controls.map(control => this.fencesValue!.handle(control)));
       this.options.changed(); this.scheduleCache();
+      this.options.controlsExchange?.(true);
     })().catch(error => {
+      this.options.controlsExchange?.(false);
       if (error && typeof error === "object" && "code" in error &&
           ["engine_authority_rejected", "credential_control_authority_rejected"].includes(String(error.code))) {
         this.activated = false; this.options.supervisor.onRetirementFailure(error);
@@ -350,13 +401,31 @@ export class CloudLocalAgentBootRuntime {
     void task.finally(() => { if (this.controlsFlight === task) this.controlsFlight = null; this.flights.delete(task); this.scheduleControls(); }).catch(() => {});
     return task;
   }
+  /** The uplink's established state changed: re-read the poll cadence and
+   * re-arm now instead of waiting out a timer set under the old cadence
+   * (a 30 s timer would otherwise outlive the gate that justified it). */
+  rescheduleControls(): void {
+    if (!this.active) return;
+    this.scheduleControls();
+  }
+  /** A pushed credential revision must not join a flight that started before
+   * the bump committed (it could return the old controls and the push would
+   * be acked applied against them). Await any in-flight exchange, then run
+   * one that starts now; concurrent pushes coalesce onto that new flight. */
+  async refreshCredentialControls(): Promise<void> {
+    const inFlight = this.controlsFlight;
+    if (inFlight) await inFlight.catch(() => {});
+    await this.pollCredentialControls();
+  }
   private scheduleControls(): void {
     if (this.controlsTimer) clearTimeout(this.controlsTimer);
     if (!this.active) return;
-    this.controlsTimer = setTimeout(() => { this.controlsTimer = null; void this.pollCredentialControls().catch(() => {}); }, 500);
+    const intervalMs = this.options.controlsPollIntervalMs?.() ?? 500;
+    this.controlsTimer = setTimeout(() => { this.controlsTimer = null; void this.pollCredentialControls().catch(() => {}); },
+      Math.min(30_000, Math.max(100, intervalMs)));
     this.controlsTimer.unref?.();
   }
-  async confirmAdmission(admission: CloudRuntimeClientAdmission): Promise<void> {
+  async confirmAdmission(admission: CloudRuntimeClientAdmission, renewal = false): Promise<void> {
     if (!this.active) return;
     const actor = admission.actor;
     if (!actor || !admission.accountUserId) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
@@ -366,33 +435,46 @@ export class CloudLocalAgentBootRuntime {
     const snapshot = { ...admission, actor: { ...actor } };
     const key = JSON.stringify([snapshot.accountUserId, snapshot.authorityEpoch, actor.sessionId,
       actor.deviceId, actor.role, actor.fingerprint]);
-    const pending = this.actorConfirmations.get(key);
-    if (pending) return pending;
+    let record = this.actors.get(actor.sessionId);
+    const pending = record?.confirmations.get(key);
+    if (pending) { if (!renewal) record!.pendingAdmissions++; return pending; }
     if (this.actorConfirmations.size >= 256) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
-    const task = this.confirmActorAdmission(snapshot);
-    this.actorConfirmations.set(key, task); this.flights.add(task);
+    if (!record) {
+      if (renewal || this.actors.size >= 256) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+      record = { admission: snapshot, confirmedUntilMs: 0, timer: null, sockets: new Set(), pendingAdmissions: 0,
+        controller: new AbortController(), confirmations: new Map() };
+      this.actors.set(actor.sessionId, record);
+    }
+    if (!renewal) record.pendingAdmissions++;
+    const task = this.confirmActorAdmission(snapshot, record);
+    record.confirmations.set(key, task); this.actorConfirmations.add(task); this.flights.add(task);
     void task.finally(() => {
-      if (this.actorConfirmations.get(key) === task) this.actorConfirmations.delete(key);
-      this.flights.delete(task);
+      if (record.confirmations.get(key) === task) record.confirmations.delete(key);
+      this.actorConfirmations.delete(task); this.flights.delete(task);
+      if (!record.confirmations.size && !record.confirmedUntilMs) this.retireActor(actor.sessionId, record);
     }).catch(() => {});
     return task;
   }
-  private async confirmActorAdmission(admission: CloudRuntimeClientAdmission & { actor: NonNullable<CloudRuntimeClientAdmission["actor"]> }): Promise<void> {
+  private async confirmActorAdmission(admission: CloudRuntimeClientAdmission & { actor: NonNullable<CloudRuntimeClientAdmission["actor"]> }, record: Actor): Promise<void> {
     const actor = admission.actor;
     const result = await this.options.registration.agentBootRequest("actor-confirm",
-      { ...this.reference(), actorSessionId: actor.sessionId }, this.controller.signal);
+      { ...this.reference(), actorSessionId: actor.sessionId }, AbortSignal.any([this.controller.signal, record.controller.signal]));
     const proof = CloudActorProvenanceSchema.parse(result.provenance);
-    if (!this.active || !isDeepStrictEqual(proof.scope, this.scope) || proof.actorSessionId !== actor.sessionId ||
+    if (!this.active || this.actors.get(actor.sessionId) !== record || record.controller.signal.aborted ||
+        !isDeepStrictEqual(proof.scope, this.scope) || proof.actorSessionId !== actor.sessionId ||
         proof.actor.userId !== admission.accountUserId || proof.authorityEpoch !== admission.authorityEpoch ||
         proof.actor.deviceId !== actor.deviceId || proof.actor.role !== actor.role || proof.actor.fingerprint !== actor.fingerprint)
       throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
     this.registry!.confirm(proof);
-    const previous = this.actors.get(actor.sessionId);
-    if (previous?.timer) clearTimeout(previous.timer);
-    if (!previous && this.actors.size >= 256) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
-    const record = { admission, confirmedUntilMs: proof.confirmedUntilMs, timer: null }; this.actors.set(actor.sessionId, record);
-    this.schedule(record, (proof.confirmedUntilMs - Date.now()) / 2, () => this.confirmAdmission(admission),
-      () => this.actors.get(actor.sessionId) === record && Date.now() < record.confirmedUntilMs);
+    record.admission = admission; record.confirmedUntilMs = proof.confirmedUntilMs;
+    this.schedule(record, (proof.confirmedUntilMs - Date.now()) / 2, () => {
+      // Upgrade admission precedes onConnect. An abandoned upgrade gets only
+      // this handoff window; it cannot create an ownerless renewal loop.
+      record.pendingAdmissions = 0; this.releaseUnusedActors();
+      return this.actors.get(actor.sessionId) === record && Date.now() < record.confirmedUntilMs
+        ? this.confirmAdmission(record.admission, true) : Promise.resolve();
+    },
+      () => this.actors.get(actor.sessionId) === record);
   }
   observeConversation(sessionId: string, conversationId: string): Promise<void> {
     if (!this.active) return Promise.reject(new CloudCommandRuntimeError("cloud_commands_unavailable"));
@@ -403,14 +485,15 @@ export class CloudLocalAgentBootRuntime {
     if (interest) return interest.flight ?? Promise.resolve();
     {
       if (this.interests.size >= 32) return Promise.reject(new CloudCommandRuntimeError("command_limit"));
-      interest = { ...conversation, sessionId, conversationId, timer: null, flight: null, proof: null, confirmedUntilMs: 0 }; this.interests.set(key, interest);
+      interest = { ...conversation, key, sessionId, conversationId, timer: null, flight: null, proof: null, confirmedUntilMs: 0 }; this.interests.set(key, interest);
     }
     return this.warmInterest(interest);
   }
   private async requestContext(body: CloudAgentWarmActorRequest, signal: AbortSignal) {
+    const key = JSON.stringify([body.actorSessionId, body.conversationId, body.provider, body.model, body.cwd]);
+    const interest = this.interests.get(key);
     const response = await this.options.registration.agentBootRequest("warm-context", body, signal);
-    const interest = this.interests.get(JSON.stringify([body.actorSessionId, body.conversationId, body.provider, body.model, body.cwd]));
-    if (interest) interest.proof = { contextId: response.contextId, confirmedUntilMs: response.actor.confirmedUntilMs };
+    if (interest && this.interests.get(key) === interest) interest.proof = { contextId: response.contextId, confirmedUntilMs: response.actor.confirmedUntilMs };
     return response;
   }
   private warmInterest(interest: Interest): Promise<void> {
@@ -420,14 +503,14 @@ export class CloudLocalAgentBootRuntime {
       const actor = this.registry!.authorizeCurrent(interest.sessionId, "run");
       const context = await this.contexts!.warm({ actor, provider: interest.provider, model: interest.model, conversationId: interest.conversationId,
         cwd: interest.cwd }, this.controller.signal);
-      if (!this.active) return;
+      if (!this.active || this.interests.get(interest.key) !== interest) return;
       // The cache independently validates the response. Its original context
       // identity then binds this deadline; actor-only renewals cannot extend it.
       if (!interest.proof || interest.proof.contextId !== context.contextId) throw new CloudAgentExecutionError("authority_response_invalid");
       interest.confirmedUntilMs = interest.proof.confirmedUntilMs;
       this.options.changed(interest.conversationId);
       this.schedule(interest, (interest.confirmedUntilMs - Date.now()) / 2, () => this.warmInterest(interest),
-        () => Date.now() < interest.confirmedUntilMs);
+        () => this.interests.get(interest.key) === interest && Date.now() < interest.confirmedUntilMs);
     })();
     interest.flight = task; this.flights.add(task);
     void task.finally(() => { if (interest.flight === task) interest.flight = null; this.flights.delete(task); }).catch(() => {});

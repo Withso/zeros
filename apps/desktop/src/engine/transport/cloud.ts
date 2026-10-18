@@ -21,7 +21,8 @@
 //
 // HTTP routes:  GET /health (status; ungated — provider/worker probes use it,
 //                            and it carries no secrets)
-// WebSocket:    /ws (the renderer's bridge; token-gated)
+// WebSocket:    /ws (the renderer's bridge; token-gated, or gated by a first
+//               `auth` frame on subprotocol zeros-cap.v1, S3 Part 3)
 // ──────────────────────────────────────────────────────────
 
 import {
@@ -32,7 +33,7 @@ import {
 } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { Duplex } from "node:stream";
-import { WebSocketServer, WebSocket } from "ws";
+import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { CloudActorContextSchema, sameCloudActor, type CloudActorContext } from "@zeros/protocol/cloud-actors";
 import {
   MAX_BRIDGE_FRAME_BYTES,
@@ -50,6 +51,40 @@ import type {
 } from "../cloud-runtime-registration";
 import { CloudRuntimePreviewGateway } from "./cloud-preview-gateway";
 import { CloudRuntimeServiceGateway, type CloudRuntimeServiceStream } from "./cloud-service-gateway";
+
+/** The engine's verifier for `zeros-cap.v1` sockets (S3 Part 3), implemented
+ * by cloud-capability-auth.ts. Structural, so this module never loads the
+ * verifier: only a cloud engine with an advertised uplink constructs one. */
+export interface CloudCapabilityAuthenticator {
+  /** The first frame: parsed, verified (S1 steps 1-12) and the client's actor
+   * admitted by the control plane. */
+  authenticateRuntimeClient(frame: string, byteLength: number): Promise<CloudCapabilityAuthResult>;
+  /** One handshake frame (top-level `t`, no `type`) after `auth.ok`. */
+  handleInBandAuth(sessionId: string, message: unknown, byteLength: number, route: "direct"): Promise<CloudCapabilityFrameOutcome>;
+  closeClient(sessionId: string): void;
+}
+
+export type CloudCapabilityClose = { code: number; reason: string };
+
+export type CloudCapabilityAuthResult =
+  | ({ ok: false } & CloudCapabilityClose)
+  | {
+      ok: true;
+      sessionId: string;
+      /** The `auth.ok` frame. */
+      authOk: string;
+      admission: CloudRuntimeClientAdmission & { actor: CloudActorContext };
+      /** Renews the admitted actor exactly like a redeemed grant. */
+      renewalToken: string;
+      /** Opens the verifier session; the close when it was revoked meanwhile. */
+      open(): CloudCapabilityClose | null;
+    };
+
+export type CloudCapabilityFrameOutcome =
+  | { kind: "engine" }
+  | { kind: "reply"; frame: string }
+  | ({ kind: "close" } & CloudCapabilityClose)
+  | { kind: "retry"; code: string };
 
 /** Constant-time string compare for equal-length candidates. Length mismatches
  *  are rejected before the constant-time byte comparison.
@@ -161,6 +196,23 @@ const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ENGINE_CONNECT_TOKEN_PATTERN = /^zw[sa]_[A-Za-z0-9_-]{43}$/;
+const RUNTIME_AUTH_SUBPROTOCOL = "zeros-cap.v1";
+/** The `auth` frame is at most 16 KiB (S3 Part 3). The slack lets an
+ * oversized frame still get its 4401 before the engine stops reading. */
+const MAX_CAPABILITY_PREAUTH_BYTES = 64 * 1024;
+/** In-band handshake frames one session may have queued. */
+const MAX_CAPABILITY_FRAMES_PENDING = 4;
+const RUNTIME_UNAVAILABLE: CloudCapabilityClose = { code: 1013, reason: "runtime_unavailable" };
+/** Sent after selecting `zeros-v1` for a capability offer this engine
+ * cannot verify; the client has already fallen back by then. */
+const LEGACY_SELECTED: CloudCapabilityClose = { code: 1000, reason: "legacy" };
+
+/** S3 Part 3: a top-level `t` and no `type` marks a handshake frame; engine
+ * protocol messages always carry `type`. */
+function isRuntimeHandshakeFrame(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) &&
+    !Object.hasOwn(value, "type") && Object.hasOwn(value, "t");
+}
 
 const CONTROL_HANDLER_MESSAGE_TYPES = new Set<string>([
   "OWNER_SIGNED_OUT",
@@ -221,6 +273,12 @@ export interface CloudTransportOptions {
    * Required with verifyToken; direct provider connections have the same lease
    * as relayed connections. A renewal never consumes another admission. */
   renewToken?: (token: string) => Promise<CloudRuntimeClientAdmission | null>;
+  /** S3 Part 3 direct route: an upgrade offering `zeros-cap.v1` with no
+   * bearer carrier authenticates with its first frame instead. Null while
+   * this engine cannot verify capabilities, which refuses the upgrade like a
+   * missing bearer. Requires renewToken: the admitted actor renews like a
+   * redeemed grant. */
+  capabilityAuth?: () => CloudCapabilityAuthenticator | null;
   clientAuthorityLeaseMs?: number;
   verifyServiceAccess?: (
     token: string,
@@ -244,6 +302,16 @@ export interface CloudTransportOptions {
     handoff?: (command: CloudRuntimeHandoffCommand) => Promise<CloudRuntimeHandoffReply | null>;
   };
 }
+
+type PendingAdmission = {
+  accountUserId: string | null;
+  authorityEpoch: number | null;
+  grantToken: string | null;
+  expiresAtMs: number;
+  actor?: CloudActorContext;
+  /** A `zeros-cap.v1` session: the verifier session that renews in band. */
+  capability?: { sessionId: string; auth: CloudCapabilityAuthenticator };
+};
 
 interface QueuedHandlerMessage {
   readonly ws: WebSocket;
@@ -277,8 +345,21 @@ class CloudClient implements TransportClient {
   }
   send(msg: EngineMessage): void {
     if (!this.authorized()) return;
+    let payload: string;
     try {
-      const payload = JSON.stringify(msg);
+      payload = JSON.stringify(msg);
+    } catch {
+      this.terminate();
+      return;
+    }
+    this.write(payload);
+  }
+  /** A serialized handshake frame (`auth.renewed`, S3 Part 3). */
+  sendFrame(payload: string): void {
+    if (this.authorized()) this.write(payload);
+  }
+  private write(payload: string): void {
+    try {
       const pendingBytes =
         this.ws.bufferedAmount + Buffer.byteLength(payload, "utf8");
       const pendingTotalBytes =
@@ -291,19 +372,17 @@ class CloudClient implements TransportClient {
         return;
       }
       this.ws.send(payload, (error) => {
-        if (!error) return;
-        try {
-          this.ws.terminate();
-        } catch {
-          // ignore
-        }
+        if (error) this.terminate();
       });
     } catch {
-      try {
-        this.ws.terminate();
-      } catch {
-        // ignore
-      }
+      this.terminate();
+    }
+  }
+  private terminate(): void {
+    try {
+      this.ws.terminate();
+    } catch {
+      // ignore
     }
   }
   authorized(): boolean {
@@ -354,16 +433,13 @@ export class CloudTransport implements Transport {
     | null;
   private readonly renewToken: CloudTransportOptions["renewToken"];
   private readonly clientAuthorityLeaseMs: number;
-  private readonly pendingAdmissions = new WeakMap<
-    WebSocket,
-    {
-      accountUserId: string | null;
-      authorityEpoch: number | null;
-      grantToken: string | null;
-      expiresAtMs: number;
-      actor?: CloudActorContext;
-    }
-  >();
+  private readonly pendingAdmissions = new WeakMap<WebSocket, PendingAdmission>();
+  private readonly capabilityAuth: CloudTransportOptions["capabilityAuth"];
+  /** Upgrades on the `zeros-cap.v1` path, read by handleProtocols. */
+  private readonly capabilityRequests = new WeakSet<IncomingMessage>();
+  /** Upgraded sockets still waiting for `auth.ok`, each with its refusal. */
+  private readonly capabilityHandshakes = new Map<WebSocket, (close: CloudCapabilityClose) => void>();
+  private readonly capabilitySessions = new Map<string, CloudClient>();
   private readonly maxConnections: number;
   private readonly handshakeTimeoutMs: number;
   private readonly maxBufferedBytes: number;
@@ -428,6 +504,10 @@ export class CloudTransport implements Transport {
       throw new Error("cloud transport admission requires a renewal verifier");
     }
     this.renewToken = opts.renewToken;
+    if (opts.capabilityAuth !== undefined && (typeof opts.capabilityAuth !== "function" || !opts.renewToken)) {
+      throw new Error("cloud transport capability auth requires a renewal verifier");
+    }
+    this.capabilityAuth = opts.capabilityAuth;
     this.clientAuthorityLeaseMs = boundedInteger(
       opts.clientAuthorityLeaseMs,
       MAX_CLIENT_AUTHORITY_LEASE_MS,
@@ -503,8 +583,11 @@ export class CloudTransport implements Transport {
       maxPayload: MAX_BRIDGE_FRAME_BYTES,
       // The token subprotocol is a browser-compatible credential carrier, not
       // an application protocol. Never echo that bearer into the response.
-      handleProtocols: (protocols) =>
-        protocols.has("zeros-v1") ? "zeros-v1" : false,
+      // A capability upgrade selects zeros-cap.v1, which carries no bearer.
+      handleProtocols: (protocols, request) => {
+        const selected = this.capabilityRequests.has(request) ? RUNTIME_AUTH_SUBPROTOCOL : "zeros-v1";
+        return protocols.has(selected) ? selected : false;
+      },
     });
 
     this.httpServer.on("upgrade", (request, socket, head) => {
@@ -514,13 +597,14 @@ export class CloudTransport implements Transport {
     });
 
     this.wss.on("connection", (ws: WebSocket) => {
-      const admission = this.pendingAdmissions.get(ws) ?? {
+      const admission: PendingAdmission = this.pendingAdmissions.get(ws) ?? {
         accountUserId: null,
         authorityEpoch: null,
         grantToken: null,
         expiresAtMs: 0,
       };
       this.pendingAdmissions.delete(ws);
+      const capability = admission.capability;
       let authorityExpiresAtMs = admission.expiresAtMs;
       let finalized = false;
       let renewalInFlight = false;
@@ -529,7 +613,7 @@ export class CloudTransport implements Transport {
       let renewalRetryTimer: ReturnType<typeof setTimeout> | undefined;
       let expiryTimer: ReturnType<typeof setTimeout> | undefined;
       const client = new CloudClient(
-        randomUUID(),
+        capability?.sessionId ?? randomUUID(),
         admission.accountUserId,
         admission.authorityEpoch,
         ws,
@@ -607,6 +691,7 @@ export class CloudTransport implements Transport {
         renewalTimer.unref?.();
       }
       this.clients.set(ws, client);
+      if (capability) this.capabilitySessions.set(capability.sessionId, client);
       let protocolReady = false;
       let protocolStarted = false;
       let preauthQueuedBytes = 0;
@@ -624,6 +709,10 @@ export class CloudTransport implements Transport {
         clearTimeout(handshakeTimer);
         preauthMessages.length = 0;
         preauthQueuedBytes = 0;
+        if (capability) {
+          this.capabilitySessions.delete(capability.sessionId);
+          capability.auth.closeClient(capability.sessionId);
+        }
         this.dropQueuedHandlerMessages(ws);
         this.clients.delete(ws);
         this.drainHandlerQueue();
@@ -631,6 +720,34 @@ export class CloudTransport implements Transport {
       };
       const invokeMessageHandler = (msg: EngineMessage): Promise<void> => {
         return this.invokeMessageHandler(client, msg);
+      };
+      // S3 Part 3: after auth.ok only `auth.renew` may arrive in band. Frames
+      // are verified one at a time in arrival order; any other handshake
+      // frame closes the session.
+      let capabilityFrames = Promise.resolve();
+      let capabilityFramesPending = 0;
+      const handleCapabilityFrame = (frame: Record<string, unknown>, bytes: number) => {
+        if (!capability) return;
+        if (capabilityFramesPending >= MAX_CAPABILITY_FRAMES_PENDING) {
+          client.close(1008, "auth frame queue limit");
+          return;
+        }
+        capabilityFramesPending += 1;
+        capabilityFrames = capabilityFrames
+          .then(() => capability.auth.handleInBandAuth(capability.sessionId, frame, bytes, "direct"))
+          .then(
+            (outcome) => {
+              if (finalized) return;
+              if (outcome.kind === "reply") client.sendFrame(outcome.frame);
+              else if (outcome.kind === "close") client.close(outcome.code, outcome.reason);
+            },
+            () => {
+              if (!finalized) client.close(1011, "auth frame failed");
+            },
+          )
+          .finally(() => {
+            capabilityFramesPending -= 1;
+          });
       };
 
       ws.on("pong", () => {
@@ -643,6 +760,10 @@ export class CloudTransport implements Transport {
         try {
           raw = JSON.parse(text);
         } catch {
+          return;
+        }
+        if (capability && isRuntimeHandshakeFrame(raw)) {
+          handleCapabilityFrame(raw, Buffer.byteLength(text, "utf8"));
           return;
         }
         const msg = safeParseClientBridgeMessage(raw) as EngineMessage | null;
@@ -989,12 +1110,23 @@ export class CloudTransport implements Transport {
   }
   setHandoffFenced(fenced: boolean): void {
     this.handoffFenced = fenced;
+    if (fenced) this.refuseCapabilityHandshakes(RUNTIME_UNAVAILABLE);
     this.previewGateway?.setHandoffFenced(fenced);
     this.serviceGateway?.setHandoffFenced(fenced);
   }
 
   get connectionCount(): number {
     return this.clients.size;
+  }
+
+  /** Closes admitted `zeros-cap.v1` sessions the verifier closed: an epoch
+   * raise, a revocation or the capability's deadline (S1). */
+  closeCapabilitySessions(closures: readonly ({ sessionId: string } & CloudCapabilityClose)[]): void {
+    for (const { sessionId, code, reason } of closures) this.capabilitySessions.get(sessionId)?.close(code, reason);
+  }
+
+  private refuseCapabilityHandshakes(close: CloudCapabilityClose): void {
+    for (const refuse of [...this.capabilityHandshakes.values()]) refuse(close);
   }
   /** The TCP port the HTTP/WS server is bound to. Equals the configured port,
    *  except when constructed with `port: 0` (tests), where it reflects the
@@ -1059,6 +1191,7 @@ export class CloudTransport implements Transport {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
     }
+    this.refuseCapabilityHandshakes({ code: 1001, reason: "Engine shutting down" });
     for (const client of this.clients.values()) {
       client.close(1001, "Engine shutting down");
     }
@@ -1129,15 +1262,23 @@ export class CloudTransport implements Transport {
     head: Buffer,
   ): Promise<void> {
     const url = new URL(request.url ?? "", "http://sandbox");
-    const credential = this.tokenCredential(url, request.headers);
     // No loopback/Origin gate here (that is LocalTransport's DNS-rebinding
     // defense for a 127.0.0.1 server). An exact capability is the boundary.
     if (
       url.pathname !== "/ws" ||
       this.handoffFenced ||
-      credential === null ||
       this.clients.size + this.pendingUpgrades >= this.maxConnections
     ) {
+      socket.destroy();
+      return;
+    }
+    const capabilityUpgrade = this.capabilityUpgrade(url, request.headers);
+    if (capabilityUpgrade) {
+      await this.handleCapabilityUpgrade(request, socket, head, capabilityUpgrade);
+      return;
+    }
+    const credential = this.tokenCredential(url, request.headers);
+    if (credential === null) {
       socket.destroy();
       return;
     }
@@ -1175,6 +1316,210 @@ export class CloudTransport implements Transport {
       this.pendingUpgrades = Math.max(0, this.pendingUpgrades - 1);
       if (!upgraded && !socket.destroyed) socket.destroy();
     }
+  }
+
+  /** A `zeros-cap.v1` upgrade (S3 Part 3) carries no bearer at all (no
+   * header, token subprotocol or `token` parameter) and offers the
+   * subprotocol exactly once. While this engine cannot verify capabilities
+   * it does not speak the contract: an offer that also names `zeros-v1`
+   * gets that selected ("legacy"), so the client falls back to a grant. */
+  private capabilityUpgrade(
+    url: URL,
+    headers: IncomingMessage["headers"],
+  ): CloudCapabilityAuthenticator | "legacy" | null {
+    if (!this.capabilityAuth || url.searchParams.has("token") || headers["x-zeros-cloud-token"] !== undefined) return null;
+    const raw = headers["sec-websocket-protocol"];
+    const header = Array.isArray(raw) ? raw.join(",") : (raw ?? "");
+    if (!header || header.length > 8 * 1024) return null;
+    const protocols = header.split(",").map((value) => value.trim()).filter(Boolean);
+    if (
+      protocols.some((value) => value.startsWith("zeros-cloud-token.")) ||
+      protocols.filter((value) => value === RUNTIME_AUTH_SUBPROTOCOL).length !== 1
+    ) {
+      return null;
+    }
+    return this.capabilityAuth() ?? (protocols.includes("zeros-v1") ? "legacy" : null);
+  }
+
+  /** The socket joins the engine only once its `auth` frame is admitted;
+   * until then, and until a refused socket is gone, it counts as a pending
+   * upgrade. A legacy selection admits nothing and closes. */
+  private async handleCapabilityUpgrade(
+    request: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    auth: CloudCapabilityAuthenticator | "legacy",
+  ): Promise<void> {
+    this.pendingUpgrades += 1;
+    const upgrade: { ws?: WebSocket } = {};
+    try {
+      if (auth !== "legacy") this.capabilityRequests.add(request);
+      try {
+        this.wss.handleUpgrade(request, socket, head, (ws) => {
+          upgrade.ws = ws;
+        });
+      } finally {
+        this.capabilityRequests.delete(request);
+      }
+      if (upgrade.ws) {
+        await (auth === "legacy"
+          ? this.refuseCapabilitySocket(upgrade.ws, socket, LEGACY_SELECTED, false)
+          : this.authenticateCapabilitySocket(upgrade.ws, socket, request, auth));
+      }
+    } catch {
+      // ws parsing fails closed below; a refused socket is already closing.
+    } finally {
+      this.pendingUpgrades = Math.max(0, this.pendingUpgrades - 1);
+      if (!upgrade.ws && !socket.destroyed) socket.destroy();
+    }
+  }
+
+  /** S3 Part 3: the first frame must be `auth` and arrive within the
+   * handshake timeout, or the socket closes 4401. Nothing else is accepted
+   * before `auth.ok`, and a peer can make the engine buffer only a bounded
+   * number of bytes until then. */
+  private authenticateCapabilitySocket(
+    ws: WebSocket,
+    socket: Duplex,
+    request: IncomingMessage,
+    auth: CloudCapabilityAuthenticator,
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let framed = false;
+      let received = 0;
+      const settle = (refusal?: CloudCapabilityClose, stopReading = false) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.off("data", count);
+        ws.off("message", onMessage);
+        ws.off("close", onClose);
+        this.capabilityHandshakes.delete(ws);
+        if (refusal) void this.refuseCapabilitySocket(ws, socket, refusal, stopReading).then(resolve);
+        else resolve();
+      };
+      const timer = setTimeout(
+        () => settle(framed ? { code: 1013, reason: "capability_issuer_unavailable" } : { code: 4401, reason: "capability_missing" }),
+        this.handshakeTimeoutMs,
+      );
+      timer.unref?.();
+      const count = (chunk: Buffer) => {
+        received += chunk.length;
+        if (received > MAX_CAPABILITY_PREAUTH_BYTES) settle({ code: 4401, reason: "capability_malformed" }, true);
+      };
+      const onClose = () => settle();
+      const onMessage = (data: RawData, isBinary: boolean) => {
+        if (framed) {
+          settle({ code: 4400, reason: "unexpected_frame" });
+          return;
+        }
+        framed = true;
+        if (isBinary) {
+          settle({ code: 4401, reason: "capability_missing" });
+          return;
+        }
+        const text = data.toString();
+        const startedAt = Date.now();
+        let sessionId: string | undefined;
+        auth.authenticateRuntimeClient(text, Buffer.byteLength(text, "utf8")).then((result) => {
+          if (settled) return;
+          if (!result.ok) {
+            settle({ code: result.code, reason: result.reason });
+            return;
+          }
+          if (
+            this.handoffFenced ||
+            ws.readyState !== WebSocket.OPEN ||
+            this.clients.size >= this.maxConnections ||
+            Date.now() >= startedAt + this.clientAuthorityLeaseMs
+          ) {
+            settle(RUNTIME_UNAVAILABLE);
+            return;
+          }
+          sessionId = result.sessionId;
+          const revoked = result.open();
+          if (revoked) {
+            settle(revoked);
+            return;
+          }
+          ws.send(result.authOk);
+          this.pendingAdmissions.set(ws, {
+            accountUserId: result.admission.accountUserId,
+            authorityEpoch: result.admission.authorityEpoch,
+            actor: result.admission.actor,
+            grantToken: result.renewalToken,
+            expiresAtMs: startedAt + this.clientAuthorityLeaseMs,
+            capability: { sessionId: result.sessionId, auth },
+          });
+          settle();
+          // Synchronously, so no frame can arrive between auth.ok and the
+          // engine's listeners.
+          this.wss.emit("connection", ws, request);
+        }).catch(() => {
+          if (sessionId !== undefined) auth.closeClient(sessionId);
+          if (!settled) {
+            settle({ code: 1011, reason: "capability_admission_failed" });
+            return;
+          }
+          // The socket already left the handshake: fail closed.
+          try {
+            ws.terminate();
+          } catch {
+            // ignore
+          }
+        });
+      };
+      this.capabilityHandshakes.set(ws, (close) => settle(close));
+      socket.on("data", count);
+      ws.on("message", onMessage);
+      ws.on("close", onClose);
+      // Kept for the socket's life: ws emits errors while closing too.
+      ws.on("error", () => {
+        settle();
+        try {
+          ws.terminate();
+        } catch {
+          // ignore
+        }
+      });
+    });
+  }
+
+  /** Closes a socket that never joined the engine and resolves once it is
+   * gone. */
+  private refuseCapabilitySocket(
+    ws: WebSocket,
+    socket: Duplex,
+    close: CloudCapabilityClose,
+    stopReading: boolean,
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      if (ws.readyState === WebSocket.CLOSED) {
+        resolve();
+        return;
+      }
+      const terminate = () => {
+        try {
+          ws.terminate();
+        } catch {
+          // ignore
+        }
+      };
+      const timer = setTimeout(terminate, FORCE_CLOSE_TIMEOUT_MS);
+      timer.unref?.();
+      ws.once("close", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      // An oversized frame is not read further; the close still goes out.
+      if (stopReading) socket.pause();
+      try {
+        ws.close(close.code, close.reason);
+      } catch {
+        terminate();
+      }
+    });
   }
 
   private handleHTTP(req: IncomingMessage, res: ServerResponse): void {

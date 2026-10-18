@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ZerosEngine } from "../zeros-engine";
+import { DESIGN_CATALOG_READ_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { closeZerosDb, setZerosDbPathForTesting } from "../db";
 import { getChat, setChatComposerMode } from "../db/chats";
 
@@ -27,7 +28,7 @@ describe("portable cloud conversations", () => {
   it("advertises the durable command contract during the successful handshake", async () => {
     const { engine } = fixture(), send = vi.fn();
     await prototype.handleConnect.call({ ...engine, framework: "unknown", actualPort: 1234 }, { id: "device", kind: "cloud", send });
-    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "ENGINE_READY", capabilities: ["cloud.commands.v1"], root: "" }));
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "ENGINE_READY", capabilities: [DESIGN_CATALOG_READ_CAPABILITY, "cloud.commands.v1"], root: "" }));
   });
   it("creates and reads an idempotent conversation using only opaque workspace identity", async () => {
     const { engine, call } = fixture();

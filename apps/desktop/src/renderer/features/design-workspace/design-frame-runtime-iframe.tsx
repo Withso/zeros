@@ -34,7 +34,14 @@ import {
   reconcileDesignWorkspaceRuntimeAudit,
   refreshDesignWorkspaceSnapshot,
 } from "./state/design-workspace-cache";
+import {
+  useDesignAgentStylesheetPreviews,
+  type DesignAgentStylesheetPreview,
+} from "./state/design-agent-drafts";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
+import { useDesignSavedEditing } from "./design-saved-editing";
+import { designWorkspaceView } from "./state/design-workspace-ui";
+import { useDesignRuntimeStore } from "./state/design-runtime-store";
 
 // --- TYPES ---
 
@@ -59,6 +66,9 @@ interface DesignFrameRuntimeIframeProps {
   theme: string | null;
   /** Last confirmed pixels cover unavoidable structural document navigation. */
   transitionCover: { sourceVersion: string; dataUrl: string } | null;
+  /** The Design directory the canvas shows; an agent's in-flight edits of
+   * its linked stylesheets apply to this frame live. */
+  designDirectory?: string;
 }
 
 // --- WORKFLOWS ---
@@ -97,6 +107,8 @@ interface DesignFrameDocumentBufferProps {
   selectedNodeIds: readonly string[];
   autoCapture: boolean;
   theme: string | null;
+  /** An agent's in-flight text per linked stylesheet of this directory. */
+  stylesheetPreviews: ReadonlyMap<string, DesignAgentStylesheetPreview>;
   onSnapshot: (snapshot: DesignRuntimeSnapshot) => void;
   onConnection: (
     documentSourceVersion: string,
@@ -127,13 +139,16 @@ function DesignFrameDocumentBuffer({
   selectedNodeIds,
   autoCapture,
   theme,
+  stylesheetPreviews,
   onSnapshot,
   onConnection,
   onReady,
   onLoadFailure,
 }: DesignFrameDocumentBufferProps) {
   const nativeRuntime = useNativeRuntime();
+  const { session: savedEditingSession, state: savedEditingState } = useDesignSavedEditing();
   const connectionRef = useRef<DesignFrameRuntimeConnection | null>(null);
+  const [connectedRuntime, setConnectedRuntime] = useState<DesignFrameRuntimeConnection | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
   const handshakeTimerRef = useRef<number | null>(null);
@@ -148,6 +163,8 @@ function DesignFrameDocumentBuffer({
     selectedNodeIds,
     autoCapture,
     theme,
+    stylesheetPreviews,
+    savedEditingSession,
   });
   latestRef.current = {
     folder,
@@ -157,7 +174,160 @@ function DesignFrameDocumentBuffer({
     selectedNodeIds,
     autoCapture,
     theme,
+    stylesheetPreviews,
+    savedEditingSession,
   };
+  // Stylesheet previews this document shows, per connection: a new document
+  // generation starts from its own saved text.
+  const appliedSheetsRef = useRef<{
+    connection: DesignFrameRuntimeConnection | null;
+    sheets: Map<string, DesignAgentStylesheetPreview>;
+  }>({ connection: null, sheets: new Map() });
+  const sheetSyncRef = useRef<Promise<void> | null>(null);
+  const sheetSyncAgainRef = useRef(false);
+  const advisoryStylesSeenRef = useRef(false);
+  const savedPreparationRef = useRef<{
+    connection: DesignFrameRuntimeConnection;
+    sourceVersion: string;
+    theme: string | null;
+    session: NonNullable<typeof savedEditingSession>;
+    promise: Promise<void>;
+  } | null>(null);
+  /** The document the next sync serves: a reload mid-sync is served next. */
+  const sheetSyncTargetRef = useRef<DesignFrameRuntimeConnection | null>(null);
+  // A watcher may load this generation before an older tool's success event.
+  // Such inherited previews are live only while that tool is still writing;
+  // success must reveal this document's own authoritative stylesheet.
+  const [inheritedSheetDrafts] = useState(
+    () => new Set([...stylesheetPreviews.values()].map((preview) => preview.draftId)),
+  );
+
+  /** Bring the document's linked stylesheets in line with the agent's latest
+   * drafts. A saved stylesheet stays only on a document that predates the draft;
+   * a new generation starts from its own saved text. A discarded one restores the
+   * document's own text. Serialized: the latest drafts and the newest
+   * document always win, and a caller's promise settles after both. */
+  const syncStylesheetPreviews = useCallback(
+    (connection: DesignFrameRuntimeConnection): Promise<void> => {
+      sheetSyncTargetRef.current = connection;
+      if (sheetSyncRef.current) {
+        sheetSyncAgainRef.current = true;
+        return sheetSyncRef.current;
+      }
+      const run = (async () => {
+        do {
+          sheetSyncAgainRef.current = false;
+          const target = sheetSyncTargetRef.current;
+          if (!target || target !== connectionRef.current || !latestRef.current.runtimeActive ||
+            target.isActive?.() === false || !target.supports("previewStylesheet")) continue;
+          if (appliedSheetsRef.current.connection !== target)
+            appliedSheetsRef.current = { connection: target, sheets: new Map() };
+          const applied = appliedSheetsRef.current.sheets;
+          const session = latestRef.current.savedEditingSession;
+          if (session && !session.isCurrent()) continue;
+          const saved = session?.editing === true;
+          const previews = saved ? new Map<string, DesignAgentStylesheetPreview>() : latestRef.current.stylesheetPreviews;
+          const current = () => target === connectionRef.current && target.isActive?.() !== false &&
+            latestRef.current.runtimeActive && latestRef.current.savedEditingSession === session &&
+            (!session || session.isCurrent()) && (session?.editing === true) === saved;
+          try {
+            for (const [file, preview] of previews) {
+              if (!current()) { sheetSyncAgainRef.current = true; break; }
+              // Saved drafts linger for the activity chip. Replaying one into
+              // a new document can overwrite a later native save permanently.
+              const previous = applied.get(file);
+              if (
+                preview.saved &&
+                (previous?.draftId !== preview.draftId || inheritedSheetDrafts.has(preview.draftId))
+              ) {
+                if (previous?.draftId === preview.draftId) {
+                  const result = await target.previewStylesheet(file, null);
+                  applied.delete(file);
+                  if (current()) onSnapshot(result.snapshot);
+                }
+                continue;
+              }
+              if (applied.get(file)?.css !== preview.css) {
+                advisoryStylesSeenRef.current = true;
+                session?.requireNativePixels();
+                applied.set(file, preview);
+                const result = await target.previewStylesheet(file, preview.css);
+                if (current()) onSnapshot(result.snapshot);
+              }
+              applied.set(file, preview);
+            }
+            for (const [file, preview] of [...applied]) {
+              if (!current()) { sheetSyncAgainRef.current = true; break; }
+              if (previews.get(file)?.draftId === preview.draftId) continue;
+              if (preview.saved && !saved) continue;
+              const result = await target.previewStylesheet(file, null);
+              applied.delete(file);
+              if (current()) onSnapshot(result.snapshot);
+            }
+          } catch {
+            // A preview is advisory and a replaced document rejects it; the
+            // saved generation is authoritative. The next document still syncs.
+          }
+        } while (sheetSyncAgainRef.current);
+      })().finally(() => {
+        sheetSyncRef.current = null;
+      });
+      sheetSyncRef.current = run;
+      return run;
+    },
+    [inheritedSheetDrafts, onSnapshot],
+  );
+  useLayoutEffect(() => {
+    if (!runtimeActive || !savedEditingSession) return;
+    if (advisoryStylesSeenRef.current) savedEditingSession.requireNativePixels();
+    return savedEditingSession.registerPreparation(() => {
+      const connection = connectionRef.current;
+      if (!connection) return;
+      const sourceVersion = connection.sourceVersion;
+      const preparedTheme = latestRef.current.theme;
+      const existing = savedPreparationRef.current;
+      if (existing?.connection === connection && existing.sourceVersion === sourceVersion && existing.theme === preparedTheme && existing.session === savedEditingSession)
+        return existing.promise;
+      if (!advisoryStylesSeenRef.current) return;
+      const assertCurrent = () => {
+        if (!savedEditingSession.isCurrent() || !savedEditingSession.editing ||
+          latestRef.current.savedEditingSession !== savedEditingSession ||
+          !latestRef.current.runtimeActive || connectionRef.current !== connection ||
+          latestRef.current.theme !== preparedTheme ||
+          connection.isActive?.() === false || connection.sourceVersion !== sourceVersion ||
+          latestRef.current.frame.sourceVersion !== sourceVersion)
+          throw new Error("Saved-pixel preparation was superseded.");
+      };
+      const promise = (async () => {
+        await syncStylesheetPreviews(connection);
+        assertCurrent();
+        if (appliedSheetsRef.current.sheets.size) throw new Error("The advisory stylesheet could not be restored.");
+        const snapshot = await connection.getSnapshot();
+        assertCurrent();
+        onSnapshot(snapshot);
+        await settleDesignSelectionDetails(workspaceId, frame.file, sourceVersion);
+        assertCurrent();
+        const selectedIds = () => designWorkspaceView(workspaceId).selectedTargets
+          .filter((target) => target.frame === frame.file && target.nodeId)
+          .map((target) => target.nodeId!);
+        const nodeIds = selectedIds();
+        const details = await Promise.all(nodeIds.map((nodeId) => connection.getNodeDetails(nodeId)));
+        const confirmed = await connection.getSnapshot();
+        assertCurrent();
+        if (confirmed.revision !== snapshot.revision || JSON.stringify(selectedIds()) !== JSON.stringify(nodeIds))
+          throw new Error("The selected geometry changed while restoring saved pixels.");
+        for (const detail of details)
+          useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, latestRef.current.folder, frame.file, detail, sourceVersion);
+      })();
+      const preparation = { connection, sourceVersion, theme: preparedTheme, session: savedEditingSession, promise };
+      savedPreparationRef.current = preparation;
+      const clear = () => {
+        if (savedPreparationRef.current === preparation) savedPreparationRef.current = null;
+      };
+      void promise.then(clear, clear);
+      return promise;
+    });
+  }, [connectedRuntime, frame.file, frame.sourceVersion, onSnapshot, ready, runtimeActive, savedEditingSession, syncStylesheetPreviews, theme, workspaceId]);
   const protocolSource = nativeRuntime.ready
     ? designProtocolFrameUrl({
         workspaceId,
@@ -270,6 +440,9 @@ function DesignFrameDocumentBuffer({
             .setTheme(latestRef.current.theme)
             .then(async (themedSnapshot) => {
               onSnapshot(themedSnapshot);
+              // An agent's in-flight stylesheet shows before this generation
+              // is revealed, so a reload never flashes the saved styles.
+              await syncStylesheetPreviews(connection);
               await settleDesignSelectionDetails(
                 workspaceId,
                 frame.file,
@@ -284,6 +457,7 @@ function DesignFrameDocumentBuffer({
       },
     );
     connectionRef.current = connection;
+    setConnectedRuntime(connection);
     onConnection(documentSourceVersion, connection);
     watchHandshake(connection);
   }, [
@@ -294,6 +468,7 @@ function DesignFrameDocumentBuffer({
     onConnection,
     onReady,
     onSnapshot,
+    syncStylesheetPreviews,
     workspaceId,
     watchHandshake,
   ]);
@@ -347,6 +522,13 @@ function DesignFrameDocumentBuffer({
         // A replacement buffer applies the latest theme before it is revealed.
       });
   }, [onSnapshot, runtimeActive, theme]);
+
+  useEffect(() => {
+    if (!runtimeActive) return;
+    const connection = connectionRef.current;
+    // Before its handshake a connection supports nothing; readiness syncs.
+    if (connection) void syncStylesheetPreviews(connection);
+  }, [runtimeActive, savedEditingState, stylesheetPreviews, syncStylesheetPreviews]);
 
   const fallback = useDesignFrameDocument(
     workspaceId,
@@ -419,7 +601,12 @@ function DesignFrameRuntimeSession({
   autoCapture,
   theme,
   transitionCover,
+  designDirectory,
 }: DesignFrameRuntimeIframeProps) {
+  const stylesheetPreviews = useDesignAgentStylesheetPreviews(
+    workspaceId,
+    designDirectory,
+  );
   // A style-only generation advances the displayed connection in place. A
   // structural generation instead preloads an immutable incoming iframe while
   // the outgoing iframe continues to supply exact live text pixels.
@@ -669,6 +856,7 @@ function DesignFrameRuntimeSession({
           selectedNodeIds={selectedNodeIds}
           autoCapture={autoCapture}
           theme={theme}
+          stylesheetPreviews={stylesheetPreviews}
           onSnapshot={handleSnapshot}
           onConnection={handleConnection}
           onReady={handleDocumentReady}

@@ -1090,19 +1090,19 @@ export function reconcileDesignWorkspaceRuntimeAudit(input: {
   const existing = runtimeAuditSettlementByFrame.get(key);
   if (existing?.fingerprint === fingerprint) return existing.result;
   const result = (async () => {
-    const current = designWorkspaceSnapshotCache
-      .peekSnapshot(input.workspaceId)
-      .data?.frames.find((candidate) => candidate.file === input.frame);
+    const started = designWorkspaceSnapshotCache.peekSnapshot(input.workspaceId);
+    const current = started.data?.frames.find(
+      (candidate) => candidate.file === input.frame,
+    );
     if (current?.sourceVersion !== input.sourceVersion) return;
     const persisted = await persistDesignRuntimeAuditSnapshot(input);
     if (!persisted) return;
     const authoritative = await designSnapshot(input.workspaceId);
+    const latest = designWorkspaceSnapshotCache.peekSnapshot(input.workspaceId);
     if (
       authoritative.frames.find((candidate) => candidate.file === input.frame)
         ?.sourceVersion !== input.sourceVersion ||
-      designWorkspaceSnapshotCache
-        .peekSnapshot(input.workspaceId)
-        .data?.frames.find((candidate) => candidate.file === input.frame)
+      latest.data?.frames.find((candidate) => candidate.file === input.frame)
         ?.sourceVersion !== input.sourceVersion
     ) {
       return;
@@ -1112,6 +1112,19 @@ export function reconcileDesignWorkspaceRuntimeAudit(input: {
       input.sourceVersion
     ) {
       retainedRuntimeAuditByFrame.delete(key);
+    }
+    // This direct read can predate a save that landed while it ran (an
+    // agent's next step, a watcher event, a mutation reply). Never publish it
+    // over that newer state: an invalidation already owns a replacement
+    // read, and any other publication gets one fresh read instead.
+    if (latest.invalidationVersion !== started.invalidationVersion) return;
+    if (latest.data !== started.data) {
+      const localMutation = pendingLocalMutationByWorkspace.get(
+        input.workspaceId,
+      );
+      if (localMutation) localMutation.deferredRefresh = true;
+      else designWorkspaceSnapshotCache.invalidate(input.workspaceId);
+      return;
     }
     publishDesignWorkspaceSnapshot(input.workspaceId, authoritative);
   })().catch((error) => {

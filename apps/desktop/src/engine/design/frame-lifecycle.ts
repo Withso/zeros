@@ -1,6 +1,7 @@
 import { escapeText, insertDesignHeadMarkup } from "./source";
 import { FRAME_SEED, TEXT_FRAME_SEED } from "./document-seeds";
 import { readDesignStyleSourceCatalog } from "./style-sources";
+import { captureDesignDependencies } from "./dependency-read-set";
 import {
   designLayerCount,
   designNodeRecords,
@@ -729,17 +730,19 @@ async function applyDesignFrameChangesUnlocked(
   }
   if (Object.keys(canvas.frames).length > MAX_FRAME_COUNT)
     throw new Error("The canvas has too many frames.");
-  for (const change of changes) {
-    const before = change.before;
-    const expected = before && sourceVersions?.get(before.file);
-    if (!before || !expected) continue;
-    const identity = await readDesignFrameRenderIdentityFromSource(workspacePath, before.file, before.source);
-    if (identity.sourceVersion !== expected)
-      throw new Error("The frame or its stylesheet dependencies changed before the layer move.");
-  }
+  const dependencies = await captureDesignDependencies(async () => {
+    for (const change of changes) {
+      const before = change.before;
+      const expected = before && sourceVersions?.get(before.file);
+      if (!before || !expected) continue;
+      const identity = await readDesignFrameRenderIdentityFromSource(workspacePath, before.file, before.source);
+      if (identity.sourceVersion !== expected)
+        throw new Error("The frame or its stylesheet dependencies changed before the layer move.");
+    }
+  });
   // The metadata journal publishes both source files and geometry as one
-  // recoverable Design storage transaction. No half-detached layer is visible.
-  await writeCanvas(workspacePath, canvas, sourceChanges, { rollbackOnFailure: true });
+  // recoverable Design storage transaction.
+  await writeCanvas(workspacePath, canvas, sourceChanges, { rollbackOnFailure: true, assertInputs: dependencies.assertCurrent });
 }
 
 export async function restoreDesignFrameChanges(
@@ -839,6 +842,7 @@ export async function transferDesignNode(
         nodeId: input.nodeId,
         styles: relocationStyles,
         scope: "inline",
+        appendInlineOverrides: true,
       }).files[from.file]!;
       const changes = [{ before: from, after: { ...from, source } }];
       await applyDesignFrameChangesUnlocked(
@@ -1069,6 +1073,7 @@ export async function transferDesignNode(
         nodeId: input.nodeId,
         styles,
         scope: "inline",
+        appendInlineOverrides: relocationStyles !== null,
       }).files[after.file]!;
     }
     const changes = [

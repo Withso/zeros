@@ -1,7 +1,7 @@
 import { DatabaseCloudRuntimeTransitionService } from "./runtime-transfer.js";
 import { readCurrentCloudAgentBootBinding } from "./agent-boot-credentials.js";
 import type { CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
-import { readCloudWorkspaceResumePlan, type CloudWorkspaceResumePlan } from "./setup-resume.js";
+import { readCloudWorkspaceResumePlan, type CloudWorkspaceResumePlan, type CloudWorkspaceResumeCanary } from "./setup-resume.js";
 import {
   createCipheriv,
   createDecipheriv,
@@ -109,8 +109,10 @@ export type CloudWorkspaceAccountAuth = {
 
 export type CloudWorkspaceSetupMaterialServiceOptions = {
   pool: pg.Pool;
-  /** Supplied only by the Alpha configuration gate; staff is checked in SQL. */
+  /** Supplied only by the Alpha configuration gate; rollout eligibility is checked in SQL. */
   resumeExistingEnabled?: boolean;
+  /** The configured Alpha canary measures the staff path without a staff grant. */
+  resumeExistingCanary?: CloudWorkspaceResumeCanary;
   setupAudience: string;
   engineRegistrationAudience: string;
   engineHeartbeatAudience: string;
@@ -729,6 +731,7 @@ async function cleanupEngineStart(
 
 export class DatabaseCloudWorkspaceSetupMaterialService {
   private readonly resumeExistingEnabled: boolean;
+  private readonly resumeExistingCanary: CloudWorkspaceResumeCanary | undefined;
   private readonly pool: pg.Pool;
   private readonly setupAudience: string;
   private readonly engineRegistrationAudience: string;
@@ -746,6 +749,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
 
   constructor(options: CloudWorkspaceSetupMaterialServiceOptions) {
     this.resumeExistingEnabled = options.resumeExistingEnabled === true;
+    this.resumeExistingCanary = options.resumeExistingCanary ? { ...options.resumeExistingCanary } : undefined;
     this.pool = options.pool;
     this.setupAudience = normalizeCloudWorkspaceGrantAudience(
       options.setupAudience,
@@ -1062,7 +1066,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       // Read the completed enrollment before inserting its fresh replacement.
       // No runtime selection/transition decision is made by this hint.
       const resume = this.resumeExistingEnabled && input.resumeExistingVersion === 1
-        ? await readCloudWorkspaceResumePlan(tx, { ...input, accountUserId }, { computer, computerEnvironment })
+        ? await readCloudWorkspaceResumePlan(tx, { ...input, accountUserId }, { computer, computerEnvironment }, this.resumeExistingCanary)
         : undefined;
       await tx.query(
         `UPDATE cloud_workspace_engine_instances
@@ -1108,6 +1112,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           engineInstanceId,
           registrationGrantId: registrationGrant.id,
           secretCount: Object.keys(computerEnvironment).length,
+          reuseDecision: !this.resumeExistingEnabled ? "disabled" : input.resumeExistingVersion !== 1 ? "not_negotiated"
+            : !resume ? "ineligible" : resume.mode === "prepare_generation" ? "no_completed_epoch" : "candidate",
         },
       );
       return {
@@ -1284,10 +1290,16 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         }
         if (contract.resume) {
           const current = await readCloudWorkspaceResumePlan(tx, { ...input, accountUserId: contract.accountUserId },
-            { computer: contract.computer, computerEnvironment: contract.computerEnvironment });
+            { computer: contract.computer, computerEnvironment: contract.computerEnvironment }, this.resumeExistingCanary);
           // Enrollment itself advances HU's epoch. Recheck the preparation
-          // tuple/staff gate here; normal current-run fences govern publication.
-          if (current?.keySha256 !== contract.resume.keySha256) contract.resume = undefined;
+          // tuple/rollout gate here; normal current-run fences govern publication.
+          if (current?.keySha256 !== contract.resume.keySha256) {
+            contract.resume = undefined;
+            await audit(tx, input.organizationId, null, "cloud_workspace.setup_preparation_changed", {
+              workspaceId: input.workspaceId, generation: input.generation, setupRunId: input.setupRunId,
+              executionFence: input.executionFence, reuseDecision: "changed_during_redemption",
+            });
+          }
         }
         return issueWorkspaceSetupRecoveryGrant(tx, {
           workspaceId: input.workspaceId,
@@ -1558,7 +1570,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     const renewed = await withSystemTx(this.pool, async (tx) => {
       // Lifecycle and liveness retirement hold workspace -> grants -> engine.
       // Serialize heartbeat renewal with that same workspace authority before
-      // touching the engine row. An expired token never creates a fresh lease.
+      // touching the engine row. An expired token never creates a fresh lease,
+      // and a lease the uplink renewed further out (lease.v1) never shortens.
       await tx.query(
         "SELECT 1 FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE",
         [input.workspaceId, input.organizationId],
@@ -1569,7 +1582,10 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       }>(
         `UPDATE cloud_workspace_engine_instances ei
          SET last_heartbeat_at = clock_timestamp(),
-             lease_expires_at = clock_timestamp() + ($6::bigint * interval '1 millisecond'),
+             lease_expires_at = greatest(
+               ei.lease_expires_at,
+               clock_timestamp() + ($6::bigint * interval '1 millisecond')
+             ),
              updated_at = now()
          FROM cloud_workspaces cw, organizations organization, teams team,
               organization_members om, team_members tm, users account
