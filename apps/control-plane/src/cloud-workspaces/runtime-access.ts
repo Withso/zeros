@@ -14,6 +14,7 @@ export type CloudWorkspaceRuntimeRetirementReason =
   | "provider_authority_revoked"
   | "provider_operation_failed"
   | "engine_unavailable"
+  | "engine_exited"
   | "setup_failed";
 
 export type RetiredCloudWorkspaceRuntimeAccess = {

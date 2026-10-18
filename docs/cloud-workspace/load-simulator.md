@@ -87,6 +87,7 @@ Per active workspace, one running engine and one connected desktop:
 | Operation | Role | Interval | Source |
 | --- | --- | --- | --- |
 | `engine.credentialControls` | engine | 500 ms after completion | `apps/desktop/src/engine/cloud-local-command-queue-boot.ts` |
+| `engine.heartbeat` | engine | 60 s while checkpoint push is active | `CHECKPOINT_PUSH_HTTP_MAX_SILENCE_MS` in cloud runtime registration (S2 `checkpoint.fallback.v1`) |
 | `engine.uplinkLeaseRenewal` | engine | 300 s | `UPLINK_WATERMARK_INTERVAL_MS` in `apps/control-plane/src/realtime/uplink-protocol.ts` (S2 `lease.v1`) |
 | `engine.uplinkCheckpointSweep` | engine | 30 s (one read per uplink, an upper bound: one statement serves up to 500) | `SWEEP_TICKS` in `apps/control-plane/src/realtime/uplink-checkpoint.ts` (S2 `checkpoint.v1`) |
 | `engine.durableRecordHead` | engine | 10 s, every heartbeat tick, posted or skipped | `synchronizeDurableRecord` in cloud runtime registration |
@@ -95,12 +96,14 @@ Per active workspace, one running engine and one connected desktop:
 | `client.relayRevalidate` | client | 5 s | `authorityCheckMs` in `apps/control-plane/src/cloud-workspaces/runtime-bridge.ts` |
 | `client.catalog` | client | 30 s, `limit=100` | `apps/desktop/src/renderer/state/cloud-workspace-lifecycle.tsx` |
 
-`engine.heartbeat` keeps its per-request budget but has no steady-state
-cadence: with `lease.v1` the uplink renews the lease and a periodic beat posts
-only when it carries something (S2 1.2.0). An engine without `lease.v1` still
+With `lease.v1`, periodic heartbeats can skip empty beats, but active checkpoint
+push now requires an independent API observation every 60 s (S2 1.3.0).
+The model includes that heartbeat at its existing measured cost: one transaction
+per call, adding 1/60 = 0.0167 tx/s per running engine. Neither pongs nor push
+callbacks refresh API freshness. An engine without `lease.v1` still
 posts every 10 s (`DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS` in
-`apps/control-plane/src/cloud-workspaces/engine-heartbeat.ts`), 0.1 tx/s more
-per running engine. `engine.checkpointHintWait` likewise keeps its
+`apps/control-plane/src/cloud-workspaces/engine-heartbeat.ts`), 0.0833 tx/s more
+per running engine than the fallback cadence. `engine.checkpointHintWait` keeps its
 per-request budget without a cadence: with `checkpoint.v1` the uplink pushes
 queued checkpoint requests and the engine pauses its hint wait (S2 1.2.0).
 An engine without `checkpoint.v1` still runs the wait (six reads per 25 s,
@@ -161,6 +164,24 @@ inventory instead of inspecting each workspace.
   requests/min/IP rate limit with a two-replica allowance: one paged
   inventory list per minute (`ceil(sandboxes / 100)` calls) plus one inspect
   per fallback-horizon drift run.
+
+Before lifecycle jobs replaced polling, the R1 independent API heartbeat run on
+PostgreSQL 18 with 0, 1 and 10 active workspaces (125 s quiet, 65 s active,
+3 s warmup, 10 serial samples) measured
+0.144 tx/s quiet and projected 2.937 tx/s per active workspace, including
+2.270 tx/s per running engine. Each heartbeat used one transaction, nine
+statements and seven round trips: the added cadence costs 0.0167 tx/s per
+running engine. A stopped workspace cost 0.117 tx/s in drift and orphan
+inspections. Transaction and per-call budgets passed with no operation failures.
+
+That run exceeded the existing 0.01/s notification budgets: the ten-workspace
+scenario measured 0.0154 authority hints/s per workspace. Isolated heartbeat
+and uplink-renewal calls emitted no authority hints; the polling drift worker
+incremented the workspace version even for an unchanged observation, emitting
+one per inspection. Budgets were not raised to hide that failure. These figures
+describe the earlier polling baseline, not the lifecycle-job model below. The
+independent heartbeat still adds 0.0167 tx/s per running engine to that model;
+the combined model needs a new measurement before claiming a notification rate.
 
 Budgets are a ratchet. When a change makes a path cheaper, regenerate them with
 `--write-budgets src/load-sim/budgets.json` and commit the lower numbers. Do not

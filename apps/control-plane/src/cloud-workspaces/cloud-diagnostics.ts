@@ -80,7 +80,7 @@ const codes = new Set([
   "provider_identity_mismatch", "provider_request_unavailable", "provider_request_timeout", "provider_rate_limited",
   "provider_response_invalid", "provider_billing_scope_mismatch", "provider_billing_scope_unknown", "provider_bootstrap_unavailable",
   "provider_access_response_invalid", "provider_command_failed", "provider_command_timeout", "provider_command_unavailable",
-  "engine_lease_expired", "engine_unavailable", "setup_image_contract_invalid", "setup_helper_failed", "setup_provider_failure",
+  "engine_lease_expired", "engine_unavailable", "engine_exited", "setup_image_contract_invalid", "setup_helper_failed", "setup_provider_failure",
   "setup_provider_bootstrap_unavailable", "setup_admission_unavailable", "setup_engine_readiness_failed", "setup_checkpoint_restore_invalid", "setup_checkpoint_incomplete",
   "setup_checkpoint_restore_unavailable", "setup_repository_revision_invalid", "setup_repository_history_limit", "setup_repository_unavailable", "setup_command_failed",
   "setup_request_invalid", "setup_settings_invalid", "setup_execution_aborted", "setup_readiness_invalid", "setup_helper_response_invalid",

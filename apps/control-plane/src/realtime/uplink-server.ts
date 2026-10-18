@@ -260,9 +260,11 @@ export class CloudEngineUplinkServer {
   negotiate(organizationId: string, offered: ReadonlySet<string>): Set<string> {
     const features = new Set(this.options.extensions
       .filter(extension => offered.has(extension.feature) &&
+        (extension.feature !== UPLINK_FEATURES.checkpoint || offered.has(UPLINK_FEATURES.checkpointFallback)) &&
         (!extension.flag || this.options.flags.enabled(organizationId, extension.flag)))
       .map(extension => extension.feature));
     if (this.options.lease && offered.has(UPLINK_FEATURES.lease) &&
+        offered.has(UPLINK_FEATURES.exitReport) &&
         this.options.flags.enabled(organizationId, "engine_lease_over_uplink")) features.add(UPLINK_FEATURES.lease);
     if (this.options.idle && offered.has(UPLINK_FEATURES.idle) &&
         this.options.flags.enabled(organizationId, "cp_idle_stop")) features.add(UPLINK_FEATURES.idle);

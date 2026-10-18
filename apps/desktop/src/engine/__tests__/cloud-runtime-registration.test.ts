@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
+import { CLOUD_ENGINE_EXIT_REPORT_ENV } from "@zeros/protocol/cloud-runtime-lifecycle";
 
 import {
   CLOUD_RUNTIME_ENV,
@@ -84,6 +85,36 @@ function registrationResponse() {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("supervisor exit reporting compatibility", () => {
+  it.each(["armed", "absent", "foreign-engine", "foreign-runtime", "foreign-boot", "foreign-supervisor", "foreign-setup", "malformed"])(
+    "offers lease.v1 only for an armed exact launch episode (%s)", kind => {
+      const source = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+      const report = { version: 1, audience: "zeros-cloud-engine-exit-v1", reason: "unexpected_exit",
+        reportId: ACCOUNT_USER_ID, ...source.execution, engineInstanceId: source.engine.instanceId,
+        runtimeId: V4_ATTESTATION.runtimeId, bootId: V4_ATTESTATION.bootId, supervisorSessionId: V4_ATTESTATION.supervisorSessionId };
+      if (kind === "foreign-engine") report.engineInstanceId = ACCOUNT_USER_ID;
+      if (kind === "foreign-runtime") report.runtimeId = `r1-${"f".repeat(64)}`;
+      if (kind === "foreign-boot") report.bootId = ACCOUNT_USER_ID;
+      if (kind === "foreign-supervisor") report.supervisorSessionId = ACCOUNT_USER_ID;
+      if (kind === "foreign-setup") report.executionFence += 1;
+      const env: Record<string, string | undefined> = { [CLOUD_RUNTIME_ENV]: encodedRuntime(),
+        ...(kind === "absent" ? {} : { [CLOUD_ENGINE_EXIT_REPORT_ENV]: kind === "malformed" ? "bad" : Buffer.from(JSON.stringify(report)).toString("base64url") }) };
+      const config = consumeCloudRuntimeEnvironment(env, () => NOW)!;
+      const registration = new CloudRuntimeRegistration(config, { agentRuntime: V4_ATTESTATION,
+        onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+      const features = registration.uplinkFeatures();
+      expect(features.includes("lease.v1")).toBe(kind === "armed");
+      expect(features.includes("exit.report.v1")).toBe(kind === "armed");
+      expect(features).toContain("checkpoint.fallback.v1");
+      expect(env).not.toHaveProperty(CLOUD_ENGINE_EXIT_REPORT_ENV);
+    });
+  it("Local consumes no registration or exit-report capability", () => {
+    const env = { [CLOUD_ENGINE_EXIT_REPORT_ENV]: "bad" };
+    expect(consumeCloudRuntimeEnvironment(env)).toBeNull();
+    expect(env).toEqual({});
+  });
 });
 
 describe("cloud renewal timing", () => {
@@ -1727,7 +1758,7 @@ describe("engine lease over the uplink (lease.v1)", () => {
    * the control plane, `greatest(lease, clock + 90 s)`; the hint wait answers
    * idle once and then holds, unless told otherwise. */
   function harness(options: { hints?: "healthy" | "absent" | "failing" | "unanswered"; push?: boolean } = {}) {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     vi.setSystemTime(NOW);
     const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
     const beats: Array<{ at: number; body: Record<string, unknown> }> = [];
@@ -1737,6 +1768,8 @@ describe("engine lease over the uplink (lease.v1)", () => {
     let hintCalls = 0;
     const hintAnswers: boolean[] = (options.hints ?? "healthy") === "healthy" ? [false] : [];
     let directive: Record<string, unknown> | null = null;
+    let heartbeatHold: Promise<void> | undefined;
+    let portHold: Promise<Ports> | undefined;
     const checkpoints: unknown[] = [];
     const held = (init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
@@ -1754,6 +1787,7 @@ describe("engine lease over the uplink (lease.v1)", () => {
       }
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       beats.push({ at: Date.now(), body });
+      await heartbeatHold;
       if (failStatus !== null) return Response.json({ error: { code: "engine_heartbeat_unavailable" } }, { status: failStatus });
       return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
         engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: answer(Date.now()),
@@ -1767,15 +1801,16 @@ describe("engine lease over the uplink (lease.v1)", () => {
     let pendingRefresh: typeof refresh | null = null;
     const sync = completedDurableRecordSync();
     const lost = vi.fn();
+    const readPorts = vi.fn(async () => portHold ?? ports);
     const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION,
       fetch: fetch as unknown as typeof globalThis.fetch, now: Date.now, negotiateLocalCommands: true,
       checkpointHints: true, onAuthorityLost: lost, onDurableRecordSync: sync,
       onCheckpointRequested: async value => { checkpoints.push(value); },
-      readObservedPorts: async () => ports, readRepositoryCredentialRefresh: () => pendingRefresh });
+      readObservedPorts: readPorts, readRepositoryCredentialRefresh: () => pendingRefresh });
     registration.attachUplinkLease(() => active);
     registration.attachUplinkCheckpointPush(() => push);
     return {
-      registration, beats, sync, lost, checkpoints,
+      registration, beats, sync, lost, checkpoints, readPorts,
       hintCalls: () => hintCalls,
       /** The uplink's checkpoint push started or ended; without `notify` the
        * change report was missed. */
@@ -1790,6 +1825,8 @@ describe("engine lease over the uplink (lease.v1)", () => {
       remaining: () => registration.agentBootAuthorityRemainingMs() + 1_000,
       setActive: (value: boolean) => { active = value; },
       setPorts: (value: Ports) => { ports = value; },
+      holdPorts: (value: Promise<Ports> | undefined) => { portHold = value; },
+      holdHeartbeat: (value: Promise<void> | undefined) => { heartbeatHold = value; },
       setRefresh: (value: typeof refresh | null) => { pendingRefresh = value; },
       failWith: (status: number | null) => { failStatus = status; },
       answerWith: (value: (now: number) => number) => { answer = value; },
@@ -2032,7 +2069,7 @@ describe("engine lease over the uplink (lease.v1)", () => {
       try {
         await vi.advanceTimersByTimeAsync(5 * 60_000);
         expect(h.hintCalls()).toBe(0);
-        expect(h.beats).toHaveLength(1);
+        expect(h.beats.map(beat => beat.at - NOW)).toEqual([30_000, 90_000, 150_000, 210_000, 270_000]);
         h.setPush(false, false); // the change report was missed
         await vi.advanceTimersByTimeAsync(29_000);
         expect(h.hintCalls()).toBe(0);
@@ -2098,7 +2135,7 @@ describe("engine lease over the uplink (lease.v1)", () => {
     });
 
     it.each(["absent", "failing", "unanswered"] as const)(
-      "skips periodic beats that carry nothing while the uplink pushes requests, even when the hint wait is %s",
+      "bounds skipped periodic beats while the uplink pushes requests and the hint wait is %s",
       async hints => {
         const h = await started({ hints });
         try {
@@ -2107,13 +2144,177 @@ describe("engine lease over the uplink (lease.v1)", () => {
           h.setPush(true);
           const hintCalls = h.hintCalls();
           await vi.advanceTimersByTimeAsync(3 * 30_000);
-          expect(h.beats).toHaveLength(3);
+          expect(h.beats).toHaveLength(4);
           expect(h.hintCalls()).toBe(hintCalls);
           h.setPush(false);
           await vi.advanceTimersByTimeAsync(3 * 30_000);
-          expect(h.beats).toHaveLength(6);
+          expect(h.beats).toHaveLength(7);
           expect(h.lost).not.toHaveBeenCalled();
         } finally { await h.registration.stop(); }
       });
+
+    it("fetches before_stop within 76 seconds when push stays open but delivers nothing", async () => {
+      const h = await started({ push: true, hints: "unanswered" });
+      try {
+        await vi.advanceTimersByTimeAsync(31_000);
+        const requestedAt = Date.now();
+        h.setDirective({ ...queued, reason: "before_stop", deadlineAtMs: requestedAt + 300_000 });
+        await vi.advanceTimersByTimeAsync(76_000);
+        expect(h.checkpoints).toEqual([expect.objectContaining({ id: queued.id, reason: "before_stop" })]);
+        expect(h.beats[1]!.at - requestedAt).toBeLessThanOrEqual(76_000);
+        expect(h.hintCalls()).toBe(0);
+        expect(h.remaining()).toBeGreaterThan(25 * 60_000);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("cached pongs and repeated push-active callbacks cannot postpone the API watchdog", async () => {
+      const h = await started({ push: true });
+      try {
+        await vi.advanceTimersByTimeAsync(30_000);
+        for (let i = 0; i < 6; i += 1) {
+          h.renew();
+          h.setPush(true);
+          await vi.advanceTimersByTimeAsync(10_000);
+        }
+        expect(h.beats.map(beat => beat.at - NOW)).toEqual([30_000, 90_000]);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("a held port scan cannot delay a due checkpoint probe or publish its late result", async () => {
+      const h = await started({ push: true });
+      let release!: (ports: Ports) => void;
+      try {
+        await vi.advanceTimersByTimeAsync(31_000);
+        h.holdPorts(new Promise(resolve => { release = resolve; }));
+        h.setDirective({ ...queued, reason: "before_stop" });
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(h.checkpoints).toHaveLength(1);
+        expect(h.beats[1]!.at - NOW).toBeLessThanOrEqual(91_000);
+        expect(h.beats[1]!.body).not.toHaveProperty("observedPorts");
+        release([{ port: 8_080, protocol: "tcp" }]);
+        h.holdPorts(undefined);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.beats).toHaveLength(2);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("a late response uses request-start freshness", async () => {
+      const h = await started({ push: true });
+      let release!: () => void;
+      try {
+        await vi.advanceTimersByTimeAsync(31_000);
+        h.holdHeartbeat(new Promise(resolve => { release = resolve; }));
+        await vi.advanceTimersByTimeAsync(73_000);
+        expect(h.beats).toHaveLength(2);
+        h.holdHeartbeat(undefined);
+        release();
+        await vi.advanceTimersByTimeAsync(46_000);
+        expect(h.beats.map(beat => beat.at - NOW)).toEqual([30_000, 90_000, 150_000]);
+      } finally { release?.(); await h.registration.stop(); }
+    });
+    it("keeps optional discovery bounded when the port reader never completes", async () => {
+      const h = await started({ push: true });
+      try {
+        await vi.advanceTimersByTimeAsync(31_000);
+        h.holdPorts(new Promise(() => {}));
+        await vi.advanceTimersByTimeAsync(180_000);
+        expect(h.beats.length).toBeGreaterThanOrEqual(3);
+        expect(h.readPorts).toHaveBeenCalledTimes(2); // One completed scan and one still held.
+        expect(h.lost).not.toHaveBeenCalled();
+      } finally { await h.registration.stop(); }
+    });
+
+    it("a scan begun before push activates cannot hold its API fallback", async () => {
+      const h = await started({ hints: "unanswered" });
+      try {
+        h.holdPorts(new Promise(() => {}));
+        await vi.advanceTimersByTimeAsync(30_000);
+        h.setPush(true);
+        h.setDirective({ ...queued, reason: "before_stop" });
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(h.checkpoints).toHaveLength(1);
+        expect(h.beats).toHaveLength(1);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("keeps a granted long lease through a 30-minute API and realtime outage", async () => {
+      const h = await started({ push: true, hints: "unanswered" });
+      try {
+        await vi.advanceTimersByTimeAsync(31_000);
+        h.failWith(503);
+        await vi.advanceTimersByTimeAsync(30 * 60_000);
+        expect(h.lost).not.toHaveBeenCalled();
+        expect(h.remaining()).toBe(LEASE - 1_831_000);
+        expect(h.beats.length).toBeLessThan(40);
+        h.failWith(null);
+        h.setDirective({ ...queued, reason: "before_stop", deadlineAtMs: Date.now() + 300_000 });
+        await vi.advanceTimersByTimeAsync(60_000);
+        // Capture has not acknowledged this request, so normal heartbeat
+        // redelivery can repeat it after the API recovers.
+        expect(h.checkpoints.length).toBeGreaterThan(0);
+        for (const checkpoint of h.checkpoints) expect(checkpoint).toMatchObject({ id: queued.id });
+      } finally { await h.registration.stop(); }
+    });
+
+    it("watchdog failure preserves the long lease and bounded retry backoff without a zero-delay loop", async () => {
+      const h = await started({ push: true });
+      try {
+        await vi.advanceTimersByTimeAsync(31_000);
+        h.failWith(503);
+        await vi.advanceTimersByTimeAsync(194_000);
+        expect(h.beats.map(beat => beat.at - NOW)).toEqual([30_000, 90_000, 95_000, 105_000, 125_000, 165_000, 225_000]);
+        expect(h.remaining()).toBe(LEASE - 225_000);
+        expect(h.lost).not.toHaveBeenCalled();
+      } finally { await h.registration.stop(); }
+    });
+
+    it("push during a held watchdog heartbeat produces one follow-up", async () => {
+      const h = await started({ push: true });
+      let release!: () => void;
+      try {
+        await vi.advanceTimersByTimeAsync(31_000);
+        h.holdHeartbeat(new Promise(resolve => { release = resolve; }));
+        await vi.advanceTimersByTimeAsync(59_000);
+        h.registration.checkpointRequested();
+        h.registration.checkpointRequested();
+        h.holdHeartbeat(undefined);
+        release();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(h.beats).toHaveLength(3);
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(h.beats).toHaveLength(3);
+      } finally { release?.(); await h.registration.stop(); }
+    });
+
+    it("stop cancels watchdog work and rejects a stale heartbeat completion", async () => {
+      const h = await started({ push: true });
+      let release!: () => void;
+      try {
+        await vi.advanceTimersByTimeAsync(31_000);
+        h.holdHeartbeat(new Promise(resolve => { release = resolve; }));
+        await vi.advanceTimersByTimeAsync(59_000);
+        await h.registration.stop();
+        const syncs = h.sync.mock.calls.length;
+        h.setDirective({ ...queued, reason: "before_stop" });
+        release();
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(h.checkpoints).toEqual([]);
+        expect(h.sync).toHaveBeenCalledTimes(syncs);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { release?.(); await h.registration.stop(); }
+    });
+
+    it("watchdog final checkpoint control still runs after record handoff", async () => {
+      const h = await started({ push: true });
+      try {
+        await vi.advanceTimersByTimeAsync(31_000);
+        await h.registration.pauseRecordForRuntimeHandoff();
+        const syncs = h.sync.mock.calls.length;
+        h.setDirective({ ...queued, reason: "before_stop" });
+        await vi.advanceTimersByTimeAsync(59_000);
+        expect(h.checkpoints).toEqual([expect.objectContaining({ id: queued.id })]);
+        expect(h.sync).toHaveBeenCalledTimes(syncs);
+      } finally { await h.registration.stop(); }
+    });
   });
 });

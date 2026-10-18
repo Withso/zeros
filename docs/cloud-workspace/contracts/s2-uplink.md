@@ -1,6 +1,6 @@
 # S2. VM uplink protocol
 
-Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.2.0` (additive;
+Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.3.0` (additive;
 see [Changelog](#changelog)) ·
 Schema: [Draft schema: uplink text frames](#draft-schema-uplink-text-frames)
 
@@ -14,7 +14,7 @@ rejection; resume tokens bound to the engine identity. Frozen as 1.0.0 on
 
 One outbound WebSocket from each cloud engine to the `realtime` service
 carries liveness, readiness, activity, credential-control revisions, epochs
-and keys, turn notifications and relayed client sessions. It replaces the
+and keys, turn notifications and relayed client sessions. It reduces routine
 engine heartbeat POSTs and their per-beat database writes, the 500 ms
 credential-control poll, the checkpoint-hint long-poll and the separate
 relay socket pairs. Preview and PTY lanes stay on their current relay paths
@@ -316,8 +316,10 @@ outage longer than about 90 s lapses the lease of every healthy engine.
 With `lease.v1` the uplink renews a lease long enough for the S1 outage
 rule:
 
-- **Negotiation.** The engine offers `lease.v1` in `sys.hello`. `realtime`
-  selects it only while the organization's `engine_lease_over_uplink`
+- **Negotiation.** The engine offers `lease.v1` and `exit.report.v1` in
+  `sys.hello` only when its actual supervisor armed an exit report for this
+  exact launch ([Supervisor exit withdrawal](#supervisor-exit-withdrawal-exitreportv1)).
+  `realtime` requires both declarations and selects `lease.v1` only while the organization's `engine_lease_over_uplink`
   rollout flag is on (that flag requires `realtime_uplink`). A flag change
   closes the affected uplinks with `1001 features_changed`, and the redial
   renegotiates.
@@ -347,7 +349,8 @@ rule:
   `lease.v1` negotiated), the engine skips a periodic beat that carries
   nothing: no first or changed port scan, no repository credential
   refresh, no redelivered checkpoint request, a checkpoint-hint wait that
-  is answering or a `checkpoint.v1` push in place of it, and more than
+  is answering or a `checkpoint.v1` push with an API observation less than
+  60 s old in place of it, and more than
   25 min of lease left. A beat requested out of cadence (by a checkpoint
   hint, a pushed `checkpoint.request`, a `4409` re-verification or a
   `4401` or `4403` park) is always sent. When the uplink is lost, the
@@ -356,9 +359,66 @@ rule:
   10, 20 and 40 s, then retries every 60 s.
 - **No shortening on loss.** A lost uplink does not shorten the lease: an
   ingress or network outage looks like many lost uplinks, and decision G
-  never stops a workspace on an unknown error. The cost is an engine that
-  dies while its VM keeps running: it holds its workspace until the lease
-  ends ([Failure and outage behavior](#failure-and-outage-behavior)).
+  never stops a workspace on an unknown error. A positively observed child
+  exit has a separate withdrawal path. If that supervisor or the API is
+  unavailable, existing lease expiry and provider recovery still apply.
+
+### Supervisor exit withdrawal (`exit.report.v1`)
+
+The root supervisor arms a private retry record before launching the engine
+and passes a nonsecret `ZEROS_CLOUD_ENGINE_EXIT_REPORT_B64` marker only to
+that launch. The engine checks its exact organization, workspace, generation,
+instance, setup/enrollment fence, runtime, boot and supervisor session before
+offering `lease.v1`. An updated engine under an older supervisor therefore
+keeps the HTTP lease, including when talking to an older CP.
+
+The supervisor observes its original child's unexpected `exit`, including
+exit code zero and exit before the launch ACK. It reports once and drains
+the original kernel workload scope through its serialized retirement path;
+it never restarts the engine or replays work. A commanded retirement is marked
+immediately before signalling, after custody and preparation checks. A refused
+signal leaves reporting armed. A late old-child event cannot drain a successor.
+
+`POST /internal/v1/cloud-workspaces/engine/exited` uses the original engine's
+`zwb_…` bridge secret. This is authenticated voluntary withdrawal, not remote
+attestation of process death, and grants no new access. The closed JSON body is
+`version: 1`, `audience: "zeros-cloud-engine-exit-v1"`,
+`reason: "unexpected_exit"`, `reportId`, `organizationId`, `workspaceId`,
+`generation`, `engineInstanceId`, `setupRunId`, `executionFence`, `runtimeId`,
+`bootId` and `supervisorSessionId`. UUIDs are canonical lowercase. For a runtime
+handoff, the existing wire keys `setupRunId` and `executionFence` identify the
+original enrollment ID and sequence. The API verifies every stored binding
+and the bridge-secret hash under organization → workspace locks. The exact
+ACK is `{ version: 1, audience: "zeros-cloud-engine-exit-v1", accepted: true,
+reportId, engineInstanceId }`.
+
+An exact historical retry is acknowledged without touching a successor.
+An active setup, replacement or runtime transition retains its lifecycle
+owner; only the reported engine is revoked. For the current ready engine,
+the API admits the existing safe Stop without waiting for lease expiry.
+A Stop/Archive waiting for capture keeps its intent and receives an audited
+`stop_unsealed` outcome. An uncommitted Delete/Rebuild fails with
+`engine_exited` and admits a separate safe source Stop. A committed final
+capture, an accepted delete requiring no capture, or an already dispatched
+operation keeps its accepted semantics. Neither the report nor Stop admission
+proves provider retirement, releases a credit reservation, or authorizes data
+purge. No checkpoint is fabricated or restored automatically.
+
+The report endpoint is derived from the trusted HTTPS registration origin;
+redirects are refused. A root-owned mode-0600 journal in canonical mode-0700
+`/run/zeros` retains at most 16 reports / 64 KiB. It reserves a slot before
+advertising support and never evicts an unacknowledged exit to arm a launch.
+Requests are single flight, time out after 10 s and retry with jitter up to
+30 s. Restart replays only recorded positive exits; an armed record or missing
+process memory is not death evidence. An unsafe or full journal withholds
+the declaration, preserving the legacy lease.
+
+`exit.report.v1` and `checkpoint.fallback.v1` are prerequisite declarations,
+not selected features in `sys.welcome`. Dotted names preserve the original
+S2 hello grammar on old CPs. New CPs withhold the corresponding optimization
+from old engines. Deployment still requires the API, realtime and actual
+supervisor to support this contract before enabling the flags; see
+[rollout flags](../rollout-flags.md).
 
 ### Checkpoint requests (`checkpoint.v1`)
 
@@ -368,8 +428,9 @@ the engine learns that one is queued from its checkpoint-hint wait, a 25 s
 long-poll that reads the database every 5 s (about 0.24 transactions/s per
 running engine). With `checkpoint.v1` `realtime` tells the engine instead:
 
-- **Negotiation.** The engine offers `checkpoint.v1` in `sys.hello`.
-  `realtime` selects it only while the organization's `checkpoint_push`
+- **Negotiation.** The engine offers `checkpoint.v1` and
+  `checkpoint.fallback.v1` in `sys.hello`. `realtime` requires the fallback
+  declaration and selects `checkpoint.v1` only while the organization's `checkpoint_push`
   rollout flag is on (that flag requires `realtime_uplink`). A flag change
   closes the affected uplinks with `1001 features_changed`, and the redial
   renegotiates.
@@ -393,6 +454,16 @@ running engine). With `checkpoint.v1` `realtime` tells the engine instead:
   re-checks when the push starts or ends and at least every 30 s, so the
   wait resumes the moment the uplink is lost and its first read sees a
   request queued meanwhile.
+- **Independent API watchdog.** While push is active, the heartbeat scheduler
+  allows at most 60 s since the monotonic request-start of its last validated
+  successful API heartbeat before another API observation is due. An open
+  socket, cached pong, lease report or repeated push callback never refreshes
+  it. Optional port discovery is bounded to 1 s, retains at most one read in
+  flight and discards late results. With a healthy API and its existing 15 s
+  HTTP bound, silent-push discovery takes at most 76 s, leaving 224 s of a
+  newly queued five-minute capture window. This is a discovery budget, not an
+  upload-completion guarantee. API failures retain the heartbeat's bounded
+  retry backoff and granted lease; they cannot create a zero-delay retry loop.
 
 ### Control-plane idle stop (`idle.v1`)
 
@@ -458,7 +529,8 @@ initiates; it resumes when the uplink is gone. No frame or schema change.
 | `realtime` redeploy | Drain, reconnect, resume or resync; relay clients re-route |
 | Engine restart (same generation) | New `bootId`, recorded by a fresh registration; resume rejected (`resumed: false`); full resync |
 | Superseded uplink (4409) | Re-verify registration, reconnect; a matching `bootId` supersedes back, an alert fires otherwise |
-| Engine dies while its VM keeps running | The uplink is lost at once or after the 45 s offline detection, and presence records the loss. With `lease.v1` the durable lease still runs to its deadline (up to 36 min, against about 90 s without): until then engine health does not stop the workspace, a stop that needs a final checkpoint fails when the checkpoint request's 5 min deadline passes, and recovery waits for the lease to lapse. A lost uplink does not shorten the lease, because an ingress or network outage also looks like many lost uplinks (decision G) |
+| Engine dies while its VM keeps running | With an armed supervisor and available API, the positive exit withdraws that exact engine and admits safe Stop immediately, or leaves an accepted lifecycle owner in control. Unfinished capture is recorded as unsealed; no restart, restore, billing settlement or purge is inferred. If reporting is unavailable, existing lease expiry remains the fallback (up to 36 min). Uplink loss alone never shortens the lease. |
+| Realtime's pool fails while API works | Cached pongs may continue, but do not refresh checkpoint freshness. The independent API watchdog discovers queued capture within the 76 s healthy-API budget, even while the push feature remains active. |
 | Database slow or down | `realtime` keeps uplinks and liveness in memory; transition writes retry with jitter through a bounded queue; no uplink is closed because a write failed; a `lease.v1` renewal that cannot complete is retried at the next watermark; a failed `checkpoint.v1` read is retried on the next 5 s tick |
 
 ## Code paths this replaces
@@ -967,6 +1039,11 @@ review aid until freeze; the frozen source of truth will be Zod in
 
 ## Changelog
 
+- **1.3.0** (2026-10-18, additive): require `exit.report.v1` before granting
+  `lease.v1`, with exact supervisor exit withdrawal through the API; require
+  `checkpoint.fallback.v1` before granting `checkpoint.v1`, with a 60 s
+  independent API heartbeat watchdog. Old engines and old supervisors retain
+  their legacy paths. Both rollout flags remain off pending qualification.
 - **1.2.0** (2026-10-18, additive): added the `lease.v1` feature
   ([Engine lease](#engine-lease-leasev1)). Negotiated only while the
   organization's `engine_lease_over_uplink` flag is on, it has `realtime`

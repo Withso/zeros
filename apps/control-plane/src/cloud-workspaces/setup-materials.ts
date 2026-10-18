@@ -1,3 +1,4 @@
+import { reportCloudEngineExit, type CloudEngineExitInput } from "./engine-exit.js";
 import { DatabaseCloudRuntimeTransitionService } from "./runtime-transfer.js";
 import { readCurrentCloudAgentBootBinding } from "./agent-boot-credentials.js";
 import type { CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
@@ -1383,6 +1384,10 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
   async registerTransitionEngine(input:CloudWorkspaceEngineRegistrationInput) {
     return new DatabaseCloudRuntimeTransitionService({pool:this.pool,qualificationMode:cloudRuntimeQualificationMode(),
       workosEnabled:this.accountIdentityProvider==='workos',heartbeatEndpoint:this.engineHeartbeatAudience}).register(input);
+  }
+
+  reportEngineExit(input: CloudEngineExitInput) {
+    return reportCloudEngineExit(this.pool, input);
   }
 
   async registerEngine(input: CloudWorkspaceEngineRegistrationInput) {

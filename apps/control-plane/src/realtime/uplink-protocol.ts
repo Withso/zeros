@@ -83,11 +83,15 @@ export const UPLINK_FEATURES = {
   relay: "relay.v1",
   /** The uplink renews the engine lease (36 min, every watermark). */
   lease: "lease.v1",
+  /** Declaration: the VM supervisor armed exact-engine exit withdrawal. */
+  exitReport: "exit.report.v1",
   /** The control plane decides idle stops from `activity.report`. */
   idle: "idle.v1",
   /** Queued checkpoint requests are pushed (`checkpoint.request`) instead
    * of the engine holding the checkpoint-hint long-poll. */
   checkpoint: "checkpoint.v1",
+  /** Declaration: an independent API heartbeat is due at least every 60 s. */
+  checkpointFallback: "checkpoint.fallback.v1",
   /** The engine turn journal (`turns.event` / `turns.ack`). */
   turns: "turns.v1",
 } as const;

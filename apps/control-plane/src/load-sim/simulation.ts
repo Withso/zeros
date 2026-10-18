@@ -21,9 +21,10 @@ export type Cadence = {
 export const STEADY_STATE_CADENCES = {
   "engine.credentialControls": { periodSeconds: 0.5, afterCompletion: true, role: "engine",
     source: "apps/desktop/src/engine/cloud-local-command-queue-boot.ts: controls poll 500 ms after each exchange" },
-  // S2 lease.v1 (engine_lease_over_uplink): the uplink renews the lease and a
-  // periodic HTTP heartbeat posts only when it carries something, so
-  // engine.heartbeat keeps a per-request budget but no steady-state cadence.
+  // S2 checkpoint.fallback.v1: push pauses the hint wait, but a successful
+  // independent API observation is still required at least once per minute.
+  "engine.heartbeat": { periodSeconds: 60, afterCompletion: false, role: "engine",
+    source: "cloud-runtime-registration.ts CHECKPOINT_PUSH_HTTP_MAX_SILENCE_MS (60 s) while checkpoint push is active" },
   "engine.uplinkLeaseRenewal": { periodSeconds: 300, afterCompletion: false, role: "engine",
     source: "uplink-server.ts renewLease on every UPLINK_WATERMARK_INTERVAL_MS (5 min) tick of a lease.v1 uplink" },
   "engine.durableRecordHead": { periodSeconds: 10, afterCompletion: false, role: "engine",
