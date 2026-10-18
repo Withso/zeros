@@ -12,7 +12,7 @@ import { changeLineCounts, status } from "../diff";
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("Local summary foreground priority", () => {
-  it.each(["sixth", "queued"])("starts foreground status for a %s workspace immediately without duplicating status", async (target) => {
+  it.each(["sixth", "queued"])("starts a fresh foreground status for a %s workspace immediately", async (target) => {
     const finish: Array<() => void> = [];
     const statuses: string[] = [];
     let ready!: () => void;
@@ -45,6 +45,9 @@ describe("Local summary foreground priority", () => {
       finish.forEach((resolve) => resolve());
       await Promise.all([background, foreground]);
     }
-    expect(statuses.filter((id) => id === foregroundId)).toHaveLength(1);
+    // A status never reuses a summary read that started earlier (Reset and
+    // Clean guards rely on it), so a queued workspace's own background read
+    // still runs once after the foreground one.
+    expect(statuses.filter((id) => id === foregroundId)).toHaveLength(target === "queued" ? 2 : 1);
   });
 });

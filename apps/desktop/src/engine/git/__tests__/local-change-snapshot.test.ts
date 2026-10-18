@@ -84,9 +84,10 @@ describe("Local change snapshot process budget", () => {
       expect(state.unstaged).toEqual([{ path: "tracked.txt", status: "modified" }]);
       expect(stamped[0]?.hasChanges).toBe(true);
     }
-    // Four comparisons, one porcelain+tracking read, three fork-point probes,
-    // and one cold policy read per workspace. Later refreshes can reuse graph state.
-    expect(calls.length).toBeLessThanOrEqual(36);
+    // Four comparisons, one shared porcelain read for the summaries, one fresh
+    // status (status never joins an earlier read), three fork-point probes and
+    // one cold policy read per workspace. Later refreshes reuse graph state.
+    expect(calls.length).toBeLessThanOrEqual(40);
   });
 
   it("keeps every observation from refreshing the index", async () => {
@@ -144,6 +145,8 @@ describe("Local change snapshot process budget", () => {
     }
     const calls = await spawns();
     console.info(JSON.stringify({ scenario, workspaces: 4, generations, gitSpawns: calls.length, elapsedMs: Math.round(performance.now() - startedAt) }));
-    expect(calls.length).toBeLessThanOrEqual(scenario === "idle-minute" ? 300 : 220);
+    // Every refresh also asks each workspace for a fresh status, as a visible
+    // Changes list does; only the summaries share one porcelain read.
+    expect(calls.length).toBeLessThanOrEqual(scenario === "idle-minute" ? 348 : 260);
   });
 });

@@ -34,7 +34,7 @@ export function workspaceChangeKey(workspace: Workspace, remote: string): string
 
 /** All consumers of a Local refresh lease the same lazy snapshot. Hold it
  * through their comparisons, not just through the initial porcelain read.
- * An invalidation queues the next generation until the old readers finish. */
+ * An invalidated generation keeps serving only the readers it already has. */
 export function createWorkspaceChangeSnapshot<T>(
   create: (workspace: Workspace, remote: string) => T,
   canJoin: (snapshot: T) => boolean = () => true,
@@ -43,25 +43,20 @@ export function createWorkspaceChangeSnapshot<T>(
     value: T;
     initialRevision: number;
     readers: number;
-    retired: Promise<void>;
-    retire: () => void;
   }
   const snapshots = new Map<string, Snapshot>();
   return async function readSnapshot<R>(workspace: Workspace, remote: string, read: (snapshot: T) => Promise<R>): Promise<R> {
     const key = workspaceChangeKey(workspace, remote);
     let entry = snapshots.get(key);
-    while (entry && entry.initialRevision !== entry.revision) {
-      await entry.retired;
-      entry = snapshots.get(key);
-    }
-    // A slow existing reader may finish its own snapshot, but cannot keep
-    // lending an old observation to newly mounted or refreshing consumers.
-    if (entry && !canJoin(entry.value)) entry = undefined;
+    // After an invalidation the next reader starts a new generation at once.
+    // Waiting for the old readers to finish could queue a foreground read
+    // behind background work held in the bounded summary lane. A slow existing
+    // reader likewise cannot keep lending an old observation to newly mounted
+    // or refreshing consumers.
+    if (entry && (entry.initialRevision !== entry.revision || !canJoin(entry.value))) entry = undefined;
     if (!entry) {
-      let retire!: () => void;
-      const retired = new Promise<void>((done) => { retire = done; });
       entry = { workspaceId: workspace.id, root: path.resolve(workspace.path), revision: 0,
-        initialRevision: 0, readers: 0, value: create(workspace, remote), retired, retire };
+        initialRevision: 0, readers: 0, value: create(workspace, remote) };
       snapshots.set(key, entry);
       activeFlights.add(entry);
     }
@@ -73,7 +68,6 @@ export function createWorkspaceChangeSnapshot<T>(
       if (entry.readers === 0) {
         if (snapshots.get(key) === entry) snapshots.delete(key);
         activeFlights.delete(entry);
-        entry.retire();
       }
     }
   };

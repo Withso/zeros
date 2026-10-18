@@ -224,6 +224,7 @@ function parseLocalStatus(output: string, trackingMeasured: boolean): LocalStatu
     tracking: { ahead: null, behind: null, upstream: null }, trackingMeasured };
   const entries: PorcelainEntry[] = [];
   const records = output.split("\0");
+  let sawAheadBehind = false;
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index]!;
     if (record.startsWith("# branch.oid ")) {
@@ -235,6 +236,7 @@ function parseLocalStatus(output: string, trackingMeasured: boolean): LocalStatu
     } else if (record.startsWith("# branch.upstream ")) {
       result.tracking.upstream = record.slice(18);
     } else if (record.startsWith("# branch.ab ")) {
+      sawAheadBehind = true;
       const counts = /^# branch\.ab \+(\d+) -(\d+)$/.exec(record);
       if (counts) {
         result.tracking.ahead = Number(counts[1]);
@@ -251,6 +253,10 @@ function parseLocalStatus(output: string, trackingMeasured: boolean): LocalStatu
         ...(fields[0] === "2" ? { oldPath: records[++index] ?? "" } : {}) });
     }
   }
+  // Git names a configured upstream even after its ref is gone (a merged PR
+  // branch deleted and pruned) and then omits the counts line. Report it the
+  // way `@{upstream}` resolution does: no upstream.
+  if (trackingMeasured && !sawAheadBehind) result.tracking.upstream = null;
   result.parsed = bucketPorcelain(entries);
   return result;
 }
@@ -358,8 +364,13 @@ export async function status(
 ): Promise<StatusResult> {
   const ws = await resolveRepoForGitOp(workspaceId);
   if (ws.placement !== "cloud" && options.paths === undefined) {
+    // A status answers "what is on disk now": the Changes list and the
+    // destructive Reset/Clean guards read it. Never join a shared summary
+    // snapshot that may predate a file the caller can already see; run one
+    // fresh porcelain v2 read, in the foreground lane.
     const { remote } = resolveRepoGit(ws.repoRoot);
-    return withLocalChangeSnapshot(ws, remote, async (snapshot) => {
+    const snapshot = new LocalChangeSnapshot(ws, remote);
+    return withGitReadLane(new GitReadLane(false), async () => {
       const observed = await snapshot.readStatus(options.includeTracking !== false);
       const tracking = options.includeTracking === false ? { ahead: null, behind: null, upstream: null }
         : observed.trackingMeasured ? observed.tracking : await upstreamAheadBehind(ws.path);
