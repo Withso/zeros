@@ -172,8 +172,10 @@ export function createDesignLayoutDropResolver(
         throw new Error("This layer has unsupported or non-invertible coordinates and cannot be moved safely.");
       if (sameParent && node.parentCoordinateSpace && node.layout) {
         const local = designParentDelta(node.parentCoordinateSpace, delta);
-        styles.left = `${node.layout.x - margin.x + local.x}px`;
-        styles.top = `${node.layout.y - margin.y + local.y}px`;
+        const left = parseFloat(node.styles.left ?? "");
+        const top = parseFloat(node.styles.top ?? "");
+        styles.left = `${(Number.isFinite(left) ? left : node.layout.x - margin.x) + local.x}px`;
+        styles.top = `${(Number.isFinite(top) ? top : node.layout.y - margin.y) + local.y}px`;
       } else if (node.borderCoordinateSpace && parent.childCoordinateSpace) {
         Object.assign(styles, designRelocatedBorderStyles({ border: node.borderCoordinateSpace, parent: parent.childCoordinateSpace, delta, margin }));
       }

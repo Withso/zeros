@@ -1649,6 +1649,25 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function parentCoordinateSpaceOf(element) {
     var parent = element.parentElement;
+    var position = getComputedStyle(element).position;
+    if (position === "absolute" || position === "fixed") {
+      for (var candidate = parent; candidate; candidate = candidate.parentElement) {
+        var style = getComputedStyle(candidate);
+        if ((position === "absolute" && style.position !== "static") ||
+            (style.transform && style.transform !== "none") ||
+            (style.translate && style.translate !== "none") ||
+            (style.rotate && style.rotate !== "none") ||
+            (style.scale && style.scale !== "none") ||
+            (style.filter && style.filter !== "none") ||
+            (style.backdropFilter && style.backdropFilter !== "none") ||
+            (style.perspective && style.perspective !== "none") ||
+            /paint|layout|strict|content/.test(style.contain || "") ||
+            /transform|translate|rotate|scale|filter|perspective/.test(style.willChange || "")) {
+          return childCoordinateSpaceOf(candidate, style, rectOf(candidate)) || null;
+        }
+      }
+      return [1, 0, 0, 1, position === "fixed" ? 0 : -window.scrollX, position === "fixed" ? 0 : -window.scrollY];
+    }
     return parent ? childCoordinateSpaceOf(parent, getComputedStyle(parent), rectOf(parent)) || null : [1, 0, 0, 1, 0, 0];
   }
 
@@ -1750,7 +1769,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       childCoordinateSpace: childCoordinateSpaceOf(element, computed, rect),
       borderCoordinateSpace: borderCoordinateSpaceOf(element, computed, rect),
       parentCoordinateSpace: parentCoordinateSpaceOf(element),
-      styles: layoutOnly ? Object.fromEntries(["display", "position", "width", "height", "boxSizing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "marginTop", "marginRight", "marginBottom", "marginLeft", "flexDirection", "flexWrap", "direction", "order", "gridColumnStart", "gridColumnEnd", "gridRowStart", "gridRowEnd"].map(function (key) { return [key, computed[key] || ""]; })) : stylesOf(computed, authoredStyleProperties),
+      styles: layoutOnly ? Object.fromEntries(["display", "position", "left", "top", "width", "height", "boxSizing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "marginTop", "marginRight", "marginBottom", "marginLeft", "flexDirection", "flexWrap", "direction", "order", "gridColumnStart", "gridColumnEnd", "gridRowStart", "gridRowEnd"].map(function (key) { return [key, computed[key] || ""]; })) : stylesOf(computed, authoredStyleProperties),
       authoredStyleProperties: authoredStyleProperties
     };
     if (textEditable && !layoutOnly) result.textSizing = textSizingOf(element);

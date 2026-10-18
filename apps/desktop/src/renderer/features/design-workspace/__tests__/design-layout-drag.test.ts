@@ -47,6 +47,12 @@ const a = node("a", "root", 0, 0);
 const b = node("b", "root", 110, 0);
 const c = node("c", "root", 220, 0);
 describe("canvas layout drop intent", () => {
+  it("keeps an absolute child's containing-block offsets when its immediate parent is static", () => {
+    const parent = node("parent", "root", 100, 0, 400, 300);
+    parent.styles.position = "static";
+    const child = { ...node("child", "parent", 20, 30, 40, 30), parentCoordinateSpace: [1, 0, 0, 1, 0, 0], styles: { position: "absolute", left: "20px", top: "30px" }, layout: { ...a.layout!, parentId: "parent", x: -80, y: 30, isContainingBlock: false } } as DesignRuntimeNodeDetails;
+    expect(designLayoutDrop(child, [parent, child], { x: 150, y: 100 }, { x: 80, y: 30 })?.styles).toMatchObject({ left: "80px", top: "30px" });
+  });
   it.each([0.5, 1, 8])("uses the moved center and screen-space boundary hysteresis at zoom %s", (zoom) => {
     const outer = node("outer", null, 0, 0, 900, 700);
     const inner = node("inner", "outer", 100, 100, 200, 200);

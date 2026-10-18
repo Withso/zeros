@@ -13,6 +13,10 @@ describe("layout drag geometry", () => {
       }>((resolve, reject) => {
         document.head.innerHTML = "<style>body{margin:0}*{box-sizing:border-box}</style>";
         document.body.innerHTML = '<main data-oid="root" style="position:relative;width:1200px;height:900px"><div data-oid="parent" style="position:absolute;left:400px;top:200px;width:300px;height:200px;border:10px solid;transform:rotate(30deg) scale(-2,3);transform-origin:0 0"><div data-oid="child" style="position:absolute;left:20px;top:30px;width:100px;height:80px;transform:rotate(15deg);transform-origin:0 0"></div></div><div data-oid="singular" style="width:10px;height:10px;transform:scale(0)"></div><div style="perspective:500px"><div data-oid="perspective" style="width:10px;height:10px;transform:rotateY(20deg)"></div></div></main>';
+        const staticParent = document.createElement("div");
+        staticParent.style.marginLeft = "200px";
+        staticParent.innerHTML = '<div data-oid="static-child" style="position:absolute;left:20px;top:30px;width:40px;height:30px"></div>';
+        document.querySelector('[data-oid="root"]')!.append(staticParent);
         const element = document.querySelector('[data-oid="child"]')!;
         const corners = [[0, 0], [100, 0], [100, 80], [0, 80]].map(([x, y]) => {
           const marker = document.createElement("i");
@@ -26,7 +30,7 @@ describe("layout drag geometry", () => {
         Object.assign(window, { __zerosDesignSourceVersion: sourceVersion });
         const channel = new MessageChannel();
         const timeout = window.setTimeout(() => reject(new Error("Affine geometry timed out")), 3_000);
-        const ids = ["child", "singular", "perspective"];
+        const ids = ["child", "singular", "perspective", "static-child"];
         const details: DesignRuntimeNodeDetails[] = [];
         const request = () => channel.port1.postMessage({ protocol: "zeros-design-runtime", version: 2, type: "request", sourceVersion, requestId: ids[details.length], method: "getNodeDetails", args: { nodeId: ids[details.length] } });
         channel.port1.onmessage = ({ data }) => {
@@ -52,6 +56,7 @@ describe("layout drag geometry", () => {
       }
       expect(result.details[1]!.borderCoordinateSpace).toBeNull();
       expect(result.details[2]!.borderCoordinateSpace).toBeNull();
+      expect(result.details[3]!.parentCoordinateSpace).toEqual([1, 0, 0, 1, 0, 0]);
     } finally {
       await browser.close();
     }

@@ -135,6 +135,7 @@ export function startDesignLayoutDrag(input: {
     const updates = [{ nodeId: details.oid, styles: drop.styles }];
     if (
       parent &&
+      parent.oid !== details.layout?.parentId &&
       drop.styles.position === "absolute" &&
       parent.styles.position === "static"
     )
@@ -351,6 +352,7 @@ export function startDesignLayoutDrag(input: {
       ];
       if (
         parent &&
+        parent.oid !== details.layout?.parentId &&
         drop.styles.position === "absolute" &&
         parent.styles.position === "static"
       )
