@@ -59,6 +59,22 @@ function harness(overrides: Partial<CloudWorkspaceInternalSetupService> = {}) {
 }
 
 describe("cloud workspace internal setup routes", () => {
+  it("negotiates performance only with all older envelopes after successful v4 redemption", async () => {
+    const { app, service } = harness();
+    const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json",
+      "x-zeros-setup-timings": "1", "x-zeros-setup-observations": "1", "x-zeros-setup-performance": "1" };
+    const input = { ...body, materialVersion: 2, runtime: runtimeWitness };
+    const request = (sent = headers, value: unknown = input) => app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH,
+      { method: "POST", headers: sent, body: JSON.stringify(value) });
+    const accepted = await request();
+    expect(accepted.headers.get("x-zeros-setup-performance")).toBe("1");
+    expect(await accepted.json()).toEqual({ version: 1, material: "secret" });
+    for (const field of ["x-zeros-setup-timings", "x-zeros-setup-observations", "x-zeros-setup-performance"])
+      expect((await request({ ...headers, [field]: "unknown" })).headers.get("x-zeros-setup-performance")).toBeNull();
+    expect((await request(headers, body)).headers.get("x-zeros-setup-performance")).toBeNull();
+    vi.mocked(service.redeem).mockRejectedValueOnce(new CloudWorkspaceSetupMaterialError("setup_admission_rejected", "closed", false));
+    expect((await request()).headers.get("x-zeros-setup-performance")).toBeNull();
+  });
   it("negotiates timing output outside the immutable setup material only after successful v4 redemption", async () => {
     const { app, service } = harness();
     const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json", "x-zeros-setup-timings": "1", "x-zeros-setup-observations": "1" };
