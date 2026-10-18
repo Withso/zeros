@@ -844,10 +844,10 @@ export class CloudWorkspaceReconciler {
       [intent.workspaceId, intent.orgId, intent.generation, intent.providerResourceId]);
       if (!workspace || workspace.current_generation !== intent.generation || workspace.desired_state !== "running" ||
           workspace.authority_epoch !== intent.authorityEpoch || workspace.agent_boot_id !== intent.sourceBindingId || !binding.rowCount) {
-        // A held provider response cannot drain a replacement source. Release
-        // only our claim; the next pass must observe the current exact scope.
-        await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='queued',lease_owner=NULL,lease_expires_at=NULL,
-          next_attempt_at=now(),updated_at=now() WHERE id=$1`, [intent.id]);
+        // A held provider response cannot act on a replacement source. End the
+        // stale intent; requeueing would adopt newer authority on its next claim.
+        await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),
+          lease_owner=NULL,lease_expires_at=NULL,error_code=NULL,error_message=NULL,updated_at=now() WHERE id=$1`, [intent.id]);
         return true;
       }
       const drain = await preserveCloudWorkspaceWakeDrain(tx, {

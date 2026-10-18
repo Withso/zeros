@@ -26,3 +26,9 @@
   Include an expired capture written by an older worker and a settled failed
   drain from before the current engine: the former must make progress, while
   the latter must not revoke a healthy successor on a warm no-op wake.
+- Stale-authority lesson: rejecting one held observation is insufficient if
+  its intent is requeued and adopts the replacement authority on its next claim.
+  Supersede the still-owned stale intent and leave newer setup untouched. Run
+  `automatic-recovery.integration.test.ts` with the wake and reconciler suites;
+  its retained two-pass probe catches the later cancellation as well as the
+  existing first-pass stale-epoch regression.
