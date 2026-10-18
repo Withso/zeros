@@ -55,7 +55,8 @@ export class DatabaseCloudIdleStop {
       await tx.query(`WITH cancelled AS (UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=now(),error_code='workspace_active'
         WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4 AND state IN ('queued','delivered') RETURNING lifecycle_intent_id)
         UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),updated_at=now(),error_code='workspace_active'
-        WHERE id IN (SELECT lifecycle_intent_id FROM cancelled) AND state IN ('queued','observing')`,
+        WHERE id IN (SELECT lifecycle_intent_id FROM cancelled) AND state IN ('queued','observing')
+          AND NOT cloud_workspace_drain_is_mandatory(id)`,
       [requestId, scope.workspaceId, scope.organizationId, scope.generation]);
     });
   }

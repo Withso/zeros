@@ -381,6 +381,25 @@ suite("automatic Boat checkpoint recovery", () => {
     expect((await pool.query("SELECT 1 FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(0);
   });
 
+  it("does not let a stale wake cancel the newer setup on its next worker pass", async () => {
+    const newerSetupId = randomUUID();
+    let advanced = false;
+    const f = await missingSnapshotWake({ duringInspect: async () => {
+      if (advanced) return;
+      advanced = true;
+      await pool.query("UPDATE cloud_workspaces SET authority_epoch=authority_epoch+1,status='waking' WHERE id=$1", [fixture.workspaceId]);
+      await pool.query(`INSERT INTO cloud_workspace_setup_runs(id,workspace_id,generation,org_id,attempt,state)
+        VALUES($1,$2,1,$3,3,'queued')`, [newerSetupId, fixture.workspaceId, fixture.organizationId]);
+    } });
+    expect((await pool.query("SELECT state FROM cloud_workspace_setup_runs WHERE id=$1", [newerSetupId])).rows[0].state).toBe("queued");
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(0);
+    await f.reconciler.runOnce();
+    expect((await pool.query("SELECT state FROM cloud_workspace_setup_runs WHERE id=$1", [newerSetupId])).rows[0].state).toBe("queued");
+    expect((await pool.query("SELECT status FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].status).toBe("waking");
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [f.wakeId])).rows[0].state).toBe("superseded");
+  });
+
   it("fences a predecessor recovery worker that would copy the expired Computer pin", async () => {
     await currentComputer(); const f = await missingSnapshotWake(); await f.reconciler.runOnce();
     const source = (await pool.query("SELECT provider_connection_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];

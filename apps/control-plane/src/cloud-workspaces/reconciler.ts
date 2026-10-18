@@ -37,6 +37,7 @@ import {
   type LifecycleWork,
 } from "./lifecycle-jobs.js";
 import { prepareCloudWorkspaceStopSeal } from "./stop-seal.js";
+import { deferCloudWorkspaceWakeForDrain, preserveCloudWorkspaceWakeDrain } from "./wake-drain.js";
 import { runCloudDiagnosticCleanup } from "./cloud-diagnostic-store.js";
 import {
   advanceCloudWorkspaceGenerationTransitionAfterDrain,
@@ -75,6 +76,8 @@ type ClaimedIntent = {
   generationWasCurrent: boolean;
   generationTransitionId: string | null;
   authorityEpoch: string;
+  sourceBindingId: string | null;
+  requestedBy: string | null;
 };
 
 type DriftCandidate = {
@@ -505,7 +508,7 @@ export class CloudWorkspaceReconciler {
     if (processed > 0 && work !== "lifecycle") this.jobs.notify();
   }
 
-  private async claimIntent(workspaceId: string | null = null): Promise<ClaimedIntent | null> {
+  private async claimIntent(workspaceId: string | null = null): Promise<ClaimedIntent | { deferred: true } | null> {
     return withSystemTx(this.pool, async (tx) => {
       const result = await tx.query<{
         id: string;
@@ -528,9 +531,13 @@ export class CloudWorkspaceReconciler {
         checkpoint_request_id: string | null;
         checkpoint_request_state: string | null;
         authority_epoch: string;
+        agent_boot_id: string | null;
+        requested_by: string | null;
+        created_at: Date;
       }>(
         `SELECT i.id, i.workspace_id, i.org_id, i.operation,
-                cw.desired_state, cw.current_generation, cw.authority_epoch, i.generation,
+                cw.desired_state, cw.current_generation, cw.authority_epoch, cw.agent_boot_id, i.generation,
+                i.requested_by,i.created_at,
                 i.affects_workspace, i.generation_transition_id, g.provider,
                 g.image_ref, g.architecture, g.cpu_millicores,
                 g.memory_mib, g.storage_mib, pb.provider_resource_id,
@@ -585,6 +592,20 @@ export class CloudWorkspaceReconciler {
       const row = result.rows[0];
       if (!row) return null;
 
+      if (row.operation === "wake" && row.affects_workspace && row.current_generation === row.generation && row.desired_state === "running") {
+        // Cover requests admitted by an older route, including those with no
+        // checkpoint or explicit prerequisite. Do this before the SQL claim
+        // fence, which also protects against older reconciler replicas.
+        const drain = await preserveCloudWorkspaceWakeDrain(tx, {
+          workspaceId: row.workspace_id, organizationId: row.org_id, generation: row.generation,
+          retireSource: true, sourceBefore: row.created_at, retryFailed: row.requested_by !== null,
+        });
+        if (drain) {
+          await deferCloudWorkspaceWakeForDrain(tx, row.id, drain);
+          return { deferred: true };
+        }
+      }
+
       if ((row.operation === "stop" || row.operation === "archive" || row.operation === "delete") &&
           !await prepareCloudWorkspaceStopSeal(tx, {
             workspaceId: row.workspace_id, organizationId: row.org_id, generation: row.generation,
@@ -631,6 +652,18 @@ export class CloudWorkspaceReconciler {
                 : "workspace_delete_requested",
         });
       }
+      if (!row.affects_workspace && row.current_generation === row.generation && row.desired_state === "running" &&
+          ["stop", "archive"].includes(row.operation) && (await tx.query(
+            "SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE resume_after_intent_id=$1 AND operation='wake' AND state IN ('queued','observing') LIMIT 1", [row.id],
+          )).rowCount) {
+        // Capture has finished. Keep the dependent wake visible through the
+        // stop, rather than advertising a warm ready VM that may no longer run.
+        const advanced = await tx.query<{ authority_epoch: string }>(`UPDATE cloud_workspaces SET status='waking',
+          authority_epoch=authority_epoch+1,version=version+1,updated_at=now() WHERE id=$1 RETURNING authority_epoch`, [row.workspace_id]);
+        authorityEpoch = advanced.rows[0]!.authority_epoch;
+        await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId: row.workspace_id, organizationId: row.org_id,
+          generation: row.generation, reason: "workspace_stop_requested" });
+      }
       await tx.query(
         `UPDATE cloud_workspace_lifecycle_intents
          SET state = 'dispatching', attempt_count = attempt_count + 1,
@@ -660,6 +693,8 @@ export class CloudWorkspaceReconciler {
         generationWasCurrent: row.generation === row.current_generation,
         generationTransitionId: row.generation_transition_id,
         authorityEpoch,
+        sourceBindingId: row.agent_boot_id,
+        requestedBy: row.requested_by,
       };
     });
   }
@@ -667,6 +702,7 @@ export class CloudWorkspaceReconciler {
   async runOnce(workspaceId: string | null = null): Promise<boolean> {
     const intent = await this.claimIntent(workspaceId);
     if (!intent) return false;
+    if ("deferred" in intent) return true;
     const mayUpgradeOnWake = !!this.runtimeUpgradeConfig && intent.affectsWorkspace &&
       !intent.generationTransitionId && ["create", "wake"].includes(intent.operation);
     let provider: CloudWorkspaceProvider;
@@ -730,6 +766,9 @@ export class CloudWorkspaceReconciler {
         return true;
       }
 
+      if (["create", "wake"].includes(intent.operation) && intent.affectsWorkspace &&
+          await this.deferWakeUntilSourceRetired(intent, current)) return true;
+
       if (intent.operation === "wake" && intent.affectsWorkspace && !intent.generationTransitionId &&
           provider.name === "boat" && current?.state === "failed" && current.computeStopped === true &&
           current.metadata.snapshotMissing === true)
@@ -788,6 +827,38 @@ export class CloudWorkspaceReconciler {
       await this.recordFailure(intent, error, current);
     }
     return true;
+  }
+
+  private async deferWakeUntilSourceRetired(intent: ClaimedIntent, resource: CloudProviderResource | null): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => {
+      await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [intent.orgId]);
+      const workspace = (await tx.query<{ current_generation: number; desired_state: string; authority_epoch: string; agent_boot_id: string | null }>(
+        "SELECT current_generation,desired_state,authority_epoch,agent_boot_id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE",
+        [intent.workspaceId, intent.orgId])).rows[0];
+      const owned = await tx.query(`SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE id=$1 AND workspace_id=$2 AND org_id=$3
+        AND generation=$4 AND state='dispatching' AND lease_owner=$5 AND lease_expires_at>clock_timestamp() FOR UPDATE`,
+      [intent.id, intent.workspaceId, intent.orgId, intent.generation, this.workerId]);
+      if (!owned.rowCount) return true;
+      const binding = await tx.query(`SELECT 1 FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND org_id=$2 AND generation=$3
+        AND provider_resource_id IS NOT DISTINCT FROM $4::text FOR UPDATE`,
+      [intent.workspaceId, intent.orgId, intent.generation, intent.providerResourceId]);
+      if (!workspace || workspace.current_generation !== intent.generation || workspace.desired_state !== "running" ||
+          workspace.authority_epoch !== intent.authorityEpoch || workspace.agent_boot_id !== intent.sourceBindingId || !binding.rowCount) {
+        // A held provider response cannot act on a replacement source. End the
+        // stale intent; requeueing would adopt newer authority on its next claim.
+        await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),
+          lease_owner=NULL,lease_expires_at=NULL,error_code=NULL,error_message=NULL,updated_at=now() WHERE id=$1`, [intent.id]);
+        return true;
+      }
+      const drain = await preserveCloudWorkspaceWakeDrain(tx, {
+        workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+        retireSource: !!resource && resource.state !== "running" && (!isTransitional(resource) || resource.computeStopped === true),
+        retryFailed: intent.requestedBy !== null,
+      });
+      if (!drain) return false;
+      await deferCloudWorkspaceWakeForDrain(tx, intent.id, drain);
+      return true;
+    });
   }
 
   private async observe(
@@ -1459,8 +1530,8 @@ export class CloudWorkspaceReconciler {
       }
       if (!(await tx.query(
         `SELECT 1 FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2
-         AND next_drift_check_at=$3 FOR UPDATE`,
-        [candidate.workspaceId,candidate.generation,candidate.driftLeaseUntil],
+         AND next_drift_check_at=$3 AND provider_resource_id IS NOT DISTINCT FROM $4::text FOR UPDATE`,
+        [candidate.workspaceId,candidate.generation,candidate.driftLeaseUntil,candidate.providerResourceId],
       )).rowCount) return;
       const observedState =
         resource?.state ??
@@ -1554,13 +1625,21 @@ export class CloudWorkspaceReconciler {
       }
       if (isTransitional(resource)) return;
 
+      // A terminal drain failure belongs to its failed wake. Only an explicit
+      // owner retry can reopen it; background drift must not create a loop.
+      if (operation === "wake" && workspace.status === "failed" && workspace.last_error_code === "workspace_drain_failed") return;
+
       const intentId = randomUUID();
       const key = `system:drift:${randomUUID()}`;
+      const drain = operation === "wake" && resource && ["stopped", "archived"].includes(resource.state)
+        ? await preserveCloudWorkspaceWakeDrain(tx, { workspaceId: candidate.workspaceId, organizationId: candidate.orgId,
+          generation: candidate.generation, retireSource: true, retryFailed: false }) : null;
+      const drainIntentId = drain?.id ?? null;
       await tx.query(
         `INSERT INTO cloud_workspace_lifecycle_intents (
            id, workspace_id, generation, org_id, requested_by, operation,
-           idempotency_key, request_sha256
-         ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7)`,
+           idempotency_key, request_sha256, resume_after_intent_id
+         ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8)`,
         [
           intentId,
           candidate.workspaceId,
@@ -1574,6 +1653,7 @@ export class CloudWorkspaceReconciler {
             desiredState: workspace.desired_state,
             reason: "provider_drift",
           }),
+          drainIntentId,
         ],
       );
       await tx.query(
@@ -1586,11 +1666,13 @@ export class CloudWorkspaceReconciler {
           statusForObserved(workspace.desired_state, resource),
         ],
       );
+      if (drain?.failed) await deferCloudWorkspaceWakeForDrain(tx, intentId, drain);
       await audit(tx, candidate.orgId, null, "cloud_workspace.drift_detected", {
         workspaceId: candidate.workspaceId,
         intentId,
         desiredState: workspace.desired_state,
         providerState: observedState,
+        ...(drainIntentId ? { drainIntentId } : {}),
       });
     });
     return true;

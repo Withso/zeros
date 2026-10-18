@@ -153,6 +153,32 @@ suite("verified inactivity shutdown", () => {
     await expect(commit()).rejects.toThrow();
     expect((await pool.query("SELECT state FROM workspace_checkpoint_requests WHERE id=$1", [directive.id])).rows[0].state).toBe("cancelled");
   });
+  it("keeps a wake pending when its mandatory capture succeeds before provider stop", async () => {
+    const { directive, commit } = await finalCheckpoint();
+    const stopId = (await pool.query("SELECT lifecycle_intent_id FROM workspace_checkpoint_requests WHERE id=$1", [directive.id])).rows[0].lifecycle_intent_id;
+    // A durable dependent wake makes this drain mandatory before capture
+    // completes, just as an adopted compute safety stop does.
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents
+      (workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,resume_after_intent_id)
+      VALUES($1,1,$2,$3,'wake',$4,$5,$6)`, [fixture.workspaceId, fixture.organizationId, fixture.userId, randomUUID(), randomBytes(32), stopId]);
+    const response = await lifecycle("wake");
+    expect(response.status).toBe(202);
+    const wakeId = (await response.json()).intent.id;
+    await commit();
+    let starts = 0;
+    let resource: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1,
+      resourceId: `sandbox-${fixture.workspaceId}`, state: "running", target: null, metadata: {} };
+    const provider: CloudWorkspaceProvider = { name: "boat", async find() { return [resource]; }, async inspect() { return resource; },
+      async create() { throw new Error("unused"); }, async start() { starts++; resource = { ...resource, state: "running" }; return resource; },
+      async stop() { resource = { ...resource, state: "stopped" }; return resource; }, async archive() { return resource; }, async delete() {}, async *listManaged() {} };
+    const worker = new CloudWorkspaceReconciler({ pool, provider, intervalMs: 1000 });
+    expect(await worker.runOnce()).toBe(true);
+    expect((await pool.query("SELECT status FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].status).toBe("waking");
+    expect((await lifecycle("wake")).status).toBe(202);
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [wakeId])).rows[0].state).toBe("queued");
+    expect(await worker.runOnce()).toBe(true);
+    expect(starts).toBe(1);
+  });
   it.each(["archive", "delete"])("reuses a committed final proof for %s without requesting the quiesced engine again", async operation => {
     const { commit } = await finalCheckpoint(); await commit();
     expect((await lifecycle(operation)).status).toBe(202);

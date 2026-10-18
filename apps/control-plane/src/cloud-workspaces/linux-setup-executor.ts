@@ -452,6 +452,8 @@ function helperFailure(
         const checkpointCode = parsed.code === "engine_readiness_failed" && diagnostic?.engineStartup?.phase === "history_restore" &&
           diagnostic.engineStartup.name === "CloudCommandRuntimeError" && diagnostic.engineStartup.code.startsWith("checkpoint_")
           ? diagnostic.engineStartup.code : null;
+        const historyRecoveryRejected = parsed.code === "engine_readiness_failed" && diagnostic?.engineStartup?.phase === "history_restore" &&
+          diagnostic.engineStartup.name === "CloudAgentExecutionError" && diagnostic.engineStartup.code === "cloud_validation_access_denied";
         // Re-running the same pin cannot produce a missing predecessor seal
         // or authorize an older artifact. Preserve custody and stop this claim
         // once; only an explicit authenticated recovery may bridge that gap.
@@ -471,7 +473,7 @@ function helperFailure(
         return Object.assign(setupError(
           checkpointFailure?.code ?? mapped.code,
           "Cloud workspace setup helper did not complete",
-          credentialFenceRejected || parsed.code === "computer_environment_revoked" || (execution.runtime && ["setup_command_failed", "setup_hook_retry_required"].includes(parsed.code)) ? false : checkpointFailure?.retryable ?? (mapped.retryable || restoringBoatImage),
+          credentialFenceRejected || historyRecoveryRejected || parsed.code === "computer_environment_revoked" || (execution.runtime && ["setup_command_failed", "setup_hook_retry_required"].includes(parsed.code)) ? false : checkpointFailure?.retryable ?? (mapped.retryable || restoringBoatImage),
         ), parsed.version === 2 || parsed.version === 3 ? { diagnostic: diagnostic! } : {},
         parsed.version === 3 ? { hookLog: parseCloudWorkspaceSetupHookLog(parsed.hookLog)! } : {});
       }

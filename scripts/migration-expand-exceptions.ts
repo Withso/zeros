@@ -66,6 +66,16 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
       "REVOKE ALL ON FUNCTION recheck_cloud_workspace_compute_leases() FROM PUBLIC;",
     ],
   },
+  "0162_cloud_workspace_mandatory_drains.sql": {
+    // PUBLIC's default EXECUTE on functions created in the same migration.
+    "privilege-tightening": [
+      "cloud_workspace_drain_is_mandatory(uuid)",
+      "cloud_workspace_preserve_capture_deadline()",
+      "cloud_workspace_preserve_mandatory_drain()",
+      "cloud_workspace_preserve_mandatory_wake()",
+      "cloud_workspace_require_retired_wake_source()",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+  },
   "0149_cloud_rollout_flags.sql": {
     // A guard that rejects TRUNCATE cannot truncate.
     "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate

@@ -63,6 +63,13 @@ worker escalates the same intent, records the checkpoint request as cancelled
 with `stop_unsealed`, and retires authority before provider dispatch. It never
 marks an incomplete checkpoint successful or extends the funded window.
 
+Once a lease adopts a safety stop, cancelling final capture cannot cancel that
+stop or reset its deadline. A wake, including an otherwise warm no-op, waits
+on the same mandatory drain. The cancelled capture remains cancelled until
+the original deadline or a tighter budget limit requires `stop_unsealed`.
+Ordinary idle captures remain reversible when work resumes. Database guards
+preserve mandatory drains across older lifecycle writers during rollout.
+
 Final checkpoint completion also requires the active native command writer's
 seal. Every lifecycle stop, archive and delete checks that gate before provider
 dispatch; direct deletion settlement without an admitted stop first requests
@@ -74,6 +81,13 @@ records an unsealed stop decision, not positive provider retirement proof.
 Credential retirement still requires the independently confirmed provider
 outcome. A completed seal does not manufacture a missing durable checkpoint,
 and an unsealed receipt does not authorize restore from an older checkpoint.
+
+A cold wake also needs positive retirement of its previous boot source before
+runtime replacement, allocation or provider start. Owner requests, queued
+legacy wakes and drift use the same prerequisite. A terminal drain failure
+stays visible; a fresh owner retry requeues it without treating revocation as
+retirement or shortening an active provider backoff. Warm receipts with no
+mandatory drain and already retired sources do not require another stop.
 
 Retryable provider failures on an active allocation retain its credit hold and
 retry with the existing 15-second to five-minute backoff while payer, generation,

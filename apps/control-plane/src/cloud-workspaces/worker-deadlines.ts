@@ -34,7 +34,8 @@ const deadlines = {
       END) AS due_at
     FROM workspace_fork_intents fork LEFT JOIN workspace_checkpoint_requests request ON request.fork_intent_id=fork.id
     WHERE fork.state NOT IN ('succeeded','failed','cancelled')`,
-  checkpoints: `SELECT deadline_at AS due_at FROM workspace_checkpoint_requests WHERE state IN ('queued','delivered')`,
+  checkpoints: `SELECT deadline_at AS due_at FROM workspace_checkpoint_requests WHERE state IN ('queued','delivered')
+    UNION ALL SELECT deadline_at FROM workspace_checkpoint_requests WHERE state='cancelled' AND error_code='mandatory_capture_cancelled'`,
   recovery: recoveryWorkDeadlines,
   operations: `SELECT expires_at AS due_at FROM workspace_exports WHERE state='available'
     UNION ALL SELECT expires_at FROM device_request_nonces

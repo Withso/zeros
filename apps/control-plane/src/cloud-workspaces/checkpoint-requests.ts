@@ -7,6 +7,8 @@ import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import { cloudWorkspaceHasActiveWork } from "./idle-workloads.js";
 import { CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL, checkpointHintKey } from "./engine-checkpoint-hints.js";
+import { recordCloudWorkspaceStopUnsealed } from "./stop-seal.js";
+import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 
 export type WorkspaceCheckpointRequestReason =
   | "before_stop"
@@ -273,7 +275,8 @@ export class CloudWorkspaceCheckpointRequestWorker {
           `SELECT request.workspace_id, request.org_id
            FROM organizations organization
            JOIN workspace_checkpoint_requests request ON request.org_id = organization.id
-           WHERE request.state IN ('queued', 'delivered') AND request.deadline_at <= now()
+           WHERE (request.state IN ('queued', 'delivered') OR
+             (request.state='cancelled' AND request.error_code='mandatory_capture_cancelled')) AND request.deadline_at <= now()
              AND NOT (request.workspace_id = ANY($1::uuid[]))
            ORDER BY request.deadline_at, request.id
            FOR UPDATE OF organization SKIP LOCKED LIMIT 1`, [visited],
@@ -288,14 +291,41 @@ export class CloudWorkspaceCheckpointRequestWorker {
         const expired = await tx.query<{
         id: string;
         lifecycle_intent_id: string | null;
+        generation: number;
+        mandatory: boolean;
       }>(
-        `SELECT id, lifecycle_intent_id FROM workspace_checkpoint_requests
-         WHERE workspace_id=$1 AND org_id=$2 AND state IN ('queued','delivered')
+        `SELECT id, lifecycle_intent_id, generation, cloud_workspace_drain_is_mandatory(lifecycle_intent_id) AS mandatory
+         FROM workspace_checkpoint_requests
+         WHERE workspace_id=$1 AND org_id=$2 AND (state IN ('queued','delivered') OR
+           (state='cancelled' AND error_code='mandatory_capture_cancelled'))
            AND deadline_at <= now()
          ORDER BY deadline_at, id LIMIT $3`,
         [candidate.workspace_id,candidate.org_id,100-count],
       );
+      for (const request of expired.rows.filter(row => row.mandatory)) {
+        const intent = (await tx.query<{ operation: "stop" | "archive"; affects_workspace: boolean }>(
+          "SELECT operation,affects_workspace FROM cloud_workspace_lifecycle_intents WHERE id=$1 FOR UPDATE",
+          [request.lifecycle_intent_id])).rows[0]!;
+        // Capture can fail; the mandatory drain cannot disappear or acquire a
+        // new window. This is an explicit unsealed decision, never a checkpoint.
+        await tx.query(`UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=now(),error_code='stop_unsealed'
+          WHERE id=$1`, [request.id]);
+        await recordCloudWorkspaceStopUnsealed(tx, { workspaceId: candidate.workspace_id, organizationId: candidate.org_id,
+          generation: request.generation, intentId: request.lifecycle_intent_id!, checkpointRequestId: request.id, reason: "seal_deadline" });
+        await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId: candidate.workspace_id, organizationId: candidate.org_id,
+          generation: request.generation, reason: intent.operation === "stop" ? "workspace_stop_requested" : "workspace_archive_requested" });
+        await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='queued',completed_at=NULL,
+          lease_owner=NULL,lease_expires_at=NULL,next_attempt_at=now(),updated_at=now() WHERE id=$1`, [request.lifecycle_intent_id]);
+        await tx.query(`UPDATE cloud_workspaces SET
+          desired_state=CASE WHEN $4 THEN $5::cloud_workspace_desired_state ELSE desired_state END,
+          status=CASE WHEN NOT $4 AND desired_state='running' THEN 'waking'::cloud_workspace_status
+            WHEN $5='stopped' THEN 'stopping'::cloud_workspace_status ELSE 'archiving'::cloud_workspace_status END,
+          authority_epoch=authority_epoch+1,version=version+1,updated_at=now()
+          WHERE id=$1 AND org_id=$2 AND current_generation=$3 AND desired_state<>'deleted'`,
+        [candidate.workspace_id, candidate.org_id, request.generation, intent.affects_workspace, intent.operation === "stop" ? "stopped" : "archived"]);
+      }
       const intentIds = expired.rows
+        .filter(row => !row.mandatory)
         .map((row) => row.lifecycle_intent_id)
         .filter((id): id is string => id !== null);
       if (intentIds.length > 0) {
@@ -339,7 +369,7 @@ export class CloudWorkspaceCheckpointRequestWorker {
         `UPDATE workspace_checkpoint_requests
          SET state='expired',completed_at=now(),error_code='checkpoint_deadline_exceeded'
          WHERE id=ANY($1::uuid[]) AND state IN ('queued','delivered') AND deadline_at<=now()`,
-        [expired.rows.map(row=>row.id)],
+        [expired.rows.filter(row=>!row.mandatory).map(row=>row.id)],
       );
       return expired.rowCount ?? 0;
       });
