@@ -51,6 +51,8 @@ migration, publication, adoption and acceptance gates.
   capability (S1), VM uplink (S2) and client (S3) contracts for cloud workspaces.
 - [Realtime service](realtime.md): process roles, graceful drain, resume tokens,
   the VM uplink and the device stream.
+- [Capability actor sessions](capability-actor-sessions.md): the disabled CP
+  admission/renewal mode, reader fences and signed expiry.
 
 ## Behavior guides
 

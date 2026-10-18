@@ -37,7 +37,7 @@ function harness(initial: Array<{ org_id: string; flag: string }> = []) {
 describe("rollout flag snapshot", () => {
   it("registers the initial flags and defaults every organization to off", async () => {
     expect(Object.keys(ROLLOUT_FLAGS).sort()).toEqual([
-      "authority_cache_enforce", "authority_cache_shadow", "capabilities", "checkpoint_push", "cp_idle_stop", "credential_push",
+      "authority_cache_enforce", "authority_cache_shadow", "capabilities", "capability_actor_sessions", "checkpoint_push", "cp_idle_stop", "credential_push",
       "device_stream", "engine_lease_over_uplink", "presence_in_memory", "realtime_uplink", "relay_over_uplink", "runtime_connect",
       "turn_journal",
     ]);

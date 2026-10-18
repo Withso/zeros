@@ -815,6 +815,7 @@ describe("repository layout contracts", () => {
       "agent-connection-health.md",
       "architecture.md",
       "authority-cache.md",
+      "capability-actor-sessions.md",
       "checkpoint-native-format.md",
       "checkpoint-recovery.md",
       "client-runtime-contract.md",

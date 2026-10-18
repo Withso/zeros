@@ -41,6 +41,7 @@ registered `whileFeedUnavailable` value:
 | `relay_over_uplink` | retain | Transport choice; the existing relay remains. |
 | `presence_in_memory` | retain | Transport choice; database presence remains. |
 | `runtime_connect` | retain | Additive endpoints; while off they answer 404 and clients keep `runtime/admission`. |
+| `capability_actor_sessions` | **off** | Replaces short actor renewal with signed expiry. New admission/renewal and current-session readers must stop using it when the flag feed is not current. |
 | `engine_lease_over_uplink` | retain | Changes which path renews the engine lease, not who may hold it: every renewal re-checks authority in SQL and the HTTP heartbeat stays as the fallback. A flip closes the affected uplinks (`1001 features_changed`), so flapping would bounce engines between the two paths. |
 | `checkpoint_push` | retain | Transport choice for a timing hint; the heartbeat still delivers and fences every checkpoint request, and the long-poll remains as fallback. A flip closes the affected uplinks (`1001 features_changed`). |
 | `cp_idle_stop` | retain | Moves who decides an idle stop, not whether the engine proves idleness: the engine cancels a request it cannot prove and its own timer resumes once the uplink is gone. A flip closes the affected uplinks (`1001 features_changed`). |
@@ -60,6 +61,12 @@ complete, so advertising or accepting the uplink alone would loop engines at
 `auth.sync`. Enabling the uplink for an organization is therefore always the
 pair: `capabilities` first, then `realtime_uplink`. `runtime_connect` also
 requires `capabilities`: its endpoints issue S1 client capabilities.
+
+`capability_actor_sessions` requires `capabilities`, `runtime_connect` and
+`realtime_uplink`. It remains off until all CP readers and the exact qualified
+engine implement the explicit mode; merely deploying the schema does not change
+any timer. See [capability actor sessions](capability-actor-sessions.md) for the
+N-1 fence, strict expiry, separate context proofs and rollback behavior.
 
 `engine_lease_over_uplink` requires `realtime_uplink`: the uplink renews the
 36 min engine lease (S2 `lease.v1`). Enable it only once every control-plane

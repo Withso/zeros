@@ -748,7 +748,8 @@ export class DatabaseCloudAgentBootService {
     const recorded=await confirmDetachedCloudActor(tx,scope,actorSessionId,{consistentRead});
     // Non-owner run consent uses the real funding ledger below; never infer
     // shared funding from a renderer role or borrow the funding owner's actor.
-    const fundingGrant=await readCloudAgentFundingConsent(tx,scope,{userId:recorded.actorUserId,role:recorded.role},{passive:consistentRead});
+    const fundingGrant=recorded.permitsRun
+      ?await readCloudAgentFundingConsent(tx,scope,{userId:recorded.actorUserId,role:recorded.role},{passive:consistentRead}):null;
     return CloudActorProvenanceSchema.parse({scope,actor:{userId:recorded.actorUserId,deviceId:recorded.deviceId,deviceKeyVersion:recorded.deviceKeyVersion,
       fingerprint:recorded.fingerprint,role:recorded.role},actorSessionId,authorityEpoch,confirmedUntilMs:recorded.confirmedUntilMs,
       fundingConsentVersion:fundingGrant?1:null,fundingGrant});

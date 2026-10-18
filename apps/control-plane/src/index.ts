@@ -67,6 +67,7 @@ import { DatabaseCloudWorkspaceEventService } from "./cloud-workspaces/event-str
 import { PostgresSecurityEventBroker, SecurityEventPublisher } from "./security-events.js";
 import { RolloutFlagSnapshot } from "./rollout-flags.js";
 import { EngineAuthorityCache, installEngineAuthorityCache } from "./cloud-workspaces/engine-authority-cache.js";
+import { installCapabilityActorSessionFlags } from "./cloud-workspaces/actor-session-authority.js";
 import { CapabilitySigningKeyStore } from "./cloud-workspaces/capability-keys.js";
 import { AuditUplinkSecurityAlerts } from "./realtime/uplink-alerts.js";
 import { DatabaseUplinkCheckpointStore, UplinkCheckpointPush } from "./realtime/uplink-checkpoint.js";
@@ -225,6 +226,7 @@ const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.s
 const rolloutFlagSnapshot = config.cloudWorkspaces && runtimeReady
   ? new RolloutFlagSnapshot({ pool, listenerPool }) : null;
 const rolloutFlagsStarted = rolloutFlagSnapshot?.start();
+installCapabilityActorSessionFlags(rolloutFlagSnapshot ?? undefined);
 // Engine authority cache: shadow comparison and fence-free reads, each behind
 // its rollout flag. Without flags it only holds a LISTEN subscription.
 const engineAuthorityCache = rolloutFlagSnapshot
@@ -616,6 +618,8 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
         cloudWorkspaceEngineClientAdmissionService!.consume(input),
       admitActorClient: (input) => cloudWorkspaceEngineClientAdmissionService!.consumeActor(input),
       admitCapabilityActor: (input) => cloudWorkspaceEngineClientAdmissionService!.admitCapabilityActor(input),
+      admitCapabilitySession: (input) => cloudWorkspaceEngineClientAdmissionService!.admitCapabilitySession(input),
+      renewCapabilitySession: (input) => cloudWorkspaceEngineClientAdmissionService!.renewCapabilitySession(input),
       admitRuntimeAccess: (input) => runtimeAccess.admit(input),
       appendRecord: (input) => recordService.append(input),
       readRecordHead: (input) => recordService.headForEngine(input),
