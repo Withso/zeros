@@ -5,7 +5,7 @@ import type { AuthedUser } from "../auth.js";
 import { HttpError } from "../authz.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import {
   DatabaseCloudWorkspaceDurableRecordService,
@@ -30,8 +30,7 @@ d("cloud history without a running worker", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     records = new DatabaseCloudWorkspaceDurableRecordService({
       pool,

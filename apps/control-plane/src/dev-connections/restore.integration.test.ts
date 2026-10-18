@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedReadyCloudWorkspace } from "../cloud-workspaces/test-fixtures.js";
 import { DatabaseCloudAgentCredentialService } from "../cloud-workspaces/agent-credentials.js";
 import { DevConnectionClient } from "./client.js";
@@ -20,7 +20,7 @@ suite("Dev reference persistence",()=>{
   afterAll(async()=>{await pool?.end();});
   afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();});
   beforeEach(async()=>{
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public"); await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture=await seedReadyCloudWorkspace(pool);
     await pool.query("UPDATE user_identities SET provider_sub='user_dev' WHERE user_id=$1",[fixture.userId]);
     await pool.query("INSERT INTO workos_organization_links(organization_id,workos_organization_id,external_id,state) VALUES($1::uuid,'org_dev',($1::uuid)::text,'active')",[fixture.organizationId]);

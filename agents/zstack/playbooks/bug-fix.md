@@ -35,6 +35,10 @@
    wait.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
+   Before calling a before/after snapshot "stable", sample the live row for a
+   full poll period of every worker that writes it (retry caps included).
+   Tolerate only a flip the system's own pollers make without new evidence,
+   and pin a transition that must still be refused.
    For worker failures, retain the first closed diagnostic before cleanup and
    across reconciliation, including late heartbeats and expired-claim recovery.
    For optional lifecycle evidence, test old strict wires and isolate reporting

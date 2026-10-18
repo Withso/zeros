@@ -1,0 +1,9 @@
+{
+  "id": "job-queue-lost-hint-timing",
+  "kind": "replay",
+  "area": "control-plane-workers",
+  "fixedBy": "pr:564",
+  "symptom": "The job-queue lost-hint test gated on a claim at >= 990 ms and then required the next claim at >= 1990 ms; on a loaded runner the gate resolved on a late hint claim and the correct poll claim landed at 1053 ms.",
+  "rule": "When several sources can wake a loop, assert structural conditions rather than absolute timing floors. See skills/zstack-review/SKILL.md (Tests).",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/job-queue.integration.test.ts"
+}

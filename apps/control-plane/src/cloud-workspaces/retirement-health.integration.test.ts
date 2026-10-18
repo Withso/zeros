@@ -1,7 +1,7 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import { DatabaseCloudWorkspaceHealthService } from "./health.js";
 import { withSystemTx } from "../db.js";
@@ -14,7 +14,7 @@ suite("retirement progress health",()=>{
   let pool:pg.Pool,f:Awaited<ReturnType<typeof seedReadyCloudWorkspace>>;
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:4});});
   afterAll(async()=>{await pool.end();});
-  beforeEach(async()=>{await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await runMigrations(pool);f=await seedReadyCloudWorkspace(pool);});
+  beforeEach(async()=>{await resetMigratedTestDatabase(pool);f=await seedReadyCloudWorkspace(pool);});
   it("alerts on old non-workspace-affecting deletion despite frequent retries",async()=>{
     await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256,affects_workspace,state,created_at,updated_at,next_attempt_at)
       VALUES($1,$2,1,$3,'delete','synthetic-retirement',$4,false,'observing',now()-interval '2 hours',now(),now()+interval '1 minute')`,[randomUUID(),f.workspaceId,f.organizationId,randomBytes(32)]);

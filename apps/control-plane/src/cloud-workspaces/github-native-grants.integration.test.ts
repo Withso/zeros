@@ -18,7 +18,7 @@ import {
   vi,
 } from "vitest";
 import { ensureUser } from "../auth.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   ensureCloudPilotUser,
   seedReadyCloudWorkspace,
@@ -60,8 +60,7 @@ suite("cloud native GitHub authority", () => {
   afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();});
   beforeEach(async () => {
     vi.clearAllMocks();
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({
       workspaceId: fixture.workspaceId,

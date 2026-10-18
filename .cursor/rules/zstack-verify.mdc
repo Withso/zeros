@@ -136,3 +136,11 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   database: migration 0004 creates the cluster-wide `zeros_app` role with a
   check-then-create race. Without Docker or sudo, signature-verified PGDG
   packages unpacked with `dpkg -x` run as an unprivileged user.
+- CI's PostgreSQL runs in a service container in another PID namespace, so a
+  test cannot signal or inspect the server's processes. Reproduce connection
+  races at the protocol layer, for example an in-test TCP relay that holds
+  client bytes, and assert that the race window was actually open.
+- Adding or renaming a file under an audited directory such as `docs/` also
+  needs the expected list in `scripts/__tests__/repository-layout.test.ts`.
+  `pnpm ci:plan` only selects the lane, so run that test before pushing. When
+  two open PRs each add a document, the second to merge adds both.

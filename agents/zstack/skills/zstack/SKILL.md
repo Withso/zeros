@@ -23,6 +23,12 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
   - When a subagent's progress feed is quiet for longer than its usual
     cadence, check its session status through the host and send its next
     step. An idle agent is lost capacity.
+  - Agents sharing a machine run heavy checks through a small number of
+    shared slots, each with a timeout and per-test timeouts: one hung suite
+    holding a single global lock idles every other agent.
+  - A contract or interface change reaches a running subagent only when you
+    tell it. Stop it and resume it with the delta before it builds on the old
+    text.
   - Sending a step is not idempotent. Read the host's documented reply
     shape before treating a send as failed, check the transcript before
     resending, and pass the host's message id flag when it has one.
