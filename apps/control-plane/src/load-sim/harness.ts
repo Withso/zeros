@@ -18,6 +18,7 @@ import { DatabaseCloudAgentExecutionService } from "../cloud-workspaces/agent-ex
 import { CloudAgentBootCredentialResponseSchema } from "../cloud-workspaces/agent-boot-contract.js";
 import { CloudWorkspaceCheckpointRequestWorker } from "../cloud-workspaces/checkpoint-requests.js";
 import { DatabaseCloudWorkspaceDurableRecordService } from "../cloud-workspaces/durable-record.js";
+import { CloudEngineCheckpointHints } from "../cloud-workspaces/engine-checkpoint-hints.js";
 import { DatabaseCloudWorkspaceEngineClientAdmissionService } from "../cloud-workspaces/engine-client-admission.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "../cloud-workspaces/engine-protocol-version.js";
 import { LIFECYCLE_JOB_KINDS } from "../cloud-workspaces/lifecycle-jobs.js";
@@ -34,6 +35,7 @@ import { DatabaseCloudWorkspaceSetupMaterialService } from "../cloud-workspaces/
 import { computerTestAccount, computerTestWallet } from "../cloud-workspaces/computer-workspace-test-fixtures.js";
 import { runtimeBase } from "../cloud-workspaces/runtime-test-fixtures.js";
 import { seedReadyCloudWorkspace, withCloudFixtureOwnerTx, type ReadyCloudWorkspaceFixture } from "../cloud-workspaces/test-fixtures.js";
+import { DatabaseUplinkLeaseStore } from "../realtime/uplink-lease.js";
 import { DatabaseCostMeter } from "./instrument.js";
 import { AUTHORITY_CACHE_CHANNEL } from "../cloud-workspaces/engine-authority-cache.js";
 
@@ -117,6 +119,8 @@ export class FakeBoatProvider implements CloudWorkspaceProvider, CloudWorkspaceA
 export type SimulatedWorkspace = {
   fixture: ReadyCloudWorkspaceFixture;
   engine: { organizationId: string; workspaceId: string; generation: number; engineInstanceId: string; heartbeatToken: string };
+  /** The registered runtime boot, which the engine's uplink hello names. */
+  runtimeBootId: string;
   bootId: string;
   writerEpoch: string;
   actorSessionId: string;
@@ -195,6 +199,10 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
   const reconciler = new CloudWorkspaceReconciler({
     pool: worker, provider: boat, providerResolver: workerResolver, workosEnabled, logger: quiet,
   });
+  // `realtime` runs the lease.v1 renewals; the API pool measures them the same.
+  const leases = new DatabaseUplinkLeaseStore({ pool: api, workosEnabled });
+  // A zero-length wait is exactly one of the reads a held wait repeats.
+  const checkpointHints = new CloudEngineCheckpointHints(api, { waitMs: 0 });
 
   // /v1 requests re-resolve the account from its verified claims on every
   // request, exactly as createAuthMiddleware does after JWT verification.
@@ -241,6 +249,8 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
       credentialRevision: 1, models: ["grok-4.6"], consent: "zeros-managed" });
     const engine = { organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, generation: 1,
       engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
+    const runtimeBootId = (await seed.query<{ runtime_boot_id: string }>(
+      "SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0]!.runtime_boot_id;
     const request = { version: 1, mode: "boot-owner-v1", organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
       generation: 1, engineInstanceId: fixture.engineInstanceId };
     const bound = CloudAgentBootCredentialResponseSchema.parse(await seedExecutions.boot(engine, "bootstrap", request));
@@ -267,7 +277,7 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
       actorUserId: user.id, proof, authenticatedUser: user });
     const consumed = await seedAdmission.consumeActor({ ...engine, token: grant.grantToken });
     identities.set(user.id, identity);
-    const workspace = { fixture, engine, bootId: bound.bootId, writerEpoch: bound.writerEpoch,
+    const workspace = { fixture, engine, runtimeBootId, bootId: bound.bootId, writerEpoch: bound.writerEpoch,
       actorSessionId: consumed.actorSessionId, grantToken: grant.grantToken, user, identity };
     workspaces.push(workspace);
     return workspace;
@@ -282,6 +292,16 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
       organizationId: w.engine.organizationId, generation: 1, engineInstanceId: w.engine.engineInstanceId,
       token: w.engine.heartbeatToken, observedPorts: [] }),
     "engine.durableRecordHead": (w: SimulatedWorkspace) => records.headForEngine({ ...w.engine, afterEntityKind: null, afterEntityId: null }),
+    // S2 lease.v1: the renewal `realtime` runs on each uplink watermark tick.
+    "engine.uplinkLeaseRenewal": async (w: SimulatedWorkspace) => {
+      const renewed = await leases.renew({ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
+        engineInstanceId: w.engine.engineInstanceId, bootId: w.runtimeBootId }, w.engine.heartbeatToken);
+      if (!renewed.ok) throw new Error(`uplink lease renewal was refused (${renewed.reason})`);
+    },
+    // One read of the engine's checkpoint-hint wait; a held 25 s wait reads six times.
+    "engine.checkpointHintWait": (w: SimulatedWorkspace) => checkpointHints.wait({ token: w.engine.heartbeatToken,
+      workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
+      engineInstanceId: w.engine.engineInstanceId }, new AbortController().signal),
     "engine.credentialControls": (w: SimulatedWorkspace) => executions.credentialControls(w.engine, { ...request(w), acknowledgements: [] }),
     "engine.actorConfirm": (w: SimulatedWorkspace) => executions.boot(w.engine, "actor-confirm", { ...request(w), actorSessionId: w.actorSessionId }),
     "client.renew": (w: SimulatedWorkspace) => admission.consumeActor({ ...w.engine, token: w.grantToken, renew: true }),
@@ -314,10 +334,10 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
     "worker.reconcileDrift": w => seed.query(`UPDATE cloud_workspace_provider_bindings
       SET last_observed_at=now()-interval '10 minutes', next_drift_check_at=now()-interval '1 second' WHERE workspace_id=$1`,
       [w.engine.workspaceId]),
-    // Steady state: the heartbeat renewed the lease before the job ran, so the
-    // run reschedules at the new expiry instead of stopping the engine.
+    // Steady state: the uplink renewed the lease (lease.v1) before the job
+    // ran, so the run reschedules at the new expiry instead of stopping the engine.
     "worker.engineHealthJob": async w => {
-      await seed.query(`UPDATE cloud_workspace_engine_instances SET lease_expires_at=now()+interval '90 seconds' WHERE id=$1`,
+      await seed.query(`UPDATE cloud_workspace_engine_instances SET lease_expires_at=now()+interval '36 minutes' WHERE id=$1`,
         [w.engine.engineInstanceId]);
       // A previous claim probe may still hold the row as running; release it
       // due now so every iteration measures the full claim→run→complete cycle.

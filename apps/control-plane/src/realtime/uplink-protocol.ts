@@ -81,6 +81,8 @@ export const UPLINK_FEATURES = {
   capabilities: "cap.v1",
   /** Client relay channels over the uplink. */
   relay: "relay.v1",
+  /** The uplink renews the engine lease (36 min, every watermark). */
+  lease: "lease.v1",
 } as const;
 
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);

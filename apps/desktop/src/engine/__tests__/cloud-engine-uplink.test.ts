@@ -8,6 +8,7 @@ import type { EngineCapabilityResult } from "../../../../control-plane/src/realt
 import { UplinkCredentialPush } from "../../../../control-plane/src/realtime/uplink-cred";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "../../../../control-plane/src/realtime/uplink-authority";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "../../../../control-plane/src/realtime/uplink-presence";
+import { UPLINK_ENGINE_LEASE_MS } from "../../../../control-plane/src/realtime/uplink-lease";
 import { UPLINK_PATH } from "../../../../control-plane/src/realtime/uplink-protocol";
 import { CloudEngineUplinkServer, type UplinkServerOptions } from "../../../../control-plane/src/realtime/uplink-server";
 
@@ -22,6 +23,7 @@ import {
   type EngineUplinkJwk,
   type EngineUplinkSocket,
 } from "../cloud-engine-uplink";
+import { UPLINK_ENGINE_LEASE_MS as ENGINE_UPLINK_LEASE_MS } from "../cloud-runtime-registration";
 
 vi.setConfig({ testTimeout: 15_000 });
 
@@ -744,6 +746,100 @@ describe("engine uplink client (socket level)", () => {
     client.stop();
   });
 
+  it("reports the lease from the welcome and each validated pong of a lease.v1 connection", async () => {
+    let nowMs = 5_000_000;
+    const leases: Array<[number, number]> = [];
+    const { client, sockets } = fakeClient({ now: () => nowMs, features: ["cred.v1", "lease.v1"],
+      onLease: (lease, sentAt) => { leases.push([lease, sentAt]); } });
+    client.start();
+    await flush();
+    const socket = sockets[0]!;
+    const helloAt = nowMs;
+    expect(socket.ofType("sys.hello")[0]!.d).toMatchObject({ features: ["cred.v1", "lease.v1"] });
+    nowMs += 40;
+    socket.frame({ t: "sys.welcome", d: { protocol: 1, resumeToken: "r1", resumed: false, pingIntervalMs: 20_000,
+      leaseExpiresAtMs: helloAt + 90_000, features: ["cred.v1", "lease.v1"] } });
+    await flush();
+    // The welcome's lease answers the hello, so it is bounded by the hello's send time.
+    expect(leases).toEqual([[helloAt + 90_000, helloAt]]);
+    expect(client.leaseActive).toBe(false); // the control plane renews only once the gate opens
+    socket.frame({ t: "auth.keys", d: { keys: [KEY] } });
+    socket.frame({ t: "auth.sync", d: { syncId: "sync-1", epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: "c-9", complete: true } });
+    await flush();
+    socket.frame({ t: "auth.capability", d: { audience: "zeros:api", token: "cap-1", expiresAtMs: nowMs + 300_000 } });
+    await flush();
+    expect(client.leaseActive).toBe(true);
+    const nextPing = async () => {
+      nowMs += 20_000;
+      await vi.advanceTimersByTimeAsync(20_000);
+      return socket.ofType("sys.ping").at(-1)!;
+    };
+    // A pong that answers a ping but carries no usable lease reports nothing.
+    for (const lease of ["soon", nowMs + 36 * 60_000 + 0.5, undefined]) {
+      const ping = await nextPing();
+      socket.frame({ t: "sys.pong", d: { ts: ping.d!.ts, ...(lease === undefined ? {} : { leaseExpiresAtMs: lease }) } });
+    }
+    expect(leases).toHaveLength(1);
+    const ping = await nextPing();
+    expect(ping.d).toEqual({ ts: nowMs });
+    const renewed = nowMs + 36 * 60_000;
+    socket.frame({ t: "sys.pong", d: { ts: ping.d!.ts, leaseExpiresAtMs: renewed } });
+    expect(leases.at(-1)).toEqual([renewed, nowMs]);
+    // Nor does one that answers no outstanding ping of this connection.
+    for (const d of [
+      { ts: nowMs, leaseExpiresAtMs: renewed + 1 }, // answered already
+      { ts: nowMs + 1, leaseExpiresAtMs: renewed + 1 }, { ts: helloAt, leaseExpiresAtMs: renewed + 1 },
+      { ts: nowMs - 0.5, leaseExpiresAtMs: renewed + 1 }, { leaseExpiresAtMs: renewed + 1 },
+    ]) socket.frame({ t: "sys.pong", d });
+    expect(leases).toHaveLength(2);
+    socket.fail();
+    await flush();
+    expect(client.leaseActive).toBe(false);
+    client.stop();
+  });
+
+  it("reports no lease and stays inactive when lease.v1 was not negotiated", async () => {
+    const leases: number[] = [];
+    const { client, sockets } = fakeClient({ features: ["cred.v1", "lease.v1"], onLease: lease => { leases.push(lease); } });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!, { features: ["cred.v1"] });
+    await vi.advanceTimersByTimeAsync(20_000);
+    const ping = sockets[0]!.ofType("sys.ping").at(-1)!;
+    sockets[0]!.frame({ t: "sys.pong", d: { ts: ping.d!.ts, leaseExpiresAtMs: Date.now() + 36 * 60_000 } });
+    await flush();
+    expect(leases).toEqual([]);
+    expect(client.established).toBe(true);
+    expect(client.leaseActive).toBe(false);
+    client.stop();
+  });
+
+  it("reports a drain handoff's lease only once the replacement is the current uplink", async () => {
+    let nowMs = 7_000_000;
+    const leases: Array<[number, number]> = [];
+    const { client, sockets } = fakeClient({ now: () => nowMs, features: ["lease.v1"],
+      onLease: (lease, sentAt) => { leases.push([lease, sentAt]); } });
+    client.start();
+    await flush();
+    await serveHandshake(sockets[0]!, { features: ["lease.v1"] });
+    expect(client.leaseActive).toBe(true);
+    leases.length = 0;
+    sockets[0]!.frame({ t: "sys.drain", d: { reconnectAfterMs: 0, deadlineMs: 30_000 } });
+    await flush();
+    expect(sockets).toHaveLength(2);
+    const handoffHelloAt = nowMs;
+    nowMs += 10;
+    // The drained uplink still owns the lineage (and the gate) until the
+    // replacement is welcomed.
+    expect(client.leaseActive).toBe(true);
+    sockets[1]!.frame({ t: "sys.welcome", d: { protocol: 1, resumeToken: "r2", resumed: true, pingIntervalMs: 20_000,
+      leaseExpiresAtMs: nowMs + 36 * 60_000, features: ["lease.v1"] } });
+    await flush();
+    expect(leases).toEqual([[nowMs + 36 * 60_000, handoffHelloAt]]);
+    // The replacement's gate is closed until its own capability lands.
+    expect(client.leaseActive).toBe(false);
+    client.stop();
+  });
   it("acks in-order reliable CP frames and closes on a sequence gap, then redials", async () => {
     const { client, sockets } = fakeClient({ random: () => 0.5 });
     client.start();
@@ -863,6 +959,7 @@ describe("engine uplink client against the real control-plane server", () => {
   let snapshotCursors: (string | undefined)[];
   let capability: EngineCapabilityResult;
   let enabled: boolean;
+  let leaseEnabled: boolean;
   const flagListeners = new Set<() => void>();
   const clients: CloudEngineUplinkClient[] = [];
   type Instance = { uplink: CloudEngineUplinkServer; http: Server; url: string };
@@ -872,7 +969,8 @@ describe("engine uplink client against the real control-plane server", () => {
     const uplink = new CloudEngineUplinkServer({
       authority, realtimeInstance: "realtime-test",
       flags: {
-        enabled: (orgId, flag) => enabled && (flag === "realtime_uplink" || flag === "credential_push") && orgId === identity.organizationId,
+        enabled: (orgId, flag) => enabled && orgId === identity.organizationId &&
+          (flag === "realtime_uplink" || flag === "credential_push" || (flag === "engine_lease_over_uplink" && leaseEnabled)),
         anyEnabled: flag => enabled && flag === "realtime_uplink",
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
@@ -912,6 +1010,7 @@ describe("engine uplink client against the real control-plane server", () => {
     writes = [];
     snapshotCursors = [];
     enabled = true;
+    leaseEnabled = false;
     capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 300_000 };
   });
 
@@ -1086,5 +1185,37 @@ describe("engine uplink client against the real control-plane server", () => {
     // The server counts the admission before the client reads its welcome.
     await until(() => client.state === "connected");
     expect(client.state).toBe("connected");
+  });
+
+  it("mirrors the control plane's uplink lease length", () => {
+    expect(ENGINE_UPLINK_LEASE_MS).toBe(UPLINK_ENGINE_LEASE_MS);
+  });
+
+  it("renews the lease when a lease.v1 gate opens and reports it in the next pong", async () => {
+    // Only the ping interval is faked: the sockets and `until` run on real time.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      leaseEnabled = true;
+      const helloLease = Date.now() + 60_000;
+      authority.result = { ok: true, accountUserId: "user-1", leaseExpiresAtMs: helloLease };
+      const renewedTo = Date.now() + UPLINK_ENGINE_LEASE_MS;
+      const renewals: UplinkIdentity[] = [];
+      const a = await start({ lease: { renew: async renewed => { renewals.push(renewed); return { ok: true, leaseExpiresAtMs: renewedTo }; } } });
+      const leases: Array<[number, number]> = [];
+      const client = makeClient({ endpoint: a.url, features: ["cred.v1", "lease.v1"],
+        onLease: (lease, sentAt) => { leases.push([lease, sentAt]); } });
+      const dialedAt = Date.now();
+      client.start();
+      await until(() => client.leaseActive && renewals.length === 1);
+      expect(renewals).toEqual([identity]);
+      expect(leases).toEqual([[helloLease, expect.any(Number)]]);
+      expect(leases[0]![1]).toBeGreaterThanOrEqual(dialedAt);
+      vi.advanceTimersByTime(30_000); // the client's ping interval (clamped to at most 30 s)
+      await until(() => leases.length >= 2);
+      expect(leases.at(-1)![0]).toBe(renewedTo);
+      expect(leases.at(-1)![1]).toBeGreaterThanOrEqual(leases[0]![1]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

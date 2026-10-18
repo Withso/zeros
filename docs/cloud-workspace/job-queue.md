@@ -339,8 +339,9 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   claim's eligibility mirrors. Nothing pending: the job completes and is
   deleted. Engine lease renewals therefore write no job: the job runs at the
   old expiry, sees the renewal and moves itself to the new one, about one run
-  per lease period (90 s) per running workspace until engine liveness moves
-  off the database.
+  per lease period per running workspace: every 31-36 min when the uplink
+  renews the lease (S2 `lease.v1`), every 90 s for an engine on the HTTP
+  heartbeat alone.
 - **Bounded runs.** A process runs one lifecycle job at a time by default
   (`jobConcurrency`), keeping the former tick's serial provider calls. A run
   makes at most 20 claims; one that hits the bound, or that a shutdown
@@ -358,7 +359,8 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   (`purgeFailedJobs`), which nothing else ever deletes.
 - **Cost.** The load simulator measures the per-workspace job cycle
   (`worker.engineHealthJob`: claim, fenced handler claim, reschedule and
-  completion, 5 transactions every 90 s per running workspace) and the hourly
+  completion, 5 transactions per lease period per running workspace, modeled
+  as every 1800 s) and the hourly
   audit (`worker.jobAudit`, 7 transactions across the six due scans and the
   purge); both carry absolute budgets in `src/load-sim/budgets.json`, along
   with the notifying-commit rate, since PostgreSQL serializes commits that

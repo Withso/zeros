@@ -8,6 +8,7 @@ import type { UplinkSecurityAlertKind } from "./uplink-alerts.js";
 import type { EngineCapabilityResult } from "./uplink-auth-source.js";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "./uplink-authority.js";
 import { UplinkCredentialPush } from "./uplink-cred.js";
+import { UPLINK_ENGINE_LEASE_MS, type UplinkLeaseRenewal, type UplinkLeaseStore } from "./uplink-lease.js";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "./uplink-presence.js";
 import { UPLINK_CLOSE, UPLINK_MAX_BINARY_FRAME_BYTES, UPLINK_PATH, UPLINK_SUBPROTOCOL } from "./uplink-protocol.js";
 import { CloudEngineUplinkServer, type UplinkServerOptions } from "./uplink-server.js";
@@ -58,6 +59,15 @@ class FakeAuthority implements UplinkAuthority {
     return decided;
   }
 }
+class FakeLease implements UplinkLeaseStore {
+  readonly calls: UplinkIdentity[] = [];
+  result: UplinkLeaseRenewal | Error = { ok: true, leaseExpiresAtMs: Date.now() + UPLINK_ENGINE_LEASE_MS };
+  async renew(identity: UplinkIdentity, token: string): Promise<UplinkLeaseRenewal> {
+    this.calls.push(identity);
+    if (this.result instanceof Error) throw this.result;
+    return token === TOKEN || token === OTHER_TOKEN ? this.result : { ok: false, reason: "authority" };
+  }
+}
 describe("engine uplink server", () => {
   let http: Server;
   let uplink: CloudEngineUplinkServer;
@@ -70,6 +80,8 @@ describe("engine uplink server", () => {
   let url: string;
   let enabled: boolean;
   let credentialPush: boolean;
+  let leaseFlag: boolean;
+  let lease: FakeLease;
   const flagListeners = new Set<() => void>();
   const peers: Peer[] = [];
   let identity: UplinkIdentity;
@@ -81,7 +93,8 @@ describe("engine uplink server", () => {
       authority, realtimeInstance: "realtime-test",
       flags: {
         enabled: (orgId, flag) => orgId === identity.organizationId &&
-          (flag === "realtime_uplink" ? enabled : flag === "credential_push" ? credentialPush : false),
+          (flag === "realtime_uplink" ? enabled : flag === "credential_push" ? credentialPush :
+            flag === "engine_lease_over_uplink" ? leaseFlag : false),
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
       authSource: {
@@ -123,6 +136,7 @@ describe("engine uplink server", () => {
 
   beforeEach(() => {
     authority = new FakeAuthority(); writes = []; alerts = []; metrics = []; enabled = true; credentialPush = true; authFails = false;
+    lease = new FakeLease(); leaseFlag = true;
     capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 300_000 };
     identity = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 3, engineInstanceId: randomUUID(), bootId: randomUUID() };
   });
@@ -773,5 +787,149 @@ describe("engine uplink server", () => {
     uplink.pushAuthEpochs(identity.workspaceId, { epochs: { wa: 9 }, revocations: [], authCursor: "c-9" }, Date.now());
     uplink.pushAuthEpochs(identity.workspaceId, { epochs: { wa: 10 }, revocations: [], authCursor: "c-10" }, Date.now());
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.backpressure });
+  });
+
+  describe("engine lease over the uplink (lease.v1)", () => {
+    const LEASE = ["lease.v1"];
+    const WATERMARK_MS = 5 * 60_000;
+    const leaseLeft = (ms: number) => { authority.result = { ok: true, accountUserId: randomUUID(), leaseExpiresAtMs: Date.now() + ms }; };
+    const ping = async (peer: Peer) => {
+      peer.send({ t: "sys.ping", d: { ts: Date.now() } });
+      return (await peer.next("sys.pong")).d!.leaseExpiresAtMs;
+    };
+    const settle = () => new Promise(resolve => setTimeout(resolve, 50));
+
+    it.each([
+      ["offered, configured and on for the organization", true, true, true, LEASE],
+      ["not offered", false, true, true, []],
+      ["off for the organization", true, false, true, []],
+      ["offered to a server without a lease store", true, true, false, []],
+    ] as const)("negotiates lease.v1 only when %s, and renews only a negotiated lease", async (_name, offered, flag, configured, features) => {
+      leaseFlag = flag;
+      leaseLeft(90_000);
+      await start(configured ? { lease } : {});
+      const { welcome } = await connect(offered ? { features: LEASE } : {});
+      expect(welcome.d!.features).toEqual(features);
+      if (features.length) await until(() => lease.calls.length === 1);
+      await settle();
+      expect(lease.calls).toHaveLength(features.length);
+    });
+
+    it("renews a short lease once the gate opens and reports it in pongs", async () => {
+      leaseLeft(90_000);
+      const verified = (authority.result as { leaseExpiresAtMs: number }).leaseExpiresAtMs;
+      const renewed = Date.now() + UPLINK_ENGINE_LEASE_MS;
+      lease.result = { ok: true, leaseExpiresAtMs: renewed };
+      await start({ lease });
+      const peer = dial();
+      await peer.opened;
+      peer.send(hello({ features: LEASE }));
+      expect(await peer.next("sys.welcome")).toMatchObject({ d: { features: LEASE, leaseExpiresAtMs: verified } });
+      await peer.next("auth.keys");
+      const sync = await peer.next("auth.sync");
+      await settle();
+      // Not before the auth exchange and the capability opened the gate.
+      expect(lease.calls).toEqual([]);
+      peer.send({ t: "auth.applied", d: { syncId: sync.d!.syncId, authCursor: sync.d!.authCursor } });
+      await peer.next("auth.capability");
+      await until(() => lease.calls.length === 1);
+      expect(lease.calls).toEqual([identity]);
+      expect(await ping(peer)).toBe(renewed);
+    });
+
+    it("skips the gate renewal while more than a watermark interval of a renewed lease is left", async () => {
+      leaseLeft(UPLINK_ENGINE_LEASE_MS - 60_000);
+      await start({ lease });
+      const first = await connect({ features: LEASE });
+      await settle();
+      expect(lease.calls).toEqual([]);
+      first.peer.ws.close();
+      await until(() => uplink.size === 0);
+      leaseLeft(UPLINK_ENGINE_LEASE_MS - WATERMARK_MS - 1_000);
+      await connect({ features: LEASE });
+      await until(() => lease.calls.length === 1);
+      expect(lease.calls).toHaveLength(1);
+    });
+
+    it("renews on every watermark tick and never moves the reported lease back", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      leaseLeft(UPLINK_ENGINE_LEASE_MS - 60_000);
+      await start({ lease });
+      const { peer } = await connect({ features: LEASE });
+      const renewed = Date.now() + UPLINK_ENGINE_LEASE_MS;
+      lease.result = { ok: true, leaseExpiresAtMs: renewed };
+      vi.advanceTimersByTime(WATERMARK_MS);
+      await until(() => lease.calls.length === 1);
+      expect(await ping(peer)).toBe(renewed);
+      // An older answer, from a renewal or a recheck that raced a newer
+      // renewal, never shortens what the engine is told.
+      lease.result = { ok: true, leaseExpiresAtMs: renewed - 120_000 };
+      vi.advanceTimersByTime(WATERMARK_MS);
+      await until(() => lease.calls.length === 2);
+      const reads = authority.calls;
+      uplink.revalidate([identity.engineInstanceId]);
+      await until(() => authority.calls > reads);
+      await settle();
+      expect(await ping(peer)).toBe(renewed);
+    });
+
+    it("keeps the uplink open while renewals are unavailable and closes 4403 once one is refused", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      leaseLeft(90_000);
+      lease.result = { ok: false, reason: "unavailable" };
+      await start({ lease });
+      const { peer } = await connect({ features: LEASE });
+      await until(() => lease.calls.length === 1);
+      lease.result = new Error("pool exhausted");
+      vi.advanceTimersByTime(WATERMARK_MS);
+      await until(() => lease.calls.length === 2);
+      await settle();
+      expect(peer.ws.readyState).toBe(WebSocket.OPEN);
+      lease.result = { ok: false, reason: "authority" };
+      vi.advanceTimersByTime(WATERMARK_MS);
+      await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.forbidden, reason: "uplink_forbidden" });
+      expect(lease.calls).toHaveLength(3);
+    });
+
+    it("skips the periodic authority recheck of a lease.v1 uplink only while uplink notifications are current", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      leaseLeft(UPLINK_ENGINE_LEASE_MS - 60_000);
+      await start({ lease });
+      expect(uplink.notificationsCurrent).toBe(false);
+      uplink.notificationsCurrent = true;
+      const leased = await connect({ features: LEASE });
+      const legacy = await connect({ engineInstanceId: randomUUID() });
+      const reads = authority.calls;
+      vi.advanceTimersByTime(60_000);
+      await until(() => authority.calls === reads + 1);
+      await settle();
+      expect(authority.calls).toBe(reads + 1);
+      uplink.notificationsCurrent = false;
+      vi.advanceTimersByTime(60_000);
+      await until(() => authority.calls === reads + 3);
+      await settle();
+      expect(authority.calls).toBe(reads + 3);
+      // A notified authority change still re-reads and closes it at once.
+      uplink.notificationsCurrent = true;
+      authority.result = { ok: false, reason: "authority" };
+      uplink.revalidate([identity.engineInstanceId]);
+      await expect(leased.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.forbidden });
+      expect(legacy.peer.ws.readyState).toBe(WebSocket.OPEN);
+    });
+
+    it("renegotiates when engine_lease_over_uplink flips", async () => {
+      leaseFlag = false;
+      await start({ lease });
+      const off = await connect({ features: LEASE });
+      expect(off.welcome.d!.features).toEqual([]);
+      leaseFlag = true;
+      for (const listener of flagListeners) listener();
+      await expect(off.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.goingAway, reason: "features_changed" });
+      const on = await connect({ features: LEASE });
+      expect(on.welcome.d!.features).toEqual(LEASE);
+      leaseFlag = false;
+      for (const listener of flagListeners) listener();
+      await expect(on.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.goingAway, reason: "features_changed" });
+    });
   });
 });

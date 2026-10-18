@@ -81,7 +81,7 @@ disconnects, keyed by an opaque resume token
 ## Engine uplink server
 
 `apps/control-plane/src/realtime/uplink-server.ts` implements the S2
-contract (`contracts/s2-uplink.md`, 1.1.0) at `/v1/uplink`. It is mounted
+contract (`contracts/s2-uplink.md`, 1.2.0) at `/v1/uplink`. It is mounted
 only in `realtime` and `combined` processes, and only once the capability
 authority supplies keys, epochs and engine tokens
 (`realtime/uplink-auth-source.ts`; until then the uplink stays unmounted).
@@ -128,7 +128,7 @@ authority supplies keys, epochs and engine tokens
   At most 1 000 epoch deltas may be held or await `auth.applied`; past that
   the uplink closes `4429` and resyncs from the snapshot on the redial.
 - **Oversized `auth.sync` (interim).** The engine closes `4400` on any text
-  frame above 64 KiB, and S2 1.1.0 cannot split `auth.sync`; an
+  frame above 64 KiB, and S2 1.2.0 cannot split `auth.sync`; an
   organization-shared workspace with roughly 500 principals crosses it. Until
   the contract owner decides on split frames (end of Wave 1) the server
   refuses to send any oversized frame: it closes `1011`
@@ -141,11 +141,15 @@ authority supplies keys, epochs and engine tokens
   `zeros_cloud_engine_uplink_authority` notification (engine state,
   revocation, credential or final checkpoint changes; workspace generation,
   desired state, deletion, status liveness or authority epoch changes). A
-  loss closes with `4403`. An unavailable database never closes an
-  established uplink. A notification that arrives while a re-read is in
-  flight runs one more re-read after it, and a hello whose read overlapped a
-  notification for its engine or workspace re-reads once it owns the engine,
-  so a revocation committed after a read's snapshot is never dropped. During
+  loss closes with `4403`. A `lease.v1` uplink skips the 60 s re-read while
+  the notification listener is current (from its ready until it is
+  unavailable or stops): every notified change still re-reads it at once,
+  and its lease renewal re-checks authority every 5 min. An unavailable
+  database never closes an established uplink. A notification that arrives
+  while a re-read is in flight runs one more re-read after it, and a hello
+  whose read overlapped a notification for its engine or workspace re-reads
+  once it owns the engine, so a revocation committed after a read's snapshot
+  is never dropped. During
   a drain the instance keeps its uplink `LISTEN` until the uplink server
   closes, so engines still on it keep pushes and teardown.
 - **Ownership.** Presence lives in memory. `cloud_workspace_engine_uplinks`
@@ -221,8 +225,31 @@ authority supplies keys, epochs and engine tokens
   every user named in a batch with one query, and retries a failed pass as
   a full re-read of every owned uplink after 1 s, doubling to 30 s while
   reads keep failing.
-- **Lease.** The HTTP heartbeat still owns the engine lease in this release;
-  the uplink reports the lease it read in `sys.welcome` and `sys.pong`.
+- **Lease (`lease.v1`).** `uplink-lease.ts` renews the engine lease of an
+  uplink that negotiated `lease.v1` (S2 1.2.0). The engine offers it, the
+  server selects it while the organization's `engine_lease_over_uplink`
+  flag is on ([rollout flags](rollout-flags.md)), and a flip closes the
+  affected uplinks with `1001 features_changed`. The server renews once the
+  gate opens, unless more than 31 min remain (a drain redial), and on each
+  5 min watermark tick. One system transaction sets a 2 s `lock_timeout`,
+  takes the authority fence every engine mutation takes
+  (`assertCurrentCloudEngineAuthority`), then moves `lease_expires_at` to
+  `greatest(lease_expires_at, now + 36 min)` and sets `last_heartbeat_at`
+  on the engine row that still matches the credential hash and
+  `runtime_boot_id`, is `ready`, unrevoked and without a final checkpoint,
+  and whose lease has not lapsed. It writes no other column, so the
+  authority-cache, engine-health and uplink-teardown triggers stay silent
+  (engine health reschedules itself to the new expiry when it runs). A
+  refusal closes `4403`; a renewal that fails (the lock timeout included)
+  keeps the uplink open until the next tick. The in-memory lease only moves
+  later and is what `sys.welcome` and `sys.pong` report. The HTTP
+  heartbeat (`setup-materials.ts`) moves the lease to
+  `greatest(lease_expires_at, now + 90 s)`, so it never shortens an
+  uplink-renewed lease. Without `lease.v1` the HTTP heartbeat owns the
+  lease and the uplink reports the lease it read. Trade-off: a lost uplink
+  never shortens the lease (decision G), so an engine that dies while its
+  VM keeps running holds its workspace for up to 36 min instead of about
+  90 s (S2, failure and outage behavior).
 
 ## Device stream server
 
@@ -431,6 +458,21 @@ registration there is no uplink client at all.
   `cred.ack`. The poll stays as the fallback: 500 ms while the uplink's
   gate is closed, a 30 s safety cadence once it is open
   (`controlsPollIntervalMs` in `cloud-local-command-queue-boot.ts`).
+- **Lease (`lease.v1`).** The engine also offers `lease.v1`. The client
+  passes on, through `onLease`, the lease in the current connection's
+  welcome (with the hello's send time) and in each pong that echoes one of
+  its last four pings (with that ping's send time).
+  `CloudRuntimeRegistration.adoptUplinkLease` raises the registration's
+  lease to at most that send time + 36 min and never revives a lapsed one.
+  While `leaseActive` holds (current connection welcomed, gate open,
+  `lease.v1` negotiated), the periodic heartbeat skips a beat that would
+  carry nothing (the S2 rule) and still runs the durable-record sync on its
+  cadence. A heartbeat response may now carry a lease up to 37 min out;
+  the engine stores at most the request's send time + 36 min. A failed beat
+  retries every 5 s only in the last 2 min of the lease, and otherwise
+  backs off to a 60 s cap. A `4401` or `4403` park asks for an immediate
+  heartbeat, so the engine checks its authority over HTTP at once instead
+  of on the next beat the long lease would allow.
 
 ## Railway configuration (planned)
 

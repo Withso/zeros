@@ -1,6 +1,6 @@
 # S2. VM uplink protocol
 
-Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.1.0` (additive;
+Status: **FROZEN** · Contract ID `zeros-uplink` · Version `1.2.0` (additive;
 see [Changelog](#changelog)) ·
 Schema: [Draft schema: uplink text frames](#draft-schema-uplink-text-frames)
 
@@ -114,7 +114,9 @@ reassembles up to the existing 64 MiB message ceiling
 Version rule: `realtime` supports protocol N and N−1 during a rollout; the
 engine sends its `min`/`max`; the CP picks the highest common version or
 closes with `4426 protocol_unsupported`. Features are additive flags; neither
-side sends a frame type behind a feature the other did not list.
+side sends a frame type behind a feature the other did not list. A feature
+can also change behavior without a new frame type: `lease.v1` moves the
+engine lease renewal onto the uplink ([Engine lease](#engine-lease-leasev1)).
 
 ### Supersede and the heartbeat credential
 
@@ -192,7 +194,7 @@ not survive a reconnect.
 | Channel | Type | Dir | Rel | Payload (summary) | Replaces |
 | --- | --- | --- | --- | --- | --- |
 | sys | `sys.hello` / `sys.welcome` | E / C | U | Handshake above | Registration-time lease setup |
-| sys | `sys.ping` / `sys.pong` | E / C | U | `{ ts }` every ~20 s | Heartbeat POST every 10 s, `cloud-runtime-registration.ts:997-1106` |
+| sys | `sys.ping` / `sys.pong` | E / C | U | `{ ts }` every ~20 s; the pong echoes `ts` and carries the current lease deadline `leaseExpiresAtMs` | Heartbeat POST every 10 s, `cloud-runtime-registration.ts:997-1106` (with `lease.v1`, a lease renewal every 5 min) |
 | sys | `sys.ack` | both | U | `{ a }` standalone ack when no other frame is due (≤ 250 ms delay) | — |
 | sys | `sys.drain` | C | U | `{ reconnectAfterMs, deadlineMs }` (both durations in ms) | — (new: graceful deploys) |
 | sys | `sys.error` | both | U | `{ code, message, fatal }` | — |
@@ -293,10 +295,66 @@ the old (`4409`). Relay channels on the draining instance are closed with
   `UPDATE cloud_workspace_engine_instances` at
   `apps/control-plane/src/cloud-workspaces/setup-materials.ts:1536-1599`
   (the update itself is at `setup-materials.ts:1570`).
-- Lease: the deadline in `sys.welcome` is extended in memory while the
-  uplink is healthy; the durable lease is extended on the watermark write.
-  An engine that loses the uplink keeps working until the lease deadline
-  (decision G: never stop on an unknown error).
+- Lease: with `lease.v1` the durable lease is renewed when the gate opens
+  and on every watermark, and `sys.welcome` and `sys.pong` report it
+  ([Engine lease](#engine-lease-leasev1)); without it the HTTP heartbeat
+  renews the lease and the uplink only reports what it read. An engine that
+  loses the uplink keeps working until the lease deadline (decision G:
+  never stop on an unknown error).
+
+### Engine lease (`lease.v1`)
+
+The engine lease (`cloud_workspace_engine_instances.lease_expires_at`) is
+the engine's durable authority deadline. An engine that cannot renew it
+gives up its authority when it ends, and engine health stops a workspace
+whose ready engine's lease lapsed. Without `lease.v1` only the HTTP
+heartbeat renews it, by 90 s every 10 s, so a control-plane or database
+outage longer than about 90 s lapses the lease of every healthy engine.
+With `lease.v1` the uplink renews a lease long enough for the S1 outage
+rule:
+
+- **Negotiation.** The engine offers `lease.v1` in `sys.hello`. `realtime`
+  selects it only while the organization's `engine_lease_over_uplink`
+  rollout flag is on (that flag requires `realtime_uplink`). A flag change
+  closes the affected uplinks with `1001 features_changed`, and the redial
+  renegotiates.
+- **Renewal.** A renewal moves the lease to the later of its current value
+  and now + 36 min, and records the time as the engine's last heartbeat.
+  `realtime` renews once the gate opens (with the first `auth.capability`
+  after `auth.applied`) unless more than 31 min remain, as after a drain
+  redial, and then on every 5 min watermark. When an outage begins, about
+  31 min or more of lease therefore remain, so an outage of up to 30 min
+  (the S1 outage rule; the outage drill runs 10 min) lets no lease lapse.
+- **Never revived.** A renewal applies only to a lease that has not lapsed,
+  under the authority conditions every engine request meets, plus the
+  current credential, `bootId`, a `ready` engine instance and no final
+  checkpoint. Only a fresh registration creates a lease.
+- **Refused or unavailable.** A refused renewal is an authority loss: the
+  uplink closes with `4403`. A renewal that cannot complete (database slow
+  or down) leaves the uplink open, and the next watermark retries.
+- **Report.** `leaseExpiresAtMs` in `sys.welcome` and in every `sys.pong`
+  is the latest lease `realtime` knows for the connection, and it never
+  moves back. The engine raises its own lease to a reported value only
+  from its current connection, only while its own lease has not lapsed,
+  and never past 36 min after it sent the frame being answered (the hello,
+  or the ping whose `ts` the pong echoes).
+- **HTTP heartbeat fallback.** The heartbeat stays and never shortens a
+  lease: it moves the lease to the later of its current value and
+  now + 90 s. While the current uplink renews the lease (gate open,
+  `lease.v1` negotiated), the engine skips a periodic beat that carries
+  nothing: no first or changed port scan, no repository credential
+  refresh, no redelivered checkpoint request, a checkpoint-hint wait that
+  is answering, and more than 25 min of lease left. A beat requested out of
+  cadence (by a checkpoint hint, a `4409` re-verification or a `4401` or
+  `4403` park) is always sent. When the uplink is lost, the periodic beats
+  resume at their normal cadence. A failed beat retries every 5 s only in
+  the last 2 min of the lease; earlier it backs off 5, 10, 20 and 40 s,
+  then retries every 60 s.
+- **No shortening on loss.** A lost uplink does not shorten the lease: an
+  ingress or network outage looks like many lost uplinks, and decision G
+  never stops a workspace on an unknown error. The cost is an engine that
+  dies while its VM keeps running: it holds its workspace until the lease
+  ends ([Failure and outage behavior](#failure-and-outage-behavior)).
 
 ## Lifetimes and limits
 
@@ -311,17 +369,18 @@ the old (`4409`). Relay channels on the draining instance are closed with
 | Relay initial window | 1 MiB per channel per direction |
 | Reconnect backoff (engine) | Full jitter, 250 ms base, 30 s cap; reset after 60 s connected |
 | Engine capability | 300 s, pushed at 60% |
+| Engine lease (`lease.v1`) | 36 min from each renewal; renewed at gate open (when 31 min or less remain) and every 5 min |
 
 ## Error and close codes
 
 | Close | Code string | Meaning | Engine action |
 | --- | --- | --- | --- |
 | 1000 | `normal` | Clean close | Reconnect only if still running |
-| 1001 | `going_away` | Process exit | Reconnect with backoff |
+| 1001 | `going_away` | Process exit, or `features_changed`: a rollout flag changed the negotiated features | Reconnect with backoff; the redial renegotiates |
 | 4400 | `frame_invalid` | Schema or size violation | Report; reconnect with backoff |
 | 4401 | `uplink_unauthenticated` | Credential definitively invalid or expired. Sent only when the durable read succeeded and rejected the credential; a verification that could not complete (database slow or down) closes with `1011` instead | Stop reconnecting; existing authority-loss path |
 | 1011 | `internal_error` | `realtime` could not complete verification | Reconnect with backoff |
-| 4403 | `uplink_forbidden` | Generation, engine instance or `bootId` not current | Existing authority-loss path; never retry with the same identity |
+| 4403 | `uplink_forbidden` | Generation, engine instance or `bootId` not current, or a `lease.v1` renewal was refused | Existing authority-loss path; never retry with the same identity |
 | 4404 | `uplink_disabled` | Rollout flag off for this organization | Park; the HTTP heartbeat and the credential poll continue; re-dial only after a new registration advertisement carries the endpoint again |
 | 4408 | `ping_timeout` | Missed pings | Reconnect |
 | 4409 | `uplink_superseded` | A newer uplink with the registered `bootId` took over | Re-verify registration authority, then reconnect with backoff; use the authority-loss path only if the registration is no longer current |
@@ -336,13 +395,14 @@ the old (`4409`). Relay channels on the draining instance are closed with
 
 | Failure | Behavior |
 | --- | --- |
-| Uplink down, `api` up | Engine keeps running; direct client sessions continue under S1 normal rules (5 min worst case, renewed in band from REST-issued tokens); after 30 s down the engine obtains engine tokens through the S1 REST fallback, so credential reads, history mirroring and checkpoints keep working; it refetches the JWKS at least every 5 min |
+| Uplink down, `api` up | Engine keeps running; direct client sessions continue under S1 normal rules (5 min worst case, renewed in band from REST-issued tokens); after 30 s down the engine obtains engine tokens through the S1 REST fallback, so credential reads, history mirroring and checkpoints keep working; it refetches the JWKS at least every 5 min. With `lease.v1` the periodic HTTP heartbeat resumes at its next tick and keeps the lease from lapsing |
 | `realtime` up, database down | Hellos that cannot be verified close with `1011`, never `4401`/`4403`; established uplinks stay open |
-| `realtime` and `api` down (full CP outage) | S1 outage rule: pre-outage sessions up to 30 min; no new sessions; agents keep running until the lease deadline; turn events buffer in the journal |
+| `realtime` and `api` down (full CP outage) | S1 outage rule: pre-outage sessions up to 30 min; no new sessions; agents keep running until the lease deadline; turn events buffer in the journal. With `lease.v1` about 31 min or more of lease remain when the outage begins, so an outage of up to 30 min lets no lease lapse; without it the lease lapses after about 90 s |
 | `realtime` redeploy | Drain, reconnect, resume or resync; relay clients re-route |
 | Engine restart (same generation) | New `bootId`, recorded by a fresh registration; resume rejected (`resumed: false`); full resync |
 | Superseded uplink (4409) | Re-verify registration, reconnect; a matching `bootId` supersedes back, an alert fires otherwise |
-| Database slow or down | `realtime` keeps uplinks and liveness in memory; transition writes retry with jitter through a bounded queue; no uplink is closed because a write failed |
+| Engine dies while its VM keeps running | The uplink is lost at once or after the 45 s offline detection, and presence records the loss. With `lease.v1` the durable lease still runs to its deadline (up to 36 min, against about 90 s without): until then engine health does not stop the workspace, a stop that needs a final checkpoint fails when the checkpoint request's 5 min deadline passes, and recovery waits for the lease to lapse. A lost uplink does not shorten the lease, because an ingress or network outage also looks like many lost uplinks (decision G) |
+| Database slow or down | `realtime` keeps uplinks and liveness in memory; transition writes retry with jitter through a bounded queue; no uplink is closed because a write failed; a `lease.v1` renewal that cannot complete is retried at the next watermark |
 
 ## Code paths this replaces
 
@@ -370,7 +430,7 @@ obtain a registration document (`scripts/electron-local.mjs:54-82`).
 | S2-Q1 | JSON for everything, or a binary encoding for control frames? | JSON text for control (debuggable, schema-validated, low rate); binary only for relay data. | Accepted. |
 | S2-Q2 | One sequence space per direction, or per channel? | One per direction; channels are few and ordering across `auth` and other frames matters for recovery. | Accepted, for the reliable channels only. `auth` and `relay` are unsequenced per-connection channels; `auth` ordering is enforced by the `auth.applied` gate, which a cumulative ack could not do across a resume gap. |
 | S2-Q3 | Resume across `realtime` instances (shared buffer in Redis or the DB)? | No in v1: resync is cheap and fully idempotent. Revisit if resync load shows up in measurements. | Accepted. |
-| S2-Q4 | Keep the HTTP heartbeat as a fallback during rollout? | Yes, behind the per-org flag, for one release; the engine uses it only when `sys.welcome` was never received. Delete it at the end of the slice. | Accepted. |
+| S2-Q4 | Keep the HTTP heartbeat as a fallback during rollout? | Yes, behind the per-org flag, for one release; the engine uses it only when `sys.welcome` was never received. Delete it at the end of the slice. | Accepted. Amended in 1.2.0: the heartbeat stays as the fallback lease renewal and for what only it carries today (port scans, repository credential refreshes, checkpoint request delivery); with `lease.v1` the engine skips a periodic beat that carries nothing ([Engine lease](#engine-lease-leasev1)). |
 | S2-Q5 | Should repository credentials move from the heartbeat response to the uplink? | Revision over the uplink, secret fetched from `api` with the engine token; secrets never pass through `realtime`. | Accepted. |
 | S2-Q6 | Watermark write interval | 5 min; drift jobs already tolerate minutes. | Accepted. |
 | S2-Q7 | Permessage-deflate | Off in v1; measure relay CPU first. | Accepted. |
@@ -839,6 +899,7 @@ review aid until freeze; the frozen source of truth will be Zod in
   },
   "examples": [
     { "t": "sys.ping", "d": { "ts": 1792000000000 } },
+    { "t": "sys.pong", "d": { "ts": 1792000000000, "leaseExpiresAtMs": 1792002160000 } },
     { "t": "auth.epochs", "a": 4, "d": { "epochs": { "members": { "11111111-1111-4111-8111-111111111111": 6 } }, "revocations": [], "authCursor": "c-1042" } },
     { "t": "auth.applied", "d": { "syncId": "88888888-8888-4888-8888-888888888888", "authCursor": "c-1042" } },
     { "t": "cred.revision", "s": 10, "d": { "kind": "agent-controls", "revision": 31 } },
@@ -849,6 +910,17 @@ review aid until freeze; the frozen source of truth will be Zod in
 
 ## Changelog
 
+- **1.2.0** (2026-10-18, additive): added the `lease.v1` feature
+  ([Engine lease](#engine-lease-leasev1)). Negotiated only while the
+  organization's `engine_lease_over_uplink` flag is on, it has `realtime`
+  renew the durable engine lease to 36 min when the gate opens and on every
+  5 min watermark. A refused renewal closes `4403`, an unavailable one
+  keeps the uplink open, and a lapsed lease is never revived. The HTTP
+  heartbeat never shortens a lease, and the engine skips periodic beats
+  that carry nothing, so a control-plane outage of up to 30 min lets no
+  lease lapse. No frame or schema change: `sys.welcome` and `sys.pong`
+  already carried `leaseExpiresAtMs`. Also recorded that `1001` carries
+  `features_changed` when a rollout flag changes the negotiated features.
 - **1.1.0** (2026-10-16, additive): added close `4404 uplink_disabled` —
   the rollout flag is off for the organization; the engine parks, the HTTP
   heartbeat and the credential poll continue, and the engine re-dials only

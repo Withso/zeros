@@ -39,6 +39,16 @@ const CHECKPOINT_HINT_PATH = "/internal/v1/cloud-workspaces/engine/checkpoint-hi
 const CHECKPOINT_HINT_AUDIENCE = "zeros-cloud-workspace-engine-checkpoint-hint-v1" as const;
 // Outlives the control plane's 25-second hint wait.
 const CHECKPOINT_HINT_TIMEOUT_MS = 35_000;
+/** S2 `lease.v1`: the engine lease one uplink renewal grants
+ * (UPLINK_ENGINE_LEASE_MS in the control plane's realtime/uplink-lease.ts). */
+export const UPLINK_ENGINE_LEASE_MS = 36 * 60_000;
+/** While the uplink renews the lease, a periodic beat that carries nothing
+ * else is skipped until no more than this much of the lease remains. */
+const UPLINK_LEASE_HEARTBEAT_FLOOR_MS = 25 * 60_000;
+/** A failed beat retries every 5 s only this close to the end of the lease;
+ * further out it backs off 5, 10, 20 and 40 s, then retries every minute. */
+const HEARTBEAT_URGENT_RETRY_WINDOW_MS = 2 * 60_000;
+const HEARTBEAT_RETRY_CAP_MS = 60_000;
 
 // This module is also imported by server-side setup contracts. Keep the wire
 // check pure; only the engine's attester may read the installed runtime.
@@ -543,6 +553,19 @@ export class CloudRuntimeRegistration {
   private readonly checkpointHints: boolean;
   private heartbeatInFlight = false;
   private heartbeatAgain = false;
+  /** The next beat posts whatever it carries: a forced beat (a queued
+   * checkpoint hint, a 4409 or parked uplink) or the retry of one. */
+  private heartbeatForced = false;
+  private heartbeatFailures = 0;
+  /** S2 `lease.v1`: whether the uplink currently renews the lease. */
+  private uplinkLeaseActive: (() => boolean) | null = null;
+  /** The port scan the control plane last accepted. */
+  private reportedPorts: string | null = null;
+  /** The last accepted beat delivered a checkpoint request; the control
+   * plane redelivers an incomplete one on every beat. */
+  private checkpointRedelivered = false;
+  /** The checkpoint hint wait's last request was answered. */
+  private checkpointHintsAnswering = false;
   private checkpointHintsStarted = false;
   private localCommandsAcknowledged = false;
   private agentJournalMode: "local" | "legacy" | undefined;
@@ -1094,8 +1117,8 @@ export class CloudRuntimeRegistration {
 
   /** The advertised S2 uplink endpoint plus the credential it authenticates
    * with, or null when the control plane did not advertise one (rollout flag
-   * off, or an older control plane). The HTTP heartbeat remains the lease
-   * owner either way. */
+   * off, or an older control plane). With `lease.v1` the uplink also renews
+   * the lease; the HTTP heartbeat stays its fallback either way. */
   engineUplink(): { endpoint: string; token: string; controlPlaneOrigin: string } | null {
     const document = this.document;
     if (!document?.uplink || this.stopped || this.authorityLost) return null;
@@ -1129,6 +1152,26 @@ export class CloudRuntimeRegistration {
     this.heartbeatSoon();
   }
 
+  /** S2 `lease.v1`: reports whether the uplink currently renews the lease
+   * (`CloudEngineUplinkClient.leaseActive`). */
+  attachUplinkLease(active: () => boolean): void {
+    this.uplinkLeaseActive = active;
+  }
+
+  /** S2 `lease.v1`: a lease the control plane reported over the uplink in
+   * answer to a frame this engine sent at `sentAtMs` (its hello or a ping).
+   * It only raises the lease, never beyond what one renewal at that time
+   * can grant, and never revives a lease that already lapsed. */
+  adoptUplinkLease(leaseExpiresAtMs: number, sentAtMs: number): void {
+    const document = this.document;
+    if (!document || this.stopped || this.authorityLost) return;
+    const now = this.now();
+    if (!Number.isSafeInteger(leaseExpiresAtMs) || !Number.isSafeInteger(sentAtMs) || sentAtMs > now ||
+        now >= document.leaseExpiresAtMs) return;
+    document.leaseExpiresAtMs = Math.max(document.leaseExpiresAtMs,
+      Math.min(leaseExpiresAtMs, sentAtMs + UPLINK_ENGINE_LEASE_MS));
+  }
+
   private scheduleHeartbeat(delayMs: number): void {
     if (this.stopped || this.authorityLost) return;
     this.timer = setTimeout(() => {
@@ -1151,12 +1194,27 @@ export class CloudRuntimeRegistration {
     this.timer = null;
     const document = this.document;
     if (!document || this.stopped || this.authorityLost) return;
+    const forced = this.heartbeatForced;
+    this.heartbeatForced = false;
     this.heartbeatInFlight = true;
     this.heartbeatAgain = false;
-    const finish = this.renewalTimings.begin("engine-heartbeat");
+    let finish: ((outcome: RenewalOutcome) => void) | undefined;
     try {
       const credentialRefresh = this.readCredentialRefresh();
       const observedPorts = await this.observedPorts();
+      if (this.document !== document || this.stopped || this.authorityLost) return;
+      if (!forced && this.heartbeatCarriesNothing(document, credentialRefresh, observedPorts)) {
+        // The uplink renews the lease; the tick still keeps the durable
+        // record's cadence.
+        this.heartbeatFailures = 0;
+        this.scheduleHeartbeat(this.heartbeatAgain ? 0 : document.heartbeat.intervalMs);
+        if (!this.recordHandoffPaused) void this.synchronizeDurableRecord(document, { initial: false }).catch(
+          () => undefined,
+        );
+        return;
+      }
+      finish = this.renewalTimings.begin("engine-heartbeat");
+      const sentAt = this.now();
       const raw = await this.post(
         document.heartbeat.endpoint,
         document.heartbeat.token,
@@ -1194,7 +1252,9 @@ export class CloudRuntimeRegistration {
         raw.engineInstanceId !== this.config.engine.instanceId ||
         !Number.isSafeInteger(raw.leaseExpiresAtMs) ||
         Number(raw.leaseExpiresAtMs) - now < 5_000 ||
-        Number(raw.leaseExpiresAtMs) - now > 10 * 60_000
+        // lease.v1: the control plane answers the longer of an uplink
+        // renewal and its own 90-second one.
+        Number(raw.leaseExpiresAtMs) - now > UPLINK_ENGINE_LEASE_MS + 60_000
       ) {
         throw new CloudRuntimeRequestError(
           "cloud engine heartbeat response is invalid",
@@ -1209,7 +1269,11 @@ export class CloudRuntimeRegistration {
         raw.checkpointRequest,
         now,
       );
-      document.leaseExpiresAtMs = Number(raw.leaseExpiresAtMs);
+      // No later than one uplink renewal at the request's send time reaches.
+      document.leaseExpiresAtMs = Math.min(Number(raw.leaseExpiresAtMs), sentAt + UPLINK_ENGINE_LEASE_MS);
+      if (observedPorts !== undefined) this.reportedPorts = JSON.stringify(observedPorts);
+      this.checkpointRedelivered = checkpointRequest !== null;
+      this.heartbeatFailures = 0;
       // A checkpoint hint that arrived during this beat asks for one more now.
       this.scheduleHeartbeat(this.heartbeatAgain ? 0 : document.heartbeat.intervalMs);
       if (!this.recordHandoffPaused) void this.synchronizeDurableRecord(document, { initial: false }).catch(
@@ -1222,28 +1286,51 @@ export class CloudRuntimeRegistration {
         this.dispatchCheckpointRequest(checkpointRequest, document);
       finish("completed");
     } catch (error) {
-      finish("failed");
+      finish?.("failed");
+      // The reason for a forced beat still stands for its retry.
+      if (forced) this.heartbeatForced = true;
       const terminal =
         error instanceof CloudRuntimeRequestError && error.terminal;
       if (terminal || this.now() >= document.leaseExpiresAtMs - 1_000) {
         this.loseAuthority();
         return;
       }
-      this.scheduleHeartbeat(
-        Math.min(
-          5_000,
-          Math.max(250, document.leaseExpiresAtMs - this.now() - 1_000),
-        ),
-      );
+      this.heartbeatFailures += 1;
+      const remainingMs = document.leaseExpiresAtMs - this.now();
+      this.scheduleHeartbeat(remainingMs <= HEARTBEAT_URGENT_RETRY_WINDOW_MS
+        // The last retry runs one second before the lease ends.
+        ? Math.min(5_000, Math.max(250, remainingMs - 1_000))
+        // A long (uplink-renewed) lease rides out an outage without a 5 s storm.
+        : Math.min(HEARTBEAT_RETRY_CAP_MS, 5_000 * 2 ** Math.min(this.heartbeatFailures - 1, 4)));
     } finally {
       this.heartbeatInFlight = false;
     }
+  }
+
+  /** S2 `lease.v1`: while the uplink renews the lease, a periodic beat posts
+   * only when it carries something: a first or changed port scan, a
+   * repository credential refresh, a checkpoint request the control plane
+   * redelivers, or a renewal once 25 minutes or less of the lease remain.
+   * The checkpoint hint wait must be answering, since only it then asks for
+   * the beat that fetches a newly queued request. */
+  private heartbeatCarriesNothing(
+    document: RegistrationDocument,
+    credentialRefresh: unknown,
+    observedPorts: readonly { port: number; protocol: "tcp" }[] | undefined,
+  ): boolean {
+    return this.uplinkLeaseActive?.() === true &&
+      this.checkpointHintsAnswering &&
+      !this.checkpointRedelivered &&
+      credentialRefresh === null &&
+      (observedPorts === undefined || JSON.stringify(observedPorts) === this.reportedPorts) &&
+      document.leaseExpiresAtMs - this.now() > UPLINK_LEASE_HEARTBEAT_FLOOR_MS;
   }
 
   /** Timing only: the next beat fetches any durable checkpoint directive
    * through the same fenced heartbeat as the regular cadence. */
   private heartbeatSoon(): void {
     if (!this.document || this.stopped || this.authorityLost) return;
+    this.heartbeatForced = true;
     if (this.heartbeatInFlight) {
       this.heartbeatAgain = true;
       return;
@@ -1292,7 +1379,9 @@ export class CloudRuntimeRegistration {
         }
         failures = 0;
         pending = raw.pending;
+        this.checkpointHintsAnswering = true;
       } catch (error) {
+        this.checkpointHintsAnswering = false;
         if (
           error instanceof CloudRuntimeRequestError &&
           error.status !== undefined &&
@@ -1310,6 +1399,7 @@ export class CloudRuntimeRegistration {
         pending ? 2_000 : failures ? Math.min(30_000, 1_000 * 2 ** Math.min(failures - 1, 5)) : 0,
       );
     }
+    this.checkpointHintsAnswering = false;
   }
 
   private pauseCheckpointHints(delayMs: number): Promise<void> {
