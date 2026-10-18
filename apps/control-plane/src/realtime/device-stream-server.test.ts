@@ -199,7 +199,9 @@ class ReferenceClient {
     this.drainAfterMs = null;
     this.lastWasUnauthenticated = code === DEVICE_STREAM_CLOSE.unauthenticated;
     this.delays.push(delay);
-    setTimeout(() => { void this.connect(); }, Math.min(delay, 30_000));
+    // Bound the timer where it is read so the range check dominates the use.
+    const boundedDelay = delay >= 0 && delay <= 30_000 ? delay : 30_000;
+    setTimeout(() => { void this.connect(); }, boundedDelay);
   }
 }
 

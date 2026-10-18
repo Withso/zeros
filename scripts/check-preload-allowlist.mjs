@@ -30,7 +30,12 @@ const SRC_DIR = path.join(ROOT, "apps", "desktop", "src");
 // Commands intentionally allowlisted ahead of their renderer call sites. Add a
 // command here (with a comment) to silence the STALE warning on purpose; leave
 // empty otherwise so the warning stays meaningful.
-const ALLOW_UNINVOKED = new Set([]);
+const ALLOW_UNINVOKED = new Set([
+  // F1-2 lands the main-process outbox first; the renderer's command path
+  // adopts it in F1-7 (S3 Part 4). Until then there is no nativeInvoke site.
+  "cloud_workspace_outbox_enqueue",
+  "cloud_workspace_outbox_list",
+]);
 
 /** Pull the string literals out of `ALLOWED_COMMANDS = new Set<string>([ … ])`. */
 function readAllowlist() {

@@ -100,6 +100,8 @@ const commandTable: Record<string, CommandHandler> = {
     3,
   ),
   cloud_workspace_runtime_close: notImpl("cloud_workspace_runtime_close", 3),
+  cloud_workspace_outbox_enqueue: notImpl("cloud_workspace_outbox_enqueue", 3),
+  cloud_workspace_outbox_list: notImpl("cloud_workspace_outbox_list", 3),
 
   // ── WorkOS session at rest — main owns the full token pair; the renderer only
   // ever gets a live access token or decoded identity claims. The pair is written

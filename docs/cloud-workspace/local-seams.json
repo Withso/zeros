@@ -3,6 +3,7 @@
   "sign_off_label": "local-seams-sign-off",
   "cloud_paths": [
     "apps/control-plane/**",
+    "packages/cloud-client/**",
     "packages/protocol/**",
     "apps/desktop/src/engine/cloud-*.ts",
     "apps/desktop/src/engine/transport/cloud.ts",

@@ -497,6 +497,11 @@
       "id": "cloud-load-scale",
       "include": ["apps/control-plane/src/load-sim/**"],
       "lanes": ["cloud-scale"]
+    },
+    {
+      "id": "cloud-client-sdk",
+      "include": ["packages/cloud-client/**"],
+      "lanes": ["cloud-client"]
     }
   ],
   "jobs": {

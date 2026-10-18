@@ -2,15 +2,24 @@
 // CloudTransport — the direct zeros-cap.v1 route (S3 Part 3)
 // ──────────────────────────────────────────────────────────
 //
-// Raw WebSocket frames against a real CloudTransport and a real
+// The SDK's connectRuntime against a real CloudTransport and a real
 // EngineCapabilityAuth (the control plane's actor admission is faked): the
 // first frame is `auth`, verified (S1) and its actor admitted before the
-// socket joins the engine. Refusals before `auth.ok` carry S3 close codes.
+// socket joins the engine; zeros-v1 is selected while the engine cannot
+// verify, so the SDK falls back to its grant; and every refusal before
+// `auth.ok` carries its S3 close code.
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, sign } from "node:crypto";
 import net from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
+import {
+  connectRuntime,
+  type ConnectResponse,
+  type RuntimeConnection,
+  type RuntimeSessionOptions,
+  type RuntimeSocketFactory,
+} from "@zeros/cloud-client";
 
 import { buildCapabilityConformance } from "../../../../../control-plane/src/cloud-workspaces/capability-conformance-test-utils";
 import {
@@ -20,6 +29,7 @@ import {
   signTestCapability,
   signTestProof,
   testClientClaims,
+  testEd25519Key,
 } from "../../../../../control-plane/src/cloud-workspaces/capability-verifier-test-utils";
 import {
   EngineCapabilityAuth,
@@ -28,7 +38,8 @@ import {
   type EngineCapabilityAuthOptions,
 } from "../../cloud-capability-auth";
 import type { EngineUplinkAuthSync } from "../../cloud-engine-uplink";
-import type { CloudRuntimeClientAdmission } from "../../cloud-runtime-registration";
+import { CloudClientAuthorityTransientError, type CloudRuntimeClientAdmission } from "../../cloud-runtime-registration";
+import type { EngineMessage } from "../../types";
 import { CloudTransport, type CloudCapabilityAuthenticator } from "../cloud";
 import type { TransportClient } from "../types";
 
@@ -43,6 +54,7 @@ const NOW_MS = TEST_CAPABILITY_NOW_S * 1000;
 const TOKEN = "worker-minted-conn-token";
 const CLIENT_SESSION = "77777777-7777-4777-8777-777777777777";
 const JTI = "DDDDDDDDDDDDDDDDDDDDDD";
+const DEVICE_KEY = testEd25519Key("device-a").privateKey;
 const ADMITTED: CapabilityActorAdmission = {
   admission: {
     accountUserId: TEST_CAPABILITY_IDS.user,
@@ -68,6 +80,44 @@ afterEach(async () => {
 
 const capability = (claims: Record<string, unknown> = {}) =>
   signTestCapability(TEST_CAPABILITY_HEADER, testClientClaims({ jti: JTI, ...claims }));
+
+function capabilities(token = capability()) {
+  const grant = { token, expiresAt: new Date((TEST_CAPABILITY_NOW_S + 290) * 1000).toISOString() };
+  return { engine: grant, realtime: grant };
+}
+
+function connectResponse(port: number): ConnectResponse {
+  return {
+    workspaceId: identity.workspaceId, generation: identity.generation, engineInstanceId: identity.engineInstanceId,
+    capabilities: capabilities(), routes: [{ kind: "direct", url: `ws://127.0.0.1:${port}/ws`, priority: 0 }],
+    renewAt: new Date(NOW_MS + 200_000).toISOString(), relayHedgeMs: 400,
+  };
+}
+
+const createSocket: RuntimeSocketFactory = (url, protocols, handlers) => {
+  const socket = new WebSocket(url, [...protocols]);
+  sockets.push(socket);
+  socket.on("open", () => handlers.open(socket.protocol));
+  socket.on("message", (data, isBinary) => {
+    if (!isBinary) handlers.message(String(data));
+  });
+  socket.on("close", (code, reason) => handlers.close(code, reason.toString()));
+  socket.on("error", () => undefined);
+  return { send: text => socket.send(text), close: (code, reason) => socket.close(code, reason) };
+};
+
+const sdkOptions: RuntimeSessionOptions = {
+  clientSessionId: CLIENT_SESSION,
+  createSocket,
+  signProof: async message => sign(null, Buffer.from(message, "utf8"), DEVICE_KEY).toString("base64url"),
+  now: () => NOW_MS,
+};
+
+async function connect(port: number): Promise<RuntimeConnection> {
+  const result = await connectRuntime(connectResponse(port), sdkOptions);
+  if (result.kind !== "connected") throw new Error(`expected a connection, got ${result.kind}`);
+  return result.connection;
+}
 
 async function engineAuth(
   admitActor: EngineCapabilityAuthOptions["admitActor"] = async () => ADMITTED,
@@ -148,21 +198,90 @@ function rawUpgrade(port: number, protocols: string): Promise<string> {
 const CONNECTED = JSON.stringify({ id: "connected-1", timestamp: NOW_MS, type: "CONNECTED", source: "browser", capabilities: [] });
 
 describe("CloudTransport — direct zeros-cap.v1 route (S3 Part 3)", () => {
-  it("refuses a capability-only offer while the engine cannot verify capabilities", async () => {
-    const transport = await startTransport(() => null);
+  it("connects the SDK with a first auth frame and joins the engine as the admitted actor", async () => {
+    const auth = await engineAuth();
+    const transport = await startTransport(() => auth);
+    const connected: TransportClient[] = [];
+    const received: EngineMessage[] = [];
+    transport.onConnect(client => connected.push(client));
+    transport.onMessage((_client, msg) => {
+      received.push(msg);
+    });
+
+    const connection = await connect(transport.boundPort);
+    expect(connection).toMatchObject({ route: "direct", scopes: ["ws:edit", "ws:prompt", "ws:read"], expiresAtMs: (TEST_CAPABILITY_NOW_S + 290) * 1000 });
+    expect(connected).toHaveLength(1);
+    expect(connected[0]).toMatchObject({ kind: "cloud", id: connection.sessionId, accountUserId: TEST_CAPABILITY_IDS.user,
+      authorityEpoch: 3, cloudActor: ADMITTED.admission.actor });
+    expect(auth.verifier.openSessionIds()).toEqual([connection.sessionId]);
+
+    const inbound: string[] = [];
+    connection.onMessage(text => inbound.push(text));
+    connection.send(CONNECTED);
+    await vi.waitFor(() => expect(received.map(msg => msg.type)).toEqual(["CONNECTED"]));
+    transport.broadcast({ type: "PTY_DATA", source: "engine", sessionId: "s1", data: "hi" } as EngineMessage);
+    await vi.waitFor(() => expect(inbound.map(text => JSON.parse(text).type)).toEqual(["PTY_DATA"]));
+
+    const disconnected = new Promise(resolve => transport.onDisconnect(resolve));
+    connection.close();
+    await disconnected;
+    expect(auth.verifier.openSessionIds()).toEqual([]);
+  });
+
+  it("renews the capability in band and the actor with its renewal token", async () => {
+    const renewals: string[] = [];
+    const auth = await engineAuth();
+    const transport = await startTransport(() => auth, {
+      clientAuthorityLeaseMs: 200,
+      renewToken: async token => {
+        renewals.push(token);
+        return ADMITTED.admission;
+      },
+    });
+    const connection = await connect(transport.boundPort);
+    const renewed = capability({ jti: "EEEEEEEEEEEEEEEEEEEEEE", iat: TEST_CAPABILITY_NOW_S, nbf: TEST_CAPABILITY_NOW_S, exp: TEST_CAPABILITY_NOW_S + 300 });
+    await expect(connection.renew(capabilities(renewed))).resolves.toBe((TEST_CAPABILITY_NOW_S + 300) * 1000);
+    await vi.waitFor(() => expect(renewals.length).toBeGreaterThanOrEqual(2));
+    expect(new Set(renewals)).toEqual(new Set([ADMITTED.renewalToken]));
+    expect(connection.closed).toBe(false);
+    expect(auth.verifier.openSessionIds()).toEqual([connection.sessionId]);
+  });
+
+  it("closes the session the control plane stops renewing", async () => {
+    let renewing = true;
+    const auth = await engineAuth();
+    const transport = await startTransport(() => auth, {
+      clientAuthorityLeaseMs: 200,
+      renewToken: async () => (renewing ? ADMITTED.admission : null),
+    });
+    const connection = await connect(transport.boundPort);
+    const closed = new Promise(resolve => connection.onClose((code, reason) => resolve({ code, reason })));
+    renewing = false;
+    expect(await closed).toEqual({ code: 1008, reason: "client authority revoked" });
+    await vi.waitFor(() => expect(auth.verifier.openSessionIds()).toEqual([]));
+  });
+
+  it("selects zeros-v1 while the engine cannot verify capabilities, so the SDK falls back to its grant", async () => {
+    let current: EngineCapabilityAuth | null = null;
+    const transport = await startTransport(() => current);
     const connected: TransportClient[] = [];
     transport.onConnect(client => connected.push(client));
 
+    await expect(connectRuntime(connectResponse(transport.boundPort), sdkOptions)).resolves.toEqual({ kind: "legacy", route: "direct" });
     // Without zeros-v1 in the offer it is refused like a missing bearer.
     expect((await openSocket(transport.boundPort, ["zeros-cap.v1"]).closed).code).toBe(1006);
     await vi.waitFor(() => expect(transport.connectionCount).toBe(0));
     expect(connected).toEqual([]);
 
+    current = await engineAuth();
+    await connect(transport.boundPort);
+    expect(connected).toHaveLength(1);
   });
 
   it("leaves a transport without capability auth refusing a tokenless upgrade", async () => {
     const transport = await startTransport(undefined);
     expect((await openSocket(transport.boundPort).closed).code).toBe(1006);
+    await expect(connectRuntime(connectResponse(transport.boundPort), sdkOptions)).rejects.toMatchObject({ code: "runtime_unreachable" });
   });
 
   it("is a capability upgrade only with no bearer and one zeros-cap.v1 offer", async () => {
@@ -223,6 +342,22 @@ describe("CloudTransport — direct zeros-cap.v1 route (S3 Part 3)", () => {
     await new Promise(resolve => setTimeout(resolve, 25));
     expect(auth.verifier.openSessionIds()).toEqual([]);
     expect(transport.connectionCount).toBe(0);
+  });
+
+  it("closes 4403 when the control plane refuses the actor and 1013 while it cannot answer", async () => {
+    let answer: () => Promise<CapabilityActorAdmission | null> = async () => null;
+    const auth = await engineAuth(() => answer());
+    const transport = await startTransport(() => auth);
+
+    await expect(connectRuntime(connectResponse(transport.boundPort), sdkOptions)).rejects.toMatchObject({
+      code: "capability_revoked", failures: [{ route: "direct", closeCode: 4403, reason: "capability_revoked" }],
+    });
+    answer = async () => { throw new CloudClientAuthorityTransientError(); };
+    await expect(connectRuntime(connectResponse(transport.boundPort), sdkOptions)).rejects.toMatchObject({
+      code: "runtime_unreachable", failures: [{ route: "direct", closeCode: 1013, reason: "capability_issuer_unavailable" }],
+    });
+    expect(transport.connectionCount).toBe(0);
+    expect(auth.verifier.openSessionIds()).toEqual([]);
   });
 
   it("refuses a handshake still awaiting admission when the engine fences or stops", async () => {
@@ -288,4 +423,22 @@ describe("CloudTransport — direct zeros-cap.v1 route (S3 Part 3)", () => {
     }
   });
 
+  it("closes a session the verifier closes, and 4400 for a handshake frame other than auth.renew", async () => {
+    const holder: { current?: CloudTransport } = {};
+    const auth = await engineAuth(undefined, holder);
+    const transport = await startTransport(() => auth);
+    holder.current = transport;
+
+    const invalid = await connect(transport.boundPort);
+    const invalidClosed = new Promise(resolve => invalid.onClose((code, reason) => resolve({ code, reason })));
+    invalid.send(JSON.stringify({ t: "auth", d: {} }));
+    expect(await invalidClosed).toEqual({ code: 4400, reason: "frame_invalid" });
+
+    const revoked = await connect(transport.boundPort);
+    const revokedClosed = new Promise(resolve => revoked.onClose((code, reason) => resolve({ code, reason })));
+    auth.verifier.revoke("sid", TEST_CAPABILITY_IDS.session);
+    expect(await revokedClosed).toEqual({ code: 4403, reason: "capability_revoked" });
+    await vi.waitFor(() => expect(transport.connectionCount).toBe(0));
+    expect(auth.verifier.openSessionIds()).toEqual([]);
+  });
 });
