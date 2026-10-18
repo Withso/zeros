@@ -1166,6 +1166,16 @@ async function main() {
             workspaceId,
             10 + textTransactionCounter,
           );
+          const transactionGate = window as typeof window & {
+            __zerosHarnessHoldTransactionReply?: boolean;
+            __zerosHarnessReleaseTransaction?: () => void;
+          };
+          if (transactionGate.__zerosHarnessHoldTransactionReply) {
+            transactionGate.__zerosHarnessHoldTransactionReply = false;
+            await new Promise<void>((resolve) => {
+              transactionGate.__zerosHarnessReleaseTransaction = resolve;
+            });
+          }
           await new Promise((resolve) => window.setTimeout(resolve, 50));
           const afterRevision = `harness:${nextSourceVersion}`;
           return {

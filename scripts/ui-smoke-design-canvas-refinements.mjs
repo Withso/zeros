@@ -532,58 +532,87 @@ export async function runDesignPanDirectoryReplacementSmoke({ page, check }) {
 export async function runDesignLayoutAffineCameraSmoke({ page, check }) {
   await openCanvasFixture(page);
   await page.evaluate(async () => {
-    const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
-    const { updateDesignNodeStylesCached } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    const { designFrameRuntime } =
+      await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+    const { updateDesignNodeStylesCached } =
+      await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
     const runtime = designFrameRuntime("ws_design_harness", "home.html");
     await updateDesignNodeStylesCached("ws_design_harness", {
-      frame: "home.html", sourceVersion: runtime.sourceVersion, nodeId: "home-heading",
-      styles: { position: "absolute", left: "100px", top: "50px", margin: "5px 7px 9px 20px" },
+      frame: "home.html",
+      sourceVersion: runtime.sourceVersion,
+      nodeId: "home-heading",
+      styles: {
+        position: "absolute",
+        left: "100px",
+        top: "50px",
+        margin: "5px 7px 9px 20px",
+      },
     });
   });
   await page.locator('[data-design-layer-id="home-heading"]').click();
   const overlay = page.locator('[data-design-element-overlay="home-heading"]');
   await expect(overlay).toHaveCount(1);
-  const runtime = page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]');
+  const runtime = page.frameLocator(
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+  );
   const child = runtime.locator('[data-oid="home-heading"]');
   const parent = runtime.locator('[data-oid="home-hero"]');
-  const local = (locator) => locator.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-  });
+  const local = (locator) =>
+    locator.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    });
   const original = await local(child);
   const parentOriginal = await local(parent);
   const screen = await child.boundingBox();
-  const start = { x: screen.x + screen.width / 2, y: screen.y + screen.height / 2 };
+  const start = {
+    x: screen.x + screen.width / 2,
+    y: screen.y + screen.height / 2,
+  };
   const writes = await transactionWrites(page);
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
   await page.mouse.move(start.x + 40, start.y + 20, { steps: 5 });
-  await expect.poll(() => local(child)).toMatchObject({ x: original.x + 80, y: original.y + 40 });
+  await expect
+    .poll(() => local(child))
+    .toMatchObject({ x: original.x + 80, y: original.y + 40 });
   await page.evaluate(async () => {
-    const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
-    useDesignWorkspaceUiStore.getState().setViewport("ws_design_harness", { zoom: 0.5, panX: 50, panY: 120 });
+    const { useDesignWorkspaceUiStore } =
+      await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+    useDesignWorkspaceUiStore
+      .getState()
+      .setViewport("ws_design_harness", { zoom: 0.5, panX: 50, panY: 120 });
   });
   await page.mouse.move(start.x + 41, start.y + 20);
-  await expect.poll(async () => {
-    const current = await child.boundingBox();
-    return Math.hypot(current.x - screen.x - 41, current.y - screen.y - 20);
-  }).toBeLessThan(0.5);
+  await expect
+    .poll(async () => {
+      const current = await child.boundingBox();
+      return Math.hypot(current.x - screen.x - 41, current.y - screen.y - 20);
+    })
+    .toBeLessThan(0.5);
   expect(await local(parent)).toEqual(parentOriginal);
   await page.keyboard.press("Escape");
   await page.mouse.up();
   await expect.poll(() => local(child)).toEqual(original);
   expect(await transactionWrites(page)).toBe(writes);
-  check("structural movement preserves margins and the world grab anchor across a live camera pan; cancellation restores source", true);
+  check(
+    "structural movement preserves margins and the world grab anchor across a live camera pan; cancellation restores source",
+    true,
+  );
 }
 
 export async function runDesignWorldNudgeSmoke({ page, check }) {
   await openCanvasFixture(page);
   const frame = page.locator('[data-design-frame="home.html"]');
   const label = frame.locator("[data-design-frame-label]");
-  const confirmedX = () => page.evaluate(async () => {
-    const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
-    return designWorkspaceSnapshotCache.peekSnapshot("ws_design_harness").data.frames.find((frame) => frame.file === "home.html").x;
-  });
+  const confirmedX = () =>
+    page.evaluate(async () => {
+      const { designWorkspaceSnapshotCache } =
+        await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+      return designWorkspaceSnapshotCache
+        .peekSnapshot("ws_design_harness")
+        .data.frames.find((frame) => frame.file === "home.html").x;
+    });
   await label.click();
   const initialX = await confirmedX();
   await page.keyboard.press("Shift+ArrowRight");
@@ -594,69 +623,137 @@ export async function runDesignWorldNudgeSmoke({ page, check }) {
   await page.keyboard.up("ArrowRight");
   await expect.poll(confirmedX).toBe(initialX + 11);
   await page.evaluate(async () => {
-    const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
-    const { updateDesignNodeStylesCached } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    const { designFrameRuntime } =
+      await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+    const { updateDesignNodeStylesCached } =
+      await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
     for (const [nodeId, styles] of [
-      ["home-hero", { left: "500px", transform: "rotate(90deg) scale(2)", "transform-origin": "0 0" }],
-      ["home-heading", { position: "absolute", left: "100px", top: "50px", margin: "0" }],
+      [
+        "home-hero",
+        {
+          left: "500px",
+          transform: "rotate(90deg) scale(2)",
+          "transform-origin": "0 0",
+        },
+      ],
+      [
+        "home-heading",
+        { position: "absolute", left: "100px", top: "50px", margin: "0" },
+      ],
     ]) {
-      await updateDesignNodeStylesCached("ws_design_harness", { frame: "home.html", sourceVersion: designFrameRuntime("ws_design_harness", "home.html").sourceVersion, nodeId, styles });
+      await updateDesignNodeStylesCached("ws_design_harness", {
+        frame: "home.html",
+        sourceVersion: designFrameRuntime("ws_design_harness", "home.html")
+          .sourceVersion,
+        nodeId,
+        styles,
+      });
     }
   });
   await page.locator('[data-design-layer-id="home-heading"]').click();
   await page.locator('[data-design-element-overlay="home-heading"]').click();
-  const child = page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]').locator('[data-oid="home-heading"]');
-  const rect = () => child.evaluate((element) => { const rect = element.getBoundingClientRect(); return { x: rect.x, y: rect.y }; });
+  const child = page
+    .frameLocator(
+      '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+    )
+    .locator('[data-oid="home-heading"]');
+  const rect = () =>
+    child.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { x: rect.x, y: rect.y };
+    });
   const before = await rect();
   const writes = await transactionWrites(page);
   await page.keyboard.press("Shift+ArrowRight");
-  await expect.poll(async () => Math.abs((await rect()).x - before.x - 8)).toBeLessThan(0.01);
+  await expect
+    .poll(async () => Math.abs((await rect()).x - before.x - 8))
+    .toBeLessThan(0.01);
   await expect.poll(() => transactionWrites(page)).toBe(writes + 1);
   expect(Math.abs((await rect()).y - before.y)).toBeLessThan(0.01);
   const committed = await rect();
   await page.keyboard.down("ArrowRight");
-  await expect.poll(async () => Math.abs((await rect()).x - committed.x - 1)).toBeLessThan(0.01);
+  await expect
+    .poll(async () => Math.abs((await rect()).x - committed.x - 1))
+    .toBeLessThan(0.01);
   await page.keyboard.press("Escape");
   await page.keyboard.up("ArrowRight");
   await expect.poll(rect).toEqual(committed);
   expect(await transactionWrites(page)).toBe(writes + 1);
-  check("scene and transformed-node arrows move one/eight world pixels; held-key cancellation restores the preview without writing", true);
+  check(
+    "scene and transformed-node arrows move one/eight world pixels; held-key cancellation restores the preview without writing",
+    true,
+  );
 }
 
 export async function runDesignFreeRelocationSmoke({ page, check }) {
   await openCanvasFixture(page, "layoutGestures&freeRelocation");
   await page.locator('[data-design-layer-id="home-hero"]').click();
   const originalFrame = page.locator('[data-design-frame="home.html"]');
-  const live = originalFrame.frameLocator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]');
+  const live = originalFrame.frameLocator(
+    'iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+  );
   const original = await live.locator('[data-oid="home-hero"]').boundingBox();
   const bounds = await originalFrame.boundingBox();
-  const start = { x: original.x + original.width / 2, y: original.y + original.height / 2 };
+  const start = {
+    x: original.x + original.width / 2,
+    y: original.y + original.height / 2,
+  };
   const end = { x: start.x + 30, y: bounds.y + bounds.height + 70 };
   const overlay = page.locator('[data-design-element-overlay="home-hero"]');
-  expect(await overlay.boundingBox()).toMatchObject({ width: expect.closeTo(original.width, 1), height: expect.closeTo(original.height, 1) });
+  expect(await overlay.boundingBox()).toMatchObject({
+    width: expect.closeTo(original.width, 1),
+    height: expect.closeTo(original.height, 1),
+  });
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
   await page.mouse.move(end.x, end.y, { steps: 10 });
   await page.mouse.up();
   const detached = page.locator('[data-design-frame="detached.html"]');
   await expect(detached).toHaveCount(1);
-  const child = detached.frameLocator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]').locator('[data-oid="home-hero"]');
+  const child = detached
+    .frameLocator(
+      'iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+    )
+    .locator('[data-oid="home-hero"]');
   await expect(child).toHaveCount(1);
   const moved = await child.boundingBox();
   expect(moved.x).toBeCloseTo(original.x + end.x - start.x, 1);
   expect(moved.y).toBeCloseTo(original.y + end.y - start.y, 1);
   expect(moved.width).toBeCloseTo(original.width, 1);
   expect(moved.height).toBeCloseTo(original.height, 1);
-  expect(await child.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return { color: style.color, fontSize: style.fontSize, background: style.backgroundColor, margin: style.margin };
-  })).toEqual({ color: "rgb(0, 0, 128)", fontSize: "30px", background: "rgb(255, 0, 0)", margin: "0px" });
-  expect(await page.evaluate(() => (window.__zerosHarnessDesignShortcutOperations ?? []).filter((operation) => operation === "transfer:confirmed").length)).toBe(1);
-  check("free direct-root children detach once with the same affine outline, inherited appearance, and world placement", true);
+  expect(
+    await child.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        color: style.color,
+        fontSize: style.fontSize,
+        background: style.backgroundColor,
+        margin: style.margin,
+      };
+    }),
+  ).toEqual({
+    color: "rgb(0, 0, 128)",
+    fontSize: "30px",
+    background: "rgb(255, 0, 0)",
+    margin: "0px",
+  });
+  expect(
+    await page.evaluate(
+      () =>
+        (window.__zerosHarnessDesignShortcutOperations ?? []).filter(
+          (operation) => operation === "transfer:confirmed",
+        ).length,
+    ),
+  ).toBe(1);
+  check(
+    "free direct-root children detach once with the same affine outline, inherited appearance, and world placement",
+    true,
+  );
 }
 
 export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignFrameLiveCameraSmoke(options);
+  await runDesignFramePendingSaveSmoke(options);
   await runDesignMixedParentMovementSmoke(options);
   await runDesignGroupDetachmentRefusalSmoke(options);
   await runDesignFreeRelocationSmoke(options);
@@ -680,63 +777,171 @@ export async function runDesignFrameLiveCameraSmoke({ page, check }) {
   const frame = page.locator('[data-design-frame="home.html"]');
   const label = frame.locator("[data-design-frame-label]");
   const bounds = await label.boundingBox();
-  const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  const start = {
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2,
+  };
   const before = await frame.boundingBox();
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
   await page.mouse.move(start.x + 30, start.y + 20);
   await page.evaluate(async () => {
-    const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
-    useDesignWorkspaceUiStore.getState().setViewport("ws_design_harness", { zoom: 0.5, panX: 50, panY: 120 });
+    const { useDesignWorkspaceUiStore } =
+      await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+    useDesignWorkspaceUiStore
+      .getState()
+      .setViewport("ws_design_harness", { zoom: 0.5, panX: 50, panY: 120 });
   });
   await page.mouse.move(start.x + 31, start.y + 20);
-  await expect.poll(async () => Math.abs((await frame.boundingBox()).x - before.x - 31)).toBeLessThan(0.5);
+  await expect
+    .poll(async () => Math.abs((await frame.boundingBox()).x - before.x - 31))
+    .toBeLessThan(0.5);
   await page.keyboard.press("Escape");
   await page.mouse.up();
   expect(await canvasWrites(page)).toBe(0);
-  check("scene dragging retains the world grab point through live camera movement", true);
+  check(
+    "scene dragging retains the world grab point through live camera movement",
+    true,
+  );
+}
+
+export async function runDesignFramePendingSaveSmoke({ page, check }) {
+  for (const cancelled of [false, true]) {
+    await openCanvasFixture(page);
+    await page.evaluate(() => {
+      window.__zerosHarnessHoldTransactionReply = true;
+    });
+    const frame = page.locator('[data-design-frame="home.html"]');
+    const before = await frameGeometry(frame);
+    const move = async (cancel = false) => {
+      const label = await frame
+        .locator("[data-design-frame-label]")
+        .boundingBox();
+      const x = label.x + label.width / 2,
+        y = label.y + label.height / 2;
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(x + 40, y + 20, { steps: 4 });
+      if (cancel) await page.keyboard.press("Escape");
+      await page.mouse.up();
+    };
+    await page.keyboard.down("Control");
+    await move();
+    await expect
+      .poll(() =>
+        page.evaluate(() => typeof window.__zerosHarnessReleaseTransaction),
+      )
+      .toBe("function");
+    await move(cancelled);
+    await page.keyboard.up("Control");
+    const delta = cancelled ? { x: 80, y: 40 } : { x: 160, y: 80 };
+    try {
+      await expect
+        .poll(() => frameGeometry(frame))
+        .toMatchObject({ x: before.x + delta.x, y: before.y + delta.y });
+      expect(await transactionWrites(page)).toBe(1);
+    } finally {
+      await page.evaluate(() => window.__zerosHarnessReleaseTransaction());
+    }
+    await expect
+      .poll(() =>
+        page.evaluate(async () => {
+          const { designWorkspaceSnapshotCache } =
+            await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+          return designWorkspaceSnapshotCache
+            .peekSnapshot("ws_design_harness")
+            .data.frames.find((item) => item.file === "home.html").x;
+        }),
+      )
+      .toBe(before.x + delta.x);
+    expect(await transactionWrites(page)).toBe(cancelled ? 1 : 2);
+    check(
+      cancelled
+        ? "cancelling a second scene drag preserves only its pending predecessor"
+        : "a second scene drag waits for its known predecessor and preserves both world movements",
+      true,
+    );
+  }
 }
 
 export async function runDesignMixedParentMovementSmoke({ page, check }) {
   await openCanvasFixture(page, "layoutGestures&mixedParents");
-  await page.locator('[data-design-layer-id="home-panel"] [data-layer-disclosure]').click();
+  await page
+    .locator('[data-design-layer-id="home-panel"] [data-layer-disclosure]')
+    .click();
   await page.locator('[data-design-layer-id="home-heading"]').click();
-  await page.locator('[data-design-layer-id="home-copy"]').click({ modifiers: ["Shift"] });
+  await page
+    .locator('[data-design-layer-id="home-copy"]')
+    .click({ modifiers: ["Shift"] });
   const frame = page.locator('[data-design-frame="home.html"]');
-  const runtime = frame.frameLocator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]');
+  const runtime = frame.frameLocator(
+    'iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+  );
   const child = (id) => runtime.locator(`[data-oid="${id}"]`);
-  const before = await Promise.all(["home-heading", "home-copy"].map((id) => child(id).boundingBox()));
-  const start = { x: before[1].x + before[1].width / 2, y: before[1].y + before[1].height / 2 };
+  const before = await Promise.all(
+    ["home-heading", "home-copy"].map((id) => child(id).boundingBox()),
+  );
+  const start = {
+    x: before[1].x + before[1].width / 2,
+    y: before[1].y + before[1].height / 2,
+  };
   await page.keyboard.down("Control");
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
   await page.mouse.move(start.x + 40, start.y + 15);
   for (const [i, id] of ["home-heading", "home-copy"].entries()) {
-    await expect.poll(async () => Math.abs((await child(id).boundingBox()).x - before[i].x - 40)).toBeLessThan(0.5);
-    await expect.poll(async () => Math.abs((await child(id).boundingBox()).y - before[i].y - 15)).toBeLessThan(0.5);
+    await expect
+      .poll(async () =>
+        Math.abs((await child(id).boundingBox()).x - before[i].x - 40),
+      )
+      .toBeLessThan(0.5);
+    await expect
+      .poll(async () =>
+        Math.abs((await child(id).boundingBox()).y - before[i].y - 15),
+      )
+      .toBeLessThan(0.5);
   }
   await page.mouse.up();
   await page.keyboard.up("Control");
   await expect.poll(() => transactionWrites(page)).toBe(1);
-  check("one group transaction moves scaled and reflected parents' children by the same world delta", true);
+  check(
+    "one group transaction moves scaled and reflected parents' children by the same world delta",
+    true,
+  );
 }
 
 export async function runDesignGroupDetachmentRefusalSmoke({ page, check }) {
   await openCanvasFixture(page, "layoutGestures&mixedParents");
-  await page.locator('[data-design-layer-id="home-panel"] [data-layer-disclosure]').click();
+  await page
+    .locator('[data-design-layer-id="home-panel"] [data-layer-disclosure]')
+    .click();
   await page.locator('[data-design-layer-id="home-heading"]').click();
-  await page.locator('[data-design-layer-id="home-copy"]').click({ modifiers: ["Shift"] });
+  await page
+    .locator('[data-design-layer-id="home-copy"]')
+    .click({ modifiers: ["Shift"] });
   const frame = page.locator('[data-design-frame="home.html"]');
-  const child = frame.frameLocator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]').locator('[data-oid="home-copy"]');
+  const child = frame
+    .frameLocator(
+      'iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+    )
+    .locator('[data-oid="home-copy"]');
   const before = await child.boundingBox();
   const bounds = await frame.boundingBox();
-  const start = { x: before.x + before.width / 2, y: before.y + before.height / 2 };
+  const start = {
+    x: before.x + before.width / 2,
+    y: before.y + before.height / 2,
+  };
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
   await page.mouse.move(start.x, bounds.y + bounds.height + 100, { steps: 5 });
-  await expect(page.getByText("Detach one layer at a time", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Detach one layer at a time", { exact: true }),
+  ).toBeVisible();
   await page.mouse.up();
   await expect.poll(() => child.boundingBox()).toEqual(before);
   expect(await transactionWrites(page)).toBe(0);
-  check("a grouped scene exit is explicitly refused and restores every preview without a write", true);
+  check(
+    "a grouped scene exit is explicitly refused and restores every preview without a write",
+    true,
+  );
 }

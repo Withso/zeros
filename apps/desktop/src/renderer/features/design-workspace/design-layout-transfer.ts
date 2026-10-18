@@ -12,6 +12,27 @@ import {
   useDesignWorkspaceUiStore,
 } from "./state/design-workspace-ui";
 
+export function designCanvasDropTargetFrame(
+  source: string,
+  frames: readonly DesignCanvasFrameWire[],
+  rect: { x: number; y: number; width: number; height: number },
+): DesignCanvasFrameWire | undefined {
+  const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  return frames
+    .filter(
+      (candidate) =>
+        candidate.file !== source &&
+        center.x >= candidate.x &&
+        center.y >= candidate.y &&
+        center.x <= candidate.x + candidate.width &&
+        center.y <= candidate.y + candidate.height &&
+        candidate.width * candidate.height > rect.width * rect.height,
+    )
+    .reduce<
+      DesignCanvasFrameWire | undefined
+    >((top, candidate) => (!top || candidate.z >= top.z ? candidate : top), undefined);
+}
+
 export async function transferDesignLayerOnCanvas(input: {
   workspaceId: string;
   folder: string;
@@ -37,22 +58,11 @@ export async function transferDesignLayerOnCanvas(input: {
     x: origin.x + details.rect.width / 2,
     y: origin.y + details.rect.height / 2,
   };
-  const destination = input.frames
-    .filter(
-      (candidate) =>
-        candidate.file !== frame.file &&
-        center.x >= candidate.x &&
-        center.y >= candidate.y &&
-        center.x <= candidate.x + candidate.width &&
-        center.y <= candidate.y + candidate.height &&
-        candidate.width * candidate.height >
-          details.rect.width * details.rect.height,
-    )
-    // Match canvas painting: higher z wins; later siblings win ties.
-    .reduce<DesignCanvasFrameWire | undefined>(
-      (top, candidate) => (!top || candidate.z >= top.z ? candidate : top),
-      undefined,
-    );
+  const destination = designCanvasDropTargetFrame(frame.file, input.frames, {
+    ...origin,
+    width: details.rect.width,
+    height: details.rect.height,
+  });
   if (!destination && !input.detach) return false;
   const targetRuntime = destination
     ? designFrameRuntime(workspaceId, destination.file)

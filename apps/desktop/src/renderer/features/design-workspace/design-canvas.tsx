@@ -168,7 +168,7 @@ import {
   type DesignGapProperty,
   type DesignSizeBadgeMode,
 } from "./design-layout-tools";
-import { transferDesignLayerOnCanvas } from "./design-layout-transfer";
+import { designCanvasDropTargetFrame, transferDesignLayerOnCanvas } from "./design-layout-transfer";
 import {
   designLayoutTransform,
   preserveDesignLayoutPins,
@@ -285,6 +285,11 @@ import {
 } from "./design-workspace-types";
 
 type FrameGestureMode = "move" | DesignResizeHandle;
+type FrameGeometryPreview = {
+  geometry: DesignFrameGeometryWire;
+  settled: boolean;
+  commit?: Promise<DesignCanvasFrameWire | undefined>;
+};
 type DesignCanvasTool = "select" | "frame" | "text";
 
 interface CanvasHitStackMenu {
@@ -804,15 +809,7 @@ export function DesignCanvas({
   const viewportRef = useRef<HTMLDivElement | null>(null);
   // Direct transform target keeps panning gesture paints out of React.
   const worldRef = useRef<HTMLDivElement | null>(null);
-  const frameGeometryPreviewsRef = useRef(
-    new Map<
-      string,
-      {
-        geometry: DesignFrameGeometryWire;
-        settled: boolean;
-      }
-    >(),
-  );
+  const frameGeometryPreviewsRef = useRef(new Map<string, FrameGeometryPreview>());
   const marqueeRef = useRef<HTMLDivElement | null>(null);
   const creationDraftRef = useRef<HTMLDivElement | null>(null);
   const verticalGuideRef = useRef<HTMLDivElement | null>(null);
@@ -2470,9 +2467,9 @@ export function DesignCanvas({
       setSelectionOverlaySuppressed(false);
       return;
     }
-    gesture.retired ||= cancelled;
+    gesture.retired ||= cancelled || designWorkspaceView(workspaceId).selectionEvent !== gesture.selectionEvent;
     const isCurrent = () => !gesture.retired && gesture.lifetime === nudgeLifetimeRef.current &&
-      isCurrentDesignPageOwner(gesture.owner) && designWorkspaceView(workspaceId).selectionEvent === gesture.selectionEvent &&
+      isCurrentDesignPageOwner(gesture.owner) &&
       designWorkspaceView(workspaceId).activeTheme === gesture.theme &&
       useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[gesture.frame.file]?.snapshot?.revision === gesture.runtimeRevision;
     const frameKey = `${canvasDocumentOwner}\0${gesture.frame.file}`;
@@ -2590,7 +2587,7 @@ export function DesignCanvas({
         designWorkspaceView(workspaceId).selectionEvent === selectionEvent;
       const previousPreview = frameGeometryPreviewsRef.current.get(previewKey);
       const start = previousPreview?.geometry ?? frameGeometry(frame);
-      const preview = { geometry: start, settled: false };
+      const preview: FrameGeometryPreview = { geometry: start, settled: false };
       const startX = event.clientX;
       const startY = event.clientY;
       const viewport = viewportRef.current;
@@ -2807,16 +2804,25 @@ export function DesignCanvas({
           return;
         }
         const persist = async () => {
+          const acknowledgedFrame = previousPreview?.commit
+            ? await previousPreview.commit
+            : frame;
+          if (!acknowledgedFrame) throw new Error("The preceding move removed this frame.");
+          if (!ownerIsCurrent()) return acknowledgedFrame;
           const root =
             useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
               frame.file
             ]?.snapshot?.frame;
+          const currentFrames = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ?? snapshot?.frames ?? [];
           if (
             mode === "move" &&
             folder &&
             root?.oid &&
             !root.oid.startsWith("::") &&
-            designWorkspaceView(workspaceId).selectedTargets.length === 1
+            designWorkspaceView(workspaceId).selectedTargets.length === 1 &&
+            designCanvasDropTargetFrame(frame.file, currentFrames, {
+              x: latest.x, y: latest.y, width: root.rect.width, height: root.rect.height,
+            })
           ) {
             const presentation = createDesignDragPresentation(
               workspaceId,
@@ -2830,14 +2836,14 @@ export function DesignCanvas({
             });
             try {
               const measured = await designFrameRuntime(workspaceId, frame.file)?.getNodeDetails(root.oid, undefined, { relocation: true });
-              if (!ownerIsCurrent()) return start;
+              if (!ownerIsCurrent()) return acknowledgedFrame;
               if (
                 await transferDesignLayerOnCanvas({
                   workspaceId,
                   folder,
-                  frame,
+                  frame: acknowledgedFrame,
                   details: measured ?? root,
-                  frames: snapshot?.frames ?? [],
+                  frames: currentFrames,
                   origin: { x: latest.x, y: latest.y },
                   detach: false,
                   requireRelocation: true,
@@ -2846,19 +2852,19 @@ export function DesignCanvas({
                     presentation?.handoff(target) ?? Promise.resolve(),
                 })
               )
-                return latest;
+                return undefined;
             } finally {
               presentation?.remove();
             }
           }
-          if (!ownerIsCurrent()) return start;
+          if (!ownerIsCurrent()) return acknowledgedFrame;
           if (mode === "move") {
-            await applyDesignEditCached(workspaceId, frame, {
+            const result = await applyDesignEditCached(workspaceId, acknowledgedFrame, {
               schemaVersion: 1, transactionId: `desktop:${crypto.randomUUID()}`, actor: { kind: "human", id: "desktop" },
               intent: "Move canvas frame", createdAt: Date.now(),
               operations: [{ operationId: crypto.randomUUID(), type: "frame.set-geometry", frame: frame.file, geometry: { x: latest.x, y: latest.y, width: latest.w, height: latest.h, z: latest.z } }],
-            }, { isCurrent: ownerIsCurrent, movementGuard: { sourceVersion: frame.sourceVersion, geometry: frameGeometry(frame) } });
-            return latest;
+            }, { isCurrent: ownerIsCurrent, movementGuard: { sourceVersion: acknowledgedFrame.sourceVersion, geometry: frameGeometry(acknowledgedFrame) } });
+            return result.snapshot?.frames.find((candidate) => candidate.file === frame.file);
           }
           const rootStyles = designFrameResizeRootStyles(
             resizeRoot,
@@ -2869,8 +2875,8 @@ export function DesignCanvas({
             // A quick release must not let the drag's preview land after the
             // committed generation.
             await frameRootPreviewQueue.idle(rootPreviewLane);
-            if (!ownerIsCurrent()) return start;
-            await applyDesignEditCached(workspaceId, frame, {
+            if (!ownerIsCurrent()) return acknowledgedFrame;
+            const result = await applyDesignEditCached(workspaceId, acknowledgedFrame, {
               schemaVersion: 1,
               transactionId: `desktop:${crypto.randomUUID()}`,
               actor: { kind: "human", id: "desktop" },
@@ -2900,13 +2906,14 @@ export function DesignCanvas({
                 },
               ],
             });
-            return latest;
+            return result.snapshot?.frames.find((candidate) => candidate.file === frame.file);
           }
-          return updateDesignFrameGeometryCached(
+          await updateDesignFrameGeometryCached(
             workspaceId,
             frame.file,
             latest,
           );
+          return designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((candidate) => candidate.file === frame.file);
         };
         const settle = (geometry: DesignFrameGeometryWire) => {
           preview.geometry = geometry;
@@ -2917,8 +2924,9 @@ export function DesignCanvas({
           if (ownerIsCurrent() && element.isConnected)
             paintFrameGeometry(element, geometry);
         };
-        void persist()
-          .then(settle)
+        preview.commit = persist();
+        void preview.commit
+          .then((confirmed) => settle(confirmed ? frameGeometry(confirmed) : latest))
           .catch((geometryError) => {
             const confirmed = designWorkspaceSnapshotCache
               .peekSnapshot(workspaceId)
@@ -5083,7 +5091,6 @@ export function DesignCanvas({
       selectedRuntimeTree,
       startFrameGesture,
       startNodeGroupMove,
-      view.selectedNodeId,
       view.selectedNodeIds,
       workspaceId,
     ],
