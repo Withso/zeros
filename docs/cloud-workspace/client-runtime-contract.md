@@ -876,6 +876,21 @@ them. Local Personal and organization-local routing constructs neither an SDK
 client nor a device stream. S3 adoption still requires the renderer's matching
 `ENGINE_READY.cloudLocalCommands` gate before commands or forwarding become ready.
 
+The cloud peer selects that SDK IPC and adapts the authenticated SDK connection
+to the existing renderer RPC client. A direct/relay race reaching `auth.ok` does
+not establish command or forwarding readiness: the actor handshake, exact boot
+binding and physical workspace root are still required. Renewal runs in band
+without changing the native runtime identity or publishing a disconnect. A
+reconnect obtains the next native connection sequence and repeats those checks.
+Cancellation closes both pending routes and fences late signing and admission.
+
+An initial `zeros-v1` negotiation selects one native legacy admission with the
+same boot binding, before the peer is published. A published peer never silently
+changes its native runtime ID; a later legacy-required result retires it so a
+fresh open can select the legacy path. Server flag discovery remains native and
+per workspace. Catalog and presence polling are unchanged by transport adoption;
+per-organization device-stream coverage and rollout evidence gate their removal.
+
 Admission failures carry a closed `error.phase`: `grant`, `provider_endpoint`,
 `provider_host_key`, or `engine_reach`. The current public admission route only
 performs the first two; it does not claim to have reached the engine or checked

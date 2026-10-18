@@ -168,7 +168,7 @@ export async function setCloudWorkspacePortForwarding(
 /** Connection lifecycle only. Select safe identity fields; the admission's
  * URL and bearer must never be included in this renderer-to-main publication. */
 export function publishCloudWorkspacePortForwardingRuntime(
-  target: CloudRuntimeConnectionTarget,
+  target: Pick<CloudRuntimeConnectionTarget, "organizationId" | "workspaceId" | "runtimeId" | "generation" | "authorityEpoch" | "engineInstanceId" | "connectionSequence">,
   connected: boolean,
 ): Promise<void> {
   return nativeInvoke("cloud_workspace_port_forwarding_runtime", {

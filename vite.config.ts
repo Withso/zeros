@@ -23,6 +23,9 @@ export function buildElectronRendererCsp(controlPlaneOrigin: string): string {
     "ws://localhost:*",
     "ws://127.0.0.1:*",
     "http://localhost:*",
+    // Native admission validates the exact provider endpoint before the
+    // renderer opens it; only encrypted provider WebSockets belong here.
+    "wss://*.on.boat.dev",
     "wss://*.zeros.build",
     "https://*.zeros.build",
     "https://*.posthog.com",

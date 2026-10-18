@@ -6,6 +6,7 @@ import {
   type RuntimeClientEnvironment,
   type RuntimeConnectionTarget,
   type CloudRuntimeConnectionTargetRefresher,
+  type CloudSdkSocketFactory,
 } from "./runtime-client";
 export * from "./runtime-client";
 
@@ -146,6 +147,7 @@ export function parseRuntimeConnectionTarget(raw: unknown, now = Date.now()): Ru
 export class RuntimeClient extends SharedRuntimeClient {
   constructor(target: RuntimeConnectionTarget = { kind: "local" }, options: {
     refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
+    createCloudSdkSocket?: CloudSdkSocketFactory;
   } = {}) {
     super(target, { ...options, environment: desktopEnvironment() });
   }
