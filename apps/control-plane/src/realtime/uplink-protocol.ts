@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/** S2 `zeros-uplink` wire constants (contract 1.1.0). The CP
+/** S2 `zeros-uplink` wire constants (contract 1.2.0). The CP
  * mirrors the contract here and never imports `@zeros/protocol`. */
 export const UPLINK_PATH = "/v1/uplink";
 export const UPLINK_SUBPROTOCOL = "zeros-uplink.v1";
@@ -83,6 +83,8 @@ export const UPLINK_FEATURES = {
   relay: "relay.v1",
   /** The uplink renews the engine lease (36 min, every watermark). */
   lease: "lease.v1",
+  /** The control plane decides idle stops from `activity.report`. */
+  idle: "idle.v1",
   /** Queued checkpoint requests are pushed (`checkpoint.request`) instead
    * of the engine holding the checkpoint-hint long-poll. */
   checkpoint: "checkpoint.v1",

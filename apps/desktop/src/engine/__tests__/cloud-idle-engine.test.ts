@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../cloud-idle-stop", async importOriginal => ({ ...await importOriginal<object>(), hasCloudUserProcesses: vi.fn(async () => false) }));
 vi.mock("../pty/node-pty-spawn", () => ({ createNodePtyShell: vi.fn(), createTerminalMirror: vi.fn(), disposePtyHost: vi.fn() }));
-import { hasCloudUserProcesses } from "../cloud-idle-stop";
+import { CloudIdleStopScheduler, CLOUD_IDLE_STOP_MS, hasCloudUserProcesses } from "../cloud-idle-stop";
 import { ZerosEngine } from "../zeros-engine";
 import { CloudOwnedWorkloadRegistry } from "../agents/containment/cloud-owned-workloads";
 import type { CloudCheckpointDirective } from "../cloud-runtime-registration";
@@ -314,5 +314,43 @@ describe("original outer idle ticket through checkpoint cancellation", () => {
     await state.cloudWorkloads.drain(seal);
     await expect(state.stopIdleCloudWorkspace(authority, () => true)).rejects.toThrow("checkpoint cancelled");
     expect(() => state.cloudWorkloads.assertAccepting()).toThrow();
+  });
+});
+describe("control-plane idle stop (idle.v1)", () => {
+  function delegated(options: { quietMs?: number; busy?: boolean; idleActive?: boolean } = {}) {
+    let now = 0;
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => options.busy === true, stop: async () => false });
+    now = options.quietMs ?? CLOUD_IDLE_STOP_MS;
+    const state = Object.assign(fixture(), { cloudIdleStop: scheduler, cloudEngineUplink: { idleActive: options.idleActive ?? true } });
+    state.cloudRuntimeCheckpointQuiescing = false;
+    state.cloudIdleReservation = null;
+    state.cloudDurabilityRuntime.checkpoint.mockRejectedValue(new Error("checkpoint cancelled"));
+    return state as typeof state & { routeCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void> };
+  }
+  const requested = (state: ReturnType<typeof delegated>) =>
+    (state.cloudRuntimeRegistration.idleStopRequest.mock.calls as unknown as [{ kind: string }][]).filter(([call]) => call.kind === "request");
+
+  it("runs a delegated idle stop through the engine's own preparation without requesting another", async () => {
+    const state = delegated();
+    await state.routeCloudCheckpointRequest(directive, authority);
+    expect(state.cloudLanguageServices.pause).toHaveBeenCalled();
+    expect(state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledOnce();
+    expect(requested(state)).toEqual([]);
+  });
+  it.each([
+    ["a turn runs", { busy: true }],
+    ["the engine was quiet for less than the idle interval", { quietMs: CLOUD_IDLE_STOP_MS - 60_000 }],
+  ])("cancels a delegated idle stop at once when %s", async (_name, options) => {
+    const state = delegated(options);
+    await state.routeCloudCheckpointRequest(directive, authority);
+    expect(state.cloudLanguageServices.pause).not.toHaveBeenCalled();
+    expect(state.cloudDurabilityRuntime.checkpoint).not.toHaveBeenCalled();
+    expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledWith({ kind: "cancel", requestId: directive.id });
+  });
+  it("keeps today's cancellation without idle.v1 (a lost uplink never stops)", async () => {
+    const state = delegated({ idleActive: false });
+    await expect(state.routeCloudCheckpointRequest(directive, authority)).rejects.toThrow("no longer idle");
+    expect(state.cloudLanguageServices.pause).not.toHaveBeenCalled();
+    expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledWith({ kind: "cancel", requestId: directive.id });
   });
 });

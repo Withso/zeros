@@ -73,6 +73,7 @@ import { DatabaseUplinkCheckpointStore, UplinkCheckpointPush } from "./realtime/
 import { DatabaseUplinkCredentialStore, UplinkCredentialPush } from "./realtime/uplink-cred.js";
 import { uplinkCapabilityAuthority } from "./realtime/uplink-auth-source.js";
 import { DatabaseUplinkAuthority } from "./realtime/uplink-authority.js";
+import { DatabaseUplinkIdleStopStore } from "./realtime/uplink-idle.js";
 import { DatabaseUplinkLeaseStore } from "./realtime/uplink-lease.js";
 import { startUplinkNotifications } from "./realtime/uplink-notifications.js";
 import { DatabaseUplinkPresenceStore, UplinkPresenceWriter } from "./realtime/uplink-presence.js";
@@ -932,6 +933,7 @@ const mountEngineUplink = () => {
   cloudEngineUplink = new CloudEngineUplinkServer({
     authority: new DatabaseUplinkAuthority({ pool, workosEnabled: config.auth.provider === "workos", alerts }),
     lease: new DatabaseUplinkLeaseStore({ pool, workosEnabled: config.auth.provider === "workos" }),
+    idle: new DatabaseUplinkIdleStopStore(new DatabaseCloudIdleStop(pool, config.auth.provider === "workos")),
     authSource: uplinkAuth.source,
     capabilities: uplinkAuth.issuer,
     flags: rolloutFlagSnapshot,

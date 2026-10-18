@@ -43,6 +43,7 @@ registered `whileFeedUnavailable` value:
 | `runtime_connect` | retain | Additive endpoints; while off they answer 404 and clients keep `runtime/admission`. |
 | `engine_lease_over_uplink` | retain | Changes which path renews the engine lease, not who may hold it: every renewal re-checks authority in SQL and the HTTP heartbeat stays as the fallback. A flip closes the affected uplinks (`1001 features_changed`), so flapping would bounce engines between the two paths. |
 | `checkpoint_push` | retain | Transport choice for a timing hint; the heartbeat still delivers and fences every checkpoint request, and the long-poll remains as fallback. A flip closes the affected uplinks (`1001 features_changed`). |
+| `cp_idle_stop` | retain | Moves who decides an idle stop, not whether the engine proves idleness: the engine cancels a request it cannot prove and its own timer resumes once the uplink is gone. A flip closes the affected uplinks (`1001 features_changed`). |
 
 `retain` keeps the last loaded value, still corrected by the safety refresh.
 Use `off` for any new flag that relaxes a database check or a security
@@ -80,6 +81,15 @@ heartbeat, so unlike `engine_lease_over_uplink` it needs no particular
 closes the organization's `checkpoint.v1` uplinks with
 `1001 features_changed`; the redial negotiates without it and the engines
 return to the long-poll.
+
+`cp_idle_stop` requires `realtime_uplink`: `realtime` decides idle stops
+from the engine's `activity.report` (S2 `idle.v1`), and the engine suspends
+its own initiation while that holds. The engine still proves idleness before
+it checkpoints: a request it cannot prove is cancelled, and unknown activity,
+a lost uplink or an unavailable database never stops a workspace. Turning the
+flag off closes the organization's `idle.v1` uplinks with
+`1001 features_changed`; the redial negotiates without it, and the engine's
+own idle timer decides again.
 
 ## Changing a flag
 

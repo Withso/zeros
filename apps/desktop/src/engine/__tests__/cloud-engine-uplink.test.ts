@@ -988,6 +988,47 @@ describe("engine uplink client (socket level)", () => {
     expect(sockets).toHaveLength(2);
     client.stop();
   });
+
+  it("reports activity at the gate, on an edge and every 60 s on an idle.v1 connection", async () => {
+    let activity = { clients: 0, runningTurns: 0, liveTerminals: 0, windowMs: 1_000 };
+    const { client, sockets } = fakeClient({ features: ["idle.v1"], activity: () => activity });
+    client.start();
+    await flush();
+    expect(sockets[0]!.ofType("sys.hello")[0]!.d).toMatchObject({ features: ["idle.v1"] });
+    await serveHandshake(sockets[0]!, { features: ["idle.v1"] });
+    expect(client.idleActive).toBe(true);
+    const reports = () => sockets[0]!.ofType("activity.report").map(frame => frame.d);
+    expect(reports()).toEqual([activity]);
+    client.reportActivity(); // the same quiet stretch: no edge
+    expect(reports()).toHaveLength(1);
+    activity = { ...activity, runningTurns: 1, windowMs: 0 };
+    client.reportActivity();
+    expect(reports()).toEqual([expect.anything(), activity]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(reports()).toHaveLength(3);
+    sockets[0]!.fail();
+    await flush();
+    expect(client.idleActive).toBe(false);
+    client.stop();
+  });
+
+  it("clamps activity to the schema and sends none without idle.v1", async () => {
+    const big = { clients: 20_000, runningTurns: 3, liveTerminals: 0, windowMs: 7_200_000 };
+    const first = fakeClient({ features: ["idle.v1"], activity: () => big });
+    first.client.start();
+    await flush();
+    await serveHandshake(first.sockets[0]!, { features: ["idle.v1"] });
+    expect(first.sockets[0]!.ofType("activity.report")[0]!.d).toEqual({ clients: 10_000, runningTurns: 3, liveTerminals: 0, windowMs: 3_600_000 });
+    first.client.stop();
+    const second = fakeClient({ features: ["idle.v1"], activity: () => big });
+    second.client.start();
+    await flush();
+    await serveHandshake(second.sockets[0]!, { features: ["cred.v1"] });
+    expect(second.client.idleActive).toBe(false);
+    second.client.reportActivity(true);
+    expect(second.sockets[0]!.ofType("activity.report")).toEqual([]);
+    second.client.stop();
+  });
 });
 
 describe("EngineUplinkAuthState", () => {

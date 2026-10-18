@@ -34,6 +34,11 @@
       "statements": 7,
       "roundTrips": 2
     },
+    "engine.uplinkIdleStopRequest": {
+      "transactions": 1,
+      "statements": 8,
+      "roundTrips": 5
+    },
     "engine.checkpointHintWait": {
       "transactions": 1,
       "statements": 7,

@@ -394,6 +394,25 @@ running engine). With `checkpoint.v1` `realtime` tells the engine instead:
   wait resumes the moment the uplink is lost and its first read sees a
   request queued meanwhile.
 
+### Control-plane idle stop (`idle.v1`)
+
+An engine that offers `idle.v1` sends `activity.report` once the gate opens,
+every 60 s and on an edge. `windowMs` is how long the engine has observed no
+activity by its own busy rules (capped at 1 h); the counts are admitted
+clients with a live presence lease, running turns and terminals with recent
+input. `realtime` selects the feature while the organization's
+`cp_idle_stop` flag is on. While all three counts are 0 and `windowMs > 0`,
+`realtime` treats the engine as quiet since the report's receipt time minus
+`windowMs`; 10 min later, on an open uplink, it runs the idle-stop
+transaction (authority, engine age, durable work) with the uplink's
+credential, which queues an idle checkpoint request delivered as any other.
+The engine runs its own idle preparation for that request and cancels it
+(`workspace_active`) unless it has itself been quiet for 10 min. Unknown
+activity, a lost uplink or an unavailable database never stops a workspace;
+a declined or failed request retries after 15 s doubling to 120 s. While
+`idle.v1` is active the engine's own idle timer observes but never
+initiates; it resumes when the uplink is gone. No frame or schema change.
+
 ## Lifetimes and limits
 
 | Item | Value |
@@ -967,6 +986,10 @@ review aid until freeze; the frozen source of truth will be Zod in
   hint: delivery stays on the heartbeat), and the engine pauses its
   checkpoint-hint wait while the push is active. No schema change: the
   frame was already defined; it is now sent only behind `checkpoint.v1`.
+  Also added the `idle.v1` feature
+  ([Control-plane idle stop](#control-plane-idle-stop-idlev1)), negotiated
+  while `cp_idle_stop` is on: `realtime` requests the idle stop from
+  `activity.report`, and the engine still proves idleness.
 - **1.1.0** (2026-10-16, additive): added close `4404 uplink_disabled` —
   the rollout flag is off for the organization; the engine parks, the HTTP
   heartbeat and the credential poll continue, and the engine re-dials only
