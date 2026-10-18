@@ -674,6 +674,28 @@ describe("session reload lifecycle", () => {
     );
   });
 
+  it.each([true, undefined])("preserves an optional fresh-thread replay request on the exact execution: %s", (resumedFresh) => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-1", {
+      ...BLANK, agentId: "codex", executionId: "live", sessionId: "live", needsConversationReplay: false,
+    });
+    const binding = { version: 1, providerId: "codex", kind: "native", resumeId: "new-thread" };
+    const update = {
+      sessionUpdate: "provider_binding_update", providerBinding: binding,
+      ...(resumedFresh ? { resumedFresh } : {}),
+    };
+    store.applyBridgeUpdate({ executionId: "retired", sessionId: "retired", chatId: "chat-1", update } as SessionNotification);
+    expect(useSessionsStore.getState().sessions["chat-1"]?.needsConversationReplay).toBe(false);
+    store.applyBridgeUpdate({ executionId: "live", sessionId: "live", chatId: "chat-1", update } as SessionNotification);
+    expect(useSessionsStore.getState().sessions["chat-1"]).toMatchObject({
+      providerBinding: binding, needsConversationReplay: resumedFresh === true,
+    });
+    store.applyBridgeUpdate({ executionId: "live", sessionId: "live", chatId: "chat-1", update: {
+      sessionUpdate: "provider_binding_update", providerBinding: binding,
+    } } as SessionNotification);
+    expect(useSessionsStore.getState().sessions["chat-1"]?.needsConversationReplay).toBe(resumedFresh === true);
+  });
+
   it("rejects a stale provider binding from a superseded execution", () => {
     const store = useSessionsStore.getState();
     store.setSession("chat-1", {

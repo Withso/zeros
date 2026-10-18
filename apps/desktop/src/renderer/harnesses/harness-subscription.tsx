@@ -48,9 +48,11 @@ import { useWorkspaceStore } from "../state/workspace-store";
 const ids = ["claude", "codex", "cursor"] as const;
 const params = new URLSearchParams(location.search);
 const queueFixture = ids.find((id) => id === params.get("queue"));
-const queueTurns = new Map<string, (reason: string) => void>();
+const queueTurns = new Map<string, (reason: "cancelled" | "end_turn") => void>();
 const queueSteers = new Map<string, (outcome: string) => void>();
 const queuePrompts: string[] = [];
+const queueReplayRequests: boolean[] = [];
+if (queueFixture) Object.assign(window, { __queueReplayRequests: queueReplayRequests });
 const queueBridgeListeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const usageFixture = ids.find((id) => id === params.get("usage"));
 const identityFixture = params.has("identity");
@@ -408,11 +410,19 @@ RuntimeClient.prototype.request = async function <
     params: Record<string, unknown>;
   };
   if (queueFixture && request.type === "AGENT_PROMPT") {
-    queuePrompts.push(request.prompt[0]?.text ?? "");
+    // A resumed fresh thread can prepend history before the user's text.
+    queuePrompts.push(request.prompt.at(-1)?.text ?? "");
+    queueReplayRequests.push(request.prompt.some((block) =>
+      block.type === "text" && block.text.startsWith("<previous_conversation>"),
+    ));
     window.dispatchEvent(new Event("queue-fixture-change"));
     return new Promise<T>((resolve) => queueTurns.set(request.sessionId, (stopReason) => {
       queueTurns.delete(request.sessionId);
-      resolve({ type: "AGENT_PROMPT_COMPLETE", sessionId: request.sessionId, result: { stopReason } } as unknown as T);
+      resolve(createMessage({
+        type: "AGENT_PROMPT_COMPLETE", source: "engine", agentId: request.agentId,
+        requestId: message.id ?? "fixture-prompt", sessionId: request.sessionId,
+        executionId: request.sessionId, stopReason, response: { stopReason },
+      }) as unknown as T);
     }));
   }
   if (queueFixture && request.type === "AGENT_STEER") {
@@ -561,11 +571,12 @@ RuntimeClient.prototype.request = async function <
       sessionUpdate: "agent_message_chunk", messageId: `reply-${request.agentId}-${counts.prompts}`,
       phase: "final_answer", content: { type: "text", text: "Continued the original request." },
     } });
-    return {
-      type: "AGENT_PROMPT_COMPLETE",
-      sessionId: request.sessionId,
-      result: { stopReason: "end_turn" },
-    } as unknown as T;
+    return createMessage({
+      type: "AGENT_PROMPT_COMPLETE", source: "engine", agentId: request.agentId,
+      requestId: message.id ?? "fixture-prompt", sessionId: request.sessionId,
+      executionId: request.sessionId, stopReason: "end_turn",
+      response: { stopReason: "end_turn" },
+    }) as unknown as T;
   }
   const params = request.params ?? {};
   const chatId = params.chatId as string;

@@ -496,6 +496,12 @@ export interface SessionsStoreState {
    *  serves them all and the user could be looking at any of them. */
   applyBridgeStderr: (agentId: string, line: string) => void;
 
+  /** One store update for a buffered burst, in arrival order. Retains exactly
+   *  what applying each line with `applyBridgeStderr` would retain. */
+  applyBridgeStderrLines: (
+    entries: ReadonlyArray<{ agentId: string; line: string }>,
+  ) => void;
+
   /** Subprocess exited. Any chat on this agent that wasn't already in a
    *  terminal state flips to `reconnecting` so the next user action can
    *  drive a fresh ensureSession. We do NOT auto-retry — that path
@@ -941,6 +947,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       effort?: string;
       providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
       providerMetadata?: import("@zeros/protocol/identities").ProviderMetadata;
+      resumedFresh?: boolean;
       goal?: import("@zeros/protocol/agent-events").AgentGoal | null;
       toolCallId?: string;
       retryId?: string | null;
@@ -963,6 +970,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       }
       get().patchSession(chatId, {
         providerBinding: upd.providerBinding,
+        ...(upd.resumedFresh ? { needsConversationReplay: true } : {}),
         ...(upd.providerMetadata
           ? { providerMetadata: upd.providerMetadata }
           : {}),
@@ -1645,14 +1653,29 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   },
 
   applyBridgeStderr: (agentId, line) => {
+    get().applyBridgeStderrLines([{ agentId, line }]);
+  },
+
+  applyBridgeStderrLines: (entries) => {
+    if (entries.length === 0) return;
+    const linesByAgent = new Map<string, string[]>();
+    for (const { agentId, line } of entries) {
+      const lines = linesByAgent.get(agentId);
+      if (lines) lines.push(line);
+      else linesByAgent.set(agentId, [line]);
+    }
     set((state) => {
       let changed = false;
       const next: Record<string, AgentSessionState> = {};
       for (const [chatId, slot] of Object.entries(state.sessions)) {
-        if (slot.agentId === agentId && slot.transcriptState === "resident") {
+        const lines =
+          slot.agentId != null && slot.transcriptState === "resident"
+            ? linesByAgent.get(slot.agentId)
+            : undefined;
+        if (lines) {
           next[chatId] = {
             ...slot,
-            stderrLog: [...slot.stderrLog.slice(-(MAX_STDERR_LINES - 1)), line],
+            stderrLog: [...slot.stderrLog, ...lines].slice(-MAX_STDERR_LINES),
           };
           changed = true;
         } else {

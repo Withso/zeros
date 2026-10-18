@@ -194,7 +194,7 @@ describe("workbench availability observers", () => {
     await vi.advanceTimersByTimeAsync(9_999);
     expect(workbenchAvailabilityStatusSnapshot(path).status).toBeNull();
     await vi.advanceTimersByTimeAsync(1);
-    expect(workbenchAvailabilityStatusSnapshot(path).status?.tone).toBe("pending");
+    expect(workbenchAvailabilityStatusSnapshot(path).status?.tone).toBe(placement === "cloud" ? "pending" : undefined);
     expect(decisions.at(-1)).toBe(decisions.at(-2));
     expect(vi.getTimerCount()).toBe(1);
     offA();
@@ -216,6 +216,27 @@ describe("workbench availability observers", () => {
     expect(before.canWake).toBeUndefined();
     expect(fixture.warm).not.toHaveBeenCalled();
     expect(describeWorkspaceAvailability(before, Date.now())).toBeNull();
+  });
+  it.each(["/local/personal", "/local/organization"])("keeps %s startup quiet without a pending-status timer", async path => {
+    const changes = vi.fn();
+    const off = subscribeWorkbenchAvailability(path, changes);
+    try {
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(workbenchAvailabilityStatusSnapshot(path).status).toBeNull();
+      expect(changes).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1); // Only the actionable failure deadline.
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(workbenchAvailabilityStatusSnapshot(path).status).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(workbenchAvailabilityStatusSnapshot(path).status).toMatchObject({
+        tone: "error", message: "Can't reach the Zeros engine.", action: "Retry",
+      });
+      fixture.localStatus = "connected";
+      for (const listener of fixture.localListeners) listener("connected");
+      expect(workbenchAvailabilityStatusSnapshot(path).status).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(fixture.warm).not.toHaveBeenCalled();
+    } finally { off(); }
   });
   it("records reconnect timestamps with passive subscriptions and no hidden timers", () => {
     connection("connected");
@@ -249,7 +270,7 @@ describe("workbench availability observers", () => {
     const disconnected = workbenchAvailabilitySnapshot("/local/organization");
     expect(disconnected).toMatchObject({ cloud: false, state: undefined, setupFailed: false, previouslyConnected: true, since: 1_000 });
     expect(describeWorkspaceAvailability(disconnected, 10_999)).toBeNull();
-    expect(describeWorkspaceAvailability(disconnected, 11_000)?.message).toBe("Reconnecting to the Zeros engine…");
+    expect(describeWorkspaceAvailability(disconnected, 11_000)).toBeNull();
     expect(describeWorkspaceAvailability(disconnected, 46_000)?.message).toBe("Can't reach the Zeros engine.");
     expect(vi.getTimerCount()).toBe(0);
   });

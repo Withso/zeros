@@ -70,6 +70,11 @@ export interface KeyedAsyncCacheOptions<T> {
    * it temporarily; inactive LRU entries are pruned as soon as ownership ends. */
   maxWeight?: number;
   weightOf?: (value: T) => number;
+  /** Preserve the latest inactive prefetch when pinned viewers exceed the
+   * budget, and allow one oversized inactive payload outside that budget.
+   * Replacing the oversized slot evicts its predecessor before ordinary warm
+   * entries. Count limits still apply; default caches keep their hard budget. */
+  retainNewest?: boolean;
 }
 
 const INITIAL_SNAPSHOT: AsyncCacheSnapshot<never> = Object.freeze({
@@ -93,6 +98,7 @@ export class KeyedAsyncCache<T> {
   private accessOrder = 0;
   private readonly maxEntries: number;
   private readonly maxWeight: number;
+  private readonly retainNewest: boolean;
   private readonly weightOf: ((value: T) => number) | null;
   private readonly initialSnapshot: KeyedAsyncCacheOptions<T>["initialSnapshot"];
   private readonly reconcile: KeyedAsyncCacheOptions<T>["reconcile"];
@@ -103,6 +109,7 @@ export class KeyedAsyncCache<T> {
         ? Math.max(1, Math.round(options))
         : 64;
       this.maxWeight = Number.POSITIVE_INFINITY;
+      this.retainNewest = false;
       this.weightOf = null;
       this.initialSnapshot = undefined;
       this.reconcile = undefined;
@@ -115,6 +122,7 @@ export class KeyedAsyncCache<T> {
       ? Math.max(0, options.maxWeight!)
       : Number.POSITIVE_INFINITY;
     this.weightOf = options.weightOf ?? null;
+    this.retainNewest = options.retainNewest ?? false;
     this.initialSnapshot = options.initialSnapshot;
     this.reconcile = options.reconcile;
   }
@@ -405,11 +413,32 @@ export class KeyedAsyncCache<T> {
           !this.pending.has(key),
       )
       .sort((a, b) => a[1].accessOrder - b[1].accessOrder);
+    let newestPayloadKey: string | undefined;
+    let oversizedKey: string | undefined;
+    if (this.retainNewest) {
+      for (let index = candidates.length - 1; index >= 0; index--) {
+        const [key, entry] = candidates[index]!;
+        if (entry.snapshot.data !== undefined) newestPayloadKey ??= key;
+        if (entry.weight > this.maxWeight && Number.isFinite(entry.weight)) oversizedKey ??= key;
+      }
+      // Hovering one large file must not flush the ordinary warm set. Only the
+      // newest oversized inactive result gets this allowance; older oversized
+      // values retire first, independent of small entries' LRU order.
+      if (oversizedKey !== undefined) {
+        totalWeight = this.totalWeight(oversizedKey);
+        candidates.sort((a, b) => {
+          const oldOversizeA = a[0] !== oversizedKey && a[1].weight > this.maxWeight;
+          const oldOversizeB = b[0] !== oversizedKey && b[1].weight > this.maxWeight;
+          return Number(oldOversizeB) - Number(oldOversizeA) || a[1].accessOrder - b[1].accessOrder;
+        });
+      }
+    }
     while (
       (this.entries.size > this.maxEntries || totalWeight > this.maxWeight) &&
       candidates.length > 0
     ) {
       const [key, entry] = candidates.shift() as [string, CacheEntry<T>];
+      if ((key === newestPayloadKey || key === oversizedKey) && this.entries.size <= this.maxEntries) continue;
       // A newer request may settle first. Do not evict that newer snapshot just
       // because the true LRU key is temporarily request-owned; its completion
       // will run pruning again. Subscribers are different: they are retained
@@ -422,9 +451,9 @@ export class KeyedAsyncCache<T> {
       );
       if (olderRequestPending) break;
       this.entries.delete(key);
-      const remainingWeight = totalWeight - entry.weight;
+      const remainingWeight = totalWeight - (key === oversizedKey ? 0 : entry.weight);
       totalWeight = Number.isNaN(remainingWeight)
-        ? this.totalWeight()
+        ? this.totalWeight(oversizedKey)
         : Math.max(0, remainingWeight);
     }
   }
@@ -441,9 +470,15 @@ export class KeyedAsyncCache<T> {
     }
   }
 
-  private totalWeight(): number {
+  private totalWeight(excludedKey?: string): number {
     let total = 0;
-    for (const entry of this.entries.values()) total += entry.weight;
+    if (excludedKey === undefined) {
+      for (const entry of this.entries.values()) total += entry.weight;
+    } else {
+      for (const [key, entry] of this.entries) {
+        if (key !== excludedKey) total += entry.weight;
+      }
+    }
     return total;
   }
 }

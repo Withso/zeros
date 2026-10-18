@@ -415,6 +415,21 @@ function normalizeProviderSpawn<
   };
 }
 
+/** Environment variables that carry a provider connection: the API key or
+ * token, the gateway URL and the native root that holds a CLI login or saved
+ * account. A Local connection change replaces exactly these names. */
+const PROVIDER_CONNECTION_ENV: Readonly<Record<string, readonly string[]>> = {
+  claude: [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CONFIG_DIR",
+  ],
+  codex: ["OPENAI_API_KEY", "CODEX_HOME"],
+  cursor: ["CURSOR_API_KEY"],
+};
+
 export function agentTerritoryAuthorityIdentity(
   territory: AgentFilesystemTerritory | undefined,
 ): string | null {
@@ -1456,6 +1471,26 @@ export class AgentGateway {
   private readonly adapters = new Map<string, AgentAdapter>();
   private readonly executionToAgent = new Map<string, string>();
   private readonly executionAuthFingerprint = new Map<string, string>();
+  /** Local admission inputs, so a changed provider connection is re-derived
+   * for a live execution exactly as its spawn derived it. Cloud executions
+   * keep their admitted credential and never have an entry. */
+  private readonly executionConnectionSources = new Map<
+    string,
+    {
+      cwd: string;
+      mainRepoRoot?: string;
+      env: Record<string, string>;
+      cliBinary?: string;
+    }
+  >();
+  /** In-flight connection adoption per execution; concurrent callers join. */
+  private readonly connectionAdoptions = new Map<
+    string,
+    Promise<string | undefined>
+  >();
+  /** Stop belongs to each accepted send, including time spent adopting a
+   * connection before the adapter has a native session to cancel. */
+  private readonly promptCancellations = new Map<string, Set<AbortController>>();
   /** Actor identity is fixed at admission and independent of workspace view. */
   private readonly executionToActor = new Map<
     string,
@@ -3916,6 +3951,143 @@ export class AgentGateway {
       .digest("hex");
   }
 
+  /** Whether a live Local execution runs under an older provider connection. */
+  private connectionAdoptionNeeded(agentId: string, sessionId: string): boolean {
+    // Cloud executions keep the credential their admission minted.
+    if (
+      this.executionBoundary.backend === "cloud-worker" ||
+      cloudProviderExecution(this.executionBoundaries.get(sessionId))
+    )
+      return false;
+    if (this.connectionAdoptions.has(sessionId)) return true;
+    const adopted = this.executionAuthFingerprint.get(sessionId);
+    return !!adopted && adopted !== this.providerAuthConfigFingerprint(agentId);
+  }
+
+  /** A Local execution follows the host's current provider connection.
+   * Switching between an API key, a CLI login and saved accounts reaches the
+   * next turn in place: the execution, its route and the provider conversation
+   * stay live, so nothing needs a reconnect or restart. A turn that is already
+   * running keeps the process it started with. Returns the connection the
+   * execution now runs under. */
+  private async adoptProviderConnection(
+    agentId: string,
+    sessionId: string,
+    adapter: AgentAdapter,
+    options: { retireUnsupported: boolean },
+  ): Promise<string | undefined> {
+    if (!this.connectionAdoptionNeeded(agentId, sessionId))
+      return this.executionAuthFingerprint.get(sessionId);
+    // A concurrent read or prompt joins the restart already under way.
+    for (let flight = this.connectionAdoptions.get(sessionId); flight;
+      flight = this.connectionAdoptions.get(sessionId))
+      await flight.catch(() => undefined);
+    const adopted = this.executionAuthFingerprint.get(sessionId);
+    if (!adopted || adopted === this.providerAuthConfigFingerprint(agentId))
+      return adopted;
+    const updateCredentials =
+      resolveAgentCapabilityPorts(adapter).runtimeConfiguration
+        ?.updateCredentials;
+    const keys = PROVIDER_CONNECTION_ENV[agentId];
+    if (!updateCredentials || !keys) {
+      if (!options.retireUnsupported) return adopted;
+      // Without an adoption path the old process must not keep its credential.
+      await this.endSession(agentId, sessionId, { failClosed: true });
+      throw new AgentFailureError({
+        kind: "session-expired", stage: "prompt",
+        message: "The provider connection changed. Reconnect this session before sending.",
+      });
+    }
+    const flight = this.applyProviderConnection(
+      agentId, sessionId, adopted, updateCredentials, keys,
+    );
+    this.connectionAdoptions.set(sessionId, flight);
+    try {
+      return await flight;
+    } finally {
+      if (this.connectionAdoptions.get(sessionId) === flight)
+        this.connectionAdoptions.delete(sessionId);
+    }
+  }
+
+  private async applyProviderConnection(
+    agentId: string,
+    sessionId: string,
+    previous: string,
+    updateCredentials: NonNullable<
+      NonNullable<AgentCapabilityPorts["runtimeConfiguration"]>["updateCredentials"]
+    >,
+    keys: readonly string[],
+  ): Promise<string> {
+    let adopted = previous;
+    // Settings can change again while the adapter applies one connection.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const fingerprint = this.providerAuthConfigFingerprint(agentId);
+      if (fingerprint === adopted) break;
+      const connection = this.currentProviderConnection(agentId, sessionId, keys);
+      try {
+        await this.raceBoundaryAttestation(
+          sessionId,
+          Promise.resolve(
+            updateCredentials({
+              sessionId,
+              keys,
+              env: connection.env,
+              ...(connection.cliBinary ? { cliBinary: connection.cliBinary } : {}),
+              authenticationContext: fingerprint,
+            }),
+          ),
+        );
+      } catch (error) {
+        // Each iteration can target another account. A late rejection belongs
+        // to this attempted identity, never the selection at rejection time.
+        if ((error as { failure?: { kind?: string } }).failure?.kind === "auth-required" &&
+            this.executionToAgent.get(sessionId) === agentId &&
+            fingerprint === this.providerAuthConfigFingerprint(agentId)) {
+          this.markAuthFailed(agentId);
+        }
+        throw error;
+      }
+      // An execution retired meanwhile keeps no record; its prompt fails as
+      // an ended session.
+      if (this.executionToAgent.get(sessionId) !== agentId) return adopted;
+      this.executionAuthFingerprint.set(sessionId, fingerprint);
+      adopted = fingerprint;
+    }
+    return adopted;
+  }
+
+  /** The connection variables a fresh spawn of this execution would receive. */
+  private currentProviderConnection(
+    agentId: string,
+    sessionId: string,
+    keys: readonly string[],
+  ): { env: Record<string, string>; cliBinary?: string } {
+    const source = this.executionConnectionSources.get(sessionId);
+    const spawn = normalizeProviderSpawn(
+      applyUserProviderConfig(
+        source?.cwd ?? this.executionToCwd.get(sessionId) ?? this.projectRoot,
+        agentId,
+        {
+          env: source?.env ?? completeAgentSpawnEnv(undefined),
+          cliBinary: source?.cliBinary,
+        },
+        source?.mainRepoRoot ?? this.executionToMainRepoRoot.get(sessionId),
+      ),
+    );
+    const env =
+      this.sanitizeProviderEnv(stripBrowserServiceCredentials(spawn.env)) ?? {};
+    const connection: Record<string, string> = {};
+    for (const key of keys) {
+      const value = env[key];
+      if (typeof value === "string") connection[key] = value;
+    }
+    return {
+      env: connection,
+      ...(spawn.cliBinary ? { cliBinary: spawn.cliBinary } : {}),
+    };
+  }
+
   /** Called only after the engine has durably installed this native binding. */
   async confirmCloudHistoryBinding(executionId: string, binding: ProviderBinding): Promise<void> {
     const cloud = cloudProviderExecution(this.executionBoundaries.get(executionId));
@@ -5340,6 +5512,14 @@ export class AgentGateway {
     this.replenishWarmSessionBoundary(preparedBoundary, protectionAttestation);
     this.executionToAgent.set(session.executionId, agentId);
     this.executionAuthFingerprint.set(session.executionId, authFingerprint);
+    if (!cloudAdmission) {
+      this.executionConnectionSources.set(session.executionId, {
+        cwd,
+        ...(mainRepoRoot ? { mainRepoRoot } : {}),
+        env: merged,
+        ...(opts.cliBinary ? { cliBinary: opts.cliBinary } : {}),
+      });
+    }
     this.executionToActor.set(session.executionId, actor);
     this.settleAdapterStartup(session.executionId);
     this.executionToCwd.set(session.executionId, cwd);
@@ -5678,6 +5858,14 @@ export class AgentGateway {
     this.replenishWarmSessionBoundary(preparedBoundary, protectionAttestation);
     this.executionToAgent.set(executionId, agentId);
     this.executionAuthFingerprint.set(executionId, authFingerprint);
+    if (!cloudAdmission) {
+      this.executionConnectionSources.set(executionId, {
+        cwd,
+        ...(mainRepoRoot ? { mainRepoRoot } : {}),
+        env: merged,
+        ...(opts.cliBinary ? { cliBinary: opts.cliBinary } : {}),
+      });
+    }
     this.executionToActor.set(executionId, "agent-code");
     this.settleAdapterStartup(executionId);
     this.executionToCwd.set(executionId, cwd);
@@ -6039,6 +6227,7 @@ export class AgentGateway {
     });
     this.executionToAgent.delete(sessionId);
     this.executionAuthFingerprint.delete(sessionId);
+    this.executionConnectionSources.delete(sessionId);
     this.executionToActor.delete(sessionId);
     this.executionToWorkspace.delete(sessionId);
     this.executionToCwd.delete(sessionId);
@@ -6432,10 +6621,17 @@ export class AgentGateway {
     onNativePromptStage?: (stage: NativePromptStage) => void,
     onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void,
   ): Promise<PromptResponse> {
-    this.sessionTools.beginPrompt(sessionId);
+    const cancellation = new AbortController();
+    const prompts = this.promptCancellations.get(sessionId) ?? new Set<AbortController>();
+    this.promptCancellations.set(sessionId, prompts);
+    prompts.add(cancellation);
     try {
-      return await this.promptAfterBegin(agentId, sessionId, prompt, turnId, onNativePromptStage, onNativeOutput);
+      this.sessionTools.beginPrompt(sessionId);
+      return await this.promptAfterBegin(agentId, sessionId, prompt, cancellation.signal, turnId, onNativePromptStage, onNativeOutput);
     } finally {
+      prompts.delete(cancellation);
+      if (!prompts.size && this.promptCancellations.get(sessionId) === prompts)
+        this.promptCancellations.delete(sessionId);
       // Every exit, including validation failures and Stop, hands surfaces the
       // turn borrowed (the in-app browser, a computer or simulator) back to the user.
       await this.sessionTools.endPrompt(sessionId);
@@ -6446,6 +6642,7 @@ export class AgentGateway {
     agentId: string,
     sessionId: string,
     prompt: ContentBlock[],
+    signal: AbortSignal,
     turnId?: string,
     onNativePromptStage?: (stage: NativePromptStage) => void,
     onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void,
@@ -6469,19 +6666,24 @@ export class AgentGateway {
         throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
       cloudExecutionLifetime(cloud).assertLive();
     }else if(cloud)await cloud.lease.validate();
-    const authFingerprint = this.executionAuthFingerprint.get(sessionId);
-    if (!cloud && authFingerprint && authFingerprint !== this.providerAuthConfigFingerprint(agentId)) {
-      await this.endSession(agentId, sessionId, { failClosed: true });
-      throw new AgentFailureError({
-        kind: "session-expired", stage: "prompt",
-        message: "The provider connection changed. Reconnect this session before sending.",
-      });
-    }
+    if (!cloud && signal.aborted) return { stopReason: "cancelled" };
     if(!cloud)this.assertSelectedAccountConnected(agentId);
     this.assertBoundaryAttestationHealthy(sessionId);
     const adapter = this.adapterForSession(sessionId, agentId, {
       requireLiveRoute: true,
     });
+    let authFingerprint = this.executionAuthFingerprint.get(sessionId);
+    if (this.connectionAdoptionNeeded(agentId, sessionId)) {
+      try {
+        authFingerprint = await this.adoptProviderConnection(
+          agentId, sessionId, adapter, { retireUnsupported: true },
+        );
+      } catch (error) {
+        if (!cloud && signal.aborted) return { stopReason: "cancelled" };
+        throw error;
+      }
+    }
+    if (!cloud && signal.aborted) return { stopReason: "cancelled" };
     const updateBrowserUse =
       resolveAgentCapabilityPorts(adapter).browser?.updateUse;
     if (cloud) {
@@ -6533,6 +6735,7 @@ export class AgentGateway {
     // their cwd. Both one-shot per session; system instruction goes outermost so
     // it's the very first block the model reads.
     const productInstruction = await this.sessionTools.preparePrompt(sessionId);
+    if (!cloud && signal.aborted) return { stopReason: "cancelled" };
     const historyHandoff = cloud?.coordinator?.takeHistoryHandoff?.();
     const promptWithHistory = historyHandoff ? [{ type: "text" as const, text: historyHandoff }, ...prompt] : prompt;
     const outgoing = this.withSystemInstruction(
@@ -6606,6 +6809,7 @@ export class AgentGateway {
   }
 
   async cancel(agentId: string, sessionId: string): Promise<void> {
+    for (const prompt of this.promptCancellations.get(sessionId) ?? []) prompt.abort();
     this.sessionTools.cancel(sessionId);
     const adapter = this.adapterForSession(sessionId, agentId);
     const cloud=cloudProviderExecution(this.executionBoundaries.get(sessionId));
@@ -6962,6 +7166,23 @@ export class AgentGateway {
     });
   }
 
+  /** Tool connections can be account-scoped, so a read follows a changed
+   * Local connection too. Null when nothing needs adopting, so an unchanged
+   * read reaches the provider synchronously. A read never retires an
+   * execution, and a failed adoption surfaces on the next send instead. */
+  private sessionToolsAdoption(
+    agentId: string,
+    sessionId: string,
+    cwd: string,
+  ): Promise<unknown> | null {
+    if (!this.connectionAdoptionNeeded(agentId, sessionId)) return null;
+    const { adapter, port } = this.sessionToolsPort(agentId, sessionId, cwd);
+    if (!port) return null;
+    return this.adoptProviderConnection(agentId, sessionId, adapter, {
+      retireUnsupported: false,
+    }).catch(() => undefined);
+  }
+
   /** Only an already-admitted execution can report tools or begin provider
    * OAuth. Neither operation may create a probe session or select another cwd. */
   private sessionToolsPort(agentId: string, sessionId: string, cwd: string) {
@@ -6984,6 +7205,8 @@ export class AgentGateway {
     sessionId: string,
     cwd: string,
   ): Promise<SessionToolsSnapshot> {
+    const adoption = this.sessionToolsAdoption(agentId, sessionId, cwd);
+    if (adoption) await adoption;
     const { adapter, port } = this.sessionToolsPort(agentId, sessionId, cwd);
     if (!port)
       return {
@@ -7008,6 +7231,8 @@ export class AgentGateway {
     sessionId: string,
     cwd: string,
   ): Promise<SessionToolsInventorySnapshot> {
+    const adoption = this.sessionToolsAdoption(agentId, sessionId, cwd);
+    if (adoption) await adoption;
     const { adapter, port } = this.sessionToolsPort(agentId, sessionId, cwd);
     if (!port?.inventory) {
       const result = await this.readSessionTools(agentId, sessionId, cwd);
@@ -7031,6 +7256,8 @@ export class AgentGateway {
     cwd: string,
     toolId: string,
   ) {
+    const adoption = this.sessionToolsAdoption(agentId, sessionId, cwd);
+    if (adoption) await adoption;
     const { adapter, port } = this.sessionToolsPort(agentId, sessionId, cwd);
     if (!port?.authenticate)
       throw new Error(
@@ -7225,6 +7452,7 @@ export class AgentGateway {
     this.adapters.clear();
     this.executionToAgent.clear();
     this.executionAuthFingerprint.clear();
+    this.executionConnectionSources.clear();
     this.executionToActor.clear();
     this.executionToWorkspace.clear();
     this.executionToCwd.clear();

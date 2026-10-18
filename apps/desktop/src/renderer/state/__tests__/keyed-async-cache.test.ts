@@ -106,6 +106,70 @@ describe("KeyedAsyncCache", () => {
     expect(weightOf).toHaveBeenCalledTimes(1);
   });
 
+  it("pins retained viewers beyond a payload budget and prunes when ownership ends", async () => {
+    const cache = new KeyedAsyncCache<string>({ maxEntries: 96, maxWeight: 8, weightOf: (value) => value.length });
+    const releaseFirst = cache.subscribe("visible", () => {});
+    const releaseSecond = cache.subscribe("retained", () => {});
+    cache.setData("visible", "aaaaaaaa");
+    cache.setData("retained", "bbbbbbbb");
+    cache.invalidate("visible");
+    const pending = deferred<string>();
+    const refresh = cache.load("visible", () => pending.promise);
+    expect(cache.peekSnapshot("visible").data).toBe("aaaaaaaa");
+    expect(cache.peekSnapshot("retained").data).toBe("bbbbbbbb");
+    pending.resolve("cccccccc");
+    await refresh;
+    expect(cache.peekSnapshot("visible").data).toBe("cccccccc");
+    expect(cache.peekSnapshot("retained").data).toBe("bbbbbbbb");
+    releaseSecond();
+    expect(cache.keys()).toEqual(["visible"]);
+    releaseFirst();
+  });
+
+  it("can retain the newest oversized snapshot for an instant prefetched navigation", async () => {
+    const cache = new KeyedAsyncCache<string>({
+      maxEntries: 3, maxWeight: 5, weightOf: (value) => value.length,
+      retainNewest: true,
+    });
+    const fetcher = vi.fn(async () => "oversized");
+    await cache.load("large", fetcher);
+    await expect(cache.load("large", fetcher, { maxAgeMs: 60_000 })).resolves.toBe("oversized");
+    expect(fetcher).toHaveBeenCalledOnce();
+    cache.invalidate("large");
+    expect(cache.peekSnapshot("large").data).toBe("oversized");
+    cache.setData("next", "small");
+    expect(cache.keys()).toEqual(["large", "next"]);
+    cache.setData("new-large", "replacement");
+    expect(cache.keys()).toEqual(["next", "new-large"]);
+    expect(cache.peekSnapshot("next").data).toBe("small");
+  });
+
+  it("does not evict the normal warm set for a single oversized hover", () => {
+    const cache = new KeyedAsyncCache<string>({ maxEntries: 6, maxWeight: 6, weightOf: (value) => value.length, retainNewest: true });
+    cache.setData("a", "aaa");
+    cache.setData("b", "bbb");
+    cache.setData("huge", "oversized");
+    expect(cache.peekSnapshot("a").data).toBe("aaa");
+    expect(cache.peekSnapshot("b").data).toBe("bbb");
+    expect(cache.peekSnapshot("huge").data).toBe("oversized");
+    cache.setData("next-huge", "replacement");
+    expect(cache.keys()).toEqual(["a", "b", "next-huge"]);
+  });
+
+  it("keeps one recent prefetch warm when retained viewers exceed the soft budget", () => {
+    const cache = new KeyedAsyncCache<string>({ maxEntries: 3, maxWeight: 5, weightOf: (value) => value.length, retainNewest: true });
+    const release = cache.subscribe("visible", () => {});
+    cache.setData("visible", "oversized");
+    cache.setData("prefetch", "next file");
+    expect(cache.peekSnapshot("prefetch").data).toBe("next file");
+    cache.setData("newer-prefetch", "new file");
+    expect(cache.peekSnapshot("visible").data).toBe("oversized");
+    expect(cache.peekSnapshot("prefetch").data).toBeUndefined();
+    expect(cache.peekSnapshot("newer-prefetch").data).toBe("new file");
+    release();
+    expect(cache.keys()).toEqual(["newer-prefetch"]);
+  });
+
   it("returns stable snapshots and deduplicates concurrent reads", async () => {
     const cache = new KeyedAsyncCache<string>();
     const request = deferred<string>();

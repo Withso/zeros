@@ -928,6 +928,8 @@ async function designFrameSelectionIdentityFromSource(
     workspacePath,
     file,
     source,
+    // Selection and CAS need the same generation, not a full CSS build.
+    { identityOnly: true },
   );
   return {
     file,

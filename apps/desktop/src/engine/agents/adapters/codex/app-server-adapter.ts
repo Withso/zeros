@@ -81,6 +81,7 @@ import type {
   NativePromptStage,
   NativePromptOutputKind,
   PromptResponse,
+  ProviderCredentialUpdate,
   QuestionAnswer,
   QuestionRequest,
   QuestionResponse,
@@ -92,6 +93,11 @@ import type {
   StopReason,
 } from "../../types";
 import { AgentFailureError } from "../../types";
+import {
+  carryCodexThread,
+  nativeHistoryRoot,
+  withProviderConnection,
+} from "../shared/provider-connection";
 import { CloudCommandFailureError, decodeCloudCommandFailure } from "@zeros/protocol/cloud-commands";
 import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import { hasKernelExecutionBoundary } from "../../containment/status";
@@ -357,6 +363,18 @@ export interface CodexSession {
   cwd: string;
   env?: Record<string, string>;
   cliBinary?: string;
+  /** Admission options a Local connection change reboots this thread with. */
+  readonly boot: {
+    mcpServers?: McpServerRegistration[];
+    browserUse?: AgentBrowserUse;
+    computerUse?: AgentComputerUse;
+    systemInstruction?: string;
+  };
+  /** A connection change that arrived during a turn; applied at the next one. */
+  pendingConnection?: ProviderCredentialUpdate;
+  /** A replacement thread is empty. Reject its first send before native I/O
+   * so the existing load/replay recovery can rebuild that prompt's context. */
+  needsHistoryReplay?: boolean;
   territory?: AgentFilesystemTerritory;
   /** Authoritative placement and original lifecycle. Local keeps native
    * permissions; cloud policy uses the VM and preserves approvals/read-only. */
@@ -627,6 +645,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
         }),
     },
     browser: { nativeSession: true },
+    runtimeConfiguration: {
+      updateCredentials: (opts) => this.updateCredentials(opts),
+    },
     account: {
       readQuota: (opts) => this.readProviderQuota(opts),
     },
@@ -658,6 +679,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   private readonly ctx: AgentAdapterContext;
   private readonly sessions = new Map<string, CodexSession>();
+  /** Survives the temporary absence of a session during a connection restart. */
+  private readonly promptCancellations = new Map<string, Set<AbortController>>();
   private readonly toolAuthFlights = new Map<
     string,
     Promise<{ authorizationUrl: string }>
@@ -1422,15 +1445,54 @@ export class CodexAppServerAdapter implements AgentAdapter {
     onNativePromptStage?: (stage: NativePromptStage) => void;
     onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
+    const cancellation = new AbortController();
+    const prompts = this.promptCancellations.get(opts.sessionId) ?? new Set<AbortController>();
+    this.promptCancellations.set(opts.sessionId, prompts);
+    prompts.add(cancellation);
+    try {
+      return await this.promptWithCancellation(opts, cancellation.signal);
+    } finally {
+      prompts.delete(cancellation);
+      if (!prompts.size && this.promptCancellations.get(opts.sessionId) === prompts)
+        this.promptCancellations.delete(opts.sessionId);
+    }
+  }
+
+  private async promptWithCancellation(
+    opts: Parameters<CodexAppServerAdapter["prompt"]>[0],
+    signal: AbortSignal,
+  ): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     // A prompt can race a session teardown: the engine supersedes a chat's
     // prior session when a rebuild creates a new one (index.ts), so an
     // AGENT_PROMPT still addressed to the OLD sessionId lands here after the
     // session was disposed. Surface a RECOVERABLE failure (not the hard
     // "unknown codex session" Error → protocol-error → red "Agent error"
     // toast that strands the composer) so the renderer rebuilds + resends.
+    const staged = this.sessions.get(opts.sessionId);
+    const connection = staged?.turnActive ? undefined : staged?.pendingConnection;
+    if (staged && connection) {
+      // A connection change that landed during the previous turn.
+      staged.pendingConnection = undefined;
+      try {
+        await this.rebootWithConnection(staged, connection);
+      } catch (error) {
+        if (signal.aborted)
+          return { stopReason: "cancelled", response: { stopReason: "cancelled" } };
+        throw error;
+      }
+    }
+    if (signal.aborted)
+      return { stopReason: "cancelled", response: { stopReason: "cancelled" } };
     const session = this.sessions.get(opts.sessionId);
     if (!session) throw codexDisconnectedFailure();
     if (session.exactModelFailure) throw session.exactModelFailure;
+    if (session.needsHistoryReplay) {
+      session.needsHistoryReplay = false;
+      throw new AgentFailureError({
+        kind: "session-expired", stage: "prompt", agentId: AGENT_ID,
+        message: "Codex started a fresh thread. Restore the conversation before continuing.",
+      });
+    }
 
     // Self-heal a send that lands after the app-server child already died
     // (an idle crash, or the narrow window right after a turn completed):
@@ -1873,6 +1935,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async cancel(opts: { sessionId: string }): Promise<void> {
+    for (const prompt of this.promptCancellations.get(opts.sessionId) ?? []) prompt.abort();
     const session = this.sessions.get(opts.sessionId);
     if (!session) return;
     session.cancelRequested = true;
@@ -2021,6 +2084,75 @@ export class CodexAppServerAdapter implements AgentAdapter {
     delete carried.ZEROS_THINKING_EFFORT;
     delete carried.ZEROS_ADDITIONAL_DIRS;
     session.env = { ...carried, ...opts.env };
+  }
+
+  /** Local connection change (API key, CLI login or saved account). The
+   *  app-server reads its credential and CODEX_HOME only at spawn, so this
+   *  execution's child restarts under the new connection and resumes the same
+   *  thread before the next turn. A change during a turn waits for it. */
+  async updateCredentials(opts: ProviderCredentialUpdate): Promise<void> {
+    const session = this.sessions.get(opts.sessionId);
+    if (!session) return;
+    if (cloudProviderExecution(session.executionBoundary))
+      throw new Error("A cloud execution keeps the credential it was admitted with");
+    if (session.turnActive) {
+      session.pendingConnection = opts;
+      return;
+    }
+    await this.rebootWithConnection(session, opts);
+  }
+
+  private async rebootWithConnection(
+    session: CodexSession,
+    update: ProviderCredentialUpdate,
+  ): Promise<void> {
+    const env = withProviderConnection(session.env, update);
+    const previousHome = nativeHistoryRoot("codex", session.env);
+    const nextHome = nativeHistoryRoot("codex", env);
+    const { zerosSessionId, threadId, providerSessionId, modeId } = session;
+    // Retire the old child first so the rollout is final before it is carried.
+    await this.disposeSession(zerosSessionId);
+    if (previousHome !== nextHome) {
+      // Codex finds a thread under its CODEX_HOME. Without the copy, resuming
+      // under another account reports "no rollout found".
+      await carryCodexThread({ from: previousHome, to: nextHome, threadId }).catch((error) => {
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[codex-app-server] thread history was not carried to the new connection: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+    }
+    const loaded = await this.loadSession({
+      ...session.boot,
+      authenticationContext: update.authenticationContext,
+      executionId: zerosSessionId,
+      providerBinding: providerBindingForResume(AGENT_ID, threadId, {
+        scopeId: providerSessionId,
+      }),
+      cwd: session.cwd,
+      env,
+      ...(update.cliBinary ? { cliBinary: update.cliBinary } : {}),
+      territory: session.territory,
+      executionBoundary: session.executionBoundary,
+    });
+    const rebooted = this.sessions.get(zerosSessionId);
+    if (!rebooted) return;
+    // The permission posture is session state, not part of the spawn env.
+    rebooted.modeId = modeId;
+    rebooted.needsHistoryReplay = session.needsHistoryReplay || loaded.resumedFresh === true;
+    if (loaded.providerBinding && rebooted.threadId !== threadId) {
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        executionId: zerosSessionId,
+        sessionId: zerosSessionId,
+        update: {
+          sessionUpdate: "provider_binding_update",
+          providerBinding: loaded.providerBinding,
+          ...(loaded.resumedFresh ? { resumedFresh: true } : {}),
+        },
+      });
+    }
   }
 
   async setMode(opts: { sessionId: string; modeId: string }): Promise<void> {
@@ -2786,6 +2918,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
       cwd: opts.cwd,
       env: opts.env,
       cliBinary: opts.cliBinary,
+      boot: {
+        mcpServers: opts.mcpServers,
+        browserUse: opts.browserUse,
+        computerUse: opts.computerUse,
+        systemInstruction: opts.systemInstruction,
+      },
       territory: opts.territory,
       executionBoundary: opts.executionBoundary,
       runtime,

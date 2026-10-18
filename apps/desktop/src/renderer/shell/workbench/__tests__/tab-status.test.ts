@@ -212,10 +212,10 @@ describe("workbench status contract", () => {
     );
   });
 
-  it.each([true, false])(
-    "graces the first connection and uses connecting copy (cloud=%s)",
-    (cloud) => {
-      const cold = { cloud, connection: "connecting" as const, since: 100 };
+  it(
+    "graces the first cloud connection and uses connecting copy",
+    () => {
+      const cold = { cloud: true, connection: "connecting" as const, since: 100 };
       expect(describeWorkspaceAvailability(cold, 10_099)).toBeNull();
       expect(describeWorkspaceAvailability(cold, 10_100)?.message).toBe(
         "Connecting…",

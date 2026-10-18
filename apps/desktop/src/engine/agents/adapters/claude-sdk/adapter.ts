@@ -115,6 +115,7 @@ import {
   type NativePromptOutputKind,
   type NewSessionResponse,
   type PromptResponse,
+  type ProviderCredentialUpdate,
   type QuestionAnswer,
   type QuestionRequest,
   type QuestionResponse,
@@ -124,6 +125,11 @@ import {
   type StopReason,
   type TurnUsage,
 } from "../../types";
+import {
+  carryClaudeConversation,
+  nativeHistoryRoot,
+  withProviderConnection,
+} from "../shared/provider-connection";
 import { claudeMcpStdio } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
 import {
@@ -737,7 +743,8 @@ function safeChromePermissionHost(value: string): string | null {
 
 interface SdkSession {
   exactModelFailure?: Error;
-  readonly modelState: AccountModelState;
+  /** Follows a Local connection change (updateCredentials). */
+  modelState: AccountModelState;
   /** Zeros-side ephemeral routing id (returned to the renderer; never durable). */
   readonly zerosSessionId: string;
   cwd: string;
@@ -891,6 +898,9 @@ interface SdkSession {
    *  staged env. Deferred to prompt() rather than torn down eagerly so it never
    *  races a concurrent prompt() nor interrupts an in-flight turn. */
   pendingRestart: boolean;
+  /** A Local connection change moved this conversation's config root while a
+   *  process was still writing it. The copy runs before the next query. */
+  pendingHistoryCarry?: { from: string; to: string };
   /** Whether the LIVE query was built with `allowDangerouslySkipPermissions`
    *  (i.e. created in "bypass"). That flag is a CREATION-only Option required
    *  for `bypassPermissions` to take effect, so a query built without it can't
@@ -947,6 +957,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       },
     },
     browser: { nativeSession: true },
+    runtimeConfiguration: {
+      updateCredentials: (opts) => this.updateCredentials(opts),
+    },
     configuration: {
       readProvenance: async (opts) =>
         configurationProvenanceFor("claude", {
@@ -974,7 +987,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     if (!state) throw new Error("This chat session ended.");
     // Prepare the control connection without sending a prompt or rebuilding a
     // live query whose settings may have staged changes.
-    if (!state.query) this.ensureQuery(state);
+    if (!state.query) {
+      await this.settleHistoryCarry(state);
+      if (this.sessions.get(sessionId) !== state)
+        throw new Error("This chat session ended.");
+      if (!state.query) this.ensureQuery(state);
+    }
     const query = state.query!;
     void this.emitSupportedCommands(state, true);
     try {
@@ -1709,6 +1727,23 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           });
         }
       }
+      // A connection change that landed during the previous turn moves the
+      // conversation now: that turn is over, so retire its process and copy
+      // the finished history before the new query resumes it.
+      if (state.pendingHistoryCarry) {
+        if (state.query) this.detachIdleQuery(state);
+        await this.settleHistoryCarry(state);
+        state = this.mustState(opts.sessionId);
+        transferPromptReservation(state);
+        if (state.turn) {
+          throw new AgentFailureError({
+            kind: "protocol-error",
+            message: "a prompt is already in flight for this session",
+            stage: "prompt",
+            agentId: this.agentId,
+          });
+        }
+      }
       // Keep a Stop recorded while this send waited on teardown. It owns the
       // not-yet-dispatched prompt as well: return cancelled before opening a
       // query or pushing input. A later user send captures the newer sequence
@@ -1945,6 +1980,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  compacts right after the run — same contract as steer. */
   async compactContext(opts: { sessionId: string }): Promise<void> {
     const state = this.mustState(opts.sessionId);
+    if (!state.query) {
+      await this.settleHistoryCarry(state);
+      this.mustState(opts.sessionId);
+    }
     this.markSessionBusy(state);
     this.ensureQuery(state);
     state.translator.expectManualCompaction();
@@ -3301,6 +3340,46 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // teardown would abort the running turn. The separate idle timer is
     // generation-guarded and rechecks all activity at its boundary.
     state.pendingRestart = true;
+  }
+
+  /** Local connection change (API key, CLI login or saved account). The CLI
+   * reads credentials only at spawn, so the next turn runs in a new query that
+   * resumes this conversation. A running turn and its background work keep the
+   * process they started with until that turn boundary. */
+  async updateCredentials(opts: ProviderCredentialUpdate): Promise<void> {
+    const state = this.sessions.get(opts.sessionId);
+    if (!state) return;
+    if (cloudProviderExecution(state.executionBoundary))
+      throw new Error("A cloud execution keeps the credential it was admitted with");
+    // The live process writes under the root it started with.
+    const from = state.pendingHistoryCarry?.from ?? nativeHistoryRoot("claude", state.env);
+    state.env = withProviderConnection(state.env, opts);
+    state.cliBinary = opts.cliBinary?.trim() || undefined;
+    state.modelState = this.modelDiscovery.capture(opts.authenticationContext);
+    if (this.canDetachIdleQuery(state)) this.detachIdleQuery(state);
+    else if (state.query) state.pendingRestart = true;
+    const to = nativeHistoryRoot("claude", state.env);
+    state.pendingHistoryCarry = from === to ? undefined : { from, to };
+    await this.settleHistoryCarry(state);
+  }
+
+  /** Claude keeps a conversation under its config root; without a copy,
+   * resuming under another account reports "No conversation found". The copy
+   * waits until no process writes the conversation, and every path that
+   * starts a query settles it first. */
+  private async settleHistoryCarry(state: SdkSession): Promise<void> {
+    const carry = state.pendingHistoryCarry;
+    if (!carry || state.query) return;
+    state.pendingHistoryCarry = undefined;
+    if (!state.claudeSessionId) return;
+    await carryClaudeConversation({ ...carry, sessionId: state.claudeSessionId }).catch((error) => {
+      this.ctx.emit.onAgentStderr(
+        this.agentId,
+        `[claude-sdk] conversation history was not carried to the new connection: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
   }
 
   // ── permission round-trip (replaces the PreToolUse HTTP hook) ──

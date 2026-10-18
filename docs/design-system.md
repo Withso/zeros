@@ -59,8 +59,10 @@ The full guide is `docs/design-system.md`; token values are in
    use toasts. Connection failures fall back to their existing app toast only
    while no affected frame is visible. Report each read with
    `useWorkbenchStatusSource`; one failed read gets a silent retry after 1.5
-   seconds. Connection gaps stay quiet for 10 seconds. Retain confirmed exact-key
-   content and never add a second error paragraph or Retry button.
+   seconds. Local startup/reconnection has no pending banner; cloud connection
+   gaps stay quiet for 10 seconds. Both expose actionable failure at 45 seconds.
+   Retain confirmed exact-key content and never add a second error paragraph or
+   Retry button.
 7. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
    ratchet) plus `pnpm typecheck`, `pnpm lint`, and the nearby tests. Fix
    findings; never raise `styles/policy/ui-debt.json`, add a `check:ui ignore`
@@ -302,11 +304,14 @@ keeps normal recovery quiet and avoids layout movement or status flashes.
 **Persistent** means a read that still fails after that one silent retry,
 terminal connection rejection, setup failure, or an explicit workspace state
 (setting up, starting/waking, stopping, stopped/sleeping, archived). These show
-the shared banner immediately when confirmed. A transport gap becomes pending
+the shared banner immediately when confirmed. A cloud transport gap becomes pending
 at 10 seconds (“Reconnecting to the workspace…”), then actionable at 45 seconds
-(“Can't reach the workspace.” with Retry). Local engine gaps use the same
-thresholds with engine-specific reconnect/error copy. Cold first connection is
-normal startup for the first 10 seconds, then says “Connecting…”.
+(“Can't reach the workspace.” with Retry). Local engine startup and reconnection
+never show a pending connection banner;
+keep confirmed content in place while the on-device engine becomes ready.
+A Local gap lasting 45 seconds still exposes “Can't reach the Zeros engine.”
+with Retry, and terminal rejections remain immediate. Cloud cold first
+connection is normal startup for the first 10 seconds, then says “Connecting…”.
 
 Availability has one decision and clock per Local engine or cloud VM; all its
 tabs observe the same thresholds. Silent read retries belong to the exact
@@ -336,8 +341,9 @@ until settled, bounded to 30 seconds even if a source never settles. Keep the
 banner element/live region stable through retry and tone changes; announce
 message changes once without moving focus. Hidden retained tabs
 are inert and do not announce, animate, poll or run status timers.
-Before a successful connection, use “Connecting…”; reserve “Reconnecting” for
-a lost confirmed connection. Stopping and stopped have distinct pending copy.
+For cloud transport, before a successful connection use “Connecting…”; reserve
+“Reconnecting” for a lost confirmed connection. Stopping and stopped have
+distinct pending copy.
 
 ## 8. Building blocks
 
