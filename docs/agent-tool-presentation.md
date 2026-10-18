@@ -940,3 +940,10 @@ contracts above. Keep Design-specific labels, catalog limits, authoring modes
 and UI scope in the [canonical Design tool contract](design-mode-roadmap.md#native-authoring-and-optional-tools).
 Native file edits retain their provider's ordinary presentation; an unqualified
 Design-looking tool name or foreign MCP server never selects trusted Design UI.
+
+Claude's streamed tool arguments (`input_json_delta`) may also feed the Local
+Design canvas's transient drafts through the translator's optional
+`onToolInput` observer, keyed by native tool id. That observer never creates,
+retitles or settles a transcript row, ignores stream replays, and is dropped
+for cloud workers; rows keep the complete-input rules above. See
+[Native edit and refresh behavior](design-mode-roadmap.md#native-edit-and-refresh-behavior).

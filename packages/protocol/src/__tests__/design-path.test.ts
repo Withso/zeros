@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   designFrameFileSchema,
+  designPageFolderProblem,
   encodeDesignFramePath,
   isDesignFrameFile,
   isDesignPageFolder,
@@ -101,5 +102,18 @@ describe("Design frame paths", () => {
     "page\n",
   ])("rejects unsafe or reserved page folder %s", (folder) => {
     expect(isDesignPageFolder(folder)).toBe(false);
+    expect(designPageFolderProblem(folder)).toEqual(expect.any(String));
+  });
+
+  it("explains a reserved page folder with a valid replacement and accepts valid ones", () => {
+    expect(designPageFolderProblem("Components")).toMatch(
+      /"Components" is reserved.*such as "components-2"/,
+    );
+    expect(isDesignPageFolder("components-2")).toBe(true);
+    expect(designPageFolderProblem("page.")).toMatch(
+      /must be one portable segment/,
+    );
+    expect(designPageFolderProblem("components-2")).toBeNull();
+    expect(designPageFolderProblem("Checkout")).toBeNull();
   });
 });

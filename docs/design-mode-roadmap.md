@@ -1,7 +1,7 @@
 # Design mode: architecture, implementation, and roadmap
 
 **Status: shared-session HTML/CSS v1 and Design directory Pages implemented;
-later feature phases remain planned. Updated 2026-10-05.** This is the single
+later feature phases remain planned. Updated 2026-10-17.** This is the single
 Design engineering reference: current product behavior, source formats,
 ownership, compatibility, resource limits, qualification, and the remaining
 roadmap. Code, schemas, and
@@ -906,6 +906,63 @@ undo history; they do not gain API receipts merely because a watcher saw them.
 Semantic undo remains exact-revision, session-local and tip-only. Native undo
 uses normal provider history or explicitly authorized Git operations.
 
+Measured on macOS (2026-10-17, engine fixtures and the browser harness): the
+worktree watcher reports a save after ~120 ms in development (native events,
+75 ms trailing debounce, 30 ms write settle) but ~0.9–1.6 s in packaged builds,
+whose compiled engine must stat-poll at 1.5 s. A small directory's aggregate
+snapshot reads in 10–20 ms, and a refreshed live frame paints its new
+generation 80–190 ms later without a blank buffer. Every case was observed:
+a new frame plus its registration, an in-place patch, an edited page-folder or
+root stylesheet, a new page folder with a frame inside it, and `canvas.json`
+replaced in place or by rename.
+
+Three Local mechanisms keep an agent's progress visible
+(`engine/design/agent-drafts.ts`; cloud workers construct none of them):
+
+- **Saved steps.** When any provider reports an `edit`/`delete`/`move` tool call
+  completed for a path inside the session workspace's active Design directory,
+  the engine fences snapshot reads for that checkout and broadcasts
+  `DB_CHANGED { kinds: ["designStyles"] }` at once (completions within 20 ms
+  coalesce). `designStyles` is the Design-only revalidation kind: Files and
+  Changes still follow the watcher. Paths come from tool locations, diff
+  content and `file_path`/`path`/`changes` inputs, never from titles.
+- **Read fences.** A shared in-flight snapshot read is joined only within the
+  fence epoch it started in (`engine/design/snapshot-epoch.ts`). The watcher
+  fences a checkout when it observes a raw change, before its debounce, and
+  style-build outputs and font downloads fence before their `designStyles`
+  broadcast, so a request made after a save never receives an older read. In
+  the renderer, a frame-ready audit reconcile reads the aggregate directly; it
+  never publishes over a newer invalidation or publication.
+- **Drafts.** While a Claude `Write`, `Edit` or `MultiEdit` that targets the
+  directory is still streaming its arguments (`input_json_delta`, observed
+  through the translator's optional `onToolInput`; nothing is persisted and the
+  transcript keeps its complete-input contract), the engine reads the
+  arguments so far (`partial-json.ts`; a path counts only once its closing
+  quote arrives, and an Edit applies only once its search text is complete and
+  found in the saved source). At most every 250 ms it renders the frame through
+  `prepareFrameRenderSource` — the saved form's stylesheets, imported sources,
+  components and sanitizer — with a script-free CSP and no runtime, then sends
+  `DESIGN_AGENT_DRAFT` to trusted local desktop clients only
+  (`router.broadcastLocal`; never journaled, replayed or relayed). Phases are
+  `writing`, `saving` (input complete, tool running or awaiting permission),
+  `saved` and `discarded` (failure, refusal, Stop or turn end while unsaved).
+  Non-frame Design files (tokens, CSS, `meta/canvas.json`) carry no preview.
+  Measured: 10–55 ms per render for a 14 KB frame, with or without Tailwind.
+  The renderer store (`state/design-agent-drafts.ts`) keeps the newest revision
+  per draft, 6 drafts per workspace, 8 workspaces and 24 MiB of previews,
+  ignores `cloud://` keys, and drops a draft whose engine goes quiet for 2
+  minutes or whose save is not handed off within a minute. The canvas shows a
+  draft over its registered frame, or as a dashed ghost right of the active
+  page's frames while the file is not in `meta/canvas.json`, in a scriptless
+  `sandbox=""` iframe double-buffered like live frames (a revision paints in
+  15–25 ms). A screen-sized badge reads Agent writing, Saving or Saved. A
+  drafted frame ranks with the selection for one of the 12 live runtimes. After
+  `saved`, the draft stays until that frame's displayed buffer has painted a
+  newer generation (or the frame first appeared after the save), then one more
+  frame, with a 6 s bound, so the hand-off never shows the old version or a
+  blank buffer. A saved ghost whose turn ends unregistered leaves after 3 s.
+  Inactive retained canvases render no drafts.
+
 New `tokens.css` defaults preserve normal inline and flex behavior and never
 select every `data-oid` to change its layout. Existing authored stylesheets are
 not replaced. A legacy folder can therefore retain its old broad layout reset
@@ -1026,8 +1083,22 @@ records pass unknown fields through:
   record lists `styles` (an ordered list of IDs, or `[]` for none). Imported
   `<style data-zeros-style-source>` blocks are inserted at the start of `head`
   by `prepareFrameRenderSource`, so the frame's own stylesheets override them.
+  They are preceded by `<style data-zeros-layer-order>@layer reset;</style>`:
+  the seeded `tokens.css` puts its reset in `@layer reset`, and a cascade
+  layer declared after an imported source's layers (Tailwind's `theme, base,
+  components, utilities`) would outrank them, zeroing heading margins and
+  replacing utility type on form controls. Naming `reset` first keeps it the
+  weakest layer for directories created before and after this ordering,
+  without rewriting their `tokens.css`. Frames that receive no source are
+  unchanged.
   The render generation hashes the result, so an edit to a source file gives
   its frames new generations through the ordinary worktree event.
+- Lint's `unknown-token` warning counts a frame's `var(--name)` as known when
+  `tokens.css`, Design-folder CSS, the frame's own styles or any source the
+  frame receives (its `styles` list, App fonts included) declares it. A
+  source's tokens are the custom properties its own files declare, Tailwind
+  `@theme` included; Tailwind's stock theme and package defaults are not the
+  application's tokens and still warn (`document.ts`, `designKnownTokens`).
 - The workspace snapshot adds optional `styleSources` (status, messages,
   themes and tokens, without CSS) and `styleSourceErrors`. The theme editor
   lists Manual (`tokens.css`, editable) and each source with its status; an
@@ -2237,6 +2308,38 @@ These are deferred enhancements, not prerequisites for Phase 2:
 Code Restriction and designer-only workspaces remain separate deferred product
 work. A permanent private authored store and separate specialist sessions are
 not reintroduced by these follow-ups.
+
+#### Proposal: the rest of live agent edits
+
+The implemented slice (saved-step refresh, read fences and Claude drafts; see
+[Native edit and refresh behavior](#native-edit-and-refresh-behavior)) covers
+Local workspaces. Each item below keeps the same rules: drafts are transient,
+the saved file wins, previews use the saved form's sanitizer with no script,
+and nothing re-enters the transcript or its replay.
+
+1. **Other providers.** Codex streams `apply_patch` and file-change items and
+   Cursor streams edit calls with their own identities. Each adapter reports
+   the same `AgentToolInputEvent` (native id, phase, chunk) once its delivery
+   shapes are pinned by native-event fixtures; patch hunks apply to the saved
+   source the way Edit previews do. Saved-step refresh already covers them.
+2. **Shared stylesheets.** While `tokens.css` or a page stylesheet streams,
+   re-render the drafted CSS into the visible frames that link it (bounded to
+   the live set) instead of only naming the file.
+3. **Canvas metadata.** Read a streaming `meta/canvas.json` with the same
+   tolerant reader to place ghosts at their registered geometry and titles
+   before the save, and show a new page's ghost in the page picker.
+4. **Follow and reveal.** An activity chip in the canvas chrome naming each
+   drafted file, with Show to center a draft or ghost without changing the
+   selection, and an opt-in follow mode; never move the camera automatically.
+5. **Faster external saves.** Packaged builds stat-poll at 1.5 s because the
+   compiled engine cannot arm native FSEvents. A Design-scoped watcher with a
+   shorter interval (bounded file count) would shorten edits made outside
+   agents, such as a person's own editor.
+6. **Cloud workspaces.** Out of scope by product decision for now. A cloud
+   design needs a non-durable live channel, because the control plane's event
+   stream is a durable replay log with a closed type list and 256 KiB frames;
+   saved-step refresh would also need the VM engine's tool completions to reach
+   devices before its watcher.
 
 ## 2. Target architecture
 

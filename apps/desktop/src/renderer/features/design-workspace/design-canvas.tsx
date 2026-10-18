@@ -246,6 +246,11 @@ import { useDesignFoundation } from "./state/use-design-foundation";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 import { DesignFrameRenderSurface } from "./design-frame-render-surface";
+import {
+  DesignAgentDraftFrameOverlay,
+  DesignAgentDraftGhosts,
+  useDesignAgentDraftFrameFiles,
+} from "./design-agent-drafts";
 import { errorMessage } from "./design-workspace-error";
 import {
   DESIGN_RESIZE_HANDLES,
@@ -1041,12 +1046,20 @@ export function DesignCanvas({
   // Layers reads each open frame's runtime tree, so an open frame is a demand
   // for a live runtime exactly like the selection is.
   const layerDisclosures = useDesignWorkspaceDisclosure(workspaceId);
+  // A frame an agent is drafting ranks the same way: once the tool saves,
+  // its live document paints the result in place under the draft.
+  const agentDraftFiles = useDesignAgentDraftFrameFiles(
+    workspaceId,
+    snapshot?.directory,
+  );
   const layersOpenFiles = useMemo(
-    () =>
-      Object.entries(layerDisclosures)
+    () => [
+      ...Object.entries(layerDisclosures)
         .filter(([, disclosure]) => disclosure.treeExpanded)
         .map(([file]) => file),
-    [layerDisclosures],
+      ...agentDraftFiles,
+    ],
+    [agentDraftFiles, layerDisclosures],
   );
   const liveFrameFiles = useMemo(() => {
     const previous =
@@ -6808,6 +6821,17 @@ export function DesignCanvas({
                   </div>
                 )}
 
+                {workspaceId && frame.kind !== "text" ? (
+                  <DesignAgentDraftFrameOverlay
+                    workspaceId={workspaceId}
+                    directory={snapshot.directory}
+                    frame={frame}
+                    live={liveFrameFiles.has(frame.file)}
+                    active={active}
+                    theme={frameTheme}
+                  />
+                ) : null}
+
                 {multiSelectionBounds ? (
                   <div
                     data-design-multi-selection=""
@@ -7263,6 +7287,17 @@ export function DesignCanvas({
               </article>
             );
           })}
+          {workspaceId && snapshot ? (
+            <DesignAgentDraftGhosts
+              workspaceId={workspaceId}
+              directory={snapshot.directory}
+              pages={snapshot.pages}
+              activePageId={view.activePageId}
+              frames={snapshot.frames}
+              active={active}
+              theme={frameTheme}
+            />
+          ) : null}
           {inlineTextEdit?.kind === "new" &&
           inlineTextEdit.owner === "canvas" &&
           !inlineTextEdit.frame ? (

@@ -484,8 +484,18 @@ async function importedStylesheets(
     sheets.push({ token, css: source.css.replace(/<\/style/gi, "<\\/style"), ...(source.bytes === undefined ? {} : { bytes: source.bytes }) });
     markup += `<style data-zeros-style-source="${source.id}" data-zeros-sheet="${token}"></style>`;
   }
+  // Imported sources come first in head, so their layers (Tailwind's
+  // `theme, base, components, utilities`) would otherwise precede the `reset`
+  // layer every seeded tokens.css declares, and a later-declared layer wins.
+  // Naming `reset` first keeps it the weakest layer for every directory,
+  // including those created before this ordering, without editing tokens.css.
+  if (markup) markup = `${DESIGN_RESET_LAYER_ORDER}${markup}`;
   return { markup, sheets };
 }
+
+/** Zeros' seeded reset layer always precedes imported source layers. */
+export const DESIGN_RESET_LAYER_ORDER =
+  '<style data-zeros-layer-order="">@layer reset;</style>';
 
 export interface FrameRenderOptions {
   /** Return only the generation; `sanitized` is then a skeleton whose

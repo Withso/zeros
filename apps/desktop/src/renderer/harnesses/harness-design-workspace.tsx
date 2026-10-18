@@ -645,6 +645,40 @@ async function main() {
   (
     window as Window & { __zerosHarnessDesignStyleRefreshes?: () => number }
   ).__zerosHarnessDesignStyleRefreshes = () => designStyleRefreshes;
+  // Agent-draft smoke: report the directory name an engine snapshot carries,
+  // and land a new home.html generation the way an agent's Write saves before
+  // any watcher event (the smoke then sends the Design-only refresh).
+  (
+    window as Window & {
+      __zerosHarnessAgentDrafts?: {
+        workspaceId: string;
+        directory: string;
+        useDirectory(): void;
+        save(source: string, sourceVersion: string): void;
+      };
+    }
+  ).__zerosHarnessAgentDrafts = {
+    workspaceId,
+    directory: "North One - Design",
+    useDirectory() {
+      currentWorkspaceSnapshot = {
+        ...currentWorkspaceSnapshot,
+        directory: "North One - Design",
+      };
+      designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+    },
+    save(source, sourceVersion) {
+      currentHomeSource = source;
+      currentWorkspaceSnapshot = {
+        ...currentWorkspaceSnapshot,
+        frames: currentWorkspaceSnapshot.frames.map((frame) =>
+          frame.file === "home.html"
+            ? { ...frame, sourceVersion, modifiedAt: Date.now() }
+            : frame,
+        ),
+      };
+    },
+  };
   const layoutUndo: Array<{
     source: string;
     snapshot: typeof currentWorkspaceSnapshot;
