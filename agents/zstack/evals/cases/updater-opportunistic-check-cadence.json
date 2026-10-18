@@ -2,7 +2,7 @@
   "id": "updater-opportunistic-check-cadence",
   "kind": "replay",
   "area": "electron-updater",
-  "fixedBy": "pending",
+  "fixedBy": "pr:583",
   "symptom": "Window focus and resume triggered repeated native update checks even immediately after a successful automatic check.",
   "rule": "The bug-fix playbook requires a fake-clock scheduler test at the native producer. Throttle successful opportunistic checks from completion without delaying manual checks or starving the next due automatic check.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/electron/__tests__/updater-check-cadence.test.ts -t 'collapses focus/resume checks'"

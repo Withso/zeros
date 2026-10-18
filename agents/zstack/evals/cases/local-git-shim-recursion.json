@@ -2,7 +2,7 @@
   "id": "local-git-shim-recursion",
   "kind": "replay",
   "area": "engine-git",
-  "fixedBy": "pending",
+  "fixedBy": "pr:583",
   "symptom": "An engine launched from a Local agent shell resolved an inherited credential shim as real Git, leaving detached shells that re-executed themselves indefinitely.",
   "rule": "Resolve through inherited wrappers and test both the resolver and script re-entry. The bug-fix playbook requires a bounded reproduction; Local and cloud normal invocations remain covered by the adjacent shim suite.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/git/__tests__/credential-shim-recursion.test.ts -t 'skips shims reached'"
