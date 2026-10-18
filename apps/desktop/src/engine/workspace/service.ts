@@ -2118,15 +2118,23 @@ export class WorkspaceService {
     const registered = designDirectoryNameFor(workspace.path);
     const hasLiveMarker = (directory: string) =>
       fs.existsSync(designDocumentMetadataPath(workspace.path, directory));
-    const discovered = await discoverDesignDirectories(workspace.path);
+    // A live selected document wins over discovery below. Local snapshot and
+    // Foundation reads need only re-read that document, not walk every other
+    // directory in the repository. Explicit listing/selection still discovers
+    // new documents; cloud keeps its current admission sequence.
+    const selectedLocalDirectory = !this.options.primaryDesignWorkspace && workspace.placement !== "cloud"
+      ? pointer.configured && hasLiveMarker(pointer.directory) ? pointer.directory
+        : hasLiveMarker(registered) ? registered : null
+      : null;
+    const discovered = selectedLocalDirectory ? [] : await discoverDesignDirectories(workspace.path);
     const designDirectory =
-      pointer.configured && hasLiveMarker(pointer.directory)
+      selectedLocalDirectory ?? (pointer.configured && hasLiveMarker(pointer.directory)
         ? pointer.directory
         : hasLiveMarker(registered)
           ? registered
           : discovered.length === 1
             ? discovered[0]!
-            : null;
+            : null);
     if (!designDirectory) {
       throw new GitError({
         code: "VALIDATION_FAILED",
