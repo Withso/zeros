@@ -77,6 +77,29 @@ beforeEach(() => {
 });
 
 describe("canvas transfer presentation", () => {
+  it.each(["workspace-a", "cloud://org-a/workspace-a"])("does not follow a fresh identical selection while saving in %s", async (workspaceId) => {
+    useDesignWorkspaceUiStore.getState().setSelection(workspaceId, source.file, node.oid);
+    let finish!: (value: typeof reply) => void;
+    mocks.transfer.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const result = transferDesignLayerOnCanvas({ ...input, workspaceId });
+    await vi.waitFor(() => expect(mocks.transfer).toHaveBeenCalledOnce());
+    useDesignWorkspaceUiStore.getState().setSelection(workspaceId, source.file, node.oid);
+    finish(reply);
+    await expect(result).resolves.toBe(true);
+    expect(designWorkspaceView(workspaceId).selectedFrame).toBe(source.file);
+    expect(mocks.selectNode).not.toHaveBeenCalled();
+  });
+
+  it("does not inspect a destination reselected while presentation was pending", async () => {
+    let present!: () => void;
+    const shown = vi.fn(() => new Promise<void>((resolve) => { present = resolve; }));
+    const result = transferDesignLayerOnCanvas({ ...input, presented: shown });
+    await vi.waitFor(() => expect(shown).toHaveBeenCalledOnce());
+    useDesignWorkspaceUiStore.getState().setSelection(input.workspaceId, destination.file, node.oid);
+    present();
+    await result;
+    expect(mocks.selectNode).not.toHaveBeenCalled();
+  });
   it.each([
     { lowerZ: 1, upperZ: 2, upperWidth: 600 },
     { lowerZ: 1, upperZ: 2, upperWidth: 800 },

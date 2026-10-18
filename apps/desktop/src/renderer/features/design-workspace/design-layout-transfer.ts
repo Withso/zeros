@@ -19,11 +19,15 @@ export async function transferDesignLayerOnCanvas(input: {
   details: DesignRuntimeNodeDetails;
   origin: { x: number; y: number };
   detach: boolean;
+  isCurrent?: () => boolean;
   presented?: (frame: DesignCanvasFrameWire) => Promise<void>;
 }): Promise<boolean> {
   const { workspaceId, folder, frame, details, origin } = input;
   const owner = captureDesignPageOwner(workspaceId);
   const initialSelection = designWorkspaceView(workspaceId);
+  const hasIntent = () => isCurrentDesignPageOwner(owner) &&
+    designWorkspaceView(workspaceId).selectionEvent === initialSelection.selectionEvent &&
+    input.isCurrent?.() !== false;
   const center = {
     x: origin.x + details.rect.width / 2,
     y: origin.y + details.rect.height / 2,
@@ -51,6 +55,7 @@ export async function transferDesignLayerOnCanvas(input: {
   const targets = targetRuntime?.supports("getLayoutTargets")
     ? await targetRuntime.getLayoutTargets()
     : [];
+  if (!hasIntent()) return false;
   const drop = destination
     ? designLayoutDrop(
         { ...details, layout: undefined },
@@ -89,6 +94,8 @@ export async function transferDesignLayerOnCanvas(input: {
     const current = designWorkspaceView(workspaceId);
     const followsTransfer =
       isCurrentDesignPageOwner(owner) &&
+      current.selectionEvent === initialSelection.selectionEvent &&
+      input.isCurrent?.() !== false &&
       current.selectedFrame === initialSelection.selectedFrame &&
       current.selectedNodeId === initialSelection.selectedNodeId &&
       current.frameSelected === initialSelection.frameSelected;
@@ -105,10 +112,13 @@ export async function transferDesignLayerOnCanvas(input: {
     // Selecting the destination makes it a live-frame priority. Its old
     // document cannot inspect the newly transferred node; wait for presentation.
     if (!followsTransfer) return true;
+    const followedEvent = designWorkspaceView(workspaceId).selectionEvent;
     await input.presented?.(nextFrame);
     const selected = designWorkspaceView(workspaceId);
     if (
       !isCurrentDesignPageOwner(owner) ||
+      selected.selectionEvent !== followedEvent ||
+      input.isCurrent?.() === false ||
       selected.selectedFrame !== nextFrame.file ||
       selected.selectedNodeId !== (destination ? result.nodeId : null)
     )
