@@ -7,9 +7,9 @@ import path from "node:path";
 // Design directory change poller — prompt canvas refresh when packaged
 // ──────────────────────────────────────────────────────────
 //
-// Packaged engines stat-poll worktrees every 1.5 s, because Bun's compiled
-// runtime deadlocks once a native FSEvents watcher is armed (see the
-// startGitWatcher call in zeros-engine.ts). An open Design canvas should not
+// Packaged engines without the native watch host stat-poll worktrees every
+// 1.5 s, because Bun's compiled runtime deadlocks once a native FSEvents
+// watcher is armed (see the startGitWatcher call in zeros-engine.ts). An open Design canvas should not
 // wait that long for an edit made in a person's own editor, a Git checkout or
 // an agent's shell script. While a Design tab shows a checkout (style-build
 // presence), this polls only that checkout's active Design directory, bounded

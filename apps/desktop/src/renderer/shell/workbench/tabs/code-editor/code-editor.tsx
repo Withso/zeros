@@ -48,6 +48,8 @@ import { resolveCodeTheme } from "@/renderer/shared/theme/code-themes";
 import { useScrollMemory } from "../../../scroll-memory";
 
 export interface CodeEditorProps {
+  /** Opted in by a Local owner; embedded and cloud editors keep their policy. */
+  tokenCacheScope?: "local";
   /** Current file contents (controlled). */
   value: string;
   /** File path — drives lazy language detection. */
@@ -179,6 +181,7 @@ const FILE_LINE_WRAP_EXTENSIONS: Extension[] = [
 ];
 
 export function CodeEditor({
+  tokenCacheScope,
   value,
   filePath,
   readOnly = false,
@@ -285,6 +288,7 @@ export function CodeEditor({
       // its document synchronously as the state is built, so the first painted
       // frame already wears the theme (no unthemed flash on open / tab switch).
       shikiColors({
+        cacheScope: tokenCacheScope,
         lang: shikiLang,
         theme: codeThemeOpt.shiki,
         syncFirstPaint: !offscreen,
@@ -301,6 +305,7 @@ export function CodeEditor({
       codeThemeOpt.appearance,
       baseFg,
       offscreen,
+      tokenCacheScope,
     ],
   );
 

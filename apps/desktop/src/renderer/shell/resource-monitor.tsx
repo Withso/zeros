@@ -52,6 +52,7 @@ import { Separator } from "../shared/ui/primitives/separator";
 import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { toast } from "../shared/ui/primitives/elements";
 import { copyToClipboardWithFallback } from "../shared/lib/clipboard";
+import { documentIsForeground, observeForeground } from "../shared/lib/element-activity";
 import {
   buildOtherAppNodes,
   buildResourceView,
@@ -73,11 +74,6 @@ import { Inline } from "@/renderer/shared/ui/layout/inline";
 // --- CONSTANTS ---
 
 const OPEN_SAMPLE_INTERVAL_MS = 1_000;
-// The closed icon's tooltip shows rounded memory — it doesn't need a near-live
-// cadence, and every sample forks a `ps` process-table scan in Electron main
-// plus (while open) a PTY census round-trip. 15s keeps the tooltip current while
-// making the idle app quiet; opening the popover snaps to the 1s cadence.
-const CLOSED_SAMPLE_INTERVAL_MS = 15_000;
 const MAX_VISIBLE_TREE_DEPTH = 8;
 const MAX_RENDERED_PROCESS_ROWS = 500;
 
@@ -274,7 +270,7 @@ const ResourceProcessRow = memo(function ResourceProcessRow({
 
 export const ResourceMonitor = memo(function ResourceMonitor() {
   const { ready } = useNativeRuntime();
-  // Whether the resource popover is mounted and receiving the faster cadence.
+  // Only an open foreground inspector owns process sampling.
   const [open, setOpen] = useState(false);
   // Last confirmed app-global process snapshot; retained through refresh errors.
   const [snapshot, setSnapshot] = useState<ProcessMetricsSnapshot | null>(null);
@@ -297,6 +293,10 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
   );
   // Invalidates an older async sample after visibility/cadence changes.
   const requestGeneration = useRef(0);
+  // A native read cannot be cancelled. Keep its lock through close/reopen and
+  // let only the currently active effect schedule the next sample.
+  const sampling = useRef(false);
+  const afterSample = useRef<((stale: boolean) => void) | null>(null);
   // Rejects an older PTY inventory after an engine bridge replacement.
   const terminalGeneration = useRef(0);
   // Last confirmed terminal roots survive a transient bridge disconnect.
@@ -366,9 +366,12 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     // session would issue a PTY_LIST per mount, terminal change, and
     // reconnect for a surface it never shows — and the engine withholds
     // processPids from non-local clients, so every one of them fails.
-    if (!ready) return;
+    if (!ready || !open) return;
     let settleTimer: number | null = null;
+    let detach: (() => void) | undefined;
+    const active = () => !!detach && documentIsForeground();
     const refreshAfterRegistryChange = (): void => {
+      if (!active()) return;
       terminalOwnership.current = {
         ...terminalOwnership.current,
         known: false,
@@ -378,40 +381,47 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       // node-pty publishes the terminal registry before its async host has
       // necessarily returned the real PID. Re-read once after that handshake.
       settleTimer = window.setTimeout(
-        () => void refreshTerminalOwnership(),
+        () => { settleTimer = null; if (active()) void refreshTerminalOwnership(); },
         500,
       );
     };
-    void refreshTerminalOwnership();
-    const offTerminals = onPtyTerminalsChanged(refreshAfterRegistryChange);
-    const offBridgeChange = onActiveBridgeChange(() => {
-      terminalGeneration.current += 1;
-      terminalOwnership.current = { pids: [], known: false };
-    });
-    const offBridge = onActiveBridgeConnected((_bridge, info) => {
-      if (info.initial) return;
-      // A reconnect is a new authoritative ownership boundary. Old PIDs remain
-      // visible through an outage, but must not classify the first snapshot
-      // after an engine respawn or missed terminal-registry broadcasts.
-      terminalOwnership.current = { pids: [], known: false };
-      void refreshTerminalOwnership();
-    });
-    return () => {
+    const stop = () => {
       terminalGeneration.current += 1;
       if (settleTimer != null) window.clearTimeout(settleTimer);
-      offTerminals();
-      offBridgeChange();
-      offBridge();
+      settleTimer = null;
+      detach?.(); detach = undefined;
     };
-  }, [ready, refreshTerminalOwnership]);
+    const update = () => {
+      if (!documentIsForeground()) { stop(); return; }
+      if (detach) return;
+      // Registry events may have been missed while inactive. The sample loop
+      // performs the initial census before it requests the next OS snapshot.
+      terminalOwnership.current = { ...terminalOwnership.current, known: false };
+      const offTerminals = onPtyTerminalsChanged(refreshAfterRegistryChange);
+      const offBridgeChange = onActiveBridgeChange(() => {
+        terminalGeneration.current += 1;
+        terminalOwnership.current = { pids: [], known: false };
+      });
+      const offBridge = onActiveBridgeConnected((_bridge, info) => {
+        if (info.initial || !active()) return;
+        terminalOwnership.current = { pids: [], known: false };
+        void refreshTerminalOwnership();
+      });
+      detach = () => { offTerminals(); offBridgeChange(); offBridge(); };
+    };
+    const unwatch = observeForeground(update);
+    update();
+    return () => { unwatch(); stop(); };
+  }, [open, ready, refreshTerminalOwnership]);
 
-  // Poll sequentially so reads never overlap. Open inspection gets a one-second
-  // cadence; the closed icon backs off to 15 seconds and hidden windows stop
-  // entirely. A generation check rejects any response from the prior cadence.
+  // Every scan runs `ps` in the native process. Closed, hidden and unfocused
+  // inspectors retain their snapshot without owning a timer or starting reads.
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !open) return;
     let disposed = false;
+    let active = false;
     let timer: number | null = null;
+    const canSample = () => !disposed && active && documentIsForeground();
 
     const clearTimer = (): void => {
       if (timer != null) window.clearTimeout(timer);
@@ -419,34 +429,27 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     };
     const schedule = (): void => {
       clearTimer();
-      if (disposed || document.visibilityState === "hidden") return;
+      if (!canSample()) return;
       timer = window.setTimeout(
-        () => void sample(),
-        open ? OPEN_SAMPLE_INTERVAL_MS : CLOSED_SAMPLE_INTERVAL_MS,
+        () => { timer = null; void sample(); },
+        OPEN_SAMPLE_INTERVAL_MS,
       );
     };
     const sample = async (): Promise<void> => {
+      if (!canSample() || sampling.current) return;
+      sampling.current = true;
       const generation = ++requestGeneration.current;
-      // Setup and ephemeral PTYs intentionally do not publish the shared-tab
-      // registry event. Refresh the cheap PID-only census at every bounded
-      // sample so the filter still covers them within this sample's exact key.
-      // Only while the popover is OPEN: the tooltip shows rounded memory,
-      // the registry listener above still tracks ordinary terminal changes,
-      // and skipping the census keeps the idle app off the engine round-trip.
-      if (open) {
-        await refreshTerminalOwnership();
-        if (disposed || generation !== requestGeneration.current) return;
-      }
-      const ownership = terminalOwnership.current;
       try {
+        // Private Setup/ephemeral PTYs do not publish registry events.
+        await refreshTerminalOwnership();
+        if (!canSample() || generation !== requestGeneration.current) return;
+        const ownership = terminalOwnership.current;
         const next = await processMetricsSnapshot({
           terminalPids: ownership.pids,
           terminalRootsKnown: ownership.known,
-          // The open inspector keeps the physical-footprint read fresh; the
-          // closed icon never pays for it.
-          detail: open,
+          detail: true,
         });
-        if (disposed || generation !== requestGeneration.current || !next)
+        if (!canSample() || generation !== requestGeneration.current || !next)
           return;
         if (next.totals.excludingTerminals) {
           lastTerminalSnapshot.current = next;
@@ -454,25 +457,36 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
         setSnapshot(next);
         setSampleError(null);
       } catch (error) {
-        if (disposed || generation !== requestGeneration.current) return;
+        if (!canSample() || generation !== requestGeneration.current) return;
         setSampleError(error instanceof Error ? error.message : String(error));
       } finally {
-        if (!disposed && generation === requestGeneration.current) schedule();
+        sampling.current = false;
+        afterSample.current?.(generation !== requestGeneration.current);
       }
     };
-    const handleVisibility = (): void => {
+    const handleActivity = (): void => {
+      const next = documentIsForeground();
+      if (next === active) {
+        if (next && timer == null) void sample();
+        return;
+      }
+      active = next;
       requestGeneration.current += 1;
       clearTimer();
-      if (document.visibilityState !== "hidden") void sample();
+      if (active) void sample();
     };
-
-    document.addEventListener("visibilitychange", handleVisibility);
-    if (document.visibilityState !== "hidden") void sample();
+    afterSample.current = (stale) => {
+      if (!canSample()) return;
+      if (stale) void sample(); else schedule();
+    };
+    const unwatch = observeForeground(handleActivity);
+    handleActivity();
     return () => {
       disposed = true;
       requestGeneration.current += 1;
+      afterSample.current = null;
       clearTimer();
-      document.removeEventListener("visibilitychange", handleVisibility);
+      unwatch();
     };
   }, [open, ready, refreshTerminalOwnership]);
 
@@ -653,7 +667,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     ? `${formatResourceMemory(totals.memoryBytes)} ${
         memoryIsFootprint ? "memory" : "resident memory"
       }, ${scopeLabel}`
-    : "Collecting app resource usage";
+    : open ? "Collecting app resource usage" : "Inspect app resource usage";
 
   return (
     <div className="flex h-full shrink-0 items-center">

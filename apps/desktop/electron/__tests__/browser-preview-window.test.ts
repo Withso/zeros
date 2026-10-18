@@ -34,10 +34,14 @@ vi.mock("../ipc/router", () => ({
 
 vi.mock("electron", () => {
   class FakeContents extends Emitter {
+    readonly pid = 600 + mocks.created.length;
+    destroyed = false;
     url = "";
     windowOpenHandler: ((details: { url: string }) => { action: string }) | null = null;
     openDevTools = vi.fn();
     getURL = () => this.url;
+    getOSProcessId = () => this.pid;
+    isDestroyed = () => this.destroyed;
     setWindowOpenHandler(handler: (details: { url: string }) => { action: string }) {
       this.windowOpenHandler = handler;
     }
@@ -59,6 +63,8 @@ vi.mock("electron", () => {
     });
     close = vi.fn(() => {
       this.destroyed = true;
+      this.webContents.destroyed = true;
+      this.webContents.emit("destroyed");
       this.emit("closed");
     });
     constructor(options: Record<string, unknown>) {
@@ -85,6 +91,7 @@ import {
   registerBrowserPreviewWindowCommands,
 } from "../browser-preview-window";
 import { previewFrameAuthorizations } from "../preview-frame-authorizations";
+import { rendererProcessOwners } from "../renderer-process-owners";
 
 interface TestWindow extends Emitter {
   webContents: Emitter & {
@@ -143,6 +150,12 @@ beforeEach(() => {
 });
 
 describe("browser:open-window request validation", () => {
+  it("attributes the preview renderer until its window closes", () => {
+    expect(invoke({ key: "zeros-browser-attribution", url: "https://example.test/preview" })).toEqual({ ok: true, reused: false });
+    expect(rendererProcessOwners.ownersByPid().get(600)).toBe("Browser preview");
+    lastWindow().close();
+    expect(rendererProcessOwners.ownersByPid().has(600)).toBe(false);
+  });
   it("rejects senders other than the app window's main frame", () => {
     expect(
       invoke(

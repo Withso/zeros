@@ -73,6 +73,7 @@
 import React, {
   memo,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -85,6 +86,7 @@ import {
   HoverCardContent,
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui";
+import { ActivityScope } from "../../shared/ui/loading/activity-scope";
 
 export interface Checkpoint {
   /** The user-prompt message id — matches the `data-checkpoint-id`
@@ -254,6 +256,10 @@ export const CheckpointRail = memo(function CheckpointRail({
   recomputeRef,
 }: CheckpointRailProps) {
   const [activeIndex, setActiveIndex] = useState(0);
+  const local = useContext(ActivityScope) !== undefined;
+  // Track dispatches rather than render state: several measurements may run
+  // before React renders. No-op updaters otherwise accumulate in its queue.
+  const publishedIndexRef = useRef(0);
   // The spy + click handlers read the latest list through a ref so the
   // scroll listener effect doesn't re-subscribe on every new message.
   const checkpointsRef = useRef(checkpoints);
@@ -397,7 +403,10 @@ export const CheckpointRail = memo(function CheckpointRail({
       const staleAtBottom =
         !navigatingRef.current && atBottom && idx !== lastIdx;
       if (idx !== -1 && !staleAtBottom) {
-        setActiveIndex((prev) => (prev === idx ? prev : idx));
+        if (!local || publishedIndexRef.current !== idx) {
+          publishedIndexRef.current = idx;
+          setActiveIndex((prev) => (prev === idx ? prev : idx));
+        }
         return;
       }
       pinnedIdRef.current = null;
@@ -409,10 +418,11 @@ export const CheckpointRail = memo(function CheckpointRail({
       spyAnchorPx(scrollEl.clientHeight),
       atBottom,
     );
-    // Identity-guarded set — scroll frames where the region didn't
-    // change must not re-render the rail.
-    setActiveIndex((prev) => (prev === next ? prev : next));
-  }, [scrollEl, measureTops, targetTopFor, onBottomSpacerChange]);
+    if (!local || publishedIndexRef.current !== next) {
+      publishedIndexRef.current = next;
+      setActiveIndex((prev) => (prev === next ? prev : next));
+    }
+  }, [scrollEl, measureTops, targetTopFor, onBottomSpacerChange, local]);
 
   // Track scroll (rAF-coalesced) + any size change: streaming growth,
   // tool-card expand/collapse, and column resizes all move checkpoint
@@ -536,7 +546,10 @@ export const CheckpointRail = memo(function CheckpointRail({
       pinnedIdRef.current = id;
       navigatingRef.current = true;
       const idx = checkpointsRef.current.findIndex((c) => c.id === id);
-      if (idx !== -1) setActiveIndex(idx);
+      if (idx !== -1 && (!local || publishedIndexRef.current !== idx)) {
+        publishedIndexRef.current = idx;
+        setActiveIndex(idx);
+      }
 
       ensureReachable(target);
       // Navigator selection is a direct jump at any distance. Intermediate
@@ -605,7 +618,7 @@ export const CheckpointRail = memo(function CheckpointRail({
       };
       arm();
     },
-    [scrollEl, targetTopFor, onBottomSpacerChange, recompute],
+    [scrollEl, targetTopFor, onBottomSpacerChange, recompute, local],
   );
 
   // Publish the scroll-spy pass for AgentChat's mount-time restore (see

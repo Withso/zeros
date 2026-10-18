@@ -60,6 +60,8 @@ import {
 import { PrStatusRow } from "../pr/pr-status-row";
 import { useBrowserFloatEntries } from "../../features/browser/browser-float-store";
 import { activeBrowserDeckKeys, browserViewKey } from "./browser-deck-keys";
+import { ActivityScope } from "../../shared/ui/loading/activity-scope";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 // Proportional columns (2026-07-17): workbench grows by `(1 - ratio)·100`,
@@ -465,6 +467,7 @@ export function WorkbenchPane({
     // browser tab's iframe don't bubble out, but the iframe keeps its state
     // across a tab switch anyway.
     <DiffWorkerPoolProvider>
+      <ActivityScope.Provider value={folderKey && !isCloudWorkspace(folderKey) ? surfaceActive && !collapsed : undefined}>
       <div
         ref={workbenchRef}
         data-zeros-column-3=""
@@ -588,6 +591,7 @@ export function WorkbenchPane({
           </>
         )}
       </div>
+      </ActivityScope.Provider>
     </DiffWorkerPoolProvider>
   );
 }

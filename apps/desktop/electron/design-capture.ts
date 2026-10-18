@@ -1,5 +1,6 @@
 import { BrowserWindow, session } from "electron";
 import { randomUUID } from "node:crypto";
+import { rendererProcessOwners } from "./renderer-process-owners";
 import { DESIGN_STATIC_RENDER_CSS } from "@zeros/protocol/design-capture";
 import { prepareDesignCaptureViewport, captureScaledDesignPng } from "../src/engine/design/capture-viewport";
 import {
@@ -56,6 +57,7 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
         spellcheck: false,
       },
     });
+    rendererProcessOwners.track(window.webContents, "Design capture");
     const destroy = () => {
       if (!window.isDestroyed()) window.destroy();
     };

@@ -212,9 +212,12 @@ let stagedReplacementFallback = "";
 
 type CheckResult = Awaited<ReturnType<typeof autoUpdater.checkForUpdates>>;
 let checkInFlight: Promise<CheckResult> | null = null;
-let lastCheckStartedAt = 0;
+let lastCheckStartedAt: number | null = null;
+let lastCheckSucceededAt: number | null = null;
 let stagedFeedPollInFlight: Promise<void> | null = null;
-let lastStagedFeedPollAt = 0;
+let lastStagedFeedPollAt: number | null = null;
+let lastStagedFeedSucceededAt: number | null = null;
+let automaticCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
 interface ParsedVersion {
   core: number[];
@@ -309,15 +312,41 @@ function markUpdateStaged(version: string): void {
   }
 }
 
+function clearAutomaticCheckTimer(): void {
+  if (automaticCheckTimer) clearTimeout(automaticCheckTimer);
+  automaticCheckTimer = null;
+}
+
+/** Schedule from completion, so a slow check or an explicit manual check does
+ * not make the fixed launch interval skip a genuinely due observation. */
+function scheduleAutomaticCheck(): void {
+  clearAutomaticCheckTimer();
+  if (!wired || !updaterEnabled()) return;
+  automaticCheckTimer = setTimeout(() => {
+    automaticCheckTimer = null;
+    checkAutomatically("interval");
+  }, CHECK_INTERVAL_MS);
+  automaticCheckTimer.unref?.();
+}
+
+function automaticCheckThrottled(startedAt: number | null, succeededAt: number | null): boolean {
+  const now = Date.now();
+  const recent = (at: number | null, gap: number) => at != null && now >= at && now - at < gap;
+  return recent(startedAt, MIN_OPPORTUNISTIC_CHECK_GAP_MS) || recent(succeededAt, CHECK_INTERVAL_MS);
+}
+
 function checkForUpdatesShared(): Promise<CheckResult> {
   if (checkInFlight) return checkInFlight;
+  clearAutomaticCheckTimer();
   lastCheckStartedAt = Date.now();
   const request = autoUpdater.checkForUpdates();
   checkInFlight = request;
   const clear = () => {
-    if (checkInFlight === request) checkInFlight = null;
+    if (checkInFlight !== request) return;
+    checkInFlight = null;
+    scheduleAutomaticCheck();
   };
-  request.then(clear, clear);
+  request.then(() => { lastCheckSucceededAt = Date.now(); clear(); }, clear);
   return request;
 }
 
@@ -329,15 +358,17 @@ function checkForUpdatesShared(): Promise<CheckResult> {
  * later same-day release.
  */
 function checkForNewerThanStaged(reason: string, force = false): void {
-  const elapsed = Date.now() - lastStagedFeedPollAt;
   if (
     stagedFeedPollInFlight ||
-    (!force && elapsed < MIN_OPPORTUNISTIC_CHECK_GAP_MS) ||
+    (!force && automaticCheckThrottled(lastStagedFeedPollAt, lastStagedFeedSucceededAt)) ||
     !updateDownloaded ||
     !stagedVersion
   ) {
+    // Whatever skipped this poll, the background chain keeps one next check.
+    if (!stagedFeedPollInFlight && !automaticCheckTimer) scheduleAutomaticCheck();
     return;
   }
+  clearAutomaticCheckTimer();
   lastStagedFeedPollAt = Date.now();
   const previousVersion = stagedVersion;
   stagedFeedPollInFlight = (async () => {
@@ -351,6 +382,7 @@ function checkForNewerThanStaged(reason: string, force = false): void {
       throw new Error(`feed metadata returned HTTP ${response.status}`);
     }
     const candidate = parseFeedVersion(await response.text());
+    if (candidate) lastStagedFeedSucceededAt = Date.now();
     if (!candidate || !isVersionNewer(candidate, previousVersion)) return;
     // The old ready toast is no longer actionable once Squirrel starts staging
     // its replacement. Hide it until the native event confirms the new build.
@@ -391,6 +423,7 @@ function checkForNewerThanStaged(reason: string, force = false): void {
     })
     .finally(() => {
       stagedFeedPollInFlight = null;
+      scheduleAutomaticCheck();
     });
 }
 
@@ -409,16 +442,27 @@ function updaterEnabled(): boolean {
 
 function checkAutomatically(reason: string): void {
   if (!updaterEnabled()) return;
+  // The interval timer is itself the cadence: it is armed only when a check
+  // completes, so its own tick is never throttled. A small wall-clock step
+  // could otherwise read the tick as "too soon" and end the background chain.
+  const due = reason === "required" || reason === "interval";
   if (updateDownloaded) {
-    checkForNewerThanStaged(reason);
+    checkForNewerThanStaged(reason, due);
     return;
   }
   // A newer feed is already downloading. Let that single attempt finish before
   // considering another feed generation; once staged, the preflight above will
   // immediately notice if an even newer version appeared in the meantime.
-  if (stagedReplacementFallback) return;
-  const elapsed = Date.now() - lastCheckStartedAt;
-  if (elapsed < MIN_OPPORTUNISTIC_CHECK_GAP_MS) return;
+  if (stagedReplacementFallback) {
+    scheduleAutomaticCheck();
+    return;
+  }
+  if (checkInFlight) return;
+  if (!due && automaticCheckThrottled(lastCheckStartedAt, lastCheckSucceededAt)) {
+    // A throttled focus/resume leaves the next automatic check scheduled.
+    if (!automaticCheckTimer) scheduleAutomaticCheck();
+    return;
+  }
   console.log(`[updater] automatic check (${reason})`);
   void checkForUpdatesShared().catch((err) => {
     // Offline/feed failures are expected background conditions. The updater's
@@ -654,12 +698,8 @@ export function setupUpdater(): void {
 
   // Main-process ownership means updates keep arriving even if all macOS
   // windows are closed. Focus/resume catches sleep or a long offline interval;
-  // the one-minute throttle collapses launch/focus bursts.
-  const timer = setInterval(
-    () => checkAutomatically("interval"),
-    CHECK_INTERVAL_MS,
-  );
-  timer.unref?.();
+  // successful checks stay fresh for five minutes, failed checks can retry on
+  // focus after one minute. The completion schedules one next automatic check.
   app.on("browser-window-focus", () => checkAutomatically("focus"));
   powerMonitor.on("resume", () => checkAutomatically("resume"));
   checkAutomatically("launch");

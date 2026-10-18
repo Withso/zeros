@@ -70,6 +70,11 @@ extraResources:
   # via the auto-walked dependency tree + asarUnpack below.
   - from: apps/desktop/src/engine/pty/pty-host.cjs
     to: pty-host.cjs
+  # The Node worktree watch host. The packaged engine cannot arm FSEvents in
+  # its own bun runtime, so it finds this script beside pty-host.cjs and runs it
+  # on the same Electron-as-Node runtime (engine/git/watch-host-client.ts).
+  - from: apps/desktop/src/engine/git/watch-host.cjs
+    to: watch-host.cjs
   # The Zeros Design skill, packaged like a Claude Code plugin. The engine finds
   # it beside its binary (engine/design/design-skill.ts) and names its SKILL.md
   # in Design conversation context. `**/*` skips dot-folders, so the plugin

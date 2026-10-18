@@ -65,6 +65,7 @@ import {
 } from "./settings/files";
 import { startSettingsWatcher, type SettingsWatcher } from "./settings/watch";
 import { onWorktreeContentChange, startGitWatcher, type GitWatcher } from "./git/watch";
+import { createLocalWatchHost, type WatchHostClient } from "./git/watch-host-client";
 import { invalidateWorkspaceChangeProbes } from "./git/workspace-change-probe";
 import { LocalTransport } from "./transport/local";
 import { CloudTransport, parseCloudTransportPort } from "./transport/cloud";
@@ -380,6 +381,7 @@ import {
   type AgentMessage,
   type AgentTextMessage,
 } from "@zeros/protocol/agent-messages";
+import { LocalSessionUpdateBatcher } from "./agents/local-session-update-batcher";
 import {
   PTY_AGENT_AUTH_CWD,
   type AgentPromptBubble,
@@ -914,6 +916,8 @@ export class ZerosEngine {
   private watcher: FileWatcher;
   private settingsWatcher: SettingsWatcher | null = null;
   private gitWatcher: GitWatcher | null = null;
+  /** Native worktree watching for a packaged Local engine (watch-host.cjs). */
+  private watchHost: WatchHostClient | null = null;
   /** Forwards worktree content events to live one-shot style builds. */
   private stopStyleBuildInputs: (() => void) | null = null;
   /** Live canvas feedback for Local agents' native Design edits. Never
@@ -1140,6 +1144,8 @@ export class ZerosEngine {
    *  shared applyUpdate folds chunks into, so the engine upserts only the rows
    *  that changed on each chunk. */
   private readonly sessionMessages = new Map<string, AgentMessage[]>();
+  private readonly sessionUpdateBatcher = new LocalSessionUpdateBatcher((agentId, notification) =>
+    this.deliverSessionUpdate(agentId, notification));
   /** Agent sessionIds with a user cancel in flight. Set by AGENT_CANCEL (and
    *  the remote-client-drop relay cancel) BEFORE the cancel is dispatched,
    *  consumed by the AGENT_PROMPT catch: a cancel that tears down the
@@ -1919,6 +1925,7 @@ export class ZerosEngine {
         );
         for (const { sessionId, ended } of endedAgents) {
           if (!ended) continue;
+          this.sessionUpdateBatcher.flush(sessionId);
           const conversationId = this.sessionChat.get(sessionId);
           this.router.clearOwner(sessionId);
           this.sessionAgent.delete(sessionId);
@@ -2150,6 +2157,7 @@ export class ZerosEngine {
     this.transports = [this.local];
     this.activityHeartbeat = new EngineActivityHeartbeat({
       instance: this.local.instanceNonce,
+      stopWhenIdle: !this.cloudWorker,
       publish: (frame) =>
         this.publishPrivateHostControl(`${JSON.stringify(frame)}\n`),
       activeTurns: () => this.activeAgentExecutionCount(),
@@ -2632,26 +2640,7 @@ export class ZerosEngine {
           // streaming draft settles; see design/agent-drafts.ts.
           if (executionAgentId === agentId)
             this.designAgentActivity?.observeSessionUpdate(executionId, normalizedNotification.update);
-          this.routeSessionScoped(
-            executionId,
-            createMessage({
-              type: "AGENT_SESSION_UPDATE",
-              source: "engine",
-              agentId,
-              executionId,
-              notification: normalizedNotification as never,
-              // Engine-authoritative routing: stamp the chat this session is
-              // bound to so the renderer never drops an update on a stale
-              // sessionId index (force-respawn / create-load / an adapter that
-              // emits before the renderer has stored the sessionId). Same map
-              // persistSessionUpdate uses below.
-              ...(this.sessionChat.get(executionId)
-                ? { chatId: this.sessionChat.get(executionId) }
-                : {}),
-            }),
-          );
-          // Persist the transcript as it streams; the engine is the source.
-          if (notification.update.sessionUpdate !== "turn_usage_update") this.persistSessionUpdate(executionId, normalizedNotification);
+          this.sessionUpdateBatcher.push(agentId, normalizedNotification, !this.cloudWorker);
         },
         onPermissionRequest: (
           agentId: string,
@@ -2659,6 +2648,7 @@ export class ZerosEngine {
           request: RequestPermissionRequest,
         ) => {
           const sessionId = request.sessionId;
+          this.sessionUpdateBatcher.flush(sessionId);
           this.touchActivePrompt(sessionId);
           this.pendingPermissionRequests.set(permissionId, {
             agentId,
@@ -2715,6 +2705,7 @@ export class ZerosEngine {
           request: QuestionRequest,
         ) => {
           const sessionId = request.sessionId;
+          this.sessionUpdateBatcher.flush(sessionId);
           this.touchActivePrompt(sessionId);
           this.pendingQuestionRequests.set(questionId, { agentId, request });
           const claim = this.cloudLocalNativePump?.claimForExecution(sessionId);
@@ -2805,6 +2796,7 @@ export class ZerosEngine {
         ) => {
           if (sessionId && this.retiringCloudExecutions.has(sessionId) &&
               (!this.activePromptContexts.has(sessionId) || this.cancelRequested.has(sessionId))) return;
+          this.sessionUpdateBatcher.flush(sessionId ?? undefined);
           const exited = createMessage({
             type: "AGENT_AGENT_EXITED",
             source: "engine",
@@ -3514,9 +3506,29 @@ export class ZerosEngine {
     // rather than each running a watcher of its own.
     this.stopStyleBuildInputs = onWorktreeContentChange(designStyleInputChanged);
     if (!this.cloudWorker) this.designAgentActivity = this.createDesignAgentActivity();
-    // Development engines receive native file events within ~120 ms; the
-    // packaged engine's worktree poll below runs every 1.5 s.
-    if (!this.cloudWorker && !isDevRuntime()) {
+    // A packaged Local engine on macOS cannot arm FSEvents itself (see the
+    // options below). Its Node watch host can, with one recursive watch per
+    // root instead of Chokidar's poller per file. Cloud workers, Linux and dev
+    // keep exactly the watcher they had; a missing host keeps polling.
+    // Development engines, and a packaged engine with its native watch host,
+    // receive file events within ~120 ms; a packaged engine without the host
+    // (or whose host gave up) stat-polls its worktrees every 1.5 s below, so
+    // it also polls the Design directory a Design tab shows.
+    let watchHost: WatchHostClient | null = null;
+    const startDesignChangePoller = () => {
+      // Only for the engine's current host: stop() releases it first.
+      if (this.cloudWorker || isDevRuntime() || this.designChangePoller || this.watchHost !== watchHost) return;
+      this.designChangePoller = this.createDesignChangePoller();
+      this.designChangePoller.start();
+    };
+    watchHost = createLocalWatchHost({
+      devRuntime: isDevRuntime(),
+      cloudWorker: this.cloudWorker !== null,
+      platform: process.platform,
+      onUnavailable: startDesignChangePoller,
+    });
+    this.watchHost = watchHost;
+    if (!this.cloudWorker && !isDevRuntime() && !watchHost) {
       this.designChangePoller = this.createDesignChangePoller();
       this.designChangePoller.start();
     }
@@ -3560,13 +3572,18 @@ export class ZerosEngine {
       // Bun's macOS --compile runtime deadlocks its main event loop after
       // Chokidar arms a native FSEvents watcher: the process keeps a LISTEN
       // socket and completes TCP handshakes but never services HTTP/WS. Dev
-      // runs Bun from source and is unaffected. Packaged/stable-mode engines
-      // use Chokidar's stat-poll backend instead; its target set is bounded and
-      // the watcher already coalesces changes. A 1.5s interval keeps packaged
-      // idle CPU bounded while retaining prompt external-edit invalidation.
+      // runs Bun from source and is unaffected. A packaged Local engine on
+      // macOS hands native watching to its Node watch host (above). Other
+      // packaged engines, and any root whose host is unavailable, use
+      // Chokidar's stat-poll backend; its target set is bounded and the watcher
+      // already coalesces changes. A 1.5s interval keeps that polling's idle
+      // CPU bounded while retaining prompt external-edit invalidation.
       {
-        usePolling: !isDevRuntime(),
+        usePolling: !isDevRuntime() && !watchHost,
         worktreePollIntervalMs: 1_500,
+        ...(watchHost
+          ? { nativeWatcher: (root: string) => watchHost.watch(root) }
+          : {}),
       },
     );
 
@@ -3627,6 +3644,8 @@ export class ZerosEngine {
    * Stop the engine gracefully.
    */
   async stop(): Promise<void> {
+    this.sessionUpdateBatcher?.flush();
+    if (!this.cloudWorker) this.slowWorkspaceOperations?.dispose();
     // Streamed transcript rows buffered by a Local engine reach SQLite first.
     try { flushStreamingChatMessages(); } catch { /* best effort, like persist-on-emit */ }
     this.cloudCheckpointProgress?.reporter.dispose();
@@ -3783,11 +3802,16 @@ export class ZerosEngine {
     this.gitWatcher = null;
     this.stopStyleBuildInputs?.();
     this.stopStyleBuildInputs = null;
+    // Release the watch host before the Design poller, so a host that gives
+    // up during teardown cannot start a replacement poller.
+    const watchHost = this.watchHost;
+    this.watchHost = null;
     this.designAgentActivity?.dispose();
     this.designAgentActivity = null;
     this.designChangePoller?.stop();
     this.designChangePoller = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
+    if (watchHost) await settle(() => watchHost.dispose());
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
       await settle(() => transport.stop());
@@ -6675,6 +6699,7 @@ export class ZerosEngine {
     chatId?: string;
     workspaceId?: string | null;
   }): void {
+    this.sessionUpdateBatcher?.flush(input.executionId);
     this.router.setOwner(input.executionId, input.ownerId);
     this.sessionAgent.set(input.executionId, input.agentId);
     if (input.chatId) {
@@ -6693,6 +6718,7 @@ export class ZerosEngine {
     executionId: string,
     opts: { preservePrompt?: boolean } = {},
   ): void {
+    this.sessionUpdateBatcher?.flush(executionId);
     const conversationId = this.sessionChat.get(executionId);
     this.steeringReceipts.delete(executionId);
     this.router.clearOwner(executionId);
@@ -7585,6 +7611,7 @@ export class ZerosEngine {
                 superseded.push(priorSessionId);
             }
             for (const priorSessionId of superseded) {
+              this.sessionUpdateBatcher.flush(priorSessionId);
               const priorAgentId =
                 this.sessionAgent.get(priorSessionId) ?? msg.agentId;
               this.router.clearOwner(priorSessionId);
@@ -7835,6 +7862,7 @@ export class ZerosEngine {
             );
             return;
           }
+          this.sessionUpdateBatcher.flush(msg.sessionId);
           this.router.setOwner(msg.sessionId, client.id);
           const promptReceivedAt = Date.now();
           // Everything from here to the `agents.prompt` handoff below is Zeros'
@@ -8420,6 +8448,7 @@ export class ZerosEngine {
             );
             for (const [index, execution] of executions.entries()) {
               const { executionId, conversationId } = execution;
+              this.sessionUpdateBatcher.flush(executionId);
               this.router.clearOwner(executionId);
               this.sessionAgent.delete(executionId);
               this.sessionChat.delete(executionId);
@@ -9178,6 +9207,7 @@ export class ZerosEngine {
                 });
               }
             }
+            this.sessionUpdateBatcher.flush(liveExecution);
             this.router.setOwner(liveExecution, client.id);
             this.sessionAgent.set(liveExecution, msg.agentId);
             if (msg.chatId) {
@@ -9985,6 +10015,16 @@ export class ZerosEngine {
 
   // ── Transcripts (engine persists on emit) ───────────────
 
+  private deliverSessionUpdate(agentId: string, notification: SessionNotification): void {
+    const executionId = notification.executionId ?? notification.sessionId;
+    this.routeSessionScoped(executionId, createMessage({
+      type: "AGENT_SESSION_UPDATE", source: "engine", agentId, executionId,
+      notification: notification as never,
+      ...(this.sessionChat.get(executionId) ? { chatId: this.sessionChat.get(executionId) } : {}),
+    }));
+    if (notification.update.sessionUpdate !== "turn_usage_update") this.persistSessionUpdate(executionId, notification);
+  }
+
   /** Persist a streaming session update to the unified DB AS IT EMITS. The
    *  engine is the source — this runs even when no client is attached (a cloud
    *  agent after the laptop closes). It folds the chunk with the SAME shared
@@ -10014,6 +10054,7 @@ export class ZerosEngine {
     /** Original renderer send time, already bounded at the engine boundary. */
     startedAt?: number,
   ): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     // Continue after authentication reuses the original turn ID. Keep its DB
     // row throughout reconnection/cancellation, then replace that exact tail
     // bubble on admission instead of coalescing the prompt text a second time.
@@ -10153,6 +10194,7 @@ export class ZerosEngine {
     userMessageId?: string,
     steeredTurnId?: string,
   ): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     const chatId = this.sessionChat.get(sessionId);
     if (!chatId) return;
     const text =
@@ -10204,6 +10246,7 @@ export class ZerosEngine {
     createdAt: number,
     steeredTurnId?: string,
   ): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     const chatId = this.sessionChat.get(sessionId);
     const presentation = this.localPresentations.get(messageId);
     this.localPresentations.delete(messageId);
@@ -10466,6 +10509,7 @@ export class ZerosEngine {
     // persisted on the turn row so the footer's usage popover survives reloads.
     usage: TurnUsage | null = null,
   ): Promise<void> {
+    this.sessionUpdateBatcher?.flush(ctx.sessionId);
     // A settled turn's transcript is durable before its row reports settled.
     try { flushStreamingChatMessages(ctx.chatId); } catch { /* persistence never disturbs settle */ }
     try {
@@ -10807,6 +10851,7 @@ export class ZerosEngine {
       }
     }
 
+    const finishLoopObservation = this.cloudWorker ? null : this.slowWorkspaceOperations?.beginEventLoopObservation?.();
     try {
       // Keep the original NORMAL rows and FULL head in one read snapshot across
       // image migration and the outer dispatch awaits. A changed writer or head
@@ -10842,6 +10887,7 @@ export class ZerosEngine {
       // stays readable during a Design territory transition.
       const startedAt = Date.now();
       const dispatchBody = async () => {
+        if (!this.cloudWorker && (op.startsWith("messages.") || op.startsWith("chats."))) this.sessionUpdateBatcher?.flush();
         if (client.cloudActor && client.authorized?.()!==true) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
         if(op==="cloudLsp.request"){
           if(!this.cloudLanguageServices||!client.cloudActor||client.authorized?.()!==true||
@@ -11183,7 +11229,7 @@ export class ZerosEngine {
         invalidateWorkspaceChangeProbes(workspaceIds);
       }
       const elapsedMs = Date.now() - startedAt;
-      this.slowWorkspaceOperations.observe(op, elapsedMs);
+      this.slowWorkspaceOperations.observe(op, elapsedMs, finishLoopObservation?.());
       client.send(
         createMessage({
           type: "WORKSPACE_RESPONSE",
@@ -11328,6 +11374,8 @@ export class ZerosEngine {
       // Forward to error tracking (gap A) — scrubbed metadata; skips expected
       // git control-flow codes. Covers every git/file/workspace op, all surfaces.
       this.reportEngineError(client, `workspace:${op}`, err);
+    } finally {
+      finishLoopObservation?.();
     }
   }
 
@@ -11475,6 +11523,7 @@ export class ZerosEngine {
     state: "running" | "completed" | "failed" | "cancelled",
     stopReason: StopReason | null = null,
   ): void {
+    this.sessionUpdateBatcher?.flush(prompt.sessionId);
     if (state !== "running") this.designAgentActivity?.endExecution(prompt.sessionId);
     this.routeSessionScoped(
       prompt.sessionId,
@@ -11589,7 +11638,10 @@ export class ZerosEngine {
     });
     const server = new LocalOrchestrationServer(
       registry,
-      (scope, body, signal) => service.call(scope, body, signal),
+      (scope, body, signal) => {
+        this.sessionUpdateBatcher.flush();
+        return service.call(scope, body, signal);
+      },
       () => ports.engineId(),
     );
     // A sandboxed shell cannot open the endpoint; it reaches the same
@@ -11779,6 +11831,7 @@ export class ZerosEngine {
    *  the settle deadline so the turn cannot stay "live" if the adapter never
    *  comes back. */
   private markCancelIntent(sessionId: string): void {
+    this.sessionUpdateBatcher?.flush(sessionId);
     this.cancelRequested.add(sessionId);
     const prompt = this.activePromptContexts.get(sessionId);
     if (!prompt) return;

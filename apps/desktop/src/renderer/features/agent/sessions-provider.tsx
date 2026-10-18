@@ -102,6 +102,7 @@ import {
   MAX_MESSAGES_PER_CHAT,
   mergeWindowedTail,
   useSessionsStore,
+  canBatchLocalTranscriptUpdate,
 } from "./sessions-store";
 import {
   clearChat as persistClearChat,
@@ -637,11 +638,13 @@ export function AgentSessionsProvider({
   const updateConfigRef = useRef<SessionsActions["updateConfig"] | null>(null);
   // One warning per exact session/task/timestamp; bounded against task-id churn.
   const warnedLongWakeupsRef = useRef(new Set<string>());
+  const flushLocalNotificationsRef = useRef<(chatId?: string) => void>(() => {});
 
   // Bridge listeners feed the store. Transcript content is buffered and
   // drained in one frame-aligned flush inside `startTransition`, so token-rate
   // inputs (10–100/s during a streaming response) are applied together once
-  // per frame; each notification still updates the store.
+  // per frame. Local transcript bursts publish the store once; cloud content
+  // retains its existing per-notification publication contract.
   // Frames stop while the window is minimized, hidden or occluded;
   // the flush scheduler's deadline timer and backlog bound keep background
   // streams draining instead of parking until the turn ends. Permissions,
@@ -681,7 +684,7 @@ export function AgentSessionsProvider({
       signal: string | null;
     }> = [];
 
-    const flush = () => {
+    const drain = () => {
       if (
         updateBuffer.length === 0 &&
         permBuffer.length === 0 &&
@@ -799,7 +802,14 @@ export function AgentSessionsProvider({
 
       startTransition(() => {
         const s = useSessionsStore.getState();
-        for (const n of updates) {
+        for (let index = 0; index < updates.length;) {
+          const batchStart = index;
+          while (index < updates.length && canBatchLocalTranscriptUpdate(useSessionsStore.getState(), updates[index])) index++;
+          if (index > batchStart) {
+            s.applyBridgeTranscriptUpdates(updates.slice(batchStart, index));
+            continue;
+          }
+          const n = updates[index++];
           const before = useSessionsStore.getState();
           const terminalTurn = n.update.sessionUpdate === "turn_state" && n.update.state !== "running" ? n.update : null;
           const chatId =
@@ -883,7 +893,59 @@ export function AgentSessionsProvider({
       }
     };
 
+    let flushing = false;
+    const flush = () => {
+      flushing = true;
+      try { drain(); } finally { flushing = false; }
+    };
     const scheduler = createAgentUpdateFlushScheduler(flush);
+    let disposed = false;
+    let localFlushQueued = false;
+    const queueLocalFlush = () => {
+      if (localFlushQueued || disposed) return;
+      localFlushQueued = true;
+      queueMicrotask(() => {
+        localFlushQueued = false;
+        if (!disposed) flushLocal();
+      });
+    };
+    const flushLocal = (onlyChatId?: string) => {
+      // First paint and hidden-page delivery use a microtask, so a notification
+      // received re-entrantly during a control drain cannot overtake its batch.
+      if (flushing) { queueLocalFlush(); return; }
+      const state = useSessionsStore.getState();
+      if (onlyChatId && (!state.sessions[onlyChatId]?.cwd || isCloudWorkspace(state.sessions[onlyChatId].cwd))) return;
+      const local: SessionNotification[] = [];
+      const remaining: SessionNotification[] = [];
+      // Take only each chat's leading run of batchable content. An earlier
+      // non-batchable update for the same chat (a recorded user row, a model
+      // fallback notice) drains first on the ordinary schedule, and everything
+      // after it waits with it so the transcript keeps its arrival order.
+      const held = new Set<string>();
+      for (const notification of updateBuffer) {
+        const chatId = (notification as SessionNotification & { chatId?: string }).chatId ??
+          state.executionToChatId[notification.executionId ?? notification.sessionId];
+        if ((!onlyChatId || chatId === onlyChatId) && !(chatId && held.has(chatId)) &&
+            canBatchLocalTranscriptUpdate(state, notification)) local.push(notification);
+        else {
+          if (chatId) held.add(chatId);
+          remaining.push(notification);
+        }
+      }
+      updateBuffer.length = 0;
+      updateBuffer.push(...remaining);
+      if (local.length) state.applyBridgeTranscriptUpdates(local);
+      // Keep an unrelated cloud batch on its original frame/deadline. With no
+      // updates left, the no-op drain also releases both pending callbacks.
+      if (!updateBuffer.length && !stderrBuffer.length && !permBuffer.length &&
+          !permissionSettledBuffer.length && !questionBuffer.length &&
+          !questionSettledBuffer.length && !exitBuffer.length) scheduler.flushNow();
+    };
+    flushLocalNotificationsRef.current = flushLocal;
+    const visibilityChanged = () => {
+      if (document.visibilityState === "hidden") queueLocalFlush();
+    };
+    document.addEventListener("visibilitychange", visibilityChanged);
 
     const admissionMetadata = (raw: AgentSessionCreatedMessage | AgentSessionLoadedMessage) => {
       const state = useSessionsStore.getState();
@@ -1071,6 +1133,13 @@ export function AgentSessionsProvider({
           ? ({ ...msg.notification, chatId: msg.chatId } as SessionNotification)
           : msg.notification,
       );
+      const update = msg.notification.update;
+      const tail = chatId ? state.sessions[chatId]?.messages.at(-1) : undefined;
+      const firstLocalText = update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" &&
+        !!update.content.text && (tail?.kind !== "text" || tail.role !== "agent" || !tail.text ||
+          (update.messageId && update.messageId !== tail.messageId));
+      if (canBatchLocalTranscriptUpdate(state, updateBuffer[updateBuffer.length - 1]) &&
+          (firstLocalText || document.visibilityState === "hidden")) queueLocalFlush();
       if (agentUpdateFlushMode(sessionUpdate) === "turn-boundary") {
         // The engine sends terminal turn_state before AGENT_PROMPT_COMPLETE.
         // Drain the final text/tool chunks and that terminal marker in this
@@ -1265,6 +1334,9 @@ export function AgentSessionsProvider({
       // Anything buffered during that final flush drains now; no frame or
       // timer callback outlives this listener set.
       scheduler.dispose();
+      disposed = true;
+      flushLocalNotificationsRef.current = () => {};
+      document.removeEventListener("visibilitychange", visibilityChanged);
       // Answer-ack watchdogs are deliberately NOT cleared here: a bridge swap
       // is the very failure the watchdog guards against (the send dropped on
       // the dying socket). The timer's own status guard ("streaming" only)
@@ -4372,6 +4444,9 @@ export function AgentSessionsProvider({
       // cannot be conditional on having one. It is a local counter bump; no
       // bridge is needed to make the in-flight send read it.
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
+      // Stop publishes the entire received Local tail before marking it final.
+      // The callback filters by exact chat and leaves cloud scheduling intact.
+      flushLocalNotificationsRef.current(chatId);
       cloudSendPreparationRef.current.cancel(chatId);
       // Ready follow-ups prepare silently, without cloudSendWait presentation.
       // Their readiness flight is still cancelled by Stop.

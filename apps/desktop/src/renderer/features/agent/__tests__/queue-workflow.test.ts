@@ -132,6 +132,7 @@ function setup(agentId = "claude", status = "streaming") {
     cancelGenerationsRef: { current: new Map() },
     cloudSendPreparationRef: { current: new CloudSendPreparation() },
     cloudSendWaitRef: { current: { cancel: vi.fn() } },
+    flushLocalNotificationsRef: { current: vi.fn() },
     sendingChatsRef: { current: sending },
     flushBubbleRef: { current: flush },
     ensureInFlightRef: { current: new Map() },

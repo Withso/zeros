@@ -45,6 +45,7 @@ import {
 } from "@zeros/protocol/browser-tools";
 
 import type { AgentControlPresenter } from "../agent-control/overlay";
+import { rendererProcessOwners } from "../renderer-process-owners";
 import { parseBrowserAnnotations, type BrowserAnnotation } from "./annotations";
 import {
   createBrowserAppearanceController,
@@ -2831,6 +2832,7 @@ function createLease(
       backgroundThrottling: false,
     },
   });
+  rendererProcessOwners.track(view.webContents, "Browser tab");
   const parkingWindow = new BaseWindow({
     show: false,
     width: 1_440,

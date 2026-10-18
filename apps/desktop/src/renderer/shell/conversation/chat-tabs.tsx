@@ -93,6 +93,7 @@ import { useTerminalBusy } from "../terminal/terminal-activity";
 import { ChatHistoryMenu } from "./chat-history-menu";
 import { CloudTerminalIndicator } from "../terminal/cloud-terminal-indicator";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { ActivityScope } from "../../shared/ui/loading/activity-scope";
 import { NewChatMenu } from "./new-chat-menu";
 import { copyChatTranscript } from "../copy-chat-transcript";
 import { copyLocalLink, useCanCopyLocalLink } from "../../state/local-link-actions";
@@ -521,6 +522,7 @@ export function ChatTabs({
   // ── Render ───────────────────────────────────────────
 
   return (
+    <ActivityScope.Provider value={workspaceFolder && !isCloudWorkspace(workspaceFolder) ? true : undefined}>
     <div className={CHAT_STRIP_SHELL_CLS}>
       {/* Fixed leading slot — outside the scrolling lane, so the mode toggle
           holds the strip's left edge no matter how far the tabs scroll. */}
@@ -661,6 +663,7 @@ export function ChatTabs({
         </div>
       ) : null}
     </div>
+    </ActivityScope.Provider>
   );
 }
 
