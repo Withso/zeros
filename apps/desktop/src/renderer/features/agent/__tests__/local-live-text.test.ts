@@ -5,7 +5,7 @@ import {
   localLiveTextSource,
 } from "../local-live-text";
 import { BLANK, useSessionsStore } from "../sessions-store";
-import type { AgentSessionState, AgentTextMessage } from "../use-agent-session";
+import type { AgentSessionState, AgentTextMessage, AgentToolMessage } from "../use-agent-session";
 import type { SessionNotification } from "../../../platform/bridge/agent-events";
 
 const tail: AgentTextMessage = {
@@ -46,6 +46,82 @@ const chunk = (text: string): SessionNotification => ({
 beforeEach(() => useSessionsStore.getState().clearAll());
 
 describe("Local live prose ownership", () => {
+  const command: AgentToolMessage = {
+    id: "command", toolCallId: "command", kind: "tool", toolKind: "execute",
+    title: "Run checks", status: "in_progress", rawOutput: "First", createdAt: 1, updatedAt: 1,
+  };
+
+  it("reads simultaneous command logs by exact row even before the tail", () => {
+    const store = useSessionsStore.getState();
+    const before = { ...local(), messages: [command, { ...command, id: "second", toolCallId: "second" }, tail] };
+    store.setSession("a", before);
+    const source = localLiveTextSource("a", before.cwd!, "execution-a");
+    const select = createChatRenderSnapshot();
+    const rendered = select(useSessionsStore.getState().sessions.a);
+    const next = { ...before, messages: [{ ...command, rawOutput: "First grows" },
+      { ...command, id: "second", toolCallId: "second", rawOutput: "First also grows" }, tail] };
+    store.setSession("a", next);
+    expect(select(useSessionsStore.getState().sessions.a)).toBe(rendered);
+    expect(source.readTool?.(command).rawOutput).toBe("First grows");
+    expect(source.readTool?.(before.messages[1] as AgentToolMessage).rawOutput).toBe("First also grows");
+    store.patchSession("a", { cwd: "/another/project" });
+    expect(source.readTool?.(command)).toBe(command);
+  });
+
+  it.each([
+    { rawOutput: "Correction" },
+    { rawOutput: { stdout: "First grows" } },
+    { status: "completed" as const, rawOutput: "First grows" },
+    { title: "Different command", rawOutput: "First grows" },
+    { content: [], rawOutput: "First grows" },
+    { parentToolCallId: "parent", rawOutput: "First grows" },
+  ])("publishes semantic command changes immediately: %j", (change) => {
+    const before = { ...local(), messages: [command] };
+    const select = createChatRenderSnapshot();
+    select(before);
+    const grown = { ...before, messages: [{ ...command, rawOutput: "First grows" }] };
+    expect(select(grown)).toBe(before);
+    const next = { ...grown, messages: [{ ...command, ...change }] };
+    expect(select(next)).toBe(next);
+  });
+
+  it.each(["thought", "tool"])("leaves cloud %s updates on their existing root path", (kind) => {
+    const before = local("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222");
+    before.messages = kind === "tool" ? [command] : [{ ...tail, role: "thought" }];
+    const next = { ...before, messages: kind === "tool" ? [{ ...command, rawOutput: "First grows" }]
+      : [{ ...tail, role: "thought" as const, text: "Answer grows" }] };
+    const select = createChatRenderSnapshot();
+    select(before);
+    expect(select(next)).toBe(next);
+  });
+
+  it.each(["/personal/project", "/organization/project"])("keeps live reasoning inside its row in %s", (cwd) => {
+    const before = local(cwd);
+    before.messages = [{ ...tail, role: "thought" }];
+    const next = { ...before, messages: [{ ...tail, role: "thought" as const, text: "Answer grows" }] };
+    const select = createChatRenderSnapshot();
+    expect(select(before)).toBe(before);
+    expect(select(next)).toBe(before);
+  });
+
+  it.each(["/personal/project", "/organization/project"])("keeps cumulative command output inside its row in %s", (cwd) => {
+    const store = useSessionsStore.getState();
+    store.setSession("a", { ...local(cwd), messages: [] });
+    store.applyBridgeUpdate({ sessionId: "execution-a", update: { sessionUpdate: "tool_call", toolCallId: "command",
+      title: "Run checks", kind: "execute", status: "in_progress", rawInput: { command: "pnpm test" }, rawOutput: "First" } });
+    const select = createChatRenderSnapshot();
+    const initial = select(useSessionsStore.getState().sessions.a);
+    for (let frame = 1; frame <= 10; frame++) {
+      store.applyBridgeTranscriptUpdates([{ sessionId: "execution-a", update: { sessionUpdate: "tool_call_update",
+        toolCallId: "command", status: "in_progress", rawOutput: `First${"x".repeat(frame)}` } }]);
+      expect(select(useSessionsStore.getState().sessions.a)).toBe(initial);
+    }
+    // Status and command meaning still reach the entire transcript projection.
+    store.applyBridgeUpdate({ sessionId: "execution-a", update: { sessionUpdate: "tool_call_update",
+      toolCallId: "command", status: "completed", rawOutput: "Done" } });
+    expect(select(useSessionsStore.getState().sessions.a)).toBe(useSessionsStore.getState().sessions.a);
+  });
+
   it.each(["/personal/project", "/organization/project"])(
     "keeps chat chrome stable for %s while the exact leaf observes all text",
     (cwd) => {
@@ -186,7 +262,7 @@ describe("Local live prose ownership", () => {
     for (const message of [
       { ...tail, text: " " },
       { ...tail, retracted: true as const },
-      { ...tail, role: "thought" as const },
+      { ...tail, role: "user" as const },
     ]) {
       expect(
         isLocalLiveTextAppend(

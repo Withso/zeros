@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
-import type { AgentSessionState, AgentTextMessage } from "./use-agent-session";
+import type { AgentMessage, AgentSessionState, AgentTextMessage, AgentToolMessage } from "./use-agent-session";
 import { useSessionsStore } from "./sessions-store";
 import { StreamingTextBuffer } from "./renderers/streaming-text-buffer";
 
@@ -9,6 +9,7 @@ import { StreamingTextBuffer } from "./renderers/streaming-text-buffer";
 export interface LiveAgentTextSource {
   subscribe(notify: () => void): () => void;
   read(message: AgentTextMessage): AgentTextMessage;
+  readTool?(message: AgentToolMessage): AgentToolMessage;
 }
 
 export interface LiveAgentTextSnapshot {
@@ -129,6 +130,36 @@ export function observeLiveAgentText(
   };
 }
 
+/** Command logs and reasoning are never animated. The provider has already
+ * grouped their native deltas; this observer only keeps hidden rows inert. */
+export function observeLiveToolOutput(
+  source: LiveAgentTextSource,
+  initial: AgentToolMessage,
+  options: Pick<LiveTextObservationOptions, "visible" | "watch"> = {},
+) {
+  const visible = options.visible ?? (() => document.visibilityState !== "hidden");
+  const watch = options.watch ?? ((changed: () => void) => {
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  });
+  let snapshot = { message: source.readTool?.(initial) ?? initial, pending: false };
+  return {
+    getSnapshot: () => snapshot,
+    subscribe(changed: () => void) {
+      const update = () => {
+        const message = source.readTool?.(initial) ?? initial;
+        if (message === snapshot.message) return;
+        snapshot = { message, pending: false };
+        if (visible()) changed();
+      };
+      const unsubscribe = source.subscribe(update);
+      const unwatch = watch(() => { update(); if (visible()) changed(); });
+      update();
+      return () => { unsubscribe(); unwatch(); };
+    },
+  };
+}
+
 function sameFieldsExcept<T extends object>(
   left: T,
   right: T,
@@ -170,14 +201,33 @@ export function isLocalLiveTextAppend(
   return (
     left.kind === "text" &&
     right.kind === "text" &&
-    left.role === "agent" &&
-    right.role === "agent" &&
+    (left.role === "agent" || left.role === "thought") &&
+    left.role === right.role &&
     !left.retracted &&
     !left.modelFallback &&
     !!left.text.trim() &&
     right.text.startsWith(left.text) &&
     sameFieldsExcept(left, right, TEXT_FIELDS)
   );
+}
+
+const TOOL_OUTPUT_FIELDS = new Set<keyof AgentToolMessage>(["rawOutput", "updatedAt"]);
+function isLocalLiveToolOutput(previous: AgentSessionState, next: AgentSessionState): boolean {
+  if (!next.cwd || isCloudWorkspace(next.cwd) || next.status !== "streaming" ||
+      next.transcriptState !== "resident" || next.transcriptPresentation ||
+      !sameFieldsExcept(previous, next, SESSION_FIELDS) ||
+      previous.messages.length !== next.messages.length) return false;
+  let changed = false;
+  for (let index = 0; index < previous.messages.length; index++) {
+    const left = previous.messages[index], right = next.messages[index];
+    if (left === right) continue;
+    if (left.kind !== "tool" || right.kind !== "tool" || left.toolKind !== "execute" ||
+        left.status !== "in_progress" || typeof left.rawOutput !== "string" ||
+        typeof right.rawOutput !== "string" || !right.rawOutput.startsWith(left.rawOutput) ||
+        !sameFieldsExcept(left, right, TOOL_OUTPUT_FIELDS)) return false;
+    changed = true;
+  }
+  return changed;
 }
 
 export function createChatRenderSnapshot(): (
@@ -187,7 +237,7 @@ export function createChatRenderSnapshot(): (
   let rendered: AgentSessionState;
   return (slot) => {
     if (slot === seen) return rendered;
-    if (!seen || !isLocalLiveTextAppend(seen, slot)) rendered = slot;
+    if (!seen || (!isLocalLiveTextAppend(seen, slot) && !isLocalLiveToolOutput(seen, slot))) rendered = slot;
     seen = slot;
     return rendered;
   };
@@ -210,30 +260,20 @@ export function localLiveTextSource(
   cwd: string,
   executionId: string | null,
 ): LiveAgentTextSource {
+  const readMessage = <T extends AgentMessage>(message: T): T => {
+    const slot = useSessionsStore.getState().sessions[chatId];
+    if (isCloudWorkspace(cwd) || slot?.cwd !== cwd || (slot.executionId ?? slot.sessionId) !== executionId ||
+        slot.transcriptState !== "resident") return message;
+    const current = slot.messages.at(-1);
+    if (current?.kind === message.kind && current.id === message.id) return current as T;
+    return slot.messages.find((entry) => entry.kind === message.kind && entry.id === message.id) as T ?? message;
+  };
   return {
     subscribe: (notify) =>
       useSessionsStore.subscribe((state, previous) => {
         if (state.sessions[chatId] !== previous.sessions[chatId]) notify();
       }),
-    read: (message) => {
-      const slot = useSessionsStore.getState().sessions[chatId];
-      if (
-        isCloudWorkspace(cwd) ||
-        slot?.cwd !== cwd ||
-        (slot.executionId ?? slot.sessionId) !== executionId ||
-        slot.transcriptState !== "resident"
-      )
-        return message;
-      const current = slot.messages.at(-1);
-      if (current?.kind === "text" && current.id === message.id) return current;
-      // A next visible activity retires this subscription in the same React
-      // update. Its final read still belongs to the preceding native message.
-      return (
-        slot.messages.find(
-          (entry): entry is AgentTextMessage =>
-            entry.kind === "text" && entry.id === message.id,
-        ) ?? message
-      );
-    },
+    read: readMessage,
+    readTool: readMessage,
   };
 }
