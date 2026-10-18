@@ -16,6 +16,8 @@ const ALLOWED: Record<string, string> = {
   "src/db.ts#withSystemStatement": "The helper itself: sets the system RLS context on the acquired client.",
   "src/db.ts#withSystemTx": "The helper itself: sets the system RLS context on the acquired client.",
   "src/app.ts#createApp": "Health and readiness probes run SELECT 1 only.",
+  "src/chaos/fault-pool.ts#faultInjectingPool":
+    "Chaos tests only: forwards connect and query to the wrapped pool unchanged, so the context helpers still run.",
   "src/postgres-notifications.ts#acquire": "Dedicated LISTEN session; it issues only LISTEN/UNLISTEN.",
   "src/workos-provider-locks.ts#connectBeforeDeadline": "Session holder for WorkOS advisory locks; it never reads tables.",
   "src/cloud-workspaces/computer-retirement.ts#retire":
