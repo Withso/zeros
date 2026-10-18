@@ -18,6 +18,7 @@ import {
   type WorkOSProviderSubject,
 } from "./workos-provider-locks.js";
 import { HttpError } from "./authz.js";
+import { enqueueAuthSessionExpiry } from "./auth-session-proof.js";
 
 export const WORKOS_SYNC_EVENT_NAMES = [
   "user.created",
@@ -217,7 +218,7 @@ async function applySessionEvent(
   );
   const userId = linked.rows[0]?.user_id ?? null;
   if (event.event === "session.created") {
-    await tx.query(
+    const changed = await tx.query<{ id: string; provider_session_proof_version: string; provider_session_expires_at: Date | null }>(
       `INSERT INTO auth_sessions (
          provider_session_id, provider_sub, user_id, client_kind, status,
          provider_session_expires_at, last_provider_event_at
@@ -225,11 +226,21 @@ async function applySessionEvent(
        ON CONFLICT (provider, provider_session_id) DO UPDATE
        SET provider_sub = EXCLUDED.provider_sub,
            user_id = COALESCE(auth_sessions.user_id, EXCLUDED.user_id),
-           provider_session_expires_at = EXCLUDED.provider_session_expires_at,
+           provider_session_expires_at = COALESCE(EXCLUDED.provider_session_expires_at, auth_sessions.provider_session_expires_at),
+           provider_session_proof_version = CASE WHEN auth_sessions.provider_session_proof_version > 0
+             AND EXCLUDED.provider_session_expires_at IS NOT NULL
+             AND EXCLUDED.provider_session_expires_at IS DISTINCT FROM auth_sessions.provider_session_expires_at
+             THEN auth_sessions.provider_session_proof_version + 1 ELSE auth_sessions.provider_session_proof_version END,
+           provider_session_proved_at = CASE WHEN EXCLUDED.provider_session_expires_at IS NOT NULL
+             AND EXCLUDED.provider_session_expires_at IS DISTINCT FROM auth_sessions.provider_session_expires_at
+             THEN NULL ELSE auth_sessions.provider_session_proved_at END,
            last_provider_event_at = EXCLUDED.last_provider_event_at
        WHERE auth_sessions.status = 'active'
+         AND auth_sessions.provider_sub = EXCLUDED.provider_sub
+         AND (auth_sessions.user_id IS NULL OR EXCLUDED.user_id IS NULL OR auth_sessions.user_id = EXCLUDED.user_id)
          AND COALESCE(auth_sessions.last_provider_event_at, '-infinity'::timestamptz)
-             <= EXCLUDED.last_provider_event_at`,
+             <= EXCLUDED.last_provider_event_at
+       RETURNING id, provider_session_proof_version, provider_session_expires_at`,
       [
         session.id,
         session.userId,
@@ -238,6 +249,12 @@ async function applySessionEvent(
         event.createdAt,
       ],
     );
+    const current = changed.rows[0];
+    // Explicit expiry changes invalidate old proofs/jobs; an omitted field
+    // retains the finite deadline. Legacy rows do not enter expiry scheduling.
+    if (current && Number(current.provider_session_proof_version) > 0 && current.provider_session_expires_at)
+      await enqueueAuthSessionExpiry(tx, { rowId: current.id, proofVersion: Number(current.provider_session_proof_version),
+        expiresAtMs: current.provider_session_expires_at.getTime() });
     return "applied";
   }
 
