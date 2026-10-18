@@ -770,7 +770,7 @@ import {CloudAgentBootCredentialResponseSchema} from "./agent-boot-contract.js";
     const scope={workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,generation:1};
     const coordinator=new CloudWorkspaceComputeLeaseCoordinator({pool,workosEnabled:false,
       providerResolver:{async resolve(input){return {provider:bindCloudAllocationProvider(pool,raw,input),connectionId:randomUUID(),connectionVersion:1,credentialSource:"hosted"};}} as never,
-      policy:{provider:"boat",policyId:"zeros-test-hu",secondsPerDollar:100000,minimumTtlSeconds:600,maximumTtlSeconds:900,requestMarginSeconds:60}});
+      policy:{provider:"boat",policyId:"zeros-test-hu",secondsPerDollar:100000,minimumTtlSeconds:600,maximumTtlSeconds:900,requestMarginSeconds:60},usageMeterWindowMs:0});
     const ledger=new DatabaseManagedComputeCreditLedger({pool,workosEnabled:false});
     await ledger.grant({organizationId:fixture.organizationId,userId:fixture.userId,startsAt:new Date(Date.now()-3600_000),
       endsAt:new Date(Date.now()+3600_000),amountMicroUsd:20000,policyId:"zeros-test-hu",idempotencyKey:randomUUID()});

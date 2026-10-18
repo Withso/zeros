@@ -287,9 +287,14 @@ export type Projection = {
 };
 
 /** Boat calls one replica issues at N workspaces: one paged list per minute
- * (100 per page) plus one inspect per fallback drift run (6 h horizon). */
+ * (100 per page), one inspect per fallback drift run (6 h horizon), and its
+ * half of the running allocations' compute calls: one inspect per lease check
+ * (at most 10 minutes apart), one usage read per hour, one renewal per half
+ * of the 3600 s maximum TTL. The budget doubles this per-replica figure. */
+const COMPUTE_BOAT_CALLS_PER_MINUTE = 60 / 600 + 60 / 3600 + 60 / 1800;
 function projectedBoatCallsPerMinute(workspaces: number): number {
-  return Math.max(1, Math.ceil(workspaces / 100)) + workspaces * (60 / 21_600);
+  return Math.max(1, Math.ceil(workspaces / 100)) + workspaces * (60 / 21_600) +
+    (workspaces * COMPUTE_BOAT_CALLS_PER_MINUTE) / 2;
 }
 
 export function projectSteadyState(hotPaths: readonly HotPathResult[], quietTransactionsPerSecond: number,

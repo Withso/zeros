@@ -47,7 +47,10 @@ a boundary; an assumed future subscription renewal cannot.
 
 The provider deadline and funded window also gate engine and human-service
 authority. A lost control plane therefore cannot leave an indefinitely funded
-VM. The worker renews only after metering and reserving the extension. A
+VM. The worker renews only after reserving the extension. A running
+allocation's Boat usage is read and metered at most once an hour; its open
+reservation holds the whole authorized window meanwhile, so the delay never
+changes a funding decision. A stop or period end is metered at once. A
 nonrecoverable provider error, policy mismatch or exhausted balance starts a bounded final
 checkpoint and stop. Near the deadline it stops directly, retaining the last
 durable checkpoint. Budget enforcement never permanently deletes the VM.
@@ -125,7 +128,11 @@ billing epoch or deletion changes, or when its status moves into or out of
 requested while a lease is being checked is kept: the running check never
 replaces it with its own later schedule. The trigger skips a lease whose row
 another transaction holds, so a workspace write never waits for one; that
-lease is still checked at its scheduled time.
+lease is still checked at its scheduled time. Each metered increment is
+compared with the allocation's weighted wall-clock time; a difference above
+max(60 s, 5 %) is recorded in `managed_compute_usage_disagreements`, audited as
+`cloud_compute.usage_disagreement` and raises `compute_usage_disagreement` for
+24 hours (an under-report only after a running allocation's first window).
 
 A failed check that carries a provider wait (an HTTP `Retry-After` or
 Boat's body wait, capped at five minutes) is not retried sooner, but an

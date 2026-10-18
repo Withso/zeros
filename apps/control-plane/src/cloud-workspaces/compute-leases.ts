@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { retryAbortedDatabaseTransaction, withRetryableSystemTx } from "../db-retry.js";
 import { isDatabaseUnavailable } from "../db.js";
+import { audit } from "../audit.js";
 import { DatabaseManagedComputeCreditLedger, readManagedComputeAllocationLost } from "./compute-credits.js";
 import {computeUserFundingAuthorityLive,lockComputeUserFunding,prepareComputeUserPeriods,readStaffComputeAllowance} from "./compute-funding.js";
 import {ensureProMonthlyAllowance} from "./pro-allowance.js";
@@ -10,7 +11,7 @@ import {
   type ComputeCreditPlanningPeriod,
   type ComputeCreditPlan,
 } from "./compute-credit-plan.js";
-import type { CloudWorkspaceComputeProvider } from "./provider-compute.js";
+import type { CloudProviderComputeUsage, CloudWorkspaceComputeProvider } from "./provider-compute.js";
 import {
   CloudProviderError,
   assertProviderResourceIdentity,
@@ -129,12 +130,21 @@ const MAX_PROVIDER_RETRY_AFTER_MS = 300_000;
 // later than this, so a change that no trigger reports is still observed.
 const RUNNING_LEASE_CHECK_CEILING_MS = 10 * 60_000;
 const REGULAR_RECHECK_MS = 15_000;
+// A running allocation's open reservation already holds its whole authorized
+// window, so its non-final meter can wait this long. A stop or period end is
+// still metered at once.
+const USAGE_METER_WINDOW_MS = 60 * 60_000;
+// A metered increment differing from the weighted wall-clock time by more than
+// the larger of these is recorded for the operator.
+const USAGE_DISAGREEMENT_MIN_SECONDS = 60;
+const USAGE_DISAGREEMENT_RATIO = 0.05;
 
 /** Owns spending authority around provider calls. It never accepts an engine's
  * CPU meter as compute billing, and a failed request never releases a hold. */
 export class CloudWorkspaceComputeLeaseCoordinator {
   private readonly ledger: DatabaseManagedComputeCreditLedger;
   private readonly workerId = `compute:${randomUUID()}`;
+  private readonly usageMeterWindowMs: number;
   constructor(
     private readonly options: {
       pool: pg.Pool;
@@ -142,6 +152,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       provider?: CloudWorkspaceProvider;
       workosEnabled: boolean;
       policy?: ManagedComputePolicy;
+      usageMeterWindowMs?: number;
       logger?: Pick<Console, "error">;
     },
   ) {
@@ -164,6 +175,10 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         p.requestMarginSeconds > 1800)
     )
       throw new Error("Invalid managed compute lease policy");
+    const window = options.usageMeterWindowMs ?? USAGE_METER_WINDOW_MS;
+    if (!Number.isSafeInteger(window) || window < 0 || window > USAGE_METER_WINDOW_MS)
+      throw new Error("Invalid compute usage meter window");
+    this.usageMeterWindowMs = window;
   }
   private async scope(input: {
     workspaceId: string;
@@ -894,6 +909,49 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     return new Date(Math.max(nowMs + REGULAR_RECHECK_MS, Math.min(nowMs + RUNNING_LEASE_CHECK_CEILING_MS, due)));
   }
 
+  /** Compares one metered provider increment with the allocation's weighted
+   * wall-clock time over the same window. Billing still follows the provider;
+   * a difference beyond the tolerance is recorded and audited for the operator.
+   * Only a running allocation past its first window can be under-reported:
+   * boot and stop make a partial window legitimately short. */
+  private async compareUsage(
+    lease: Lease,
+    row: { period_id: string; meter_since: Date; meter_through: Date; billable_seconds: string },
+    usage: CloudProviderComputeUsage,
+    untilMs: number,
+    stopped: boolean,
+  ): Promise<void> {
+    const windowMs = untilMs - row.meter_through.getTime();
+    if (windowMs <= 0) return;
+    const providerSeconds = usage.billableSeconds - money(row.billable_seconds);
+    const expectedSeconds = Math.ceil((windowMs * lease.weight_numerator) / (lease.weight_denominator * 1000));
+    const tolerance = Math.max(USAGE_DISAGREEMENT_MIN_SECONDS, Math.ceil(expectedSeconds * USAGE_DISAGREEMENT_RATIO));
+    const direction = providerSeconds > expectedSeconds + tolerance ? "over"
+      : !stopped && row.meter_through.getTime() > row.meter_since.getTime() && providerSeconds < expectedSeconds - tolerance
+        ? "under" : null;
+    if (!direction) return;
+    const identity = this.identity(lease);
+    try {
+      await withRetryableSystemTx(this.options.pool, async (tx) => {
+        const inserted = await tx.query(
+          `INSERT INTO managed_compute_usage_disagreements(reservation_id,period_id,org_id,workspace_id,generation,
+            window_since,window_until,provider_seconds,expected_seconds,direction)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (reservation_id,period_id,window_until) DO NOTHING RETURNING id`,
+          [lease.id, row.period_id, identity.organizationId, identity.workspaceId, identity.generation,
+            row.meter_through, new Date(untilMs), providerSeconds, expectedSeconds, direction],
+        );
+        if (inserted.rowCount) await audit(tx, identity.organizationId, null, "cloud_compute.usage_disagreement", {
+          workspaceId: identity.workspaceId, generation: identity.generation, reservationId: lease.id, periodId: row.period_id,
+          windowSince: row.meter_through.toISOString(), windowUntil: new Date(untilMs).toISOString(),
+          providerSeconds, expectedSeconds, direction,
+        });
+      });
+      this.options.logger?.error(`[cloud-workspace] compute usage disagrees with the provider meter (${direction})`);
+    } catch {
+      this.options.logger?.error("[cloud-workspace] compute usage disagreement was not recorded");
+    }
+  }
+
   /** Returns when a just-stopped allocation can next settle, or null to keep
    * the regular cadence. */
   private async reconcile(lease: Lease, phase: (phase: CloudDiagnosticPhase, site?: ComputeFailureSite) => void): Promise<Date | null> {
@@ -1019,9 +1077,10 @@ export class CloudWorkspaceComputeLeaseCoordinator {
             period_id: string;
             meter_since: Date;
             meter_through: Date;
+            billable_seconds: string;
             ends_at: Date;
           }>(
-            `SELECT reservation.period_id,reservation.meter_since,reservation.meter_through,period.ends_at FROM managed_compute_credit_reservations reservation
+            `SELECT reservation.period_id,reservation.meter_since,reservation.meter_through,reservation.billable_seconds,period.ends_at FROM managed_compute_credit_reservations reservation
       JOIN managed_compute_credit_periods period ON period.id=reservation.period_id WHERE reservation.id=$1 AND reservation.state='open' ORDER BY period.starts_at`,
             [lease.id],
           )
@@ -1045,6 +1104,8 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         until < row.meter_through.getTime()
       )
         continue;
+      if (!finalStopped && until !== row.ends_at.getTime() &&
+          until - row.meter_through.getTime() < this.usageMeterWindowMs) continue;
       phase("meter_read");
       const usage = await provider.readComputeUsage(resource.resourceId, {
         since: row.meter_since,
@@ -1055,6 +1116,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         throw failure("compute_stop_meter_unconfirmed", true);
       phase("ledger_commit", "meter_commit");
       const meter = { reservationId: lease.id, periodId: row.period_id, usage, allocationLeaseClaim: { owner: this.workerId } };
+      let regressed = false;
       await retryAbortedDatabaseTransaction(() => this.ledger.meter({
         ...meter,
         ...(finalStopped
@@ -1071,8 +1133,10 @@ export class CloudWorkspaceComputeLeaseCoordinator {
             lease.last_error_code !== "compute_credit_meter_rejected" ||
             observed.now.getTime() - observed.stopped_observed_at!.getTime() < REGRESSED_FINAL_METER_GRACE_MS) throw error;
         await retryAbortedDatabaseTransaction(() => this.ledger.finalizeRegressed(meter));
+        regressed = true;
         this.options.logger?.error("[cloud-workspace] settled a stopped allocation at its confirmed meter after the provider meter regressed");
       });
+      if (!regressed) await this.compareUsage(lease, row, usage, until, stopped);
     }
     if (finalStopped) {
       phase("final_settlement");
