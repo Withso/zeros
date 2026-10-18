@@ -47,6 +47,27 @@ describe("session tool ownership", () => {
     await registry.dispose();
   });
 
+  it("reports tools retired during preparation as a recoverable supersession, not a raw abort", async () => {
+    let finish!: (value: string) => void;
+    const tools = {
+      ...resource(),
+      preparePrompt: vi.fn(() => new Promise<string>((resolve) => { finish = resolve; })),
+    };
+    const registry = new AgentSessionToolRegistry(async () => tools);
+    await registry.admit({ agentId: "codex", executionId: "one", cwd: "/a" }, [], {});
+    const pending = registry.preparePrompt("one");
+    await vi.waitFor(() => expect(tools.preparePrompt).toHaveBeenCalledOnce());
+    const stopped = registry.stop("one");
+    // The prompt never reached the provider, so the sender may resume and resend it.
+    await expect(pending).rejects.toMatchObject({
+      name: "AgentFailureError",
+      failure: { kind: "lifecycle-superseded", stage: "prompt", agentId: "codex" },
+    });
+    finish("obsolete instructions");
+    await stopped;
+    await registry.dispose();
+  });
+
   it("merges a reserved product server with ordinary user MCP and keeps credentials per execution", async () => {
     const tools = resource();
     const factory = vi.fn(async () => tools);

@@ -1,6 +1,6 @@
 import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 import { isTurnFailureNotice } from "./turn-failure";
-import { isProviderWorkEvent, isUsageNotice } from "./transcript-notices";
+import { isProviderWorkEvent, isUsageNotice, usageStatusChanges } from "./transcript-notices";
 // Split working narration/tools from provider-declared partial/final answers.
 // Live events retain their source order and become inspectable immediately.
 
@@ -21,6 +21,10 @@ export interface PartitionOptions {
   /** This provider turn has a footer that owns its settled terminal failures.
    * Omit for child feeds, standalone records and transcript export. */
   failureTurnId?: string;
+  /** Provider-turn events that include this segment's own. A Claude usage
+   * notice stays in the working feed where it arrived, but only where it
+   * changes that turn's status. Defaults to the segment's own events. */
+  usageEvents?: readonly AgentMessage[];
 }
 
 /** Replaced legacy fragments retain their durable ids with empty text so a
@@ -100,7 +104,27 @@ export function partitionTurn(
   events: AgentMessage[],
   options?: PartitionOptions,
 ): TurnPartition {
+  const { working, finalOutput } = partitionVisible(events, options);
+  return { working, finalOutput };
+}
+
+/** The split plus the visible events it was made from, in source order. A
+ * usage status row can be a projection of its native record. */
+function partitionVisible(
+  events: AgentMessage[],
+  options?: PartitionOptions,
+): TurnPartition & { events: AgentMessage[] } {
   events = withoutRedundantAgentTasks(events).filter(isVisibleTranscriptEvent);
+  // Usage is inbetween status, like other runtime feedback: later work follows
+  // it in the working feed. A repeated receipt adds no row.
+  if (events.some(isUsageNotice)) {
+    const usage = usageStatusChanges(options?.usageEvents ?? events);
+    events = events.flatMap((event) => {
+      if (!isUsageNotice(event)) return [event];
+      const row = usage.get(event.id);
+      return row ? [row] : [];
+    });
+  }
   const finalOutputIndexes = new Set<number>();
   const failureTurnId = options?.failureTurnId;
   let liveFailureIndex = -1;
@@ -130,8 +154,6 @@ export function partitionTurn(
   const working: AgentMessage[] = [];
   const finalOutput: AgentMessage[] = [];
   events.forEach((event, index) => {
-    // Usage is a product status rendered once below the turn's output.
-    if (isUsageNotice(event)) return;
     // Keep the native event as an answer boundary above: dropping a failure
     // before partitioning would turn unfinished phase-less prose into output.
     // Before settlement, show the latest terminal notice outside activity.
@@ -142,7 +164,7 @@ export function partitionTurn(
     }
     (finalOutputIndexes.has(index) ? finalOutput : working).push(event);
   });
-  return { working, finalOutput };
+  return { events, working, finalOutput };
 }
 
 export interface TurnSegment {
@@ -161,11 +183,11 @@ export function partitionTurnSequence(
   options?: PartitionOptions,
   previousSegments: readonly TurnSegment[] = [],
 ): TurnSegment[] {
-  const { working, finalOutput } = partitionTurn(events, options);
-  const output = new Set(finalOutput);
-  const visible = new Set([...working, ...finalOutput]);
+  const partition = partitionVisible(events, options);
+  const output = new Set(partition.finalOutput);
+  const visible = new Set([...partition.working, ...partition.finalOutput]);
   const segments: TurnSegment[] = [];
-  for (const event of events) {
+  for (const event of partition.events) {
     if (!visible.has(event)) continue;
     const kind = output.has(event) ? "output" : "working";
     const previous = segments.at(-1);
