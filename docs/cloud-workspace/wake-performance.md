@@ -246,6 +246,32 @@ explicit. Final successful clocks are available in current code; the historical
 runs lack them. They do not independently isolate Node/SQLite/registration HTTP.
 Never subtract timestamps from independent machine clock epochs.
 
+## Closed attester refusals
+
+The v4 helper retains the attester's fixed stage and failed-check names when the
+child completes with an exact, validated failure diagnostic. This optional
+`attester` evidence travels through the installer, setup-claim audit and authorized
+setup evidence read. Output with extra fields, duplicate keys, unknown names,
+truncation or inconsistent exit status cannot supply this evidence. Raw child
+output remains private. Success still requires the complete report, successful
+completion, exact runtime witness and every admission gate.
+
+Boat retries remain bounded for legacy or missing reports, incomplete inventory,
+identity/proof publication changes and process/lock failures. Only completed
+receipt-digest, manifest-schema, file-mode, hard-link, UID or seccomp predicates
+are terminal for that claim. Other names also cover an unavailable read or a
+probe that never started: a missing manifest can report `root_ownership`, and
+spawn `EAGAIN` can report `engine_lifecycle` or `setup_exit`. Keep those ambiguous
+causes retryable until the producer distinguishes them; each attempt still needs
+full attestation. The failed check is preserved alongside that decision.
+Missing-report admission booleans cannot authorize automatic replacement as
+immutable-inventory evidence.
+
+This is additive diagnostic evidence, not an admission grant. Older helpers keep
+their existing behavior; older readers may omit unsupported evidence and still
+fail setup closed. Deploy the control-plane reader before publishing a runtime
+with the new helper. Local setup does not use this cloud attestation path.
+
 ## Unmatched VM probes
 
 Earlier disposable cold-fork probes observed provider running in 2.860–5.017

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { diagnosticPhases, setupEngineStartupSchema } from "./cloud-diagnostics.js";
+import { diagnosticPhases, setupEngineStartupSchema, setupAttesterFailureSchema } from "./cloud-diagnostics.js";
 import { setupTimingsSchema } from "./setup-timings.js";
 import { setupObservationsSchema, setupReuseDecisions } from "./setup-observations.js";
 
@@ -18,6 +18,7 @@ export const setupErrorCodes = [
 ] as const;
 export const setupFailureSchema = z.object({ code: z.enum(setupErrorCodes), phase: z.enum(diagnosticPhases), retryable: z.boolean(),
   engineStartup: setupEngineStartupSchema.optional(),
+  attester: setupAttesterFailureSchema.optional(),
 }).strict();
 const positive = z.number().int().positive().safe();
 const timestamp = z.string().datetime({ precision: 3 }).refine(value => Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value);

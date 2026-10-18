@@ -1,7 +1,10 @@
 import { EventEmitter } from "node:events";
+import { unlinkSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseSetupDiagnostic } from "../../apps/control-plane/src/cloud-workspaces/cloud-diagnostics";
+import { CloudWorkspaceLinuxSetupExecutor } from "../../apps/control-plane/src/cloud-workspaces/linux-setup-executor";
+import type { CloudWorkspaceSetupExecution } from "../../apps/control-plane/src/cloud-workspaces/setup-worker";
 import { createCloudRuntimeResolver } from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
 import { activePath, attestationFixture } from "./cloud-worker-attestation-fixture";
 
@@ -66,6 +69,32 @@ function rewriteDiagnostic(stdout: string, change: Record<string, unknown>) {
   return `${lines[0]}\n${JSON.stringify({ ...JSON.parse(lines[1]), ...change })}\n`;
 }
 
+async function classifyBoatFailure(diagnostic: unknown) {
+  const input: CloudWorkspaceSetupExecution = {
+    setupRunId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222",
+    organizationId: "33333333-3333-4333-8333-333333333333", generation: 1, attempt: 1, executionFence: 1,
+    authority: { accountUserId: "44444444-4444-4444-8444-444444444444" },
+    provider: { name: "boat", resourceId: "sandbox-fixture" }, image: { ref: "snapshot-fixture", sourceCommit: "a".repeat(40) },
+    repository: { forge: "github.com", owner: "fixture", name: "repo", revision: "main",
+      githubInstallationId: "55555555-5555-4555-8555-555555555555" },
+    settings: { version: 1, snapshot: { schemaVersion: 1, values: {} }, sha256: "b".repeat(64) },
+  };
+  const grant = { id: "66666666-6666-4666-8666-666666666666", token: `zws_${"A".repeat(43)}`,
+    endpoint: "https://control.example.test/v1/internal/cloud-workspaces/setup", expiresAt: new Date(Date.now() + 60_000),
+    setupRunId: input.setupRunId, workspaceId: input.workspaceId, organizationId: input.organizationId,
+    generation: input.generation, executionFence: input.executionFence };
+  const revoke = vi.fn(async () => {});
+  const executor = new CloudWorkspaceLinuxSetupExecutor({
+    admissionBroker: { issue: async () => grant, revoke }, runtimeArtifacts: null, engineProtocolVersion: 1, timeoutSeconds: 300,
+    commandRunner: { execute: async () => ({ exitCode: 1, outputTruncated: false,
+      output: JSON.stringify({ version: 2, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error",
+        code: "image_contract_invalid", diagnostic }) }) },
+  });
+  const failure = await executor.execute(input, new AbortController().signal).catch((error: unknown) => error);
+  expect(revoke).toHaveBeenCalledWith(grant, "failed");
+  return failure;
+}
+
 describe("v4 attester to setup admission", () => {
   it("returns closed stage clocks after proof publication and carries them through setup", async () => {
     const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
@@ -78,6 +107,13 @@ describe("v4 attester to setup admission", () => {
     await attestImage(material(), profile, vi.fn(), recordTimings);
     expect(recordTimings).toHaveBeenCalledWith(diagnostic.timings);
   });
+  it("keeps a timing observer failure outside admission", async () => {
+    const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+    returnOutput(attesterOutput());
+    await expect(attestImage(material(), profile, vi.fn(), () => { throw new Error("private-observer-canary"); }))
+      .resolves.toBeUndefined();
+  });
+
   it("admits the real report against the resolver witness without legacy metadata", async () => {
     const { cloudWorkspaceImageAdmissionChecks } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
     const result = attesterOutput(), report = JSON.parse(result.stdout.split("\n")[0]);
@@ -108,11 +144,83 @@ describe("v4 attester to setup admission", () => {
     expect(result.exitCode).toBe(1);
     expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, failedChecks: ["file_inventory"] });
     returnOutput({ ...result, code: result.exitCode });
-    await expect(attestImage(material(), profile, record)).rejects.toMatchObject({ code: "image_contract_invalid" });
+    const error = await attestImage(material(), profile, record).catch((failure: unknown) => failure);
+    const attester = { stage: "verify_tree", failedChecks: ["file_inventory"] };
+    expect(error).toMatchObject({ code: "image_contract_invalid", diagnostic: { attester } });
+    expect(JSON.stringify(error)).not.toContain(tree.root);
     expect(record).toHaveBeenCalledTimes(1);
     expect(record.mock.calls[0][0]).toMatchObject({ execution: false, report: false });
-    const diagnostic = { version: 1, phase: "image_preflight", checks: record.mock.calls[0][0] };
+    const diagnostic = { version: 1, phase: "image_preflight", checks: record.mock.calls[0][0], attester };
     expect(parseSetupDiagnostic(diagnostic)).toEqual(diagnostic);
+  });
+
+  it.each(["missing manifest", "engine spawn EAGAIN", "setup spawn EAGAIN"])(
+    "keeps %s retryable through attestation, setup and the Boat executor", async fault => {
+      // Resolve the unchanged installed witness before the transient fault.
+      const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+      if (fault === "missing manifest") unlinkSync(tree.physical(`${tree.root}/manifest.json`));
+      else tree.setSpawn((_file, args) => args[0]?.endsWith(fault === "engine spawn EAGAIN"
+        ? "cloud-engine-launcher.mjs" : "cloud-setup-process.mjs")
+        ? { status: null, signal: null, error: { code: "EAGAIN" }, stdout: "", stderr: "" } : undefined);
+      const result = tree.execute();
+      expect(result.exitCode).toBe(1);
+      const closed = JSON.parse(result.stdout);
+      expect(closed.failedChecks).toEqual([fault === "missing manifest" ? "root_ownership"
+        : fault === "engine spawn EAGAIN" ? "engine_lifecycle" : "setup_exit"]);
+      returnOutput({ ...result, code: result.exitCode });
+      const error = await attestImage(material(), profile, vi.fn()).catch((failure: any) => failure);
+      const attester = { stage: closed.stage, failedChecks: closed.failedChecks };
+      expect(error).toMatchObject({ code: "image_contract_invalid", diagnostic: { attester } });
+
+      // Retry the identical inventory/probe after removing only the fault.
+      // No attestation check, installed pin or qualification result is relaxed.
+      if (fault === "missing manifest") tree.write(`${tree.root}/manifest.json`, tree.manifest);
+      else tree.setSpawn(() => undefined);
+      returnOutput(attesterOutput());
+      await expect(attestImage(material(), profile, vi.fn())).resolves.toBeUndefined();
+      const diagnostic = { version: 1, phase: "image_preflight", ...error.diagnostic };
+      await expect(classifyBoatFailure(diagnostic)).resolves.toMatchObject({
+        code: "setup_image_contract_invalid", retryable: true, diagnostic,
+      });
+    });
+
+  it.each([
+    ["root_ownership", (value: typeof tree) => { value.owners.set(`${value.root}/worker/package.json`, 10003); }, true],
+    ["seccomp", (value: typeof tree) => { value.qualification.identity.seccompMode = 0; }, false],
+    ["uid_map", (value: typeof tree) => { value.qualification.identity.hostUid = 0; }, false],
+    ["engine_lifecycle", (value: typeof tree) => { value.qualification.execution.vmWorkloadDrain = false; }, true],
+  ] as const)("keeps a real %s refusal closed while classifying retry evidence", async (check, change, retryable) => {
+    const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+    change(tree);
+    const result = tree.execute();
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout).failedChecks).toEqual([check]);
+    returnOutput({ ...result, code: result.exitCode });
+    const error = await attestImage(material(), profile, vi.fn()).catch((failure: any) => failure);
+    const diagnostic = { version: 1, phase: "image_preflight", ...error.diagnostic };
+    await expect(classifyBoatFailure(diagnostic)).resolves.toMatchObject({
+      code: "setup_image_contract_invalid", retryable, diagnostic,
+    });
+  });
+
+  it.each([
+    ["extra field", (value: Record<string, unknown>) => JSON.stringify({ ...value, message: "private-canary" })],
+    ["unknown stage", (value: Record<string, unknown>) => JSON.stringify({ ...value, stage: "private-canary" })],
+    ["unknown check", (value: Record<string, unknown>) => JSON.stringify({ ...value, failedChecks: ["private-canary"] })],
+    ["duplicate check", (value: Record<string, unknown>) => JSON.stringify({ ...value, failedChecks: ["file_inventory", "file_inventory"] })],
+    ["duplicate key", (value: Record<string, unknown>) => JSON.stringify(value).replace('"ok":false', '"ok":true,"ok":false')],
+    ["wrong component", (value: Record<string, unknown>) => JSON.stringify({ ...value, component: "installer" })],
+    ["extra output", (value: Record<string, unknown>) => `private-canary\n${JSON.stringify(value)}`],
+    ["wrong exit", (value: Record<string, unknown>) => JSON.stringify({ ...value, exitCode: 0 })],
+  ])("does not retain malformed failed attester output: %s", async (_name, corrupt) => {
+    const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+    tree.write(`${tree.root}.incomplete`, "", 0o600);
+    const result = tree.execute(), record = vi.fn();
+    returnOutput({ ...result, code: result.exitCode, stdout: corrupt(JSON.parse(result.stdout)) + "\n" });
+    const error = await attestImage(material(), profile, record).catch((failure: any) => failure);
+    expect(error.code).toBe("image_contract_invalid");
+    expect(error.diagnostic.attester).toBeUndefined();
+    expect(JSON.stringify([error, record.mock.calls])).not.toContain("private-canary");
   });
 
   it.each([1, 2, 3])("refuses worker v%i before attestation or material access", async version => {

@@ -617,6 +617,29 @@ describe("CloudWorkspaceLinuxSetupExecutor", () => {
     expect(runner.execute).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["receipt_digest", false], ["manifest_schema", false], ["seccomp", false],
+    ["uid_map", false], ["hard_link", false], ["file_mode", false],
+    ["root_ownership", true], ["manifest_digest", true], ["base_compatibility", true],
+    ["engine_lifecycle", true], ["setup_exit", true], ["apparmor", true],
+    ["cgroup_controllers", true], ["finite_resources", true], ["symlink_escape", true],
+    ["containment_smoke", true], ["input_schema", true],
+    ["lock_busy", true], ["timeout", true], ["process_signal", true],
+    ["diagnostic_missing", true], ["file_inventory", true], ["active_descriptor", true],
+  ] as const)("uses closed attester %s evidence for Boat retry classification", async (check, retryable) => {
+    const { broker, executor, grant, input, runner } = harness();
+    const diagnostic = { version: 1, phase: "image_preflight", checks: { report: false, metadata: false },
+      attester: { stage: "qualify_engine", failedChecks: [check] } };
+    vi.mocked(runner.execute).mockResolvedValueOnce({ exitCode: 1, outputTruncated: false,
+      output: JSON.stringify({ version: 2, audience: "zeros-cloud-workspace-setup-result-v1",
+        outcome: "error", code: "image_contract_invalid", diagnostic }) });
+    await expect(executor.execute(input, new AbortController().signal)).rejects.toMatchObject({
+      code: "setup_image_contract_invalid", retryable, diagnostic,
+    });
+    expect(broker.revoke).toHaveBeenCalledWith(grant, "failed");
+    expect(runner.execute).toHaveBeenCalledTimes(1);
+  });
+
   it("requires a fresh fenced admission and full readiness after a Boat restore race", async () => {
     const first = execution({ provider: { name: "boat", resourceId: "sandbox-exact-id" } });
     const next = { ...first, executionFence: first.executionFence + 1 };

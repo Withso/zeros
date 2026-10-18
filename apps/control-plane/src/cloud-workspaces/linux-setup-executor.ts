@@ -140,6 +140,15 @@ const HELPER_FAILURES: Readonly<
   settings_invalid: { code: "setup_settings_invalid", retryable: false },
 });
 
+// These names report completed predicates. Other attester checks also wrap
+// read/spawn failures: root_ownership can mean a missing manifest, and
+// engine_lifecycle/setup_exit can mean EAGAIN before the probe even starts.
+// Their closed names alone cannot prove permanence; keep bounded retries until
+// the producer distinguishes unavailable evidence from an observed refusal.
+const TERMINAL_ATTESTER_CHECKS = new Set([
+  "receipt_digest", "manifest_schema", "file_mode", "hard_link", "uid_map", "seccomp",
+]);
+
 function setupError(
   code: string,
   message: string,
@@ -462,14 +471,11 @@ function helperFailure(
           : { code: ["checkpoint_expected_writer_mismatch", "checkpoint_manifest_missing", "checkpoint_part_missing",
             "checkpoint_seal_missing", "checkpoint_writer_unsealed"].includes(checkpointCode)
             ? "setup_checkpoint_incomplete" : "setup_checkpoint_restore_invalid", retryable: false };
-        // Boat can expose its command channel while snapshot restoration is
-        // still replacing runtime files. A failed proof never admits the VM:
-        // let the setup worker's bounded claim budget rerun the entire helper
-        // with fresh credentials and a new fence. Persistent mismatches exhaust
-        // that budget and fail closed; other providers keep their policy.
-        const restoringBoatImage =
-          execution.provider.name === "boat" &&
-          parsed.code === "image_contract_invalid";
+        // Older helpers and a missing report cannot prove an immutable mismatch.
+        // Retain bounded Boat retries unless a completed predicate proves the
+        // refusal, preserving the attester's closed cause in either case.
+        const restoringBoatImage = execution.provider.name === "boat" && parsed.code === "image_contract_invalid" &&
+          !diagnostic?.attester?.failedChecks.some(check => TERMINAL_ATTESTER_CHECKS.has(check));
         return Object.assign(setupError(
           checkpointFailure?.code ?? mapped.code,
           "Cloud workspace setup helper did not complete",

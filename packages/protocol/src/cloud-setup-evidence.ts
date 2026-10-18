@@ -60,6 +60,20 @@ export const setupEngineStartupSchema = z.object({
   errno: z.number().int().refine(value => [-1, -2, -5, -13, -16, -17, -20, -21, -23, -24, -28, -30, -40, -104, -110, -111, -122].includes(value)).nullable(),
 }).strict();
 
+// Mirrors the v4 attester's closed vocabulary; never accept arbitrary child text.
+export const setupAttesterStages = ["validate_input", "lock", "verify_tree", "qualify_engine", "run_setup", "publish_proof", "consume_proof", "done"] as const;
+export const setupAttesterChecks = [
+  "active_descriptor", "host_marker", "installer_receipt", "receipt_digest",
+  "manifest_digest", "manifest_schema", "base_compatibility", "root_ownership",
+  "file_mode", "file_inventory", "hard_link", "symlink_escape", "boot_identity",
+  "namespace_binding", "uid_map", "apparmor", "cgroup_controllers", "finite_resources",
+  "engine_lifecycle", "containment_smoke", "seccomp", "setup_exit", "input_schema",
+  "lock_busy", "launch_proof", "pointer_publish", "timeout", "process_signal", "diagnostic_missing",
+] as const;
+export const setupAttesterFailureSchema = z.object({ stage: z.enum(setupAttesterStages),
+  failedChecks: z.array(z.enum(setupAttesterChecks)).min(1).max(32),
+}).strict().refine(value => new Set(value.failedChecks).size === value.failedChecks.length);
+
 export const setupErrorCodes = [
   "setup_image_contract_invalid", "setup_helper_failed", "setup_provider_failure",
   "setup_provider_bootstrap_unavailable", "setup_provider_bootstrap_cleanup_unconfirmed", "setup_admission_unavailable", "setup_engine_readiness_failed",
@@ -73,6 +87,7 @@ export const setupErrorCodes = [
 ] as const;
 export const setupFailureSchema = z.object({ code: z.enum(setupErrorCodes), phase: z.enum(diagnosticPhases), retryable: z.boolean(),
   engineStartup: setupEngineStartupSchema.optional(),
+  attester: setupAttesterFailureSchema.optional(),
 }).strict();
 const positive = z.number().int().positive().safe();
 const timestamp = z.string().datetime({ precision: 3 }).refine(value => Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value);

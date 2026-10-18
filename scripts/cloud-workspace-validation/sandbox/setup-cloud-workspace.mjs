@@ -2436,18 +2436,28 @@ function installGithubProjection(material, profile, now = Date.now()) {
   });
 }
 
-/** V4 emits a report followed by a closed completion diagnostic. Never admit
- * a report on its own, ambiguous JSON keys, or extra/truncated child output. */
-function readCloudWorkspaceV4Attestation(result) {
+/** A failure emits one closed diagnostic; success emits a report then a
+ * completion. Reject extra, duplicate-key or truncated output in both cases. */
+function readCloudWorkspaceV4Completion(result) {
   try {
-    if (typeof result.stdout !== "string" || Buffer.byteLength(result.stdout) > MAX_PROCESS_OUTPUT_BYTES) return null;
+    if (result.timedOut || result.overflow || result.signal || typeof result.stdout !== "string" ||
+      Buffer.byteLength(result.stdout) > MAX_PROCESS_OUTPUT_BYTES) return null;
     const lines = result.stdout.split("\n");
     if (lines.at(-1) === "") lines.pop();
-    if (lines.length !== 2) return null;
-    const diagnostic = parseCloudV4Document(Buffer.from(lines[1]), "diagnostic_missing");
-    if (!validV4Diagnostic(diagnostic) || diagnostic.stage !== "done" || !diagnostic.ok ||
-      diagnostic.exitCode !== result.code) return null;
-    const report = parseCloudV4Document(Buffer.from(lines[0]), "diagnostic_missing");
+    if (lines.length !== 1 && lines.length !== 2) return null;
+    const diagnostic = parseCloudV4Document(Buffer.from(lines.at(-1)), "diagnostic_missing");
+    if (!validV4Diagnostic(diagnostic) || diagnostic.exitCode !== result.code ||
+      lines.length !== (diagnostic.ok ? 2 : 1) || (diagnostic.ok && diagnostic.stage !== "done")) return null;
+    return diagnostic;
+  } catch {
+    return null;
+  }
+}
+
+function readCloudWorkspaceV4Attestation(result, completion) {
+  if (!completion?.ok) return null;
+  try {
+    const report = parseCloudV4Document(Buffer.from(result.stdout.split("\n")[0]), "diagnostic_missing");
     return isRecord(report) ? report : null;
   } catch {
     return null;
@@ -2602,12 +2612,11 @@ export async function attestImage(material, profile, recordChecks, recordTimings
       timeoutMs: 4 * 60_000,
     },
   );
-  try {
-    const diagnostic = JSON.parse(result.stdout.trimEnd().split("\n").at(-1));
-    const timings = parseSetupTimings(diagnostic?.timings);
-    if (timings) recordTimings(timings);
-  } catch { /* Telemetry cannot supply admission or leak raw output. */ }
-  const report = readCloudWorkspaceV4Attestation(result);
+  const completion = readCloudWorkspaceV4Completion(result);
+  const timings = parseSetupTimings(completion?.timings);
+  try { if (timings) recordTimings(timings); }
+  catch { /* Optional telemetry cannot change admission. */ }
+  const report = readCloudWorkspaceV4Attestation(result, completion);
   const checks = cloudWorkspaceImageAdmissionChecks(
     material,
     profile,
@@ -2616,7 +2625,12 @@ export async function attestImage(material, profile, recordChecks, recordTimings
   );
   recordChecks(checks, cloudWorkspaceImageAdmissionDiagnostic(report));
   if (!Object.values(checks).every((value) => value === true)) {
-    throw failure("image_contract_invalid");
+    const error = failure("image_contract_invalid");
+    error.diagnostic = {
+      exit: result.timedOut ? "timeout" : result.overflow ? "overflow" : result.signal ? "signal" : result.code !== 0 ? "nonzero" : "unknown",
+      ...(completion && !completion.ok ? { attester: { stage: completion.stage, failedChecks: completion.failedChecks } } : {}),
+    };
+    throw error;
   }
 }
 
@@ -2896,6 +2910,8 @@ async function executeSetup(encoded) {
     normalized.diagnostic = {
       version: 1, phase: diagnostic.stage.replaceAll("-", "_"),
       ...(normalized.diagnostic?.engineStartup ? { engineStartup: normalized.diagnostic.engineStartup } : {}),
+      ...(normalized.diagnostic?.attester ? { attester: normalized.diagnostic.attester } : {}),
+      ...(normalized.diagnostic?.exit ? { exit: normalized.diagnostic.exit } : {}),
       ...(diagnostic.checks ? { checks: diagnostic.checks } : {}),
       ...(diagnostic.digests ? { digests: diagnostic.digests } : {}),
       files: {

@@ -265,6 +265,9 @@ export function classifyCloudRestoreEvidence(code: string, diagnostic: unknown):
   // After repository hooks/engine admission the source can contain new work;
   // an image-launch failure cannot justify unattended rollback to a snapshot.
   if (code === "setup_image_contract_invalid" && evidence.phase === "image_preflight" &&
+    // V4 derives all admission flags from a report. No report is no evidence
+    // of an immutable mismatch and must not authorize automatic replacement.
+    evidence.checks?.report !== false &&
     [evidence.checks?.metadata, evidence.checks?.source, evidence.checks?.engine, evidence.checks?.osRelease,
       evidence.checks?.packageInventory, evidence.checks?.node].some(valid => valid === false)) return "setup_immutable_inventory_invalid";
   return null;

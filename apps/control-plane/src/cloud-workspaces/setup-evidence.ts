@@ -71,6 +71,7 @@ export async function readCloudWorkspaceSetupEvidence(tx: Tx, scope: {
       const failure = setupFailureSchema.safeParse(diagnostic.success ? {
         phase: diagnostic.data.phase, code: setupErrorCodes.includes(diagnostic.data.code as typeof setupErrorCodes[number]) ? diagnostic.data.code : "unknown", retryable: diagnostic.data.retryable,
         ...(diagnostic.data.setup?.engineStartup ? { engineStartup: diagnostic.data.setup.engineStartup } : {}),
+        ...(diagnostic.data.setup?.attester ? { attester: diagnostic.data.setup.attester } : {}),
       } : subject.failure);
       if (failure.success) value.failure = failure.data;
     }

@@ -12,6 +12,7 @@ import {
 } from "vitest";
 
 import { withSystemTx } from "../db.js";
+import { readCloudWorkspaceSetupEvidence } from "./setup-evidence.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 import * as runtimeAccess from "./runtime-access.js";
@@ -486,6 +487,34 @@ d("cloud workspace setup worker", () => {
     runtimeArtifacts: { presignCreatePut: vi.fn(), head: vi.fn(),
       presignGet: vi.fn(async () => ({ url: "https://artifacts.example.test/runtime?signature=private-runtime-delivery",
         expiresAt: new Date(Date.now() + 900_000).toISOString() })) },
+  });
+
+  it("stops after one explicit attester qualification refusal and preserves it in audit and setup evidence", async () => {
+    const seeded = await seedSetup({ v4: true });
+    const attester = { stage: "qualify_engine", failedChecks: ["seccomp"] };
+    const diagnostic = { version: 1, phase: "image_preflight", checks: { report: false, metadata: false }, attester };
+    const broker = new DatabaseCloudWorkspaceSetupAdmissionBroker({ pool, endpoint: admissionEndpoint });
+    const runner = { execute: vi.fn(async () => ({ exitCode: 1, outputTruncated: false,
+      output: JSON.stringify({ version: 2, audience: "zeros-cloud-workspace-setup-result-v1",
+        outcome: "error", code: "image_contract_invalid", diagnostic }) + "\n" +
+        JSON.stringify({ ...installerSuccess, stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] }),
+    })) };
+    const linux = new CloudWorkspaceLinuxSetupExecutor(linuxSetupOptions(broker, runner));
+    const instance = worker(linux);
+    await instance.runOnce();
+    expect((await pool.query("SELECT state,claim_count,error_code FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0])
+      .toEqual({ state: "failed", claim_count: 1, error_code: "setup_image_contract_invalid" });
+    expect(await instance.runOnce()).toBe(false);
+    expect(runner.execute).toHaveBeenCalledTimes(1);
+    const receipts = (await pool.query(`SELECT subject FROM audit_log WHERE org_id=$1 AND subject->>'setupRunId'=$2
+      AND action='cloud_workspace.setup_claim_failed'`, [organizationId, seeded.setupRunId])).rows;
+    expect(receipts).toEqual([{ subject: expect.objectContaining({ diagnostic: expect.objectContaining({
+      retryable: false, setup: expect.objectContaining({ attester }),
+    }) }) }]);
+    const evidence = await withSystemTx(pool, tx => readCloudWorkspaceSetupEvidence(tx, {
+      organizationId, workspaceId: seeded.workspaceId, generation: 1, setupRunId: seeded.setupRunId, executionFence: 1,
+    }));
+    expect(evidence?.claims[0]?.failure).toEqual({ code: "setup_image_contract_invalid", phase: "image_preflight", retryable: false, attester });
   });
 
   it.each([

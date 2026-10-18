@@ -7,6 +7,15 @@ describe("allowlisted restore evidence", () => {
     expect(classifyCloudRestoreEvidence("setup_image_contract_invalid", { version: 1, phase: "image_preflight", checks: { packageInventory: false } }))
       .toBe("setup_immutable_inventory_invalid");
   });
+  it("does not turn a missing v4 attestation report into proved immutable inventory drift", () => {
+    const checks = { execution: false, report: false, profile: false, qualified: false,
+      metadata: false, helpers: false, resources: false, runtime: false };
+    expect(classifyCloudRestoreEvidence("setup_image_contract_invalid", { version: 1, phase: "image_preflight", checks })).toBeNull();
+    expect(classifyCloudRestoreEvidence("setup_image_contract_invalid", {
+      version: 1, phase: "image_preflight", checks: { report: true, metadata: false },
+    })).toBe("setup_immutable_inventory_invalid");
+  });
+
   it("rejects generic errors, post-hook failures, and untrusted diagnostics", () => {
     expect(classifyCloudRestoreEvidence("setup_provider_bootstrap_unavailable", undefined)).toBeNull();
     expect(classifyCloudRestoreEvidence("setup_image_contract_invalid", { version: 1, phase: "image_launch", checks: { packageInventory: false } })).toBeNull();
