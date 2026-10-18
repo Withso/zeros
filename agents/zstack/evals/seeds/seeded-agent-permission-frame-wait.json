@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/features/agent/sessions-provider.tsx",
+  "before": "permissionId: msg.permissionId,\n        request: msg.request,\n      });\n      scheduler.flushNow();",
+  "after": "permissionId: msg.permissionId,\n        request: msg.request,\n      });\n      scheduler.schedule();"
+}

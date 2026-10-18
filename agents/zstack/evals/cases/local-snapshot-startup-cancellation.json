@@ -1,0 +1,9 @@
+{
+  "id": "local-snapshot-startup-cancellation",
+  "kind": "replay",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:570",
+  "symptom": "Restarting the app left a completed chat with a terminal missing workspace snapshot error.",
+  "rule": "Preserve lifecycle cancellation through aggregate reads and test the real reattachment consumer, as required by the bug-fix playbook. Local startup must not block independently confirmed cloud data.",
+  "check": "pnpm test:git apps/desktop/src/renderer/platform/bridge/__tests__/local-list-races.test.ts apps/desktop/src/renderer/features/agent/__tests__/transcript-bind-presentation.test.ts"
+}

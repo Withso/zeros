@@ -69,7 +69,8 @@ function updateDecision(entry: AvailabilityEntry): boolean {
 
 /** One clock/decision per Local engine or cloud VM, shared by every tab. A
  * transient gap has no banner or empty state. Only visible subscribers own
- * the 10s/45s timers; passive observers retain timestamps without timers/I/O. */
+ * cloud's 10s pending and both placements' 45s failure timers; passive
+ * observers retain timestamps without timers/I/O. */
 function refreshAvailability(entry: AvailabilityEntry): void {
   clearTimeout(entry.timer);
   entry.timer = undefined;
@@ -82,7 +83,7 @@ function refreshAvailability(entry: AvailabilityEntry): void {
   ) {
     const elapsed = Date.now() - input.since;
     const threshold =
-      elapsed < WORKBENCH_RECONNECT_GRACE_MS
+      input.cloud && elapsed < WORKBENCH_RECONNECT_GRACE_MS
         ? WORKBENCH_RECONNECT_GRACE_MS
         : WORKBENCH_RECONNECT_ERROR_MS;
     if (elapsed < threshold)

@@ -17,7 +17,7 @@ import { isConflictEntry, parsePorcelainZ } from "./porcelain";
 import { getInProgressState } from "./repo";
 import { GitError } from "./errors";
 import { mapBounded } from "./bounded-parallel";
-import { shareWorkspaceChangeProbe } from "./workspace-change-probe";
+import { createWorkspaceChangeProbe, shareWorkspaceChangeProbe } from "./workspace-change-probe";
 import type {
   Commit,
   FileChange,
@@ -182,6 +182,28 @@ function isInternal(p: string): boolean {
   return p === ".zeros" || p.startsWith(".zeros/");
 }
 
+interface ChangeSummaryInputs {
+  parsed: ReturnType<typeof parsePorcelain>;
+  resolvedFloor: string | null;
+}
+
+const shareLocalChangeSummaryInputs = createWorkspaceChangeProbe<ChangeSummaryInputs>();
+
+function changeSummaryInputs(ws: Workspace, remote: string): Promise<ChangeSummaryInputs> {
+  const read = async (): Promise<ChangeSummaryInputs> => {
+    const [{ stdout }, resolvedFloor] = await Promise.all([
+      runGitRead(ws.path, ["status", "--porcelain=v1", "-z", "-uall"]),
+      forkPoint(ws.path, ws.baseBranch, remote),
+    ]);
+    return { parsed: parsePorcelain(stdout), resolvedFloor };
+  };
+  // Local badges, scope counts and line totals often refresh together. Share
+  // their identical inputs only while running; settled data is never cached.
+  // Watcher/mutation invalidation fences every kind of summary together, and
+  // each caller still applies its own filter and exact Git comparison below.
+  return ws.placement === "cloud" ? read() : shareLocalChangeSummaryInputs(ws, remote, read);
+}
+
 export async function status(
   workspaceId: string,
   options: StatusOptions = {},
@@ -300,11 +322,7 @@ export async function changeCounts(
 ): Promise<ChangeCounts> {
   const ws = await resolveRepoForGitOp(workspaceId);
   const { remote } = resolveRepoGit(ws.repoRoot);
-  const [{ stdout }, resolvedFloor] = await Promise.all([
-    runGitRead(ws.path, ["status", "--porcelain=v1", "-z", "-uall"]),
-    forkPoint(ws.path, ws.baseBranch, remote),
-  ]);
-  const parsed = parsePorcelain(stdout);
+  const { parsed, resolvedFloor } = await changeSummaryInputs(ws, remote);
   const head = resolvedFloor ? "HEAD" : await headOrEmptyTree(ws.path);
   const floor = resolvedFloor ?? head;
   const [allTracked, uncommittedTracked, stagedTracked, unstagedTracked] =
@@ -505,11 +523,7 @@ export async function changeLineCounts(
 ): Promise<ChangeLineCounts> {
   const ws = await resolveRepoForGitOp(workspaceId);
   const { remote } = resolveRepoGit(ws.repoRoot);
-  const [{ stdout }, resolvedFloor] = await Promise.all([
-    runGitRead(ws.path, ["status", "--porcelain=v1", "-z", "-uall"]),
-    forkPoint(ws.path, ws.baseBranch, remote),
-  ]);
-  const parsed = parsePorcelain(stdout);
+  const { parsed, resolvedFloor } = await changeSummaryInputs(ws, remote);
   const conflicted = new Set(parsed.conflicted.map((entry) => entry.path));
   const untracked = parsed.untracked.filter(
     (untrackedPath) => !isInternal(untrackedPath) && includePath(untrackedPath),
@@ -541,11 +555,7 @@ export async function hasWorkspaceChanges(
     const ws = await resolveRepoForGitOp(workspaceId);
     const { remote } = resolveRepoGit(ws.repoRoot);
     return await shareWorkspaceChangeProbe(ws, remote, async () => {
-      const [{ stdout }, resolvedFloor] = await Promise.all([
-        runGitRead(ws.path, ["status", "--porcelain=v1", "-z", "-uall"]),
-        forkPoint(ws.path, ws.baseBranch, remote),
-      ]);
-      const parsed = parsePorcelain(stdout);
+      const { parsed, resolvedFloor } = await changeSummaryInputs(ws, remote);
       const tracked = await diffNameStatus(ws.path, [
         resolvedFloor ?? (await headOrEmptyTree(ws.path)),
       ]);
