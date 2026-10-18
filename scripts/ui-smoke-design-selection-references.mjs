@@ -1,75 +1,145 @@
 import { expect } from "@playwright/test";
 
 export async function runDesignSelectionReferencesSmoke({ page, check }) {
-  await page.setViewportSize({ width: 1600, height: 1000 });
-  await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?selectionReferences`, { waitUntil: "networkidle" });
-  await page.locator('[data-design-frame="home.html"] iframe[data-design-document-ready]').waitFor();
-  const pill = page.locator("[data-composer-design-frame]");
-  const row = file => page.locator(`[data-design-frame-row="${file}"]`);
-  const layer = id => page.locator(`[data-design-layer-id="${id}"]`);
-  await row("home.html").click();
-  await expect(pill).toHaveText("home.html");
-  await page.getByRole("button", { name: "Attach notes", exact: true }).click();
-  const editor = page.locator("[data-selection-reference-fixture] .tiptap");
-  await editor.click();
-  await pill.click();
-  await expect(pill).toHaveCount(0);
-  await expect(editor).toBeFocused();
-  await expect(page.locator("[data-attachment-pill]")).toHaveCount(1);
-  await expect(page.locator("[data-historical-reference]")).toHaveText("Earlier message: design-history.md");
-  await row("home.html").click();
-  await expect(pill).toHaveText("home.html");
-  await pill.click();
-  await row("home.html").click();
-  await expect(pill).toHaveText("home.html");
-  check("removing a canvas reference preserves editor focus and unrelated attachments, and same-target clicks reattach repeatedly", true);
+  const previousViewport = page.viewportSize();
+  const previousStorage = await page.evaluate(() =>
+    Object.entries(localStorage),
+  );
+  try {
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.goto(
+      `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?selectionReferences`,
+      { waitUntil: "networkidle" },
+    );
+    await page
+      .locator(
+        '[data-design-frame="home.html"] iframe[data-design-document-ready]',
+      )
+      .waitFor();
+    const pill = page.locator("[data-composer-design-frame]");
+    const row = (file) => page.locator(`[data-design-frame-row="${file}"]`);
+    const layer = (id) => page.locator(`[data-design-layer-id="${id}"]`);
+    await row("home.html").click();
+    await expect(pill).toHaveText("home.html");
+    await page
+      .getByRole("button", { name: "Attach notes", exact: true })
+      .click();
+    const editor = page.locator("[data-selection-reference-fixture] .tiptap");
+    await editor.click();
+    await pill.click();
+    await expect(pill).toHaveCount(0);
+    await expect(editor).toBeFocused();
+    await expect(page.locator("[data-attachment-pill]")).toHaveCount(1);
+    await expect(page.locator("[data-historical-reference]")).toHaveText(
+      "Earlier message: design-history.md",
+    );
+    await row("home.html").click();
+    await expect(pill).toHaveText("home.html");
+    await pill.click();
+    await row("home.html").click();
+    await expect(pill).toHaveText("home.html");
+    check(
+      "removing a canvas reference preserves editor focus and unrelated attachments, and same-target clicks reattach repeatedly",
+      true,
+    );
 
-  await layer("home-hero").click();
-  await layer("home-heading").click({ modifiers: ["Shift"] });
-  await row("pricing.html").click({ modifiers: ["Shift"] });
-  await expect(pill).toHaveText("3 selected");
-  await expect(pill).toHaveCount(1);
-  await expect(layer("home-hero")).toHaveAttribute("aria-selected", "true");
-  await expect(layer("home-heading")).toHaveAttribute("aria-selected", "true");
-  await expect(row("pricing.html")).toHaveAttribute("aria-selected", "true");
-  await page.getByRole("button", { name: "Save reference draft", exact: true }).click();
-  await page.getByRole("button", { name: "Send selection", exact: true }).click();
-  await expect(pill).toHaveCount(0);
-  const submitted = JSON.parse(await page.getByLabel("Submitted canvas references").textContent());
-  expect(submitted).toHaveLength(3);
-  expect(submitted.map(target => [target.frame, target.nodeId ?? null])).toEqual([["pricing.html", null], ["home.html", "home-heading"], ["home.html", "home-hero"]]);
-  await expect(page.locator("[data-attachment-pill]")).toHaveCount(1);
-  await page.getByRole("button", { name: "Restore reference draft", exact: true }).click();
-  await expect(pill).toHaveText("3 selected");
-  await pill.click();
-  await expect(pill).toHaveCount(0);
-  await row("home.html").click();
-  await expect(pill).toHaveText("home.html");
-  await page.getByRole("button", { name: "Clear composer", exact: true }).click();
-  await expect(pill).toHaveCount(0);
-  await row("home.html").click();
-  await row("pricing.html").click({ modifiers: ["Shift"] });
-  await expect(pill).toHaveText("2 selected");
-  await row("pricing.html").click({ modifiers: ["Shift"] });
-  await expect(pill).toHaveText("home.html");
-  check("mixed ancestor/descendant/frame references share one counted pill, all survive capture and draft restoration, and deselection updates the group", true);
+    await layer("home-hero").click();
+    await layer("home-heading").click({ modifiers: ["Shift"] });
+    await row("pricing.html").click({ modifiers: ["Shift"] });
+    await expect(pill).toHaveText("3 selected");
+    await expect(pill).toHaveCount(1);
+    await expect(layer("home-hero")).toHaveAttribute("aria-selected", "true");
+    await expect(layer("home-heading")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(row("pricing.html")).toHaveAttribute("aria-selected", "true");
+    await page
+      .getByRole("button", { name: "Save reference draft", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Send selection", exact: true })
+      .click();
+    await expect(pill).toHaveCount(0);
+    const submitted = JSON.parse(
+      await page.getByLabel("Submitted canvas references").textContent(),
+    );
+    expect(submitted).toHaveLength(3);
+    expect(
+      submitted.map((target) => [target.frame, target.nodeId ?? null]),
+    ).toEqual([
+      ["pricing.html", null],
+      ["home.html", "home-heading"],
+      ["home.html", "home-hero"],
+    ]);
+    await expect(page.locator("[data-attachment-pill]")).toHaveCount(1);
+    await page
+      .getByRole("button", { name: "Restore reference draft", exact: true })
+      .click();
+    await expect(pill).toHaveText("3 selected");
+    await pill.click();
+    await expect(pill).toHaveCount(0);
+    await row("home.html").click();
+    await expect(pill).toHaveText("home.html");
+    await page
+      .getByRole("button", { name: "Clear composer", exact: true })
+      .click();
+    await expect(pill).toHaveCount(0);
+    await row("home.html").click();
+    await row("pricing.html").click({ modifiers: ["Shift"] });
+    await expect(pill).toHaveText("2 selected");
+    await row("pricing.html").click({ modifiers: ["Shift"] });
+    await expect(pill).toHaveText("home.html");
+    check(
+      "mixed ancestor/descendant/frame references share one counted pill, all survive capture and draft restoration, and deselection updates the group",
+      true,
+    );
 
-  await page.evaluate(async () => {
-    const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
-    const store = useDesignWorkspaceUiStore.getState();
-    store.setPanels("ws_design_harness", { inspectorVisible: false });
-    store.setViewport("ws_design_harness", { zoom: 0.25, panX: 64, panY: 96 });
-  });
-  const home = await page.locator('[data-design-frame="home.html"]').boundingBox();
-  const pricing = await page.locator('[data-design-frame="pricing.html"]').boundingBox();
-  await page.mouse.move(home.x - 12, home.y + home.height + 20);
-  await page.mouse.down();
-  await page.mouse.move(pricing.x + pricing.width + 12, pricing.y - 12, { steps: 12 });
-  await page.mouse.up();
-  await expect(pill).toHaveText("2 selected");
-  check("a real outer marquee selects every intersecting scene frame instead of only one", true);
-  await page.mouse.move(1550, 980);
-  await page.screenshot({ path: ".context/design-selection-references-dark.png" });
-  await page.evaluate(() => { document.documentElement.classList.remove("dark"); document.documentElement.classList.add("light"); document.documentElement.dataset.theme = "light"; });
-  await page.screenshot({ path: ".context/design-selection-references-light.png" });
+    await page.evaluate(async () => {
+      const { useDesignWorkspaceUiStore } =
+        await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+      const store = useDesignWorkspaceUiStore.getState();
+      store.setPanels("ws_design_harness", { inspectorVisible: false });
+      store.setViewport("ws_design_harness", {
+        zoom: 0.25,
+        panX: 64,
+        panY: 96,
+      });
+    });
+    const home = await page
+      .locator('[data-design-frame="home.html"]')
+      .boundingBox();
+    const pricing = await page
+      .locator('[data-design-frame="pricing.html"]')
+      .boundingBox();
+    await page.mouse.move(home.x - 12, home.y + home.height + 20);
+    await page.mouse.down();
+    await page.mouse.move(pricing.x + pricing.width + 12, pricing.y - 12, {
+      steps: 12,
+    });
+    await page.mouse.up();
+    await expect(pill).toHaveText("2 selected");
+    check(
+      "a real outer marquee selects every intersecting scene frame instead of only one",
+      true,
+    );
+    await page.mouse.move(1550, 980);
+    await page.screenshot({
+      path: ".context/design-selection-references-dark.png",
+    });
+    await page.evaluate(() => {
+      document.documentElement.classList.remove("dark");
+      document.documentElement.classList.add("light");
+      document.documentElement.dataset.theme = "light";
+    });
+    await page.screenshot({
+      path: ".context/design-selection-references-light.png",
+    });
+  } finally {
+    await page.evaluate((entries) => {
+      localStorage.clear();
+      for (const [key, value] of entries) localStorage.setItem(key, value);
+    }, previousStorage);
+    if (previousViewport) await page.setViewportSize(previousViewport);
+  }
 }

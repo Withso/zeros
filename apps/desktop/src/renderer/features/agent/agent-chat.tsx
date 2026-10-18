@@ -3922,7 +3922,7 @@ function AgentChatBody({
         text: snapshot.displayText,
         attachments: snapshot.attachments,
         json: snapshot.json,
-        designFrame: submittedDesignFrame,
+        designFrame: composerLiveRef.current.designFrame,
       };
       composerLiveRef.current = draft;
       dispatch({ type: "SET_CHAT_DRAFT", chatId, draft });

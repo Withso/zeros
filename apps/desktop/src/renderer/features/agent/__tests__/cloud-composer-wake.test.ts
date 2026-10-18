@@ -139,6 +139,18 @@ function harness(cloud = true, status = "stopped", resident = true) {
 }
 
 describe("cloud composer readiness queue", () => {
+  it("keeps the pin-owned persisted Design reference when parking a prepared workspace", async () => {
+    const h = harness(false, "ready");
+    const saved = { workspaceId: "local", directoryId: "design", frame: "home.html", intent: "code" };
+    h.composer.workspaceProvisioning = true;
+    h.composer.useWorkspaceStore.getState().pendingAutoSend = {};
+    h.composer.designFrameContext.capture = () => ({ ...saved, selectionEvent: 7, ownerRevision: 3 });
+    h.composer.designFrameContext.pin.mockImplementation(() => { h.composer.composerLiveRef.current = { designFrame: saved }; });
+    await h.send();
+    expect(h.composer.composerLiveRef.current.designFrame).toEqual(saved);
+    expect(h.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "SET_CHAT_DRAFT", draft: expect.objectContaining({ designFrame: saved }) }));
+  });
+
   it.each(["stopped", "waking", "setting_up", "ready"])("paints the first cloud user bubble before %s preparation completes", async status => {
     const h = harness(true, status);
     await h.send();

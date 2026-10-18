@@ -18,7 +18,8 @@
   restart. Cause: runtime intent and owner epochs survived in draft JSON but
   not in restored canvas state. Rule: persist frozen source identity and editing
   intent, never runtime epochs; keep in-session fences separate from the saved
-  draft. Encoded in cold-restore Send and removal regressions.
+  draft; prepared-workspace writers must retain that same saved snapshot.
+  Encoded in cold-restore Send/removal and prepared-send regressions.
 - Symptom: an away-and-back page response could match the same semantic key;
   a bounded runtime tree could also appear to prove a target was deleted.
   Cause: ownership lacked a transition revision and absence was treated as
@@ -39,3 +40,8 @@
   children stay in the payload. Geometry consumes a separate topmost-target
   projection so an ancestor is moved once. The collection is bounded by the
   existing shared selection limit; no second persisted selection model exists.
+- Browser coverage must preserve the caller's storage and viewport: a synthetic
+  directory left behind by a shared-page scenario can retire the next fixture's
+  selection. The held-marquee race starts inside a frame now that an outer
+  marquee selects scene frames without runtime element reads; its stale-result
+  assertion remains unchanged.
