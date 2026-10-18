@@ -15,7 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { accessSync, constants as fsConstants } from "node:fs";
+import { accessSync, closeSync, constants as fsConstants, fstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { chmod, chown, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -260,12 +260,48 @@ export async function refreshGitCredentialAfterAuthenticationFailure(
   }
 }
 
-function findExecutable(name: string, pathValue: string): string | null {
+function isCredentialShimDirectory(directory: string): boolean {
+  return path.basename(directory).startsWith("zeros-git-auth-");
+}
+
+function withoutCredentialShimDirectories(pathValue: string): string {
+  return pathValue.split(path.delimiter).filter((directory) => {
+    if (isCredentialShimDirectory(directory)) return false;
+    try {
+      return !isCredentialShimDirectory(realpathSync(directory));
+    } catch {
+      return true;
+    }
+  }).join(path.delimiter);
+}
+
+/** Inspect a bounded prefix as well as the resolved directory: a terminal may
+ * inherit an older broker's shim through a symlink or a copied executable. */
+function isCredentialShim(candidate: string): boolean {
+  const resolved = realpathSync(candidate);
+  if (isCredentialShimDirectory(path.dirname(resolved))) return true;
+  // Read-only open of the already-resolved executable, validated through its
+  // own descriptor. Whoever can swap or plant files in a PATH directory
+  // already chooses the Git this engine runs, so no stronger flag adds a
+  // boundary here.
+  const fd = openSync(resolved, "r");
+  try {
+    if (!fstatSync(fd).isFile()) return true;
+    const prefix = Buffer.alloc(1024);
+    const length = readSync(fd, prefix, 0, prefix.length, 0);
+    return /real="\$\{ZEROS_REAL_(?:GIT|GH)_PATH[:?]/.test(prefix.toString("utf8", 0, length));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function findExecutable(name: string, pathValue: string, skipCredentialShims = false): string | null {
   for (const directory of pathValue.split(path.delimiter)) {
     if (!directory) continue;
     const candidate = path.join(directory, name);
     try {
       accessSync(candidate, fsConstants.X_OK);
+      if (skipCredentialShims && isCredentialShim(candidate)) continue;
       return candidate;
     } catch {
       /* next PATH entry */
@@ -422,9 +458,14 @@ export async function prepareGitCredentialShellEnvironment(
   if (!credentialSource?.supports(request)) return null;
   const activeBroker = await ensureBroker();
   if (consumerIdentity) await activeBroker.grantConsumer(consumerIdentity);
-  const realGit = findExecutable("git", pathValue);
+  // A Local engine may itself be started inside a terminal whose PATH already
+  // contains a different broker. Never make that shim our "real" executable,
+  // or its inherited ZEROS_REAL_* path would exec itself indefinitely. Keep
+  // the qualified cloud consumer's executable/permission contract unchanged.
+  const shellPath = consumerIdentity ? pathValue : withoutCredentialShimDirectories(pathValue);
+  const realGit = findExecutable("git", shellPath, !consumerIdentity);
   if (!realGit) return null;
-  const realGh = findExecutable("gh", pathValue);
+  const realGh = findExecutable("gh", shellPath, !consumerIdentity);
   return {
     env: {
       ZEROS_GIT_AUTH_CONTEXT: contextId,
@@ -440,8 +481,8 @@ export async function prepareGitCredentialShellEnvironment(
       ...(!consumerIdentity
         ? { ZEROS_GIT_AUTH_BROKER_PID: String(process.pid) }
         : {}),
-      ...(realGh ? { ZEROS_REAL_GH_PATH: realGh } : {}),
-      PATH: `${activeBroker.helpersDir}${path.delimiter}${pathValue}`,
+      ...(realGh ? { ZEROS_REAL_GH_PATH: realGh } : consumerIdentity ? {} : { ZEROS_REAL_GH_PATH: "" }),
+      PATH: `${activeBroker.helpersDir}${path.delimiter}${shellPath}`,
     },
   };
 }
@@ -906,6 +947,19 @@ set -eu
 real="\${ZEROS_REAL_GIT_PATH:?}"
 helper="\${ZEROS_GIT_AUTH_HELPER:?}"
 
+# Check before either broker probe or dead-broker fallback. The inode check
+# also catches aliases of this script without spawning another process.
+if [ "$real" = "$0" ] || [ "$real" -ef "$0" ]; then
+  printf '%s\\n' "Zeros Git shim refused a recursive executable." >&2
+  exit 126
+fi
+case "$real" in
+  */zeros-git-auth-*/git)
+    printf '%s\\n' "Zeros Git shim refused a recursive executable." >&2
+    exit 126
+    ;;
+esac
+
 # A hard-killed engine can leave this shim and its unix-socket inode on PATH.
 # Native same-host shells use a cheap PID liveness check. Consumers in another
 # PID namespace probe the projected socket. Only a dead process or
@@ -947,6 +1001,17 @@ real="\${ZEROS_REAL_GH_PATH:-}"
   printf '%s\\n' "GitHub CLI is not installed." >&2
   exit 127
 }
+
+if [ "$real" = "$0" ] || [ "$real" -ef "$0" ]; then
+  printf '%s\\n' "Zeros GitHub CLI shim refused a recursive executable." >&2
+  exit 126
+fi
+case "$real" in
+  */zeros-git-auth-*/gh)
+    printf '%s\\n' "Zeros GitHub CLI shim refused a recursive executable." >&2
+    exit 126
+    ;;
+esac
 
 # Authentication management belongs to the real gh config store. In
 # particular, a selected PAT must not become GH_TOKEN for gh-auth-login,
