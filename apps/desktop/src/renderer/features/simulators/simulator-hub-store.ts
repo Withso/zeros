@@ -9,6 +9,7 @@ import {
 
 import { nativeListen } from "../../platform/runtime";
 import { readSimulatorHub, refreshSimulatorHub } from "./simulator-api";
+import { documentIsForeground, observeForeground } from "../../shared/lib/element-activity";
 
 // DeviceHub in main owns the devices. The renderer mirrors its latest
 // snapshot: main sends one whenever something changes, and the first
@@ -95,10 +96,24 @@ export const SIMULATOR_HUB_FOLLOW_MS = 10_000;
 
 let followers = 0;
 let followTimer: ReturnType<typeof setInterval> | null = null;
+let stopFollowActivity: (() => void) | null = null;
+let followRead: Promise<unknown> | null = null;
 
 function refreshFollowed(): void {
+  if (!followers || !documentIsForeground() || followRead) return;
   // Main publishes what the read finds; a failed read keeps the last snapshot.
-  void refreshSimulatorHub().catch(() => undefined);
+  const request = refreshSimulatorHub().catch(() => undefined).finally(() => {
+    if (followRead === request) followRead = null;
+  });
+  followRead = request;
+}
+
+function scheduleFollowing(refresh: boolean): void {
+  if (followTimer !== null) clearInterval(followTimer);
+  followTimer = null;
+  if (!followers || !documentIsForeground()) return;
+  if (refresh) refreshFollowed();
+  followTimer = setInterval(refreshFollowed, SIMULATOR_HUB_FOLLOW_MS);
 }
 
 /** Main re-reads devices only while one is on screen, so a tab that shows
@@ -108,11 +123,10 @@ function refreshFollowed(): void {
 export function followSimulatorHub(): () => void {
   followers += 1;
   if (followers === 1) {
-    followTimer = setInterval(refreshFollowed, SIMULATOR_HUB_FOLLOW_MS);
-    window.addEventListener("focus", refreshFollowed);
+    stopFollowActivity = observeForeground(() => scheduleFollowing(true));
     // The tab's first read is already on its way; a hub read earlier may be
     // out of date by now.
-    if (readOnce) refreshFollowed();
+    scheduleFollowing(readOnce);
   }
   let released = false;
   return () => {
@@ -126,7 +140,8 @@ export function followSimulatorHub(): () => void {
 function stopFollowing(): void {
   if (followTimer !== null) clearInterval(followTimer);
   followTimer = null;
-  window.removeEventListener("focus", refreshFollowed);
+  stopFollowActivity?.();
+  stopFollowActivity = null;
 }
 
 /** Follows the hub while `on`. */
@@ -183,8 +198,8 @@ export function resetSimulatorHubForTests(): void {
   read = null;
   readOnce = false;
   liveSerial = 0;
-  if (followTimer !== null) clearInterval(followTimer);
-  followTimer = null;
+  stopFollowing();
+  followRead = null;
   followers = 0;
   for (const listener of listeners) listener();
 }
