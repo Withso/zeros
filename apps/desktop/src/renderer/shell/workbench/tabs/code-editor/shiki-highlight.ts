@@ -100,6 +100,7 @@ export function planShikiHighlightWork(args: {
 }
 
 export interface ShikiConfig {
+  cacheScope?: "local";
   /** Shiki bundled language id, or null → no color (plain + Lezer structure). */
   lang: string | null;
   /** Shiki theme name. */
@@ -192,7 +193,8 @@ function firstPaint(state: EditorState): ShikiPaint {
   if (headOptions && headLine) {
     code += doc.sliceString(headLine.to, doc.line(headLine.number + 1).from);
   }
-  const res = tokenizeSync(code, cfg.lang, cfg.theme, headOptions);
+  const res = tokenizeSync(code, cfg.lang, cfg.theme, cfg.cacheScope
+    ? { ...headOptions, cacheScope: cfg.cacheScope } : headOptions);
   if (!res) return NO_PAINT;
   return {
     decos: buildShikiDecorations(res.tokens, doc.length),
@@ -333,6 +335,7 @@ const shikiPlugin = ViewPlugin.fromClass(
         code,
         cfg.lang!,
         cfg.theme,
+        cfg.cacheScope ? { cacheScope: cfg.cacheScope } : undefined,
       );
 
       // Drop stale: a newer run started, or the doc changed under us. CM's Text

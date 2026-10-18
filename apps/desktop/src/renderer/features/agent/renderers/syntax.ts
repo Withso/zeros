@@ -27,6 +27,7 @@
 import type { Highlighter, ThemedToken, BundledLanguage } from "shiki";
 import { getPrefs } from "@/renderer/shared/theme/store";
 import { resolveCodeTheme } from "@/renderer/shared/theme/code-themes";
+import { LocalTokenCache } from "./local-token-cache";
 
 /** Languages we ship in the singleton. Adding more here costs
  *  bundle size (shiki grammars are TextMate JSON, ~30-100KB
@@ -160,6 +161,13 @@ export interface TokenizedCode {
 
 const tokenCache = new Map<string, Map<string, TokenizedCode>>();
 let tokenCacheTokens = 0;
+const localTokenCache = new LocalTokenCache();
+
+export interface SyntaxTokenOptions {
+  headLines?: number;
+  /** Selected by the owning Local file surface. Cloud retains its cache path. */
+  cacheScope?: "local";
+}
 
 /** Inner-map key: theme + language (see the cacheKey note on the separator). */
 function tokenVariantKey(lang: string, theme: string): string {
@@ -176,7 +184,9 @@ function tokenCacheGet(
   code: string,
   lang: string,
   theme: string,
+  scope?: "local",
 ): TokenizedCode | undefined {
+  if (scope === "local") return localTokenCache.get(code, tokenVariantKey(lang, theme));
   const byVariant = tokenCache.get(code);
   if (!byVariant) return undefined;
   const hit = byVariant.get(tokenVariantKey(lang, theme));
@@ -193,7 +203,12 @@ function tokenCachePut(
   lang: string,
   theme: string,
   value: TokenizedCode,
+  scope?: "local",
 ): void {
+  if (scope === "local") {
+    localTokenCache.put(code, tokenVariantKey(lang, theme), value);
+    return;
+  }
   // Head-only paints are cheap to redo and must never shadow the full pass.
   if (value.partial) return;
   if (code.length > TOKEN_CACHE_MAX_INPUT) return;
@@ -460,6 +475,7 @@ function tokenizeNow(
   shikiLang: string,
   theme: string,
   partial: boolean,
+  scope?: "local",
 ): TokenizedCode | null {
   try {
     const { tokens, fg, bg } = hl.codeToTokens(code, {
@@ -469,7 +485,7 @@ function tokenizeNow(
     const out: TokenizedCode = partial
       ? { tokens, fg, bg, partial: true }
       : { tokens, fg, bg };
-    tokenCachePut(code, shikiLang, theme, out);
+    tokenCachePut(code, shikiLang, theme, out, scope);
     return out;
   } catch {
     return null;
@@ -514,10 +530,10 @@ export function tokenizeSync(
   code: string,
   shikiLang: string | null,
   theme: string,
-  opts?: { headLines?: number },
+  opts?: SyntaxTokenOptions,
 ): TokenizedCode | null {
   if (!shikiLang || shikiLang === "text") return null;
-  const hit = tokenCacheGet(code, shikiLang, theme);
+  const hit = tokenCacheGet(code, shikiLang, theme, opts?.cacheScope);
   if (hit) return hit;
   const hl = mainHighlighter;
   if (!hl) return null;
@@ -528,9 +544,9 @@ export function tokenizeSync(
     if (headLines <= 0) return null;
     const cut = nthNewlineIndex(code, headLines);
     if (cut === -1) return null; // fewer lines than the budget → nothing cheap to slice
-    return tokenizeNow(hl, code.slice(0, cut), shikiLang, theme, true);
+    return tokenizeNow(hl, code.slice(0, cut), shikiLang, theme, true, opts?.cacheScope);
   }
-  return tokenizeNow(hl, code, shikiLang, theme, false);
+  return tokenizeNow(hl, code, shikiLang, theme, false, opts?.cacheScope);
 }
 
 /** Tokenize `code` for the CodeMirror editor's Shiki color layer. Ensures the
@@ -543,13 +559,14 @@ export async function highlightToTokens(
   code: string,
   shikiLang: string,
   theme: string,
+  opts?: Pick<SyntaxTokenOptions, "cacheScope">,
 ): Promise<TokenizedCode | null> {
   if (!shikiLang || shikiLang === "text") return null;
-  const hit = tokenCacheGet(code, shikiLang, theme);
+  const hit = tokenCacheGet(code, shikiLang, theme, opts?.cacheScope);
   if (hit && !hit.partial) return hit;
   const hl = await prepareTokenizer(shikiLang, theme);
   if (!hl) return null;
-  return tokenizeNow(hl, code, shikiLang, theme, false);
+  return tokenizeNow(hl, code, shikiLang, theme, false, opts?.cacheScope);
 }
 
 // ─── Prewarm ──────────────────────────────────────────────
