@@ -33,7 +33,7 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 
-import { runGit } from "./git-exec";
+import { gitExecutionIdentity, runGit } from "./git-exec";
 import { isInside } from "../files/read-file";
 import { listMentionPaths } from "../files/mention-paths";
 
@@ -196,6 +196,7 @@ export function collectSkipWorktree(tagged: string): Set<string> {
  *  thousands of sibling entries; past this the tree row count stops being
  *  navigable anyway, and the payload crosses a bridge. */
 const IGNORED_DIR_LIMIT = 5_000;
+const ignoredEntryFlights = new Map<string, Promise<string[]>>();
 
 /** Byte-order comparator — deliberately NOT `localeCompare`.
  *
@@ -236,7 +237,19 @@ export async function listIgnoredEntries(
   limit: number = IGNORED_DIR_LIMIT,
 ): Promise<string[]> {
   if (!cwd) return [];
-  return dir ? readIgnoredDir(cwd, dir, limit) : listIgnoredRoots(cwd, limit);
+  const read = () => dir ? readIgnoredDir(cwd, dir, limit) : listIgnoredRoots(cwd, limit);
+  if (gitExecutionIdentity()) return read();
+  const key = JSON.stringify([path.resolve(cwd), dir ?? null, limit]);
+  const current = ignoredEntryFlights.get(key);
+  if (current) return [...await current];
+  const pending = read();
+  ignoredEntryFlights.set(key, pending);
+  while (ignoredEntryFlights.size > 128) ignoredEntryFlights.delete(ignoredEntryFlights.keys().next().value!);
+  try {
+    return [...await pending];
+  } finally {
+    if (ignoredEntryFlights.get(key) === pending) ignoredEntryFlights.delete(key);
+  }
 }
 
 /** `git ls-files -o -i --exclude-standard --directory`, NUL-split. `-z` means
