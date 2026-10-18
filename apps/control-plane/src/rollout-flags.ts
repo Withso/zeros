@@ -51,6 +51,8 @@ export const ROLLOUT_FLAGS = {
   // Off, turns.v1 is never negotiated: the engine keeps its journal and
   // sends it once an uplink negotiates it. No other path reads it.
   turn_journal: { whileFeedUnavailable: "retain", summary: "Deliver the engine turn journal over the uplink (turns.v1)", requires: ["realtime_uplink"] },
+  detached_turns: { whileFeedUnavailable: "off", summary: "Enroll exact owner-funded accepted work",
+    requires: ["capabilities", "realtime_uplink", "credential_push", "turn_journal"] },
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;

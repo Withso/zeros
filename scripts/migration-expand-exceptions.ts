@@ -85,6 +85,12 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
       "cloud_workspace_require_retired_wake_source()",
     ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
   },
+  "0166_cloud_accepted_work.sql": {
+    // PUBLIC's default EXECUTE on the new system-only key fence.
+    "privilege-tightening": [
+      "REVOKE ALL ON FUNCTION cloud_accepted_work_key_live(text) FROM PUBLIC;",
+    ],
+  },
   "0149_cloud_rollout_flags.sql": {
     // A guard that rejects TRUNCATE cannot truncate.
     "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate

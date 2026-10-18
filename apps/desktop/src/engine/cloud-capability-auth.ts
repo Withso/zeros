@@ -271,6 +271,7 @@ export class EngineCapabilityAuth implements EngineUplinkAuthSink {
   private recheckTimer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
   private readonly boundMs: number;
+  private readonly sessionObservers = new Set<(closures: readonly CapabilitySessionClosure[]) => void>();
 
   constructor(private readonly options: EngineCapabilityAuthOptions) {
     this.now = options.now ?? Date.now;
@@ -279,7 +280,10 @@ export class EngineCapabilityAuth implements EngineUplinkAuthSink {
       issuer: options.issuer,
       now: this.now,
       ...(options.fetchKeys ? { fetchKeys: () => this.fetchKeysBounded() } : {}),
-      ...(options.onSessionsClosed ? { onSessionsClosed: options.onSessionsClosed } : {}),
+      onSessionsClosed: closures => {
+        this.notifySessionObservers(closures);
+        options.onSessionsClosed?.(closures);
+      },
     });
     this.downSinceMs = this.now();
     this.scheduleFallback();
@@ -298,7 +302,21 @@ export class EngineCapabilityAuth implements EngineUplinkAuthSink {
 
   authCursor(): string | undefined { return this.cursor; }
   ready(): boolean { return this.synced; }
+  active(): boolean { return this.synced && !this.stopped; }
   engineCapability(): EngineUplinkCapability | null { return this.capability; }
+
+  /** Independent accepted work tracks its own verifier session. A socket
+   * disconnect still closes only that socket's session, never its work. */
+  observeSessionClosures(listener: (closures: readonly CapabilitySessionClosure[]) => void): () => void {
+    if (this.stopped || this.sessionObservers.size >= 16) throw new Error("capability_observer_unavailable");
+    this.sessionObservers.add(listener);
+    return () => { this.sessionObservers.delete(listener); };
+  }
+  private notifySessionObservers(closures: readonly CapabilitySessionClosure[]): void {
+    for (const listener of [...this.sessionObservers]) {
+      try { listener(closures); } catch { /* one observer cannot suppress another revocation */ }
+    }
+  }
 
   applyKeys(keys: readonly EngineUplinkJwk[]): Promise<void> {
     return this.bounded(async () => { this.verifier.applyKeys(keys); });
@@ -445,6 +463,8 @@ export class EngineCapabilityAuth implements EngineUplinkAuthSink {
 
   stop(): void {
     this.stopped = true;
+    this.notifySessionObservers(this.verifier.openSessionIds().map(sessionId => ({ sessionId, code: "capability_revoked" })));
+    this.sessionObservers.clear();
     this.clearFallbackTimer();
     this.stopProbe();
     if (this.recheckTimer) clearInterval(this.recheckTimer);

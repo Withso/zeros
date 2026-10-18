@@ -58,7 +58,14 @@ suite("data-purge expansion on the populated previous schema", () => {
     expect(pendingMigrations[0]).toBe(migration);
     expect(await planMigrations(pool)).toEqual({ pendingMigrations, controlledApprovals: [] });
     expect(await runMigrations(pool, { env: { NODE_ENV: "production" } })).toEqual(pendingMigrations);
-    expect(await snapshot()).toEqual(before);
+    const migrated = await snapshot();
+    // The additive accepted-work opt-in must default to disabled on existing
+    // engines. Every pre-existing field still has to match byte for byte.
+    for (const row of migrated.cloud_workspace_engine_instances) {
+      expect(row.value.accepted_work_version).toBeNull();
+      delete row.value.accepted_work_version;
+    }
+    expect(migrated).toEqual(before);
     expect(await actorCounts()).toEqual(actorTables.map(() => 1));
     expect((await pool.query(`SELECT session_kind,capability_source_session_id,capability_claims
       FROM cloud_workspace_actor_sessions WHERE workspace_id=$1`, [old.workspaceId])).rows)
