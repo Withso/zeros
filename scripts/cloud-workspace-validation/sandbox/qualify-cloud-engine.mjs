@@ -25,6 +25,7 @@ import { readCloudResourceBudgetProjection } from "./cloud-resource-budget.mjs";
 import { loadCloudWorkloadCustody, nativeCloudWorkloadIO } from "../../../apps/desktop/src/engine/agents/containment/cloud-workload-cgroup.mjs";
 import { cloudEnginePrivilegeStatus } from "./cloud-engine-privilege.mjs";
 import { loadCloudQualificationRoles } from "./cloud-qualification-loader.mjs";
+import { setupPerformance, notifySetupPerformance } from "./cloud-setup-performance.mjs";
 
 function optional(file) {
   try {
@@ -220,8 +221,12 @@ export async function qualifyCloudEngineIdentity(context) {
  * view. Owned groups mean the original detached Host supervisor group and its
  * non-escaped members; this does not prove retirement of arbitrary setsid escapes. */
 /** @param {Awaited<ReturnType<typeof qualifyCloudEngineIdentity>>} [identity]
- * @param {typeof loadCloudQualificationRoles} [loadRoles] */
-export async function qualifyCloudEngineRuntime(identity, loadRoles = loadCloudQualificationRoles) {
+ * @param {typeof loadCloudQualificationRoles} [loadRoles]
+ * @param {{onPerformance?: (value: unknown) => void, now?: () => number}} [options] */
+export async function qualifyCloudEngineRuntime(identity, loadRoles = loadCloudQualificationRoles, options = {}) {
+  const metrics = options.onPerformance ? setupPerformance("attester_preflight", options.now) : undefined;
+  let finish;
+  const next = stage => { finish?.(); finish = metrics?.start(stage); };
   const report = { version: 2, boundary: "workspace-vm", engineChecksPassed: false, qualified: false, identity,
     execution: null, capture: null, humanServices: null, actorTools: null };
   const identityPassed = value => {
@@ -231,17 +236,21 @@ export async function qualifyCloudEngineRuntime(identity, loadRoles = loadCloudQ
       Object.keys(capabilities).sort().join(",") === "ambient,bounding,effective,inheritable,permitted" &&
       Object.values(capabilities).every(value => value === 0) && cloudRuntimeResourcesQualified(value.resources);
   };
-  if (identity !== undefined && !identityPassed(identity)) return report;
   let loaded, context;
   try {
+    if (identity !== undefined && !identityPassed(identity)) return report;
     // Inline execution preserves the original root-projected controller birth.
+    next("module_load");
     loaded = await loadRoles();
     const { createCloudQualificationRuntime, qualifyCloudActorTools, qualifyCloudCapture, qualifyCloudHumanServices } = loaded.roles;
+    next("context_create");
     context = createCloudQualificationRuntime();
     if (identity === undefined) {
+      next("identity");
       report.identity = await qualifyCloudEngineIdentity(context);
       if (!identityPassed(report.identity)) return report;
     }
+    next("actor_tools");
     const actor = await qualifyCloudActorTools(context);
     const execution = actor?.execution;
     const fields = ["sameEngineIdentity", "noSandbox", "ownedProcessGroups", "originalProcessGroupsRetired", "timeoutRetired", "workloadCgroup"];
@@ -249,29 +258,40 @@ export async function qualifyCloudEngineRuntime(identity, loadRoles = loadCloudQ
         actor.actorTools?.sameEngineIdentity !== true || actor.actorTools.noSandbox !== true) return report;
     report.execution = { ...Object.fromEntries(fields.map(key => [key, true])), vmWorkloadDrain: false };
     report.actorTools = { sameEngineIdentity: true, noSandbox: true };
+    next("capture");
     const capture = await qualifyCloudCapture(context);
     if (capture?.sameEngineIdentity !== true || capture.chromiumSandbox !== true) return report;
     report.capture = { sameEngineIdentity: true, chromiumSandbox: true };
+    next("human_services");
     const human = await qualifyCloudHumanServices(context);
     if (human?.sameEngineIdentity !== true || human.noSandbox !== true) return report;
     report.humanServices = { sameEngineIdentity: true, noSandbox: true };
+    next("census");
     const inspection = await context.workloads.inspect();
     if (!inspection.complete || inspection.pendingLaunches || inspection.failedRetirements || inspection.workloadPids.length) return report;
     context.custody.assertLive();
     report.engineChecksPassed = true;
   } catch { /* Raw probe failures never become public diagnostics or success. */ }
   finally {
+    finish?.(report.engineChecksPassed ? "passed" : "failed");
     // Services that role probes start for this controller end with it, as in
     // the engine's stop(); otherwise it never exits to publish this report.
-    try { context?.close(); } catch { report.engineChecksPassed = false; }
-    await loaded?.unregister();
+    const close = context || loaded ? metrics?.start("context_close") : undefined;
+    let outcome = "passed";
+    try {
+      try { context?.close(); } catch { report.engineChecksPassed = false; outcome = "failed"; }
+      await loaded?.unregister();
+    } catch (error) { outcome = "failed"; throw error; }
+    finally { close?.(outcome); notifySetupPerformance(options.onPerformance, metrics?.snapshot()); }
   }
   return report;
 }
 async function main() {
   process.umask(0o077);
-  const report = await qualifyCloudEngineRuntime();
-  process.stdout.write(`${JSON.stringify(report)}\n`);
+  let performance;
+  const options = process.env.ZEROS_SETUP_PERFORMANCE === "1" ? { onPerformance: value => { performance = value; } } : {};
+  const report = await qualifyCloudEngineRuntime(undefined, loadCloudQualificationRoles, options);
+  process.stdout.write(`${JSON.stringify({ ...report, ...(performance ? { performance } : {}) })}\n`);
   if (!report.engineChecksPassed) process.exitCode = 1;
 }
 if (
