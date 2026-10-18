@@ -317,6 +317,53 @@ d("capability actor sessions with PostgreSQL", () => {
     expect((await post(LEGACY,legacy)).status).toBe(429);
   });
 
+  it("recovering an expired session cannot exceed the 100 live session limit", async () => {
+    const admitted = await admit(), old = await expired(admitted);
+    await expect(current(old.admitted.actorSessionId)).rejects.toMatchObject({ status: 401 });
+    await pool.query(`INSERT INTO cloud_workspace_actor_sessions
+      SELECT (jsonb_populate_record(NULL::cloud_workspace_actor_sessions,to_jsonb(session)||jsonb_build_object('id',gen_random_uuid()))).*
+      FROM cloud_workspace_actor_sessions session CROSS JOIN generate_series(1,99) WHERE id=$1`, [admitted.actorSessionId]);
+    const liveCount = async () => Number((await pool.query<{ count: string }>(`SELECT count(*) FROM cloud_workspace_actor_sessions
+      WHERE workspace_id=$1 AND revoked_at IS NULL AND session_expires_at>clock_timestamp()`, [fixture.workspaceId])).rows[0]!.count);
+    expect(await liveCount()).toBe(100);
+    const response = await renew(old.admitted, await token());
+    expect({ status: response.status, active: await liveCount() }).toEqual({ status: 429, active: 100 });
+  });
+
+  it("renews an already live session at capacity without allocating another slot", async () => {
+    const admitted = await admit();
+    await pool.query(`INSERT INTO cloud_workspace_actor_sessions
+      SELECT (jsonb_populate_record(NULL::cloud_workspace_actor_sessions,to_jsonb(session)||jsonb_build_object('id',gen_random_uuid()))).*
+      FROM cloud_workspace_actor_sessions session CROSS JOIN generate_series(1,99) WHERE id=$1`, [admitted.actorSessionId]);
+    const response = await renew(admitted, next(admitted.capability.claims));
+    expect(response.status).toBe(200);
+    expect(CapabilitySessionResponseSchema.parse(await response.json())).toMatchObject({ actorSessionId: admitted.actorSessionId,
+      capability: { revision: 2 } });
+    expect(Number((await pool.query<{ count: string }>(`SELECT count(*) FROM cloud_workspace_actor_sessions
+      WHERE workspace_id=$1 AND revoked_at IS NULL AND session_expires_at>clock_timestamp()`, [fixture.workspaceId])).rows[0]!.count)).toBe(100);
+  });
+
+  it("serializes expired recovery on the admission fence before competing for the last slot", async () => {
+    const admitted = await admit(), first = await expired(admitted), second = await expired(admitted);
+    await pool.query(`INSERT INTO cloud_workspace_actor_sessions
+      SELECT (jsonb_populate_record(NULL::cloud_workspace_actor_sessions,to_jsonb(session)||jsonb_build_object('id',gen_random_uuid()))).*
+      FROM cloud_workspace_actor_sessions session CROSS JOIN generate_series(1,98) WHERE id=$1`, [admitted.actorSessionId]);
+    const tokens = await Promise.all([token(), token()]), blocker = await pool.connect();
+    let pending: Promise<Response[]> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`cloud-actor-session-limit:${fixture.workspaceId}`]);
+      const pid = (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+      pending = Promise.all([renew(first.admitted, tokens[0]!), renew(second.admitted, tokens[1]!)]);
+      await vi.waitFor(async () => expect((await pool.query(`SELECT 1 FROM pg_stat_activity
+        WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)) AND wait_event='advisory'`, [pid])).rowCount).toBe(2));
+      await blocker.query("COMMIT");
+      expect((await pending).map(response => response.status).sort()).toEqual([200, 429]);
+      expect(Number((await pool.query<{ count: string }>(`SELECT count(*) FROM cloud_workspace_actor_sessions
+        WHERE workspace_id=$1 AND revoked_at IS NULL AND session_expires_at>clock_timestamp()`, [fixture.workspaceId])).rows[0]!.count)).toBe(100);
+    } finally { await blocker.query("ROLLBACK"); blocker.release(); await pending; }
+  });
+
   it("keeps source fields, kind and renewal authority immutable under SQL and forced RLS", async () => {
     const admitted = await admit();
     for (const [sql,value] of [
