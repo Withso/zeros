@@ -1,4 +1,4 @@
-import type { McpServerRegistration } from "./types";
+import { AgentFailureError, type McpServerRegistration } from "./types";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 
 /** A trusted product handler bound once to a registered workspace owner. */
@@ -123,6 +123,7 @@ export function prependPath(
 }
 
 interface Entry {
+  agentId?: string;
   workspaceId?: string;
   controller: AbortController;
   preparation: AbortController;
@@ -158,6 +159,7 @@ export class AgentSessionToolRegistry {
       void this.stop(input.executionId).catch(() => {});
     };
     const entry: Entry = {
+      agentId: input.agentId,
       workspaceId: input.workspaceId,
       controller,
       preparation: new AbortController(),
@@ -221,9 +223,9 @@ export class AgentSessionToolRegistry {
     const entry = this.entries.get(executionId);
     if (!entry) return undefined;
     const signal = AbortSignal.any([entry.controller.signal, entry.preparation.signal]);
-    signal.throwIfAborted();
     let abort!: () => void;
     try {
+      signal.throwIfAborted();
       // Discovery can outlive Stop or execution disposal. Retire its waiter
       // immediately; a late result must never continue into a native send.
       return await Promise.race([
@@ -236,6 +238,18 @@ export class AgentSessionToolRegistry {
           signal.addEventListener("abort", abort, { once: true });
         }),
       ]);
+    } catch (error) {
+      // Stop keeps its cancellation. Retired tools mean this execution is being
+      // replaced before the prompt reached the provider, so it can be resent.
+      if (entry.controller.signal.aborted && !entry.preparation.signal.aborted)
+        throw new AgentFailureError({
+          kind: "lifecycle-superseded",
+          stage: "prompt",
+          ...(entry.agentId ? { agentId: entry.agentId } : {}),
+          message:
+            "This agent execution's tools were retired before the prompt was sent. Reconnecting to its provider conversation.",
+        });
+      throw error;
     } finally {
       signal.removeEventListener("abort", abort);
     }

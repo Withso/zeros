@@ -392,3 +392,133 @@ describe("shared conversation Design tools over MCP", () => {
     expect((await call("design_document_list")).frames).toHaveLength(0);
   });
 });
+
+describe("Design prompt preparation across a directory transition", () => {
+  const unsettled = async () => {
+    for (let turn = 0; turn < 5; turn += 1)
+      await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  const observe = (pending: Promise<unknown>) => {
+    const outcome = vi.fn();
+    pending.then(
+      () => outcome("prepared"),
+      (error: unknown) => outcome(error),
+    );
+    return outcome;
+  };
+  const conversation = (
+    resolveTarget: () => Promise<null> = async () => null,
+  ) =>
+    new ConversationDesignTools({
+      mode: {
+        get: () => ({ mode: "code", revision: 0 }),
+        set: () => {
+          throw new Error("unused");
+        },
+      },
+      assertOwner: () => {},
+      resolveTarget,
+    });
+
+  it("holds the prompt until the transition resumes instead of aborting it", async () => {
+    const handler = conversation();
+    try {
+      const resume = handler.suspend();
+      const pending = handler.preparePrompt();
+      const outcome = observe(pending);
+      await unsettled();
+      expect(outcome).not.toHaveBeenCalled();
+      resume();
+      await expect(pending).resolves.toContain("Current composer mode: Code");
+    } finally {
+      handler.dispose();
+    }
+  });
+
+  it("prepares again when a transition interrupts an attempt", async () => {
+    const lookups: Array<(target: null) => void> = [];
+    const handler = conversation(
+      () => new Promise((resolve) => lookups.push(resolve)),
+    );
+    try {
+      const pending = handler.preparePrompt();
+      const outcome = observe(pending);
+      await vi.waitFor(() => expect(lookups).toHaveLength(1));
+      const resume = handler.suspend();
+      lookups[0]!(null);
+      await unsettled();
+      expect(outcome).not.toHaveBeenCalled();
+      expect(lookups).toHaveLength(1);
+      resume();
+      await vi.waitFor(() => expect(lookups).toHaveLength(2));
+      lookups[1]!(null);
+      await expect(pending).resolves.toContain("Current composer mode: Code");
+    } finally {
+      handler.dispose();
+    }
+  });
+
+  it.each(["cancel", "dispose"] as const)(
+    "lets %s end a prompt held by a transition",
+    async (action) => {
+      const handler = conversation();
+      const resume = handler.suspend();
+      try {
+        const pending = handler.preparePrompt();
+        const rejected = expect(pending).rejects.toThrow(/abort/i);
+        await unsettled();
+        if (action === "cancel") handler.cancel();
+        else handler.dispose();
+        await rejected;
+      } finally {
+        resume();
+        handler.dispose();
+      }
+    },
+  );
+
+  it("does not continue a stopped preparation under the next prompt's turn", async () => {
+    const lookups: Array<(target: null) => void> = [];
+    const handler = conversation(
+      () => new Promise((resolve) => lookups.push(resolve)),
+    );
+    try {
+      const stopped = handler.preparePrompt();
+      const rejected = expect(stopped).rejects.toThrow(/abort/i);
+      await vi.waitFor(() => expect(lookups).toHaveLength(1));
+      handler.cancel();
+      handler.beginPrompt();
+      const resume = handler.suspend();
+      lookups[0]!(null);
+      await rejected;
+      resume();
+      await unsettled();
+      expect(lookups).toHaveLength(1);
+    } finally {
+      handler.dispose();
+    }
+  });
+
+  it("names the transition when it interrupts a Design tool call", async () => {
+    let lookup!: (target: null) => void;
+    const handler = conversation(
+      () => new Promise((resolve) => (lookup = resolve)),
+    );
+    try {
+      const pending = handler.callTool(
+        "design_document_list",
+        {},
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(lookup).toBeTypeOf("function"));
+      const resume = handler.suspend();
+      lookup(null);
+      await expect(pending).rejects.toThrow(
+        "The Design directory is changing. Retry after the directory operation finishes.",
+      );
+      resume();
+    } finally {
+      handler.dispose();
+    }
+  });
+});

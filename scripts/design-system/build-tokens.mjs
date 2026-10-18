@@ -7,17 +7,14 @@
 // Only marked declaration groups change; imports, explanations, theme resets,
 // type/radius wiring, native color-scheme hints and base rules stay authored.
 // ============================================================
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { declarations, extractBlock, extractBlockRange, hslToRgb, toHex, TOKENS_FILE } from "./token-palette.mjs";
 
 export const TOKEN_RESOLVER_FILE = "styles/tokens/zeros.resolver.json";
 export const MARKETING_TOKENS_FILE = "apps/marketing/src/index.css";
-// The Design tab's private, Git-excluded build folder: the only place the
-// token preview writes.
-const DESIGN_PREVIEW_OUTPUT = /^\.zeros\/design-styles\/[A-Za-z0-9._-]+\.css$/;
 const EXTENSION = "org.zeros";
 const ALIAS = /^\{([a-z0-9-]+(?:\.[a-z0-9-]+)*)\}$/;
 const SECTION = /^[a-z0-9-]+$/;
@@ -400,33 +397,6 @@ export function renderMarketingTokenCss(root = process.cwd(), css) {
   return result;
 }
 
-/** The token declarations alone, as renderTokenCss writes them into
- * styles/zeros-tokens.css, for the Design tab's live preview of
- * styles/tokens/ edits. Nothing in the checkout changes. */
-export function renderTokenPreviewCss(root = process.cwd()) {
-  const { base, lightOverrides, themes } = readTokenSources(root);
-  const block = (selector, tokens, theme) =>
-    `${selector} {\n${[...tokens.values()].map((entry) => `  ${entry.cssName}: ${tokenCss(entry, theme, false)};`).join("\n")}\n}\n`;
-  return "/* Generated from styles/tokens/ by build-tokens.mjs --preview for the Design tab. */\n" +
-    block(":root", base, themes.dark) + block('[data-theme="light"]', lightOverrides, themes.light);
-}
-
-/** Write the preview only when it changed, atomically, so an unchanged save
- * neither touches the file nor refreshes the canvas. */
-export function writeTokenPreview(root, output) {
-  if (!DESIGN_PREVIEW_OUTPUT.test(output)) fail("--preview writes a .css file in .zeros/design-styles/", output);
-  const css = renderTokenPreviewCss(root);
-  const target = join(root, output);
-  let current = null;
-  try { current = readFileSync(target, "utf8"); } catch { /* first build */ }
-  if (current === css) return false;
-  mkdirSync(dirname(target), { recursive: true });
-  const temporary = `${target}.${process.pid}.tmp`;
-  writeFileSync(temporary, css);
-  renameSync(temporary, target);
-  return true;
-}
-
 const TOKEN_OUTPUTS = [
   [TOKENS_FILE, renderTokenCss],
   [MARKETING_TOKENS_FILE, renderMarketingTokenCss],
@@ -465,17 +435,7 @@ export function checkGeneratedTokens(root = process.cwd()) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  if (process.argv.includes("--preview")) {
-    // One short process per change while the Design tab is open: no watcher,
-    // no package manager, and no write when nothing changed.
-    const output = process.argv[process.argv.indexOf("--preview") + 1] ?? "";
-    try {
-      console.log(writeTokenPreview(process.cwd(), output) ? `wrote ${output}` : `${output} unchanged`);
-    } catch (error) {
-      console.error(error.message);
-      process.exitCode = 1;
-    }
-  } else if (process.argv.includes("--check")) {
+  if (process.argv.includes("--check")) {
     const violations = checkGeneratedTokens();
     for (const violation of violations) console.error(`${violation.file}: ${violation.message}`);
     if (violations.length) process.exitCode = 1;

@@ -76,3 +76,13 @@
   gesture owner. Rule: query the owner first, keep the 32-target cap, disclose
   overflow and assert highlight/chip/payload identity equality. Encoded in the
   workflow suite and 40-frame real-pointer smoke.
+- When integrating advisory agent drafts, retain the draft preview before the
+  canonical secondary outlines at their shared paint level. Verify both layers
+  coexist while the counted reference group and frozen source context remain
+  unchanged; the shared reference smoke now covers this integration boundary.
+- A later base can change workspace grant suspension and transcript steering
+  without conflicting with selection files. Qualify the composed tree with
+  owner/lifecycle ABA, resumed and stopped prompt preparation, frozen reference
+  payloads and inline usage ordering; neither a clean merge nor prior-tree
+  checks qualify that composition. Keep no-commit source receipts tree-bound
+  until the authorized publisher returns an immutable commit identity.

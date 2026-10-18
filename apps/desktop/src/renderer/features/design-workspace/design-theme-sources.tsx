@@ -71,7 +71,31 @@ export function DesignThemeSourceRail({
 }) {
   return (
     <div role="group" aria-label="Theme sources" className="zd-theme-sources">
-      <div className="zd-theme-rail-label">Sources</div>
+      <div className="zd-theme-rail-heading">
+        <div className="zd-theme-rail-label">Sources</div>
+        {sources.length > 0 && onUpdate ? (
+          <Tooltip
+            className="zd-theme-tooltip"
+            label="Update sources · re-read every source and rerun its build now"
+          >
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-compact"
+              className="zd-icon-button"
+              data-design-theme-update=""
+              aria-label={updating ? "Updating sources" : "Update sources"}
+              disabled={updating}
+              onClick={onUpdate}
+            >
+              <RefreshCw
+                aria-hidden="true"
+                className={updating ? "animate-spin" : undefined}
+              />
+            </Button>
+          </Tooltip>
+        ) : null}
+      </div>
       <Button
         type="button"
         variant="ghost"
@@ -139,29 +163,6 @@ export function DesignThemeSourceRail({
             <span className="zd-theme-source-name">
               <MessageSquarePlus aria-hidden="true" className="size-3.5 shrink-0" />
               <span className="truncate">Ask agent to sync</span>
-            </span>
-          </Button>
-        </Tooltip>
-      ) : null}
-      {sources.length > 0 && onUpdate ? (
-        <Tooltip
-          className="zd-theme-tooltip"
-          label="Re-read every source and rerun its build now"
-        >
-          <Button
-            type="button"
-            variant="ghost"
-            className="zd-theme-filter w-full"
-            data-design-theme-update=""
-            disabled={updating}
-            onClick={onUpdate}
-          >
-            <span className="zd-theme-source-name">
-              <RefreshCw
-                aria-hidden="true"
-                className={cn("size-3.5 shrink-0", updating && "animate-spin")}
-              />
-              <span className="truncate">{updating ? "Updating…" : "Update"}</span>
             </span>
           </Button>
         </Tooltip>

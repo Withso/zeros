@@ -11,8 +11,8 @@
 //   it — and `spawn(<cli>, …)` fails with ENOENT.
 //
 // The fix (athas pattern): once per process, ask the user's login
-// shell to print its PATH (via `$SHELL -ilc 'echo $PATH'`). Cache the
-// result. Inject it into spawn env for spawned agents.
+// shell to print its PATH (via `$SHELL -ilc 'printf "%s\n" "$PATH"'`). Cache
+// the result. Inject it into spawn env for spawned agents.
 //
 // Caveats:
 //   * `$SHELL -ilc` runs the user's shell init files (.zshrc / .bashrc).
@@ -36,6 +36,12 @@ import {
 } from "../../../env/launcher-env";
 
 const RESOLVE_TIMEOUT_MS = 3_000;
+
+/** `printf '%s\n'` prints PATH exactly. `echo` does not: zsh, dash and macOS
+ *  /bin/sh expand backslash sequences, so one entry holding a literal `\n` (a
+ *  mistyped /etc/paths.d file) split the output, and the text after it became
+ *  the whole PATH. */
+const PROBE_ARGS = ["-ilc", `printf '%s\\n' "$PATH"`] as const;
 
 /** How many times a FAILED probe may be retried by a later caller before we give
  *  up and cache the fallback for good. Small, because each retry costs up to
@@ -144,7 +150,7 @@ async function resolveOnce(): Promise<ProbeResult> {
   const fallback = process.env.PATH ?? "";
   if (configuredRunner) {
     try {
-      const result = await configuredRunner.run(shell, ["-ilc", "echo $PATH"], {
+      const result = await configuredRunner.run(shell, PROBE_ARGS, {
         timeoutMs: RESOLVE_TIMEOUT_MS,
       });
       const value = pathFromProbeOutput(result.stdout);
@@ -157,7 +163,7 @@ async function resolveOnce(): Promise<ProbeResult> {
     let stdout = "";
     let settled = false;
 
-    const child = spawn(shell, ["-ilc", "echo $PATH"], {
+    const child = spawn(shell, PROBE_ARGS, {
       env: withoutLocalDevelopment(process.env),
       stdio: ["ignore", "pipe", "pipe"],
       // Detached so a misbehaving init can't keep the parent waiting
@@ -185,7 +191,7 @@ async function resolveOnce(): Promise<ProbeResult> {
       // Login shell hung — fall back. Log to stderr so the next
       // ENOENT is at least diagnosable.
       console.warn(
-        `[login-shell-path] ${shell} -ilc 'echo $PATH' timed out after ${RESOLVE_TIMEOUT_MS}ms; using inherited PATH`,
+        `[login-shell-path] ${shell} -ilc PATH probe timed out after ${RESOLVE_TIMEOUT_MS}ms; using inherited PATH`,
       );
       settle(fallback, false);
     }, RESOLVE_TIMEOUT_MS);

@@ -4,6 +4,8 @@
 // ("thought") is working content, never the answer.
 
 import { describe, it, expect } from "vitest";
+import { applyUpdate } from "@zeros/protocol/agent-messages";
+import { ClaudeStreamTranslator } from "../../../../engine/agents/adapters/claude/translator";
 import { partitionTurn, partitionTurnSequence } from "../turn-partition";
 import type { AgentMessage } from "../use-agent-session";
 
@@ -376,5 +378,55 @@ describe("partitionTurn", () => {
       expect(ids(working)).toEqual(["t1", "c1"]);
       expect(finalOutput).toEqual([]);
     });
+  });
+});
+
+describe("Claude usage status in the working feed", () => {
+  const usage = (id: string, message = "Claude is nearing its usage limit."): AgentMessage =>
+    ({ kind: "error_notice", id, severity: "warning", recoverable: true, code: "claude-rate-limit:five_hour", message, createdAt: 1 }) as AgentMessage;
+
+  it.each([true, false])("keeps a status change in source order inside the working group (live=%s)", (live) => {
+    const segments = partitionTurnSequence([tool("before"), usage("usage"), tool("after"), phasedAgentText("answer", "final_answer")], { live });
+    expect(segments.map((segment) => [segment.kind, ids(segment.events)])).toEqual([
+      ["working", ["before", "usage", "after"]],
+      ["output", ["answer"]],
+    ]);
+  });
+
+  it("hides a status already shown by an earlier segment of the provider turn", () => {
+    const segment = [usage("repeated"), tool("after-steer")];
+    expect(ids(partitionTurn(segment).working)).toEqual(["repeated", "after-steer"]);
+    expect(ids(partitionTurn(segment, { usageEvents: [usage("earlier"), ...segment] }).working)).toEqual(["after-steer"]);
+  });
+
+  it("keeps a settled phase-less answer as output when a repeated status follows it", () => {
+    const { working, finalOutput } = partitionTurn([usage("first"), tool("work"), agentText("answer"), usage("repeat")]);
+    expect(ids(working)).toEqual(["first", "work"]);
+    expect(ids(finalOutput)).toEqual(["answer"]);
+  });
+
+  it("presents legacy usage feedback as provider status in its arrival position", () => {
+    const legacy = { kind: "text", role: "agent", phase: "commentary", id: "row", messageId: "claude-feedback-old",
+      text: "Claude is nearing its usage limit.", createdAt: 1 } as unknown as AgentMessage;
+    const [segment] = partitionTurnSequence([tool("before"), legacy, tool("after")], { live: true });
+    expect(ids(segment.events)).toEqual(["before", "row", "after"]);
+    expect(segment.events[1]).toMatchObject({ kind: "error_notice", code: "claude-rate-limit:legacy" });
+  });
+
+  it("keeps the producer's notice between the tool calls it arrived between", () => {
+    let messages: AgentMessage[] = [];
+    const translator = new ClaudeStreamTranslator({ sessionId: "usage-order", emit: (note) => { messages = applyUpdate(messages, note); } });
+    const bash = (id: string, command: string) => ({ type: "assistant", parent_tool_use_id: null,
+      message: { content: [{ type: "tool_use", id, name: "Bash", input: { command } }] } });
+    const warning = { type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour" } };
+    translator.beginTurn();
+    translator.feed(bash("toolu_before", "pwd"));
+    translator.feed({ ...warning, uuid: "usage-first" });
+    translator.feed(bash("toolu_after", "ls"));
+    translator.feed({ ...warning, uuid: "usage-repeat" });
+    translator.feed(bash("toolu_last", "git status"));
+    const [segment] = partitionTurnSequence(messages, { live: true });
+    expect(segment.events.map((event) => event.kind === "tool" ? event.rawInput : event.kind === "error_notice" ? event.message : event.kind))
+      .toEqual([{ command: "pwd" }, "Claude is nearing its usage limit.", { command: "ls" }, { command: "git status" }]);
   });
 });

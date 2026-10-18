@@ -54,12 +54,14 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
   await expect(recovery).not.toContainText("No conversation found");
   await expect(recovery).not.toContainText("Background Task");
   await expect(recovery).not.toContainText("1 message");
-  const usageAtTail = await recovery.evaluate(element => {
+  const usageInline = await recovery.evaluate(element => {
     const notice = element.querySelector("[data-provider-usage-notice]");
+    const agent = element.querySelector("[data-agent-group]");
     const report = [...element.querySelectorAll("p")].find(p => p.textContent.includes("The conversation continued."));
-    return !!report && !!(report.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const precedes = (first, second) => !!(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+    return !!notice?.closest(".zeros-working-feed") && !!agent && !!report && precedes(notice, agent) && precedes(agent, report);
   });
-  check("Recovered Claude turns show Signed in, three real Agent groups and one usage message after the output", usageAtTail);
+  check("Recovered Claude turns show Signed in, three real Agent groups and one usage message in the working feed before the work it preceded", usageInline);
   const inlineUsage = await recovery.locator("[data-provider-usage-notice]").evaluate(element => {
     const style = getComputedStyle(element);
     return !element.closest("[data-agent-notice]") &&
@@ -70,9 +72,14 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
   });
   check("Usage feedback is a plain inbetween message with no banner surface or action", inlineUsage);
   await recovery.getByRole("button", { name: "Show settled recovery", exact: true }).click();
-  await expect(recovery.locator("[data-provider-usage-notice]")).toHaveCount(1);
+  const settledWork = recovery.getByRole("button", { name: "1 message, 3 agents", exact: true });
+  await expect(settledWork).toHaveAttribute("aria-expanded", "false");
+  await expect(recovery.locator("[data-provider-usage-notice]")).toHaveCount(0);
   await expect(recovery).not.toContainText("No conversation found");
-  await expect(recovery).not.toContainText("message");
+  await settledWork.click();
+  await expect(recovery.locator("[data-provider-usage-notice]")).toHaveCount(1);
+  check("Settled usage folds into the working summary with the work it preceded and returns when expanded", true);
+  await settledWork.click();
   await recovery.getByRole("button", { name: "Show live recovery", exact: true }).click();
   const monitor = page.locator("#claude-monitor-activity");
   await expect(monitor.getByText("Waiting for 2 background tasks", { exact: true })).toBeVisible();

@@ -486,6 +486,14 @@ function leave(session: Session): void {
   session.idle.unref?.();
 }
 
+/** Checkouts a Design tab shows now: their presence has neither been
+ * withdrawn nor expired. */
+export function presentDesignStyleBuildRoots(): string[] {
+  return [...sessions.values()]
+    .filter((session) => session.present)
+    .map((session) => session.root);
+}
+
 /** A Design tab shows this checkout (`present`), or stopped showing it. The
  * renderer repeats `present` while it stays visible; returning before the idle
  * timer fires finds every build still running. Resolves once builds have been

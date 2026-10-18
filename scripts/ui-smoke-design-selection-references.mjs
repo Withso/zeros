@@ -44,7 +44,9 @@ export async function runDesignSelectionReferencesSmoke({ page, check }) {
     );
 
     await layer("home-hero").click();
+    await expect(page.locator('[data-design-element-overlay="home-hero"]')).toHaveCount(1);
     await layer("home-heading").click({ modifiers: ["Shift"] });
+    await expect(page.locator('[data-design-element-overlay="home-heading"]')).toHaveCount(1);
     await row("pricing.html").click({ modifiers: ["Shift"] });
     await expect(pill).toHaveText("3 selected");
     await expect(pill).toHaveCount(1);
@@ -54,6 +56,33 @@ export async function runDesignSelectionReferencesSmoke({ page, check }) {
       "true",
     );
     await expect(row("pricing.html")).toHaveAttribute("aria-selected", "true");
+    await page.evaluate(async () => {
+      const { receiveDesignAgentDraft } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-agent-drafts.ts");
+      const harness = window.__zerosHarnessAgentDrafts;
+      receiveDesignAgentDraft(harness.workspaceId, {
+        id: "selection-draft-overlay", chatId: "selection-reference-smoke", directory: harness.directory,
+        file: "home.html", operation: "write", phase: "writing", revision: 1,
+        preview: { srcDoc: "<!doctype html><html><body>Draft preview</body></html>", width: 1440, height: 900, title: "Draft preview" },
+      });
+    });
+    try {
+      const homeFrame = page.locator('[data-design-frame="home.html"]');
+      await expect(homeFrame.locator('[data-design-agent-draft="selection-draft-overlay"] iframe[data-design-agent-draft-buffer="shown"]')).toHaveCount(1);
+      await expect(homeFrame.locator("[data-design-secondary-selection]")).toHaveCount(2);
+      expect(await homeFrame.evaluate(frame => {
+        const draft = frame.querySelector("[data-design-agent-draft]");
+        const outline = frame.querySelector("[data-design-secondary-selection]");
+        return Boolean(draft && outline && (draft.compareDocumentPosition(outline) & Node.DOCUMENT_POSITION_FOLLOWING));
+      })).toBe(true);
+      await expect(pill).toHaveText("3 selected");
+      await page.screenshot({ path: ".context/design-selection-agent-draft-overlay.png" });
+      check("an agent draft overlay and cross-frame secondary selection outlines coexist without changing canonical references", true);
+    } finally {
+      await page.evaluate(async () => {
+        const { retireDesignAgentDraft } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-agent-drafts.ts");
+        retireDesignAgentDraft(window.__zerosHarnessAgentDrafts.workspaceId, "selection-draft-overlay");
+      });
+    }
     await page
       .getByRole("button", { name: "Save reference draft", exact: true })
       .click();

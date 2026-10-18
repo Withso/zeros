@@ -29,6 +29,10 @@
    serial requests and a final owner-ID comparison alone do not fence A → B → A.
    Let a held read observe hidden state before the visibility event runs; retiring
    that read must still leave one catch-up for a quick reveal.
+   For a scoped gate, drive the real request dispatcher for every op it names;
+   calling the gate helper directly cannot show that dispatch never selects it.
+   A suspension holds prompt preparation until it resumes; Stop still ends the
+   wait.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
    For worker failures, retain the first closed diagnostic before cleanup and

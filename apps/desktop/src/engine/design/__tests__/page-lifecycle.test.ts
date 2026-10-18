@@ -82,6 +82,32 @@ describe("Design page lifecycle", () => {
     }));
 
   it.each([
+    { title: "Components", folder: "components-2" },
+    { title: "  COMPONENTS ", folder: "components-2" },
+    { title: "Assets", folder: "assets-2" },
+  ])(
+    "gives a page titled $title a valid unique folder instead of the reserved name",
+    ({ title, folder }) =>
+      run(async () => {
+        const components = path.join(root, directory, "components");
+        mkdirSync(components, { recursive: true });
+        const shared = readdirSync(components);
+        const page = await createDesignPage(root, { title });
+        expect(page).toMatchObject({ title: title.trim(), folder });
+        const created = await createDesignFrame(root, {
+          title: "Button",
+          pageId: page.id,
+        });
+        expect(created.file).toBe(`${folder}/button.html`);
+        // The shared components folder is untouched and the canvas stays readable.
+        expect(readdirSync(components)).toEqual(shared);
+        expect(
+          JSON.parse(read()).pages.map((entry: { folder: string }) => entry.folder),
+        ).toEqual(["page-1", folder]);
+      }),
+  );
+
+  it.each([
     { title: "Café déjà vu", folder: "cafe-deja-vu", frame: "cafe-deja-vu" },
     { title: "✨", folder: "page-2", frame: "frame" },
     {

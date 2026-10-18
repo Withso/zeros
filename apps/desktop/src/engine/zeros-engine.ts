@@ -12,8 +12,10 @@ import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
 import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
-import { configureDesignStyleBuilds, designStyleInputChanged, hasRunningDesignStyleBuilds, stopDesignStyleBuilds } from "./design/style-builds";
+import { configureDesignStyleBuilds, designStyleInputChanged, hasRunningDesignStyleBuilds, presentDesignStyleBuildRoots, stopDesignStyleBuilds } from "./design/style-builds";
+import { DesignChangePoller, designSnapshotDirectory } from "./design/change-poller";
 import { configureDesignFonts } from "./design/style-fonts";
+import { fenceDesignSnapshotReads } from "./design/snapshot-epoch";
 import type { DesignCaptureService } from "./design/capture-service";
 // ──────────────────────────────────────────────────────────
 // ZerosEngine — The heart of Zeros V2
@@ -159,8 +161,19 @@ import { codeReviewAgentActor, codeReviewProfileName } from "./code-review/actor
 import { CodeReviewError } from "./code-review/errors";
 import {
   DESIGN_CANVAS_FILE,
+  activeDesignDirectoryNameFor,
   designDirectoryNameFor,
+  withDesignDirectoryNameLease,
 } from "./design/directory-registry";
+import {
+  DesignAgentActivity,
+  type DesignAgentTarget,
+} from "./design/agent-drafts";
+import {
+  composeDesignAgentDraftPreview,
+  composeDesignAgentStylesheetPreview,
+  readDesignAgentDraftBase,
+} from "./design/agent-draft-preview";
 import {
   discoverDesignDirectories,
   resolveDesignDirectoryPointerState,
@@ -903,6 +916,12 @@ export class ZerosEngine {
   private gitWatcher: GitWatcher | null = null;
   /** Forwards worktree content events to live one-shot style builds. */
   private stopStyleBuildInputs: (() => void) | null = null;
+  /** Live canvas feedback for Local agents' native Design edits. Never
+   * constructed for a cloud worker. */
+  private designAgentActivity: DesignAgentActivity | null = null;
+  /** Packaged Local engines poll the Design directory a Design tab shows on
+   * a short interval; see design/change-poller.ts. */
+  private designChangePoller: DesignChangePoller | null = null;
   /** Coalesce filesystem invalidations behind one authority-reconciliation
    * lane. Settings and Git watchers can fire together for one checkout; this
    * prevents overlapping session retirement/territory publication. */
@@ -1109,6 +1128,9 @@ export class ZerosEngine {
    * immutable-boundary handoff. Native sessions never stop or change backend
    * for this set. */
   private readonly designTerritoryTransitions = new Set<string>();
+  /** Settles when an owner leaves designTerritoryTransitions. */
+  private designTerritoryOwnerRelease: Promise<void> | null = null;
+  private wakeDesignTerritoryOwnerWaiters: (() => void) | null = null;
   /** Serializes changes to the app-wide Design owner map and tool authority.
    * Only cloud Code process admission depends on this count. */
   private globalDesignTerritoryTransitionCount = 0;
@@ -1514,6 +1536,9 @@ export class ZerosEngine {
       // Only Design re-reads; Files and Changes ignore a rebuilt output.
       changed: (workspacePath) => {
         const workspaceId = getWorkspaceByPath(workspacePath)?.id;
+        // Outputs live in ignored .zeros/design-styles/, so no watcher event
+        // fences an aggregate read that began before this rebuild.
+        fenceDesignSnapshotReads(workspacePath);
         this.broadcast(
           createMessage({
             type: "DB_CHANGED",
@@ -1529,6 +1554,7 @@ export class ZerosEngine {
     configureDesignFonts({
       onReady: (roots) => {
         const workspaceIds = roots.flatMap((root) => getWorkspaceByPath(root)?.id ?? []);
+        for (const root of roots) fenceDesignSnapshotReads(root);
         this.broadcast(
           createMessage({
             type: "DB_CHANGED",
@@ -1615,7 +1641,7 @@ export class ZerosEngine {
         ? { agentAuthIdentity: { uid: cloudWorker.uid, gid: cloudWorker.gid } }
         : undefined,
     );
-    // Warm the login-shell PATH probe (`$SHELL -ilc 'echo $PATH'`) off the
+    // Warm the login-shell PATH probe (`$SHELL -ilc 'printf …'`) off the
     // critical path. It's cached process-wide and every one-shot command shell
     // — Setup script, Run action — awaits it before spawning; resolving it here
     // keeps that from showing up as a stall on the FIRST Run of a session.
@@ -2411,6 +2437,11 @@ export class ZerosEngine {
             }),
           );
         },
+        onToolInput: (agentId, sessionId, event) => {
+          // Local Design drafts only; a cloud worker never constructs this.
+          if (this.sessionAgent.get(sessionId) !== agentId) return;
+          this.designAgentActivity?.observeToolInput(sessionId, event);
+        },
         onSessionUpdate: (
           agentId: string,
           notification: SessionNotification,
@@ -2597,6 +2628,10 @@ export class ZerosEngine {
             }
           }
           if (notification.update.sessionUpdate !== "turn_usage_update") this.touchActivePrompt(executionId);
+          // A finished Design edit refreshes the Local canvas now, and a
+          // streaming draft settles; see design/agent-drafts.ts.
+          if (executionAgentId === agentId)
+            this.designAgentActivity?.observeSessionUpdate(executionId, normalizedNotification.update);
           this.routeSessionScoped(
             executionId,
             createMessage({
@@ -3478,6 +3513,13 @@ export class ZerosEngine {
     // One-shot Design style builds re-run on their inputs from this watcher,
     // rather than each running a watcher of its own.
     this.stopStyleBuildInputs = onWorktreeContentChange(designStyleInputChanged);
+    if (!this.cloudWorker) this.designAgentActivity = this.createDesignAgentActivity();
+    // Development engines receive native file events within ~120 ms; the
+    // packaged engine's worktree poll below runs every 1.5 s.
+    if (!this.cloudWorker && !isDevRuntime()) {
+      this.designChangePoller = this.createDesignChangePoller();
+      this.designChangePoller.start();
+    }
     this.gitWatcher = startGitWatcher(
       () => this.cloudRuntimeHandoffFenced ? [] : this.workspace.gitWatchTargets(),
       (change) => {
@@ -3741,6 +3783,10 @@ export class ZerosEngine {
     this.gitWatcher = null;
     this.stopStyleBuildInputs?.();
     this.stopStyleBuildInputs = null;
+    this.designAgentActivity?.dispose();
+    this.designAgentActivity = null;
+    this.designChangePoller?.stop();
+    this.designChangePoller = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
@@ -5746,9 +5792,7 @@ export class ZerosEngine {
         try { return await mutation(); } finally { resumeTools.forEach((resume) => resume()); }
       } finally {
         release();
-        for (const target of validated) {
-          this.designTerritoryTransitions.delete(target.workspaceId);
-        }
+        this.releaseDesignTerritoryOwners(validated);
       }
     }
     const validated: typeof ordered = [];
@@ -5873,10 +5917,27 @@ export class ZerosEngine {
       for (const workspaceRoot of suspendedUtilityRoots) {
         this.agents.resumePooledUtilityWorkspaceTerritory(workspaceRoot);
       }
-      for (const target of validated) {
-        this.designTerritoryTransitions.delete(target.workspaceId);
-      }
+      this.releaseDesignTerritoryOwners(validated);
     }
+  }
+
+  private designTerritoryOwnerReleased(): Promise<void> {
+    this.designTerritoryOwnerRelease ??= new Promise<void>((resolve) => {
+      this.wakeDesignTerritoryOwnerWaiters = resolve;
+    });
+    return this.designTerritoryOwnerRelease;
+  }
+
+  private releaseDesignTerritoryOwners(
+    targets: readonly { workspaceId: string }[],
+  ): void {
+    for (const target of targets) {
+      this.designTerritoryTransitions.delete(target.workspaceId);
+    }
+    const wake = this.wakeDesignTerritoryOwnerWaiters;
+    this.designTerritoryOwnerRelease = null;
+    this.wakeDesignTerritoryOwnerWaiters = null;
+    wake?.();
   }
 
   /** Qualified-cloud Code authority is creation-time state. The local desktop
@@ -10927,9 +10988,15 @@ export class ZerosEngine {
         ) {
           return null;
         }
-        if (!lifecycleMutationWorkspaceId) return null;
+        // These lifecycles own the barrier that lifecycleMutationWorkspaceId
+        // feeds, so it is always null for them; their exact owner is the
+        // request's workspaceId. The global gate would suspend Design tools in
+        // every workspace's chats. A rowless owner (the cloud primary checkout)
+        // keeps the global gate.
+        const workspaceId = params.workspaceId;
+        if (typeof workspaceId !== "string" || !workspaceId) return null;
         try {
-          return getWorkspaceById(lifecycleMutationWorkspaceId);
+          return getWorkspaceById(workspaceId);
         } catch {
           return null;
         }
@@ -11016,15 +11083,29 @@ export class ZerosEngine {
         }
       }
       const operation = managedLifecycleRegistryTarget
-        ? this.withDesignTerritoryTransition(
-            [
-              {
-                workspaceId: managedLifecycleRegistryTarget.id,
-                designDirectory: designDirOf(managedLifecycleRegistryTarget),
-              },
-            ],
-            dispatch,
-          )
+        ? (async () => {
+            // A repeat or follow-up lifecycle for this owner (another window,
+            // archive then restore) queues behind its transition, as it did
+            // behind the app-wide gate, instead of failing the owner check.
+            // Lifecycles never run inside a transition, so this cannot wait on
+            // itself.
+            while (
+              this.designTerritoryTransitions.has(
+                managedLifecycleRegistryTarget.id,
+              )
+            ) {
+              await this.designTerritoryOwnerReleased();
+            }
+            return this.withDesignTerritoryTransition(
+              [
+                {
+                  workspaceId: managedLifecycleRegistryTarget.id,
+                  designDirectory: designDirOf(managedLifecycleRegistryTarget),
+                },
+              ],
+              dispatch,
+            );
+          })()
         : changesDesignOwnerRegistry
           ? this.withGlobalDesignTerritoryTransition(dispatch)
           : recognitionMutationTarget
@@ -11303,6 +11384,88 @@ export class ZerosEngine {
     );
   }
 
+  /** The Local managed workspace and active Design directory an agent
+   * execution writes into, or null. Cloud workers never ask. */
+  private designAgentTarget(executionId: string): DesignAgentTarget | null {
+    if (this.cloudWorker) return null;
+    const chatId = this.sessionChat.get(executionId);
+    if (!chatId) return null;
+    let cwd: string | undefined;
+    try {
+      cwd = getChat(chatId)?.folder;
+    } catch {
+      return null;
+    }
+    if (!cwd) return null;
+    const workspaceId = this.workspace.workspaceIdForCwd(cwd);
+    if (!workspaceId || workspaceId === LOCAL_MAIN_WORKSPACE_ID) return null;
+    let workspace: ReturnType<typeof getWorkspaceById>;
+    try {
+      workspace = getWorkspaceById(workspaceId);
+    } catch {
+      return null;
+    }
+    if (!workspace || workspace.archivedAt != null) return null;
+    const directory = activeDesignDirectoryNameFor(workspace.path);
+    if (!directory) return null;
+    return { workspaceId, workspacePath: workspace.path, cwd, directory, chatId };
+  }
+
+  private createDesignAgentActivity(): DesignAgentActivity {
+    return new DesignAgentActivity({
+      target: (executionId) => this.designAgentTarget(executionId),
+      compose: (target, file, html) =>
+        withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+          composeDesignAgentDraftPreview(target.workspacePath, file, html),
+        ),
+      composeStylesheet: (target, file, css) =>
+        withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+          composeDesignAgentStylesheetPreview(target.workspacePath, file, css),
+        ),
+      readSource: (target, file) =>
+        withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+          readDesignAgentDraftBase(target.workspacePath, file),
+        ),
+      // Drafts carry authored content: only the trusted local desktop gets them.
+      publish: (workspaceId, draft) =>
+        this.router.broadcastLocal(
+          createMessage({ type: "DESIGN_AGENT_DRAFT", source: "engine", workspaceId, draft }),
+        ),
+      // The same Design-only revalidation a rebuilt style output uses, ahead
+      // of the worktree watcher (a 1.5 s stat poll in packaged builds).
+      saved: (target) => {
+        this.refreshDesignCanvas(target.workspacePath, target.workspaceId);
+        // That refresh covers these files: the poller must not repeat it.
+        void this.designChangePoller?.absorb(target.workspacePath);
+      },
+      // A shell command or script may have written Design files itself.
+      toolSettled: (target) => void this.designChangePoller?.check(target.workspacePath),
+    });
+  }
+
+  private createDesignChangePoller(): DesignChangePoller {
+    return new DesignChangePoller({
+      presentRoots: presentDesignStyleBuildRoots,
+      directory: (root) => designSnapshotDirectory(root) ?? activeDesignDirectoryNameFor(root) ?? null,
+      changed: (root) => this.refreshDesignCanvas(root, getWorkspaceByPath(root)?.id),
+    });
+  }
+
+  /** Re-read one checkout's Design canvas now: the Design-only revalidation
+   * a rebuilt style output uses, ahead of the worktree watcher. A checkout
+   * without a workspace row (the main checkout) refreshes every canvas. */
+  private refreshDesignCanvas(workspacePath: string, workspaceId: string | undefined): void {
+    fenceDesignSnapshotReads(workspacePath);
+    this.broadcast(
+      createMessage({
+        type: "DB_CHANGED",
+        source: "engine",
+        kinds: ["designStyles"],
+        ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
+      }),
+    );
+  }
+
   /** Publish prompt lifecycle independently of the request/response socket.
    * The current owner may be a renderer that adopted the session after the
    * prompt began, which is precisely why the original RPC response is not
@@ -11312,6 +11475,7 @@ export class ZerosEngine {
     state: "running" | "completed" | "failed" | "cancelled",
     stopReason: StopReason | null = null,
   ): void {
+    if (state !== "running") this.designAgentActivity?.endExecution(prompt.sessionId);
     this.routeSessionScoped(
       prompt.sessionId,
       createMessage({

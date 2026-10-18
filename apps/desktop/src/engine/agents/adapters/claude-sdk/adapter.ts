@@ -1478,6 +1478,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         // `stream_event` deltas (see includePartialMessages below) and skip
         // the matching full blocks of the final assistant message.
         streamPartials: true,
+        // Streamed tool arguments feed engine-local observers (Design drafts).
+        onToolInput: (event) => this.ctx.emit.onToolInput?.(this.agentId, zerosSessionId, event),
         onUnknown: () => {
           /* benign — the SDK emits many message subtypes we don't render */
         },

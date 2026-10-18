@@ -254,7 +254,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
           {(!authRequired || visibleEvents.length > 0) && (
             <TurnEventList
               events={visibleEvents}
-              usageEvents={ownsProviderFooter ? turn.providerEvents : null}
+              usageEvents={turn.providerEvents}
               failureTurnId={!cloudAdmission && !authRequired && shared.chatId ? turn.recordedTurnId ?? undefined : undefined}
               isActive={isActiveProviderSegment}
               isStreaming={turnInFlight && !authStopped}
