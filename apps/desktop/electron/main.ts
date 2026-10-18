@@ -139,6 +139,7 @@ import { installIframeHeaderStripping } from "./iframe-headers";
 import { registerAllCommands } from "./ipc/commands";
 import { stopProviderSubscriptions } from "./ipc/commands/provider-subscription";
 import { stopCloudProviderAuth } from "./ipc/commands/cloud-provider-auth";
+import { startProcessMetricsLogging } from "./ipc/commands/process-metrics";
 import {
   readPersistedAppearanceMode,
   readPersistedWindowBackground,
@@ -1253,6 +1254,7 @@ function setupDockBrand(): void {
 
 
 app.whenReady().then(async () => {
+  app.once("will-quit", startProcessMetricsLogging());
   if (IS_LOCAL_DEVELOPMENT && process.env.ZEROS_SHARED_SECRETS_DIR) {
     try {
       migrateLocalProviderSecrets(app.getPath("userData"));
