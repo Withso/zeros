@@ -100,6 +100,7 @@ vi.mock("../../../session-paths", () => ({
 
 import { CodexAppServerAdapter } from "../app-server-adapter";
 import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
+import * as cloudExecution from "../../../cloud-provider-execution";
 
 const TEXT: ContentBlock[] = [{ type: "text", text: "go" } as never];
 
@@ -366,6 +367,23 @@ describe("codex permission settlement receipts", () => {
     expect(rt.respondCalls).toEqual([
       { permissionId: "permission-auto", response: { decision: "accept" } },
     ]);
+  });
+
+  it.each([false, true])("keeps approval receipts without repeated Local console writes, cloud=%s", async (cloud) => {
+    const { adapter, emit } = makeAdapter();
+    await adapter.newSession({ cwd: "/tmp/proj", env: { ZEROS_PERMISSION_MODE: "auto" } });
+    const placement = vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue(
+      cloud ? {} as cloudExecution.CloudProviderExecution : null,
+    );
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 100; i += 1) raiseApproval(`approved-${i}`);
+      expect(rt.respondCalls).toHaveLength(100);
+      expect(emit.onPermissionRequest).toHaveBeenCalledTimes(100);
+      expect(emit.onPermissionSettled).toHaveBeenCalledTimes(100);
+      const lines = log.mock.calls.filter(([line]) => String(line).includes("auto-approved"));
+      expect(lines.length).toBe(cloud ? 100 : 0);
+    } finally { placement.mockRestore(); log.mockRestore(); await adapter.dispose(); }
   });
 
   it("Approve for me still prompts for sandbox-escalation permission profiles", async () => {
