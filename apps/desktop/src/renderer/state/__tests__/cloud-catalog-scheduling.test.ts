@@ -21,6 +21,24 @@ const h = vi.hoisted(() => ({
   access: false,
   selection: new Set<() => void>(),
   stream: vi.fn(), streamSelect: vi.fn(), streamDispose: vi.fn(),
+  rollout: false,
+  members: null as string[] | null,
+  membershipShape: "complete" as "complete" | "empty" | "legacy" | "missing personal",
+  membership: new Set<() => void>(),
+}));
+vi.mock("../cloud-workspace-stream-rollout", () => ({ cloudCatalogStreamRolloutEnabled: () => h.rollout }));
+vi.mock("../../features/team/team-store", async original => ({
+  ...await original<typeof import("../../features/team/team-store")>(),
+  getTeamStoreState: () => {
+    const members = h.members?.map(id => ({ id, isPersonal: false })) ?? [];
+    const organizations = h.membershipShape === "empty" ? [] : h.membershipShape === "missing personal" ? members
+      : [{ id: "99999999-9999-4999-8999-999999999999", isPersonal: true }, ...members];
+    return { status: h.members === null ? "idle" : "ready", me: h.members === null ? null : {
+      organizations: h.membershipShape === "legacy" ? undefined : organizations,
+      teams: organizations,
+    } };
+  },
+  subscribeOrganizationSnapshots: (listener: () => void) => { h.membership.add(listener); return () => { h.membership.delete(listener); }; },
 }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
@@ -73,6 +91,7 @@ vi.mock("../../platform/cloud-transcript-cache", async (original) => ({
   readCachedCloudTranscriptWindow: h.readCached,
 }));
 import { CloudWorkspaceLifecycle } from "../cloud-workspace-lifecycle";
+import { setCloudWorkspaceStreamCoverage } from "../cloud-workspace-stream-coverage";
 import {
   acceptCloudWorkspaceDocument,
   clearCloudWorkspaceCatalog,
@@ -138,6 +157,8 @@ beforeEach(() => {
   h.auth.clear();
   h.folder = "/local-personal";
   h.access = false; h.selection.clear();
+  h.rollout = false; h.members = null; h.membershipShape = "complete";
+  h.membership.clear(); setCloudWorkspaceStreamCoverage(null);
   h.stream.mockReturnValue({ select: h.streamSelect, dispose: h.streamDispose });
   h.activeChatId = undefined;
   h.cache.mockReset().mockReturnValue([]);
@@ -160,12 +181,62 @@ afterEach(() => {
   cleanup?.();
   cleanup = undefined;
   clearCloudWorkspaceCatalog();
+  setCloudWorkspaceStreamCoverage(null);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
 describe("cloud catalog timer ownership", () => {
+  const otherOrg = "33333333-3333-4333-8333-333333333333";
+  const other = () => ({ ...doc(), id: "44444444-4444-4444-8444-444444444444", organizationId: otherOrg, teamId: otherOrg });
+  const covered = (mixed = false) => setCloudWorkspaceStreamCoverage({ streamId: target.organizationId, leaseId: target.workspaceId,
+    sequence: 1, revision: 1, state: "open", catalogRequired: false, organizations: [
+      { organizationId: target.organizationId, deviceStream: true, presence: true },
+      ...(mixed ? [{ organizationId: otherOrg, deviceStream: false, presence: false }] : []),
+    ] });
+
+  it("has no periodic catalog callbacks or reads for ten minutes with complete coverage, then restores global fallback on loss", async () => {
+    h.rollout = true; h.members = [target.organizationId]; h.folder = folder;
+    await mount(); const rows = getCloudWorkspaceRows(); covered();
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(h.list).toHaveBeenCalledOnce(); expect(timerFirings).toBe(0); expect(getCloudWorkspaceRows()).toBe(rows);
+    setCloudWorkspaceStreamCoverage(null); await flush();
+    expect(h.list).toHaveBeenCalledTimes(2); expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("polls only the uncovered member for ten minutes, even while a covered organization is transitioning", async () => {
+    h.rollout = true; h.members = [target.organizationId, otherOrg]; h.folder = folder;
+    h.list.mockImplementation(async (org?: string) => org ? [other()] : [doc(), other()]);
+    await mount(); covered(true); acceptCloudWorkspaceDocument(doc(2, "waking"));
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(h.list.mock.calls.filter(args => args.length === 0)).toHaveLength(1);
+    expect(h.list.mock.calls.filter(([org]) => org === otherOrg)).toHaveLength(20);
+    expect(h.list.mock.calls.some(([org]) => org === target.organizationId)).toBe(false);
+    expect(timerFirings).toBe(20); expect(cloudWorkspaceDocument(target)?.status).toBe("waking");
+  });
+
+  it.each(["guest", "unknown", "rollout off"])("keeps the global legacy cadence for %s organization knowledge", async kind => {
+    h.rollout = kind !== "rollout off"; h.members = kind === "unknown" ? null : [target.organizationId];
+    await mount(); covered(kind === "guest"); await vi.advanceTimersByTimeAsync(600_000);
+    expect(h.list).toHaveBeenCalledTimes(21); expect(h.list.mock.calls.every(args => args.length === 0)).toBe(true);
+    expect(timerFirings).toBe(20);
+  });
+
+  it("resumes observation when membership becomes unknown without waiting for the old cadence", async () => {
+    h.rollout = true; h.members = [target.organizationId]; await mount(); covered();
+    await vi.advanceTimersByTimeAsync(5_000); h.members = null;
+    for (const changed of h.membership) changed(); await flush();
+    expect(h.list).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["empty", "legacy", "missing personal"] as const)("keeps global fallback for a %s membership snapshot", async shape => {
+    h.rollout = true; h.members = [target.organizationId]; h.membershipShape = shape;
+    await mount(); covered(); await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.list).toHaveBeenCalledTimes(3);
+    expect(h.list.mock.calls.every(args => args.length === 0)).toBe(true);
+  });
+
   it.each(["/local-personal", "/organization-local"])("constructs no stream for the native %s selection", async selected => {
     Object.assign(browser, { __ZEROS_NATIVE__: {} }); h.access = true; h.folder = selected;
     await mount(); await vi.advanceTimersByTimeAsync(60_000);

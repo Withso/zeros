@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControlPlaneError } from "../../features/team/control-plane";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
-const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), recover: vi.fn(), projects: vi.fn(() => [] as unknown[]) }));
+const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), recover: vi.fn(), projects: vi.fn(() => [] as unknown[]), rollout: false }));
+vi.mock("../cloud-workspace-stream-rollout", () => ({ cloudCatalogStreamRolloutEnabled: () => api.rollout }));
 vi.mock("../../platform/cloud-workspaces", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../platform/cloud-workspaces")>()),
   listCloudWorkspaceDocuments: api.list,
@@ -10,6 +11,7 @@ vi.mock("../../platform/cloud-workspaces", async (importOriginal) => ({
   recoverCloudWorkspace: api.recover,
 }));
 vi.mock("../projects-store", () => ({ loadProjects: api.projects }));
+import { setCloudWorkspaceStreamCoverage } from "../cloud-workspace-stream-coverage";
 import {
   acceptCloudWorkspaceDocument,
   clearCloudWorkspaceCatalog,
@@ -72,6 +74,7 @@ function doc(version: number, status = "ready"): CloudWorkspaceDocument {
   };
 }
 beforeEach(() => {
+  api.rollout = false; setCloudWorkspaceStreamCoverage(null);
   clearCloudWorkspaceCatalog();
   vi.clearAllMocks();
   api.projects.mockReturnValue([]);
@@ -139,6 +142,98 @@ describe("catalog stream races", () => {
   });
 });
 
+describe("organization-scoped catalog fallback", () => {
+  afterEach(() => api.list.mockReset());
+  const other = { organizationId: "33333333-3333-4333-8333-333333333333", workspaceId: "44444444-4444-4444-8444-444444444444" };
+  const otherDoc = () => ({ ...doc(6), id: other.workspaceId, organizationId: other.organizationId, teamId: other.organizationId });
+
+  it("reads only uncovered organizations without pruning or moving another owner's snapshot", async () => {
+    acceptCloudWorkspaceDocument(doc(6)); acceptCloudWorkspaceDocument(otherDoc());
+    const before = getCloudWorkspaceRows(), kept = cloudWorkspaceDocument(target);
+    api.list.mockResolvedValue([otherDoc()]);
+    await refreshCloudWorkspaceCatalog([other.organizationId]);
+    expect(api.list).toHaveBeenCalledExactlyOnceWith(other.organizationId);
+    expect(cloudWorkspaceDocument(target)).toBe(kept); expect(getCloudWorkspaceRows()).toBe(before);
+    api.list.mockResolvedValue([]); await refreshCloudWorkspaceCatalog([other.organizationId]);
+    expect(cloudWorkspaceDocument(other)).toBeUndefined(); expect(cloudWorkspaceDocument(target)).toBe(kept);
+  });
+
+  it("keeps concurrent access updates and removals over an older scoped response", async () => {
+    acceptCloudWorkspaceDocument(doc(6)); acceptCloudWorkspaceDocument(otherDoc());
+    let finish!: (rows: CloudWorkspaceDocument[]) => void;
+    api.list.mockReturnValueOnce(new Promise<CloudWorkspaceDocument[]>(resolve => { finish = resolve; }));
+    const reading = refreshCloudWorkspaceCatalog([other.organizationId]);
+    const update = { ...doc(6), capabilities: { ...doc(6).capabilities, canWrite: false } };
+    acceptCloudWorkspaceDocument(update);
+    applyCloudWorkspaceStreamCatalog({ t: "catalog.changed", c: "removed", d: {
+      workspaceId: other.workspaceId, version: 6, catalogVersion: 1, op: "remove",
+    } });
+    finish([otherDoc()]); await reading;
+    expect(cloudWorkspaceDocument(other)).toBeUndefined();
+    expect(cloudWorkspaceDocument(target)?.capabilities.canWrite).toBe(false);
+  });
+
+  it.each(["covered", "fallback"])("keeps row order when the %s organization publishes during a scoped read", async owner => {
+    acceptCloudWorkspaceDocument(doc(6)); acceptCloudWorkspaceDocument(otherDoc());
+    acceptCloudWorkspaceDocument({ ...doc(6), id: "55555555-5555-4555-8555-555555555555" });
+    let finish!: (rows: CloudWorkspaceDocument[]) => void;
+    api.list.mockReturnValueOnce(new Promise<CloudWorkspaceDocument[]>(resolve => { finish = resolve; }));
+    const reading = refreshCloudWorkspaceCatalog([other.organizationId]);
+    const current = owner === "covered" ? doc(6) : otherDoc();
+    acceptCloudWorkspaceDocument({ ...current, capabilities: { ...current.capabilities, canWrite: false } });
+    const published = getCloudWorkspaceRows();
+    finish([otherDoc()]); await reading;
+    expect(getCloudWorkspaceRows()).toBe(published);
+    expect(cloudWorkspaceDocument(owner === "covered" ? target : other)?.capabilities.canWrite).toBe(false);
+  });
+
+  it("refuses a scoped response for another organization and keeps confirmed rows", async () => {
+    acceptCloudWorkspaceDocument(doc(6)); const before = getCloudWorkspaceRows();
+    api.list.mockResolvedValue([doc(6)]);
+    await expect(refreshCloudWorkspaceCatalog([other.organizationId])).rejects.toThrow(/organization/i);
+    expect(getCloudWorkspaceRows()).toBe(before);
+  });
+
+  it("does no read for an empty fallback set", async () => {
+    acceptCloudWorkspaceDocument(doc(6));
+    api.list.mockResolvedValue([]); await refreshCloudWorkspaceCatalog([]);
+    expect(api.list).not.toHaveBeenCalled(); expect(cloudWorkspaceDocument(target)).toBeDefined();
+  });
+
+  it("does not satisfy a requested global snapshot with an older scoped flight", async () => {
+    acceptCloudWorkspaceDocument(doc(6)); acceptCloudWorkspaceDocument(otherDoc());
+    let finish!: (rows: CloudWorkspaceDocument[]) => void;
+    api.list.mockReturnValueOnce(new Promise<CloudWorkspaceDocument[]>(resolve => { finish = resolve; }))
+      .mockResolvedValueOnce([doc(7), otherDoc()]);
+    const scoped = refreshCloudWorkspaceCatalog([other.organizationId]);
+    const global = refreshCloudWorkspaceCatalog();
+    expect(api.list).toHaveBeenCalledTimes(1);
+    finish([otherDoc()]); await Promise.all([scoped, global]);
+    expect(api.list.mock.calls).toEqual([[other.organizationId], []]);
+    expect(cloudWorkspaceDocument(target)?.version).toBe(7);
+  });
+
+  it("uses the guest-aware global list when a scoped route reports lost membership", async () => {
+    acceptCloudWorkspaceDocument(doc(6)); acceptCloudWorkspaceDocument(otherDoc());
+    api.list.mockRejectedValueOnce(new ControlPlaneError(403, "forbidden", "Membership ended"))
+      .mockResolvedValueOnce([doc(6)]);
+    await refreshCloudWorkspaceCatalog([other.organizationId]);
+    expect(api.list.mock.calls).toEqual([[other.organizationId], []]);
+    expect(cloudWorkspaceDocument(target)).toBeDefined(); expect(cloudWorkspaceDocument(other)).toBeUndefined();
+  });
+
+  it("does not start a queued global read for an account replaced during a scoped read", async () => {
+    acceptCloudWorkspaceDocument(otherDoc());
+    let finish!: (rows: CloudWorkspaceDocument[]) => void;
+    api.list.mockReturnValueOnce(new Promise<CloudWorkspaceDocument[]>(resolve => { finish = resolve; }));
+    const scoped = refreshCloudWorkspaceCatalog([other.organizationId]), global = refreshCloudWorkspaceCatalog();
+    clearCloudWorkspaceCatalog(); acceptCloudWorkspaceDocument(doc(8));
+    finish([otherDoc()]); await Promise.all([scoped, global]);
+    expect(api.list).toHaveBeenCalledTimes(1); expect(cloudWorkspaceDocument(other)).toBeUndefined();
+    expect(cloudWorkspaceDocument(target)?.version).toBe(8);
+  });
+});
+
 describe("cloud lifecycle observation", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -147,7 +242,29 @@ describe("cloud lifecycle observation", () => {
   });
   afterEach(() => {
     clearCloudWorkspaceCatalog();
+    setCloudWorkspaceStreamCoverage(null);
     vi.useRealTimers();
+  });
+
+  it.each(["push", "coverage loss"])("uses current stream observation until %s without polling", async finish => {
+    api.rollout = true;
+    setCloudWorkspaceStreamCoverage({ streamId: target.organizationId, leaseId: target.workspaceId,
+      revision: 1, sequence: 1, state: "open", catalogRequired: false,
+      organizations: [{ organizationId: target.organizationId, deviceStream: true, presence: false }] });
+    api.read.mockResolvedValue(doc(3, "stopped"));
+    const pending = waitForCloudWorkspaceLifecycle(target, "stop", doc(2, "stopping"));
+    void pending.catch(() => {});
+    try {
+      await vi.advanceTimersByTimeAsync(10_000); expect(api.read).not.toHaveBeenCalled();
+      if (finish === "push") acceptCloudWorkspaceDocument(doc(3, "stopped"));
+      else {
+        setCloudWorkspaceStreamCoverage(null);
+        await vi.advanceTimersByTimeAsync(999); expect(api.read).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1); expect(api.read).toHaveBeenCalledOnce();
+      }
+      await expect(pending).resolves.toMatchObject({ status: "stopped" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { acceptCloudWorkspaceDocument(doc(4, "stopped")); await pending.catch(() => {}); }
   });
 
   it("settles a Stop event published before the older operation receipt", async () => {

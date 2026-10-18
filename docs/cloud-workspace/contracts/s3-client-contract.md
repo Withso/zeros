@@ -514,8 +514,19 @@ The renderer starts this lease lazily for a readable cloud selection. It
 retains confirmed exact-key documents during catch-up, fences stale account
 and snapshot results, and releases a hidden stream after 30 seconds. Native
 capability pushes are registered before delivery to the exact runtime socket.
-Legacy catalog, lifecycle and presence polling remains active until its
-separate rollout gate has fixture and owner-organization conformance evidence.
+Catalog and lifecycle poll replacement has a separate static rollout gate,
+disabled until fixture and owner-organization conformance is recorded. With
+that gate enabled, complete current stream coverage removes exact-organization
+lifecycle polls. Catalog fallback reads only uncovered member organizations;
+uncovered guests and unknown, bounded or incomplete organization sets retain
+the global list. Empty and legacy membership snapshots are incomplete proof.
+Coverage loss restores observation without clearing confirmed documents.
+
+Presence polling remains unchanged. Stream collaboration presence does not yet
+renew the engine's idle-stop and automatic-update presence lease. That parity,
+and replacement/fallback for secondary catalog-refresh consumers (history,
+agent discovery and collaboration caches), are activation prerequisites; current
+stream coverage alone does not establish them.
 
 ## Open questions
 

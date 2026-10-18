@@ -228,10 +228,10 @@ function organizationPath(organizationId: string): string {
   return `/v1/organizations/${z.string().uuid().parse(organizationId)}/cloud-workspaces`;
 }
 
-export async function listCloudWorkspaceDocuments(): Promise<
+export async function listCloudWorkspaceDocuments(organizationId?: string): Promise<
   CloudWorkspaceDocument[]
 > {
-  return (await listCloudWorkspaceCatalogSnapshot()).workspaces;
+  return (await listCloudWorkspaceCatalogSnapshot(organizationId)).workspaces;
 }
 
 export interface CloudWorkspaceCatalogSnapshot {
@@ -239,7 +239,8 @@ export interface CloudWorkspaceCatalogSnapshot {
   /** A resume hint, never an event cutoff or a transaction snapshot point. */
   catalogVersion: number | null;
 }
-export async function listCloudWorkspaceCatalogSnapshot(): Promise<CloudWorkspaceCatalogSnapshot> {
+export async function listCloudWorkspaceCatalogSnapshot(organizationId?: string): Promise<CloudWorkspaceCatalogSnapshot> {
+  const path = organizationId === undefined ? "/v1/cloud-workspaces" : organizationPath(organizationId);
   const rows: CloudWorkspaceDocument[] = [];
   let cursor: string | null = null;
   let watermark = 0, complete = true;
@@ -250,13 +251,15 @@ export async function listCloudWorkspaceCatalogSnapshot(): Promise<CloudWorkspac
       nextCursor: string | null;
       catalogVersion?: number;
     } = await request(
-      `/v1/cloud-workspaces?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+      `${path}?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
       z.object({
         workspaces: z.array(CloudWorkspaceDocumentSchema).max(100),
         nextCursor: z.string().nullable(),
         catalogVersion: z.number().int().nonnegative().safe().optional(),
       }),
     );
+    if (organizationId !== undefined && page.workspaces.some(row => row.organizationId !== organizationId))
+      throw new Error("Cloud catalog returned another organization");
     rows.push(...page.workspaces);
     if (page.catalogVersion === undefined) complete = false;
     else watermark = Math.max(watermark, page.catalogVersion);
