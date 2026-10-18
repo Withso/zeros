@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { ControlPlaneError } from "../../features/team/control-plane";
 
-const api = vi.hoisted(() => ({ enabled: true, signedIn: true, entitled: true, read: vi.fn(), wake: vi.fn(), list: vi.fn() }));
+const api = vi.hoisted(() => ({ enabled: true, signedIn: true, entitled: true, read: vi.fn(), wake: vi.fn(), list: vi.fn(), rollout: false }));
+vi.mock("../cloud-workspace-stream-rollout", () => ({ cloudCatalogStreamRolloutEnabled: () => api.rollout }));
 vi.mock("../../features/settings/internal-features", () => ({ isInternalFeatureActive: () => api.enabled }));
 vi.mock("../../features/team/team-store", async original => ({
   ...await original<typeof import("../../features/team/team-store")>(),
@@ -24,6 +25,7 @@ vi.mock("../../platform/cloud-workspaces", async original => ({
   listCloudWorkspaceDocuments: api.list,
 }));
 import { wakeCloudWorkspace } from "../cloud-workspace-wake";
+import { setCloudWorkspaceStreamCoverage } from "../cloud-workspace-stream-coverage";
 import { CloudWorkspaceInteraction } from "../cloud-workspace-interaction";
 import {
   acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudWorkspaceDocument,
@@ -45,13 +47,35 @@ function doc(version: number, status = "stopped"): CloudWorkspaceDocument {
 }
 beforeEach(() => {
   vi.useFakeTimers(); vi.clearAllMocks(); api.enabled = true; api.signedIn = true; api.entitled = true;
+  api.rollout = false; setCloudWorkspaceStreamCoverage(null);
   clearCloudWorkspaceCatalog(); acceptCloudWorkspaceDocument(doc(1));
   api.wake.mockResolvedValue(doc(2, "waking"));
   api.read.mockResolvedValue(doc(3, "ready"));
 });
-afterEach(() => { clearCloudWorkspaceCatalog(); vi.useRealTimers(); });
+afterEach(() => { clearCloudWorkspaceCatalog(); setCloudWorkspaceStreamCoverage(null); vi.useRealTimers(); });
 
 describe("explicit cloud wake readiness", () => {
+  it.each(["push", "coverage loss"])("waits through ten minutes of covered setup until %s without detail polls or another wake", async finish => {
+    api.rollout = true;
+    setCloudWorkspaceStreamCoverage({ streamId: target.organizationId, leaseId: target.workspaceId,
+      revision: 1, sequence: 1, state: "open", catalogRequired: false,
+      organizations: [{ organizationId: target.organizationId, deviceStream: true, presence: false }] });
+    const pending = wakeCloudWorkspace(target, cloudWorkspaceDocument(target)!);
+    void pending.catch(() => {});
+    try {
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(api.read).not.toHaveBeenCalled(); expect(api.wake).toHaveBeenCalledOnce();
+      if (finish === "push") acceptCloudWorkspaceDocument(doc(3, "ready"));
+      else {
+        setCloudWorkspaceStreamCoverage(null);
+        await vi.advanceTimersByTimeAsync(1_999); expect(api.read).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1); expect(api.read).toHaveBeenCalledOnce();
+      }
+      await expect(pending).resolves.toMatchObject({ status: "ready" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { acceptCloudWorkspaceDocument(doc(4, "ready")); await pending.catch(() => {}); }
+  });
+
   it.each(["ready", "busy"])("prepares an already-%s workspace without creating wake intents", async status => {
     acceptCloudWorkspaceDocument(doc(1, status));
     api.wake.mockResolvedValue(doc(2, status));

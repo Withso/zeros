@@ -7,6 +7,8 @@ import {
   type CloudWorkspaceRecoveryInput,
   getCloudWorkspaceDocument,
   listCloudWorkspaceDocuments,
+  listCloudWorkspaceCatalogSnapshot,
+  type CloudWorkspaceCatalogSnapshot,
   type CloudWorkspaceDocument,
 } from "../platform/cloud-workspaces";
 import {
@@ -20,6 +22,8 @@ import type { Project } from "./projects-store";
 import { clearCloudComposerPrs } from "./read-caches";
 import { cloudWorkspaceExecutionRefusal } from "../platform/cloud-workspace-execution";
 import { forgetCloudHistoryRecoveryDismissals } from "./cloud-history-recovery-dismissal";
+import { CloudSdkStreamPayloadSchema, type CloudSdkStreamPayload } from "../../../shared/cloud-sdk-stream-contract";
+import { cloudWorkspaceLifecycleStreamCovered, subscribeCloudWorkspacePollCoverage } from "./cloud-workspace-catalog-polling";
 
 export const cloudWorkspaceDetails =
   new KeyedAsyncCache<CloudWorkspaceDocument>(128);
@@ -35,7 +39,11 @@ export const cloudWorkspaceCatalogConfirmed = () => catalogConfirmed;
  * rollback may both retarget an authorized intent during server progress. */
 export const isCloudWorkspaceLifecyclePending = (doc: Pick<CloudWorkspaceDocument, "status" | "error"> | undefined) =>
   !!doc && !doc.error && ["stopping", "waking", "provisioning", "setting_up"].includes(doc.status);
-let inflight: Promise<void> | null = null;
+let inflight: Promise<CloudWorkspaceCatalogSnapshot | null> | null = null;
+let inflightScope: string | undefined;
+let streamSequence = 0, streamReadFence = 0;
+const streamTombstones = new Map<string, { sequence: number; version: number }>();
+const MAX_STREAM_TOMBSTONES = 2_000;
 let catalogReadGeneration = 0;
 // Read provenance follows the published object without retaining removed owners.
 const detailCatalogGenerations = new WeakMap<CloudWorkspaceDocument, number>();
@@ -61,7 +69,7 @@ const localStopVersions = new Map<string, number>();
 let nextLocalStopVersion = 0;
 export const cloudWorkspaceStopVersion = (target: CloudWorkspaceTarget) =>
   localStopVersions.get(cloudWorkspaceKey(target)) ?? 0;
-const refreshListeners = new Set<() => void>();
+const refreshListeners = new Set<(organizations?: ReadonlySet<string>) => void>();
 export interface CloudWorkspaceRowsChange {
   workspaceIds: readonly string[];
   removedWorkspaceIds: readonly string[];
@@ -89,13 +97,17 @@ export const subscribeCloudWorkspaceRows = (listener: (change: CloudWorkspaceRow
   rowListeners.add(listener);
   return () => { rowListeners.delete(listener); };
 };
-/** A successful catalog read is a history revalidation opportunity, not a row
- * mutation. Only the visible owner subscribes to this separate cadence. */
-export const subscribeCloudWorkspaceRefresh = (listener: () => void) => {
+/** Resource revalidation opportunity, without a catalog/row mutation. Catalog
+ * reads supply their scope; dormant stream replacement keeps a separate clock. */
+export const subscribeCloudWorkspaceRefresh = (listener: (organizations?: ReadonlySet<string>) => void) => {
   refreshListeners.add(listener);
   return () => { refreshListeners.delete(listener); };
 };
+export const notifyCloudWorkspaceRefresh = (organizations?: ReadonlySet<string>) => {
+  for (const listener of refreshListeners) listener(organizations);
+};
 export const getCloudWorkspaceRows = () => rows;
+export const getCloudWorkspaceDocuments = () => documents;
 export const getCloudProjects = () => projects;
 /** Logical deletion revokes reads immediately, even while the provider is
  * still removing its physical snapshot. Stopped/archived history stays readable. */
@@ -109,11 +121,12 @@ export function canBackgroundSyncCloudWorkspace(target: CloudWorkspaceTarget): b
   const doc = cloudWorkspaceDocument(target);
   return canReadCloudWorkspace(doc) && !cloudWorkspaceExecutionRefusal(doc) && (doc?.status === "ready" || doc?.status === "busy");
 }
-export function cloudCatalogNeedsFastRefresh(): boolean {
+export function cloudCatalogNeedsFastRefresh(organizationIds?: readonly string[]): boolean {
   // Provider storage deletion can take much longer than an interactive setup
   // transition. Keep observing it at the normal cadence without refetching
   // every other workspace and its history every two seconds.
-  return documents.some(doc => doc.deletedAt === null && !cloudWorkspaceExecutionRefusal(doc) &&
+  return documents.some(doc => (!organizationIds || organizationIds.includes(doc.organizationId)) &&
+    doc.deletedAt === null && !cloudWorkspaceExecutionRefusal(doc) &&
     !["ready", "busy", "stopped", "archived", "failed", "error", "deleting", "deleted"].includes(doc.status));
 }
 export function cloudProjectForFolder(folder: string): Project | null {
@@ -263,6 +276,36 @@ export function acceptCloudWorkspaceDocument(
   rebuild(true);
 }
 
+/** Ordered S3 catalog events. Equal document versions can change access;
+ * the catalog watermark is deliberately not used to discard any event. */
+export function applyCloudWorkspaceStreamCatalog(
+  frame: Extract<CloudSdkStreamPayload, { t: "catalog.changed" }>, account = epoch,
+): boolean {
+  if (account !== epoch) return false;
+  const parsed = CloudSdkStreamPayloadSchema.parse(frame);
+  if (parsed.t !== "catalog.changed") return false;
+  const { d } = parsed, previous = documents.find(row => row.id === d.workspaceId), tombstone = streamTombstones.get(d.workspaceId);
+  if ((previous?.version ?? -1) > d.version || (tombstone?.version ?? -1) > d.version) return true;
+  if (d.op === "upsert") {
+    if (previous && previous.organizationId !== d.workspace!.organizationId) return false;
+    streamTombstones.delete(d.workspaceId);
+    acceptCloudWorkspaceDocument(d.workspace!); return true;
+  }
+  streamTombstones.set(d.workspaceId, { sequence: ++streamSequence, version: d.version });
+  documents = documents.filter(row => row.id !== d.workspaceId);
+  for (const key of new Set([...detailOwnerGenerations.keys(), ...cloudWorkspaceDetails.keys()])) {
+    if (parseCloudWorkspaceKey(key)?.workspaceId !== d.workspaceId) continue;
+    detailOwnerGenerations.delete(key); cloudWorkspaceDetails.forget(key); engineRows.delete(key);
+    forgetCloudHistoryRecoveryDismissals([key]);
+  }
+  if (previous) rebuild(true);
+  if (streamTombstones.size <= MAX_STREAM_TOMBSTONES) return true;
+  // Refuse every older aggregate/detail completion before bounding metadata.
+  // The stream owner reconnects for a fresh snapshot after this false result.
+  streamReadFence++; streamTombstones.clear(); catalogConfirmed = false;
+  return false;
+}
+
 export function acceptCloudEngineWorkspace(
   target: CloudWorkspaceTarget,
   workspace: Workspace,
@@ -273,24 +316,48 @@ export function acceptCloudEngineWorkspace(
   rebuild();
 }
 
-export async function refreshCloudWorkspaceCatalog(): Promise<void> {
-  if (inflight) return inflight;
+async function readCatalog(fetchSnapshot: () => Promise<CloudWorkspaceCatalogSnapshot>,
+  organizations?: ReadonlySet<string>): Promise<CloudWorkspaceCatalogSnapshot | null> {
+  const scope = organizations ? JSON.stringify([...organizations].sort()) : "global";
+  if (inflight) {
+    if (inflightScope === scope) return inflight;
+    const account = epoch;
+    // A caller requesting a different observation must actually read it.
+    // Preserve one flight while a global catch-up waits behind a scoped poll.
+    await inflight.catch(() => null);
+    if (account !== epoch) return null;
+    return readCatalog(fetchSnapshot, organizations);
+  }
   const version = epoch;
+  const fence = streamReadFence, removedBefore = streamSequence;
   const readGeneration = ++catalogReadGeneration;
   const before = documents;
-  const flight = listCloudWorkspaceDocuments()
-    .then((next) => {
-      if (version !== epoch) return;
+  const flight = fetchSnapshot()
+    .then((snapshot) => {
+      if (version !== epoch || fence !== streamReadFence) return null;
+      if (organizations && snapshot.workspaces.some(row => !organizations.has(row.organizationId)))
+        throw new Error("Cloud catalog returned another organization");
+      const next = snapshot.workspaces.filter(row => (streamTombstones.get(row.id)?.sequence ?? 0) <= removedBefore);
       // A create or detail refresh may win while the aggregate list is in flight.
       const changed = documents.filter(
         (row) => before.find((old) => old.id === row.id) !== row,
       );
-      documents = next.map(raw => {
+      const refreshed = next.map(raw => {
         const row = CloudWorkspaceDocumentSchema.parse(raw);
         const prior = documents.find(old => old.id === row.id);
-        return prior && JSON.stringify(prior) === JSON.stringify(row) ? prior : row;
+        return prior && (prior.version > row.version || JSON.stringify(prior) === JSON.stringify(row)) ? prior : row;
       });
+      if (organizations) {
+        const remaining = new Map(refreshed.map(row => [row.id, row]));
+        // Preserve the aggregate order and references of every untouched owner.
+        documents = documents.flatMap(row => {
+          if (!organizations.has(row.organizationId)) return [row];
+          const replacement = remaining.get(row.id); remaining.delete(row.id);
+          return replacement ? [replacement] : [];
+        }).concat([...remaining.values()]);
+      } else documents = refreshed;
       for (const row of changed) {
+        if (organizations && !organizations.has(row.organizationId)) continue;
         const listed = documents.find((item) => item.id === row.id);
         // A pre-list detail is not a concurrent create receipt. The newer
         // catalog omission wins regardless of which response completes first.
@@ -300,9 +367,11 @@ export async function refreshCloudWorkspaceCatalog(): Promise<void> {
           !listed ||
           row.version > listed.version ||
           (row.version === listed.version &&
-            Date.parse(row.updatedAt) > Date.parse(listed.updatedAt))
+            Date.parse(row.updatedAt) >= Date.parse(listed.updatedAt))
         )
-          documents = [...documents.filter((item) => item.id !== row.id), row];
+          documents = organizations && listed
+            ? documents.map(item => item.id === row.id ? row : item)
+            : [...documents.filter((item) => item.id !== row.id), row];
       }
       const documentsChanged = JSON.stringify(before) !== JSON.stringify(documents);
       const currentOwners = new Set(documents.filter(canReadCloudWorkspace).map(row => cloudWorkspaceKey({
@@ -318,21 +387,60 @@ export async function refreshCloudWorkspaceCatalog(): Promise<void> {
         settleLifecycleIntents(row);
         publishDocument(row);
       }
-      catalogConfirmed = true;
+      if (!organizations) catalogConfirmed = true;
       rebuild(documentsChanged);
-      for (const listener of refreshListeners) listener();
+      notifyCloudWorkspaceRefresh(organizations);
+      return { workspaces: [...documents], catalogVersion: snapshot.catalogVersion };
     })
     .finally(() => {
-      if (inflight === flight) inflight = null;
+      if (inflight === flight) { inflight = null; inflightScope = undefined; }
     });
   inflight = flight;
+  inflightScope = scope;
   return flight;
+}
+
+export async function refreshCloudWorkspaceCatalog(organizationIds?: readonly string[]): Promise<void> {
+  if (organizationIds === undefined) {
+    await readCatalog(async () => ({ workspaces: await listCloudWorkspaceDocuments(), catalogVersion: null }));
+    return;
+  }
+  const organizations = new Set(organizationIds), account = epoch;
+  if (!organizations.size) return;
+  if (organizations.size > 16) throw new Error("Cloud catalog exceeded its organization read limit");
+  try {
+    await readCatalog(async () => {
+      const workspaces: CloudWorkspaceDocument[] = [];
+      for (const organizationId of organizations) {
+        if (account !== epoch) throw new Error("Cloud account changed");
+        workspaces.push(...await listCloudWorkspaceDocuments(organizationId));
+      }
+      return { workspaces, catalogVersion: null };
+    }, organizations);
+  } catch (error) {
+    // Membership can end before the cached account snapshot changes. The
+    // global route still authorizes guest access and removes revoked rows.
+    if (account === epoch && error instanceof ControlPlaneError && [403, 404].includes(error.status))
+      await refreshCloudWorkspaceCatalog();
+    else throw error;
+  }
+}
+
+/** A read begun before ready/reset cannot acknowledge the new stream revision. */
+export async function refreshCloudWorkspaceStreamSnapshot(): Promise<CloudWorkspaceCatalogSnapshot> {
+  const account = epoch;
+  if (inflight) await inflight;
+  if (account !== epoch) throw new Error("Cloud account changed");
+  const result = await readCatalog(listCloudWorkspaceCatalogSnapshot);
+  if (!result || account !== epoch) throw new Error("Cloud catalog observation changed");
+  return result;
 }
 
 export async function refreshCloudWorkspace(
   target: CloudWorkspaceTarget,
 ): Promise<CloudWorkspaceDocument> {
   const version = epoch;
+  const fence = streamReadFence, original = cloudWorkspaceDocument(target);
   const readGeneration = catalogReadGeneration;
   const generation = cloudWorkspaceDocument(target)?.generation.number;
   const owner = cloudWorkspaceKey(target);
@@ -343,7 +451,7 @@ export async function refreshCloudWorkspace(
   if (detailReads.size >= 128) throw new Error("Too many cloud catalog reads");
   detailOwnerGenerations.set(owner, ownerGeneration);
   const flight = getCloudWorkspaceDocument(target).then(doc => {
-    if (version !== epoch) throw new Error("Cloud account changed");
+    if (version !== epoch || fence !== streamReadFence) throw new Error("Cloud account changed");
     if (detailOwnerGenerations.get(owner) !== ownerGeneration)
       throw new Error("Cloud workspace was removed while loading details");
     if (doc.id !== target.workspaceId || doc.organizationId !== target.organizationId)
@@ -352,6 +460,7 @@ export async function refreshCloudWorkspace(
     if (current && current.generation.number !== doc.generation.number &&
         (current.version >= doc.version || current.generation.number > doc.generation.number && !isCloudWorkspaceLifecyclePending(doc)))
       throw new Error("Cloud workspace generation changed");
+    if (current && current !== original && current.version >= doc.version) return current;
     // A newer stopped/deleted document must win over a late ready read, too.
     acceptCloudWorkspaceDocument(doc, readGeneration);
     return cloudWorkspaceDocument(target)!;
@@ -367,8 +476,10 @@ export async function refreshCloudWorkspace(
 export function clearCloudWorkspaceCatalog(): void {
   clearCloudComposerPrs();
   epoch++;
+  streamReadFence++; streamSequence = 0; streamTombstones.clear();
   catalogConfirmed = false;
   inflight = null;
+  inflightScope = undefined;
   detailReads.clear();
   detailOwnerGenerations.clear();
   documents = [];
@@ -412,6 +523,7 @@ export async function waitForCloudWorkspaceLifecycle(
   if (refused) throw refused;
   return new Promise((resolve, reject) => {
     let settled = false;
+    let reading = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let safety: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => {
@@ -419,6 +531,7 @@ export async function waitForCloudWorkspaceLifecycle(
       clearTimeout(timer);
       clearTimeout(safety);
       off();
+      offCoverage();
     };
     const fail = (error: unknown) => {
       if (settled) return;
@@ -441,11 +554,19 @@ export async function waitForCloudWorkspaceLifecycle(
       } catch (error) { fail(error); }
     };
     const poll = () => {
+      if (settled) return;
+      if (cloudWorkspaceLifecycleStreamCovered(target.organizationId)) {
+        clearTimeout(timer); timer = undefined; return;
+      }
+      if (reading || timer !== undefined) return;
       timer = setTimeout(() => {
         timer = undefined;
         observe();
         if (settled) return;
+        if (cloudWorkspaceLifecycleStreamCovered(target.organizationId)) return;
+        reading = true;
         void refreshCloudWorkspace(target).then(() => {
+          reading = false;
           observe();
           if (!settled) poll();
         }, fail);
@@ -453,6 +574,7 @@ export async function waitForCloudWorkspaceLifecycle(
     };
     // Exact catalog events can finish even while the fallback read is hung.
     const off = subscribeCloudWorkspaces(observe);
+    const offCoverage = subscribeCloudWorkspacePollCoverage(() => { observe(); poll(); });
     safety = setTimeout(() => fail(new Error(
       "The cloud workspace operation is still running. Its status will update when it finishes.",
     )), 60_000);

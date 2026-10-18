@@ -4,8 +4,9 @@ import type { CloudSdkRuntimeTarget } from "../../../../../shared/cloud-sdk-cont
 import type { RuntimeClient as Client } from "../ws-client";
 
 const state = vi.hoisted(() => ({ epoch: 1, listeners: new Set<() => void>(), open: vi.fn(), refresh: vi.fn(), fallback: vi.fn(),
-  proof: vi.fn(), renew: vi.fn(), legacy: vi.fn(), close: vi.fn(async () => true), publish: vi.fn(async (_target: unknown, _connected: boolean) => {}), accept: vi.fn(),
+  proof: vi.fn(), renew: vi.fn(), subscribeRenewals: vi.fn(), legacy: vi.fn(), close: vi.fn(async () => true), publish: vi.fn(async (_target: unknown, _connected: boolean) => {}), accept: vi.fn(),
   clients: [] as Client[], document: { status: "ready", generation: { number: 7 }, capabilities: { canRead: true, canWrite: true } } }));
+vi.mock("../../cloud-sdk-stream", () => ({ subscribeCloudSdkRuntimeRenewals: state.subscribeRenewals }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({ cloudCatalogGeneration: () => state.epoch,
   cloudWorkspaceDocument: () => state.document, refreshCloudWorkspace: async () => state.document, canReadCloudWorkspace: () => true,
   acceptCloudEngineWorkspace: state.accept, subscribeCloudWorkspaces: (fn: () => void) => { state.listeners.add(fn); return () => state.listeners.delete(fn); } }));
@@ -83,6 +84,7 @@ beforeEach(() => {
   state.open.mockResolvedValue(sdk()); state.legacy.mockImplementation(async () => legacy()); state.fallback.mockImplementation(async () => legacy());
   state.proof.mockResolvedValue("s".repeat(86)); state.refresh.mockImplementation(async previous => sdk(previous.connectionSequence + 1));
   state.renew.mockImplementation(async () => capabilities(Date.now()));
+  state.subscribeRenewals.mockResolvedValue(vi.fn());
 });
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); for (const client of state.clients) client.dispose();
   vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); });
@@ -153,6 +155,28 @@ describe("desktop SDK runtime activation", () => {
     expect(peer.client.status).toBe("connected"); expect(statuses).not.toHaveBeenCalled(); expect(state.publish).not.toHaveBeenCalled();
     expect(state.refresh).not.toHaveBeenCalled();
     peer.release(); await tick(600_000); expect(state.renew).toHaveBeenCalledTimes(2);
+  });
+
+  it("applies native-validated pushes in band and stops the subscription with the runtime", async () => {
+    const off = vi.fn(); state.subscribeRenewals.mockResolvedValue(off);
+    const pending = opening(); await tick(); await authenticate(Socket.instances[0]!); const peer = await pending;
+    expect(state.subscribeRenewals).toHaveBeenCalledOnce();
+    const pushed = state.subscribeRenewals.mock.calls[0]![1] as (value: ReturnType<typeof capabilities>) => void;
+    const statuses = vi.fn(); peer.client.onStatusChange(statuses); state.publish.mockClear();
+    await tick(60_000); pushed(capabilities(Date.now())); await tick();
+    expect(Socket.instances[0]!.sent.filter(frame => frame.t === "auth.renew")).toHaveLength(1);
+    expect(state.renew).not.toHaveBeenCalled(); expect(state.refresh).not.toHaveBeenCalled();
+    expect(statuses).not.toHaveBeenCalled(); expect(state.publish).not.toHaveBeenCalled();
+    peer.release(); expect(off).toHaveBeenCalledOnce(); pushed(capabilities(Date.now() + 60_000)); await tick();
+    expect(Socket.instances[0]!.sent.filter(frame => frame.t === "auth.renew")).toHaveLength(1);
+  });
+
+  it("unsubscribes a listener whose installation completes after its runtime closed", async () => {
+    let finish!: (off: () => void) => void; const off = vi.fn();
+    state.subscribeRenewals.mockReturnValue(new Promise<() => void>(resolve => { finish = resolve; }));
+    const pending = opening(); await tick(); await authenticate(Socket.instances[0]!); const peer = await pending;
+    expect(state.subscribeRenewals).toHaveBeenCalledOnce(); peer.release(); finish(off); await tick();
+    expect(off).toHaveBeenCalledOnce();
   });
 
   it("makes one fresh native connect after a 4403 refusal and stops when CP denies it", async () => {

@@ -105,6 +105,7 @@ const commandTable: Record<string, CommandHandler> = {
   cloud_workspace_sdk_runtime_legacy: notImpl("cloud_workspace_sdk_runtime_legacy", 3),
   cloud_workspace_sdk_runtime_proof: notImpl("cloud_workspace_sdk_runtime_proof", 3),
   cloud_workspace_sdk_runtime_capabilities: notImpl("cloud_workspace_sdk_runtime_capabilities", 3),
+  cloud_workspace_sdk_stream: notImpl("cloud_workspace_sdk_stream", 3),
   cloud_workspace_outbox_enqueue: notImpl("cloud_workspace_outbox_enqueue", 3),
   cloud_workspace_outbox_list: notImpl("cloud_workspace_outbox_list", 3),
 

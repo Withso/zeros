@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { CloudRestClient, CloudRestError, probeFromConnectFailure, readRuntimeBinding,
-  type CapabilityProofFields, type DeviceProofHeaders, type DeviceProofRequest } from "@zeros/cloud-client";
+  type CapabilityProofFields, type DeviceProofHeaders, type DeviceProofRequest, type DeviceSessionGrant } from "@zeros/cloud-client";
 import type { Capabilities, DeviceSessionResponse, RestOperationId } from "@zeros/cloud-client/generated/rest";
 import { CapabilityClaimsSchema, CapabilityHeaderSchema, CAPABILITY_POP_TIMESTAMP_LEEWAY_MS } from "@zeros/protocol/cloud-capabilities";
 import { isCloudDirectProviderUrl } from "@zeros/protocol/cloud-runtime-connection";
@@ -15,7 +15,8 @@ type StoredCapability = { aud: string; wsp: string; jti: string; exp: number };
 type Entry = { target: CloudSdkRuntimeTarget; device: Device; capabilities: Capabilities; proofs: StoredCapability[]; stop: AbortController;
   previous?: StoredCapability[]; renew?: Promise<Capabilities>; refresh?: { source: CloudSdkRuntimeIdentity; promise: Promise<CloudSdkRuntimeTarget> };
   receipt?: { source: CloudSdkRuntimeIdentity; target: CloudSdkRuntimeTarget } };
-type Session = { id: string; device: Device; streamOrigin: string; issuedAt: number };
+type Session = { id: string; device: Device; streamOrigin: string; issuedAt: number;
+  ticket?: { url: string; value: string; expiresAt: number } };
 
 export interface CloudSdkRuntimeBrokerOptions {
   baseUrl: string;
@@ -75,6 +76,9 @@ export class CloudSdkRuntimeBroker {
   private readonly requests = new Set<AbortController>();
   private session: Session | null = null;
   private sessionFlight: Promise<Session> | null = null;
+  private streamSessionFlight: Promise<DeviceSessionGrant> | null = null;
+  private streamSessionId: string | null = null;
+  private readonly runtimeListeners = new Set<() => void>();
   private disposed = false;
 
   constructor(private readonly options: CloudSdkRuntimeBrokerOptions) {
@@ -87,6 +91,39 @@ export class CloudSdkRuntimeBroker {
 
   get size(): number { return this.entries.size; }
   owns(runtimeId: string): boolean { return this.entries.has(runtimeId); }
+  runtimeTargets(): readonly CloudSdkRuntimeTarget[] { return [...this.entries.values()].map(entry => entry.target); }
+  subscribeRuntimeTargets(listener: () => void): () => void {
+    this.runtimeListeners.add(listener); return () => { this.runtimeListeners.delete(listener); };
+  }
+  private runtimeChanged(): void {
+    for (const listener of this.runtimeListeners) { try { listener(); } catch { /* consumers cannot extend authority */ } }
+  }
+  assertActive(): void {
+    this.assertCurrent();
+    if (this.session && !sameDevice(this.session.device, this.options.readDevice())) { this.dispose(); throw error(); }
+  }
+
+  /** Main's one stream consumes each ticket once. A null held ID after an
+   * earlier hello means the SDK discarded a disabled/superseded session. */
+  openStreamSession(heldId: string | null): Promise<DeviceSessionGrant> {
+    this.assertActive();
+    if (this.streamSessionFlight) return this.streamSessionFlight;
+    const previous = this.streamSessionId;
+    if (heldId === null && previous !== null && this.session?.id === previous) this.session = null;
+    const flight = (async () => {
+      let session = await this.ensureSession(); this.assertActive();
+      if (!session.ticket || session.ticket.expiresAt <= this.now() + 1_000) session = await this.ensureSession(true);
+      this.assertActive();
+      const ticket = session.ticket;
+      if (this.session !== session || !ticket || ticket.expiresAt <= this.now()) throw error();
+      session.ticket = undefined;
+      this.streamSessionId = session.id;
+      return { deviceSessionId: session.id, url: ticket.url, ticket: ticket.value };
+    })();
+    this.streamSessionFlight = flight;
+    void flight.finally(() => { if (this.streamSessionFlight === flight) this.streamSessionFlight = null; }).catch(() => {});
+    return flight;
+  }
 
   private assertCurrent(initial = false): void {
     if (this.disposed || !this.options.enabled() || !this.account || this.options.getAccountSessionKey() !== this.account) {
@@ -153,6 +190,7 @@ export class CloudSdkRuntimeBroker {
         response = await connectRequest(); // One fresh session, never an unbounded repair loop.
       }
       assert();
+      if (this.session?.id !== session.id) throw error();
       const parsed = CloudSdkConnectResponseSchema.safeParse(response);
       if (!parsed.success) throw error("bad_response", 201);
       const connect = parsed.data;
@@ -177,6 +215,7 @@ export class CloudSdkRuntimeBroker {
       if (!previous && this.entries.has(runtime.runtimeId)) throw error();
       this.entries.set(runtime.runtimeId, { target: runtime, device: session.device, capabilities: runtime.connect.capabilities, proofs, stop: new AbortController() });
       previous?.stop.abort();
+      this.runtimeChanged();
       return runtime;
     } catch (cause) {
       assert();
@@ -270,9 +309,9 @@ export class CloudSdkRuntimeBroker {
     });
   }
 
-  private async ensureSession(): Promise<Session> {
+  private async ensureSession(freshTicket = false): Promise<Session> {
     this.assertCurrent();
-    if (this.session && sameDevice(this.session.device, this.options.readDevice()) && this.now() - this.session.issuedAt < 23 * 60 * 60_000) return this.session;
+    if (!freshTicket && this.session && sameDevice(this.session.device, this.options.readDevice()) && this.now() - this.session.issuedAt < 23 * 60 * 60_000) return this.session;
     if (this.sessionFlight) return this.sessionFlight;
     const promise = (async () => {
       await this.options.ensureDevice(); this.assertCurrent();
@@ -286,8 +325,11 @@ export class CloudSdkRuntimeBroker {
       const grant: DeviceSessionResponse = parsed.data, url = socketUrl(grant.stream.url, "/v1/device-stream");
       if (Date.parse(grant.stream.ticketExpiresAt) <= this.now() || Date.parse(grant.stream.ticketExpiresAt) - this.now() > 90_000) throw error("bad_response", 201);
       this.assertCurrent();
-      const session = { id: grant.deviceSessionId, device: { ...device }, streamOrigin: url.origin, issuedAt: this.now() };
-      this.session = session; return session;
+      const session: Session = { id: grant.deviceSessionId, device: { ...device }, streamOrigin: url.origin, issuedAt: this.now(),
+        ticket: { url: grant.stream.url, value: grant.stream.ticket, expiresAt: Date.parse(grant.stream.ticketExpiresAt) } };
+      this.session = session;
+      for (const entry of [...this.entries.values()]) if (entry.target.deviceSessionId !== session.id) this.close(entry.target.runtimeId);
+      return session;
     })();
     this.sessionFlight = promise;
     try { return await promise; } finally { if (this.sessionFlight === promise) this.sessionFlight = null; }
@@ -323,6 +365,7 @@ export class CloudSdkRuntimeBroker {
     if (!entry) return false;
     this.entries.delete(runtimeId); entry.stop.abort();
     try { this.options.onRetired([runtimeId]); } catch { /* retirement is already authoritative */ }
+    this.runtimeChanged();
     return true;
   }
   dispose(): void {
@@ -331,6 +374,8 @@ export class CloudSdkRuntimeBroker {
     for (const decision of this.decisions.values()) decision.stop.abort();
     for (const controller of this.requests) controller.abort(); this.requests.clear();
     const ids = [...this.entries.keys()]; this.entries.clear(); this.opens.clear(); this.decisions.clear(); this.session = null; this.sessionFlight = null;
+    this.streamSessionFlight = null; this.streamSessionId = null;
     if (ids.length) { try { this.options.onRetired(ids); } catch { /* all local authority is already gone */ } }
+    this.runtimeChanged(); this.runtimeListeners.clear();
   }
 }

@@ -5,6 +5,8 @@ import type { CloudRuntimeServiceAccess, CloudRuntimeServiceApi } from "./cloud-
 import type { CloudServiceHandle, CloudServiceTunnel } from "./cloud-runtime-service-transport";
 import type { CloudNativeSshHandle } from "./cloud-workspace-ssh-runtime";
 import type { CloudSdkRuntimeBroker } from "./cloud-sdk-runtime-broker";
+import type { CloudSdkDeviceStream, CloudStreamRendererLifetime } from "./cloud-sdk-device-stream";
+import type { CloudSdkStreamCommand } from "../shared/cloud-sdk-stream-contract";
 import type { CloudSdkRuntimeTarget } from "../shared/cloud-sdk-contract";
 
 import {
@@ -204,6 +206,8 @@ function safeFrameName(value: string): string {
 export class CloudWorkspaceAccessBroker {
   private readonly createSdkRuntime?: () => CloudSdkRuntimeBroker;
   private sdkRuntime: CloudSdkRuntimeBroker | null = null;
+  private readonly createSdkStream?: (broker: CloudSdkRuntimeBroker) => CloudSdkDeviceStream;
+  private sdkStream: CloudSdkDeviceStream | null = null;
   private readonly nativeServices?: NativeServices;
   private readonly nativeLeases = new Map<string, NativeLease>();
   private readonly nativeAuthorityId = randomUUID();
@@ -249,6 +253,7 @@ export class CloudWorkspaceAccessBroker {
 
   constructor(input: {
     createSdkRuntime?: () => CloudSdkRuntimeBroker;
+    createSdkStream?: (broker: CloudSdkRuntimeBroker) => CloudSdkDeviceStream;
     nativeServices?: NativeServices;
     api: CloudWorkspaceAccessBrokerApi;
     getAccessToken: () => Promise<string | null>;
@@ -269,6 +274,7 @@ export class CloudWorkspaceAccessBroker {
     disposeLocalAccess?: () => Promise<void>;
   }) {
     this.createSdkRuntime = input.createSdkRuntime;
+    this.createSdkStream = input.createSdkStream;
     this.nativeServices = input.nativeServices;
     this.api = input.api;
     this.getAccessToken = input.getAccessToken;
@@ -1335,6 +1341,13 @@ export class CloudWorkspaceAccessBroker {
     return this.sdkRuntime.renewCapabilities(input);
   }
 
+  controlSdkStream(input: CloudSdkStreamCommand, lifetime?: CloudStreamRendererLifetime) {
+    if (!this.hasCurrentSession()) throw new CloudWorkspaceAccessClientError(401, "signed_out", "Cloud access authority has ended");
+    if (input.action === "start" && !this.sdkStream && this.createSdkRuntime && this.createSdkStream)
+      this.sdkStream = this.createSdkStream(this.sdkRuntime ??= this.createSdkRuntime());
+    return this.sdkStream?.control(input, lifetime) ?? false;
+  }
+
   /** Reconcile the exact reconnect boundary before minting. Concurrent and
    * retried requests share one published descriptor, even if IPC lost it. */
   async refreshRuntime(input: CloudWorkspaceRuntimeIdentity,
@@ -1593,6 +1606,7 @@ export class CloudWorkspaceAccessBroker {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.sdkStream?.dispose(); this.sdkStream = null;
     this.sdkRuntime?.dispose();
     this.runtimeRefreshReceipts.clear();
     this.controlPlanePreferences.clear();

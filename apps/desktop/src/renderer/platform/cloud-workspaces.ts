@@ -228,30 +228,47 @@ function organizationPath(organizationId: string): string {
   return `/v1/organizations/${z.string().uuid().parse(organizationId)}/cloud-workspaces`;
 }
 
-export async function listCloudWorkspaceDocuments(): Promise<
+export async function listCloudWorkspaceDocuments(organizationId?: string): Promise<
   CloudWorkspaceDocument[]
 > {
+  return (await listCloudWorkspaceCatalogSnapshot(organizationId)).workspaces;
+}
+
+export interface CloudWorkspaceCatalogSnapshot {
+  workspaces: CloudWorkspaceDocument[];
+  /** A resume hint, never an event cutoff or a transaction snapshot point. */
+  catalogVersion: number | null;
+}
+export async function listCloudWorkspaceCatalogSnapshot(organizationId?: string): Promise<CloudWorkspaceCatalogSnapshot> {
+  const path = organizationId === undefined ? "/v1/cloud-workspaces" : organizationPath(organizationId);
   const rows: CloudWorkspaceDocument[] = [];
   let cursor: string | null = null;
+  let watermark = 0, complete = true;
   const seen = new Set<string>();
   do {
     const page: {
       workspaces: CloudWorkspaceDocument[];
       nextCursor: string | null;
+      catalogVersion?: number;
     } = await request(
-      `/v1/cloud-workspaces?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+      `${path}?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
       z.object({
         workspaces: z.array(CloudWorkspaceDocumentSchema).max(100),
         nextCursor: z.string().nullable(),
+        catalogVersion: z.number().int().nonnegative().safe().optional(),
       }),
     );
+    if (organizationId !== undefined && page.workspaces.some(row => row.organizationId !== organizationId))
+      throw new Error("Cloud catalog returned another organization");
     rows.push(...page.workspaces);
+    if (page.catalogVersion === undefined) complete = false;
+    else watermark = Math.max(watermark, page.catalogVersion);
     cursor = page.nextCursor;
     if (cursor && (seen.has(cursor) || rows.length >= 2_000))
       throw new Error("Cloud workspace list exceeded its page limit");
     if (cursor) seen.add(cursor);
   } while (cursor);
-  return rows;
+  return { workspaces: rows, catalogVersion: complete ? watermark : null };
 }
 
 export async function getCloudWorkspaceDocument(

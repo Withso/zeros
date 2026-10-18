@@ -2,6 +2,7 @@ import { hasCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace
 import { ControlPlaneError } from "../features/team/control-plane";
 import { cloudWorkspaceKey, type CloudWorkspaceTarget } from "../platform/bridge/cloud-workspace-key";
 import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
+import { cloudWorkspaceLifecycleStreamCovered, subscribeCloudWorkspacePollCoverage } from "./cloud-workspace-catalog-polling";
 import {
   canReadCloudWorkspace,
   cloudCatalogGeneration,
@@ -129,17 +130,29 @@ export async function wakeCloudWorkspace(
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const waitForProgress = async (previous: CloudWorkspaceDocument) => {
+    let offCoverage = () => {};
     const progress = new Promise<void>((resolve, reject) => {
+      let reading = false;
       onProgress = current => { if (current !== previous) resolve(); };
       // Catalog/runtime publications settle immediately, including while a
       // detail refresh is hung. Poll only when no exact-workspace event arrives.
-      timer = setTimeout(() => {
-        timer = undefined;
-        void refreshCloudWorkspace(target).then(() => resolve(), reject);
-      }, 2_000);
+      const fallback = () => {
+        if (cloudWorkspaceLifecycleStreamCovered(target.organizationId)) {
+          clearTimeout(timer); timer = undefined; return;
+        }
+        if (reading || timer !== undefined) return;
+        timer = setTimeout(() => {
+          timer = undefined;
+          if (cloudWorkspaceLifecycleStreamCovered(target.organizationId)) return;
+          reading = true;
+          void refreshCloudWorkspace(target).then(() => resolve(), reject);
+        }, 2_000);
+      };
+      offCoverage = subscribeCloudWorkspacePollCoverage(fallback);
+      fallback();
     });
     try { await wait(progress); }
-    finally { onProgress = undefined; clearTimeout(timer); }
+    finally { onProgress = undefined; clearTimeout(timer); timer = undefined; offCoverage(); }
   };
   // Compute drain/create/setup are server-owned progress, not agent admission
   // time. Keep waiting without a short client deadline; bound even hung IPC

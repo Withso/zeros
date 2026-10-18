@@ -1,0 +1,9 @@
+{
+  "id": "cloud-catalog-overlapping-observations",
+  "kind": "replay",
+  "area": "cloud-runtime",
+  "fixedBy": "pr:605",
+  "symptom": "A pending aggregate catalog read overwrote a same-version access update or replaced a confirmed newer document with a lower-version response.",
+  "rule": "Reconcile snapshots with concurrent exact-key observations; authorization fields can change without a document version bump.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/state/__tests__/cloud-workspace-catalog.test.ts -t 'retains a same-version access update delivered while an aggregate read is pending|does not replace a confirmed newer document with a lower-version snapshot'"
+}

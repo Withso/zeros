@@ -14,7 +14,7 @@ import {
   CloudWorkspaceCollaborationCache, cloudWorkspaceCollaboration, cloudWorkspaceCollaborationKey,
   cloudWorkspaceCollaborationOwner, type CloudWorkspaceCollaborationOwner,
 } from "../cloud-workspace-collaboration-cache";
-import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../cloud-workspace-catalog";
+import { cloudWorkspaceDocument, subscribeCloudWorkspaces, subscribeCloudWorkspaceRefresh } from "../cloud-workspace-catalog";
 
 const owner: CloudWorkspaceCollaborationOwner = {
   accountId: "33333333-3333-4333-8333-333333333333", accountGeneration: 1, deviceScopeId: "device-a", catalogGeneration: 1,
@@ -45,6 +45,17 @@ beforeEach(() => {
 });
 
 describe("cloud collaborator exact-owner cache", () => {
+  it("keeps foreign organizations fresh when a scoped resource opportunity invalidates collaborators", () => {
+    const first = cloudWorkspaceCollaborationKey(owner), second = cloudWorkspaceCollaborationKey({ ...owner, organizationId: id(80) });
+    const snapshots = cloudWorkspaceCollaboration.snapshots;
+    snapshots.clear(); snapshots.setData(first, page()); snapshots.setData(second, page({ organizationId: id(80) }));
+    const a = snapshots.peekSnapshot(first), b = snapshots.peekSnapshot(second);
+    vi.mocked(subscribeCloudWorkspaceRefresh).mock.calls[0]![0](new Set([owner.organizationId]));
+    expect(snapshots.peekSnapshot(first).invalidationVersion).toBe(a.invalidationVersion + 1);
+    expect(snapshots.peekSnapshot(first).data).toBe(a.data); expect(snapshots.peekSnapshot(second)).toBe(b);
+    snapshots.clear();
+  });
+
   it("keeps a cold intent read when workspace details arrive before its response", async () => {
     account.userId = owner.accountId;
     const warmedOwner = cloudWorkspaceCollaborationOwner(owner)!;

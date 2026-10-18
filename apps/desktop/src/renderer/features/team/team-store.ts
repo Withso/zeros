@@ -279,6 +279,9 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/** Observe the existing account snapshot without starting another read. */
+export const subscribeOrganizationSnapshots = subscribe;
+
 /** The cached account/organizations; auto-loads on first mounted use. */
 export function useTeams(): TeamStoreState & {
   reload: () => Promise<Me | null>;

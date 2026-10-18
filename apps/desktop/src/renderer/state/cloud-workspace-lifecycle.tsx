@@ -10,6 +10,7 @@ import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-cli
 import { wireCloudTranscriptCheckpoints } from "../platform/bridge/cloud-transcript-checkpoints";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
+import { getTeamStoreState, subscribeOrganizationSnapshots } from "../features/team/team-store";
 import { subscribeCloudWorkspaceOpens } from "./cloud-workspace-open-intent";
 import {
   getSession,
@@ -21,12 +22,15 @@ import {
   canReadCloudWorkspace,
   cloudCatalogNeedsFastRefresh,
   cloudCatalogGeneration,
+  cloudWorkspaceCatalogConfirmed,
+  getCloudWorkspaceDocuments,
   cloudWorkspaceDocument,
   cloudWorkspaceStopVersion,
   refreshCloudWorkspaceCatalog,
   subscribeCloudWorkspaces,
   subscribeCloudWorkspaceRows,
   subscribeCloudWorkspaceRefresh,
+  notifyCloudWorkspaceRefresh,
 } from "./cloud-workspace-catalog";
 import { notifyProjectsChanged, notifyWorkspacesChanged, pruneCloudWorkspaceCollections } from "./use-projects";
 import {
@@ -51,6 +55,11 @@ import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
 import { clearCloudLatencySpans, pruneCloudLatencySpans } from "./cloud-workspace-latency";
 import { clearWorkbenchConnectionFailure, recordWorkbenchConnectionFailure } from "./workbench-availability";
 import { CloudWorkspaceInteraction } from "./cloud-workspace-interaction";
+import { createCloudWorkspaceStream } from "./cloud-workspace-stream";
+import { cloudWorkspaceStreamOrganizations, subscribeCloudWorkspaceStreamCoverage } from "./cloud-workspace-stream-coverage";
+import { cloudCatalogFallbackOrganizations } from "./cloud-workspace-catalog-polling";
+import { cloudCatalogStreamRolloutEnabled } from "./cloud-workspace-stream-rollout";
+import { CloudWorkspaceResourceRefresh } from "./cloud-workspace-resource-refresh";
 
 function recordCloudOpenFailure(key: string, error: unknown): void {
   const target = parseCloudWorkspaceKey(key), doc = target ? cloudWorkspaceDocument(target) : undefined;
@@ -88,6 +97,7 @@ function ActiveCloudWorkspaceLifecycle() {
     let alive = true;
     let enabled = false;
     let lastRefresh: number | undefined;
+    let refreshOrganizations: readonly string[] | null = null;
     let refreshTimer: number | undefined;
     let refreshFlight: object | undefined;
     let account: string | null = null;
@@ -95,6 +105,19 @@ function ActiveCloudWorkspaceLifecycle() {
     let installed = false;
     let restored = false;
     let cached = loadCloudChatCache();
+    const resources = cloudCatalogStreamRolloutEnabled()
+      ? new CloudWorkspaceResourceRefresh(notifyCloudWorkspaceRefresh) : undefined;
+    const offResources = resources ? subscribeCloudWorkspaceRefresh(scope => resources.observed(scope)) : () => {};
+    let stream: ReturnType<typeof createCloudWorkspaceStream> | undefined;
+    const syncStream = () => {
+      const target = parseCloudWorkspaceKey(selectActiveFolder(useWorkspaceStore.getState()));
+      const visible = document.visibilityState !== "hidden";
+      const eligible = alive && enabled && account && isElectron() && target && canReadCloudWorkspace(cloudWorkspaceDocument(target))
+        ? { organizationId: target.organizationId, workspaceId: target.workspaceId } : null;
+      if (eligible && visible && !stream) stream = createCloudWorkspaceStream();
+      stream?.select(eligible, visible);
+    };
+    const offStreamSelection = isElectron() ? useWorkspaceStore.subscribe(syncStream) : () => {};
     const pruneChats = (all: boolean) => {
       const state = useWorkspaceStore.getState();
       const activeFolder = selectActiveFolder(state);
@@ -121,16 +144,40 @@ function ActiveCloudWorkspaceLifecycle() {
     };
     const canRefresh = () => alive && enabled && !!account &&
       document.visibilityState !== "hidden";
+    const updateRefreshOrganizations = () => {
+      if (!cloudCatalogStreamRolloutEnabled()) return;
+      const owner = getTeamStoreState();
+      const organizations = owner.me?.organizations;
+      // As in the organization store, only a hierarchy containing Personal
+      // proves membership completeness. Empty/legacy snapshots remain uncertain.
+      const members = owner.status === "ready" && organizations && organizations.length < 1_000 &&
+        organizations.some(org => org.isPersonal) && cloudWorkspaceCatalogConfirmed()
+        ? organizations.filter(org => !org.isPersonal).map(org => org.id) : null;
+      const next = cloudCatalogFallbackOrganizations(members, getCloudWorkspaceDocuments().map(row => row.organizationId));
+      // Restore lost observation immediately, including after a scoped read
+      // finishes. Unrelated catalog events never postpone the fallback.
+      if (refreshOrganizations !== null && (next === null || next.some(id => !refreshOrganizations!.includes(id))))
+        lastRefresh = undefined;
+      refreshOrganizations = next;
+      resources?.sync(next === null ? [] : (cloudWorkspaceStreamOrganizations() ?? [])
+        .filter(org => org.deviceStream && !next.includes(org.organizationId)).map(org => org.organizationId));
+    };
     const refreshDelay = () => lastRefresh === undefined ? 0 : Math.max(0,
-      lastRefresh + (cloudCatalogNeedsFastRefresh() ? 2_000 : 30_000) - performance.now());
+      lastRefresh + (cloudCatalogNeedsFastRefresh(refreshOrganizations ?? undefined) ? 2_000 : 30_000) - performance.now());
     const scheduleRefresh = () => {
       cancelRefreshTimer();
-      if (!canRefresh() || refreshFlight) return;
+      if (!canRefresh()) { resources?.pause(); return; }
+      updateRefreshOrganizations();
+      if (refreshFlight) return;
+      if (refreshOrganizations?.length === 0) return;
       refreshTimer = window.setTimeout(refresh, Math.ceil(refreshDelay()));
     };
     const refresh = () => {
       cancelRefreshTimer();
-      if (!canRefresh() || refreshFlight) return;
+      if (!canRefresh()) { resources?.pause(); return; }
+      updateRefreshOrganizations();
+      if (refreshFlight) return;
+      if (refreshOrganizations?.length === 0) return;
       if (refreshDelay() > 0) {
         scheduleRefresh();
         return;
@@ -139,7 +186,8 @@ function ActiveCloudWorkspaceLifecycle() {
       const flight = {};
       refreshFlight = flight;
       const version = authVersion;
-      void refreshCloudWorkspaceCatalog()
+      const reading = refreshOrganizations === null ? refreshCloudWorkspaceCatalog() : refreshCloudWorkspaceCatalog(refreshOrganizations);
+      void reading
         .finally(() => {
           // Network observation owns this flight, not slower cache restoration.
           // A retired A1 request cannot clear A2's flight or arm its timer.
@@ -182,7 +230,9 @@ function ActiveCloudWorkspaceLifecycle() {
     };
     // Local create/lifecycle receipts can change the cadence before the next
     // fallback. Anchor it to the read start so unrelated events cannot defer it.
-    const offRefreshSchedule = subscribeCloudWorkspaces(scheduleRefresh);
+    const offRefreshSchedule = subscribeCloudWorkspaces(() => { scheduleRefresh(); syncStream(); });
+    const offCoverage = cloudCatalogStreamRolloutEnabled() ? subscribeCloudWorkspaceStreamCoverage(scheduleRefresh) : () => {};
+    const offOrganizations = cloudCatalogStreamRolloutEnabled() ? subscribeOrganizationSnapshots(scheduleRefresh) : () => {};
     const offCatalog = subscribeCloudWorkspaceRows((change) => {
       pruneCloudLatencySpans();
       forgetRemovedCloudTranscriptWorkspaces(change.removedWorkspaceIds);
@@ -194,6 +244,8 @@ function ActiveCloudWorkspaceLifecycle() {
         notifyWorkspacesChanged(slug, change.workspaceIds);
     });
     const clear = (preservePendingTarget = false) => {
+      resources?.clear();
+      stream?.dispose(); stream = undefined;
       clearCloudLatencySpans();
       setCloudTranscriptCacheOwner(null);
       setCloudChatCacheOwner(null);
@@ -225,6 +277,7 @@ function ActiveCloudWorkspaceLifecycle() {
       cancelRefreshTimer();
       refreshFlight = undefined;
       lastRefresh = undefined;
+      refreshOrganizations = null;
       // The first authenticated snapshot validates the saved identity below.
       // Account changes/sign-out discard it; initial auth must not discard it
       // just because no cloud chat has been released into the store yet.
@@ -237,12 +290,14 @@ function ActiveCloudWorkspaceLifecycle() {
       cached = loadCloudChatCache();
       refresh();
       setCloudCreationModeOwner(next);
+      syncStream();
     };
     const offAuth = onAuthStateChange((session) => {
       authVersion++;
       install(session);
     });
     const visibility = () => {
+      syncStream();
       if (document.visibilityState === "hidden") {
         const bridge = getActiveBridge();
         if (bridge instanceof WorkspaceRuntimeClient) bridge.cancelSpeculativeWarmups();
@@ -261,14 +316,18 @@ function ActiveCloudWorkspaceLifecycle() {
         if (!alive) return;
         enabled = capability.enabled;
         refresh();
+        syncStream();
       })
       .catch(() => {});
     document.addEventListener("visibilitychange", visibility);
     window.addEventListener("focus", refresh);
     return () => {
       alive = false;
+      offStreamSelection(); stream?.dispose();
       offCatalog();
       offRefreshSchedule();
+      offCoverage(); offOrganizations();
+      offResources(); resources?.clear();
       offAuth();
       cancelRefreshTimer();
       document.removeEventListener("visibilitychange", visibility);
@@ -371,7 +430,8 @@ function ActiveCloudWorkspaceLifecycle() {
     };
     attach();
     const off = subscribeCloudWorkspaces(attach);
-    const offRefresh = subscribeCloudWorkspaceRefresh(() => {
+    const offRefresh = subscribeCloudWorkspaceRefresh(organizations => {
+      if (organizations && !organizations.has(target.organizationId)) return;
       if (cancelled || document.visibilityState === "hidden" ||
           !canReadCloudWorkspace(cloudWorkspaceDocument(target))) return;
       // History has its own revision and remains readable while the VM is

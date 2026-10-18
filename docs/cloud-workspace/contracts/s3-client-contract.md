@@ -501,6 +501,42 @@ starts. Account and organization APIs used by signed-in organization-local
 workspaces (`/v1/me`, organizations, teams, settings, `/v1/auth/events`) are
 not part of this contract and do not change.
 
+### Desktop implementation
+
+The desktop implementation keeps the device stream in Electron main, sharing
+the registered device and device session with runtime admission. It connects
+only to the control plane's advertised stream URL. The closed
+`cloud_workspace_sdk_stream` command controls a replaceable renderer lease;
+tickets, resume cursors and capability registration stay native. Events on
+`cloud-workspace-sdk-stream` carry native sequence and coverage revisions.
+
+The renderer starts this lease lazily for a readable cloud selection. It
+retains confirmed exact-key documents during catch-up, fences stale account
+and snapshot results, and releases a hidden stream after 30 seconds. Native
+capability pushes are registered before delivery to the exact runtime socket.
+Catalog and lifecycle poll replacement has a separate static rollout gate,
+disabled until fixture and owner-organization conformance is recorded. With
+that gate enabled, complete current stream coverage removes exact-organization
+lifecycle polls. Catalog fallback reads only uncovered member organizations;
+uncovered guests and unknown, bounded or incomplete organization sets retain
+the global list. Empty and legacy membership snapshots are incomplete proof.
+Coverage loss restores observation without clearing confirmed documents.
+
+Presence polling remains unchanged. Stream collaboration presence does not yet
+renew the engine's idle-stop and automatic-update presence lease. Removing those
+polls requires that separate parity; current stream coverage does not prove it.
+
+History, agent discovery and collaborator invitations/roles have revisions that
+the current device stream does not carry. Under the same disabled catalog rollout
+gate, one account-owned 30-second clock preserves their refresh opportunities for
+organizations omitted from periodic catalog reads. Scoped reads and this clock
+invalidate only the matching organization; active consumers retain their exact-key
+snapshots and own deduplicated reads. Global catalog fallback needs no additional
+clock. Hidden windows pause it, resume catches up due work, and account changes
+discard its deadlines. Reading stopped history still does not acquire runtime
+admission. Live fixture and owner-organization conformance remain prerequisites
+for enabling catalog poll replacement.
+
 ## Open questions
 
 | # | Question | Recommendation | Answer (freeze review) |

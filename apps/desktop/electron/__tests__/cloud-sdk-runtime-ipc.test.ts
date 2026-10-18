@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const broker = vi.hoisted(() => ({ openSdkRuntime: vi.fn(), refreshSdkRuntime: vi.fn(), fallbackSdkRuntime: vi.fn(),
-  signSdkRuntimeProof: vi.fn(), renewSdkRuntimeCapabilities: vi.fn() }));
+  signSdkRuntimeProof: vi.fn(), renewSdkRuntimeCapabilities: vi.fn(), controlSdkStream: vi.fn() }));
 vi.mock("../cloud-workspace-access-runtime", () => ({ getCloudWorkspaceAccessBroker: () => broker }));
 import { cloudWorkspaceSdkRuntimeOpen, cloudWorkspaceSdkRuntimeRefresh, cloudWorkspaceSdkRuntimeLegacy,
-  cloudWorkspaceSdkRuntimeProof, cloudWorkspaceSdkRuntimeCapabilities } from "../ipc/commands/cloud-sdk-runtime";
+  cloudWorkspaceSdkRuntimeProof, cloudWorkspaceSdkRuntimeCapabilities, cloudWorkspaceSdkStream } from "../ipc/commands/cloud-sdk-runtime";
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const identity = { ...target, runtimeId: "33333333-3333-4333-8333-333333333333", generation: 2, authorityEpoch: 3,
   engineInstanceId: "44444444-4444-4444-8444-444444444444", connectionSequence: 1 };
@@ -11,6 +11,15 @@ const fields = { aud: "zeros:engine", wsp: target.workspaceId, jti: "a".repeat(2
 const event = {} as Parameters<typeof cloudWorkspaceSdkRuntimeOpen>[1];
 beforeEach(() => vi.resetAllMocks());
 describe("closed native SDK IPC", () => {
+  it("exposes closed stream controls without accepting tickets, cursors, capabilities or remote URLs", async () => {
+    for (const extra of [{ url: "wss://foreign.example.test" }, { ticket: "arbitrary" }, { cursor: "arbitrary" }, { capabilities: {} }]) {
+      expect(await cloudWorkspaceSdkStream({ action: "start", target, ...extra }, event)).toMatchObject({ code: "invalid_input" });
+    }
+    expect(broker.controlSdkStream).not.toHaveBeenCalled();
+    await cloudWorkspaceSdkStream({ action: "start", target }, event);
+    expect(broker.controlSdkStream).toHaveBeenCalledWith({ action: "start", target }, expect.any(Function));
+  });
+
   it("passes only a target or a complete native identity to the broker", async () => {
     await cloudWorkspaceSdkRuntimeOpen(target, event); expect(broker.openSdkRuntime).toHaveBeenCalledWith(target);
     await cloudWorkspaceSdkRuntimeRefresh(identity, event); expect(broker.refreshSdkRuntime).toHaveBeenCalledWith(identity);

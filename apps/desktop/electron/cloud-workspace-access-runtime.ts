@@ -10,6 +10,7 @@ import { CloudWorkspaceNativeSshRuntime, CloudWorkspaceSshRuntime } from "./clou
 import { CloudRuntimeServiceClient } from "./cloud-runtime-service-client";
 import { CloudRuntimeServiceTransport } from "./cloud-runtime-service-transport";
 import { CloudSdkRuntimeBroker } from "./cloud-sdk-runtime-broker";
+import { CloudSdkDeviceStream } from "./cloud-sdk-device-stream";
 import { ensureCloudAccessDeviceForMain, readCloudAccessDeviceForMain, signCloudEngineAdmissionForMain, signCloudRuntimeServiceForMain, signCloudPreviewForMain,
   signCloudSdkDeviceRequestForMain, signCloudSdkCapabilityProofForMain } from "./cloud-replica-host-runtime";
 import { previewFrameAuthorizations } from "./preview-frame-authorizations";
@@ -155,6 +156,7 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
     return ssh;
   };
   const current = new CloudWorkspaceAccessBroker({
+    createSdkStream: sdk => new CloudSdkDeviceStream({ broker: sdk, emit: event => emitEvent("cloud-workspace-sdk-stream", event) }),
     createSdkRuntime: () => new CloudSdkRuntimeBroker({
       baseUrl: controlPlaneBaseUrl(), appVersion: app.getVersion(),
       platform: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux",

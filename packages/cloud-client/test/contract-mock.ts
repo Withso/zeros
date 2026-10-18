@@ -19,7 +19,7 @@ import {
   openApiComponentSchema,
   type JsonObject,
 } from "../src/contract-source";
-import type { WorkspaceDocument } from "../src/generated/rest";
+import type { Capabilities, ConnectResponse, WorkspaceDocument } from "../src/generated/rest";
 
 const SUPPORTED_CONTRACT = 1;
 const HEARTBEAT_INTERVAL_MS = 20000;
@@ -57,6 +57,13 @@ export interface ContractMockOptions {
   legacyMetadata?: boolean;
   deviceStreamOrganizations?: string[];
   presenceOrganizations?: string[];
+  /** Native integration fixtures use live expiry, full S1 claims and the
+   * advertised deployment URLs while retaining schema validation. */
+  now?: () => number;
+  ticket?: string;
+  capabilities?: (workspaceId: string) => Capabilities;
+  streamUrl?: string;
+  runtimeRoutes?: ConnectResponse["routes"];
 }
 
 export interface ContractMock {
@@ -120,7 +127,7 @@ export async function createContractMock(
   const workspaces = options.workspaces ?? [DEFAULT_WORKSPACE];
   const deviceSessionId =
     options.deviceSessionId ?? "77777777-7777-4777-8777-777777777777";
-  const ticket = `mock-ticket-${"t".repeat(32)}`;
+  const ticket = options.ticket ?? `mock-ticket-${"t".repeat(32)}`;
   const cursor = "c-1";
   const idempotent = new Map<string, { status: number; body: JsonObject }>();
   const faults: { method: string; pathIncludes: string; status: number; body?: JsonObject; raw?: string }[] = [];
@@ -168,10 +175,10 @@ export async function createContractMock(
     response.end(JSON.stringify(body));
   };
 
-  const capabilities = (workspaceId: string) => ({
+  const capabilities = options.capabilities ?? ((workspaceId: string) => ({
     engine: { token: mockCapabilityToken({ aud: "zeros:engine", wsp: workspaceId, jti: "MOCKjtiENGINE000000000", exp: 1760000300 }), expiresAt: NOW_ISO },
     realtime: { token: mockCapabilityToken({ aud: "zeros:realtime", wsp: workspaceId, jti: "MOCKjtiREALTIME0000000", exp: 1760000300 }), expiresAt: NOW_ISO },
-  });
+  }));
 
   function handleRest(
     request: IncomingMessage,
@@ -199,9 +206,9 @@ export async function createContractMock(
       json(response, 201, {
         deviceSessionId,
         stream: {
-          url: `${wsBase}/v1/device-stream`,
+          url: options.streamUrl ?? `${wsBase}/v1/device-stream`,
           ticket,
-          ticketExpiresAt: NOW_ISO,
+          ticketExpiresAt: options.now ? new Date(options.now() + 60_000).toISOString() : NOW_ISO,
         },
         contract: SUPPORTED_CONTRACT,
         heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
@@ -253,11 +260,11 @@ export async function createContractMock(
             writerEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", fundingOwnerUserId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", fundingOwnerEpoch: 1 },
         } }),
         capabilities: capabilities(workspaceId),
-        routes: [
+        routes: options.runtimeRoutes ?? [
           { kind: "direct", url: `${wsBase}/runtime/direct`, priority: 0 },
           { kind: "relay", url: `${wsBase}/runtime/relay`, priority: 1 },
         ],
-        renewAt: NOW_ISO,
+        renewAt: options.now ? new Date(options.now() + 180_000).toISOString() : NOW_ISO,
         relayHedgeMs: 400,
       };
       if (!connectValid(answer)) throw new Error("contract mock would send an invalid ConnectResponse");
