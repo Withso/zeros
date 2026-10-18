@@ -3634,6 +3634,7 @@ export class ZerosEngine {
    */
   async stop(): Promise<void> {
     this.sessionUpdateBatcher?.flush();
+    if (!this.cloudWorker) this.slowWorkspaceOperations?.dispose();
     // Streamed transcript rows buffered by a Local engine reach SQLite first.
     try { flushStreamingChatMessages(); } catch { /* best effort, like persist-on-emit */ }
     this.cloudCheckpointProgress?.reporter.dispose();
@@ -10822,6 +10823,7 @@ export class ZerosEngine {
       }
     }
 
+    const finishLoopObservation = this.cloudWorker ? null : this.slowWorkspaceOperations?.beginEventLoopObservation?.();
     try {
       // Keep the original NORMAL rows and FULL head in one read snapshot across
       // image migration and the outer dispatch awaits. A changed writer or head
@@ -11179,7 +11181,7 @@ export class ZerosEngine {
         invalidateWorkspaceChangeProbes(workspaceIds);
       }
       const elapsedMs = Date.now() - startedAt;
-      this.slowWorkspaceOperations.observe(op, elapsedMs);
+      this.slowWorkspaceOperations.observe(op, elapsedMs, finishLoopObservation?.());
       client.send(
         createMessage({
           type: "WORKSPACE_RESPONSE",
@@ -11324,6 +11326,8 @@ export class ZerosEngine {
       // Forward to error tracking (gap A) — scrubbed metadata; skips expected
       // git control-flow codes. Covers every git/file/workspace op, all surfaces.
       this.reportEngineError(client, `workspace:${op}`, err);
+    } finally {
+      finishLoopObservation?.();
     }
   }
 
