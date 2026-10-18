@@ -38,6 +38,10 @@ export const ROLLOUT_FLAGS = {
   relay_over_uplink: { whileFeedUnavailable: "retain", summary: "Relay client sessions over the uplink" },
   presence_in_memory: { whileFeedUnavailable: "retain", summary: "Keep presence and engine liveness in memory" },
   runtime_connect: { whileFeedUnavailable: "retain", summary: "Serve S3 runtime connect and capability renewal", requires: ["capabilities"] },
+  // Enable only once every control-plane service runs the heartbeat that
+  // never shortens a lease: an older one would cut a 36-minute uplink lease
+  // back to 90 s while the engine skips its periodic heartbeat.
+  engine_lease_over_uplink: { whileFeedUnavailable: "retain", summary: "Renew the engine lease over the uplink (lease.v1)", requires: ["realtime_uplink"] },
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;

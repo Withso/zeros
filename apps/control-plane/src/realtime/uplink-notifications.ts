@@ -58,6 +58,7 @@ export function startUplinkNotifications(
     channels: [UPLINK_OWNER_CHANNEL, UPLINK_AUTHORITY_CHANNEL, ...(cred ? [UPLINK_CRED_REVISION_CHANNEL] : [])],
     onNotification: notice => handleUplinkNotification(server, notice.channel, notice.payload ?? "", cred),
     onReady: () => {
+      server.notificationsCurrent = true;
       server.revalidate();
       void presence.owners(server.ownedEngineInstances()).then(rows => {
         for (const row of rows) server.ownerChanged(row.engineInstanceId, row.connectionId, row.connectedAtMs);
@@ -67,8 +68,14 @@ export function startUplinkNotifications(
       // ones get it here.
       void cred?.resync?.(server.ownedEngineInstances()).catch(() => {});
     },
-    onUnavailable: () => logger.warn("[realtime] uplink notifications unavailable; owners and authority rely on the periodic recheck"),
+    onUnavailable: () => {
+      server.notificationsCurrent = false;
+      logger.warn("[realtime] uplink notifications unavailable; owners and authority rely on the periodic recheck");
+    },
   });
   void listener.start().catch(() => {});
-  return () => listener.stop();
+  return async () => {
+    server.notificationsCurrent = false;
+    await listener.stop();
+  };
 }

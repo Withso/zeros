@@ -41,6 +41,7 @@ registered `whileFeedUnavailable` value:
 | `relay_over_uplink` | retain | Transport choice; the existing relay remains. |
 | `presence_in_memory` | retain | Transport choice; database presence remains. |
 | `runtime_connect` | retain | Additive endpoints; while off they answer 404 and clients keep `runtime/admission`. |
+| `engine_lease_over_uplink` | retain | Changes which path renews the engine lease, not who may hold it: every renewal re-checks authority in SQL and the HTTP heartbeat stays as the fallback. A flip closes the affected uplinks (`1001 features_changed`), so flapping would bounce engines between the two paths. |
 
 `retain` keeps the last loaded value, still corrected by the safety refresh.
 Use `off` for any new flag that relaxes a database check or a security
@@ -56,6 +57,18 @@ complete, so advertising or accepting the uplink alone would loop engines at
 `auth.sync`. Enabling the uplink for an organization is therefore always the
 pair: `capabilities` first, then `realtime_uplink`. `runtime_connect` also
 requires `capabilities`: its endpoints issue S1 client capabilities.
+
+`engine_lease_over_uplink` requires `realtime_uplink`: the uplink renews the
+36 min engine lease (S2 `lease.v1`). Enable it only once every control-plane
+service runs the HTTP heartbeat that never shortens a lease
+(`greatest(lease_expires_at, now + 90 s)` in `setup-materials.ts`). An older
+`api` would cut an uplink-renewed lease back to 90 s while the engine, which
+trusts the uplink's report, skips its periodic beats, so the lease could
+lapse and stop the workspace. Turning the flag off closes the organization's
+`lease.v1` uplinks with `1001 features_changed`; the redial negotiates
+without it and the engines return to the 10 s HTTP heartbeat. A lease the
+uplink already renewed stays in force until it ends (up to 36 min), because
+the heartbeat never shortens it.
 
 ## Changing a flag
 

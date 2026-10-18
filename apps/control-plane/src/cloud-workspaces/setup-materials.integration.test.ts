@@ -1040,6 +1040,42 @@ d("cloud workspace setup material redemption", () => {
     expect((await pool.query("SELECT lease_expires_at<now() AS expired FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0].expired).toBe(true);
   });
 
+  it("never shortens a longer uplink-renewed lease with an HTTP heartbeat", async () => {
+    const materials = await service.redeem(redemptionInput());
+    const registration = await service.registerEngine({
+      actorProtocolVersion: 2, agentRuntime: { ...runtimeWitness, profile: "zeros-cloud-worker-v4" }, agentCustomizationVersion: 3,
+      token: materials.engine.registration.token,
+      workspaceId: seed.execution.workspaceId,
+      organizationId: seed.execution.organizationId,
+      generation: seed.execution.generation,
+      setupRunId: seed.execution.setupRunId,
+      executionFence: seed.execution.executionFence,
+      engineInstanceId: materials.engine.instanceId,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+    });
+    const beat = () => service.heartbeat({
+      token: registration.heartbeat.token,
+      workspaceId: seed.execution.workspaceId,
+      organizationId: seed.execution.organizationId,
+      generation: seed.execution.generation,
+      engineInstanceId: materials.engine.instanceId,
+    });
+    const lease = async () => (await pool.query<{ lease: Date }>(
+      "SELECT lease_expires_at AS lease FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0]!.lease.getTime();
+    // An uplink renewal (lease.v1) left the lease 30 minutes out.
+    await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp()+interval '30 minutes' WHERE id=$1",
+      [materials.engine.instanceId]);
+    const longer = await lease();
+    await expect(beat()).resolves.toMatchObject({ leaseExpiresAtMs: longer });
+    expect(await lease()).toBe(longer);
+    // A lease shorter than the HTTP lease still renews to 90 s.
+    await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp()+interval '5 seconds' WHERE id=$1",
+      [materials.engine.instanceId]);
+    const renewed = await beat();
+    expect(renewed.leaseExpiresAtMs).toBeGreaterThan(Date.now() + 80_000);
+    expect(renewed.leaseExpiresAtMs).toBeLessThan(Date.now() + 95_000);
+  });
+
   it("persists local-command opt-in only with an attested supported registration",async()=>{
     const material=await service.redeem({...redemptionInput(),materialVersion:2,runtime:runtimeWitness});
     const registered=await service.registerEngine({token:material.engine.registration.token,...material.execution,

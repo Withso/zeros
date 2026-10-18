@@ -248,10 +248,13 @@ d("engine uplink database paths", () => {
       expect(sent).toEqual([{ t: "cred.revision", d: { kind: "agent-controls", revision: 6 } }]);
       // One read for the owned engines that negotiated cred.v1 only.
       expect(reads).toEqual([[identity.engineInstanceId]]);
+      // lease.v1 uplinks skip the periodic authority recheck only while this holds.
+      expect((server as { notificationsCurrent?: boolean }).notificationsCurrent).toBe(true);
     } finally {
       await stop();
       await listenerPool.end();
     }
+    expect((server as { notificationsCurrent?: boolean }).notificationsCurrent).toBe(false);
   });
 
   it("notifies a credential-control revision bump and routes it to the push extension", async () => {

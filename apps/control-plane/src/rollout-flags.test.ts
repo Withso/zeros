@@ -38,7 +38,7 @@ describe("rollout flag snapshot", () => {
   it("registers the initial flags and defaults every organization to off", async () => {
     expect(Object.keys(ROLLOUT_FLAGS).sort()).toEqual([
       "authority_cache_enforce", "authority_cache_shadow", "capabilities", "credential_push",
-      "device_stream", "presence_in_memory", "realtime_uplink", "relay_over_uplink", "runtime_connect",
+      "device_stream", "engine_lease_over_uplink", "presence_in_memory", "realtime_uplink", "relay_over_uplink", "runtime_connect",
     ]);
     expect(isRolloutFlagName("capabilities")).toBe(true);
     expect(isRolloutFlagName("toString")).toBe(false);
@@ -243,6 +243,19 @@ describe("rollout flag snapshot", () => {
     expect(h.snapshot.anyEnabled("realtime_uplink")).toBe(true);
     // A second org with only the dependency still reads off.
     expect(h.snapshot.enabled("22222222-2222-4222-8222-222222222222", "realtime_uplink")).toBe(false);
+    await h.snapshot.stop();
+  });
+
+  // The lease is renewed only over an admitted uplink, so the flag means
+  // nothing without realtime_uplink (and, through it, capabilities).
+  it("reads engine_lease_over_uplink off until realtime_uplink is effective for the same org", async () => {
+    const h = harness([{ org_id: ORG, flag: "engine_lease_over_uplink" }, { org_id: ORG, flag: "realtime_uplink" }]);
+    await h.snapshot.start();
+    expect(ROLLOUT_FLAGS.engine_lease_over_uplink.whileFeedUnavailable).toBe("retain");
+    expect(h.snapshot.enabled(ORG, "engine_lease_over_uplink")).toBe(false);
+    h.rows = [{ org_id: ORG, flag: "engine_lease_over_uplink" }, { org_id: ORG, flag: "realtime_uplink" }, { org_id: ORG, flag: "capabilities" }];
+    await h.snapshot.reload();
+    expect(h.snapshot.enabled(ORG, "engine_lease_over_uplink")).toBe(true);
     await h.snapshot.stop();
   });
 

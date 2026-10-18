@@ -21,10 +21,15 @@ export type Cadence = {
 export const STEADY_STATE_CADENCES = {
   "engine.credentialControls": { periodSeconds: 0.5, afterCompletion: true, role: "engine",
     source: "apps/desktop/src/engine/cloud-local-command-queue-boot.ts: controls poll 500 ms after each exchange" },
-  "engine.heartbeat": { periodSeconds: 10, afterCompletion: false, role: "engine",
-    source: "engine-heartbeat.ts DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS, sent in the registration document" },
+  // S2 lease.v1 (engine_lease_over_uplink): the uplink renews the lease and a
+  // periodic HTTP heartbeat posts only when it carries something, so
+  // engine.heartbeat keeps a per-request budget but no steady-state cadence.
+  "engine.uplinkLeaseRenewal": { periodSeconds: 300, afterCompletion: false, role: "engine",
+    source: "uplink-server.ts renewLease on every UPLINK_WATERMARK_INTERVAL_MS (5 min) tick of a lease.v1 uplink" },
   "engine.durableRecordHead": { periodSeconds: 10, afterCompletion: false, role: "engine",
-    source: "cloud-runtime-registration.ts synchronizeDurableRecord after each accepted heartbeat" },
+    source: "cloud-runtime-registration.ts synchronizeDurableRecord on every heartbeat tick, posted or skipped" },
+  "engine.checkpointHintWait": { periodSeconds: 25 / 6, afterCompletion: false, role: "engine",
+    source: "engine-checkpoint-hints.ts: a 25 s wait reads at its start and every 5 s (six reads), and the engine waits again at once" },
   "engine.actorConfirm": { periodSeconds: 5, afterCompletion: false, role: "client",
     source: "cloud-local-command-queue-boot.ts: re-confirm at half of the 10 s confirmedUntil" },
   "client.renew": { periodSeconds: 5, afterCompletion: false, role: "client",
@@ -42,8 +47,8 @@ export type SteadyOperation = keyof typeof STEADY_STATE_CADENCES;
  * difference between one seeded workspace and an empty inventory, and
  * `runningOnly` work stops when the workspace does. */
 export const WORKER_PER_WORKSPACE_CADENCES = {
-  "worker.engineHealthJob": { periodSeconds: 90, marginal: false, runningOnly: true,
-    source: "lifecycle-jobs.ts DUE.engineHealth: one job run per engine lease period (90 s) while the workspace runs" },
+  "worker.engineHealthJob": { periodSeconds: 1_800, marginal: false, runningOnly: true,
+    source: "lifecycle-jobs.ts DUE.engineHealth: one job run at each engine lease expiry while the workspace runs; lease.v1 renewals keep it 31-36 min out" },
   "worker.reconcileDrift": { periodSeconds: 21_600, marginal: false, runningOnly: false,
     source: "reconciler.ts sweepScopeInventory: the paged inventory keeps matched bindings pushed to the 6 h inventoryFallbackMs horizon; only then does a per-workspace drift inspect run" },
   "worker.reconcileOrphans": { periodSeconds: 60, marginal: true, runningOnly: false,

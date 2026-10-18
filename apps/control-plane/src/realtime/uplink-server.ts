@@ -10,12 +10,14 @@ import { InboundSequence, ReliableOutbox, ResumeStore } from "./resume.js";
 import type { UplinkSecurityAlerts } from "./uplink-alerts.js";
 import type { EngineCapabilityIssuer, UplinkAuthSource } from "./uplink-auth-source.js";
 import type { UplinkAuthority, UplinkIdentity } from "./uplink-authority.js";
+import { UPLINK_ENGINE_LEASE_MS, type UplinkLeaseStore } from "./uplink-lease.js";
 import type { UplinkPhase, UplinkPresenceSnapshot, UplinkPresenceWriter } from "./uplink-presence.js";
 import {
   UPLINK_ACK_DELAY_MS,
   UPLINK_AUTH_APPLIED_TIMEOUT_MS,
   UPLINK_CLOSE,
   UPLINK_DEFAULT_PING_INTERVAL_MS,
+  UPLINK_FEATURES,
   UPLINK_HELLO_TIMEOUT_MS,
   UPLINK_MAX_SOCKET_PAYLOAD_BYTES,
   UPLINK_MAX_CONTROL_FRAME_BYTES,
@@ -110,6 +112,9 @@ export type UplinkServerOptions = {
   realtimeInstance: string;
   presence?: UplinkPresenceWriter;
   alerts?: UplinkSecurityAlerts;
+  /** Renews the engine lease of `lease.v1` uplinks; negotiated only while
+   * `engine_lease_over_uplink` is on for the organization. */
+  lease?: UplinkLeaseStore;
   extensions?: readonly UplinkExtension[];
   metric?: (name: UplinkMetric, valueMs: number) => void;
   pingIntervalMs?: number;
@@ -143,8 +148,8 @@ export type UplinkServerOptions = {
   random?: () => number;
 };
 
-type ResolvedOptions = Required<Omit<UplinkServerOptions, "presence" | "alerts" | "metric" | "resumeRetentionMs">> &
-  Pick<UplinkServerOptions, "presence" | "alerts" | "metric">;
+type ResolvedOptions = Required<Omit<UplinkServerOptions, "presence" | "alerts" | "lease" | "metric" | "resumeRetentionMs">> &
+  Pick<UplinkServerOptions, "presence" | "alerts" | "lease" | "metric">;
 
 export type UplinkCounters = {
   admitted: number;
@@ -183,6 +188,11 @@ export class CloudEngineUplinkServer {
   private draining = false;
   readonly counters: UplinkCounters = { admitted: 0, resumed: 0, refused: {}, closed: {} };
   readonly options: ResolvedOptions;
+  /** True while the uplink LISTEN session is current. Only then do `lease.v1`
+   * uplinks skip the periodic authority recheck: every notified authority
+   * change still re-reads them at once, and each lease renewal re-checks
+   * authority within one watermark interval. */
+  notificationsCurrent = false;
 
   constructor(options: UplinkServerOptions) {
     this.options = {
@@ -231,12 +241,16 @@ export class CloudEngineUplinkServer {
     return this.options.flags.enabled(organizationId, "realtime_uplink");
   }
 
-  /** The extensions both sides offer whose rollout flag (if any) is on. */
+  /** The extensions both sides offer whose rollout flag (if any) is on,
+   * plus `lease.v1` when this server renews leases and the flag is on. */
   negotiate(organizationId: string, offered: ReadonlySet<string>): Set<string> {
-    return new Set(this.options.extensions
+    const features = new Set(this.options.extensions
       .filter(extension => offered.has(extension.feature) &&
         (!extension.flag || this.options.flags.enabled(organizationId, extension.flag)))
       .map(extension => extension.feature));
+    if (this.options.lease && offered.has(UPLINK_FEATURES.lease) &&
+        this.options.flags.enabled(organizationId, "engine_lease_over_uplink")) features.add(UPLINK_FEATURES.lease);
+    return features;
   }
 
   /** A flag turned off closes that organization's uplinks with 4404; the
@@ -474,6 +488,7 @@ class UplinkConnection {
   private drainTimers: ReturnType<typeof setTimeout>[] = [];
   private rechecking = false;
   private recheckAgain = false;
+  private leaseRenewing = false;
 
   constructor(
     private readonly server: CloudEngineUplinkServer,
@@ -741,6 +756,9 @@ class UplinkConnection {
         for (const frame of frames) this.sendText(frame.text);
         for (const extension of this.server.options.extensions)
           if (this.features.has(extension.feature)) extension.onOpen?.(this.session!, this.resumed);
+        // A redial within one watermark of the last renewal (a drain or a
+        // deploy) keeps that lease until the next tick.
+        if (this.leaseExpiresAtMs - this.now() <= UPLINK_ENGINE_LEASE_MS - options.watermarkIntervalMs) void this.renewLease();
       }
     } else {
       nextMs = Math.max(100, Math.floor(options.random() * options.capabilityRetryMs));
@@ -767,8 +785,14 @@ class UplinkConnection {
     this.livenessTimer = setInterval(() => {
       if (this.now() - this.lastSeenAtMs > offlineAfterMs) this.close(UPLINK_CLOSE.pingTimeout, "ping_timeout", { park: true });
     }, Math.min(5_000, options.pingIntervalMs));
-    this.watermarkTimer = setInterval(() => this.writePresence(false), options.watermarkIntervalMs);
-    this.authorityTimer = setInterval(() => void this.recheck(), options.authorityRecheckMs);
+    this.watermarkTimer = setInterval(() => {
+      this.writePresence(false);
+      if (this.flowing) void this.renewLease();
+    }, options.watermarkIntervalMs);
+    this.authorityTimer = setInterval(() => {
+      if (this.features.has(UPLINK_FEATURES.lease) && this.server.notificationsCurrent) return;
+      void this.recheck();
+    }, options.authorityRecheckMs);
     for (const timer of [this.livenessTimer, this.watermarkTimer, this.authorityTimer]) timer.unref?.();
   }
 
@@ -792,11 +816,27 @@ class UplinkConnection {
         this.recheckAgain = false;
         const verified = await this.server.options.authority.verify(this.identity, this.token).catch(() => null);
         if (this.state !== "welcomed") return;
-        if (verified?.ok) { this.leaseExpiresAtMs = verified.leaseExpiresAtMs; continue; }
+        // A read that raced a newer renewal never moves the lease back.
+        if (verified?.ok) { this.leaseExpiresAtMs = Math.max(this.leaseExpiresAtMs, verified.leaseExpiresAtMs); continue; }
         if (!verified || verified.reason === "unavailable") continue;
         return this.close(UPLINK_CLOSE.forbidden, "uplink_forbidden", { park: false });
       } while (this.recheckAgain);
     } finally { this.rechecking = false; }
+  }
+
+  /** `lease.v1`: an unavailable renewal keeps the uplink open (the next
+   * tick retries, and the engine's HTTP heartbeat resumes before the lease
+   * runs low); a refusal is an authority loss and closes 4403. */
+  private async renewLease(): Promise<void> {
+    const store = this.server.options.lease, identity = this.identity;
+    if (!store || !identity || !this.features.has(UPLINK_FEATURES.lease) || this.state !== "welcomed" || this.leaseRenewing) return;
+    this.leaseRenewing = true;
+    try {
+      const renewed = await store.renew(identity, this.token).catch(() => ({ ok: false, reason: "unavailable" }) as const);
+      if (this.state !== "welcomed") return;
+      if (renewed.ok) this.leaseExpiresAtMs = Math.max(this.leaseExpiresAtMs, renewed.leaseExpiresAtMs);
+      else if (renewed.reason === "authority") this.close(UPLINK_CLOSE.forbidden, "uplink_forbidden", { park: false });
+    } finally { this.leaseRenewing = false; }
   }
 
   /** Readiness writes are bounded per uplink (a burst, then one per

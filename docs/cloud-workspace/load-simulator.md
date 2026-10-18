@@ -72,7 +72,7 @@ otherwise. It takes about 10 seconds and checks:
 | --- | --- |
 | Migrated schema, SQL, transactions and stored functions on PostgreSQL 18 | Network distance to the database (see the round-trip floor column) |
 | `createPool` API and worker pools with production pool settings | Boat provider (`FakeBoatProvider` returns immediately) |
-| Engine services: heartbeat, durable record head, credential controls, actor confirmation | Engine and desktop processes, relay sockets and HTTP framing (except the catalog route) |
+| Engine services: heartbeat, uplink lease renewal, checkpoint-hint wait, durable record head, credential controls, actor confirmation | Engine and desktop processes, relay sockets and HTTP framing (except the catalog route) |
 | Desktop paths: actor-session renew, relay authority revalidation, catalog through the Hono route with `resolveAuthenticatedUser` | WorkOS network calls |
 | Provider resolver, reconciler job claim/intent claim/drift/orphan sweep, access revocation, checkpoint request and security-event workers | WorkOS sync, outbox and other workers not listed |
 
@@ -87,17 +87,28 @@ Per active workspace, one running engine and one connected desktop:
 | Operation | Role | Interval | Source |
 | --- | --- | --- | --- |
 | `engine.credentialControls` | engine | 500 ms after completion | `apps/desktop/src/engine/cloud-local-command-queue-boot.ts` |
-| `engine.heartbeat` | engine | 10 s | `DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS` in `apps/control-plane/src/cloud-workspaces/engine-heartbeat.ts` |
-| `engine.durableRecordHead` | engine | after each heartbeat | `synchronizeDurableRecord` in cloud runtime registration |
+| `engine.uplinkLeaseRenewal` | engine | 300 s | `UPLINK_WATERMARK_INTERVAL_MS` in `apps/control-plane/src/realtime/uplink-protocol.ts` (S2 `lease.v1`) |
+| `engine.checkpointHintWait` | engine | 25/6 s (six reads per 25 s wait) | `apps/control-plane/src/cloud-workspaces/engine-checkpoint-hints.ts` |
+| `engine.durableRecordHead` | engine | 10 s, every heartbeat tick, posted or skipped | `synchronizeDurableRecord` in cloud runtime registration |
 | `engine.actorConfirm` | client | 5 s (half of `confirmedUntil`) | engine actor confirmation |
 | `client.renew` | client | 5 s (lease / 2) | `apps/desktop/src/engine/transport/cloud.ts` |
 | `client.relayRevalidate` | client | 5 s | `authorityCheckMs` in `apps/control-plane/src/cloud-workspaces/runtime-bridge.ts` |
 | `client.catalog` | client | 30 s, `limit=100` | `apps/desktop/src/renderer/state/cloud-workspace-lifecycle.tsx` |
 
+`engine.heartbeat` keeps its per-request budget but has no steady-state
+cadence: with `lease.v1` the uplink renews the lease and a periodic beat posts
+only when it carries something (S2 1.2.0). An engine without `lease.v1` still
+posts every 10 s (`DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS` in
+`apps/control-plane/src/cloud-workspaces/engine-heartbeat.ts`), 0.1 tx/s more
+per running engine. Engines already ran the checkpoint-hint wait; the
+simulator counts it since the 2026-10-18 re-run.
+
 The background workers run once per process at their configured intervals
 (`apps/control-plane/src/worker-polling-config.ts`). Lifecycle due work runs as
 jobs (docs/cloud-workspace/job-queue.md): one engine-health cycle per running
-workspace per lease period (90 s), drift when a binding's `next_drift_check_at`
+workspace per lease period (the job runs at the lease expiry: every 31-36 min
+with `lease.v1`, modeled as 1800 s, and every 90 s for an engine on the HTTP
+heartbeat alone), drift when a binding's `next_drift_check_at`
 passes (60 s while running or transitional, 6 h once settled stopped or
 archived), and the 60 s orphan sweep, which paces drift from Boat's paged
 inventory instead of inspecting each workspace.
@@ -177,6 +188,8 @@ PostgreSQL 18.6 on loopback, Node 24, 4 CPUs, WorkOS authority on.
 | --- | --- | --- | --- | --- | --- |
 | `engine.heartbeat` | 1 | 9 | 7 | 9.5 | 35 |
 | `engine.durableRecordHead` | 1 | 7 | 5 | 3.2 | 25 |
+| `engine.uplinkLeaseRenewal` (2026-10-18) | 1 | 7 | 5 | 3.3 | 25 |
+| `engine.checkpointHintWait`, one read (2026-10-18) | 1 | 5 | 3 | 0.9 | 15 |
 | `engine.credentialControls` | 1 | 10 | 8 | 4.6 | 40 |
 | `engine.actorConfirm` | 1 | 11 | 9 | 10.1 | 45 |
 | `client.renew` | 1 | 12 | 10 | 9.7 | 50 |
@@ -214,6 +227,14 @@ add nothing while the listing confirms the bindings. One replica's Boat calls
 project to 6.4 per minute at 500 workspaces against the enforced 1000
 requests/min/IP budget (two replicas).
 
+With `lease.v1` (re-run 2026-10-18) one active workspace projects to
+**3.01 tx/s** and 29.0 statements/s, and a running engine alone to 2.35 tx/s.
+The 10 s heartbeat (0.1 tx/s) is gone and the engine-health cycle falls to
+0.003 tx/s per running workspace, while the model now counts the
+checkpoint-hint wait (0.24 tx/s per running engine); the lease renewal adds
+0.003 tx/s. The steady-state budgets moved to 3.32 tx/s per active workspace
+and 2.59 tx/s per running engine.
+
 ### Findings
 
 1. `engine.credentialControls` polls every 500 ms: 2.0 tx/s per running engine,
@@ -228,6 +249,8 @@ requests/min/IP budget (two replicas).
 5. The orphan sweep costs three transactions per 60 s per replica while the
    paged listing confirms every binding; its marginal per-workspace cost is
    zero in steady state.
+6. The checkpoint-hint wait reads the database every 5 s per running engine
+   (0.24 tx/s); `checkpoint.request` over the uplink (S2) replaces it.
 
 The provider resolver's connection query took 9.5 ms mean on loopback,
 compared with 25.4 ms measured on Alpha.

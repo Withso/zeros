@@ -3708,9 +3708,10 @@ export class ZerosEngine {
   /** S2 engine uplink (contracts/s2-uplink.md): cloud placements only, and
    * only when the control plane advertised an endpoint to this opted-in
    * engine (the organization's `realtime_uplink` rollout flag was on at
-   * registration). The HTTP heartbeat remains the lease owner; the uplink
-   * carries push traffic and presence and parks without redialing when the
-   * control plane definitively refuses it. */
+   * registration). The uplink carries push traffic and presence, renews the
+   * engine lease when `lease.v1` is negotiated (the HTTP heartbeat stays the
+   * fallback renewal), and parks without redialing when the control plane
+   * definitively refuses it. */
   private startCloudEngineUplink(): void {
     const registration = this.cloudRuntimeRegistration;
     const config = this.cloudRuntimeConfig;
@@ -3747,7 +3748,7 @@ export class ZerosEngine {
       runtimeVersion: VERSION,
       auth: capabilityAuth,
       readiness: () => this.cloudEngineUplinkReadiness(),
-      features: ["cred.v1"],
+      features: ["cred.v1", "lease.v1"],
       // Credential-control push (P0.10 C01): a pushed revision runs the same
       // credential-controls exchange the 500 ms poll runs; the poll itself
       // stays as the fallback (see controlsPollIntervalMs at the boot).
@@ -3776,14 +3777,20 @@ export class ZerosEngine {
         capabilityAuth.uplinkEstablished(established);
         if (!established) this.cloudAgentBoot?.rescheduleControls();
       },
+      onLease: (leaseExpiresAtMs, sentAtMs) => registration.adoptUplinkLease(leaseExpiresAtMs, sentAtMs),
       onReverifyAuthority: () => registration.requestHeartbeatSoon(),
-      onParked: reason =>
-        console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`),
+      onParked: reason => {
+        console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`);
+        // A refused credential or identity may mean lost authority: verify it
+        // over HTTP now rather than on the next beat the lease would allow.
+        if (reason === "unauthenticated" || reason === "forbidden") registration.requestHeartbeatSoon();
+      },
       // No engine metrics pipeline exists yet; the durations are per-connect
       // and per-sync rarities, so the uplink log channel carries them.
       metric: (name, valueMs) => console.info(`[engine-uplink] metric ${name}=${Math.round(valueMs)}ms`),
     });
     this.cloudEngineUplink = uplink;
+    registration.attachUplinkLease(() => this.cloudEngineUplink === uplink && uplink.leaseActive);
     // The hello offers the last durable cursor; an unreadable file starts
     // from a complete snapshot.
     void capabilityAuth.restore().catch(() => undefined).then(() => {

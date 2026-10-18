@@ -1,10 +1,12 @@
 import { WebSocket } from "ws";
 
 /**
- * S2 engine uplink client (`contracts/s2-uplink.md`, 1.1.0): the
+ * S2 engine uplink client (`contracts/s2-uplink.md`, 1.2.0): the
  * cloud engine's WebSocket to `realtime`. Cloud workspaces only; a Local
- * engine never constructs this class. The HTTP heartbeat remains the lease
- * owner in this release — the uplink carries push traffic and presence and
+ * engine never constructs this class. The uplink carries push traffic and
+ * presence; with `lease.v1` negotiated the control plane also renews the
+ * engine lease over it and the client reports every lease it learns
+ * (`onLease`), while the HTTP heartbeat stays the fallback renewal. It
  * is parked (never redialed) when the control plane says the credential or
  * identity is definitively rejected (4401/4403), the rollout flag is off
  * (4404) or no common protocol exists (4426); every other loss redials with
@@ -28,6 +30,7 @@ const BACKOFF_CAP_MS = 30_000;
 /** Full jitter can draw near zero; a tight redial is never correct. */
 const BACKOFF_FLOOR_MS = 100;
 const BACKOFF_RESET_AFTER_MS = 60_000;
+const MAX_PINGS_IN_FLIGHT = 4;
 const OUTBOX_MAX_BYTES = 2 * 1024 * 1024;
 const OUTBOX_MAX_FRAMES = 2_000;
 
@@ -211,7 +214,7 @@ export type CloudEngineUplinkOptions = {
   identity: EngineUplinkIdentity;
   runtimeVersion: string;
   /** Additive feature flags offered in the hello; `cred.v1` negotiates the
-   * credential-control push. */
+   * credential-control push, `lease.v1` the lease renewal. */
   features?: readonly string[];
   auth: EngineUplinkAuthSink;
   /** Current engine readiness, sent as `status.ready` once the gate opens. */
@@ -232,6 +235,11 @@ export type CloudEngineUplinkOptions = {
    * back to its fast fallback cadence the moment the gate closes instead of
    * waiting out an armed slow timer. */
   onEstablishedChange?: (established: boolean) => void;
+  /** `lease.v1`: the engine lease the current uplink reported, in its
+   * welcome or a pong, with the send time of the frame it answers (the
+   * hello, or a ping of that connection), which bounds what the control
+   * plane can have granted. */
+  onLease?: (leaseExpiresAtMs: number, sentAtMs: number) => void;
   /** 4409: re-verify registration authority before the redial (S2 rule 4). */
   onReverifyAuthority?: () => void;
   /** Terminal close: the client parks and never redials (HTTP stays up). */
@@ -325,6 +333,13 @@ export class CloudEngineUplinkClient {
     return connection?.gateOpen === true
       && connection.features.has("cred.v1") // no negotiated push channel: poll fast
       && !this.credFailedOutstanding;
+  }
+
+  /** True while the current connection negotiated `lease.v1` and its gate
+   * is open: the control plane renews the engine lease over this uplink. */
+  get leaseActive(): boolean {
+    const connection = this.connection;
+    return connection?.welcomed === true && connection.gateOpen && connection.features.has("lease.v1");
   }
 
   /** A credential-control exchange succeeded outside a push (the fallback
@@ -550,6 +565,15 @@ export class CloudEngineUplinkClient {
     }
   }
 
+  /** @internal A lease answering a frame `connection` sent at `sentAtMs`.
+   * Only the current uplink reports: a drain handoff's welcome counts once
+   * the replacement took over. */
+  reportLease(connection: Connection, leaseExpiresAtMs: unknown, sentAtMs: number): void {
+    if (connection !== this.connection || this.stopped || this.parked) return;
+    if (typeof leaseExpiresAtMs !== "number" || !Number.isSafeInteger(leaseExpiresAtMs)) return;
+    this.options.onLease?.(leaseExpiresAtMs, sentAtMs);
+  }
+
   /** @internal Simulates an unannounced network loss (failover tests). */
   dropConnection(): void {
     this.connection?.drop();
@@ -678,6 +702,11 @@ class Connection {
   draining = false;
   private socket: EngineUplinkSocket | null = null;
   private pingIntervalMs = DEFAULT_PING_INTERVAL_MS;
+  /** When the hello left; the welcome's lease answers it. */
+  private helloSentAtMs = 0;
+  /** Unanswered pings by send time. A pong's lease counts only when it
+   * echoes one of them, so its bound is a time this engine really asked. */
+  private readonly pingsInFlight: number[] = [];
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private ackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -717,6 +746,7 @@ class Connection {
       this.lastReceivedAtMs = this.uplink.now();
       const offer = this.uplink.resumeOffer;
       this.offeredResume = offer !== null;
+      this.helloSentAtMs = this.uplink.now();
       this.send({
         t: "sys.hello",
         d: {
@@ -816,7 +846,7 @@ class Connection {
       case "sys.welcome":
         return this.onWelcome(frame.d ?? {});
       case "sys.pong":
-        return;
+        return this.onPong(frame.d ?? {});
       case "sys.drain":
         return this.onDrain(frame.d ?? {});
       case "sys.error":
@@ -860,7 +890,15 @@ class Connection {
     this.features = new Set((d.features as string[] | undefined) ?? []);
     this.pingIntervalMs = clampPingInterval(d.pingIntervalMs);
     this.uplink.welcomed(this, d.resumed === true);
-    this.pingTimer = setInterval(() => this.send({ t: "sys.ping", d: { ts: this.uplink.now() } }), this.pingIntervalMs);
+    if (this.features.has("lease.v1")) this.uplink.reportLease(this, d.leaseExpiresAtMs, this.helloSentAtMs);
+    this.pingTimer = setInterval(() => {
+      const ts = this.uplink.now();
+      this.pingsInFlight.push(ts);
+      // A connection is closed after two silent ping intervals, so older
+      // pings can never be answered.
+      if (this.pingsInFlight.length > MAX_PINGS_IN_FLIGHT) this.pingsInFlight.shift();
+      this.send({ t: "sys.ping", d: { ts } });
+    }, this.pingIntervalMs);
     this.livenessTimer = setInterval(() => {
       if (this.uplink.now() - this.lastReceivedAtMs > 2 * this.pingIntervalMs + 5_000) {
         console.warn("[engine-uplink] no frame within two ping intervals; redialing");
@@ -923,6 +961,16 @@ class Connection {
     } else if (this.uplink.config.readiness) {
       this.uplink.sendReliable("status.ready", { ...this.uplink.config.readiness() });
     }
+  }
+
+  private onPong(d: Record<string, unknown>): void {
+    if (!this.features.has("lease.v1")) return;
+    const index = typeof d.ts === "number" ? this.pingsInFlight.indexOf(d.ts) : -1;
+    if (index < 0) return;
+    const sentAtMs = this.pingsInFlight[index]!;
+    // Pongs answer pings in order: earlier unanswered pings never will be.
+    this.pingsInFlight.splice(0, index + 1);
+    this.uplink.reportLease(this, d.leaseExpiresAtMs, sentAtMs);
   }
 
   private onDrain(d: Record<string, unknown>): void {
