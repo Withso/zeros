@@ -53,6 +53,8 @@ const tracker = new ProcessMetricsTracker();
 // its argv identities, or change the terminal-ownership key of its flight.
 const electronTracker = new ProcessMetricsTracker();
 let lastMetricsLogAt: number | null = null;
+let metricsLogTimer: ReturnType<typeof setTimeout> | null = null;
+let metricsLogging = false;
 let footprint: FootprintRead | null = null;
 let footprintRead: Promise<void> | null = null;
 let system: SystemResourceState | null = null;
@@ -67,7 +69,9 @@ function parseRequest(args: Record<string, unknown>): MetricsRequest {
 
 function electronDescriptors(): ElectronProcessDescriptor[] {
   const owners = rendererProcessOwners.ownersByPid();
-  const descriptors = app.getAppMetrics().map((metric) => {
+  const metrics = app.getAppMetrics();
+  logElectronMetrics(metrics);
+  return metrics.map((metric) => {
     const workingSetKb = metric.memory?.workingSetSize;
     return {
       pid: metric.pid,
@@ -84,19 +88,22 @@ function electronDescriptors(): ElectronProcessDescriptor[] {
         : {}),
     };
   });
-  // Reuse an explicitly requested observation for log attribution. There is
-  // no idle telemetry timer and no additional native/process-table sample.
+}
+
+function logElectronMetrics(metrics: ReturnType<typeof app.getAppMetrics>): void {
+  // Explicit observations and the sparse history timer share one deadline.
+  // Keep product process types in the compatible log, never page/owner names.
   const now = Date.now();
   if (lastMetricsLogAt == null || now - lastMetricsLogAt >= METRICS_LOG_INTERVAL_MS) {
     lastMetricsLogAt = now;
     const groups = new Map<string, { count: number; bytes: number }>();
     let total = 0;
-    for (const descriptor of descriptors) {
-      const bytes = descriptor.workingSetBytes ?? 0;
+    for (const metric of metrics) {
+      const bytes = (metric.memory?.workingSetSize ?? 0) * 1024;
       total += bytes;
-      const group = groups.get(descriptor.type) ?? { count: 0, bytes: 0 };
+      const group = groups.get(metric.type) ?? { count: 0, bytes: 0 };
       group.count += 1; group.bytes += bytes;
-      groups.set(descriptor.type, group);
+      groups.set(metric.type, group);
     }
     const parts = [...groups].sort((a, b) => b[1].bytes - a[1].bytes)
       .map(([type, group]) => `${type}=${group.count}/${(group.bytes / 1024 ** 2).toFixed(0)}MB`).join(" ");
@@ -105,8 +112,41 @@ function electronDescriptors(): ElectronProcessDescriptor[] {
     } catch {
       // A closed log sink cannot turn a usable observation into an IPC error.
     }
+    scheduleMetricsLog();
   }
-  return descriptors;
+}
+
+function scheduleMetricsLog(delay = METRICS_LOG_INTERVAL_MS): void {
+  if (!metricsLogging) return;
+  if (metricsLogTimer) clearTimeout(metricsLogTimer);
+  metricsLogTimer = setTimeout(() => {
+    metricsLogTimer = null;
+    try {
+      // History does not need a process tree, OS context or renderer owners.
+      logElectronMetrics(app.getAppMetrics());
+    } catch {
+      // Sampling cannot interrupt the app, and failures wait a full interval.
+    } finally {
+      if (!metricsLogTimer) scheduleMetricsLog();
+    }
+  }, delay);
+  metricsLogTimer.unref?.();
+}
+
+/** Start after app ready; keep a sparse memory timeline for leak diagnostics
+ * even when no inspector is open. No child process is involved. */
+export function startProcessMetricsLogging(): () => void {
+  if (!metricsLogging) {
+    metricsLogging = true;
+    const delay = lastMetricsLogAt == null ? METRICS_LOG_INTERVAL_MS :
+      Math.max(0, Math.min(METRICS_LOG_INTERVAL_MS, lastMetricsLogAt + METRICS_LOG_INTERVAL_MS - Date.now()));
+    scheduleMetricsLog(delay);
+  }
+  return () => {
+    metricsLogging = false;
+    if (metricsLogTimer) clearTimeout(metricsLogTimer);
+    metricsLogTimer = null;
+  };
 }
 
 function thermalState(): SystemThermalState | null {

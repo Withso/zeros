@@ -148,6 +148,75 @@ describe("on-demand main-process resource observations", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("retains a ten-minute memory history with only built-in metrics and cancels on disposal", async () => {
+    const metrics = await import("../process-metrics");
+    native.metrics.mockReturnValue([
+      { pid: process.pid, type: "Browser", memory: { workingSetSize: 100 * 1024 } },
+      { pid: 200, type: "Tab", name: "Browser tab", memory: { workingSetSize: 200 * 1024 } },
+      { pid: 201, type: "GPU", memory: { workingSetSize: 50 * 1024 } },
+    ]);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const stop = metrics.startProcessMetricsLogging();
+      expect(vi.getTimerCount()).toBe(1);
+      expect(native.metrics).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(native.metrics).toHaveBeenCalledTimes(6);
+      expect(log.mock.calls).toEqual(Array.from({ length: 6 }, () => ["[Zeros procmem] total=350MB Tab=1/200MB Browser=1/100MB GPU=1/50MB"]));
+      expect(native.exec.mock.calls.length).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
+      stop();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(native.metrics).toHaveBeenCalledTimes(6);
+    } finally { log.mockRestore(); }
+  });
+
+  it("coalesces periodic history with requested observations without duplicate samples or log lines", async () => {
+    const metrics = await import("../process-metrics");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const stop = metrics.startProcessMetricsLogging();
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await metrics.processMetricsSnapshot({ detail: false });
+      expect(log).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(native.metrics).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(native.metrics).toHaveBeenCalledTimes(2);
+      expect(log).toHaveBeenCalledTimes(2);
+      await metrics.processMetricsSnapshot({ detail: false });
+      expect(log).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(native.metrics).toHaveBeenCalledTimes(4);
+      expect(log).toHaveBeenCalledTimes(3);
+      expect(native.exec.mock.calls.length).toBe(0);
+      stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { log.mockRestore(); }
+  });
+
+  it("keeps one history timer and retries native failures only on the next interval", async () => {
+    const metrics = await import("../process-metrics");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const stop = metrics.startProcessMetricsLogging();
+      metrics.startProcessMetricsLogging();
+      native.metrics.mockImplementationOnce(() => { throw new Error("metrics unavailable"); });
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(log).not.toHaveBeenCalled();
+      expect(native.metrics).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(native.metrics).toHaveBeenCalledTimes(2);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(native.exec.mock.calls.length).toBe(0);
+      stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { log.mockRestore(); }
+  });
+
   it("does not let telemetry logging fail an explicitly requested observation", async () => {
     const { processMetricsSnapshot } = await import("../process-metrics");
     const log = vi.spyOn(console, "log").mockImplementationOnce(() => { throw new Error("closed log sink"); });
