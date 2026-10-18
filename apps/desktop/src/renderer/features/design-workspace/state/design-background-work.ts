@@ -1,4 +1,6 @@
 interface BackgroundTask {
+  key: string;
+  latest: boolean;
   run: () => Promise<void>;
   cancel: () => void;
 }
@@ -7,7 +9,7 @@ interface BackgroundTask {
  * always wins; queued work is replaced by its newest exact owner request. */
 export class DesignBackgroundWorkQueue {
   private pending = new Map<string, BackgroundTask>();
-  private running = false;
+  private running: BackgroundTask | null = null;
   private active = 0;
   private quietUntil = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -17,7 +19,16 @@ export class DesignBackgroundWorkQueue {
   constructor(
     private readonly limit = 32,
     private readonly quietMs = 150,
-  ) {}
+  ) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 32) {
+      throw new RangeError(
+        "Design background queue limit must be 1 through 32.",
+      );
+    }
+    if (!Number.isFinite(quietMs) || quietMs < 0 || quietMs > 60_000) {
+      throw new RangeError("Design background quiet period is invalid.");
+    }
+  }
 
   touch(): void {
     this.quietUntil = Date.now() + this.quietMs;
@@ -25,29 +36,49 @@ export class DesignBackgroundWorkQueue {
 
   pause(): () => void {
     this.active++;
+    const generation = this.generation;
     let released = false;
     return () => {
       if (released) return;
       released = true;
+      if (generation !== this.generation) return;
       this.active = Math.max(0, this.active - 1);
       this.touch();
       this.pump();
     };
   }
 
-  schedule<T>(key: string, work: () => Promise<T>): Promise<T | null> {
+  schedule<T>(
+    key: string,
+    work: () => Promise<T>,
+    options: { latest?: boolean } = {},
+  ): Promise<T | null> {
     return new Promise((resolve, reject) => {
+      if (
+        this.running?.key === key &&
+        this.running.latest &&
+        options.latest === true
+      )
+        this.running.cancel();
       this.pending.get(key)?.cancel();
       this.pending.delete(key);
+      let retired = false;
       this.pending.set(key, {
+        key,
+        latest: options.latest === true,
         run: async () => {
           try {
-            resolve(await work());
+            const result = await work();
+            if (!retired) resolve(result);
           } catch (error) {
-            reject(error);
+            if (!retired) reject(error);
           }
         },
-        cancel: () => resolve(null),
+        cancel: () => {
+          if (retired) return;
+          retired = true;
+          resolve(null);
+        },
       });
       while (this.pending.size > this.limit) {
         const oldest = this.pending.keys().next().value!;
@@ -67,9 +98,11 @@ export class DesignBackgroundWorkQueue {
       !this.pending.size
     )
       return;
+    const generation = this.generation;
     const start = () => {
+      if (generation !== this.generation) return;
       this.cancelIdle = null;
-      if (this.active || Date.now() < this.quietUntil) {
+      if (this.running || this.active || Date.now() < this.quietUntil) {
         this.pump();
         return;
       }
@@ -77,16 +110,16 @@ export class DesignBackgroundWorkQueue {
       if (key === undefined) return;
       const task = this.pending.get(key)!;
       this.pending.delete(key);
-      this.running = true;
-      const generation = this.generation;
+      this.running = task;
       void task.run().finally(() => {
-        if (generation !== this.generation) return;
-        this.running = false;
+        if (this.running !== task) return;
+        this.running = null;
         this.pump();
       });
     };
     this.timer = setTimeout(
       () => {
+        if (generation !== this.generation) return;
         this.timer = null;
         if (typeof window !== "undefined" && window.requestIdleCallback) {
           // Chromium need not offer an idle period under sustained rendering.
@@ -108,7 +141,7 @@ export class DesignBackgroundWorkQueue {
     this.timer = null;
     for (const task of this.pending.values()) task.cancel();
     this.pending.clear();
-    this.running = false;
+    this.running?.cancel();
     this.active = 0;
     this.quietUntil = 0;
   }
