@@ -34,7 +34,7 @@ import type {
   AgentTextMessageAttachment,
   MessageContentSegment,
 } from "../use-agent-session";
-import { renderMarkdownSegments, fileRefPath } from "../markdown";
+import { createStreamingMarkdownRenderer, renderMarkdownSegments, fileRefPath } from "../markdown";
 import { iconForFile } from "../agent-attachments";
 // Direct path (not the barrel) so the message renderer doesn't pull in the
 // whole TipTap editor — just the static pill views.
@@ -110,9 +110,11 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     const text = message.modelFallback ? fallbackDisplayText(message.modelFallback) : message.text;
     const proseRef = useRef<HTMLDivElement>(null);
     const smooth = useStreamingText(text, useMarkdown && ctx.isStreaming && ctx.lastMessageId === message.id && ctx.attachmentImagesActive !== false, ctx.liveTextPresentation);
+    const liveLocal = !!ctx.liveTextSource && useMarkdown && ctx.isStreaming && ctx.lastMessageId === message.id && ctx.attachmentImagesActive !== false;
+    const parse = useMemo(() => liveLocal ? createStreamingMarkdownRenderer() : renderMarkdownSegments, [liveLocal]);
     const segments = useMemo(
-      () => (useMarkdown ? renderMarkdownSegments(smooth.text) : null),
-      [useMarkdown, smooth.text],
+      () => (useMarkdown ? parse(smooth.text) : null),
+      [useMarkdown, smooth.text, parse],
     );
     useStreamingTextEdge(proseRef, smooth.text, smooth.pending);
 

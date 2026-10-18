@@ -153,15 +153,72 @@ export type MarkdownSegment =
   | { type: "html"; html: string }
   | { type: "code"; lang: string; code: string };
 
+/** One active Local message owns this parser; completed/hidden messages drop it. */
+export function createStreamingMarkdownRenderer(): (text: string) => MarkdownSegment[] {
+  let previousInput = "";
+  let previousSegments: MarkdownSegment[] = [];
+  let prefixChars = 0;
+  let prefix: MarkdownSegment[] = [];
+  return (text) => {
+    const input = markdownSegmentInput(text);
+    if (input === previousInput) return previousSegments;
+    if (!input.startsWith(previousInput) || input.includes("\r")) {
+      prefixChars = 0;
+      prefix = [];
+    }
+    const tokens = marked.lexer(input.slice(prefixChars));
+    // A top-level, closed fence followed by a newline cannot be extended by
+    // later prose. Reference links are different: a later definition can alter
+    // earlier prose, so any bracket-bearing prose keeps that suffix reparsable.
+    // Definitions do not have raw tokens; never use raw offsets past one.
+    let safe = !input.includes("\r") && Object.keys(tokens.links).length === 0;
+    let consumed = 0, stableEnd = 0, stableChars = 0;
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index];
+      consumed += token.raw.length;
+      if (token.type !== "code" && token.raw.includes("[")) safe = false;
+      if (safe && token.type === "code" &&
+          input[prefixChars + consumed] === "\n" && closedFence(token.raw)) {
+        stableEnd = index + 1;
+        stableChars = consumed;
+      }
+    }
+    const slice = (start: number, end?: number): TokensList => {
+      const part = tokens.slice(start, end) as TokensList;
+      part.links = tokens.links;
+      return part;
+    };
+    if (stableEnd) {
+      prefix = [...prefix, ...renderMarkdownTokenSegments(slice(0, stableEnd))];
+      prefixChars += stableChars;
+    }
+    const tail = renderMarkdownTokenSegments(stableEnd ? slice(stableEnd) : tokens);
+    previousInput = input;
+    previousSegments = prefix.length ? [...prefix, ...tail] : tail;
+    return previousSegments;
+  };
+}
+
+function closedFence(raw: string): boolean {
+  const opening = /^ {0,3}(`{3,}|~{3,})[^\n]*\n/.exec(raw);
+  if (!opening) return false;
+  const fence = opening[1];
+  return new RegExp(`\\n {0,3}${fence[0]}{${fence.length},}[ \\t]*$`).test(raw);
+}
+
+function markdownSegmentInput(text: string): string {
+  return text.length > MARKDOWN_MAX_INPUT_BYTES
+    ? text.slice(0, MARKDOWN_MAX_INPUT_BYTES) +
+      "\n\n*[…content truncated; open the originating tool card for the full output]*"
+    : text;
+}
+
 export function renderMarkdownSegments(text: string): MarkdownSegment[] {
   if (!text) return [];
-  let input = text;
-  if (input.length > MARKDOWN_MAX_INPUT_BYTES) {
-    input =
-      input.slice(0, MARKDOWN_MAX_INPUT_BYTES) +
-      "\n\n*[…content truncated; open the originating tool card for the full output]*";
-  }
-  const tokens = marked.lexer(input);
+  return renderMarkdownTokenSegments(marked.lexer(markdownSegmentInput(text)));
+}
+
+function renderMarkdownTokenSegments(tokens: TokensList): MarkdownSegment[] {
   const segments: MarkdownSegment[] = [];
   let prose: Token[] = [];
   const flushProse = () => {
