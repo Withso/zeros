@@ -9,12 +9,14 @@ import { StreamingTextBuffer } from "./streaming-text-buffer";
 
 /** Only the visible conversation's currently growing assistant message owns
  * a frame loop. History, reasoning, tools and user messages never animate. */
-export function useStreamingText(text: string, enabled: boolean) {
+export function useStreamingText(text: string, enabled: boolean, presentation?: { text: string; pending: boolean }) {
+  const external = presentation !== undefined;
   const [buffer] = useState(() => new StreamingTextBuffer(text));
   const [view, setView] = useState({ text, pending: false });
   const runtime = useRef<{ push: (text: string) => void } | null>(null);
 
   useEffect(() => {
+    if (external) return;
     if (!enabled) {
       buffer.flush();
       return;
@@ -77,9 +79,10 @@ export function useStreamingText(text: string, enabled: boolean) {
       media.removeEventListener("change", preferenceChanged);
       document.removeEventListener("visibilitychange", preferenceChanged);
     };
-  }, [enabled, buffer]);
+  }, [enabled, buffer, external]);
 
   useEffect(() => {
+    if (external) return;
     if (enabled && runtime.current) runtime.current.push(text);
     else {
       buffer.push(text, 0);
@@ -90,12 +93,12 @@ export function useStreamingText(text: string, enabled: boolean) {
           : { text, pending: false },
       );
     }
-  }, [text, enabled, buffer]);
+  }, [text, enabled, buffer, external]);
 
   // Stop/correction renders show authoritative text immediately, even before
   // effects run. A newly mounted or reactivated history never replays a backlog.
   const incremental = enabled && text.startsWith(view.text);
-  return incremental ? view : { text, pending: false };
+  return presentation ?? (incremental ? view : { text, pending: false });
 }
 
 const useBrowserLayoutEffect =
