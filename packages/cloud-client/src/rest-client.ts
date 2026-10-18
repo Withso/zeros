@@ -125,6 +125,13 @@ export interface CloudRestClientOptions {
   tracing?: { sampleRatio: number; random?: () => number; randomBytes?: (length: number) => Uint8Array };
 }
 
+/** Linear on any input; a backtracking `/\/+$/` is quadratic on slash runs. */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f) end--;
+  return value.slice(0, end);
+}
+
 export class CloudRestClient {
   private readonly baseUrl: string;
   private readonly getAccessToken: () => string | Promise<string>;
@@ -133,7 +140,7 @@ export class CloudRestClient {
   private readonly tracing?: NonNullable<CloudRestClientOptions["tracing"]>;
 
   constructor(options: CloudRestClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.baseUrl = withoutTrailingSlashes(options.baseUrl);
     this.getAccessToken = options.getAccessToken;
     if (options.getDeviceProof) this.getDeviceProof = options.getDeviceProof;
     this.fetchImpl = options.fetchImpl ?? fetch;

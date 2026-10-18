@@ -222,6 +222,35 @@ describe("CloudRestClient", () => {
   });
 });
 
+describe("CloudRestClient base URL", () => {
+  function firstUrl(baseUrl: string) {
+    const urls: string[] = [];
+    const client = new CloudRestClient({
+      baseUrl,
+      getAccessToken: () => "test-session-token",
+      fetchImpl: (async (url: string) => {
+        urls.push(url);
+        return new Response(JSON.stringify({}), { status: 201, headers: { "content-type": "application/json" } });
+      }) as typeof fetch,
+    });
+    return { client, urls };
+  }
+
+  it("drops trailing slashes and keeps the rest of the origin", async () => {
+    const { client, urls } = firstUrl("https://control.invalid///");
+    await client.invoke("listCloudWorkspaces");
+    expect(urls[0]).toMatch(/^https:\/\/control\.invalid\/v1\//);
+  });
+
+  it("trims in linear time when slashes repeat before other characters", () => {
+    // A backtracking /\/+$/ is quadratic on this input; it must not be.
+    const baseUrl = `https://control.invalid${"/".repeat(50_000)}x`;
+    const started = performance.now();
+    firstUrl(baseUrl);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});
+
 describe("CloudRestClient tracing", () => {
   /** Records the headers of every request; each fetch answers 201 with an empty object. */
   function clientWith(tracing?: { sampleRatio: number }) {

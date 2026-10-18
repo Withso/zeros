@@ -18,7 +18,6 @@ import { pathToFileURL } from "node:url";
 
 import { load } from "js-yaml";
 
-const PACKAGE_ROOT = new URL("..", import.meta.url);
 const CONTRACT_DOC = new URL(
   "../../../docs/cloud-workspace/contracts/s3-client-contract.md",
   import.meta.url,
