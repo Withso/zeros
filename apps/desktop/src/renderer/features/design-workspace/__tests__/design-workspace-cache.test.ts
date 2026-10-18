@@ -84,6 +84,7 @@ import {
   applyDesignHistoryCached,
   applyDesignEditCached,
   applyDesignTransactionCached,
+  prepareDesignMovementFrame,
   designFrameDocumentCache,
   designFrameDocumentKey,
   designFoundationCache,
@@ -179,6 +180,57 @@ function snapshot(
 }
 
 describe("design workspace cache", () => {
+  it.each(["workspace-a", "cloud://org/workspace-a"])(
+    "prepares movement after its local acknowledgement but rejects foreign source or scene changes in %s",
+    async (workspaceId) => {
+      const before = snapshot();
+      const frame = before.frames[0]!;
+      const after = structuredClone(before);
+      after.frames[0]!.sourceVersion = "b".repeat(24);
+      designWorkspaceSnapshotCache.setData(workspaceId, before);
+      const reply = { frame: after.frames[0]!, snapshot: after };
+      let release!: (result: typeof reply) => void;
+      platformMocks.updateStyles.mockReturnValue(
+        new Promise<typeof reply>((resolve) => {
+          release = resolve;
+        }),
+      );
+      const save = updateDesignNodeStylesCached(workspaceId, {
+        frame: frame.file,
+        sourceVersion: frame.sourceVersion,
+        nodeId: "heading",
+        styles: { left: "1px" },
+      });
+      await vi.waitFor(() =>
+        expect(platformMocks.updateStyles).toHaveBeenCalledTimes(1),
+      );
+      let settled = false;
+      const prepared = prepareDesignMovementFrame(workspaceId, frame).then(
+        (result) => {
+          settled = true;
+          return result;
+        },
+      );
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      release(reply);
+      await save;
+      await expect(prepared).resolves.toEqual(after.frames[0]);
+      const foreign = structuredClone(after);
+      foreign.frames[0]!.sourceVersion = "c".repeat(24);
+      designWorkspaceSnapshotCache.setData(workspaceId, foreign);
+      await expect(
+        prepareDesignMovementFrame(workspaceId, after.frames[0]!),
+      ).rejects.toThrow("frame changed");
+      const moved = structuredClone(after);
+      moved.frames[0]!.x += 1;
+      designWorkspaceSnapshotCache.setData(workspaceId, moved);
+      await expect(
+        prepareDesignMovementFrame(workspaceId, after.frames[0]!),
+      ).rejects.toThrow("frame changed");
+    },
+  );
+
   it("carries imported style sources and keeps unchanged ones by reference", () => {
     const source = {
       id: "app", title: "App", kind: "css", path: "styles/app.css", status: "ready" as const,

@@ -754,6 +754,7 @@ export async function runDesignFreeRelocationSmoke({ page, check }) {
 export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignFrameLiveCameraSmoke(options);
   await runDesignFramePendingSaveSmoke(options);
+  await runDesignFlowPendingSaveSmoke(options);
   await runDesignMixedParentMovementSmoke(options);
   await runDesignGroupDetachmentRefusalSmoke(options);
   await runDesignFreeRelocationSmoke(options);
@@ -859,6 +860,93 @@ export async function runDesignFramePendingSaveSmoke({ page, check }) {
       cancelled
         ? "cancelling a second scene drag preserves only its pending predecessor"
         : "a second scene drag waits for its known predecessor and preserves both world movements",
+      true,
+    );
+  }
+}
+
+export async function runDesignFlowPendingSaveSmoke({ page, check }) {
+  for (const cancelled of [false, true]) {
+    await openCanvasFixture(page);
+    await page.locator('[data-design-layer-id="home-heading"]').click();
+    await page.evaluate(() => {
+      window.__zerosHarnessHoldTransactionReply = true;
+    });
+    const runtime = page.frameLocator(
+      '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+    );
+    const hero = runtime.locator('[data-oid="home-hero"]');
+    const heading = runtime.locator('[data-oid="home-heading"]');
+    const drag = async (target, cancel = false) => {
+      const box = await page
+        .locator('[data-design-element-overlay="home-heading"]')
+        .boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(target.x, target.y, { steps: 12 });
+      if (cancel) await page.keyboard.press("Escape");
+      await page.mouse.up();
+    };
+    const last = await runtime
+      .locator('[data-oid="home-action"]')
+      .boundingBox();
+    await drag({ x: last.x + last.width * 0.8, y: last.y + last.height / 2 });
+    await expect
+      .poll(() =>
+        page.evaluate(() => typeof window.__zerosHarnessReleaseTransaction),
+      )
+      .toBe("function");
+    await expect
+      .poll(() =>
+        hero.evaluate((el) =>
+          [...el.children].map((child) => child.getAttribute("data-oid")),
+        ),
+      )
+      .toEqual(["home-copy", "home-action", "home-heading"]);
+    const parent = await hero.boundingBox();
+    try {
+      await drag(
+        { x: parent.x + parent.width + 70, y: parent.y + parent.height / 2 },
+        cancelled,
+      );
+      if (cancelled)
+        await expect
+          .poll(() =>
+            hero.evaluate((el) =>
+              [...el.children].map((child) => child.getAttribute("data-oid")),
+            ),
+          )
+          .toEqual(["home-copy", "home-action", "home-heading"]);
+    } finally {
+      await page.evaluate(() => window.__zerosHarnessReleaseTransaction());
+    }
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => window.__zerosHarnessFoundation.transactions.length,
+        ),
+      )
+      .toBe(cancelled ? 1 : 2);
+    await expect
+      .poll(() =>
+        heading.evaluate((el) => el.parentElement.getAttribute("data-oid")),
+      )
+      .toBe(cancelled ? "home-hero" : "home-main");
+    await expect
+      .poll(() => heading.evaluate((el) => getComputedStyle(el).position))
+      .toBe(cancelled ? "relative" : "absolute");
+    await expect
+      .poll(() =>
+        heading.evaluate(
+          (el) => el.ownerDocument.defaultView.__zerosDesignSourceVersion,
+        ),
+      )
+      .not.toBe("a".repeat(24));
+    expect(await page.locator("[data-sonner-toast]").count()).toBe(0);
+    check(
+      cancelled
+        ? "cancelling a queued flow drag preserves the preceding reorder's pixels and emits no error"
+        : "a flow drag after a pending reorder measures its acknowledged source and persists the new parent",
       true,
     );
   }

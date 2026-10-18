@@ -39,6 +39,7 @@ import {
   designUpdateStyles,
   designTransferNode,
   designWriteHtml,
+  type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
   type DesignTextFrameSeedWire,
   type DesignFrameDocumentWire,
@@ -196,6 +197,32 @@ export async function waitForPendingDesignEdits(workspaceId: string): Promise<vo
   while (localMutationTailByWorkspace.has(workspaceId)) {
     await localMutationTailByWorkspace.get(workspaceId);
   }
+}
+
+export async function prepareDesignMovementFrame(
+  workspaceId: string,
+  frame: DesignCanvasFrameWire,
+): Promise<DesignCanvasFrameWire> {
+  await waitForPendingDesignEdits(workspaceId);
+  const current = designWorkspaceSnapshotCache
+    .peekSnapshot(workspaceId)
+    .data?.frames.find((candidate) => candidate.file === frame.file);
+  if (
+    !current ||
+    current.sourceVersion !==
+      resolveLocalFrameSourceVersion(
+        workspaceId,
+        frame.file,
+        frame.sourceVersion,
+      ) ||
+    current.x !== frame.x ||
+    current.y !== frame.y ||
+    current.width !== frame.width ||
+    current.height !== frame.height ||
+    current.z !== frame.z
+  )
+    throw new Error("The frame changed before movement could be measured.");
+  return current;
 }
 
 async function runLocalDesignMutation<T>(

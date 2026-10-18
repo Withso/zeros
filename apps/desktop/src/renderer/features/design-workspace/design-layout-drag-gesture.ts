@@ -5,6 +5,7 @@ import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
 import {
   applyDesignEditCached,
   designWorkspaceSnapshotCache,
+  prepareDesignMovementFrame,
   transferDesignNodeCached,
 } from "./state/design-workspace-cache";
 import { clearDesignNodeStylePreviewTransient } from "./state/design-selection";
@@ -26,6 +27,7 @@ import {
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 
 const dragOwners = new WeakMap<object, object>();
+const pendingSaves = new Map<string, Promise<void>>();
 
 /** A single-flight structural drag. Hit testing uses a frozen geometry set;
  * previews preserve DOM identity and the release is one undoable transaction. */
@@ -52,23 +54,33 @@ export function startDesignLayoutDrag(input: {
     canWrite: () => boolean,
   ) => Promise<boolean>;
 }): (() => void) | null {
-  const { event, workspaceId, frame } = input;
+  const { event, workspaceId } = input;
+  let frame = input.frame;
   let details = input.details;
-  const runtime = designFrameRuntime(workspaceId, frame.file);
+  const initialRuntime = designFrameRuntime(workspaceId, frame.file);
   if (
-    !runtime?.supports("previewLayout") ||
-    !runtime.supports("getLayoutTargets")
+    !initialRuntime?.supports("previewLayout") ||
+    !initialRuntime.supports("getLayoutTargets")
   )
     return null;
+  let runtime = initialRuntime;
   const owner = event.currentTarget;
   const article = owner.closest<HTMLElement>("[data-design-frame]");
   if (!article) return null;
   const ownership = {};
-  dragOwners.set(runtime, ownership);
+  dragOwners.set(article, ownership);
   const pageOwner = captureDesignPageOwner(workspaceId);
+  const saveKey = JSON.stringify([
+    workspaceId,
+    pageOwner.directoryId,
+    pageOwner.pageId,
+    pageOwner.revision,
+    frame.file,
+  ]);
+  const previousSave = pendingSaves.get(saveKey);
   const selection = designWorkspaceView(workspaceId);
-  const sourceVersion = runtime.sourceVersion;
-  const geometry = {
+  let sourceVersion = runtime.sourceVersion;
+  let geometry = {
     x: frame.x,
     y: frame.y,
     w: frame.width,
@@ -89,24 +101,27 @@ export function startDesignLayoutDrag(input: {
       current.z === frame.z
     );
   };
-  const revision =
+  let revision =
     useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
       frame.file
     ]?.snapshot?.revision;
-  const positioned = details.styles.position === "absolute";
-  const freePosition =
+  let positioned = details.styles.position === "absolute";
+  let freePosition =
     positioned && details.styles["--zeros-layout-origin-flow"] !== "1";
   let cancelled = false;
+  let accepted = false;
+  const ownsPointer = () =>
+    dragOwners.get(article) === ownership &&
+    input.isCurrent?.() !== false &&
+    designWorkspaceView(workspaceId).selectionEvent ===
+      selection.selectionEvent;
   const isCurrent = () =>
-    dragOwners.get(runtime) === ownership &&
+    (accepted || ownsPointer()) &&
     designFrameRuntime(workspaceId, frame.file) === runtime &&
     runtime.sourceVersion === sourceVersion &&
     runtime.isActive?.() !== false &&
     frameIsCurrent() &&
     isCurrentDesignPageOwner(pageOwner) &&
-    input.isCurrent?.() !== false &&
-    designWorkspaceView(workspaceId).selectionEvent ===
-      selection.selectionEvent &&
     designWorkspaceView(workspaceId).activeTheme === selection.activeTheme &&
     useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
       frame.file
@@ -242,7 +257,7 @@ export function startDesignLayoutDrag(input: {
           !stopped &&
           isCurrent() &&
           stillCurrent &&
-          dragOwners.get(runtime) === ownership &&
+          dragOwners.get(article) === ownership &&
           geometries[0]
         ) {
           presentation?.hide();
@@ -264,7 +279,7 @@ export function startDesignLayoutDrag(input: {
           if (dirty) schedule();
         })
         .catch((error) => {
-          if (!released) {
+          if (!released && !stopped) {
             cancelPointerGesture();
             input.failed(error);
           }
@@ -276,6 +291,33 @@ export function startDesignLayoutDrag(input: {
   let ready: Promise<void> | null = null;
   const prepare = () =>
     (ready ??= (async () => {
+      await previousSave;
+      frame = await prepareDesignMovementFrame(workspaceId, frame);
+      const currentRuntime = designFrameRuntime(workspaceId, frame.file);
+      if (!currentRuntime || (!accepted && !ownsPointer()) || cancelled)
+        throw new Error("The layer move no longer owns its editing context.");
+      const currentRevision =
+        useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
+          frame.file
+        ]?.snapshot?.revision;
+      if (
+        frame.sourceVersion === input.frame.sourceVersion &&
+        (currentRuntime !== initialRuntime || currentRevision !== revision)
+      )
+        throw new Error(
+          "The layer runtime changed before movement could be measured.",
+        );
+      runtime = currentRuntime;
+      sourceVersion = frame.sourceVersion;
+      geometry = {
+        x: frame.x,
+        y: frame.y,
+        w: frame.width,
+        h: frame.height,
+        z: frame.z,
+      };
+      revision = currentRevision;
+      assertCurrent();
       const [result, measured] = await Promise.all([
         runtime.getLayoutTargets(undefined, details.oid),
         positioned
@@ -293,6 +335,15 @@ export function startDesignLayoutDrag(input: {
         details = current;
         grab.x = (start.x - bounds.left) / initialZoom - current.rect.x;
         grab.y = (start.y - bounds.top) / initialZoom - current.rect.y;
+      }
+      positioned = details.styles.position === "absolute";
+      freePosition =
+        positioned && details.styles["--zeros-layout-origin-flow"] !== "1";
+      if (positioned && !details.relocationContext) {
+        details = await runtime.getNodeDetails(details.oid, undefined, {
+          relocation: true,
+        });
+        assertCurrent();
       }
       if (positioned && !details.relocationContext)
         throw new Error(
@@ -316,7 +367,7 @@ export function startDesignLayoutDrag(input: {
     sample++;
     if (!ready)
       void prepare().catch((error) => {
-        if (!released) {
+        if (!released && !stopped) {
           cancelPointerGesture();
           input.failed(error);
         }
@@ -343,10 +394,27 @@ export function startDesignLayoutDrag(input: {
   const restore = async () => {
     await inFlight?.catch(() => {});
     if (
-      dragOwners.get(runtime) !== ownership ||
+      dragOwners.get(article) !== ownership ||
       designFrameRuntime(workspaceId, frame.file) !== runtime ||
       runtime.sourceVersion !== sourceVersion
     ) {
+      presentation?.remove();
+      return;
+    }
+    if (previewedIds.size === 0 && !suppressed) {
+      const restored = await runtime
+        .getLayoutTargets(undefined, details.oid)
+        .catch(() => []);
+      const current = restored.find(
+        (candidate) => candidate.oid === details.oid,
+      );
+      if (current && isCurrent())
+        input.paint(
+          current,
+          restored.find(
+            (candidate) => candidate.oid === current.layout?.parentId,
+          ),
+        );
       presentation?.remove();
       return;
     }
@@ -384,6 +452,11 @@ export function startDesignLayoutDrag(input: {
   };
   const finish = () => {
     if (released || stopped) return;
+    if (!ownsPointer()) {
+      cancel();
+      return;
+    }
+    accepted = true;
     released = true;
     cleanup();
     if (!moved) {
@@ -392,7 +465,7 @@ export function startDesignLayoutDrag(input: {
       input.clicked();
       return;
     }
-    void (async () => {
+    const save = (async () => {
       await prepare();
       await inFlight;
       await flush();
@@ -501,13 +574,18 @@ export function startDesignLayoutDrag(input: {
         { movementGuard: { sourceVersion, geometry }, isCurrent },
       );
       presentation?.remove();
-    })()
+    })();
+    pendingSaves.set(saveKey, save);
+    void save
       .catch(async (error) => {
         stopped = true;
         await restore();
         input.failed(error);
       })
-      .finally(resumeBackground);
+      .finally(() => {
+        if (pendingSaves.get(saveKey) === save) pendingSaves.delete(saveKey);
+        resumeBackground();
+      });
   };
   event.preventDefault();
   event.stopPropagation();
