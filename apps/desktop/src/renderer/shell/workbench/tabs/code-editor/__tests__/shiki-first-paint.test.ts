@@ -25,10 +25,11 @@ export function Counter({ start = 0 }: { start?: number }) {
 function firstPaintDecorationCount(
   doc: string | Text,
   lang: string | null,
+  cacheScope?: "local",
 ): number {
   const state = EditorState.create({
     doc,
-    extensions: [shikiColors({ lang, theme: THEME })],
+    extensions: [shikiColors({ lang, theme: THEME, cacheScope })],
   });
   let count = 0;
   for (const value of state.facet(EditorView.decorations)) {
@@ -47,6 +48,12 @@ describe("Shiki first paint", () => {
 
   it("colors the document in EditorState.create (no unthemed first frame)", () => {
     expect(firstPaintDecorationCount(SOURCE, "tsx")).toBeGreaterThan(10);
+  });
+
+  it("keeps Local first paint identical with the bounded cache", () => {
+    const existing = firstPaintDecorationCount(SOURCE, "tsx");
+    expect(firstPaintDecorationCount(SOURCE, "tsx", "local")).toBe(existing);
+    expect(firstPaintDecorationCount(SOURCE, "tsx", "local")).toBe(existing);
   });
 
   it("re-creating the same state is served from the token cache", () => {
