@@ -2154,6 +2154,7 @@ export class ZerosEngine {
     this.transports = [this.local];
     this.activityHeartbeat = new EngineActivityHeartbeat({
       instance: this.local.instanceNonce,
+      stopWhenIdle: !this.cloudWorker,
       publish: (frame) =>
         this.publishPrivateHostControl(`${JSON.stringify(frame)}\n`),
       activeTurns: () => this.activeAgentExecutionCount(),
