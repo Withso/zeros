@@ -117,6 +117,49 @@ previous, and sources of workspaces whose workspace/data deletion is unfinished)
 belongs to the separate retention worker, not this build worker. There is no
 additional ready-history hold; retired versions require Rebuild before Activate.
 
+## Graceful build handoff
+
+On SIGTERM the worker stops taking new builds and hands each active build over
+at its next acknowledged checkpoint. Migration 0163 adds a handoff marker while
+keeping the build `running`, its capacity hold, stage, start time, original
+30-minute deadline, configuration, runtime/base pin and builder operation.
+This also keeps older workers from claiming it as a fresh queued build, including
+after its builder has stopped. A successor consumes the marker under the normal
+global and organization locks, advances the control-plane worker fence and
+reloads the exact saved runtime through qualification and revocation checks.
+It never follows a new release or changes the builder's source, wallet or TTL.
+
+The immutable helper fence stays separate from the advancing control-plane
+fence. A running recipe is polled using the same durable helper job; completed
+clones, runtime installation and integrity baselines are not repeated. Clone
+credentials are revoked before handoff, and a clone in flight must finish and
+record its manifest before the worker can yield. Sanitation similarly must
+record its digest before handing over to stopping/capture. Final integrity,
+runtime self-test, sanitation and exact saved-tree proof remain required.
+Cancellation, expiry and actual helper failures still fail closed.
+
+Handoff records contain only bounded install progress: whether start was
+acknowledged, the consumed log cursor and stream names with a partial line.
+They never contain credentials, redaction literals or unfiltered log prefixes.
+The VM keeps its original log filter; a successor discards interrupted line
+tails before applying the control-plane filter to new output. Completed log
+chunks are not replayed. A lost handoff commit reply cannot fail or delete a
+build that the database handed to a successor.
+
+This is cooperative shutdown, not crash recovery. Configure both
+`CONTROL_PLANE_DRAIN_SECONDS` (C0: 0–120, default **0**) and Railway's draining
+seconds to leave time for the next checkpoint. The process hard exit is
+15 seconds plus the configured C0 window; Railway can terminate it sooner.
+With the default C0 value, the worker has at most 15 seconds. Runtime install,
+clone, sanitation, provider archive or capture may outlast even a configured
+window. If SIGKILL or the hard exit precedes the durable checkpoint, the next
+worker does **not** adopt or replay the uncertain step. The original running
+claim expires at its existing deadline and normal fenced cleanup retires the
+same builder; its finite provider TTL is unchanged. A database outage before
+the checkpoint has the same bounded outcome. Rolling back to older code leaves
+handed-off builds to that deadline/cleanup path. This change requires no new
+base contract and does not affect Local or organization-local workspaces.
+
 ## Base-owned helpers
 
 Both Python helpers belong to the approved base, not the replaceable runtime:

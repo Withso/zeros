@@ -57,6 +57,21 @@ export function createComputerTemplateBoatAdapters(input: {
       return selected ? { baseImageId: selected.pin.baseImageId, baseCompatibilityId: selected.pin.baseCompatibilityId,
         descriptor: selected.descriptor, objectKey: selected.objectKey } : null;
     },
+    async load(tx: Tx, pin: { baseImageId: string; runtimeId: string }): Promise<ComputerTemplateRuntime | null> {
+      // Registry identities are immutable. Resolve the full saved pin, then
+      // apply the same revocation and qualification locks as final admission.
+      const identity = (await tx.query<{ base_compatibility_id: string; manifest_sha256: string; engine_protocol_version: number }>(
+        `SELECT base.base_compatibility_id,bundle.manifest_sha256,bundle.engine_protocol_version
+         FROM cloud_runtime_base_images base CROSS JOIN cloud_runtime_bundles bundle
+         WHERE base.base_image_id=$1 AND bundle.runtime_id=$2`, [pin.baseImageId, pin.runtimeId],
+      )).rows[0];
+      if (!identity) return null;
+      const loaded = await loadPinnedCloudRuntime(tx, {
+        ...pin, baseCompatibilityId: identity.base_compatibility_id, manifestSha256: identity.manifest_sha256,
+        engineProtocolVersion: identity.engine_protocol_version, profile: "zeros-cloud-worker-v4",
+      }, input.qualificationMode);
+      return loaded ? { ...loaded, baseImageId: pin.baseImageId, baseCompatibilityId: identity.base_compatibility_id } : null;
+    },
     async validate(tx: Tx, pinned: ComputerTemplateRuntime): Promise<boolean> {
       return await loadPinnedCloudRuntime(tx, {
         baseImageId: pinned.baseImageId, baseCompatibilityId: pinned.baseCompatibilityId,

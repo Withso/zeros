@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { builderFixture, BUILDER_WALLET } from "./cloud-builder-vm-test-fixtures.js";
 import { DatabaseBuilderVmOperationStore, type BuilderVmIntent } from "./cloud-builder-vm-store.js";
@@ -54,7 +54,7 @@ database("computer template claim preparation with the real B7 journal", () => {
     worker = new ComputerTemplateWorker({
       pool, service, operations, vms: boat.vms,
       accountScope: claimOptions().accountScope, billingOrg: BUILDER_WALLET,
-      runtime: { select: async () => templateRuntime, validate: async () => true },
+      runtime: { select: async () => templateRuntime, load: async () => templateRuntime, validate: async () => true },
       github: { mintContentsRead: vi.fn(), revoke: vi.fn() },
       artifacts: { presignGet: vi.fn() },
       snapshots: { capture: vi.fn(), reconcile: vi.fn(async () => 0) },
@@ -261,8 +261,85 @@ database("computer template claim preparation with the real B7 journal", () => {
       descriptor: first.descriptor, objectKey: first.objectKey });
     await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "3", releaseOrder: 2 }));
     expect(await withSystemTx(pool, tx => adapters.runtime.validate(tx, selected!))).toBe(true);
+    expect(await withSystemTx(pool, tx => adapters.runtime.load(tx, first.pin))).toEqual(selected);
     await withSystemTx(pool, tx => tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [first.pin.runtimeId]));
     expect(await withSystemTx(pool, tx => adapters.runtime.validate(tx, selected!))).toBe(false);
+    expect(await withSystemTx(pool, tx => adapters.runtime.load(tx, first.pin))).toBeNull();
     expect(boat.fetcher).not.toHaveBeenCalled();
+  });
+
+  it("adopts exactly one explicit handoff at full capacity with the saved runtime and an advancing fence", async () => {
+    const adapters = createComputerTemplateBoatAdapters({ pool, client: boat.client,
+      accountScope: claimOptions().accountScope, billingOrg: BUILDER_WALLET, qualificationMode: "full", deploymentChannel: "alpha" });
+    const first = await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "2" }));
+    const build = await request();
+    const initial = (await service.claimNextBuild(70, { ...claimOptions(),
+      selectRuntime: async () => ({ baseImageId: first.pin.baseImageId, runtimeId: first.pin.runtimeId }) }))!;
+    const key = `computer-build:${build.build.id}`;
+    const original = await operations.find(key);
+    const load = vi.fn(async (tx: Tx, pin: { baseImageId: string; runtimeId: string }) => await adapters.runtime.load(tx, pin) !== null);
+    const options = { ...claimOptions(), loadRuntime: load, selectRuntime: vi.fn(async () => null) };
+    // Hard exit with no checkpoint never grants an adoption. The original
+    // deadline/cleanup path still owns a worker lost during clone.
+    expect(await service.claimNextBuild(71, options)).toBeNull();
+    expect(load).not.toHaveBeenCalled();
+    expect(await service.handoffBuild(build.build.id, 70, initial.installProgress)).toBe(true);
+    expect(await service.claimNextBuild(71, { ...options, accountScope: "foreign-fixture-account" })).toBeNull();
+    expect(await service.claimNextBuild(71, { ...options, billingOrg: "foreign-fixture-wallet" })).toBeNull();
+    expect(load).not.toHaveBeenCalled();
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "3", releaseOrder: 2 }));
+    // These include a replacement whose wall clock is behind its predecessor.
+    const claims = (await Promise.all([service.claimNextBuild(2, options), service.claimNextBuild(3, options)])).filter(Boolean);
+    expect(claims).toHaveLength(1);
+    const adopted = claims[0]!;
+    expect(adopted).toMatchObject({ helperFence: 70, deadlineAt: initial.deadlineAt,
+      build: { id: build.build.id, stage: "allocating", startedAt: initial.build.startedAt }, config: initial.config });
+    expect(adopted.workerFence).toBeGreaterThan(71);
+    expect(options.selectRuntime).not.toHaveBeenCalled();
+    expect(load).toHaveBeenCalledExactlyOnceWith(expect.anything(), { baseImageId: first.pin.baseImageId, runtimeId: first.pin.runtimeId });
+    expect(await operations.find(key)).toEqual(original);
+    expect(await service.handoffBuild(build.build.id, 70, initial.installProgress)).toBe(false);
+    await expect(withSystemTx(pool, tx => tx.query("UPDATE cloud_computer_v2_builds SET helper_fence=helper_fence+1 WHERE id=$1", [build.build.id])))
+      .rejects.toMatchObject({ code: "23514" });
+    expect(boat.fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each(["runtime", "base", "contract", "qualification", "full qualification"])(
+    "refuses handoff admission after the saved %s becomes unavailable", async reason => {
+      const first = await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "2", mode: "smoke" }));
+      const build = await request();
+      const initial = (await service.claimNextBuild(7, { ...claimOptions(),
+        selectRuntime: async () => ({ baseImageId: first.pin.baseImageId, runtimeId: first.pin.runtimeId }) }))!;
+      expect(await service.handoffBuild(build.build.id, 7, initial.installProgress)).toBe(true);
+      const adapters = createComputerTemplateBoatAdapters({ pool, client: boat.client,
+        accountScope: claimOptions().accountScope, billingOrg: BUILDER_WALLET,
+        qualificationMode: reason === "full qualification" ? "full" : "smoke", deploymentChannel: "alpha" });
+      await withSystemTx(pool, async tx => {
+        // A valid new release must never replace a handed-off build's pin.
+        await seedRuntimeBundle(tx, { digit: "3", releaseOrder: 2 });
+        if (reason === "runtime") await tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [first.pin.runtimeId]);
+        if (reason === "base") await tx.query("UPDATE cloud_runtime_base_images SET revoked_at=now() WHERE base_image_id=$1", [first.pin.baseImageId]);
+        if (reason === "contract") await tx.query("UPDATE cloud_runtime_base_contracts SET revoked_at=now() WHERE base_compatibility_id=$1", [first.pin.baseCompatibilityId]);
+        if (reason === "qualification") await tx.query(`UPDATE cloud_runtime_qualifications SET revoked_at=now(),enabled=false,mcp_qualified=false
+          WHERE runtime_id=$1 AND credential_kind='codex-chatgpt'`, [first.pin.runtimeId]);
+      });
+      expect(await service.claimNextBuild(8, { ...claimOptions(), loadRuntime: async (tx, pin) => await adapters.runtime.load(tx, pin) !== null })).toBeNull();
+      expect((await read()).latestBuild).toMatchObject({ state: "failed", errorCode: "runtime_unavailable" });
+      expect((await operations.find(`computer-build:${build.build.id}`))!.intent.source).toEqual({ kind: "base", baseImageId: first.pin.baseImageId });
+      expect(boat.fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["cancellation", "deadline"])("retires a handed-off build on %s without adopting or allocating", async reason => {
+    const build = await request();
+    const initial = (await service.claimNextBuild(7, claimOptions()))!;
+    expect(await service.handoffBuild(build.build.id, 7, initial.installProgress)).toBe(true);
+    if (reason === "cancellation") await service.cancel(fixture.organizationId, fixture.userId, build.build.id, { expectedRevision: build.revision });
+    else await withSystemTx(pool, tx => tx.query("UPDATE cloud_computer_v2_builds SET deadline_at=clock_timestamp()-interval '1 second' WHERE id=$1", [build.build.id]));
+    await worker.tick();
+    expect((await read()).latestBuild).toMatchObject({ state: reason === "cancellation" ? "cancelled" : "failed",
+      errorCode: reason === "cancellation" ? null : "build_timeout" });
+    expect((await operations.find(`computer-build:${build.build.id}`))!.create_closed_at).toBeInstanceOf(Date);
+    expect(boat.state.creates).toBe(0);
   });
 });

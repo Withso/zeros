@@ -88,6 +88,7 @@ class BuildFailure extends Error {
     super(code);
   }
 }
+class BuildHandoff extends Error {}
 export type ComputerTemplateWorkerDependencies = {
   pool: pg.Pool;
   service: DatabaseCloudComputerV2Service;
@@ -103,6 +104,7 @@ export type ComputerTemplateWorkerDependencies = {
   };
   runtime: {
     select(tx: Tx): Promise<ComputerTemplateRuntime | null>;
+    load(tx: Tx, pin: { baseImageId: string; runtimeId: string }): Promise<ComputerTemplateRuntime | null>;
     validate(tx: Tx, runtime: ComputerTemplateRuntime): Promise<boolean>;
   };
   artifacts: {
@@ -231,6 +233,10 @@ export class ComputerTemplateWorker {
               }
             : null;
         },
+        loadRuntime: async (tx, pin) => {
+          runtime = await this.deps.runtime.load(tx, pin);
+          return runtime !== null && runtime.baseImageId === pin.baseImageId && runtime.descriptor.runtimeId === pin.runtimeId;
+        },
       });
       if (!claim || !runtime) break;
       const pin: ComputerTemplateRuntime = runtime;
@@ -246,10 +252,28 @@ export class ComputerTemplateWorker {
       claim.build.id,
       claim.workerFence,
     );
-    if (this.stopping || !authority.active)
+    if (!authority.active)
       throw new BuildFailure(
         authority.expired ? "build_timeout" : "build_failed",
       );
+  }
+  private async checkpoint(claim: CloudComputerV2Claim) {
+    if (!this.stopping) return;
+    await this.guard(claim);
+    let applied: boolean;
+    try {
+      applied = await this.deps.service.handoffBuild(claim.build.id, claim.workerFence, claim.installProgress);
+    } catch {
+      // A lost commit reply is not a failed build. Only the durable checkpoint
+      // permits adoption; an uncommitted handoff keeps the original deadline.
+      console.error("[computer-template-worker] handoff_unconfirmed");
+      throw new BuildHandoff();
+    }
+    if (!applied) {
+      await this.guard(claim);
+      throw new BuildFailure("build_failed");
+    }
+    throw new BuildHandoff();
   }
   private async stage(
     claim: CloudComputerV2Claim,
@@ -266,6 +290,7 @@ export class ComputerTemplateWorker {
       ).applied
     )
       throw new BuildFailure("build_failed");
+    claim.build.stage = stage;
   }
   private async fixed(
     vm: BuilderVm,
@@ -331,127 +356,103 @@ export class ComputerTemplateWorker {
       baseImageId: runtime.baseImageId,
       runtimeId: runtime.descriptor.runtimeId,
     };
-    const job = { buildId: id, workerFence: fence };
+    const job = { buildId: id, workerFence: claim.helperFence };
     let failure: CloudComputerV2BuildError = "allocation_failed";
     try {
       await this.guard(claim);
+      await this.checkpoint(claim);
       const allocation = await this.journal.allocation(id);
-      const vm = await this.create(allocation);
+      if (!allocation.provider_resource_id && claim.build.stage !== "allocating")
+        throw new BuildFailure("allocation_failed");
+      const vm = allocation.provider_resource_id
+        ? { sandboxId: allocation.provider_resource_id, purpose: "computer-build" as const, operationKey: allocation.builder_operation_key }
+        : await this.create(allocation);
       if (
         vm.purpose !== "computer-build" ||
         vm.operationKey !== allocation.builder_operation_key
       )
         throw new BuildFailure("allocation_failed");
       await this.journal.recordVm(id, vm.operationKey, vm.sandboxId);
-      await this.stage(claim, "runtime");
-      failure = "runtime_install_failed";
-      const status = await this.deps.vms.waitForBase(vm);
-      const imageId = allocation.builder_source_image_id;
+      if (claim.build.stage === "allocating") {
+        await this.stage(claim, "runtime");
+        await this.checkpoint(claim);
+      }
       const literals: string[] = [];
-      if (status.baseCompatibilityId !== runtime.baseCompatibilityId) {
-        if (imageId) await quarantineRuntimeImage(this.deps.pool, imageId, "base_compatibility");
-        throw new BuildFailure(failure);
-      }
-      if (imageId) {
-        if (status.currentRuntimeId !== pin.runtimeId) {
-          await quarantineRuntimeImage(this.deps.pool, imageId, "runtime_identity");
-          throw new BuildFailure(failure);
-        }
-        if (status.hostState !== "idle") throw new BuildFailure(failure);
-      } else {
-        if (status.currentRuntimeId !== null || !["idle", "waiting_for_runtime"].includes(status.hostState))
-          throw new BuildFailure(failure);
-        const artifact = await this.deps.artifacts.presignGet(runtime.objectKey, 900);
-        literals.push(artifact.url);
-        await this.fixed(
-          vm,
-          "install-runtime",
-          { schema: "zeros.runtime-install/v1", purpose: "build", runtime: runtime.descriptor, artifact },
-          failure,
-          this.timeout(claim, 600_000),
-          "installer",
-          "done",
-        );
-      }
-      await this.guard(claim);
       const tcbInput = {
         schema: "zeros.computer-tcb-input/v1",
         ...job,
         baseCompatibilityId: runtime.baseCompatibilityId,
         runtimeId: pin.runtimeId,
       };
-      // The frozen helper also reports internal timeouts and OS errors as
-      // tcb_modified; this diagnostic cannot establish shared-image corruption.
-      const baseline = result(
-        TcbResult,
-        await this.fixed(
-          vm,
-          "computer:verify-tcb",
-          { ...tcbInput, action: "baseline" },
-          "tcb_modified",
-          this.timeout(claim, 180_000),
-          "build",
-          "integrity",
-        ),
-        "tcb_modified",
-      );
-      if (
-        baseline.buildId !== id ||
-        baseline.runtimeId !== pin.runtimeId ||
-        baseline.baseCompatibilityId !== runtime.baseCompatibilityId
-      )
+      if (claim.build.stage === "runtime") {
+        failure = "runtime_install_failed";
+        const status = await this.deps.vms.waitForBase(vm);
+        const imageId = allocation.builder_source_image_id;
+        if (status.baseCompatibilityId !== runtime.baseCompatibilityId) {
+          if (imageId) await quarantineRuntimeImage(this.deps.pool, imageId, "base_compatibility");
+          throw new BuildFailure(failure);
+        }
+        if (imageId) {
+          if (status.currentRuntimeId !== pin.runtimeId) {
+            await quarantineRuntimeImage(this.deps.pool, imageId, "runtime_identity");
+            throw new BuildFailure(failure);
+          }
+          if (status.hostState !== "idle") throw new BuildFailure(failure);
+        } else {
+          if (status.currentRuntimeId !== null || !["idle", "waiting_for_runtime"].includes(status.hostState))
+            throw new BuildFailure(failure);
+          const artifact = await this.deps.artifacts.presignGet(runtime.objectKey, 900);
+          literals.push(artifact.url);
+          await this.fixed(vm, "install-runtime",
+            { schema: "zeros.runtime-install/v1", purpose: "build", runtime: runtime.descriptor, artifact },
+            failure, this.timeout(claim, 600_000), "installer", "done");
+        }
+        await this.guard(claim);
+        // Only take this baseline before the recipe, never on adoption. The
+        // helper's generic tcb_modified does not prove shared-image corruption.
+        const baseline = result(TcbResult, await this.fixed(vm, "computer:verify-tcb",
+          { ...tcbInput, action: "baseline" }, "tcb_modified", this.timeout(claim, 180_000), "build", "integrity"), "tcb_modified");
+        if (baseline.buildId !== id || baseline.runtimeId !== pin.runtimeId || baseline.baseCompatibilityId !== runtime.baseCompatibilityId)
+          throw new BuildFailure("tcb_modified");
+        await this.journal.recordDigest(id, fence, baseline.protectedContractDigest, "protected");
+        allocation.protected_contract_digest = Buffer.from(baseline.protectedContractDigest, "hex");
+        await this.stage(claim, "repositories");
+        await this.checkpoint(claim);
+      }
+      if (!allocation.protected_contract_digest) throw new BuildFailure("tcb_modified");
+      const baseline = {
+        schema: "zeros.computer-tcb/v1", buildId: id, baseCompatibilityId: runtime.baseCompatibilityId,
+        runtimeId: pin.runtimeId, protectedContractDigest: allocation.protected_contract_digest.toString("hex"),
+      };
+      let repositories = claim.repositoryManifest;
+      if (claim.build.stage === "repositories") {
+        failure = "repository_access_denied";
+        repositories = await this.clone(claim, vm, literals);
+        if (!(await this.deps.service.markBuildStage(id, fence, "install", { ...pin, repositoryManifest: repositories })).applied)
+          throw new BuildFailure("build_failed");
+        claim.build.stage = "install";
+        // Clone is not replayable. Revoke its credentials and start the durable
+        // helper with its redactions before yielding to another CP process.
+      }
+      if (!repositories) throw new BuildFailure("repository_clone_failed");
+      if (claim.build.stage === "install") {
+        failure = "install_failed";
+        await this.install(claim, vm, literals);
+        await this.stage(claim, "integrity");
+        await this.checkpoint(claim);
+      }
+      if (claim.build.stage === "integrity") {
+        const checked = result(TcbResult, await this.fixed(vm, "computer:verify-tcb",
+          { ...tcbInput, action: "verify", protectedContractDigest: baseline.protectedContractDigest },
+          "tcb_modified", this.timeout(claim, 180_000), "build", "integrity"), "tcb_modified");
+        if (canonical(checked) !== canonical(baseline))
+          throw new BuildFailure("tcb_modified");
+        await this.fixed(vm, "runtime-self-test", undefined, "integrity_failed", this.timeout(claim, 120_000), "qualification", "self_test");
+        await this.stage(claim, "sanitation");
+        await this.checkpoint(claim);
+      }
+      if (!["sanitation", "stopping", "capture_confirmed"].includes(claim.build.stage))
         throw new BuildFailure("tcb_modified");
-      await this.journal.recordDigest(
-        id,
-        fence,
-        baseline.protectedContractDigest,
-        "protected",
-      );
-      await this.stage(claim, "repositories");
-      failure = "repository_access_denied";
-      const repositories = await this.clone(claim, vm, literals);
-      if (
-        !(
-          await this.deps.service.markBuildStage(id, fence, "install", {
-            ...pin,
-            repositoryManifest: repositories,
-          })
-        ).applied
-      )
-        throw new BuildFailure("build_failed");
-      await this.guard(claim);
-      failure = "install_failed";
-      await this.install(claim, vm, literals);
-      await this.stage(claim, "integrity");
-      const checked = result(
-        TcbResult,
-        await this.fixed(
-          vm,
-          "computer:verify-tcb",
-          {
-            ...tcbInput,
-            action: "verify",
-            protectedContractDigest: baseline.protectedContractDigest,
-          },
-          "tcb_modified",
-          this.timeout(claim, 180_000),
-          "build",
-          "integrity",
-        ),
-        "tcb_modified",
-      );
-      if (canonical(checked) !== canonical(baseline))
-        throw new BuildFailure("tcb_modified");
-      await this.fixed(
-        vm,
-        "runtime-self-test",
-        undefined,
-        "integrity_failed",
-        this.timeout(claim, 120_000),
-        "qualification",
-        "self_test",
-      );
-      await this.stage(claim, "sanitation");
       const manifest = {
         schema: "zeros.computer-template/v1",
         buildId: id,
@@ -464,52 +465,43 @@ export class ComputerTemplateWorker {
       const manifestSha256 = createHash("sha256")
         .update(canonical(manifest))
         .digest("hex");
-      const sanitation = result(
-        SanitationResult,
-        await this.fixed(
-          vm,
-          "computer:sanitize",
-          {
-            schema: "zeros.computer-sanitation-input/v1",
-            ...job,
-            manifest,
-            manifestSha256,
-          },
-          "sanitation_failed",
-          this.timeout(claim, 120_000),
-          "build",
-          "sanitation",
-        ),
-        "sanitation_failed",
-      );
-      if (
-        sanitation.buildId !== id ||
-        sanitation.manifestSha256 !== manifestSha256
-      )
+      if (claim.build.stage === "sanitation") {
+        const sanitation = result(SanitationResult, await this.fixed(vm, "computer:sanitize",
+          { schema: "zeros.computer-sanitation-input/v1", ...job, manifest, manifestSha256 },
+          "sanitation_failed", this.timeout(claim, 120_000), "build", "sanitation"), "sanitation_failed");
+        if (sanitation.buildId !== id || sanitation.manifestSha256 !== manifestSha256)
+          throw new BuildFailure("sanitation_failed");
+        await this.journal.recordDigest(id, fence, manifestSha256, "manifest");
+        allocation.manifest_sha256 = Buffer.from(manifestSha256, "hex");
+        await this.stage(claim, "stopping");
+        await this.checkpoint(claim);
+      }
+      if (allocation.manifest_sha256?.toString("hex") !== manifestSha256)
         throw new BuildFailure("sanitation_failed");
-      await this.journal.recordDigest(id, fence, manifestSha256, "manifest");
-      await this.stage(claim, "stopping");
-      failure = "template_stop_failed";
-      // Archiving saves the whole disk, and Boat can take well over ten
-      // minutes to do it. Reserve five minutes for the named capture/proof
-      // and one minute for the final completion CAS.
-      const stopped = await this.deps.vms
-        .stop(vm, { timeoutMs: this.timeout(claim, 30 * 60_000, CAPTURE_COMPLETION_MS + NAMED_CAPTURE_MS), requireSnapshot: true })
-        .catch((error: unknown) => {
-          if (error instanceof BuilderVmError && error.check === "stop_snapshot_failed")
-            throw new BuildFailure("template_capture_failed");
-          throw error;
-        });
-      if (stopped.archived !== true)
-        throw new BuildFailure("template_capture_failed");
-      const stoppedAt = await this.journal.recordStopped(id);
-      failure = "template_capture_failed";
-      // The saved artifact, rather than the expiring stopped sandbox, becomes
-      // the creation source. A name/save without its exact proof is not ready.
-      await this.deps.snapshots.capture({ buildId: id, workerFence: fence,
-        deadlineAt: new Date(Date.parse(claim.deadlineAt) - CAPTURE_COMPLETION_MS).toISOString(),
-        guard: () => this.guard(claim) });
-      await this.stage(claim, "capture_confirmed");
+      if (claim.build.stage === "stopping") {
+        failure = "template_stop_failed";
+        if (!allocation.stopped_at) {
+          // Keep the original stop/capture reserves across every handoff.
+          const stopped = await this.deps.vms
+            .stop(vm, { timeoutMs: this.timeout(claim, 30 * 60_000, CAPTURE_COMPLETION_MS + NAMED_CAPTURE_MS), requireSnapshot: true })
+            .catch((error: unknown) => {
+              if (error instanceof BuilderVmError && error.check === "stop_snapshot_failed")
+                throw new BuildFailure("template_capture_failed");
+              throw error;
+            });
+          if (stopped.archived !== true) throw new BuildFailure("template_capture_failed");
+          allocation.stopped_at = new Date(await this.journal.recordStopped(id));
+        }
+        await this.checkpoint(claim);
+        failure = "template_capture_failed";
+        // A name/save without its exact saved-artifact proof is not ready.
+        await this.deps.snapshots.capture({ buildId: id, workerFence: fence,
+          deadlineAt: new Date(Date.parse(claim.deadlineAt) - CAPTURE_COMPLETION_MS).toISOString(),
+          guard: () => this.guard(claim) });
+        await this.stage(claim, "capture_confirmed");
+        await this.checkpoint(claim);
+      }
+      if (!allocation.stopped_at) throw new BuildFailure("template_capture_failed");
       await this.deps.service.completeBuild(
         id,
         fence,
@@ -521,12 +513,13 @@ export class ComputerTemplateWorker {
             accountScope: this.deps.accountScope,
             billingOrg: this.deps.billingOrg,
             protectedContractDigest: baseline.protectedContractDigest,
-            stoppedAt,
+            stoppedAt: allocation.stopped_at.toISOString(),
           },
         },
         (tx) => this.deps.runtime.validate(tx, runtime),
       );
     } catch (error) {
+      if (error instanceof BuildHandoff) return;
       // failBuild is fenced and cannot turn an already-committed success into a
       // failure when the completion reply was lost. Cleanup reads that DB fact.
       await this.deps.service.failBuild(
@@ -593,7 +586,7 @@ export class ComputerTemplateWorker {
           {
             schema: "zeros.computer-repositories-input/v1",
             buildId: claim.build.id,
-            workerFence: claim.workerFence,
+            workerFence: claim.helperFence,
             repositories,
           },
           "repository_clone_failed",
@@ -622,11 +615,11 @@ export class ComputerTemplateWorker {
     const job = {
       schema: "zeros.computer-install-input/v1",
       buildId: claim.build.id,
-      workerFence: claim.workerFence,
+      workerFence: claim.helperFence,
     };
-    const redactor = new ComputerTemplateLogRedactor(literals);
-    let after = 0,
-      started = false,
+    const redactor = new ComputerTemplateLogRedactor(literals, claim.installProgress.discardStreams);
+    let after = claim.installProgress.after,
+      started = claim.installProgress.started,
       failures = 0;
     // Repeating start is an inspection of the same durable helper marker. In
     // particular a lost SSH reply never starts another arbitrary root script.
@@ -663,7 +656,7 @@ export class ComputerTemplateWorker {
       const output = result(InstallResult, stdout, "install_failed");
       if (
         output.buildId !== claim.build.id ||
-        output.workerFence !== claim.workerFence ||
+        output.workerFence !== claim.helperFence ||
         output.nextAfter < after
       )
         throw new BuildFailure("install_failed");
@@ -694,6 +687,7 @@ export class ComputerTemplateWorker {
         after = chunk.seq;
       }
       if (output.nextAfter !== after) throw new BuildFailure("install_failed");
+      claim.installProgress = { started, after, discardStreams: redactor.handoffStreams() };
       if (output.state !== "running") {
         for (const stream of ["stdout", "stderr"] as const)
           await this.append(claim, stream, redactor.finish(stream));
@@ -705,6 +699,7 @@ export class ComputerTemplateWorker {
           throw new BuildFailure("install_failed");
         return;
       }
+      await this.checkpoint(claim);
       if (this.pollMs)
         await new Promise((resolve) => setTimeout(resolve, this.pollMs));
     }
