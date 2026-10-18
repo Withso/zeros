@@ -288,7 +288,7 @@ describe("readiness with deferred retired Boat deletions", () => {
   afterEach(() => vi.useRealTimers());
 
   it.each(["deletion_jobs_failed", "deletion_provider_stalled", "deletion_intent_stalled", "object_deletion_stalled",
-    "provider_orphans_stalled", "lifecycle_stalled", "object_rotation_failed"])(
+    "provider_orphans_stalled", "lifecycle_stalled", "object_rotation_failed", "compute_usage_disagreement"])(
     "admits a CP repair release when %s was classified as unrelated cleanup", async reason => {
       const measured = { ...health, reasons: [reason] };
       const test = deferred({}, measured, false, true, true);

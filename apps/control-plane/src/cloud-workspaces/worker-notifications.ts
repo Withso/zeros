@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { postgresNotificationSubscription } from "../postgres-notifications.js";
+import { JOB_NOTIFICATION_CHANNEL } from "../job-queue.js";
 
 const channels = {
   workos: "zeros_account_maintenance_work",
@@ -16,6 +17,7 @@ const channels = {
   operations: "zeros_cloud_operations_work",
   retirement: "zeros_cloud_retirement_work",
   templates: "zeros_cloud_template_work",
+  jobs: JOB_NOTIFICATION_CHANNEL,
 } as const;
 export type CloudWorkerNotificationHandlers = Partial<Record<keyof typeof channels, () => void>>;
 

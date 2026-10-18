@@ -47,7 +47,10 @@ a boundary; an assumed future subscription renewal cannot.
 
 The provider deadline and funded window also gate engine and human-service
 authority. A lost control plane therefore cannot leave an indefinitely funded
-VM. The worker renews only after metering and reserving the extension. A
+VM. The worker renews only after reserving the extension. A running
+allocation's Boat usage is read and metered at most once an hour; its open
+reservation holds the whole authorized window meanwhile, so the delay never
+changes a funding decision. A stop or period end is metered at once. A
 nonrecoverable provider error, policy mismatch or exhausted balance starts a bounded final
 checkpoint and stop. Near the deadline it stops directly, retaining the last
 durable checkpoint. Budget enforcement never permanently deletes the VM.
@@ -122,6 +125,30 @@ customer debt. Later grants cannot retroactively charge that exposure. This
 initial policy meters allocated compute. Provider snapshot/storage/network
 charges and Zeros durable-object costs require separate operational budgets;
 they are not silently debited as compute seconds.
+
+### Lease check cadence
+
+A healthy running lease is next checked at its renewal point: half the
+maximum TTL before the provider deadline, or 315 seconds (the checkpoint and
+stop margin) before it when that is earlier. The next check is at least 15
+seconds and at most 10 minutes away. A failing check keeps its backoff.
+Migration `0160_cloud_compute_lease_recheck.sql` re-checks every unsettled
+lease of a workspace at once when its desired state, generation, owner,
+billing epoch or deletion changes, or when its status moves into or out of
+`failed` or the serving statuses `ready` and `busy`. A start refused with
+`compute_previous_lease_pending` re-checks the previous lease at once. A check
+requested while a lease is being checked is kept: the running check never
+replaces it with its own later schedule. The trigger skips a lease whose row
+another transaction holds, so a workspace write never waits for one; that
+lease is still checked at its scheduled time. Each metered increment is
+compared with the allocation's weighted wall-clock time; a difference above
+max(60 s, 5 %) is recorded in `managed_compute_usage_disagreements`, audited as
+`cloud_compute.usage_disagreement` and raises `compute_usage_disagreement` for
+24 hours (an under-report only after a running allocation's first window).
+
+A failed check that carries a provider wait (an HTTP `Retry-After` or
+Boat's body wait, capped at five minutes) is not retried sooner, but an
+active allocation is still re-checked before its checkpoint and stop margin.
 
 ## Configuration and rollout
 

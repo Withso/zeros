@@ -24,6 +24,7 @@ export type CloudWorkspaceReleaseHealthReader = {
 const cleanupReasons = new Set([
   "deletion_jobs_failed", "deletion_provider_stalled", "deletion_intent_stalled",
   "object_deletion_stalled", "provider_orphans_stalled", "lifecycle_stalled", "object_rotation_failed",
+  "compute_usage_disagreement",
 ]);
 
 /** Mixed lifecycle/rotation reasons also require the SQL projection. Unknown
@@ -49,6 +50,7 @@ type HealthSignals = {
   compute_settlement_stalled: boolean;
   compute_lease_expired: boolean;
   compute_platform_exposure: boolean;
+  compute_usage_disagreement: boolean;
 };
 type ReleaseSignals = HealthSignals & { release_lifecycle_stalled: boolean; release_rotation_failed: boolean };
 type MeasuredHealth = { health: CloudWorkspaceHealth; controlPlaneReady: boolean };
@@ -184,7 +186,9 @@ export class DatabaseCloudWorkspaceHealthService {
              EXISTS (SELECT 1 FROM managed_compute_allocation_leases WHERE state IN ('active','draining')
                AND provider_expires_at < now()-interval '5 minutes') AS compute_lease_expired,
              EXISTS (SELECT 1 FROM managed_compute_credit_periods WHERE exposure_micro_usd>0
-               AND updated_at>now()-interval '24 hours') AS compute_platform_exposure`,
+               AND updated_at>now()-interval '24 hours') AS compute_platform_exposure,
+             EXISTS (SELECT 1 FROM managed_compute_usage_disagreements
+               WHERE detected_at>now()-interval '24 hours') AS compute_usage_disagreement`,
           [
             this.posture.outboxDeliveryEnabled,
             this.posture.durabilityEnabled,

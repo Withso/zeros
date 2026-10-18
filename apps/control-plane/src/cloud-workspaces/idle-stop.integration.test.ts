@@ -9,6 +9,7 @@ import { CloudWorkspaceReconciler } from "./reconciler.js";
 import type { CloudWorkspaceProvider, CloudProviderResource } from "./provider.js";
 import { CloudProviderError } from "./provider.js";
 import { previousBackendWake } from "./lifecycle-compatibility-fixtures.js";
+import { runDueLifecycleJobs } from "./lifecycle-job-test-utils.js";
 import { previousBackendReconciler } from "./previous-reconciler-fixture.js";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -264,6 +265,39 @@ suite("verified inactivity shutdown", () => {
     await pool.query("UPDATE cloud_workspace_lifecycle_intents SET resume_after_intent_id=NULL WHERE id=$1", [wakeId]);
     await expect(withSystemTx(pool, tx => tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='dispatching',lease_owner='old-worker',lease_expires_at=now()+interval '1 minute' WHERE id=$1", [wakeId])))
       .rejects.toThrow("workspace drain is not complete");
+  });
+  it("keeps a superseded drain parked while an inventory-forced observation refresh is pending", async () => {
+    // The drift sweep clears last_observed_at when the provider listing
+    // disagrees with the recorded observation. The drain-response trigger
+    // (0113) requires last_observed_at >= the intent's update, so the cleared
+    // observation must park the drain -- never complete it -- until the
+    // forced drift check writes a fresh one.
+    const { commit } = await finalCheckpoint(); await commit();
+    const stopId = (await pool.query("SELECT id FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='stop'", [fixture.workspaceId])).rows[0].id;
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='dispatching',lease_owner='previous-backend',lease_expires_at=now()+interval '1 minute' WHERE id=$1", [stopId]);
+    expect((await lifecycle("wake")).status).toBe(202);
+    const resourceId = (await pool.query("SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].provider_resource_id;
+    await pool.query(`UPDATE cloud_workspace_provider_bindings SET observed_state='stopped',last_observed_at=clock_timestamp(),
+      next_drift_check_at=now()+interval '1 hour' WHERE workspace_id=$1`, [fixture.workspaceId]);
+    const stopped: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1, resourceId, state: "stopped", target: null, metadata: {} };
+    const provider: CloudWorkspaceProvider = { name: "boat",
+      // The listing still shows the sandbox running: a stale observation.
+      async *listInventory() { yield { resourceId, state: "running", computeStopped: false, workspaceId: fixture.workspaceId, generation: 1 }; },
+      async inspect() { return stopped; }, async find() { return [stopped]; },
+      async create() { throw new Error("unused"); }, async start() { return stopped; },
+      async stop() { return stopped; }, async archive() { return stopped; }, async delete() {}, async *listManaged() {} };
+    const reconciler = new CloudWorkspaceReconciler({ pool, provider, intervalMs: 60_000 });
+    await reconciler.reconcileOrphansOnce();
+    expect((await pool.query("SELECT last_observed_at FROM cloud_workspace_provider_bindings WHERE workspace_id=$1", [fixture.workspaceId])).rows[0])
+      .toEqual({ last_observed_at: null });
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [stopId]);
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [stopId])).rows[0].state).toBe("observing");
+    // The parked drain's own re-run re-observes the provider and completes;
+    // the cleared observation never let it complete on stale data.
+    await runDueLifecycleJobs(pool, reconciler, ["lifecycle"]);
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [stopId])).rows[0].state).toBe("succeeded");
+    expect((await pool.query("SELECT observed_state, last_observed_at IS NOT NULL AS fresh FROM cloud_workspace_provider_bindings WHERE workspace_id=$1", [fixture.workspaceId])).rows[0])
+      .toEqual({ observed_state: "stopped", fresh: true });
   });
   it.each(["stopped", "running"])("preserves the final drain when an older provider response supersedes it (%s)", async observed => {
     const { commit } = await finalCheckpoint(); await commit();

@@ -3,12 +3,13 @@
   "policy": "transactions: measured, no headroom (a new transaction is a deliberate change); statements and round trips: ceil(measured x 1.25); steady-state tx/s: measured x 1.1 rounded up to 0.01.",
   "targets": {
     "quietTransactionsPerSecond": 0.5,
-    "perActiveWorkspaceTransactionsPerSecond": 0.01
+    "perActiveWorkspaceTransactionsPerSecond": 0.01,
+    "boatCallsPerMinute": 1000
   },
   "steadyState": {
     "perActiveWorkspaceTransactionsPerSecond": 3.09,
     "perRunningEngineTransactionsPerSecond": 2.36,
-    "perStoppedWorkspaceTransactionsPerSecond": 0.13,
+    "perStoppedWorkspaceTransactionsPerSecond": 0.01,
     "notifyingCommitsPerActiveWorkspacePerSecond": 0.07,
     "authorityCacheNotificationsPerActiveWorkspacePerSecond": 0.03
   },
@@ -78,10 +79,10 @@
       "statements": 9,
       "roundTrips": 7
     },
-    "worker.lifecycleDeadlines": {
+    "worker.lifecycleJobClaim": {
       "transactions": 1,
       "statements": 7,
-      "roundTrips": 4
+      "roundTrips": 2
     },
     "worker.reconcileOnce": {
       "transactions": 1,
@@ -94,9 +95,19 @@
       "roundTrips": 30
     },
     "worker.reconcileOrphans": {
-      "transactions": 2,
-      "statements": 14,
-      "roundTrips": 9
+      "transactions": 3,
+      "statements": 20,
+      "roundTrips": 13
+    },
+    "worker.engineHealthJob": {
+      "transactions": 5,
+      "statements": 32,
+      "roundTrips": 12
+    },
+    "worker.jobAudit": {
+      "transactions": 7,
+      "statements": 44,
+      "roundTrips": 24
     }
   }
 }

@@ -3,7 +3,7 @@ import { COMPUTER_NAMED_REF, isComputerTemplateSnapshotName, type ComputerSnapsh
 import type { ComputerSnapshotIdentity } from "./computer-template-snapshot-boat.js";
 import { assertHostedDevAdmission } from "../development-environment.js";
 import { z } from "zod";
-import { BoatApiClient, BoatCreateRejectedError, type BoatApiClientOptions, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
+import { BoatApiClient, BoatCreateRejectedError, BoatSnapshotExpiredError, type BoatApiClientOptions, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
 import { setBoatDisplayName, type BoatDisplayName } from "./boat-display-name.js";
 import { computeMicroUsd, type CloudProviderComputeUsage, type CloudWorkspaceComputeProvider } from "./provider-compute.js";
 import type {
@@ -14,6 +14,7 @@ import {
   CloudProviderError,
   type CloudProviderCreateInput,
   type CloudProviderIdentity,
+  type CloudProviderInventoryItem,
   type CloudProviderObservedState,
   type CloudProviderResource,
   type CloudProviderDeletionRetirement,
@@ -48,6 +49,16 @@ const SandboxSchema = z.object({
     .optional(),
   monitoring: z.boolean().optional(),
 });
+/** Archived means durable only with a completed snapshot; anything else is
+ * still archiving or failed. Both the inspect and the paged-inventory paths
+ * must agree, or the sweep would re-inspect a matching binding forever. */
+function observedState(sandbox: z.infer<typeof SandboxSchema>): CloudProviderObservedState {
+  return sandbox.state === "archived" &&
+      (sandbox.snapshotAvailable !== true || sandbox.lastSnapshotStatus !== "completed")
+    ? (["queued", "in_progress"].includes(sandbox.lastSnapshotStatus ?? "") ? "archiving" : "failed")
+    : STATES[sandbox.state];
+}
+
 const BillingTeamSchema = z.object({ id: z.string() });
 const DeletionSchema = z.object({
   id: z.string().regex(/^bdop_[a-f0-9]{32}$/),
@@ -118,6 +129,12 @@ export type BoatWorkspaceProviderOptions = BoatApiClientOptions & {
   resolveDisplayName?: (input: CloudProviderCreateInput) => BoatDisplayName;
   now?: () => number;
 };
+
+/** Pages of 100 sandboxes one sweep may follow before a provider pagination
+ * bug is assumed; the sweep must never spin against Boat's rate limit. Twice
+ * the reconciler's 10,000-resource ceiling, so the ceiling's warning, not
+ * this failure, is what a large account meets first. */
+const MAX_INVENTORY_PAGES = 200;
 
 function failure(code: string, retryable = false): CloudProviderError {
   return new CloudProviderError(
@@ -210,12 +227,7 @@ export class BoatWorkspaceProvider
     if (!parsed.success || parsed.data.id !== record.resourceId)
       throw failure("provider_response_invalid");
     const sandbox = parsed.data;
-    const state =
-      sandbox.state === "archived" &&
-      (sandbox.snapshotAvailable !== true ||
-        sandbox.lastSnapshotStatus !== "completed")
-        ? (["queued", "in_progress"].includes(sandbox.lastSnapshotStatus ?? "") ? "archiving" : "failed")
-        : STATES[sandbox.state];
+    const state = observedState(sandbox);
     // Live compute on an unconfirmed wallet is never reported as usable, so no
     // lifecycle or metering path can admit or renew it. Stop still applies.
     const billingScope = this.billingScope(value);
@@ -586,10 +598,18 @@ export class BoatWorkspaceProvider
       throw failure("provider_operation_pending", true);
     if (current.state === "failed")
       throw failure(current.metadata.snapshotMissing === true ? "provider_snapshot_missing" : "provider_snapshot_unavailable");
-    await this.client.request(`/sandboxes/${resourceId}/resume`, {
-      method: "POST",
-      body: { ttlSeconds },
-    });
+    try {
+      await this.client.request(`/sandboxes/${resourceId}/resume`, {
+        method: "POST",
+        body: { ttlSeconds },
+      });
+    } catch (error) {
+      // The allocation was just confirmed owned, stopped and on the expected
+      // wallet and template, so Boat's statement that it deleted the disk is
+      // the same evidence as an inspected missing capture.
+      if (error instanceof BoatSnapshotExpiredError) throw failure("provider_snapshot_missing");
+      throw error;
+    }
     return (
       (await this.inspect(resourceId)) ??
       (() => {
@@ -720,6 +740,49 @@ export class BoatWorkspaceProvider
           state: "deleting", target: null, metadata: { deletionStatus: "blocked" } };
       }
     }
+  }
+
+  /** The paged list replaces one inspect per sandbox: identity comes from
+   * the local allocation journal, state from the same mapping inspect uses,
+   * minus the billing/template checks that only an inspect can certify. */
+  async *listInventory(): AsyncIterable<CloudProviderInventoryItem> {
+    const records = new Map<string, CloudProviderOperationRecord>();
+    for await (const record of this.options.operations.list())
+      if (record.resourceId) records.set(record.resourceId, record);
+    let cursor: string | null = null;
+    const seen = new Set<string>();
+    for (let page = 0; page < MAX_INVENTORY_PAGES; page++) {
+      const listed = await this.client.listSandboxes({ cursor });
+      for (const value of listed.sandboxes) {
+        const parsed = SandboxSchema.safeParse(value);
+        // One malformed record must not lose the rest of the page.
+        if (!parsed.success) continue;
+        const record = records.get(parsed.data.id);
+        yield {
+          resourceId: parsed.data.id,
+          state: observedState(parsed.data),
+          computeStopped: parsed.data.state === "archived" || parsed.data.state === "cancelled",
+          workspaceId: record?.workspaceId ?? null,
+          generation: record?.generation ?? null,
+        };
+      }
+      cursor = listed.nextCursor;
+      if (!cursor) return;
+      // A provider pagination bug must not spin the sweep against the rate
+      // limit: bound the pages and refuse a cursor already followed.
+      if (seen.has(cursor))
+        throw new CloudProviderError(
+          "provider_response_invalid",
+          "Boat repeated an inventory cursor",
+          false,
+        );
+      seen.add(cursor);
+    }
+    throw new CloudProviderError(
+      "provider_response_invalid",
+      "Boat inventory exceeds the page limit",
+      false,
+    );
   }
 
   async createSshAccess(resourceId: string, expiresInMinutes: number) {

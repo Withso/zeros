@@ -9,8 +9,10 @@ export type RequestBudget = { transactions: number; statements: number; roundTri
 export type LoadBudgets = {
   version: 1;
   policy: string;
-  /** PLAN targets; reported against, not enforced, until the hot paths are rebuilt. */
-  targets: { quietTransactionsPerSecond: number; perActiveWorkspaceTransactionsPerSecond: number };
+  /** PLAN targets; reported against, not enforced, until the hot paths are rebuilt.
+   * boatCallsPerMinute is enforced: Boat rate-limits 1000 requests per minute
+   * per egress IP, and every control-plane replica shares one. */
+  targets: { quietTransactionsPerSecond: number; perActiveWorkspaceTransactionsPerSecond: number; boatCallsPerMinute: number };
   steadyState: { perActiveWorkspaceTransactionsPerSecond: number; perRunningEngineTransactionsPerSecond: number;
     perStoppedWorkspaceTransactionsPerSecond: number;
     /** Notifying commits per active workspace per second (jobs channel
@@ -81,6 +83,13 @@ export function checkBudgets(budgets: LoadBudgets, hotPaths: readonly HotPathRes
       measured: authorityCacheNotificationsPerActiveWorkspace, budget: budgets.steadyState.authorityCacheNotificationsPerActiveWorkspacePerSecond });
   for (const [metric, measured] of steady) {
     if (measured > budgets.steadyState[metric]) violations.push({ subject: "steadyState", metric, measured, budget: budgets.steadyState[metric] });
+  }
+  // Every replica sweeps from behind one egress IP; the largest projected
+  // footprint must leave Boat's shared per-minute limit to real traffic.
+  for (const row of projection.atWorkspaces) {
+    const measured = row.boatCallsPerMinutePerReplica * 2;
+    if (measured > budgets.targets.boatCallsPerMinute)
+      violations.push({ subject: `boatCallsPerMinute at ${row.workspaces} workspaces (2 replicas)`, metric: "boatCallsPerMinute", measured, budget: budgets.targets.boatCallsPerMinute });
   }
   return violations;
 }

@@ -130,8 +130,55 @@ export class BoatBootPendingError extends CloudProviderError {
   }
 }
 
+/** Boat deleted the disk of a sandbox that stayed stopped for 14 days, so it
+ * can never be resumed or forked. The public code is unchanged; a caller that
+ * knows the allocation decides what the loss means. */
+export class BoatSnapshotExpiredError extends CloudProviderError {
+  constructor() {
+    super("provider_request_failed", "Boat API request did not succeed", false, { httpStatus: 409 });
+  }
+}
+
+const MAX_RETRY_AFTER_MS = 300_000;
+// A retry cannot clear an hour or day start window; the longest wait paces it.
+const START_WINDOW_MS: Readonly<Record<string, number>> = {
+  minute: 60_000, hour: MAX_RETRY_AFTER_MS, day: MAX_RETRY_AFTER_MS,
+};
+
+/** Boat sends no Retry-After header: a 503 carries `retryAfterSeconds`, the
+ * per-IP limit `retryAfter`, and a refused start its rolling `window`. Their
+ * position in the envelope is undocumented, so the envelope, its error and
+ * the error's details are read. A header from an intermediary still counts;
+ * the longest wait wins. */
+function retryAfterMs(response: Response, value: Record<string, unknown> | null): number | undefined {
+  const waits: number[] = [];
+  const seconds = (candidate: unknown) => {
+    const parsed = typeof candidate === "number" ? candidate
+      : typeof candidate === "string" && /^\d{1,7}(?:\.\d{1,3})?$/.test(candidate) ? Number(candidate) : NaN;
+    if (Number.isFinite(parsed) && parsed > 0) waits.push(parsed * 1000);
+  };
+  const object = (candidate: unknown) =>
+    candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate as Record<string, unknown> : null;
+  seconds(Number(response.headers.get("retry-after")));
+  const error = object(value?.error);
+  const startRefused = value?.code === "rate_limited" || error?.code === "rate_limited";
+  for (const scope of [value, error, object(error?.details)]) {
+    if (!scope) continue;
+    seconds(scope.retryAfterSeconds);
+    seconds(scope.retryAfter);
+    if (startRefused && typeof scope.window === "string" && Object.hasOwn(START_WINDOW_MS, scope.window))
+      waits.push(START_WINDOW_MS[scope.window]!);
+  }
+  return waits.length ? Math.min(Math.ceil(Math.max(...waits)), MAX_RETRY_AFTER_MS) : undefined;
+}
+
 /** Credentials are sent only to the provider's pinned API origin. Redirects,
  * response bodies and vendor error text never enter coordinator diagnostics. */
+// The API path accepts only [A-Za-z0-9_=&%.-] in a query; escape the rest,
+// mirroring encodeCursor in cloud-provider-evidence.ts.
+const encodeListCursor = (cursor: string) =>
+  encodeURIComponent(cursor).replace(/[!'()*~]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+
 type BoatRequestInput = {
   method?: "GET" | "POST" | "PATCH" | "DELETE" | "PUT";
   body?: unknown;
@@ -294,11 +341,11 @@ export class BoatApiClient {
                 : response.status === 429
                   ? "provider_rate_limited"
                   : "provider_request_failed";
-        const retrySeconds = Number(response.headers.get("retry-after"));
-        const retryOptions = { httpStatus: response.status, ...(Number.isFinite(retrySeconds) && retrySeconds > 0
-          ? { retryAfterMs: Math.min(retrySeconds * 1000, 300_000) } : {}) };
+        const wait = retryAfterMs(response, value);
+        const retryOptions = { httpStatus: response.status, ...(wait !== undefined ? { retryAfterMs: wait } : {}) };
         if (response.status === 409 && ["boat_restoring", "boat_starting", "sandbox_starting"].includes(String(value?.code)))
           throw new BoatBootPendingError(retryOptions);
+        if (response.status === 409 && value?.code === "snapshot_data_expired") throw new BoatSnapshotExpiredError();
         const createRefusal = (path === "/sandboxes" || /^\/sandboxes\/[A-Za-z0-9_-]+\/fork$/.test(path)) &&
           input.method === "POST" && Boolean(input.idempotencyKey) && response.status === 429;
         const assessment = createRefusal ? assessCreateRefusal(value) : null;
@@ -330,5 +377,43 @@ export class BoatApiClient {
     }
   }
 
-
+  /** One page of the account's sandboxes for inventory sweeps. A page holds
+   * full sandbox documents, so no per-sandbox inspect follows. */
+  async listSandboxes(
+    input: { cursor?: string | null; limit?: number } = {},
+  ): Promise<{ sandboxes: unknown[]; nextCursor: string | null }> {
+    // Boat publishes no maximum page size; 100 is the size the operator
+    // inventory (cloud-provider-evidence.ts) has paged this endpoint with.
+    const limit = input.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+      throw new Error("Invalid Boat list page size");
+    const cursor = input.cursor ?? null;
+    // Cursors are opaque (a standard base64 cursor carries +/=). Percent-
+    // encode so the request path keeps its documented query character set
+    // instead of rejecting a valid page turn.
+    if (cursor !== null && (cursor.length === 0 || cursor.length > 512))
+      throw new CloudProviderError(
+        "provider_response_invalid",
+        "Boat returned an invalid response",
+        false,
+      );
+    const page = await this.request(
+      `/sandboxes?limit=${limit}${cursor ? `&cursor=${encodeListCursor(cursor)}` : ""}`,
+    );
+    const pageInfo =
+      page.pageInfo && typeof page.pageInfo === "object" && !Array.isArray(page.pageInfo)
+        ? (page.pageInfo as Record<string, unknown>)
+        : null;
+    if (!Array.isArray(page.sandboxes) || !pageInfo)
+      throw new CloudProviderError(
+        "provider_response_invalid",
+        "Boat returned an invalid response",
+        false,
+      );
+    const nextCursor =
+      pageInfo.hasMore === true && typeof pageInfo.nextCursor === "string"
+        ? pageInfo.nextCursor
+        : null;
+    return { sandboxes: page.sandboxes, nextCursor };
+  }
 }

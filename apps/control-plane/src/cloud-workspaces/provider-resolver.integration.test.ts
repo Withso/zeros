@@ -112,6 +112,35 @@ d("generation-bound cloud provider resolution", () => {
     expect(hosted.delete).not.toHaveBeenCalled();
   });
 
+  it("resolves for cleanup without row locks or authority and policy evaluation", async () => {
+    const statements: string[] = [];
+    const traced = tracedPool(pool, async (_client, sql, run) => { statements.push(sql); return run(); });
+    const resolving = new DatabaseCloudWorkspaceProviderResolver({ pool: traced, workosEnabled: false,
+      registry: new CloudWorkspaceProviderRegistry([{ name: "boat", hosted: { provider: provider() } }]) });
+    const locker = await pool.connect();
+    try {
+      await locker.query("BEGIN");
+      // Writers hold these rows; cleanup resolution must not queue behind them.
+      await locker.query("SELECT 1 FROM organizations WHERE id=$1 FOR UPDATE", [fixture.organizationId]);
+      await locker.query("SELECT 1 FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [fixture.workspaceId]);
+      await expect(resolving.resolve({ ...input(), purpose: "cleanup" }))
+        .resolves.toMatchObject({ provider: { name: "boat" }, credentialSource: "hosted" });
+    } finally { await locker.query("ROLLBACK"); locker.release(); }
+    expect(statements.some(sql => /FOR (SHARE|UPDATE)/.test(sql))).toBe(false);
+    expect(statements.some(sql => sql.includes("cloud_workspace_paid_authority_live")
+      || sql.includes("cloud_workspace_generation_policy_current"))).toBe(false);
+  });
+
+  it("still locks and evaluates authority for lifecycle resolution", async () => {
+    const statements: string[] = [];
+    const traced = tracedPool(pool, async (_client, sql, run) => { statements.push(sql); return run(); });
+    const resolving = new DatabaseCloudWorkspaceProviderResolver({ pool: traced, workosEnabled: false,
+      registry: new CloudWorkspaceProviderRegistry([{ name: "boat", hosted: { provider: provider() } }]) });
+    await expect(resolving.resolve(input())).resolves.toMatchObject({ credentialSource: "hosted" });
+    expect(statements.some(sql => sql.includes("FOR SHARE"))).toBe(true);
+    expect(statements.some(sql => sql.includes("cloud_workspace_paid_authority_live"))).toBe(true);
+  });
+
   it("rejects an invalid hosted endpoint before provider calls", async () => {
     await pool.query("UPDATE provider_connection_versions SET endpoint='hosted://unconfigured'");
     await expect(resolver().resolve(input())).rejects.toMatchObject({ code: "provider_connection_invalid" });

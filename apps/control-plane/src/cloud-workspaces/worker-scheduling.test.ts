@@ -5,10 +5,6 @@ import { CloudWorkspaceSetupWorker } from "./setup-worker.js";
 import type { CloudWorkspaceProvider } from "./provider.js";
 
 const workers = {
-  lifecycle: (pool = {} as pg.Pool) => new CloudWorkspaceReconciler({
-    pool, provider: { name: "boat" } as CloudWorkspaceProvider,
-    intervalMs: 5_000, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  }),
   setup: () => new CloudWorkspaceSetupWorker({
     pool: {} as pg.Pool, executor: { execute: vi.fn() },
     sanitizeLog: value => value, intervalMs: 1_000,
@@ -63,7 +59,7 @@ describe.each(Object.entries(workers))("%s work scheduling", (_name, makeWorker)
     const { worker, tick, notify, makeDue } = fixture();
     const stop = worker.start();
     await vi.advanceTimersByTimeAsync(0);
-    const interval = _name === "lifecycle" ? 5_000 : 1_000;
+    const interval = 1_000;
     await vi.advanceTimersByTimeAsync(interval - 100);
     notify();
     await vi.advanceTimersByTimeAsync(0);
@@ -105,21 +101,81 @@ describe.each(Object.entries(workers))("%s work scheduling", (_name, makeWorker)
     await vi.advanceTimersByTimeAsync(0);
     expect(tick).toHaveBeenCalledTimes(2);
     makeDue();
-    await vi.advanceTimersByTimeAsync(_name === "lifecycle" ? 5_000 : 1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(tick).toHaveBeenCalledTimes(3);
     await stop();
   });
 });
 
-it("lifecycle hints do not run maintenance without its own due deadline", async () => {
-  const query = vi.fn(async (sql: string) => ({ rows: sql.includes("delay_ms") ? [{ kind: "lifecycle", delay_ms: 0 }] : [], rowCount: 0 }));
-  const worker = workers.lifecycle({ connect: async () => ({ query, release: vi.fn() }) } as unknown as pg.Pool);
-  const claim = vi.spyOn(worker, "runOnce").mockResolvedValue(false);
-  const drift = vi.spyOn(worker, "reconcileDriftOnce").mockResolvedValue(false);
-  const orphans = vi.spyOn(worker, "reconcileOrphansOnce").mockResolvedValue(0);
-  const internal = worker as unknown as { readNextDelayMs(): Promise<number | null>; tick(): Promise<void> };
-  for (let i = 0; i < 24; i++) { await internal.readNextDelayMs(); await internal.tick(); }
-  expect(claim).toHaveBeenCalledTimes(24);
-  expect(drift).not.toHaveBeenCalled();
-  expect(orphans).not.toHaveBeenCalled();
+describe("lifecycle reconciler", () => {
+  function fixture() {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      statements.push(sql);
+      const result = { rows: [], rowCount: 0 };
+      return /^BEGIN; /.test(sql) ? Array.from({ length: 5 }, () => result) : result;
+    });
+    const pool = { connect: async () => ({ query, release: vi.fn() }), query } as unknown as pg.Pool;
+    const worker = new CloudWorkspaceReconciler({
+      pool, provider: { name: "boat" } as CloudWorkspaceProvider, intervalMs: 5_000,
+      jobAuditIntervalMs: 10 * 60_000, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const orphans = vi.spyOn(worker, "reconcileOrphansOnce").mockResolvedValue(0);
+    const audit = vi.spyOn(worker, "auditJobs").mockResolvedValue({});
+    const claims = () => statements.filter(sql => sql.includes("control_plane_jobs")).length;
+    return { worker, statements, orphans, audit, claims };
+  }
+
+  it("claims jobs on a hint and never runs claims or due scans of its own", async () => {
+    const { worker, statements, orphans, audit, claims } = fixture();
+    const claim = vi.spyOn(worker, "runOnce");
+    const drift = vi.spyOn(worker, "reconcileDriftOnce");
+    const stop = worker.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(claims()).toBe(1);
+    worker.notify();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(claims()).toBe(2);
+    expect(statements.length).toBe(claims());
+    expect(claim).not.toHaveBeenCalled();
+    expect(drift).not.toHaveBeenCalled();
+    expect(orphans).not.toHaveBeenCalled();
+    expect(audit).not.toHaveBeenCalled();
+    await stop();
+  });
+
+  it("runs the inventory sweep each minute and the job audit at its jittered interval", async () => {
+    const { worker, orphans, audit } = fixture();
+    const stop = worker.start();
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(orphans).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(orphans).toHaveBeenCalledTimes(1);
+    // Jitter 0.5 places the first audit at 0.75 of its interval.
+    await vi.advanceTimersByTimeAsync(7.5 * 60_000 - 65_000 - 6_000);
+    expect(audit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(audit).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(audit).toHaveBeenCalledTimes(2);
+    await stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("scopes each job to its own workspace and reschedules it", async () => {
+    const { worker } = fixture();
+    const claim = vi.spyOn(worker, "runOnce").mockResolvedValueOnce(true).mockResolvedValue(false);
+    const drift = vi.spyOn(worker, "reconcileDriftOnce").mockResolvedValue(false);
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    await worker.runJob({ kind: "cloud_lifecycle_intent", workspaceId, orgId: workspaceId, payload: {} });
+    expect(claim.mock.calls).toEqual([[workspaceId], [workspaceId]]);
+    await worker.runJob({ kind: "cloud_workspace_drift", workspaceId, orgId: workspaceId, payload: {} });
+    expect(drift).toHaveBeenCalledWith(workspaceId);
+    // A workspace job without its workspace never widens to every workspace.
+    await worker.runJob({ kind: "cloud_lifecycle_intent", workspaceId: null, orgId: null, payload: {} });
+    expect(claim).toHaveBeenCalledTimes(2);
+  });
 });

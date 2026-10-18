@@ -65,8 +65,8 @@ export function formatReport(report: LoadSimulationReport): string {
       [row.operation, row.role, fixed(row.requestsPerSecond, 3), fixed(row.transactionsPerSecond, 3)])) + "\n\n" +
     table(["Reconciler share", "Tx per 60 s cycle", "Tx/s"], report.projection.perWorkspaceWorker.map(row =>
       [row.operation, fixed(row.transactionsPerCycle), fixed(row.transactionsPerSecond, 3)])) + "\n\n" +
-    table(["Workspaces", "Tx/s", "Statements/s"], report.projection.atWorkspaces.map(row =>
-      [String(row.workspaces), fixed(row.transactionsPerSecond), fixed(row.statementsPerSecond)])));
+    table(["Workspaces", "Tx/s", "Statements/s", "Boat calls/min/replica"], report.projection.atWorkspaces.map(row =>
+      [String(row.workspaces), fixed(row.transactionsPerSecond), fixed(row.statementsPerSecond), fixed(row.boatCallsPerMinutePerReplica, 2)])));
   if (largest && Object.keys(largest.providerCalls).length) sections.push(`## Provider calls (${largest.name})\n\n` + table(
     ["Call", "Per minute"],
     Object.entries(largest.providerCalls).map(([name, count]) => [name, fixed(count / largest.durationSeconds * 60, 2)])));

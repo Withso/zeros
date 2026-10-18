@@ -117,6 +117,30 @@ suite("automatic Boat checkpoint recovery", () => {
     await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='deleted',deletion_verified_at=now() WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId]);
     expect(await readCloudWorkerNextDelay(pool, "recovery")).toBeLessThanOrEqual(0);
   });
+  it("does not let an inventory sweep defer the drift check that follows a restore incident", async () => {
+    await exhaust();
+    expect((await pool.query("SELECT state FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].state)
+      .toMatch(/queued|recovery_needed/);
+    const binding = (await pool.query("SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];
+    await pool.query(`UPDATE cloud_workspace_provider_bindings SET observed_state='running',last_observed_at=now(),
+      next_drift_check_at=now()-interval '1 minute' WHERE workspace_id=$1 AND generation=1`, [fixture.workspaceId]);
+    // The listing matches the recorded observation; an incident-free sweep
+    // would push the check six hours out.
+    const resource: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1, resourceId: binding.provider_resource_id,
+      state: "running", target: null, metadata: {} };
+    const provider: CloudWorkspaceProvider = { name: "boat", async find() { return [resource]; }, async inspect() { return resource; },
+      async create() { throw new Error("unused"); }, async start() { throw new Error("unused"); },
+      async stop() { return resource; }, async archive() { return resource; }, async delete() {},
+      async *listManaged() {},
+      async *listInventory() { yield { resourceId: binding.provider_resource_id, state: "running", computeStopped: false,
+        workspaceId: fixture.workspaceId, generation: 1 }; } };
+    await new CloudWorkspaceReconciler({ pool, provider, intervalMs: 60_000 }).reconcileOrphansOnce();
+    // While an incident is active the sweep leaves the schedule alone, so the
+    // restore-resolution trigger's enqueue finds the check due and the first
+    // post-incident drift run refreshes target and metadata at once.
+    expect((await pool.query("SELECT next_drift_check_at<=now() AS due FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=1",
+      [fixture.workspaceId])).rows[0]).toEqual({ due: true });
+  });
   function route(path = "", body?: unknown, key = randomUUID()) {
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", { id: fixture.userId }); await next(); });
@@ -178,14 +202,15 @@ suite("automatic Boat checkpoint recovery", () => {
     });
   }
 
-  async function missingSnapshotWake(options: { missing?: boolean; failure?: string; duringInspect?: () => Promise<void> } = {}) {
+  async function missingSnapshotWake(options: { missing?: boolean; failure?: string; stopped?: boolean; duringInspect?: () => Promise<void> } = {}) {
     await pool.query("UPDATE cloud_workspace_setup_runs SET state='cancelled',completed_at=now() WHERE id=$1", [setupRunId]);
     await pool.query("UPDATE cloud_workspaces SET status='stopped',desired_state='stopped' WHERE id=$1", [fixture.workspaceId]);
     const wake = await route("/wake");
     expect(wake.status, JSON.stringify(await wake.clone().json())).toBe(202);
     const wakeId = (await wake.json()).intent.id;
     let resource: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1, resourceId: `sandbox-${fixture.workspaceId}`,
-      state: "failed", computeStopped: true, target: null, metadata: options.missing === false ? {} : { snapshotMissing: true } };
+      state: options.stopped ? "stopped" : "failed", computeStopped: true, target: null,
+      metadata: options.missing === false ? {} : { snapshotMissing: true } };
     const start = vi.fn(async () => { throw new CloudProviderError(options.failure ?? "provider_snapshot_unavailable", "fixture error", options.failure === "provider_unavailable"); });
     const stop = vi.fn(async () => resource);
     const provider: CloudWorkspaceProvider = { name: "boat", async find(identity) { return resource.generation === identity.generation ? [resource] : []; },
@@ -219,6 +244,15 @@ suite("automatic Boat checkpoint recovery", () => {
     await advanceCloudAutomaticRecovery(pool, recoveryConfig, false);
     expect((await pool.query("SELECT image_ref FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0].image_ref).toBe(current.imageRef);
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generation_transitions WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
+  });
+
+  it("recovers once when the provider refuses to resume a stopped sandbox whose disk it deleted", async () => {
+    const f = await missingSnapshotWake({ stopped: true, missing: false, failure: "provider_snapshot_missing" });
+    expect(f.start).toHaveBeenCalledTimes(1);
+    expect((await pool.query("SELECT state,evidence_code FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows)
+      .toEqual([{ state: "queued", evidence_code: "provider_snapshot_missing" }]);
+    expect((await pool.query("SELECT state,error_code FROM cloud_workspace_lifecycle_intents WHERE id=$1", [f.wakeId])).rows[0])
+      .toEqual({ state: "failed", error_code: "provider_snapshot_missing" });
   });
 
   it("automatically uses the latest available periodic checkpoint only after confirmed provider capture loss", async () => {

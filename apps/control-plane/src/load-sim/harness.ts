@@ -22,9 +22,11 @@ import { CloudEngineCheckpointHints } from "../cloud-workspaces/engine-checkpoin
 import { DatabaseCloudWorkspaceEngineClientAdmissionService } from "../cloud-workspaces/engine-client-admission.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "../cloud-workspaces/engine-protocol-version.js";
 import { DatabaseCloudIdleStop } from "../cloud-workspaces/idle-stop.js";
-import { readLifecycleDeadlines } from "../cloud-workspaces/lifecycle-deadlines.js";
+import { LIFECYCLE_JOB_KINDS } from "../cloud-workspaces/lifecycle-jobs.js";
+import { runDueLifecycleJobs } from "../cloud-workspaces/lifecycle-job-test-utils.js";
+import { claimJobs } from "../job-queue.js";
 import { cloudRuntimeRelayLimits } from "../cloud-workspaces/runtime-bridge-limits.js";
-import type { CloudProviderResource, CloudWorkspaceAccessProvider, CloudWorkspaceProvider } from "../cloud-workspaces/provider.js";
+import type { CloudProviderInventoryItem, CloudProviderResource, CloudWorkspaceAccessProvider, CloudWorkspaceProvider } from "../cloud-workspaces/provider.js";
 import { CloudWorkspaceProviderRegistry } from "../cloud-workspaces/provider-registry.js";
 import { DatabaseCloudWorkspaceProviderResolver } from "../cloud-workspaces/provider-resolver.js";
 import { CloudWorkspaceReconciler } from "../cloud-workspaces/reconciler.js";
@@ -102,6 +104,17 @@ export class FakeBoatProvider implements CloudWorkspaceProvider, CloudWorkspaceA
   async archive(id: string) { this.count("archive"); return { ...this.resources.get(id)!, state: "archived" as const }; }
   async delete(id: string) { this.count("delete"); this.resources.delete(id); }
   async *listManaged() { this.count("listManaged"); yield* this.resources.values(); }
+  /** The real provider pages GET /sandboxes at 100 per request. */
+  async *listInventory(): AsyncIterable<CloudProviderInventoryItem> {
+    const all = [...this.resources.values()];
+    for (let offset = 0; offset === 0 || offset < all.length; offset += 100) {
+      this.count("listInventoryPage");
+      for (const resource of all.slice(offset, offset + 100))
+        yield { resourceId: resource.resourceId, state: resource.state,
+          computeStopped: resource.computeStopped === true,
+          workspaceId: resource.workspaceId, generation: resource.generation };
+    }
+  }
   async createSshAccess(): Promise<never> { throw new Error("load simulator never creates SSH access"); }
   async revokeSshAccess() { this.count("revokeSshAccess"); }
   async getPreviewEndpoint(): Promise<never> { throw new Error("load simulator never opens previews"); }
@@ -332,10 +345,16 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
     },
     "provider.resolve": (w: SimulatedWorkspace) => apiResolver.resolve({ workspaceId: w.engine.workspaceId,
       organizationId: w.engine.organizationId, generation: 1, purpose: "lifecycle" }),
-    "worker.lifecycleDeadlines": () => readLifecycleDeadlines(worker, null, 60_000),
+    // An idle replica's only lifecycle read: one claim over the job kinds.
+    "worker.lifecycleJobClaim": () => claimJobs(worker, { owner: "load-sim", limit: 4,
+      kinds: Object.values(LIFECYCLE_JOB_KINDS).map(kind => ({ kind, leaseMs: 60_000 })) }),
     "worker.reconcileOnce": () => reconciler.runOnce(),
     "worker.reconcileDrift": () => reconciler.reconcileDriftOnce(),
     "worker.reconcileOrphans": () => reconciler.reconcileOrphansOnce(),
+    // One engine-health job run: claim, due read, lease check, exact reschedule.
+    "worker.engineHealthJob": () => runDueLifecycleJobs(worker, reconciler, ["engineHealth"]),
+    // One hourly maintenance pass: six DUE scans plus the failed-job purge.
+    "worker.jobAudit": () => reconciler.auditJobs(),
   } satisfies Record<string, SimulatorOperation>;
 
   /** Untimed, unattributed setup that makes the next measured call do real work. */
@@ -345,6 +364,18 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
     "worker.reconcileDrift": w => seed.query(`UPDATE cloud_workspace_provider_bindings
       SET last_observed_at=now()-interval '10 minutes', next_drift_check_at=now()-interval '1 second' WHERE workspace_id=$1`,
       [w.engine.workspaceId]),
+    // Steady state: the uplink renewed the lease (lease.v1) before the job
+    // ran, so the run reschedules at the new expiry instead of stopping the engine.
+    "worker.engineHealthJob": async w => {
+      await seed.query(`UPDATE cloud_workspace_engine_instances SET lease_expires_at=now()+interval '36 minutes' WHERE id=$1`,
+        [w.engine.engineInstanceId]);
+      // A previous claim probe may still hold the row as running; release it
+      // due now so every iteration measures the full claim→run→complete cycle.
+      await seed.query(`UPDATE control_plane_jobs
+        SET state='queued', run_at=now(), lease_owner=NULL, lease_token=NULL, locked_until=NULL
+        WHERE kind='cloud_engine_health' AND dedupe_key=$1`,
+        [`workspace:${w.engine.workspaceId}`]);
+    },
   };
 
   /** Production's idle background workers that need no external service. */
