@@ -33,6 +33,7 @@ import { pruneLauncherScriptEnv } from "../env/launcher-env";
 import { gitExecutionIdentity, gitProcessOptions } from "./git-execution-identity";
 import { withoutLocalDevelopment } from "../env/local-development";
 import { scopedCloudGitAuthorEnvironment } from "./cloud-git-author";
+import { isBackgroundGitRead } from "./git-read-lane";
 export { gitExecutionIdentity } from "./git-execution-identity";
 
 const execFileAsync = promisify(execFile);
@@ -1975,9 +1976,9 @@ export async function runGitRead(
   opts: Omit<RunGitOptions, "readOnly"> = {},
 ): Promise<RunGitResult> {
   const read = () => runGit(cwd, args, { ...opts, readOnly: true });
-  // A qualified cloud engine keeps its existing scheduling. Local refreshes
-  // can otherwise multiply into dozens of competing Git processes per board.
-  return gitExecutionIdentity(opts.identity) ? read() : queueLocalGitRead(read, opts.signal);
+  // Only summary fan-out uses the bounded lane. Interactive diff/log/history
+  // reads must start immediately even when slow background reads fill it.
+  return !isBackgroundGitRead() || gitExecutionIdentity(opts.identity) ? read() : queueLocalGitRead(read, opts.signal);
 }
 
 const LOCAL_GIT_READ_CONCURRENCY = 4;
