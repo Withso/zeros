@@ -234,6 +234,14 @@ PostgreSQL 18.6 on loopback, Node 24, 4 CPUs, WorkOS authority on.
 | `worker.engineHealthJob` (full job cycle) | 5 | 25 | 9 | 7.4 | 45 |
 | `worker.jobAudit` (six due scans + purge) | 7 | 35 | 19 | 11.1 | 95 |
 
+Finite source-session expiry repair adds one bounded transaction at startup and
+once per hourly audit on WorkOS-enabled workers; it does not call the provider.
+With that repair, three local PostgreSQL 18 measurements on 2026-10-18 recorded
+8 transactions, 40 statements and 22 round trips per `worker.jobAudit`. Its
+budget is therefore 8/50/28 under the existing headroom policy. The increment is
+one transaction per hour per worker, independent of workspace count; proof
+storage and actual expiry delivery are separate enrollment/deadline work.
+
 ### Real time
 
 | Active workspaces | Tx/s | Tx/s per active | Statements/s | Notify commits/s | CP CPU ms/s | Failures |

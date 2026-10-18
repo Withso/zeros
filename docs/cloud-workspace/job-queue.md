@@ -2,7 +2,18 @@
 
 Status: the lifecycle reconciler runs its due work on this queue (see
 [lifecycle due work](#lifecycle-due-work)). Migration `0157_cloud_lifecycle_jobs.sql`
-adds the enqueue triggers; no other worker uses the queue yet.
+adds the lifecycle enqueue triggers. The same runner also handles finite
+provider-session expiry when WorkOS is enabled.
+
+`auth_session_expire` is enrollment-only work. Its closed payload contains
+`rowId`, `proofVersion` and `expiresAtMs`; the key is the internal row UUID and
+proof version. Proof storage and enqueue commit together. The handler locks the
+source and compares all three fields before expiring it and appending the
+existing `session.revoked` event in that transaction. A stale delivery is a
+no-op; an early one reschedules the original deadline. New observations remove
+the previous unclaimed job, while a claimed old job retains its lease and fences
+itself. Startup and the hourly audit repair up to 256 missing jobs per pass;
+version-zero legacy sources stay inert. Neither delivery nor repair calls WorkOS.
 
 Source: `apps/control-plane/src/job-queue.ts` (SQL operations),
 `apps/control-plane/src/job-runner.ts` (runner),
@@ -361,8 +372,8 @@ reschedule and audit), `CloudWorkspaceReconciler.runJob` in
   (`worker.engineHealthJob`: claim, fenced handler claim, reschedule and
   completion, 5 transactions per lease period per running workspace, modeled
   as every 1800 s) and the hourly
-  audit (`worker.jobAudit`, 7 transactions across the six due scans and the
-  purge); both carry absolute budgets in `src/load-sim/budgets.json`, along
+  audit (`worker.jobAudit`, 8 transactions across the six due scans, finite
+  source-session expiry repair and the purge); both carry absolute budgets in `src/load-sim/budgets.json`, along
   with the notifying-commit rate, since PostgreSQL serializes commits that
   issued a NOTIFY. Steady-state reschedules and completions are silent by
   design; enqueues that insert a job or move it earlier notify one wake-up

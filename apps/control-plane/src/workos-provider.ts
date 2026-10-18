@@ -1,6 +1,6 @@
 import { WorkOS, type Event, type EventName, type User } from "@workos-inc/node";
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
-import {fetchWithHeldWorkOSProviderLock} from "./workos-provider-lock-context.js";
+import { fetchWithWorkOSRequestSignal, withWorkOSRequestSignal } from "./workos-provider-request-context.js";
 
 import type { AuthBackendConfig, WorkOSBackendConfig } from "./config.js";
 
@@ -55,6 +55,14 @@ export interface WorkOSBrowserProvider {
   revokeSession(sessionId: string): Promise<void>;
 }
 
+export type WorkOSSessionPage = {
+  data: Array<{ id: string; status: string; createdAt: string;
+    /** Optional for older adapters; absence never proves detached authority. */
+    userId?: string; expiresAt?: string | null }>;
+  listMetadata: { after: string | null };
+};
+export type WorkOSSessionListOptions = { limit: number; after?: string; signal?: AbortSignal };
+
 export interface WorkOSDesktopProvider {
   verifyDesktopBearer(accessToken: string): Promise<{
     subject: string;
@@ -62,11 +70,8 @@ export interface WorkOSDesktopProvider {
   }>;
   listSessions(
     subject: string,
-    options: { limit: number; after?: string },
-  ): Promise<{
-    data: Array<{ id: string; status: string; createdAt: string }>;
-    listMetadata: { after: string | null };
-  }>;
+    options: WorkOSSessionListOptions,
+  ): Promise<WorkOSSessionPage>;
   revokeSession(sessionId: string): Promise<void>;
 }
 
@@ -166,11 +171,8 @@ export interface WorkOSManagementProvider {
   revokeInvitation(invitationId: string): Promise<WorkOSInvitationRecord>;
   listSessions(
     subject: string,
-    options: { limit: number; after?: string },
-  ): Promise<{
-    data: Array<{ id: string; status: string; createdAt: string }>;
-    listMetadata: { after: string | null };
-  }>;
+    options: WorkOSSessionListOptions,
+  ): Promise<WorkOSSessionPage>;
   revokeSession(sessionId: string): Promise<void>;
   deleteUser(userId: string): Promise<void>;
 }
@@ -214,7 +216,7 @@ export class RailwayWorkOSProvider
         ...(apiUrl.port ? { port: Number(apiUrl.port) } : {}),
         timeout: 8_000,
         maxRetries: 2,
-        fetchFn:fetchWithHeldWorkOSProviderLock,
+        fetchFn: fetchWithWorkOSRequestSignal,
       });
     this.desktopJwks = createRemoteJWKSet(new URL(auth.jwksUrl), {
       cooldownDuration: 5 * 60_000,
@@ -393,20 +395,17 @@ export class RailwayWorkOSProvider
 
   async listSessions(
     subject: string,
-    options: { limit: number; after?: string },
-  ): Promise<{
-    data: Array<{ id: string; status: string; createdAt: string }>;
-    listMetadata: { after: string | null };
-  }> {
-    const page = await this.client.userManagement.listSessions(
-      subject,
-      options,
-    );
+    options: WorkOSSessionListOptions,
+  ): Promise<WorkOSSessionPage> {
+    const { signal, ...pagination } = options;
+    const page = await withWorkOSRequestSignal(signal, () => this.client.userManagement.listSessions(subject, pagination));
     return {
       data: page.data.map((session) => ({
         id: session.id,
         status: session.status,
         createdAt: session.createdAt,
+        userId: session.userId,
+        expiresAt: session.expiresAt,
       })),
       listMetadata: { after: page.listMetadata.after ?? null },
     };

@@ -477,6 +477,23 @@ Security-relevant transactions increment monotonic revisions, append a durable
 `security_events` row, and wake connected clients through PostgreSQL
 `LISTEN/NOTIFY` (the notification is only a wake-up; rows are replayable).
 
+Detached-work enrollment has an internal finite-session proof service. It keeps
+the provider session's user and expiry, coalesces lookups for one exact source,
+and bounds them to five seconds and four pages of 100 sessions. Positive cache
+entries last at most ten seconds from observation start. Missing expiry, changed
+identity, inactive status or unavailable evidence cannot qualify. Dormant
+sessions make no provider calls; continuation does not use this lookup.
+
+The service rechecks the active account, identity and source after external I/O,
+then stores a monotonic proof version and its expiry job atomically. An expiry
+job compares the exact source row/version/deadline before expiring that source
+and publishing `session.revoked`; other sessions stay independent. A webhook
+that omits expiry preserves it. An explicit change invalidates cached proof and
+reschedules the deadline only for previously proved sources. Terminal sources
+cannot be reactivated by a late positive response. This foundation does not
+enable detached work: its enrollment transaction must still recheck current
+authority, and accepted work must retain its own original hard expiry.
+
 The browser maintains one authenticated EventSource and the desktop main
 process maintains one bounded SSE connection. Account revocation broadcasts to
 every session for that account; a session revocation is replayed only to the

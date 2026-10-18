@@ -105,9 +105,9 @@
       "roundTrips": 12
     },
     "worker.jobAudit": {
-      "transactions": 7,
-      "statements": 44,
-      "roundTrips": 24
+      "transactions": 8,
+      "statements": 50,
+      "roundTrips": 28
     }
   }
 }

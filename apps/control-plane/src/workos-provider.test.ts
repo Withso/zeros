@@ -134,6 +134,22 @@ describe("WorkOS organization membership listing", () => {
   });
 });
 
+describe("WorkOS session proof projection", () => {
+  it("preserves the session user and finite provider expiry without extra provider data", async () => {
+    const session = { id: "session_proof", userId: "user_proof", status: "active",
+      createdAt: "2026-01-01T00:00:00.000Z", expiresAt: "2026-01-02T00:00:00.000Z",
+      ipAddress: "192.0.2.1", userAgent: "private-provider-data" };
+    const client = { userManagement: { listSessions: async () => ({
+      data: [session], listMetadata: { after: null },
+    }) } } as unknown as WorkOS;
+    await expect(provider(client).listSessions("user_proof", { limit: 100 })).resolves.toEqual({
+      data: [{ id: session.id, userId: session.userId, status: session.status,
+        createdAt: session.createdAt, expiresAt: session.expiresAt }],
+      listMetadata: { after: null },
+    });
+  });
+});
+
 describe("WorkOS native invitations", () => {
   const invitation = {
     id: "invitation_example",

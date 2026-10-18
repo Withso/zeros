@@ -26,7 +26,8 @@ import type {
 } from "./provider-resolver.js";
 import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
-import { JobRunner } from "../job-runner.js";
+import { JobRunner, type JobHandler } from "../job-runner.js";
+import { authSessionExpiryHandler, repairAuthSessionExpiryJobs } from "../auth-session-proof.js";
 import { isValidJobOwner, purgeFailedJobs, type ClaimedJob } from "../job-queue.js";
 import {
   auditLifecycleJobs,
@@ -331,6 +332,7 @@ export class CloudWorkspaceReconciler {
   private readonly workosEnabled: boolean;
   private readonly scheduler: CloudWorkerScheduler;
   private readonly jobs: JobRunner;
+  private authExpiryRepair: Promise<void> | null = null;
   private readonly jobAuditIntervalMs: number;
   private stopped = false;
   private ticking = false;
@@ -412,19 +414,23 @@ export class CloudWorkspaceReconciler {
       pollIntervalMs: Math.min(300_000, Math.max(1_000, this.intervalMs)),
       ownerId: isValidJobOwner(this.workerId) ? this.workerId : `control-plane:${randomUUID()}`,
       logger: this.logger,
-      handlers: (Object.keys(LIFECYCLE_JOB_KINDS) as LifecycleWork[]).map(work => ({
+      handlers: [...(this.workosEnabled ? [authSessionExpiryHandler(this.pool)] : []),
+        ...(Object.keys(LIFECYCLE_JOB_KINDS) as LifecycleWork[]).map<JobHandler>(work => ({
         kind: LIFECYCLE_JOB_KINDS[work],
         leaseMs: 60_000,
         // A lifecycle dispatch holds its own intent lease for up to leaseMs.
         timeoutMs: leaseMs,
         backoff: { baseMs: 1_000, maxMs: 5 * 60_000 },
         handle: (job, { signal }) => this.runJob(job, signal),
-      })),
+      }))],
     });
   }
 
   start(): () => Promise<void> {
     this.jobs.start();
+    if (this.workosEnabled) this.authExpiryRepair = repairAuthSessionExpiryJobs(this.pool)
+      .then(count => { if (count) this.jobs.notify(); })
+      .catch(() => { this.logger.error("[auth] provider expiry job repair failed; will retry"); });
     this.scheduler.start();
     return () => this.stop();
   }
@@ -434,7 +440,7 @@ export class CloudWorkspaceReconciler {
 
   async stop(): Promise<void> {
     this.stopped = true;
-    await Promise.all([this.scheduler.stop(), this.jobs.stop()]);
+    await Promise.all([this.scheduler.stop(), this.jobs.stop(), this.authExpiryRepair]);
   }
 
   private async tick(): Promise<void> {
@@ -462,6 +468,7 @@ export class CloudWorkspaceReconciler {
   /** Hourly maintenance: repair missing or late jobs and purge terminally
    * failed rows, which nothing else ever deletes. */
   async auditJobs(): Promise<Partial<Record<LifecycleWork, number>>> {
+    if (this.workosEnabled) await repairAuthSessionExpiryJobs(this.pool);
     const repaired = await auditLifecycleJobs(this.pool, this.dueScope());
     const total = Object.values(repaired).reduce((sum, count) => sum + count, 0);
     if (total) this.logger.warn(`[cloud-workspace] lifecycle job audit repaired ${total} missing or late job(s)`);

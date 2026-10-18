@@ -471,6 +471,24 @@ d("WorkOS normalized event synchronization", () => {
     });
   });
 
+  it("webhook_omission_preserves_verified_expiry", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const subject = `user_proof_${suffix}`;
+    const user = await ensureUser(pool, { provider: "workos", providerSubject: subject,
+      email: `proof-${suffix}@example.com`, displayName: "Proof User" });
+    const sessionId = `session_proof_${suffix}`;
+    const expiry = new Date(Date.now() + 60_000);
+    await pool.query(`INSERT INTO auth_sessions
+      (provider_session_id, provider_sub, user_id, provider_session_expires_at)
+      VALUES ($1, $2, $3, $4)`, [sessionId, subject, user.id, expiry]);
+    expect(await ingestWorkOSManagementEvent(pool, managementEvent("session.created", {
+      id: sessionId, userId: subject, updatedAt: new Date().toISOString(),
+    }), "webhook")).toEqual({ status: "applied" });
+    const row = await pool.query(`SELECT provider_session_expires_at FROM auth_sessions
+      WHERE provider_session_id = $1`, [sessionId]);
+    expect(row.rows[0].provider_session_expires_at).toEqual(expiry);
+  });
+
   it("advances the ordered Events API cursor only after each event is durable", async () => {
     const suffix = randomUUID().replaceAll("-", "");
     const subject = `user_cursor_${suffix}`;
