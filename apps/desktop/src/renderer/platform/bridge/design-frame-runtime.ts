@@ -9,8 +9,11 @@
 
 import {
   DESIGN_RUNTIME_GEOMETRY_CHILD_LIMIT,
+  DESIGN_RUNTIME_OPT_IN_METHODS,
   DESIGN_RUNTIME_PROTOCOL,
   DESIGN_RUNTIME_VERSION,
+  MAX_DESIGN_RUNTIME_PREVIEW_STYLESHEET_CHARS,
+  isDesignRuntimeAuthoredStyles,
   isDesignRuntimeFrameMessage,
   isRuntimeNodeLayout,
   type DesignRuntimeFrameMessage,
@@ -102,6 +105,14 @@ export interface DesignFrameRuntimeConnection {
     theme: string | null,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeSnapshot>;
+  /** Show a linked Design stylesheet's in-flight text (an agent draft) in
+   * place of its inlined copy, or restore it with null. Opt-in: check
+   * `supports("previewStylesheet")` first. */
+  previewStylesheet(
+    file: string,
+    css: string | null,
+    signal?: AbortSignal,
+  ): Promise<{ applied: number; snapshot: DesignRuntimeSnapshot }>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -188,9 +199,22 @@ function runtimeError(
   return new DesignFrameRuntimeError(message, code, retryable);
 }
 
+/** Optional provenance is advisory: a malformed value from the untrusted
+ * frame is dropped rather than failing the whole details payload. */
+function dropMalformedAuthoredStyles(details: object): void {
+  const record = details as { authoredStyles?: unknown };
+  if (
+    record.authoredStyles !== undefined &&
+    !isDesignRuntimeAuthoredStyles(record.authoredStyles)
+  )
+    delete record.authoredStyles;
+}
+
 function isRuntimeSnapshot(value: unknown): value is DesignRuntimeSnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const snapshot = value as Partial<DesignRuntimeSnapshot>;
+  if (snapshot.frame && typeof snapshot.frame === "object")
+    dropMalformedAuthoredStyles(snapshot.frame);
   return (
     typeof snapshot.sourceVersion === "string" &&
     typeof snapshot.revision === "number" &&
@@ -206,6 +230,7 @@ function isRuntimeSnapshot(value: unknown): value is DesignRuntimeSnapshot {
 function isNodeDetails(value: unknown): value is DesignRuntimeNodeDetails {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const details = value as Partial<DesignRuntimeNodeDetails>;
+  dropMalformedAuthoredStyles(details);
   return (
     typeof details.sourceVersion === "string" &&
     typeof details.oid === "string" &&
@@ -348,6 +373,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       version: DESIGN_RUNTIME_VERSION,
       type: "handshake",
       sourceVersion: this.expectedSourceVersion,
+      features: [...DESIGN_RUNTIME_OPT_IN_METHODS],
     };
     (this.source as WindowProxy).postMessage(handshake, {
       targetOrigin: "*",
@@ -655,6 +681,28 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       throw runtimeError("setTheme returned malformed data");
     }
     return result;
+  }
+
+  async previewStylesheet(
+    file: string,
+    css: string | null,
+    signal?: AbortSignal,
+  ): Promise<{ applied: number; snapshot: DesignRuntimeSnapshot }> {
+    if (css !== null && css.length > MAX_DESIGN_RUNTIME_PREVIEW_STYLESHEET_CHARS)
+      throw runtimeError("previewStylesheet text exceeds its bound");
+    const result = await this.request("previewStylesheet", { file, css }, signal);
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !Number.isInteger((result as { applied?: unknown }).applied) ||
+      (result as { applied: number }).applied < 0 ||
+      !isRuntimeSnapshot((result as { snapshot?: unknown }).snapshot) ||
+      (result as { snapshot: DesignRuntimeSnapshot }).snapshot.sourceVersion !==
+        this.expectedSourceVersion
+    ) {
+      throw runtimeError("previewStylesheet returned malformed data");
+    }
+    return result as { applied: number; snapshot: DesignRuntimeSnapshot };
   }
 
   async previewStyles(

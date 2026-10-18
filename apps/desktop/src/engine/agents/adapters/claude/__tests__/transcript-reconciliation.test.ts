@@ -447,3 +447,74 @@ describe("Claude native transcript reconciliation", () => {
     ).toEqual(["failed", "in_progress"]);
   });
 });
+
+describe("Claude streamed tool arguments", () => {
+  it("reports a tool call's argument stream by native identity without changing the transcript", () => {
+    const observed: Array<Record<string, unknown>> = [];
+    const plain = capture();
+    const observing = (() => {
+      let messages: AgentMessage[] = [];
+      const updates: SessionNotification[] = [];
+      const t = new ClaudeStreamTranslator({
+        sessionId: "session",
+        streamPartials: true,
+        emit: (e) => {
+          updates.push(e);
+          messages = applyUpdate(messages, e);
+        },
+        onToolInput: (event) => observed.push({ ...event }),
+      });
+      return { t, messages: () => messages, updates: () => updates };
+    })();
+    const write = { type: "tool_use", id: "toolu_write", name: "Write", input: {} };
+    const frames = [
+      start("m1"),
+      { type: "stream_event", event: { type: "content_block_start", index: 1, content_block: write } },
+      { type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"file_path":"/w/D/page-1/a.html",' } } },
+      { type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '"content":"<main>' } } },
+      { type: "stream_event", event: { type: "content_block_stop", index: 1 } },
+      assistant("m1", [{ ...write, input: { file_path: "/w/D/page-1/a.html", content: "<main>" } }]),
+    ];
+    for (const frame of frames) {
+      plain.t.feed(frame);
+      observing.t.feed(frame);
+    }
+    // A reconnect replay of the completed block reports nothing new.
+    observing.t.feed({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{}" } } });
+    const toolCallId = observing
+      .updates()
+      .map((notification) => notification.update)
+      .find((update) => update.sessionUpdate === "tool_call")?.toolCallId;
+    expect(toolCallId).toEqual(expect.any(String));
+    expect(observed).toEqual([
+      { nativeToolId: "toolu_write", name: "Write", toolCallId, phase: "start" },
+      { nativeToolId: "toolu_write", name: "Write", phase: "delta", chunk: '{"file_path":"/w/D/page-1/a.html",' },
+      { nativeToolId: "toolu_write", name: "Write", phase: "delta", chunk: '"content":"<main>' },
+      { nativeToolId: "toolu_write", name: "Write", phase: "stop" },
+    ]);
+    // Minted ids and clocks differ per translator; the transcript is the same.
+    const normalized = (messages: AgentMessage[]) =>
+      JSON.stringify(messages)
+        .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<id>")
+        .replace(/"(at|createdAt|startedAt|updatedAt|completedAt|timestamp)":\d+/g, '"$1":0');
+    expect(normalized(observing.messages())).toBe(normalized(plain.messages()));
+  });
+
+  it("never lets an observer failure interrupt the stream", () => {
+    let messages: AgentMessage[] = [];
+    const t = new ClaudeStreamTranslator({
+      sessionId: "session",
+      streamPartials: true,
+      emit: (e) => {
+        messages = applyUpdate(messages, e);
+      },
+      onToolInput: () => {
+        throw new Error("observer failed");
+      },
+    });
+    t.feed(start("m2"));
+    t.feed({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_x", name: "Write", input: {} } } });
+    t.feed({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{" } } });
+    expect(messages.filter((message) => message.kind === "tool")).toHaveLength(1);
+  });
+});

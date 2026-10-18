@@ -127,8 +127,29 @@ export class AgentFailureError extends Error {
 // Every adapter emits into this channel. The gateway translates to
 // AGENT_* wire messages and broadcasts over the WebSocket.
 
+/** One streamed piece of a tool call's arguments, before the provider
+ * finishes the call's input. Engine-local and transient: it is never routed to
+ * clients or persisted, and the transcript keeps its complete-input contract. */
+export interface AgentToolInputEvent {
+  /** Provider-native tool call id. */
+  nativeToolId: string;
+  /** Zeros transcript tool call id, when already minted. */
+  toolCallId?: string;
+  name: string;
+  /** Native parent for subagent calls. */
+  parentToolUseId?: string;
+  phase: "start" | "delta" | "stop";
+  chunk?: string;
+}
+
 export interface AgentGatewayEvents {
   onSessionUpdate: (agentId: string, notification: SessionNotification) => void;
+  /** Optional observer of streamed tool arguments (see AgentToolInputEvent). */
+  onToolInput?: (
+    agentId: string,
+    sessionId: string,
+    event: AgentToolInputEvent,
+  ) => void;
   /** Engine-authoritative status for the exact live execution. Contains only
    * stable categories and counts, never paths, endpoints, refs, or errors. */
   onBoundaryStatusChanged?: (

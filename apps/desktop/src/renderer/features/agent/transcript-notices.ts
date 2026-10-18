@@ -30,28 +30,40 @@ export function isUsageNotice(event: AgentMessage): boolean {
       (event.messageId ?? event.id)?.startsWith("claude-feedback-") === true && typeof event.text === "string" && USAGE_PRIORITY.has(event.text.trim());
 }
 
-/** One current usage status at the turn tail. Distinct native budgets retain
- * their latest state; recovery for one budget cannot clear another's warning. */
-export function turnUsageNotice(events: readonly AgentMessage[]): AgentErrorNoticeMessage | null {
+/** Usage is an inbetween status in the working feed, shown where it arrived,
+ * but only where it changes the provider turn's status: repeated receipts
+ * across results, background replies and steering stay hidden. Distinct native
+ * budgets retain their latest state; recovery for one budget cannot clear
+ * another's warning, which that recovery restates instead. Keyed by the id of
+ * the arriving event. */
+export function usageStatusChanges(events: readonly AgentMessage[]): ReadonlyMap<string, AgentErrorNoticeMessage> {
   const current = new Map<string, AgentErrorNoticeMessage>();
+  const changes = new Map<string, AgentErrorNoticeMessage>();
+  let status: string | undefined;
   for (const event of events) {
     if (!isUsageNotice(event)) continue;
+    let notice: AgentErrorNoticeMessage;
     if (event.kind === "error_notice") {
+      notice = event;
       current.delete("legacy");
       current.set(event.code!, event);
     } else if (event.kind === "text") {
-      current.set("legacy", {
+      notice = {
         id: event.id, kind: "error_notice", createdAt: event.createdAt,
-        severity: "warning", recoverable: true, code: `${USAGE_PREFIX}legacy`, message: event.text,
-      });
+        severity: "warning", recoverable: true, code: `${USAGE_PREFIX}legacy`, message: event.text.trim(),
+      };
+      current.set("legacy", notice);
+    } else continue;
+    let selected: AgentErrorNoticeMessage | null = null;
+    for (const candidate of current.values()) {
+      if (!selected || (USAGE_PRIORITY.get(candidate.message) ?? 2) >= (USAGE_PRIORITY.get(selected.message) ?? 2))
+        selected = candidate;
     }
+    if (!selected || selected.message === status) continue;
+    status = selected.message;
+    changes.set(event.id, selected === notice ? notice : { ...selected, id: event.id, createdAt: event.createdAt });
   }
-  let selected: AgentErrorNoticeMessage | null = null;
-  for (const notice of current.values()) {
-    if (!selected || (USAGE_PRIORITY.get(notice.message) ?? 2) >= (USAGE_PRIORITY.get(selected.message) ?? 2))
-      selected = notice;
-  }
-  return selected;
+  return changes;
 }
 
 /** Root model work establishes progress after a failed attempt. Bookkeeping,

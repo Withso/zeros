@@ -47,6 +47,7 @@ import {
   readDesignComputedStyle,
 } from "./design-style-values";
 import { DesignTypographySection } from "./design-typography-editor";
+import { useDesignStyleToken } from "./design-style-provenance";
 import { useDesignLivePreviewValue } from "./state/design-live-preview";
 
 interface DesignLivePreviewOwner {
@@ -248,6 +249,7 @@ export function DesignStyleEditor({
   const blendMode = styleValue(details, "mix-blend-mode", "normal");
 
   const fillProperty = textLayer ? "color" : "background-color";
+  const fillToken = useDesignStyleToken(details, fillProperty);
   const fillColor = styleValue(
     details,
     fillProperty,
@@ -489,6 +491,7 @@ export function DesignStyleEditor({
               label="Fill"
               property="color"
               disabled={disabled}
+              {...fillToken}
               onPreview={(color) => preview({ color })}
               onCancelPreview={cancelPreview}
               onCommit={(color) => commit({ color }, "text fill")}
@@ -497,6 +500,7 @@ export function DesignStyleEditor({
             <DesignFillEditor
               color={fillColor}
               image={fillImage}
+              {...fillToken}
               position={styleValue(details, "background-position", "0% 0%")}
               size={styleValue(details, "background-size", "auto")}
               repeat={styleValue(details, "background-repeat", "repeat")}
