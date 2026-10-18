@@ -65,6 +65,7 @@ import {
 } from "./settings/files";
 import { startSettingsWatcher, type SettingsWatcher } from "./settings/watch";
 import { onWorktreeContentChange, startGitWatcher, type GitWatcher } from "./git/watch";
+import { createLocalWatchHost, type WatchHostClient } from "./git/watch-host-client";
 import { invalidateWorkspaceChangeProbes } from "./git/workspace-change-probe";
 import { LocalTransport } from "./transport/local";
 import { CloudTransport, parseCloudTransportPort } from "./transport/cloud";
@@ -915,6 +916,8 @@ export class ZerosEngine {
   private watcher: FileWatcher;
   private settingsWatcher: SettingsWatcher | null = null;
   private gitWatcher: GitWatcher | null = null;
+  /** Native worktree watching for a packaged Local engine (watch-host.cjs). */
+  private watchHost: WatchHostClient | null = null;
   /** Forwards worktree content events to live one-shot style builds. */
   private stopStyleBuildInputs: (() => void) | null = null;
   /** Live canvas feedback for Local agents' native Design edits. Never
@@ -3499,9 +3502,21 @@ export class ZerosEngine {
     // rather than each running a watcher of its own.
     this.stopStyleBuildInputs = onWorktreeContentChange(designStyleInputChanged);
     if (!this.cloudWorker) this.designAgentActivity = this.createDesignAgentActivity();
-    // Development engines receive native file events within ~120 ms; the
-    // packaged engine's worktree poll below runs every 1.5 s.
-    if (!this.cloudWorker && !isDevRuntime()) {
+    // A packaged Local engine on macOS cannot arm FSEvents itself (see the
+    // options below). Its Node watch host can, with one recursive watch per
+    // root instead of Chokidar's poller per file. Cloud workers, Linux and dev
+    // keep exactly the watcher they had; a missing host keeps polling.
+    const watchHost = createLocalWatchHost({
+      devRuntime: isDevRuntime(),
+      cloudWorker: this.cloudWorker !== null,
+      platform: process.platform,
+    });
+    this.watchHost = watchHost;
+    // Development engines, and a packaged engine with its native watch host,
+    // receive file events within ~120 ms; a packaged engine without the host
+    // stat-polls its worktrees every 1.5 s below, so it also polls the
+    // Design directory a Design tab shows.
+    if (!this.cloudWorker && !isDevRuntime() && !watchHost) {
       this.designChangePoller = this.createDesignChangePoller();
       this.designChangePoller.start();
     }
@@ -3545,13 +3560,18 @@ export class ZerosEngine {
       // Bun's macOS --compile runtime deadlocks its main event loop after
       // Chokidar arms a native FSEvents watcher: the process keeps a LISTEN
       // socket and completes TCP handshakes but never services HTTP/WS. Dev
-      // runs Bun from source and is unaffected. Packaged/stable-mode engines
-      // use Chokidar's stat-poll backend instead; its target set is bounded and
-      // the watcher already coalesces changes. A 1.5s interval keeps packaged
-      // idle CPU bounded while retaining prompt external-edit invalidation.
+      // runs Bun from source and is unaffected. A packaged Local engine on
+      // macOS hands native watching to its Node watch host (above). Other
+      // packaged engines, and any root whose host is unavailable, use
+      // Chokidar's stat-poll backend; its target set is bounded and the watcher
+      // already coalesces changes. A 1.5s interval keeps that polling's idle
+      // CPU bounded while retaining prompt external-edit invalidation.
       {
-        usePolling: !isDevRuntime(),
+        usePolling: !isDevRuntime() && !watchHost,
         worktreePollIntervalMs: 1_500,
+        ...(watchHost
+          ? { nativeWatcher: (root: string) => watchHost.watch(root) }
+          : {}),
       },
     );
 
@@ -3774,6 +3794,9 @@ export class ZerosEngine {
     this.designChangePoller?.stop();
     this.designChangePoller = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
+    const watchHost = this.watchHost;
+    this.watchHost = null;
+    if (watchHost) await settle(() => watchHost.dispose());
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
       await settle(() => transport.stop());
