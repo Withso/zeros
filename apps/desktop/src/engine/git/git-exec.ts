@@ -25,6 +25,7 @@ import { redactSensitive } from "@zeros/protocol/scrub";
 import { GitError, type GitErrorCode } from "./errors";
 import {
   prepareGitCredentialInvocation,
+  findLocalGitExecutable,
   refreshGitCredentialAfterAuthenticationFailure,
   type GitCredentialRequest,
 } from "./credential-broker";
@@ -75,14 +76,15 @@ export function runGitProbeSync(
 ): string {
   if (!cwd) throw new GitError({ code: "VALIDATION_FAILED", message: "Managed Git probe requires a checkout." });
   try {
-    return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
+    const processOptions = gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" });
+    return execFileSync(processOptions.uid === undefined ? engineGitBinary() : "git", ["-c", "core.fsmonitor=false", ...args], {
       cwd,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
       timeout: options.timeoutMs ?? 10_000,
       maxBuffer: options.maxBufferBytes ?? 1024 * 1024,
       ...(options.input !== undefined ? { input: options.input } : {}),
-      ...gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }),
+      ...processOptions,
     });
   } catch (error) {
     if (options.expectedExitCodes?.includes((error as { status: number }).status)) return "";
@@ -226,10 +228,18 @@ export async function runFile(
   }
   if (path.basename(command) === "git") {
     const { uid, gid, env } = gitProcessOptions(opts.env, opts.identity);
+    if (uid === undefined && command === "git") {
+      // Resolve once per effective PATH, excluding broker scripts and aliases.
+      // Explicit shim paths (shell/credential tests) and cloud keep their path.
+      const effectivePath = (env.PATH ?? "/usr/bin:/bin").split(path.delimiter)
+        .map((directory) => path.resolve(opts.cwd ?? process.cwd(), directory || "."))
+        .join(path.delimiter);
+      command = engineExecutable("git", effectivePath);
+    }
     opts = {
       ...opts,
       ...(uid !== undefined && gid !== undefined ? { identity: { uid, gid } } : {}),
-      env,
+      env: uid === undefined && isGitObservation(args) ? { ...env, GIT_OPTIONAL_LOCKS: "0" } : env,
     };
   }
   if (opts.signal?.aborted) {
@@ -714,6 +724,26 @@ function subcommandIndex(args: string[]): number {
     return i;
   }
   return -1;
+}
+
+const GIT_OBSERVATIONS = new Set([
+  "status", "diff", "diff-index", "diff-files", "diff-tree", "log", "show", "rev-parse",
+  "merge-base", "ls-files", "ls-tree", "cat-file", "for-each-ref", "check-ignore", "check-attr",
+  "rev-list", "shortlog", "blame", "name-rev", "describe", "count-objects", "ls-remote", "show-ref",
+]);
+
+/** Apply at the subprocess boundary so legacy read callers (Design, Files,
+ * turns and worktree discovery) cannot accidentally refresh the real index. */
+function isGitObservation(args: string[]): boolean {
+  const index = subcommandIndex(args);
+  if (index < 0) return false;
+  const command = args[index];
+  const rest = args.slice(index + 1);
+  if (GIT_OBSERVATIONS.has(command)) return true;
+  if (command === "worktree") return rest[0] === "list";
+  if (command === "remote") return rest[0] === "get-url" || rest[0] === "show";
+  if (command === "config") return rest[0] === "get" || rest[0] === "list" || rest.some((arg) => ["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "--get-color", "--get-colorbool"].includes(arg));
+  return command === "symbolic-ref" && !rest.includes("--delete") && !rest.includes("-d") && rest.filter((arg) => !arg.startsWith("-")).length === 1;
 }
 
 const ENGINE_GIT_BUILTINS = new Set([
@@ -1260,19 +1290,24 @@ interface EngineGitPolicyCacheEntry {
 
 const engineExecutableCache = new Map<string, string>();
 
-function engineExecutable(name: string): string {
-  const enginePath = process.env.PATH ?? "";
-  const cacheKey = `${name}\0${enginePath}`;
+function engineExecutable(name: string, enginePath = process.env.PATH ?? ""): string {
+  const localGit = name === "git" && !gitExecutionIdentity();
+  const cacheKey = `${name}\0${localGit}\0${enginePath}`;
   const cached = engineExecutableCache.get(cacheKey);
-  if (cached) return cached;
-  for (const directory of enginePath.split(path.delimiter)) {
-    if (!directory) continue;
-    const candidate = path.join(directory, name);
+  if (cached) {
+    engineExecutableCache.delete(cacheKey);
+    engineExecutableCache.set(cacheKey, cached);
+    return cached;
+  }
+  const localBinary = localGit ? findLocalGitExecutable(enginePath) : null;
+  const candidates = localGit ? (localBinary ? [localBinary] : []) : enginePath.split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, name));
+  for (const candidate of candidates) {
     try {
       accessSync(candidate, fsConstants.X_OK);
       const resolved = realpathSync(candidate);
       if (statSync(resolved).isFile()) {
         engineExecutableCache.set(cacheKey, resolved);
+        while (engineExecutableCache.size > 128) engineExecutableCache.delete(engineExecutableCache.keys().next().value!);
         return resolved;
       }
     } catch {

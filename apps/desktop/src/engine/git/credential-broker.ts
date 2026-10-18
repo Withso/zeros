@@ -306,6 +306,12 @@ function findExecutable(name: string, pathValue: string, skipCredentialShims = f
   return null;
 }
 
+/** Engine-owned Local processes already apply their credential policy. They
+ * must reach the binary directly even when launched inside an agent shell. */
+export function findLocalGitExecutable(pathValue: string): string | null {
+  return findExecutable("git", withoutCredentialShimDirectories(pathValue), true);
+}
+
 const AMBIENT_CREDENTIAL_OUTPUT_LIMIT = 1024 * 1024;
 
 function ambientCredentialEnvironment(
