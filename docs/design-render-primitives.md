@@ -67,6 +67,11 @@ with file-name tie order. Queries match brute force; the index does not sort or
 mutate caller arrays. Rebuild on confirmed membership/geometry changes and
 discard obsolete instances. Frame records must remain immutable.
 
+Candidate and node-bound distances use the same underflow-safe Euclidean
+metric, including accepted subnormal coordinates. Equal-distance names use
+locale collation, then original catalog order when distinct names collate
+equally; tree traversal cannot choose a different tied membership.
+
 Pass conservative world rectangles supplied by the geometry owner, not DOM
 pixels, raster crops or unprojected nested-node coordinates. Rotated/overflowing
 content needs that owner's conservative bounds before any culling integration.

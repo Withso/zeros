@@ -38,9 +38,14 @@ function closest(
   limit: number,
   within?: DesignSpatialRect,
 ) {
-  const distance = (frame: DesignSpatialFrame) =>
-    (frame.x + frame.width / 2 - point.x) ** 2 +
-    (frame.y + frame.height / 2 - point.y) ** 2;
+  const distance = (frame: DesignSpatialFrame) => {
+    const dx = Math.abs(frame.x + frame.width / 2 - point.x);
+    const dy = Math.abs(frame.y + frame.height / 2 - point.y);
+    const scale = Math.max(dx, dy);
+    return scale === 0
+      ? 0
+      : scale * Math.sqrt((dx / scale) ** 2 + (dy / scale) ** 2);
+  };
   return candidates
     .filter((frame) => !within || intersects(frame, within))
     .sort((a, b) => distance(a) - distance(b) || a.file.localeCompare(b.file))
@@ -48,6 +53,90 @@ function closest(
 }
 
 describe("design frame spatial index", () => {
+  it("ranks the review's tiny rectangles without squared-distance underflow", () => {
+    const input = [
+      { file: "a-far.html", x: 1e-200, y: 0, width: 1e-210, height: 1e-210 },
+      { file: "z-near.html", x: 1e-210, y: 0, width: 1e-210, height: 1e-210 },
+    ];
+    const point = { x: 0, y: 0 };
+    const expected = closest(input, point, 1);
+    expect(expected).toEqual([input[1]]);
+    expect(new DesignFrameSpatialIndex(input).nearest(point, 1)).toEqual(
+      expected,
+    );
+  });
+
+  it("preserves original order when distinct review IDs collate equally", () => {
+    const input = Array.from({ length: 16 }, (_, n) =>
+      Object.freeze({
+        file:
+          Array.from({ length: 4 }, (_, b) =>
+            n & (1 << b) ? "e\u0301" : "é",
+          ).join("") + ".html",
+        x: -1,
+        y: -1,
+        width: 2,
+        height: 2,
+      }),
+    );
+    expect(new Set(input.map((frame) => frame.file)).size).toBe(16);
+    expect(
+      input.every((frame) => frame.file.localeCompare(input[0]!.file) === 0),
+    ).toBe(true);
+    const expected = closest(input, { x: 0, y: 0 }, 3);
+    expect(expected).toEqual(input.slice(0, 3));
+    expect(
+      new DesignFrameSpatialIndex(input).nearest({ x: 0, y: 0 }, 3),
+    ).toEqual(expected);
+  });
+
+  it("keeps positive subnormal center distances in its accepted domain", () => {
+    const size = Number.MIN_VALUE;
+    const input = [
+      { file: "a-far", x: size * 3, y: 0, width: size, height: size },
+      { file: "z-near", x: size, y: 0, width: size, height: size },
+    ];
+    const expected = closest(input, { x: 0, y: 0 }, 1);
+    expect(expected).toEqual([input[1]]);
+    expect(
+      new DesignFrameSpatialIndex(input).nearest({ x: 0, y: 0 }, 1),
+    ).toEqual(expected);
+  });
+
+  it.each([1e-300, 1e-200, 1e-160, 1, 1e140, 1e148])(
+    "matches a separately scaled brute-force oracle at coordinate scale %s",
+    (scale) => {
+      const input = frames(128).map((frame) =>
+        Object.freeze({
+          ...frame,
+          x: frame.x * scale,
+          y: frame.y * scale,
+          width: frame.width * scale,
+          height: frame.height * scale,
+        }),
+      );
+      const index = new DesignFrameSpatialIndex(input);
+      const within = {
+        x: -50_000 * scale,
+        y: -50_000 * scale,
+        width: 100_000 * scale,
+        height: 100_000 * scale,
+      };
+      for (const unscaled of [
+        { x: 0, y: 0 },
+        { x: 92_000, y: -85_000 },
+        { x: -75_000, y: 22_000 },
+      ]) {
+        const point = { x: unscaled.x * scale, y: unscaled.y * scale };
+        expect(index.nearest(point, 1)).toEqual(closest(input, point, 1));
+        expect(index.nearest(point, 12)).toEqual(closest(input, point, 12));
+        expect(index.nearest(point, 12, within)).toEqual(
+          closest(input, point, 12, within),
+        );
+      }
+    },
+  );
+
   it.each([
     "local/personal",
     "local/organization",

@@ -46,7 +46,7 @@ function distanceToBounds(
   const offset = index * 4;
   const dx = Math.max(data[offset]! - x, 0, x - data[offset + 2]!);
   const dy = Math.max(data[offset + 1]! - y, 0, y - data[offset + 3]!);
-  return dx * dx + dy * dy;
+  return Math.hypot(dx, dy);
 }
 
 export class DesignFrameSpatialIndex<T extends DesignSpatialFrame> {
@@ -157,7 +157,8 @@ export class DesignFrameSpatialIndex<T extends DesignSpatialFrame> {
     const best: Array<{ index: number; distance: number }> = [];
     const compare = (a: (typeof best)[number], b: (typeof best)[number]) =>
       a.distance - b.distance ||
-      this.frames[a.index]!.file.localeCompare(this.frames[b.index]!.file);
+      this.frames[a.index]!.file.localeCompare(this.frames[b.index]!.file) ||
+      a.index - b.index;
     const offer = (candidate: (typeof best)[number]) => {
       if (best.length < limit) {
         best.push(candidate);
@@ -200,7 +201,7 @@ export class DesignFrameSpatialIndex<T extends DesignSpatialFrame> {
           if (bounds && !overlaps(this.geometry, index, bounds)) continue;
           const dx = this.centers[index * 2]! - point.x;
           const dy = this.centers[index * 2 + 1]! - point.y;
-          offer({ index, distance: dx * dx + dy * dy });
+          offer({ index, distance: Math.hypot(dx, dy) });
         }
       } else {
         const left = this.left[node]!;
@@ -249,7 +250,8 @@ export class DesignFrameSpatialIndex<T extends DesignSpatialFrame> {
       .sort(
         (a, b) =>
           this.centers[a * 2 + axis]! - this.centers[b * 2 + axis]! ||
-          this.frames[a]!.file.localeCompare(this.frames[b]!.file),
+          this.frames[a]!.file.localeCompare(this.frames[b]!.file) ||
+          a - b,
       );
     this.indices.set(ordered, start);
     const middle = (start + end) >>> 1;
