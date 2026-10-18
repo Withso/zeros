@@ -57,10 +57,12 @@ import type {
   NativePromptStage,
   NativePromptOutputKind,
   PromptResponse,
+  ProviderCredentialUpdate,
   SessionMode,
   StopReason,
   TurnUsage,
 } from "../../types";
+import { withProviderConnection } from "../shared/provider-connection";
 import { advertiseAgentCapabilities } from "../../capabilities";
 import { CursorSdkTranslator } from "./translator";
 import { CursorSubagentTranscriptReader } from "./subagent-transcript-reader";
@@ -1063,6 +1065,9 @@ interface Session {
   zerosSessionId: string;
   cwd: string;
   apiKey: string;
+  /** The key `agent` was created or resumed with. A Local connection change
+   *  replaces `apiKey`; the next run resumes the agent under it. */
+  appliedApiKey: string;
   /** Account-scoped discovery and runtime denylist captured at admission. The
    * adapter may later activate another API key without changing this session's
    * model semantics. */
@@ -1180,6 +1185,9 @@ export class CursorSdkAdapter implements AgentAdapter {
           ),
         };
       },
+    },
+    runtimeConfiguration: {
+      updateCredentials: (opts) => this.updateCredentials(opts),
     },
     configuration: {
       readProvenance: async (opts) =>
@@ -2049,6 +2057,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       zerosSessionId: executionId,
       cwd: opts.cwd,
       apiKey,
+      appliedApiKey: apiKey,
       modelState,
       modelId,
       modeId: initialMode,
@@ -2249,6 +2258,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       zerosSessionId: executionId,
       cwd: opts.cwd,
       apiKey,
+      appliedApiKey: apiKey,
       modelState,
       modelId,
       modeId: initialMode,
@@ -2975,13 +2985,15 @@ export class CursorSdkAdapter implements AgentAdapter {
       const want = autoReviewFor(session.modeId);
       const catalog = this.mcpCatalog(session.mcpServers);
       const catalogChanged = catalog.key !== session.appliedMcpCatalog;
-      if (!catalogChanged && want === session.appliedAutoReview) return;
+      const credentialChanged = session.apiKey !== session.appliedApiKey;
+      if (!catalogChanged && !credentialChanged && want === session.appliedAutoReview) return;
       if (session.activeRun) throw new Error("Cursor MCP configuration cannot refresh during an active run.");
       const previous = session.agent;
+      const apiKey = session.apiKey;
       const refresh = async () => {
         const sessionMcp = this.mcpServers(catalog.servers, session.env, session.cwd);
         const agent = await session.sdk.Agent.resume(previous.agentId, {
-          apiKey: session.apiKey,
+          apiKey,
           model: this.modelSelection(session.modelId, session.modelState, session.env, "loadSession"),
           cwd: session.cwd,
           local: this.buildLocalOpts(session.cwd, session.env, want, session.settingSources),
@@ -2994,6 +3006,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         // The host proxy owns an individual native handle, not just agentId;
         // releasing the old executor cannot close the replacement conversation.
         session.agent = agent;
+        session.appliedApiKey = apiKey;
         session.appliedAutoReview = want;
         session.appliedMcpCatalog = catalog.key;
         if (previous !== agent) previous.close?.();
@@ -3003,9 +3016,11 @@ export class CursorSdkAdapter implements AgentAdapter {
       try {
         await pending;
       } catch (err) {
-        // Keep the prior mode-only recovery behavior. A stale tool catalog must
-        // instead fail before submitting the prompt and retry via existing UI.
-        if (catalogChanged || this.mcpCatalog(session.mcpServers).key !== session.appliedMcpCatalog) throw err;
+        // Keep the prior mode-only recovery behavior. A stale tool catalog or
+        // a replaced credential must instead fail before submitting the
+        // prompt: the old handle would keep running under the previous key.
+        if (catalogChanged || credentialChanged || session.apiKey !== session.appliedApiKey ||
+            this.mcpCatalog(session.mcpServers).key !== session.appliedMcpCatalog) throw err;
         this.ctx.emit.onAgentStderr(AGENT_ID,
           `[cursor-sdk] Auto-review rebuild (autoReview=${want}) failed; keeping current agent: ${err instanceof Error ? err.message : String(err)}`);
         return;
@@ -3016,9 +3031,28 @@ export class CursorSdkAdapter implements AgentAdapter {
       // a handle created with the first revision. Bound pathological churn.
     }
     if (this.mcpCatalog(session.mcpServers).key !== session.appliedMcpCatalog ||
+        session.apiKey !== session.appliedApiKey ||
         autoReviewFor(session.modeId) !== session.appliedAutoReview) {
       throw new Error("Cursor MCP configuration kept changing. Please retry the message.");
     }
+  }
+
+  /** Local connection change (API key or Cursor account). An agent handle is
+   * bound to its key, so the next run resumes this agent under the new one
+   * (ensureSessionConfiguration); a running turn keeps its handle. */
+  async updateCredentials(opts: ProviderCredentialUpdate): Promise<void> {
+    const session = this.sessions.get(opts.sessionId);
+    if (!session) return;
+    if (session.cloudExecution)
+      throw new Error("A cloud execution keeps the credential it was admitted with");
+    const env = withProviderConnection(session.env, opts);
+    // A removed key or signed-out account asks for a connection, exactly as a
+    // new session would; it never falls back to the previous key.
+    const apiKey = this.resolveApiKey(env);
+    session.env = env;
+    if (apiKey === session.apiKey) return;
+    session.apiKey = apiKey;
+    session.modelState = await this.activateModelState(apiKey);
   }
 
   async disposeSession(sessionId: string): Promise<void> {

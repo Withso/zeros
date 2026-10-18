@@ -95,11 +95,14 @@ export function resolveAgentCapabilityPorts(
       ? (opts: Parameters<NonNullable<AgentAdapter["updateConfig"]>>[0]) =>
           adapter.updateConfig!(opts)
       : undefined);
+  // Port-only: credential adoption has no legacy flat-method shim.
+  const updateCredentials = declared?.runtimeConfiguration?.updateCredentials;
   const runtimeConfiguration =
-    setModel || updateConfig
+    setModel || updateConfig || updateCredentials
       ? {
           ...(setModel ? { setModel } : {}),
           ...(updateConfig ? { updateConfig } : {}),
+          ...(updateCredentials ? { updateCredentials } : {}),
         }
       : undefined;
 

@@ -108,7 +108,14 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   installs all three dependency graphs, as `.conductor/settings.toml` does.
   Playwright-backed Design suites also need `npx playwright install chromium`.
   Before blaming your diff for a red local run, rerun the failing files in a
-  clean checkout of your base commit.
+  clean checkout of your base commit. A base worktree at another path changes
+  path- and Git-dependent suites; for an exact comparison, swap only your
+  changed source files back to the base revision in the same checkout, compare
+  failing test names, then rerun every differing test in isolation. macOS
+  cannot run the `/proc`-based portable cloud fixtures at all.
+- `pnpm typecheck` keeps incremental state in `node_modules/.cache/zeros-typecheck`.
+  An error in a file you did not touch may be stale state: confirm with
+  `tsc --noEmit -p tsconfig.typecheck.json --incremental false` before chasing it.
 - `pnpm test:ui-smoke` stops at the first scenario that throws, so one base
   failure hides every later scenario. Confirm the failure on the base commit,
   then run the rest from an untracked copy of `scripts/` without that scenario

@@ -202,4 +202,52 @@ describe("Cursor credential lifecycle", () => {
       await c.adapter.dispose();
     }
   });
+
+  const replace = (c: ReturnType<typeof setup>, sessionId: string, key: string) =>
+    c.adapter.capabilityPorts.runtimeConfiguration.updateCredentials({
+      sessionId,
+      keys: ["CURSOR_API_KEY"],
+      env: { CURSOR_API_KEY: key },
+      authenticationContext: "replacement",
+    });
+
+  it("runs the next send under a replacement key without reconnecting", async () => {
+    const c = setup();
+    const { session } = await c.adapter.newSession(options);
+    try {
+      await c.adapter.prompt({ sessionId: session.sessionId, prompt });
+      await replace(c, session.sessionId, "replacement-fixture-key");
+      await expect(
+        c.adapter.prompt({ sessionId: session.sessionId, prompt }),
+      ).resolves.toMatchObject({ stopReason: "end_turn" });
+      // The same agent conversation, now bound to the replacement key.
+      expect(sdk.resume).toHaveBeenCalledExactlyOnceWith(
+        "parent",
+        expect.objectContaining({ apiKey: "replacement-fixture-key" }),
+      );
+      expect(sdk.create).toHaveBeenCalledOnce();
+      expect(sdk.send).toHaveBeenCalledTimes(2);
+      // Unchanged keys do not rebuild the agent again.
+      await replace(c, session.sessionId, "replacement-fixture-key");
+      await c.adapter.prompt({ sessionId: session.sessionId, prompt });
+      expect(sdk.resume).toHaveBeenCalledOnce();
+    } finally {
+      await c.adapter.dispose();
+    }
+  });
+
+  it("asks for a connection instead of falling back to the previous key", async () => {
+    const c = setup();
+    const { session } = await c.adapter.newSession(options);
+    try {
+      await expect(replace(c, session.sessionId, "")).rejects.toMatchObject({
+        failure: { kind: "auth-required" },
+      });
+      await c.adapter.prompt({ sessionId: session.sessionId, prompt });
+      // A refused change leaves the session exactly as it was.
+      expect(sdk.resume).not.toHaveBeenCalled();
+    } finally {
+      await c.adapter.dispose();
+    }
+  });
 });

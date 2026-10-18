@@ -941,6 +941,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       effort?: string;
       providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
       providerMetadata?: import("@zeros/protocol/identities").ProviderMetadata;
+      resumedFresh?: boolean;
       goal?: import("@zeros/protocol/agent-events").AgentGoal | null;
       toolCallId?: string;
       retryId?: string | null;
@@ -963,6 +964,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       }
       get().patchSession(chatId, {
         providerBinding: upd.providerBinding,
+        ...(upd.resumedFresh ? { needsConversationReplay: true } : {}),
         ...(upd.providerMetadata
           ? { providerMetadata: upd.providerMetadata }
           : {}),
