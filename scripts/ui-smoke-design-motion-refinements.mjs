@@ -478,15 +478,20 @@ export async function runDesignMotionAlternateSettingsEditSmoke({
     .getByRole("button", { name: "Play motion preview", exact: true })
     .click();
   const heading = animatedHeading(page);
-  await expect
-    .poll(() =>
-      heading.evaluate(
-        (element) =>
-          element.getAnimations()[0]?.effect.getComputedTiming()
-            .currentIteration,
-      ),
-    )
-    .toBe(1);
+  const headingElement = await heading.elementHandle();
+  const animationFrame = await headingElement.ownerFrame();
+  const iteration = await animationFrame.waitForFunction(
+    (element) => {
+      const value = element.getAnimations()[0]?.effect.getComputedTiming()
+        .currentIteration;
+      return value === 1 ? value : false;
+    },
+    headingElement,
+    { polling: "raf", timeout: 5000 },
+  );
+  expect(await iteration.jsonValue()).toBe(1);
+  await iteration.dispose();
+  await headingElement.dispose();
   await timeline
     .getByRole("button", { name: "Pause motion preview", exact: true })
     .click();
