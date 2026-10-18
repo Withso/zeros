@@ -11,3 +11,18 @@
   and `agent-history-recovery.integration.test.ts`: stop prerequisites precede
   resume, stale bindings cannot publish drift, explicit denial stops retries,
   and a retired unsealed source recovers only through authenticated custody.
+
+- Retry lesson: an uninterrupted worker chain does not prove recovery through
+  the owner API. A fresh idempotency key after terminal drain failure must keep
+  the retirement prerequisite, including without a committed checkpoint.
+  `wake-source-retirement.integration.test.ts` covers the real route, queued
+  requests, held provider observations and a direct older-worker SQL claim.
+  A compatibility fixture sharing the new provider loop cannot prove that last
+  boundary; test the old claim independently.
+- Cancellation lesson: a capture acknowledgement cannot erase a mandatory
+  safety stop. Both engine cancellation and warm owner wakes retain one drain
+  and its original deadline. The compute regressions exercise current and
+  previous lifecycle writers, followed by same-intent unsealed escalation.
+  Include an expired capture written by an older worker and a settled failed
+  drain from before the current engine: the former must make progress, while
+  the latter must not revoke a healthy successor on a warm no-op wake.

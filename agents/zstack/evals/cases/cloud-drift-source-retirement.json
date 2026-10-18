@@ -2,8 +2,8 @@
   "id": "cloud-drift-source-retirement",
   "kind": "replay",
   "area": "cloud-engine-resume",
-  "fixedBy": "pending",
+  "fixedBy": "pr:588",
   "symptom": "Cold provider drift resumed an allocation while its previous unsealed boot source remained active, so every new engine was refused history recovery.",
-  "rule": "Exercise the actual drift-to-start path with an active unsealed source. Require a confirmed stop prerequisite before resume, retain failed retirement, and never fabricate a seal. See changes/provider-drift-history-retirement.md.",
-  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/reconciler.integration.test.ts -t 'requires source retirement before resuming'"
+  "rule": "Exercise the owner wake route after terminal drain failure, direct and queued cold wakes, and the older SQL claim boundary. Require positive source retirement before provider start; retain failure and backoff without fabricating a seal. See changes/provider-drift-history-retirement.md.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/wake-source-retirement.integration.test.ts"
 }

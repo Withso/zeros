@@ -51,6 +51,7 @@ import {
 } from "./authorization.js";
 import { cancelCloudWorkspaceGenerationTransition, lockCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
 import { enqueueWorkspaceCheckpointRequest, loadCommittedFinalCheckpoint } from "./checkpoint-requests.js";
+import { preserveCloudWorkspaceWakeDrain } from "./wake-drain.js";
 import { MAX_WORKSPACE_FILE_BYTES } from "./content-record.js";
 import {
   CloudWorkspaceEngineClientAdmissionError,
@@ -1607,18 +1608,11 @@ async function requestCloudWorkspaceLifecycleIntent(
 ): Promise<{ workspace: WorkspaceRow; intent: IntentRow; replayed: boolean }> {
   const { orgId, workspaceId, actorUserId, workspace, operation, key, digest, discardUncheckpointed } = input;
   const finalProof = await loadCommittedFinalCheckpoint(tx, workspaceId, workspace.current_generation);
-  const drainBeforeWake = operation === "wake" && finalProof &&
-    ["queued", "observing", "dispatching", "failed", "superseded"].includes(finalProof.intent_state)
-    ? finalProof.lifecycle_intent_id : null;
-  if (drainBeforeWake) {
-    // Preserve the irrevocable drain independently of the newest desired
-    // state. The new wake cannot be claimed until provider stop is proven.
-    await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET affects_workspace=false,
-      state=CASE WHEN state IN ('failed','superseded') THEN 'queued'::cloud_workspace_intent_state ELSE state END,
-      completed_at=NULL,next_attempt_at=now(),error_code=NULL,error_message=NULL WHERE id=$1`, [drainBeforeWake]);
-    await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId, organizationId: orgId,
-      generation: workspace.current_generation, reason: "workspace_stop_requested" });
-  }
+  const drain = operation === "wake" ? await preserveCloudWorkspaceWakeDrain(tx, {
+    workspaceId, organizationId: orgId, generation: workspace.current_generation, retryFailed: true,
+    retireSource: workspace.desired_state !== "running" || !["provisioning", "setting_up", "ready", "busy"].includes(workspace.status),
+  }) : null;
+  const drainBeforeWake = drain?.id ?? null;
   const alreadySatisfied =
     (operation === "stop" && workspace.status === "stopped") ||
     (operation === "wake" &&
@@ -1745,7 +1739,7 @@ async function requestCloudWorkspaceLifecycleIntent(
     });
   }
 
-  if (!alreadySatisfied && !requiresFinalCheckpoint) {
+  if (!alreadySatisfied && !requiresFinalCheckpoint && !drain?.capturePending) {
     await tx.query(
       `UPDATE cloud_workspaces
        SET desired_state = $2, status = $3, version = version + 1,

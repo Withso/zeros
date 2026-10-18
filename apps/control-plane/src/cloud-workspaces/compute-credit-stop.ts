@@ -115,9 +115,9 @@ export async function requestManagedComputeStop(
     // Adopt the user's exact-generation stop as well as our own. A second
     // intent could cancel its in-flight capture and bypass the final seal.
     const pending = (await tx.query<{
-      id: string; state: string; operation: "stop" | "archive"; requested_by: string | null;
+      id: string; state: string; operation: "stop" | "archive"; requested_by: string | null; affects_workspace: boolean;
       checkpoint_id: string | null; checkpoint_state: string | null; checkpoint_live: boolean | null; checkpoint_error: string | null;
-    }>(`SELECT intent.id,intent.state,intent.operation,intent.requested_by,request.id AS checkpoint_id,
+    }>(`SELECT intent.id,intent.state,intent.operation,intent.requested_by,intent.affects_workspace,request.id AS checkpoint_id,
         request.state AS checkpoint_state,request.error_code AS checkpoint_error,request.deadline_at>clock_timestamp() AS checkpoint_live
       FROM cloud_workspace_lifecycle_intents intent
       LEFT JOIN workspace_checkpoint_requests request ON request.lifecycle_intent_id=intent.id
@@ -125,13 +125,22 @@ export async function requestManagedComputeStop(
         AND intent.operation IN ('stop','archive')
         AND (intent.id=$1 OR intent.affects_workspace)
         AND (intent.state IN ('queued','observing','dispatching') OR
-          (intent.id=$1 AND intent.state='failed' AND request.state='expired'))
+          (intent.id=$1 AND intent.state IN ('failed','superseded') AND request.state IN ('expired','cancelled')
+            AND request.error_code IN ('checkpoint_deadline_exceeded','workspace_active','superseded_by_newer_intent','mandatory_capture_cancelled')))
       ORDER BY (intent.id=$1) DESC NULLS LAST,intent.created_at DESC,intent.id LIMIT 1`,
     [lease.stop_intent_id, scope.workspace_id, scope.org_id, scope.generation])).rows[0];
     if (pending) await tx.query(
       "UPDATE managed_compute_allocation_leases SET stop_intent_id=$2,updated_at=now() WHERE id=$1",
       [input.leaseId, pending.id],
     );
+    if (pending?.state === "superseded") {
+      // Repair a cancellation written before mandatory drains were preserved.
+      // Reuse its capture deadline instead of admitting another five minutes.
+      await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='queued',completed_at=NULL,
+        lease_owner=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1`, [pending.id]);
+      await tx.query("UPDATE workspace_checkpoint_requests SET state=state WHERE id=$1 AND state='cancelled'", [pending.checkpoint_id]);
+      pending.state = "queued";
+    }
     if (
       pending &&
       ["queued", "observing", "dispatching"].includes(pending.state) &&
@@ -165,7 +174,7 @@ export async function requestManagedComputeStop(
       // cannot replace the operation or turn an incomplete capture into success.
       await tx.query(`UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=now(),error_code='stop_unsealed',
         deadline_at=least(deadline_at,greatest(clock_timestamp(),created_at+interval '1 millisecond'))
-        WHERE id=$1 AND state IN ('queued','delivered','failed','expired')`, [pending.checkpoint_id]);
+        WHERE id=$1 AND state IN ('queued','delivered','failed','expired','cancelled')`, [pending.checkpoint_id]);
       await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='queued',completed_at=NULL,next_attempt_at=now(),
         lease_owner=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1`, [pending.id]);
       await recordCloudWorkspaceStopUnsealed(tx, {
@@ -181,7 +190,9 @@ export async function requestManagedComputeStop(
           version=version+1,updated_at=now(),last_error_code=$2,last_error_message=$3 WHERE id=$1`,
         [scope.workspace_id, ordinaryStop ? null : code,
           ordinaryStop ? null : `${reason.message}${incidentId ? ` (incident ${incidentId})` : ''}`,
-          pending.operation === "stop" ? "stopped" : "archived", pending.operation === "stop" ? "stopping" : "archiving"]);
+          pending.affects_workspace ? (pending.operation === "stop" ? "stopped" : "archived") : workspace.desired_state,
+          pending.affects_workspace ? (pending.operation === "stop" ? "stopping" : "archiving")
+            : workspace.desired_state === "running" ? "waking" : workspace.desired_state === "stopped" ? "stopping" : "archiving"]);
       }
       return handledNextCheckAt();
     }

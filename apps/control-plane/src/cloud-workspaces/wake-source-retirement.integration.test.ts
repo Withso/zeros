@@ -81,6 +81,7 @@ suite("wake source retirement", () => {
     const drains = async () => (await pool.query(`SELECT id,state,next_attempt_at FROM cloud_workspace_lifecycle_intents
       WHERE workspace_id=$1 AND operation='stop' ORDER BY created_at,id`, [fixture.workspaceId])).rows;
     return { fixture, boot, engine, worker, provider, source, wake, run, atStart, stop, start, drains,
+      setState: (state: CloudProviderResource["state"]) => { resource = { ...resource, state }; },
       failStop: (error: CloudProviderError | null) => { stopError = error; } };
   }
 
@@ -144,6 +145,84 @@ suite("wake source retirement", () => {
     expect(f.atStart).toEqual([{ state: "retired", binding_retired: true }]);
   });
 
+  it("leaves a terminal retirement failure visible during later background drift", async () => {
+    const f = await readySource();
+    f.failStop(new CloudProviderError("synthetic_access_drain_failed", "Synthetic drain failure", false));
+    await f.worker.reconcileDriftOnce();
+    await f.worker.runOnce();
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET next_drift_check_at=now() WHERE workspace_id=$1", [f.fixture.workspaceId]);
+    await f.worker.reconcileDriftOnce();
+    await f.run();
+    expect((await f.drains()).map(row => row.state)).toEqual(["failed"]);
+    expect(f.stop).toHaveBeenCalledOnce();
+    expect(f.atStart).toEqual([]);
+    expect((await pool.query("SELECT status,last_error_code FROM cloud_workspaces WHERE id=$1", [f.fixture.workspaceId])).rows[0])
+      .toEqual({ status: "failed", last_error_code: "workspace_drain_failed" });
+  });
+
+  it.each(["failed", "superseded"] as const)("publishes a %s predecessor drain inherited by background drift", async state => {
+    const f = await readySource();
+    const drainId = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents
+      (id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256,state,completed_at)
+      VALUES($1,$2,1,$3,'stop',$4,$5,$6,now())`,
+    [drainId, f.fixture.workspaceId, f.fixture.organizationId, randomUUID(), randomBytes(32), state]);
+    await f.worker.reconcileDriftOnce();
+    expect((await pool.query(`SELECT state,error_code,resume_after_intent_id FROM cloud_workspace_lifecycle_intents
+      WHERE workspace_id=$1 AND operation='wake'`, [f.fixture.workspaceId])).rows)
+      .toEqual([{ state: "failed", error_code: "workspace_drain_failed", resume_after_intent_id: drainId }]);
+    expect((await pool.query("SELECT status,last_error_code FROM cloud_workspaces WHERE id=$1", [f.fixture.workspaceId])).rows[0])
+      .toEqual({ status: "failed", last_error_code: "workspace_drain_failed" });
+    expect(f.stop).not.toHaveBeenCalled();
+    expect(f.atStart).toEqual([]);
+    await f.wake();
+    await f.run();
+    expect(f.atStart).toEqual([{ state: "retired", binding_retired: true }]);
+  });
+
+  async function pendingOriginalWake(f: Awaited<ReturnType<typeof readySource>>) {
+    // A source created during this wake is not a predecessor at claim time.
+    // A later cold observation must still retire it before restarting the VM.
+    await pool.query("UPDATE cloud_workspaces SET status='waking' WHERE id=$1", [f.fixture.workspaceId]);
+    return (await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents
+      (workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,created_at)
+      VALUES($1,1,$2,$3,'wake',$4,$5,now()-interval '1 minute') RETURNING id`,
+    [f.fixture.workspaceId, f.fixture.organizationId, f.fixture.userId, randomUUID(), randomBytes(32)])).rows[0].id as string;
+  }
+
+  it("drains a source discovered cold by the common provider observation before restarting", async () => {
+    const f = await readySource();
+    await pendingOriginalWake(f);
+    await f.run();
+    expect(f.atStart).toEqual([{ state: "retired", binding_retired: true }]);
+    expect(f.stop).toHaveBeenCalledOnce();
+  });
+
+  it.each(["provider binding", "authority epoch", "claim"] as const)("discards a cold observation after its %s changed", async changed => {
+    const f = await readySource();
+    const wakeId = await pendingOriginalWake(f);
+    let entered!: () => void, finish!: () => void;
+    const inspecting = new Promise<void>(resolve => { entered = resolve; });
+    const release = new Promise<void>(resolve => { finish = resolve; });
+    const inspect = f.provider.inspect.bind(f.provider);
+    vi.spyOn(f.provider, "inspect").mockImplementationOnce(async id => {
+      const result = await inspect(id);
+      entered(); await release; return result;
+    });
+    const pass = f.worker.runOnce();
+    await inspecting;
+    try {
+      if (changed === "provider binding") await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='replacement' WHERE workspace_id=$1", [f.fixture.workspaceId]);
+      else if (changed === "authority epoch") await pool.query("UPDATE cloud_workspaces SET authority_epoch=authority_epoch+1 WHERE id=$1", [f.fixture.workspaceId]);
+      else await pool.query("UPDATE cloud_workspace_lifecycle_intents SET lease_owner='other-worker' WHERE id=$1", [wakeId]);
+    } finally { finish(); }
+    await pass;
+    expect(f.stop).not.toHaveBeenCalled();
+    expect(f.start).not.toHaveBeenCalled();
+    expect(await f.drains()).toEqual([]);
+    expect(await f.source()).toEqual({ state: "active", binding_retired: false });
+  });
+
   it("preserves the existing drain and its provider backoff across repeated owner wakes", async () => {
     const f = await readySource();
     f.failStop(new CloudProviderError("provider_rate_limited", "Synthetic retryable drain failure", true, { retryAfterMs: 60_000 }));
@@ -171,5 +250,17 @@ suite("wake source retirement", () => {
     expect(f.stop).not.toHaveBeenCalled();
     expect(f.start).not.toHaveBeenCalled();
     expect(await f.source()).toEqual({ state: "active", binding_retired: false });
+  });
+
+  it("resumes an already retired source without another provider drain", async () => {
+    const f = await readySource();
+    await f.worker.reconcileDriftOnce();
+    await f.run();
+    f.stop.mockClear(); f.start.mockClear(); f.atStart.length = 0;
+    f.setState("stopped");
+    await pool.query("UPDATE cloud_workspaces SET desired_state='stopped',status='stopped' WHERE id=$1", [f.fixture.workspaceId]);
+    await f.wake(); await f.run();
+    expect(f.stop).not.toHaveBeenCalled();
+    expect(f.atStart).toEqual([{ state: "retired", binding_retired: true }]);
   });
 });
