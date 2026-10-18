@@ -990,6 +990,13 @@ review aid until freeze; the frozen source of truth will be Zod in
   ([Control-plane idle stop](#control-plane-idle-stop-idlev1)), negotiated
   while `cp_idle_stop` is on: `realtime` requests the idle stop from
   `activity.report`, and the engine still proves idleness.
+  Also added the `turns.v1` feature (rollout flag `turn_journal`): the
+  journal is one contiguous sequence per engine instance and boot, numbered
+  from 1; a new writer renumbers its predecessor's unacknowledged entries.
+  `turns.ack` is cumulative. `sys.error turn_journal_gap` carries
+  `expectedJournalSeq`; the engine resends from it, and resends from its ack
+  after 60 s without ack progress. `lastJournalSeq` is the engine's persisted
+  ack (informational).
 - **1.1.0** (2026-10-16, additive): added close `4404 uplink_disabled` —
   the rollout flag is off for the organization; the engine parks, the HTTP
   heartbeat and the credential poll continue, and the engine re-dials only

@@ -46,6 +46,9 @@ export const ROLLOUT_FLAGS = {
   // The engine still proves idleness before any checkpoint, and unknown
   // activity or a lost uplink never stops a workspace (decision G).
   cp_idle_stop: { whileFeedUnavailable: "retain", summary: "Decide idle stops in the control plane from uplink activity (idle.v1)", requires: ["realtime_uplink"] },
+  // Off, turns.v1 is never negotiated: the engine keeps its journal and
+  // sends it once an uplink negotiates it. No other path reads it.
+  turn_journal: { whileFeedUnavailable: "retain", summary: "Deliver the engine turn journal over the uplink (turns.v1)", requires: ["realtime_uplink"] },
 } as const satisfies Record<string, RolloutFlagDefinition>;
 
 export type RolloutFlagName = keyof typeof ROLLOUT_FLAGS;

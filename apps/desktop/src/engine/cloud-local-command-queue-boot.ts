@@ -66,6 +66,8 @@ type Options = {
    * failed-push-outstanding mark on a poll success so the uplink's
    * `established` recovers without waiting for the CP to push again. */
   controlsExchange?(ok: boolean): void;
+  /** The queue committed turn journal entries, or the boot activated. */
+  turnJournalChanged?(): void;
 };
 
 /** Registration establishes a candidate; only an exact activation response
@@ -138,6 +140,8 @@ export class CloudLocalAgentBootRuntime {
     if (!this.active || !this.fencesValue) throw new CloudCommandRuntimeError("cloud_commands_unavailable");
     return this.fencesValue;
   }
+  /** Readable while final replication is still permitted, unlike `queue`. */
+  get turnJournal(): CloudLocalCommandQueue | null { return this.authorityActive ? this.queueValue ?? null : null; }
   private reference() {
     const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...reference } = this.scope;
     return { ...reference, version: 1 as const, mode: "boot-owner-v1" as const };
@@ -293,7 +297,7 @@ export class CloudLocalAgentBootRuntime {
         }, selectionRolledBack: claimId => {
           const record = this.selections.get(claimId);
           if (record) { this.closeUnused(record.lifetime); this.selections.delete(claimId); }
-        } });
+        }, turnJournalChanged: () => this.options.turnJournalChanged?.() });
     }
     this.enterStartupPhase("boot_credentials");
     const credentials = this.credentials, metadata = credentials.metadata;
@@ -324,7 +328,7 @@ export class CloudLocalAgentBootRuntime {
     this.enterStartupPhase("boot_install");
     await this.options.install(this.factory!, this.queueValue!);
     this.startupRemainingMs();
-    this.activated = true; this.scheduleCache(); this.scheduleControls(); this.options.changed(); return true;
+    this.activated = true; this.scheduleCache(); this.scheduleControls(); this.options.changed(); this.options.turnJournalChanged?.(); return true;
   }
   /** Independent of Send and socket lifetime. The FULL ACK is retained until
    * the entire strict current-scope exchange succeeds; unknown HTTP responses

@@ -78,6 +78,7 @@ import { DatabaseUplinkLeaseStore } from "./realtime/uplink-lease.js";
 import { startUplinkNotifications } from "./realtime/uplink-notifications.js";
 import { DatabaseUplinkPresenceStore, UplinkPresenceWriter } from "./realtime/uplink-presence.js";
 import { CloudEngineUplinkServer, realtimeInstanceId } from "./realtime/uplink-server.js";
+import { DatabaseUplinkTurnStore, UplinkTurnJournal } from "./realtime/uplink-turns.js";
 import { DatabaseDeviceSessionAuthority } from "./realtime/device-sessions.js";
 import { DatabaseDeviceStreamCatalogSource } from "./realtime/device-stream-catalog.js";
 import { startDeviceStreamNotifications } from "./realtime/device-stream-notifications.js";
@@ -940,7 +941,7 @@ const mountEngineUplink = () => {
     realtimeInstance: realtimeInstanceId(),
     presence: uplinkPresence,
     alerts,
-    extensions: [uplinkCredPush, checkpointPush],
+    extensions: [uplinkCredPush, checkpointPush, new UplinkTurnJournal({ store: new DatabaseUplinkTurnStore(pool) })],
   });
   uplinkAuthSource = uplinkAuth;
   startCapabilityRevocationPush();

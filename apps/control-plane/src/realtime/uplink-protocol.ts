@@ -88,6 +88,8 @@ export const UPLINK_FEATURES = {
   /** Queued checkpoint requests are pushed (`checkpoint.request`) instead
    * of the engine holding the checkpoint-hint long-poll. */
   checkpoint: "checkpoint.v1",
+  /** The engine turn journal (`turns.event` / `turns.ack`). */
+  turns: "turns.v1",
 } as const;
 
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
@@ -138,6 +140,16 @@ export const UplinkActivityReportSchema = z.object({
   lastInputAtMs: timestampMs.optional(),
   windowMs: z.number().int().min(0).max(3_600_000),
 });
+const journalIdentity = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
+export const UplinkTurnEventSchema = z.object({
+  journalSeq: seq.min(1),
+  chatId: journalIdentity,
+  turnId: journalIdentity,
+  state: z.enum(["started", "completed", "failed", "needs_attention", "interrupted"]),
+  atMs: timestampMs,
+  actorUserId: uuid.optional(),
+});
+export type UplinkTurnEvent = z.infer<typeof UplinkTurnEventSchema>;
 export const UplinkCredentialKindSchema = z.enum(["agent-controls", "repository"]);
 export const UplinkCredentialAckSchema = z.object({
   kind: UplinkCredentialKindSchema,

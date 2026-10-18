@@ -217,6 +217,18 @@ export function sanitizeCredAckCode(code: unknown): string {
   return typeof code === "string" && /^[a-z][a-z0-9_]{2,63}$/.test(code) ? code : "cred_fetch_failed";
 }
 
+export type EngineUplinkTurnEvent = Readonly<{ journalSeq: number; chatId: string; turnId: string;
+  state: "started" | "completed" | "failed" | "needs_attention" | "interrupted"; atMs: number; actorUserId?: string }>;
+/** `turns.v1`: the engine's durable turn journal. */
+export type EngineUplinkTurnJournal = {
+  /** Entries after `afterSeq` of the current writer, in order, at most `limit`. */
+  read(afterSeq: number, limit: number): readonly EngineUplinkTurnEvent[];
+  /** The persisted `turns.ack` watermark. */
+  acked(): number;
+  ack(journalSeq: number): void;
+};
+const TURNS_WINDOW = 64;
+
 export type CloudEngineUplinkOptions = {
   endpoint: string;
   /** The heartbeat credential; the uplink authenticates with it once per connection. */
@@ -254,6 +266,9 @@ export type CloudEngineUplinkOptions = {
   /** `idle.v1`: the engine's activity, reported at the gate, every 60 s and
    * on an edge (`reportActivity`). */
   activity?: () => EngineUplinkActivity;
+  turns?: EngineUplinkTurnJournal;
+  /** Unacked `turns.event` frames are resent after this long without ack progress. Defaults to 60 s. */
+  turnsResendMs?: number;
   /** `checkpoint.v1`: a pushed checkpoint request. The engine answers it
    * with one heartbeat, which delivers, fences and acknowledges the
    * directive; the frame itself grants nothing. */
@@ -301,6 +316,9 @@ export class CloudEngineUplinkClient {
   private handoff: Connection | null = null;
   /** The lineage offered on the next dial; dropped on any terminal close. */
   private resume: { token: string; lastReceivedSeq: number } | null = null;
+  /** Highest journal sequence sent on this lineage; null re-reads the ack. */
+  private turnsSentThrough: number | null = null;
+  private turnsTimer: ReturnType<typeof setTimeout> | null = null;
   /** Engine-side reliable sequence state; survives a resume, resets when the
    * server answers `resumed: false`. */
   private outbox: ReliableFrame[] = [];
@@ -441,6 +459,8 @@ export class CloudEngineUplinkClient {
     this.dialTimer = this.handoffTimer = null;
     if (this.activityTimer) clearInterval(this.activityTimer);
     this.activityTimer = null;
+    if (this.turnsTimer) clearTimeout(this.turnsTimer);
+    this.turnsTimer = null;
     this.connection?.initiateClose(CLOSE.normal, "engine_stopping");
     this.handoff?.initiateClose(CLOSE.normal, "engine_stopping");
     this.connection = this.handoff = null;
@@ -479,6 +499,62 @@ export class CloudEngineUplinkClient {
   reportReadiness(): void {
     if (!this.options.readiness) return;
     this.sendReliable("status.ready", { ...this.options.readiness() });
+  }
+
+  /** New turn journal entries were committed (or the journal became readable). */
+  noteTurnJournal(): void { this.pumpTurns(); }
+
+  /** @internal */
+  turnsAckedForHello(): number {
+    try { return this.options.turns?.acked() ?? 0; } catch { return 0; }
+  }
+
+  /** @internal Sends unsent entries while fewer than 64 are unacked. */
+  pumpTurns(): void {
+    const journal = this.options.turns, connection = this.connection;
+    if (!journal || !connection?.gateOpen || !connection.features.has("turns.v1")) return;
+    let entries: readonly EngineUplinkTurnEvent[];
+    try {
+      const acked = journal.acked(), from = Math.max(acked, this.turnsSentThrough ?? acked);
+      this.turnsSentThrough = from;
+      const room = TURNS_WINDOW - (from - acked);
+      entries = room > 0 ? journal.read(from, room) : [];
+    } catch { return; } // the journal is not readable yet; the next note retries
+    for (const entry of entries) {
+      this.sendReliable("turns.event", { ...entry });
+      this.turnsSentThrough = entry.journalSeq;
+    }
+    this.armTurnsResend();
+  }
+
+  private armTurnsResend(): void {
+    if (this.turnsTimer || this.turnsSentThrough === null || this.turnsSentThrough <= this.turnsAckedForHello()) return;
+    this.turnsTimer = setTimeout(() => {
+      this.turnsTimer = null;
+      this.turnsSentThrough = null;
+      this.pumpTurns();
+    }, this.options.turnsResendMs ?? 60_000);
+    this.turnsTimer.unref?.();
+  }
+
+  /** @internal A `turns.ack` arrived (cumulative: the CP journal is contiguous). */
+  turnsAcked(journalSeq: number): void {
+    const journal = this.options.turns;
+    if (!journal) return;
+    try {
+      if (journalSeq <= journal.acked()) return;
+      journal.ack(journalSeq);
+    } catch { return; }
+    if (this.turnsTimer) clearTimeout(this.turnsTimer);
+    this.turnsTimer = null;
+    this.pumpTurns();
+  }
+
+  /** @internal `sys.error turn_journal_gap`: the CP holds the journal through `expectedJournalSeq - 1`. */
+  turnsGap(expectedJournalSeq: number): void {
+    if (this.turnsSentThrough === null) return;
+    this.turnsSentThrough = Math.min(this.turnsSentThrough, expectedJournalSeq - 1);
+    this.pumpTurns();
   }
 
   /** @internal A validated `cred.revision` arrived on the wire. Applies
@@ -625,6 +701,7 @@ export class CloudEngineUplinkClient {
     // fresh lineage — never transmitted, correctly numbered from s=1 — so
     // they survive to flush at the gate.
     if (!resumed && connection.offeredResume) this.resetLineage();
+    if (!resumed) this.turnsSentThrough = null;
     if (connection.handoff) {
       this.handoff = null;
       const old = this.connection;
@@ -832,7 +909,7 @@ class Connection {
           runtimeVersion: options.runtimeVersion,
           ...options.identity,
           features: [...(options.features ?? [])],
-          lastJournalSeq: 0,
+          lastJournalSeq: this.uplink.turnsAckedForHello(),
           ...(offer ? { resume: offer } : {}),
           ...(options.auth.authCursor() ? { authCursor: options.auth.authCursor() } : {}),
         },
@@ -929,6 +1006,9 @@ class Connection {
         return this.onDrain(frame.d ?? {});
       case "sys.error":
         console.warn(`[engine-uplink] sys.error ${String(frame.d?.code ?? "unknown")}${frame.d?.fatal === true ? " (fatal)" : ""}`);
+        if (frame.d?.code === "turn_journal_gap" && typeof frame.d.expectedJournalSeq === "number" &&
+            Number.isSafeInteger(frame.d.expectedJournalSeq) && frame.d.expectedJournalSeq >= 1)
+          this.uplink.turnsGap(frame.d.expectedJournalSeq);
         return;
       case "auth.keys":
         return this.enqueueAuth(() => this.applyKeys(frame.d ?? {}));
@@ -956,6 +1036,13 @@ class Connection {
             typeof d.deadlineAtMs !== "number" || !Number.isSafeInteger(d.deadlineAtMs) || d.deadlineAtMs < 0)
           return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
         this.uplink.checkpointRequested({ requestId: d.requestId, reason: d.reason, deadlineAtMs: d.deadlineAtMs });
+        return;
+      }
+      case "turns.ack": {
+        const journalSeq = frame.d?.journalSeq;
+        if (typeof journalSeq !== "number" || !Number.isSafeInteger(journalSeq) || journalSeq < 1)
+          return this.initiateClose(CLOSE.frameInvalid, "frame_invalid");
+        this.uplink.turnsAcked(journalSeq);
         return;
       }
       default:
@@ -1052,6 +1139,7 @@ class Connection {
       this.uplink.sendReliable("status.ready", { ...this.uplink.config.readiness() });
     }
     this.uplink.reportActivity(true);
+    this.uplink.pumpTurns();
   }
 
   private onPong(d: Record<string, unknown>): void {

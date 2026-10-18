@@ -19,6 +19,7 @@ import { DatabaseDeviceStreamCatalogSource } from "./device-stream-catalog.js";
 import { DEVICE_STREAM_CATALOG_CHANNEL, startDeviceStreamNotifications } from "./device-stream-notifications.js";
 import { DEVICE_STREAM_PATH } from "./device-stream-protocol.js";
 import { DeviceStreamServer } from "./device-stream-server.js";
+import { DatabaseUplinkTurnStore } from "./uplink-turns.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -267,6 +268,21 @@ d("device stream database paths", () => {
       await wait(() => frames.some(frame => frame.t === "catalog.changed"));
       expect(frames.find(frame => frame.t === "catalog.changed")).toMatchObject({ d: { workspaceId: fixture.workspaceId, version, op: "upsert",
         workspace: { id: fixture.workspaceId, version } } });
+      ws.terminate();
+    });
+
+    it("pushes a turn notification recorded over the uplink to the owner's device session", async () => {
+      await serve();
+      stop = startDeviceStreamNotifications(listenerPool, server, { warn: () => {} });
+      const { ws, frames } = await ownerStream();
+      await new Promise(resolve => setTimeout(resolve, 200));
+      const identity = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+        engineInstanceId: fixture.engineInstanceId, bootId: randomUUID() };
+      await expect(new DatabaseUplinkTurnStore(pool).record(identity,
+        { journalSeq: 1, chatId: "chat-1", turnId: "turn-1", state: "completed", atMs: Date.now() })).resolves.toEqual({ result: "stored" });
+      await wait(() => frames.some(frame => frame.t === "notification"));
+      expect(frames.find(frame => frame.t === "notification")).toMatchObject({ d: { kind: "turn.completed",
+        workspaceId: fixture.workspaceId, chatId: "chat-1", turnId: "turn-1", title: "Turn completed" } });
       ws.terminate();
     });
 

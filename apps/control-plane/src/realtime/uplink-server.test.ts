@@ -13,7 +13,7 @@ import type { UplinkIdleStopResult, UplinkIdleStopStore } from "./uplink-idle.js
 import { UPLINK_ENGINE_LEASE_MS, type UplinkLeaseRenewal, type UplinkLeaseStore } from "./uplink-lease.js";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "./uplink-presence.js";
 import { UPLINK_CLOSE, UPLINK_MAX_BINARY_FRAME_BYTES, UPLINK_PATH, UPLINK_SUBPROTOCOL } from "./uplink-protocol.js";
-import { CloudEngineUplinkServer, type UplinkServerOptions } from "./uplink-server.js";
+import { CloudEngineUplinkServer, type UplinkServerOptions, type UplinkSession } from "./uplink-server.js";
 
 vi.setConfig({ testTimeout: 15_000 });
 
@@ -92,6 +92,7 @@ describe("engine uplink server", () => {
   let credentialPush: boolean;
   let checkpointPush: boolean;
   let leaseFlag: boolean;
+  let turnJournal: boolean;
   let lease: FakeLease;
   let idleFlag: boolean;
   let idle: FakeIdle;
@@ -108,7 +109,7 @@ describe("engine uplink server", () => {
         enabled: (orgId, flag) => orgId === identity.organizationId &&
           (flag === "realtime_uplink" ? enabled : flag === "credential_push" ? credentialPush :
             flag === "engine_lease_over_uplink" ? leaseFlag : flag === "checkpoint_push" ? checkpointPush :
-            flag === "cp_idle_stop" ? idleFlag : false),
+            flag === "cp_idle_stop" ? idleFlag : flag === "turn_journal" ? turnJournal : false),
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
       authSource: {
@@ -150,7 +151,7 @@ describe("engine uplink server", () => {
 
   beforeEach(() => {
     authority = new FakeAuthority(); writes = []; alerts = []; metrics = []; enabled = true; credentialPush = true; authFails = false;
-    lease = new FakeLease(); leaseFlag = true; idle = new FakeIdle(); idleFlag = true; checkpointPush = true;
+    lease = new FakeLease(); leaseFlag = true; idle = new FakeIdle(); idleFlag = true; checkpointPush = true; turnJournal = true;
     capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 300_000 };
     identity = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 3, engineInstanceId: randomUUID(), bootId: randomUUID() };
   });
@@ -475,6 +476,23 @@ describe("engine uplink server", () => {
     expect(peer.ws.readyState).toBe(WebSocket.OPEN);
     peer.send({ t: "relay.reject", d: { channel: 7, code: "capability_invalid" } });
     await expect(peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.frameInvalid });
+  });
+
+  it("negotiates turns.v1 only while turn_journal is on and sends a non-fatal sys.error through the session", async () => {
+    const opened: UplinkSession[] = [];
+    await start({ extensions: [{ feature: "turns.v1", flag: "turn_journal", onOpen: session => { opened.push(session); } }] });
+    turnJournal = false;
+    const off = await connect({ features: ["turns.v1"] });
+    expect(off.welcome.d!.features).toEqual([]);
+    off.peer.ws.terminate();
+    turnJournal = true;
+    const { peer, welcome } = await connect({ features: ["turns.v1"] });
+    expect(welcome.d!.features).toEqual(["turns.v1"]);
+    await until(() => opened.length === 1);
+    opened[0]!.sendError!("turn_journal_gap", "turn journal sequence gap", { expectedJournalSeq: 4 });
+    const error = await peer.next("sys.error");
+    expect(error.s).toBeUndefined();
+    expect(error.d).toEqual({ code: "turn_journal_gap", message: "turn journal sequence gap", fatal: false, expectedJournalSeq: 4 });
   });
 
   it("routes binary relay chunks to the negotiated extension and answers unknown channels with sys.error", async () => {

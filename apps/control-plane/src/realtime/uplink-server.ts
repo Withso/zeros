@@ -55,6 +55,8 @@ export interface UplinkSession {
   /** Queues a reliable frame. Frames queued before the `auth` exchange
    * completes are held and sent after it. False once the session closed. */
   sendReliable(t: string, d: Record<string, unknown>): boolean;
+  /** Sends a non-fatal, unsequenced `sys.error` (contract error codes). */
+  sendError?(code: string, message: string, extra?: Record<string, unknown>): void;
 }
 
 /** Feature modules (credential push, relay) plug in here instead of growing
@@ -710,6 +712,7 @@ class UplinkConnection {
     this.session = {
       connectionId: this.connectionId, identity, features: this.features,
       sendReliable: (t, d) => this.sendReliable(t, d),
+      sendError: (code, message, extra) => { this.send({ t: "sys.error", d: { ...extra, code, message, fatal: false } }); },
     };
     this.send({ t: "sys.welcome", d: {
       protocol, features: [...this.features], resumeToken: this.resumeToken, resumed: this.resumed,

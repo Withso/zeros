@@ -3762,7 +3762,7 @@ export class ZerosEngine {
       auth: capabilityAuth,
       readiness: () => this.cloudEngineUplinkReadiness(),
       activity: () => this.cloudEngineUplinkActivity(),
-      features: ["cred.v1", "lease.v1", "checkpoint.v1", "idle.v1"],
+      features: ["cred.v1", "lease.v1", "checkpoint.v1", "idle.v1", "turns.v1"],
       // Credential-control push (P0.10 C01): a pushed revision runs the same
       // credential-controls exchange the 500 ms poll runs; the poll itself
       // stays as the fallback (see controlsPollIntervalMs at the boot).
@@ -3792,6 +3792,13 @@ export class ZerosEngine {
         if (!established) this.cloudAgentBoot?.rescheduleControls();
       },
       onLease: (leaseExpiresAtMs, sentAtMs) => registration.adoptUplinkLease(leaseExpiresAtMs, sentAtMs),
+      // The boot's journal reads stay valid through the final drain; before
+      // activation they read empty and the activation note sends them.
+      turns: {
+        read: (afterSeq, limit) => this.cloudAgentBoot?.turnJournal?.turnJournal(afterSeq, limit) ?? [],
+        acked: () => this.cloudAgentBoot?.turnJournal?.turnJournalAcked() ?? 0,
+        ack: journalSeq => this.cloudAgentBoot?.turnJournal?.acknowledgeTurnJournal(journalSeq),
+      },
       onCheckpointRequest: () => registration.checkpointRequested(),
       onCheckpointPushChange: () => registration.uplinkCheckpointPushChanged(),
       onReverifyAuthority: () => registration.requestHeartbeatSoon(),
@@ -4591,6 +4598,7 @@ export class ZerosEngine {
       // A successful poll clears the uplink's failed-push mark, so a
       // transient push failure recovers the slow cadence after one poll.
       controlsExchange: ok => { if (ok) this.cloudEngineUplink?.noteCredentialExchangeSucceeded(); },
+      turnJournalChanged: () => this.cloudEngineUplink?.noteTurnJournal(),
       startsAllowed: () => !this.cloudRuntimeHandoffFenced && !this.cloudRuntimeCheckpointQuiescing && !this.cloudLegacyResidentRequiresFreshView,
       isAdmittedCwd: cwd => {
         try {

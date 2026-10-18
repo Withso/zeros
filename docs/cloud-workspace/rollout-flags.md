@@ -44,6 +44,7 @@ registered `whileFeedUnavailable` value:
 | `engine_lease_over_uplink` | retain | Changes which path renews the engine lease, not who may hold it: every renewal re-checks authority in SQL and the HTTP heartbeat stays as the fallback. A flip closes the affected uplinks (`1001 features_changed`), so flapping would bounce engines between the two paths. |
 | `checkpoint_push` | retain | Transport choice for a timing hint; the heartbeat still delivers and fences every checkpoint request, and the long-poll remains as fallback. A flip closes the affected uplinks (`1001 features_changed`). |
 | `cp_idle_stop` | retain | Moves who decides an idle stop, not whether the engine proves idleness: the engine cancels a request it cannot prove and its own timer resumes once the uplink is gone. A flip closes the affected uplinks (`1001 features_changed`). |
+| `turn_journal` | retain | Transport choice: the engine keeps its turn journal either way and sends it only over an uplink that negotiated `turns.v1`. A flip closes the affected uplinks (`1001 features_changed`). |
 
 `retain` keeps the last loaded value, still corrected by the safety refresh.
 Use `off` for any new flag that relaxes a database check or a security
@@ -90,6 +91,12 @@ a lost uplink or an unavailable database never stops a workspace. Turning the
 flag off closes the organization's `idle.v1` uplinks with
 `1001 features_changed`; the redial negotiates without it, and the engine's
 own idle timer decides again.
+
+`turn_journal` requires `realtime_uplink`: the engine offers `turns.v1` only
+on an uplink this flag allows. Turning the flag off closes the organization's
+`turns.v1` uplinks with `1001 features_changed`; the engine keeps its journal
+and sends the unacknowledged entries on the next uplink that negotiates the
+feature. Rows already stored are kept.
 
 ## Changing a flag
 

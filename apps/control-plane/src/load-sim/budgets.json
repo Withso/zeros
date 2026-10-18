@@ -39,6 +39,11 @@
       "statements": 8,
       "roundTrips": 5
     },
+    "engine.uplinkTurnEvent": {
+      "transactions": 1,
+      "statements": 12,
+      "roundTrips": 9
+    },
     "engine.checkpointHintWait": {
       "transactions": 1,
       "statements": 7,
