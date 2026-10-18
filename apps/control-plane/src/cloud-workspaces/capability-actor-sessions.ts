@@ -72,7 +72,7 @@ export class DatabaseCapabilityActorSessionService {
       // another admission must not take that slot before renewal commits.
       // Legacy issue holds the workspace update lock; legacy capability
       // admission shares this advisory fence.
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`cloud-actor-session-limit:${input.workspaceId.toLowerCase()}`]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) /*lock_purpose='actor-session-capacity'*/", [`cloud-actor-session-limit:${input.workspaceId.toLowerCase()}`]);
       const authority = await authorizeCloudWorkspaceActor(tx, { workspaceId: input.workspaceId,
         organizationId: input.organizationId, actorUserId: userId, capability: "read" });
       if (authority.role !== role) rejected();

@@ -288,7 +288,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
       if(authority.role!==role)rejected();
       // Share the capability-mode capacity fence; issue() already owns the
       // exclusive workspace lock before it counts either persisted kind.
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",[`cloud-actor-session-limit:${input.workspaceId.toLowerCase()}`]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) /*lock_purpose='actor-session-capacity'*/",[`cloud-actor-session-limit:${input.workspaceId.toLowerCase()}`]);
       const active=(await tx.query<{count:string}>(`SELECT count(*) FROM cloud_workspace_actor_sessions
         WHERE workspace_id=$1 AND revoked_at IS NULL AND session_expires_at>clock_timestamp()
           AND ((consumed_at IS NULL AND admission_expires_at>clock_timestamp()) OR

@@ -14,7 +14,8 @@ import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test
 
 /** Synthetic content plus real enrollment/transfer and actor-service writes.
  * No provider or object-store network calls are involved. */
-export async function seedWorkspaceDeletionGraph(pool: pg.Pool, runtimeTransfer: boolean | number = true) {
+export async function seedWorkspaceDeletionGraph(pool: pg.Pool, runtimeTransfer: boolean | number = true,
+  seedActorGraph = seedWorkspaceDeletionActorGraph) {
   const fixture = await seedReadyCloudWorkspace(pool);
   const scope = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
     generation: 1, engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
@@ -59,19 +60,9 @@ export async function seedWorkspaceDeletionGraph(pool: pg.Pool, runtimeTransfer:
   [fixture.organizationId, fixture.workspaceId, fixture.userId, checkpointId, blob.id]);
   await pool.query(`INSERT INTO workspace_blob_references(blob_id,org_id,workspace_id,reference_kind,reference_id)
     VALUES($1,$2,$3,'checkpoint_manifest',$4)`, [blob.id, fixture.organizationId, fixture.workspaceId, checkpointId]);
-  const actor = await seedRecordedCloudWorkspaceActor(pool, fixture, { executionId: "deletion-execution" });
-  const commands = new DatabaseCloudWorkspaceCommandService({ pool });
-  await commands.mutate(actor, { conversationId: "deletion-chat", operationId: randomUUID(), expectedRevision: 0,
-    action: { kind: "enqueue", commandId: randomUUID(), payload: { agentId: "claude", modeRevision: 0,
-      userMessageId: randomUUID(), prompt: [{ type: "text", text: "synthetic deletion prompt" }] } } });
-  await commands.claim(actor, "deletion-chat", "deletion-execution");
-  await new DatabaseCloudWorkspaceEventService({ pool }).request(actor, { kind: "append", batchId: randomUUID(),
-    events: [{ sequence: 1, frame: { id: randomUUID(), source: "engine", timestamp: 0,
-      type: "AGENT_SESSION_UPDATE", content: "synthetic deletion event",
-      cloudStream: { streamId: fixture.engineInstanceId, sequence: 1 } } }] });
-  await new DatabaseCloudWorkspaceActionService({ pool }).request(actor, { kind: "begin", admissible: true,
-    action: { operationId: randomUUID(), conversationId: "deletion-chat", executionId: "deletion-execution",
-      kind: "permission", requestId: randomUUID(), payload: { response: { outcome: "cancelled" } } } });
+  // Populated-schema migration tests supply a writer pinned to that schema.
+  // Every ordinary deletion fixture still exercises today's actor services.
+  await seedActorGraph(pool, fixture);
   await pool.query(`INSERT INTO cloud_workspace_setup_attestations(
     setup_run_id,workspace_id,generation,org_id,execution_fence,image_ref,image_source_commit,
     repository_revision,repository_commit,settings_version,settings_snapshot_sha256,engine_instance_id,
@@ -118,6 +109,22 @@ export async function seedWorkspaceDeletionGraph(pool: pg.Pool, runtimeTransfer:
   [fixture.workspaceId, fixture.organizationId, writerEpoch, digest, sourceId,
     JSON.stringify({ kind: "mutation", mutationId: sourceId, operation: "edit" })]);
   return { ...fixture, current, objects, store, blobId: blob.id, bindingId, checkpointId };
+}
+
+async function seedWorkspaceDeletionActorGraph(pool: pg.Pool, fixture: ReadyCloudWorkspaceFixture) {
+  const actor = await seedRecordedCloudWorkspaceActor(pool, fixture, { executionId: "deletion-execution" });
+  const commands = new DatabaseCloudWorkspaceCommandService({ pool });
+  await commands.mutate(actor, { conversationId: "deletion-chat", operationId: randomUUID(), expectedRevision: 0,
+    action: { kind: "enqueue", commandId: randomUUID(), payload: { agentId: "claude", modeRevision: 0,
+      userMessageId: randomUUID(), prompt: [{ type: "text", text: "synthetic deletion prompt" }] } } });
+  await commands.claim(actor, "deletion-chat", "deletion-execution");
+  await new DatabaseCloudWorkspaceEventService({ pool }).request(actor, { kind: "append", batchId: randomUUID(),
+    events: [{ sequence: 1, frame: { id: randomUUID(), source: "engine", timestamp: 0,
+      type: "AGENT_SESSION_UPDATE", content: "synthetic deletion event",
+      cloudStream: { streamId: fixture.engineInstanceId, sequence: 1 } } }] });
+  await new DatabaseCloudWorkspaceActionService({ pool }).request(actor, { kind: "begin", admissible: true,
+    action: { operationId: randomUUID(), conversationId: "deletion-chat", executionId: "deletion-execution",
+      kind: "permission", requestId: randomUUID(), payload: { response: { outcome: "cancelled" } } } });
 }
 
 async function transferWorkspace(pool: pg.Pool, fixture: ReadyCloudWorkspaceFixture,

@@ -6,6 +6,7 @@ import { planMigrations, runMigrations } from "../migrate.js";
 import { confirmWorkspaceDeletion, seedWorkspaceDeletionGraph } from "./deletion-test-fixtures.js";
 import * as computerWorkspaceSource from "./computer-workspace-source.js";
 import { loadPrePurgeComputerWorkspaceSource } from "./data-purge-legacy-source.test-fixtures.js";
+import { seedPrePurgeActorGraph } from "./data-purge-legacy-actor.test-fixtures.js";
 import { CloudWorkspaceOperationsWorker } from "./operations.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -32,13 +33,21 @@ suite("data-purge expansion on the populated previous schema", () => {
       }
     } finally { tx.release(); }
     expect((await pool.query("SELECT to_regclass('cloud_computer_template_snapshots') AS relation")).rows[0].relation).toBeNull();
+    expect((await pool.query(`SELECT column_name FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='cloud_workspace_actor_sessions' AND column_name='session_kind'`)).rows).toEqual([]);
     // Keep admission on the actual pre-0142 reader while seeding the old
     // schema. Restore today's reader before migration and every purge check.
     const legacyReader = vi.spyOn(computerWorkspaceSource, "loadComputerWorkspaceSource")
       .mockImplementation(loadPrePurgeComputerWorkspaceSource);
     let old: Awaited<ReturnType<typeof seedWorkspaceDeletionGraph>>;
-    try { old = await seedWorkspaceDeletionGraph(pool, 2); }
+    try { old = await seedWorkspaceDeletionGraph(pool, 2, seedPrePurgeActorGraph); }
     finally { legacyReader.mockRestore(); }
+    const actorTables = ["cloud_workspace_actor_sessions", "cloud_workspace_conversation_controls",
+      "cloud_workspace_commands", "cloud_workspace_command_operations", "cloud_workspace_event_streams",
+      "cloud_workspace_stream_events", "cloud_workspace_action_receipts"];
+    const actorCounts = async () => Promise.all(actorTables.map(async table =>
+      (await pool.query(`SELECT count(*)::int AS count FROM ${table} WHERE workspace_id=$1`, [old.workspaceId])).rows[0].count));
+    expect(await actorCounts()).toEqual(actorTables.map(() => 1));
     const retained = ["cloud_workspaces", "cloud_workspace_generations", "cloud_workspace_engine_instances",
       "cloud_workspace_generation_transitions", "cloud_workspace_runtime_transitions", "cloud_workspace_runtime_enrollments",
       "cloud_workspace_allocation_owners", "cloud_workspace_allocation_transfers", "workspace_billing_epochs", "audit_log"];
@@ -50,6 +59,10 @@ suite("data-purge expansion on the populated previous schema", () => {
     expect(await planMigrations(pool)).toEqual({ pendingMigrations, controlledApprovals: [] });
     expect(await runMigrations(pool, { env: { NODE_ENV: "production" } })).toEqual(pendingMigrations);
     expect(await snapshot()).toEqual(before);
+    expect(await actorCounts()).toEqual(actorTables.map(() => 1));
+    expect((await pool.query(`SELECT session_kind,capability_source_session_id,capability_claims
+      FROM cloud_workspace_actor_sessions WHERE workspace_id=$1`, [old.workspaceId])).rows)
+      .toEqual([{ session_kind: "legacy", capability_source_session_id: null, capability_claims: null }]);
     expect(await runMigrations(pool, { env: { NODE_ENV: "production" } })).toEqual([]);
     await expect(withSystemTx(pool, tx => tx.query("UPDATE cloud_workspaces SET agent_boot_id=NULL WHERE id=$1", [old.workspaceId])))
       .rejects.toMatchObject({ code: "23514" });

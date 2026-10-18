@@ -28,3 +28,18 @@ Expired renewal is a new live-capacity admission. Share the same serialized
 capacity fence with admission before row/source/key waits; ordinary live
 renewal retains its existing slot. Test expired recovery at capacity, renewal
 of a live row at capacity, and two recoveries contending for the last slot.
+
+CI exposed two integration gaps: capacity locks lacked the registered static
+SQLCommenter purpose, and a populated migration fixture called current actor
+readers against schema 0141. Keep lock purposes closed and independent of lock
+keys. Pin historical fixture writes to their old schema; exercise current
+services again only after applying the upgrade. `database-lock-tags.test.ts`
+enforces the tags, and `data-purge-migration.integration.test.ts` preserves the
+complete historical actor graph across migration before purging both old and
+new service-backed workspaces.
+
+The full sweep also exposed a local fixture mismatch: an OS-user-initialized
+PostgreSQL cluster had no `postgres` role, which the hosted Dev membership
+guard names explicitly. Match CI's role fixture before that check; never relax
+the production privilege guard to accommodate a differently initialized test
+cluster. Preserve the environmental failure and the identical rerun as evidence.
