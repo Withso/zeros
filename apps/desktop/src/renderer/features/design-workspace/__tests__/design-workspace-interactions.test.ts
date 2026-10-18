@@ -104,10 +104,10 @@ describe("design workspace interaction wiring", () => {
       "publishSelection(frame, { selected: true, reveal: true });",
     );
     expect(source).toContain(
-      "publishSelection(selectedFrame, { selected: view.frameSelected });",
+      "publishSelection(selectedFrame, { selected: view.frameSelected, explicit: false });",
     );
     expect(source).toContain(
-      "selected && view.frameSelected && !selectedElement;",
+      "view.selectedTargets.some(target => target.frame === frame.file && !target.nodeId)",
     );
     // Body hit tests use the same stale-response guard as other selections.
     expect(source).toContain("selectDesignFrameBodyAtLocation({");

@@ -37,7 +37,7 @@ import { ensureCloudPrimaryWorkspace } from "../../git/cloud-primary-workspace";
 import { closeState, setStateRootForTesting } from "../../git/state";
 import type { EngineMessage } from "../../types";
 import { WorkspaceService } from "../service";
-import { openDesignFramePreview } from "../../../renderer/platform/bridge/design-context-bridge";
+import { captureDesignFrameContext, createDesignFrameContext, inspectDesignFrameContext, openDesignFramePreview } from "../../../renderer/platform/bridge/design-context-bridge";
 import { setDesignCaptureConfig } from "../../design/capture-client";
 import { startDesignCaptureService } from "../../design/capture-service";
 import { runDesignVerificationCli } from "../../design/verification-cli";
@@ -280,6 +280,14 @@ describe("cloud Design checkout round trips", () => {
       const inspected = await workspaceOp(bridge, "design.context.inspect", { workspaceId: key, reference: opened.reference }) as { reference: { workspaceId: string }; verification: { captureAvailable: boolean } };
       expect(inspected.reference.workspaceId).toBe(key);
       expect(inspected.verification.captureAvailable).toBe(true);
+      const contextReference = await createDesignFrameContext(bridge, key, frame.file, undefined, directoryId);
+      expect(await inspectDesignFrameContext(bridge, contextReference)).toMatchObject({ status: "ready", reference: contextReference });
+      const contextCapture = await captureDesignFrameContext(bridge, contextReference);
+      expect(contextCapture.reference).toEqual(contextReference);
+      expect(Buffer.from(contextCapture.data, "base64").readUInt32BE(16)).toBeGreaterThan(0);
+      await expect(captureDesignFrameContext(client("prompter", "prompter").bridge, contextReference)).rejects.toThrow(/actor/);
+      await expect(createDesignFrameContext(client("prompter", "prompter").bridge, key, frame.file)).rejects.toThrow(/actor/);
+      await expect(workspaceOp(bridge, "design.context.capture", { workspaceId: key, reference: { ...contextReference, workspaceId: "foreign" } })).rejects.toThrow();
       // The host-local route still opens its own native reference unchanged.
       const local = await service.handle("design.verification.open", { workspaceId: "local-main", directoryId, frame: frame.file }) as typeof opened;
       expect(local.reference.workspaceId).toBe("local-main");

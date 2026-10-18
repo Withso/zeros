@@ -55,6 +55,7 @@
 import type { ComposerDraft, EditDraftStash, WorkspaceState } from "./store";
 import { liveChatDraftEntries } from "../features/agent/composer-live-drafts";
 import { liveEditDraftEntries } from "../features/agent/edit-live-drafts";
+import { composerDraftHasPayload } from "./composer-draft-payload";
 
 const STORAGE_KEY = "zeros:composer-drafts:v1";
 const DEBOUNCE_MS = 500;
@@ -129,12 +130,6 @@ function parseAutoSendRecord(raw: unknown): Record<string, number> {
   return out;
 }
 
-/** True when this draft still carries something an agent could receive. */
-function draftHasPayload(draft: ComposerDraft | undefined): boolean {
-  if (!draft) return false;
-  return draft.text.trim().length > 0 || draft.attachments.length > 0;
-}
-
 /** The parked first turns a fresh boot may still dispatch, keyed exactly as
  *  the store keeps them (chatId → queuedAt).
  *
@@ -155,7 +150,7 @@ export function recoverPendingAutoSend(
     if (Math.abs(now - queuedAt) > PENDING_AUTO_SEND_RECOVERY_MAX_AGE_MS) {
       continue;
     }
-    if (!draftHasPayload(persisted.chats[chatId])) continue;
+    if (!composerDraftHasPayload(persisted.chats[chatId])) continue;
     armed[chatId] = queuedAt;
   }
   return armed;
@@ -212,7 +207,7 @@ function withoutAttachments(snapshot: PersistedDrafts): PersistedDrafts {
     chats[id] =
       d.attachments.length === 0
         ? d
-        : { text: d.text, attachments: [], json: null };
+        : { ...d, attachments: [], json: null };
   }
   const edits: PersistedDrafts["edits"] = {};
   for (const [id, d] of Object.entries(snapshot.edits)) {
@@ -306,7 +301,7 @@ function snapshotOf(state: WorkspaceState): PersistedDrafts {
   const owners = state.chats && new Set(state.chats.map((chat) => chat.id));
   for (const [id, draft] of liveChatDraftEntries()) {
     if (owners && !owners.has(id)) continue;
-    if (draft.text.trim() || draft.attachments.length > 0) chats[id] = draft;
+    if (composerDraftHasPayload(draft) || draft.designFrame === null) chats[id] = draft;
     else delete chats[id];
   }
   for (const [key, { chatId, draft }] of liveEditDraftEntries()) {

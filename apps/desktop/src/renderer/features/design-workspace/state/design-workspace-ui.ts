@@ -11,6 +11,7 @@ import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import { designPageIdSchema, type DesignPageSummary } from "@zeros/protocol/design-pages";
 import { create } from "zustand";
 import { normalizeDesignCanvasBackground } from "../design-canvas-background";
+import { designSelectionTargetKey, type DesignSelectionTarget } from "../design-selected-targets";
 
 const STORAGE_KEY = "zeros:design-workspace-ui-v1";
 const MAX_WORKSPACES = 32;
@@ -20,6 +21,8 @@ export const DESIGN_MIN_ZOOM = 0.01;
 export const DESIGN_MAX_ZOOM = 256;
 
 export type DesignBottomPanel = "layers" | "assets";
+let nextSelectionEvent = 0;
+let nextOwnerRevision = 0;
 
 export interface DesignWorkspaceViewState {
   directoryId?: string;
@@ -36,6 +39,9 @@ export interface DesignWorkspaceViewState {
   selectedNodeId: string | null;
   /** Primary-first stable identities for additive canvas/layer selection. */
   selectedNodeIds: string[];
+  selectedTargets: readonly DesignSelectionTarget[];
+  selectionEvent?: number;
+  ownerRevision?: number;
   panel: DesignBottomPanel;
   codeView: boolean;
   activeTheme: string | null;
@@ -49,7 +55,7 @@ export interface DesignWorkspaceViewState {
 }
 
 export type DesignPageViewState = Pick<DesignWorkspaceViewState,
-  "selectedFrame" | "frameSelected" | "selectedNodeId" | "selectedNodeIds" |
+  "selectedFrame" | "frameSelected" | "selectedNodeId" | "selectedNodeIds" | "selectedTargets" |
   "codeView" | "canvasBackground" | "zoom" | "panX" | "panY" | "updatedAt"
 >;
 
@@ -57,12 +63,13 @@ export interface DesignPageOwner {
   workspaceId: string;
   directoryId?: string;
   pageId?: string;
+  revision?: number;
 }
 
 function pageView(view: DesignWorkspaceViewState): DesignPageViewState {
-  const { selectedFrame, frameSelected, selectedNodeId, selectedNodeIds,
+  const { selectedFrame, frameSelected, selectedNodeId, selectedNodeIds, selectedTargets,
     codeView, canvasBackground, zoom, panX, panY, updatedAt } = view;
-  return { selectedFrame, frameSelected, selectedNodeId, selectedNodeIds,
+  return { selectedFrame, frameSelected, selectedNodeId, selectedNodeIds, selectedTargets,
     codeView, canvasBackground, zoom, panX, panY, updatedAt };
 }
 
@@ -80,16 +87,16 @@ function samePageView(left: DesignPageViewState, right: DesignPageViewState) {
   return left.selectedFrame === right.selectedFrame && left.frameSelected === right.frameSelected &&
     left.selectedNodeId === right.selectedNodeId && left.selectedNodeIds.length === right.selectedNodeIds.length &&
     left.selectedNodeIds.every((id, index) => id === right.selectedNodeIds[index]) &&
+    JSON.stringify(left.selectedTargets) === JSON.stringify(right.selectedTargets) &&
     left.codeView === right.codeView && left.canvasBackground === right.canvasBackground &&
     left.zoom === right.zoom && left.panX === right.panX && left.panY === right.panY;
 }
 
 function validatePageSelection(view: DesignPageViewState, page: DesignPageSummary): DesignPageViewState {
-  if (view.selectedFrame && page.frameFiles.includes(view.selectedFrame)) return view;
-  const selectedFrame = page.frameFiles[0] ?? null;
-  if (view.selectedFrame === selectedFrame) return view;
-  return { ...view, selectedFrame, frameSelected: false, selectedNodeId: null,
-    selectedNodeIds: [], codeView: false };
+  const targets = view.selectedTargets.filter(target => page.frameFiles.includes(target.frame));
+  if (view.selectedFrame && page.frameFiles.includes(view.selectedFrame) && targets.length === view.selectedTargets.length) return view;
+  const selectedFrame = view.selectedFrame && page.frameFiles.includes(view.selectedFrame) ? view.selectedFrame : page.frameFiles[0] ?? null;
+  return { ...view, ...designSelectionPatch(targets, selectedFrame), ...(selectedFrame === view.selectedFrame ? {} : { codeView: false }) };
 }
 
 export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
@@ -100,6 +107,7 @@ export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
     frameSelected: false,
     selectedNodeId: null,
     selectedNodeIds: [],
+    selectedTargets: [],
     panel: "layers",
     codeView: false,
     activeTheme: null,
@@ -131,6 +139,34 @@ export function isValidDesignNodeId(value: unknown): value is string {
     if (code < 32 || code === 127) return false;
   }
   return true;
+}
+
+export function normalizeDesignSelectedTargets(value: unknown, onOverflow?: () => void): DesignSelectionTarget[] {
+  if (!Array.isArray(value)) return [];
+  const unique = new Map<string, DesignSelectionTarget>();
+  for (const target of value) {
+    if (!target || typeof target !== "object" || !isDesignFrameFile(target.frame) ||
+      (target.nodeId !== undefined && !isValidDesignNodeId(target.nodeId))) continue;
+    const normalized = { frame: target.frame, ...(target.nodeId ? { nodeId: target.nodeId } : {}) };
+    unique.set(designSelectionTargetKey(normalized), normalized);
+    if (unique.size > DESIGN_SELECTION_NODE_LIMIT) {
+      onOverflow?.();
+      break;
+    }
+  }
+  return [...unique.values()].slice(0, DESIGN_SELECTION_NODE_LIMIT);
+}
+
+function designSelectionPatch(targets: readonly DesignSelectionTarget[], activeFrame: string | null) {
+  const selectedTargets = normalizeDesignSelectedTargets(targets);
+  const primary = selectedTargets[0];
+  return {
+    selectedTargets,
+    selectedFrame: primary?.frame ?? activeFrame,
+    frameSelected: Boolean(primary && !primary.nodeId),
+    selectedNodeId: primary?.nodeId ?? null,
+    selectedNodeIds: primary?.nodeId ? selectedTargets.filter(target => target.frame === primary.frame && target.nodeId).map(target => target.nodeId!) : [],
+  };
 }
 
 export function normalizeDesignWorkspaceView(
@@ -171,6 +207,7 @@ export function normalizeDesignWorkspaceView(
       selectedNodeId === null,
     selectedNodeId,
     selectedNodeIds,
+    selectedTargets: [],
     panel: record.panel === "assets" ? "assets" : "layers",
     codeView: record.codeView === true,
     activeTheme:
@@ -199,6 +236,9 @@ export function normalizeDesignWorkspaceView(
         ? record.updatedAt
         : 0,
   };
+  Object.assign(normalized, designSelectionPatch(Array.isArray(record.selectedTargets) ? record.selectedTargets :
+    selectedFrame ? selectedNodeId ? selectedNodeIds.map(nodeId => ({ frame: selectedFrame, nodeId })) :
+      record.frameSelected === true ? [{ frame: selectedFrame }] : [] : [], selectedFrame));
   const activePageId = designPageIdSchema.safeParse(record.activePageId);
   if (activePageId.success) normalized.activePageId = activePageId.data;
   if ((record.byPage && typeof record.byPage === "object" && !Array.isArray(record.byPage)) || activePageId.success) {
@@ -252,7 +292,7 @@ function pruneViews(
 function writeViews(views: Record<string, DesignWorkspaceViewState>): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(views));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(views, (key, value) => key === "selectionEvent" || key === "ownerRevision" ? undefined : value));
   } catch {
     // Navigation persistence is best-effort in private/quota-limited storage.
   }
@@ -300,8 +340,9 @@ interface DesignWorkspaceUiStore {
     frame: string,
     nodeId: string | null,
     nodeIds?: readonly string[],
-    options?: { frameSelected?: boolean; owner?: DesignPageOwner },
+    options?: { frameSelected?: boolean; owner?: DesignPageOwner; additive?: boolean; toggle?: boolean; explicit?: boolean },
   ): void;
+  setSelectedTargets(workspaceId: string, targets: readonly DesignSelectionTarget[], options?: { owner?: DesignPageOwner; activeFrame?: string | null; explicit?: boolean }): void;
   setPanels(workspaceId: string, panels: Partial<Pick<DesignWorkspaceViewState, "layersVisible" | "inspectorVisible">>): void;
   setPanel(workspaceId: string, panel: DesignBottomPanel): void;
   setCodeView(workspaceId: string, codeView: boolean): void;
@@ -329,6 +370,10 @@ function updateWorkspaceView(
     updatedAt: Date.now(),
     byPage: undefined,
   });
+  next.selectionEvent = patch.selectionEvent ?? previous.selectionEvent;
+  next.ownerRevision = (previous.directoryId !== undefined && previous.directoryId !== next.directoryId) ||
+    (previous.activePageId !== undefined && previous.activePageId !== next.activePageId)
+    ? ++nextOwnerRevision : previous.ownerRevision;
   if (next.activePageId) {
     const memory = Object.hasOwn(patch, "byPage") ? patch.byPage : previous.byPage;
     next.byPage = boundPageViews({ ...memory, [next.activePageId]: pageView(next) }, next.activePageId);
@@ -370,7 +415,8 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
           previous.activePageId === activePageId && samePageView(previous, active) &&
           Object.keys(previous.byPage ?? {}).length === Object.keys(bounded).length &&
           Object.entries(bounded).every(([id, view]) => savedPage(previous.byPage, id) === view)) return state;
-        const next = { ...base, ...active, ...(directoryId ? { directoryId } : {}), activePageId, byPage: bounded, updatedAt: Date.now() };
+        const next = { ...base, ...active, ...(directoryId ? { directoryId } : {}), activePageId, byPage: bounded, updatedAt: Date.now(),
+          ownerRevision: replaced || (previous.activePageId !== undefined && previous.activePageId !== activePageId) ? ++nextOwnerRevision : previous.ownerRevision };
         const byWorkspace = pruneViews({ ...state.byWorkspace, [workspaceId]: next });
         persistViews(byWorkspace);
         return { byWorkspace };
@@ -394,6 +440,7 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           selectedFrame,
+          selectedTargets: state.byWorkspace[workspaceId]?.selectedFrame === selectedFrame ? state.byWorkspace[workspaceId]?.selectedTargets ?? [] : [],
           frameSelected:
             state.byWorkspace[workspaceId]?.selectedFrame === selectedFrame
               ? state.byWorkspace[workspaceId]?.frameSelected
@@ -421,18 +468,25 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       options,
     ) {
       if (options?.owner && (options.owner.workspaceId !== workspaceId || !isCurrentDesignPageOwner(options.owner))) return;
-      set((state) => ({
-        byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
-          selectedFrame,
-          frameSelected: selectedNodeId
-            ? false
-            : (options?.frameSelected ?? false),
-          selectedNodeId,
-          selectedNodeIds: selectedNodeId
-            ? [selectedNodeId, ...(selectedNodeIds ?? [])]
-            : [],
-        }),
-      }));
+      set((state) => {
+        const previous = state.byWorkspace[workspaceId];
+        const requested = normalizeDesignSelectedTargets(selectedNodeId ? [selectedNodeId, ...(selectedNodeIds ?? [])].map(nodeId => ({ frame: selectedFrame, nodeId })) : options?.frameSelected ? [{ frame: selectedFrame }] : []);
+        const old = previous?.selectedTargets ?? [];
+        const removed = options?.toggle && requested.length === 1 && old.some(target => designSelectionTargetKey(target) === designSelectionTargetKey(requested[0]));
+        const targets = options?.additive ? removed ? old.filter(target => designSelectionTargetKey(target) !== designSelectionTargetKey(requested[0])) : [...requested, ...old] : requested;
+        return { byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
+          ...designSelectionPatch(targets, selectedFrame),
+          selectionEvent: options?.explicit === false ? previous?.selectionEvent : ++nextSelectionEvent,
+        }) };
+      });
+    },
+
+    setSelectedTargets(workspaceId, targets, options) {
+      if (options?.owner && (options.owner.workspaceId !== workspaceId || !isCurrentDesignPageOwner(options.owner))) return;
+      set(state => ({ byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
+        ...designSelectionPatch(targets, options?.activeFrame ?? state.byWorkspace[workspaceId]?.selectedFrame ?? null),
+        selectionEvent: options?.explicit === false ? state.byWorkspace[workspaceId]?.selectionEvent : ++nextSelectionEvent,
+      }) }));
     },
 
     setPanels(workspaceId, panels) {
@@ -522,12 +576,13 @@ export function designWorkspaceView(
 
 export function captureDesignPageOwner(workspaceId: string): DesignPageOwner {
   const view = designWorkspaceView(workspaceId);
-  return { workspaceId, directoryId: view.directoryId, pageId: view.activePageId };
+  return { workspaceId, directoryId: view.directoryId, pageId: view.activePageId, revision: view.ownerRevision ?? 0 };
 }
 
 export function isCurrentDesignPageOwner(owner: DesignPageOwner): boolean {
   const current = designWorkspaceView(owner.workspaceId);
-  return current.directoryId === owner.directoryId && current.activePageId === owner.pageId;
+  return current.directoryId === owner.directoryId && current.activePageId === owner.pageId &&
+    (owner.revision === undefined || owner.revision === (current.ownerRevision ?? 0));
 }
 
 /** Cold/revalidating catalogs must never prune remembered page identity. */

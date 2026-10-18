@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/state/composer-draft-payload.ts",
+  "before": "return Boolean(draft && (draft.text.trim().length > 0 || draft.attachments.length > 0 || hasDesignFrameAttachmentSelection(draft.designFrame)));",
+  "after": "return Boolean(draft && (draft.text.trim().length > 0 || draft.attachments.length > 0));"
+}

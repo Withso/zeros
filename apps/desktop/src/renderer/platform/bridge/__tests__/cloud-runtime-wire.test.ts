@@ -17,6 +17,14 @@ const scope: CloudRuntimeScope = {
 const key = cloudWorkspaceKey(scope);
 
 describe("cloud runtime wire routing", () => {
+  it("maps capture reference ownership in both directions and rejects foreign references", () => {
+    const reference = { version: 1, workspaceId: key, directoryId: "directory", frame: "a.html", frameId: "frame", revision: "a".repeat(24) };
+    const message = { type: "WORKSPACE_REQUEST", op: "design.context.capture", params: { workspaceId: key, reference } };
+    expect(cloudOutgoing(scope, message).params).toMatchObject({ workspaceId: scope.engineWorkspaceId, reference: { workspaceId: scope.engineWorkspaceId } });
+    expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: message.op, result: { reference: { ...reference, workspaceId: scope.engineWorkspaceId }, data: "fixture" } }).result)
+      .toMatchObject({ reference, data: "fixture" });
+    expect(() => cloudOutgoing(scope, { ...message, params: { ...message.params, reference: { ...reference, workspaceId: "foreign" } } })).toThrow(/another workspace/);
+  });
   it.each([
     "identity", "list", "create", "pause", "resume", "remove", "divergences", "sync", "relocate",
   ])("keeps cloudReplica.%s on this Mac even with a cloud workspace parameter", (operation) => {

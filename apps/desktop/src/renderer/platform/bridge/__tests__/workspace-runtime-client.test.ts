@@ -1099,7 +1099,7 @@ describe("workspace runtime routing", () => {
     client.dispose();
   });
 
-  it.each(["design.context.create", "design.context.inspect", "design.verification.open"])("keeps Local %s references outside cloud wire translation", async op => {
+  it.each(["design.context.create", "design.context.inspect", "design.context.capture", "design.verification.open"])("keeps Local %s references outside cloud wire translation", async op => {
     const reference = { workspaceId: "ws_local", directoryId: "local-design", frame: "page-1/home.html" };
     const reply = { type: "WORKSPACE_RESPONSE", op, result: { reference, previewUrl: "http://127.0.0.1:12345/preview/" } } as BridgeMessage;
     const local = vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue(reply);

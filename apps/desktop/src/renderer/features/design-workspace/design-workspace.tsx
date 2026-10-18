@@ -27,11 +27,12 @@ import { clearWorkspaceSettling } from "../../state/pending-workspaces";
 import { resolveDesignCanvasDefaultBackground } from "./design-canvas-background";
 import { type DesignMotionPropertyRequest } from "./design-motion-timeline";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
-import { selectDesignFrame } from "./state/design-selection";
+import { selectDesignFrame, selectDesignTargets } from "./state/design-selection";
 import { deleteDesignFrameCached } from "./state/design-workspace-cache";
 import {
   bindDesignWorkspacePages,
   captureDesignPageOwner,
+  designWorkspaceView,
   isCurrentDesignPageOwner,
   useDesignWorkspaceUiStore,
 } from "./state/design-workspace-ui";
@@ -136,8 +137,9 @@ export function DesignWorkspaceColumn({
     workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined,
   );
   const pageSnapshot = useDesignPageSnapshot(snapshot.data, activePageId);
-  const pageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: pageSnapshot?.directoryId, pageId: activePageId } : undefined,
-    [workspaceId, activePageId, pageSnapshot?.directoryId]);
+  const ownerRevision = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.ownerRevision ?? 0 : 0);
+  const pageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: pageSnapshot?.directoryId, pageId: activePageId, revision: ownerRevision } : undefined,
+    [workspaceId, activePageId, pageSnapshot?.directoryId, ownerRevision]);
   useLayoutEffect(() => {
     if (!surfaceActive || !workspaceId || !pageSnapshot || snapshot.loading || snapshot.refreshing || snapshot.error) return;
     bindDesignWorkspacePages(workspaceId, pageSnapshot.directoryId, pageSnapshot.pages!);
@@ -201,9 +203,12 @@ export function DesignWorkspaceColumn({
         // Selection publishes locally before its durable bridge write. Do not
         // make that bookkeeping delay—or misreport—a completed deletion.
         if (!isCurrentDesignPageOwner(owner)) return;
-        void selectDesignFrame(workspaceId, next.frames.find(frame => frame.pageId === owner.pageId) ?? null, { owner }).catch(
-          () => {},
-        );
+        const targets = designWorkspaceView(workspaceId).selectedTargets.filter(target => target.frame !== candidate.file);
+        if (targets.length) {
+          void selectDesignTargets({ workspaceId, folder: folder ?? "", targets, frames: next.frames, owner, explicit: false }).catch(() => {});
+        } else {
+          void selectDesignFrame(workspaceId, next.frames.find(frame => frame.pageId === owner.pageId) ?? null, { owner, explicit: false }).catch(() => {});
+        }
       } catch (deleteError) {
         toast.error("Couldn't delete the design frame", {
           description: errorMessage(deleteError),
@@ -212,7 +217,7 @@ export function DesignWorkspaceColumn({
         deletingFrameFilesRef.current.delete(candidate.file);
       }
     },
-    [workspaceId],
+    [workspaceId, folder],
   );
 
   const selectedFrame = useMemo(

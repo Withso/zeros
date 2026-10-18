@@ -20,6 +20,8 @@ import { notifyAgentSendFailure } from "../agent-send-failure-toast";
 import { hasBackgroundAgentWork } from "../background-task-state";
 import { getFollowUpBehavior } from "../../settings/follow-up-behavior";
 import { queuedTranscriptPresentation } from "./helpers/queued-transcript-presentation";
+import { recoverPendingAutoSend } from "../../../state/persist-composer-drafts";
+import { hasDesignFrameAttachmentSelection } from "../design-frame-selection";
 
 const encoding = vi.hoisted(() => ({ run: vi.fn() }));
 const mocks = vi.hoisted(() => ({ failureToast: vi.fn() }));
@@ -39,7 +41,7 @@ function callbacks(sourceFile: ts.SourceFile, names: readonly string[]) {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText;
 }
-const composerCode = callbacks(ast, ["runSend", "handleSend"]);
+const composerCode = callbacks(ast, ["parkUnreadableTranscriptSend", "runSend", "handleSend", "saveQueuedEdit"]);
 const providerSource = readFileSync(new URL("../sessions-provider.tsx", import.meta.url), "utf8");
 const providerAst = ts.createSourceFile("provider.tsx", providerSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const providerCode = callbacks(providerAst, ["pauseQueue", "resumeQueue", "retryCloudQueuedPrompt", "markQueuedDelivery", "refreshQueuedAttachments", "flushQueuedPrompt", "drainNextQueued",
@@ -114,20 +116,20 @@ function harness(cloud = true, status = "stopped", resident = true) {
   let current: any = draft;
   const clear = vi.fn(() => { current = { ...draft, displayText: "", attachments: [], segments: [], json: {} }; });
   const dispatch = vi.fn(), localSend = vi.fn(async () => {}), cloudError = vi.fn();
-  const composer: any = { ...lifecycle, getFollowUpBehavior, chatId: "chat", readOnly: false, runtimeUpgradeRequired: false, cloudComputerV2: cloud, chatThread: workspace.chats[0], workspaceProvisioning: false,
+  const composer: any = { ...lifecycle, getFollowUpBehavior, hasDesignFrameAttachmentSelection, chatId: "chat", readOnly: false, runtimeUpgradeRequired: false, cloudComputerV2: cloud, chatThread: workspace.chats[0], workspaceProvisioning: false,
     session: { transcriptState: resident ? "resident" : "loading", status: "reconnecting", agentId: "codex", startSession: vi.fn(async () => {}),
       sendPrompt: cloud ? (...args: unknown[]) => provider.actions.sendPrompt("chat", ...args.slice(0, 5), undefined, args[5], args[6], args[7], args[8]) : localSend },
     agentSessions: { getSendGeneration: () => cancellation }, cloudWorkspaceDocument: () => doc, parseCloudWorkspaceKey, isCloudWorkspace,
     cloudQueuedPrompt, redactLogSecrets: (s: string) => s, setCloudSendError: cloudError,
     notifyAgentSendFailure: failureNotice, crypto: provider.crypto,
-    designFrameContext: { capture: () => null, pin: vi.fn() }, hasPendingTextAttachmentDelivery: () => false, transcriptAttachesRef: { current: new Set() },
-    composerAttachmentsReading: () => false, waitForComposerAttachmentReads: vi.fn(async () => {}),
+    designFrameContext: { capture: () => null, pin: vi.fn(), consume: vi.fn() }, hasPendingTextAttachmentDelivery: () => false, transcriptAttachesRef: { current: new Set() },
+    composerAttachmentsReading: () => false, waitForComposerAttachmentReads: vi.fn(async () => {}), waitForPendingTextAttachmentDeliveries: vi.fn(async () => {}),
     useSessionsStore: { getState: () => store }, useWorkspaceStore: { getState: () => workspace }, transcriptParkedChatRef: { current: null },
     serializeComposerState: () => current, sendPastPermission: () => "send", planReview: null, bareInlineSlashCommand: () => null,
     composerLiveRef: { current: null }, dispatch, recordWorkspaceActivity: vi.fn(), agentsList: null, envForChat: () => ({}),
     setCloudSendPreparing: vi.fn(), setSendPreparing: vi.fn(), encodeComposerAttachments: encoding.run, reportSkippedAttachments: vi.fn(),
     expandMentionsInText: (text: string) => text, browserPickerSelection: null, toMessageSegments: () => draft.segments, isSubmittedComposerDocument,
-    clearComposer: clear, pendingSendScrollCountRef: { current: 0 }, sendInFlightRef: { current: false }, startCloudSubmitSpan: () => vi.fn(), toast: toasts,
+    clearComposer: clear, clearComposerEditor: clear, pendingSendScrollCountRef: { current: 0 }, sendInFlightRef: { current: false }, startCloudSubmitSpan: () => vi.fn(), toast: toasts,
   };
   vm.runInNewContext(composerCode, composer);
   return { account, provider, composer, queue, store, prepare, delivered, clear, dispatch, cloudError, toasts, draft, failureNotice,
@@ -139,6 +141,69 @@ function harness(cloud = true, status = "stopped", resident = true) {
 }
 
 describe("cloud composer readiness queue", () => {
+  it("saves an empty queued editor when its existing frozen additional payload survives, without using a new canvas selection", async () => {
+    const h = harness(true, "ready");
+    h.type("");
+    h.composer.editingQueuedRef = { current: "queued" };
+    h.composer.queueSaveInFlightRef = { current: false };
+    h.composer.queueEditGenerationRef = { current: 1 };
+    h.composer.exitQueuedEdit = vi.fn();
+    h.composer.session.editQueued = vi.fn();
+    const prepareAdditional = vi.fn(async () => h.draft.attachments);
+    h.composer.session.getQueuedDraft = () => ({ prepareAdditional });
+    expect(await h.composer.actions.saveQueuedEdit()).toBe(true);
+    expect(h.composer.session.editQueued).toHaveBeenCalledWith("queued", expect.objectContaining({ cloudQueue: expect.objectContaining({ draft: expect.objectContaining({ prepareAdditional }) }) }));
+    expect(prepareAdditional).not.toHaveBeenCalled();
+    h.composer.session.editQueued.mockClear();
+    h.composer.session.getQueuedDraft = () => undefined;
+    h.composer.designFrameContext.hasContext = true;
+    expect(await h.composer.actions.saveQueuedEdit()).toBe(false);
+    expect(h.composer.session.editQueued).not.toHaveBeenCalled();
+  });
+
+  it.each(["legacy", "grouped"].flatMap(shape => [false, true].map(prepared => ({ shape, prepared }))))("parks and recovers $shape reference-only sends with prepared=$prepared", async ({ shape, prepared }) => {
+    const target = { workspaceId: "local", directoryId: "design", frame: "home.html", intent: "code" };
+    const references = shape === "legacy" ? target : [target, { ...target, frame: "pricing.html" }];
+    const h = harness(false, "ready", prepared);
+    h.composer.workspaceProvisioning = prepared;
+    h.composer.session.hydrateChat = vi.fn(async () => {});
+    h.composer.serializeComposerState = () => ({ isEmpty: true, displayText: "", attachments: [], json: { type: "doc", content: [] }, segments: [] });
+    h.composer.designFrameContext.capture = () => references;
+    h.composer.designFrameContext.pin.mockImplementation((value: unknown) => { h.composer.composerLiveRef.current = { designFrame: value }; });
+    await h.send();
+    const parked = h.dispatch.mock.calls.find(([action]) => action.type === "SET_CHAT_DRAFT")?.[0];
+    expect(parked?.draft.designFrame).toEqual(references);
+    expect(h.dispatch).toHaveBeenCalledWith({ type: "REQUEST_AUTO_SEND", chatId: "chat" });
+    expect(h.toasts.info).toHaveBeenCalledOnce();
+    expect(recoverPendingAutoSend({ chats: { chat: parked.draft }, edits: {}, autoSend: { chat: Date.now() } }, Date.now())).toEqual({ chat: Date.now() });
+  });
+
+  it.each([{ label: "removed", references: null }, { label: "empty group", references: [] }, { label: "invalid group", references: [{}] }])("does not arm empty sends for $label references", async ({ references }) => {
+    for (const prepared of [false, true]) {
+      const h = harness(false, "ready", prepared);
+      h.composer.workspaceProvisioning = prepared;
+      h.composer.session.hydrateChat = vi.fn(async () => {});
+      h.composer.serializeComposerState = () => ({ isEmpty: true, displayText: "", attachments: [], json: { type: "doc", content: [] }, segments: [] });
+      h.composer.designFrameContext.capture = () => references;
+      h.composer.designFrameContext.pin.mockImplementation((value: unknown) => { h.composer.composerLiveRef.current = { designFrame: value }; });
+      await h.send();
+      expect(h.dispatch).not.toHaveBeenCalled();
+      expect(h.toasts.info).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps the pin-owned persisted Design reference when parking a prepared workspace", async () => {
+    const h = harness(false, "ready");
+    const saved = { workspaceId: "local", directoryId: "design", frame: "home.html", intent: "code" };
+    h.composer.workspaceProvisioning = true;
+    h.composer.useWorkspaceStore.getState().pendingAutoSend = {};
+    h.composer.designFrameContext.capture = () => ({ ...saved, selectionEvent: 7, ownerRevision: 3 });
+    h.composer.designFrameContext.pin.mockImplementation(() => { h.composer.composerLiveRef.current = { designFrame: saved }; });
+    await h.send();
+    expect(h.composer.composerLiveRef.current.designFrame).toEqual(saved);
+    expect(h.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "SET_CHAT_DRAFT", draft: expect.objectContaining({ designFrame: saved }) }));
+  });
+
   it.each(["stopped", "waking", "setting_up", "ready"])("paints the first cloud user bubble before %s preparation completes", async status => {
     const h = harness(true, status);
     await h.send();

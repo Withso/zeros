@@ -60,7 +60,7 @@ export interface ComposerDraft {
    *  is kept for display/back-compat with pre-editor drafts. */
   json?: object | null;
   /** A parked send keeps its submitted canvas target, including explicit removal. */
-  designFrame?: import("../features/agent/design-frame-attachment").DesignFrameAttachmentTarget | null;
+  designFrame?: import("../features/agent/design-frame-attachment").DesignFrameAttachmentSelection | null;
 }
 
 // Per-message edit-mode draft. Same lifecycle reasoning as the

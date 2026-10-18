@@ -190,9 +190,9 @@ export async function runDesignMarqueeSelectionRaceSmoke({ page, check }) {
       });
     };
   });
-  await page.mouse.move(frame.x - 8, frame.y - 8);
+  await page.mouse.move(frame.x + frame.width - 8, frame.y + frame.height - 8);
   await page.mouse.down();
-  await page.mouse.move(frame.x + frame.width + 8, frame.y + frame.height + 8, {
+  await page.mouse.move(frame.x + 8, frame.y + 8, {
     steps: 3,
   });
   await page.mouse.up();

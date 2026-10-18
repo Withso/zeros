@@ -62,6 +62,13 @@ describe("draftHasContent", () => {
 });
 
 describe("isChatDiscardableOnClose", () => {
+  it.each(["legacy", "grouped"].flatMap(shape => ["live", "stored"].map(owner => ({ shape, owner }))))("keeps a $shape reference-only $owner draft on close", ({ shape, owner }) => {
+    const target = { workspaceId: "local", directoryId: "design", frame: "home.html", intent: "code" as const };
+    const referenceDraft = { ...draft(""), designFrame: shape === "legacy" ? target : [target, { ...target, frame: "pricing.html" }] };
+    expect(draftHasContent(referenceDraft)).toBe(true);
+    expect(isChatDiscardableOnClose(pristineInputs(owner === "live" ? { liveDraft: referenceDraft } : { storedDraft: referenceDraft }))).toBe(false);
+  });
+
   it("discards a pristine, never-used Untitled chat tab", () => {
     expect(isChatDiscardableOnClose(pristineInputs())).toBe(true);
   });

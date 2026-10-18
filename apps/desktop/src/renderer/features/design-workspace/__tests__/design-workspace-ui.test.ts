@@ -50,6 +50,7 @@ describe("design workspace UI memory", () => {
       frameSelected: false,
       selectedNodeId: null,
       selectedNodeIds: [],
+      selectedTargets: [],
       panel: "layers",
       activeTheme: null,
       canvasBackground: null,

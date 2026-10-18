@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runDesignSelectionReferencesSmoke } from "./ui-smoke-design-selection-references.mjs";
 
 export async function runDesignModeSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -110,6 +111,19 @@ export async function runDesignModeSmoke({ page, check }) {
   await page.getByRole("button", { name: "Switch conversation", exact: true }).click();
   await page.getByRole("button", { name: "Switch conversation", exact: true }).click();
   await expect(frame).toHaveCount(0);
+  const workspaceRows = await page.evaluate(async () => {
+    const { peekWorkspacesFor, setWorkspaceRowsForTesting } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
+    const rows = peekWorkspacesFor("design-harness");
+    setWorkspaceRowsForTesting("design-harness", []);
+    return rows;
+  });
+  await page.getByRole("button", { name: "Switch conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Switch conversation", exact: true }).click();
+  await page.evaluate(async rows => {
+    const { setWorkspaceRowsForTesting } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
+    setWorkspaceRowsForTesting("design-harness", rows);
+  }, workspaceRows);
+  await expect(frame).toHaveCount(0);
   await page.getByRole("button", { name: "Use current selection", exact: true }).click();
   await expect(frame).toHaveText("tablet.html");
   check("frame context follows its own workspace, freezes on Send, restores on reconnect and stays removable with an optional image", true);
@@ -118,4 +132,5 @@ export async function runDesignModeSmoke({ page, check }) {
   await page
     .locator("[data-design-mode-fixture]")
     .screenshot({ path: ".context/design-mode-v1.png" });
+  await runDesignSelectionReferencesSmoke({ page, check });
 }

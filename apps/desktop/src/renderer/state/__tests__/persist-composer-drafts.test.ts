@@ -14,7 +14,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { loadPersistedDrafts, schedulePersistDrafts, persistDraftsNow } from "../persist-composer-drafts";
+import { loadPersistedDrafts, schedulePersistDrafts, persistDraftsNow, recoverPendingAutoSend } from "../persist-composer-drafts";
 import { setLiveChatDraft } from "../../features/agent/composer-live-drafts";
 import { registerLiveEditDraft, pruneLiveEditDrafts } from "../../features/agent/edit-live-drafts";
 import { editSeedSource } from "../../features/agent/edit-seed";
@@ -108,6 +108,48 @@ describe("persist-composer-drafts", () => {
     installWindow();
     setLiveChatDraft("chat-1", null);
     setLiveChatDraft("chat-2", null);
+  });
+
+  it.each([
+    { workspaceId: "personal", placement: "local" as const, organizationId: null },
+    { workspaceId: "organization-local", placement: "local" as const, organizationId: "organization" },
+    { workspaceId: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", placement: "cloud" as const, organizationId: "11111111-1111-4111-8111-111111111111" },
+  ].flatMap(owner => ["legacy", "grouped"].map(shape => ({ owner, shape }))))("persists and recovers a live $shape reference-only draft for $owner.workspaceId", ({ owner, shape }) => {
+    installStorage();
+    const target = { ...owner, directoryId: "design", frame: "home.html", intent: "code" as const };
+    const draft = { text: "", attachments: [], designFrame: shape === "legacy" ? target : [target, { ...target, frame: "pricing.html" }] };
+    const state = { ...stateWith("", ""), chatComposerDrafts: {}, pendingAutoSend: { "chat-1": Date.now() } };
+    setLiveChatDraft("chat-1", draft);
+    persistDraftsNow(state);
+    const saved = loadPersistedDrafts();
+    expect(saved.chats["chat-1"]).toEqual(draft);
+    expect(recoverPendingAutoSend(saved, Date.now())).toEqual(state.pendingAutoSend);
+  });
+
+  it("persists explicit removal without recovering it as a reference payload", () => {
+    installStorage();
+    const state = { ...stateWith("", ""), chatComposerDrafts: {}, pendingAutoSend: { "chat-1": Date.now() } };
+    setLiveChatDraft("chat-1", { text: "", attachments: [], designFrame: null });
+    persistDraftsNow(state);
+    const saved = loadPersistedDrafts();
+    expect(saved.chats["chat-1"]?.designFrame).toBeNull();
+    expect(recoverPendingAutoSend(saved, Date.now())).toEqual({});
+  });
+
+  it("retains Design references and their send arm when attachment quota fallback removes editor attachments", () => {
+    installStorage({ maxBytes: 1500 });
+    const target = { workspaceId: "local", directoryId: "design", frame: "home.html", intent: "code" as const };
+    const state = { ...stateWith("", "x".repeat(4000)), pendingAutoSend: { "chat-1": Date.now() } };
+    state.chatComposerDrafts["chat-1"].designFrame = target;
+    persistDraftsNow(state);
+    const saved = loadPersistedDrafts();
+    expect(saved.chats["chat-1"].attachments).toEqual([]);
+    expect(saved.chats["chat-1"].designFrame).toEqual(target);
+    expect(recoverPendingAutoSend(saved, Date.now())).toEqual(state.pendingAutoSend);
+  });
+
+  it.each([{ designFrame: [] }, { designFrame: [{}] }, { designFrame: { frame: "home.html" } }])("does not recover an invalid empty reference $designFrame", ({ designFrame }) => {
+    expect(recoverPendingAutoSend({ chats: { chat: { text: "", attachments: [], designFrame: designFrame as never } }, edits: {}, autoSend: { chat: Date.now() } }, Date.now())).toEqual({});
   });
 
   it("flushes the newest mounted draft without a workspace store update", async () => {

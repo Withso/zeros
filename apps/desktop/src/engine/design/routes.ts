@@ -685,7 +685,7 @@ export async function handleDesignWorkspaceRoute(
       });
     }
     case "design.context.capture": {
-      if (remote || !hostLocalResources) throw new Error("Frame image attachments are currently available in local workspaces.");
+      if (remote || (!hostLocalResources && !options.primaryRepositoryRoot)) throw new Error("Frame image attachments require an admitted workspace host.");
       const reference = designContextReferenceSchema.parse(params.reference);
       if (reqStr(params, "workspaceId") !== reference.workspaceId)
         throw new Error("The frame belongs to another workspace.");
