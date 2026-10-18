@@ -126,6 +126,9 @@ import {
 } from "./pr-status-refresh";
 import { optimisticPushGeneration } from "./pr-status-optimistic";
 import { registerPrWorkspaceCacheForget } from "./pr-cache-forget";
+import { useDocumentActive } from "../../state/use-document-active";
+import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
+import { documentIsForeground } from "../../shared/lib/element-activity";
 
 interface PrStatusIslandProps {
   workspace: Workspace;
@@ -287,12 +290,15 @@ export function PrStatusIsland({
   active,
   localDesktop,
 }: PrStatusIslandProps) {
+  const local = !!workspace.path && !isCloudWorkspace(workspace.path) && !isCloudWorkspace(workspace.id) && !parseCloudScopedId(workspace.id);
+  const foreground = useDocumentActive(local && active, true);
+  const observing = local ? foreground : active;
   const prNumber = workspace.prNumber;
   const sendToChat = useSendToActiveChat(workspace.path);
   // The repo's configured push/PR remote — action prompts must name the same
   // remote the engine's own git ops use.
   const remote = useGitRemote(workspace.repoRoot);
-  const refreshKey = useGitRefreshKey(workspace.path, workspace.id);
+  const refreshKey = useGitRefreshKey(workspace.path, workspace.id, local ? observing : true);
   // Focus workbench's pinned Review tab — shared by the View-PR chip and the
   // Show-checks action (which lands directly on its Checks sub-tab).
   const showPr = useShowReviewTab();
@@ -359,9 +365,12 @@ export function PrStatusIsland({
   // (merged/closed) batch is additionally fresh across refresh generations
   // and suppresses refresh-key refetches entirely; see the two guards below.
   useEffect(() => {
+    // Blur pauses the same surface; it is not a new tab activation. Keep
+    // terminal-state suppression and same-key navigation freshness intact.
+    if (local && active && !observing) return;
     const effectTrigger = classifyPrStatusEffectTrigger(
       activationKeyRef.current,
-      active && prNumber != null,
+      observing && prNumber != null,
       dataKey,
     );
     activationKeyRef.current = effectTrigger.activeDataKey;
@@ -437,7 +446,9 @@ export function PrStatusIsland({
       cancelled = true;
     };
   }, [
+    observing,
     active,
+    local,
     workspace.id,
     workspace.path,
     workspace.prState,
@@ -460,6 +471,7 @@ export function PrStatusIsland({
     if (!active || prNumber == null) return;
     const requestExternalRefresh = (trigger: "interval" | "resume") => {
       if (document.visibilityState !== "visible") return;
+      if (local && !documentIsForeground()) return;
       const batch = lastKnownData.get(dataKey);
       if (
         !shouldPollPrStatus(
@@ -476,19 +488,21 @@ export function PrStatusIsland({
       lastRequestAtRef.current = now;
       setForceRefreshAt(now);
     };
-    const timer = window.setInterval(
+    const timer = observing ? window.setInterval(
       () => requestExternalRefresh("interval"),
       PR_STATUS_FULL_POLL_MS,
-    );
+    ) : undefined;
+    // Keep the return listener while this surface is selected. It advances
+    // the force generation promptly even when its interval was disarmed.
     const onResume = () => requestExternalRefresh("resume");
     document.addEventListener("visibilitychange", onResume);
     window.addEventListener("focus", onResume);
     return () => {
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onResume);
       window.removeEventListener("focus", onResume);
     };
-  }, [active, dataKey, prNumber, workspace.prState]);
+  }, [active, observing, dataKey, prNumber, workspace.prState, local]);
 
   /** Patch the current settled batch in place (optimistic transition after a
    *  direct action lands) — the derived state flips INSTANTLY; the refresh-key
@@ -801,7 +815,7 @@ export function PrStatusIsland({
     tries: 0,
   });
   useEffect(() => {
-    if (!active) return;
+    if (!observing) return;
     if (checkingRetryRef.current.key !== stabilityKey) {
       checkingRetryRef.current = { key: stabilityKey, tries: 0 };
     }
@@ -814,7 +828,7 @@ export function PrStatusIsland({
       setForceRefreshAt(Date.now());
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [active, stabilityKey, rawKind, dataAt]);
+  }, [observing, stabilityKey, rawKind, dataAt]);
 
   // Publish the RENDERED kind for the top bar's workspace tabs (they paint a
   // per-status PR glyph) — the stabilized state, so the tab can't flap either.
