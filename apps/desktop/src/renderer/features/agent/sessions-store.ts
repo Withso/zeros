@@ -431,6 +431,9 @@ export interface SessionsStoreState {
    *  `available_commands_update` patch top-level fields; everything else
    *  feeds into the messages reducer (`applyUpdate`). */
   applyBridgeUpdate: (notification: SessionNotification) => void;
+  /** Local transcript content already grouped by one provider flush. Controls
+   * and cloud notifications keep their individual, ordered reducer path. */
+  applyBridgeTranscriptUpdates: (notifications: readonly SessionNotification[]) => void;
   installCloudSnapshot: (chatId: string, snapshot: CloudConversationSnapshot, metadata?: Partial<AgentSessionState>) => void;
   /** CP restore state only; a separately proved live/native snapshot keeps its
    * own transcript lineage. This does not settle or cancel any native turn. */
@@ -523,6 +526,37 @@ export interface SessionsStoreState {
     executionId: string,
     status: ExecutionBoundaryStatus,
   ) => void;
+}
+
+/** Select only Local message reducers; usage, lifecycle and provider controls
+ * must remain observable before later events can act on them. */
+export function canBatchLocalTranscriptUpdate(state: SessionsStoreState, notification: SessionNotification): boolean {
+  const kind = notification.update.sessionUpdate;
+  if (kind !== "agent_message_chunk" && kind !== "agent_thought_chunk" && kind !== "tool_call" && kind !== "tool_call_update") return false;
+  const chatId = (notification as { chatId?: string }).chatId ??
+    state.executionToChatId[notification.executionId ?? notification.sessionId];
+  const slot = chatId ? state.sessions[chatId] : undefined;
+  return !!slot?.cwd && !isCloudWorkspace(slot.cwd) && !parseCloudScopedId(chatId);
+}
+
+function reduceTranscriptUpdate(state: SessionsStoreState, chatId: string, notification: SessionNotification): SessionsStoreState {
+  const slot = state.sessions[chatId];
+  if (!slot) return state;
+  if (slot.transcriptState !== "resident") {
+    // Keep evicted transcripts absent; the engine owns their durable content.
+    const producesMessage = applyUpdate([], notification).length > 0;
+    if (slot.transcriptDirty && (slot.hasTranscript || !producesMessage)) return state;
+    return { ...state, sessions: { ...state.sessions, [chatId]: {
+      ...slot, transcriptDirty: true, hasTranscript: slot.hasTranscript || producesMessage,
+    } } };
+  }
+  const updated = applyUpdate(slot.messages, notification);
+  const messages = slot.historyExpanded ? updated : capMessages(updated);
+  if (messages === slot.messages) return state;
+  return { ...state, sessions: { ...state.sessions, [chatId]: settleSlotLeadingPrompt(chatId, slot, {
+    ...slot, messages, transcriptPresentation: null,
+    hasTranscript: slot.hasTranscript || hasDurableMessages(messages),
+  }, undefined) } };
 }
 
 export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
@@ -909,6 +943,34 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       cancellingChats: new Set(),
       pendingLocalTurns: {},
     });
+  },
+
+  applyBridgeTranscriptUpdates: (notifications) => {
+    // The provider partitions at cloud/control boundaries. Recheck here so an
+    // accidental mixed caller cannot change the cloud publication contract.
+    let pending: SessionNotification[] = [];
+    const flush = () => {
+      if (!pending.length) return;
+      const batch = pending;
+      pending = [];
+      set((state) => {
+        let next = state;
+        for (const notification of batch) {
+          const chatId = (notification as { chatId?: string }).chatId ??
+            next.executionToChatId[notification.executionId ?? notification.sessionId];
+          if (chatId) next = reduceTranscriptUpdate(next, chatId, notification);
+        }
+        return next;
+      });
+    };
+    for (const notification of notifications) {
+      if (canBatchLocalTranscriptUpdate(get(), notification)) pending.push(notification);
+      else {
+        flush();
+        get().applyBridgeUpdate(notification);
+      }
+    }
+    flush();
   },
 
   applyBridgeUpdate: (notification) => {
@@ -1318,53 +1380,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     }
 
     // Everything else → feed to the messages reducer.
-    set((state) => {
-      const slot = state.sessions[chatId];
-      if (!slot) return state;
-      if (slot.transcriptState !== "resident") {
-        // SQLite is authoritative while this payload is absent. Folding a raw
-        // chunk into [] would manufacture a partial transcript and, worse,
-        // repopulate every evicted chat as background turns stream. Remember
-        // only that an exact re-window is required when the chat is retained.
-        const producesMessage = applyUpdate([], notification).length > 0;
-        if (slot.transcriptDirty && (slot.hasTranscript || !producesMessage)) {
-          return state;
-        }
-        return {
-          sessions: {
-            ...state.sessions,
-            [chatId]: {
-              ...slot,
-              transcriptDirty: true,
-              hasTranscript: slot.hasTranscript || producesMessage,
-            },
-          },
-        };
-      }
-      // Cap suspended while the user has paged older history in
-      // (historyExpanded) — trimming mid-read would pull the transcript
-      // out from under them. agent-chat re-arms the cap at bottom.
-      const updated = applyUpdate(slot.messages, notification);
-      const nextMessages = slot.historyExpanded
-        ? updated
-        : capMessages(updated);
-      // Reference-equal short-circuit: if applyUpdate returned the same
-      // array (no-op for a kind we don't model in messages), avoid the
-      // spread to keep selectors stable.
-      if (nextMessages === slot.messages) return state;
-      return {
-        sessions: {
-          ...state.sessions,
-          [chatId]: settleSlotLeadingPrompt(chatId, slot, {
-            ...slot,
-            messages: nextMessages,
-            transcriptPresentation: null,
-            hasTranscript:
-              slot.hasTranscript || hasDurableMessages(nextMessages),
-          }, undefined),
-        },
-      };
-    });
+    set((state) => reduceTranscriptUpdate(state, chatId, notification));
   },
 
   applyCloudHistoryRestoreHead: (chatId, input, preserveNativeSnapshot = false, authenticated = false) => {

@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BLANK, useSessionsStore } from "../sessions-store";
+import { BLANK, canBatchLocalTranscriptUpdate, useSessionsStore } from "../sessions-store";
 import { permissionPolicyOption } from "../policies";
 import {
   agentUpdateFlushMode,
@@ -19,7 +19,7 @@ import {
   createAgentUpdateFlushScheduler,
 } from "../agent-update-flush-scheduler";
 import { cloudReplyOwnership } from "../../../platform/bridge/cloud-runtime-wire";
-import { cloudScopedId, cloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
+import { cloudScopedId, cloudWorkspaceKey, isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 
 const ast = ts.createSourceFile(
   "sessions-provider.tsx",
@@ -54,6 +54,13 @@ type Placement = (typeof placements)[number];
 type Handler = (message: Record<string, unknown>) => void;
 
 function harness() {
+  const visibilityListeners = new Set<() => void>();
+  const document = {
+    visibilityState: "visible",
+    addEventListener: (_type: string, listener: () => void) => visibilityListeners.add(listener),
+    removeEventListener: (_type: string, listener: () => void) => visibilityListeners.delete(listener),
+  };
+  const flushLocalNotificationsRef = { current: (_chatId?: string) => {} };
   const handlers = new Map<string, Set<Handler>>();
   const emit = (type: string, message: object) => {
     for (const handler of [...(handlers.get(type) ?? [])]) handler({ type, ...message });
@@ -83,7 +90,7 @@ function harness() {
   vi.stubGlobal("cancelAnimationFrame", cancelAnimationFrame);
   const release = vi.fn();
   const context: Record<string, unknown> = {
-    bridge, useSessionsStore, permissionPolicyOption, cloudReplyOwnership, agentUpdateFlushMode,
+    bridge, document, flushLocalNotificationsRef, isCloudWorkspace, useSessionsStore, canBatchLocalTranscriptUpdate, permissionPolicyOption, cloudReplyOwnership, agentUpdateFlushMode,
     takePrebindDirty, markPrebindDirty, createAgentUpdateFlushScheduler, AGENT_UPDATE_BACKLOG_LIMIT,
     markPrebindGoalSnapshot: vi.fn(), trackAgentPermissionDecided: vi.fn(), trackAgentPromptFinished: vi.fn(),
     trackAgentFirstResponse: vi.fn(), finishCloudFirstText: vi.fn(), peekAgentPromptId: () => undefined,
@@ -116,6 +123,8 @@ function harness() {
     },
     pendingFrames: () => frames.size,
     notifications: () => notifications,
+    stopLocal: (chatId: string) => flushLocalNotificationsRef.current(chatId),
+    visibility(value: string) { document.visibilityState = value; for (const listener of visibilityListeners) listener(); },
     onSend(callback: (message: Record<string, unknown>) => void) { onSend = callback; },
     stop() { stop(); unsubscribe(); },
   };
@@ -320,6 +329,69 @@ describe("agent notifications while animation frames are suspended", () => {
 });
 
 describe("agent notifications in a visible window", () => {
+  it.each(placements)("$owner delivers the first prose before a frame only for Local", async (placement) => {
+    open(placement);
+    const h = start();
+    h.emit("AGENT_SESSION_UPDATE", chunk(placement, "First token"));
+    await Promise.resolve();
+    expect(text(placement.chat)).toBe(placement.owner === "cloud" ? "" : "First token");
+    h.frame();
+    h.emit("AGENT_SESSION_UPDATE", chunk(placement, " batched"));
+    await Promise.resolve();
+    expect(text(placement.chat)).toBe("First token");
+    h.frame();
+    expect(text(placement.chat)).toBe("First token batched");
+  });
+
+  it("drains only Local content on hide and Stop, preserving a pending cloud frame", async () => {
+    const [personal, organization, cloud] = placements;
+    for (const placement of placements) open(placement);
+    const h = start();
+    for (const placement of placements) h.emit("AGENT_SESSION_UPDATE", chunk(placement, "First"));
+    h.frame();
+    for (const placement of placements) h.emit("AGENT_SESSION_UPDATE", chunk(placement, " next"));
+    h.stopLocal(personal.chat);
+    expect(text(personal.chat)).toBe("First next");
+    expect(text(organization.chat)).toBe("First");
+    expect(text(cloud.chat)).toBe("First");
+    h.visibility("hidden");
+    await Promise.resolve();
+    expect(text(organization.chat)).toBe("First next");
+    expect(text(cloud.chat)).toBe("First");
+    for (const placement of placements) h.emit("AGENT_SESSION_UPDATE", chunk(placement, " hidden"));
+    await Promise.resolve();
+    expect(text(personal.chat)).toBe("First next hidden");
+    expect(text(organization.chat)).toBe("First next hidden");
+    expect(text(cloud.chat)).toBe("First");
+    h.frame();
+    expect(text(cloud.chat)).toBe("First next hidden");
+  });
+
+  it("releases the pending frame and deadline when hiding only Local content", async () => {
+    const [placement] = placements;
+    open(placement);
+    const h = start();
+    h.emit("AGENT_SESSION_UPDATE", chunk(placement, "First"));
+    h.frame();
+    h.emit("AGENT_SESSION_UPDATE", chunk(placement, " hidden"));
+    h.visibility("hidden");
+    await Promise.resolve();
+    expect(text(placement.chat)).toBe("First hidden");
+    expect(h.pendingFrames()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(placements)("$owner records the store publication budget for a 300-delta frame", (placement) => {
+    open(placement);
+    const h = start();
+    const before = h.notifications();
+    for (let index = 0; index < 300; index++) h.emit("AGENT_SESSION_UPDATE", chunk(placement, "x"));
+    h.frame();
+    expect(text(placement.chat)).toBe("x".repeat(300));
+    expect(h.notifications() - before).toBe(placement.owner === "cloud" ? 300 : 1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("keeps content in one frame-aligned flush with no extra timer flush", () => {
     const [placement] = placements;
     open(placement);
@@ -366,6 +438,19 @@ describe("agent notifications in a visible window", () => {
 });
 
 describe("agent stderr", () => {
+  it("leaves the existing stderr schedule unchanged on cloud Stop or window hide", async () => {
+    const [, , cloud] = placements;
+    open(cloud);
+    const h = start();
+    h.emit("AGENT_AGENT_STDERR", { agentId: "claude", line: "diagnostic" });
+    h.stopLocal(cloud.chat);
+    h.visibility("hidden");
+    await Promise.resolve();
+    expect(slot(cloud.chat).stderrLog).toEqual([]);
+    h.frame();
+    expect(slot(cloud.chat).stderrLog).toEqual(["diagnostic"]);
+  });
+
   it("applies a burst of stderr lines as one store update with the same retained lines", () => {
     const [personal, organization, cloud] = placements;
     open(personal);
