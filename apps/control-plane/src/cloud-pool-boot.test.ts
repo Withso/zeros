@@ -50,7 +50,8 @@ vi.mock("./email.js", () => ({ loadEmailConfig: () => ({ apiKey: "synthetic", fr
 vi.mock("./github.js", () => ({ startGithubOauthCleanup: state.cleanup }));
 vi.mock("@hono/node-server", () => ({ serve: state.serve }));
 vi.mock("./cloud-workspaces/worker-notifications.js", () => ({ startCloudWorkerNotifications: state.notifications }));
-vi.mock("./cloud-workspaces/engine-checkpoint-hints.js", () => ({
+vi.mock("./cloud-workspaces/engine-checkpoint-hints.js", async original => ({
+  ...(await original<typeof import("./cloud-workspaces/engine-checkpoint-hints.js")>()),
   CloudEngineCheckpointHints: class { wait() {} close() {} }, startCloudEngineCheckpointHintNotifications: state.checkpoint,
 }));
 vi.mock("./security-events.js", () => ({
