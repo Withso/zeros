@@ -29,15 +29,15 @@
       "statements": 9,
       "roundTrips": 7
     },
-    "engine.uplinkIdleStopRequest": {
-      "transactions": 1,
-      "statements": 8,
-      "roundTrips": 5
-    },
     "engine.uplinkCheckpointSweep": {
       "transactions": 1,
       "statements": 7,
       "roundTrips": 2
+    },
+    "engine.uplinkIdleStopRequest": {
+      "transactions": 1,
+      "statements": 8,
+      "roundTrips": 5
     },
     "engine.uplinkTurnEvent": {
       "transactions": 1,

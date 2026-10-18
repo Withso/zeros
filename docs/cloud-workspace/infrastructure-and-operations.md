@@ -251,7 +251,9 @@ from a closed list, `TRACE_ATTRIBUTE_TYPES` in `apps/control-plane/src/tracing.t
 and carry no identifiers, tokens, prompts, payloads, raw paths or error messages.
 Health probes are not traced.
 
-WebSockets and the VM leg are not traced yet; an optional S2 1.1 envelope member is approved for a
+The cloud SDK can start a trace per request with its `tracing` option, or
+continue a caller's trace with a per-request `traceparent`. WebSockets and the VM
+leg are not traced yet; an optional S2 1.1 envelope member is approved for a
 later slice. If the exporter is down, spans are dropped rather than queued
 without bound (the queue holds 2,048 spans), and requests are never affected.
 

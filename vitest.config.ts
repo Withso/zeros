@@ -52,6 +52,8 @@ export default defineConfig({
       "apps/desktop/src/renderer/platform/observability/analytics/__tests__/**/*.test.ts",
       // Shared crypto primitives + EncryptedChannel (kept for the future cloud transport).
       "packages/protocol/src/**/__tests__/**/*.test.ts",
+      // Cloud-only client SDK: S3 contract types, frame parsers, contract mock.
+      "packages/cloud-client/src/**/__tests__/**/*.test.ts",
       // Headless Design Foundation: schemas, transactions, history, and geometry.
       "packages/design-core/src/**/__tests__/**/*.test.ts",
       // Pure authored HTML/CSS adapter and provenance engine.

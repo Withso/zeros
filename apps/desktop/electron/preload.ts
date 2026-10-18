@@ -64,6 +64,8 @@ const ALLOWED_COMMANDS = new Set<string>([
   "cloud_transcript_cache_prune",
   "cloud_workspace_runtime_close",
   "cloud_workspace_runtime_open",
+  "cloud_workspace_outbox_enqueue",
+  "cloud_workspace_outbox_list",
   "cloud_workspace_runtime_refresh",
   "cloud_workspace_ssh_copy",
   "cloud_workspace_ssh_ide",
