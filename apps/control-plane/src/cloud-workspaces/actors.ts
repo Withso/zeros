@@ -11,6 +11,7 @@ import {emitCloudWorkspaceAccessChange} from "./collaboration-events.js";
 import {sealWorkspaceInvitation} from "./invitation-envelope.js";
 import {activateWriterSlot,hasProSharing,pruneWriterSlots,releaseWriterSlot,reserveWriterSlot,writerAvailability} from "./pro-sharing.js";
 import { purgeCloudAgentAdoptions } from "./agent-boot-credentials.js";
+import { actorCapabilityScope, capabilityActorSessionsEnabled } from "./actor-session-authority.js";
 
 export type WorkspaceInvitationDeliveryConfig={keys:Readonly<Record<number,string>>;currentKeyVersion:number;webOrigin:string};
 
@@ -83,7 +84,7 @@ export type CloudWorkspaceRecordedActorSource = {sourceSessionId:string;deviceId
  * session and trusted device still stand, in one round trip. Approvals run
  * this several times while holding the workspace and engine rows. With
  * `currentSession`, the source session must also be unrevoked, unexpired and
- * renewed within 30 seconds. Callers apply the checks in authority, source,
+ * current by its kind (legacy renewal or signed expiry). Callers check authority, source,
  * device order. */
 export async function authorizeRecordedCloudWorkspaceActor(
   tx:Tx,input:CloudWorkspaceActorScope & {capability:CloudWorkspaceCapability;actor:CloudWorkspaceRecordedActorSource;currentSession:boolean},
@@ -91,19 +92,24 @@ export async function authorizeRecordedCloudWorkspaceActor(
   validateScope(input);
   assertCapability(input.capability);
   const actor=input.actor;
-  const row = (await tx.query<ActorAuthorityRow & {source_live:boolean;device_live:boolean}>(`SELECT ${ACTOR_AUTHORITY_COLUMNS},
-      EXISTS (SELECT 1 FROM cloud_workspace_actor_sessions session WHERE session.id=$4
-        AND session.workspace_id=$1 AND session.org_id=$2 AND session.actor_user_id=$3
-        AND session.device_id=$5 AND session.device_key_version=$6 AND session.actor_fingerprint=$7
-        AND cloud_workspace_actor_auth_live(session.actor_user_id,session.auth_provider,session.auth_subject,session.auth_session_id,session.auth_session_created_at)
-        AND (NOT $8::boolean OR (session.revoked_at IS NULL AND session.session_expires_at>clock_timestamp()
-          AND session.last_renewed_at>clock_timestamp()-interval '30 seconds'))) AS source_live,
+  const observedAt=Date.now(),monotonicStart=performance.now();
+  const row = (await tx.query<ActorAuthorityRow & {source_live:boolean;device_live:boolean;session_kind:string|null;session_expires_at:Date|null}>(`SELECT ${ACTOR_AUTHORITY_COLUMNS},
+      coalesce(cloud_workspace_actor_session_source_live(session,$9,$8,$10),false) AS source_live,
+      session.session_kind,session.session_expires_at,
       EXISTS (SELECT 1 FROM devices device WHERE device.id=$5 AND device.user_id=$3
         AND device.key_version=$6 AND device.trust_state='trusted' AND device.revoked_at IS NULL) AS device_live
-    ${ACTOR_WORKSPACE}`,
-  [input.workspaceId,input.organizationId,input.actorUserId,actor.sourceSessionId,actor.deviceId,actor.deviceKeyVersion,actor.fingerprint,input.currentSession])).rows[0];
+    FROM cloud_workspaces workspace
+    LEFT JOIN cloud_workspace_actor_sessions session ON session.id=$4
+      AND session.workspace_id=$1 AND session.org_id=$2 AND session.actor_user_id=$3
+      AND session.device_id=$5 AND session.device_key_version=$6 AND session.actor_fingerprint=$7
+    WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.deleted_at IS NULL AND app_is_system()`,
+  [input.workspaceId,input.organizationId,input.actorUserId,actor.sourceSessionId,actor.deviceId,actor.deviceKeyVersion,actor.fingerprint,input.currentSession,
+    actorCapabilityScope(input.capability),capabilityActorSessionsEnabled(input.organizationId)])).rows[0];
   if (!row) unavailable();
-  return {authority:actorAuthority(input,row,row.role),sourceLive:row.source_live,deviceLive:row.device_live};
+  const deadline=row.session_expires_at?.getTime()??0;
+  return {authority:actorAuthority(input,row,row.role),sourceLive:row.source_live &&
+    (!input.currentSession || row.session_kind!=="capability-v1" || (capabilityActorSessionsEnabled(input.organizationId) &&
+      Date.now()<deadline && performance.now()-monotonicStart<deadline-observedAt)),deviceLive:row.device_live};
 }
 
 /** Resource withdrawal never requires purchasing compute. This narrow authority

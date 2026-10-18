@@ -13,6 +13,8 @@ import {readActiveCloudAgentBootScope} from "./agent-boot-credentials.js";
 import {CloudAgentBootScopeSchema,type CloudAgentBootScope} from "./agent-boot-contract.js";
 import { CloudRuntimeAdmissionError, type CloudRuntimeAdmissionPhase } from "./runtime-admission-errors.js";
 import type { CapabilityClaims } from "./capability-contract.js";
+import { actorCapabilityScope, capabilityActorSessionsEnabled } from "./actor-session-authority.js";
+import { DatabaseCapabilityActorSessionService, type VerifiedCapabilitySessionInput, type CapabilitySessionRenewalInput } from "./capability-actor-sessions.js";
 
 export const CLOUD_ACTOR_ADMISSION_PATH = "/internal/v2/cloud-workspaces/engine/client-admission";
 export const CLOUD_ACTOR_ADMISSION_AUDIENCE = "zeros-cloud-workspace-engine-client-admission-v2";
@@ -58,7 +60,7 @@ export type CloudActorEngineScope = {
 type Session = {
   id:string;workspace_id:string;org_id:string;generation:number;engine_instance_id:string;
   actor_user_id:string;device_id:string;device_key_version:string;actor_fingerprint:string;
-  actor_role:CloudWorkspaceActorRole;authority_epoch:string;
+  actor_role:CloudWorkspaceActorRole;authority_epoch:string;session_kind:"legacy"|"capability-v1";capability_claims:CapabilityClaims|null;session_expires_at:Date;
 };
 function recordedActor(row:Session):CloudRecordedActor {
   return {actorUserId:row.actor_user_id,deviceId:row.device_id,deviceKeyVersion:Number(row.device_key_version),fingerprint:row.actor_fingerprint,sourceSessionId:row.id};
@@ -88,12 +90,14 @@ async function recordedActorAuthority(
 /** Background confirmation of an already consumed actor. Disconnect does not
  * erase accepted work; current account/auth/device/access proof still does. */
 export async function confirmDetachedCloudActor(tx:Tx,scope:Omit<CloudActorEngineScope,"heartbeatToken">,
-  actorSessionId:string,options:{consistentRead?:boolean}={}):Promise<CloudRecordedActor & {role:CloudWorkspaceActorRole;confirmedUntilMs:number}> {
+  actorSessionId:string,options:{consistentRead?:boolean}={}):Promise<CloudRecordedActor & {role:CloudWorkspaceActorRole;confirmedUntilMs:number;permitsRun:boolean}> {
   if(!uuid.test(actorSessionId))rejected();
   const row=(await tx.query<Session & {confirmed_until:Date}>(`SELECT session.*,least(${options.consistentRead ? "transaction_timestamp()" : "clock_timestamp()"}+interval '10 seconds',engine.lease_expires_at,
       auth.last_token_expires_at) AS confirmed_until
     FROM cloud_workspace_actor_sessions session JOIN cloud_workspace_engine_instances engine ON engine.id=session.engine_instance_id
-    JOIN auth_sessions auth ON auth.provider_session_id=session.auth_session_id AND auth.user_id=session.actor_user_id
+    JOIN auth_sessions auth ON auth.user_id=session.actor_user_id AND
+      ((session.session_kind='legacy' AND auth.provider_session_id=session.auth_session_id)
+        OR (session.session_kind='capability-v1' AND auth.id=session.capability_source_session_id))
     WHERE session.id=$1 AND session.workspace_id=$2 AND session.org_id=$3 AND session.generation=$4 AND session.engine_instance_id=$5
       AND session.consumed_at IS NOT NULL AND auth.status='active' AND auth.last_token_expires_at>clock_timestamp()
       AND engine.revoked_at IS NULL AND engine.state='ready' AND engine.lease_expires_at>clock_timestamp()${options.consistentRead ? "" : " FOR SHARE OF session,auth"}`,
@@ -102,7 +106,7 @@ export async function confirmDetachedCloudActor(tx:Tx,scope:Omit<CloudActorEngin
   const actor=recordedActor(row),authority=await assertRecordedCloudActor(tx,{...scope,actorUserId:actor.actorUserId,actor,capability:"read"});
   const confirmedUntilMs=row.confirmed_until.getTime();
   if(!Number.isSafeInteger(confirmedUntilMs)||confirmedUntilMs<=Date.now())rejected();
-  return {...actor,role:authority.role,confirmedUntilMs};
+  return {...actor,role:authority.role,confirmedUntilMs,permitsRun:row.session_kind==="legacy" || row.capability_claims?.scp.includes("ws:prompt")===true};
 }
 
 export async function assertCloudActorSession(
@@ -114,15 +118,15 @@ export async function assertCloudActorSession(
     JOIN cloud_workspaces workspace ON workspace.id=session.workspace_id AND workspace.org_id=session.org_id
       AND workspace.authority_epoch=session.authority_epoch AND workspace.current_generation=session.generation
     WHERE session.id=$1 AND session.workspace_id=$2 AND session.org_id=$3 AND session.generation=$4 AND session.engine_instance_id=$5
-      AND session.revoked_at IS NULL AND session.consumed_at IS NOT NULL AND session.session_expires_at>clock_timestamp()
-      AND cloud_workspace_actor_auth_live(session.actor_user_id,session.auth_provider,session.auth_subject,session.auth_session_id,session.auth_session_created_at)
-      AND session.last_renewed_at>clock_timestamp()-interval '30 seconds'`,
-  [actorSessionId,scope.workspaceId,scope.organizationId,scope.generation,scope.engineInstanceId])).rows[0];
+      AND cloud_workspace_actor_session_source_live(session,$6,true,$7)`,
+  [actorSessionId,scope.workspaceId,scope.organizationId,scope.generation,scope.engineInstanceId,
+    actorCapabilityScope(capability),capabilityActorSessionsEnabled(scope.organizationId)])).rows[0];
   if (!row) rejected();
   await requireSupportedCloudWorkspaceGeneration(tx,scope);
   const actor = recordedActor(row);
   // The same statement confirms the session is still current after authorization.
   const authority = await recordedActorAuthority(tx,{...scope,actorUserId:actor.actorUserId,actor,capability},true);
+  if(row.session_kind==="capability-v1" && (row.session_expires_at.getTime()<=Date.now() || !capabilityActorSessionsEnabled(scope.organizationId)))rejected();
   return {...actor,role:authority.role,sessionId:row.id};
 }
 
@@ -182,7 +186,8 @@ export class DatabaseCloudWorkspaceActorSessionService {
         payload:{organizationId:input.organizationId,workspaceId:input.workspaceId},proof:input.proof});
       const active = (await tx.query<{count:string}>(`SELECT count(*) FROM cloud_workspace_actor_sessions
         WHERE workspace_id=$1 AND revoked_at IS NULL AND session_expires_at>clock_timestamp()
-          AND ((consumed_at IS NULL AND admission_expires_at>clock_timestamp()) OR last_renewed_at>clock_timestamp()-interval '30 seconds')`,[input.workspaceId])).rows[0]!;
+          AND ((consumed_at IS NULL AND admission_expires_at>clock_timestamp()) OR
+            (session_kind='capability-v1' AND consumed_at IS NOT NULL) OR last_renewed_at>clock_timestamp()-interval '30 seconds')`,[input.workspaceId])).rows[0]!;
       if (Number(active.count)>=100) throw new HttpError(429,"cloud_actor_session_limit","Workspace connection limit reached");
       const token = `zwa_${randomBytes(32).toString("base64url")}`;
       const row = (await tx.query<{admission_expires_at:Date}>(`INSERT INTO cloud_workspace_actor_sessions
@@ -281,11 +286,13 @@ export class DatabaseCloudWorkspaceActorSessionService {
         facts.device_public_key.length!==32||facts.device_public_key.toString("base64url")!==cnf.jwk.x)rejected();
       const authority=await authorizeCloudWorkspaceActor(tx,{workspaceId:input.workspaceId,organizationId:input.organizationId,actorUserId,capability:"read"});
       if(authority.role!==role)rejected();
-      // Unlike issue(), this holds share locks only, so concurrent admissions
-      // may pass the count together; the limit bounds resources, not authority.
+      // Share the capability-mode capacity fence; issue() already owns the
+      // exclusive workspace lock before it counts either persisted kind.
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) /*lock_purpose='actor-session-capacity'*/",[`cloud-actor-session-limit:${input.workspaceId.toLowerCase()}`]);
       const active=(await tx.query<{count:string}>(`SELECT count(*) FROM cloud_workspace_actor_sessions
         WHERE workspace_id=$1 AND revoked_at IS NULL AND session_expires_at>clock_timestamp()
-          AND ((consumed_at IS NULL AND admission_expires_at>clock_timestamp()) OR last_renewed_at>clock_timestamp()-interval '30 seconds')`,[input.workspaceId])).rows[0]!;
+          AND ((consumed_at IS NULL AND admission_expires_at>clock_timestamp()) OR
+            (session_kind='capability-v1' AND consumed_at IS NOT NULL) OR last_renewed_at>clock_timestamp()-interval '30 seconds')`,[input.workspaceId])).rows[0]!;
       if(Number(active.count)>=100)throw new HttpError(429,"cloud_actor_session_limit","Workspace connection limit reached");
       const id=randomUUID(),token=`zwa_${randomBytes(32).toString("base64url")}`;
       await tx.query(`INSERT INTO cloud_workspace_actor_sessions
@@ -305,6 +312,13 @@ export class DatabaseCloudWorkspaceActorSessionService {
     });
   }
 
+  async admitCapabilitySession(input:VerifiedCapabilitySessionInput) {
+    return new DatabaseCapabilityActorSessionService(this.options.pool,this.options.workosEnabled).admit(input);
+  }
+  async renewCapabilitySession(input:CapabilitySessionRenewalInput) {
+    return new DatabaseCapabilityActorSessionService(this.options.pool,this.options.workosEnabled).renew(input);
+  }
+
   async consume(input:CloudActorEngineScope & {token:string;renew?:boolean}) {
     if (!CLOUD_ACTOR_TOKEN_PATTERN.test(input.token)) rejected();
     return withSystemTx(this.options.pool,async tx=>{
@@ -316,7 +330,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
       await requireSupportedCloudWorkspaceGeneration(tx,input);
       const row = (await tx.query<Session>(`SELECT session.* FROM cloud_workspace_actor_sessions session
         JOIN cloud_workspace_engine_instances engine ON engine.id=session.engine_instance_id AND engine.actor_protocol_version=2
-        WHERE session.token_hash=$1 AND session.workspace_id=$2 AND session.org_id=$3 AND session.generation=$4
+        WHERE session.token_hash=$1 AND session.session_kind='legacy' AND session.workspace_id=$2 AND session.org_id=$3 AND session.generation=$4
           AND session.engine_instance_id=$5 AND session.authority_epoch=$6 AND session.revoked_at IS NULL AND session.session_expires_at>clock_timestamp()
           AND cloud_workspace_actor_auth_live(session.actor_user_id,session.auth_provider,session.auth_subject,session.auth_session_id,session.auth_session_created_at)
           AND ((NOT $7::boolean AND session.consumed_at IS NULL AND session.admission_expires_at>clock_timestamp())
@@ -354,7 +368,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
           AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>clock_timestamp()
         JOIN cloud_workspace_provider_bindings binding ON binding.workspace_id=session.workspace_id AND binding.org_id=session.org_id
           AND binding.generation=session.generation AND binding.observed_state='running'
-        WHERE session.token_hash=$1 AND session.revoked_at IS NULL AND session.session_expires_at>clock_timestamp()
+        WHERE session.token_hash=$1 AND session.session_kind='legacy' AND session.revoked_at IS NULL AND session.session_expires_at>clock_timestamp()
           AND cloud_workspace_actor_auth_live(session.actor_user_id,session.auth_provider,session.auth_subject,session.auth_session_id,session.auth_session_created_at)
           AND (($2::boolean AND session.consumed_at IS NOT NULL AND session.last_renewed_at>clock_timestamp()-interval '30 seconds')
             OR (NOT $2::boolean AND session.consumed_at IS NULL AND session.admission_expires_at>clock_timestamp()))

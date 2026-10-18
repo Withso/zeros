@@ -1,8 +1,14 @@
 import { Hono, type MiddlewareHandler } from "hono";
+import { createHash } from "node:crypto";
 import {createCloudAgentExecutionRoutes} from "./agent-credential-routes.js";
 import type {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import { HttpError } from "../authz.js";
 import { CLOUD_ACTOR_ADMISSION_PATH, CLOUD_ACTOR_TOKEN_PATTERN, CLOUD_CAPABILITY_ACTOR_ADMISSION_PATH } from "./actor-sessions.js";
+import { capabilityActorSessionsEnabled } from "./actor-session-authority.js";
+import {
+  CAPABILITY_SESSION_ADMISSION_PATH, CAPABILITY_SESSION_RENEWAL_PATH,
+  CapabilitySessionAdmissionRequestSchema, CapabilitySessionRenewalRequestSchema,
+} from "./capability-actor-contract.js";
 import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -420,6 +426,8 @@ export interface CloudWorkspaceInternalSetupService {
   admitEngineClient?: DatabaseCloudWorkspaceEngineClientAdmissionService["consume"];
   admitActorClient?: DatabaseCloudWorkspaceEngineClientAdmissionService["consumeActor"];
   admitCapabilityActor?: DatabaseCloudWorkspaceEngineClientAdmissionService["admitCapabilityActor"];
+  admitCapabilitySession?: DatabaseCloudWorkspaceEngineClientAdmissionService["admitCapabilitySession"];
+  renewCapabilitySession?: DatabaseCloudWorkspaceEngineClientAdmissionService["renewCapabilitySession"];
   admitRuntimeAccess?: DatabaseCloudRuntimeAccessAdmissionService["admit"];
   appendRecord?: DatabaseCloudWorkspaceDurableRecordService["append"];
   readRecordHead?: DatabaseCloudWorkspaceDurableRecordService["headForEngine"];
@@ -653,6 +661,8 @@ export function createCloudWorkspaceInternalRoutes(
     CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH,
     CLOUD_ACTOR_ADMISSION_PATH,
     CLOUD_CAPABILITY_ACTOR_ADMISSION_PATH,
+    CAPABILITY_SESSION_ADMISSION_PATH,
+    CAPABILITY_SESSION_RENEWAL_PATH,
   ]) {
     routes.use(path, bodyLimit({ maxSize: INTERNAL_BODY_BYTES }));
   }
@@ -858,6 +868,44 @@ export function createCloudWorkspaceInternalRoutes(
     });
   }
   const clientCapabilities = options?.clientCapabilities;
+  if (clientCapabilities) for (const renewal of [false, true]) {
+    const method = renewal ? service.renewCapabilitySession : service.admitCapabilitySession;
+    if (!method) continue;
+    routes.post(renewal ? CAPABILITY_SESSION_RENEWAL_PATH : CAPABILITY_SESSION_ADMISSION_PATH, async c => {
+      c.header("Cache-Control", "no-store");
+      const heartbeatToken = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);
+      if (!heartbeatToken) return c.json({ error: { code: "invalid_capability" } }, 401);
+      const input = renewal ? await strictJson(c.req, CapabilitySessionRenewalRequestSchema)
+        : await strictJson(c.req, CapabilitySessionAdmissionRequestSchema);
+      if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
+      const renewalInput = renewal ? CapabilitySessionRenewalRequestSchema.parse(input) : null;
+      if (!capabilityActorSessionsEnabled(input.organizationId, clientCapabilities.flags))
+        return c.json({ error: { code: "cloud_actor_admission_rejected" } }, 401);
+      const verified = await clientCapabilities.verifier.verify(input.capability, {
+        workspaceId: input.workspaceId, organizationId: input.organizationId, route: input.route,
+        proof: input.proof, scope: "ws:read",
+      });
+      if (!verified.ok) return c.json({ error: { code: verified.code } },
+        verified.code === "capability_issuer_unavailable" ? 503 : verified.code === "capability_scope_denied" ? 403 : 401);
+      const value = { workspaceId: input.workspaceId, organizationId: input.organizationId,
+        generation: input.generation, engineInstanceId: input.engineInstanceId, heartbeatToken,
+        claims: verified.claims, keyId: verified.header.kid, route: input.route,
+        tokenSha256: createHash("sha256").update(input.capability).digest("hex"), signal: c.req.raw.signal };
+      try {
+        const result = renewalInput
+          ? await service.renewCapabilitySession!({ ...value, actorSessionId: renewalInput.actorSessionId, expectedRevision: renewalInput.expectedRevision })
+          : await service.admitCapabilitySession!(value);
+        if (c.req.raw.signal.aborted || !capabilityActorSessionsEnabled(input.organizationId, clientCapabilities.flags))
+          return c.json({ error: { code: "cloud_actor_admission_rejected" } }, 401);
+        return c.json(result);
+      } catch (error) {
+        if (error instanceof HttpError && error.status === 429) return c.json({ error: { code: error.code } }, 429);
+        if (!(error instanceof HttpError) && !(error instanceof CloudWorkspaceEngineAuthorityError) &&
+            !(error instanceof CloudWorkspaceEngineClientAdmissionError)) throw error;
+        return c.json({ error: { code: "cloud_actor_admission_rejected" } }, 401);
+      }
+    });
+  }
   if (service.admitCapabilityActor && clientCapabilities) {
     routes.post(CLOUD_CAPABILITY_ACTOR_ADMISSION_PATH, async c => {
       c.header("Cache-Control","no-store");

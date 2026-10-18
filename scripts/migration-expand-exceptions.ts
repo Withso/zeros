@@ -66,6 +66,15 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
       "REVOKE ALL ON FUNCTION recheck_cloud_workspace_compute_leases() FROM PUBLIC;",
     ],
   },
+  "0165_cloud_capability_actor_sessions.sql": {
+    "nullable-enrollment": ["ALTER TABLE cloud_workspace_actor_sessions ALTER COLUMN token_hash DROP NOT NULL;"],
+    "widen-check": ["ALTER TABLE cloud_workspace_actor_sessions DROP CONSTRAINT cloud_actor_source_session_required;"],
+    "privilege-tightening": [
+      "preserve_cloud_capability_actor_session()",
+      "cloud_capability_actor_signing_keys_live(text[])",
+      "cloud_workspace_actor_session_source_live(cloud_workspace_actor_sessions, text, boolean, boolean)",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+  },
   "0162_cloud_workspace_mandatory_drains.sql": {
     // PUBLIC's default EXECUTE on functions created in the same migration.
     "privilege-tightening": [

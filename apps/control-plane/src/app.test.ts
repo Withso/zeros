@@ -29,6 +29,43 @@ const pool = {
 
 const emailConfig = { from: null, token: null, apiUrl: "", inviteLinkBase: "" };
 
+it.each([
+  ["capability-session-admission", true], ["capability-session-admission", false],
+  ["capability-session-renewal", true], ["capability-session-renewal", false],
+] as const)("bounds %s before parsing with declared length %s and rollout off", async (route, declaredLength) => {
+  const invoke = vi.fn(async () => ({ version: 1 }));
+  const app = createApp(config(null), pool, emailConfig as never, {
+    cloudWorkspaceInternalSetupService: {
+      redeem: invoke, registerEngine: invoke, heartbeat: invoke,
+      admitCapabilitySession: invoke, renewCapabilitySession: invoke,
+    } as never,
+    cloudCapabilities: {
+      pool, issuer: "https://api.example.test", workosEnabled: true,
+      keyStore: { publicKeySet: () => [] },
+      flags: { enabled: () => false, anyEnabled: () => false },
+    } as never,
+  });
+  const bytes = new TextEncoder().encode(JSON.stringify({ padding: "x".repeat(512 * 1024) }));
+  const headers: Record<string, string> = {
+    authorization: `Bearer zwh_${"a".repeat(43)}`, "content-type": "application/json",
+  };
+  if (declaredLength) headers["content-length"] = String(bytes.byteLength);
+  let offset = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (offset === bytes.length) { controller.close(); return; }
+      const next = Math.min(bytes.length, offset + 16 * 1024);
+      controller.enqueue(bytes.slice(offset, next)); offset = next;
+    },
+  });
+  const request = new Request(`http://localhost/internal/v2/cloud-workspaces/engine/${route}`, {
+    method: "POST", headers, body: stream, duplex: "half",
+  } as RequestInit & { duplex: "half" });
+  const response = await app.request(request);
+  expect(invoke).not.toHaveBeenCalled();
+  expect(response.status).toBe(413);
+});
+
 it("checks native grant authority before account auth without exposing or admitting a stream", async () => {
   const expiresAtMs = Date.now() + 10_000;
   const check = vi.fn(async (_request: Request): Promise<number | null> => expiresAtMs);

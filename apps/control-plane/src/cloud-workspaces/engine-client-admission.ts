@@ -99,6 +99,16 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
     return this.actors.admitCapability(input);
   }
 
+  async admitCapabilitySession(input:Parameters<DatabaseCloudWorkspaceActorSessionService["admitCapabilitySession"]>[0]) {
+    if (!this.actors) throw new CloudWorkspaceEngineClientAdmissionError("engine_client_admission_rejected","Actor admission is unavailable");
+    return this.actors.admitCapabilitySession(input);
+  }
+
+  async renewCapabilitySession(input:Parameters<DatabaseCloudWorkspaceActorSessionService["renewCapabilitySession"]>[0]) {
+    if (!this.actors) throw new CloudWorkspaceEngineClientAdmissionError("engine_client_admission_rejected","Actor admission is unavailable");
+    return this.actors.renewCapabilitySession(input);
+  }
+
   async revokeActor(input:Parameters<DatabaseCloudWorkspaceActorSessionService["revoke"]>[0]) {
     if (!this.actors) throw new CloudWorkspaceEngineClientAdmissionError("engine_client_admission_rejected","Actor admission is unavailable");
     await this.actors.revoke(input);

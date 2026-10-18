@@ -38,6 +38,8 @@ export const ROLLOUT_FLAGS = {
   relay_over_uplink: { whileFeedUnavailable: "retain", summary: "Relay client sessions over the uplink" },
   presence_in_memory: { whileFeedUnavailable: "retain", summary: "Keep presence and engine liveness in memory" },
   runtime_connect: { whileFeedUnavailable: "retain", summary: "Serve S3 runtime connect and capability renewal", requires: ["capabilities"] },
+  capability_actor_sessions: { whileFeedUnavailable: "off", summary: "Use signed capability expiry for actor sessions",
+    requires: ["capabilities", "runtime_connect", "realtime_uplink"] },
   // Enable only once every control-plane service runs the heartbeat that
   // never shortens a lease: an older one would cut a 36-minute uplink lease
   // back to 90 s while the engine skips its periodic heartbeat.
