@@ -8,6 +8,8 @@ import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { rateLimit } from "../ratelimit.js";
 import { deviceSessionLive } from "../realtime/device-sessions.js";
+import { readActiveCloudAgentBootScope } from "./agent-boot-credentials.js";
+import type { CloudAgentBootScope } from "./agent-boot-contract.js";
 import {
   cloudDirectProviderWebSocketUrl,
   type CloudDirectProviderEndpointLookup,
@@ -20,6 +22,8 @@ import {
   type IssuedCapability,
 } from "./capability-issuer.js";
 import type { CloudCapabilityService } from "./capability-routes.js";
+import { assertCloudEngineAuthorityDeadline, CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
+import { CloudRuntimeBindingSchema, type CloudRuntimeBinding } from "./runtime-connect-contract.js";
 import { publicCloudError } from "./public-contract.js";
 import {
   consumeCloudWorkspaceDeviceProof,
@@ -63,6 +67,7 @@ export class CloudRuntimeConnectError extends Error {
 
 export type CloudRuntimeTarget = {
   generation: number;
+  authorityEpoch: number;
   engineInstanceId: string;
   /** The provider resource observed running, for the direct route. */
   providerResourceId: string | null;
@@ -72,6 +77,7 @@ export type CloudRuntimeCapabilities = CloudRuntimeTarget & {
   engine: IssuedCapability;
   realtime: IssuedCapability;
   renewAt: Date;
+  runtimeBinding?: CloudRuntimeBinding;
 };
 
 /** Authorizes the caller for the workspace and finds the one engine running
@@ -81,10 +87,11 @@ export async function readCloudRuntimeTarget(
   tx: Tx,
   scope: { organizationId: string; workspaceId: string; actorUserId: string },
   workosEnabled: boolean,
+  lock = false,
 ): Promise<CloudRuntimeTarget | null> {
-  const workspace = (await tx.query<{ generation: number; role: string | null }>(
-    `SELECT current_generation AS generation, cloud_workspace_actor_role(id, $3) AS role
-     FROM cloud_workspaces WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL`,
+  const workspace = (await tx.query<{ generation: number; authority_epoch: string; role: string | null }>(
+    `SELECT current_generation AS generation, authority_epoch, cloud_workspace_actor_role(id, $3) AS role
+     FROM cloud_workspaces WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL${lock ? " FOR SHARE" : ""}`,
     [scope.workspaceId, scope.organizationId, scope.actorUserId])).rows[0];
   if (!workspace) throw new CloudRuntimeConnectError(404, "cloud_workspace_not_found");
   if (!workspace.role) throw new CloudRuntimeConnectError(403, "workspace_role_required");
@@ -107,13 +114,16 @@ export async function readCloudRuntimeTarget(
        AND engine.lease_expires_at > clock_timestamp()
        AND cloud_workspace_generation_policy_current(workspace.id, engine.generation, workspace.org_id)
        AND cloud_workspace_runtime_authority_live(workspace.id, engine.generation, workspace.owner_user_id, $3)
-     LIMIT 2`,
+     LIMIT 2${lock ? " FOR SHARE OF engine" : ""}`,
     [scope.workspaceId, scope.organizationId, workosEnabled, workspace.generation])).rows;
   if (engines.length === 0) return null;
   // Two ready engines for one generation is a fence the reconciler settles;
   // a retry after that finds one.
   if (engines.length > 1) throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });
-  return { generation: workspace.generation, engineInstanceId: engines[0]!.id, providerResourceId: engines[0]!.provider_resource_id };
+  const authorityEpoch = Number(workspace.authority_epoch);
+  if (!Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1) throw new CapabilityIssuerUnavailableError();
+  return { generation: workspace.generation, authorityEpoch, engineInstanceId: engines[0]!.id,
+    providerResourceId: engines[0]!.provider_resource_id };
 }
 
 /** The runtime connection's `zeros:engine` and `zeros:realtime` tokens for
@@ -129,10 +139,24 @@ export async function issueCloudRuntimeCapabilities(
   const issued = await issueClientCapabilities(tx, service.keyStore, service.issuer,
     { ...scope, engineInstanceId: target.engineInstanceId }, ["zeros:engine", "zeros:realtime"] as const);
   // The engine stopped or the generation moved between the two reads.
-  if (issued.generation !== target.generation || issued.engineInstanceId !== target.engineInstanceId)
+  if (issued.generation !== target.generation || issued.engineInstanceId !== target.engineInstanceId || issued.authorityEpoch !== target.authorityEpoch)
     throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });
   const engine = issued.capabilities["zeros:engine"], realtime = issued.capabilities["zeros:realtime"];
   return { ...target, engine, realtime, renewAt: new Date(Math.min(engine.renewAt.getTime(), realtime.renewAt.getTime())) };
+}
+
+/** Workspace then engine are already locked by readCloudRuntimeTarget.
+ * Pin the exact pointer's writer last, in the existing authority lock order. */
+async function runtimeBootScope(tx: Tx, scope: {
+  organizationId: string; workspaceId: string; generation: number; engineInstanceId: string;
+}): Promise<CloudAgentBootScope | null> {
+  await tx.query(`SELECT writer.writer_epoch FROM cloud_workspaces workspace
+    JOIN cloud_agent_boot_bindings binding ON binding.id=workspace.agent_boot_id
+      AND binding.workspace_id=workspace.id AND binding.org_id=workspace.org_id
+    JOIN cloud_workspace_local_command_writers writer ON writer.workspace_id=binding.workspace_id
+      AND writer.org_id=binding.org_id AND writer.writer_epoch=binding.writer_epoch
+    WHERE workspace.id=$1 AND workspace.org_id=$2 FOR SHARE OF writer`, [scope.workspaceId, scope.organizationId]);
+  return readActiveCloudAgentBootScope(tx, scope);
 }
 
 export type CloudRuntimeConnectOptions = {
@@ -267,7 +291,8 @@ export function createCloudRuntimeConnectRoutes(options: CloudRuntimeConnectOpti
     const deviceId = input.proof.deviceId.toLowerCase();
     try {
       const outcome = await withSystemTx(pool, async (tx): Promise<CloudRuntimeCapabilities | { wakeable: boolean }> => {
-        const target = await readCloudRuntimeTarget(tx, scope, workosEnabled);
+        const connect = input.action === RUNTIME_CONNECT_PROOF_ACTION;
+        const target = await readCloudRuntimeTarget(tx, scope, workosEnabled, connect);
         if (!target) return { wakeable: await wakeable(tx, scope, options.cloudWorkspaces) };
         const sessionId = await authSessionId(tx, input.user);
         if (!sessionId) throw new CloudRuntimeConnectError(403, "capability_revoked");
@@ -276,7 +301,11 @@ export function createCloudRuntimeConnectRoutes(options: CloudRuntimeConnectOpti
           throw new CloudRuntimeConnectError(409, "device_session_expired");
         await consumeCloudWorkspaceDeviceProof(tx, { accountUserId: input.user.id, action: input.action,
           payload: input.payload, proof: input.proof });
-        return issueCloudRuntimeCapabilities(tx, options.capabilities, { ...scope, deviceId, sessionId }, target);
+        const issued = await issueCloudRuntimeCapabilities(tx, options.capabilities, { ...scope, deviceId, sessionId }, target);
+        const bootScope = connect ? await runtimeBootScope(tx, { ...scope, ...target }) : null;
+        return { ...issued, ...(bootScope ? {
+          runtimeBinding: CloudRuntimeBindingSchema.parse({ authorityEpoch: issued.authorityEpoch, bootScope }),
+        } : {}) };
       });
       if ("wakeable" in outcome) return failure(c, 409, "cloud_workspace_not_running", { wakeable: outcome.wakeable });
       return outcome;
@@ -308,8 +337,32 @@ export function createCloudRuntimeConnectRoutes(options: CloudRuntimeConnectOpti
     // Only a requested direct route can be missing here, while its provider
     // resource or endpoint settles.
     if (routes.length === 0) return failure(c, 503, "cloud_workspace_unavailable", { retryable: true });
+    // Endpoint I/O owns no locks. Recheck the original authority and exact
+    // boot/writer before returning its tokens; never replace just the binding.
+    try {
+      await withSystemTx(pool, async tx => {
+        const current = await readCloudRuntimeTarget(tx, { ...ids, actorUserId: c.get("user").id }, workosEnabled, true);
+        if (!current || Object.entries(current).some(([key, value]) => issued[key as keyof CloudRuntimeTarget] !== value))
+          throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });
+        const bootScope = await runtimeBootScope(tx, { ...ids, ...current });
+        if (JSON.stringify(bootScope) !== JSON.stringify(issued.runtimeBinding?.bootScope ?? null) ||
+            !await deviceSessionLive(tx, { deviceSessionId: body.deviceSessionId, accountUserId: c.get("user").id,
+              deviceId: proof.deviceId.toLowerCase(), providerSessionId: workosEnabled ? c.get("user").authentication.sessionId : null }))
+          throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });
+        // Locks preserve identity, not time: waiting for the writer may have
+        // crossed the engine lease or runtime authority deadline.
+        await assertCloudEngineAuthorityDeadline(tx, current.engineInstanceId, workosEnabled);
+        if (Math.min(issued.engine.expiresAt.getTime(), issued.realtime.expiresAt.getTime()) <= Date.now())
+          throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });
+      });
+    } catch (error) {
+      if (error instanceof HttpError || error instanceof CloudRuntimeConnectError || error instanceof CloudWorkspaceEngineAuthorityError)
+        return failure(c, 503, "cloud_workspace_unavailable", { retryable: true });
+      return refusal(c, error);
+    }
     return c.json({
       workspaceId: ids.workspaceId, generation: issued.generation, engineInstanceId: issued.engineInstanceId,
+      ...(issued.runtimeBinding ? { runtimeBinding: issued.runtimeBinding } : {}),
       capabilities: grants(issued), routes, renewAt: issued.renewAt.toISOString(), relayHedgeMs,
     }, 201);
   });

@@ -1,7 +1,7 @@
 # S3. Client contract v1 (cloud workspaces)
 
-Status: **FROZEN** · Contract ID `zeros-client` · Version `1.2.1`
-(direct-route handshake closes; see [Changelog](#changelog)) ·
+Status: **FROZEN** · Contract ID `zeros-client` · Version `1.3.0`
+(runtime boot binding and organization stream coverage; see [Changelog](#changelog)) ·
 Schemas: [Draft schema: REST API (OpenAPI 3.1)](#draft-schema-rest-api-openapi-31),
 [Draft schema: device stream frames](#draft-schema-device-stream-frames),
 [Draft schema: runtime auth frames](#draft-schema-runtime-auth-frames)
@@ -171,6 +171,33 @@ whose route kinds are all unconfigured gets
 whose requested routes are all unavailable for the moment gets
 `503 cloud_workspace_unavailable` (`"retryable": true`).
 
+Since 1.3, an activated boot includes optional nonsecret
+`runtimeBinding: { authorityEpoch, bootScope }`. `bootScope` is the existing
+exact `CloudAgentBootScope`: `organizationId`, `workspaceId`, `generation`,
+`engineInstanceId`, `bootId`, `writerEpoch`, `fundingOwnerUserId` and
+`fundingOwnerEpoch`. Its organization matches the request and its workspace,
+generation and engine match the response. `authorityEpoch` is exactly the
+issued S1 tokens' `ep.wa`. This metadata confers no actor or funding grant.
+
+The CP reads the active writer in the same authority boundary as issuance.
+Provider endpoint I/O holds no database locks; afterward the CP rechecks the
+original authority, boot and writer under workspace → engine → writer locks.
+A changed observation refuses the old admission with retryable
+`503 cloud_workspace_unavailable`; the CP never pairs old tokens with a new
+binding. Corrupt or inactive bindings refuse. Only explicit legacy boot state
+may omit the field on a 1.3 server. Renewal does not change an admission's
+binding.
+
+Clients validate the optional metadata and compare the entire scope to the
+authenticated `ENGINE_READY.cloudLocalCommands` before publishing readiness,
+forwarding, resource usage or command availability. Native code creates its
+own opaque `runtimeId` and monotonic `connectionSequence` for that admission;
+neither the CP nor renderer creates those native handles. Normal S1 scope and
+proof-of-possession checks still apply. A server omitting the metadata selects
+the existing legacy admission once, before SDK activation, or leaves dependent
+features disabled. Malformed or mismatched metadata is an error and cannot
+select a weaker fallback. Renderer JWT decoding is not an authority source.
+
 `POST …/runtime/capabilities` takes `{ "deviceSessionId", "clientSessionId" }`
 and returns `{ "capabilities", "renewAt" }` for the engine running the
 workspace's current generation. The proofs of both endpoints are in
@@ -241,7 +268,7 @@ stream cursor on resumable server events. Schema:
 
 | Type | Payload | Resumable |
 | --- | --- | --- |
-| `ready` | `{ deviceSessionId, cursor, resumed, heartbeatIntervalMs, contract }` | — |
+| `ready` | `{ deviceSessionId, cursor, resumed, heartbeatIntervalMs, contract, organizationFeatures? }` | — |
 | `catalog.changed` | `{ workspaceId, version, catalogVersion, op: "upsert" \| "remove", workspace? }` (full document on upsert) | yes |
 | `catalog.reset` | `{ reason }`: resume impossible; fetch the snapshot again | — |
 | `lifecycle.changed` | `{ workspaceId, version, status, generation, observedState, reason? }` | yes |
@@ -253,6 +280,29 @@ stream cursor on resumable server events. Schema:
 | `pong` | `{ ts }` | — |
 | `drain` | `{ reconnectAfterMs }` | — |
 | `error` | `{ code, message, fatal }` | — |
+
+Since 1.3, `ready.organizationFeatures` is an optional snapshot of at most
+1000 entries `{ organizationId, deviceStream, presence }`, one per authorized
+membership or live guest-access organization. `deviceStream` reports that
+organization's effective stream behavior; `presence` additionally requires
+its `presence_in_memory` flag. The snapshot is recomputed on initial and
+resumed handshakes after membership/catalog reads, rechecking access changes
+that arrived during I/O. A stale flag feed supplies no positive coverage.
+The ticket response and receiving a workspace event are not coverage proof.
+
+Only an explicitly covered organization can suppress the corresponding polls,
+after catalog catch-up. Missing fields, unknown organizations and entries
+omitted by the bound remain unproven and keep polling. The server retains the
+advertised coverage per connection. A relevant flag or membership change that
+alters it drains that connection with the existing `drain`/4503 path, even if
+another organization keeps the account eligible. Unrelated catalog changes do
+not reconnect peers. Losing all stream eligibility still closes 4404.
+
+Disconnect, drain, account change or `catalog.reset` clears client coverage
+proof and resumes fallback/repair until fresh `ready` coverage and catalog
+catch-up. A reset may reconnect to refresh that proof. Replayed frames cannot
+restore it, and resume must not replay documents or notifications whose access
+was lost while parked. Keep confirmed exact-key documents during repair.
 
 Fan-out follows current access: `realtime` sends `catalog.changed`,
 `lifecycle.changed`, `presence.changed` and `notification` for a workspace
@@ -476,7 +526,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
 openapi: 3.1.0
 info:
   title: Zeros cloud workspace client contract (S3)
-  version: 1.2.1
+  version: 1.3.0
   description: >-
     FROZEN reference sketch of the REST half of client contract v1 for cloud
     workspaces. Existing endpoints keep their current request and response
@@ -1080,6 +1130,25 @@ components:
         kind: { enum: [direct, relay] }
         url: { type: string, pattern: '^wss://' }
         priority: { type: integer, minimum: 0, maximum: 9 }
+    CloudAgentBootScope:
+      type: object
+      additionalProperties: false
+      required: [organizationId, workspaceId, generation, engineInstanceId, bootId, writerEpoch, fundingOwnerUserId, fundingOwnerEpoch]
+      properties:
+        organizationId: { type: string, format: uuid }
+        workspaceId: { type: string, format: uuid }
+        generation: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        engineInstanceId: { type: string, format: uuid }
+        bootId: { type: string, format: uuid }
+        writerEpoch: { type: string, format: uuid }
+        fundingOwnerUserId: { type: string, format: uuid }
+        fundingOwnerEpoch: { type: integer, minimum: 1, maximum: 9007199254740991 }
+    RuntimeBinding:
+      type: object
+      required: [authorityEpoch, bootScope]
+      properties:
+        authorityEpoch: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        bootScope: { $ref: '#/components/schemas/CloudAgentBootScope' }
     ConnectResponse:
       type: object
       required: [workspaceId, generation, capabilities, routes, renewAt, relayHedgeMs]
@@ -1087,6 +1156,7 @@ components:
         workspaceId: { $ref: '#/components/schemas/Uuid' }
         generation: { type: integer, minimum: 1 }
         engineInstanceId: { $ref: '#/components/schemas/Uuid' }
+        runtimeBinding: { $ref: '#/components/schemas/RuntimeBinding' }
         capabilities: { $ref: '#/components/schemas/Capabilities' }
         routes:
           type: array
@@ -1095,6 +1165,8 @@ components:
           items: { $ref: '#/components/schemas/Route' }
         renewAt: { type: string, format: date-time }
         relayHedgeMs: { type: integer, minimum: 300, maximum: 500, default: 400 }
+      if: { required: [runtimeBinding] }
+      then: { required: [engineInstanceId] }
     Jwks:
       type: object
       required: [keys]
@@ -1128,7 +1200,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://zeros.dev/schemas/cloud-contracts/s3-device-stream-events.schema.json",
   "title": "Zeros device stream (S3) frames",
-  "description": "FROZEN 1.0.0. Reference sketch. Envelope { t, d, c? }; c is an opaque cursor present on resumable server events. Clients ignore unknown event types and unknown fields.",
+  "description": "FROZEN 1.3.0. Reference sketch. Envelope { t, d, c? }; c is an opaque cursor present on resumable server events. Clients ignore unknown event types and unknown fields.",
   "oneOf": [
     { "$ref": "#/$defs/client.hello" },
     { "$ref": "#/$defs/client.attach" },
@@ -1272,6 +1344,19 @@ a review aid until freeze; the frozen source of truth will be Zod in
         "d": { "type": "object", "required": ["ts"], "properties": { "ts": { "$ref": "#/$defs/timestampMs" } } }
       }
     },
+    "organizationFeatures": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "required": ["organizationId", "deviceStream", "presence"],
+        "properties": {
+          "organizationId": { "$ref": "#/$defs/uuid" },
+          "deviceStream": { "type": "boolean" },
+          "presence": { "type": "boolean" }
+        }
+      }
+    },
     "server.ready": {
       "allOf": [{ "$ref": "#/$defs/frame" }],
       "properties": {
@@ -1284,7 +1369,8 @@ a review aid until freeze; the frozen source of truth will be Zod in
             "cursor": { "$ref": "#/$defs/cursor" },
             "resumed": { "type": "boolean" },
             "heartbeatIntervalMs": { "type": "integer", "minimum": 5000, "maximum": 60000 },
-            "contract": { "type": "integer", "minimum": 1 }
+            "contract": { "type": "integer", "minimum": 1 },
+            "organizationFeatures": { "$ref": "#/$defs/organizationFeatures" }
           }
         }
       }
@@ -1449,6 +1535,7 @@ a review aid until freeze; the frozen source of truth will be Zod in
   },
   "examples": [
     { "t": "ready", "d": { "deviceSessionId": "77777777-7777-4777-8777-777777777777", "cursor": "c-1", "resumed": false, "heartbeatIntervalMs": 20000, "contract": 1 } },
+    { "t": "ready", "d": { "deviceSessionId": "77777777-7777-4777-8777-777777777777", "cursor": "c-1", "resumed": true, "heartbeatIntervalMs": 20000, "contract": 1, "organizationFeatures": [{ "organizationId": "11111111-1111-4111-8111-111111111111", "deviceStream": true, "presence": false }] } },
     { "t": "lifecycle.changed", "c": "c-2", "d": { "workspaceId": "33333333-3333-4333-8333-333333333333", "version": 41, "status": "running", "generation": 7, "observedState": "running" } },
     { "t": "capability.revoked", "c": "c-3", "d": { "workspaceId": "33333333-3333-4333-8333-333333333333", "reason": "membership_changed", "scope": "workspace" } },
     { "t": "presence.set", "d": { "workspaceId": "33333333-3333-4333-8333-333333333333", "state": "active" } }
@@ -1605,6 +1692,17 @@ is a review aid until freeze; the frozen source of truth will be Zod in
 
 ## Changelog
 
+- **1.3.0** (2026-10-18, additive optional response fields; major remains 1):
+  - `runtime/connect` can carry the exact active `runtimeBinding`, tied to
+    issued authority and rechecked after endpoint I/O. Native handles remain
+    native-owned. Missing metadata on older servers keeps legacy admission;
+    invalid metadata cannot select fallback.
+  - Device-stream `ready` can carry bounded per-organization stream and
+    presence coverage. Resume rechecks access and flags; relevant changes
+    drain affected connections. Poll suppression requires fresh coverage and
+    catalog catch-up, and resets/disconnects invalidate that proof.
+  - Older clients ignore the optional fields. Older server responses remain
+    valid; neither request bodies nor S1 claims change.
 - **1.2.1** (2026-10-17, clarifications; no schema change):
   - [Part 3](#part-3-runtime-connection) gives the engine's closes before
     `auth.ok` on the direct route: `4400` for a second frame, `4403`

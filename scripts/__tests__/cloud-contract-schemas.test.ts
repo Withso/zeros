@@ -4,6 +4,8 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { load } from "js-yaml";
 import { describe, expect, it } from "vitest";
+import { CloudRuntimeBindingSchema } from "../../apps/control-plane/src/cloud-workspaces/runtime-connect-contract.js";
+import { DeviceStreamOrganizationFeaturesSchema } from "../../apps/control-plane/src/realtime/device-stream-protocol.js";
 
 const root = resolve(import.meta.dirname, "../..");
 const contracts = join(root, "docs/cloud-workspace/contracts");
@@ -307,6 +309,64 @@ describe("cloud workspace contract sketches", () => {
         expect(declared.sort(), path).toEqual([...templated].sort());
       }
     }
+  });
+
+  it("S3 1.3 runtime binding is optional for older peers and matches the standalone CP schema", () => {
+    const api = load(block("s3-client-api")) as { info: { version: string }; components: { schemas: JsonObject } };
+    expect(api.info.version).toBe("1.3.0");
+    const instance = ajv();
+    instance.addSchema({ $id: "s3-api", $defs: rewriteRefs(api.components.schemas) });
+    const connect = instance.getSchema("s3-api#/$defs/ConnectResponse")!;
+    const binding = instance.getSchema("s3-api#/$defs/RuntimeBinding")!;
+    const fixture = JSON.parse(readFileSync(join(root, "scripts/__tests__/fixtures/s3-client-mixed-version.json"), "utf8"));
+    for (const response of [fixture.legacy.connect, fixture.current.connect]) expect(connect(response), JSON.stringify(connect.errors)).toBe(true);
+    const valid = fixture.current.connect.runtimeBinding;
+    for (const [value, accepted] of [
+      [valid, true], [{ ...valid, futureField: true }, true], [{}, false], [null, false],
+      [{ ...valid, authorityEpoch: 0 }, false], [{ ...valid, authorityEpoch: Number.MAX_SAFE_INTEGER + 1 }, false],
+      [{ ...valid, bootScope: { ...valid.bootScope, writerEpoch: "not-a-writer" } }, false],
+      [{ ...valid, bootScope: { ...valid.bootScope, generation: 0 } }, false],
+      [{ ...valid, bootScope: { ...valid.bootScope, fundingOwnerEpoch: 0 } }, false],
+    ] as const) {
+      expect(binding(value)).toBe(accepted);
+      expect(CloudRuntimeBindingSchema.safeParse(value).success).toBe(accepted);
+      expect(connect({ ...fixture.current.connect, runtimeBinding: value })).toBe(accepted);
+    }
+    // The prior client's open response shape ignores the new optional field.
+    const oldSchemas = structuredClone(api.components.schemas) as Record<string, JsonObject>;
+    delete (oldSchemas.ConnectResponse!.properties as JsonObject).runtimeBinding;
+    delete oldSchemas.ConnectResponse!.if;
+    delete oldSchemas.ConnectResponse!.then;
+    const old = ajv().compile({ $defs: rewriteRefs(oldSchemas), $ref: "#/$defs/ConnectResponse" });
+    expect(old(fixture.current.connect)).toBe(true);
+    const withoutEngine = { ...fixture.current.connect };
+    delete withoutEngine.engineInstanceId;
+    expect(old(withoutEngine)).toBe(true);
+    expect(connect(withoutEngine)).toBe(false);
+  });
+
+  it("S3 1.3 ready coverage stays bounded, optional and compatible with older clients", () => {
+    const schema = json("s3-device-stream-events");
+    const instance = ajv();
+    const ready = instance.compile(schema);
+    const coverage = instance.compile({ $defs: schema.$defs, $ref: "#/$defs/organizationFeatures" });
+    const fixture = JSON.parse(readFileSync(join(root, "scripts/__tests__/fixtures/s3-client-mixed-version.json"), "utf8"));
+    for (const frame of [fixture.legacy.ready, fixture.current.ready]) expect(ready(frame), JSON.stringify(ready.errors)).toBe(true);
+    const valid = fixture.current.ready.d.organizationFeatures;
+    for (const [value, accepted] of [
+      [valid, true], [[], true], [[{ ...valid[0], futureField: true }], true],
+      [null, false], [[{ organizationId: valid[0].organizationId, deviceStream: true }], false],
+      [[{ ...valid[0], organizationId: "foreign" }], false], [[{ ...valid[0], presence: "yes" }], false],
+      [Array.from({ length: 1_001 }, () => valid[0]), false],
+    ] as const) {
+      expect(coverage(value)).toBe(accepted);
+      expect(DeviceStreamOrganizationFeaturesSchema.safeParse(value).success).toBe(accepted);
+      expect(ready({ ...fixture.current.ready, d: { ...fixture.current.ready.d, organizationFeatures: value } })).toBe(accepted);
+    }
+    const oldSchema = structuredClone(schema);
+    const oldReady = (oldSchema.$defs as Record<string, JsonObject>)["server.ready"]!;
+    delete (((oldReady.properties as JsonObject).d as JsonObject).properties as JsonObject).organizationFeatures;
+    expect(ajv().compile(oldSchema)(fixture.current.ready)).toBe(true);
   });
 
   it("links only to files that exist, and anchors to headings that exist", () => {

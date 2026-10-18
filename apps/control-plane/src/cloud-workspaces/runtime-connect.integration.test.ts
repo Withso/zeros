@@ -12,6 +12,7 @@ import { issueDeviceSession } from "../realtime/device-sessions.js";
 import type { RolloutFlagName } from "../rollout-flags.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { CapabilityClaimsSchema } from "./capability-contract.js";
+import type { CloudAgentBootScope } from "./agent-boot-contract.js";
 import type { CapabilitySigningKeyStore } from "./capability-keys.js";
 import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
 import {
@@ -41,6 +42,7 @@ type ConnectBody = {
   capabilities: { engine: Grant; realtime: Grant };
   routes: { kind: "direct" | "relay"; url: string; priority: number }[];
   renewAt: string; relayHedgeMs: number;
+  runtimeBinding?: { authorityEpoch: number; bootScope: CloudAgentBootScope };
 };
 type Ids = { organizationId: string; workspaceId: string };
 type Actor = { user: AuthedUser; deviceId: string; privateKey: KeyObject };
@@ -155,6 +157,98 @@ d("runtime connect and capability renewal with PostgreSQL", () => {
     expect(protectedHeader.kid).toBe("cap-test-a");
     return CapabilityClaimsSchema.parse(payload);
   }
+
+  async function bindActiveBoot(): Promise<CloudAgentBootScope> {
+    const bootId = (await pool.query<{ id: string }>(
+      "SELECT runtime_boot_id AS id FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0]!.id;
+    const writerEpoch = randomUUID(), id = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_local_command_writers
+      (workspace_id,org_id,generation,engine_instance_id,boot_id,writer_epoch,funding_owner_user_id,funding_owner_epoch)
+      VALUES($1,$2,1,$3,$4,$5,$6,1)`,
+    [fixture.workspaceId, fixture.organizationId, fixture.engineInstanceId, bootId, writerEpoch, fixture.userId]);
+    await pool.query(`INSERT INTO cloud_agent_boot_bindings
+      (id,workspace_id,org_id,generation,engine_instance_id,boot_id,writer_epoch,funding_owner_user_id,funding_owner_epoch,
+       credentials_initialized,initial_adoptions) VALUES($1,$2,$3,1,$4,$5,$6,$7,1,true,$8)`,
+    [id, fixture.workspaceId, fixture.organizationId, fixture.engineInstanceId, bootId, writerEpoch, fixture.userId,
+      JSON.stringify(["claude", "codex", "cursor"].map(provider => ({ provider, status: "missing" })))]);
+    await pool.query("UPDATE cloud_workspace_local_command_writers SET state='active',activated_at=now() WHERE writer_epoch=$1", [writerEpoch]);
+    await pool.query("UPDATE cloud_workspaces SET agent_command_mode='boot-owner-v1',agent_boot_id=$2 WHERE id=$1", [fixture.workspaceId, id]);
+    return { organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, generation: 1,
+      engineInstanceId: fixture.engineInstanceId, bootId, writerEpoch, fundingOwnerUserId: fixture.userId, fundingOwnerEpoch: 1 };
+  }
+
+  it("runtime_connect_returns_exact_active_boot_binding", async () => {
+    const bootScope = await bindActiveBoot();
+    const response = await post(CONNECT, connectBody());
+    expect(response.status).toBe(201);
+    const body = await response.json() as ConnectBody;
+    const engine = await claims(body.capabilities.engine.token), realtime = await claims(body.capabilities.realtime.token);
+    expect(body.runtimeBinding).toEqual({ authorityEpoch: engine.ep.wa, bootScope });
+    expect(body.runtimeBinding?.authorityEpoch).toBe(realtime.ep.wa);
+    expect(body).not.toHaveProperty("runtimeId");
+    expect(body).not.toHaveProperty("connectionSequence");
+  });
+
+  it.each(["authority", "boot", "writer", "device", "session"] as const)("boot_or_authority_changes_during_direct_lookup_refuse_old_admission: %s", async change => {
+    const boot = await bindActiveBoot();
+    let changed = false;
+    const endpoint = vi.fn(async () => {
+      // This write must finish while the provider lookup is pending: endpoint
+      // I/O cannot hold the workspace/engine locks needed to retire a boot.
+      if (change === "authority") await pool.query("UPDATE cloud_workspaces SET authority_epoch=authority_epoch+1 WHERE id=$1", [fixture.workspaceId]);
+      // Boot identity is immutable; retiring its engine invalidates that boot.
+      if (change === "boot") await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked',revoked_at=now() WHERE id=$1", [fixture.engineInstanceId]);
+      if (change === "writer") await pool.query("UPDATE cloud_workspace_local_command_writers SET state='retired',retired_at=now() WHERE writer_epoch=$1", [boot.writerEpoch]);
+      if (change === "device") await pool.query("UPDATE devices SET trust_state='revoked',revoked_at=now() WHERE id=$1", [deviceId]);
+      if (change === "session") await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=now() WHERE id=$1", [authSessionId]);
+      changed = true;
+      return { url: DIRECT_ENDPOINT };
+    });
+    const response = await post(CONNECT, connectBody(), { app: routes({ direct: { enginePort: 39393, endpoint } }) });
+    expect(endpoint).toHaveBeenCalledOnce();
+    expect(changed).toBe(true);
+    expect(response.status).toBe(503);
+    expect(await failure(response)).toMatchObject({ code: "cloud_workspace_unavailable", retryable: true });
+  });
+
+  it("omits runtimeBinding only for an explicitly legacy boot", async () => {
+    const response = await post(CONNECT, connectBody());
+    expect(response.status).toBe(201);
+    expect(await response.json()).not.toHaveProperty("runtimeBinding");
+    const boot = await bindActiveBoot();
+    await pool.query("UPDATE cloud_workspace_local_command_writers SET state='retired',retired_at=now() WHERE writer_epoch=$1", [boot.writerEpoch]);
+    const inactive = await post(CONNECT, connectBody());
+    expect(inactive.status).not.toBe(201);
+    expect(await inactive.json()).not.toHaveProperty("capabilities");
+  });
+
+  it("refuses a lease that expires while the final writer lock is pending", async () => {
+    const boot = await bindActiveBoot();
+    const blocker = await pool.connect();
+    await blocker.query("BEGIN");
+    const endpoint = async () => {
+      await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp()+interval '2 seconds' WHERE id=$1", [fixture.engineInstanceId]);
+      await blocker.query("SELECT writer_epoch FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1 FOR UPDATE", [boot.writerEpoch]);
+      return { url: DIRECT_ENDPOINT };
+    };
+    const pending = post(CONNECT, connectBody(), { app: routes({ direct: { enginePort: 39393, endpoint } }) });
+    try {
+      // Wait for the actual lock boundary, not an assumed scheduling delay.
+      await vi.waitFor(async () => {
+        const waiting = await pool.query(`SELECT 1 FROM pg_stat_activity
+          WHERE datname=current_database() AND query LIKE 'SELECT writer.writer_epoch%'
+            AND wait_event_type='Lock'`);
+        expect(waiting.rowCount).toBe(1);
+      }, { timeout: 1_500, interval: 10 });
+      await pool.query("SELECT pg_sleep(2.1)");
+    } finally {
+      await blocker.query("ROLLBACK");
+      blocker.release();
+    }
+    const response = await pending;
+    expect(response.status).toBe(503);
+    expect(await failure(response)).toMatchObject({ code: "cloud_workspace_unavailable", retryable: true });
+  });
 
   it("issues engine and realtime capabilities for the running engine with direct and relay routes", async () => {
     const response = await post(CLOUD_RUNTIME_CONNECT_PATH, connectBody());
