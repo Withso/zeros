@@ -1,0 +1,9 @@
+{
+  "id": "cloud-runtime-connect-boot-fence",
+  "kind": "replay",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:599",
+  "symptom": "Runtime connect returned capabilities after the admitted boot, writer or authority changed during provider endpoint I/O and supplied no exact boot binding for the native readiness fence.",
+  "rule": "Read the active boot in the issuance authority boundary, return its exact epoch and scope, and recheck the original binding after I/O without holding locks across the provider lookup. S3 1.3 runtime connect and zstack-review concurrency checks.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/runtime-connect.integration.test.ts -t 'runtime_connect_returns_exact_active_boot_binding|boot_or_authority_changes_during_direct_lookup_refuse_old_admission'"
+}

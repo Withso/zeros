@@ -1,0 +1,9 @@
+{
+  "id": "device-stream-organization-coverage",
+  "kind": "replay",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:599",
+  "symptom": "A mixed-organization device stream remained open when one organization's rollout was disabled, and resume reused parked membership instead of proving current coverage.",
+  "rule": "Publish fresh bounded per-organization coverage in ready, fence membership reads, and drain affected connections when that coverage changes even if another organization stays enabled. S3 1.3 device stream and zstack-review owner isolation checks.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/realtime/device-stream-server.test.ts -t 'disable_org_a_while_org_b_stays_enabled_invalidates_coverage|resumed_stream_rechecks_membership_and_flags_before_ready'"
+}
