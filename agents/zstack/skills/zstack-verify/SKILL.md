@@ -116,6 +116,10 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
 - `pnpm typecheck` keeps incremental state in `node_modules/.cache/zeros-typecheck`.
   An error in a file you did not touch may be stale state: confirm with
   `tsc --noEmit -p tsconfig.typecheck.json --incremental false` before chasing it.
+- On macOS the default `TMPDIR` (`/var/folders/…`) is reached through the
+  `/var` symlink, so path-safety suites fail with `zstack_source_unsafe`,
+  `zstack_receipt_unsafe` or "not canonical". Rerun them with `TMPDIR` set to a
+  directory under `/private/tmp`; Linux-only cloud fixtures still fail on macOS.
 - `pnpm test:ui-smoke` stops at the first scenario that throws, so one base
   failure hides every later scenario. Confirm the failure on the base commit,
   then run the rest from an untracked copy of `scripts/` without that scenario

@@ -1128,6 +1128,9 @@ export class ZerosEngine {
    * immutable-boundary handoff. Native sessions never stop or change backend
    * for this set. */
   private readonly designTerritoryTransitions = new Set<string>();
+  /** Settles when an owner leaves designTerritoryTransitions. */
+  private designTerritoryOwnerRelease: Promise<void> | null = null;
+  private wakeDesignTerritoryOwnerWaiters: (() => void) | null = null;
   /** Serializes changes to the app-wide Design owner map and tool authority.
    * Only cloud Code process admission depends on this count. */
   private globalDesignTerritoryTransitionCount = 0;
@@ -5789,9 +5792,7 @@ export class ZerosEngine {
         try { return await mutation(); } finally { resumeTools.forEach((resume) => resume()); }
       } finally {
         release();
-        for (const target of validated) {
-          this.designTerritoryTransitions.delete(target.workspaceId);
-        }
+        this.releaseDesignTerritoryOwners(validated);
       }
     }
     const validated: typeof ordered = [];
@@ -5916,10 +5917,27 @@ export class ZerosEngine {
       for (const workspaceRoot of suspendedUtilityRoots) {
         this.agents.resumePooledUtilityWorkspaceTerritory(workspaceRoot);
       }
-      for (const target of validated) {
-        this.designTerritoryTransitions.delete(target.workspaceId);
-      }
+      this.releaseDesignTerritoryOwners(validated);
     }
+  }
+
+  private designTerritoryOwnerReleased(): Promise<void> {
+    this.designTerritoryOwnerRelease ??= new Promise<void>((resolve) => {
+      this.wakeDesignTerritoryOwnerWaiters = resolve;
+    });
+    return this.designTerritoryOwnerRelease;
+  }
+
+  private releaseDesignTerritoryOwners(
+    targets: readonly { workspaceId: string }[],
+  ): void {
+    for (const target of targets) {
+      this.designTerritoryTransitions.delete(target.workspaceId);
+    }
+    const wake = this.wakeDesignTerritoryOwnerWaiters;
+    this.designTerritoryOwnerRelease = null;
+    this.wakeDesignTerritoryOwnerWaiters = null;
+    wake?.();
   }
 
   /** Qualified-cloud Code authority is creation-time state. The local desktop
@@ -10970,9 +10988,15 @@ export class ZerosEngine {
         ) {
           return null;
         }
-        if (!lifecycleMutationWorkspaceId) return null;
+        // These lifecycles own the barrier that lifecycleMutationWorkspaceId
+        // feeds, so it is always null for them; their exact owner is the
+        // request's workspaceId. The global gate would suspend Design tools in
+        // every workspace's chats. A rowless owner (the cloud primary checkout)
+        // keeps the global gate.
+        const workspaceId = params.workspaceId;
+        if (typeof workspaceId !== "string" || !workspaceId) return null;
         try {
-          return getWorkspaceById(lifecycleMutationWorkspaceId);
+          return getWorkspaceById(workspaceId);
         } catch {
           return null;
         }
@@ -11059,15 +11083,29 @@ export class ZerosEngine {
         }
       }
       const operation = managedLifecycleRegistryTarget
-        ? this.withDesignTerritoryTransition(
-            [
-              {
-                workspaceId: managedLifecycleRegistryTarget.id,
-                designDirectory: designDirOf(managedLifecycleRegistryTarget),
-              },
-            ],
-            dispatch,
-          )
+        ? (async () => {
+            // A repeat or follow-up lifecycle for this owner (another window,
+            // archive then restore) queues behind its transition, as it did
+            // behind the app-wide gate, instead of failing the owner check.
+            // Lifecycles never run inside a transition, so this cannot wait on
+            // itself.
+            while (
+              this.designTerritoryTransitions.has(
+                managedLifecycleRegistryTarget.id,
+              )
+            ) {
+              await this.designTerritoryOwnerReleased();
+            }
+            return this.withDesignTerritoryTransition(
+              [
+                {
+                  workspaceId: managedLifecycleRegistryTarget.id,
+                  designDirectory: designDirOf(managedLifecycleRegistryTarget),
+                },
+              ],
+              dispatch,
+            );
+          })()
         : changesDesignOwnerRegistry
           ? this.withGlobalDesignTerritoryTransition(dispatch)
           : recognitionMutationTarget

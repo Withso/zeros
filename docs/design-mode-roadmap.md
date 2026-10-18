@@ -786,8 +786,12 @@ make Code files read-only.
 - `ConversationDesignTools` lazily binds the active registered directory. A
   missing directory can be created and then used through the same MCP connection.
   Local directory transitions suspend and revoke document grants, then permit
-  a fresh capability read; they preserve the provider and MCP endpoint. Existing
-  cloud execution-boundary transitions retain their separate lifecycle policy.
+  a fresh capability read; they preserve the provider and MCP endpoint. A
+  managed workspace's archive, delete, restore or recover suspends only that
+  workspace's grants; registry-wide owner changes suspend every workspace's.
+  Prompt and steer preparation waits for suspended grants to resume instead of
+  failing; Stop and disposal still end the wait. Existing cloud
+  execution-boundary transitions retain their separate lifecycle policy.
 - API writes retain the existing owner/directory checks, document CAS,
   durable request receipts, journal recovery, and actor-local undo. An
   execution configured for API-only authoring (none is, today) cannot apply a
