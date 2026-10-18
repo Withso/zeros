@@ -149,12 +149,26 @@ export class WatchHostClient {
   private readonly ids = new Map<NativeRootWatcher, number>();
 
   private readonly earlyDeathMs: number;
+  private readonly onUnavailable: (() => void) | undefined;
 
   constructor(
     private readonly launch: () => WatchHostLaunch | null,
-    options: { earlyDeathMs?: number } = {},
+    options: { earlyDeathMs?: number; onUnavailable?: () => void } = {},
   ) {
     this.earlyDeathMs = options.earlyDeathMs ?? EARLY_DEATH_MS;
+    this.onUnavailable = options.onUnavailable;
+  }
+
+  /** Every root falls back to stat polling from here on. Report it once, so
+   * the engine can restore the prompt Design refresh that polling lacks. */
+  private markUnavailable(): void {
+    if (this.unavailable) return;
+    this.unavailable = true;
+    try {
+      this.onUnavailable?.();
+    } catch {
+      /* a consumer's failure never disturbs watching */
+    }
   }
 
   /** One native recursive watch for `root`, armed on the shared host. */
@@ -203,7 +217,7 @@ export class WatchHostClient {
     if (this.unavailable) return false;
     const launch = this.launch();
     if (!launch) {
-      this.unavailable = true;
+      this.markUnavailable();
       return false;
     }
     let child: ChildProcess;
@@ -213,7 +227,7 @@ export class WatchHostClient {
         env: launch.env,
       });
     } catch {
-      this.unavailable = true;
+      this.markUnavailable();
       return false;
     }
     this.child = child;
@@ -306,7 +320,7 @@ export class WatchHostClient {
     const early = Date.now() - this.spawnedAt < this.earlyDeathMs;
     this.earlyDeaths = early ? this.earlyDeaths + 1 : 0;
     if (this.earlyDeaths >= MAX_EARLY_DEATHS || !this.ensure()) {
-      this.unavailable = true;
+      this.markUnavailable();
       const roots = [...this.roots.values()];
       this.roots.clear();
       this.ids.clear();
@@ -368,10 +382,14 @@ export function createLocalWatchHost(context: {
   cloudWorker: boolean;
   platform: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
+  /** Called once if the host gives up and every root polls instead. */
+  onUnavailable?: () => void;
 }): WatchHostClient | null {
   if (context.devRuntime || context.cloudWorker || context.platform !== "darwin")
     return null;
   const env = context.env ?? process.env;
   if (!watchHostLaunchFromEnvironment(env)) return null;
-  return new WatchHostClient(() => watchHostLaunchFromEnvironment(env));
+  return new WatchHostClient(() => watchHostLaunchFromEnvironment(env), {
+    onUnavailable: context.onUnavailable,
+  });
 }

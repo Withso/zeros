@@ -969,6 +969,16 @@ export function startGitWatcher(
     });
     native.on("all", (_event, filePath) => {
       if (rootWatchers.get(key) !== entry) return;
+      // Chokidar applies these exclusions through `ignored`; a native host
+      // watches the whole root, so apply the same rules to each event here.
+      if (
+        !entry.polling &&
+        options.nativeWatcher !== undefined &&
+        (WORKTREE_IGNORED_PATHS.some((pattern) => pattern.test(filePath)) ||
+          isInsideNestedToolWorktree(entry.target.root, filePath))
+      ) {
+        return;
+      }
       // Churn inside a Git-ignored folder changes no Git view; an unwatch can
       // trail a few already-queued callbacks.
       if (isInsideAny(filePath, entry.ignoredDirectories)) return;

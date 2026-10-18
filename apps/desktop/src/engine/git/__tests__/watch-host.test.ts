@@ -177,6 +177,37 @@ describe("startGitWatcher with the native watch host", () => {
     },
   );
 
+  it.each(["nested tool worktree file", "nested tool worktree folder", ".zeros private state", "save temp file"])(
+    "applies the engine's own exclusions to native events: %s",
+    async (kind) => {
+      const root = await gitRoot("zeros-native-exclusions-");
+      const nested = join(root, ".claude", "worktrees", "feature");
+      await mkdir(join(nested, "src"), { recursive: true });
+      await writeFile(join(nested, ".git"), "gitdir: /nonexistent/worktrees/feature\n");
+      await writeFile(join(nested, "src", "lib.ts"), "export {};\n");
+      await mkdir(join(root, ".zeros"), { recursive: true });
+      const client = new WatchHostClient(launch);
+      clients.push(client);
+      const changes: GitWatchChange[] = [];
+      const watcher = watch(root, "workspace-exclusions", client, (change) => changes.push(change));
+      await watcher.ready;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const before = changes.length;
+      for (let index = 0; index < 3; index += 1) {
+        if (kind === "nested tool worktree file") await writeFile(join(nested, "src", "lib.ts"), `export const v = ${index};\n`);
+        if (kind === "nested tool worktree folder") await mkdir(join(nested, `build-${index}`), { recursive: true });
+        if (kind === ".zeros private state") await writeFile(join(root, ".zeros", "private-state.json"), `{"n":${index}}\n`);
+        if (kind === "save temp file") await writeFile(join(root, "src", "save.ts.zeros-tmp"), `x${index}\n`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(changes.slice(before)).toEqual([]);
+      // The same root still reports ordinary source edits.
+      await writeFile(join(root, "src", "app.ts"), "export const edited = true;\n");
+      await waitFor(() => changes.length > before);
+    },
+  );
+
   it("marks Design recognition when a marker appears and when its folder is moved away", async () => {
     const root = await gitRoot("zeros-native-design-");
     await mkdir(join(root, "Design", "meta"), { recursive: true });
@@ -221,7 +252,8 @@ describe("startGitWatcher with the native watch host", () => {
   it("falls back to polling for each root when the host keeps dying at start", async () => {
     const root = await gitRoot("zeros-native-fallback-");
     const broken: WatchHostLaunch = { command: process.execPath, args: ["-e", "process.exit(3)"], env: { ...process.env } };
-    const client = new WatchHostClient(() => broken);
+    const onUnavailable = vi.fn();
+    const client = new WatchHostClient(() => broken, { onUnavailable });
     clients.push(client);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const changes: GitWatchChange[] = [];
@@ -239,6 +271,8 @@ describe("startGitWatcher with the native watch host", () => {
     const before = changes.length;
     await writeFile(join(root, "src", "polled.ts"), "export {};\n");
     await waitFor(() => changes.length > before);
+    // The engine restores its prompt Design refresh once, for every root.
+    expect(onUnavailable).toHaveBeenCalledTimes(1);
   });
 });
 

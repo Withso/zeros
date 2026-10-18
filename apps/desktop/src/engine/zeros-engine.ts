@@ -3507,16 +3507,24 @@ export class ZerosEngine {
     // options below). Its Node watch host can, with one recursive watch per
     // root instead of Chokidar's poller per file. Cloud workers, Linux and dev
     // keep exactly the watcher they had; a missing host keeps polling.
-    const watchHost = createLocalWatchHost({
+    // Development engines, and a packaged engine with its native watch host,
+    // receive file events within ~120 ms; a packaged engine without the host
+    // (or whose host gave up) stat-polls its worktrees every 1.5 s below, so
+    // it also polls the Design directory a Design tab shows.
+    let watchHost: WatchHostClient | null = null;
+    const startDesignChangePoller = () => {
+      // Only for the engine's current host: stop() releases it first.
+      if (this.cloudWorker || isDevRuntime() || this.designChangePoller || this.watchHost !== watchHost) return;
+      this.designChangePoller = this.createDesignChangePoller();
+      this.designChangePoller.start();
+    };
+    watchHost = createLocalWatchHost({
       devRuntime: isDevRuntime(),
       cloudWorker: this.cloudWorker !== null,
       platform: process.platform,
+      onUnavailable: startDesignChangePoller,
     });
     this.watchHost = watchHost;
-    // Development engines, and a packaged engine with its native watch host,
-    // receive file events within ~120 ms; a packaged engine without the host
-    // stat-polls its worktrees every 1.5 s below, so it also polls the
-    // Design directory a Design tab shows.
     if (!this.cloudWorker && !isDevRuntime() && !watchHost) {
       this.designChangePoller = this.createDesignChangePoller();
       this.designChangePoller.start();
@@ -3791,13 +3799,15 @@ export class ZerosEngine {
     this.gitWatcher = null;
     this.stopStyleBuildInputs?.();
     this.stopStyleBuildInputs = null;
+    // Release the watch host before the Design poller, so a host that gives
+    // up during teardown cannot start a replacement poller.
+    const watchHost = this.watchHost;
+    this.watchHost = null;
     this.designAgentActivity?.dispose();
     this.designAgentActivity = null;
     this.designChangePoller?.stop();
     this.designChangePoller = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
-    const watchHost = this.watchHost;
-    this.watchHost = null;
     if (watchHost) await settle(() => watchHost.dispose());
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
