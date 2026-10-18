@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { Hono } from "hono";
 import type { AuthedUser } from "../auth.js";
+import type { CloudWorkspaceBackendConfig } from "../config.js";
 import {
   afterAll,
   afterEach,
@@ -35,6 +36,7 @@ import {
 import { DatabaseCloudWorkspaceProviderResolver, type CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { CloudWorkspaceProviderRegistry } from "./provider-registry.js";
 import { requestManagedComputeStop } from "./compute-credit-stop.js";
+import { DatabaseCloudIdleStop } from "./idle-stop.js";
 import { computeMicroUsd } from "./provider-compute.js";
 import { DatabaseCloudWorkspaceHealthService } from "./health.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
@@ -428,6 +430,59 @@ suite("managed compute lifecycle admission", () => {
     expect(response.status).toBe(202);
     return (await pool.query<{ id: string }>("SELECT id FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='stop'", [f.workspaceId])).rows[0]!.id;
   }
+
+  it("retains a mandatory drain and its deadline when the engine cancels final capture", async () => {
+    await ready(); await age();
+    await requestManagedComputeStop(pool, { leaseId: input.intentId, reason: "compute_reconciliation_failed" });
+    const request = (await pool.query(`SELECT request.id,request.lifecycle_intent_id,request.deadline_at
+      FROM workspace_checkpoint_requests request WHERE request.workspace_id=$1`, [f.workspaceId])).rows[0];
+    const idle = new DatabaseCloudIdleStop(pool, false);
+    const engine = { workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1,
+      engineInstanceId: f.engineInstanceId, heartbeatToken: f.heartbeatToken };
+    await idle.cancel(engine, request.id);
+    await idle.cancel(engine, request.id);
+    for (let n = 0; n < 2; n++) {
+      await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+      expect(await coordinator.runOnce()).toBe(true);
+    }
+    expect((await pool.query("SELECT id,state FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='stop'", [f.workspaceId])).rows)
+      .toEqual([{ id: request.lifecycle_intent_id, state: "queued" }]);
+    expect((await pool.query("SELECT id,state,deadline_at,checkpoint_id FROM workspace_checkpoint_requests WHERE workspace_id=$1", [f.workspaceId])).rows)
+      .toEqual([{ id: request.id, state: "cancelled", deadline_at: request.deadline_at, checkpoint_id: null }]);
+
+    await requestManagedComputeStop(pool, { leaseId: input.intentId, reason: "compute_reconciliation_failed", force: true });
+    expect((await pool.query("SELECT state,error_code,checkpoint_id FROM workspace_checkpoint_requests WHERE id=$1", [request.id])).rows[0])
+      .toEqual({ state: "cancelled", error_code: "stop_unsealed", checkpoint_id: null });
+    provider.stop.mockResolvedValue({ ...resource(), state: "stopped" });
+    await new CloudWorkspaceReconciler({ pool, provider: asProvider(), intervalMs: 1000, workosEnabled: false }).runOnce();
+    expect(provider.stop).toHaveBeenCalledOnce();
+    expect((await pool.query("SELECT id,state FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='stop'", [f.workspaceId])).rows)
+      .toEqual([{ id: request.lifecycle_intent_id, state: "succeeded" }]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM audit_log WHERE action='cloud_workspace.compute_stop_requested' AND subject->>'workspaceId'=$1", [f.workspaceId])).rows[0].count).toBe(1);
+  });
+
+  it("keeps an unsealed mandatory drain as the prerequisite of a fresh owner wake", async () => {
+    await ready();
+    await requestManagedComputeStop(pool, { leaseId: input.intentId, reason: "compute_reconciliation_failed" });
+    const request = (await pool.query("SELECT id,lifecycle_intent_id,deadline_at FROM workspace_checkpoint_requests WHERE workspace_id=$1", [f.workspaceId])).rows[0];
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: f.userId } as AuthedUser); await next(); });
+    const config = { provider: "boat", imageRef: "fixture-image", architecture: "linux/amd64", cpuMillicores: 2000,
+      memoryMiB: 4096, storageMiB: 20480, sourceCommit: "b".repeat(40), settingsSecretEncryptionKeys: {},
+      currentSettingsSecretEncryptionKeyVersion: null } as CloudWorkspaceBackendConfig;
+    app.route("/", createCloudWorkspaceRoutes(pool, config, { workosEnabled: false }));
+    const response = await app.request(`/v1/organizations/${f.organizationId}/cloud-workspaces/${f.workspaceId}/wake`, {
+      method: "POST", headers: { "Idempotency-Key": randomUUID() },
+    });
+    expect(response.status).toBe(202);
+    const wake = (await response.json()).intent;
+    expect((await pool.query("SELECT state,resume_after_intent_id FROM cloud_workspace_lifecycle_intents WHERE id=$1", [wake.id])).rows[0])
+      .toEqual({ state: "queued", resume_after_intent_id: request.lifecycle_intent_id });
+    expect((await pool.query("SELECT state,deadline_at FROM workspace_checkpoint_requests WHERE id=$1", [request.id])).rows[0])
+      .toEqual({ state: "queued", deadline_at: request.deadline_at });
+    expect((await pool.query("SELECT state,affects_workspace FROM cloud_workspace_lifecycle_intents WHERE id=$1", [request.lifecycle_intent_id])).rows[0])
+      .toEqual({ state: "queued", affects_workspace: false });
+  });
 
   it("adopts a slow user stop across lease ticks without cancelling its final checkpoint", async () => {
     await ready(); await age();
