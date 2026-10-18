@@ -19,7 +19,7 @@ import { GitError } from "./errors";
 import { mapBounded } from "./bounded-parallel";
 import { createWorkspaceChangeSnapshot, shareWorkspaceChangeProbe } from "./workspace-change-probe";
 import { readLocalGitGraph } from "./local-git-graph";
-import { withBackgroundGitReads } from "./git-read-lane";
+import { GitReadLane, isBackgroundGitRead, withBackgroundGitReads, withGitReadLane } from "./git-read-lane";
 import type {
   Commit,
   FileChange,
@@ -272,6 +272,7 @@ function parseRawNumstat(output: string): { files: FileChange[]; numstat: string
  * share each exact comparison, and a combined raw/numstat read is requested
  * only when a line-total consumer has joined before that comparison starts. */
 class LocalChangeSnapshot {
+  readonly readLane = new GitReadLane(isBackgroundGitRead());
   private statusFlight?: Promise<LocalStatus>;
   private statusSettledAt?: number;
   private floorFlight?: Promise<string | null>;
@@ -344,7 +345,11 @@ const leaseLocalChangeSnapshot = createWorkspaceChangeSnapshot(
 );
 
 function withLocalChangeSnapshot<T>(workspace: Workspace, remote: string, read: (snapshot: LocalChangeSnapshot) => Promise<T>): Promise<T> {
-  return withBackgroundGitReads(() => leaseLocalChangeSnapshot(workspace, remote, read));
+  const foreground = !isBackgroundGitRead();
+  return leaseLocalChangeSnapshot(workspace, remote, (snapshot) => {
+    if (foreground) snapshot.readLane.promote();
+    return withGitReadLane(snapshot.readLane, () => read(snapshot));
+  });
 }
 
 export async function status(
@@ -710,7 +715,7 @@ export async function changeLineCounts(
       deletions: tracked.deletions,
     };
   };
-  return ws.placement === "cloud" ? read() : withLocalChangeSnapshot(ws, remote, read);
+  return ws.placement === "cloud" ? read() : withBackgroundGitReads(() => withLocalChangeSnapshot(ws, remote, read));
 }
 
 /** Exact "anything worth a PR?" probe — the single signal shared by the
@@ -756,7 +761,8 @@ export async function stampChangeState(
       if (w.archivedAt != null || w.present === false || w.repoSlug === "") {
         return { ...w, hasChanges: false };
       }
-      return { ...w, hasChanges: await hasWorkspaceChanges(w.id) };
+      return { ...w, hasChanges: await (w.placement === "cloud"
+        ? hasWorkspaceChanges(w.id) : withBackgroundGitReads(() => hasWorkspaceChanges(w.id))) };
     },
   );
 }

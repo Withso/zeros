@@ -5,10 +5,11 @@ import path from "node:path";
 import { resolveGitdir } from "./repo";
 import type { Workspace } from "./types";
 import { workspaceChangeKey } from "./workspace-change-probe";
+import { currentGitReadLane, type GitReadLane } from "./git-read-lane";
 
 const MAX_ENTRIES = 128;
 interface GraphResult { value: string | null; complete: boolean }
-const graphReads = new Map<string, Promise<GraphResult>>();
+const graphReads = new Map<string, { promise: Promise<GraphResult>; lane?: GitReadLane }>();
 
 function safeRefPath(ref: string): boolean {
   // Revision expressions and per-worktree reference namespaces do not map to
@@ -117,15 +118,16 @@ export async function readLocalGitGraph(
   const key = JSON.stringify([workspaceChangeKey(workspace, remote), observed.head, observed.branch, fingerprint]);
   const cached = graphReads.get(key);
   if (cached) {
+    if (!currentGitReadLane()?.background) cached.lane?.promote();
     graphReads.delete(key);
     graphReads.set(key, cached);
-    return (await cached).value;
+    return (await cached.promise).value;
   }
-  const flight = read();
+  const flight = { promise: read(), lane: currentGitReadLane() };
   graphReads.set(key, flight);
   while (graphReads.size > MAX_ENTRIES) graphReads.delete(graphReads.keys().next().value!);
   try {
-    const result = await flight;
+    const result = await flight.promise;
     if (!result.complete || await graphFingerprint(workspace, remote, observed.branch) !== fingerprint) graphReads.delete(key);
     return result.value;
   } catch (error) {
