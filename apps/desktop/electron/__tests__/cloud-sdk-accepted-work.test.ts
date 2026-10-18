@@ -202,6 +202,8 @@ describe("native accepted-work command envelopes", () => {
     await vi.waitFor(() => expect(f.signProof).toHaveBeenCalledOnce());
     await expect(prepare(f, c, command(2))).rejects.toMatchObject({ code: "rate_limited" });
     f.broker.controlConnection({ action: "cancel", runtime: identity(c.runtime), attemptId: c.attemptId, requestId: "request-1" });
+    await expect(prepare(f, c, command(3))).rejects.toMatchObject({ code: "rate_limited" });
+    expect(f.signProof).toHaveBeenCalledOnce();
     gate.resolve("s".repeat(86)); await rejected;
     for (const text of ["{bad json", " ".repeat(256 * 1024 + 1)])
       await expect(f.broker.prepareCommandEnvelope({ runtime: identity(c.runtime), attemptId: c.attemptId, command: text })).rejects.toThrow();

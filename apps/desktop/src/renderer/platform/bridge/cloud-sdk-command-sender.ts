@@ -5,7 +5,7 @@ const MAX_QUEUED_BYTES = 1024 * 1024;
 type Options = { prepare(command: string): Promise<string>; send(envelope: string): void;
   cancel(requestId: string): void; assertCurrent(): void };
 type Pending = { text: string; requestId: string; eligible: boolean; bytes: number; signal?: AbortSignal;
-  onAbort?: () => void; settled: boolean; resolve(): void; reject(error: unknown): void };
+  onAbort?: () => void; releasePreparationWait?: () => void; settled: boolean; resolve(): void; reject(error: unknown): void };
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value)
   ? value as Record<string, unknown> : {};
 const cancelled = () => new DOMException("Command send cancelled", "AbortError");
@@ -16,6 +16,7 @@ const cancelled = () => new DOMException("Command send cancelled", "AbortError")
 export class CloudSdkCommandSender {
   private readonly queue: Pending[] = [];
   private active?: Pending;
+  private preparing?: Pending;
   private draining = false;
   private closed = false;
 
@@ -32,8 +33,9 @@ export class CloudSdkCommandSender {
           request.kind === "mutate" && action.kind === "enqueue" && !Object.hasOwn(record(action.payload), "operation");
         if (!eligible && !this.active && !this.queue.length) { this.options.send(text); resolve(); return; }
         const bytes = new TextEncoder().encode(text).byteLength;
-        const heldBytes = (this.active?.bytes ?? 0) + this.queue.reduce((sum, item) => sum + item.bytes, 0);
-        if (this.queue.length + Number(Boolean(this.active)) >= MAX_COMMANDS || heldBytes + bytes > MAX_QUEUED_BYTES)
+        const cancelledPreparation = this.preparing !== this.active ? this.preparing : undefined;
+        const heldBytes = (this.active?.bytes ?? 0) + (cancelledPreparation?.bytes ?? 0) + this.queue.reduce((sum, item) => sum + item.bytes, 0);
+        if (this.queue.length + Number(Boolean(this.active)) + Number(Boolean(cancelledPreparation)) >= MAX_COMMANDS || heldBytes + bytes > MAX_QUEUED_BYTES)
           throw new CloudRuntimeAccessError({ code: "rate_limited", status: 429 });
         if (typeof frame.id !== "string") throw new CloudRuntimeAccessError({ code: "invalid_input", status: 422 });
         const pending: Pending = { text, requestId: frame.id, eligible, bytes, signal, resolve, reject, settled: false };
@@ -56,7 +58,7 @@ export class CloudSdkCommandSender {
         const pending = this.active = this.queue.shift()!;
         try {
           this.assertCurrent(); pending.signal?.throwIfAborted();
-          const envelope = pending.eligible ? await this.options.prepare(pending.text) : pending.text;
+          const envelope = pending.eligible ? await this.prepare(pending) : pending.text;
           if (pending.settled) continue;
           this.assertCurrent(); pending.signal?.throwIfAborted();
           // Sending is synchronous. An immediate correlated response may
@@ -69,10 +71,26 @@ export class CloudSdkCommandSender {
     } finally { this.draining = false; }
   }
 
+  private prepare(pending: Pending): Promise<string> {
+    if (this.preparing) throw new CloudRuntimeAccessError({ code: "rate_limited", status: 429 });
+    this.preparing = pending;
+    const cancelledWait = new Promise<never>((_, reject) => { pending.releasePreparationWait = () => reject(cancelled()); });
+    let preparation: Promise<string>;
+    try { preparation = this.options.prepare(pending.text); }
+    catch (error) { preparation = Promise.reject(error); }
+    // Cancellation releases the drain even if signing never settles. Keep its
+    // slot and payload budget until settlement so cancellation churn cannot
+    // accumulate native work or callbacks; controls can still use the socket.
+    return Promise.race([preparation.finally(() => {
+      if (this.preparing === pending) this.preparing = undefined;
+    }), cancelledWait]);
+  }
+
   private finish(pending: Pending, failure?: { error: unknown }): void {
     if (pending.settled) return;
     pending.settled = true;
     this.detachAbort(pending);
+    pending.releasePreparationWait?.(); pending.releasePreparationWait = undefined;
     if (failure) pending.reject(failure.error instanceof Error ? failure.error : new CloudRuntimeAccessError(failure.error));
     else pending.resolve();
   }

@@ -123,6 +123,24 @@ describe("desktop SDK runtime activation", () => {
     peer.release(); expect(state.retire).toHaveBeenCalledWith(expect.objectContaining({ runtimeId: id(7) }), id(12));
   });
 
+  it.each(["abort", "timeout"])("sends Stop after %s while the cancelled native envelope never settles", async reason => {
+    state.open.mockResolvedValue(acceptedSdk()); const openingPeer = opening(); await tick(); await authenticate(Socket.instances[0]!); const peer = await openingPeer;
+    state.envelope.mockImplementationOnce(() => new Promise<string>(() => {}));
+    const stop = new AbortController(), pending = peer.client.request(enqueue(), { timeoutMs: 20, signal: stop.signal });
+    const rejected = expect(pending).rejects.toThrow();
+    if (reason === "abort") stop.abort();
+    else await tick(20);
+    await rejected;
+    const base = enqueue(), command = { ...base, params: { ...base.params,
+      request: { kind: "stop", conversationId: "conversation-1", operationId: id(16) } } };
+    const stopping = peer.client.request(command); void stopping.catch(() => {});
+    await tick();
+    expect(Socket.instances[0]!.sent.filter(frame => frame.op === "cloudCommands.request")).toEqual([expect.objectContaining(command)]);
+    await stopping;
+    expect(state.envelope).toHaveBeenCalledOnce();
+    expect(state.cancelCommand).toHaveBeenCalledOnce();
+  });
+
   it.each(["abort", "timeout", "release", "disconnect", "account"])("discards a late accepted-work envelope after %s", async reason => {
     state.open.mockResolvedValue(acceptedSdk()); const openingPeer = opening(); await tick(); await authenticate(Socket.instances[0]!); const peer = await openingPeer;
     let finish!: (envelope: string) => void;

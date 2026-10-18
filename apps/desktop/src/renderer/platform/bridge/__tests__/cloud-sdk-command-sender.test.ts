@@ -95,4 +95,64 @@ describe("bounded SDK command send", () => {
     const f = fixture(); f.prepare.mockRejectedValueOnce(undefined);
     await expect(f.sender.send(command())).rejects.toThrow(); expect(f.send).not.toHaveBeenCalled();
   });
+  it("releases Stop after cancellation even when native preparation never settles", async () => {
+    const f = fixture(), stop = new AbortController();
+    f.prepare.mockReturnValueOnce(new Promise<string>(() => {}));
+    const pending = f.sender.send(command(), stop.signal);
+    const rejected = expect(pending).rejects.toThrow();
+    stop.abort(); await rejected;
+    const frame = JSON.parse(command(2));
+    frame.params.request = { kind: "stop", conversationId: "conversation-1", operationId: id(12) };
+    const text = JSON.stringify(frame), stopping = f.sender.send(text);
+    void stopping.catch(() => {});
+    try {
+      await Promise.resolve(); await Promise.resolve();
+      expect(f.send).toHaveBeenCalledExactlyOnceWith(text);
+    } finally { f.sender.close(); }
+  });
+
+  it.each(["read", "stop", "edit"])("releases an already queued %s after cancelling a stalled preparation", async kind => {
+    const f = fixture(), stop = new AbortController();
+    f.prepare.mockReturnValueOnce(new Promise<string>(() => {}));
+    const pending = f.sender.send(command(), stop.signal), rejected = expect(pending).rejects.toThrow();
+    const frame = JSON.parse(command(2, kind));
+    if (kind !== "edit") frame.params.request = { kind, conversationId: "conversation-1", operationId: id(12) };
+    const text = JSON.stringify(frame), control = f.sender.send(text); void control.catch(() => {});
+    expect(f.send).not.toHaveBeenCalled();
+    stop.abort(); await rejected;
+    try {
+      await Promise.resolve(); await Promise.resolve();
+      expect(f.send).toHaveBeenCalledExactlyOnceWith(text);
+      await control;
+      expect(f.prepare).toHaveBeenCalledOnce();
+    } finally { f.sender.close(); }
+  });
+
+  it.each(["resolve", "reject"] as const)("bounds cancelled preparations and discards their late %s before signing again", async outcome => {
+    const f = fixture(), gate = deferred<string>(), stop = new AbortController();
+    f.prepare.mockReturnValueOnce(gate.promise);
+    const pending = f.sender.send(command(), stop.signal), rejected = expect(pending).rejects.toThrow();
+    const queued = f.sender.send(command(2)), busy = expect(queued).rejects.toMatchObject({ code: "rate_limited" });
+    stop.abort();
+    try {
+      await rejected; await busy;
+      for (let index = 3; index < 35; index++) {
+        const cancelled = new AbortController();
+        await expect(f.sender.send(command(index), cancelled.signal)).rejects.toMatchObject({ code: "rate_limited" });
+        cancelled.abort();
+        await f.sender.send(command(index, "edit"));
+      }
+      expect(f.prepare).toHaveBeenCalledOnce();
+      expect(f.cancel).toHaveBeenCalledExactlyOnceWith("request-1");
+      expect(f.send).toHaveBeenCalledTimes(32);
+      if (outcome === "resolve") gate.resolve("cancelled native envelope");
+      else gate.reject(new Error("cancelled preparation failed"));
+      await gate.promise.catch(() => {});
+      await f.sender.send(command(35));
+      expect(f.prepare).toHaveBeenCalledTimes(2);
+      expect(f.send).toHaveBeenCalledTimes(33);
+      expect(f.send).toHaveBeenLastCalledWith("opaque native envelope");
+    } finally { f.sender.close(); }
+  });
+
 });

@@ -904,9 +904,12 @@ bytes are inspectable within the existing renderer transport trust model;
 they are never logged, traced, journaled or stored with durable commands. The
 queue holds at most 16 commands and 1 MiB, with one native signing flight per
 runtime. RPC cancellation, timeout, renderer destruction and connection
-retirement discard pending output. PTY and file traffic keep their direct
-socket path. Reads, Stop, edits, native operations, Local and legacy sends keep
-their existing payloads. A proof failure never retries an unsigned command;
+retirement discard pending output. Cancellation releases the send queue without
+waiting for native signing. The unresolved preparation retains its signing slot
+and payload budget; further proof requests fail busy until it settles, while
+reads, Stop and edits can proceed. PTY and file traffic keep their direct socket
+path. Reads, Stop, edits, native operations, Local and legacy sends keep their
+existing payloads. A proof failure never retries an unsigned command;
 an application retry signs the immutable command again with a fresh nonce.
 
 An initial `zeros-v1` negotiation selects one native legacy admission with the
