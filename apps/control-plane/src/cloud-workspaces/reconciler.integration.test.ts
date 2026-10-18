@@ -2393,6 +2393,67 @@ d("cloud workspace reconciliation", () => {
     });
   });
 
+  it.each([
+    { previous: "running", code: "provider_deletion_blocked" },
+    { previous: "archiving", code: "provider_deletion_blocked" },
+    { previous: "running", code: "provider_deletion_pending" },
+    { previous: "archiving", code: "provider_deletion_pending" },
+  ])("retains the observed stopped compute while deletion waits: $previous / $code", async ({ previous, code }) => {
+    const seeded = await seedWorkspace({ desiredState: "deleted", status: "deleting", operation: "delete",
+      providerResourceId: "bound-resource", observedState: previous });
+    const provider = new FakeProvider();
+    provider.resources.set("bound-resource", provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, "archived", "bound-resource"));
+    vi.spyOn(provider, "delete").mockRejectedValue(new CloudProviderError(code, "Storage deletion is pending", true));
+
+    expect(await reconciler(provider).runOnce()).toBe(true);
+    const result = await pool.query(`SELECT w.status,w.deleted_at,b.observed_state,b.deletion_verified_at,
+      i.state AS intent_state,i.error_code
+      FROM cloud_workspaces w JOIN cloud_workspace_provider_bindings b ON b.workspace_id=w.id AND b.generation=w.current_generation
+      JOIN cloud_workspace_lifecycle_intents i ON i.id=$2 WHERE w.id=$1`, [seeded.workspaceId, seeded.intentId]);
+    expect(result.rows[0]).toEqual({ status: "deleting", deleted_at: null, observed_state: "archived",
+      deletion_verified_at: null, intent_state: "observing", error_code: code });
+    expect(provider.delete).toHaveBeenCalledExactlyOnceWith("bound-resource");
+  });
+
+  it("retains the authority advanced by its own closed checkpoint gate when deletion is blocked", async () => {
+    const seeded = await seedWorkspace({ desiredState: "running", status: "ready", operation: "delete",
+      providerResourceId: "bound-resource", observedState: "archiving" });
+    await pool.query(`INSERT INTO workspace_checkpoint_requests
+      (workspace_id,generation,org_id,requested_by,lifecycle_intent_id,reason,state,idempotency_key,error_code,created_at,deadline_at,completed_at)
+      VALUES($1,1,$2,$3,$4,'before_delete','cancelled',$5,'stop_unsealed',now()-interval '10 minutes',now()-interval '1 second',now())`,
+    [seeded.workspaceId, orgId, ownerId, seeded.intentId, `lifecycle.${seeded.intentId}`]);
+    const provider = new FakeProvider();
+    provider.resources.set("bound-resource", provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, "archived", "bound-resource"));
+    vi.spyOn(provider, "delete").mockRejectedValue(new CloudProviderError("provider_deletion_blocked", "Storage deletion is pending", true));
+
+    expect(await reconciler(provider).runOnce()).toBe(true);
+    expect(provider.delete).toHaveBeenCalledExactlyOnceWith("bound-resource");
+    expect((await pool.query(`SELECT w.authority_epoch::text,w.desired_state,b.observed_state,b.deletion_verified_at
+      FROM cloud_workspaces w JOIN cloud_workspace_provider_bindings b ON b.workspace_id=w.id
+      WHERE w.id=$1`, [seeded.workspaceId])).rows[0])
+      .toEqual({ authority_epoch: "2", desired_state: "deleted", observed_state: "archived", deletion_verified_at: null });
+  });
+
+  it.each(["expired claim", "new authority", "new binding", "live compute", "unrelated failure"])(
+    "does not retain an ineligible stopped observation after deletion: %s", async condition => {
+      const seeded = await seedWorkspace({ desiredState: "deleted", status: "deleting", operation: "delete",
+        providerResourceId: "bound-resource", observedState: "archiving" });
+      const provider = new FakeProvider();
+      provider.resources.set("bound-resource", provider.make({ workspaceId: seeded.workspaceId, generation: 1 },
+        condition === "live compute" ? "running" : "archived", "bound-resource"));
+      vi.spyOn(provider, "delete").mockImplementation(async () => {
+        if (condition === "expired claim") await pool.query("UPDATE cloud_workspace_lifecycle_intents SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [seeded.intentId]);
+        if (condition === "new authority") await pool.query("UPDATE cloud_workspaces SET authority_epoch=authority_epoch+1 WHERE id=$1", [seeded.workspaceId]);
+        if (condition === "new binding") await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='replacement-resource' WHERE workspace_id=$1", [seeded.workspaceId]);
+        throw new CloudProviderError(condition === "unrelated failure" ? "provider_temporarily_unavailable" : "provider_deletion_blocked", "Deletion is pending", true);
+      });
+      expect(await reconciler(provider).runOnce()).toBe(true);
+      expect(provider.delete).toHaveBeenCalledOnce();
+      expect((await pool.query("SELECT observed_state,deletion_verified_at FROM cloud_workspace_provider_bindings WHERE workspace_id=$1", [seeded.workspaceId])).rows[0])
+        .toEqual({ observed_state: "archiving", deletion_verified_at: null });
+    },
+  );
+
   it("does not complete delete until a post-dispatch inspection proves absence", async () => {
     const seeded = await seedWorkspace({
       desiredState: "deleted",

@@ -336,6 +336,16 @@ closed create journal with no uncertain dispatch and positively verified
 absence. A transferred or historical identity that cannot meet every predicate
 remains outside this optional proof; normal physical cleanup continues.
 
+When a delete poll observes stopped compute before Boat reports
+`provider_deletion_blocked` or `provider_deletion_pending`, the reconciler keeps
+that observation under the same current workspace authority, binding and live
+intent claim. Boat can prove `computeStopped` while its snapshot is still
+uploading or has failed; that observation advances the binding to `deleting`,
+without declaring the snapshot resumable. Otherwise an earlier `archiving`
+observation could prevent retirement throughout a storage hold. This does not
+mark deletion verified, settle compute, retire access or complete the deletion
+job; retirement still requires fresh exact provider evidence and every fence.
+
 Provider reads use a shared ten-second observation budget and hold no database
 client. The service rechecks the exact workspace, actor authority, delete,
 generation, journal and settlement snapshot after the provider reads. It issues
