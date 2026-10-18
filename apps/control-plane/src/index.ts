@@ -668,6 +668,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       workosEnabled: config.auth.provider === "workos",
       sanitizeLog: sanitizeCloudWorkspaceSetupLog,
       ...workerPollingOptions(config.workerPollIntervalsMs, "setup"),
+      concurrency: setup.concurrency,
       leaseMs: setup.leaseMs,
       heartbeatMs: Math.max(250, Math.floor(setup.leaseMs / 3)),
       executionTimeoutMs: (setup.timeoutSeconds + 15) * 1_000,

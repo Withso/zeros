@@ -277,6 +277,7 @@ export type CloudWorkspaceBackendConfig = {
     enginePort: number;
     engineHeartbeatIntervalMs: number;
     intervalMs: number;
+    concurrency: number;
     timeoutSeconds: number;
     leaseMs: number;
     admissionTtlSeconds: number;
@@ -537,6 +538,7 @@ const CloudWorkspaceSetupEnvSchema = z.object({
     .min(30)
     .max(3_600)
     .default(1_800),
+  CLOUD_WORKSPACE_SETUP_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
   CLOUD_WORKSPACE_SETUP_LEASE_MS: z.coerce
     .number()
     .int()
@@ -1388,6 +1390,7 @@ function loadCloudWorkspaceConfig(
       engineHeartbeatIntervalMs:
         setup.data.CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS,
       intervalMs: setup.data.CLOUD_WORKSPACE_SETUP_INTERVAL_MS,
+      concurrency: setup.data.CLOUD_WORKSPACE_SETUP_CONCURRENCY,
       timeoutSeconds: setup.data.CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS,
       leaseMs: setup.data.CLOUD_WORKSPACE_SETUP_LEASE_MS,
       admissionTtlSeconds:

@@ -206,7 +206,7 @@ still waits for its existing controlled-migration boundary.
 Notifications are hints, not a durable queue or an authority grant. Missing
 hints or a failed deadline read retry within the fallback. A healthy notification
 path targets claim p99 below one second; an outage uses the bounded fallback.
-Serial in-flight work is not preempted. Fake-clock and local Postgres tests
+In-flight commands are not preempted. Fake-clock and local Postgres tests
 verify these mechanisms; Alpha's quiet ≤0.5 tx/s and claim percentile require a
 deployed measurement with the worker replica count recorded.
 
@@ -229,6 +229,31 @@ require dropping triggers or cancelling queued work. Security/directory
 publication and its dedicated listener remain active when cloud workers are
 disabled. Reassess temporary short-interval overrides after the Alpha soak;
 do not use the global worker pause as a scheduling rollback for running VMs.
+
+## Bounded setup execution
+
+`CLOUD_WORKSPACE_SETUP_CONCURRENCY` limits setup executions on each control-plane
+process. It defaults to **2**, accepts integers from **1 to 8**, and can be set to
+1 to restore serial execution. Total capacity also depends on the worker replica
+count. This setting does not raise compute credits or change managed-wallet
+admission; setup uses the already admitted workspace resource.
+
+Claims remain short transactions in workspace → setup-run lock order. Provider
+commands run outside those transactions, with independent heartbeats, timeouts
+and execution fences. A workspace with a live setup lease cannot start another
+attempt, even on a different replica. The same process also excludes its still
+executing workspaces until their fenced result handling finishes. Candidate
+ordering favors organizations with fewer live setup leases, then the oldest due
+work; it is a fairness preference, not a separate organization quota.
+
+Completing an execution wakes the scheduler to refill its slot. Notifications can
+fill a spare slot during another execution. A full pool skips queue reads and
+claims until capacity returns, while the existing quiet fallback remains armed.
+Retry dates and other replicas' lease expiries still determine the next eligible
+claim. Shutdown aborts all owned executions, waits for current claim/result
+handling, and prevents a late claim from starting a provider command. Fresh
+admission, runtime qualification and readiness publication remain mandatory for
+every execution. Local workspace setup uses its existing path.
 
 ## Closed setup clocks
 

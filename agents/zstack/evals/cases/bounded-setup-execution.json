@@ -1,0 +1,9 @@
+{
+  "id": "bounded-setup-execution",
+  "kind": "replay",
+  "area": "control-plane-workers",
+  "fixedBy": "pr:595",
+  "symptom": "A held setup executor blocked other eligible workspaces and notifications; a late claim could still start execution after shutdown.",
+  "rule": "Bound execution separately from short serialized claims. Refill on completion, exclude live workspace leases under the workspace lock, preserve retry deadlines, and prove quiet scheduling with held executions and fake clocks.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/setup-worker.integration.test.ts src/cloud-workspaces/setup-worker-scheduling.test.ts src/config.test.ts"
+}
