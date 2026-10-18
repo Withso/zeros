@@ -307,8 +307,11 @@ d("durable job queue", () => {
       expect(instance.inFlight).toBe(0);
       expect((await pool.query("SELECT count(*)::integer AS count FROM control_plane_jobs")).rows[0].count).toBe(0);
     } finally {
-      await holder.query("ROLLBACK");
-      holder.release();
+      try {
+        await holder.query("ROLLBACK");
+      } finally {
+        holder.release(true);
+      }
     }
   });
 

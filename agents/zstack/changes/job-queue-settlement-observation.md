@@ -18,3 +18,10 @@ checking all twelve deliveries, zero in-flight work and zero durable rows. The
 held-completion assertion failed with the old synchronization and passed with
 the drain; no production queue or CI behavior changed. This is a test-observation
 repair, not a production queue bug or a fixed-test replay claim.
+
+Independent review also reproduced a disconnected lock holder whose failed
+rollback skipped release and blocked pool teardown. Rollback is not guaranteed
+cleanup: release/discard the dedicated holder in an inner `finally`, preserving
+the rollback error. `job-queue-cleanup.integration.test.ts` executes the actual
+concurrency callback, terminates its backend before COMMIT, and asserts failed
+ROLLBACK remains visible, exactly one discard, and completed pool teardown.
