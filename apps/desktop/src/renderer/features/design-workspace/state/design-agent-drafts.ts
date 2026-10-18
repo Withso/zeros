@@ -23,7 +23,8 @@ import {
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 
 export interface DesignAgentDraftEntry {
-  draft: DesignAgentDraft;
+  /** Status metadata never owns text: eviction must release every payload reference. */
+  draft: Omit<DesignAgentDraft, "preview" | "registrations" | "stylesheet">;
   /** The newest preview, retained across later preview-less phase updates. */
   preview: DesignAgentDraft["preview"] | null;
   /** A canvas document's newest frame placements, retained the same way. */
@@ -142,7 +143,7 @@ export function receiveDesignAgentDraft(
   if (isCloudWorkspace(workspaceId)) return;
   const parsed = designAgentDraftSchema.safeParse(value);
   if (!parsed.success) return;
-  const draft = parsed.data;
+  const { preview, registrations, stylesheet, ...draft } = parsed.data;
   const { byWorkspace } = useDesignAgentDraftStore.getState();
   const drafts = byWorkspace[workspaceId] ?? EMPTY_DRAFTS;
   const existing = drafts[draft.id];
@@ -156,9 +157,9 @@ export function receiveDesignAgentDraft(
   } else {
     nextDrafts[draft.id] = {
       draft,
-      preview: draft.preview ?? existing?.preview ?? null,
-      registrations: draft.registrations ?? existing?.registrations ?? null,
-      stylesheet: draft.stylesheet ?? existing?.stylesheet ?? null,
+      preview: preview ?? existing?.preview ?? null,
+      registrations: registrations ?? existing?.registrations ?? null,
+      stylesheet: stylesheet ?? existing?.stylesheet ?? null,
       updatedAt: now,
       savedAt:
         draft.phase === "saved" ? (existing?.savedAt ?? now) : (existing?.savedAt ?? null),
@@ -236,9 +237,10 @@ export function designAgentDraftPlacements(
 }
 
 export interface DesignAgentStylesheetPreview {
+  draftId: string;
   css: string;
-  /** The tool saved it: the saved text is this text, so a live document that
-   * already shows it keeps it until the saved generation loads. */
+  /** Only a document already showing this draft may retain it after save;
+   * a new generation's own saved text is authoritative. */
   saved: boolean;
 }
 
@@ -253,7 +255,7 @@ export function designAgentStylesheetPreviews(
   const previews = new Map<string, DesignAgentStylesheetPreview>();
   for (const [file, entry] of designAgentDraftsByFile(drafts, directory)) {
     if (!entry.stylesheet) continue;
-    previews.set(file, { css: entry.stylesheet.css, saved: entry.savedAt !== null });
+    previews.set(file, { draftId: entry.draft.id, css: entry.stylesheet.css, saved: entry.savedAt !== null });
   }
   return previews;
 }

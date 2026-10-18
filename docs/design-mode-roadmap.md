@@ -976,10 +976,13 @@ These Local mechanisms keep an agent's progress visible
     input is the new file alone. An Edit applies once its replacement is
     whole. Live frames that link the file apply it in place through the
     runtime's opt-in `previewStylesheet` (no reload, no incoming buffer); a
-    newly loaded generation applies it before it is revealed; a discarded
-    draft restores the generation's own text, and a saved one stays until the
-    saved generation replaces the document. Raster (non-live) frames update
-    when the file saves.
+    newly loaded generation applies unsaved text before it is revealed. A
+    discarded draft restores the generation's own text. A saved draft stays
+    only in a document that predates that draft; it never replays into a new
+    generation while its activity chip lingers. If a generation inherited an
+    unsaved preview before the tool's success event, success restores that
+    generation's own CSS. Draft identity distinguishes successive edits of the
+    same file. Raster (non-live) frames update when the file saves.
   - A canvas document (`meta/canvas.json`, legacy root `canvas.json`) sends
     the frames it registers so far (`agent-draft-canvas.ts`): a frame counts
     once its source path and all four numbers have fully arrived; an Edit is
@@ -988,7 +991,9 @@ These Local mechanisms keep an agent's progress visible
     registered position, size and title instead of right of the page's
     frames, so it never jumps when the registration saves.
   The renderer store (`state/design-agent-drafts.ts`) keeps the newest revision
-  per draft, 6 drafts per workspace, 8 workspaces and 24 MiB of previews,
+  per draft, 6 drafts per workspace, 8 workspaces and 24 MiB of preview text.
+  Status metadata excludes preview payloads; the budget owns the only retained
+  HTML/CSS fields, so eviction releases their text across phase updates. It
   ignores `cloud://` keys, and drops a draft whose engine goes quiet for 2
   minutes or whose save is not handed off within a minute. The canvas shows a
   draft over its registered frame, or as a dashed ghost right of the active
@@ -1373,6 +1378,12 @@ or renderer owners.
   responsive, and state-specific values remain distinguishable. The inspector
   must not present a computed value as authored source or invent cascade
   certainty.
+- Runtime authored-style provenance is optional evidence. Inline `var()`
+  shorthands compete even when CSSOM cannot expand their longhands. Nested
+  declarations and element-dependent container queries make affected winners
+  uncertain; omit that provenance and keep the browser's computed value in the
+  inspector. Unaffected declarations retain provenance. An uncertain custom
+  property override also prevents attribution to an ancestor's token source.
 - Base responsive/default interaction state is the only generally authorable
   context in Foundation v1. Breakpoint and pseudo-state writes fail closed
   until an adapter can identify their exact at-rule and selector target.

@@ -1614,7 +1614,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   // cascade's winner among the element's style attribute and the active rules
   // that match it: importance, then the style attribute, then cascade layers
   // (reversed for !important), then specificity, then order of appearance.
-  // Nested style rules are skipped, as authoredStylePropertiesOf skips them.
+  // Nesting and element-dependent conditions are conservative candidates:
+  // if one can set the property, fall back to the browser's computed value.
 
   function styleOriginOf(sheet) {
     var node = sheet && sheet.ownerNode;
@@ -1769,13 +1770,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       });
       return { key: key, path: path };
     }
-    function visit(list, active, layer, origin) {
+    function visit(list, active, layer, origin, uncertain, nested) {
       for (var index = 0; index < list.length; index += 1) {
         var rule = list[index];
         var kind = rule.constructor && rule.constructor.name;
-        if (rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) {
+        if ((rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) || (nested && kind === "CSSNestedDeclarations" && rule.style)) {
           var declared = declarationProperties(rule.style);
-          var entry = { rule: rule, selector: rule.selectorText, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared };
+          // A nested selector is relative to its parent, so element.matches()
+          // cannot establish applicability or specificity. Keep its property
+          // footprint rather than silently selecting a losing outer rule.
+          var entry = { rule: rule, selector: nested ? null : rule.selectorText, uncertain: uncertain || nested, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared };
           rules.push(entry);
           declared.forEach(function (property) {
             if (property.indexOf("--") !== 0) return;
@@ -1783,20 +1787,24 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
             if (!list) { list = []; customRules.set(property, list); }
             list.push(entry);
           });
+          if (rule.cssRules) visit(rule.cssRules, active, layer, origin, uncertain, true);
         } else if (kind === "CSSLayerStatementRule" && rule.nameList) {
           for (var name = 0; name < rule.nameList.length; name += 1) layerPosition(layer.key, layer.path, rule.nameList[name]);
         } else if (kind === "CSSLayerBlockRule") {
           anonymousLayers += 1;
-          visit(rule.cssRules || [], active, layerPosition(layer.key, layer.path, rule.name || "\u0001" + anonymousLayers), origin);
+          visit(rule.cssRules || [], active, layerPosition(layer.key, layer.path, rule.name || "\u0001" + anonymousLayers), origin, uncertain, nested);
         } else if (rule.cssRules) {
-          visit(rule.cssRules, active && conditionalRuleActive(rule), layer, origin);
+          // Media/supports are document-wide. Container queries, scopes and
+          // other groups need evidence this resolver does not have per element.
+          var knownCondition = rule.type === CSSRule.MEDIA_RULE || rule.type === CSSRule.SUPPORTS_RULE;
+          visit(rule.cssRules, active && conditionalRuleActive(rule), layer, origin, uncertain || !knownCondition, nested);
         }
       }
     }
     for (var sheetIndex = 0; sheetIndex < document.styleSheets.length; sheetIndex += 1) {
       var sheet = document.styleSheets[sheetIndex];
       try {
-        visit(sheet.cssRules || [], true, { key: "", path: [] }, styleOriginOf(sheet));
+        visit(sheet.cssRules || [], true, { key: "", path: [] }, styleOriginOf(sheet), false, false);
       } catch (_error) {
         // Inaccessible sheets cannot provide trustworthy provenance.
       }
@@ -1833,8 +1841,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     for (var index = 0; index < entries.length; index += 1) {
       var entry = entries[index];
       if (!entry.active) continue;
-      var matches = false;
-      try { matches = element.matches(entry.selector); } catch (_error) { matches = false; }
+      var matches = entry.selector === null;
+      try { if (!matches) matches = element.matches(entry.selector); } catch (_error) { matches = false; }
       if (matches) result.push({ entry: entry, specificity: null });
     }
     return result;
@@ -1871,28 +1879,37 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return candidate.match.entry.order > current.match.entry.order;
   }
 
+  function declarationValue(style, property, declared) {
+    var value = style.getPropertyValue(property);
+    var important = style.getPropertyPriority(property) === "important";
+    if (!value) {
+      // CSSOM leaves a var()-based shorthand's longhands empty, including in
+      // style attributes. Its unknown value still competes in the cascade.
+      var shorthand = (declared || declarationProperties(style)).filter(function (name) {
+        return name !== property && longhandsOf(name).indexOf(property) >= 0 && style.getPropertyValue(name).indexOf("var(") >= 0;
+      })[0];
+      if (!shorthand) return null;
+      value = null;
+      important = style.getPropertyPriority(shorthand) === "important";
+    }
+    return { value: value === null ? null : value.trim(), important: important };
+  }
+
   /** The winning declaration of one property. A rule that sets it through a
    * var()-based shorthand competes with an unknown value, so the inspector
    * never claims a value the browser could not expand. */
   function winningDeclaration(element, property, matches) {
-    var best = null;
-    var inlineValue = element.style.getPropertyValue(property);
-    if (inlineValue) best = { inline: true, value: inlineValue.trim(), important: element.style.getPropertyPriority(property) === "important" };
+    var inline = declarationValue(element.style, property, null);
+    var best = inline ? { inline: true, value: inline.value, important: inline.important } : null;
     for (var index = 0; index < matches.length; index += 1) {
       var match = matches[index];
-      var style = match.entry.rule.style;
-      var value = style.getPropertyValue(property);
-      var important = style.getPropertyPriority(property) === "important";
-      if (!value) {
-        // Declared through a shorthand whose value only resolves at computed time.
-        var shorthand = match.entry.declared.filter(function (name) {
-          return name !== property && longhandsOf(name).indexOf(property) >= 0 && style.getPropertyValue(name).indexOf("var(") >= 0;
-        })[0];
-        if (!shorthand) continue;
-        value = null;
-        important = style.getPropertyPriority(shorthand) === "important";
+      var declaration = declarationValue(match.entry.rule.style, property, match.entry.declared);
+      if (!declaration) continue;
+      var candidate = { match: match, value: declaration.value, important: declaration.important };
+      if (match.entry.uncertain) {
+        candidate.value = null;
+        return candidate;
       }
-      var candidate = { match: match, value: value === null ? null : value.trim(), important: important };
       if (!best || outranks(candidate, best, element)) best = candidate;
     }
     return best;
@@ -1919,7 +1936,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var entries = index.customRules.get(name) || [];
     for (var current = element; current && current.nodeType === 1; current = current.parentElement) {
       var winner = winningDeclaration(current, name, matchingEntries(current, entries));
-      if (winner && winner.value !== null) return originOfWinner(winner);
+      // An uncertain local override also prevents attributing the token to an
+      // ancestor. The computed token value is still available to the inspector.
+      if (winner) return winner.value === null ? null : originOfWinner(winner);
     }
     return null;
   }

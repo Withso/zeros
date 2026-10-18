@@ -91,6 +91,30 @@ describe("Design agent draft store", () => {
     expect(previews).toEqual([false, true, true, true]);
   });
 
+  it.each(["preview", "stylesheet"] as const)("releases all references to evicted %s text, including phase metadata", (kind) => {
+    const size = (kind === "preview" ? 7 : 4) * 1024 * 1024;
+    const count = kind === "preview" ? 4 : 7;
+    for (let index = 0; index < count; index += 1) {
+      const text = `${index}${"x".repeat(size - 1)}`;
+      receiveDesignAgentDraft(`ws_${index}`, draft({
+        preview: kind === "preview" ? { srcDoc: text, width: 1, height: 1 } : undefined,
+        stylesheet: kind === "stylesheet" ? { css: text } : undefined,
+      }), index);
+    }
+    expect(drafts("ws_0").draft1?.[kind]).toBeNull();
+    // Check reachability through the whole stored object, not just the field
+    // the canvas reads: metadata must never retain a second payload reference.
+    const retained = new Set<string>();
+    const collect = (value: unknown): void => {
+      if (typeof value === "string" && value.length >= size) retained.add(value);
+      else if (value && typeof value === "object") Object.values(value).forEach(collect);
+    };
+    collect(useDesignAgentDraftStore.getState().byWorkspace);
+    expect([...retained].reduce((sum, text) => sum + text.length, 0)).toBeLessThanOrEqual(24 * 1024 * 1024);
+    receiveDesignAgentDraft("ws_0", draft({ revision: 2, phase: "saved", preview: undefined }), count);
+    expect(drafts("ws_0").draft1?.[kind]).toBeNull();
+  });
+
   it("expires drafts whose engine went quiet or whose save was never handed off", () => {
     receiveDesignAgentDraft("ws_local", draft(), 0);
     receiveDesignAgentDraft("ws_local", draft({ id: "saved", revision: 1, phase: "saved" }), 0);
@@ -265,7 +289,7 @@ describe("Design agent activity chip", () => {
     receiveDesignAgentDraft("ws_local", draft({ id: "css", file: "tokens.css", phase: "saved", revision: 2, preview: undefined }), 2_000);
     receiveDesignAgentDraft("ws_local", draft({ id: "frame", file: "page-1/card.html" }), 3_000);
     expect([...designAgentStylesheetPreviews(drafts(), "App - Design")]).toEqual([
-      ["tokens.css", { css: ":root{--a:1}", saved: true }],
+      ["tokens.css", { draftId: "css", css: ":root{--a:1}", saved: true }],
     ]);
     expect(designAgentStylesheetPreviews(drafts(), "Other - Design").size).toBe(0);
   });

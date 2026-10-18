@@ -274,8 +274,8 @@ async function runDesignAgentStylesheetSmoke({ page, check }) {
       .locator('[data-oid="home-heading"]')
       .evaluate((element) => getComputedStyle(element).color);
   const saved = await titleColor();
-  const send = (draft) =>
-    page.evaluate(async (value) => {
+  const send = (draft, holdSaved = false) =>
+    page.evaluate(async ({ value, holdSaved }) => {
       const drafts = await import(
         "/apps/desktop/src/renderer/features/design-workspace/state/design-agent-drafts.ts"
       );
@@ -288,8 +288,32 @@ async function runDesignAgentStylesheetSmoke({ page, check }) {
         file: "tokens.css",
         operation: "write",
         ...value,
-      });
-    }, draft);
+      }, holdSaved ? Date.now() + 60_000 : undefined);
+    }, { value: draft, holdSaved });
+  const save = (color, version) => page.evaluate(async ({ color, version }) => {
+    const cache = await import(
+      "/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts"
+    );
+    const harness = window.__zerosHarnessAgentDrafts;
+    harness.save(
+      `<!doctype html><html><head><style data-zeros-source="tokens.css">:root{--brand:${color}}.title{color:var(--brand)}</style></head><body><main data-oid="home-main" data-zeros-frame-root><h1 data-oid="home-heading" class="title">Newer saved ${color}</h1></main></body></html>`,
+      version,
+    );
+    cache.invalidateDesignWorkspacesForStyleBuild([harness.workspaceId]);
+  }, { color, version });
+  const retire = (id) => page.evaluate(async (id) => {
+    const drafts = await import(
+      "/apps/desktop/src/renderer/features/design-workspace/state/design-agent-drafts.ts"
+    );
+    drafts.retireDesignAgentDraft(window.__zerosHarnessAgentDrafts.workspaceId, id);
+  }, id);
+  const waitForColor = async (expected) => {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (await titleColor() === expected) return true;
+      await page.waitForTimeout(100);
+    }
+    return false;
+  };
   await send({
     phase: "writing",
     revision: 1,
@@ -316,4 +340,39 @@ async function runDesignAgentStylesheetSmoke({ page, check }) {
     await page.waitForTimeout(100);
   }
   check("a discarded stylesheet draft restores the frame's saved styles", restored === saved);
+
+  await send({
+    id: "savedTokens",
+    phase: "saving",
+    revision: 1,
+    stylesheet: { css: ":root { --brand: green; } .title { color: var(--brand); }" },
+  });
+  check("the next stylesheet draft previews before saving", await waitForColor("rgb(0, 128, 0)"));
+  // Hold retirement explicitly across the new generation; no race against
+  // the activity chip's 1.5-second linger is needed to reproduce this handoff.
+  await send({ id: "savedTokens", phase: "saved", revision: 2 }, true);
+  check("a saved stylesheet stays on the old document during handoff", await titleColor() === "rgb(0, 128, 0)");
+  const newerVersion = "bbbbbbbbbbbbbbbbbbbbbbbb";
+  await save("blue", newerVersion);
+  await frame.locator(`iframe[data-design-document-buffer="displayed"][data-design-document-ready][data-design-document-source-version="${newerVersion}"]`).waitFor({ timeout: 10_000 });
+  check(
+    "a newer saved generation keeps its own CSS while an older saved draft lingers",
+    await titleColor() === "rgb(0, 0, 255)" && await page.locator("[data-design-agent-activity]").count() === 1,
+  );
+  await retire("savedTokens");
+  await page.locator("[data-design-agent-activity]").waitFor({ state: "detached", timeout: 5_000 });
+  check("retiring the older saved draft preserves the newer saved styles", await titleColor() === "rgb(0, 0, 255)");
+
+  // The file watcher can publish a generation before the tool's success event.
+  await send({ id: "lateSave", phase: "saving", revision: 1, stylesheet: { css: ":root { --brand: green; } .title { color: var(--brand); }" } });
+  check("a later streaming draft still previews on the saved generation", await waitForColor("rgb(0, 128, 0)"));
+  const earlyVersion = "cccccccccccccccccccccccc";
+  await save("red", earlyVersion);
+  await frame.locator(`iframe[data-design-document-buffer="displayed"][data-design-document-ready][data-design-document-source-version="${earlyVersion}"]`).waitFor({ timeout: 10_000 });
+  check("a new generation continues an unsaved stylesheet preview", await titleColor() === "rgb(0, 128, 0)");
+  await send({ id: "lateSave", phase: "saved", revision: 2 }, true);
+  check("a delayed save event releases an inherited preview to the document's own CSS", await waitForColor("rgb(255, 0, 0)"));
+  await retire("lateSave");
+  await page.locator("[data-design-agent-activity]").waitFor({ state: "detached", timeout: 5_000 });
+  check("retirement after a delayed save preserves the authoritative generation", await titleColor() === "rgb(255, 0, 0)");
 }

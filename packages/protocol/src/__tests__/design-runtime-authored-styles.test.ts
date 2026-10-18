@@ -48,7 +48,7 @@ const BODY = `
   <div data-oid="mixed" class="p-3 pt-1 stack">Mixed</div>
 </main>`;
 
-async function fixture(browser: Browser): Promise<Page> {
+async function fixture(browser: Browser, head = HEAD, body = BODY): Promise<Page> {
   const page = await browser.newPage();
   await page.evaluate(
     async ({ source, head, body }) => {
@@ -96,7 +96,7 @@ async function fixture(browser: Browser): Promise<Page> {
       );
       await ready;
     },
-    { source: DESIGN_RUNTIME_SOURCE, head: HEAD, body: BODY },
+    { source: DESIGN_RUNTIME_SOURCE, head, body },
   );
   return page;
 }
@@ -171,6 +171,89 @@ describe("winning authored declarations in Chromium", () => {
     expect(mixed.authoredStyles?.padding).toBeUndefined();
     expect(mixed.authoredStyles?.["padding-top"]).toMatchObject({ value: "4px" });
     expect(mixed.authoredStyles?.gap).toMatchObject({ origin: "frame", value: "8px" });
+  });
+
+  it.each([false, true])("does not assign an inline var shorthand's longhand to a losing rule (important: %s)", async (important) => {
+    const scoped = await fixture(browser, `<style>
+      :root { --old: red; --new: blue; }
+      .card { background-color: var(--old)${important ? " !important" : ""}; }
+    </style>`, `<div data-oid="card" class="card" style="background:var(--new)${important ? " !important" : ""}">Card</div>`);
+    try {
+      expect(await scoped.locator(".card").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(0, 0, 255)");
+      const card = await details(scoped, "card");
+      expect(card.authoredStyles?.["background-color"]).toBeUndefined();
+      expect(card.authoredStyles?.background).toMatchObject({ origin: "inline", value: "var(--new)" });
+    } finally {
+      await scoped.close();
+    }
+  });
+
+  it("still reports an important rule that beats a normal inline variable shorthand", async () => {
+    const scoped = await fixture(browser, `<style>
+      :root { --old: red; --new: blue; }
+      .card { background-color: var(--old) !important; }
+    </style>`, '<div data-oid="card" class="card" style="background:var(--new)">Card</div>');
+    try {
+      expect(await scoped.locator(".card").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(255, 0, 0)");
+      const card = await details(scoped, "card");
+      expect(card.authoredStyles?.["background-color"]).toMatchObject({ value: "var(--old)", important: true });
+      expect(card.authoredStyles?.background).toBeUndefined();
+    } finally {
+      await scoped.close();
+    }
+  });
+
+  it.each([
+    ".card { color: var(--outer); & { color: var(--inner); } }",
+    ".wrapper { .card { color: var(--inner); } }",
+    ".card { @media (min-width: 1px) { color: var(--inner); } }",
+  ])("uses computed values when nesting can override a declaration: %s", async (nested) => {
+    const scoped = await fixture(browser, `<style>
+      :root { --outer: red; --inner: blue; }
+      .card { color: var(--outer); padding: 4px; }
+      ${nested}
+    </style>`, '<div class="wrapper"><div data-oid="card" class="card">Card</div></div>');
+    try {
+      expect(await scoped.locator(".card").evaluate((element) => getComputedStyle(element).color)).toBe("rgb(0, 0, 255)");
+      const card = await details(scoped, "card");
+      expect(card.authoredStyles?.color).toBeUndefined();
+      expect(card.authoredStyles?.padding).toMatchObject({ value: "4px" });
+    } finally {
+      await scoped.close();
+    }
+  });
+
+  it.each([100, 600])("does not claim a winner from an element-dependent container query at %s px", async (width) => {
+    const scoped = await fixture(browser, `<style>
+      :root { --small: red; --large: blue; }
+      .container { container-type: inline-size; width: ${width}px; }
+      .card, .outside { color: var(--small); padding: 4px; }
+      @container (min-width: 500px) { .card { color: var(--large); } }
+    </style>`, '<div class="container"><div data-oid="card" class="card">Card</div></div><div data-oid="outside" class="outside">Outside</div>');
+    try {
+      expect(await scoped.locator(".card").evaluate((element) => getComputedStyle(element).color)).toBe(width < 500 ? "rgb(255, 0, 0)" : "rgb(0, 0, 255)");
+      const card = await details(scoped, "card");
+      expect(card.authoredStyles?.color).toBeUndefined();
+      expect(card.authoredStyles?.padding).toMatchObject({ value: "4px" });
+      expect((await details(scoped, "outside")).authoredStyles?.color).toMatchObject({ value: "var(--small)" });
+    } finally {
+      await scoped.close();
+    }
+  });
+
+  it("does not attribute a nested token override to an ancestor's declaration", async () => {
+    const scoped = await fixture(browser, `<style data-zeros-source="tokens.css">
+      :root { --brand: red; }
+      .card { color: var(--brand); & { --brand: blue; } }
+    </style>`, '<div data-oid="card" class="card">Card</div>');
+    try {
+      expect((await details(scoped, "card")).authoredStyles?.color).toMatchObject({
+        value: "var(--brand)", tokens: [{ name: "--brand", value: "blue" }],
+      });
+      expect((await details(scoped, "card")).authoredStyles?.color?.tokens?.[0]?.origin).toBeUndefined();
+    } finally {
+      await scoped.close();
+    }
   });
 });
 

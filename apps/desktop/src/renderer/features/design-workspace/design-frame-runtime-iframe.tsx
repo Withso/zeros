@@ -180,10 +180,16 @@ function DesignFrameDocumentBuffer({
   const sheetSyncAgainRef = useRef(false);
   /** The document the next sync serves: a reload mid-sync is served next. */
   const sheetSyncTargetRef = useRef<DesignFrameRuntimeConnection | null>(null);
+  // A watcher may load this generation before an older tool's success event.
+  // Such inherited previews are live only while that tool is still writing;
+  // success must reveal this document's own authoritative stylesheet.
+  const [inheritedSheetDrafts] = useState(
+    () => new Set([...stylesheetPreviews.values()].map((preview) => preview.draftId)),
+  );
 
   /** Bring the document's linked stylesheets in line with the agent's latest
-   * drafts. A saved stylesheet's text is the saved text, so it stays until
-   * the saved generation replaces this document; a discarded one restores the
+   * drafts. A saved stylesheet stays only on a document that predates the draft;
+   * a new generation starts from its own saved text. A discarded one restores the
    * document's own text. Serialized: the latest drafts and the newest
    * document always win, and a caller's promise settles after both. */
   const syncStylesheetPreviews = useCallback(
@@ -204,6 +210,20 @@ function DesignFrameDocumentBuffer({
           const previews = latestRef.current.stylesheetPreviews;
           try {
             for (const [file, preview] of previews) {
+              // Saved drafts linger for the activity chip. Replaying one into
+              // a new document can overwrite a later native save permanently.
+              const previous = applied.get(file);
+              if (
+                preview.saved &&
+                (previous?.draftId !== preview.draftId || inheritedSheetDrafts.has(preview.draftId))
+              ) {
+                if (previous?.draftId === preview.draftId) {
+                  const result = await target.previewStylesheet(file, null);
+                  onSnapshot(result.snapshot);
+                  applied.delete(file);
+                }
+                continue;
+              }
               if (applied.get(file)?.css !== preview.css) {
                 const result = await target.previewStylesheet(file, preview.css);
                 onSnapshot(result.snapshot);
@@ -211,7 +231,7 @@ function DesignFrameDocumentBuffer({
               applied.set(file, preview);
             }
             for (const [file, preview] of [...applied]) {
-              if (previews.has(file)) continue;
+              if (previews.get(file)?.draftId === preview.draftId) continue;
               applied.delete(file);
               if (preview.saved) continue;
               const result = await target.previewStylesheet(file, null);
@@ -228,7 +248,7 @@ function DesignFrameDocumentBuffer({
       sheetSyncRef.current = run;
       return run;
     },
-    [onSnapshot],
+    [inheritedSheetDrafts, onSnapshot],
   );
   const protocolSource = nativeRuntime.ready
     ? designProtocolFrameUrl({
