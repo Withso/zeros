@@ -8,8 +8,9 @@
   counters before producers settled. Pixels shared the short runtime-history
   lifetime rather than their own byte/count/lease budget.
 - **Rule.** Settle opted-in obsolete callers without releasing the producer slot
-  early; preserve legacy running results because explicit PNG export shares
-  the queue.
+  early; preserve legacy running and queued work against opted-in background
+  requests, including different-family capacity eviction, because explicit
+  PNG export shares the queue.
   Fence pause and idle callbacks by lifetime. Keep preview entry/encoded/decoded
   budgets explicit, charge pinned replacement overlap, and retire owned bitmaps
   only after the final lease. Treat decoded/GPU costs as estimates and verify

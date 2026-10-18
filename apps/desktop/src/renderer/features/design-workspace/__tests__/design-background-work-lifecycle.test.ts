@@ -49,6 +49,55 @@ describe("design background work lifecycle", () => {
     queue.reset();
   });
 
+  it("does not replace a queued legacy export with an opted-in background request", async () => {
+    vi.useFakeTimers();
+    const queue = new DesignBackgroundWorkQueue(4, 0);
+    const release = queue.pause();
+    const exported = queue.schedule("frame", async () => "export");
+    const background = queue.schedule("frame", async () => "background", {
+      latest: true,
+    });
+    release();
+    await vi.runAllTimersAsync();
+    expect(await exported).toBe("export");
+    expect(await background).toBeNull();
+    queue.reset();
+  });
+
+  it("refuses background admission when every queued slot belongs to legacy work", async () => {
+    vi.useFakeTimers();
+    const queue = new DesignBackgroundWorkQueue(1, 0);
+    const release = queue.pause();
+    const exported = queue.schedule("export", async () => "export");
+    const background = queue.schedule("preview", async () => "preview", {
+      latest: true,
+    });
+    release();
+    await vi.runAllTimersAsync();
+    expect(await exported).toBe("export");
+    expect(await background).toBeNull();
+    queue.reset();
+  });
+
+  it("evicts optional work rather than a queued legacy export at capacity", async () => {
+    vi.useFakeTimers();
+    const queue = new DesignBackgroundWorkQueue(2, 0);
+    const release = queue.pause();
+    const exported = queue.schedule("export", async () => "export");
+    const old = queue.schedule("old-preview", async () => "old", {
+      latest: true,
+    });
+    const newest = queue.schedule("new-preview", async () => "new", {
+      latest: true,
+    });
+    release();
+    await vi.runAllTimersAsync();
+    expect(await exported).toBe("export");
+    expect(await old).toBeNull();
+    expect(await newest).toBe("new");
+    queue.reset();
+  });
+
   it("discards a running result when a newer request owns its family", async () => {
     vi.useFakeTimers();
     const queue = new DesignBackgroundWorkQueue(4, 0);

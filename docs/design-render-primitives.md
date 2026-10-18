@@ -18,7 +18,8 @@ admission epoch supplied by the canonical intent owner.
 Each cache instance bounds entries, encoded string/key bytes and decoded/texture
 estimates separately. Defaults are 10,000 entries, 32 MiB encoded and 128 MiB
 decoded estimate; configuration may lower but not exceed them. PNG IHDR sizes
-must match declared dimensions. The decoded estimate reserves two RGBA backings
+must match declared raster-pixel dimensions, not a frame's logical CSS viewport.
+The decoded estimate reserves two RGBA backings
 (more for 16-bit input); it is not a driver, GPU or process-memory guarantee.
 Inputs are static capture PNGs, not arbitrary animated assets. The helper does
 not fully decode or validate PNG contents. Use one shared pool for retained
@@ -41,9 +42,13 @@ callers are outside this pool's accounting.
 
 `DesignBackgroundWorkQueue` keeps one producer callback outstanding and at most
 32 queued families. Queued work retains its existing replacement behavior.
-When both running and incoming requests opt into `{ latest: true }`, a newer
+When both running and admitted incoming requests opt into `{ latest: true }`, a newer
 same-family request also settles the obsolete running caller with `null`.
 Legacy callers are protected because explicit PNG export shares the queue.
+Opted-in background work is refused instead of replacing queued legacy work;
+legacy-to-legacy queued replacement keeps its existing behavior.
+At capacity, background admission evicts the oldest optional family only;
+if every slot holds legacy work, the incoming background request returns `null`.
 The original callback occupies its slot until its promise settles, including
 across `reset`. Retired pause leases and idle callbacks cannot admit a new owner.
 
@@ -69,8 +74,9 @@ Selection, camera projection, gesture hit-testing and host ordering are unchange
 
 `getStats().bufferBytes` reports owned typed-array allocation, not retained frame
 objects, Map/array overhead, transient build allocations or complete process
-memory. Sparse queries can avoid a full-scene scan; dense all-visible results
-still cost O(N), and nearest ties/large overlaps may visit the whole index.
+memory. Sparse queries can avoid a full-scene scan; dense all-visible queries
+still materialize and sort the full result, and nearest ties/large overlaps
+may visit the whole index.
 This helper alone cannot make a dense overview cheap.
 
 ## Integration gates

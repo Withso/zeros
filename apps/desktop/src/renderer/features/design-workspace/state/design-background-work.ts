@@ -54,13 +54,27 @@ export class DesignBackgroundWorkQueue {
     options: { latest?: boolean } = {},
   ): Promise<T | null> {
     return new Promise((resolve, reject) => {
+      const pending = this.pending.get(key);
+      if (options.latest === true && pending && !pending.latest) {
+        resolve(null);
+        return;
+      }
+      if (options.latest === true && !pending && this.pending.size >= this.limit) {
+        const oldest = [...this.pending.values()].find((task) => task.latest);
+        if (!oldest) {
+          resolve(null);
+          return;
+        }
+        oldest.cancel();
+        this.pending.delete(oldest.key);
+      }
       if (
         this.running?.key === key &&
         this.running.latest &&
         options.latest === true
       )
         this.running.cancel();
-      this.pending.get(key)?.cancel();
+      pending?.cancel();
       this.pending.delete(key);
       let retired = false;
       this.pending.set(key, {
