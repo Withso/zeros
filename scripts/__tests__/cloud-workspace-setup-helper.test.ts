@@ -227,6 +227,7 @@ describe("cloud setup credential transport", () => {
         expect(Object.keys(material).sort()).toEqual(Object.keys(body).sort());
         expect((fetch.mock.calls[0] as any)[1].headers["X-Zeros-Setup-Timings"]).toBe("1");
         expect((fetch.mock.calls[0] as any)[1].headers["X-Zeros-Setup-Observations"]).toBe("1");
+        expect((fetch.mock.calls[0] as any)[1].headers["X-Zeros-Setup-Performance"]).toBe("1");
       }
     } finally { vi.restoreAllMocks(); vi.unstubAllGlobals(); }
   });

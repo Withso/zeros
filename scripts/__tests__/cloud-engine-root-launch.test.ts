@@ -86,3 +86,18 @@ it.each([{ ...inner, qualified: true }, { ...inner, engineChecksPassed: false },
   await expect(launchCloudEngine(options)).rejects.toThrow(/qualification/);
   expect(retireRuntime).toHaveBeenCalledOnce(); expect(publish).not.toHaveBeenCalled();
 });
+it("keeps root timing outside the report until whole-tree retirement and output drain", async () => {
+  const performance = {version:1,truncated:false,groups:[{source:"attester_preflight",stages:[
+    {stage:"actor_tools",count:1,totalMs:13,maxMs:13,lastOutcome:"passed"},
+  ]}]};
+  const {options,order,publish,spawnProcess}=fixture("qualify",{...inner,performance});
+  expect(await launchCloudEngine({...options,collectPerformance:true} as any)).toBe(0);
+  expect((spawnProcess.mock.calls[0][2] as any).env.ZEROS_SETUP_PERFORMANCE).toBe("1");
+  const result=publish.mock.calls[0][0];
+  expect(result.performance.groups[0].stages).toEqual(expect.arrayContaining([
+    ...performance.groups[0].stages,
+    expect.objectContaining({stage:"launcher_view"}),expect.objectContaining({stage:"launcher_spawn"}),
+    expect.objectContaining({stage:"launcher_retire"}),expect.objectContaining({stage:"launcher_drain"}),
+  ]));
+  expect(order.indexOf("whole-tree-kill-empty")).toBeGreaterThan(order.indexOf("engine-exit"));
+});

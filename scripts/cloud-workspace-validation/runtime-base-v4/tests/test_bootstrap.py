@@ -993,6 +993,34 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(len(output.splitlines()), 1)
         self.assertEqual(json.loads(output)["component"], "installer")
 
+    def test_negotiated_cached_setup_measures_cache_verification_and_host_restart(self):
+        self.install()
+        self.value.update(purpose="workspace-setup", setup="e30")
+        self.host.setup_performance = True
+        ms = [0.0]
+        def delayed(operation, duration):
+            def run(*args, **kwargs):
+                ms[0] += duration
+                return operation(*args, **kwargs)
+            return run
+        with mock.patch.object(b.time, "monotonic", side_effect=lambda: ms[0]), \
+             mock.patch.object(self.app, "verify_runtime", side_effect=delayed(self.app.verify_runtime, .25)), \
+             mock.patch.object(self.host, "stop", side_effect=delayed(self.host.stop, .5)), \
+             mock.patch.object(self.host, "start", side_effect=delayed(self.host.start, .75)):
+            code, output = self.cli()
+        self.assertEqual(code, 0)
+        envelope = json.loads(output)
+        self.assertEqual(envelope["schema"], "zeros.diagnostic/v2")
+        self.assertTrue(envelope["diagnostic"]["ok"])
+        self.assertEqual(envelope["performance"]["groups"][0]["source"], "installer")
+        stages = {entry["stage"]: entry for entry in envelope["performance"]["groups"][0]["stages"]}
+        self.assertEqual(stages["cache_verify"]["totalMs"], 250)
+        self.assertEqual(stages["host_stop"]["totalMs"], 500)
+        self.assertGreaterEqual(stages["host_start"]["totalMs"], 750)
+        self.assertEqual(self.downloads, 1)
+        self.assertEqual(self.host.calls.count("stop"), 2)
+        self.assertEqual(self.host.calls.count("start"), 2)
+
     def test_input_is_strict_bounded_and_has_no_extra_authority(self):
         for change, check in [
             (lambda v: v.update(command="private-canary"), "input_schema"),
