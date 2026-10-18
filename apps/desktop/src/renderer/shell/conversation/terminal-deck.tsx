@@ -3,8 +3,8 @@
 // ──────────────────────────────────────────────────────────
 //
 // Mounted ONCE at the column level (a sibling of the pane tree inside
-// ConversationPane's body stack). Renders every `kind: "terminal"`
-// ChatThread as a persistent layer; the layer's DOM is PORTALED into
+// ConversationPane's body stack). Renders opened Local terminal chats
+// (and every cloud terminal chat) as persistent layers. The DOM is PORTALED into
 // the pane that owns the chat (split panes, 2026-07-17) and is visible
 // only while it's that pane's displayed chat.
 //
@@ -28,7 +28,7 @@
 //   - Everything else      → `invisible pointer-events-none`, aria-hidden
 // ──────────────────────────────────────────────────────────
 
-import React from "react";
+import React, { useLayoutEffect, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
 
@@ -43,6 +43,8 @@ import { paneForChat } from "../../state/chat-panes";
 import { usePaneLayout } from "../../state/chat-panes-store";
 import { usePanePortalsStore } from "./pane-portal-store";
 import { TerminalSessionView } from "../terminal/terminal-session-view";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { usePreparedChatId } from "./chat-intent";
 
 export function TerminalDeck() {
   // Select only terminal-kind chats; useShallow keeps the result
@@ -60,12 +62,36 @@ export function TerminalDeck() {
   const layout = usePaneLayout(activeFolder);
   const paneSlots = usePanePortalsStore((s) => s.panes);
   const dispatch = useWorkspaceDispatch();
+  const preparedChatId = usePreparedChatId();
+
+  // Restored history may include many Local terminal tabs the user has never
+  // opened this session. They need no xterm grid, parser, or subscriptions yet.
+  // Record only committed visits; keep opened grids intact for instant return,
+  // and prune removed/archived identities rather than retaining stale entries.
+  const openedLocalRef = useRef(new Map<string, string>());
+  const openedLocal = useMemo(() => {
+    const next = new Map<string, string>();
+    for (const chat of terminals) {
+      if (isCloudWorkspace(chat.folder)) continue;
+      const paneId = chat.folder === activeFolder ? paneForChat(layout, chat.id) : null;
+      const slot = paneId ? paneSlots[paneId] : undefined;
+      if (openedLocalRef.current.get(chat.id) === chat.folder ||
+          (activePage === "workspace" && slot?.host && slot.activeChatId === chat.id)) {
+        next.set(chat.id, chat.folder);
+      }
+    }
+    return next;
+  }, [terminals, activeFolder, activePage, layout, paneSlots]);
+  useLayoutEffect(() => { openedLocalRef.current = openedLocal; }, [openedLocal]);
 
   if (terminals.length === 0) return null;
 
   return (
     <>
       {terminals.map((chat) => {
+        // One intent may prepare a hidden widget before selection. It is not
+        // a committed visit and disappears when a newer destination is warmed.
+        if (!isCloudWorkspace(chat.folder) && !openedLocal.has(chat.id) && chat.id !== preparedChatId) return null;
         // Resolve where this terminal should live: the owning pane of
         // the ACTIVE workspace, else the deck's hidden container.
         const inActiveWorkspace = chat.folder === activeFolder;
