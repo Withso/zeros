@@ -9,6 +9,16 @@ const keys = (value, expected) => value !== null && typeof value === "object" &&
   Object.keys(value).sort().join("\0") === [...expected].sort().join("\0");
 const integer = value => Number.isInteger(value) && value >= 0 && value <= 3_600_000;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+export const setupPreparationOutcomes = ["plan_unavailable", "prepare_generation", "record_unavailable", "record_invalid",
+  "key_changed", "epoch_changed", "repository_incomplete", "settings_changed", "repository_changed", "reused"];
+export const setupReadinessObservations = ["ready", "transport_error", "http_error", "invalid_response", "not_ready"];
+export function parseSetupObservations(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value) ||
+    !keys(value, ["version", ...(value.preparation === undefined ? [] : ["preparation"]), ...(value.readiness === undefined ? [] : ["readiness"])]) ||
+    value.version !== 1 || value.preparation !== undefined && !setupPreparationOutcomes.includes(value.preparation) ||
+    value.readiness !== undefined && !setupReadinessObservations.includes(value.readiness)) return undefined;
+  return value;
+}
 export function parseSetupTimings(value) {
   if (!keys(value, ["version", "clocks"]) || value.version !== 1 || !Array.isArray(value.clocks) || value.clocks.length > 5) return undefined;
   let count = 0;

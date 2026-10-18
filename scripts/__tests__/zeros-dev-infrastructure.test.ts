@@ -13,6 +13,7 @@ import { RunSchema, type RunHandle } from "../zeros-dev/receipts";
 import { computerBuild } from "../../apps/desktop/src/renderer/features/settings/__tests__/cloud-computer-v2-fixtures";
 import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
 import { infrastructureTask } from "./zeros-dev-infrastructure-fixture";
+import { fixtureSetupEvidence } from "./zeros-dev-setup-fixture";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const roots: string[] = [];
@@ -201,14 +202,22 @@ describe("infrastructure-only product lifecycle", () => {
 
   it("keeps the first wake failure and its setup observation through cleanup failure", async () => {
     const f = fixture(), wait = f.api.waitWorkspace.getMockImplementation()!;
+    const prior = fixtureSetupEvidence(), evidence = { ...prior, attempt: 2, claimCount: 2, executionFence: 2,
+      state: "queued" as const, completedAt: null, truncated: false,
+      claims: [1, 2].map(executionFence => ({ ...prior.claims[0], executionFence, claimCount: executionFence, outcome: "failed" as const,
+        observations: { version: 1 as const, preparation: "reused" as const, readiness: "not_ready" as const },
+        failure: { code: "setup_engine_readiness_failed" as const, phase: "engine_readiness" as const, retryable: true,
+          engineStartup: { phase: "boot_durability" as const, name: "Error" as const, code: "EIO" as const, errno: -5 } },
+      })),
+    };
     f.api.waitWorkspace.mockImplementation(async (...args) => {
       if (args[1] === "running" && f.api.lifecycle.mock.calls.length) throw new ZerosDevError("deadline", undefined, undefined,
-        { attempt: 2, claimCount: 2, state: "queued", errorCode: "setup_provider_bootstrap_cleanup_unconfirmed" });
+        { attempt: 2, claimCount: 2, state: "queued", errorCode: "setup_provider_bootstrap_cleanup_unconfirmed", evidence });
       return wait(...args);
     });
     f.api.cleanup.mockRejectedValue(new Error("synthetic-private-cleanup"));
-    await expect(runInfrastructure(f.options as never)).rejects.toMatchObject({ code: "deadline", setup: { claimCount: 2 } });
-    expect(f.output.find(row => row.outcome === "failed")).toMatchObject({ phase: "workspace_resume_wait", code: "deadline" });
+    await expect(runInfrastructure(f.options as never)).rejects.toMatchObject({ code: "deadline", setup: { claimCount: 2, evidence } });
+    expect(f.output.find(row => row.outcome === "failed")).toMatchObject({ phase: "workspace_resume_wait", code: "deadline", setup: { evidence } });
     expect(JSON.stringify(f.output)).not.toContain("synthetic-private-cleanup"); expect(f.native).not.toHaveBeenCalled();
   });
 

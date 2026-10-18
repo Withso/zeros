@@ -9,13 +9,15 @@ export type CloudWorkspaceResumePlan = {
   proofEpoch: string | null;
 };
 
+export type CloudWorkspaceResumeCanary = Readonly<{ accountUserId: string; organizationId: string }>;
+
 /** Called under the live workspace/setup locks, before enrolling the fresh
  * engine. This is a preparation hint, never a launch or admission capability.
  * PostgreSQL canonicalizes the exact preparation tuple before hashing it.
  */
 export async function readCloudWorkspaceResumePlan(tx: Tx, input: {
   workspaceId: string; organizationId: string; generation: number; accountUserId: string;
-}, preparation: unknown): Promise<CloudWorkspaceResumePlan | undefined> {
+}, preparation: unknown, canary?: CloudWorkspaceResumeCanary): Promise<CloudWorkspaceResumePlan | undefined> {
   const row = (await tx.query<{ identity: string }>(`SELECT jsonb_build_array(
       'zeros.resume-preparation/v1',w.org_id,w.id,g.generation,w.created_by,
       g.provider_connection_id,pb.provider,pb.provider_resource_id,
@@ -31,11 +33,13 @@ export async function readCloudWorkspaceResumePlan(tx: Tx, input: {
     JOIN cloud_workspace_provider_bindings pb ON pb.workspace_id=w.id AND pb.org_id=w.org_id AND pb.generation=g.generation
     JOIN users account ON account.id=$4
     WHERE w.id=$1 AND w.org_id=$2 AND w.current_generation=$3
-      AND account.staff_role IN ('developer','platform_owner')
+      AND (account.staff_role IN ('developer','platform_owner')
+        OR (account.staff_role IS NULL AND account.id=$6::uuid AND w.org_id=$7::uuid))
       AND account.auth_status='active' AND account.deleted_at IS NULL
       AND pb.provider='boat' AND pb.provider_resource_id IS NOT NULL
       AND g.runtime_profile='zeros-cloud-worker-v4'`,
-  [input.workspaceId, input.organizationId, input.generation, input.accountUserId, JSON.stringify(preparation)])).rows[0];
+  [input.workspaceId, input.organizationId, input.generation, input.accountUserId, JSON.stringify(preparation),
+    canary?.accountUserId ?? null, canary?.organizationId ?? null])).rows[0];
   if (!row) return undefined;
   const proofEpoch = await readCloudRuntimeResumeProofEpoch(tx, input);
   return { version: 1, mode: proofEpoch ? "resume_existing" : "prepare_generation",

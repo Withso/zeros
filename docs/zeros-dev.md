@@ -216,13 +216,18 @@ replaced during the read are refused.
 
 Lifecycle waits are bounded at three minutes, Computer builds at fifteen,
 agent observation at five, and an invocation at thirty. A workspace wait uses
-the existing status request with `setupProgress=true`; default desktop reads
+the existing status request with `setupProgress=true&setupEvidence=true`; default desktop reads
 keep their response shape. Deadline/failure evidence names `workspace_create_wait`,
 `workspace_resume_wait`, `workspace_stop_wait` or `workspace_delete_wait` and, when
 available, the last observed current-generation setup attempt, claim count,
-state and closed error code. Unknown codes become `unknown`; raw logs and
-provider fields are refused. An older CP or stale/malformed progress supplies
-no setup evidence. The product's longer retry loop does not extend this wait,
+state and closed error code. Optional setup evidence retains the exact run/fence,
+runtime ID, at most five claim clocks, engine creation/registration times and
+closed reuse/readiness reasons in the signed receipt before fixture deletion.
+Long histories retain the first failure and mark truncation. Nested attester
+spans overlap setup spans; never add durations across their independent clocks.
+Unknown codes become `unknown`; raw logs and provider fields are refused. An older
+CP supplies ordinary progress; stale or malformed evidence is dropped independently.
+The product's longer retry loop does not extend this wait,
 and no new diagnostic request runs after its deadline. Standalone workspace
 commands retain their run for iteration. `scenario run smoke --agent <agent>
 --model <model>` creates a throwaway, verifies the repo through a terminal,

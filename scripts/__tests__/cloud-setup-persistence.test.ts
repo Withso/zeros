@@ -208,31 +208,41 @@ it("reuses only an exact completed enrollment and leaves dirty files, Design and
     resume: { version: 1, mode: "prepare_generation", keySha256: "d".repeat(64), proofEpoch: null } };
   const waking = { ...prepared, engine: { instanceId: "55555555-5555-4555-8555-555555555555" },
     resume: { ...prepared.resume, mode: "resume_existing", proofEpoch: engineId } };
-  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBeNull();
+  const observe = vi.fn();
+  const read = (value = waking, selected = profile) => helper.readCompletedCloudWorkspacePreparation(value, selected, async () => "", observe);
+  expect(await read()).toBeNull();
+  expect(observe).toHaveBeenLastCalledWith("record_unavailable");
   helper.saveCompletedCloudWorkspacePreparation(prepared, profile);
   const files = `${fixture.root}/srv/zeros/files/workspace`;
   for (const name of ["dirty.txt", "design.html", "engine.sqlite"]) fs.writeFileSync(`${files}/${name}`, `preserved ${name}`);
   fixture.spawn.mockClear();
   fixture.head = "f".repeat(40); // Preserve commits made by the owner after setup.
-  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBe(fixture.head);
+  expect(await read()).toBe(fixture.head);
+  expect(observe).toHaveBeenLastCalledWith("reused");
   expect(fixture.spawn.mock.calls.every(([, args]) => !args.some((arg: string) => ["checkout", "init", "fetch", "reset"].includes(arg)))).toBe(true);
   for (const name of ["dirty.txt", "design.html", "engine.sqlite"]) expect(fs.readFileSync(`${files}/${name}`, "utf8")).toBe(`preserved ${name}`);
-  for (const resume of [{ ...waking.resume, keySha256: "e".repeat(64) },
-    { ...waking.resume, proofEpoch: waking.engine.instanceId }, { ...waking.resume, mode: "prepare_generation", proofEpoch: null }])
-    expect(await helper.readCompletedCloudWorkspacePreparation({ ...waking, resume }, profile, async () => "")).toBeNull();
+  for (const [resume, reason] of [[{ ...waking.resume, keySha256: "e".repeat(64) }, "key_changed"],
+    [{ ...waking.resume, proofEpoch: waking.engine.instanceId }, "epoch_changed"],
+    [{ ...waking.resume, mode: "prepare_generation", proofEpoch: null }, "prepare_generation"]] as const) {
+    expect(await read({ ...waking, resume } as typeof waking)).toBeNull();
+    expect(observe).toHaveBeenLastCalledWith(reason);
+  }
   expect(await helper.readCompletedCloudWorkspacePreparation(waking, { ...profile, version: 3 }, async () => "")).toBeNull();
   const journalPath = `${profile.setupDirectory}/repository.json`;
   const journal = fs.readFileSync(journalPath, "utf8");
   fs.writeFileSync(journalPath, JSON.stringify({ ...JSON.parse(journal), commandState: "failed" }));
-  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBeNull();
+  expect(await read()).toBeNull();
+  expect(observe).toHaveBeenLastCalledWith("repository_incomplete");
   fs.writeFileSync(journalPath, journal);
   const settingsPath = `${profile.managedSettingsDirectory}/settings.managed.toml`;
   fs.writeFileSync(settingsPath, "changed settings");
-  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBeNull();
+  expect(await read()).toBeNull();
+  expect(observe).toHaveBeenLastCalledWith("settings_changed");
   fs.writeFileSync(settingsPath, "");
   fs.renameSync(`${files}/.git`, `${files}/.git-real`);
   fs.symlinkSync(`${files}/.git-real`, `${files}/.git`);
-  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBeNull();
+  expect(await read()).toBeNull();
+  expect(observe).toHaveBeenLastCalledWith("repository_changed");
   fs.unlinkSync(`${files}/.git`);
   fs.renameSync(`${files}/.git-real`, `${files}/.git`);
   fs.writeFileSync(`${profile.setupDirectory}/resume.json`, "corrupt");

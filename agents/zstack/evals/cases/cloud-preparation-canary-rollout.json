@@ -1,0 +1,9 @@
+{
+  "id": "cloud-preparation-canary-rollout",
+  "kind": "replay",
+  "area": "cloud-setup-diagnostics",
+  "fixedBy": "pr:587",
+  "symptom": "The non-staff Alpha canary repeated full preparation on eligible wakes because the reuse rollout only admitted staff, while all integration fixtures were staff.",
+  "rule": "Reproduce the canary's actual identity and entitlement shape. Pin a rollout exception to its configured account and organization, preserve ordinary admission and fresh qualification, and keep non-fixture accounts excluded. See changes/cloud-preparation-canary-evidence.md.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/setup-materials.integration.test.ts -t 'pinned non-staff canary without granting staff authority'"
+}
