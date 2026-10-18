@@ -24,6 +24,7 @@ import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
 import type { SessionNotification } from "../platform/bridge/agent-events";
 import { useWorkspaceStore } from "../state/workspace-store";
+import { createStreamingMarkdownRenderer, renderMarkdownSegments } from "../features/agent/markdown";
 import {
   AuthContext,
   type AuthContextValue,
@@ -31,6 +32,7 @@ import {
 
 const noop = () => {};
 const optimized = new URLSearchParams(location.search).get("baseline") !== "1";
+const streamKind = new URLSearchParams(location.search).get("kind") ?? "prose";
 const agents = [
   {
     id: "codex",
@@ -91,14 +93,18 @@ for (const chat of chats)
         text: "Explain the change.",
         createdAt: 1,
       },
-      {
+      ...(chat.id === "stream-A" && streamKind === "tool" ? [{
+        id: `${chat.id}-answer`, kind: "tool" as const, toolCallId: "command", title: "Run checks",
+        toolKind: "execute" as const, status: "in_progress" as const, rawInput: { command: "pnpm test" },
+        rawOutput: "The output starts here.", createdAt: 2, updatedAt: 2,
+      }] : [{
         id: `${chat.id}-answer`,
         messageId: `${chat.id}-answer`,
-        kind: "text",
-        role: "agent",
+        kind: "text" as const,
+        role: chat.id === "stream-A" && streamKind === "thought" ? "thought" as const : "agent" as const,
         text: "The answer starts here.",
         createdAt: 2,
-      },
+      }]),
     ],
   });
 const actions = {
@@ -211,6 +217,22 @@ function Harness() {
   );
 }
 const fixture = {
+  appendText(text: string) {
+    flushSync(() => useSessionsStore.getState().applyBridgeTranscriptUpdates([{
+      sessionId: chats[0].id,
+      update: { sessionUpdate: "agent_message_chunk", messageId: `${chats[0].id}-answer`, content: { type: "text", text } },
+    }]));
+  },
+  verifyMarkdown() {
+    const render = createStreamingMarkdownRenderer();
+    const input = "Example:\n\n```ts\nconst value = 1;\n```\n\nTail <img src=x onerror=alert(1)> [link](javascript:alert(1))";
+    for (let end = 0; end <= input.length; end++) {
+      const text = input.slice(0, end);
+      if (JSON.stringify(render(text)) !== JSON.stringify(renderMarkdownSegments(text)))
+        throw new Error(`Markdown parity failed at ${end}`);
+    }
+    return input.length + 1;
+  },
   select(id: string) {
     flushSync(() => {
       select(id);
@@ -229,11 +251,16 @@ const fixture = {
     for (let frame = 0; frame < frames; frame++) {
       flushSync(() => {
         const updates: SessionNotification[] = [];
+        const previous = useSessionsStore.getState().sessions[chats[0].id].messages.at(-1);
+        const output = previous?.kind === "tool" ? String(previous.rawOutput) : "";
         for (let index = 0; index < deltas; index++)
           updates.push({
             sessionId: chats[0].id,
-            update: {
-              sessionUpdate: "agent_message_chunk",
+            update: streamKind === "tool" ? {
+              sessionUpdate: "tool_call_update", toolCallId: "command", status: "in_progress",
+              rawOutput: `${output}${" x".repeat(index + 1)}`,
+            } : {
+              sessionUpdate: streamKind === "thought" ? "agent_thought_chunk" : "agent_message_chunk",
               messageId: `${chats[0].id}-answer`,
               content: { type: "text", text: " x" },
             },
@@ -248,10 +275,10 @@ const fixture = {
     const message = useSessionsStore
       .getState()
       .sessions[chats[0].id].messages.at(-1);
-    const text = message?.kind === "text" ? message.text : "";
+    const text = message?.kind === "text" ? message.text : message?.kind === "tool" ? String(message.rawOutput) : "";
     const painted =
       document
-        .querySelector("[data-chat='stream-A'] .zeros-agent-md")
+        .querySelector("[data-chat='stream-A'] .zeros-agent-messages")
         ?.textContent?.trimEnd() ?? "";
     return {
       frames,
@@ -262,7 +289,7 @@ const fixture = {
       causes: counters.streamRenderCauses,
       textLength: text.length,
       paintedTextLength: painted.length,
-      paintedLatest: text === painted,
+      paintedLatest: painted.includes(text),
     };
   },
 };
