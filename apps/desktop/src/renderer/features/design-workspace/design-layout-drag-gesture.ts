@@ -93,7 +93,9 @@ export function startDesignLayoutDrag(input: {
     useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
       frame.file
     ]?.snapshot?.revision;
-  const freePosition = details.styles.position === "absolute";
+  const positioned = details.styles.position === "absolute";
+  const freePosition =
+    positioned && details.styles["--zeros-layout-origin-flow"] !== "1";
   let cancelled = false;
   const isCurrent = () =>
     dragOwners.get(runtime) === ownership &&
@@ -276,7 +278,7 @@ export function startDesignLayoutDrag(input: {
     (ready ??= (async () => {
       const [result, measured] = await Promise.all([
         runtime.getLayoutTargets(undefined, details.oid),
-        freePosition
+        positioned
           ? runtime.getNodeDetails(details.oid, undefined, { relocation: true })
           : Promise.resolve(null),
       ]);
@@ -292,7 +294,7 @@ export function startDesignLayoutDrag(input: {
         grab.x = (start.x - bounds.left) / initialZoom - current.rect.x;
         grab.y = (start.y - bounds.top) / initialZoom - current.rect.y;
       }
-      if (freePosition && !details.relocationContext)
+      if (positioned && !details.relocationContext)
         throw new Error(
           "This runtime cannot measure inherited appearance for safe layer movement.",
         );

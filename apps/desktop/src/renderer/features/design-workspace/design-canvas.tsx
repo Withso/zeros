@@ -152,7 +152,7 @@ import {
   flattenDesignLayerTree,
 } from "./design-layer-tree";
 import { startDesignLayoutDrag } from "./design-layout-drag-gesture";
-import { designMovementDelta, designNodeMovementStyles, designNudgeStep } from "./design-movement-geometry";
+import { DESIGN_REPARENT_HYSTERESIS_PIXELS, designMovementDelta, designNodeMovementStyles, designNudgeStep } from "./design-movement-geometry";
 import { designSelectionMutationTargets } from "./design-selected-targets";
 import {
   DESIGN_SPACING_DRAG_THRESHOLD,
@@ -3842,6 +3842,7 @@ export function DesignCanvas({
       frame: DesignCanvasFrameWire,
       nodes: readonly DesignRuntimeNodeDetails[],
       clickedNode: DesignRuntimeNodeDetails,
+      clicked?: () => void,
     ) => {
       if (
         !workspaceId ||
@@ -3868,7 +3869,8 @@ export function DesignCanvas({
       const selection = designWorkspaceView(workspaceId);
       const lifetime = ++nudgeLifetimeRef.current;
       const revision = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.revision;
-      const isCurrent = () => isCurrentDesignPageOwner(owner) && nudgeLifetimeRef.current === lifetime &&
+      let cancelled = false;
+      const isCurrent = () => !cancelled && isCurrentDesignPageOwner(owner) && nudgeLifetimeRef.current === lifetime &&
         designWorkspaceView(workspaceId).selectionEvent === selection.selectionEvent && designWorkspaceView(workspaceId).activeTheme === selection.activeTheme &&
         designFrameRuntime(workspaceId, frame.file) === runtime && runtime.sourceVersion === frame.sourceVersion &&
         useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.revision === revision;
@@ -3997,6 +3999,16 @@ export function DesignCanvas({
           x: snapped.rect.x - groupBounds.x,
           y: snapped.rect.y - groupBounds.y,
         };
+        const margin = DESIGN_REPARENT_HYSTERESIS_PIXELS / zoom;
+        if (selection.selectedTargets.length > 1 && starts.some(({ details }) => {
+          const x = details.rect.x + delta.x + details.rect.width / 2;
+          const y = details.rect.y + delta.y + details.rect.height / 2;
+          return x < -margin || y < -margin || x > frame.width + margin || y > frame.height + margin;
+        })) {
+          gestureCancelRef.current?.();
+          toast.error("Detach one layer at a time", { description: "Grouped structural transfer is not yet atomic; nothing was moved." });
+          return;
+        }
         paintGuides(snapped.guides);
         paint();
         loop.author({});
@@ -4010,6 +4022,7 @@ export function DesignCanvas({
         cleanup();
         if (!isCurrent()) { restore(); return; }
         if (!moved) {
+          if (clicked) { clicked(); return; }
           if (!folder) return;
           const intent = designSelectionClickIntent(event);
           if (intent === "toggle") {
@@ -4091,6 +4104,7 @@ export function DesignCanvas({
         });
       };
       const cancel = () => {
+        cancelled = true;
         cleanup();
         restore();
       };
@@ -4624,7 +4638,7 @@ export function DesignCanvas({
           }
         }
       }
-      if (gestureMode === "move" && startNodeGroupMove(event, frame, [details], details)) return;
+      if (gestureMode === "move" && startNodeGroupMove(event, frame, [details], details, finishClickSelection)) return;
       event.preventDefault();
       event.stopPropagation();
       const startX = event.clientX;
@@ -5449,7 +5463,6 @@ export function DesignCanvas({
       );
     };
     const blur = () => {
-      nudgeLifetimeRef.current += 1;
       spacePressedRef.current = false;
       setSpacePressed(false);
       syncMeasureModifier(false);

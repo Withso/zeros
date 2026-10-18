@@ -155,6 +155,11 @@ export function createDesignLayoutDropResolver(
         ? original
         : parents.find((target) => {
             if (
+              node.styles["--zeros-layout-origin-flow"] === "1" &&
+              designLayoutMode(target.styles.display ?? "") !== "none"
+            )
+              return contains(target, point);
+            if (
               !contains(
                 target,
                 anchor,
@@ -186,6 +191,16 @@ export function createDesignLayoutDropResolver(
       right: "auto",
       bottom: "auto",
     };
+    if (flow !== "none" && node.styles["--zeros-layout-origin-flow"] === "1")
+      styles["--zeros-layout-origin-flow"] = null;
+    if (
+      flow === "none" &&
+      !sameParent &&
+      original &&
+      designLayoutMode(original.styles.display ?? "") !== "none" &&
+      node.styles.position !== "absolute"
+    )
+      styles["--zeros-layout-origin-flow"] = "1";
     if (parent.oid !== node.layout?.parentId)
       Object.assign(styles, {
         width: cssSize(node, "x", borderSize(node, "x")),

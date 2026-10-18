@@ -1720,7 +1720,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       if (value.length > 2048) unsupported.add("inherited style size");
       else if (value) inheritedStyles[property] = value;
     });
-    Array.from(computed).filter(function (property) { return property.startsWith("--"); }).forEach(function (property) {
+    Array.from(computed).filter(function (property) { return property.startsWith("--") && property !== "--zeros-layout-origin-flow"; }).forEach(function (property) {
       var value = computed.getPropertyValue(property);
       if (value.toLowerCase().includes("url(")) unsupported.add("inherited asset reference");
       if (Object.keys(inheritedStyles).length >= 64 || property.length > 128 || value.length > 2048) unsupported.add("inherited style size");
@@ -1772,6 +1772,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       styles: layoutOnly ? Object.fromEntries(["display", "position", "left", "top", "width", "height", "boxSizing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "marginTop", "marginRight", "marginBottom", "marginLeft", "flexDirection", "flexWrap", "direction", "order", "gridColumnStart", "gridColumnEnd", "gridRowStart", "gridRowEnd"].map(function (key) { return [key, computed[key] || ""]; })) : stylesOf(computed, authoredStyleProperties),
       authoredStyleProperties: authoredStyleProperties
     };
+    result.styles["--zeros-layout-origin-flow"] = element.style ? element.style.getPropertyValue("--zeros-layout-origin-flow").trim() : "";
     if (textEditable && !layoutOnly) result.textSizing = textSizingOf(element);
     if (relocation) result.relocationContext = relocationContextOf(element);
     return result;

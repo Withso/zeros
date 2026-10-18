@@ -658,6 +658,7 @@ export async function runDesignFreeRelocationSmoke({ page, check }) {
 export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignFrameLiveCameraSmoke(options);
   await runDesignMixedParentMovementSmoke(options);
+  await runDesignGroupDetachmentRefusalSmoke(options);
   await runDesignFreeRelocationSmoke(options);
   await runDesignWorldNudgeSmoke(options);
   await runDesignLayoutAffineCameraSmoke(options);
@@ -718,4 +719,24 @@ export async function runDesignMixedParentMovementSmoke({ page, check }) {
   await page.keyboard.up("Control");
   await expect.poll(() => transactionWrites(page)).toBe(1);
   check("one group transaction moves scaled and reflected parents' children by the same world delta", true);
+}
+
+export async function runDesignGroupDetachmentRefusalSmoke({ page, check }) {
+  await openCanvasFixture(page, "layoutGestures&mixedParents");
+  await page.locator('[data-design-layer-id="home-panel"] [data-layer-disclosure]').click();
+  await page.locator('[data-design-layer-id="home-heading"]').click();
+  await page.locator('[data-design-layer-id="home-copy"]').click({ modifiers: ["Shift"] });
+  const frame = page.locator('[data-design-frame="home.html"]');
+  const child = frame.frameLocator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]').locator('[data-oid="home-copy"]');
+  const before = await child.boundingBox();
+  const bounds = await frame.boundingBox();
+  const start = { x: before.x + before.width / 2, y: before.y + before.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x, bounds.y + bounds.height + 100, { steps: 5 });
+  await expect(page.getByText("Detach one layer at a time", { exact: true })).toBeVisible();
+  await page.mouse.up();
+  await expect.poll(() => child.boundingBox()).toEqual(before);
+  expect(await transactionWrites(page)).toBe(0);
+  check("a grouped scene exit is explicitly refused and restores every preview without a write", true);
 }
