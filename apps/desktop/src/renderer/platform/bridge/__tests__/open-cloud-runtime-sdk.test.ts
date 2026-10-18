@@ -4,6 +4,7 @@ import type { CloudSdkRuntimeTarget } from "../../../../../shared/cloud-sdk-cont
 import type { RuntimeClient as Client } from "../ws-client";
 
 const state = vi.hoisted(() => ({ epoch: 1, listeners: new Set<() => void>(), open: vi.fn(), refresh: vi.fn(), fallback: vi.fn(),
+  activate: vi.fn(), retire: vi.fn(), cancelCommand: vi.fn(), envelope: vi.fn(),
   proof: vi.fn(), renew: vi.fn(), subscribeRenewals: vi.fn(), legacy: vi.fn(), close: vi.fn(async () => true), publish: vi.fn(async (_target: unknown, _connected: boolean) => {}), accept: vi.fn(),
   clients: [] as Client[], document: { status: "ready", generation: { number: 7 }, capabilities: { canRead: true, canWrite: true } } }));
 vi.mock("../../cloud-sdk-stream", () => ({ subscribeCloudSdkRuntimeRenewals: state.subscribeRenewals }));
@@ -13,7 +14,9 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({ cloudCatalogGeneratio
 vi.mock("../../../state/cloud-workspace-wake", () => ({ wakeCloudWorkspace: vi.fn() }));
 vi.mock("../../cloud-sdk-runtime", async importOriginal => ({ ...await importOriginal<typeof import("../../cloud-sdk-runtime")>(),
   openCloudSdkWorkspaceRuntime: state.open, refreshCloudSdkWorkspaceRuntime: state.refresh, fallbackCloudSdkWorkspaceRuntime: state.fallback,
-  signCloudSdkRuntimeProof: state.proof, renewCloudSdkRuntimeCapabilities: state.renew }));
+  signCloudSdkRuntimeProof: state.proof, renewCloudSdkRuntimeCapabilities: state.renew,
+  activateCloudSdkRuntimeConnection: state.activate, retireCloudSdkRuntimeConnection: state.retire,
+  cancelCloudSdkRuntimeCommand: state.cancelCommand, prepareCloudSdkCommandEnvelope: state.envelope }));
 vi.mock("../../cloud-workspace-access", () => ({ openCloudWorkspaceRuntime: state.legacy, refreshCloudWorkspaceRuntime: vi.fn(),
   closeCloudWorkspaceRuntime: state.close, publishCloudWorkspacePortForwardingRuntime: state.publish }));
 vi.mock("../ws-client", async importOriginal => {
@@ -51,11 +54,12 @@ const legacy = () => ({ kind: "cloud", channel: "control-plane-websocket", ...ta
 
 class Socket {
   static instances: Socket[] = [];
-  readyState = 0; protocol = "zeros-cap.v1"; sent: Record<string, unknown>[] = []; closeCount = 0;
+  readyState = 0; protocol = "zeros-cap.v1"; sent: Record<string, unknown>[] = []; texts: string[] = []; closeCount = 0;
   onopen: (() => void) | null = null; onmessage: ((event: { data: string }) => void) | null = null;
   onclose: ((event: { code: number; reason: string }) => void) | null = null; onerror: (() => void) | null = null;
   constructor(readonly url: string, readonly protocols?: string[]) { Socket.instances.push(this); }
   send(text: string) {
+    this.texts.push(text);
     const request = JSON.parse(text) as Record<string, unknown>; this.sent.push(request);
     if (request.type === "WORKSPACE_REQUEST") this.engine({ type: "WORKSPACE_RESPONSE", requestId: request.id, op: request.op,
       result: request.op === "workspace.list" ? { workspaces: [{ id: "local-main", path: "/workspace/repo" }] } : {} });
@@ -85,11 +89,86 @@ beforeEach(() => {
   state.proof.mockResolvedValue("s".repeat(86)); state.refresh.mockImplementation(async previous => sdk(previous.connectionSequence + 1));
   state.renew.mockImplementation(async () => capabilities(Date.now()));
   state.subscribeRenewals.mockResolvedValue(vi.fn());
+  state.activate.mockResolvedValue({ attemptId: id(12) }); state.retire.mockResolvedValue(true); state.cancelCommand.mockResolvedValue(true);
+  state.envelope.mockImplementation(async (_runtime, _attemptId, text) => {
+    const frame = JSON.parse(text); frame.params.acceptedWorkProof = { version: 1, capability: capabilities().engine.token,
+      proof: { timestampMs: now, nonce: "n".repeat(22), signature: "s".repeat(86) }, commandSignature: "c".repeat(86) };
+    return JSON.stringify(frame);
+  });
 });
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); for (const client of state.clients) client.dispose();
   vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 describe("desktop SDK runtime activation", () => {
+  const enqueue = () => ({ type: "WORKSPACE_REQUEST" as const, op: "cloudCommands.request", params: {
+    cloudLocalCommandsVersion: 1, bootId: scope.bootId, writerEpoch: scope.writerEpoch, request: { kind: "mutate", mutation: {
+      conversationId: "conversation-1", operationId: id(15), expectedRevision: 0, action: { kind: "enqueue", commandId: id(15),
+        payload: { agentId: "claude", model: "claude-sonnet-4-6", modeRevision: 0, userMessageId: "turn-1",
+          prompt: [{ type: "text", text: "synthetic command" }] } } } } } });
+  const acceptedSdk = () => { const target = sdk(); target.connect.runtimeBinding.acceptedWorkVersion = 1; return target; };
+
+  it("sends accepted work as the exact opaque native envelope on the winning registered connection", async () => {
+    state.open.mockResolvedValue(acceptedSdk()); const pending = opening(); await tick();
+    const socket = Socket.instances[0]!; await authenticate(socket); const peer = await pending;
+    const handshake = state.proof.mock.calls.find(([, fields]) => fields.aud === "zeros:engine")![1];
+    expect(state.activate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ runtimeId: id(7) }), handshake.nonce);
+    await peer.client.request(enqueue());
+    expect(state.envelope).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ runtimeId: id(7) }), id(12), expect.any(String));
+    const unsigned = JSON.parse(state.envelope.mock.calls[0]![2]);
+    expect(unsigned.params).not.toHaveProperty("acceptedWorkProof");
+    expect(socket.texts).toContain(await state.envelope.mock.results[0]!.value);
+    expect(socket.sent.find(frame => frame.op === "cloudCommands.request")).toHaveProperty("params.acceptedWorkProof.version", 1);
+    await peer.client.request({ type: "WORKSPACE_REQUEST", op: "file.read", params: {} });
+    expect(state.envelope).toHaveBeenCalledOnce();
+    peer.release(); expect(state.retire).toHaveBeenCalledWith(expect.objectContaining({ runtimeId: id(7) }), id(12));
+  });
+
+  it.each(["abort", "timeout", "release", "disconnect", "account"])("discards a late accepted-work envelope after %s", async reason => {
+    state.open.mockResolvedValue(acceptedSdk()); const openingPeer = opening(); await tick(); await authenticate(Socket.instances[0]!); const peer = await openingPeer;
+    let finish!: (envelope: string) => void;
+    state.envelope.mockImplementationOnce(() => new Promise<string>(resolve => { finish = resolve; }));
+    const stop = new AbortController(), pending = peer.client.request(enqueue(), { timeoutMs: 20, signal: stop.signal });
+    void pending.catch(() => {});
+    expect(state.envelope).toHaveBeenCalledOnce();
+    const rejected = expect(pending).rejects.toThrow();
+    if (reason === "abort") stop.abort();
+    if (reason === "timeout") await tick(20);
+    if (reason === "release") peer.release();
+    if (reason === "disconnect") Socket.instances[0]!.close(1006);
+    if (reason === "account") { state.epoch++; for (const listener of state.listeners) listener(); }
+    await rejected; finish(state.envelope.mock.calls[0]![2]); await tick();
+    expect(Socket.instances.every(socket => !socket.sent.some(frame => frame.op === "cloudCommands.request"))).toBe(true);
+    expect(state.cancelCommand).toHaveBeenCalledWith(expect.objectContaining({ runtimeId: id(7) }), id(12), expect.any(String));
+    expect(state.fallback).not.toHaveBeenCalled();
+  });
+
+  it("refuses a native proof failure without falling back or sending the unsigned command", async () => {
+    state.open.mockResolvedValue(acceptedSdk()); const pending = opening(); await tick(); await authenticate(Socket.instances[0]!); const peer = await pending;
+    state.envelope.mockRejectedValueOnce(new Error("proof refused"));
+    await expect(peer.client.request(enqueue())).rejects.toThrow("proof refused");
+    expect(Socket.instances.every(socket => !socket.sent.some(frame => frame.op === "cloudCommands.request"))).toBe(true);
+    expect(state.fallback).not.toHaveBeenCalled(); expect(peer.client.status).toBe("connected");
+  });
+
+  it("retains the old command bytes with no native attempt or proof IPC when metadata is absent", async () => {
+    const pending = opening(); await tick(); await authenticate(Socket.instances[0]!); const peer = await pending;
+    await peer.client.request(enqueue());
+    expect(Socket.instances[0]!.sent.find(frame => frame.op === "cloudCommands.request")).toMatchObject(enqueue());
+    expect(Socket.instances[0]!.sent.find(frame => frame.op === "cloudCommands.request")).not.toHaveProperty("params.acceptedWorkProof");
+    expect(state.activate).not.toHaveBeenCalled(); expect(state.envelope).not.toHaveBeenCalled();
+  });
+
+  it("retires an activation receipt delivered after the socket was cancelled", async () => {
+    state.open.mockResolvedValue(acceptedSdk()); let finish!: (receipt: { attemptId: string }) => void;
+    state.activate.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const stop = new AbortController(), pending = opening(stop.signal), rejected = expect(pending).rejects.toThrow();
+    await tick(); await authenticate(Socket.instances[0]!); expect(state.activate).toHaveBeenCalledOnce();
+    expect(state.publish).not.toHaveBeenCalled();
+    stop.abort(); await rejected; finish({ attemptId: id(12) }); await tick();
+    expect(state.retire).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ runtimeId: id(7) }), id(12));
+    expect(state.envelope).not.toHaveBeenCalled(); expect(state.accept).not.toHaveBeenCalled();
+  });
+
   it("uses SDK authentication and retains the engine boot/root gate before forwarding", async () => {
     const pending = opening(); await tick(); const direct = Socket.instances[0]!;
     expect(state.open).toHaveBeenCalledExactlyOnceWith(target); expect(state.legacy).not.toHaveBeenCalled();

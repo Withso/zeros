@@ -2,6 +2,7 @@ import { createPrivateKey, sign } from "node:crypto";
 import { capabilityProofMessage, type CapabilityProofFields, type DeviceProofRequest } from "@zeros/cloud-client";
 import { CloudSdkCapabilityProofFieldsSchema, CloudSdkDeviceRequestSchema } from "../shared/cloud-sdk-contract";
 import { CAPABILITY_POP_TIMESTAMP_LEEWAY_MS } from "@zeros/protocol/cloud-capabilities";
+import { CloudAcceptedWorkProofBindingSchema, cloudAcceptedWorkProofMessage, type CloudAcceptedWorkProofBinding } from "@zeros/protocol/cloud-accepted-work-client";
 import {
   cloudDesktopDeviceLabel,
   cloudDesktopPlatform,
@@ -216,6 +217,27 @@ export class CloudAccessDeviceAuthority {
     return sign(null, Buffer.from(capabilityProofMessage(parsed.data), "utf8"), key).toString("base64url");
   }
 
+  /** Main's accepted-work sender supplies a parsed command/boot binding. This
+   * domain is never exposed as arbitrary signing input over IPC. */
+  async signSdkAcceptedWorkProof(accessToken: string, expectedDevice: { deviceId: string; keyVersion: number }, fields: CloudAcceptedWorkProofBinding) {
+    const parsed = CloudAcceptedWorkProofBindingSchema.safeParse(fields);
+    if (!parsed.success || Math.abs(parsed.data.timestampMs - Date.now()) > CAPABILITY_POP_TIMESTAMP_LEEWAY_MS)
+      throw new Error("Cloud accepted work proof is invalid");
+    const device = await this.ensure();
+    const session = workosAccountSession(await this.dependencies.getSession());
+    if (!this.dependencies.capabilityEnabled() || !session || session.accountId !== device.accountUserId || session.accessToken !== accessToken)
+      throw new Error("Cloud device admission session changed");
+    if (parsed.data.scope.fundingOwnerUserId !== session.accountId) throw new Error("Cloud funding owner changed");
+    const envelope = this.dependencies.store.load(session.accountId);
+    if (!envelope || envelope.active.deviceId !== device.deviceId || envelope.active.deviceId !== expectedDevice.deviceId ||
+        envelope.active.keyVersion !== expectedDevice.keyVersion)
+      throw new Error("Cloud device admission identity changed");
+    if (Math.abs(parsed.data.timestampMs - Date.now()) > CAPABILITY_POP_TIMESTAMP_LEEWAY_MS) throw new Error("Cloud accepted work proof is invalid");
+    const { publicKey, privateKey } = envelope.active;
+    const key = createPrivateKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: publicKey, d: privateKey } });
+    return sign(null, Buffer.from(cloudAcceptedWorkProofMessage(parsed.data), "utf8"), key).toString("base64url");
+  }
+
   private async signAccess(accessToken: string, action: string, payload: unknown) {
     const device=await this.ensure();
     const session=workosAccountSession(await this.dependencies.getSession());
@@ -364,6 +386,11 @@ export async function signCloudSdkDeviceRequestForMain(accessToken: string, requ
 export async function signCloudSdkCapabilityProofForMain(accessToken: string, device: { deviceId: string; keyVersion: number }, fields: CapabilityProofFields) {
   await ensureCloudAccessDeviceForMain();
   return accessDeviceAuthority!.signSdkCapabilityProof(accessToken, device, fields);
+}
+
+export async function signCloudSdkAcceptedWorkProofForMain(accessToken: string, device: { deviceId: string; keyVersion: number }, fields: CloudAcceptedWorkProofBinding) {
+  await ensureCloudAccessDeviceForMain();
+  return accessDeviceAuthority!.signSdkAcceptedWorkProof(accessToken, device, fields);
 }
 
 /** Build the private stdin seed. Auth0 compatibility sessions deliberately

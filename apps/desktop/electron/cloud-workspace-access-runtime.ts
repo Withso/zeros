@@ -12,7 +12,7 @@ import { CloudRuntimeServiceTransport } from "./cloud-runtime-service-transport"
 import { CloudSdkRuntimeBroker } from "./cloud-sdk-runtime-broker";
 import { CloudSdkDeviceStream } from "./cloud-sdk-device-stream";
 import { ensureCloudAccessDeviceForMain, readCloudAccessDeviceForMain, signCloudEngineAdmissionForMain, signCloudRuntimeServiceForMain, signCloudPreviewForMain,
-  signCloudSdkDeviceRequestForMain, signCloudSdkCapabilityProofForMain } from "./cloud-replica-host-runtime";
+  signCloudSdkDeviceRequestForMain, signCloudSdkCapabilityProofForMain, signCloudSdkAcceptedWorkProofForMain } from "./cloud-replica-host-runtime";
 import { previewFrameAuthorizations } from "./preview-frame-authorizations";
 import {
   getValidAccessTokenForMain,
@@ -165,6 +165,7 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
       getAccessToken: getValidAccessTokenForMain,
       ensureDevice: ensureCloudAccessDeviceForMain, readDevice: readCloudAccessDeviceForMain,
       signRequest: signCloudSdkDeviceRequestForMain, signProof: signCloudSdkCapabilityProofForMain,
+      signAcceptedWorkProof: signCloudSdkAcceptedWorkProofForMain,
       fetch: controlPlaneFetch, allowInsecureLoopback: IS_DEV,
       onRetired: runtimeIds => {
         if (forwarding?.broker === current) for (const id of runtimeIds) forwarding.coordinator.retireRuntime(id);

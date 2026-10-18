@@ -31,7 +31,8 @@ export const CloudSdkCapabilitiesSchema = z.object({
   engine: z.object({ token: z.string().min(1).max(4096), expiresAt: z.iso.datetime() }),
   realtime: z.object({ token: z.string().min(1).max(4096), expiresAt: z.iso.datetime() }),
 });
-export const CloudSdkRuntimeBindingSchema = z.object({ authorityEpoch: positive, bootScope: CloudAgentBootScopeSchema });
+export const CloudSdkRuntimeBindingSchema = z.object({ authorityEpoch: positive, bootScope: CloudAgentBootScopeSchema,
+  acceptedWorkVersion: z.literal(1).optional() });
 export const CloudSdkConnectResponseSchema = z.object({
   workspaceId: uuid, generation: positive, engineInstanceId: uuid.optional(), runtimeBinding: CloudSdkRuntimeBindingSchema.optional(),
   capabilities: CloudSdkCapabilitiesSchema,
