@@ -239,6 +239,7 @@ import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-actio
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { CloudEngineUplinkClient, sanitizeCredAckCode, type EngineUplinkActivity, type EngineUplinkReadiness } from "./cloud-engine-uplink";
+import { CloudDetachedPushHealth } from "./cloud-detached-push-health";
 import {
   EngineCapabilityAuth,
   capabilitySessionClose,
@@ -1250,6 +1251,7 @@ export class ZerosEngine {
    * plane did not advertise an endpoint (rollout flag off or older CP). */
   private cloudEngineUplink: CloudEngineUplinkClient | null = null;
   private cloudCapabilityAuth: EngineCapabilityAuth | null = null;
+  private cloudDetachedPushHealth: CloudDetachedPushHealth | null = null;
   private readonly cloudDurabilityRuntime: CloudWorkspaceDurabilityRuntime | null;
   private readonly cloudRecordRuntime: CloudWorkspaceRecordRuntime | null;
   private readonly cloudCheckpointScheduler: CloudCheckpointScheduler | null;
@@ -3759,6 +3761,7 @@ export class ZerosEngine {
     if (cloudEngineUplink) await settle(() => cloudEngineUplink.stop());
     this.cloudCapabilityAuth?.stop();
     this.cloudCapabilityAuth = null;
+    this.cloudDetachedPushHealth?.connect(null); this.cloudDetachedPushHealth = null;
     if (this.cloudRuntimeRegistration && !this.cloudLegacyResidentRequiresFreshView) {
       await settle(() => this.cloudRuntimeRegistration!.stop());
     }
@@ -3909,6 +3912,7 @@ export class ZerosEngine {
       onSessionsClosed: closures => this.cloud?.closeCapabilitySessions(closures.map(capabilitySessionClose)),
     });
     this.cloudCapabilityAuth = capabilityAuth;
+    const detached = this.cloudDetachedPushHealth = new CloudDetachedPushHealth();
     const uplink = new CloudEngineUplinkClient({
       endpoint: advertised.endpoint,
       token: advertised.token,
@@ -3920,7 +3924,7 @@ export class ZerosEngine {
         bootId: registration.runtimeBootId,
       },
       runtimeVersion: VERSION,
-      auth: capabilityAuth,
+      auth: capabilityAuth, detached,
       readiness: () => this.cloudEngineUplinkReadiness(),
       activity: () => this.cloudEngineUplinkActivity(),
       features: registration.uplinkFeatures(),
@@ -4744,6 +4748,14 @@ export class ZerosEngine {
       file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
       predecessor: this.cloudLocalCommandPredecessor,
       runtimeBootId: registration.runtimeBootId, registration, legacy,
+      ...(registration.acceptedWorkNegotiated() && this.cloudDetachedPushHealth ? { accepted: {
+        auth: () => this.cloudCapabilityAuth, runtimeId: registration.runtimeId,
+        enabled: () => registration.acceptedWorkNegotiated() && this.cloudEngineUplink?.detachedActive === true,
+        health: this.cloudDetachedPushHealth,
+        enroll: (body, signal) => registration.acceptedWorkRequest("enroll", body, signal),
+        context: (body, signal) => registration.acceptedWorkRequest("context", body, signal),
+        close: body => registration.acceptedWorkRequest("close", body, AbortSignal.timeout(10_000)),
+      } } : {}),
       observeStartup: observation => {
         this.cloudStartupPhase = observation.phase;
         console.info("[Zeros cloud boot]", JSON.stringify(observation));
@@ -5225,7 +5237,7 @@ export class ZerosEngine {
           params.cloudLocalCommandsVersion !== 1 || params.bootId !== boot.metadataFor(client.cloudActor.sessionId).bootId ||
           params.writerEpoch !== boot.metadataFor(client.cloudActor.sessionId).writerEpoch))
         throw new CloudCommandRuntimeError("cloud_workspace_client_update_required");
-      const allowed = boot ? ["request", "nativeCommandsVersion", "cloudTurnProtocolVersion", "claudePreferencesVersion", "cloudLocalCommandsVersion", "bootId", "writerEpoch"]
+      const allowed = boot ? ["request", "acceptedWorkProof", "nativeCommandsVersion", "cloudTurnProtocolVersion", "claudePreferencesVersion", "cloudLocalCommandsVersion", "bootId", "writerEpoch"]
         : ["request", "nativeCommandsVersion", "cloudTurnProtocolVersion", "claudePreferencesVersion"];
       if (Object.keys(params).some(key=>!allowed.includes(key)) || !("request" in params) ||
           (params.nativeCommandsVersion!==undefined&&params.nativeCommandsVersion!==1) ||
@@ -5247,7 +5259,14 @@ export class ZerosEngine {
           }
         }
       } catch { /* Metadata collection cannot reject or retry a command. */ }
-      const result=await this.cloudCommands.handle(params.request,client.cloudActor?.sessionId);
+      let result: unknown;
+      if ("acceptedWorkProof" in params) {
+        const route = this.cloudCapabilityAuth?.verifier.sessionRoute(client.id);
+        if (!boot || !route || !client.cloudActor) throw new CloudCommandRuntimeError("invalid_command");
+        const actorSessionId = client.cloudActor.sessionId;
+        result = await this.cloudCommands.handle(params.request, actorSessionId,
+          () => boot.acceptCommand(params.request, params.acceptedWorkProof, client.id, actorSessionId, route));
+      } else result = await this.cloudCommands.handle(params.request,client.cloudActor?.sessionId);
       try {
         if (observed) {
           const snapshot = (boot ? CloudBootCommandSnapshotSchema : CloudCommandSnapshotSchema).safeParse(result);

@@ -7,8 +7,10 @@ import { withSystemTx, withUserTx } from "../db.js";
 import { flagEffective, type RolloutFlagName } from "../rollout-flags.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { DatabaseCloudAcceptedWorkService, type AcceptedWorkOptions } from "./accepted-work.js";
-import { type CloudAcceptedWorkEnrollRequest, CloudAcceptedWorkReceiptSchema } from "./accepted-work-contract.js";
+import { type CloudAcceptedWorkEnrollRequest, CloudAcceptedWorkReceiptSchema, cloudAcceptedWorkProofMessage } from "./accepted-work-contract.js";
 import { DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
+import { DatabaseCapabilityActorSessionService } from "./capability-actor-sessions.js";
+import { installCapabilityActorSessionFlags } from "./actor-session-authority.js";
 import { DatabaseCloudAgentExecutionService } from "./agent-executions.js";
 import { CloudAgentBootCredentialResponseSchema, CloudAgentBootScopeSchema } from "./agent-boot-contract.js";
 import { issueClientCapabilities } from "./capability-issuer.js";
@@ -17,6 +19,8 @@ import { ServiceCapabilityVerifier, ENGINE_CLIENT_CAPABILITY_PIN } from "./capab
 import { capabilityProofMessage } from "./capability-verifier.js";
 import { signTestCapability, testEd25519Key, testSigningJwk, testEngineClaims } from "./capability-verifier-test-utils.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
+import { assertNativeGithubActor } from "./github-native-grants.js";
 import { createCloudWorkspaceInternalRoutes, type CloudWorkspaceInternalSetupService } from "./internal-routes.js";
 
 const ISSUER = "https://cp.example.test", KID = "cap-2026-10-accepted";
@@ -36,14 +40,22 @@ suite("exact accepted-work enrollment", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8 }); });
   afterAll(async () => pool.end());
   beforeEach(async () => { await resetMigratedTestDatabase(pool); });
-  afterEach(() => { for (const proof of proofs.splice(0)) proof.dispose(); });
+  afterEach(() => { for (const proof of proofs.splice(0)) proof.dispose(); installCapabilityActorSessionFlags(); });
 
-  async function fixture() {
+  async function fixture(withCredential = false) {
     const f = await seedReadyCloudWorkspace(pool);
     await pool.query("UPDATE cloud_workspace_engine_instances SET cloud_local_commands_version=1,accepted_work_version=1 WHERE id=$1", [f.engineInstanceId]);
     const engine = { workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1,
       engineInstanceId: f.engineInstanceId, heartbeatToken: f.heartbeatToken };
-    const bootService = new DatabaseCloudAgentExecutionService(pool, { currentKeyVersion: 1, keys: { 1: randomBytes(32).toString("base64url") } }, false);
+    const credentialKeys = { currentKeyVersion: 1, keys: { 1: randomBytes(32).toString("base64url") } };
+    const bootService = new DatabaseCloudAgentExecutionService(pool, credentialKeys, false);
+    if (withCredential) {
+      const credentials = new DatabaseCloudAgentCredentialService(pool, credentialKeys), credentialId = randomUUID();
+      await credentials.put({ credentialId, ownerUserId: f.userId, organizationId: f.organizationId, operationId: randomUUID(),
+        expectedRevision: 0, displayName: "Accepted Cursor", material: { kind: "cursor-api-key", apiKey: "synthetic-accepted-provider-key" } });
+      await credentials.setOrganizationConnection(f.userId, f.organizationId, "cursor", { expectedRevision: 0, credentialId,
+        credentialRevision: 1, models: ["grok-4.6"], consent: "zeros-managed" });
+    }
     const bootInput = { version: 1, mode: "boot-owner-v1", workspaceId: f.workspaceId, organizationId: f.organizationId,
       generation: 1, engineInstanceId: f.engineInstanceId };
     const boot = CloudAgentBootCredentialResponseSchema.parse(await bootService.boot(engine, "bootstrap", bootInput));
@@ -88,10 +100,18 @@ suite("exact accepted-work enrollment", () => {
     const command = { commandId: randomUUID(), conversationId: randomUUID(), turnId: randomUUID(), executionId: randomUUID(),
       payloadSha256: createHash("sha256").update("synthetic immutable command").digest("hex"), provider: "cursor" as const,
       model: "grok-4.6", cwd: "/srv/zeros/workspace" };
-    const request = (overrides: Partial<CloudAcceptedWorkEnrollRequest> = {}): CloudAcceptedWorkEnrollRequest => ({ version: 1, scope,
-      runtimeId, actorSessionId: admission.actorSessionId, command, capability, proof: freshProof(overrides.capability), route: "direct", ...overrides });
+    const request = (overrides: Partial<CloudAcceptedWorkEnrollRequest> = {}): CloudAcceptedWorkEnrollRequest => {
+      const value = { version: 1 as const, scope, runtimeId, actorSessionId: admission.actorSessionId, command, capability,
+        proof: freshProof(overrides.capability), route: "direct" as const, ...overrides };
+      const c = JSON.parse(Buffer.from(value.capability.split(".")[1]!, "base64url").toString("utf8"));
+      const commandSignature = sign(null, Buffer.from(cloudAcceptedWorkProofMessage({ aud: c.aud, wsp: c.wsp, jti: c.jti,
+        scope: value.scope, commandId: value.command.commandId, conversationId: value.command.conversationId,
+        payloadSha256: value.command.payloadSha256, timestampMs: value.proof.timestampMs, nonce: value.proof.nonce, route: value.route })),
+        deviceKey.privateKey).toString("base64url");
+      return { ...value, commandSignature: overrides.commandSignature ?? commandSignature };
+    };
     const count = async () => Number((await pool.query("SELECT count(*) AS count FROM cloud_accepted_work_enrollments")).rows[0]!.count);
-    return { ...f, engine, scope, runtimeId, sourceId, user, deviceId, admission, claims, capability, verifier, freshProof, request, command,
+    return { ...f, engine, scope, runtimeId, sourceId, user, deviceId, admission, claims, capability, verifier, freshProof, request, command, bootService,
       proof, list, make, on, count, clock, advance: (ms: number) => { clockOffset += ms; }, setClock: (ms: number) => { clockOffset = ms - Date.now(); } };
   }
 
@@ -108,6 +128,20 @@ suite("exact accepted-work enrollment", () => {
     expect(await f.count()).toBe(1);
   });
 
+  it("enrolls the immutable capability session source without borrowing legacy auth columns", async () => {
+    const f = await fixture();
+    await pool.query("INSERT INTO workos_organization_links(organization_id,workos_organization_id,external_id,state) VALUES($1::uuid,$2,$1::text,'active')",
+      [f.organizationId, `org_${randomUUID()}`]);
+    const enabled = new Set(["capabilities", "runtime_connect", "realtime_uplink", "capability_actor_sessions"]);
+    installCapabilityActorSessionFlags({ enabled: (org, flag) => org === f.organizationId && enabled.has(flag), anyEnabled: flag => enabled.has(flag) });
+    const admission = await new DatabaseCapabilityActorSessionService(pool, true).admit({ ...f.engine, claims: f.claims,
+      keyId: KID, tokenSha256: createHash("sha256").update(f.capability).digest("hex"), route: "direct" });
+    const receipt = await f.make().enroll(f.engine, f.request({ actorSessionId: admission.actorSessionId }));
+    expect(receipt).toMatchObject({ actorSessionId: admission.actorSessionId, sourceSessionId: f.sourceId });
+    expect((await pool.query("SELECT auth_provider,auth_subject,auth_session_id FROM cloud_workspace_actor_sessions WHERE id=$1",
+      [admission.actorSessionId])).rows[0]).toEqual({ auth_provider: null, auth_subject: null, auth_session_id: null });
+  });
+
   it("exposes only an engine-authenticated closed enrollment request with no-store responses", async () => {
     const f = await fixture(), service = f.make();
     const app = createCloudWorkspaceInternalRoutes({} as CloudWorkspaceInternalSetupService, { acceptedWork: service });
@@ -119,6 +153,36 @@ suite("exact accepted-work enrollment", () => {
     expect((await post(f.request(), "not-an-engine-credential")).status).toBe(401);
     expect((await post({ ...f.request(), genericGrant: true })).status).toBe(422);
     expect(await f.count()).toBe(1);
+  });
+
+  it("keeps context and terminal closure engine-authenticated, bounded and private even with flags off", async () => {
+    const f = await fixture(true), service = f.make(), receipt = await service.enroll(f.engine, f.request());
+    const app = createCloudWorkspaceInternalRoutes({ agentExecutions: f.bootService } as CloudWorkspaceInternalSetupService, { acceptedWork: service });
+    const root = "/internal/v2/cloud-workspaces/engine/accepted-work";
+    const context = { version: 1, scope: f.scope, runtimeId: f.runtimeId, acceptedWorkId: receipt.acceptedWorkId,
+      command: f.command, operation: "context", repositoryServers: [] };
+    const closure = { version: 1, scope: f.scope, acceptedWorkId: receipt.acceptedWorkId, commandId: f.command.commandId };
+    const post = (path: string, body: unknown, token = f.heartbeatToken) => app.request(root + path, { method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    const response = await post("/context", context);
+    expect(response.status).toBe(200); expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).not.toHaveProperty("actor");
+    for (const [path, body] of [["/context", context], ["/close", closure]] as const) {
+      expect((await post(path, body, "bad")).status).toBe(401);
+      expect((await post(path, { ...body, genericGrant: true })).status).toBe(422);
+    }
+    f.on.clear();
+    expect((await post("/context", context)).status).toBe(403);
+    expect((await post("/close", { ...closure, commandId: randomUUID() })).status).toBe(403);
+    for (let i = 0; i < 2; i++) {
+      const closed = await post("/close", closure);
+      expect(closed.status).toBe(200); expect(await closed.json()).toEqual({ closed: true });
+      expect(closed.headers.get("cache-control")).toBe("no-store");
+    }
+    for (const [path, limit] of [["/close", 64 * 1024], ["/context", 1024 * 1024]] as const)
+      expect((await post(path, { padding: "x".repeat(limit) })).status).toBe(413);
+    expect((await pool.query("SELECT closed_at IS NOT NULL AS closed FROM cloud_accepted_work_enrollments WHERE id=$1",
+      [receipt.acceptedWorkId])).rows[0].closed).toBe(true);
   });
 
   it("same_id_changed_payload_conflicts; fresh-proof retries keep the first receipt and expiry", async () => {
@@ -188,6 +252,39 @@ suite("exact accepted-work enrollment", () => {
     await expect(service.authorize(f.engine, input)).rejects.toMatchObject({ code: "accepted_work_rejected" });
   });
 
+  it("an exact accepted operation outlives client expiry but not its original provider deadline", async () => {
+    const f = await fixture(), service = f.make(), receipt = await service.enroll(f.engine, f.request());
+    const request = { version: 1, acceptedWorkId: receipt.acceptedWorkId, scope: f.scope, runtimeId: f.runtimeId, command: f.command, operation: "context" };
+    f.setClock(receipt.capabilityExpiresAtMs + 1);
+    expect(await service.authorize(f.engine, request)).toEqual(receipt);
+    await expect(service.enroll(f.engine, f.request())).rejects.toMatchObject({ code: "accepted_work_rejected" });
+    f.setClock(receipt.providerExpiresAtMs);
+    await expect(service.authorize(f.engine, request)).rejects.toMatchObject({ code: "accepted_work_rejected" });
+  });
+
+  it("renews only an enrolled command's ten-second context and native source after the desktop actor ends", async () => {
+    const f = await fixture(true), service = f.make(), receipt = await service.enroll(f.engine, f.request());
+    await pool.query("UPDATE cloud_workspace_actor_sessions SET revoked_at=clock_timestamp() WHERE id=$1", [f.admission.actorSessionId]);
+    f.setClock(receipt.capabilityExpiresAtMs + 1);
+    const request = { version: 1, acceptedWorkId: receipt.acceptedWorkId, scope: f.scope, runtimeId: f.runtimeId,
+      command: f.command, operation: "context", repositoryServers: [] };
+    const response = await f.bootService.acceptedContext(f.engine, request, service) as {
+      contextId: string; acceptedWork: { acceptedWorkId: string; confirmedUntilMs: number } };
+    expect(response).toMatchObject({ provider: "cursor", conversationId: f.command.conversationId,
+      acceptedWork: { acceptedWorkId: receipt.acceptedWorkId } });
+    expect(response).not.toHaveProperty("actor");
+    expect(response.acceptedWork.confirmedUntilMs).toBeGreaterThan(Date.now());
+    expect(response.acceptedWork.confirmedUntilMs).toBeLessThanOrEqual(Date.now() + 10_000);
+    await expect(f.bootService.acceptedContext(f.engine, { ...request, command: { ...f.command, executionId: randomUUID() } }, service)).rejects.toThrow();
+    const source = { kind: "boot-agent" as const, contextId: response.contextId };
+    await expect(withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, source, false))).rejects.toThrow();
+    expect(await withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, source, false, service)))
+      .toMatchObject({ actorUserId: f.user.id });
+    await pool.query("UPDATE cloud_accepted_work_enrollments SET closed_at=clock_timestamp() WHERE id=$1", [receipt.acceptedWorkId]);
+    await expect(f.bootService.acceptedContext(f.engine, request, service)).rejects.toThrow();
+    await expect(withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine, source, false, service))).rejects.toThrow();
+  });
+
   it("flags and explicit runtime support fail closed and are not enabled by a partial prerequisite set", async () => {
     const f = await fixture();
     for (const missing of flags) {
@@ -202,6 +299,29 @@ suite("exact accepted-work enrollment", () => {
     await pool.query("UPDATE cloud_workspace_engine_instances SET accepted_work_version=NULL WHERE id=$1", [f.engineInstanceId]);
     await expect(f.make().enroll(f.engine, f.request())).rejects.toMatchObject({ code: "accepted_work_rejected" });
     expect(f.list).not.toHaveBeenCalled();
+  });
+
+  it("does not deadlock account retirement behind an accepted native source check", async () => {
+    const f = await fixture(true), service = f.make(), receipt = await service.enroll(f.engine, f.request());
+    const response = await f.bootService.acceptedContext(f.engine, { version: 1, acceptedWorkId: receipt.acceptedWorkId,
+      scope: f.scope, runtimeId: f.runtimeId, command: f.command, operation: "context", repositoryServers: [] }, service) as { contextId: string };
+    const blocker = await pool.connect();
+    let operation: Promise<unknown> | undefined, finished = false;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [f.user.id]);
+      const pid = (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+      operation = withSystemTx(pool, tx => assertNativeGithubActor(tx, f.engine,
+        { kind: "boot-agent", contextId: response.contextId }, false, service))
+        .then(value => { finished = true; return value; }, error => { finished = true; return error; });
+      await vi.waitFor(async () => expect(finished || (await pool.query(`SELECT 1 FROM pg_stat_activity
+        WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))`, [pid])).rowCount! > 0).toBe(true));
+      // Account lifecycle owns the account first, then its workspaces. A
+      // native request already owns the workspace and must not wait backward.
+      await blocker.query("SET LOCAL lock_timeout='200ms'");
+      await expect(blocker.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [f.workspaceId])).resolves.toMatchObject({ rowCount: 1 });
+      expect(await operation).toMatchObject({ code: "github_cloud_write_denied" });
+    } finally { await blocker.query("ROLLBACK"); blocker.release(); await operation; }
   });
 
   it("rolling back any prerequisite refuses an existing accepted operation", async () => {
@@ -227,7 +347,7 @@ suite("exact accepted-work enrollment", () => {
         runtimeId: f.runtimeId, command: f.command, operation: "context" }).catch(error => error);
       await vi.waitFor(async () => expect((await pool.query(`SELECT 1 FROM pg_stat_activity
         WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))`, [pid])).rowCount).toBeGreaterThan(0));
-      if (change === "expiry") f.setClock(receipt.capabilityExpiresAtMs);
+      if (change === "expiry") f.setClock(receipt.providerExpiresAtMs);
       if (change === "source") await blocker.query("UPDATE auth_sessions SET status='revoked',revoked_at=clock_timestamp() WHERE id=$1", [f.sourceId]);
       if (change === "flag") f.on.delete("detached_turns");
       await blocker.query("COMMIT");

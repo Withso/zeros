@@ -86,6 +86,7 @@ export function publicCustomization(document: CloudCustomizationDocument, bindin
 
 const bootUuid = z.string().uuid(), bootRevision = z.number().int().positive().safe(), bootDigest = z.string().regex(/^[a-f0-9]{64}$/);
 export const CloudBootCustomizationBindingSchema = z.object({
+  acceptedWorkId: z.string().uuid().optional(),
   contextId: bootUuid, organizationId: bootUuid, workspaceId: bootUuid, generation: bootRevision,
   engineInstanceId: bootUuid, bootId: bootUuid, writerEpoch: bootUuid, fundingOwnerUserId: bootUuid, fundingOwnerEpoch: bootRevision,
   actorSessionId: bootUuid, actorUserId: bootUuid, actorDeviceId: bootUuid, actorDeviceKeyVersion: bootRevision,

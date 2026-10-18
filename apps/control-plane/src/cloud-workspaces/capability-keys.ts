@@ -131,6 +131,9 @@ export class CapabilitySigningKeyStore {
   private reloading: Promise<void> | undefined;
   private again = false;
   private stopped = false;
+  private listening = false;
+  private loadCurrent = false;
+  private readonly lossListeners = new Set<() => void>();
   private timer: NodeJS.Timeout | undefined;
   private retryTimer: NodeJS.Timeout | undefined;
   private retryAttempt = 0;
@@ -179,8 +182,8 @@ export class CapabilitySigningKeyStore {
     if (this.subscription || this.stopped) return this.reloading ?? Promise.resolve();
     this.subscription = this.subscribe({
       onNotification: () => { this.hinted = true; void this.reload(); },
-      onReady: () => { this.hinted = true; void this.reload(); },
-      onUnavailable: () => {},
+      onReady: () => { this.listening = true; this.hinted = true; void this.reload(); },
+      onUnavailable: () => { this.listening = false; this.lost(); },
     });
     void this.subscription.start().catch(() => {});
     this.timer = setInterval(() => { void this.reload(); }, this.refreshMs);
@@ -190,6 +193,8 @@ export class CapabilitySigningKeyStore {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.lost();
+    this.lossListeners.clear();
     this.keyListeners.clear();
     clearInterval(this.timer);
     clearTimeout(this.retryTimer);
@@ -221,6 +226,23 @@ export class CapabilitySigningKeyStore {
     return { ...this.counters };
   }
 
+  authorityCurrent(): boolean { return !this.stopped && this.listening && this.loadCurrent && !this.hinted; }
+  onHealthLost(listener: () => void): () => void {
+    this.lossListeners.add(listener);
+    return () => { this.lossListeners.delete(listener); };
+  }
+  private lost(): void {
+    this.loadCurrent = false;
+    for (const listener of [...this.lossListeners]) listener();
+  }
+  /** reload() can retain old keys on failure. Continuation needs positive
+   * source evidence, including a pass started after the challenge batch. */
+  async observeAuthority(): Promise<boolean> {
+    const failures = this.counters.reloadFailures;
+    await this.reload();
+    return this.authorityCurrent() && failures === this.counters.reloadFailures;
+  }
+
   reload(): Promise<void> {
     if (this.stopped) return Promise.resolve();
     if (this.reloading) { this.again = true; return this.reloading; }
@@ -248,6 +270,7 @@ export class CapabilitySigningKeyStore {
         rows = await this.loadRows();
       } catch {
         this.counters.reloadFailures += 1;
+        this.lost();
         if (hinted && this.current) {
           this.current = null;
           this.logger.warn("[capability-keys] reload after a key change failed; not signing until a reload succeeds");
@@ -291,6 +314,7 @@ export class CapabilitySigningKeyStore {
           previous.crv === key.crv && previous.x === key.x));
       this.published = published;
       this.current = current;
+      this.loadCurrent = true;
       if (changed) for (const listener of this.keyListeners) {
         try { listener(published); }
         catch { this.logger.warn("[capability-keys] key-set consumer callback failed"); }

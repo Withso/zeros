@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CloudBootCommandSnapshotSchema, type CloudBootCommandClaim } from "@zeros/protocol/cloud-commands";
+import { CloudBootCommandSnapshotSchema, CloudBootCommandClaimSchema, type CloudBootCommandClaim } from "@zeros/protocol/cloud-commands";
 import { CloudAgentBootCredentialResponseSchema, CloudAgentBootSyncResponseSchema, CloudAgentBootActivateResponseSchema,
   CloudAgentBootRefreshResponseSchema, CloudAgentActorConfirmResponseSchema, CloudAgentWarmActorResponseSchema,
   CloudAgentWarmActorRequestSchema, CloudAgentHistoryRecoveryResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
@@ -19,6 +19,7 @@ import { CloudExecutionBoundary } from "../agents/containment/cloud-execution-bo
 import { portableCloudWorkloads } from "../agents/containment/__tests__/helpers/portable-cloud-custody";
 import type { CloudRuntimeRegistration } from "../cloud-runtime-registration";
 import { testCloudBootFixture } from "../agents/__tests__/helpers/test-cloud-boot";
+import { testAcceptedWorkOptions } from "../agents/__tests__/helpers/test-accepted-work";
 import type { TransportClient } from "../transport/types";
 import { CloudCommandRuntime } from "../cloud-command-runtime";
 import type { CloudAgentBootOperation, CloudAgentBootRequests, CloudAgentBootResponses } from "../cloud-agent-execution-client";
@@ -58,13 +59,15 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture(provider: "cursor" | "codex" | "claude" = "cursor") {
+async function fixture(provider: "cursor" | "codex" | "claude" = "cursor", detached = false) {
   const directory = mkdtempSync(path.join(tmpdir(), "zeros-native-pump-"));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const cwd = path.join(directory, "workspace"); mkdirSync(cwd);
   const workloads = portableCloudWorkloads(deployment); cleanups.push(() => workloads.drain(workloads.fence()));
   const boundary = new CloudExecutionBoundary({projectRoot: process.cwd(), configuration: deployment, workloads});
   const f = await testCloudBootFixture(cwd, provider); cleanups.push(f.close);
+  const accepted = detached ? await testAcceptedWorkOptions(f) : null;
+  if (accepted) cleanups.push(accepted.close);
   const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, bootId: _boot, writerEpoch: _writer, ...scope } = f.scope;
   const request = vi.fn(async (operation: string, input: unknown) => {
     if (operation === "bootstrap" || operation === "sync") return f.response;
@@ -91,6 +94,7 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor") {
     })),
   } satisfies Pick<CloudRuntimeRegistration, "localCommandsNegotiated" | "agentBootAuthorityRemainingMs" | "agentBootRequest" | "credentialControlsRequest">;
   const boot = new CloudLocalAgentBootRuntime({ file: path.join(directory, "queue.sqlite"), scope,
+    ...(accepted ? { accepted: accepted.options } : {}),
     runtimeBootId: f.scope.bootId, registration,
     legacy: f.legacy, supervisor: { onRetirementFailure: vi.fn() }, engineLive: () => true,
     isAdmittedCwd: root => root === cwd, resolveConversation: conversationId => conversations.has(conversationId)
@@ -173,6 +177,17 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor") {
   request.mockClear(); f.contextRequest.mockClear();
   return { f, boot, factory, pump, options, gateway, claim, finish, handleAgentMessage, request, broadcast,
     routes, executions, stops, retirementFailure, bindings, releaseClaim,
+    acceptedClaim: async () => {
+      if (!accepted) throw new Error("accepted fixture missing");
+      const request = { kind: "mutate" as const, mutation: { conversationId: f.input.conversationId, operationId: randomUUID(),
+        expectedRevision: 0, action: { kind: "enqueue" as const, commandId: randomUUID(), payload: { agentId: provider,
+          model: f.input.model, modeRevision: 0, userMessageId: randomUUID(), prompt: [{ type: "text" as const, text: "Accepted turn" }] } } } };
+      await boot.acceptCommand(request, accepted.senderProof(request), accepted.clientSessionId, admission.actor.sessionId, "direct");
+      let claim: CloudBootCommandClaim;
+      await vi.waitFor(() => { claim = CloudBootCommandClaimSchema.parse(boot.queue.handle({ kind: "claim", conversationId: f.input.conversationId,
+        executionId: randomUUID(), claimId: randomUUID() }, { writerEpoch: f.scope.writerEpoch })); });
+      return claim!;
+    },
     addConversation: async (conversationId: string) => {
       conversations.set(conversationId, { ...conversations.get(f.input.conversationId)!, id: conversationId });
       await boot.observeConversation(admission.actor.sessionId, conversationId);
@@ -180,6 +195,16 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor") {
 }
 
 describe("VM-local native command pump", () => {
+  it("proves terminal accepted work and removes its native host before publishing settlement", async () => {
+    const f = await fixture("cursor", true), claim = await f.acceptedClaim();
+    await f.pump.prepare(claim); f.background(); await f.finish(claim);
+    expect(f.gateway.completeCloudForeground).not.toHaveBeenCalled();
+    expect(f.stops.get(claim.executionId)).toHaveBeenCalled();
+    expect(f.gateway.endSession).toHaveBeenCalledWith("cursor", claim.executionId, { failClosed: true });
+    expect(f.executions.has(claim.executionId)).toBe(false); expect(f.routes.has(claim.conversationId)).toBe(false);
+    expect(f.boot.queue.acceptedWork.get(claim.commandId)?.state).toBe("closed");
+    expect(f.factory.bootScopeActivity([])).toMatchObject({ complete: true, foreground: 0, background: 0, idleHosts: 0, scopes: [] });
+  });
   it("selects the exact FULL-stored actor/credential and forwards the ORIGINAL cold selection without CP", async () => {
     const f = await fixture(), claim = f.claim(); await f.pump.prepare(claim);
     expect(f.pump.admissionSelection(claim)).toMatchObject({ executionId: claim.executionId,

@@ -1,7 +1,8 @@
 import { WebSocket } from "ws";
+import type { CloudDetachedPushHealth, DetachedPushConnection } from "./cloud-detached-push-health";
 
 /**
- * S2 engine uplink client (`contracts/s2-uplink.md`, 1.2.0): the
+ * S2 engine uplink client (`contracts/s2-uplink.md`, 1.4.0): the
  * cloud engine's WebSocket to `realtime`. Cloud workspaces only; a Local
  * engine never constructs this class. The uplink carries push traffic and
  * presence; with `lease.v1` negotiated the control plane also renews the
@@ -240,6 +241,8 @@ export type CloudEngineUplinkOptions = {
    * the checkpoint-request push. */
   features?: readonly string[];
   auth: EngineUplinkAuthSink;
+  /** Qualified detached.v1 runtimes only; dormant without accepted work. */
+  detached?: CloudDetachedPushHealth;
   /** Current engine readiness, sent as `status.ready` once the gate opens. */
   readiness?: () => EngineUplinkReadiness;
   /** Applies a pushed credential-control revision (runs the engine's
@@ -362,6 +365,10 @@ export class CloudEngineUplinkClient {
    * arrived): pushed cred.revision frames flow, so the credential-control
    * poll can back off to its slow fallback cadence. */
   get established(): boolean { return this.computeEstablished(); }
+  get detachedActive(): boolean {
+    const connection = this.connection;
+    return connection?.welcomed === true && connection.gateOpen && connection.features.has("detached.v1");
+  }
   private lastEstablished = false;
   private lastCheckpointPush = false;
 
@@ -431,6 +438,7 @@ export class CloudEngineUplinkClient {
    * every input change (gate open, connection loss, stop) and report each
    * flip exactly once. */
   noteEstablished(): void {
+    this.noteDetached();
     const value = this.computeEstablished();
     if (value !== this.lastEstablished) {
       this.lastEstablished = value;
@@ -440,6 +448,16 @@ export class CloudEngineUplinkClient {
     if (push === this.lastCheckpointPush) return;
     this.lastCheckpointPush = push;
     this.options.onCheckpointPushChange?.(push);
+  }
+
+  /** @internal Auth and health are bound to the current connection only. */
+  noteDetached(): void {
+    this.options.detached?.connect(!this.stopped && !this.parked ? this.connection?.detachedState() ?? null : null);
+  }
+  /** @internal */
+  detachedFrame(connection: Connection, t: string, d: Record<string, unknown>): void {
+    if (connection !== this.connection || connection.isFinished || !connection.features.has("detached.v1")) return;
+    this.noteDetached(); this.options.detached?.receive(t, d);
   }
 
   start(): void {
@@ -841,6 +859,18 @@ export class CloudEngineUplinkClient {
 }
 
 class Connection {
+  private connectionId: string | null = null;
+  private syncId: string | null = null;
+  private appliedCursor: string | null = null;
+  private authRevision = 0;
+  detachedState(): DetachedPushConnection | null {
+    return !this.finished && this.gateOpen && this.features.has("detached.v1") && this.connectionId && this.syncId && this.appliedCursor
+      ? { connectionId: this.connectionId, syncId: this.syncId, authCursor: this.appliedCursor, revision: this.authRevision,
+        send: (t, d) => {
+          if (this.finished || this.socket?.readyState !== 1) return false;
+          try { this.send({ t, d }); return true; } catch { return false; }
+        } } : null;
+  }
   readonly openedAtMs: number;
   welcomed = false;
   welcomedAtMs = 0;
@@ -1011,11 +1041,18 @@ class Connection {
           this.uplink.turnsGap(frame.d.expectedJournalSeq);
         return;
       case "auth.keys":
+        this.authRevision += 1; this.uplink.noteDetached();
         return this.enqueueAuth(() => this.applyKeys(frame.d ?? {}));
       case "auth.sync":
+        this.authRevision += 1; this.uplink.noteDetached();
         return this.enqueueAuth(() => this.applySync(frame.d ?? {}));
       case "auth.epochs":
+        this.authRevision += 1; this.uplink.noteDetached();
         return this.enqueueAuth(() => this.applyEpochs(frame.d ?? {}));
+      case "auth.health":
+        return this.enqueueAuth(async () => this.uplink.detachedFrame(this, frame.t, frame.d ?? {}));
+      case "auth.health_lost":
+        return this.uplink.detachedFrame(this, frame.t, frame.d ?? {});
       case "auth.capability":
         return this.onCapability(frame.d ?? {});
       case "cred.revision": {
@@ -1065,6 +1102,11 @@ class Connection {
     this.welcomedAtMs = this.uplink.now();
     this.resumeToken = d.resumeToken;
     this.features = new Set((d.features as string[] | undefined) ?? []);
+    if (this.features.has("detached.v1")) {
+      if (typeof d.connectionId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(d.connectionId))
+        return this.initiateClose(CLOSE.frameInvalid, "welcome_invalid");
+      this.connectionId = d.connectionId;
+    }
     this.pingIntervalMs = clampPingInterval(d.pingIntervalMs);
     this.uplink.welcomed(this, d.resumed === true);
     if (this.features.has("lease.v1")) this.uplink.reportLease(this, d.leaseExpiresAtMs, this.helloSentAtMs);
@@ -1110,7 +1152,10 @@ class Connection {
       return this.initiateClose(CLOSE.normal, "auth_apply_failed");
     }
     this.uplink.config.metric?.("engine_uplink_auth_apply_ms", this.uplink.now() - started);
+    this.syncId = d.syncId;
+    this.appliedCursor = this.uplink.config.auth.authCursor() ?? d.authCursor;
     this.send({ t: "auth.applied", d: { syncId: d.syncId, authCursor: this.uplink.config.auth.authCursor() ?? d.authCursor } });
+    this.uplink.noteDetached();
   }
 
   private async applyEpochs(d: Record<string, unknown>): Promise<void> {
@@ -1122,6 +1167,8 @@ class Connection {
       return this.initiateClose(CLOSE.normal, "auth_apply_failed");
     }
     this.send({ t: "auth.applied", d: { authCursor: this.uplink.config.auth.authCursor() ?? d.authCursor } });
+    this.appliedCursor = this.uplink.config.auth.authCursor() ?? d.authCursor;
+    this.uplink.noteDetached();
   }
 
   private onCapability(d: Record<string, unknown>): void {

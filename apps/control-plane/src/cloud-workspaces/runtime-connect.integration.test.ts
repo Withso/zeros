@@ -42,7 +42,7 @@ type ConnectBody = {
   capabilities: { engine: Grant; realtime: Grant };
   routes: { kind: "direct" | "relay"; url: string; priority: number }[];
   renewAt: string; relayHedgeMs: number;
-  runtimeBinding?: { authorityEpoch: number; bootScope: CloudAgentBootScope };
+  runtimeBinding?: { authorityEpoch: number; bootScope: CloudAgentBootScope; acceptedWorkVersion?: 1 };
 };
 type Ids = { organizationId: string; workspaceId: string };
 type Actor = { user: AuthedUser; deviceId: string; privateKey: KeyObject };
@@ -187,6 +187,35 @@ d("runtime connect and capability renewal with PostgreSQL", () => {
     expect(body.runtimeBinding?.authorityEpoch).toBe(realtime.ep.wa);
     expect(body).not.toHaveProperty("runtimeId");
     expect(body).not.toHaveProperty("connectionSequence");
+  });
+
+  it("advertises accepted work only for the supported exact boot and every required flag", async () => {
+    await bindActiveBoot();
+    for (const flag of ["realtime_uplink", "credential_push", "turn_journal", "detached_turns"] as const) on.add(flag);
+    expect((await (await post(CONNECT, connectBody())).json()).runtimeBinding).not.toHaveProperty("acceptedWorkVersion");
+    await pool.query("UPDATE cloud_workspace_engine_instances SET cloud_local_commands_version=1,accepted_work_version=1 WHERE id=$1", [fixture.engineInstanceId]);
+    const current = await post(CONNECT, connectBody()); expect(current.status).toBe(201);
+    expect((await current.json()).runtimeBinding.acceptedWorkVersion).toBe(1);
+    on.delete("detached_turns");
+    expect((await (await post(CONNECT, connectBody())).json()).runtimeBinding).not.toHaveProperty("acceptedWorkVersion");
+  });
+
+  it.each(["manager", "developer"])("keeps %s clients outside the funding owner on legacy command admission", async role => {
+    await bindActiveBoot();
+    for (const flag of ["realtime_uplink", "credential_push", "turn_journal", "detached_turns"] as const) on.add(flag);
+    await pool.query("UPDATE cloud_workspace_engine_instances SET cloud_local_commands_version=1,accepted_work_version=1 WHERE id=$1", [fixture.engineInstanceId]);
+    const peer = await account(`workos|${randomUUID()}`, `peer-${randomUUID()}@example.test`, "Peer");
+    await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [peer.user.id]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,$3)", [fixture.organizationId, peer.user.id, role === "manager" ? "admin" : "member"]);
+    await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')", [fixture.organizationId, peer.user.id]);
+    await pool.query("UPDATE cloud_workspaces SET sharing_mode='organization',single_member_mode=false WHERE id=$1", [fixture.workspaceId]);
+    const peerDevice = await device(peer.user), body = { ...connectBody(), deviceSessionId: peerDevice.deviceSessionId };
+    const response = await post(CONNECT, body, { actor: { user: peer.user, ...peerDevice }, app: routes({}, { as: peer.user }) });
+    expect(response.status, response.status === 201 ? undefined : JSON.stringify(await failure(response))).toBe(201);
+    const connected = await response.json() as ConnectBody;
+    expect((await claims(connected.capabilities.engine.token)).role).toBe(role);
+    expect(connected.runtimeBinding).toBeDefined();
+    expect(connected.runtimeBinding).not.toHaveProperty("acceptedWorkVersion");
   });
 
   it.each(["authority", "boot", "writer", "device", "session"] as const)("boot_or_authority_changes_during_direct_lookup_refuse_old_admission: %s", async change => {

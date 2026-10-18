@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   DatabaseRealtimeSecurityEventFeed, type RealtimeSecurityEvent, type SecurityEventGapReason, type SecurityEventSource,
@@ -13,6 +13,8 @@ class MemorySource implements SecurityEventSource {
   rows: RealtimeSecurityEvent[] = [];
   publishes = 0;
   failNext = 0;
+  pending = false;
+  async watermark() { return { cursor: await this.head(), pending: this.pending }; }
   async publish() { this.publishes += 1; }
   async head() { return this.rows.at(-1)?.sequence ?? 0; }
   async after(after: number, limit: number) {
@@ -28,6 +30,39 @@ function recorder() {
 }
 
 describe("realtime security event feed", () => {
+  it("live_pongs_with_failed_realtime_pool_cannot_prove_authority", async () => {
+    const source = new MemorySource(), feed = new DatabaseRealtimeSecurityEventFeed(source);
+    await feed.start(); const lost = vi.fn(); feed.onHealthLost(lost);
+    try {
+      expect(await feed.observeAuthority()).toBe(true);
+      source.failNext = 1;
+      // Legacy socket readiness remains true; challenged freshness fails.
+      expect(feed.healthy()).toBe(true); expect(await feed.observeAuthority()).toBe(false);
+      expect(lost).toHaveBeenCalled();
+      expect(await feed.observeAuthority()).toBe(true);
+    } finally { await feed.stop(); }
+  });
+
+  it("publication failure or committed unpublished backlog cannot yield positive health", async () => {
+    const source = new MemorySource(), feed = new DatabaseRealtimeSecurityEventFeed(source);
+    await feed.start();
+    try {
+      source.pending = true; expect(await feed.observeAuthority()).toBe(false);
+      source.pending = false;
+      const publish = vi.spyOn(source, "publish").mockRejectedValueOnce(new Error("publisher unavailable"));
+      expect(await feed.observeAuthority()).toBe(false); publish.mockRestore();
+      expect(await feed.observeAuthority()).toBe(true);
+    } finally { await feed.stop(); }
+  });
+
+  it("a source cut ahead of delivery must reach subscribers before a positive observation", async () => {
+    const source = new MemorySource(), feed = new DatabaseRealtimeSecurityEventFeed(source), r = recorder();
+    feed.subscribe(r.subscriber); await feed.start();
+    vi.spyOn(source, "watermark").mockImplementationOnce(async () => { source.rows.push(event(1)); return { cursor: 1, pending: false }; });
+    try { expect(await feed.observeAuthority()).toBe(true); expect(r.seen).toEqual([1]); }
+    finally { await feed.stop(); }
+  });
+
   it("starts at the current head and delivers each later event once, in order, after publishing", async () => {
     const source = new MemorySource();
     source.rows.push(event(1), event(2));

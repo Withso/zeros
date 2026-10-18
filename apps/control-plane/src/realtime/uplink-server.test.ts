@@ -170,6 +170,12 @@ describe("engine uplink server", () => {
     expect(authority.calls).toBe(0);
   });
 
+  it.each(["capabilities", "realtime_uplink", "credential_push", "turn_journal", "detached_turns"])("never negotiates detached work without %s", async missing => {
+    await start({ flags: { enabled: (_org, flag) => flag !== missing, anyEnabled: flag => flag !== missing, onChange: () => () => {} },
+      extensions: [{ feature: "detached.v1", flag: "detached_turns" }] });
+    expect(uplink.negotiate(identity.organizationId, new Set(["detached.v1"])).has("detached.v1")).toBe(false);
+  });
+
   it.each([
     ["rollout off", () => { enabled = false; }, {}, UPLINK_CLOSE.disabled],
     ["no shared protocol", () => {}, { protocol: { min: 2, max: 3 } }, UPLINK_CLOSE.protocolUnsupported],

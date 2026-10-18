@@ -1,23 +1,33 @@
-import { randomUUID } from "node:crypto";
+import { createPublicKey, randomUUID, verify } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { CloudAcceptedWorkEnrollRequestSchema, CloudAcceptedWorkReceiptSchema,
   type CloudAcceptedWorkEnrollRequest, type CloudAcceptedWorkReceipt } from "@zeros/protocol/cloud-accepted-work";
 import { CloudBootCommandMutationSchema, type CloudBootCommandMutation, type CloudBootCommandSnapshot } from "@zeros/protocol/cloud-commands";
+import { cloudAcceptedWorkCommandBinding, cloudAcceptedWorkProofMessage } from "@zeros/protocol/cloud-accepted-work-client";
 import type { CloudAcceptedWorkLedger, AcceptedReservation } from "../cloud-accepted-work-ledger";
 import type { EngineCapabilityAuth, EngineClientAuth, CapabilityRoute } from "../cloud-capability-auth";
-import type { CapabilityVerifySuccess } from "../cloud-capability-verifier";
+import { capabilityEpochSubject, type CapabilityVerifySuccess } from "../cloud-capability-verifier";
 import { freezeCloudSnapshot } from "./cloud-mcp";
 
 declare const accepted: unique symbol;
 export type CloudAcceptedWork = Readonly<{ readonly [accepted]: true; receipt: Readonly<CloudAcceptedWorkReceipt>;
   signal: AbortSignal; assertLive(operation?: "run" | "context" | "native-git"): void }>;
+/** Only the current uplink's challenged, durably applied authority can
+ * supply this deadline. It cannot mint a client or another command. */
+export interface AcceptedWorkPushHealth {
+  retain(): () => void;
+  deadline(): number | null;
+  onChange(listener: () => void): () => void;
+}
 export type AcceptedWorkAuthorityOptions = { ledger: CloudAcceptedWorkLedger; auth: EngineCapabilityAuth; runtimeId: string;
-  engineLive(): boolean; enabled(): boolean;
+  engineLive(): boolean; enabled(): boolean; continuation?: AcceptedWorkPushHealth;
   enroll(request: CloudAcceptedWorkEnrollRequest, signal: AbortSignal): Promise<unknown>;
+  close?(receipt: CloudAcceptedWorkReceipt): Promise<unknown>;
   time?: { wall(): number; monotonic(): number }; maxEntries?: number };
 export type AcceptedWorkInput = { mutation: CloudBootCommandMutation; cwd: string; executionId: string;
-  clientSessionId: string; actorSessionId: string; auth: EngineClientAuth; route: CapabilityRoute };
+  clientSessionId: string; actorSessionId: string; auth: EngineClientAuth & { commandSignature: string }; route: CapabilityRoute };
 type Lifetime = { commandId: string; sessionId: string; stop: AbortController; deadline: number; wallDeadline: number;
+  verified?: CapabilityVerifySuccess; capabilityDeadline?: number; providerDeadline?: number; releaseHealth?: () => void;
   timer: ReturnType<typeof setTimeout> | null; reserved: boolean; ioPending: boolean; done: boolean; work?: CloudAcceptedWork };
 const genuine = new WeakSet<object>();
 const time = { wall: () => Date.now(), monotonic: () => performance.now() };
@@ -62,20 +72,43 @@ export class CloudAcceptedWorkAuthority {
         } catch { this.dispose(); }
       });
     } catch (error) { unsubscribeAuth(); throw error; }
-    this.unsubscribe = () => { unsubscribeAuth(); unsubscribeLedger(); };
+    const changed = () => {
+      for (const lifetime of [...this.records.values()]) {
+        try { this.assertLifetime(lifetime); this.schedule(lifetime); } catch { /* retirement is sticky */ }
+      }
+    };
+    const unsubscribeAuthority = options.auth.verifier.observeAuthorityChanges(changed);
+    const unsubscribeHealth = options.continuation?.onChange(changed);
+    this.unsubscribe = () => { unsubscribeAuth(); unsubscribeLedger(); unsubscribeAuthority(); unsubscribeHealth?.(); };
   }
 
   private assertEngine(): void {
     let live = false;
     try {
-      live = !this.disposed && this.options.auth.active() && this.options.engineLive() && this.options.enabled();
+      live = !this.disposed && this.options.auth.active() && this.options.engineLive();
       if (live) this.options.ledger.assertCurrent();
     } catch { live = false; }
     if (!live) { this.dispose(); rejected(); }
   }
   private assertLifetime(lifetime: Lifetime): void {
     this.assertEngine();
-    if (lifetime.stop.signal.aborted || this.time.wall() >= lifetime.wallDeadline || this.time.monotonic() >= lifetime.deadline) {
+    if (lifetime.stop.signal.aborted) rejected();
+    const work = lifetime.work;
+    if (work) {
+      const { receipt } = work, verified = lifetime.verified!;
+      const verifier = this.options.auth.verifier;
+      const expired = this.time.wall() >= receipt.capabilityExpiresAtMs || this.time.monotonic() >= lifetime.capabilityDeadline!;
+      const health = this.options.enabled() ? this.options.continuation?.deadline() : null;
+      if (this.time.wall() >= receipt.providerExpiresAtMs || this.time.monotonic() >= lifetime.providerDeadline! ||
+        (expired && (health == null || this.time.monotonic() >= health)) ||
+        !verifier.keyIds().includes(receipt.kid) || verifier.isRevoked("sid", receipt.sourceSessionId) ||
+        verifier.isRevoked("did", receipt.actor.deviceId) || Object.entries(verified.claims.ep).some(([key, epoch]) => {
+          const subject = capabilityEpochSubject(key, verified.claims);
+          return subject && epoch !== undefined && (verifier.knownEpoch(subject) ?? 0) > epoch;
+        })) { this.retire(lifetime); rejected(); }
+      return;
+    }
+    if (this.time.wall() >= lifetime.wallDeadline || this.time.monotonic() >= lifetime.deadline) {
       this.retire(lifetime); rejected();
     }
     this.options.auth.verifier.recheck();
@@ -88,25 +121,37 @@ export class CloudAcceptedWorkAuthority {
     this.options.auth.verifier.recheck();
     const current = this.options.auth.verifier.sessionClaims(input.clientSessionId);
     const claims = verified.claims;
-    if (!current || !isDeepStrictEqual(immutable(current), immutable(claims)) || claims.knd !== "client" ||
+    if (!this.options.enabled() || !current || !isDeepStrictEqual(immutable(current), immutable(claims)) || claims.knd !== "client" ||
       claims.role !== "owner" || claims.sub !== `user:${this.options.ledger.scope.fundingOwnerUserId}` ||
       !claims.sid || !claims.did || !claims.cnf || !claims.scp.includes("ws:prompt") || this.time.wall() >= claims.exp * 1000) rejected();
   }
   private schedule(lifetime: Lifetime, bound?: number): void {
     if (lifetime.timer) clearTimeout(lifetime.timer);
-    const remaining = Math.min(lifetime.deadline - this.time.monotonic(), lifetime.wallDeadline - this.time.wall(), bound ?? Infinity);
-    lifetime.timer = setTimeout(() => this.retire(lifetime), Math.max(0, remaining));
+    const work = lifetime.work;
+    const wall = this.time.wall(), mono = this.time.monotonic();
+    const capabilityRemaining = work ? Math.min(work.receipt.capabilityExpiresAtMs - wall, lifetime.capabilityDeadline! - mono) : 0;
+    const remaining = work ? Math.min(work.receipt.providerExpiresAtMs - wall, lifetime.providerDeadline! - mono,
+      capabilityRemaining > 0 ? capabilityRemaining : (this.options.continuation?.deadline() ?? mono) - mono) :
+      Math.min(lifetime.deadline - mono, lifetime.wallDeadline - wall, bound ?? Infinity);
+    lifetime.timer = setTimeout(() => {
+      if (!lifetime.work) return this.retire(lifetime);
+      try { this.assertLifetime(lifetime); this.schedule(lifetime); } catch { /* deadline retired it */ }
+    }, Math.max(0, remaining));
     lifetime.timer.unref?.();
   }
   private retire(lifetime: Lifetime): void {
     if (lifetime.timer) { clearTimeout(lifetime.timer); lifetime.timer = null; }
+    lifetime.releaseHealth?.(); lifetime.releaseHealth = undefined;
     this.sessions.delete(lifetime.sessionId);
     this.options.auth.closeClient(lifetime.sessionId);
     if (this.records.get(lifetime.commandId) === lifetime) this.records.delete(lifetime.commandId);
     if (!lifetime.stop.signal.aborted) lifetime.stop.abort(new Error("accepted_work_rejected"));
     if (lifetime.reserved) {
       lifetime.reserved = false;
+      let receipt = lifetime.work?.receipt;
+      try { receipt ??= this.options.ledger.get(lifetime.commandId)?.receipt ?? undefined; } catch { /* the writer may already be closed */ }
       try { this.options.ledger.close(lifetime.commandId); } catch { /* local authority is already terminal; reopen quarantines it */ }
+      if (receipt) void Promise.resolve().then(() => this.options.close?.(receipt)).catch(() => {});
     }
   }
 
@@ -120,7 +165,7 @@ export class CloudAcceptedWorkAuthority {
       throw new Error("accepted_work_limit");
     // Copy the transient proof before the first await. The durable ledger
     // stores only the immutable command/authority identities, never this pair.
-    const auth = { capability: input.auth.capability, proof: { ...input.auth.proof } };
+    const auth = { capability: input.auth.capability, proof: { ...input.auth.proof }, commandSignature: input.auth.commandSignature };
     input = { ...input, mutation, auth };
     const wall = this.time.wall(), mono = this.time.monotonic();
     const lifetime: Lifetime = { commandId, sessionId: randomUUID(), stop: new AbortController(), wallDeadline: wall + ENROLLMENT_BOUND_MS,
@@ -131,6 +176,11 @@ export class CloudAcceptedWorkAuthority {
       const verified = await this.options.auth.verifyClient(auth, input.route);
       if (!verified.ok || lifetime.stop.signal.aborted) rejected();
       this.assertClient(input, verified);
+      if (typeof auth.commandSignature !== "string" || !/^[A-Za-z0-9_-]{86}$/.test(auth.commandSignature) ||
+        !verify(null, Buffer.from(cloudAcceptedWorkProofMessage({ aud: "zeros:engine", wsp: verified.claims.wsp, jti: verified.claims.jti,
+          scope: this.options.ledger.scope, ...cloudAcceptedWorkCommandBinding(mutation),
+          timestampMs: auth.proof.timestampMs, nonce: auth.proof.nonce, route: input.route })),
+        createPublicKey({ key: verified.claims.cnf!.jwk, format: "jwk" }), Buffer.from(auth.commandSignature, "base64url"))) rejected();
       const reservation = this.options.ledger.reserve({ mutation, actorSessionId: input.actorSessionId, cwd: input.cwd, executionId: input.executionId,
         capabilityId: verified.claims.jti, kid: verified.header.kid, capabilityExpiresAtMs: verified.claims.exp * 1000 });
       // Own cleanup immediately, including a binding failure before CP I/O.
@@ -143,6 +193,7 @@ export class CloudAcceptedWorkAuthority {
         existing.assertLive();
         return { work: existing, snapshot: this.options.ledger.commit(commandId, reservation.receipt, () => existing.assertLive()) };
       }
+      lifetime.verified = verified;
       lifetime.wallDeadline = verified.claims.exp * 1000;
       lifetime.deadline = mono + lifetime.wallDeadline - wall;
       this.sessions.set(lifetime.sessionId, lifetime);
@@ -163,7 +214,13 @@ export class CloudAcceptedWorkAuthority {
       const snapshot = this.options.ledger.commit(commandId, receipt, recheck);
       const work = Object.freeze({ receipt: freezeCloudSnapshot(receipt), signal: lifetime.stop.signal,
         assertLive: (operation: "run" | "context" | "native-git" = "run") => this.assertWork(lifetime, operation) }) as CloudAcceptedWork;
+      lifetime.capabilityDeadline = mono + receipt.capabilityExpiresAtMs - wall;
+      lifetime.providerDeadline = mono + receipt.providerExpiresAtMs - wall;
       lifetime.work = work; this.records.set(commandId, lifetime); genuine.add(work);
+      // Enrollment has ended. Generic session expiry cannot govern the
+      // independent accepted principal; its original deadlines still do.
+      this.sessions.delete(lifetime.sessionId); this.options.auth.closeClient(lifetime.sessionId);
+      lifetime.releaseHealth = this.options.continuation?.retain();
       this.schedule(lifetime); work.assertLive();
       return { work, snapshot };
     } catch (error) {

@@ -12,6 +12,7 @@ import type { CloudEventEngineRequest } from "@zeros/protocol/cloud-events";
 import type { CloudActionEngineRequest } from "@zeros/protocol/cloud-actions";
 import type {CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
 import {requestCloudAgentExecution,requestCloudAgentBoot,CloudAgentExecutionError,type CloudAgentBootOperation,type CloudAgentBootResponses} from "./cloud-agent-execution-client";
+import { requestCloudAcceptedWork, type AcceptedWorkRequests, type AcceptedWorkResponses } from "./cloud-accepted-work-client";
 import { requestCloudEvent, CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudCommandRuntimeError, requestCloudCommand, requestCloudAction } from "./cloud-command-client";
 import { requestCloudCredentialControls } from "./cloud-local-command-queue-control-client";
@@ -598,6 +599,7 @@ export class CloudRuntimeRegistration {
   private checkpointHintsAnswering = false;
   private checkpointHintsStarted = false;
   private localCommandsAcknowledged = false;
+  private acceptedWorkAcknowledged = false;
   private agentJournalMode: "local" | "legacy" | undefined;
   private sourceWriterEpoch: string | null = null;
   private activatedLocalWriter: Readonly<{ bootId: string; writerEpoch: string }> | null = null;
@@ -676,7 +678,7 @@ export class CloudRuntimeRegistration {
           this.sourceWriterEpoch = acknowledged && journalMode === "local" ? sourceWriterEpoch ?? null : null;
         } } : undefined,
       REQUEST_TIMEOUT_MS,
-      { [ENGINE_UPLINK_OPT_IN_HEADER]: "1" },
+      { [ENGINE_UPLINK_OPT_IN_HEADER]: "1", ...(this.negotiateLocalCommands ? { "x-zeros-cloud-accepted-work": "1" } : {}) },
     );
     const document = this.parseRegistration(raw);
     this.document = document;
@@ -700,6 +702,8 @@ export class CloudRuntimeRegistration {
     return this.localCommandsAcknowledged && this.document !== null &&
       this.initialRecordConnected && !this.recordHandoffPaused && this.hasControlAuthority(this.document);
   }
+  acceptedWorkNegotiated(): boolean { return this.acceptedWorkAcknowledged && this.localCommandsNegotiated(); }
+  get runtimeId(): string { return this.agentRuntime.runtimeId; }
   /** A retry may consume only already-confirmed authority. This read neither
    * renews the heartbeat nor relaxes its one-second dispatch safety margin. */
   agentBootAuthorityRemainingMs(): number {
@@ -714,7 +718,7 @@ export class CloudRuntimeRegistration {
     const armed = report && report.runtimeId === this.agentRuntime.runtimeId && report.bootId === this.agentRuntime.bootId &&
       report.supervisorSessionId === this.agentRuntime.supervisorSessionId;
     return ["cred.v1", ...(armed ? ["lease.v1", CLOUD_ENGINE_EXIT_REPORT_FEATURE] : []),
-      "checkpoint.v1", CLOUD_CHECKPOINT_FALLBACK_FEATURE, "idle.v1", "turns.v1"];
+      "checkpoint.v1", CLOUD_CHECKPOINT_FALLBACK_FEATURE, "idle.v1", "turns.v1", ...(this.acceptedWorkNegotiated() ? ["detached.v1"] : [])];
   }
   /** Authenticated history provenance, never execution or retirement authority. */
   get agentSourceWriterEpoch(): string | null { return this.sourceWriterEpoch; }
@@ -760,6 +764,17 @@ export class CloudRuntimeRegistration {
       this.document !== null && this.hasControlAuthority(this.document) : this.localCommandsNegotiated();
     return negotiated && this.activatedLocalWriter?.bootId === bootId &&
       this.activatedLocalWriter.writerEpoch === writerEpoch;
+  }
+  async acceptedWorkRequest<Operation extends keyof AcceptedWorkRequests>(operation: Operation,
+    request: AcceptedWorkRequests[Operation], signal: AbortSignal): Promise<AcceptedWorkResponses[Operation]> {
+    const document = this.document;
+    const current = () => this.acceptedWorkAcknowledged && document !== null && document === this.document &&
+      this.localWriterCurrent(request.scope.bootId, request.scope.writerEpoch, operation === "close");
+    if (!current()) throw new CloudAgentExecutionError();
+    const result = await requestCloudAcceptedWork(this.authority(document!), operation, request,
+      AbortSignal.any([signal, this.abortController.signal]), this.fetch);
+    if (!current()) throw new CloudAgentExecutionError();
+    return result;
   }
   async localCommandSealRequest(seal: CloudLocalCommandWriterSeal, signal: AbortSignal) {
     const document = this.document;
@@ -1848,6 +1863,8 @@ export class CloudRuntimeRegistration {
     const sourceWriter = response.headers.get("x-zeros-cloud-agent-source-writer");
     if (negotiation && journalMode === "local" && (!acknowledged || !sourceWriter || !UUID_PATTERN.test(sourceWriter)))
       throw new CloudRuntimeRequestError("cloud engine history source response is invalid", true);
+    if (extraHeaders?.["x-zeros-cloud-accepted-work"] === "1")
+      this.acceptedWorkAcknowledged = acknowledged && response.headers.get("x-zeros-cloud-accepted-work") === "1";
     negotiation?.acknowledgement(acknowledged,
       journalMode === "local" || journalMode === "legacy" ? journalMode : undefined,
       acknowledged && journalMode === "local" && sourceWriter !== null ? sourceWriter : undefined);

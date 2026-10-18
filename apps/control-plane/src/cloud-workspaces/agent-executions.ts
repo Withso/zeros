@@ -12,6 +12,7 @@ import { cloudWorkspaceCustomization, type CloudCustomizationOperationSchema } f
 import type pg from "pg";
 import {z} from "zod";
 import {HttpError} from "../authz.js";
+import type { CloudAcceptedWorkOperationAuthority } from "./accepted-work.js";
 import {readGithubGitAuthor} from "../github-git-author.js";
 import {withSystemTx,type Tx} from "../db.js";
 import {assertCloudEngineAuthorityDeadline,assertCurrentCloudEngineAuthority} from "./engine-authority.js";
@@ -219,6 +220,11 @@ export class DatabaseCloudAgentExecutionService {
 
   boot(scope:EngineScope,operation:CloudAgentBootOperation,value:unknown) {
     return new DatabaseCloudAgentBootService(this.pool,this.encryption,this.workosEnabled,this.settingsEncryption,this.codexRenewal).execute(scope,operation,value);
+  }
+
+  acceptedContext(scope:EngineScope,value:unknown,authority:CloudAcceptedWorkOperationAuthority) {
+    return new DatabaseCloudAgentBootService(this.pool,this.encryption,this.workosEnabled,this.settingsEncryption,this.codexRenewal)
+      .acceptedContext(scope,value,authority);
   }
 
   credentialControls(scope:EngineScope,value:unknown) {

@@ -2,6 +2,7 @@ import { devConnectionRuntime } from "../dev-connections/runtime.js";
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from "node:crypto";
 import type pg from "pg";
 import { assertNativeGithubActor } from "./github-native-grants.js";
+import type { CloudAcceptedWorkOperationAuthority } from "./accepted-work.js";
 import { githubCommentWriteBody } from "./github-review-policy.js";
 import { cloudGithubNativePreparationSchema, type CloudGithubNativePreparation, type CloudGithubNativeSource } from "./github-native-schema.js";
 import { z } from "zod";
@@ -80,12 +81,13 @@ function expectedBody(input: z.infer<typeof githubWriteRedemption>): Record<stri
  * potentially broader privileges. Only a repository/action proxy capability
  * leaves the backend. It is tied to one live engine and actor session. */
 export class DatabaseCloudGithubWriteGrants {
-  constructor(private readonly pool: pg.Pool, private readonly workosEnabled: boolean) {}
+  constructor(private readonly pool: pg.Pool, private readonly workosEnabled: boolean,
+    private readonly acceptedWork?: CloudAcceptedWorkOperationAuthority) {}
   async nativeContext(scope: CloudActorEngineScope, source?: CloudGithubNativeSource) {
     return withSystemTx(this.pool, async tx => {
       await assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: this.workosEnabled });
       if (!source) return { nativeGit: 1 };
-      const actor = await assertNativeGithubActor(tx, scope, source, this.workosEnabled);
+      const actor = await assertNativeGithubActor(tx, scope, source, this.workosEnabled, this.acceptedWork);
       const snapshot = await this.snapshot(tx, { action: "prepareWrite", organizationId: scope.organizationId,
         workspaceId: scope.workspaceId, operation: "git.push", paramsSha256: "0".repeat(64) }, actor.actorUserId);
       return { actorUserId: actor.actorUserId, organizationId: scope.organizationId, workspaceId: scope.workspaceId,
@@ -117,7 +119,7 @@ export class DatabaseCloudGithubWriteGrants {
           (input.operation === "git.push" && !ref.safeParse(input.native.branch).success) ||
           hash(JSON.stringify([input.operation, { nativeRequestId: input.native.requestId }])).toString("hex") !== input.paramsSha256) throw denied();
       const nativeActor = await assertNativeGithubActor(tx, { ...input, generation: input.native.generation,
-        engineInstanceId: input.native.engineInstanceId }, input.native.source, this.workosEnabled);
+        engineInstanceId: input.native.engineInstanceId }, input.native.source, this.workosEnabled, this.acceptedWork);
       if (nativeActor.actorUserId !== actorUserId || nativeActor.fingerprint !== actor.fingerprint) throw denied();
     }
     await devConnectionRuntime(this.pool)?.assertGithub(tx,actorUserId,input.organizationId);

@@ -24,6 +24,7 @@ import { CloudLocalCommandHistorySchema, CloudLocalCommandHistoryHeadSchema, can
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { openSqlite } from "./db/sqlite";
 import { CloudAcceptedWorkLedger } from "./cloud-accepted-work-ledger";
+import { isCloudAcceptedWork, type CloudAcceptedWork } from "./agents/cloud-accepted-work-authority";
 import type { CloudLocalCommandHistoryCapture, CloudLocalCommandHistoryDocument } from "./cloud-local-command-queue-history";
 
 // This store is selected only by the explicitly negotiated cloud mode. Local
@@ -86,6 +87,15 @@ type Options = { file: string; scope: CloudLocalCommandWriter; actors: ActorAuth
   selectExecution?(input: { commandId: string; claimId: string; conversationId: string;
     payload: CloudBootCommandClaim["payload"]; actor: CloudAuthorizedActor; candidateExecutionId: string }):
     { executionId: string; credentialRun?: CloudAgentCredentialRunInfo } | null;
+  /** A separate genuine principal for an exact durably enrolled command.
+   * Neither an expired actor nor a receipt-shaped object can enter this path. */
+  accepted?: {
+    get(commandId: string): CloudAcceptedWork | undefined;
+    ready(work: CloudAcceptedWork): boolean;
+    selectExecution(input: { commandId: string; claimId: string; conversationId: string;
+      payload: CloudBootCommandClaim["payload"]; work: CloudAcceptedWork; candidateExecutionId: string }):
+      { executionId: string; credentialRun?: CloudAgentCredentialRunInfo } | null;
+  };
   selectionRolledBack?(claimId: string): void;
   /** Called after a commit that appended turn journal entries. */
   turnJournalChanged?(): void;
@@ -530,7 +540,7 @@ export class CloudLocalCommandQueue {
         if (previous) {
           if (previous.conversation_id !== input.conversationId || previous.execution_id !== input.executionId || previous.writer_epoch !== this.scope.writerEpoch)
             throw new CloudCommandRuntimeError("command_conflict");
-          return previous.state === "dispatching" && !this.acceptedWork.has(previous.id) ? this.claimView(previous) : null;
+          return previous.state === "dispatching" ? this.claimView(previous) : null;
         }
       }
       if (this.claimsPaused) return null;
@@ -539,25 +549,28 @@ export class CloudLocalCommandQueue {
       const queued = this.db.prepare("SELECT * FROM local_commands WHERE conversation_id=? AND state='queued' ORDER BY position").all(input.conversationId) as CommandRow[];
       const row = queued.find(row => !control.paused || JSON.parse(row.payload!).operation?.kind === "goal");
       if (!row) return null;
-      // Accepted work cannot borrow a legacy actor at dispatch. The qualified
-      // execution consumer must explicitly adopt its distinct principal.
-      if (this.acceptedWork.has(row.id)) return null;
+      const accepted = this.acceptedWork.has(row.id);
+      const work = accepted ? this.acceptedForRow(row) : undefined;
+      if (accepted && (!work || !this.options.accepted!.ready(work))) return null;
       if (row.writer_epoch !== this.scope.writerEpoch) throw new CloudCommandRuntimeError("cloud_command_writer_retired");
       const provenance: ActorProvenance = JSON.parse(row.actor);
       // A revoked actor is still durably claimed and settled cancelled; an
       // authorized actor with a pending background credential update waits.
       let principal: CloudAuthorizedActor | null = null;
-      try { principal = this.options.actors.reauthorizeRecorded(provenance,"run"); } catch { /* cancelled claim below */ }
+      if (!accepted) try { principal = this.options.actors.reauthorizeRecorded(provenance,"run"); } catch { /* cancelled claim below */ }
       const authorized = principal !== null;
       if (authorized && !this.options.ready(JSON.parse(row.payload!),provenance,row.conversation_id)) return null;
       if (!this.journalCapacity(false)) return null;
       const claimId = input.claimId ?? randomUUID();
-      const selected = principal && this.options.selectExecution ? this.options.selectExecution({ commandId: row.id,
+      const selected = work ? this.options.accepted!.selectExecution({ commandId: row.id, claimId,
+        conversationId: row.conversation_id, payload: JSON.parse(row.payload!), work, candidateExecutionId: work.receipt.command.executionId }) :
+        principal && this.options.selectExecution ? this.options.selectExecution({ commandId: row.id,
         claimId, conversationId: row.conversation_id, payload: JSON.parse(row.payload!), actor: principal,
         candidateExecutionId: input.executionId }) : { executionId: input.executionId };
       if (!selected) return null;
-      if (principal && this.options.selectExecution) selectedClaimId = claimId;
+      if (work || principal && this.options.selectExecution) selectedClaimId = claimId;
       if (!identity.safeParse(selected.executionId).success) throw new CloudCommandRuntimeError("command_conflict");
+      if (work && selected.executionId !== work.receipt.command.executionId) throw new CloudCommandRuntimeError("command_conflict");
       const credentialRun = selected.credentialRun ? CloudAgentCredentialRunInfoSchema.parse(selected.credentialRun) : null;
       if (credentialRun && (credentialRun.bootId !== this.scope.bootId || credentialRun.writerEpoch !== this.scope.writerEpoch ||
           credentialRun.fundingOwnerUserId !== this.scope.fundingOwnerUserId || credentialRun.fundingOwnerEpoch !== this.scope.fundingOwnerEpoch ||
@@ -567,21 +580,34 @@ export class CloudLocalCommandQueue {
       this.bump(input.conversationId);
       const claimed = this.row(row.id)!;
       this.journal(input.conversationId,claimed);
-      if (principal) this.appendTurn(claimed, "started");
+      if (principal || work) this.appendTurn(claimed, "started");
       return this.claimView(claimed);
     }); } catch (error) {
       if (selectedClaimId) this.options.selectionRolledBack?.(selectedClaimId);
       throw error;
     }
   }
+  private acceptedForRow(row: CommandRow): CloudAcceptedWork | undefined {
+    const work = this.options.accepted?.get(row.id);
+    if (!isCloudAcceptedWork(work)) return undefined;
+    work.assertLive();
+    const { receipt } = work, command = receipt.command;
+    if (!isDeepStrictEqual(receipt.scope, this.scope) || !isDeepStrictEqual(this.acceptedWork.get(row.id)?.receipt, receipt) ||
+      command.commandId !== row.id || command.conversationId !== row.conversation_id || command.turnId !== row.user_message_id ||
+      command.provider !== row.agent_id || !row.payload || command.payloadSha256 !== hash(JSON.parse(row.payload)) ||
+      row.execution_id !== null && row.execution_id !== command.executionId) throw new CloudCommandRuntimeError("command_conflict");
+    return work;
+  }
   private claimView(row: CommandRow): CloudBootCommandClaim {
-    if (this.acceptedWork.has(row.id)) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
     let actor: CloudCommandActor | undefined;
     try {
+      if (this.acceptedWork.has(row.id)) actor = this.acceptedForRow(row)?.receipt.actor;
+      else {
       const provenance: ActorProvenance = JSON.parse(row.actor);
       const current = this.options.actors.reauthorizeRecorded(provenance,"run").provenance;
       if (canonical(current.scope) !== canonical(this.scope)) throw new Error("foreign actor");
       actor = CloudCommandActorSchema.parse(current.actor);
+      }
     } catch { /* A durable claim with denied authority is settled cancelled. */ }
     return CloudBootCommandClaimSchema.parse({ commandId: row.id, claimId: row.claim_id, conversationId: row.conversation_id,
       executionId: row.execution_id, payload: JSON.parse(row.payload!), dispatchAllowed: actor !== undefined, ...(actor ? { actor } : {}) });
@@ -591,10 +617,15 @@ export class CloudLocalCommandQueue {
    * turns, so neither a native ID nor user-message ID alone is a lookup key. */
   authorizeClaim(value: CloudBootCommandClaim) {
     this.live(); const claim = CloudBootCommandClaimSchema.parse(value), row = this.row(claim.commandId);
-    if (!row || this.acceptedWork.has(row.id) || row.state !== "dispatching" || row.writer_epoch !== this.scope.writerEpoch ||
+    if (!row || row.state !== "dispatching" || row.writer_epoch !== this.scope.writerEpoch ||
         row.conversation_id !== claim.conversationId || row.claim_id !== claim.claimId || row.execution_id !== claim.executionId ||
         canonical(JSON.parse(row.payload!)) !== canonical(claim.payload)) throw new CloudCommandRuntimeError("command_conflict");
     try {
+      if (this.acceptedWork.has(row.id)) {
+        const work = this.acceptedForRow(row);
+        if (!work || !claim.dispatchAllowed || !isDeepStrictEqual(work.receipt.actor, claim.actor)) throw new Error("Accepted work changed");
+        return work;
+      }
       const principal = this.options.actors.reauthorizeRecorded(JSON.parse(row.actor), "run");
       if (!claim.dispatchAllowed || !isDeepStrictEqual(principal.provenance.actor, claim.actor)) throw new Error("Actor changed");
       return principal;
@@ -653,6 +684,7 @@ export class CloudLocalCommandQueue {
       this.bump(row.conversation_id);
       this.journal(row.conversation_id,this.row(row.id)!,true);
       this.appendTurn(row, SETTLED_TURN_STATE[result.state]);
+      this.acceptedWork.close(row.id);
       return { ...this.snapshot(row.conversation_id), replayed: false };
     });
   }

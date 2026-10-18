@@ -15,6 +15,7 @@ export function readRuntimeBinding(connect: ConnectResponse, target?: RuntimeBin
   if (binding === undefined) return null;
   const invalid = () => new TypeError("runtime_binding_invalid");
   if (!isRecord(binding) || !isRevision(binding.authorityEpoch) || !isRecord(binding.bootScope)) throw invalid();
+  if (binding.acceptedWorkVersion !== undefined && binding.acceptedWorkVersion !== 1) throw invalid();
   const scope = binding.bootScope;
   if (Object.keys(scope).length !== UUID_FIELDS.length + REVISION_FIELDS.length ||
       UUID_FIELDS.some(key => typeof scope[key] !== "string" || !UUID.test(scope[key])) ||
@@ -24,5 +25,6 @@ export function readRuntimeBinding(connect: ConnectResponse, target?: RuntimeBin
       (target && (scope.organizationId !== target.organizationId || scope.workspaceId !== target.workspaceId ||
         (target.generation !== undefined && scope.generation !== target.generation)))) throw invalid();
   return Object.freeze({ authorityEpoch: binding.authorityEpoch,
-    bootScope: Object.freeze({ ...scope }) as CloudAgentBootScope });
+    bootScope: Object.freeze({ ...scope }) as CloudAgentBootScope,
+    ...(binding.acceptedWorkVersion === 1 ? { acceptedWorkVersion: 1 as const } : {}) });
 }

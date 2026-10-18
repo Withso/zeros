@@ -223,6 +223,7 @@ function decodeJson(segment: string): Record<string, unknown> | null {
 const fail = (code: CapabilityErrorCode, step: number): CapabilityVerifyFailure => ({ ok: false, code, step });
 
 export class CapabilityVerifier {
+  private readonly authorityListeners = new Set<() => void>();
   private keys = new Map<string, KeyObject>();
   private lastRefreshAt = Number.NEGATIVE_INFINITY;
   private refreshing: Promise<void> | null = null;
@@ -259,7 +260,9 @@ export class CapabilityVerifier {
     }
     this.keys = next;
     this.keyRevision += 1;
-    return this.recheck();
+    const closed = this.recheck();
+    this.authorityChanged();
+    return closed;
   }
 
   keyIds(): string[] { return [...this.keys.keys()]; }
@@ -278,10 +281,22 @@ export class CapabilityVerifier {
     // Step 10 records every subject of every token it admits, so a subject
     // seen for the first time belongs to no open session: only a raise over a
     // known value can close one.
-    return raised ? this.recheck() : [];
+    const closed = raised ? this.recheck() : [];
+    if (raised) this.authorityChanged();
+    return closed;
   }
 
   knownEpoch(subject: string): number | undefined { return this.known.get(subject); }
+
+  /** Accepted work has its own finite lifetime; it observes authority changes
+   * without becoming a generic client session or inheriting token outage grace. */
+  observeAuthorityChanges(listener: () => void): () => void {
+    this.authorityListeners.add(listener);
+    return () => { this.authorityListeners.delete(listener); };
+  }
+  private authorityChanged(): void {
+    for (const listener of [...this.authorityListeners]) listener();
+  }
 
   /** Known epochs and live revocations, for a verifier that persists them. */
   exportState(): { known: Array<[string, number]>; revoked: Array<["sid" | "did", string, number]> } {
@@ -298,7 +313,9 @@ export class CapabilityVerifier {
   revoke(kind: "sid" | "did", id: string, untilMs = this.now() + CAPABILITY_REVOCATION_RETENTION_MS): CapabilitySessionClosure[] {
     const key = `${kind}:${id}`;
     this.revoked.set(key, Math.max(this.revoked.get(key) ?? 0, untilMs));
-    return this.recheck();
+    const closed = this.recheck();
+    this.authorityChanged();
+    return closed;
   }
 
   isRevoked(kind: "sid" | "did", id: string): boolean {
@@ -332,6 +349,7 @@ export class CapabilityVerifier {
   closeSession(sessionId: string): void { this.sessions.delete(sessionId); }
   openSessionIds(): string[] { return [...this.sessions.keys()]; }
   sessionClaims(sessionId: string): CapabilityClaims | undefined { return this.sessions.get(sessionId)?.claims; }
+  sessionRoute(sessionId: string): CapabilityRoute | undefined { return this.sessions.get(sessionId)?.context.route; }
 
   /** Re-checks every open session against steps 8-11 (5-7 cannot change for
    * an admitted token) and the outage-aware deadline; closes and reports

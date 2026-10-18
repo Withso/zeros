@@ -128,11 +128,14 @@ export class CloudCommandRuntime {
     }
   }
 
-  async handle(value: unknown,actorSessionId?:string): Promise<unknown> {
+  async handle(value: unknown,actorSessionId?:string, acceptWork?: () => Promise<unknown>): Promise<unknown> {
     const parsed = (this.localQueue ? CloudBootCommandClientRequestSchema : CloudCommandClientRequestSchema).safeParse(value);
     if (!parsed.success) throw new CloudCommandRuntimeError("invalid_command");
     const request = parsed.data;
     if (this.closed) throw new CloudCommandRuntimeError("engine_authority_rejected");
+    if (acceptWork && (!this.localQueue || !actorSessionId || request.kind !== "mutate" ||
+      request.mutation.action.kind !== "enqueue" || request.mutation.action.payload.operation))
+      throw new CloudCommandRuntimeError("invalid_command");
     const conversationId = request.kind === "read" ? null : request.kind === "mutate" ? request.mutation.conversationId : request.conversationId;
     let engineRequest: CloudCommandEngineRequest;
     if (request.kind === "mutate") {
@@ -148,6 +151,7 @@ export class CloudCommandRuntime {
       // Only the authenticated engine supplies this field. CP resolves an old
       // operation receipt first, then rejects new work with stale context.
       engineRequest = { ...request, admissionError };
+      if (acceptWork && admissionError) throw new CloudCommandRuntimeError(admissionError);
     } else {
       if (conversationId) this.dependencies.validate(conversationId);
       engineRequest = request;
@@ -160,7 +164,14 @@ export class CloudCommandRuntime {
       intents.add(stopIntent); this.stopping.set(request.conversationId, intents);
     }
     let raw: unknown;
-    try { raw = await (actorSessionId?this.request(engineRequest,actorSessionId):this.request(engineRequest)); }
+    try {
+      // Enrollment replaces only the durable acceptance transaction. Keep
+      // validation, drain accounting, snapshot observation and the one pump.
+      if (acceptWork) {
+        this.serviceRequests++;
+        try { raw = await acceptWork(); } finally { this.serviceRequests--; }
+      } else raw = await (actorSessionId?this.request(engineRequest,actorSessionId):this.request(engineRequest));
+    }
     catch (error) {
       // Even an unacknowledged Stop cancels local activity. The caller receives
       // an error and can retry its same durable identity after recovery.

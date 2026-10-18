@@ -68,6 +68,9 @@ export interface SecurityEventSource {
   head(): Promise<number>;
   /** Published, unexpired events with delivery sequence > `after`, ascending. */
   after(after: number, limit: number): Promise<RealtimeSecurityEvent[]>;
+  /** One MVCC observation of the committed publication cut. SKIP LOCKED
+   * publication alone cannot prove that every committed row was delivered. */
+  watermark?(): Promise<{ cursor: number; pending: boolean }>;
 }
 
 export class DatabaseSecurityEventSource implements SecurityEventSource {
@@ -78,6 +81,16 @@ export class DatabaseSecurityEventSource implements SecurityEventSource {
   head(): Promise<number> {
     return withSystemTx(this.pool, async tx => Number((await tx.query<{ cursor: string }>(
       "SELECT COALESCE(max(delivery_sequence), 0) AS cursor FROM security_events")).rows[0]?.cursor ?? 0));
+  }
+
+  watermark(): Promise<{ cursor: number; pending: boolean }> {
+    return withSystemTx(this.pool, async tx => {
+      const row = (await tx.query<{ cursor: string; pending: boolean }>(`SELECT
+        COALESCE((SELECT max(delivery_sequence) FROM security_events), 0) AS cursor,
+        EXISTS (SELECT 1 FROM security_events
+          WHERE delivery_sequence IS NULL AND expires_at > clock_timestamp()) AS pending`)).rows[0]!;
+      return { cursor: Number(row.cursor), pending: row.pending };
+    });
   }
 
   after(after: number, limit: number): Promise<RealtimeSecurityEvent[]> {
@@ -106,6 +119,8 @@ export class DatabaseRealtimeSecurityEventFeed implements RealtimeSecurityEventF
   private poll: ReturnType<typeof setInterval> | null = null;
   private started = false;
   private stopped = false;
+  private failures = 0;
+  private readonly lossListeners = new Set<() => void>();
 
   constructor(private readonly source: SecurityEventSource, options: {
     /** Dedicated LISTEN pool; omitted in tests that drive `wake` directly. */
@@ -122,7 +137,7 @@ export class DatabaseRealtimeSecurityEventFeed implements RealtimeSecurityEventF
         this.everReady = true;
         this.wake();
       },
-      onDisconnect: () => { this.listening = false; },
+      onDisconnect: () => { this.listening = false; this.lost(); },
     }) : null;
     if (!this.listener) this.listening = true;
   }
@@ -134,6 +149,33 @@ export class DatabaseRealtimeSecurityEventFeed implements RealtimeSecurityEventF
 
   cursor(): number { return this.position; }
   healthy(): boolean { return this.started && !this.stopped && this.listening && this.positioned; }
+
+  onHealthLost(listener: () => void): () => void {
+    this.lossListeners.add(listener);
+    return () => { this.lossListeners.delete(listener); };
+  }
+  private lost(): void {
+    this.failures += 1;
+    for (const listener of [...this.lossListeners]) listener();
+  }
+
+  /** Called by the one shared D4 challenge batch, never per turn. Force a
+   * read begun after this request, including publication, then prove that
+   * no committed unpublished row or unseen delivered row precedes the cut. */
+  async observeAuthority(): Promise<boolean> {
+    if (!this.healthy() || !this.source.watermark) return false;
+    const failures = this.failures;
+    await this.settled();
+    if (!this.healthy()) return false;
+    this.wake();
+    await this.settled();
+    try {
+      const cut = await this.source.watermark();
+      if (cut.pending) { this.lost(); return false; }
+      if (this.position < cut.cursor) { this.wake(); await this.settled(); }
+      return this.healthy() && failures === this.failures && this.position >= cut.cursor;
+    } catch { this.lost(); return false; }
+  }
 
   async start(): Promise<void> {
     if (this.started || this.stopped) return;
@@ -154,11 +196,13 @@ export class DatabaseRealtimeSecurityEventFeed implements RealtimeSecurityEventF
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.lost();
     if (this.poll) clearInterval(this.poll);
     this.poll = null;
     await this.listener?.stop();
     await this.running;
     this.subscribers.clear();
+    this.lossListeners.clear();
   }
 
   wake(): void {
@@ -177,7 +221,7 @@ export class DatabaseRealtimeSecurityEventFeed implements RealtimeSecurityEventF
 
   private async drain(): Promise<void> {
     try {
-      await this.source.publish().catch(() => undefined);
+      await this.source.publish().catch(() => { this.lost(); });
       for (let page = 0; page < MAX_PAGES_PER_WAKE && !this.stopped; page += 1) {
         const batch = await this.source.after(this.position, PAGE_SIZE);
         if (this.stopped || batch.length === 0) return;
@@ -189,6 +233,7 @@ export class DatabaseRealtimeSecurityEventFeed implements RealtimeSecurityEventF
       this.position = Math.max(this.position, await this.source.head());
       this.gapAll("overflow");
     } catch {
+      this.lost();
       // The cursor did not move, so nothing is lost; retry soon.
       if (this.stopped) return;
       const retry = setTimeout(() => this.wake(), READ_RETRY_MS);
@@ -205,6 +250,7 @@ export class DatabaseRealtimeSecurityEventFeed implements RealtimeSecurityEventF
   }
 
   private gapAll(reason: SecurityEventGapReason): void {
+    this.lost();
     for (const subscriber of [...this.subscribers]) {
       try { subscriber.gap(reason); }
       catch { this.logger.warn("[realtime] security event subscriber failed"); }

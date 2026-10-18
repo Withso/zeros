@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/** S2 `zeros-uplink` wire constants (contract 1.2.0). The CP
+/** S2 `zeros-uplink` wire constants (contract 1.4.0). The CP
  * mirrors the contract here and never imports `@zeros/protocol`. */
 export const UPLINK_PATH = "/v1/uplink";
 export const UPLINK_SUBPROTOCOL = "zeros-uplink.v1";
@@ -76,6 +76,7 @@ export const UPLINK_CLOSE = {
 } as const;
 
 export const UPLINK_FEATURES = {
+  detached: "detached.v1",
   /** Credential-control revision push (`cred.revision` / `cred.ack`). */
   credentialControls: "cred.v1",
   capabilities: "cap.v1",
@@ -99,6 +100,13 @@ export const UPLINK_FEATURES = {
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const seq = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const timestampMs = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+/** Unsequenced, connection-bound challenge; never replayed on resume. */
+export const UplinkAuthHealthRequestSchema = z.object({
+  connectionId: uuid, syncId: uuid, challengeId: uuid, authCursor: z.string().min(1).max(256),
+});
+export const UplinkAuthHealthSchema = UplinkAuthHealthRequestSchema.extend({ healthy: z.boolean() });
+export const UplinkAuthHealthLostSchema = z.object({ connectionId: uuid, syncId: uuid });
+export type UplinkAuthHealthRequest = z.infer<typeof UplinkAuthHealthRequestSchema>;
 /** The contract's machine code shape, shared by every frame that carries one. */
 export const UplinkCodeSchema = z.string().regex(/^[a-z][a-z0-9_]{2,63}$/);
 const code = UplinkCodeSchema;

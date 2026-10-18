@@ -7,6 +7,8 @@ import WebSocket from "ws";
 import type { EngineCapabilityResult } from "../../../../control-plane/src/realtime/uplink-auth-source";
 import { UplinkCheckpointPush } from "../../../../control-plane/src/realtime/uplink-checkpoint";
 import { UplinkCredentialPush } from "../../../../control-plane/src/realtime/uplink-cred";
+import { UplinkDetachedHealth } from "../../../../control-plane/src/realtime/uplink-detached";
+import { CloudDetachedPushHealth } from "../cloud-detached-push-health";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "../../../../control-plane/src/realtime/uplink-authority";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "../../../../control-plane/src/realtime/uplink-presence";
 import { UPLINK_ENGINE_LEASE_MS } from "../../../../control-plane/src/realtime/uplink-lease";
@@ -1239,6 +1241,32 @@ describe("engine uplink client against the real control-plane server", () => {
     expect(client.state).toBe("connected");
     expect(metrics.some(([name]) => name === "engine_uplink_hello_ms")).toBe(true);
     expect(metrics.some(([name]) => name === "engine_uplink_auth_apply_ms")).toBe(true);
+  });
+
+  it("ends challenged health on realtime source failure while pongs and the API remain live", async () => {
+    const observe = vi.fn(async () => true), detached = new CloudDetachedPushHealth();
+    const source = new UplinkDetachedHealth({ observe, current: () => true });
+    const server = await start({ extensions: [source],
+      flags: { enabled: () => true, anyEnabled: () => true, onChange: () => () => {} } });
+    let pongs = 0, socket: WebSocket | undefined;
+    const client = makeClient({ endpoint: server.url, features: ["detached.v1"], detached,
+      openSocket: (endpoint, protocols, headers) => {
+        socket = new WebSocket(endpoint, protocols, { headers, perMessageDeflate: false });
+        socket.on("message", data => { if (JSON.parse(String(data)).t === "sys.pong") pongs++; });
+        return socket;
+      } });
+    const release = detached.retain();
+    try {
+      client.start(); await until(() => detached.deadline() !== null);
+      expect(detached.deadline()).not.toBeNull(); expect(client.detachedActive).toBe(true);
+      observe.mockRejectedValue(new Error("synthetic realtime pool failure"));
+      await new Promise(resolve => setTimeout(resolve, 5_050)); await until(() => detached.deadline() === null);
+      for (let i = 0; i < 3; i++) socket!.send(JSON.stringify({ t: "sys.ping", d: { ts: Date.now() } }));
+      await until(() => pongs >= 3);
+      expect(detached.deadline()).toBeNull(); expect(pongs).toBeGreaterThan(2);
+      expect((await fetch(server.url.replace("ws:", "http:"))).status).toBe(200);
+      expect(client.state).toBe("connected"); expect(observe).toHaveBeenCalledTimes(2);
+    } finally { release(); source.stop(); }
   });
 
   it("pushes credential revisions to a cred.v1 engine and receives its cred.ack", async () => {

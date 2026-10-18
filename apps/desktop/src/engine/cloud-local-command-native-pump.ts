@@ -1,3 +1,5 @@
+import { cloudExecutionPrincipalActor } from "./agents/cloud-execution-principal";
+import { isCloudAcceptedWork } from "./agents/cloud-accepted-work-authority";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
@@ -126,7 +128,7 @@ export class CloudLocalCommandNativePump {
       factory.validateBootSelection(selected, { actor: selected.actor, provider: parsed.data.payload.agentId,
         model: parsed.data.payload.model, conversationId: claim.conversationId, executionId: claim.executionId,
         cwd: selected.cwd, cacheRevision: selected.cacheRevision });
-      if (!isDeepStrictEqual(selected.actor.provenance.actor, parsed.data.actor))
+      if (!isDeepStrictEqual(cloudExecutionPrincipalActor(selected.actor), parsed.data.actor))
         throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
       record.selection = selected; record.lifetime = cloudBootNativeAuthority(selected).lifetime;
       this.assertPreparing(record);
@@ -237,7 +239,7 @@ export class CloudLocalCommandNativePump {
     record.retirement = (async () => {
       await record.preparation.catch(() => {});
       if (record.ownsExecution && result.state === "succeeded" && record.dispatched && !record.controller.signal.aborted &&
-          !record.snapshot.payload.operation && record.reservation) {
+          !record.snapshot.payload.operation && record.reservation && !isCloudAcceptedWork(record.selection?.actor)) {
         try {
           const retained = await this.options.gateway.completeCloudForeground(claim.payload.agentId, claim.executionId, undefined, record.reservation);
           if (!retained) throw new CloudCommandFailureError({ stage: "containment", category: "attestation_failed" });

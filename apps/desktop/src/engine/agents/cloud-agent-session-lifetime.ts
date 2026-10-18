@@ -1,7 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import { CloudCommandFailureError, decodeCloudCommandFailure, type CloudCommandFailureCause } from "@zeros/protocol/cloud-commands";
-import { isCloudAuthorizedActor, type CloudAuthorizedActor } from "./cloud-actor-authority";
+import { isCloudAuthorizedActor } from "./cloud-actor-authority";
+import { isCloudAcceptedWork } from "./cloud-accepted-work-authority";
+import { cloudExecutionPrincipalScope, type CloudExecutionPrincipal } from "./cloud-execution-principal";
 import { isCloudAgentCredentialCapture, type CloudAgentCredentialCapture } from "./cloud-agent-credential-cache";
 import type { CloudAgentLeaseSupervisor } from "./cloud-agent-lease";
 
@@ -32,11 +34,11 @@ export class CloudAgentSessionLifetime {
   private escalated = false;
   private retry: ReturnType<typeof setTimeout> | null = null;
   constructor(private readonly options: {
-    actor: CloudAuthorizedActor; credential: CloudAgentCredentialCapture;
+    actor: CloudExecutionPrincipal; credential: CloudAgentCredentialCapture;
     engineLive(): boolean; supervisor: CloudAgentLeaseSupervisor;
   }) {
-    if (!isCloudAuthorizedActor(options.actor) || !isCloudAgentCredentialCapture(options.credential) ||
-      !isDeepStrictEqual(options.actor.provenance.scope, options.credential.scope)) throw failure("access_denied");
+    if ((!isCloudAuthorizedActor(options.actor) && !isCloudAcceptedWork(options.actor)) || !isCloudAgentCredentialCapture(options.credential) ||
+      !isDeepStrictEqual(cloudExecutionPrincipalScope(options.actor), options.credential.scope)) throw failure("access_denied");
     this.assertLive();
     options.actor.signal.addEventListener("abort", this.authorityEnded, { once: true });
     options.credential.signal.addEventListener("abort", this.authorityEnded, { once: true });

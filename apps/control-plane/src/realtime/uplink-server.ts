@@ -58,6 +58,10 @@ export interface UplinkSession {
   sendReliable(t: string, d: Record<string, unknown>): boolean;
   /** Sends a non-fatal, unsequenced `sys.error` (contract error codes). */
   sendError?(code: string, message: string, extra?: Record<string, unknown>): void;
+  /** Connection-local auth control, excluded from reliable resume replay. */
+  sendControl?(t: string, d: Record<string, unknown>): boolean;
+  /** Null until the snapshot and every targeted delta have been ACKed. */
+  authState?(): { syncId: string; authCursor: string; revision: number } | null;
 }
 
 /** Feature modules (credential push, relay) plug in here instead of growing
@@ -260,6 +264,9 @@ export class CloudEngineUplinkServer {
   negotiate(organizationId: string, offered: ReadonlySet<string>): Set<string> {
     const features = new Set(this.options.extensions
       .filter(extension => offered.has(extension.feature) &&
+        (extension.feature !== UPLINK_FEATURES.detached ||
+          (["capabilities", "realtime_uplink", "credential_push", "turn_journal", "detached_turns"] as const)
+            .every(flag => this.options.flags.enabled(organizationId, flag))) &&
         (extension.feature !== UPLINK_FEATURES.checkpoint || offered.has(UPLINK_FEATURES.checkpointFallback)) &&
         (!extension.flag || this.options.flags.enabled(organizationId, extension.flag)))
       .map(extension => extension.feature));
@@ -486,6 +493,8 @@ class UplinkConnection {
   private leaseExpiresAtMs = 0;
   private state: "hello" | "admitting" | "welcomed" | "closed" = "hello";
   private syncId: string | null = null;
+  private authCursor: string | null = null;
+  private authRevision = 0;
   private syncSentAtMs = 0;
   private authApplied = false;
   /** Reliable frames flow only after `auth.applied`, the capability and the
@@ -495,7 +504,7 @@ class UplinkConnection {
   private pendingKeys: readonly UplinkJwk[] | null = null;
   private pendingDeltas: UplinkAuthDelta[] = [];
   /** One entry per delta sent or held and not yet applied, oldest first. */
-  private deltaCreatedAt: number[] = [];
+  private deltaCreatedAt: Array<{ at: number; cursor: string }> = [];
   private presenceTokens = PRESENCE_BURST;
   private presenceAtMs = 0;
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -585,13 +594,18 @@ class UplinkConnection {
       if (!applied.success) return this.invalid("frame_invalid");
       if (applied.data.syncId !== undefined) {
         if (this.authApplied || applied.data.syncId !== this.syncId) return this.invalid("auth_sync_unknown");
+        if (this.features.has(UPLINK_FEATURES.detached) && applied.data.authCursor !== this.authCursor)
+          return this.invalid("auth_cursor_mismatch");
         this.server.options.metric?.("uplink_auth_sync_ms", this.now() - this.syncSentAtMs);
         void this.openGate().catch(() => this.close(UPLINK_CLOSE.internalError, "internal_error", { park: true }));
         return;
       }
       const createdAt = this.deltaCreatedAt.shift();
       if (!this.authApplied || createdAt === undefined) return this.invalid("auth_applied_unexpected");
-      this.server.options.metric?.("capability_revocation_push_ms", Math.max(0, this.now() - createdAt));
+      if (this.features.has(UPLINK_FEATURES.detached) && applied.data.authCursor !== createdAt.cursor)
+        return this.invalid("auth_cursor_mismatch");
+      this.authCursor = createdAt.cursor;
+      this.server.options.metric?.("capability_revocation_push_ms", Math.max(0, this.now() - createdAt.at));
       return;
     }
     // sys.ack carries only `a`, applied above. Other unsequenced engine→CP
@@ -722,10 +736,14 @@ class UplinkConnection {
     this.session = {
       connectionId: this.connectionId, identity, features: this.features,
       sendReliable: (t, d) => this.sendReliable(t, d),
+      sendControl: (t, d) => this.flowing && this.send({ t, d }),
+      authState: () => this.state === "welcomed" && this.flowing && this.authApplied && !this.deltaCreatedAt.length && this.syncId && this.authCursor
+        ? { syncId: this.syncId, authCursor: this.authCursor, revision: this.authRevision } : null,
       sendError: (code, message, extra) => { this.send({ t: "sys.error", d: { ...extra, code, message, fatal: false } }); },
     };
     this.send({ t: "sys.welcome", d: {
       protocol, features: [...this.features], resumeToken: this.resumeToken, resumed: this.resumed,
+      ...(this.features.has(UPLINK_FEATURES.detached) ? { connectionId: this.connectionId } : {}),
       pingIntervalMs: options.pingIntervalMs, leaseExpiresAtMs: this.leaseExpiresAtMs,
     } });
     this.presenceAtMs = this.now();
@@ -742,6 +760,8 @@ class UplinkConnection {
     }
     if (this.state !== "welcomed") return;
     this.syncId = randomUUID();
+    this.authCursor = snapshot.authCursor;
+    this.authRevision += 1;
     this.syncSentAtMs = this.now();
     // A change during admission or these reads wins over the older snapshot.
     // Keep the frozen welcome -> keys -> sync order with only one pending set.
@@ -801,6 +821,7 @@ class UplinkConnection {
 
   pushKeys(keys: readonly UplinkJwk[]): void {
     if (this.state === "closed") return;
+    this.authRevision += 1;
     if (!this.initialKeysSent) { this.pendingKeys = keys; return; }
     this.send({ t: "auth.keys", d: { keys } });
   }
@@ -812,7 +833,8 @@ class UplinkConnection {
     // behind resyncs from the snapshot on its redial instead.
     if (this.deltaCreatedAt.length >= this.server.options.maxOutstandingAuthDeltas)
       return this.close(UPLINK_CLOSE.backpressure, "auth_deltas_backlog", { park: true });
-    this.deltaCreatedAt.push(createdAtMs);
+    this.authRevision += 1;
+    this.deltaCreatedAt.push({ at: createdAtMs, cursor: delta.authCursor });
     if (!this.authApplied) { this.pendingDeltas.push(delta); return; }
     this.send({ t: "auth.epochs", d: delta });
   }

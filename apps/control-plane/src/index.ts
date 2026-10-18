@@ -1,3 +1,4 @@
+import { CloudAcceptedWorkOperationAuthority } from "./cloud-workspaces/accepted-work.js";
 import { createCloudComputerRetirementWorker } from "./cloud-workspaces/computer-retirement.js";
 // ──────────────────────────────────────────────────────────
 // Zeros control plane — entrypoint.
@@ -80,6 +81,7 @@ import { startUplinkNotifications } from "./realtime/uplink-notifications.js";
 import { DatabaseUplinkPresenceStore, UplinkPresenceWriter } from "./realtime/uplink-presence.js";
 import { CloudEngineUplinkServer, realtimeInstanceId } from "./realtime/uplink-server.js";
 import { DatabaseUplinkTurnStore, UplinkTurnJournal } from "./realtime/uplink-turns.js";
+import { UplinkDetachedHealth } from "./realtime/uplink-detached.js";
 import { DatabaseDeviceSessionAuthority } from "./realtime/device-sessions.js";
 import { DatabaseDeviceStreamCatalogSource } from "./realtime/device-stream-catalog.js";
 import { startDeviceStreamNotifications } from "./realtime/device-stream-notifications.js";
@@ -785,8 +787,10 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   };
 }
 
+const acceptedWorkOperations = rolloutFlagSnapshot ? new CloudAcceptedWorkOperationAuthority({
+  flags: rolloutFlagSnapshot, workosEnabled: config.auth.provider === "workos" }) : undefined;
 const cloudGithubWriteGrants = config.github && cloudWorkspaceInternalSetupService && servesHttpApi
-  ? new DatabaseCloudGithubWriteGrants(pool, config.auth.provider === "workos") : undefined;
+  ? new DatabaseCloudGithubWriteGrants(pool, config.auth.provider === "workos", acceptedWorkOperations) : undefined;
 const cloudGithubReads = config.github && cloudWorkspaceInternalSetupService && servesHttpApi
   ? new DatabaseCloudGithubReads(pool, config.auth.provider === "workos", new GithubCloudWorkspaceCredentialBroker(config.github)) : undefined;
 const cloudGithubWriteCleanup = workerPool && config.github && runtimeReady &&
@@ -939,6 +943,18 @@ const mountEngineUplink = () => {
     notificationsCurrent: () => cloudEngineUplink?.notificationsCurrent === true,
   });
   uplinkCheckpointPush = checkpointPush;
+  const authorityFeed = sharedSecurityEvents(), flags = rolloutFlagSnapshot;
+  const detachedHealth = new UplinkDetachedHealth({
+    observe: async () => {
+      const results = await Promise.all([
+        authorityFeed.observeAuthority(), capabilityKeyStore?.observeAuthority() ?? false, flags.observeAuthority(),
+      ]);
+      await capabilityRevocationPush?.settled();
+      return results.every(Boolean) && capabilityRevocationPush?.caughtUp() === true;
+    },
+    current: () => authorityFeed.healthy() && capabilityKeyStore?.authorityCurrent() === true &&
+      flags.feedCurrent() && capabilityRevocationPush?.caughtUp() === true,
+  });
   cloudEngineUplink = new CloudEngineUplinkServer({
     authority: new DatabaseUplinkAuthority({ pool, workosEnabled: config.auth.provider === "workos", alerts }),
     lease: new DatabaseUplinkLeaseStore({ pool, workosEnabled: config.auth.provider === "workos" }),
@@ -949,12 +965,20 @@ const mountEngineUplink = () => {
     realtimeInstance: realtimeInstanceId(),
     presence: uplinkPresence,
     alerts,
-    extensions: [uplinkCredPush, checkpointPush, new UplinkTurnJournal({ store: new DatabaseUplinkTurnStore(pool) })],
+    extensions: [uplinkCredPush, checkpointPush, detachedHealth, new UplinkTurnJournal({ store: new DatabaseUplinkTurnStore(pool) })],
   });
   uplinkAuthSource = uplinkAuth;
   startCapabilityRevocationPush();
+  const stopDetachedObservers = [
+    authorityFeed.onHealthLost(() => detachedHealth.invalidate()),
+    capabilityKeyStore?.onHealthLost(() => detachedHealth.invalidate()),
+    capabilityRevocationPush?.onHealthLost(() => detachedHealth.invalidate()),
+    flags.onChange(() => { if (!flags.feedCurrent()) detachedHealth.invalidate(); }),
+  ];
   const stopNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore, console, uplinkCredPush, checkpointPush);
   stopUplinkNotifications = async () => {
+    detachedHealth.stop();
+    for (const stop of stopDetachedObservers) stop?.();
     capabilityRevocationPush?.stop();
     await Promise.allSettled([stopNotifications(), realtimeSecurityEvents?.stop()]);
   };

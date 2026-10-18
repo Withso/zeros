@@ -283,6 +283,17 @@ export function createCloudRuntimeConnectRoutes(options: CloudRuntimeConnectOpti
     return { proof, body: parsed.data as z.infer<T> };
   };
 
+  const acceptedWorkVersion = async (tx: Tx, bootScope: CloudAgentBootScope, actorUserId: string): Promise<1 | undefined> => {
+    if (actorUserId !== bootScope.fundingOwnerUserId ||
+      !(["capabilities", "realtime_uplink", "credential_push", "turn_journal", "detached_turns"] as const).every(flag =>
+      flags.enabled(bootScope.organizationId, flag))) return undefined;
+    const supported = await tx.query(`SELECT 1 FROM cloud_workspace_engine_instances
+      WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4 AND runtime_boot_id=$5
+        AND accepted_work_version=1 AND actor_protocol_version=2 AND cloud_local_commands_version=1`,
+    [bootScope.engineInstanceId, bootScope.workspaceId, bootScope.organizationId, bootScope.generation, bootScope.bootId]);
+    return supported.rowCount === 1 ? 1 : undefined;
+  };
+
   const issue = async (c: Context, input: {
     organizationId: string; workspaceId: string; user: AuthedUser; proof: CloudWorkspaceDeviceProof;
     deviceSessionId: string; action: string; payload: Record<string, unknown>;
@@ -304,7 +315,8 @@ export function createCloudRuntimeConnectRoutes(options: CloudRuntimeConnectOpti
         const issued = await issueCloudRuntimeCapabilities(tx, options.capabilities, { ...scope, deviceId, sessionId }, target);
         const bootScope = connect ? await runtimeBootScope(tx, { ...scope, ...target }) : null;
         return { ...issued, ...(bootScope ? {
-          runtimeBinding: CloudRuntimeBindingSchema.parse({ authorityEpoch: issued.authorityEpoch, bootScope }),
+          runtimeBinding: CloudRuntimeBindingSchema.parse({ authorityEpoch: issued.authorityEpoch, bootScope,
+            ...(await acceptedWorkVersion(tx, bootScope, input.user.id) === 1 ? { acceptedWorkVersion: 1 } : {}) }),
         } : {}) };
       });
       if ("wakeable" in outcome) return failure(c, 409, "cloud_workspace_not_running", { wakeable: outcome.wakeable });
@@ -346,6 +358,7 @@ export function createCloudRuntimeConnectRoutes(options: CloudRuntimeConnectOpti
           throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });
         const bootScope = await runtimeBootScope(tx, { ...ids, ...current });
         if (JSON.stringify(bootScope) !== JSON.stringify(issued.runtimeBinding?.bootScope ?? null) ||
+            (bootScope ? await acceptedWorkVersion(tx, bootScope, c.get("user").id) : undefined) !== issued.runtimeBinding?.acceptedWorkVersion ||
             !await deviceSessionLive(tx, { deviceSessionId: body.deviceSessionId, accountUserId: c.get("user").id,
               deviceId: proof.deviceId.toLowerCase(), providerSessionId: workosEnabled ? c.get("user").authentication.sessionId : null }))
           throw new CloudRuntimeConnectError(503, "cloud_workspace_unavailable", { retryable: true });

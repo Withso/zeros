@@ -25,7 +25,10 @@ import {
   CloudAgentBootScopeSchema, CloudAgentWarmActorRequestSchema, CloudAgentWarmActorResponseSchema,
   type CloudAgentBootScope, type CloudAgentWarmActorRequest, type CloudAgentWarmActorResponse,
 } from "@zeros/protocol/cloud-agent-bootstrap";
-import { CloudActorAuthorityRegistry, isCloudActorAuthorityRegistry, type CloudAuthorizedActor } from "./cloud-actor-authority";
+import { CloudActorAuthorityRegistry, isCloudActorAuthorityRegistry } from "./cloud-actor-authority";
+import { CloudAcceptedWorkContextResponseSchema, type CloudAcceptedWorkContextRequest, type CloudAcceptedWorkContextResponse } from "@zeros/protocol/cloud-accepted-work";
+import { isCloudAcceptedWork } from "./cloud-accepted-work-authority";
+import { assertCloudExecutionPrincipal, cloudExecutionPrincipalSession, type CloudExecutionPrincipal } from "./cloud-execution-principal";
 import { cloudMcpDigest } from "./cloud-mcp";
 import { CloudAgentCredentialCache, isCloudAgentCredentialCache, type CloudAgentCredentialCapture } from "./cloud-agent-credential-cache";
 import { CloudAgentSessionLifetime } from "./cloud-agent-session-lifetime";
@@ -199,7 +202,7 @@ export interface CloudAuthorizedAgentContext{
   readonly contextId:string;
   readonly contextRevision:string;
   readonly scope:CloudAgentBootScope;
-  readonly actor:CloudAuthorizedActor;
+  readonly actor:CloudExecutionPrincipal;
   readonly provider:CloudAgentExecutionAdmission["provider"];
   readonly model:string;
   readonly conversationId:string;
@@ -208,13 +211,14 @@ export interface CloudAuthorizedAgentContext{
   assertLive():void;
 }
 export type CloudAgentContextInput={
-  actor:CloudAuthorizedActor; provider:CloudAgentExecutionAdmission["provider"];
+  actor:CloudExecutionPrincipal; provider:CloudAgentExecutionAdmission["provider"];
   conversationId:string; model:string; cwd:string;
 };
 type ContextClock={wall():number;monotonic():number};
+type AgentContextResponse=CloudAgentWarmActorResponse|CloudAcceptedWorkContextResponse;
 type AgentContextRecord={
   cache:CloudAgentContextCache;context:CloudAuthorizedAgentContext;key:string;controller:AbortController;
-  response:CloudAgentWarmActorResponse|null;confirmedUntilMs:number;deadline:number;
+  response:AgentContextResponse|null;confirmedUntilMs:number;deadline:number;
   timer:ReturnType<typeof setTimeout>|null;cause:Error|null;notice?:CloudRepositoryMcpNotice;
 };
 const authorizedContexts=new WeakMap<object,AgentContextRecord>();
@@ -231,10 +235,17 @@ function contextCause(error:unknown):Error{
   if(isCloudAgentAdmissionCode(code)||decodeCloudCommandFailure(code))return Object.assign(new Error("Cloud actor context is unavailable"),{code});
   return contextFailure("authority_unavailable","admission");
 }
-function contextSnapshot(value:CloudAgentWarmActorResponse):unknown{
-  const {actor,...snapshot}=value;
-  const {confirmedUntilMs:_deadline,...provenance}=actor;
-  return {...snapshot,actor:provenance};
+function contextProofDeadline(value:AgentContextResponse):number {
+  return "actor" in value?value.actor.confirmedUntilMs:value.acceptedWork.confirmedUntilMs;
+}
+function contextSnapshot(value:AgentContextResponse):unknown{
+  if("actor" in value){
+    const {actor,...snapshot}=value;
+    const {confirmedUntilMs:_deadline,...provenance}=actor;
+    return {...snapshot,actor:provenance};
+  }
+  const {acceptedWork,...snapshot}=value;
+  return {...snapshot,acceptedWork:{acceptedWorkId:acceptedWork.acceptedWorkId}};
 }
 
 /** Explicit background warming only. An actor-only renewal cannot extend
@@ -247,7 +258,7 @@ export class CloudAgentContextCache{
   private readonly controller=new AbortController();
   private readonly records=new Map<string,AgentContextRecord>();
   private readonly current=new Map<string,AgentContextRecord>();
-  private readonly pending=new Map<string,{actor:CloudAuthorizedActor;flight:Promise<CloudAuthorizedAgentContext>}>();
+  private readonly pending=new Map<string,{actor:CloudExecutionPrincipal;flight:Promise<CloudAuthorizedAgentContext>}>();
   private readonly pendingFlights=new Set<Promise<CloudAuthorizedAgentContext>>();
   private readonly revoked=new Set<string>();
   private disposed=false;
@@ -256,8 +267,9 @@ export class CloudAgentContextCache{
   constructor(private readonly options:{
     scope:CloudAgentBootScope;registry:CloudActorAuthorityRegistry;engineLive():boolean;
     /** Current engine-owned workspace/worktree admission, never a renderer list. */
-    isAdmittedCwd(cwd:string,actor:CloudAuthorizedActor):boolean;
+    isAdmittedCwd(cwd:string,actor:CloudExecutionPrincipal):boolean;
     request(request:CloudAgentWarmActorRequest,signal:AbortSignal):Promise<unknown>;
+    acceptedRequest?(request:CloudAcceptedWorkContextRequest,signal:AbortSignal):Promise<unknown>;
     time?:ContextClock;maxContexts?:number;maxSeenContexts?:number;
   }){
     const scope=CloudAgentBootScopeSchema.safeParse(options.scope);
@@ -275,14 +287,20 @@ export class CloudAgentContextCache{
     if(!live){this.dispose();throw contextFailure("lifecycle_superseded");}
   }
   private inputKey(input:CloudAgentContextInput):string{
-    this.assertEngine();this.options.registry.assertActor(input.actor,"run");
+    this.assertEngine();assertCloudExecutionPrincipal(input.actor,this.options.registry);
     const {fundingOwnerUserId:_owner,fundingOwnerEpoch:_epoch,...reference}=this.scope;
     const parsed=CloudAgentWarmActorRequestSchema.safeParse({...reference,version:1,mode:"boot-owner-v1",
-      actorSessionId:input.actor.provenance.actorSessionId,provider:input.provider,conversationId:input.conversationId,
+      actorSessionId:cloudExecutionPrincipalSession(input.actor),provider:input.provider,conversationId:input.conversationId,
       model:input.model,cwd:input.cwd,repositoryServers:[]});
     let admitted=false;
     try{admitted=parsed.success&&path.resolve(input.cwd)===input.cwd&&this.options.isAdmittedCwd(input.cwd,input.actor);}catch{/* refuses missing root authority */}
     if(!admitted)throw contextFailure("access_denied");
+    if(isCloudAcceptedWork(input.actor)){
+      const work=input.actor;work.assertLive("context");
+      if(!this.options.acceptedRequest||(["provider","model","conversationId","cwd"] as const)
+        .some(key=>input[key]!==work.receipt.command[key]))throw contextFailure("access_denied");
+      return JSON.stringify(["accepted",input.actor.receipt.acceptedWorkId,input.actor.receipt.command]);
+    }
     const provenance=input.actor.provenance;
     return JSON.stringify([provenance.actorSessionId,provenance.authorityEpoch,provenance.actor,provenance.fundingGrant,
       input.provider,input.conversationId,input.model,input.cwd]);
@@ -296,7 +314,7 @@ export class CloudAgentContextCache{
     this.assertEngine();
     if(record.cause)throw record.cause;
     try{
-      this.options.registry.assertActor(record.context.actor,"run");
+      assertCloudExecutionPrincipal(record.context.actor,this.options.registry);
       if(this.time.wall()>=record.confirmedUntilMs||this.time.monotonic()>=record.deadline)throw contextFailure("session_expired");
       if(this.current.get(record.key)!==record||this.revoked.has(record.context.contextId))throw contextFailure("lifecycle_superseded");
       if(this.inputKey(record.context)!==record.key)throw contextFailure("access_denied");
@@ -322,6 +340,11 @@ export class CloudAgentContextCache{
     if(!record||record.cache!==this)throw contextFailure("access_denied");
     this.assertRecord(record);
   }
+  remainingMs(context:CloudAuthorizedAgentContext):number{
+    this.assertContext(context);
+    const record=authorizedContexts.get(context)!;
+    return Math.max(0,Math.min(record.confirmedUntilMs-this.time.wall(),record.deadline-this.time.monotonic()));
+  }
   warm(input:CloudAgentContextInput,signal:AbortSignal=this.controller.signal):Promise<CloudAuthorizedAgentContext>{
     let key:string;
     try{key=this.inputKey(input);}catch(error){return Promise.reject(contextCause(error));}
@@ -337,24 +360,44 @@ export class CloudAgentContextCache{
       this.inputKey(input);
       const {fundingOwnerUserId:_owner,fundingOwnerEpoch:_epoch,...reference}=this.scope;
       const request=CloudAgentWarmActorRequestSchema.parse({...reference,version:1,mode:"boot-owner-v1",
-        actorSessionId:input.actor.provenance.actorSessionId,provider:input.provider,conversationId:input.conversationId,
+        actorSessionId:cloudExecutionPrincipalSession(input.actor),provider:input.provider,conversationId:input.conversationId,
         model:input.model,cwd:input.cwd,repositoryServers});
-      const value=await this.options.request(request,requestSignal);
+      const startedWall=this.time.wall(),startedMono=this.time.monotonic();
+      const accepted=isCloudAcceptedWork(input.actor)?input.actor:null;
+      const value=accepted?await this.options.acceptedRequest!({version:1,acceptedWorkId:accepted.receipt.acceptedWorkId,
+        scope:accepted.receipt.scope,runtimeId:accepted.receipt.runtimeId,command:accepted.receipt.command,operation:"context",repositoryServers},requestSignal)
+        :await this.options.request(request,requestSignal);
       this.assertEngine();
       if(requestSignal.aborted)throw contextFailure("lifecycle_superseded");
-      const parsed=CloudAgentWarmActorResponseSchema.safeParse(value);
-      if(!parsed.success||Object.entries(this.scope).some(([field,item])=>parsed.data[field as keyof typeof parsed.data]!==item)||
-        parsed.data.actor.actorSessionId!==request.actorSessionId||parsed.data.provider!==request.provider||parsed.data.model!==request.model||
-        parsed.data.cwd!==request.cwd||parsed.data.conversationId!==request.conversationId)
+      let response:AgentContextResponse;
+      if(accepted){
+        const parsed=CloudAcceptedWorkContextResponseSchema.safeParse(value);
+        if(!parsed.success||parsed.data.acceptedWork.acceptedWorkId!==accepted.receipt.acceptedWorkId||
+          parsed.data.authorityEpoch!==accepted.receipt.epochs.wa||
+          this.time.monotonic()>=startedMono+10_000)throw contextFailure("authority_response_invalid","admission");
+        accepted.assertLive("context");response=parsed.data;
+      }else{
+        const parsed=CloudAgentWarmActorResponseSchema.safeParse(value);
+        if(!parsed.success||parsed.data.actor.actorSessionId!==request.actorSessionId)throw contextFailure("authority_response_invalid","admission");
+        if(this.options.registry.confirm(parsed.data.actor)!==input.actor)throw contextFailure("lifecycle_superseded");
+        response=parsed.data;
+      }
+      if(Object.entries(this.scope).some(([field,item])=>response[field as keyof typeof response]!==item)||
+        response.provider!==request.provider||response.model!==request.model||response.cwd!==request.cwd||response.conversationId!==request.conversationId)
         throw contextFailure("authority_response_invalid","admission");
-      const response=parsed.data;
+      // The CP starts its observation after outbound transit. Clamp its
+      // deadline to this request's budget instead of refusing ordinary delay
+      // or treating receipt time as the start of a fresh ten-second window.
+      const proofDeadline=accepted?Math.min(contextProofDeadline(response),startedWall+10_000):contextProofDeadline(response);
+      const monotonicDeadline=accepted?Math.min(startedMono+10_000,startedMono+proofDeadline-startedWall)
+        :this.time.monotonic()+proofDeadline-this.time.wall();
+      if(proofDeadline<=this.time.wall()||monotonicDeadline<=this.time.monotonic())throw contextFailure("session_expired");
       if(!isDeepStrictEqual(response.customization?.servers.filter(entry=>entry.scope==="repository").map(entry=>entry.server)??[],repositoryServers))
         throw contextFailure("customization_changed","admission");
       if(response.customization){
         const {digest,...snapshot}=response.customization;
         if(digest!==cloudMcpDigest(snapshot))throw contextFailure("authority_response_invalid","admission");
       }
-      if(this.options.registry.confirm(response.actor)!==input.actor)throw contextFailure("lifecycle_superseded");
       this.inputKey(input);
       if(this.revoked.has(response.contextId))throw contextFailure("access_denied");
       const existing=this.records.get(response.contextId);
@@ -363,13 +406,15 @@ export class CloudAgentContextCache{
         if(existing.key!==key||!existing.response||!isDeepStrictEqual(contextSnapshot(existing.response),contextSnapshot(response))){
           this.retire(existing,contextFailure("authority_response_invalid","admission"));throw existing.cause;
         }
-        if(response.actor.confirmedUntilMs>existing.confirmedUntilMs){
-          existing.confirmedUntilMs=response.actor.confirmedUntilMs;
-          existing.deadline=this.time.monotonic()+existing.confirmedUntilMs-this.time.wall();
+        if(proofDeadline>existing.confirmedUntilMs){
+          existing.confirmedUntilMs=proofDeadline;
+          existing.deadline=monotonicDeadline;
           // The exact context payload was compared above and is immutable.
           // Replace only its renewed proof; keep environment/MCP/history/Git
           // references shared by admitted executions across lease periods.
-          existing.response=Object.freeze({...existing.response,actor:freezeCloudSnapshot(structuredClone(response.actor))});
+          existing.response="actor" in response
+            ?Object.freeze({...existing.response,actor:freezeCloudSnapshot(structuredClone(response.actor))})
+            :Object.freeze({...existing.response,acceptedWork:freezeCloudSnapshot(structuredClone(response.acceptedWork))});
           this.schedule(existing);
         }
         return existing.context;
@@ -383,7 +428,7 @@ export class CloudAgentContextCache{
         actor:input.actor,provider:input.provider,model:input.model,conversationId:input.conversationId,cwd:input.cwd,
         signal:controller.signal,assertLive:()=>this.assertRecord(record)}) as CloudAuthorizedAgentContext;
       record={cache:this,context,key,controller,response:freezeCloudSnapshot(structuredClone(response)),notice,
-        confirmedUntilMs:response.actor.confirmedUntilMs,deadline:this.time.monotonic()+response.actor.confirmedUntilMs-this.time.wall(),timer:null,cause:null};
+        confirmedUntilMs:proofDeadline,deadline:monotonicDeadline,timer:null,cause:null};
       this.records.set(response.contextId,record);authorizedContexts.set(context,record);
       this.current.set(key,record);this.schedule(record);
       input.actor.signal.addEventListener("abort",()=>this.retire(record,contextCause(input.actor.signal.reason)),{once:true});
@@ -416,7 +461,7 @@ export interface CloudBootAgentSelection extends CloudExecutionMetadata{
   readonly [bootSelection]:true;
   readonly mode:"boot-owner-v1";
   readonly scope:CloudAgentBootScope;
-  readonly actor:CloudAuthorizedActor;
+  readonly actor:CloudExecutionPrincipal;
   readonly context:CloudAuthorizedAgentContext;
   readonly executionId:string;
   readonly conversationId:string;
@@ -429,7 +474,7 @@ export interface CloudBootAgentSelection extends CloudExecutionMetadata{
 export interface CloudBootNativeAuthority extends CloudExecutionMetadata{
   readonly mode:"boot-owner-v1";
   readonly scope:CloudAgentBootScope;
-  readonly actor:CloudAuthorizedActor;
+  readonly actor:CloudExecutionPrincipal;
   readonly contextId:string;
   readonly executionId:string;
   readonly conversationId:string;
@@ -441,7 +486,7 @@ export interface CloudBootNativeAuthority extends CloudExecutionMetadata{
 export type CloudBootProviderExecution=CloudExecutionMetadata&{
   readonly mode:"boot-owner-v1";
   readonly scope:CloudAgentBootScope;
-  readonly actor:CloudAuthorizedActor;
+  readonly actor:CloudExecutionPrincipal;
   readonly context:CloudAuthorizedAgentContext;
   readonly credentialRun:CloudAgentCredentialRunInfo;
   readonly executionId:string;
@@ -457,7 +502,7 @@ export type CloudBootProviderExecution=CloudExecutionMetadata&{
   readonly background?:never;
 };
 export type CloudBootSelectionInput={
-  readonly actor:CloudAuthorizedActor;readonly context:CloudAuthorizedAgentContext;
+  readonly actor:CloudExecutionPrincipal;readonly context:CloudAuthorizedAgentContext;
   readonly provider:CloudAgentExecutionAdmission["provider"];readonly model:string;
   readonly conversationId:string;readonly executionId:string;readonly cwd:string;
 };
@@ -628,8 +673,11 @@ export function createCloudBootAgentExecutionFactory(options:{
     record.rawLifetime.assertLive();options.contexts.assertContext(record.selection.context);
   };
   const assertInput=(input:CloudBootSelectionInput)=>{
-    assertEngine();options.registry.assertActor(input.actor,"run");options.contexts.assertContext(input.context);
+    assertEngine();assertCloudExecutionPrincipal(input.actor,options.registry);options.contexts.assertContext(input.context);
     if(!/^[A-Za-z0-9._:-]{1,128}$/.test(input.executionId))throw contextFailure("access_denied");
+    const work=isCloudAcceptedWork(input.actor)?input.actor:null;
+    if(work&&(["executionId","conversationId","provider","model","cwd"] as const)
+      .some(key=>input[key]!==work.receipt.command[key]))throw contextFailure("access_denied");
   };
   const assertBinding=(input:CloudBootSelectionInput)=>{
     const context=input.context;
@@ -672,7 +720,7 @@ export function createCloudBootAgentExecutionFactory(options:{
       if(ready.state==="pending")throw Object.assign(new Error("Cloud credentials are refreshing"),{code:"cloud_agent_credential_refresh_required"});
       if(ready.state==="unavailable")throw Object.assign(new Error("Cloud provider credentials are unavailable"),{code:ready.code});
       if(active.size>=maxScopes||(!seen.has(input.executionId)&&seen.size>=1024))throw contextFailure("execution_limit");
-      const reuseOnly=seen.has(input.executionId)?[...active].find(record=>record.selection.executionId===input.executionId&&
+      const reuseOnly=!isCloudAcceptedWork(input.actor)&&seen.has(input.executionId)?[...active].find(record=>record.selection.executionId===input.executionId&&
         record.execution&&!record.parent&&!record.closed&&record.phase==="idle"&&!record.reservation)??null:null;
       if(seen.has(input.executionId)&&!reuseOnly)throw contextFailure("lifecycle_superseded");
       const context=authorizedContexts.get(input.context)!;
@@ -808,6 +856,7 @@ export function createCloudBootAgentExecutionFactory(options:{
       record.preparation=preparing;return preparing;
     },
     canRetainBootExecution(input){
+      if(isCloudAcceptedWork(input.actor))return false;
       let capture:CloudAgentCredentialCapture|undefined;
       try{
         assertInput(input);assertBinding(input);
@@ -828,6 +877,7 @@ export function createCloudBootAgentExecutionFactory(options:{
       finally{capture?.release();}
     },
     canReuseBootExecution(execution,selection){
+      if(isCloudAcceptedWork(selection.actor))return false;
       try{
         const owner=executionRecord(execution),next=original(selection);factory.assertBootStart(selection);
         assertCloudPreparedBoundaryLive(owner.workload!);
@@ -863,6 +913,9 @@ export function createCloudBootAgentExecutionFactory(options:{
     },
     async settleBootTurn(execution,reservation){
       const turn=turnRecord(execution,reservation);if(!turn.entered)throw contextFailure("access_denied");
+      if(isCloudAcceptedWork(turn.selection.selection.actor)){
+        turn.settled=true;turn.owner.reservation=null;await closeRecord(turn.owner);return;
+      }
       const background=await execution.coordinator.hasBackgroundServers();
       turnRecord(execution,reservation);
       turn.settled=true;turn.owner.reservation=null;turn.owner.phase=background?"background":"idle";
@@ -889,7 +942,7 @@ export function createCloudBootAgentExecutionFactory(options:{
       return closeRecord(record).then(()=>true);
     },
     hasActorWork(actorSessionId){
-      return [...active].some(record=>!record.proved&&record.selection.actor.provenance.actorSessionId===actorSessionId&&
+      return [...active].some(record=>!record.proved&&!isCloudAcceptedWork(record.selection.actor)&&record.selection.actor.provenance.actorSessionId===actorSessionId&&
         (record.phase!=="idle"||record.reservation!==null));
     },
     bootScopeActivity(selectors){

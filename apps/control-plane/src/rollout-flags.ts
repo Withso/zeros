@@ -126,6 +126,7 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
   private listening = false;
   private listenEpoch = 0;
   private current = false;
+  private failedLoads = 0;
   private reloading: Promise<void> | undefined;
   private again = false;
   private stopped = false;
@@ -215,6 +216,14 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
    * started, so every later change will arrive as a hint. */
   feedCurrent(): boolean { return this.current; }
 
+  /** Positive fresh proof for the shared detached-work observation. A
+   * reload's completion by itself can represent a caught read failure. */
+  async observeAuthority(): Promise<boolean> {
+    const failures = this.failedLoads;
+    await this.reload();
+    return !this.stopped && this.current && failures === this.failedLoads;
+  }
+
   /** True when any organization has the flag on. Process-level mount gates
    * use this; per-organization admission still checks `enabled(orgId, …)`. */
   anyEnabled(flag: RolloutFlagName): boolean {
@@ -273,6 +282,7 @@ export class RolloutFlagSnapshot implements RolloutFlagReader {
       try {
         rows = await this.load(this.maxRows + 1);
       } catch {
+        this.failedLoads += 1;
         this.logger.warn("[rollout-flags] reload failed; retrying with backoff before the safety refresh");
         this.setCurrent(false);
         this.scheduleRetry();
