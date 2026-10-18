@@ -13,6 +13,7 @@ const reads=new Set([
   // Discovery copies GitHub's own PR metadata, never client-supplied content.
   "gh.prSync",
   "design.browseDirectories",
+  "design.catalog.read",
   "design.page.select",
   "codeReview.list",
   "git.reviewHunks",
