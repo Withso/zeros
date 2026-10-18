@@ -19,3 +19,12 @@ real row-lock and held-reply races, SQL/RLS constraints and concurrent renewal.
 Capability-actor-contract.test.ts keeps the new strict mode separate from the
 legacy bearer response and verifies feed-loss/dependency behavior. These are
 new feature guards, not an escaped-production bug or a live rollout receipt.
+
+Independent review found two missing bounds before activation. New internal
+routes must join the body-limit middleware before parsing, even with rollout
+disabled: a syntactically shaped bearer is not authentication. Retain both
+declared-length and streaming oversized requests through the assembled app.
+Expired renewal is a new live-capacity admission. Share the same serialized
+capacity fence with admission before row/source/key waits; ordinary live
+renewal retains its existing slot. Test expired recovery at capacity, renewal
+of a live row at capacity, and two recoveries contending for the last slot.

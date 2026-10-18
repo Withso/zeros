@@ -33,8 +33,12 @@ confirmations keep their at-most-10-second bound.
 
 Legacy consume and grant-relay routes accept only legacy rows. Every live socket
 counts toward the existing 100-session workspace limit, including capability
-rows whose diagnostic `last_renewed_at` is older than 30 seconds. Admission
-shares a workspace capacity fence; renewals serialize only their session row.
+rows whose diagnostic `last_renewed_at` is older than 30 seconds. Admission and
+renewal share a workspace capacity fence before taking actor/source/key locks.
+Recovering an expired row requires a free live slot; an already-live renewal
+retains its existing slot and succeeds at capacity. Holding the fence across
+renewal also prevents a concurrent admission from taking that slot if the old
+expiry passes while renewal waits on another lock.
 
 ## HTTP boundary
 
@@ -43,6 +47,9 @@ The new internal POST routes are
 `/internal/v2/cloud-workspaces/engine/capability-session-renewal`.
 The separate strict contracts are mirrored in `packages/protocol` and CP.
 The old `capability-admission` route and its required `renewalToken` stay intact.
+Both new routes enforce the existing 64 KiB internal request-body limit before
+JSON parsing, for declared-length and streamed bodies, including while rollout
+is disabled. A syntactically shaped heartbeat bearer grants no exception.
 
 Both requests carry explicit version/mode, exact engine placement, heartbeat
 bearer, the client's `zeros:engine` token and its device PoP for `direct` or

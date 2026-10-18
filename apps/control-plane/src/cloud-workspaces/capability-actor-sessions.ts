@@ -67,9 +67,12 @@ export class DatabaseCapabilityActorSessionService {
           boot.binding.generation !== input.generation || boot.binding.engineInstanceId !== input.engineInstanceId.toLowerCase())) rejected();
       live();
       if (claims.ep.wa !== engine.authorityEpoch) rejected();
-      // Serialize admission capacity (legacy issue holds the workspace update
-      // lock; legacy capability admission shares this advisory fence).
-      if (!renewal) await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`cloud-actor-session-limit:${input.workspaceId.toLowerCase()}`]);
+      // Renewal can revive an expired row or cross its old expiry while
+      // waiting on later locks. Keep the capacity fence before those waits:
+      // another admission must not take that slot before renewal commits.
+      // Legacy issue holds the workspace update lock; legacy capability
+      // admission shares this advisory fence.
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`cloud-actor-session-limit:${input.workspaceId.toLowerCase()}`]);
       const authority = await authorizeCloudWorkspaceActor(tx, { workspaceId: input.workspaceId,
         organizationId: input.organizationId, actorUserId: userId, capability: "read" });
       if (authority.role !== role) rejected();
@@ -88,8 +91,11 @@ export class DatabaseCapabilityActorSessionService {
         // period for CP operations. A revoked source/key cannot be rescued.
         signingKids = [current.capability_key_id, input.keyId];
         await this.lockSources(tx, sid, did, userId, signingKids);
-        if (!(await tx.query(`SELECT 1 FROM cloud_workspace_actor_sessions session WHERE id=$1
-          AND cloud_workspace_actor_session_source_live(session,'ws:read',false,false)`, [current.id])).rowCount) rejected();
+        const source = (await tx.query<{ needs_slot: boolean }>(`SELECT session_expires_at<=clock_timestamp() AS needs_slot
+          FROM cloud_workspace_actor_sessions session WHERE id=$1
+          AND cloud_workspace_actor_session_source_live(session,'ws:read',false,false)`, [current.id])).rows[0];
+        if (!source) rejected();
+        if (source.needs_slot) await this.assertAvailableSessionSlot(tx, input.workspaceId);
         const revision = Number(current.capability_revision);
         if (current.capability_token_sha256.toString("hex") === input.tokenSha256) {
           if (current.capability_key_id !== input.keyId || !isDeepStrictEqual(current.capability_claims, claims) ||
@@ -106,12 +112,7 @@ export class DatabaseCapabilityActorSessionService {
         }
       } else {
         await this.lockSources(tx, sid, did, userId, [input.keyId]);
-        const count = (await tx.query<{ count: string }>(`SELECT count(*) FROM cloud_workspace_actor_sessions
-          WHERE workspace_id=$1 AND revoked_at IS NULL AND session_expires_at>clock_timestamp()
-            AND ((consumed_at IS NULL AND admission_expires_at>clock_timestamp()) OR
-              (session_kind='capability-v1' AND consumed_at IS NOT NULL) OR last_renewed_at>clock_timestamp()-interval '30 seconds')`,
-        [input.workspaceId])).rows[0]!;
-        if (Number(count.count) >= 100) throw new HttpError(429, "cloud_actor_session_limit", "Workspace connection limit reached");
+        await this.assertAvailableSessionSlot(tx, input.workspaceId);
         row = (await tx.query<SessionRow>(`INSERT INTO cloud_workspace_actor_sessions
           (id,workspace_id,org_id,generation,engine_instance_id,actor_user_id,device_id,device_key_version,
            authority_epoch,actor_fingerprint,actor_role,admission_expires_at,session_expires_at,consumed_at,last_renewed_at,
@@ -144,6 +145,17 @@ export class DatabaseCapabilityActorSessionService {
     // disable cannot turn an expired observation into a successful ACK.
     live();
     return result;
+  }
+
+  /** Caller holds the workspace's admission fence. A live renewal retains its
+   * existing slot; only admission and expired recovery consume another one. */
+  private async assertAvailableSessionSlot(tx: Tx, workspaceId: string): Promise<void> {
+    const count = (await tx.query<{ count: string }>(`SELECT count(*) FROM cloud_workspace_actor_sessions
+      WHERE workspace_id=$1 AND revoked_at IS NULL AND session_expires_at>clock_timestamp()
+        AND ((consumed_at IS NULL AND admission_expires_at>clock_timestamp()) OR
+          (session_kind='capability-v1' AND consumed_at IS NOT NULL) OR last_renewed_at>clock_timestamp()-interval '30 seconds')`,
+    [workspaceId])).rows[0]!;
+    if (Number(count.count) >= 100) throw new HttpError(429, "cloud_actor_session_limit", "Workspace connection limit reached");
   }
 
   private async lockSources(tx: Tx, sourceId: string, deviceId: string, userId: string, kids: string[]): Promise<void> {
