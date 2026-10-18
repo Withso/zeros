@@ -282,16 +282,37 @@ d("durable job queue", () => {
 
   it("bounds concurrency and claims again as slots free", async () => {
     let running = 0, peak = 0, done = 0;
-    runner({ concurrency: 3, handlers: [{ kind: KIND, handle: async () => {
-      running += 1; peak = Math.max(peak, running);
-      await new Promise(resolve => setTimeout(resolve, 40));
-      running -= 1; done += 1;
-    } }] });
-    await pool.query(`INSERT INTO control_plane_jobs(kind,dedupe_key) SELECT 'test_kind','c-'||n FROM generate_series(1,12) n`);
-    runners[0]!.start();
-    await vi.waitFor(() => expect(done).toBe(12), { timeout: 5_000, interval: 20 });
-    expect(peak).toBe(3);
-    expect((await pool.query("SELECT count(*)::integer AS count FROM control_plane_jobs")).rows[0].count).toBe(0);
+    let releaseFirst!: () => void;
+    const firstWave = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const holder = await pool.connect();
+    try {
+      await holder.query("BEGIN");
+      const instance = runner({ concurrency: 3, handlers: [{ kind: KIND, handle: async job => {
+        running += 1; peak = Math.max(peak, running);
+        if (running === 3) releaseFirst();
+        await firstWave;
+        if (job.dedupeKey === "c-12") await holder.query("SELECT id FROM control_plane_jobs WHERE id=$1 FOR UPDATE", [job.id]);
+        running -= 1; done += 1;
+      } }] });
+      await pool.query(`INSERT INTO control_plane_jobs(kind,dedupe_key) SELECT 'test_kind','c-'||n FROM generate_series(1,12) n`);
+      instance.start();
+      await vi.waitFor(() => expect(done).toBe(12), { timeout: 5_000, interval: 20 });
+      expect(peak).toBe(3);
+      expect(instance.inFlight).toBeGreaterThan(0);
+      const draining = instance.stop();
+      await holder.query("COMMIT");
+      await draining;
+      expect(done).toBe(12);
+      expect(running).toBe(0);
+      expect(instance.inFlight).toBe(0);
+      expect((await pool.query("SELECT count(*)::integer AS count FROM control_plane_jobs")).rows[0].count).toBe(0);
+    } finally {
+      try {
+        await holder.query("ROLLBACK");
+      } finally {
+        holder.release(true);
+      }
+    }
   });
 
   it("wakes on NOTIFY rather than the poll", async () => {
