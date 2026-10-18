@@ -59,7 +59,11 @@ export class DesignBackgroundWorkQueue {
         resolve(null);
         return;
       }
-      if (options.latest === true && !pending && this.pending.size >= this.limit) {
+      if (
+        options.latest === true &&
+        !pending &&
+        this.pending.size >= this.limit
+      ) {
         const oldest = [...this.pending.values()].find((task) => task.latest);
         if (!oldest) {
           resolve(null);
