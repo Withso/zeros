@@ -8,6 +8,9 @@ import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
 import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
 import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
 import { CloudCommandRuntimeError } from "../cloud-command-client";
+import { requestCloudLocalCommandSeal } from "../cloud-local-command-mirror";
+import { CloudCheckpointProgressReporter } from "../cloud-checkpoint-progress";
+import { CloudCheckpointProgressSchema } from "@zeros/protocol/cloud-checkpoint-progress";
 import { openSqlite } from "../db/sqlite";
 import { createMessage } from "@zeros/protocol/messages";
 import { canonicalCloudLocalCommandHistoryJson, canonicalCloudLocalCommandWriterSealDescriptor } from "@zeros/protocol/cloud-local-mirror";
@@ -44,6 +47,54 @@ function fixture() {
   return { file, scope, queue, options, events, normal, lifecycle, lifecycleOptions, quiescent, enqueue, drain, acknowledgement };
 }
 describe("FULL writer drain and immutable seal", () => {
+  it.each(["conflict", "context", "authority", "transport", "server", "invalid_ack", "frozen_head", "ack_persistence"] as const)(
+    "retains the first closed %s seal refusal without changing strict v1 progress or accepting the seal", async kind => {
+      const f = fixture(), reports: Array<{ body: unknown; header: string | null }> = [];
+      const authority = { organizationId: f.scope.organizationId, workspaceId: f.scope.workspaceId,
+        generation: f.scope.generation, engineInstanceId: f.scope.engineInstanceId,
+        heartbeatEndpoint: "https://control.fixture.test/internal/v1/cloud-workspaces/engine/heartbeat", heartbeatToken: `zwh_${"s".repeat(43)}` };
+      const reporter = new CloudCheckpointProgressReporter({ authority,
+        directive: { id: randomUUID(), reason: "before_stop", deadlineAtMs: Date.now() + 60_000 },
+        registrationEndpoint: "https://control.fixture.test/internal/v1/cloud-workspaces/engine/register", current: () => true,
+        requestFetch: async (_url, init) => {
+          // Simulate an older control plane's exact strict JSON validator.
+          reports.push({ body: CloudCheckpointProgressSchema.parse(JSON.parse(String(init?.body))),
+            header: new Headers(init?.headers).get("x-zeros-checkpoint-seal-refusal") });
+          return new Response(null, { status: 202 });
+        } });
+      cleanup.push(() => reporter.dispose());
+      const failureCode = kind === "conflict" ? "command_conflict" : kind === "context" ? "command_context_changed"
+        : kind === "authority" ? "engine_authority_rejected" : "command_service_unavailable";
+      const onSealRefusal = vi.fn(refusal => reporter.sealRefusal(refusal));
+      const original = new Error("private-ack-storage-canary");
+      if (kind === "ack_persistence") vi.spyOn(f.lifecycle, "acknowledge").mockImplementationOnce(() => { throw original; });
+      const flight = f.lifecycle.drainAndSeal({
+        mirror: { flush: async () => {} }, retireNative: async () => {}, waitForWork: async () => {}, freezeNormal: () => {},
+        request: (seal, signal) => requestCloudLocalCommandSeal(authority, seal, signal, async () => {
+          if (kind === "transport") throw new Error("private-transport-canary");
+          if (["conflict", "context", "authority", "server"].includes(kind)) return Response.json({ error: failureCode,
+            detail: "private-server-canary" }, { status: kind === "server" ? 503 : kind === "authority" ? 401 : 409 });
+          if (kind === "frozen_head") f.normal.prepare("UPDATE source_head SET value=8").run();
+          return Response.json({ result: { ...f.acknowledgement(seal), ...(kind === "invalid_ack" ? { sha256: "f".repeat(64) } : {}) } });
+        }), onStage: stage => reporter.stage(stage), onSealRefusal,
+      });
+      const failure = await flight.catch(error => { reporter.fail(error); return error; });
+      expect(failure).toBeInstanceOf(Error);
+      if (kind === "ack_persistence") expect(failure).toBe(original);
+      expect(f.lifecycle.seal).not.toBeNull(); expect(f.lifecycle.acknowledged).toBe(false);
+      reporter.fail(new Error("private-cleanup-canary")); reporter.complete();
+      const closed = { version: 1,
+        site: kind === "invalid_ack" ? "response" : kind === "frozen_head" ? "frozen_head" : kind === "ack_persistence" ? "ack_persistence" : "request",
+        code: kind === "invalid_ack" ? "command_response_invalid" : kind === "frozen_head" ? "command_conflict" : kind === "ack_persistence" ? "unknown" : failureCode,
+        httpClass: kind === "transport" ? "none" : kind === "server" ? "5xx" : ["conflict", "context", "authority"].includes(kind) ? "4xx" : "2xx" };
+      expect(onSealRefusal).toHaveBeenCalledExactlyOnceWith(closed);
+      expect(reports.at(-1)?.body).toMatchObject({ version: 1, stage: "seal_ack", state: "failed" });
+      expect(JSON.parse(reports.at(-1)?.header ?? "null")).toEqual(closed);
+      expect(reports.slice(0, -1).every(report => report.header === null)).toBe(true);
+      expect(JSON.stringify(reports)).not.toContain("private");
+      expect(JSON.stringify(reports)).not.toContain(f.lifecycle.seal!.sha256);
+    });
+
   it("observes the real mirror, seal, freeze and ACK gates without changing their order", async () => {
     const f = fixture(), order: string[] = [];
     const ports = { mirror: { flush: async () => { order.push("mirror-work"); } },
@@ -81,6 +132,14 @@ describe("FULL writer drain and immutable seal", () => {
     await f.lifecycle.drainAndSeal({ mirror: { flush: async () => {} }, retireNative: async () => {},
       waitForWork: async () => {}, freezeNormal: () => {}, request: async seal => f.acknowledgement(seal), onStage });
     expect(onStage).toHaveBeenCalledTimes(4); expect(f.lifecycle.acknowledged).toBe(true);
+  });
+
+  it("ignores a refusal observer exception without replacing the error or reopening the frozen writer", async () => {
+    const f = fixture(), original = new CloudCommandRuntimeError("command_conflict");
+    await expect(f.lifecycle.drainAndSeal({ mirror: { flush: async () => {} }, retireNative: async () => {},
+      waitForWork: async () => {}, freezeNormal: () => {}, request: async () => { throw original; },
+      onSealRefusal: () => { throw new Error("private-observer-canary"); } })).rejects.toBe(original);
+    expect(f.lifecycle.seal).not.toBeNull(); expect(f.lifecycle.acknowledged).toBe(false); expect(f.queue.accepting).toBe(false);
   });
 
   it("does not acknowledge an old seal when NORMAL freeze failed and its head advanced", async () => {

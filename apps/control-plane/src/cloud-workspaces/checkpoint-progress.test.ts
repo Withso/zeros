@@ -33,6 +33,28 @@ function harness() {
 }
 
 describe("closed checkpoint progress route", () => {
+  it("accepts optional closed seal evidence outside the unchanged strict v1 JSON", async () => {
+    const { app, service } = harness();
+    const sealRefusal = { version: 1, site: "request", code: "command_conflict", httpClass: "4xx" };
+    const failure = { ...progress, stage: "seal_ack", state: "failed", reason: "unknown" };
+    const response = await app.request(path, { method: "POST", headers: { authorization: `Bearer ${token}`,
+      "content-type": "application/json", "x-zeros-checkpoint-seal-refusal": JSON.stringify(sealRefusal) }, body: JSON.stringify(failure) });
+    expect(response.status).toBe(202);
+    expect(service.reportCheckpointProgress).toHaveBeenCalledExactlyOnceWith({ ...failure, token, sealRefusal });
+    expect(service.heartbeat).not.toHaveBeenCalled();
+  });
+
+  it.each(["{", "x".repeat(513), JSON.stringify({ version: 1, site: "request", code: "private-code-canary", httpClass: "4xx" }),
+    JSON.stringify({ version: 1, site: "request", code: "command_conflict", httpClass: "4xx", detail: "private-body-canary" })])(
+    "drops malformed seal evidence without rejecting legacy progress", async header => {
+      const { app, service } = harness();
+      const failure = { ...progress, stage: "seal_ack", state: "failed", reason: "unknown" };
+      const response = await app.request(path, { method: "POST", headers: { authorization: `Bearer ${token}`,
+        "content-type": "application/json", "x-zeros-checkpoint-seal-refusal": header }, body: JSON.stringify(failure) });
+      expect(response.status).toBe(202);
+      expect(service.reportCheckpointProgress).toHaveBeenCalledExactlyOnceWith({ ...failure, token });
+    });
+
   it("routes the exact report and heartbeat credential without invoking heartbeat", async () => {
     const { app, service } = harness();
     const response = await app.request(path, { method: "POST",

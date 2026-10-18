@@ -117,6 +117,17 @@ const FINAL_METER_LAG_MS = 5000;
 const REGRESSED_FINAL_METER_GRACE_MS = 15 * 60_000;
 const MAX_CHECKPOINT_DEADLINE_MS = 300_000;
 const STOP_MARGIN_MS = 15_000;
+const FORCE_STOP_MARGIN_MS = 45_000;
+// Used only while a drain lacks positive stopped proof. Read the current row
+// and original checkpoint, not a captured pre-I/O deadline. A stopped lease
+// can remain draining solely for metering and must keep settlement backoff.
+const confirmedRunwayDeadlineSql = `least(coalesce(lease.provider_expires_at,clock_timestamp()),coalesce(lease.funded_until,clock_timestamp()))`;
+const pendingStopDeadlineSql = `least(
+  ${confirmedRunwayDeadlineSql} - (${FORCE_STOP_MARGIN_MS}::bigint*interval '1 millisecond'),
+  (SELECT min(request.deadline_at) FROM workspace_checkpoint_requests request
+   WHERE request.lifecycle_intent_id=lease.stop_intent_id AND request.workspace_id=lease.workspace_id AND request.org_id=lease.org_id
+     AND request.generation=coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),lease.generation)
+     AND request.state<>'succeeded' AND request.error_code IS DISTINCT FROM 'stop_unsealed'))`;
 // Reserve the full checkpoint deadline plus the existing stop margin. Retry
 // backoff must never sleep past this boundary, even during a lasting outage.
 const PROVIDER_RETRY_SAFETY_MARGIN_MS = MAX_CHECKPOINT_DEADLINE_MS + STOP_MARGIN_MS;
@@ -646,13 +657,29 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       reason,
       ...(stopReason ? { stopReason } : {}),
       ...(incidentId ? { incidentId } : {}),
-      force: remaining < 45_000,
+      force: remaining <= FORCE_STOP_MARGIN_MS,
       expectedLeaseOwner: this.workerId,
       expectedGeneration: this.identity(lease).generation,
       checkpointDeadlineMs: Math.max(
         30_000,
         Math.min(MAX_CHECKPOINT_DEADLINE_MS, remaining - STOP_MARGIN_MS),
       ),
+    });
+  }
+
+  private async escalateDueStop(lease: Lease): Promise<void> {
+    if (lease.state !== "draining") return;
+    const due = await withRetryableSystemTx(this.options.pool, tx => tx.query(
+      `SELECT 1 FROM managed_compute_allocation_leases lease
+       WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp()
+         AND state='draining' AND stopped_observed_at IS NULL
+         AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),generation)=$3
+         AND ${pendingStopDeadlineSql}<=clock_timestamp()`,
+      [lease.id, this.workerId, this.identity(lease).generation],
+    ));
+    if (due.rowCount) await requestManagedComputeStop(this.options.pool, {
+      leaseId: lease.id, reason: lease.last_error_code ?? "compute_scope_unavailable", force: true,
+      expectedLeaseOwner: this.workerId, expectedGeneration: this.identity(lease).generation,
     });
   }
 
@@ -822,7 +849,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           fundedTtlMs: bounded((lease.funded_until?.getTime() ?? now) - now),
           providerTtlMs: bounded((lease.provider_expires_at?.getTime() ?? now) - now),
           ...(stopReason ? { stopReason } : {}),
-          decision: retry ? "retry" : remaining < 45_000 ? "direct_stop" : "checkpoint", claim: "current" });
+          decision: retry ? "retry" : remaining <= FORCE_STOP_MARGIN_MS ? "direct_stop" : "checkpoint", claim: "current" });
       } catch { await diagnosticStorageFailed(this.options.pool); }
       await withRetryableSystemTx(this.options.pool, (tx) => tx.query(
         `UPDATE managed_compute_allocation_leases SET last_error_code=$3,first_error_at=coalesce(first_error_at,clock_timestamp()),updated_at=now()
@@ -838,17 +865,24 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       await withRetryableSystemTx(this.options.pool, (tx) =>
         tx.query(
           // A just-stopped allocation settles once its final meter can cover
-          // the stop; recheck then instead of after a full poll. A persistent
-          // failure (for example an unattested provider loss) backs off to
-          // five minutes rather than requesting another stop every poll.
-          `UPDATE managed_compute_allocation_leases SET lease_owner=NULL,lease_expires_at=NULL,
-        next_check_at=CASE
+          // the stop; recheck then instead of after a full poll. Backoff cannot
+          // defer an unproved stop past its next safety deadline. After a due
+          // escalation attempt, use the normal cadence up to the finite TTL.
+          // Past expiry, or with positive stopped proof, retain normal backoff
+          // instead of making an expired deadline a permanent hot poll.
+          `UPDATE managed_compute_allocation_leases lease SET lease_owner=NULL,lease_expires_at=NULL,
+        next_check_at=least(CASE
           WHEN $4 THEN least(coalesce($3::timestamptz,'infinity'::timestamptz),clock_timestamp()+least(interval '5 minutes',
             greatest(interval '15 seconds',clock_timestamp()-coalesce(first_error_at,clock_timestamp()))))
           WHEN $3::timestamptz IS NULL THEN clock_timestamp()+interval '15 seconds'
-          ELSE greatest($3::timestamptz,clock_timestamp()+interval '1 second') END,updated_at=now()
-        WHERE id=$1 AND lease_owner=$2
-          AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=managed_compute_allocation_leases.id),generation)=$5`,
+          ELSE greatest($3::timestamptz,clock_timestamp()+interval '1 second') END,
+          CASE WHEN state='draining' AND stopped_observed_at IS NULL THEN
+            CASE WHEN ${pendingStopDeadlineSql}>clock_timestamp() THEN ${pendingStopDeadlineSql}
+              WHEN ${confirmedRunwayDeadlineSql}>clock_timestamp() THEN least(${confirmedRunwayDeadlineSql},clock_timestamp()+interval '15 seconds')
+              ELSE 'infinity'::timestamptz END
+          ELSE 'infinity'::timestamptz END),updated_at=now()
+        WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp()
+          AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),generation)=$5`,
           [lease.id, this.workerId, recheckAt, failed, this.identity(lease).generation],
         ),
       );
@@ -860,6 +894,11 @@ export class CloudWorkspaceComputeLeaseCoordinator {
    * the regular cadence. */
   private async reconcile(lease: Lease, phase: (phase: CloudDiagnosticPhase, site?: ComputeFailureSite) => void): Promise<Date | null> {
     const identity = this.identity(lease);
+    // An unavailable/held provider cannot postpone the due safety decision.
+    // The stop request rechecks claim and generation under its own row locks.
+    phase("authority_check");
+    await this.escalateDueStop(lease);
+    phase("provider_inspect");
     const resolved = this.options.providerResolver
       ? (
           await this.options.providerResolver.resolve({

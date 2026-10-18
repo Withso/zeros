@@ -86,6 +86,41 @@ const url = process.env.TEST_DATABASE_URL;
     ]);
   });
 
+  it("retains one closed seal refusal beside strict v1 receipts without changing authority or the first cause", async () => {
+    const before = await authority();
+    const sealRefusal = { version: 1 as const, site: "request" as const, code: "command_context_changed" as const, httpClass: "4xx" as const };
+    const failure = { ...report({ stage: "seal_ack", state: "failed", reason: "unknown" }), sealRefusal };
+    await service.report(failure);
+    await service.report(failure);
+    await service.report({ ...failure, sequence: 2, sealRefusal: { ...sealRefusal, code: "command_conflict" } });
+    const closed = (await pool.query(`SELECT subject FROM audit_log
+      WHERE org_id=$1 AND action='cloud_workspace.checkpoint_seal_refusal' ORDER BY id`, [fixture.organizationId])).rows;
+    const { token: _token, ...expected } = failure;
+    expect(closed).toEqual([{ subject: expected }]);
+    expect(await receipts()).toEqual([report({ stage: "seal_ack", state: "failed", reason: "unknown" })].map(({ token: _token, ...body }) => body));
+    expect(await authority()).toEqual(before);
+  });
+
+  it("cannot append seal evidence after a headerless first failure or a cancelled request", async () => {
+    const failure = report({ stage: "seal_ack", state: "failed", reason: "unknown" });
+    const sealRefusal = { version: 1 as const, site: "request" as const, code: "command_conflict" as const, httpClass: "4xx" as const };
+    await service.report(failure);
+    await service.report({ ...failure, sealRefusal });
+    await pool.query("UPDATE workspace_checkpoint_requests SET state='cancelled',completed_at=now() WHERE id=$1", [requestId]);
+    await expect(service.report({ ...failure, sequence: 2, sealRefusal })).rejects.toBeInstanceOf(CloudEngineCheckpointProgressRejected);
+    expect((await pool.query("SELECT count(*)::int count FROM audit_log WHERE action='cloud_workspace.checkpoint_seal_refusal'")).rows[0].count).toBe(0);
+  });
+
+  it("fences foreign seal evidence and ignores it outside a failed seal stage", async () => {
+    const sealRefusal = { version: 1 as const, site: "request" as const, code: "command_conflict" as const, httpClass: "4xx" as const };
+    await expect(service.report({ ...report({ engineInstanceId: randomUUID(), stage: "seal_ack", state: "failed", reason: "unknown" }), sealRefusal }))
+      .rejects.toBeInstanceOf(CloudEngineCheckpointProgressRejected);
+    await service.report({ ...report(), sealRefusal });
+    await service.report({ ...report({ sequence: 2, stage: "record_flush", state: "failed", reason: "unknown" }), sealRefusal });
+    expect((await pool.query("SELECT count(*)::int count FROM audit_log WHERE action='cloud_workspace.checkpoint_seal_refusal'")).rows[0].count).toBe(0);
+    expect(await receipts()).toHaveLength(2);
+  });
+
   it("uses one immutable receipt history for UUID case aliases", async () => {
     const canonical = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     await withSystemTx(pool, tx => tx.query("UPDATE workspace_checkpoint_requests SET id=$2 WHERE id=$1", [requestId, canonical]));

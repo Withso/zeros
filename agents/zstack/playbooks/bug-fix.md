@@ -67,6 +67,11 @@
    reopening NORMAL or claims; exercise heartbeat delivery, failed handoff flush,
    lost seal ACK, cancellation ACK, replacement final capture and original drain
    tickets together. A generic cancellation label does not identify the failed gate.
+   Bound draining compute retries by the next finite stop deadline, and attempt
+   due escalation before provider I/O. Test both stopped-but-unsettled metering
+   and already-expired budgets so a past deadline cannot create a hot retry loop.
+   Trace seal refusals through the dedicated transport and local ACK boundary;
+   preserve strict request and stored-receipt compatibility when adding evidence.
    For packaged imports, reproduce against staged
    sources; a checkout import or bundled CLI can hide a missing source file.
    For periodic disconnects, inspect client retirement timers before blaming

@@ -18,6 +18,27 @@ function setup() {
   return { scope, seal, ack, authority, fetcher, call };
 }
 describe("actual private seal HTTP client", () => {
+  it.each([
+    [409, "command_conflict", "command_conflict", "4xx"],
+    [409, "command_context_changed", "command_context_changed", "4xx"],
+    [401, "engine_authority_rejected", "engine_authority_rejected", "4xx"],
+    [403, "cloud_actor_authority_rejected", "cloud_actor_authority_rejected", "4xx"],
+    [503, "private-server-canary", "command_service_unavailable", "5xx"],
+    [200, "private-invalid-ack-canary", "command_response_invalid", "2xx"],
+  ] as const)("retains only the closed seal refusal and HTTP class for %i/%s", async (status, error, code, httpClass) => {
+    const f = setup();
+    f.fetcher.mockResolvedValueOnce(Response.json({ error, detail: "private-response-canary" }, { status }));
+    const failure = await f.call().catch(value => value);
+    expect(failure).toMatchObject({ code, httpClass });
+    expect(JSON.stringify(failure)).not.toContain("private");
+  });
+
+  it("distinguishes a seal transport failure from an HTTP server refusal", async () => {
+    const f = setup();
+    f.fetcher.mockRejectedValueOnce(new Error("private-network-canary"));
+    await expect(f.call()).rejects.toMatchObject({ code: "command_service_unavailable", httpClass: "none" });
+  });
+
   it("posts immutable descriptor only to the registered CP origin with exact engine scope and no redirects", async () => {
     const f = setup(); expect(await f.call()).toEqual(f.ack);
     const [url, init] = f.fetcher.mock.calls[0]!;

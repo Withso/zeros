@@ -14,6 +14,16 @@ const input = {
 };
 
 describe("checkpoint diagnostic contract parity", () => {
+  it.each([shared, controlPlane])("bounds the optional closed header without extending v1 JSON", contract => {
+    const refusal = { version: 1, site: "request", code: "command_conflict", httpClass: "4xx" };
+    expect(contract.CLOUD_CHECKPOINT_SEAL_REFUSAL_HEADER).toBe("x-zeros-checkpoint-seal-refusal");
+    expect(contract.parseCloudCheckpointSealRefusal(JSON.stringify(refusal))).toEqual(refusal);
+    expect(contract.CloudCheckpointProgressSchema.safeParse({ ...input, sealRefusal: refusal }).success).toBe(false);
+    for (const value of [undefined, "{", "x".repeat(513), JSON.stringify({ ...refusal, detail: "private-canary" }),
+      ...["version", "site", "code", "httpClass"].map(key => JSON.stringify({ ...refusal, [key]: "private-canary" }))])
+      expect(contract.parseCloudCheckpointSealRefusal(value)).toBeUndefined();
+  });
+
   it("keeps the standalone CP mirror and package export exact", () => {
     const source = (url: URL) => readFileSync(url, "utf8").replace(/Mirrored in [^\n]+/, "Mirrored contract.");
     expect(source(new URL("../../apps/control-plane/src/cloud-workspaces/checkpoint-progress-contract.ts", import.meta.url)))

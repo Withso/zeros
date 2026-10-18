@@ -11,7 +11,9 @@ function protocolBinding(authority: CloudRuntimeAuthority): string {
 }
 const codes = new Set(["command_conflict", "command_context_changed", "command_not_found", "command_limit", "invalid_command", "engine_authority_rejected", "cloud_actor_authority_rejected"]);
 export class CloudCommandRuntimeError extends Error {
-  constructor(readonly code: string) { super(code); this.name = "CloudCommandRuntimeError"; }
+  constructor(readonly code: string, readonly httpClass: "none" | "2xx" | "4xx" | "5xx" | "other" = "none") {
+    super(code); this.name = "CloudCommandRuntimeError";
+  }
 }
 /** Token stays in the engine. Queue payloads cannot override the authority or
  * redirect credentials to a caller-controlled endpoint. */

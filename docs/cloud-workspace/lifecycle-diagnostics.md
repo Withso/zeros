@@ -47,6 +47,24 @@ never retried, and a 404 disables only optional diagnostics. Dispatch before
 cancellation does not guarantee acceptance if cancellation wins at the CP.
 Deploy the CP reader and shared contract before the separately packaged producer.
 
+A failed `seal_ack` can also carry `x-zeros-checkpoint-seal-refusal`, a bounded
+optional header containing only version 1, a closed site (`request`, `response`,
+`frozen_head` or `ack_persistence`), a closed command error code and an HTTP
+class (`none`, `2xx`, `4xx`, `5xx` or `other`). `none` means no HTTP response was
+observed; an unknown local error stays `unknown`. Messages, response bodies,
+seal descriptors and paths are never copied. This records the observed refusal
+boundary, not the underlying cause of a generic command conflict.
+
+The v1 JSON body and heartbeat remain unchanged. Older servers ignore the
+header; new servers accept headerless reports and drop malformed headers.
+With the first failed seal receipt, the CP atomically stores at most one
+`cloud_workspace.checkpoint_seal_refusal` companion under the same authority,
+request and sequence. Every `checkpoint_progress` receipt stays strict v1 for
+rollback compatibility. Duplicate or later reports cannot add or replace the
+first refusal. This evidence shares the audit retention policy above and uses
+the same bounded best-effort request; it never changes seal acceptance, local
+writer fencing or checkpoint completion.
+
 ## Engine boot-owner startup
 
 Negotiated cloud boot-owner startup retries only the exact bootstrap, initial

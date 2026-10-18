@@ -1277,6 +1277,148 @@ suite("managed compute lifecycle admission", () => {
     expect(failing.state).not.toBe("settled");
     expect(Number(failing.from_now)).toBeGreaterThan(12);
   });
+
+  async function drainingWithRunway(seconds: number, funding = false) {
+    await ready(); await age();
+    await requestManagedComputeStop(pool, { leaseId: input.intentId, reason: "compute_reconciliation_failed" });
+    // Confirmed provider time must fit inside funding; the funding-bound case
+    // shortens both rather than constructing an impossible lease.
+    await pool.query(`UPDATE managed_compute_allocation_leases SET
+      provider_expires_at=statement_timestamp()+($2*interval '1 second'),
+      funded_until=CASE WHEN $3 THEN statement_timestamp()+($2*interval '1 second') ELSE funded_until END,
+      first_error_at=clock_timestamp()-interval '10 minutes',next_check_at=clock_timestamp() WHERE id=$1`,
+    [input.intentId, seconds, funding]);
+    return (await pool.query<{ id: string; checkpoint_id: string }>(
+      `SELECT lease.stop_intent_id AS id,request.id AS checkpoint_id FROM managed_compute_allocation_leases lease
+       JOIN workspace_checkpoint_requests request ON request.lifecycle_intent_id=lease.stop_intent_id WHERE lease.id=$1`,
+      [input.intentId])).rows[0]!;
+  }
+
+  it.each([false, true])("bounds failed drain backoff at its confirmed force deadline (funding=%s)", async funding => {
+    await drainingWithRunway(137, funding);
+    provider.inspect.mockRejectedValue(new CloudProviderError("provider_response_invalid", "private-provider-canary", true));
+    await coordinator.runOnce();
+    const row = (await pool.query(`SELECT state,stopped_observed_at,
+      next_check_at<=least(provider_expires_at,funded_until)-interval '45 seconds' AS bounded,
+      next_check_at>clock_timestamp() AS future FROM managed_compute_allocation_leases WHERE id=$1`, [input.intentId])).rows[0];
+    expect(row).toMatchObject({ state: "draining", stopped_observed_at: null, bounded: true, future: true });
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+    expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+  });
+
+  it("bounds successful drain polling at a force deadline closer than the normal cadence", async () => {
+    await drainingWithRunway(55);
+    await coordinator.runOnce();
+    expect((await pool.query(`SELECT next_check_at<=provider_expires_at-interval '45 seconds' AS bounded
+      FROM managed_compute_allocation_leases WHERE id=$1`, [input.intentId])).rows[0].bounded).toBe(true);
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+  });
+
+  it("bounds failed drain backoff by its earlier original checkpoint deadline", async () => {
+    const stop = await drainingWithRunway(600);
+    await pool.query("UPDATE workspace_checkpoint_requests SET deadline_at=clock_timestamp()+interval '20 seconds' WHERE id=$1", [stop.checkpoint_id]);
+    provider.inspect.mockRejectedValue(new TypeError("private-inspect-canary"));
+    await coordinator.runOnce();
+    expect((await pool.query(`SELECT lease.next_check_at<=request.deadline_at AS bounded
+      FROM managed_compute_allocation_leases lease JOIN workspace_checkpoint_requests request ON request.id=$2
+      WHERE lease.id=$1`, [input.intentId, stop.checkpoint_id])).rows[0].bounded).toBe(true);
+    expect((await pool.query("SELECT stop_intent_id FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].stop_intent_id).toBe(stop.id);
+  });
+
+  it.each(["force", "checkpoint"] as const)("escalates a due %s drain before a held provider inspection", async boundary => {
+    const stop = await drainingWithRunway(boundary === "force" ? 44 : 600);
+    if (boundary === "checkpoint") await pool.query(`UPDATE workspace_checkpoint_requests
+      SET created_at=clock_timestamp()-interval '1 minute',deadline_at=clock_timestamp()-interval '1 second' WHERE id=$1`, [stop.checkpoint_id]);
+    let release!: (value: CloudProviderResource) => void, inspected!: () => void;
+    const reached = new Promise<void>(resolve => { inspected = resolve; });
+    provider.inspect.mockImplementationOnce(() => { inspected(); return new Promise(resolve => { release = resolve; }); });
+    const flight = coordinator.runOnce();
+    try {
+      await reached;
+      expect((await pool.query("SELECT state,error_code FROM workspace_checkpoint_requests WHERE id=$1", [stop.checkpoint_id])).rows[0])
+        .toMatchObject({ state: "cancelled", error_code: "stop_unsealed" });
+      expect((await pool.query("SELECT revoked_at FROM cloud_workspace_engine_instances WHERE id=$1", [f.engineInstanceId])).rows[0].revoked_at).not.toBeNull();
+      expect((await pool.query("SELECT stop_intent_id FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].stop_intent_id).toBe(stop.id);
+    } finally { release(resource()); await flight; }
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+    expect((await pool.query(`SELECT next_check_at>updated_at AND next_check_at<=updated_at+interval '16 seconds' AS bounded
+      FROM managed_compute_allocation_leases WHERE id=$1`, [input.intentId])).rows[0].bounded).toBe(true);
+    provider.stop.mockResolvedValue({ ...resource(), state: "stopped" });
+    const reconciler = new CloudWorkspaceReconciler({ pool, provider: asProvider(), intervalMs: 1000, workosEnabled: false });
+    await reconciler.runOnce();
+    expect(provider.stop).toHaveBeenCalledOnce();
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [stop.id])).rows[0].state).toBe("succeeded");
+    expect((await pool.query("SELECT checkpoint_id,error_code FROM workspace_checkpoint_requests WHERE id=$1", [stop.checkpoint_id])).rows[0])
+      .toMatchObject({ checkpoint_id: null, error_code: "stop_unsealed" });
+  });
+
+  it("retains settlement backoff after positive stopped proof with expired compute deadlines", async () => {
+    await drainingWithRunway(-30, true);
+    stoppedMeter();
+    provider.readComputeUsage.mockRejectedValue(new CloudProviderError("provider_request_unavailable", "private-meter-canary", true));
+    await coordinator.runOnce();
+    const row = await nextCheck();
+    expect(row.state).toBe("draining");
+    expect(row.after_stop).not.toBeNull();
+    expect(Number(row.from_now)).toBeGreaterThan(290);
+    expect(Number(row.from_now)).toBeLessThanOrEqual(300);
+    expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+  });
+
+  it.each([12, -30])("bounds post-escalation retries by the remaining TTL without hot polling after expiry (runway=%i)", async seconds => {
+    const stop = await drainingWithRunway(seconds, true);
+    provider.inspect.mockRejectedValue(new CloudProviderError("provider_request_unavailable", "private-inspect-canary", true));
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT state,error_code FROM workspace_checkpoint_requests WHERE id=$1", [stop.checkpoint_id])).rows[0])
+      .toMatchObject({ state: "cancelled", error_code: "stop_unsealed" });
+    const row = (await pool.query(`SELECT stopped_observed_at,extract(epoch FROM next_check_at-clock_timestamp()) AS delay,
+      next_check_at<=provider_expires_at AS bounded FROM managed_compute_allocation_leases WHERE id=$1`, [input.intentId])).rows[0];
+    expect(row.stopped_observed_at).toBeNull();
+    expect(Number(row.delay)).toBeGreaterThan(seconds > 0 ? 9 : 290);
+    if (seconds > 0) expect(row.bounded).toBe(true);
+  });
+
+  it("bounds a draining database failure without replaying provider I/O", async () => {
+    await drainingWithRunway(137);
+    const db = abortingPool(pool, { code: "40P01", count: 3, when: providerLookup });
+    await originalCoordinator(db.pool).runOnce();
+    expect(db.observed.aborts).toBe(3);
+    expect(provider.inspect).not.toHaveBeenCalled();
+    expect((await pool.query(`SELECT next_check_at<=provider_expires_at-interval '45 seconds' AS bounded
+      FROM managed_compute_allocation_leases WHERE id=$1`, [input.intentId])).rows[0].bounded).toBe(true);
+  });
+
+  it.each(["claim", "generation"] as const)("cannot change a successor %s or its schedule after a late drain inspection failure", async changed => {
+    const stop = await drainingWithRunway(137);
+    let successor!: { lease_owner: string; next_check_at: Date };
+    let setupError: unknown;
+    provider.inspect.mockImplementationOnce(async () => {
+      try {
+        if (changed === "generation") {
+          await pool.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,architecture,
+          cpu_millicores,memory_mib,storage_mib,created_by,provider_connection_id,provider_connection_version,sandbox_class,source_commit,
+          runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version)
+          SELECT workspace_id,2,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,created_by,provider_connection_id,
+          provider_connection_version,sandbox_class,source_commit,runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version
+          FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1`, [f.workspaceId]);
+          await pool.query(`INSERT INTO cloud_workspace_allocation_owners(workspace_id,org_id,provider_resource_id,original_generation,current_generation,allocation_lease_id)
+          SELECT workspace_id,org_id,provider_resource_id,generation,2,id FROM managed_compute_allocation_leases WHERE id=$1
+          ON CONFLICT(workspace_id,provider_resource_id) DO UPDATE SET current_generation=2`, [input.intentId]);
+        }
+        successor = (await pool.query(`UPDATE managed_compute_allocation_leases
+        SET lease_owner=CASE WHEN $2 THEN 'compute:successor' ELSE lease_owner END,
+          provider_expires_at=clock_timestamp()+interval '10 seconds',next_check_at=clock_timestamp()+interval '1 minute'
+        WHERE id=$1 RETURNING lease_owner,next_check_at`, [input.intentId, changed === "claim"])).rows[0];
+      } catch (error) { setupError = error; }
+      throw new CloudProviderError("provider_response_invalid", "private-late-canary", true);
+    });
+    await coordinator.runOnce();
+    expect(setupError).toBeUndefined();
+    expect((await pool.query("SELECT lease_owner,next_check_at FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0]).toEqual(successor);
+    expect((await pool.query("SELECT state,error_code FROM workspace_checkpoint_requests WHERE id=$1", [stop.checkpoint_id])).rows[0])
+      .toMatchObject({ state: "queued", error_code: null });
+    expect((await pool.query("SELECT revoked_at FROM cloud_workspace_engine_instances WHERE id=$1", [f.engineInstanceId])).rows[0].revoked_at).toBeNull();
+  });
   it("wakes only a start that was refused for the unsettled allocation", async () => {
     await ready();
     await age();

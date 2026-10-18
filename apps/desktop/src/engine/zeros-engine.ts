@@ -4886,6 +4886,7 @@ export class ZerosEngine {
       freezeNormal: sealZerosDbForRuntimeHandoff,
       request: (seal,signal) => registration.localCommandSealRequest(seal,signal),
       onStage: stage => progress?.stage(stage),
+      onSealRefusal: refusal => progress?.sealRefusal(refusal),
       onDeadline: () => progress?.fail(undefined, "deadline"),
     }).then(async () => {
       progress?.stage("checkpoint_capture");

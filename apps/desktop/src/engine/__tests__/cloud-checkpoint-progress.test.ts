@@ -26,6 +26,26 @@ function fixture(overrides: Partial<ConstructorParameters<typeof CloudCheckpoint
 }
 
 describe("finite checkpoint diagnostics", () => {
+  it("keeps only the first closed seal refusal and leaves the strict progress body unchanged", async () => {
+    const f = fixture();
+    const refusal = { version: 1, site: "request", code: "command_conflict", httpClass: "4xx" };
+    f.reporter.sealRefusal(refusal); // No seal stage yet.
+    f.reporter.stage("seal_ack");
+    f.reporter.sealRefusal({ ...refusal, detail: "private-refusal-canary" });
+    f.reporter.sealRefusal({ ...refusal, code: "private-code-canary" });
+    f.reporter.sealRefusal(Object.defineProperty({}, "version", { get() { throw new Error("private-getter-canary"); } }));
+    f.reporter.sealRefusal(refusal);
+    f.reporter.sealRefusal({ ...refusal, code: "command_context_changed" });
+    f.reporter.fail(new CloudCommandRuntimeError("command_conflict"));
+    f.reporter.sealRefusal({ ...refusal, code: "command_service_unavailable", httpClass: "5xx" });
+    await settle();
+    const init = f.requestFetch.mock.calls.at(-1)![1]!;
+    expect(new Headers(init.headers).get("x-zeros-checkpoint-seal-refusal")).toBe(JSON.stringify(refusal));
+    expect(CloudCheckpointProgressSchema.parse(JSON.parse(String(init.body)))).not.toHaveProperty("sealRefusal");
+    expect(JSON.stringify(f.requestFetch.mock.calls)).not.toContain("private-");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("coalesces held stage reports and aborts the obsolete observation before the first failure", async () => {
     const f = fixture(); let reply!: (response: Response) => void;
     f.requestFetch.mockImplementationOnce((_url, init) => {
