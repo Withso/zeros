@@ -106,6 +106,7 @@ interface Session {
   nonce: string;
   expiresAt: number;
   bytes: number;
+  readers: number;
   snapshot?: DesignCatalogSnapshot;
 }
 
@@ -113,6 +114,7 @@ export class DesignCatalogReader {
   private readonly secret = randomBytes(32);
   private readonly sessions = new Map<string, Session>();
   private running = 0;
+  private retainedBytes = 0;
 
   constructor(
     private readonly options: {
@@ -126,7 +128,20 @@ export class DesignCatalogReader {
 
   retire(connectionId: string): void {
     for (const [key, session] of this.sessions)
-      if (session.connectionId === connectionId) this.sessions.delete(key);
+      if (session.connectionId === connectionId) this.retireSession(key);
+  }
+
+  private releaseSnapshot(session: Session): void {
+    this.retainedBytes -= session.bytes;
+    session.bytes = 0;
+    session.snapshot = undefined;
+  }
+
+  private retireSession(key: string): void {
+    const session = this.sessions.get(key);
+    if (!session) return;
+    this.sessions.delete(key);
+    if (session.readers === 0) this.releaseSnapshot(session);
   }
 
   private binding(value: string): string {
@@ -149,7 +164,7 @@ export class DesignCatalogReader {
     const now = () => this.options.now?.() ?? Date.now();
     const startedAt = now();
     for (const [key, session] of this.sessions)
-      if (session.expiresAt <= startedAt) this.sessions.delete(key);
+      if (session.expiresAt <= startedAt) this.retireSession(key);
     const key = JSON.stringify([admission.connectionId, input.workspaceId]);
     const unavailable = (
       reason: DesignCatalogFailure["reason"],
@@ -206,11 +221,12 @@ export class DesignCatalogReader {
         nonce: randomBytes(16).toString("hex"),
         expiresAt: startedAt + (this.options.ttlMs ?? 60_000),
         bytes: 0,
+        readers: 0,
       };
-      this.sessions.delete(key);
+      this.retireSession(key);
       this.sessions.set(key, session);
       while (this.sessions.size > (this.options.maxSessions ?? 16))
-        this.sessions.delete(this.sessions.keys().next().value!);
+        this.retireSession(this.sessions.keys().next().value!);
     }
     const assertCurrent = () => {
       if (!admission.authorized())
@@ -222,6 +238,7 @@ export class DesignCatalogReader {
     if (this.running >= (this.options.maxReads ?? 4))
       return unavailable("busy");
     this.running++;
+    session.readers++;
     try {
       if (!session.snapshot) {
         const snapshot = await source.open();
@@ -240,18 +257,22 @@ export class DesignCatalogReader {
           Math.min(8 * 1024 * 1024, this.options.maxBytes ?? 32 * 1024 * 1024)
         )
           throw new DesignCatalogError("too-large");
-        session.snapshot = snapshot;
-        session.bytes = bytes;
         for (const [oldKey] of this.sessions) {
           if (
-            [...this.sessions.values()].reduce(
-              (sum, item) => sum + item.bytes,
-              0,
-            ) <= (this.options.maxBytes ?? 32 * 1024 * 1024)
+            this.retainedBytes + bytes <=
+            (this.options.maxBytes ?? 32 * 1024 * 1024)
           )
             break;
-          if (oldKey !== key) this.sessions.delete(oldKey);
+          if (oldKey !== key) this.retireSession(oldKey);
         }
+        if (
+          this.retainedBytes + bytes >
+          (this.options.maxBytes ?? 32 * 1024 * 1024)
+        )
+          throw new DesignCatalogError("busy");
+        session.snapshot = snapshot;
+        session.bytes = bytes;
+        this.retainedBytes += bytes;
       }
       if (!(await source.validate(session.snapshot)))
         throw new DesignCatalogError("stale");
@@ -314,11 +335,14 @@ export class DesignCatalogReader {
       assertCurrent();
       return result;
     } catch (error) {
-      if (this.sessions.get(key) === session) this.sessions.delete(key);
+      if (this.sessions.get(key) === session) this.retireSession(key);
       if (error instanceof DesignCatalogError) return unavailable(error.reason);
       throw error;
     } finally {
       this.running--;
+      session.readers--;
+      if (session.readers === 0 && this.sessions.get(key) !== session)
+        this.releaseSnapshot(session);
     }
   }
 }

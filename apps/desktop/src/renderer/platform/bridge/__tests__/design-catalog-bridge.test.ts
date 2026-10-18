@@ -73,6 +73,7 @@ describe("negotiated passive Design catalog reads", () => {
       ).toEqual(reply(owner));
       expect(bridge.supportsEngineCapability).toHaveBeenCalledWith(
         DESIGN_CATALOG_READ_CAPABILITY,
+        owner.workspaceId,
       );
       expect(bridge.requestConnected).toHaveBeenCalledWith(
         {

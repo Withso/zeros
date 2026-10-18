@@ -1204,6 +1204,7 @@ export class ZerosEngine {
    *  connects (then relay clients are fail-closed as owner-unknown). */
   private ownerAccountSub: string | null = null;
   private ownerAccountName: string | null = null;
+  private localCatalogBindingEpoch?: number;
   private readonly cloudRuntimeConfig: CloudRuntimeConfig | null;
   private readonly cloudRuntimeRegistration: CloudRuntimeRegistration | null;
   private readonly cloudDurabilityRuntime: CloudWorkspaceDurabilityRuntime | null;
@@ -10796,13 +10797,13 @@ export class ZerosEngine {
           ? this.clientAccountNames.get(client.id)
           : client.kind === "local" && reviewUserId === this.ownerAccountSub ? this.ownerAccountName ?? undefined : undefined;
         const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION
-          ? JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.cloudActor]) : "";
+          ? JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.cloudActor, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]) : "";
         const handleWorkspaceRequest=()=>this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay||client.cloudActor!==undefined,cloudWorker:!!this.cloudWorker,
           ...(op === DESIGN_CATALOG_READ_OPERATION ? { catalogAdmission: {
             connectionId: client.id,
             authority: catalogAuthority,
             authorized: () => this.router.getClient(client.id) === client && (client.kind === "local" || client.authorized?.() === true) && !this.cloudRuntimeAuthorityStopping &&
-              catalogAuthority === JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.cloudActor]),
+              catalogAuthority === JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.cloudActor, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]),
             ...(this.cloudRuntimeConfig ? { cloudOrganizationId: this.cloudRuntimeConfig.execution.organizationId } : {}),
           } } : {}),
           ...(op.startsWith("codeReview.") ? { reviewUserId, reviewUserName } : {}),
@@ -11828,6 +11829,8 @@ export class ZerosEngine {
           `[Zeros] engine owner account changed ${this.ownerAccountSub.slice(0, 8)}… → ${next?.slice(0, 8) ?? "∅"}…`,
         );
       }
+      if (next !== this.ownerAccountSub)
+        this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
       this.ownerAccountSub = next;
       if (sub) this.ownerAccountName = verifiedName ?? null;
       return;
@@ -11930,6 +11933,7 @@ export class ZerosEngine {
    *  drop would be pointless reconnect churn. We still forget the owner in either
    *  mode so a later flip to required-mode starts from a clean slate. */
   private clearOwnerBinding(): void {
+    this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
     this.ownerAccountSub = nextOwnerAccount(this.ownerAccountSub, {
       kind: "signed-out",
     });

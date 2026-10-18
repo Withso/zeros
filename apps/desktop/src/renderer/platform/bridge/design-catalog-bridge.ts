@@ -22,7 +22,12 @@ export async function bridgeDesignCatalog(
     owner.directoryId !== params.directoryId
   )
     throw new Error("Design catalog request belongs to another owner.");
-  if (!bridge.supportsEngineCapability(DESIGN_CATALOG_READ_CAPABILITY))
+  if (
+    !bridge.supportsEngineCapability(
+      DESIGN_CATALOG_READ_CAPABILITY,
+      params.workspaceId,
+    )
+  )
     throw new Error(
       "This engine does not support metadata-only Design catalogs.",
     );

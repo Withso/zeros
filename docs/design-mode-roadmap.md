@@ -1987,6 +1987,10 @@ including an away-and-back transition. It is ephemeral within the connection,
 not authored state or a new selection store. The bridge helper requires the
 advertised capability, verifies the expected owner/intent, and uses only a
 connected passive request; it never wakes or reconnects a cloud workspace.
+Through the workspace facade, both capability lookup and dispatch use the exact
+already-connected owning peer, independent of the Local socket. Replies are
+fenced against peer, account, generation and execution-identity replacement;
+an absent, retired or incompatible cloud peer never falls back to Local.
 
 Replies use a distinct `kind: "design-catalog"` envelope. Ready replies contain
 the exact owner, an opaque root binding, metadata revision, page counts and a
@@ -2014,6 +2018,13 @@ encoded-string estimate per snapshot and 32 MiB in total, with at most four
 concurrent reads and no wait queue. The 60-second deadline starts at admission
 and never extends while paging. These are retained-payload budgets, not RSS
 guarantees. Disconnect retires the connection's sessions and held publications.
+Retired snapshots remain charged until their last executing read releases them,
+including eviction, supersession and expiry. If executing leases prevent freeing
+enough bytes, a new read returns `busy` without queuing or freeing producer slots.
+Local sign-out and actual owner changes advance a separate account-binding
+lifetime, so account A→B→A cannot revive an old cursor or held publication.
+Unchanged-account reverification and unavailable claims preserve that lifetime;
+unsigned/offline Local reads remain supported.
 
 The read path neither enters the mutation lane nor composes/lints frame source.
 Pending metadata, page-layout or semantic journals return `unsettled`; this

@@ -24,3 +24,15 @@ CI follow-up: capability advertisement also has exact-array assertions outside
 the catalog suites. Include those handshake consumers when adding a capability;
 update their explicit expected read-only list without weakening the checks that
 Local engines must not advertise cloud command or timing authority.
+
+Independent review found three gaps that the helper-level mocks missed: inherited
+passive methods still used the Local socket through the real workspace facade,
+semantic account equality revived Local reads after A→B→A, and map deletion
+released byte charges before executing readers released the payload. Test the
+exported bridge through `WorkspaceRuntimeClient`, fence Local admissions with a
+binding lifetime advanced at the real account hooks, and retain aggregate byte
+ownership until the last reader finishes. These are encoded in
+`design-catalog-routing.test.ts`, `design-catalog-account-lifetime.test.ts` and
+the retirement/default-budget cases in `catalog.test.ts`. The unchanged synthetic
+independent proofs were six red contract assertions before these repairs; they
+are review regressions, not escaped production incidents or capacity evidence.

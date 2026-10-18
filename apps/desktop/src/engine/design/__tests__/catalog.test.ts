@@ -64,6 +64,189 @@ const held = <T>() => {
 };
 
 describe("bounded revisioned metadata catalog", () => {
+  it.each(["disconnect", "supersede", "expire", "evict"])(
+    "retains executing snapshot charges through %s and releases the last lease exactly once",
+    async (transition) => {
+      const data = metadata(3);
+      const size = Buffer.byteLength(JSON.stringify(data)) * 2;
+      let time = 0;
+      const reader = new DesignCatalogReader({
+        maxBytes: size * 2,
+        maxSessions: 2,
+        maxReads: 4,
+        now: () => time,
+        ttlMs: 10,
+      });
+      const state = reader as unknown as {
+        retainedBytes: number;
+        running: number;
+      };
+      const first = await reader.read(input, admission, source(data));
+      if (first.status !== "ready" || !first.nextCursor)
+        throw new Error("expected cursor");
+      const gates = [held<boolean>(), held<boolean>()];
+      const entered = [held<void>(), held<void>()];
+      const reads = gates.map((gate, index) =>
+        reader.read({ ...input, cursor: first.nextCursor! }, admission, {
+          open: async () => data,
+          validate: () => {
+            entered[index].resolve();
+            return gate.promise;
+          },
+        }),
+      );
+      await Promise.all(entered.map((gate) => gate.promise));
+      if (transition === "disconnect") reader.retire(admission.connectionId);
+      if (transition === "supersede")
+        expect(
+          await reader.read({ ...input, intent: 2 }, admission, source(data)),
+        ).toMatchObject({ status: "ready" });
+      if (transition === "expire") time = 10;
+      const latest = await reader.read(
+        input,
+        { ...admission, connectionId: "b" },
+        source(data),
+      );
+      expect(latest).toMatchObject({ status: "ready" });
+      const next = await reader.read(
+        input,
+        { ...admission, connectionId: "c" },
+        source(data),
+      );
+      expect(next).toMatchObject({ status: "ready" });
+      expect(state.retainedBytes).toBe(size * 2);
+      expect(state.running).toBe(2);
+      gates[0].resolve(true);
+      expect(await reads[0]).toMatchObject({ status: "unavailable" });
+      expect(state.retainedBytes).toBe(size * 2);
+      expect(state.running).toBe(1);
+      gates[1].resolve(true);
+      expect(await reads[1]).toMatchObject({ status: "unavailable" });
+      expect(state.retainedBytes).toBe(size);
+      expect(state.running).toBe(0);
+      reader.retire("b");
+      reader.retire("c");
+      reader.retire("c");
+      reader.retire(admission.connectionId);
+      expect(state.retainedBytes).toBe(0);
+    },
+  );
+
+  it("refuses a snapshot when every byte is leased by retired continuations, without freeing producer slots", async () => {
+    const data = metadata(3),
+      size = Buffer.byteLength(JSON.stringify(data)) * 2;
+    const reader = new DesignCatalogReader({ maxBytes: size, maxReads: 2 });
+    const first = await reader.read(input, admission, source(data));
+    if (first.status !== "ready" || !first.nextCursor)
+      throw new Error("expected cursor");
+    const gate = held<boolean>(),
+      entered = held<void>();
+    const reading = reader.read(
+      { ...input, cursor: first.nextCursor },
+      admission,
+      {
+        open: async () => data,
+        validate: () => {
+          entered.resolve();
+          return gate.promise;
+        },
+      },
+    );
+    await entered.promise;
+    reader.retire(admission.connectionId);
+    expect(
+      await reader.read(
+        input,
+        { ...admission, connectionId: "b" },
+        source(data),
+      ),
+    ).toMatchObject({ reason: "busy" });
+    const state = reader as unknown as {
+      retainedBytes: number;
+      running: number;
+    };
+    expect(state.running).toBe(1);
+    expect(state.retainedBytes).toBe(size);
+    gate.resolve(true);
+    expect(await reading).toMatchObject({ reason: "superseded" });
+    expect(state.retainedBytes).toBe(0);
+    expect(
+      await reader.read(
+        input,
+        { ...admission, connectionId: "b" },
+        source(data),
+      ),
+    ).toMatchObject({ status: "ready" });
+  });
+
+  it("counts three retired executing snapshots inside the default 32 MiB aggregate ceiling", async () => {
+    const reader = new DesignCatalogReader();
+    const data = metadata(256);
+    data.frames = data.frames.map((frame, index) => ({
+      ...frame,
+      source: `page-1/f${index}${"x".repeat(3900)}.html`,
+    }));
+    const size = Buffer.byteLength(JSON.stringify(data)) * 2;
+    const retired: { bytes: number }[] = [];
+    const state = reader as unknown as {
+      sessions: Map<string, { bytes: number }>;
+      retainedBytes: number;
+      running: number;
+    };
+    const gates = [held<boolean>(), held<boolean>(), held<boolean>()];
+    const reads: Promise<unknown>[] = [];
+    for (let i = 0; i < gates.length; i++) {
+      const actor = { ...admission, connectionId: `old-${i}` };
+      const first = await reader.read(input, actor, source(data));
+      if (first.status !== "ready" || !first.nextCursor)
+        throw new Error("expected cursor");
+      const entered = held<void>();
+      reads.push(
+        reader.read({ ...input, cursor: first.nextCursor }, actor, {
+          open: async () => data,
+          validate: () => {
+            entered.resolve();
+            return gates[i].promise;
+          },
+        }),
+      );
+      await entered.promise;
+      retired.push(
+        state.sessions.get(
+          JSON.stringify([actor.connectionId, input.workspaceId]),
+        )!,
+      );
+      reader.retire(actor.connectionId);
+    }
+    for (let i = 0; i < 16; i++)
+      expect(
+        await reader.read(
+          input,
+          { ...admission, connectionId: `new-${i}` },
+          source(data),
+        ),
+      ).toMatchObject({ status: "ready" });
+    const activeBytes = [...state.sessions.values()].reduce(
+      (sum, session) => sum + session.bytes,
+      0,
+    );
+    const retiredBytes = retired.reduce(
+      (sum, session) => sum + session.bytes,
+      0,
+    );
+    expect(activeBytes + retiredBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+    expect(state.retainedBytes).toBe(activeBytes + retiredBytes);
+    expect(retiredBytes).toBe(size * 3);
+    expect(state.running).toBe(3);
+    for (const gate of gates) gate.resolve(true);
+    for (const result of await Promise.all(reads))
+      expect(result).toMatchObject({ reason: "superseded" });
+    expect(state.retainedBytes).toBe(activeBytes);
+    expect(state.running).toBe(0);
+    for (let i = 0; i < 16; i++) reader.retire(`new-${i}`);
+    expect(state.retainedBytes).toBe(0);
+  });
+
   it("allows a new authority to start its own intent while retiring the predecessor", async () => {
     const reader = new DesignCatalogReader();
     const pending = held<DesignCatalogSnapshot>();
