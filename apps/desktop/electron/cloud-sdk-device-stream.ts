@@ -62,20 +62,28 @@ export class CloudSdkDeviceStream {
           throw failure;
         }
       },
-      createSocket: (url, handlers) => (options.createSocket ?? nativeSocket)(url, {
-        ...handlers, message: text => {
-          if (!this.isActive()) return;
-          if (Buffer.byteLength(text, "utf8") > MAX_FRAME_BYTES) { this.client.stop(); return; }
-          let raw: unknown;
-          try { raw = JSON.parse(text); } catch { this.client.stop(); return; }
-          const type = raw && typeof raw === "object" ? (raw as { t?: unknown }).t : undefined;
-          // Unknown types are ignored per S3; known consumed frames are checked.
-          if (!CloudSdkDeviceFrameSchema.options.some(schema => schema.shape.t.value === type)) return;
-          const parsed = CloudSdkDeviceFrameSchema.safeParse(raw);
-          if (!parsed.success || parsed.data.t === "ready" && parsed.data.d.deviceSessionId !== this.expectedSessionId) { this.client.stop(); return; }
-          handlers.message(JSON.stringify(parsed.data));
-        },
-      }),
+      createSocket: (url, handlers) => {
+        let live = true;
+        const socket = (options.createSocket ?? nativeSocket)(url, {
+          open: () => { if (live) handlers.open(); },
+          close: (code, reason) => { live = false; handlers.close(code, reason); },
+          message: text => {
+            // Native validation runs before the SDK's connection guard. Retire
+            // it on either close path before a late frame can stop a successor.
+            if (!live || !this.isActive()) return;
+            if (Buffer.byteLength(text, "utf8") > MAX_FRAME_BYTES) { this.client.stop(); return; }
+            let raw: unknown;
+            try { raw = JSON.parse(text); } catch { this.client.stop(); return; }
+            const type = raw && typeof raw === "object" ? (raw as { t?: unknown }).t : undefined;
+            // Unknown types are ignored per S3; known consumed frames are checked.
+            if (!CloudSdkDeviceFrameSchema.options.some(schema => schema.shape.t.value === type)) return;
+            const parsed = CloudSdkDeviceFrameSchema.safeParse(raw);
+            if (!parsed.success || parsed.data.t === "ready" && parsed.data.d.deviceSessionId !== this.expectedSessionId) { this.client.stop(); return; }
+            handlers.message(JSON.stringify(parsed.data));
+          },
+        });
+        return { send: text => socket.send(text), close: (code, reason) => { live = false; socket.close(code, reason); } };
+      },
       resumeBase: () => this.resume,
       onEvent: event => this.onEvent(event), random: options.random,
     });

@@ -48,6 +48,48 @@ const acknowledge = (f: ReturnType<typeof fixture>) => {
 };
 
 describe("native device stream ownership", () => {
+  it("CM review: ignores a retired socket's late ready after a replacement session opens", async () => {
+    const f = fixture(), first = f.stream.control({ action: "start", target });
+    await tick();
+    const retired = f.sockets[0]!;
+    retired.handlers.open(); // The first hello is still awaiting its ready.
+    f.stream.control({ action: "stop", streamId: first.streamId, leaseId: first.leaseId! });
+    const replacementSessionId = id(99);
+    f.broker.openStreamSession.mockResolvedValueOnce({ ...grant, deviceSessionId: replacementSessionId });
+    f.stream.control({ action: "start", target });
+    await tick();
+    expect(f.sockets).toHaveLength(2);
+    const current = f.sockets[1]!;
+    current.handlers.open();
+    const readyFrame = (deviceSessionId: string) => JSON.stringify({ t: "ready", d: {
+      deviceSessionId, cursor: "c0", resumed: false, contract: 1,
+      heartbeatIntervalMs: 20_000, organizationFeatures: [],
+    } });
+    current.handlers.message(readyFrame(replacementSessionId));
+    expect(f.stream.snapshot().state).toBe("open");
+    f.emit.mockClear();
+    retired.handlers.message(readyFrame(sessionId));
+    expect(f.stream.snapshot().state).toBe("open");
+    expect(current.close).not.toHaveBeenCalled();
+    expect(f.emit).not.toHaveBeenCalled();
+  });
+
+  it.each(["local close", "remote close"])("ignores invalid frames after %s without stopping a replacement", async close => {
+    const f = fixture(), first = f.stream.control({ action: "start", target });
+    await f.ready(); const retired = f.sockets[0]!;
+    if (close === "local close") f.stream.control({ action: "stop", streamId: first.streamId, leaseId: first.leaseId! });
+    else retired.handlers.close(1006, "closed");
+    if (close === "local close") f.stream.control({ action: "start", target });
+    else await vi.advanceTimersByTimeAsync(1_000);
+    await f.ready(); const current = f.sockets[1]!;
+    f.emit.mockClear();
+    for (const frame of ["{", "x".repeat(512 * 1024 + 1), JSON.stringify({ t: "ready", d: {} })]) {
+      retired.handlers.message(frame);
+      expect(f.stream.snapshot().state).toBe("open");
+    }
+    expect(current.close).not.toHaveBeenCalled(); expect(f.emit).not.toHaveBeenCalled();
+  });
+
   it("uses one shared session/socket and a replacement renderer lease cannot be stopped by the old lease", async () => {
     const f = fixture(), first = f.stream.control({ action: "start", target });
     const second = f.stream.control({ action: "start", target }); await f.ready();
