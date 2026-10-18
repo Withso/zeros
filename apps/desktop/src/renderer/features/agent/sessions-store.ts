@@ -42,6 +42,7 @@ import {
   type AgentActivity,
 } from "./agent-activity";
 import { create } from "zustand";
+import { shallow } from "zustand/shallow";
 import type {
   AvailableCommand,
   AvailableSubagent,
@@ -272,6 +273,10 @@ function settleSlotLeadingPrompt(
 
 function hasDurableMessages(messages: AgentMessage[]): boolean {
   return messages.some((message) => message.kind !== "text" || !message.queued);
+}
+
+function isLocalSessionSlot(chatId: string, slot: AgentSessionState): boolean {
+  return !!slot.cwd && !isCloudWorkspace(slot.cwd) && !parseCloudScopedId(chatId);
 }
 
 export const BLANK: AgentSessionState = {
@@ -710,10 +715,23 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       ) {
         normalized = { ...normalized, safetyReviewRetries: {} };
       }
+      const local = isLocalSessionSlot(chatId, normalized);
+      if (local && previous && previous.cwd === normalized.cwd &&
+          previous.agentId === normalized.agentId &&
+          (previous.executionId ?? previous.sessionId) === executionId) {
+        // Authoritative replacement is low frequency. Reuse equal serialized
+        // rows only within the same owner; streaming reducers never do this
+        // comparison. Normalization above still owns every lifecycle field.
+        const messages = retainMessageReferences(previous.messages, normalized.messages);
+        if (messages !== normalized.messages) normalized = { ...normalized, messages };
+        if (shallow(previous, normalized)) return state;
+      }
       const next = { ...state.sessions, [chatId]: normalized };
       return {
         sessions: next,
-        executionToChatId: rebuildIndex(next),
+        executionToChatId: local && previous &&
+          (previous.executionId ?? previous.sessionId) === executionId
+          ? state.executionToChatId : rebuildIndex(next),
       };
     });
   },
@@ -765,6 +783,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       ) {
         updated = { ...updated, safetyReviewRetries: {} };
       }
+      // Repeated status/metadata writes should not wake transcript consumers.
+      // This checks field identity only; no history scan or serialization on
+      // the patch path, and an absent slot must still be installed.
+      if (state.sessions[chatId] && isLocalSessionSlot(chatId, updated) && shallow(existing, updated)) return state;
       const next = { ...state.sessions, [chatId]: updated };
       // Only rebuild the reverse index if executionId changed — saves work
       // on the common path (token chunks don't touch routing identity).
