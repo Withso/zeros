@@ -17,6 +17,7 @@ import {
   PopoverTrigger,
 } from "../../shared/ui/primitives";
 import { DesignColorField } from "./design-color-picker";
+import { useDesignStyleToken } from "./design-style-provenance";
 import {
   InspectorIconButton,
   InspectorSection,
@@ -230,6 +231,7 @@ function StrokeRows({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const name = kind === "border" ? "Stroke" : "Outline";
   const colorProperty = `${kind}-color`;
+  const colorToken = useDesignStyleToken(details, colorProperty);
   const lineStyle = firstToken(style(details, `${kind}-style`)) || "solid";
   return (
     <Popover open={settingsOpen} onOpenChange={setSettingsOpen}>
@@ -243,6 +245,7 @@ function StrokeRows({
             label={name}
             property={colorProperty}
             disabled={disabled}
+            {...colorToken}
             onPreview={(value) => onPreview?.({ [colorProperty]: value })}
             onCancelPreview={onCancelPreview}
             onCommit={(value) =>

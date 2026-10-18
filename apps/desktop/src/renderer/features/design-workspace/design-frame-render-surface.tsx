@@ -60,6 +60,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   theme,
   highResolutionTile,
   highResolutionDisabled,
+  designDirectory,
 }: {
   workspaceId: string;
   protocolCapability: string | null;
@@ -72,6 +73,8 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   theme: string | null;
   highResolutionTile: DesignHighResolutionViewportTile | null;
   highResolutionDisabled: boolean;
+  /** The Design directory the canvas shows (agent stylesheet drafts). */
+  designDirectory?: string;
 }) {
   const screenshot = useDesignRuntimeStore(
     (state) =>
@@ -208,6 +211,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
         autoCapture
         theme={theme}
         transitionCover={screenshot ?? null}
+        designDirectory={designDirectory}
       />
     );
   } else if (screenshot?.sourceVersion === frame.sourceVersion) {

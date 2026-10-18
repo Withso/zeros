@@ -329,9 +329,11 @@ export function designCssPropertySuggestions(): readonly string[] {
   return browserCssPropertySuggestions;
 }
 
-/** Values are computed by the iframe runtime, but only directly authored
- * declarations are shown. This keeps the surface concise like browser
- * inspector rules instead of dumping every inherited browser default. */
+/** Only directly authored declarations are shown, concise like browser
+ * inspector rules instead of every inherited browser default. Each shows its
+ * winning declaration as written (`var(--primary-button-bg)`) when the
+ * runtime reports it, else the computed value (older runtimes, or a shorthand
+ * partly overridden by a longhand). Edits diff against these same values. */
 export function computedDesignCssDeclarations(
   details: DesignRuntimeNodeDetails,
 ): Record<string, string> {
@@ -340,8 +342,10 @@ export function computedDesignCssDeclarations(
   const declarations: Record<string, string> = {};
   for (const property of properties) {
     const canonical = canonicalDesignCssProperty(property);
-    const value = readDesignComputedStyle(details.styles, canonical);
-    if (!value || Object.hasOwn(declarations, canonical)) continue;
+    if (Object.hasOwn(declarations, canonical)) continue;
+    const authored = details.authoredStyles?.[canonical]?.value;
+    const value = authored || readDesignComputedStyle(details.styles, canonical);
+    if (!value) continue;
     declarations[canonical] = value;
   }
   return declarations;

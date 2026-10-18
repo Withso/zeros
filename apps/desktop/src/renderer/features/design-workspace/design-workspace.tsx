@@ -37,6 +37,7 @@ import {
 } from "./state/design-workspace-ui";
 import { useDesignPageSnapshot } from "./state/design-page-projection";
 import { useDesignStyleBuildPresence } from "./state/use-design-style-build-presence";
+import { startDesignAgentDraftEvents } from "./state/design-agent-drafts";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
 import { useDesignLifecycleFeedback } from "./state/use-design-lifecycle-feedback";
 
@@ -112,6 +113,8 @@ export function DesignWorkspaceColumn({
   );
   // Keeps the person's style builds live while this Design tab is showing.
   useDesignStyleBuildPresence(workspaceId, surfaceActive);
+  // Local agents' in-flight Design edits stream onto the canvas as drafts.
+  useEffect(() => startDesignAgentDraftEvents(), []);
   // "Create and ask agent to sync styles": once the new directory has loaded,
   // a new chat with the person's default agent sets up syncing.
   const askAgent = useAskDesignAgent(folder);
