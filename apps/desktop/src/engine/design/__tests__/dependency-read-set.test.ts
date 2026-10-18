@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdtemp, open, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -11,17 +12,22 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
 it("checks exact cached bytes even when length and modification time are retained", async () => {
   const target = path.join(root, "theme.css");
-  await writeFile(target, "red");
-  const metadata = await stat(target);
-  const fingerprint = designDependencyFingerprint(await readFile(target));
-  const captured = await captureDesignDependencies(async () => {
-    observeDesignFileDependency(root, { target, limit: 100, fingerprint });
-  });
-  expect(captured.assertCurrent).not.toThrow();
-  await writeFile(target, "tan");
-  await utimes(target, metadata.atime, metadata.mtime);
-  expect((await stat(target)).size).toBe(metadata.size);
-  expect(captured.assertCurrent).toThrow(/changed/);
+  await writeFile(target, "red", { flag: "wx", mode: 0o600 });
+  const file = await open(target, constants.O_RDWR | constants.O_NOFOLLOW);
+  try {
+    const metadata = await file.stat();
+    const fingerprint = designDependencyFingerprint(await file.readFile());
+    const captured = await captureDesignDependencies(async () => {
+      observeDesignFileDependency(root, { target, limit: 100, fingerprint });
+    });
+    expect(captured.assertCurrent).not.toThrow();
+    await file.write("tan", 0);
+    await file.utimes(metadata.atime, metadata.mtime);
+    expect((await file.stat()).size).toBe(metadata.size);
+    expect(captured.assertCurrent).toThrow(/changed/);
+  } finally {
+    await file.close();
+  }
 });
 
 it("captures binary asset bytes without lossy text conversion", async () => {
