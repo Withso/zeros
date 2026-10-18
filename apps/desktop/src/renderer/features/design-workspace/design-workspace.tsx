@@ -133,8 +133,9 @@ export function DesignWorkspaceColumn({
     workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined,
   );
   const pageSnapshot = useDesignPageSnapshot(snapshot.data, activePageId);
-  const pageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: pageSnapshot?.directoryId, pageId: activePageId } : undefined,
-    [workspaceId, activePageId, pageSnapshot?.directoryId]);
+  const ownerRevision = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.ownerRevision ?? 0 : 0);
+  const pageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: pageSnapshot?.directoryId, pageId: activePageId, revision: ownerRevision } : undefined,
+    [workspaceId, activePageId, pageSnapshot?.directoryId, ownerRevision]);
   useLayoutEffect(() => {
     if (!surfaceActive || !workspaceId || !pageSnapshot || snapshot.loading || snapshot.refreshing || snapshot.error) return;
     bindDesignWorkspacePages(workspaceId, pageSnapshot.directoryId, pageSnapshot.pages!);

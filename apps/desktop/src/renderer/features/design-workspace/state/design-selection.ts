@@ -1118,7 +1118,7 @@ export async function selectDesignTargets(input: {
   explicit?: boolean;
 }): Promise<DesignRuntimeNodeDetails[] | null> {
   const owner = input.owner ?? captureDesignPageOwner(input.workspaceId);
-  if (!selectionPageOwnerIsCurrent(owner)) return null;
+  if (owner.workspaceId !== input.workspaceId || !selectionPageOwnerIsCurrent(owner)) return null;
   const targets = normalizeDesignSelectedTargets(input.targets);
   const primary = targets[0];
   const frame = (input.frames ?? readSelectionSnapshot(input.workspaceId)?.frames)?.find(candidate => candidate.file === primary?.frame);
@@ -1138,7 +1138,7 @@ export async function selectDesignTargets(input: {
 }
 
 export function clearDesignCanvasSelection(workspaceId: string, owner: DesignPageOwner, targets: readonly DesignSelectionTarget[]): void {
-  if (!selectionPageOwnerIsCurrent(owner)) return;
+  if (owner.workspaceId !== workspaceId || !selectionPageOwnerIsCurrent(owner)) return;
   const current = designWorkspaceView(workspaceId);
   const removed = new Set(targets.map(designSelectionTargetKey));
   const remaining = current.selectedTargets.filter(target => !removed.has(designSelectionTargetKey(target)));
@@ -1449,7 +1449,7 @@ export async function selectDesignTargetsInRect(input: {
   owner?: DesignPageOwner;
 }): Promise<DesignRuntimeNodeDetails[] | null> {
   const owner = input.owner ?? captureDesignPageOwner(input.workspaceId);
-  if (!selectionPageOwnerIsCurrent(owner)) return null;
+  if (owner.workspaceId !== input.workspaceId || !selectionPageOwnerIsCurrent(owner)) return null;
   const generation = nextGeneration(selectionGenerationByWorkspace, input.workspaceId);
   const initial = designWorkspaceView(input.workspaceId);
   const overlaps = (frame: DesignCanvasFrameWire) => frame.x < input.rect.x + input.rect.width && frame.y < input.rect.y + input.rect.height &&
@@ -2011,7 +2011,8 @@ export function reconcileDesignRuntimeSnapshot(input: {
     warnings: snapshot.warnings,
   });
   const view = designWorkspaceView(workspaceId);
-  const survivingTargets = view.selectedTargets.filter(target => target.frame !== frame.file || !target.nodeId ||
+  const completeTree = !snapshot.warnings.some(warning => warning.ruleId === "layer-tree-limit");
+  const survivingTargets = view.selectedTargets.filter(target => !completeTree || target.frame !== frame.file || !target.nodeId ||
     target.nodeId === snapshot.frame.oid || treeContainsOid(snapshot.tree, target.nodeId));
   if (survivingTargets.length !== view.selectedTargets.length) {
     void selectDesignTargets({ workspaceId, folder, targets: survivingTargets, frames: readSelectionSnapshot(workspaceId)?.frames ?? [frame], explicit: false }).catch(() => {});
@@ -2025,6 +2026,7 @@ export function reconcileDesignRuntimeSnapshot(input: {
       if (!runtime || designRuntimeFrameState(workspaceId, frame.file)?.detailsByNode[target.nodeId!]?.sourceVersion === frame.sourceVersion) continue;
       void runtime.getNodeDetails(target.nodeId!).then(details => {
         if (!selectionPageOwnerIsCurrent(owner) || designFrameRuntime(workspaceId, frame.file) !== runtime ||
+          (runtime.sourceVersion !== undefined && runtime.sourceVersion !== frame.sourceVersion) ||
           details.sourceVersion !== frame.sourceVersion || !designWorkspaceView(workspaceId).selectedTargets.some(candidate => designSelectionTargetKey(candidate) === designSelectionTargetKey(target))) return;
         useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, folder, frame.file, details, frame.sourceVersion);
       }).catch(() => {});

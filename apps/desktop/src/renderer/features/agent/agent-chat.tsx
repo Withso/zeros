@@ -1922,6 +1922,7 @@ function AgentChatBody({
     dragHandlers,
   } = composer;
   const clearComposer = () => { clearComposerEditor(); designFrameContext.clear(); };
+  const composerHasContent = !composerEmpty || designFrameContext.hasContext;
   composerFocusRef.current = focusComposer;
   // The composer stays editable in EVERY session state. `failed` /
   // `auth-required` used to flip the editor read-only here (mirroring the old
@@ -3635,7 +3636,7 @@ function AgentChatBody({
     !runtimeUpgradeRequired &&
     (session.transcriptState === "resident" || cloudComputerV2 && isCloudWorkspace(chatThread?.folder)) &&
     !composerStreaming &&
-    !composerEmpty;
+    composerHasContent;
   // Keep blocked Send focusable for its tooltip and explicit attempt feedback.
   // Stop and queued editing retain their existing controls while agents run.
   const runtimeSendBlocked = runtimeUpgradeRequired && !composerStreaming && !sendPreparing && !editingQueuedId;
@@ -3868,8 +3869,8 @@ function AgentChatBody({
       displayText.length === 0 &&
       localAttachments.length === 0 &&
       importCount === 0 &&
-      extraAttachCount === 0
-      && !submittedDesignFrame
+      extraAttachCount === 0 &&
+      !submittedDesignFrame
     ) {
       return;
     }
@@ -4584,7 +4585,7 @@ function AgentChatBody({
       queuedContentSeenRef.current = false;
       return;
     }
-    if (!composerEmpty) {
+    if (composerHasContent) {
       queuedContentSeenRef.current = true;
       return;
     }
@@ -4592,7 +4593,7 @@ function AgentChatBody({
       dispatch({ type: "CONSUME_AUTO_SEND", chatId });
       queuedContentSeenRef.current = false;
     }
-  }, [chatId, composerEmpty, dispatch, pendingAutoSend, readOnly]);
+  }, [chatId, composerHasContent, dispatch, pendingAutoSend, readOnly]);
 
   // Prepared-workspace hand-off: the dispatcher can seed this composer, or the
   // user can type and press Send while checkout is still running. Once the
@@ -4612,7 +4613,7 @@ function AgentChatBody({
         status: session.status,
         provisioning: workspaceProvisioning,
         hasPermissionGate: !!session.pendingPermission,
-        composerEmpty,
+        composerEmpty: !composerHasContent,
         // Don't retire the intent into a send that handleSend would drop
         // because another one is mid-preparation; this effect re-runs when
         // that clears.
@@ -4671,7 +4672,7 @@ function AgentChatBody({
     session.status,
     session.pendingPermission,
     chatId,
-    composerEmpty,
+    composerHasContent,
     sendPreparing,
   ]);
 

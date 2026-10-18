@@ -2,8 +2,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useComposerDesignFrame } from "../composer-design-frame";
-import type { DesignFrameAttachmentTarget } from "../design-frame-attachment";
-import { designWorkspaceView, resetDesignWorkspaceUiForTests, useDesignWorkspaceUiStore } from "../../design-workspace/state/design-workspace-ui";
+import type { DesignFrameAttachmentSelection, DesignFrameAttachmentTarget } from "../design-frame-attachment";
+import { designWorkspaceView, normalizeDesignWorkspaceView, resetDesignWorkspaceUiForTests, useDesignWorkspaceUiStore } from "../../design-workspace/state/design-workspace-ui";
 
 const mocks = vi.hoisted(() => ({
   project: { repoSlug: "project" },
@@ -61,6 +61,7 @@ describe("parked composer frame ownership", () => {
   it("delivers the pinned frame and image while a queued send drains offscreen", () => {
     const context = readContext({ ...options, initialFrame: target });
     expect(context.selection).toBeNull();
+    expect(context.hasContext).toBe(true);
     expect(context.capture()).toEqual(target);
     expect(context.capture()).not.toBe(target);
     expect(mocks.useWorkspaces).toHaveBeenCalledWith(null);
@@ -178,5 +179,35 @@ describe("parked composer frame ownership", () => {
     store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
     context.consume(submitted);
     expect(designWorkspaceView("workspace").selectedTargets).toEqual([{ frame: "phone.html" }]);
+  });
+
+  it("also fences same-identity clicks while a legacy parked draft is sending", () => {
+    const store = useDesignWorkspaceUiStore.getState();
+    store.bindDirectory("workspace", "design_directory");
+    store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
+    const context = readContext({ ...options, active: true, initialFrame: target });
+    const submitted = context.capture();
+    store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
+    context.consume(submitted);
+    expect(designWorkspaceView("workspace").selectedTargets).toEqual([{ frame: "phone.html" }]);
+  });
+
+  it.each(["remove", "send"])("does not restore runtime epochs from a persisted draft before %s", operation => {
+    const store = useDesignWorkspaceUiStore.getState();
+    store.bindDirectory("workspace", "other_directory");
+    store.bindDirectory("workspace", "design_directory");
+    store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
+    let saved: DesignFrameAttachmentSelection | null | undefined;
+    const context = readContext({ ...options, active: true, onPin: value => { saved = value; } });
+    context.pin(context.capture());
+    const draft = JSON.parse(JSON.stringify(saved));
+    const restoredView = normalizeDesignWorkspaceView(JSON.parse(JSON.stringify(designWorkspaceView("workspace"))));
+    useDesignWorkspaceUiStore.setState({ byWorkspace: { workspace: restoredView } });
+    const restored = readContext({ ...options, active: true, initialFrame: draft });
+    if (operation === "remove") restored.remove();
+    else restored.consume(restored.capture());
+    expect(designWorkspaceView("workspace").selectedTargets).toEqual([]);
+    const targets = Array.isArray(draft) ? draft : [draft];
+    expect(targets.every(target => target.selectionEvent === undefined && target.ownerRevision === undefined)).toBe(true);
   });
 });

@@ -619,13 +619,40 @@ per-page renderer state in this version.
 
 ### Native verification and selected-frame context
 
-The composer shows the selected local frame as a removable chip. Send fixes
-workspace, directory, frame ID/file, optional node, source revision, viewport and
-editing intent. A queued reconnect keeps that target. Newer source or replaced
-identity produces an actionable stale-context error. The source snapshot is an
-ordinary persisted attachment. The adjacent image toggle adds an on-demand PNG
-through the existing attachment path; a changed-during-capture result is rejected.
-No frame selection changes an in-flight task's target or provider binding.
+The composer follows the exact workspace's canvas selection in Local Personal,
+organization-local and cloud workspaces. One target shows its frame path; several
+unique targets show one counted selection chip. Shift-click toggles frame or
+element membership, and an outer marquee selects all intersecting scene frames.
+A marquee begun inside a frame keeps that frame's scoped element query and can
+also include other scene frames. Clearing selection removes the live chip;
+removing the chip clears only its linked selection, preserves source view and
+editor focus, and permits an explicit click on the same target to attach again.
+Background refreshes are not explicit selection events.
+
+Send freezes every individual workspace, directory, page, frame ID/file, optional
+node, source revision and editing intent. Each target becomes an ordinary persisted
+source attachment; grouping never reduces the payload to its primary target.
+The existing `designFrame` draft key still accepts a legacy single target or null;
+multi-target drafts use an array. A parked reconnect retains its frozen group,
+including explicit removal. Send/clear never consume a newer explicit selection.
+Newer source or replaced identity produces an actionable stale-context error.
+The adjacent image toggle adds on-demand PNGs through the existing attachment
+path; changed-during-capture results are rejected. Cloud context capture requires
+the admitted workspace host and the same edit role as the existing frame capture.
+No selection changes an in-flight task's target or provider binding.
+
+`DesignWorkspaceViewState.selectedTargets` is the primary-first, unique,
+workspace/directory/page-owned collection of readonly `{ frame, nodeId? }`
+references. `selectedFrame`, `frameSelected`, `selectedNodeId` and
+`selectedNodeIds` remain the primary-frame inspector projection. Page memory
+persists the collection under the existing bounded workspace UI key; old records
+derive it from those primary fields. `selectionEvent` is a runtime-only explicit
+intent epoch, and `captureDesignPageOwner` includes a runtime-only revision that
+retires away-and-back page/directory replies. Neither epoch is persisted.
+`design-selected-targets.ts` exports target identity and the separate
+`designSelectionMutationTargets` projection: selected ancestors suppress their
+descendants only for mutations, and a selected scene frame dominates its node
+targets only in that projection. Reference payloads retain all explicit targets.
 
 The existing engine CLI now implements:
 
