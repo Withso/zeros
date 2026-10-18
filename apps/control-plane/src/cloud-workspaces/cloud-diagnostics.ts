@@ -36,7 +36,7 @@ const checkpointFailureCodes = [
   "checkpoint_part_missing", "checkpoint_part_size", "checkpoint_part_hash", "checkpoint_part_identity",
   "checkpoint_assembled_size", "checkpoint_assembled_hash", "checkpoint_restore_read", "checkpoint_restore_hash", "checkpoint_restore_identity",
 ] as const;
-const engineStartup = z.object({
+export const setupEngineStartupSchema = z.object({
   phase: z.enum(["startup", "registration", "history_restore", "boot_owner",
     "boot_bootstrap", "boot_credentials", "boot_durability", "boot_activate", "boot_install"]),
   name: z.enum(["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError", "ZodError", "SqliteError",
@@ -60,7 +60,7 @@ export const setupDiagnosticSchema = z.object({ version: z.literal(1), phase: z.
   files: z.object({ node: z.boolean(), supervisor: z.boolean(), setup: z.boolean(), engine: z.boolean() }).strict().optional(),
   exit: z.enum(["nonzero", "timeout", "signal", "overflow", "unknown"]).optional(),
   installer: ClosedDiagnosticSchema.refine(value => value.component === "installer").optional(),
-  engineStartup: engineStartup.optional(),
+  engineStartup: setupEngineStartupSchema.optional(),
 }).strict();
 export type SetupDiagnostic = z.infer<typeof setupDiagnosticSchema>;
 export function parseSetupDiagnostic(value: unknown): SetupDiagnostic | null {

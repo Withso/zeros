@@ -11,6 +11,7 @@ import type { Fixture } from "../zeros-dev/config";
 import { retireFixtureCompute } from "./zeros-dev-cleanup-fixture";
 import { PRESTART_RECOVERY } from "../zeros-dev/prestart-recovery.mjs";
 import { initialInfrastructure } from "../zeros-dev/infrastructure-contract";
+import { fixtureSetupEvidence } from "./zeros-dev-setup-fixture";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -29,6 +30,32 @@ async function fixture(deviceId: string = randomUUID()) {
 }
 
 describe("cross-run signed Actions receipts", () => {
+  it("preserves setup clocks and reuse decisions in a signed receipt after fixture deletion", async () => {
+    const f = await fixture(), evidence = fixtureSetupEvidence();
+    const setup = { attempt: 1, claimCount: 1, state: "succeeded" as const, errorCode: null, evidence };
+    await f.store.withRun(f.runId, null, async h => {
+      h.run.hourly!.infrastructure = initialInfrastructure();
+      h.run.create = { key: randomUUID(), body: { name: `zd-${f.runId}`, repository: { forge: "github.com", owner: "fixture", name: "fixture",
+        revision: "main", githubInstallationId: f.fixture.repository.installationId } },
+        result: { id: evidence.workspaceId, createdBy: f.fixture.accountId, createdAt: evidence.createdAt, generation: 1 } };
+      h.run.evidence.push({ phase: "workspace_setup", outcome: "ok", durationMs: 20_000, setup });
+      retireFixtureCompute(h);
+      h.run.deletionConfirmed = true;
+      delete h.run.retirement;
+      h.run.lifecycle.at(-1)!.confirmed = true;
+      await h.save();
+    });
+    await exportHourlyArtifact(f.file, f.store, f.credential, f.execution,
+      { code: "deadline", success: false, runId: f.runId, setup }, { profile: "infrastructure" });
+    const raw = JSON.parse(await readFile(f.file, "utf8")), trust = { deviceId: f.credential.deviceId, publicKey: f.credential.publicKey };
+    const verified = verifyPublicHourlyArtifact(raw, trust, f.execution);
+    expect(verified.runs[0]).toMatchObject({ deletionConfirmed: true, evidence: [{ setup }] });
+    const next = new RunStore(path.join(f.root, "setup-import"), f.fixture, f.credential);
+    await importHourlyArtifact(f.file, next, f.credential, f.execution);
+    expect((await next.read(f.runId)).evidence[0]).toMatchObject({ setup });
+    raw.payload.runs[0].evidence[0].setup.evidence.claims[0].timings.clocks[1].spans[0].endMs++;
+    expect(() => verifyPublicHourlyArtifact(raw, trust, f.execution)).toThrow("zeros_dev_artifact_invalid");
+  });
   it("signs the first native predicate alongside a later cleanup failure and rejects edited diagnostics", async () => {
     const f = await fixture();
     await f.store.withRun(f.runId, null, async h => {
