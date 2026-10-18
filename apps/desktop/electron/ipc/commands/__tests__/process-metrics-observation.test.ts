@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
 
 const native = vi.hoisted(() => ({ exec: vi.fn(), metrics: vi.fn(), holdTable: false, release: null as (() => void) | null }));
 vi.mock("node:child_process", async (original) => ({ ...await original<typeof import("node:child_process")>(), execFile: native.exec }));
@@ -122,6 +123,21 @@ describe("on-demand main-process resource observations", () => {
     expect(report.text).toContain("PID 500 PPID 1");
     expect(report.text).toContain("zeros-git-auth-fixture");
     expect(report.text).toContain("CPU over the last 1.0 s");
+  });
+
+  it("carries native owner labels into the renderer snapshot and explicit diagnostics", async () => {
+    const { processMetricsSnapshot, processDiagnosticsReport } = await import("../process-metrics");
+    const { rendererProcessOwners } = await import("../../../renderer-process-owners");
+    const contents = Object.assign(new EventEmitter(), { isDestroyed: () => false, getOSProcessId: () => 200 });
+    rendererProcessOwners.track(contents, "Browser tab");
+    const snapshot = await processMetricsSnapshot(request);
+    expect(snapshot.processes.find((row) => row.pid === 200)?.name).toBe("Renderer — Browser tab");
+    const pending = processDiagnosticsReport(request);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await pending).text).toContain("Renderer — Browser tab");
+    contents.emit("destroyed");
+    expect(rendererProcessOwners.ownersByPid().size).toBe(0);
   });
 
   it("performs no sampling or timers without an observer request", async () => {

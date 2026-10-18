@@ -31,6 +31,7 @@ import {
   type ProcessArgsRow,
 } from "../../process-metrics";
 import { buildDiagnosticsReport } from "../../process-diagnostics";
+import { rendererProcessOwners } from "../../renderer-process-owners";
 import { scrubbedRecentTail } from "./logs";
 
 interface MetricsRequest {
@@ -65,6 +66,7 @@ function parseRequest(args: Record<string, unknown>): MetricsRequest {
 }
 
 function electronDescriptors(): ElectronProcessDescriptor[] {
+  const owners = rendererProcessOwners.ownersByPid();
   const descriptors = app.getAppMetrics().map((metric) => {
     const workingSetKb = metric.memory?.workingSetSize;
     return {
@@ -73,6 +75,7 @@ function electronDescriptors(): ElectronProcessDescriptor[] {
       name: metric.name,
       serviceName: metric.serviceName,
       creationTime: metric.creationTime,
+      rendererOwner: owners.get(metric.pid),
       ...(typeof workingSetKb === "number"
         ? { workingSetBytes: workingSetKb * 1024 }
         : {}),

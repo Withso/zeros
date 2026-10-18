@@ -22,6 +22,7 @@ import type {
 } from "electron";
 
 import type { BrowserViewBounds } from "../browser/surface";
+import { rendererProcessOwners } from "../renderer-process-owners";
 import {
   AGENT_CONTROL_CHANNELS,
   type AgentControlOverlayState,
@@ -200,6 +201,7 @@ export function createAgentControlOverlayHost(options: {
 
   const create = (sessionId: string): OverlayEntry => {
     const view = options.createView();
+    rendererProcessOwners.track(view.webContents, "Agent-control overlay");
     // Transparent around the bar, so the page shows through.
     view.setBackgroundColor("#00000000");
     const contents = view.webContents;

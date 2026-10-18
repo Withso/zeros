@@ -52,6 +52,8 @@ export interface ElectronProcessDescriptor {
   creationTime?: number;
   workingSetBytes?: number;
   cpuPercent?: number;
+  /** Closed native owner labels, resolved from live WebContents. */
+  rendererOwner?: string;
 }
 
 export interface ProcessMetricsCaptureInput {
@@ -510,7 +512,7 @@ function electronPresentation(descriptor: ElectronProcessDescriptor): ProcessRol
     case "Browser":
       return { name: "Main", kind: "main" };
     case "Tab":
-      return { name: "Renderer", kind: "renderer" };
+      return { name: descriptor.rendererOwner ? `Renderer — ${descriptor.rendererOwner}` : "Renderer", kind: "renderer" };
     case "GPU":
       return { name: "GPU", kind: "gpu" };
     case "Utility":
