@@ -28,6 +28,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
     comparison: undefined as any, ledgerStatus: 200, tagType: "commit", parent: { ...parent },
     unreadable: "", ledgerValue: undefined as any, cloudEnabled: undefined as boolean | undefined,
     artifactPresent: true, artifactExpired: false,
+    ledgerAssetMissing: 0,
     admission: { version: 1, channel: "alpha", sourceSha, repository: candidate.repository, branch: "main",
       runId: "300", runAttempt: "1", mode: "admitted" },
     jobs: [{ run_id: 300, run_attempt: 1, head_sha: sourceSha, head_branch: "main",
@@ -71,8 +72,14 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
     if (route === "/git/ref/tags/alpha") return Response.json({ ref: "refs/tags/alpha", object: { type: state.tagType, sha: state.tag } },
       { status: state.unreadable === "tag" ? 403 : 200 });
     if (route === `/git/tags/${state.tag}`) return Response.json({ object: { type: "commit", sha: ancestor } });
-    if (route === "/releases/tags/alpha") return Response.json({ draft: false, prerelease: true, tag_name: "alpha",
-      assets: [{ name: "alpha-release-ledger.json", browser_download_url: `https://github.com/${candidate.repository}/releases/download/alpha/alpha-release-ledger.json` }] });
+    if (route === "/releases/tags/alpha") {
+      // The parallel desktop publisher replaces the ledger asset: a listing
+      // inside that window omits it.
+      const missing = state.ledgerAssetMissing > 0;
+      if (missing) state.ledgerAssetMissing--;
+      return Response.json({ draft: false, prerelease: true, tag_name: "alpha", assets: missing ? [] :
+        [{ name: "alpha-release-ledger.json", browser_download_url: `https://github.com/${candidate.repository}/releases/download/alpha/alpha-release-ledger.json` }] });
+    }
     if (url.hostname === "github.com") return Response.json(state.ledgerValue ?? { version: 1, channel: "alpha", releases: [
       { version: "0.1.0-alpha.1", publishedAt: "2026-10-01T00:00:00.000Z", sourceSha: state.ledger },
     ] }, { status: state.unreadable === "ledger" ? 404 : state.ledgerStatus });
@@ -94,7 +101,10 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
     await writeFile(path.join(args[args.indexOf("--dir") + 1], "alpha-admission.json"), JSON.stringify(state.admission));
     return "";
   });
-  return { state, requests, command, fetcher, client: githubClient({ ...candidate, ...source }, { ...env, ...overrides }, { fetch: fetcher, command }) };
+  const sleeps: number[] = [];
+  const sleep = async (milliseconds: number) => { sleeps.push(milliseconds); };
+  return { state, requests, command, fetcher, sleeps,
+    client: githubClient({ ...candidate, ...source }, { ...env, ...overrides }, { fetch: fetcher, command, sleep }) };
 }
 
 describe("Alpha publication transaction entry", () => {
@@ -447,6 +457,20 @@ describe("Stage 2 automatic Alpha admission", () => {
     test.state.ops = descendant;
     await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(PromotionError);
     expect(test.requests.filter(route => route === "https://ops-alpha.zeros.build/zeros-deployment.json")).toHaveLength(2);
+  });
+
+  it("waits out the parallel desktop publisher replacing the ledger asset", async () => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "runtime-publish" });
+    test.state.ledgerAssetMissing = 2;
+    await expect(test.client.assertCurrent()).resolves.toBeUndefined();
+    expect(test.sleeps.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("still refuses a ledger asset that stays missing", async () => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "runtime-publish" });
+    test.state.ledgerAssetMissing = 1_000;
+    await expect(test.client.assertCurrent()).rejects.toThrow("Alpha live release ledger is unavailable; forward-only admission refused");
+    expect(test.sleeps.length).toBeLessThanOrEqual(10);
   });
 
   it("allows its parallel desktop publisher to advance the ledger before the tag", async () => {
