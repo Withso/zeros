@@ -134,7 +134,7 @@ describe("macOS updater staging boundary", () => {
       ([event]) => event === "browser-window-focus",
     )?.[1] as (() => void) | undefined;
     const now = Date.now();
-    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 61_000);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 301_000);
     mocks.net.fetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
