@@ -352,6 +352,25 @@ their existing behavior; older readers may omit unsupported evidence and still
 fail setup closed. Deploy the control-plane reader before publishing a runtime
 with the new helper. Local setup does not use this cloud attestation path.
 
+## Pre-admission readiness cadence
+
+Before v4 setup authority exists, an exact-base status with `hostState=stopped`
+permits a 500 ms pause before the next read-only status request. At most four
+such pauses are allowed per wait; later stopped observations use the ordinary
+2 s pause. The status must be successful, complete and valid for the pinned
+base. Malformed, failed or foreign-base observations do not earn a short pause.
+
+Provider errors, Retry-After handling and restore timeouts keep their existing
+pacing. They neither spend nor reset the four-pause budget. Cancellation and
+the absolute execution, boot and restore ceilings still bound the wait. The
+post-admission preparation check keeps its 2 s cadence. This change does not
+restart the host or relax readiness or attestation; Local setup is unaffected.
+
+The burst can reduce detection delay when the host becomes ready during one of
+the accelerated intervals, at the cost of additional status requests. Measure
+request count, request duration and wait time together. The burst does not
+establish a live wake-latency gain or shorten provider restoration itself.
+
 ## Unmatched VM probes
 
 Earlier disposable cold-fork probes observed provider running in 2.860–5.017

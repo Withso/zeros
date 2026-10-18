@@ -65,6 +65,10 @@ async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, res
   const hostPending = Object.assign(new CloudProviderError("provider_bootstrap_unavailable", "Boat runtime broker is not ready", true),
     { diagnostic: { version: 1, phase: "bootstrap", exit: "unknown" } });
   let previousError: unknown;
+  // Before admission, a successful exact-base stopped status earns one small
+  // burst while the enabled host starts. Errors/timeouts never spend or reset
+  // this budget; the post-admission check retains its ordinary cadence.
+  let hostStoppedPauses = restoreMs > 0 ? 4 : 0;
   try {
     for (;;) {
       signal.throwIfAborted();
@@ -99,7 +103,9 @@ async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, res
         else if (error !== hostPending && bootPending) performance?.count("server_retryable");
         if (!bootPending || (error instanceof CloudProviderError && (error.retryAfterMs ?? 0) > 2000)) throw error;
         previousError = error;
-        await pause(2000, error);
+        const shortPause = error === hostPending && hostStoppedPauses > 0;
+        if (shortPause) hostStoppedPauses--;
+        await pause(shortPause ? 500 : 2000, error);
       }
     }
   } finally { for (const timer of timers) clearTimeout(timer); }
