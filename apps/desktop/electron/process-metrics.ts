@@ -111,6 +111,28 @@ export interface ProcessTableRead {
   durationMs: number;
 }
 
+type ProcessTableFailureReason = "timeout" | "output-limit" | "exit" | "signal" | "spawn" | "invalid-output";
+const PROCESS_TABLE_ERROR_CODES = new Set([
+  "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", "ETIMEDOUT", "ENOENT", "EACCES", "EPERM", "EIO", "ENOMEM", "EAGAIN",
+]);
+
+/** Only closed OS metadata leaves the sampler on failure. execFile's default
+ * error can retain process output and does not distinguish a busy-host timeout
+ * from an output limit in the caller's log. */
+export class ProcessTableReadError extends Error {
+  constructor(
+    readonly reason: ProcessTableFailureReason,
+    readonly durationMs: number,
+    readonly stdoutBytes: number,
+    readonly stderrBytes: number,
+    readonly code: number | string | null = null,
+    readonly signal: string | null = null,
+  ) {
+    super(`Process table sample failed (${reason}; code=${code ?? "none"}; signal=${signal ?? "none"}; elapsed=${Math.round(durationMs)}ms; stdout=${stdoutBytes}B; stderr=${stderrBytes}B)`);
+    this.name = "ProcessTableReadError";
+  }
+}
+
 /** One scan coordinator for the app-global metrics key. Concurrent callers
  * share the same scan; the newest ownership request is read only after the OS
  * table settles, closing the stale-terminal-filter race. */
@@ -427,8 +449,9 @@ export async function readSystemSysctl(): Promise<
   );
 }
 
-/** One bounded, argv-free process-table read. The child PID is returned so the
- * reducer can remove the sampler from its own snapshot. */
+/** One bounded, argv-free process-table read for an open inspector or explicit
+ * diagnostics copy. Allow a busy host five seconds; concurrent requests share
+ * this read rather than starting another process. */
 export function readProcessTable(): Promise<ProcessTableRead> {
   const startedAt = performance.now();
   return new Promise((resolve, reject) => {
@@ -437,20 +460,34 @@ export function readProcessTable(): Promise<ProcessTableRead> {
       "/bin/ps",
       ["-axo", "pid=,ppid=,rss=,time=,lstart=,comm="],
       {
-        timeout: 2_000,
+        timeout: 5_000,
         maxBuffer: 4 * 1024 * 1024,
         encoding: "utf8",
         env: { ...process.env, LC_ALL: "C" },
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
+        const durationMs = performance.now() - startedAt;
+        const stdoutBytes = Buffer.byteLength(stdout ?? "");
+        const stderrBytes = Buffer.byteLength(stderr ?? "");
         if (error) {
-          reject(error);
+          const code = typeof error.code === "number" || (typeof error.code === "string" && PROCESS_TABLE_ERROR_CODES.has(error.code)) ? error.code : null;
+          const signal = typeof error.signal === "string" && /^SIG[A-Z0-9]{1,12}$/.test(error.signal) ? error.signal : null;
+          const reason = code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "output-limit"
+            : error.killed || code === "ETIMEDOUT" ? "timeout"
+            : typeof code === "number" ? "exit"
+            : signal ? "signal" : "spawn";
+          reject(new ProcessTableReadError(reason, durationMs, stdoutBytes, stderrBytes, code, signal));
+          return;
+        }
+        const rows = parseProcessTable(stdout);
+        if (rows.length === 0) {
+          reject(new ProcessTableReadError("invalid-output", durationMs, stdoutBytes, stderrBytes));
           return;
         }
         resolve({
-          rows: parseProcessTable(stdout),
+          rows,
           samplerPid,
-          durationMs: performance.now() - startedAt,
+          durationMs,
         });
       },
     );
