@@ -306,9 +306,9 @@ export function stripLauncherNodeOptions(
   return kept.join(" ");
 }
 
-/** A PATH obtained by probing the user's login shell (`$SHELL -ilc 'echo
- *  $PATH'`), cleaned. The probe runs with OUR env, so its shell re-exports the
- *  launcher's node_modules/.bin into the result. */
+/** A PATH obtained by probing the user's login shell (`$SHELL -ilc 'printf
+ *  "%s\n" "$PATH"'`), cleaned. The probe runs with OUR env, so its shell
+ *  re-exports the launcher's node_modules/.bin into the result. */
 export function sanitizeProbedPath(probed: string): string {
   if (!probed || !hasLauncherScriptEnv()) return probed;
   return stripLauncherBinFromPath(probed);

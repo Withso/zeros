@@ -1615,7 +1615,7 @@ export class ZerosEngine {
         ? { agentAuthIdentity: { uid: cloudWorker.uid, gid: cloudWorker.gid } }
         : undefined,
     );
-    // Warm the login-shell PATH probe (`$SHELL -ilc 'echo $PATH'`) off the
+    // Warm the login-shell PATH probe (`$SHELL -ilc 'printf …'`) off the
     // critical path. It's cached process-wide and every one-shot command shell
     // — Setup script, Run action — awaits it before spawning; resolving it here
     // keeps that from showing up as a stall on the FIRST Run of a session.

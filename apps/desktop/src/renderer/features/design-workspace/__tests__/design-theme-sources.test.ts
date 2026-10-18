@@ -42,6 +42,33 @@ describe("theme editor sources", () => {
     expect(html).toContain("1 declaration problem");
   });
 
+  it("offers Update as an icon beside the Sources label, not as a source row", () => {
+    const rail = (props: { sources?: DesignStyleSourceWire[]; updating?: boolean; onUpdate?: () => void }) =>
+      render(createElement(DesignThemeSourceRail, {
+        sources: [source()],
+        errors: [],
+        manualCount: 1,
+        selectedId: null,
+        onSelect: () => {},
+        ...props,
+      }));
+    const updateButton = (html: string) => html.match(/<button[^>]*data-design-theme-update[^>]*>/)?.[0];
+
+    const idle = rail({ onUpdate: () => {} });
+    expect(idle).toMatch(/zd-theme-rail-heading.*>Sources<.*data-design-theme-update.*>Manual</s);
+    expect(idle).not.toContain(">Update<");
+    expect(updateButton(idle)).toContain('aria-label="Update sources"');
+    expect(updateButton(idle)).not.toContain('disabled=""');
+
+    const busy = rail({ onUpdate: () => {}, updating: true });
+    expect(updateButton(busy)).toContain('aria-label="Updating sources"');
+    expect(updateButton(busy)).toContain('disabled=""');
+    expect(busy).toContain("animate-spin");
+
+    expect(updateButton(rail({ sources: [], onUpdate: () => {} }))).toBeUndefined();
+    expect(updateButton(rail({}))).toBeUndefined();
+  });
+
   it("shows a source's path, read-only summary and leveled messages", () => {
     const html = render(createElement(DesignThemeSourceStatus, {
       source: source({
