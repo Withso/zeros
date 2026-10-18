@@ -72,7 +72,8 @@ export async function validateWorkerArtifact(receipt: unknown, run: any, config:
   assertArtifactJob(run, attempt, config, jobs, "worker", ["Worker plan or guarded execution", "Save success receipt"]);
   return value;
 }
-export function githubClient(config: Pick<PromotionConfig, "repository" | "sourceSha" | "branch">, env: NodeJS.ProcessEnv, options: { fetch?: typeof fetch; command?: Command } = {}) {
+export function githubClient(config: Pick<PromotionConfig, "repository" | "sourceSha" | "branch">, env: NodeJS.ProcessEnv,
+  options: { fetch?: typeof fetch; command?: Command; sleep?: (milliseconds: number) => Promise<void> } = {}) {
   const json = jsonClient(options.fetch), runCommand = options.command ?? command;
   const read = (route: string) => json(`https://api.github.com/repos/${config.repository}${route}`, { headers: {
     authorization: `Bearer ${env.GH_TOKEN}`, accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
@@ -265,7 +266,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       // A failed-job retry may carry the successful entry job from an older
       // attempt. Every downstream checkpoint must reread frontiers/order as
       // well, so that carried entry cannot regress a newer published candidate.
-      const previous = await assertAlphaDestinations(config, env, read, ancestor, options.fetch);
+      const previous = await assertAlphaDestinations(config, env, read, ancestor, options.fetch, options.sleep);
       if (env.GITHUB_JOB !== "ci") {
         assertAlphaReleaseOrder(config.sourceSha, parent.run_number, previous, env.ALPHA_PREPARED_VERSION);
       }
@@ -280,7 +281,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       await this.assertCurrent();
       const previous = alphaForwardOnlyMode(env) === "off"
         ? await previousReleaseLedger(config.repository, "alpha", env.GH_TOKEN, options.fetch)
-        : await assertAlphaDestinations(config, env, read, alphaAncestry(read), options.fetch);
+        : await assertAlphaDestinations(config, env, read, alphaAncestry(read), options.fetch, options.sleep);
       assertAlphaReleaseOrder(config.sourceSha, parent.run_number, previous, env.ALPHA_PREPARED_VERSION);
       await authenticatedAlphaParent(env, read);
     },

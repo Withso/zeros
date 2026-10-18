@@ -125,8 +125,29 @@ async function alphaTagSource(read: Read) {
   throw new AlphaAdmissionRejectedError("Alpha rolling tag source is unavailable");
 }
 
+// The parallel desktop publisher replaces the feed ledger asset (delete, then
+// upload). A read inside that window finds no asset; a few short retries let
+// it settle. A ledger that stays missing or unreadable still refuses below.
+const LEDGER_READ_ATTEMPTS = 6, LEDGER_READ_RETRY_MS = 5_000;
+const defaultSleep = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
+
+async function liveReleaseLedger(repository: string, token: string | undefined, fetcher: typeof fetch,
+  sleep: (milliseconds: number) => Promise<void>): Promise<unknown> {
+  for (let attempt = 1; ; attempt++) {
+    const last = attempt >= LEDGER_READ_ATTEMPTS;
+    try {
+      const value = await previousReleaseLedger(repository, "alpha", token, fetcher);
+      if (value !== null || last) return value;
+    } catch (error) {
+      if (last) throw error;
+    }
+    await sleep(LEDGER_READ_RETRY_MS);
+  }
+}
+
 export async function assertAlphaDestinations(candidate: { repository: string; sourceSha: string }, env: NodeJS.ProcessEnv,
-  read: Read, ancestor: ReturnType<typeof alphaAncestry>, fetcher: typeof fetch = fetch) {
+  read: Read, ancestor: ReturnType<typeof alphaAncestry>, fetcher: typeof fetch = fetch,
+  sleep: (milliseconds: number) => Promise<void> = defaultSleep) {
   // Load the existing bounded, schema-aware Pages reader at use time. Its
   // guard also uses githubClient; this avoids a module initialization cycle.
   const { publicPagesSource } = await import("./guard");
@@ -135,7 +156,7 @@ export async function assertAlphaDestinations(candidate: { repository: string; s
     publicPagesSource(CHANNELS.alpha.app, "app", fetcher),
     publicPagesSource(CHANNELS.alpha.ops, "ops", fetcher),
     alphaTagSource(read),
-    previousReleaseLedger(candidate.repository, "alpha", env.GH_TOKEN, fetcher),
+    liveReleaseLedger(candidate.repository, env.GH_TOKEN, fetcher, sleep),
   ]).catch(error => {
     if (error instanceof AlphaAdmissionRejectedError) throw error;
     throw new AlphaAdmissionRejectedError("Alpha live destination identity is unavailable; forward-only admission refused");
