@@ -16,6 +16,7 @@
   real renderer resources before claiming end-to-end support.
 - **Encoded in.** `design-background-work-lifecycle.test.ts`,
   `design-preview-cache.test.ts`, `design-frame-spatial-index.test.ts`, and
-  `docs/design-render-primitives.md`. Spatial buffers, PNG/cache stress fixtures
+  `docs/design-render-primitives.md`; eval case `design-background-work-lifetime`.
+  Spatial buffers, PNG/cache stress fixtures
   and callback bounds are not rendered 10k workspace acceptance. Existing reset
   is a test workflow; its API failures are not a diagnosed navigation regression.
