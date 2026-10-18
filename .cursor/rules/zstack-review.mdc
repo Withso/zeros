@@ -62,6 +62,10 @@ failing input, or a reproduction. Drop anything you can't substantiate.
 
 **Tests**
 - Bug fixes include a regression that fails without the fix.
+- Owner-bound editing sessions follow the rendered directory as well as the
+  remembered page and revision. Test a persisted page whose directory first
+  resolves without a revision change, with cold-entry and real owner-refresh
+  controls; retain the unchanged selection assertion and owner guard.
 - No fixed sleeps standing in for contention. Hold the condition until the
   code under test has actually observed it.
 - When several sources can wake a loop (hint, poll, retry timer), assert

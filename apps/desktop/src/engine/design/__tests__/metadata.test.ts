@@ -82,6 +82,23 @@ describe("portable Design metadata", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("refuses an oversized escaped journal before changing gitignore or any source", () => {
+    commitDesignMetadata(root, directory, json);
+    write(".gitignore", "keep-me\n");
+    const before = read(`${directory}/canvas.json`);
+    const escaped = "\n".repeat(16 * 1024 * 1024);
+    expect(() =>
+      commitDesignMetadata(root, directory, json, [
+        { file: `${directory}/one.css`, before: null, after: escaped },
+        { file: `${directory}/two.css`, before: null, after: escaped },
+      ]),
+    ).toThrow(/too large/);
+    expect(read(".gitignore")).toBe("keep-me\n");
+    expect(read(`${directory}/canvas.json`)).toBe(before);
+    expect(existsSync(path.join(root, directory, "one.css"))).toBe(false);
+    expect(existsSync(path.join(root, directory, "two.css"))).toBe(false);
+  });
+
   it("retains experimental private-store ownership and refuses checkout writes", async () => {
     commitDesignMetadata(root, directory, json);
     const before = read(`${directory}/design.toml`);

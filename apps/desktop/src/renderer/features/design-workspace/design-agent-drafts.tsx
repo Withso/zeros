@@ -32,6 +32,7 @@ import {
   designCanvasScreenPixels,
 } from "./design-canvas-camera";
 import { DesignToolbarButton } from "./design-inspector-kit";
+import { useDesignSavedEditing } from "./design-saved-editing";
 import {
   designAgentDraftPlacements,
   designAgentDraftsByFile,
@@ -199,11 +200,13 @@ export const DesignAgentDraftFrameOverlay = React.memo(function DesignAgentDraft
   theme: string | null;
 }) {
   const drafts = useDesignAgentDrafts(workspaceId);
+  const { session: savedEditingSession, state: savedEditing } = useDesignSavedEditing();
   const entry = useMemo(
     () => designAgentDraftsByFile(drafts, directory).get(frame.file) ?? null,
     [directory, drafts, frame.file],
   );
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
   // The generation shown when this draft first reached the frame. A newer
   // one is the saved file; a frame first seen after the save already is.
   const baseRef = useRef<{ id: string; sourceVersion: string; seenAt: number } | null>(null);
@@ -254,12 +257,18 @@ export const DesignAgentDraftFrameOverlay = React.memo(function DesignAgentDraft
     () => (srcDoc ? designAgentDraftThemeDocument(srcDoc, theme) : null),
     [srcDoc, theme],
   );
+  useLayoutEffect(() => {
+    if (!active || !themed || !savedEditingSession) return;
+    return savedEditingSession.registerPreparation(() => {
+      if (previewRef.current) previewRef.current.style.display = "none";
+    });
+  }, [active, savedEditingSession, themed]);
   if (!active || !entry) return null;
   return (
     <div ref={rootRef} data-design-agent-draft={entry.draft.id} className="contents">
       <DesignAgentDraftBadge entry={entry} />
-      {themed ? (
-        <div className="pointer-events-none absolute inset-0 z-1 overflow-hidden">
+      {themed && !savedEditing ? (
+        <div ref={previewRef} className="pointer-events-none absolute inset-0 z-1 overflow-hidden">
           <DesignAgentDraftDocument srcDoc={themed} title={`${frame.title} draft`} />
         </div>
       ) : null}

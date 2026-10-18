@@ -159,7 +159,7 @@ function syncDirectory(directory: string): void {
 }
 export interface DesignStorageAtomicOptions {
   /** An admitted migration owns this exact temporary name across restarts. */
-  temporaryToken: string;
+  temporaryToken?: string;
   afterPrepare?: () => void;
   /** Recheck migration inputs after preparing the temporary, before publish. */
   beforePublish?: () => void;
@@ -172,11 +172,11 @@ function atomicWrite(
   options?: DesignStorageAtomicOptions,
 ): void {
   const target = assertSafeDesignStoragePath(root, relative, true);
-  if (options && !/^[a-f0-9]{32}$/.test(options.temporaryToken))
+  if (options?.temporaryToken !== undefined && !/^[a-f0-9]{32}$/.test(options.temporaryToken))
     throw new Error("Invalid Design migration temporary identity.");
   const temporaryFile = `${relative}.${options?.temporaryToken ?? randomUUID()}.zeros-tmp`;
   const temporary = assertSafeDesignStoragePath(root, temporaryFile);
-  if (options && existsSync(temporary)) {
+  if (options?.temporaryToken && existsSync(temporary)) {
     unlinkSync(temporary);
     syncDirectory(path.dirname(target));
   }
@@ -200,8 +200,8 @@ function atomicWrite(
   // The next attempt safely replaces it before publishing the successor.
   options?.afterPrepare?.();
   try {
-    options?.beforePublish?.();
     assertSafeDesignStoragePath(root, relative);
+    options?.beforePublish?.();
     renameSync(temporary, target);
     syncDirectory(path.dirname(target));
   } finally {

@@ -22,7 +22,6 @@ import {
 import { cn } from "../../shared/ui/cn";
 import {
   DESIGN_ROTATION_CORNERS,
-  designConstraintGuides,
   designMeasureSpacing,
   designOriginTranslationShift,
   designRotationCursor,
@@ -53,6 +52,8 @@ import {
   type DesignLayoutToolsProps,
 } from "./design-layout-tools-overlay";
 import {
+  designConstraintReferenceGeometry,
+  designProjectedConstraintGuides,
   designSizeBadgeText,
   type DesignSizeBadgeMode,
 } from "./design-layout-tools";
@@ -103,7 +104,9 @@ export function designSelectionOverlayStyle(
     top: overlay.top,
     width: overlay.width,
     height: overlay.height,
-    ...(overlay.rotation
+    ...(overlay.affine
+      ? { transform: `matrix(${overlay.affine.join(",")},0,0)`, transformOrigin: "0 0" }
+      : overlay.rotation
       ? {
           transform: `rotate(${overlay.rotation}deg)`,
           transformOrigin: `${overlay.pivotX}px ${overlay.pivotY}px`,
@@ -148,10 +151,14 @@ export function paintDesignNodeOverlayGeometry(
   element.style.top = `${overlay.top}px`;
   element.style.width = `${overlay.width}px`;
   element.style.height = `${overlay.height}px`;
-  element.style.transform = overlay.rotation
+  element.style.transform = overlay.affine
+    ? `matrix(${overlay.affine.join(",")},0,0)`
+    : overlay.rotation
     ? `rotate(${overlay.rotation}deg)`
     : "";
-  element.style.transformOrigin = overlay.rotation
+  element.style.transformOrigin = overlay.affine
+    ? "0 0"
+    : overlay.rotation
     ? `${overlay.pivotX}px ${overlay.pivotY}px`
     : "";
   const size = element.querySelector<HTMLElement>(
@@ -202,6 +209,9 @@ export function DesignConstraintGuides({
   parentRect,
   outlineRect,
   sides,
+  reference,
+  box,
+  outlineBox,
 }: {
   nodeId: string;
   bounds: DesignCanvasRect;
@@ -210,10 +220,14 @@ export function DesignConstraintGuides({
   /** The parent's own box, outlined while its child is pinned to it. */
   outlineRect?: DesignCanvasRect;
   sides: DesignConstraintSides;
+  reference?: ReturnType<typeof designConstraintReferenceGeometry>;
+  box?: DesignSelectionBox;
+  outlineBox?: DesignSelectionBox;
 }) {
-  const guides = designConstraintGuides(bounds, parentRect, sides);
-  const centerX = bounds.x + bounds.width / 2;
-  const centerY = bounds.y + bounds.height / 2;
+  if (reference === null) return null;
+  const { guides, center } = designProjectedConstraintGuides(bounds, parentRect, sides, reference, box);
+  const centerX = center.x;
+  const centerY = center.y;
   return (
     <span
       data-design-parent-guides={nodeId}
@@ -221,6 +235,9 @@ export function DesignConstraintGuides({
       data-parent-y={parentRect.y}
       data-parent-width={parentRect.width}
       data-parent-height={parentRect.height}
+      data-parent-matrix={reference?.matrix.join(",")}
+      data-parent-local-width={reference?.width}
+      data-parent-local-height={reference?.height}
       data-constraint-sides={[...sides.horizontal, ...sides.vertical].join(" ")}
       className="pointer-events-none absolute inset-0 z-[1]"
       aria-hidden="true"
@@ -234,6 +251,7 @@ export function DesignConstraintGuides({
             top: outlineRect.y,
             width: outlineRect.width,
             height: outlineRect.height,
+            ...(outlineBox ? designSelectionOverlayStyle(designSelectionOverlayFrame(outlineBox)) : {}),
             outlineWidth: designCanvasScreenPixels(1),
           }}
         />
@@ -260,6 +278,8 @@ export function DesignConstraintGuides({
                 ? designCanvasScreenPixels(1)
                 : undefined,
             display: guide.length > 0.5 ? undefined : "none",
+            transform: guide.rotation ? `rotate(${guide.rotation}deg)` : undefined,
+            transformOrigin: "0 0",
           }}
         />
       ))}
@@ -298,8 +318,22 @@ export function DesignConstraintGuides({
 export function paintDesignConstraintGuides(
   guides: HTMLElement | null,
   bounds: DesignCanvasRect,
+  box?: DesignSelectionBox,
+  parentDetails?: DesignRuntimeNodeDetails,
 ): void {
   if (!guides) return;
+  if (parentDetails) {
+    const reference = designConstraintReferenceGeometry(parentDetails);
+    guides.hidden = !reference;
+    if (!reference) return;
+    Object.assign(guides.dataset, {
+      parentX: String(reference.rect.x), parentY: String(reference.rect.y),
+      parentWidth: String(reference.rect.width), parentHeight: String(reference.rect.height),
+      parentMatrix: reference.matrix.join(","), parentLocalWidth: String(reference.width), parentLocalHeight: String(reference.height),
+    });
+    const outline = guides.querySelector<HTMLElement>("[data-design-constraint-parent]");
+    if (outline) paintDesignNodeOverlayGeometry(outline, designSelectionOverlayFrame(designSelectionBox(parentDetails)));
+  }
   const parent = {
     x: Number(guides.dataset.parentX),
     y: Number(guides.dataset.parentY),
@@ -310,10 +344,14 @@ export function paintDesignConstraintGuides(
   const sides = (guides.dataset.constraintSides ?? "")
     .split(" ")
     .filter(Boolean) as DesignConstraintSide[];
-  const painted = designConstraintGuides(bounds, parent, {
+  const matrix = guides.dataset.parentMatrix?.split(",").map(Number);
+  const reference = matrix?.length === 6 && matrix.every(Number.isFinite)
+    ? { matrix: matrix as [number, number, number, number, number, number], width: Number(guides.dataset.parentLocalWidth), height: Number(guides.dataset.parentLocalHeight) }
+    : undefined;
+  const { guides: painted, center } = designProjectedConstraintGuides(bounds, parent, {
     horizontal: sides.filter((side) => side === "left" || side === "right"),
     vertical: sides.filter((side) => side === "top" || side === "bottom"),
-  });
+  }, reference, box);
   for (const guide of painted) {
     const element = guides.querySelector<HTMLElement>(
       `[data-design-parent-guide="${guide.side}"]`,
@@ -324,9 +362,11 @@ export function paintDesignConstraintGuides(
     if (guide.axis === "vertical") element.style.height = `${guide.length}px`;
     else element.style.width = `${guide.length}px`;
     element.style.display = guide.length > 0.5 ? "" : "none";
+    element.style.transform = guide.rotation ? `rotate(${guide.rotation}deg)` : "";
+    element.style.transformOrigin = "0 0";
   }
-  const centerX = bounds.x + bounds.width / 2;
-  const centerY = bounds.y + bounds.height / 2;
+  const centerX = center.x;
+  const centerY = center.y;
   const markX = guides.querySelector<HTMLElement>(
     '[data-design-parent-guide="center-x"]',
   );

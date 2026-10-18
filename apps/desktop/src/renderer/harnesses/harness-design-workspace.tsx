@@ -16,6 +16,7 @@ import {
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
 } from "@zeros/protocol/design-runtime";
 import { designFrameGeometryError } from "@zeros/design-core";
+import { designRelocationSchema, designRelocationStyles } from "@zeros/protocol/design-relocation";
 import type {
   DesignFoundationOpenWire,
   DesignWorkspaceSnapshotWire,
@@ -113,6 +114,10 @@ const DESIGN_TOKENS_HOME_SOURCE = `<!doctype html>
 </html>`;
 const homeSource = designTokensHarness
   ? DESIGN_TOKENS_HOME_SOURCE
+  : new URLSearchParams(window.location.search).has("mixedParents")
+  ? `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0}</style></head><body><main data-oid="home-main" data-zeros-frame-root style="position:relative;display:block;width:100%;height:100vh;background:white"><div data-oid="home-hero" style="position:absolute;left:80px;top:80px;width:200px;height:200px;transform:scale(2,1.5);transform-origin:0 0"><div data-oid="home-heading" style="position:absolute;left:20px;top:20px;width:80px;height:60px;background:red"></div></div><div data-oid="home-panel" style="position:absolute;left:640px;top:80px;width:200px;height:200px;transform:scale(-1,1)"><div data-oid="home-copy" style="position:absolute;left:20px;top:20px;width:80px;height:60px;background:blue"></div></div></main></body></html>`
+  : new URLSearchParams(window.location.search).has("freeRelocation")
+  ? `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0;font-family:system-ui}</style></head><body><main data-oid="home-main" data-zeros-frame-root style="position:relative;display:block;width:100%;height:100vh;background:white;color:navy;font-size:30px;--accent:red"><div data-oid="home-hero" style="position:absolute;left:80px;top:80px;width:120px;height:80px;margin:5px 7px 9px 20px;transform:matrix(1,0.2,0.25,1,0,0);background:var(--accent)"><span data-oid="home-heading">Move</span></div></main></body></html>`
   : new URLSearchParams(window.location.search).has("autoLayout")
   ? `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0;background:white;color:black;font-family:system-ui}</style></head><body><main data-oid="home-main" data-zeros-frame-root style="display:block;min-height:100vh;padding:72px"><div data-oid="home-hero" style="position:relative;display:block;width:300px;height:240px;max-width:none;padding:0;box-sizing:border-box">${["h1", "p", "span"].map((tag, index) => `<${tag} data-oid="${["home-heading", "home-copy", "home-action"][index]}" style="position:absolute;left:${16 + index * 90}px;top:20px;width:80px;height:40px;min-width:0;max-width:none;margin:0;padding:0;box-sizing:border-box;font-size:12px">${["Heading", "Copy", "Action"][index]}</${tag}>`).join("")}</div></main></body></html>`
   : layoutGestureHarness
@@ -711,6 +716,21 @@ async function main() {
       designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
     },
     save(source, sourceVersion) {
+      const previousVersion = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "home.html")?.sourceVersion;
+      const previousFoundation = previousVersion ? foundationReplies.get(designFoundationKey(workspaceId, "home.html", previousVersion)) : undefined;
+      if (previousFoundation) {
+        const revision = `harness:${sourceVersion}`;
+        publishFoundation(designFoundationKey(workspaceId, "home.html", sourceVersion), {
+          ...previousFoundation,
+          summary: {
+            ...previousFoundation.summary,
+            revision,
+            lastValidRevision: revision,
+            history: { ...previousFoundation.summary.history, revision },
+          },
+          foundation: { ...previousFoundation.foundation, revision },
+        });
+      }
       currentHomeSource = source;
       currentWorkspaceSnapshot = {
         ...currentWorkspaceSnapshot,
@@ -825,7 +845,10 @@ async function main() {
         };
         element.remove();
         element.setAttribute("data-zeros-frame-root", "");
-        Object.assign(element.style, {
+        if (params.relocation) {
+          for (const [property, value] of Object.entries(designRelocationStyles(designRelocationSchema.parse(params.relocation))))
+            element.style.setProperty(property, value);
+        } else Object.assign(element.style, {
           position: "relative",
           left: "auto",
           top: "auto",
@@ -1077,7 +1100,8 @@ async function main() {
           transaction?.operations?.some(
             (operation) =>
               operation.type === "node.set-styles" ||
-              operation.type === "node.set-html",
+              operation.type === "node.set-html" ||
+              operation.type === "frame.set-geometry",
           )
         ) {
           const frameFile = String(message.params?.frame ?? "");
@@ -1162,7 +1186,8 @@ async function main() {
               target.style.setProperty(property, value ?? "");
             }
           }
-          currentHomeSource = `<!doctype html>${parsed.documentElement.outerHTML}`;
+          if (transaction?.operations?.some((operation) => operation.type !== "frame.set-geometry"))
+            currentHomeSource = `<!doctype html>${parsed.documentElement.outerHTML}`;
           textTransactionCounter += 1;
           const nextSourceVersion = textTransactionCounter
             .toString(16)
@@ -1189,6 +1214,10 @@ async function main() {
           const nextFrame = nextWorkspaceSnapshot.frames.find(
             (frame) => frame.file === frameFile,
           )!;
+          if (transaction?.operations?.some((operation) => operation.type === "frame.set-geometry")) {
+            const requests = ((window as typeof window & { __zerosHarnessCanvasUpdates?: unknown[] }).__zerosHarnessCanvasUpdates ??= []);
+            requests.push({ frame: frameFile, x: nextFrame.x, y: nextFrame.y, w: nextFrame.width, h: nextFrame.height, z: nextFrame.z });
+          }
           designFrameDocumentCache.setData(
             designFrameDocumentKey(workspaceId, frameFile, nextSourceVersion),
             {
@@ -1226,6 +1255,16 @@ async function main() {
             workspaceId,
             10 + textTransactionCounter,
           );
+          const transactionGate = window as typeof window & {
+            __zerosHarnessHoldTransactionReply?: boolean;
+            __zerosHarnessReleaseTransaction?: () => void;
+          };
+          if (transactionGate.__zerosHarnessHoldTransactionReply) {
+            transactionGate.__zerosHarnessHoldTransactionReply = false;
+            await new Promise<void>((resolve) => {
+              transactionGate.__zerosHarnessReleaseTransaction = resolve;
+            });
+          }
           await new Promise((resolve) => window.setTimeout(resolve, 50));
           const afterRevision = `harness:${nextSourceVersion}`;
           return {
@@ -1594,7 +1633,7 @@ async function main() {
           throw new Error("Design snapshot temporarily unavailable");
         return {
           type: "WORKSPACE_RESPONSE",
-          result: { snapshot: workbenchHarness ? { ...currentWorkspaceSnapshot, lint: { ...currentWorkspaceSnapshot.lint, workspacePath: workspaces.find((row) => row.id === message.params?.workspaceId)?.path ?? workspacePath } } : currentWorkspaceSnapshot },
+          result: { snapshot: workbenchHarness || message.params?.workspaceId !== workspaceId ? { ...currentWorkspaceSnapshot, lint: { ...currentWorkspaceSnapshot.lint, workspacePath: workspaces.find((row) => row.id === message.params?.workspaceId)?.path ?? workspacePath } } : currentWorkspaceSnapshot },
         };
       }
       if (message.op === "design.frame") {
@@ -1853,19 +1892,44 @@ async function main() {
   };
 
   function Harness() {
+    const [ownerId, setOwnerId] = React.useState(workspaceId);
+    const [rootPath, setRootPath] = React.useState(workspacePath);
+    const [surfaceActive, setSurfaceActive] = React.useState(true);
+    React.useLayoutEffect(() => {
+      const controls = {
+        owner(id: string) {
+          if (id !== workspaceId) {
+            const ownerPath = `${workspacePath}-${id}`;
+            if (!workspaces.some((row) => row.id === id)) workspaces.push({ ...workspace, id, path: ownerPath });
+            designWorkspaceSnapshotCache.setData(id, {
+              ...structuredClone(currentWorkspaceSnapshot),
+              lint: { ...currentWorkspaceSnapshot.lint, workspacePath: ownerPath },
+            });
+          }
+          setOwnerId(id);
+        },
+        root(replaced: boolean) { setRootPath(replaced ? `${workspacePath}-replacement` : workspacePath); },
+        active: setSurfaceActive,
+      };
+      const target = window as Window & { __zerosHarnessDesignSurface?: typeof controls };
+      target.__zerosHarnessDesignSurface = controls;
+      return () => { delete target.__zerosHarnessDesignSurface; };
+    }, []);
+    const visibleWorkspace = ownerId === workspaceId && rootPath === workspacePath ? workspace :
+      { ...workspace, id: ownerId, path: ownerId === workspaceId ? rootPath : `${rootPath}-${ownerId}` };
     return (
       <ActionsCtx.Provider value={new Proxy({
         setRetainedChatIds: () => {}, getSession: () => undefined, getCloseActivity: () => ({ running: false, queuedCount: 0 }),
         hydrateChat: async () => {}, listAgents: async () => [],
       }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => Promise.resolve() }) as unknown as import("../features/agent/sessions-context").SessionsCtx}>
       <TooltipProvider delayDuration={300} skipDelayDuration={0}>
-        <main className="bg-bg1 flex h-screen min-h-0 overflow-hidden">
+        <main data-harness-design-root={rootPath} className="bg-bg1 flex h-screen min-h-0 overflow-hidden">
           {WorkbenchPane && ConversationPane ? <><ConversationPane workspace={workspace} /><WorkbenchPane surfaceActive onToggleWorkbench={() => {}} /></> : <>
           {ReferenceFixture && <ReferenceFixture folder={workspacePath} />}
           <DesignWorkspaceColumn
-            workspace={workspace}
-            folder={workspacePath}
-            surfaceActive
+            workspace={visibleWorkspace}
+            folder={visibleWorkspace.path}
+            surfaceActive={surfaceActive}
           />
           </>}
         </main>

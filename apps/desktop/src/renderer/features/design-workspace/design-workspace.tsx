@@ -17,6 +17,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import "./design-workspace-ui.css";
 
@@ -28,7 +29,7 @@ import { resolveDesignCanvasDefaultBackground } from "./design-canvas-background
 import { type DesignMotionPropertyRequest } from "./design-motion-timeline";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { selectDesignFrame, selectDesignTargets } from "./state/design-selection";
-import { deleteDesignFrameCached } from "./state/design-workspace-cache";
+import { deleteDesignFrameCached, waitForPendingDesignEdits } from "./state/design-workspace-cache";
 import {
   bindDesignWorkspacePages,
   captureDesignPageOwner,
@@ -43,6 +44,7 @@ import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
 import { useDesignLifecycleFeedback } from "./state/use-design-lifecycle-feedback";
 
 import { DesignCanvas, EMPTY_NODE_IDS } from "./design-canvas";
+import { DesignSavedEditingContext, DesignSavedEditingSession } from "./design-saved-editing";
 import { DesignDirectoryPill } from "./design-directory-pill";
 import { DesignFloatingPanel } from "./design-floating-panel";
 import { DesignInspector } from "./design-inspector";
@@ -58,6 +60,10 @@ import {
 
 const DESIGN_COLUMN_CLS =
   "relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-bg1";
+
+function isDesignTreeSelection(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest("[data-design-frame-row], [data-design-layer-id]");
+}
 
 /** ⌘\ / Ctrl+\ puts the floating panel away and brings it back. */
 function isDesignPanelToggleShortcut(event: KeyboardEvent): boolean {
@@ -140,6 +146,20 @@ export function DesignWorkspaceColumn({
   const ownerRevision = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.ownerRevision ?? 0 : 0);
   const pageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: pageSnapshot?.directoryId, pageId: activePageId, revision: ownerRevision } : undefined,
     [workspaceId, activePageId, pageSnapshot?.directoryId, ownerRevision]);
+  const savedEditingFolderRef = useRef(folder);
+  savedEditingFolderRef.current = folder;
+  const savedEditing = useMemo(() => {
+    return new DesignSavedEditingSession(() => surfaceActive && savedEditingFolderRef.current === folder && !!pageOwner && isCurrentDesignPageOwner(pageOwner));
+  }, [surfaceActive, folder, pageOwner]);
+  const pointerInsideRef = useRef(false);
+  const savedEditingState = useSyncExternalStore(savedEditing.subscribe, savedEditing.snapshot, savedEditing.snapshot);
+  useLayoutEffect(() => {
+    savedEditing.activate();
+    return () => savedEditing.retire();
+  }, [savedEditing]);
+  useLayoutEffect(() => workspaceId
+    ? savedEditing.registerDrain(() => waitForPendingDesignEdits(workspaceId))
+    : undefined, [savedEditing, workspaceId]);
   useLayoutEffect(() => {
     if (!surfaceActive || !workspaceId || !pageSnapshot || snapshot.loading || snapshot.refreshing || snapshot.error) return;
     bindDesignWorkspacePages(workspaceId, pageSnapshot.directoryId, pageSnapshot.pages!);
@@ -330,14 +350,59 @@ export function DesignWorkspaceColumn({
   // --- RENDER ---
 
   return (
+    <DesignSavedEditingContext.Provider value={savedEditing}>
     <section
       ref={sectionRef}
       {...(!surfaceActive ? { inert: "" } : {})}
       data-design-workspace-surface=""
       data-design-workspace-id={workspaceId ?? undefined}
       data-design-panel={panelVisible ? "open" : "closed"}
+      data-design-saved-editing={savedEditingState === 0 ? "viewing" : savedEditingState === 1 ? "preparing" : "ready"}
       className={DESIGN_COLUMN_CLS}
       aria-label="Design workspace"
+      onPointerMoveCapture={(event) => {
+        if (isDesignTreeSelection(event.target) || !(event.target instanceof Element) || event.target.closest("[data-design-agent-activity]") ||
+          !event.target.closest("[data-design-frame], [data-design-floating-panel]")) return;
+        pointerInsideRef.current = true;
+        savedEditing.enter();
+      }}
+      onPointerLeave={() => {
+        pointerInsideRef.current = false;
+        if (!sectionRef.current?.contains(document.activeElement)) savedEditing.leave();
+      }}
+      onFocusCapture={(event) => {
+        if (isDesignTreeSelection(event.target)) return;
+        if (!(event.target instanceof Element) || !event.target.closest("[data-design-agent-activity]")) savedEditing.enter();
+      }}
+      onBlurCapture={(event) => {
+        if (!pointerInsideRef.current && !event.currentTarget.contains(event.relatedTarget)) savedEditing.leave();
+      }}
+      onPointerDownCapture={(event) => {
+        if (event.button === 1 || isDesignTreeSelection(event.target)) return;
+        if (event.target instanceof Element && event.target.closest("[data-design-agent-activity]")) {
+          savedEditing.leave();
+          return;
+        }
+        if (savedEditing.enter()) return;
+        event.preventDefault();
+        event.stopPropagation();
+        toast.info("Saved source is still restoring. Try the edit again when the preview has cleared.");
+      }}
+      onClickCapture={(event) => {
+        if (isDesignTreeSelection(event.target)) return;
+        if (event.target instanceof Element && event.target.closest("[data-design-agent-activity]")) return;
+        if (savedEditing.enter()) return;
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onKeyDownCapture={(event) => {
+        if (isDesignTreeSelection(event.target) && ["Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        if (["Escape", "Tab", "Shift", "Control", "Alt", "Meta", " "].includes(event.key) || event.target instanceof Element && event.target.closest("[data-design-agent-activity]")) return;
+        if (savedEditing.enter()) return;
+        event.preventDefault();
+        event.stopPropagation();
+        toast.info("Saved source is still restoring. Try the edit again when the preview has cleared.");
+      }}
     >
       <DesignCanvas
         workspaceId={workspaceId}
@@ -412,5 +477,6 @@ export function DesignWorkspaceColumn({
         }
       />
     </section>
+    </DesignSavedEditingContext.Provider>
   );
 }

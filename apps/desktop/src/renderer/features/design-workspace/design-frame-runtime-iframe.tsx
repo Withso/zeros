@@ -39,6 +39,9 @@ import {
   type DesignAgentStylesheetPreview,
 } from "./state/design-agent-drafts";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
+import { useDesignSavedEditing } from "./design-saved-editing";
+import { designWorkspaceView } from "./state/design-workspace-ui";
+import { useDesignRuntimeStore } from "./state/design-runtime-store";
 
 // --- TYPES ---
 
@@ -143,7 +146,9 @@ function DesignFrameDocumentBuffer({
   onLoadFailure,
 }: DesignFrameDocumentBufferProps) {
   const nativeRuntime = useNativeRuntime();
+  const { session: savedEditingSession, state: savedEditingState } = useDesignSavedEditing();
   const connectionRef = useRef<DesignFrameRuntimeConnection | null>(null);
+  const [connectedRuntime, setConnectedRuntime] = useState<DesignFrameRuntimeConnection | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
   const handshakeTimerRef = useRef<number | null>(null);
@@ -159,6 +164,7 @@ function DesignFrameDocumentBuffer({
     autoCapture,
     theme,
     stylesheetPreviews,
+    savedEditingSession,
   });
   latestRef.current = {
     folder,
@@ -169,6 +175,7 @@ function DesignFrameDocumentBuffer({
     autoCapture,
     theme,
     stylesheetPreviews,
+    savedEditingSession,
   };
   // Stylesheet previews this document shows, per connection: a new document
   // generation starts from its own saved text.
@@ -178,6 +185,14 @@ function DesignFrameDocumentBuffer({
   }>({ connection: null, sheets: new Map() });
   const sheetSyncRef = useRef<Promise<void> | null>(null);
   const sheetSyncAgainRef = useRef(false);
+  const advisoryStylesSeenRef = useRef(false);
+  const savedPreparationRef = useRef<{
+    connection: DesignFrameRuntimeConnection;
+    sourceVersion: string;
+    theme: string | null;
+    session: NonNullable<typeof savedEditingSession>;
+    promise: Promise<void>;
+  } | null>(null);
   /** The document the next sync serves: a reload mid-sync is served next. */
   const sheetSyncTargetRef = useRef<DesignFrameRuntimeConnection | null>(null);
   // A watcher may load this generation before an older tool's success event.
@@ -203,13 +218,21 @@ function DesignFrameDocumentBuffer({
         do {
           sheetSyncAgainRef.current = false;
           const target = sheetSyncTargetRef.current;
-          if (!target || !target.supports("previewStylesheet")) continue;
+          if (!target || target !== connectionRef.current || !latestRef.current.runtimeActive ||
+            target.isActive?.() === false || !target.supports("previewStylesheet")) continue;
           if (appliedSheetsRef.current.connection !== target)
             appliedSheetsRef.current = { connection: target, sheets: new Map() };
           const applied = appliedSheetsRef.current.sheets;
-          const previews = latestRef.current.stylesheetPreviews;
+          const session = latestRef.current.savedEditingSession;
+          if (session && !session.isCurrent()) continue;
+          const saved = session?.editing === true;
+          const previews = saved ? new Map<string, DesignAgentStylesheetPreview>() : latestRef.current.stylesheetPreviews;
+          const current = () => target === connectionRef.current && target.isActive?.() !== false &&
+            latestRef.current.runtimeActive && latestRef.current.savedEditingSession === session &&
+            (!session || session.isCurrent()) && (session?.editing === true) === saved;
           try {
             for (const [file, preview] of previews) {
+              if (!current()) { sheetSyncAgainRef.current = true; break; }
               // Saved drafts linger for the activity chip. Replaying one into
               // a new document can overwrite a later native save permanently.
               const previous = applied.get(file);
@@ -219,23 +242,27 @@ function DesignFrameDocumentBuffer({
               ) {
                 if (previous?.draftId === preview.draftId) {
                   const result = await target.previewStylesheet(file, null);
-                  onSnapshot(result.snapshot);
                   applied.delete(file);
+                  if (current()) onSnapshot(result.snapshot);
                 }
                 continue;
               }
               if (applied.get(file)?.css !== preview.css) {
+                advisoryStylesSeenRef.current = true;
+                session?.requireNativePixels();
+                applied.set(file, preview);
                 const result = await target.previewStylesheet(file, preview.css);
-                onSnapshot(result.snapshot);
+                if (current()) onSnapshot(result.snapshot);
               }
               applied.set(file, preview);
             }
             for (const [file, preview] of [...applied]) {
+              if (!current()) { sheetSyncAgainRef.current = true; break; }
               if (previews.get(file)?.draftId === preview.draftId) continue;
-              applied.delete(file);
-              if (preview.saved) continue;
+              if (preview.saved && !saved) continue;
               const result = await target.previewStylesheet(file, null);
-              onSnapshot(result.snapshot);
+              applied.delete(file);
+              if (current()) onSnapshot(result.snapshot);
             }
           } catch {
             // A preview is advisory and a replaced document rejects it; the
@@ -250,6 +277,57 @@ function DesignFrameDocumentBuffer({
     },
     [inheritedSheetDrafts, onSnapshot],
   );
+  useLayoutEffect(() => {
+    if (!runtimeActive || !savedEditingSession) return;
+    if (advisoryStylesSeenRef.current) savedEditingSession.requireNativePixels();
+    return savedEditingSession.registerPreparation(() => {
+      const connection = connectionRef.current;
+      if (!connection) return;
+      const sourceVersion = connection.sourceVersion;
+      const preparedTheme = latestRef.current.theme;
+      const existing = savedPreparationRef.current;
+      if (existing?.connection === connection && existing.sourceVersion === sourceVersion && existing.theme === preparedTheme && existing.session === savedEditingSession)
+        return existing.promise;
+      if (!advisoryStylesSeenRef.current) return;
+      const assertCurrent = () => {
+        if (!savedEditingSession.isCurrent() || !savedEditingSession.editing ||
+          latestRef.current.savedEditingSession !== savedEditingSession ||
+          !latestRef.current.runtimeActive || connectionRef.current !== connection ||
+          latestRef.current.theme !== preparedTheme ||
+          connection.isActive?.() === false || connection.sourceVersion !== sourceVersion ||
+          latestRef.current.frame.sourceVersion !== sourceVersion)
+          throw new Error("Saved-pixel preparation was superseded.");
+      };
+      const promise = (async () => {
+        await syncStylesheetPreviews(connection);
+        assertCurrent();
+        if (appliedSheetsRef.current.sheets.size) throw new Error("The advisory stylesheet could not be restored.");
+        const snapshot = await connection.getSnapshot();
+        assertCurrent();
+        onSnapshot(snapshot);
+        await settleDesignSelectionDetails(workspaceId, frame.file, sourceVersion);
+        assertCurrent();
+        const selectedIds = () => designWorkspaceView(workspaceId).selectedTargets
+          .filter((target) => target.frame === frame.file && target.nodeId)
+          .map((target) => target.nodeId!);
+        const nodeIds = selectedIds();
+        const details = await Promise.all(nodeIds.map((nodeId) => connection.getNodeDetails(nodeId)));
+        const confirmed = await connection.getSnapshot();
+        assertCurrent();
+        if (confirmed.revision !== snapshot.revision || JSON.stringify(selectedIds()) !== JSON.stringify(nodeIds))
+          throw new Error("The selected geometry changed while restoring saved pixels.");
+        for (const detail of details)
+          useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, latestRef.current.folder, frame.file, detail, sourceVersion);
+      })();
+      const preparation = { connection, sourceVersion, theme: preparedTheme, session: savedEditingSession, promise };
+      savedPreparationRef.current = preparation;
+      const clear = () => {
+        if (savedPreparationRef.current === preparation) savedPreparationRef.current = null;
+      };
+      void promise.then(clear, clear);
+      return promise;
+    });
+  }, [connectedRuntime, frame.file, frame.sourceVersion, onSnapshot, ready, runtimeActive, savedEditingSession, syncStylesheetPreviews, theme, workspaceId]);
   const protocolSource = nativeRuntime.ready
     ? designProtocolFrameUrl({
         workspaceId,
@@ -379,6 +457,7 @@ function DesignFrameDocumentBuffer({
       },
     );
     connectionRef.current = connection;
+    setConnectedRuntime(connection);
     onConnection(documentSourceVersion, connection);
     watchHandshake(connection);
   }, [
@@ -449,7 +528,7 @@ function DesignFrameDocumentBuffer({
     const connection = connectionRef.current;
     // Before its handshake a connection supports nothing; readiness syncs.
     if (connection) void syncStylesheetPreviews(connection);
-  }, [runtimeActive, stylesheetPreviews, syncStylesheetPreviews]);
+  }, [runtimeActive, savedEditingState, stylesheetPreviews, syncStylesheetPreviews]);
 
   const fallback = useDesignFrameDocument(
     workspaceId,

@@ -168,6 +168,74 @@ describe("cloud Design checkout round trips", () => {
     await rm(temporary, { recursive: true, force: true });
   });
 
+  it("admits measured movement only for its exact source and scene geometry through the cloud bridge", async () => {
+    const { bridge } = client("device-a");
+    const { frame } = await initialize(bridge);
+    const initial = (await bridgeDesignSnapshot(bridge, key)).frames.find(
+      (candidate) => candidate.file === frame.file,
+    )!;
+    const geometry = {
+      x: initial.x,
+      y: initial.y,
+      w: initial.width,
+      h: initial.height,
+      z: initial.z,
+    };
+    const opened = await bridgeDesignFoundationOpen(bridge, key, frame.file);
+    const transaction = (revision: string, x: number): DesignTransaction => ({
+      ...move(frame.file, revision, x),
+      operations: [
+        {
+          operationId: "move",
+          type: "frame.set-geometry",
+          frame: frame.file,
+          geometry: {
+            x,
+            y: geometry.y,
+            width: geometry.w,
+            height: geometry.h,
+            z: geometry.z,
+          },
+        },
+      ],
+    });
+    const moved = await bridgeDesignApplyTransaction(
+      bridge,
+      key,
+      frame.file,
+      transaction(opened.summary.revision, geometry.x + 1),
+      false,
+      { sourceVersion: initial.sourceVersion, geometry },
+    );
+    expect(moved.result?.receipt.status).toBe("applied");
+    const fresh = await bridgeDesignFoundationOpen(bridge, key, frame.file);
+    await expect(
+      bridgeDesignApplyTransaction(
+        bridge,
+        key,
+        frame.file,
+        transaction(fresh.summary.revision, geometry.x + 8),
+        false,
+        { sourceVersion: initial.sourceVersion, geometry },
+      ),
+    ).rejects.toThrow(/geometry changed/);
+    await expect(
+      bridgeDesignApplyTransaction(
+        bridge,
+        key,
+        frame.file,
+        transaction(fresh.summary.revision, geometry.x + 8),
+        false,
+        { sourceVersion: "f".repeat(24) },
+      ),
+    ).rejects.toThrow(/source.*changed/);
+    expect(
+      (await bridgeDesignSnapshot(bridge, key)).frames.find(
+        (candidate) => candidate.file === frame.file,
+      )?.x,
+    ).toBe(geometry.x + 1);
+  });
+
   it("discovers, initializes, edits and commits the VM checkout through the cloud bridge", async () => {
     const { bridge } = client("device-a");
     const head = git("rev-parse", "HEAD");

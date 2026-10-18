@@ -19,12 +19,12 @@ import type { CanvasDocument } from "./document-model";
 import { readCanvas } from "./document-storage";
 import { frameStyleSources } from "./style-sources";
 import { designTailwindVariables } from "./style-tailwind";
-import { inspectSafeRegularFile } from "./safe-files";
+import { inspectSafeRegularFile, readSafeRegularFile } from "./safe-files";
+import { designDependencyFingerprint, observeDesignFileDependency } from "./dependency-read-set";
 import {
   MAX_ASSET_BYTES,
   DESIGN_ASSET_MIME_TYPES,
   DESIGN_FONT_MIME_TYPES,
-  readSafeDesignText,
   readSafeDesignBuffer,
   safeLocalReference,
 } from "./assets";
@@ -70,7 +70,7 @@ interface PreparedStylesheet {
 }
 interface StylesheetCacheEntry {
   /** Each file the result depends on, with its size and mtime before reading. */
-  dependencies: Array<{ file: string; signature: string }>;
+  dependencies: Array<{ file: string; signature: string; fingerprint: string | null; limit: number }>;
   prepared: PreparedStylesheet;
 }
 const MAX_PREPARED_STYLESHEETS = 64;
@@ -119,6 +119,8 @@ async function prepareStylesheet(
         entry.dependencies.map(({ file }) => fileSignature(directory, file)),
       );
       if (current.every((signature, index) => signature === entry.dependencies[index]!.signature)) {
+        for (const dependency of entry.dependencies)
+          observeDesignFileDependency(directory, { target: dependency.file, limit: dependency.limit, fingerprint: dependency.fingerprint });
         preparedStylesheetStats.hits += 1;
         preparedStylesheets.delete(key);
         preparedStylesheets.set(key, entry);
@@ -131,15 +133,19 @@ async function prepareStylesheet(
   // Signatures are taken before each read, so a change during preparation
   // can only make the cached entry miss later, never serve stale content.
   const dependencies: StylesheetCacheEntry["dependencies"] = [];
-  if (cacheable) dependencies.push({ file: resolved, signature: await fileSignature(directory, resolved) });
-  const css = sources ? (sources[cssFile] ?? null) : await readSafeDesignText(directory, resolved);
+  const signature = cacheable ? await fileSignature(directory, resolved) : "";
+  const file = sources ? null : await readSafeRegularFile(directory, resolved, MAX_DESIGN_TEXT_BYTES);
+  if (cacheable) dependencies.push({ file: resolved, signature, fingerprint: designDependencyFingerprint(file?.body ?? null), limit: MAX_DESIGN_TEXT_BYTES });
+  const css = sources ? (sources[cssFile] ?? null) : file?.body.toString("utf8") ?? null;
   if (css === null) return null;
   let rebased = css;
   try { rebased = rebaseDesignCssReferences(css, cssFile, entryFile); }
   catch { /* Lint reports malformed authored CSS; keep its repair preview. */ }
   const reader: DesignRenderAssetReader = async (assetDirectory, asset) => {
-    if (cacheable) dependencies.push({ file: asset, signature: await fileSignature(directory, asset) });
-    return (readAsset ?? readSafeDesignBuffer)(assetDirectory, asset);
+    const signature = cacheable ? await fileSignature(directory, asset) : "";
+    const body = await (readAsset ?? readSafeDesignBuffer)(assetDirectory, asset);
+    if (cacheable) dependencies.push({ file: asset, signature, fingerprint: designDependencyFingerprint(body), limit: MAX_ASSET_BYTES });
+    return body;
   };
   const budget = { inlineAssetBytes: 0 };
   // Escape before asset inlining: postcss would otherwise rewrite a comment's

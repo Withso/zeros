@@ -152,10 +152,13 @@ import {
   flattenDesignLayerTree,
 } from "./design-layer-tree";
 import { startDesignLayoutDrag } from "./design-layout-drag-gesture";
+import { DESIGN_REPARENT_HYSTERESIS_PIXELS, designMovementDelta, designNodeMovementStyles, designNudgeStep } from "./design-movement-geometry";
+import { designSelectionMutationTargets } from "./design-selected-targets";
 import {
   DESIGN_SPACING_DRAG_THRESHOLD,
   designConstraintGuidesApply,
   designConstraintReferenceRect,
+  designConstraintReferenceGeometry,
   designGapValue,
   designLocalAxisCursor,
   designLocalAxisDelta,
@@ -165,7 +168,7 @@ import {
   type DesignGapProperty,
   type DesignSizeBadgeMode,
 } from "./design-layout-tools";
-import { transferDesignLayerOnCanvas } from "./design-layout-transfer";
+import { designCanvasDropTargetFrame, transferDesignLayerOnCanvas } from "./design-layout-transfer";
 import {
   designLayoutTransform,
   preserveDesignLayoutPins,
@@ -189,6 +192,7 @@ import { CloudDesignImageUpload } from "./cloud-design-image-upload";
 import { designRuntimeLayerLabel } from "./design-layer-label";
 import { useDesignWorkspaceDisclosure } from "./state/design-layer-disclosure";
 import {
+  clearDesignLivePreview,
   designLivePreviewValue,
   publishDesignGestureLivePreview,
 } from "./state/design-live-preview";
@@ -247,6 +251,7 @@ import { useDesignFoundation } from "./state/use-design-foundation";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 import { DesignFrameRenderSurface } from "./design-frame-render-surface";
+import { useDesignSavedEditing } from "./design-saved-editing";
 import {
   DesignAgentActivityChip,
   DesignAgentDraftFrameOverlay,
@@ -288,6 +293,11 @@ import {
 } from "./design-workspace-types";
 
 type FrameGestureMode = "move" | DesignResizeHandle;
+type FrameGeometryPreview = {
+  geometry: DesignFrameGeometryWire;
+  settled: boolean;
+  commit?: Promise<DesignCanvasFrameWire | undefined>;
+};
 type DesignCanvasTool = "select" | "frame" | "text";
 
 interface CanvasHitStackMenu {
@@ -807,15 +817,7 @@ export function DesignCanvas({
   const viewportRef = useRef<HTMLDivElement | null>(null);
   // Direct transform target keeps panning gesture paints out of React.
   const worldRef = useRef<HTMLDivElement | null>(null);
-  const frameGeometryPreviewsRef = useRef(
-    new Map<
-      string,
-      {
-        geometry: DesignFrameGeometryWire;
-        settled: boolean;
-      }
-    >(),
-  );
+  const frameGeometryPreviewsRef = useRef(new Map<string, FrameGeometryPreview>());
   const marqueeRef = useRef<HTMLDivElement | null>(null);
   const creationDraftRef = useRef<HTMLDivElement | null>(null);
   const verticalGuideRef = useRef<HTMLDivElement | null>(null);
@@ -947,17 +949,22 @@ export function DesignCanvas({
   const [selectionOverlaySuppressed, setSelectionOverlaySuppressed] =
     useState(false);
   const nudgeGestureRef = useRef<
-    | {
+    | (({
         mode: "move";
         frame: DesignCanvasFrameWire;
         selectionKey: string;
         nodes: Array<{
           nodeId: string;
           details: DesignRuntimeNodeDetails;
-          position: string;
-          left: number;
-          top: number;
         }>;
+        dx: number;
+        dy: number;
+      }
+    | {
+        mode: "frame";
+        frame: DesignCanvasFrameWire;
+        element: HTMLElement;
+        preview: { geometry: DesignFrameGeometryWire; settled: boolean };
         dx: number;
         dy: number;
       }
@@ -970,9 +977,35 @@ export function DesignCanvas({
         height: number;
         dw: number;
         dh: number;
-      }
+      }) & {
+        owner: ReturnType<typeof captureDesignPageOwner>;
+        selectionEvent: number | undefined;
+        lifetime: number;
+        canvasLifetime: number;
+        retired: boolean;
+        runtime: ReturnType<typeof designFrameRuntime>;
+        runtimeRevision: number | undefined;
+        theme: string | null;
+        pending?: Promise<unknown>;
+      })
     | null
   >(null);
+  const nudgeLifetimeRef = useRef(0);
+  const { session: savedEditingSession, state: savedEditingState, nativePixels } = useDesignSavedEditing();
+  const canvasLifetimeRef = useRef(0);
+  const nudgeCommitRef = useRef<Promise<void> | null>(null);
+  const [nudgeCommitVersion, setNudgeCommitVersion] = useState(0);
+  const queuedNudgeRef = useRef<{
+    owner: ReturnType<typeof captureDesignPageOwner>;
+    frame: string;
+    selectionEvent: number | undefined;
+    lifetime: number;
+    theme: string | null;
+    sourceVersion?: string;
+    dx: number;
+    dy: number;
+    released: boolean;
+  } | null>(null);
   // Inline text drafts are ephemeral and remain owned by their exact source key.
   const [inlineTextEdit, setInlineTextEdit] = useState<InlineTextEdit | null>(
     null,
@@ -2310,15 +2343,65 @@ export function DesignCanvas({
 
   const nudgeSelectedNode = useCallback(
     (deltaX: number, deltaY: number) => {
-      if (!workspaceId || !selectedFrame || !selectedNodeDetails) return false;
-      const pixel = (value: string | undefined) => {
-        const match = /^(-?\d+(?:\.\d+)?)px$/.exec(value?.trim() ?? "");
-        return match?.[1] ? Number(match[1]) : 0;
-      };
-      const topLevelIds = designLayerTopLevelSelectionIds(
-        selectedRuntimeTree,
-        view.selectedNodeIds,
-      );
+      if (!workspaceId || !selectedFrame) return false;
+      if (gestureCancelRef.current) return true;
+      const selection = designWorkspaceView(workspaceId);
+      if (nudgeCommitRef.current || queuedNudgeRef.current) {
+        const previous = queuedNudgeRef.current;
+        const queued = previous && previous.selectionEvent === selection.selectionEvent && previous.lifetime === nudgeLifetimeRef.current && previous.frame === selectedFrame.file && previous.theme === selection.activeTheme && isCurrentDesignPageOwner(previous.owner) ? previous : {
+          owner: captureDesignPageOwner(workspaceId), frame: selectedFrame.file,
+          selectionEvent: selection.selectionEvent, lifetime: nudgeLifetimeRef.current, theme: selection.activeTheme,
+          dx: 0, dy: 0, released: false,
+        };
+        queued.dx += deltaX;
+        queued.dy += deltaY;
+        queued.released = false;
+        queuedNudgeRef.current = queued;
+        return true;
+      }
+      const roots = designSelectionMutationTargets(selection.selectedTargets, new Map([[selectedFrame.file, selectedRuntimeTree]]));
+      if (!roots.length) return false;
+      if (roots.some((target) => target.frame !== selectedFrame.file)) {
+        toast.error("Move layers in one scene at a time", { description: "Cross-scene group movement is not yet atomic; nothing was moved." });
+        return true;
+      }
+      const runtime = designFrameRuntime(workspaceId, selectedFrame.file);
+      if (!runtime || runtime.sourceVersion !== selectedFrame.sourceVersion) {
+        toast.error("Wait for the selected scene to finish loading");
+        return true;
+      }
+      const previous = nudgeGestureRef.current;
+      if (previous && (previous.frame.sourceVersion !== selectedFrame.sourceVersion || !isCurrentDesignPageOwner(previous.owner) || previous.selectionEvent !== selection.selectionEvent)) {
+        previous.retired = true;
+        return true;
+      }
+      const runtimeState = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[selectedFrame.file];
+      const context = { owner: captureDesignPageOwner(workspaceId), selectionEvent: selection.selectionEvent, lifetime: nudgeLifetimeRef.current, canvasLifetime: canvasLifetimeRef.current, retired: false, runtime, runtimeRevision: runtimeState?.snapshot?.revision, theme: selection.activeTheme };
+      if (roots.some((target) => !target.nodeId)) {
+        const element = viewportRef.current?.querySelector<HTMLElement>(`[data-design-frame="${CSS.escape(selectedFrame.file)}"]`);
+        if (!element) return false;
+        const current = nudgeGestureRef.current;
+        const gesture: NonNullable<typeof nudgeGestureRef.current> = current?.mode === "frame" && current.frame.file === selectedFrame.file && current.selectionEvent === selection.selectionEvent
+          ? current : { mode: "frame" as const, frame: selectedFrame, element, preview: { geometry: frameGeometry(selectedFrame), settled: false }, dx: 0, dy: 0, ...context };
+        gesture.dx += deltaX;
+        gesture.dy += deltaY;
+        gesture.preview.geometry = { ...frameGeometry(gesture.frame), x: Math.max(-DESIGN_FRAME_COORDINATE_LIMIT, Math.min(DESIGN_FRAME_COORDINATE_LIMIT, gesture.frame.x + gesture.dx)), y: Math.max(-DESIGN_FRAME_COORDINATE_LIMIT, Math.min(DESIGN_FRAME_COORDINATE_LIMIT, gesture.frame.y + gesture.dy)) };
+        frameGeometryPreviewsRef.current.set(`${canvasDocumentOwner}\0${gesture.frame.file}`, gesture.preview);
+        paintFrameGeometry(element, gesture.preview.geometry);
+        nudgeGestureRef.current = gesture;
+        return true;
+      }
+      if (!selectedNodeDetails) return false;
+      if (roots.length > 1) {
+        const known = new Set<string>();
+        const pending = [...selectedRuntimeTree];
+        while (pending.length) { const node = pending.pop()!; known.add(node.oid); pending.push(...node.children); }
+        if (runtimeState?.sourceVersion !== selectedFrame.sourceVersion || selection.selectedTargets.some((target) => target.nodeId && !known.has(target.nodeId))) {
+          toast.error("The selected ancestry is not ready", { description: "Nothing was moved; select fewer layers or wait for this scene to refresh." });
+          return true;
+        }
+      }
+      const topLevelIds = roots.flatMap((target) => target.nodeId ? [target.nodeId] : []);
       const detailsById = new Map(
         selectedNodeDetailsList.map((details) => [details.oid, details]),
       );
@@ -2329,23 +2412,21 @@ export function DesignCanvas({
               {
                 nodeId,
                 details,
-                position:
-                  details.styles.position === "static"
-                    ? "relative"
-                    : details.styles.position || "relative",
-                left: pixel(details.styles.left),
-                top: pixel(details.styles.top),
               },
             ]
           : [];
       });
-      if (nodes.length === 0) return false;
+      if (nodes.length !== topLevelIds.length || nodes.some((node) => node.details.sourceVersion !== selectedFrame.sourceVersion)) {
+        toast.error("Wait for the selected layers to finish loading", { description: "Nothing was moved." });
+        return true;
+      }
       const selectionKey = nodes.map((node) => node.nodeId).join("\u0000");
       const current = nudgeGestureRef.current;
-      const gesture =
+      const gesture: NonNullable<typeof nudgeGestureRef.current> =
         current?.mode === "move" &&
         current.frame.file === selectedFrame.file &&
-        current.selectionKey === selectionKey
+        current.selectionKey === selectionKey &&
+        current.selectionEvent === selection.selectionEvent
           ? current
           : {
               mode: "move" as const,
@@ -2354,26 +2435,31 @@ export function DesignCanvas({
               nodes,
               dx: 0,
               dy: 0,
+              ...context,
             };
       gesture.dx += deltaX;
       gesture.dy += deltaY;
+      let updates;
+      try {
+        updates = gesture.nodes.map((node) => ({ nodeId: node.nodeId, styles: designNodeMovementStyles(node.details, { x: gesture.dx, y: gesture.dy }) }));
+      } catch (error) {
+        toast.error("This selection cannot be moved safely", { description: errorMessage(error) });
+        return true;
+      }
       nudgeGestureRef.current = gesture;
       setSelectionOverlaySuppressed(true);
-      void Promise.all(
-        gesture.nodes.map((node) =>
+      gesture.pending = Promise.all([
+        gesture.pending,
+        ...updates.map((node) =>
           previewDesignNodeStylesTransient({
             workspaceId,
             frame: gesture.frame.file,
             sourceVersion: gesture.frame.sourceVersion,
             nodeId: node.nodeId,
-            styles: preserveDesignLayoutPins(node.details, {
-              position: node.position,
-              left: `${Math.round(node.left + gesture.dx)}px`,
-              top: `${Math.round(node.top + gesture.dy)}px`,
-            }),
+            styles: node.styles,
           }),
         ),
-      ).catch(() => {});
+      ]).catch(() => {});
       return true;
     },
     [
@@ -2381,7 +2467,7 @@ export function DesignCanvas({
       selectedNodeDetails,
       selectedNodeDetailsList,
       selectedRuntimeTree,
-      view.selectedNodeIds,
+      canvasDocumentOwner,
       workspaceId,
     ],
   );
@@ -2397,7 +2483,7 @@ export function DesignCanvas({
         return false;
       }
       const current = nudgeGestureRef.current;
-      const gesture =
+      const gesture: NonNullable<typeof nudgeGestureRef.current> =
         current?.mode === "resize" &&
         current.frame.file === selectedFrame.file &&
         current.nodeId === selectedNodeDetails.oid
@@ -2417,12 +2503,20 @@ export function DesignCanvas({
               ),
               dw: 0,
               dh: 0,
+              owner: captureDesignPageOwner(workspaceId),
+              selectionEvent: designWorkspaceView(workspaceId).selectionEvent,
+              lifetime: nudgeLifetimeRef.current,
+              canvasLifetime: canvasLifetimeRef.current,
+              retired: false,
+              runtime: designFrameRuntime(workspaceId, selectedFrame.file),
+              runtimeRevision: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[selectedFrame.file]?.snapshot?.revision,
+              theme: designWorkspaceView(workspaceId).activeTheme,
             };
       gesture.dw += deltaWidth;
       gesture.dh += deltaHeight;
       nudgeGestureRef.current = gesture;
       setSelectionOverlaySuppressed(true);
-      void previewDesignNodeStylesTransient({
+      gesture.pending = previewDesignNodeStylesTransient({
         workspaceId,
         frame: gesture.frame.file,
         sourceVersion: gesture.frame.sourceVersion,
@@ -2442,74 +2536,88 @@ export function DesignCanvas({
     ],
   );
 
-  const finishNodeNudge = useCallback(() => {
+  const finishNodeNudge = useCallback((cancelled = false) => {
+    if (cancelled) queuedNudgeRef.current = null;
+    else if (queuedNudgeRef.current) queuedNudgeRef.current.released = true;
     const gesture = nudgeGestureRef.current;
     nudgeGestureRef.current = null;
     if (!gesture || !workspaceId) {
       setSelectionOverlaySuppressed(false);
       return;
     }
-    const updates =
-      gesture.mode === "move"
-        ? gesture.nodes.map((node) => ({
-            nodeId: node.nodeId,
-            styles: preserveDesignLayoutPins(node.details, {
-              position: node.position,
-              left: `${Math.round(node.left + gesture.dx)}px`,
-              top: `${Math.round(node.top + gesture.dy)}px`,
-            }),
-          }))
-        : [
-            {
-              nodeId: gesture.nodeId,
-              styles: preserveDesignLayoutPins(gesture.details, {
-                width: `${Math.max(1, Math.round(gesture.width + gesture.dw))}px`,
-                height: `${Math.max(1, Math.round(gesture.height + gesture.dh))}px`,
-              }),
-            },
-          ];
-    const commit =
-      updates.length === 1
-        ? updateDesignNodeStylesCached(workspaceId, {
-            frame: gesture.frame.file,
-            nodeId: updates[0]!.nodeId,
-            sourceVersion: gesture.frame.sourceVersion,
-            styles: updates[0]!.styles,
-          })
-        : applyDesignEditCached(workspaceId, gesture.frame, {
-            schemaVersion: 1,
-            transactionId: `desktop:${crypto.randomUUID()}`,
-            actor: { kind: "human", id: "desktop" },
-            intent: `Move ${updates.length} selected layers`,
-            createdAt: Date.now(),
-            operations: updates.map((update) => ({
-              operationId: `move:${crypto.randomUUID()}`,
-              type: "node.set-styles" as const,
-              nodeId: update.nodeId,
-              styles: update.styles,
-              scope: "auto" as const,
-              responsiveContext: "base",
-              stateContext: "default",
-            })),
-          });
-    void commit
-      .catch((error) => {
-        void Promise.all(
-          updates.map((update) =>
-            clearDesignNodeStylePreviewTransient({
-              workspaceId,
-              frame: gesture.frame.file,
-              sourceVersion: gesture.frame.sourceVersion,
-              nodeId: update.nodeId,
-            }),
-          ),
-        ).catch(() => {});
-        toast.error("Couldn't nudge the design element", {
-          description: errorMessage(error),
-        });
-      })
-      .finally(() => setSelectionOverlaySuppressed(false));
-  }, [workspaceId]);
+    gesture.retired ||= cancelled || gesture.lifetime !== nudgeLifetimeRef.current || designWorkspaceView(workspaceId).selectionEvent !== gesture.selectionEvent;
+    const isCurrent = () => !gesture.retired && gesture.canvasLifetime === canvasLifetimeRef.current &&
+      isCurrentDesignPageOwner(gesture.owner) &&
+      designWorkspaceView(workspaceId).activeTheme === gesture.theme &&
+      gesture.runtime?.isActive?.() === true &&
+      designFrameRuntime(workspaceId, gesture.frame.file) === gesture.runtime &&
+      useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[gesture.frame.file]?.snapshot?.revision === gesture.runtimeRevision;
+    const frameKey = `${canvasDocumentOwner}\0${gesture.frame.file}`;
+    const restore = async () => {
+      if (gesture.mode === "frame") {
+        if (frameGeometryPreviewsRef.current.get(frameKey) !== gesture.preview) return;
+        frameGeometryPreviewsRef.current.delete(frameKey);
+        const confirmed = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((frame) => frame.file === gesture.frame.file);
+        if (gesture.element.isConnected && isCurrentDesignPageOwner(gesture.owner)) paintFrameGeometry(gesture.element, frameGeometry(confirmed ?? gesture.frame));
+      } else if (!nudgeGestureRef.current && !gestureCancelRef.current && gesture.runtime &&
+        designFrameRuntime(workspaceId, gesture.frame.file) === gesture.runtime && gesture.runtime.sourceVersion === gesture.frame.sourceVersion) {
+        const ids = gesture.mode === "move" ? gesture.nodes.map((node) => node.nodeId) : [gesture.nodeId];
+        await Promise.all(ids.map((nodeId) => {
+          clearDesignLivePreview(workspaceId, gesture.frame.file, nodeId);
+          return gesture.runtime!.clearPreviewStyles(nodeId).catch(() => {});
+        }));
+      }
+    };
+    const pending = (async () => {
+      await gesture.pending;
+      if (!isCurrent() || (gesture.mode !== "resize" && gesture.dx === 0 && gesture.dy === 0)) {
+        if (isCurrent() && queuedNudgeRef.current) queuedNudgeRef.current.sourceVersion = gesture.frame.sourceVersion;
+        await restore();
+        return;
+      }
+      const updates = gesture.mode === "frame" ? [] : gesture.mode === "move"
+        ? gesture.nodes.map((node) => ({ nodeId: node.nodeId, styles: designNodeMovementStyles(node.details, { x: gesture.dx, y: gesture.dy }) }))
+        : [{ nodeId: gesture.nodeId, styles: preserveDesignLayoutPins(gesture.details, { width: `${Math.max(1, Math.round(gesture.width + gesture.dw))}px`, height: `${Math.max(1, Math.round(gesture.height + gesture.dh))}px` }) }];
+      const operations: DesignOperation[] = gesture.mode === "frame"
+        ? [{ operationId: crypto.randomUUID(), type: "frame.set-geometry", frame: gesture.frame.file, geometry: { x: gesture.preview.geometry.x, y: gesture.preview.geometry.y, width: gesture.preview.geometry.w, height: gesture.preview.geometry.h, z: gesture.preview.geometry.z } }]
+        : updates.map((update) => ({ operationId: crypto.randomUUID(), type: "node.set-styles", nodeId: update.nodeId, styles: update.styles, scope: "auto", responsiveContext: "base", stateContext: "default" }));
+      const result = await applyDesignEditCached(workspaceId, gesture.frame, { schemaVersion: 1, transactionId: `desktop:${crypto.randomUUID()}`, actor: { kind: "human", id: "desktop" }, intent: gesture.mode === "frame" ? "Move canvas frame" : `Move ${updates.length} selected layers`, createdAt: Date.now(), operations }, {
+        movementGuard: { sourceVersion: gesture.frame.sourceVersion, geometry: frameGeometry(gesture.frame) },
+        isCurrent,
+      });
+      const queued = queuedNudgeRef.current;
+      if (queued) queued.sourceVersion = result.snapshot?.frames.find((frame) => frame.file === queued.frame)?.sourceVersion;
+      if (gesture.mode === "frame") await restore();
+    })().catch(async (error) => {
+      queuedNudgeRef.current = null;
+      await restore();
+      if (isCurrent()) toast.error("Couldn't move the selection", { description: errorMessage(error) });
+    }).finally(() => {
+      if (nudgeCommitRef.current === pending) nudgeCommitRef.current = null;
+      if (!nudgeGestureRef.current) setSelectionOverlaySuppressed(false);
+      setNudgeCommitVersion((version) => version + 1);
+    });
+    nudgeCommitRef.current = pending;
+    savedEditingSession?.retain(pending);
+  }, [workspaceId, canvasDocumentOwner, savedEditingSession]);
+
+  useEffect(() => {
+    const queued = queuedNudgeRef.current;
+    if (!queued || nudgeCommitRef.current || !workspaceId) return;
+    const selection = designWorkspaceView(workspaceId);
+    if (!active || !isCurrentDesignPageOwner(queued.owner) || queued.lifetime !== nudgeLifetimeRef.current ||
+      queued.selectionEvent !== selection.selectionEvent || queued.theme !== selection.activeTheme ||
+      !queued.sourceVersion || selectedFrame?.file !== queued.frame || selectedFrame.sourceVersion !== queued.sourceVersion) {
+      queuedNudgeRef.current = null;
+      return;
+    }
+    if (designFrameRuntime(workspaceId, queued.frame)?.sourceVersion !== queued.sourceVersion ||
+      (selection.selectedTargets.some((target) => target.nodeId) &&
+        selection.selectedTargets.some((target) => target.nodeId && !selectedNodeDetailsList.some((details) => details.oid === target.nodeId && details.sourceVersion === queued.sourceVersion)))) return;
+    queuedNudgeRef.current = null;
+    nudgeSelectedNode(queued.dx, queued.dy);
+    if (queued.released) finishNodeNudge();
+  }, [active, workspaceId, nudgeCommitVersion, selectedFrame, selectedNodeDetailsList, nudgeSelectedNode, finishNodeNudge]);
 
   /** Move/resize previews paint one node; release publishes one engine write. */
   const startFrameGesture = useCallback(
@@ -2532,24 +2640,46 @@ export function DesignCanvas({
       event.stopPropagation();
       // Labels move the whole frame; body drags retain scoped marquee.
       viewportRef.current?.focus({ preventScroll: true });
+      gestureCancelRef.current?.();
       if (event.shiftKey && mode === "move") {
         publishSelection(frame, { selected: true, reveal: true, additive: true });
         return;
       }
-      publishSelection(frame, { selected: true, reveal: true });
+      const currentSelection = designWorkspaceView(workspaceId);
+      const selectedScene = currentSelection.selectedTargets.some((target) => target.frame === frame.file && !target.nodeId);
+      if (mode === "move" && selectedScene && currentSelection.selectedTargets.some((target) => target.frame !== frame.file)) {
+        toast.error("Move one scene at a time", { description: "Cross-scene group movement is not yet atomic; nothing was moved." });
+        return;
+      }
+      if (selectedScene) useDesignWorkspaceUiStore.getState().setSelectedTargets(workspaceId, currentSelection.selectedTargets, { activeFrame: frame.file });
+      else publishSelection(frame, { selected: true, reveal: true });
       const element = event.currentTarget.closest<HTMLElement>(
         "[data-design-frame]",
       );
       if (!element) return;
       const previewKey = `${canvasDocumentOwner}\0${frame.file}`;
+      const pageOwner = captureDesignPageOwner(workspaceId);
+      const selectionEvent = designWorkspaceView(workspaceId).selectionEvent;
+      const lifetime = ++nudgeLifetimeRef.current;
+      const canvasLifetime = canvasLifetimeRef.current;
+      const theme = designWorkspaceView(workspaceId).activeTheme;
+      let completed = false;
       const ownerIsCurrent = () =>
         canvasDocumentOwnerRef.current === canvasDocumentOwner &&
-        designWorkspaceView(workspaceId).directoryId === canvasDirectoryId;
+        designWorkspaceView(workspaceId).directoryId === canvasDirectoryId &&
+        isCurrentDesignPageOwner(pageOwner) && canvasLifetimeRef.current === canvasLifetime &&
+        designWorkspaceView(workspaceId).activeTheme === theme &&
+        (completed || (nudgeLifetimeRef.current === lifetime &&
+          designWorkspaceView(workspaceId).selectionEvent === selectionEvent));
       const previousPreview = frameGeometryPreviewsRef.current.get(previewKey);
       const start = previousPreview?.geometry ?? frameGeometry(frame);
-      const preview = { geometry: start, settled: false };
+      const preview: FrameGeometryPreview = { geometry: start, settled: false };
       const startX = event.clientX;
       const startY = event.clientY;
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      const startWorld = designCanvasPointFromClient({ x: startX, y: startY }, viewport.getBoundingClientRect(), wheelViewportRef.current ?? designWorkspaceView(workspaceId));
+      const grab = { x: startWorld.x - start.x, y: startWorld.y - start.y };
       let latest = start;
       const startRect = {
         x: start.x,
@@ -2654,8 +2784,9 @@ export function DesignCanvas({
         // A trackpad pinch repaints the camera up to 80ms before the store
         // learns the new zoom, so travel divides by what is on screen now.
         const zoom = liveDesignZoom();
-        const dx = (pointerEvent.clientX - startX) / zoom;
-        const dy = (pointerEvent.clientY - startY) / zoom;
+        const delta = designMovementDelta({ x: pointerEvent.clientX, y: pointerEvent.clientY }, viewport.getBoundingClientRect(), wheelViewportRef.current ?? designWorkspaceView(workspaceId), start, grab);
+        const dx = delta.x;
+        const dy = delta.y;
         if (!moved && Math.hypot(dx, dy) < 3 / zoom) return;
         moved = true;
         if (mode === "move") document.body.style.cursor = "grabbing";
@@ -2759,15 +2890,25 @@ export function DesignCanvas({
           return;
         }
         const persist = async () => {
+          const acknowledgedFrame = previousPreview?.commit
+            ? await previousPreview.commit
+            : frame;
+          if (!acknowledgedFrame) throw new Error("The preceding move removed this frame.");
+          if (!ownerIsCurrent()) return acknowledgedFrame;
           const root =
             useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
               frame.file
             ]?.snapshot?.frame;
+          const currentFrames = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ?? snapshot?.frames ?? [];
           if (
             mode === "move" &&
             folder &&
             root?.oid &&
-            !root.oid.startsWith("::")
+            !root.oid.startsWith("::") &&
+            designWorkspaceView(workspaceId).selectedTargets.length === 1 &&
+            designCanvasDropTargetFrame(frame.file, currentFrames, {
+              x: latest.x, y: latest.y, width: root.rect.width, height: root.rect.height,
+            })
           ) {
             const presentation = createDesignDragPresentation(
               workspaceId,
@@ -2780,25 +2921,37 @@ export function DesignCanvas({
               y: latest.y - frame.y,
             });
             try {
+              const measured = await designFrameRuntime(workspaceId, frame.file)?.getNodeDetails(root.oid, undefined, { relocation: true });
+              if (!ownerIsCurrent()) return acknowledgedFrame;
               if (
                 await transferDesignLayerOnCanvas({
                   workspaceId,
                   folder,
-                  frame,
-                  details: root,
-                  frames: snapshot?.frames ?? [],
+                  frame: acknowledgedFrame,
+                  details: measured ?? root,
+                  frames: currentFrames,
                   origin: { x: latest.x, y: latest.y },
                   detach: false,
+                  requireRelocation: true,
+                  isCurrent: ownerIsCurrent,
                   presented: (target) =>
                     presentation?.handoff(target) ?? Promise.resolve(),
                 })
               )
-                return latest;
+                return undefined;
             } finally {
               presentation?.remove();
             }
           }
-          if (!ownerIsCurrent()) return start;
+          if (!ownerIsCurrent()) return acknowledgedFrame;
+          if (mode === "move") {
+            const result = await applyDesignEditCached(workspaceId, acknowledgedFrame, {
+              schemaVersion: 1, transactionId: `desktop:${crypto.randomUUID()}`, actor: { kind: "human", id: "desktop" },
+              intent: "Move canvas frame", createdAt: Date.now(),
+              operations: [{ operationId: crypto.randomUUID(), type: "frame.set-geometry", frame: frame.file, geometry: { x: latest.x, y: latest.y, width: latest.w, height: latest.h, z: latest.z } }],
+            }, { isCurrent: ownerIsCurrent, movementGuard: { sourceVersion: acknowledgedFrame.sourceVersion, geometry: frameGeometry(acknowledgedFrame) } });
+            return result.snapshot?.frames.find((candidate) => candidate.file === frame.file);
+          }
           const rootStyles = designFrameResizeRootStyles(
             resizeRoot,
             start,
@@ -2808,8 +2961,8 @@ export function DesignCanvas({
             // A quick release must not let the drag's preview land after the
             // committed generation.
             await frameRootPreviewQueue.idle(rootPreviewLane);
-            if (!ownerIsCurrent()) return start;
-            await applyDesignEditCached(workspaceId, frame, {
+            if (!ownerIsCurrent()) return acknowledgedFrame;
+            const result = await applyDesignEditCached(workspaceId, acknowledgedFrame, {
               schemaVersion: 1,
               transactionId: `desktop:${crypto.randomUUID()}`,
               actor: { kind: "human", id: "desktop" },
@@ -2839,13 +2992,14 @@ export function DesignCanvas({
                 },
               ],
             });
-            return latest;
+            return result.snapshot?.frames.find((candidate) => candidate.file === frame.file);
           }
-          return updateDesignFrameGeometryCached(
+          await updateDesignFrameGeometryCached(
             workspaceId,
             frame.file,
             latest,
           );
+          return designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((candidate) => candidate.file === frame.file);
         };
         const settle = (geometry: DesignFrameGeometryWire) => {
           preview.geometry = geometry;
@@ -2856,8 +3010,11 @@ export function DesignCanvas({
           if (ownerIsCurrent() && element.isConnected)
             paintFrameGeometry(element, geometry);
         };
-        void persist()
-          .then(settle)
+        completed = true;
+        preview.commit = persist();
+        savedEditingSession?.retain(preview.commit);
+        void preview.commit
+          .then((confirmed) => settle(confirmed ? frameGeometry(confirmed) : latest))
           .catch((geometryError) => {
             const confirmed = designWorkspaceSnapshotCache
               .peekSnapshot(workspaceId)
@@ -2921,6 +3078,7 @@ export function DesignCanvas({
       folder,
       liveDesignZoom,
       publishSelection,
+      savedEditingSession,
       snapshot?.frames,
       workspaceId,
     ],
@@ -3781,14 +3939,14 @@ export function DesignCanvas({
       frame: DesignCanvasFrameWire,
       nodes: readonly DesignRuntimeNodeDetails[],
       clickedNode: DesignRuntimeNodeDetails,
+      clicked?: () => void,
     ) => {
-      const foundationAtStart = canvasFoundation.data;
       if (
         !workspaceId ||
         !active ||
         !event.isPrimary ||
         event.button !== 0 ||
-        nodes.length < 2
+        nodes.length < 1
       ) {
         return false;
       }
@@ -3798,6 +3956,21 @@ export function DesignCanvas({
       if (!article) return false;
       event.preventDefault();
       event.stopPropagation();
+      const runtime = designFrameRuntime(workspaceId, frame.file);
+      if (!runtime?.supports("previewLayout") || runtime.sourceVersion !== frame.sourceVersion) {
+        toast.error("Wait for the selected scene to finish loading");
+        return true;
+      }
+      gestureCancelRef.current?.();
+      const owner = captureDesignPageOwner(workspaceId);
+      const selection = designWorkspaceView(workspaceId);
+      const lifetime = ++nudgeLifetimeRef.current;
+      const revision = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.revision;
+      let cancelled = false;
+      const isCurrent = () => !cancelled && isCurrentDesignPageOwner(owner) && nudgeLifetimeRef.current === lifetime &&
+        designWorkspaceView(workspaceId).selectionEvent === selection.selectionEvent && designWorkspaceView(workspaceId).activeTheme === selection.activeTheme &&
+        designFrameRuntime(workspaceId, frame.file) === runtime && runtime.sourceVersion === frame.sourceVersion &&
+        useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.revision === revision;
       const overlays = new Map(
         Array.from(
           article.querySelectorAll<HTMLElement>(
@@ -3808,26 +3981,12 @@ export function DesignCanvas({
           return nodeId ? [[nodeId, overlay] as const] : [];
         }),
       );
-      const starts = nodes.map((details) => ({
-        details,
+      const starts = nodes.map((details) => ({ details }));
+      const painted = selectedNodeDetailsList.map((details) => ({
         overlay: overlays.get(details.oid) ?? null,
         // A rotated member's overlay is anchored on its pivot, so a group move
         // has to translate that placement rather than its bounding box.
         overlayFrame: designSelectionOverlayFrame(designSelectionBox(details)),
-        position:
-          details.styles.position === "static"
-            ? "relative"
-            : details.styles.position || "relative",
-        left: designGesturePixelBase(
-          { workspaceId, frame: frame.file, nodeId: details.oid },
-          "left",
-          details.styles.left,
-        ),
-        top: designGesturePixelBase(
-          { workspaceId, frame: frame.file, nodeId: details.oid },
-          "top",
-          details.styles.top,
-        ),
       }));
       const groupBounds = {
         x: Math.min(...starts.map(({ details }) => details.rect.x)),
@@ -3852,6 +4011,8 @@ export function DesignCanvas({
       ];
       const startX = event.clientX;
       const startY = event.clientY;
+      const initialBounds = article.getBoundingClientRect();
+      const grab = { x: (startX - initialBounds.left) / liveDesignZoom(), y: (startY - initialBounds.top) / liveDesignZoom() };
       let delta = { x: 0, y: 0 };
       let latestRawBounds = groupBounds;
       let moved = false;
@@ -3874,41 +4035,27 @@ export function DesignCanvas({
       const updates = () =>
         starts.map((start) => ({
           nodeId: start.details.oid,
-          styles: preserveDesignLayoutPins(start.details, {
-            position: start.position,
-            left: `${Math.round(start.left + delta.x)}px`,
-            top: `${Math.round(start.top + delta.y)}px`,
-          }),
+          styles: designNodeMovementStyles(start.details, delta),
         }));
       // The whole group is one flight: its members must never land a frame apart.
       const loop = createDesignGestureLoop<unknown>({
-        request: () =>
-          Promise.all(
-            updates().map((update) => {
-              publishDesignGestureLivePreview(
-                workspaceId,
-                frame.file,
-                update.nodeId,
-                update.styles,
-              );
-              return previewDesignNodeGeometry({
-                workspaceId,
-                frame,
-                nodeId: update.nodeId,
-                styles: update.styles,
-              });
-            }),
-          ),
+        request: async () => {
+          if (!isCurrent()) throw new Error("The group changed during this move.");
+          const next = updates();
+          for (const update of next) publishDesignGestureLivePreview(workspaceId, frame.file, update.nodeId, update.styles);
+          return runtime.previewLayout({ updates: next, nodeIds: [], children: false });
+        },
       });
       const paint = () => {
-        for (const start of starts) {
+        for (const start of painted) {
           if (!start.overlay) continue;
           start.overlay.style.left = `${start.overlayFrame.left + delta.x}px`;
           start.overlay.style.top = `${start.overlayFrame.top + delta.y}px`;
         }
       };
       const restore = () => {
-        for (const start of starts) {
+        if (nudgeLifetimeRef.current !== lifetime || runtime.sourceVersion !== frame.sourceVersion || designFrameRuntime(workspaceId, frame.file) !== runtime) return;
+        for (const start of painted) {
           if (start.overlay) {
             start.overlay.style.left = `${start.overlayFrame.left}px`;
             start.overlay.style.top = `${start.overlayFrame.top}px`;
@@ -3929,8 +4076,10 @@ export function DesignCanvas({
         // A trackpad pinch repaints the camera up to 80ms before the store
         // learns the new zoom, so travel divides by what is on screen now.
         const zoom = liveDesignZoom();
-        const rawX = (pointerEvent.clientX - startX) / zoom;
-        const rawY = (pointerEvent.clientY - startY) / zoom;
+        if (!isCurrent()) return;
+        const currentBounds = article.getBoundingClientRect();
+        const rawX = (pointerEvent.clientX - currentBounds.left) / zoom - grab.x;
+        const rawY = (pointerEvent.clientY - currentBounds.top) / zoom - grab.y;
         if (!moved && Math.hypot(rawX, rawY) < 3 / zoom) return;
         moved = true;
         const moving = {
@@ -3947,6 +4096,16 @@ export function DesignCanvas({
           x: snapped.rect.x - groupBounds.x,
           y: snapped.rect.y - groupBounds.y,
         };
+        const margin = DESIGN_REPARENT_HYSTERESIS_PIXELS / zoom;
+        if (selection.selectedTargets.length > 1 && starts.some(({ details }) => {
+          const x = details.rect.x + delta.x + details.rect.width / 2;
+          const y = details.rect.y + delta.y + details.rect.height / 2;
+          return x < -margin || y < -margin || x > frame.width + margin || y > frame.height + margin;
+        })) {
+          gestureCancelRef.current?.();
+          toast.error("Detach one layer at a time", { description: "Grouped structural transfer is not yet atomic; nothing was moved." });
+          return;
+        }
         paintGuides(snapped.guides);
         paint();
         loop.author({});
@@ -3958,7 +4117,9 @@ export function DesignCanvas({
       };
       const finish = () => {
         cleanup();
+        if (!isCurrent()) { restore(); return; }
         if (!moved) {
+          if (clicked) { clicked(); return; }
           if (!folder) return;
           const intent = designSelectionClickIntent(event);
           if (intent === "toggle") {
@@ -4016,25 +4177,9 @@ export function DesignCanvas({
           );
         }
         void (async () => {
-          const foundation =
-            foundationAtStart ??
-            (await designFoundationCache.load(
-              designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
-              () =>
-                fetchDesignFoundation(
-                  designFoundationKey(
-                    workspaceId,
-                    frame.file,
-                    frame.sourceVersion,
-                  ),
-                ),
-              { maxAgeMs: Number.POSITIVE_INFINITY },
-            ));
-          await applyDesignTransactionCached(workspaceId, frame.file, {
+          await applyDesignEditCached(workspaceId, frame, {
             schemaVersion: 1,
             transactionId: `desktop:${crypto.randomUUID()}`,
-            documentId: foundation.summary.documentId,
-            baseRevision: foundation.summary.revision,
             actor: { kind: "human", id: "desktop" },
             intent: `Move ${finalUpdates.length} selected layers`,
             createdAt: Date.now(),
@@ -4047,7 +4192,7 @@ export function DesignCanvas({
               responsiveContext: "base",
               stateContext: "default",
             })),
-          });
+          }, { isCurrent, movementGuard: { sourceVersion: frame.sourceVersion, geometry: frameGeometry(frame) } });
         })().catch((error) => {
           restore();
           toast.error("Couldn't move the selected elements", {
@@ -4056,6 +4201,7 @@ export function DesignCanvas({
         });
       };
       const cancel = () => {
+        cancelled = true;
         cleanup();
         restore();
       };
@@ -4074,12 +4220,12 @@ export function DesignCanvas({
     [
       active,
       activeTool,
-      canvasFoundation.data,
       finishInlineTextTool,
       folder,
       liveDesignZoom,
       parentOutlineDetails,
       peerGeometryDetails,
+      selectedNodeDetailsList,
       workspaceId,
     ],
   );
@@ -4441,11 +4587,28 @@ export function DesignCanvas({
       if (gestureMode === "move") {
         viewportRef.current?.focus({ preventScroll: true });
       }
-      if (gestureMode === "move" && view.selectedNodeIds.length > 1) {
-        const topLevelIds = designLayerTopLevelSelectionIds(
-          selectedRuntimeTree,
-          view.selectedNodeIds,
-        );
+      if (gestureMode === "move") {
+        const targets = designWorkspaceView(workspaceId).selectedTargets;
+        if (targets.some((target) => target.frame !== frame.file)) {
+          event.preventDefault();
+          event.stopPropagation();
+          toast.error("Move layers in one scene at a time", { description: "Cross-scene group movement is not yet atomic; nothing was moved." });
+          return;
+        }
+        const roots = designSelectionMutationTargets(targets, new Map([[frame.file, selectedRuntimeTree]]));
+        if (roots.some((target) => !target.nodeId)) {
+          startFrameGesture(event, frame, "move");
+          return;
+        }
+        if (targets.length > 1) {
+        const runtimeState = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file];
+        const topLevelIds = roots.flatMap((target) => target.nodeId ? [target.nodeId] : []);
+        if (runtimeState?.sourceVersion !== frame.sourceVersion || targets.some((target) => target.nodeId && !designLayerPathIds(selectedRuntimeTree, target.nodeId).length)) {
+          event.preventDefault();
+          event.stopPropagation();
+          toast.error("The selected ancestry is not ready", { description: "Nothing was moved; wait for this scene to refresh." });
+          return;
+        }
         const detailsById = new Map(
           selectedNodeDetailsList.map((candidate) => [
             candidate.oid,
@@ -4456,7 +4619,14 @@ export function DesignCanvas({
           const candidate = detailsById.get(nodeId);
           return candidate ? [candidate] : [];
         });
+        if (group.length !== topLevelIds.length || group.some((node) => node.sourceVersion !== frame.sourceVersion || node.parentCoordinateSpace === null)) {
+          event.preventDefault();
+          event.stopPropagation();
+          toast.error("The selected geometry is not ready", { description: "Nothing was moved." });
+          return;
+        }
         if (startNodeGroupMove(event, frame, group, details)) return;
+        }
       }
       const overlay = event.currentTarget.closest<HTMLElement>(
         "[data-design-element-overlay]",
@@ -4497,22 +4667,25 @@ export function DesignCanvas({
       if (
         gestureMode === "move" &&
         view.selectedNodeIds.length <= 1 &&
-        !details.box?.rotation
+        (details.styles.position === "absolute" || !details.box?.rotation)
       ) {
         if (
           ["flex", "inline-flex", "grid", "inline-grid"].includes(
             details.layout?.parentDisplay ?? "",
           ) ||
-          selectedFrameHasFlow
+          selectedFrameHasFlow || details.styles.position === "absolute"
         ) {
           gestureCancelRef.current?.();
+          const lifetime = ++nudgeLifetimeRef.current;
           const cancel = startDesignLayoutDrag({
+            saving: (save) => savedEditingSession?.retain(save),
             event,
             workspaceId,
             frame,
             details,
             zoom: liveDesignZoom,
-            paint: (geometry, parentRect) => {
+            isCurrent: () => nudgeLifetimeRef.current === lifetime,
+            paint: (geometry, parent) => {
               const box =
                 "styles" in geometry
                   ? designSelectionBox(geometry)
@@ -4525,19 +4698,15 @@ export function DesignCanvas({
                 overlay.parentElement?.querySelector<HTMLElement>(
                   `[data-design-parent-guides="${CSS.escape(details.oid)}"]`,
                 ) ?? null;
-              if (guides && parentRect) {
-                guides.dataset.parentX = String(parentRect.x);
-                guides.dataset.parentY = String(parentRect.y);
-                guides.dataset.parentWidth = String(parentRect.width);
-                guides.dataset.parentHeight = String(parentRect.height);
-              }
               paintDesignConstraintGuides(
                 guides,
                 designSelectionBoxBounds(box),
+                box,
+                parent,
               );
             },
             detach: folder
-              ? async (origin, movedDetails, presented) => {
+              ? async (origin, movedDetails, presented, canWrite) => {
                   return transferDesignLayerOnCanvas({
                     workspaceId,
                     folder,
@@ -4546,6 +4715,8 @@ export function DesignCanvas({
                     frames: snapshot?.frames ?? [],
                     origin: { x: frame.x + origin.x, y: frame.y + origin.y },
                     detach: true,
+                    isCurrent: () => nudgeLifetimeRef.current === lifetime,
+                    canWrite,
                     presented,
                   });
                 }
@@ -4565,6 +4736,7 @@ export function DesignCanvas({
           }
         }
       }
+      if (gestureMode === "move" && startNodeGroupMove(event, frame, [details], details, finishClickSelection)) return;
       event.preventDefault();
       event.stopPropagation();
       const startX = event.clientX;
@@ -4849,6 +5021,7 @@ export function DesignCanvas({
           paintDesignConstraintGuides(
             constraintGuides,
             designSelectionBoxBounds(measuredBox),
+            measuredBox,
           );
           if (!spacingRoot) return;
           paintDesignInlinePaddingGeometry(spacingRoot, geometry);
@@ -4921,6 +5094,7 @@ export function DesignCanvas({
         paintDesignConstraintGuides(
           constraintGuides,
           designSelectionBoxBounds(box),
+          box,
         );
         if (spacingRoot) {
           paintDesignInlinePaddingGeometry(spacingRoot, details);
@@ -5001,12 +5175,13 @@ export function DesignCanvas({
       liveDesignZoom,
       parentOutlineDetails,
       peerGeometryDetails,
+      savedEditingSession,
       selectedNodeDetailsList,
       snapshot?.frames,
       selectedFrameHasFlow,
       selectedRuntimeTree,
+      startFrameGesture,
       startNodeGroupMove,
-      view.selectedNodeId,
       view.selectedNodeIds,
       workspaceId,
     ],
@@ -5114,7 +5289,7 @@ export function DesignCanvas({
       // The timeline is mounted inside the canvas, but its controls own native
       // focus, activation and keyframe editing rather than layer navigation.
       if (
-        event.defaultPrevented ||
+        event.defaultPrevented || event.isComposing ||
         (event.target instanceof Element &&
           event.target.closest(
             "[data-design-motion-timeline], [data-design-motion-settings]",
@@ -5160,6 +5335,11 @@ export function DesignCanvas({
       }
       if (editableTarget) return;
       if (!viewport.contains(document.activeElement)) return;
+      if (event.key === "Escape" && (nudgeGestureRef.current || queuedNudgeRef.current)) {
+        event.preventDefault();
+        finishNodeNudge(true);
+        return;
+      }
       if (event.key === "Escape" && hitStackMenu) {
         event.preventDefault();
         setHitStackMenu(null);
@@ -5298,7 +5478,7 @@ export function DesignCanvas({
         !event.altKey &&
         ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)
       ) {
-        const step = event.shiftKey ? 10 : 1;
+        const step = designNudgeStep(event.shiftKey);
         const handled = nudgeSelectedNode(
           event.key === "ArrowLeft"
             ? -step
@@ -5368,7 +5548,7 @@ export function DesignCanvas({
         ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(
           event.key,
         ) &&
-        nudgeGestureRef.current
+        (nudgeGestureRef.current || queuedNudgeRef.current)
       ) {
         finishNodeNudge();
       }
@@ -5384,7 +5564,7 @@ export function DesignCanvas({
       spacePressedRef.current = false;
       setSpacePressed(false);
       syncMeasureModifier(false);
-      if (nudgeGestureRef.current) finishNodeNudge();
+      if (nudgeGestureRef.current || queuedNudgeRef.current) finishNodeNudge(true);
     };
     // A hidden window cannot deliver the release, so leaving the app must not
     // strand the measurement overlay on the canvas.
@@ -5471,7 +5651,9 @@ export function DesignCanvas({
       inlineTextPreviewRef.current.pending = null;
       renameSettledRef.current = true;
       hitStackGenerationRef.current += 1;
-      nudgeGestureRef.current = null;
+      canvasLifetimeRef.current += 1;
+      nudgeLifetimeRef.current += 1;
+      finishNodeNudge(true);
       setInlineTextEdit(null);
       setRenamingFrame(null);
       setHitStackMenu(null);
@@ -5480,7 +5662,7 @@ export function DesignCanvas({
       setMotionSeekState({ owner: "", request: null });
       activateTool("select");
     },
-    [active, canvasDocumentOwner, folder, view.directoryId, workspaceId, activateTool],
+    [active, canvasDocumentOwner, folder, view.directoryId, workspaceId, activateTool, finishNodeNudge],
   );
 
   // --- EVENT HANDLERS ---
@@ -6853,7 +7035,7 @@ export function DesignCanvas({
                       highResolutionTiles.get(frame.file) ?? null
                     }
                     highResolutionDisabled={
-                      inlineTextEdit?.frame === frame.file
+                      inlineTextEdit?.frame === frame.file || savedEditingState > 0 && nativePixels
                     }
                     designDirectory={snapshot.directory}
                   />
@@ -6969,6 +7151,9 @@ export function DesignCanvas({
                 inlineTextEdit?.frame !== frame.file ? (
                   <DesignConstraintGuides
                     nodeId={selectedElement.oid}
+                    box={designSelectionBox(selectedElement)}
+                    reference={parentElement && selectedElement.styles.position !== "fixed" ? designConstraintReferenceGeometry(parentElement) : undefined}
+                    outlineBox={parentElement && selectedElement.styles.position !== "fixed" ? designSelectionBox(parentElement) : undefined}
                     bounds={designSelectionBoxBounds(
                       designSelectionBox(selectedElement),
                     )}

@@ -7,6 +7,8 @@
 // speaks to it. Authored design files remain HTML/CSS-only: the script below is
 // app-owned, nonce-gated, and removed from every screenshot clone.
 
+import { DESIGN_RELOCATION_INHERITED_PROPERTIES, type DesignRuntimeRelocationContext } from "./design-relocation";
+
 export const DESIGN_RUNTIME_PROTOCOL = "zeros-design-runtime";
 export const DESIGN_RUNTIME_VERSION = 2;
 /** Mirrors design-core's document-scoped style/append target. Never emitted as
@@ -165,6 +167,9 @@ export interface DesignRuntimeNodeDetails {
   /** Affine map from the children's padding-box coordinates to frame space.
    * Includes ancestor transforms, reflections, borders, and container scroll. */
   childCoordinateSpace?: [number, number, number, number, number, number];
+  borderCoordinateSpace?: DesignRuntimeCoordinateSpace | null;
+  parentCoordinateSpace?: DesignRuntimeCoordinateSpace | null;
+  relocationContext?: DesignRuntimeRelocationContext;
   styles: Record<string, string>;
   /** Computed-style keys with a direct active declaration on this element.
    * Omitted by older runtimes; inspector chrome treats omission as unknown. */
@@ -300,9 +305,17 @@ export interface DesignRuntimeNodeGeometry {
   oid: string;
   rect: DesignRuntimeRect;
   box: DesignRuntimeNodeBox;
+  borderCoordinateSpace?: DesignRuntimeCoordinateSpace | null;
+  parentCoordinateSpace?: DesignRuntimeCoordinateSpace | null;
   styles: Record<string, string>;
   /** Populated only when the caller asked for children (gap affordances). */
   children: DesignRuntimeChildGeometry[];
+}
+
+export type DesignRuntimeCoordinateSpace = [number, number, number, number, number, number];
+
+export function isDesignRuntimeCoordinateSpace(value: unknown): value is DesignRuntimeCoordinateSpace {
+  return Array.isArray(value) && value.length === 6 && value.every((entry) => typeof entry === "number" && Number.isFinite(entry));
 }
 
 /** Children one geometry response may describe. Gap handles are drawn between
@@ -696,6 +709,14 @@ function isRuntimeChildrenLayout(
   );
 }
 
+export function isDesignRuntimeRelocationContext(value: unknown): value is DesignRuntimeRelocationContext {
+  return isRecord(value) && isRecord(value.inheritedStyles) &&
+    Object.keys(value.inheritedStyles).length <= 64 &&
+    Object.entries(value.inheritedStyles).every(([key, style]) => key.length <= 128 && typeof style === "string" && style.length <= 2048) &&
+    Array.isArray(value.unsupported) && value.unsupported.length <= 8 &&
+    value.unsupported.every((reason) => typeof reason === "string" && reason.length <= 256);
+}
+
 function isRuntimeNodeDetails(
   value: unknown,
 ): value is DesignRuntimeNodeDetails {
@@ -724,6 +745,9 @@ function isRuntimeNodeDetails(
       (Array.isArray(value.childCoordinateSpace) &&
         value.childCoordinateSpace.length === 6 &&
         value.childCoordinateSpace.every(isFiniteNumber))) &&
+    (value.borderCoordinateSpace === undefined || value.borderCoordinateSpace === null || isDesignRuntimeCoordinateSpace(value.borderCoordinateSpace)) &&
+    (value.parentCoordinateSpace === undefined || value.parentCoordinateSpace === null || isDesignRuntimeCoordinateSpace(value.parentCoordinateSpace)) &&
+    (value.relocationContext === undefined || isDesignRuntimeRelocationContext(value.relocationContext)) &&
     Object.keys(value.styles).length <= DESIGN_RUNTIME_STYLE_SNAPSHOT_LIMIT &&
     Object.values(value.styles).every((style) => typeof style === "string") &&
     (value.authoredStyleProperties === undefined ||
@@ -1364,6 +1388,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     ) {
       depth += 1;
       var computed = getComputedStyle(node);
+      if ((computed.perspective && computed.perspective !== "none") || (computed.zoom && computed.zoom !== "1" && computed.zoom !== "normal")) return null;
       // Transforms do not apply to non-replaced inline boxes.
       if (computed.display === "inline") continue;
       var own = ownLinearOf(computed);
@@ -2119,16 +2144,49 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     };
   }
 
-  function childCoordinateSpaceOf(element, computed, rect) {
+  function borderCoordinateSpaceOf(element, computed, rect) {
     var size = borderBoxSizeOf(computed);
     var matrix = size ? accumulatedLinearOf(element) : null;
-    if (!matrix || Math.abs(matrix[0] * matrix[3] - matrix[1] * matrix[2]) < 0.000001) return undefined;
+    if (!matrix || Math.abs(matrix[0] * matrix[3] - matrix[1] * matrix[2]) < 0.000001) return null;
+    var a = matrix[0], b = matrix[1], c = matrix[2], d = matrix[3];
+    return [a, b, c, d,
+      rect.x - Math.min(0, a * size.width, c * size.height, a * size.width + c * size.height),
+      rect.y - Math.min(0, b * size.width, d * size.height, b * size.width + d * size.height)];
+  }
+
+  function childCoordinateSpaceOf(element, computed, rect) {
+    var matrix = borderCoordinateSpaceOf(element, computed, rect);
+    if (!matrix) return undefined;
     var a = matrix[0], b = matrix[1], c = matrix[2], d = matrix[3];
     var x = (parseFloat(computed.borderLeftWidth) || 0) - element.scrollLeft;
     var y = (parseFloat(computed.borderTopWidth) || 0) - element.scrollTop;
     return [a, b, c, d,
-      rect.x - Math.min(0, a * size.width, c * size.height, a * size.width + c * size.height) + a * x + c * y,
-      rect.y - Math.min(0, b * size.width, d * size.height, b * size.width + d * size.height) + b * x + d * y];
+      matrix[4] + a * x + c * y,
+      matrix[5] + b * x + d * y];
+  }
+
+  function parentCoordinateSpaceOf(element) {
+    var parent = element.parentElement;
+    var position = getComputedStyle(element).position;
+    if (position === "absolute" || position === "fixed") {
+      for (var candidate = parent; candidate; candidate = candidate.parentElement) {
+        var style = getComputedStyle(candidate);
+        if ((position === "absolute" && style.position !== "static") ||
+            (style.transform && style.transform !== "none") ||
+            (style.translate && style.translate !== "none") ||
+            (style.rotate && style.rotate !== "none") ||
+            (style.scale && style.scale !== "none") ||
+            (style.filter && style.filter !== "none") ||
+            (style.backdropFilter && style.backdropFilter !== "none") ||
+            (style.perspective && style.perspective !== "none") ||
+            /paint|layout|strict|content/.test(style.contain || "") ||
+            /transform|translate|rotate|scale|filter|perspective/.test(style.willChange || "")) {
+          return childCoordinateSpaceOf(candidate, style, rectOf(candidate)) || null;
+        }
+      }
+      return [1, 0, 0, 1, position === "fixed" ? 0 : -window.scrollX, position === "fixed" ? 0 : -window.scrollY];
+    }
+    return parent ? childCoordinateSpaceOf(parent, getComputedStyle(parent), rectOf(parent)) || null : [1, 0, 0, 1, 0, 0];
   }
 
   function childConstraintOf(element, computed, authored, axis) {
@@ -2170,7 +2228,39 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return result;
   }
 
-  function detailsOf(element, layoutOnly) {
+  function relocationContextOf(element) {
+    var inheritedStyles = {};
+    var unsupported = new Set();
+    var computed = getComputedStyle(element);
+    ${JSON.stringify(DESIGN_RELOCATION_INHERITED_PROPERTIES)}.forEach(function (property) {
+      var value = computed.getPropertyValue(property);
+      if (value.toLowerCase().includes("url(")) unsupported.add("inherited asset reference");
+      if (value.length > 2048) unsupported.add("inherited style size");
+      else if (value) inheritedStyles[property] = value;
+    });
+    Array.from(computed).filter(function (property) { return property.startsWith("--") && property !== "--zeros-layout-origin-flow"; }).forEach(function (property) {
+      var value = computed.getPropertyValue(property);
+      if (value.toLowerCase().includes("url(")) unsupported.add("inherited asset reference");
+      if (Object.keys(inheritedStyles).length >= 64 || property.length > 128 || value.length > 2048) unsupported.add("inherited style size");
+      else inheritedStyles[property] = value;
+    });
+    for (var ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      var style = getComputedStyle(ancestor);
+      if (Number(style.opacity) !== 1 || style.filter !== "none" || style.backdropFilter !== "none" || style.mixBlendMode !== "normal" || style.maskImage !== "none" || style.clipPath !== "none" || style.textDecorationLine !== "none") unsupported.add("ancestor compositing");
+    }
+    var descendants = element.querySelectorAll("*");
+    if (descendants.length > 256) unsupported.add("subtree size");
+    var inspect = [element].concat(Array.from(descendants).slice(0, 256));
+    inspect.forEach(function (node) {
+      var style = getComputedStyle(node);
+      if (!(node instanceof HTMLElement) || style.position === "fixed" || style.position === "sticky" || style.display === "contents" || node.scrollTop || node.scrollLeft) unsupported.add("unsupported subtree layout");
+      if (style.animationName !== "none" || node.getAnimations().length) unsupported.add("active animation");
+    });
+    if (!borderCoordinateSpaceOf(element, computed, rectOf(element))) unsupported.add("unsupported transform");
+    return { inheritedStyles: inheritedStyles, unsupported: Array.from(unsupported) };
+  }
+
+  function detailsOf(element, layoutOnly, relocation) {
     var oid = targetOidOf(element);
     if (!oid) throw new Error("The selected element has no stable data-oid.");
     var escaped = window.CSS && typeof window.CSS.escape === "function"
@@ -2195,10 +2285,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       layout: layoutOf(element, computed),
       childrenLayout: layoutOnly ? undefined : childrenLayoutOf(element, computed),
       childCoordinateSpace: childCoordinateSpaceOf(element, computed, rect),
-      styles: layoutOnly ? Object.fromEntries(["display", "position", "width", "height", "boxSizing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "flexDirection", "flexWrap", "direction", "order", "gridColumnStart", "gridColumnEnd", "gridRowStart", "gridRowEnd"].map(function (key) { return [key, computed[key] || ""]; })) : stylesOf(computed, authoredStyleProperties),
+      borderCoordinateSpace: borderCoordinateSpaceOf(element, computed, rect),
+      parentCoordinateSpace: parentCoordinateSpaceOf(element),
+      styles: layoutOnly ? Object.fromEntries(["display", "position", "left", "top", "width", "height", "boxSizing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "marginTop", "marginRight", "marginBottom", "marginLeft", "flexDirection", "flexWrap", "direction", "order", "gridColumnStart", "gridColumnEnd", "gridRowStart", "gridRowEnd"].map(function (key) { return [key, computed[key] || ""]; })) : stylesOf(computed, authoredStyleProperties),
       authoredStyleProperties: authoredStyleProperties
     };
+    result.styles["--zeros-layout-origin-flow"] = element.style ? element.style.getPropertyValue("--zeros-layout-origin-flow").trim() : "";
     if (textEditable && !layoutOnly) result.textSizing = textSizingOf(element);
+    if (relocation) result.relocationContext = relocationContextOf(element);
     if (!layoutOnly) attachAuthoredStyles(result, element, authoredStyleProperties);
     return result;
   }
@@ -2688,6 +2782,23 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return { applied: applied, snapshot: styleOnlySnapshot() };
   }
 
+  function previewStyleProperties(property) {
+    var probe = document.createElement("div").style;
+    probe.setProperty(property, "initial");
+    return probe.length ? Array.from(probe) : [property];
+  }
+
+  function restorePreviewStyle(element, prior) {
+    prior.effects.forEach(function (effect) {
+      if (effect.value) element.style.setProperty(effect.property, effect.value, effect.priority);
+      else element.style.removeProperty(effect.property);
+      if (prior.rule) {
+        if (effect.ruleValue) prior.rule.style.setProperty(effect.property, effect.ruleValue, effect.rulePriority);
+        else prior.rule.style.removeProperty(effect.property);
+      }
+    });
+  }
+
   function applyPreviewStyles(element, oid, styles) {
     if (!styles || typeof styles !== "object" || Array.isArray(styles)) {
       throw new Error("styles must be an object.");
@@ -2696,36 +2807,64 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (entries.length < 1 || entries.length > 64) {
       throw new Error("styles must contain between 1 and 64 properties.");
     }
+    entries.forEach(function (entry) {
+      if (!/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(entry[0]) || (typeof entry[1] !== "string" && entry[1] !== null)) throw new Error("Invalid preview style: " + entry[0]);
+    });
     var priorByProperty = previewStyleOverridesByOid.get(oid);
     var entering = !priorByProperty;
     if (!priorByProperty) {
       priorByProperty = new Map();
       previewStyleOverridesByOid.set(oid, priorByProperty);
     }
+    if (entries.some(function (entry) { return !priorByProperty.has(entry[0]); })) {
+      var originalInline = document.createElement("div").style;
+      originalInline.cssText = element.style.cssText;
+      var originalRules = new Map();
+      priorByProperty.forEach(function (prior) {
+        if (prior.rule && !originalRules.has(prior.rule)) {
+          var original = document.createElement("div").style;
+          original.cssText = prior.rule.style.cssText;
+          originalRules.set(prior.rule, original);
+        }
+        prior.effects.forEach(function (effect) {
+          if (effect.value) originalInline.setProperty(effect.property, effect.value, effect.priority);
+          else originalInline.removeProperty(effect.property);
+          if (prior.rule) {
+            var rule = originalRules.get(prior.rule);
+            if (effect.ruleValue) rule.setProperty(effect.property, effect.ruleValue, effect.rulePriority);
+            else rule.removeProperty(effect.property);
+          }
+        });
+      });
+      entries.forEach(function (entry) {
+        var property = entry[0];
+        if (priorByProperty.has(property)) return;
+        var inlineValue = originalInline.getPropertyValue(property);
+        var exactRules = inlineValue ? [] : exactTopLevelStyleRules(oid, property);
+        var rule = exactRules.length === 1 ? exactRules[0] : null;
+        var originalRule = rule ? originalRules.get(rule) || rule.style : null;
+        priorByProperty.set(property, {
+          value: inlineValue,
+          priority: originalInline.getPropertyPriority(property),
+          rule: rule,
+          ruleValue: originalRule ? originalRule.getPropertyValue(property) : "",
+          rulePriority: originalRule ? originalRule.getPropertyPriority(property) : "",
+          effects: previewStyleProperties(property).map(function (affected) {
+            return {
+              property: affected,
+              value: originalInline.getPropertyValue(affected),
+              priority: originalInline.getPropertyPriority(affected),
+              ruleValue: originalRule ? originalRule.getPropertyValue(affected) : "",
+              rulePriority: originalRule ? originalRule.getPropertyPriority(affected) : ""
+            };
+          })
+        });
+      });
+    }
     withoutObservedMutations(function () {
       for (var index = 0; index < entries.length; index += 1) {
         var property = entries[index][0];
         var value = entries[index][1];
-        if (
-          !/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property) ||
-          (typeof value !== "string" && value !== null)
-        ) {
-          throw new Error("Invalid preview style: " + property);
-        }
-        if (!priorByProperty.has(property)) {
-          var inlineValue = element.style.getPropertyValue(property);
-          var exactRules = inlineValue
-            ? []
-            : exactTopLevelStyleRules(oid, property);
-          var rule = exactRules.length === 1 ? exactRules[0] : null;
-          priorByProperty.set(property, {
-            value: inlineValue,
-            priority: element.style.getPropertyPriority(property),
-            rule: rule,
-            ruleValue: rule ? rule.style.getPropertyValue(property) : "",
-            rulePriority: rule ? rule.style.getPropertyPriority(property) : ""
-          });
-        }
         var prior = priorByProperty.get(property);
         prior.latestValue = value;
         if (prior.rule) {
@@ -2820,6 +2959,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       oid: oid,
       rect: rect,
       box: box,
+      borderCoordinateSpace: borderCoordinateSpaceOf(element, computed, rect),
+      parentCoordinateSpace: parentCoordinateSpaceOf(element),
       styles: geometryStylesOf(computed),
       children: children
     };
@@ -3456,6 +3597,13 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       });
       var element = elementForOid(oid);
       var preview = previewStyleOverridesByOid.get(oid);
+      if (preview) {
+        var committedProperties = new Set(entries.map(function (entry) { return entry[0]; }));
+        var committedEffects = new Set(entries.flatMap(function (entry) { return previewStyleProperties(entry[0]); }));
+        preview.forEach(function (prior, property) {
+          if (!committedProperties.has(property) && prior.effects.some(function (effect) { return committedEffects.has(effect.property); })) throw new Error("Reload the saved source after overlapping style previews.");
+        });
+      }
       var plans = entries.map(function (entry) {
         var property = entry[0];
         var prior = preview ? preview.get(property) : null;
@@ -3495,10 +3643,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       prepared.forEach(function (update) {
         update.plans.forEach(function (plan) {
           var target = plan.rule ? plan.rule.style : update.element.style;
-          changes.push({ target: target, property: plan.property,
-            before: plan.rule ? (plan.prior ? plan.prior.ruleValue : target.getPropertyValue(plan.property)) : plan.inlineValue,
-            beforePriority: plan.rule ? (plan.prior ? plan.prior.rulePriority : target.getPropertyPriority(plan.property)) : plan.inlinePriority,
-            after: plan.value || "", afterPriority: target.getPropertyPriority(plan.property) });
+          var effects = previewStyleProperties(plan.property).map(function (property) {
+            var prior = plan.prior && plan.prior.effects.find(function (effect) { return effect.property === property; });
+            return { target: target, property: property,
+              before: prior ? (plan.rule ? prior.ruleValue : prior.value) : target.getPropertyValue(property),
+              beforePriority: prior ? (plan.rule ? prior.rulePriority : prior.priority) : target.getPropertyPriority(property) };
+          });
 
           if (plan.rule) {
             // Auto-scope edits one unambiguous top-level data-oid rule. Remove
@@ -3519,6 +3669,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
               plan.inlinePriority
             );
           }
+          effects.forEach(function (effect) {
+            changes.push(Object.assign(effect, { after: target.getPropertyValue(effect.property), afterPriority: target.getPropertyPriority(effect.property) }));
+          });
           if (update.preview) update.preview.delete(plan.property);
           if (plan.newerPreview !== undefined) {
             applyPreviewStyles(update.element, update.oid, { [plan.property]: plan.newerPreview });
@@ -3670,24 +3823,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     withoutObservedMutations(function () {
       if (priorByProperty) {
-        priorByProperty.forEach(function (prior, property) {
-          if (prior.rule) {
-            element.style.removeProperty(property);
-            if (prior.ruleValue) {
-              prior.rule.style.setProperty(
-                property,
-                prior.ruleValue,
-                prior.rulePriority
-              );
-            } else {
-              prior.rule.style.removeProperty(property);
-            }
-          } else if (prior.value) {
-            element.style.setProperty(property, prior.value, prior.priority);
-          } else {
-            element.style.removeProperty(property);
-          }
-        });
+        priorByProperty.forEach(function (prior) { restorePreviewStyle(element, prior); });
         previewStyleOverridesByOid.delete(oid);
       }
     });
@@ -4010,7 +4146,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           typeof args.scopeNodeId === "string" && args.scopeNodeId ? args.scopeNodeId : null
         );
       case "getNodeDetails":
-        return detailsOf(elementForOid(args.nodeId));
+        return detailsOf(elementForOid(args.nodeId), false, args.relocation === true);
       case "getMatchedStyles":
         return getMatchedStyles(args.nodeId, args.property);
       case "setNodeVisibility":
@@ -4064,20 +4200,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     previewStyleOverridesByOid.forEach(function (properties, oid) {
       var element = elementsByOid.get(oid);
       if (!element) return;
-      properties.forEach(function (prior, property) {
-        if (prior.rule) {
-          element.style.removeProperty(property);
-          if (prior.ruleValue) {
-            prior.rule.style.setProperty(property, prior.ruleValue, prior.rulePriority);
-          } else {
-            prior.rule.style.removeProperty(property);
-          }
-        } else if (prior.value) {
-          element.style.setProperty(property, prior.value, prior.priority);
-        } else {
-          element.style.removeProperty(property);
-        }
-      });
+      properties.forEach(function (prior) { restorePreviewStyle(element, prior); });
     });
     visibilityOverridesByOid.forEach(function (prior, oid) {
       var element = elementsByOid.get(oid);

@@ -84,6 +84,7 @@ import {
   applyDesignHistoryCached,
   applyDesignEditCached,
   applyDesignTransactionCached,
+  prepareDesignMovementFrame,
   designFrameDocumentCache,
   designFrameDocumentKey,
   designFoundationCache,
@@ -179,6 +180,57 @@ function snapshot(
 }
 
 describe("design workspace cache", () => {
+  it.each(["workspace-a", "cloud://org/workspace-a"])(
+    "prepares movement after its local acknowledgement but rejects foreign source or scene changes in %s",
+    async (workspaceId) => {
+      const before = snapshot();
+      const frame = before.frames[0]!;
+      const after = structuredClone(before);
+      after.frames[0]!.sourceVersion = "b".repeat(24);
+      designWorkspaceSnapshotCache.setData(workspaceId, before);
+      const reply = { frame: after.frames[0]!, snapshot: after };
+      let release!: (result: typeof reply) => void;
+      platformMocks.updateStyles.mockReturnValue(
+        new Promise<typeof reply>((resolve) => {
+          release = resolve;
+        }),
+      );
+      const save = updateDesignNodeStylesCached(workspaceId, {
+        frame: frame.file,
+        sourceVersion: frame.sourceVersion,
+        nodeId: "heading",
+        styles: { left: "1px" },
+      });
+      await vi.waitFor(() =>
+        expect(platformMocks.updateStyles).toHaveBeenCalledTimes(1),
+      );
+      let settled = false;
+      const prepared = prepareDesignMovementFrame(workspaceId, frame).then(
+        (result) => {
+          settled = true;
+          return result;
+        },
+      );
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      release(reply);
+      await save;
+      await expect(prepared).resolves.toEqual(after.frames[0]);
+      const foreign = structuredClone(after);
+      foreign.frames[0]!.sourceVersion = "c".repeat(24);
+      designWorkspaceSnapshotCache.setData(workspaceId, foreign);
+      await expect(
+        prepareDesignMovementFrame(workspaceId, after.frames[0]!),
+      ).rejects.toThrow("frame changed");
+      const moved = structuredClone(after);
+      moved.frames[0]!.x += 1;
+      designWorkspaceSnapshotCache.setData(workspaceId, moved);
+      await expect(
+        prepareDesignMovementFrame(workspaceId, after.frames[0]!),
+      ).rejects.toThrow("frame changed");
+    },
+  );
+
   it("carries imported style sources and keeps unchanged ones by reference", () => {
     const source = {
       id: "app", title: "App", kind: "css", path: "styles/app.css", status: "ready" as const,
@@ -333,6 +385,59 @@ describe("design workspace cache", () => {
         },
         keyframes: [],
       },
+    });
+
+    it.each(["ws_exact_move", "cloud://org-a/workspace-a"])(
+      "retires measured movement while its metadata read is held in %s",
+      async (owner) => {
+        const current = snapshot();
+        const frame = current.frames[0]!;
+        designWorkspaceSnapshotCache.setData(owner, current);
+        let finish!: (value: DesignFoundationOpenWire) => void;
+        let active = true;
+        platformMocks.foundationOpen.mockReturnValue(
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+        );
+        platformMocks.applyTransaction.mockResolvedValue({ result: null });
+        const pending = applyDesignEditCached(owner, frame, draft(), {
+          movementGuard: { sourceVersion: frame.sourceVersion },
+          isCurrent: () => active,
+        });
+        await vi.waitFor(() =>
+          expect(platformMocks.foundationOpen).toHaveBeenCalledOnce(),
+        );
+        active = false;
+        const refused = expect(pending).rejects.toThrow(/changed|retired/);
+        finish(opened("document:home", "home:1"));
+        await refused;
+        expect(platformMocks.applyTransaction).not.toHaveBeenCalled();
+      },
+    );
+
+    it("does not replay measured geometry against a fresh source revision", async () => {
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      platformMocks.applyTransaction.mockRejectedValue(
+        new Error(
+          "Design frame changed before the mutation: home.html. Re-read it and retry.",
+        ),
+      );
+      platformMocks.readSnapshot.mockResolvedValue(current);
+      await expect(
+        applyDesignEditCached(workspaceId, frame, draft(), {
+          movementGuard: { sourceVersion: frame.sourceVersion },
+          isCurrent: () => true,
+        }),
+      ).rejects.toThrow(/changed/);
+      expect(platformMocks.applyTransaction).toHaveBeenCalledOnce();
+      expect(platformMocks.readSnapshot).not.toHaveBeenCalled();
     });
 
     it("joins the exact in-flight document read before committing the original targets once", async () => {

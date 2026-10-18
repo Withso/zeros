@@ -31,6 +31,7 @@ import {
 import { DESIGN_STYLE_BUILD_DIRECTORY, designBuildInputPathError, designBuildOutputPathError, designSassSourcePathError, designStyleSourcePathError } from "./style-source-path";
 import { compileDesignSass, DesignSassImportError } from "./style-sass";
 import { designStyleCache, designStyleCacheKey } from "./style-cache";
+import { designDependencyFingerprint, isDesignDependencyCaptureActive, observeDesignDependencyCheck, observeDesignFileDependency } from "./dependency-read-set";
 import {
   concatDesignCssIndexes,
   designFrameFeatures,
@@ -503,6 +504,7 @@ interface FileDependency {
   target: string;
   limit: number;
   signature: string;
+  fingerprint: string | null;
   allowCanonicalPath?: (relativePath: string) => boolean;
 }
 
@@ -513,7 +515,9 @@ async function fileSignature(root: string, dependency: FileDependency): Promise<
 
 async function unchanged(root: string, dependencies: readonly FileDependency[]): Promise<boolean> {
   const current = await Promise.all(dependencies.map((dependency) => fileSignature(root, dependency)));
-  return current.every((signature, index) => signature === dependencies[index]!.signature);
+  if (!current.every((signature, index) => signature === dependencies[index]!.signature)) return false;
+  for (const dependency of dependencies) observeDesignFileDependency(root, dependency);
+  return true;
 }
 
 /** Asset embedding shared by every stylesheet one source reads. */
@@ -588,6 +592,7 @@ async function embedStyleSourceAssetsInRoot(
           target,
           limit: fileLimit,
           signature: file ? `${file.size}:${file.modifiedAt}` : "missing",
+          fingerprint: designDependencyFingerprint(file?.body ?? null),
           allowCanonicalPath: allowedAssetPath,
         });
       }
@@ -808,7 +813,7 @@ async function importCssSource(
   designStyleIndexes.set(result, index);
   designStyleCache.set(key, {
     dependencies: [
-      { target, limit: MAX_DESIGN_STYLE_SOURCE_BYTES, signature: `${file.size}:${file.modifiedAt}` },
+      { target, limit: MAX_DESIGN_STYLE_SOURCE_BYTES, signature: `${file.size}:${file.modifiedAt}`, fingerprint: designDependencyFingerprint(file.body) },
       ...assets.fonts.dependencies.values(),
       ...assets.images.dependencies.values(),
     ],
@@ -889,6 +894,7 @@ async function loadTailwindGeneration(
       target,
       limit: MAX_DESIGN_STYLE_SOURCE_BYTES,
       signature: body ? `${body.size}:${body.modifiedAt}` : "missing",
+      fingerprint: designDependencyFingerprint(body?.body ?? null),
     });
     let content = body ? body.body.toString("utf8") : null;
     if (content !== null && file.endsWith(".css")) {
@@ -1015,6 +1021,7 @@ async function tailwindGeneration(
     tailwindLoads.set(key, pending);
   }
   const generation = await pending;
+  for (const dependency of generation.dependencies) observeDesignFileDependency(root, dependency);
   designStyleCache.set(key, generation, generationBytes(generation));
   return generation;
 }
@@ -1071,7 +1078,7 @@ async function loadSassGeneration(root: string, declaration: DesignStyleSourceDe
     if (!readableRepositoryFile(file)) return null;
     const target = path.join(root, ...file.split("/"));
     const body = await readSafeRegularFile(root, target, MAX_DESIGN_STYLE_SOURCE_BYTES);
-    dependencies.set(target, { target, limit: MAX_DESIGN_STYLE_SOURCE_BYTES, signature: body ? `${body.size}:${body.modifiedAt}` : "missing" });
+    dependencies.set(target, { target, limit: MAX_DESIGN_STYLE_SOURCE_BYTES, signature: body ? `${body.size}:${body.modifiedAt}` : "missing", fingerprint: designDependencyFingerprint(body?.body ?? null) });
     if (body && !file.endsWith("/package.json")) {
       inputBytes += body.size;
       if (inputBytes > MAX_DESIGN_STYLE_SOURCE_INPUT_BYTES) {
@@ -1146,6 +1153,7 @@ async function sassGeneration(workspacePath: string, declaration: DesignStyleSou
     sassLoads.set(key, pending);
   }
   const generation = await pending;
+  for (const dependency of generation.dependencies) observeDesignFileDependency(root, dependency);
   const index = designStyleIndexes.get(generation.result);
   designStyleCache.set(key, generation, (index?.bytes ?? 0) + 4096);
   return generation;
@@ -1368,9 +1376,13 @@ async function appFontsSource(
     return metadata ? `${metadata.size}:${metadata.modifiedAt}` : "missing";
   }));
   const memoKey = designStyleCacheKey(root, "fonts", `${JSON.stringify(catalog.fonts)}\0${imports.join("\n")}`);
-  const key = `${designFontsGeneration()}\0${locals.join(",")}`;
+  const fontGeneration = designFontsGeneration();
+  observeDesignDependencyCheck(() => {
+    if (designFontsGeneration() !== fontGeneration) throw new Error("The frame font dependencies changed before the layer move.");
+  });
+  const key = `${fontGeneration}\0${locals.join(",")}`;
   const memo = designStyleCache.get<AppFontsMemo>(memoKey);
-  if (memo?.key === key) return memo.result;
+  if (memo?.key === key && !isDesignDependencyCaptureActive()) return memo.result;
 
   const parts: string[] = [];
   const ready: string[] = [];

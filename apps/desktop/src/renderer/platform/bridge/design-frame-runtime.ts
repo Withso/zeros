@@ -8,6 +8,8 @@
 // requests stay on that per-document channel.
 
 import {
+  isDesignRuntimeCoordinateSpace,
+  isDesignRuntimeRelocationContext,
   DESIGN_RUNTIME_GEOMETRY_CHILD_LIMIT,
   DESIGN_RUNTIME_OPT_IN_METHODS,
   DESIGN_RUNTIME_PROTOCOL,
@@ -90,6 +92,7 @@ export interface DesignFrameRuntimeConnection {
   getNodeDetails(
     nodeId: string,
     signal?: AbortSignal,
+    options?: { relocation?: boolean },
   ): Promise<DesignRuntimeNodeDetails>;
   getMatchedStyles(
     nodeId: string,
@@ -247,6 +250,9 @@ function isNodeDetails(value: unknown): value is DesignRuntimeNodeDetails {
         typeof details.textSizing.availableWidth === "number" &&
         Number.isFinite(details.textSizing.availableWidth))) &&
     (details.layout === undefined || isRuntimeNodeLayout(details.layout)) &&
+    (details.borderCoordinateSpace === undefined || details.borderCoordinateSpace === null || isDesignRuntimeCoordinateSpace(details.borderCoordinateSpace)) &&
+    (details.parentCoordinateSpace === undefined || details.parentCoordinateSpace === null || isDesignRuntimeCoordinateSpace(details.parentCoordinateSpace)) &&
+    (details.relocationContext === undefined || isDesignRuntimeRelocationContext(details.relocationContext)) &&
     typeof details.selector === "string" &&
     Array.isArray(details.breadcrumb) &&
     !!details.rect &&
@@ -278,6 +284,8 @@ function isNodeGeometry(value: unknown): value is DesignRuntimeNodeGeometry {
     typeof geometry.box === "object" &&
     typeof geometry.box.rotation === "number" &&
     typeof geometry.box.scaleX === "number" &&
+    (geometry.borderCoordinateSpace === undefined || geometry.borderCoordinateSpace === null || isDesignRuntimeCoordinateSpace(geometry.borderCoordinateSpace)) &&
+    (geometry.parentCoordinateSpace === undefined || geometry.parentCoordinateSpace === null || isDesignRuntimeCoordinateSpace(geometry.parentCoordinateSpace)) &&
     !!geometry.styles &&
     typeof geometry.styles === "object" &&
     Array.isArray(geometry.children) &&
@@ -617,8 +625,9 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   async getNodeDetails(
     nodeId: string,
     signal?: AbortSignal,
+    options?: { relocation?: boolean },
   ): Promise<DesignRuntimeNodeDetails> {
-    const result = await this.request("getNodeDetails", { nodeId }, signal);
+    const result = await this.request("getNodeDetails", { nodeId, ...options }, signal);
     if (
       !isNodeDetails(result) ||
       result.sourceVersion !== this.expectedSourceVersion

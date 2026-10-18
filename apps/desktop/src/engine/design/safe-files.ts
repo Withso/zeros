@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
+import { observeDesignDependencyBytes } from "./dependency-read-set";
 
 export interface SafeRegularFileMetadata {
   size: number;
@@ -144,7 +145,10 @@ export async function readSafeRegularFile(
   allowCanonicalPath?: (relativePath: string) => boolean,
 ): Promise<SafeRegularFile | null> {
   const opened = await openVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath);
-  if (!opened) return null;
+  if (!opened) {
+    observeDesignDependencyBytes(root, target, maxBytes, null, allowCanonicalPath);
+    return null;
+  }
   try {
     // fstat already established the descriptor's bounded size. Read one byte
     // beyond that exact generation so growth racing the stat fails closed,
@@ -162,11 +166,15 @@ export async function readSafeRegularFile(
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
-    if (offset > expectedSize || offset > maxBytes) return null;
+    if (offset > expectedSize || offset > maxBytes) {
+      observeDesignDependencyBytes(root, target, maxBytes, null, allowCanonicalPath);
+      return null;
+    }
     // Buffer.subarray would retain the read buffer (and, for pooled buffers,
     // potentially an even larger slab). Give callers an exact backing store.
     const body = Buffer.alloc(offset);
     buffer.copy(body, 0, 0, offset);
+    observeDesignDependencyBytes(root, target, maxBytes, body, allowCanonicalPath);
     return {
       body,
       size: offset,

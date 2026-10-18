@@ -4,6 +4,7 @@
 // semantics still go through its shared workspaceOp helper, while the design
 // wire vocabulary remains cohesive and cheap for the design shell to import.
 
+import type { DesignRelocation, DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import {
   designFoundationManifestSchema,
   designTransactionSchema,
@@ -451,6 +452,7 @@ export async function bridgeDesignApplyTransaction(
   frame: string,
   transaction: DesignTransaction,
   dryRun = false,
+  movementGuard?: DesignMovementGuard,
 ): Promise<DesignApiMutationReplyWire> {
   const parsed = designTransactionSchema.parse(transaction);
   return designApiMutationReply(
@@ -459,6 +461,7 @@ export async function bridgeDesignApplyTransaction(
       frame,
       transaction: parsed,
       dryRun,
+      ...(movementGuard ? { movementGuard } : {}),
     }),
     "design.transaction.apply",
     !dryRun,
@@ -909,6 +912,9 @@ export interface DesignNodeTransferInput {
   parentId?: string;
   beforeId?: string | null;
   styles?: Record<string, string | null>;
+  relocation?: DesignRelocation;
+  movementGuard?: DesignMovementGuard;
+  destinationMovementGuard?: DesignMovementGuard;
   x: number;
   y: number;
   w: number;

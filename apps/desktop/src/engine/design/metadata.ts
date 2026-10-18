@@ -751,13 +751,20 @@ function applyStorageChanges(
       );
   }
   for (const change of changes) {
-    if (readDesignStorageFile(workspace, change.file) === change.after)
+    const assertCurrent = () => {
+      const current = readDesignStorageFile(workspace, change.file);
+      if (current !== change.before && current !== change.after)
+        throw new Error("Design metadata or source changed during migration. Review the retained recovery record before retrying.");
+      return current;
+    };
+    if (assertCurrent() === change.after)
       continue;
     if (change.after === null) {
       const target = assertSafeDesignStoragePath(workspace, change.file);
+      if (assertCurrent() === null) continue;
       unlinkSync(target);
       syncDirectory(path.dirname(target));
-    } else atomicWrite(workspace, change.file, change.after);
+    } else atomicWrite(workspace, change.file, change.after, undefined, { beforePublish: assertCurrent });
   }
 }
 /** Lifecycle snapshots must include the completed source/metadata pair, even
@@ -810,6 +817,7 @@ export function commitDesignMetadata(
   sourceChanges: DesignStorageChange[] = [],
   expected?: DesignMetadataSnapshot,
   restoredId?: string,
+  options?: { rollbackOnFailure?: boolean; assertInputs?: () => void },
 ): string[] {
   assertDesignWriteAuthorized();
   if (sanitizeDesignDirectoryName(directory) !== directory)
@@ -996,34 +1004,74 @@ export function commitDesignMetadata(
     )
       throw new Error("Design metadata exceeds its size limit.");
   }
-  // Repository configuration is repaired before starting a document write.
-  // A higher-priority nested exclusion must not produce a successful save
-  // whose metadata is hidden. The ignore edit stays reviewable on failure.
-  const ignoreChanges: string[] = [];
-  if (ignoreAfter !== ignoreBefore) {
-    if (readDesignStorageFile(workspace, ".gitignore") !== ignoreBefore)
-      throw new Error(
-        "Git ignore rules changed while preparing Design metadata.",
-      );
-    atomicWrite(workspace, ".gitignore", ignoreAfter);
-    ignoreChanges.push(".gitignore");
-  }
-  assertDesignFilesNotIgnored(workspace, visibleFiles);
-  if (!changes.length) return ignoreChanges;
   const source = JSON.stringify({
     version: 1,
     workspace: path.resolve(workspace),
     directory,
     changes,
   });
-  if (Buffer.byteLength(source) > MAX_JOURNAL_BYTES)
+  const inverse = options?.rollbackOnFailure
+    ? [...changes]
+        .reverse()
+        .map(({ file, before, after }) => ({
+          file,
+          before: after,
+          after: before,
+        }))
+    : null;
+  const inverseSource = inverse
+    ? JSON.stringify({
+        version: 1,
+        workspace: path.resolve(workspace),
+        directory,
+        changes: inverse,
+      })
+    : null;
+  if (
+    Buffer.byteLength(source) > MAX_JOURNAL_BYTES ||
+    (inverseSource && Buffer.byteLength(inverseSource) > MAX_JOURNAL_BYTES)
+  )
     throw new Error("Design metadata migration is too large.");
+  // Repository configuration is repaired before starting a document write.
+  // A higher-priority nested exclusion must not produce a successful save
+  // whose metadata is hidden. The ignore edit stays reviewable on failure.
+  options?.assertInputs?.();
+  const ignoreChanges: string[] = [];
+  if (ignoreAfter !== ignoreBefore) {
+    if (readDesignStorageFile(workspace, ".gitignore") !== ignoreBefore)
+      throw new Error(
+        "Git ignore rules changed while preparing Design metadata.",
+      );
+    atomicWrite(workspace, ".gitignore", ignoreAfter, undefined, {
+      beforePublish: () => {
+        if (readDesignStorageFile(workspace, ".gitignore") !== ignoreBefore)
+          throw new Error("Git ignore rules changed while preparing Design metadata.");
+      },
+    });
+    ignoreChanges.push(".gitignore");
+  }
+  assertDesignFilesNotIgnored(workspace, visibleFiles);
+  if (!changes.length) return ignoreChanges;
   const journal = writePrivateDesignState(
     workspace,
     journalName(directory),
     source,
+    { beforePublish: () => { options?.assertInputs?.(); assertDesignWriteAuthorized(); } },
   );
-  applyStorageChanges(workspace, directory, changes);
+  try {
+    applyStorageChanges(workspace, directory, changes);
+  } catch (error) {
+    if (!inverse || !inverseSource) throw error;
+    try {
+      writePrivateDesignState(workspace, journalName(directory), inverseSource);
+      applyStorageChanges(workspace, directory, inverse);
+      unlinkSync(journal);
+      syncDirectory(path.dirname(journal));
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], "The Design edit failed and rollback needs recovery. Reopen the workspace before retrying.");
+    }
+    throw error;
+  }
   unlinkSync(journal);
   syncDirectory(path.dirname(journal));
   for (const folder of migrating.values()) rememberManifest(workspace, folder);

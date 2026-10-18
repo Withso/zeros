@@ -1,4 +1,5 @@
-import type { DesignCanvasRect } from "./design-canvas-math";
+import { designConstraintGuides, designSelectionBoxCorners, type DesignCanvasRect, type DesignConstraintSides, type DesignSelectionBox } from "./design-canvas-math";
+import type { DesignRuntimeCoordinateSpace } from "@zeros/protocol/design-runtime";
 
 /** Geometry for the canvas's direct layout tools — padding bands, gap
  * gutters, grid tracks, constraint runs and the size badge — in the selection
@@ -875,6 +876,64 @@ export function designConstraintReferenceRect(
     y: parent.y + border.top,
     width: Math.max(0, parent.width - border.left - border.right),
     height: Math.max(0, parent.height - border.top - border.bottom),
+  };
+}
+
+export function designConstraintReferenceGeometry(parent: {
+  rect: DesignCanvasRect;
+  styles: Record<string, string>;
+  box?: { width: number; height: number };
+  borderCoordinateSpace?: DesignRuntimeCoordinateSpace | null;
+}) {
+  if (parent.borderCoordinateSpace === null) return null;
+  if (!parent.borderCoordinateSpace || !parent.box) {
+    const rect = designConstraintReferenceRect(parent.rect, parent.styles);
+    return { rect, width: rect.width, height: rect.height, matrix: [1, 0, 0, 1, rect.x, rect.y] as DesignRuntimeCoordinateSpace };
+  }
+  const [a, b, c, d, e, f] = parent.borderCoordinateSpace;
+  if (Math.abs(a * d - b * c) < 0.000001) return null;
+  const { border } = designLayoutBoxEdges(parent.styles);
+  const width = Math.max(0, parent.box.width - border.left - border.right);
+  const height = Math.max(0, parent.box.height - border.top - border.bottom);
+  const x = e + a * border.left + c * border.top;
+  const y = f + b * border.left + d * border.top;
+  const xs = [0, a * width, c * height, a * width + c * height];
+  const ys = [0, b * width, d * height, b * width + d * height];
+  return {
+    matrix: [a, b, c, d, x, y] as DesignRuntimeCoordinateSpace,
+    width,
+    height,
+    rect: { x: x + Math.min(...xs), y: y + Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) },
+  };
+}
+
+export function designProjectedConstraintGuides(
+  bounds: DesignCanvasRect,
+  parent: DesignCanvasRect,
+  sides: DesignConstraintSides,
+  reference?: { matrix: DesignRuntimeCoordinateSpace; width: number; height: number },
+  box?: DesignSelectionBox,
+) {
+  const [a, b, c, d, e, f] = reference?.matrix ?? [1, 0, 0, 1, 0, 0];
+  const determinant = a * d - b * c;
+  let local = bounds;
+  if (reference) {
+    const corners = box ? designSelectionBoxCorners(box) : [
+      { x: bounds.x, y: bounds.y }, { x: bounds.x + bounds.width, y: bounds.y },
+      { x: bounds.x + bounds.width, y: bounds.y + bounds.height }, { x: bounds.x, y: bounds.y + bounds.height },
+    ];
+    const xs = corners.map(({ x, y }) => (d * (x - e) - c * (y - f)) / determinant);
+    const ys = corners.map(({ x, y }) => (-b * (x - e) + a * (y - f)) / determinant);
+    local = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+  }
+  const project = (x: number, y: number) => ({ x: a * x + c * y + e, y: b * x + d * y + f });
+  return {
+    center: project(local.x + local.width / 2, local.y + local.height / 2),
+    guides: designConstraintGuides(local, reference ? { x: 0, y: 0, width: reference.width, height: reference.height } : parent, sides).map((guide) => ({
+      ...guide, ...project(guide.x, guide.y),
+      length: guide.length * (guide.axis === "horizontal" ? Math.hypot(a, b) : Math.hypot(c, d)),
+      rotation: (guide.axis === "horizontal" ? Math.atan2(b, a) : Math.atan2(-c, d)) * 180 / Math.PI,
+    })),
   };
 }
 

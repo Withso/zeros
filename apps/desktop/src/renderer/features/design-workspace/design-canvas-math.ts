@@ -827,6 +827,7 @@ export function designMeasureSpacing(
  * resized along its own axes. Mirrors the runtime box, with a rect-shaped
  * fallback for older runtimes. */
 export interface DesignSelectionBox {
+  affine?: readonly [number, number, number, number];
   /** Frame-space position of the element's own top-left corner. */
   x: number;
   y: number;
@@ -846,6 +847,7 @@ export interface DesignSelectionBox {
  * a rotation cannot move, so anchoring the overlay there lets a rotation
  * gesture repaint nothing but `transform`. */
 export interface DesignSelectionOverlayFrame {
+  affine?: DesignSelectionBox["affine"];
   left: number;
   top: number;
   /** Painted size, so a scaled element still outlines its visible bounds while
@@ -901,7 +903,30 @@ export function designSelectionBox(details: {
   rect: DesignCanvasRect;
   box?: DesignSelectionBox;
   styles?: Record<string, string>;
+  borderCoordinateSpace?:
+    | readonly [number, number, number, number, number, number]
+    | null;
 }): DesignSelectionBox {
+  if (details.box && details.borderCoordinateSpace) {
+    const [a, b, c, d, x, y] = details.borderCoordinateSpace;
+    const scaleX = Math.hypot(a, b);
+    const scaleY = Math.hypot(c, d);
+    if (
+      scaleX > 0 &&
+      scaleY > 0 &&
+      Math.abs((a * c + b * d) / (scaleX * scaleY)) > 0.0005
+    ) {
+      return {
+        ...details.box,
+        x,
+        y,
+        scaleX,
+        scaleY,
+        rotation: (Math.atan2(b, a) * 180) / Math.PI,
+        affine: [a / scaleX, b / scaleX, c / scaleY, d / scaleY],
+      };
+    }
+  }
   if (details.box) return details.box;
   const origin = (details.styles?.transformOrigin ?? "").trim().split(/\s+/);
   return {
@@ -933,6 +958,17 @@ export function designSelectionOverlayFrame(
   const { width, height } = designSelectionBoxSize(box);
   const pivotX = box.originX * width;
   const pivotY = box.originY * height;
+  if (box.affine)
+    return {
+      left: box.x,
+      top: box.y,
+      width,
+      height,
+      rotation: box.rotation,
+      pivotX,
+      pivotY,
+      affine: box.affine,
+    };
   const turned = rotateVector({ x: pivotX, y: pivotY }, box.rotation);
   return {
     left: box.x + turned.x - pivotX,
@@ -1125,7 +1161,12 @@ export function designSelectionBoxCorners(
     { x: width, y: height },
     { x: 0, y: height },
   ].map((corner) => {
-    const turned = rotateVector(corner, box.rotation);
+    const turned = box.affine
+      ? {
+          x: box.affine[0] * corner.x + box.affine[2] * corner.y,
+          y: box.affine[1] * corner.x + box.affine[3] * corner.y,
+        }
+      : rotateVector(corner, box.rotation);
     return { x: box.x + turned.x, y: box.y + turned.y };
   });
 }
@@ -1136,6 +1177,17 @@ export function designSelectionPivot(box: DesignSelectionBox): {
   y: number;
 } {
   const { width, height } = designSelectionBoxSize(box);
+  if (box.affine)
+    return {
+      x:
+        box.x +
+        box.affine[0] * box.originX * width +
+        box.affine[2] * box.originY * height,
+      y:
+        box.y +
+        box.affine[1] * box.originX * width +
+        box.affine[3] * box.originY * height,
+    };
   const turned = rotateVector(
     { x: box.originX * width, y: box.originY * height },
     box.rotation,
