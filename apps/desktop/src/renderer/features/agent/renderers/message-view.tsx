@@ -11,7 +11,8 @@
 //
 // ──────────────────────────────────────────────────────────
 
-import { memo } from "react";
+import { memo, useCallback, useMemo, useSyncExternalStore } from "react";
+import { observeLiveAgentText } from "../local-live-text";
 import type { AgentMessage } from "../use-agent-session";
 import type { RendererContext, RendererRegistry } from "./types";
 import { defaultRegistry, resolveRenderer } from "./registry";
@@ -22,18 +23,32 @@ interface MessageViewProps {
   registry?: RendererRegistry;
 }
 
+const noSubscription = () => () => {};
+
 export const MessageView = memo(
   function MessageView({
-    message,
+    message: suppliedMessage,
     ctx,
     registry = defaultRegistry,
   }: MessageViewProps) {
+    const source = ctx.attachmentImagesActive !== false && ctx.isStreaming &&
+      ctx.lastMessageId === suppliedMessage.id && suppliedMessage.kind === "text" && suppliedMessage.role === "agent"
+      ? ctx.liveTextSource : undefined;
+    const observation = useMemo(() => source && suppliedMessage.kind === "text" ? observeLiveAgentText(source, suppliedMessage) : undefined,
+      [source, suppliedMessage]);
+    const fallback = useMemo(() => ({ message: suppliedMessage, pending: false }), [suppliedMessage]);
+    const read = useCallback(() => observation?.getSnapshot() ?? fallback, [observation, fallback]);
+    const snapshot = useSyncExternalStore(observation?.subscribe ?? noSubscription, read, read);
+    const message = snapshot.message;
+    const renderCtx = useMemo(() => observation && message.kind === "text"
+      ? { ...ctx, liveTextPresentation: { text: message.text, pending: snapshot.pending } } : ctx,
+    [ctx, observation, message, snapshot.pending]);
     const { Component } = resolveRenderer(message, registry);
     // 2026-07-02: the inline permission cluster was removed. Permissions now
     // render in ONE card that replaces the composer (see <PermissionCard>).
     // The "auto-allowed by policy" attribution chip is also omitted because
     // policy auto-allows are silent, with no extra timeline UI.
-    return <Component message={message} ctx={ctx} />;
+    return <Component message={message} ctx={renderCtx} />;
   },
   // Re-render only when the message itself or its slice of ctx changed.
   (prev, next) => {
@@ -47,6 +62,7 @@ export const MessageView = memo(
       prev.ctx.transcriptReadOnly !== next.ctx.transcriptReadOnly ||
       prev.ctx.attachmentCwd !== next.ctx.attachmentCwd ||
       prev.ctx.chatId !== next.ctx.chatId
+      || prev.ctx.liveTextSource !== next.ctx.liveTextSource
     )
       return false;
     if (prev.message.kind === "text" && prev.message.role === "agent") {

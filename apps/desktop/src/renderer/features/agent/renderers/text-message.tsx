@@ -109,7 +109,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     const useMarkdown = message.role === "agent" && !message.modelFallback;
     const text = message.modelFallback ? fallbackDisplayText(message.modelFallback) : message.text;
     const proseRef = useRef<HTMLDivElement>(null);
-    const smooth = useStreamingText(text, useMarkdown && ctx.isStreaming && ctx.lastMessageId === message.id && ctx.attachmentImagesActive !== false);
+    const smooth = useStreamingText(text, useMarkdown && ctx.isStreaming && ctx.lastMessageId === message.id && ctx.attachmentImagesActive !== false, ctx.liveTextPresentation);
     const segments = useMemo(
       () => (useMarkdown ? renderMarkdownSegments(smooth.text) : null),
       [useMarkdown, smooth.text],
