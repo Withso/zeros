@@ -199,7 +199,7 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
       command: `${input.command}${v4 ? "" : " --stdin"}`,
       stdin: encoded,
       timeoutSeconds: input.timeoutSeconds,
-    }, { ...this.options, ...(performance ? { performance } : {}) }, signal, async () => {
+    }, { ...this.options, overlapAccessReads: v4, ...(performance ? { performance } : {}) }, signal, async () => {
       bootstrapFinished = timings?.start("bootstrap_probe");
       // Boat cold resume restores disk, not the image's OCI entrypoint or /run.
       // This fixed, secret-free helper probes or starts the one root broker;

@@ -401,6 +401,8 @@ export type BoatPinnedSshOptions = {
   openChannel?: (signal: AbortSignal) => Promise<BoatBootstrapChannel>;
   /** Selected only by v4 setup; never sent through the provider or SSH. */
   performance?: SetupPerformanceRecorder;
+  /** Selected only by v4 workspace setup; other shared callers stay serial. */
+  overlapAccessReads?: boolean;
 };
 
 /** Fixed commands only. Public key material uses the provider API; private
@@ -418,32 +420,59 @@ export async function executeBoatPinnedSsh(
     let failure: CloudProviderError | undefined;
     try {
       await measureSetupPerformance(options.performance, "prepare", async () => { await prepare?.(); }, signal);
-      const key = await measureSetupPerformance(options.performance, "host_key", () => options.client.request(
-        `/sandboxes/${input.resourceId}/commands`,
-        {
-          method: "POST",
-          body: { command: HOST_KEY_COMMAND, timeoutSeconds: 15 },
-          signal,
-        },
-      ), signal);
-      if (
-        key.success !== true ||
-        key.exitCode !== 0 ||
-        key.timedOut ||
-        key.stdoutTruncated
-      )
-        throw invalidAccess();
-      const hostPublicKey = parseBoatHostKey(key.stdout);
-      parseBoatHostKey(channel.publicKey);
-      const access = await measureSetupPerformance(options.performance, "endpoint", () => options.client.request(
-        `/sandboxes/${input.resourceId}`,
-        { signal },
-      ), signal);
-      const sandbox = access.sandbox as
-        | { id?: unknown; ip?: unknown; sshEndpoint?: unknown }
-        | undefined;
-      if (sandbox?.id !== input.resourceId) throw invalidAccess();
-      const endpoint = parseBoatSshEndpoint(sandbox);
+      const readHostKey = async (readSignal: AbortSignal) => {
+        const key = await measureSetupPerformance(options.performance, "host_key", () => options.client.request(
+          `/sandboxes/${input.resourceId}/commands`,
+          {
+            method: "POST",
+            body: { command: HOST_KEY_COMMAND, timeoutSeconds: 15 },
+            signal: readSignal,
+          },
+        ), readSignal);
+        if (
+          key.success !== true ||
+          key.exitCode !== 0 ||
+          key.timedOut ||
+          key.stdoutTruncated
+        )
+          throw invalidAccess();
+        const hostPublicKey = parseBoatHostKey(key.stdout);
+        parseBoatHostKey(channel.publicKey);
+        return hostPublicKey;
+      };
+      const readEndpoint = async (readSignal: AbortSignal) => {
+        const access = await measureSetupPerformance(options.performance, "endpoint", () => options.client.request(
+          `/sandboxes/${input.resourceId}`,
+          { signal: readSignal },
+        ), readSignal);
+        const sandbox = access.sandbox as
+          | { id?: unknown; ip?: unknown; sshEndpoint?: unknown }
+          | undefined;
+        if (sandbox?.id !== input.resourceId) throw invalidAccess();
+        return parseBoatSshEndpoint(sandbox);
+      };
+      let hostPublicKey: string;
+      let endpoint: ReturnType<typeof parseBoatSshEndpoint>;
+      if (options.overlapAccessReads === true) {
+        signal.throwIfAborted();
+        const controller = new AbortController();
+        const readSignal = AbortSignal.any([signal, controller.signal]);
+        const reads = [readHostKey(readSignal), readEndpoint(readSignal)] as const;
+        try {
+          [hostPublicKey, endpoint] = await Promise.all(reads);
+        } finally {
+          // Cancel a failed read's sibling, retain the original rejection, and
+          // join both before the outer cleanup can dispose this channel.
+          controller.abort();
+          await Promise.allSettled(reads);
+        }
+        // A provider response may complete despite cancellation. It cannot
+        // authorize installation or secret-bearing SSH for the old execution.
+        signal.throwIfAborted();
+      } else {
+        hostPublicKey = await readHostKey(signal);
+        endpoint = await readEndpoint(signal);
+      }
       const command = `/usr/bin/sudo -n /usr/bin/timeout --signal=TERM --kill-after=5s ${input.timeoutSeconds}s ${input.command}`;
       installed = true;
       const restricted = await measureSetupPerformance(options.performance, "key_install", () => options.client.request(

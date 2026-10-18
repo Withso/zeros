@@ -411,12 +411,12 @@ describe("Boat bootstrap transport", () => {
     f.channel.execute.mockImplementation(() => delay({ exitCode: 0, output: "ready", outputTruncated: false }, 700));
     f.channel.dispose.mockImplementation(() => delay(undefined, 60));
     const running = f.runner.execute({ ...f.input, onPerformance }, new AbortController().signal);
-    await vi.advanceTimersByTimeAsync(2300);
+    await vi.advanceTimersByTimeAsync(2100);
     expect(await running).toMatchObject({ exitCode: 0, output: "ready", outputTruncated: false });
     expect(f.request).toHaveBeenCalledTimes(5);
     expect(f.channel.execute).toHaveBeenCalledOnce();
     expect(onPerformance).toHaveBeenCalledExactlyOnceWith({ version: 1, truncated: false, groups: [{ source: "transport",
-      stages: expect.arrayContaining(Object.entries({ total: 2300, channel_open: 40, prepare: 100, status_request: 100,
+      stages: expect.arrayContaining(Object.entries({ total: 2100, channel_open: 40, prepare: 100, status_request: 100,
         host_key: 200, endpoint: 300, key_install: 400, ssh_command: 700, key_revoke: 500, channel_dispose: 60 })
         .map(([stage, ms]) => ({ stage, count: 1, totalMs: ms, maxMs: ms, lastOutcome: "passed" }))) }] });
     const retained = JSON.stringify(onPerformance.mock.calls);

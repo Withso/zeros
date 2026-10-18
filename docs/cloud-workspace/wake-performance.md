@@ -255,6 +255,26 @@ handling, and prevents a late claim from starting a provider command. Fresh
 admission, runtime qualification and readiness publication remain mandatory for
 every execution. Local workspace setup uses its existing path.
 
+## V4 setup access reads
+
+After successful preparation, v4 workspace setup reads the public SSH host key
+and the exact sandbox endpoint concurrently. Both reads must finish and pass
+validation before it installs the restricted, expiring key or sends setup
+secrets through pinned SSH. The overlap is selected only by the v4 setup caller;
+legacy setup, Computer builds and runtime updates keep serial access reads.
+
+Each execution owns its read cancellation. On a failed read, cancel its sibling
+and join both before disposing the channel, preserving the first failure. A
+cancelled execution cannot install access from late successful replies. Existing
+host-key pinning, public-address validation, ownership checks and key revocation
+after any possibly applied install remain mandatory. Local workspace setup and
+owner selection do not use this control-plane path.
+
+Successful overlap can remove the shorter read's latency if the requests do not
+contend; that is a bound, not a measured wake improvement. Compare the two read
+durations and total setup time from the same diagnostic sample before attributing
+an observed gain.
+
 ## Closed setup clocks
 
 Migration 0135 adds nullable `stage_timings` on setup runs. The negotiated version 1
