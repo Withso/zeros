@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeSetupPerformance, parseSetupPerformance, reportSetupPerformance, setupPerformance } from "./setup-performance.js";
+import { mergeSetupPerformance, parseSetupPerformance, reportSetupPerformance, selectSetupPerformance, setupPerformance, unwrapSetupPerformanceDiagnostic } from "./setup-performance.js";
 
 describe("closed setup performance", () => {
   const report = () => ({ version: 1, truncated: false, groups: [{ source: "readiness", stages: [
@@ -52,5 +52,26 @@ describe("closed setup performance", () => {
     const snapshot = second.snapshot();
     snapshot.groups[0]!.stages[0]!.count = 999;
     expect(second.snapshot().groups[0]!.stages[0]!.count).toBe(1);
+  });
+
+  it("keeps closed guest stages in their own producer groups", () => {
+    const metric = { count: 1, totalMs: 11, maxMs: 11, lastOutcome: "passed" };
+    for (const [source, stage] of [["helper", "materials"], ["attester_preflight", "actor_tools"],
+      ["attester_launch", "launcher_retire"], ["installer", "cache_verify"], ["installer", "host_stop"], ["installer", "host_start"]]) {
+      const value = { version: 1, truncated: false, groups: [{ source, stages: [{ stage, ...metric }] }] };
+      expect(parseSetupPerformance(value)).toEqual(value);
+      expect(selectSetupPerformance(value, ["readiness", "transport"])).toBeUndefined();
+      expect(parseSetupPerformance({ ...value, groups: [{ source: "readiness", stages: [{ stage, ...metric }] }] })).toBeUndefined();
+    }
+    expect(selectSetupPerformance(report(), ["helper", "attester_launch", "attester_preflight"])).toBeUndefined();
+  });
+
+  it("unwraps only the negotiated diagnostic envelope while leaving its proof reader strict", () => {
+    const diagnostic = { schema: "zeros.diagnostic/v1", component: "installer", ok: false };
+    const value = { schema: "zeros.diagnostic/v2", diagnostic, performance: { privateText: "discarded" } };
+    expect(unwrapSetupPerformanceDiagnostic(value)).toEqual({ diagnostic, performance: value.performance });
+    expect(parseSetupPerformance(unwrapSetupPerformanceDiagnostic(value).performance)).toBeUndefined();
+    expect(unwrapSetupPerformanceDiagnostic(diagnostic)).toEqual({ diagnostic });
+    expect(unwrapSetupPerformanceDiagnostic({ ...value, extra: "unknown" }).diagnostic).not.toBe(diagnostic);
   });
 });

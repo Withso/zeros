@@ -1,14 +1,21 @@
 import { z } from "zod";
 
-// CP-only observations, separate from readiness and the immutable stage_timings
+// Optional observations, separate from readiness and the immutable stage_timings
 // contract. A completed request is not proof that its response authorizes setup.
 const readinessStages = ["total", "status_request", "sleep", "host_stopped", "boot_pending", "server_retryable",
   "status_timeout", "definitive_response"] as const;
 const transportStages = ["channel_open", "prepare", "host_key", "endpoint", "key_install", "ssh_command",
   "key_revoke", "channel_dispose"] as const;
-const stages = [...readinessStages, ...transportStages] as const;
-const sources = ["readiness", "transport"] as const;
-const allowed = { readiness: new Set<string>(readinessStages), transport: new Set<string>(stages) };
+const helperStages = ["process_prelude", "request_parse", "materials", "total"] as const;
+const qualificationStages = ["module_load", "context_create", "identity", "actor_tools", "capture", "human_services",
+  "census", "context_close", "launcher_view", "launcher_spawn", "launcher_retire", "launcher_drain"] as const;
+const installerStages = ["base", "install_lock", "persistence", "cache_verify", "download", "archive_verify", "extract",
+  "switch", "host_stop", "host_start", "helper", "total"] as const;
+const stages = [...readinessStages, ...transportStages, ...helperStages, ...qualificationStages, ...installerStages] as const;
+const sources = ["readiness", "transport", "helper", "attester_preflight", "attester_launch", "installer"] as const;
+const allowed = { readiness: new Set<string>(readinessStages), transport: new Set<string>([...readinessStages, ...transportStages]),
+  helper: new Set<string>(helperStages), attester_preflight: new Set<string>(qualificationStages),
+  attester_launch: new Set<string>(qualificationStages), installer: new Set<string>(installerStages) };
 const MAX_MS = 3_600_000, MAX_COUNT = 4096;
 const milliseconds = z.number().int().min(0).max(MAX_MS);
 const metric = z.object({ stage: z.enum(stages), count: z.number().int().min(1).max(MAX_COUNT),
@@ -53,6 +60,21 @@ export function mergeSetupPerformance(...values: unknown[]): SetupPerformance | 
     for (const item of parsed.groups) groups.set(item.source, item);
   }
   return groups.size ? parseSetupPerformance({ version: 1, truncated, groups: [...groups.values()] }) : undefined;
+}
+
+/** A guest cannot replace a CP phase, nor a helper replace the installer. */
+export function selectSetupPerformance(value: unknown, permitted: readonly Source[]): SetupPerformance | undefined {
+  const parsed = parseSetupPerformance(value);
+  return parsed?.groups.every(item => permitted.includes(item.source)) ? parsed : undefined;
+}
+
+/** Keep the strict v1 diagnostic intact. Malformed optional performance is
+ * omitted independently; unknown envelope fields still fail the v1 reader. */
+export function unwrapSetupPerformanceDiagnostic(value: unknown): { diagnostic: unknown; performance?: unknown } {
+  if (value && typeof value === "object" && !Array.isArray(value) && "schema" in value && value.schema === "zeros.diagnostic/v2" &&
+    Object.keys(value).sort().join(",") === "diagnostic,performance,schema" && "diagnostic" in value && "performance" in value)
+    return { diagnostic: value.diagnostic, performance: value.performance };
+  return { diagnostic: value };
 }
 
 export function setupPerformance(source: Source, now: () => number = () => performance.now()) {

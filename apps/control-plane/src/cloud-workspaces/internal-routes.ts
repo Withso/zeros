@@ -676,6 +676,8 @@ export function createCloudWorkspaceInternalRoutes(
       if (input.runtime && c.req.header("x-zeros-setup-timings") === "1") c.header("x-zeros-setup-timings", "1");
       if (input.runtime && c.req.header("x-zeros-setup-timings") === "1" && c.req.header("x-zeros-setup-observations") === "1")
         c.header("x-zeros-setup-observations", "1");
+      if (input.runtime && c.req.header("x-zeros-setup-timings") === "1" && c.req.header("x-zeros-setup-observations") === "1" &&
+        c.req.header("x-zeros-setup-performance") === "1") c.header("x-zeros-setup-performance", "1");
       return c.json(material);
     } catch (error) {
       if (!(error instanceof CloudWorkspaceSetupMaterialError)) throw error;
