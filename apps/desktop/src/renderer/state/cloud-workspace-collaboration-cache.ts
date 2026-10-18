@@ -280,8 +280,10 @@ subscribeCloudWorkspaces(() => {
       cloudWorkspaceCollaboration.invalidate(key);
   }
 });
-// The existing catalog cadence is the fallback for invitation/role changes
-// that do not advance sharing CAS. Only active cache consumers initiate reads.
-subscribeCloudWorkspaceRefresh(() => {
-  for (const key of cloudWorkspaceCollaboration.snapshots.keys()) cloudWorkspaceCollaboration.invalidate(key);
+// Invitation/role changes can leave sharing CAS unchanged. Scoped catalog reads
+// or the dormant resource clock invalidate only those organizations; active
+// cache consumers initiate reads and retain the last confirmed exact-key window.
+subscribeCloudWorkspaceRefresh(organizations => {
+  for (const key of cloudWorkspaceCollaboration.snapshots.keys())
+    if (!organizations || organizations.has(ownerFromKey(key).organizationId)) cloudWorkspaceCollaboration.invalidate(key);
 });

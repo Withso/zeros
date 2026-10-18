@@ -30,6 +30,7 @@ import {
   subscribeCloudWorkspaces,
   subscribeCloudWorkspaceRows,
   subscribeCloudWorkspaceRefresh,
+  notifyCloudWorkspaceRefresh,
 } from "./cloud-workspace-catalog";
 import { notifyProjectsChanged, notifyWorkspacesChanged, pruneCloudWorkspaceCollections } from "./use-projects";
 import {
@@ -55,9 +56,10 @@ import { clearCloudLatencySpans, pruneCloudLatencySpans } from "./cloud-workspac
 import { clearWorkbenchConnectionFailure, recordWorkbenchConnectionFailure } from "./workbench-availability";
 import { CloudWorkspaceInteraction } from "./cloud-workspace-interaction";
 import { createCloudWorkspaceStream } from "./cloud-workspace-stream";
-import { subscribeCloudWorkspaceStreamCoverage } from "./cloud-workspace-stream-coverage";
+import { cloudWorkspaceStreamOrganizations, subscribeCloudWorkspaceStreamCoverage } from "./cloud-workspace-stream-coverage";
 import { cloudCatalogFallbackOrganizations } from "./cloud-workspace-catalog-polling";
 import { cloudCatalogStreamRolloutEnabled } from "./cloud-workspace-stream-rollout";
+import { CloudWorkspaceResourceRefresh } from "./cloud-workspace-resource-refresh";
 
 function recordCloudOpenFailure(key: string, error: unknown): void {
   const target = parseCloudWorkspaceKey(key), doc = target ? cloudWorkspaceDocument(target) : undefined;
@@ -103,6 +105,9 @@ function ActiveCloudWorkspaceLifecycle() {
     let installed = false;
     let restored = false;
     let cached = loadCloudChatCache();
+    const resources = cloudCatalogStreamRolloutEnabled()
+      ? new CloudWorkspaceResourceRefresh(notifyCloudWorkspaceRefresh) : undefined;
+    const offResources = resources ? subscribeCloudWorkspaceRefresh(scope => resources.observed(scope)) : () => {};
     let stream: ReturnType<typeof createCloudWorkspaceStream> | undefined;
     const syncStream = () => {
       const target = parseCloudWorkspaceKey(selectActiveFolder(useWorkspaceStore.getState()));
@@ -154,20 +159,24 @@ function ActiveCloudWorkspaceLifecycle() {
       if (refreshOrganizations !== null && (next === null || next.some(id => !refreshOrganizations!.includes(id))))
         lastRefresh = undefined;
       refreshOrganizations = next;
+      resources?.sync(next === null ? [] : (cloudWorkspaceStreamOrganizations() ?? [])
+        .filter(org => org.deviceStream && !next.includes(org.organizationId)).map(org => org.organizationId));
     };
     const refreshDelay = () => lastRefresh === undefined ? 0 : Math.max(0,
       lastRefresh + (cloudCatalogNeedsFastRefresh(refreshOrganizations ?? undefined) ? 2_000 : 30_000) - performance.now());
     const scheduleRefresh = () => {
       cancelRefreshTimer();
-      if (!canRefresh() || refreshFlight) return;
+      if (!canRefresh()) { resources?.pause(); return; }
       updateRefreshOrganizations();
+      if (refreshFlight) return;
       if (refreshOrganizations?.length === 0) return;
       refreshTimer = window.setTimeout(refresh, Math.ceil(refreshDelay()));
     };
     const refresh = () => {
       cancelRefreshTimer();
-      if (!canRefresh() || refreshFlight) return;
+      if (!canRefresh()) { resources?.pause(); return; }
       updateRefreshOrganizations();
+      if (refreshFlight) return;
       if (refreshOrganizations?.length === 0) return;
       if (refreshDelay() > 0) {
         scheduleRefresh();
@@ -235,6 +244,7 @@ function ActiveCloudWorkspaceLifecycle() {
         notifyWorkspacesChanged(slug, change.workspaceIds);
     });
     const clear = (preservePendingTarget = false) => {
+      resources?.clear();
       stream?.dispose(); stream = undefined;
       clearCloudLatencySpans();
       setCloudTranscriptCacheOwner(null);
@@ -317,6 +327,7 @@ function ActiveCloudWorkspaceLifecycle() {
       offCatalog();
       offRefreshSchedule();
       offCoverage(); offOrganizations();
+      offResources(); resources?.clear();
       offAuth();
       cancelRefreshTimer();
       document.removeEventListener("visibilitychange", visibility);
@@ -419,7 +430,8 @@ function ActiveCloudWorkspaceLifecycle() {
     };
     attach();
     const off = subscribeCloudWorkspaces(attach);
-    const offRefresh = subscribeCloudWorkspaceRefresh(() => {
+    const offRefresh = subscribeCloudWorkspaceRefresh(organizations => {
+      if (organizations && !organizations.has(target.organizationId)) return;
       if (cancelled || document.visibilityState === "hidden" ||
           !canReadCloudWorkspace(cloudWorkspaceDocument(target))) return;
       // History has its own revision and remains readable while the VM is

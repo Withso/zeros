@@ -35,7 +35,9 @@ import {
   clearCloudWorkspaceCatalog,
   refreshCloudWorkspaceCatalog,
   getCloudWorkspaceRows,
+  notifyCloudWorkspaceRefresh,
 } from "@/renderer/state/cloud-workspace-catalog";
+import { CloudWorkspaceResourceRefresh } from "../cloud-workspace-resource-refresh";
 import { setActiveBridge } from "@/renderer/platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "@/renderer/platform/bridge/workspace-runtime-client";
 import type { CloudWorkspaceDocument } from "@/renderer/platform/cloud-workspaces";
@@ -91,7 +93,48 @@ afterEach(() => {
   setActiveBridge(null);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
+it.each(["temporary failure", "new revision"])("revalidates stopped history after %s without catalog or runtime admission", async mode => {
+  vi.useFakeTimers();
+  let revision = 1;
+  const history = vi.fn(async () => ({ chats: [], chatDeletions: [], revision, sampledAt: Date.now() }));
+  if (mode === "temporary failure") history.mockRejectedValueOnce(new Error("offline"));
+  const open = vi.fn(), bridge = new WorkspaceRuntimeClient({ open, workspaces: () => [], readHistory: history });
+  setActiveBridge(bridge); acceptCloudWorkspaceDocument(doc); harness.list.mockClear();
+  renderToStaticMarkup(createElement(CloudWorkspaceLifecycle));
+  const off = harness.effects.find(effect => effect.toString().includes("warmCloudWorkspaceDestination"))!();
+  const clock = new CloudWorkspaceResourceRefresh(notifyCloudWorkspaceRefresh);
+  try {
+    await vi.advanceTimersByTimeAsync(0); expect(history).toHaveBeenCalledOnce();
+    clock.sync([target.organizationId]); revision++;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(history).toHaveBeenCalledTimes(2); expect(bridge.hasChatSnapshot(harness.folder)).toBe(true);
+    expect(harness.list).not.toHaveBeenCalled(); expect(open).not.toHaveBeenCalled();
+  } finally { clock.clear(); off?.(); bridge.dispose(); }
+});
+
+it("revalidates selected history only for its own organization refresh scope", async () => {
+  let now = 100_000;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const history = vi.fn(async () => ({ chats: [], chatDeletions: [], revision: 1, sampledAt: now }));
+  const open = vi.fn(), bridge = new WorkspaceRuntimeClient({ open, workspaces: () => [], readHistory: history });
+  setActiveBridge(bridge); acceptCloudWorkspaceDocument(doc);
+  const otherOrg = "44444444-4444-4444-8444-444444444444";
+  const other = { ...doc, organizationId: otherOrg, teamId: otherOrg, id: otherOrg };
+  acceptCloudWorkspaceDocument(other);
+  renderToStaticMarkup(createElement(CloudWorkspaceLifecycle));
+  const off = harness.effects.find(effect => effect.toString().includes("warmCloudWorkspaceDestination"))!();
+  try {
+    await flush(); expect(history).toHaveBeenCalledOnce(); now += 31_000;
+    harness.list.mockResolvedValue([other]);
+    await refreshCloudWorkspaceCatalog([otherOrg]); await flush();
+    expect(history).toHaveBeenCalledOnce();
+    harness.list.mockResolvedValue([doc]); await refreshCloudWorkspaceCatalog([target.organizationId]); await flush();
+    expect(history).toHaveBeenCalledTimes(2); expect(open).not.toHaveBeenCalled();
+  } finally { off?.(); bridge.dispose(); }
+});
+
 it.each(["initial failure", "new revision"])(
   "normal unchanged catalog polling recovers selected stopped history after %s",
   async (mode) => {

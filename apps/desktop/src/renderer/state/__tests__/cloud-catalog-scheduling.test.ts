@@ -97,6 +97,8 @@ import {
   clearCloudWorkspaceCatalog,
   cloudWorkspaceDocument,
   getCloudWorkspaceRows,
+  refreshCloudWorkspaceCatalog,
+  subscribeCloudWorkspaceRefresh,
 } from "../cloud-workspace-catalog";
 
 const target = {
@@ -214,6 +216,57 @@ describe("cloud catalog timer ownership", () => {
     expect(h.list.mock.calls.filter(([org]) => org === otherOrg)).toHaveLength(20);
     expect(h.list.mock.calls.some(([org]) => org === target.organizationId)).toBe(false);
     expect(timerFirings).toBe(20); expect(cloudWorkspaceDocument(target)?.status).toBe("waking");
+  });
+
+  it.each([false, true])("preserves scoped resource refreshes for ten minutes with mixed coverage %s", async mixed => {
+    h.rollout = true; h.members = mixed ? [target.organizationId, otherOrg] : [target.organizationId];
+    h.list.mockImplementation(async (org?: string) => org ? [other()] : mixed ? [doc(), other()] : [doc()]);
+    await mount(); covered(mixed);
+    const observed: Array<ReadonlySet<string> | undefined> = [];
+    const off = subscribeCloudWorkspaceRefresh(scope => observed.push(scope));
+    try {
+      // Unrelated publications cannot keep moving the resource deadline.
+      for (let i = 0; i < 30; i++) {
+        await vi.advanceTimersByTimeAsync(20_000); acceptCloudWorkspaceDocument(doc(i + 2, "waking"));
+      }
+      expect(observed.filter(scope => scope?.has(target.organizationId))).toHaveLength(20);
+      expect(observed.filter(scope => scope?.has(otherOrg))).toHaveLength(mixed ? 20 : 0);
+      expect(observed.every(scope => scope?.size === 1)).toBe(true);
+      expect(h.list).toHaveBeenCalledTimes(mixed ? 21 : 1);
+    } finally { off(); }
+  });
+
+  it("pauses resource refresh while hidden, catches up on resume and retires it on sign-out", async () => {
+    h.rollout = true; h.members = [target.organizationId]; await mount(); covered();
+    const refresh = vi.fn(), off = subscribeCloudWorkspaceRefresh(refresh);
+    try {
+      await vi.advanceTimersByTimeAsync(20_000); visibility("hidden");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(refresh).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+      visibility("visible"); await flush();
+      expect(refresh).toHaveBeenCalledExactlyOnceWith(new Set([target.organizationId]));
+      auth(null); refresh.mockClear(); await vi.advanceTimersByTimeAsync(60_000);
+      expect(refresh).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+    } finally { off(); }
+  });
+
+  it("reanchors only the resource organizations actually observed by a completed read", async () => {
+    h.rollout = true; h.members = [target.organizationId, otherOrg];
+    h.list.mockImplementation(async (org?: string) => org === target.organizationId ? [doc()] : org ? [other()] : [doc(), other()]);
+    await mount();
+    setCloudWorkspaceStreamCoverage({ streamId: target.organizationId, leaseId: target.workspaceId,
+      sequence: 1, revision: 1, state: "open", catalogRequired: false,
+      organizations: h.members.map(organizationId => ({ organizationId, deviceStream: true, presence: false })) });
+    const observed: Array<ReadonlySet<string> | undefined> = [];
+    const off = subscribeCloudWorkspaceRefresh(scope => observed.push(scope));
+    try {
+      await vi.advanceTimersByTimeAsync(15_000); await refreshCloudWorkspaceCatalog([target.organizationId]);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(observed).toEqual([new Set([target.organizationId]), new Set([otherOrg])]);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(observed.at(-1)).toEqual(new Set([target.organizationId]));
+      expect(h.list).toHaveBeenCalledTimes(2);
+    } finally { off(); }
   });
 
   it.each(["guest", "unknown", "rollout off"])("keeps the global legacy cadence for %s organization knowledge", async kind => {

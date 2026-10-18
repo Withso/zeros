@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { BridgeRegistryAgent } from "../../../platform/bridge/messages";
 import { isSelectableAgent } from "../agent-runnable";
-const mock = vi.hoisted(() => ({ request: vi.fn(), grants: vi.fn(), refreshListeners: new Set<() => void>() }));
+const mock = vi.hoisted(() => ({ request: vi.fn(), grants: vi.fn(), refreshListeners: new Set<(scope?: ReadonlySet<string>) => void>() }));
 vi.mock("../../../platform/bridge/active-bridge", () => ({
   getActiveBridge: () => ({ request: mock.request }),
 }));
@@ -13,7 +13,7 @@ vi.mock("../../../platform/cloud-workspaces", () => ({
 vi.mock("../../../state/cloud-workspace-catalog", () => ({
   cloudWorkspaceDocument: () => null,
   subscribeCloudWorkspaces: () => () => {},
-  subscribeCloudWorkspaceRefresh: (listener: () => void) => { mock.refreshListeners.add(listener); return () => mock.refreshListeners.delete(listener); },
+  subscribeCloudWorkspaceRefresh: (listener: (scope?: ReadonlySet<string>) => void) => { mock.refreshListeners.add(listener); return () => mock.refreshListeners.delete(listener); },
 }));
 import {
   clearCloudAgentRegistry,
@@ -46,6 +46,19 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 describe("workspace agent registry", () => {
+  it("refreshes only the signaled organization while retaining another owner's confirmed discovery", async () => {
+    const c = "cloud://44444444-4444-4444-8444-444444444444/55555555-5555-4555-8555-555555555555";
+    mock.request.mockResolvedValue({ type: "AGENT_AGENTS_LIST", agents: [{ id: "codex", installed: true }] });
+    mock.grants.mockResolvedValue([{ kind: "codex-api-key", runtimeQualified: true, models: ["gpt-6.1-sol"] }]);
+    await Promise.all([warmCloudAgentRegistry(a), warmCloudAgentRegistry(c)]);
+    const retained = workspaceAgentsSnapshot(c), before = workspaceAgentsSnapshot(a);
+    for (const listener of mock.refreshListeners) listener(new Set(["11111111-1111-4111-8111-111111111111"]));
+    expect(workspaceAgentsSnapshot(a)).toBe(before); expect(workspaceAgentsSnapshot(c)).toBe(retained);
+    await Promise.all([warmCloudAgentRegistry(a), warmCloudAgentRegistry(c)]);
+    expect(mock.request).toHaveBeenCalledTimes(3); expect(mock.grants).toHaveBeenCalledTimes(3);
+    expect(workspaceAgentsSnapshot(c)).toBe(retained);
+  });
+
   it.each(Array.from({ length: 8 }, (_, mask) => mask))("resolves new-chat defaults from confirmed actor grants for combination %i", async mask => {
     const families = ["claude", "codex", "cursor"] as const;
     const models = { claude: "claude-opus-5-5[1m]", codex: "gpt-6.1-sol", cursor: "grok-4.7" };

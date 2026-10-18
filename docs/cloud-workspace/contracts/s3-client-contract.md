@@ -523,10 +523,19 @@ the global list. Empty and legacy membership snapshots are incomplete proof.
 Coverage loss restores observation without clearing confirmed documents.
 
 Presence polling remains unchanged. Stream collaboration presence does not yet
-renew the engine's idle-stop and automatic-update presence lease. That parity,
-and replacement/fallback for secondary catalog-refresh consumers (history,
-agent discovery and collaboration caches), are activation prerequisites; current
-stream coverage alone does not establish them.
+renew the engine's idle-stop and automatic-update presence lease. Removing those
+polls requires that separate parity; current stream coverage does not prove it.
+
+History, agent discovery and collaborator invitations/roles have revisions that
+the current device stream does not carry. Under the same disabled catalog rollout
+gate, one account-owned 30-second clock preserves their refresh opportunities for
+organizations omitted from periodic catalog reads. Scoped reads and this clock
+invalidate only the matching organization; active consumers retain their exact-key
+snapshots and own deduplicated reads. Global catalog fallback needs no additional
+clock. Hidden windows pause it, resume catches up due work, and account changes
+discard its deadlines. Reading stopped history still does not acquire runtime
+admission. Live fixture and owner-organization conformance remain prerequisites
+for enabling catalog poll replacement.
 
 ## Open questions
 

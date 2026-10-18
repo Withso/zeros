@@ -69,7 +69,7 @@ const localStopVersions = new Map<string, number>();
 let nextLocalStopVersion = 0;
 export const cloudWorkspaceStopVersion = (target: CloudWorkspaceTarget) =>
   localStopVersions.get(cloudWorkspaceKey(target)) ?? 0;
-const refreshListeners = new Set<() => void>();
+const refreshListeners = new Set<(organizations?: ReadonlySet<string>) => void>();
 export interface CloudWorkspaceRowsChange {
   workspaceIds: readonly string[];
   removedWorkspaceIds: readonly string[];
@@ -97,11 +97,14 @@ export const subscribeCloudWorkspaceRows = (listener: (change: CloudWorkspaceRow
   rowListeners.add(listener);
   return () => { rowListeners.delete(listener); };
 };
-/** A successful catalog read is a history revalidation opportunity, not a row
- * mutation. Only the visible owner subscribes to this separate cadence. */
-export const subscribeCloudWorkspaceRefresh = (listener: () => void) => {
+/** Resource revalidation opportunity, without a catalog/row mutation. Catalog
+ * reads supply their scope; dormant stream replacement keeps a separate clock. */
+export const subscribeCloudWorkspaceRefresh = (listener: (organizations?: ReadonlySet<string>) => void) => {
   refreshListeners.add(listener);
   return () => { refreshListeners.delete(listener); };
+};
+export const notifyCloudWorkspaceRefresh = (organizations?: ReadonlySet<string>) => {
+  for (const listener of refreshListeners) listener(organizations);
 };
 export const getCloudWorkspaceRows = () => rows;
 export const getCloudWorkspaceDocuments = () => documents;
@@ -386,7 +389,7 @@ async function readCatalog(fetchSnapshot: () => Promise<CloudWorkspaceCatalogSna
       }
       if (!organizations) catalogConfirmed = true;
       rebuild(documentsChanged);
-      for (const listener of refreshListeners) listener();
+      notifyCloudWorkspaceRefresh(organizations);
       return { workspaces: [...documents], catalogVersion: snapshot.catalogVersion };
     })
     .finally(() => {

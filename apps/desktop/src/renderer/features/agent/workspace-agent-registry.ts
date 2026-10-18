@@ -79,10 +79,13 @@ function registryKey(target: CloudWorkspaceTarget): string {
   return `${cloudWorkspaceKey(target)}#${authority.join(":")}`;
 }
 const registryTarget = (key: string) => parseCloudWorkspaceKey(key.slice(0, key.indexOf("#")));
-// Reuse the catalog cadence for changes from other devices, consent expiry,
-// and engine replacement. Only active hook subscribers initiate revalidation.
-subscribeCloudWorkspaceRefresh(() => {
-  for (const key of cache.keys()) cache.invalidate(key);
+// Catalog reads or the dormant stream fallback cover resource revisions that
+// have no dedicated event. Only active hook subscribers initiate revalidation.
+subscribeCloudWorkspaceRefresh(organizations => {
+  for (const key of cache.keys()) {
+    const target = registryTarget(key);
+    if (!organizations || target && organizations.has(target.organizationId)) cache.invalidate(key);
+  }
 });
 export const clearCloudAgentRegistry = () => {
   for (const key of cache.keys()) cache.forget(key);
