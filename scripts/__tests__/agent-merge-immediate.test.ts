@@ -7,7 +7,6 @@ import { runAgentMerge } from "../agent-merge.mjs";
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const MERGE = "c".repeat(40);
-const REPOSITORY = "Withso/zeros";
 
 function fixture() {
   return {
