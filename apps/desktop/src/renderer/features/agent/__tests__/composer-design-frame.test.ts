@@ -58,6 +58,13 @@ describe("parked composer frame ownership", () => {
     mocks.peekWorkspaces.mockReset().mockReturnValue(mocks.workspaces);
   });
 
+  it.each([{ label: "empty", value: [] }, { label: "invalid", value: [{}] }])("does not expose $label parked groups as context", ({ value }) => {
+    const context = readContext({ ...options, initialFrame: value as never });
+    expect(context.hasContext).toBe(false);
+    expect(context.selection).toBeNull();
+    expect(context.capture()).toBeNull();
+  });
+
   it("delivers the pinned frame and image while a queued send drains offscreen", () => {
     const context = readContext({ ...options, initialFrame: target });
     expect(context.selection).toBeNull();

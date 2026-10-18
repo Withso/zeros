@@ -25,7 +25,11 @@
   Cause: ownership lacked a transition revision and absence was treated as
   authoritative. Rule: fence confirmed owner transitions without retiring the
   first directory bind; prune missing nodes only from a complete exact-source
-  tree. Encoded in the collection, detail-race and selection workflow suites.
+  tree below the node/depth bounds with an unsaturated warning buffer. Retain
+  the existing truncation warning before trimming audit warnings; qualify the
+  actual producer → bridge → reconciler path, not only a hand-authored warning.
+  Encoded in the collection, detail-race, selection workflow and opaque-runtime
+  browser suites.
 - Symptom: a foreign workspace owner was rejected by the store but still
   published a null engine selection. Cause: collection workflows checked the
   owner's freshness without comparing its workspace. Rule: reject a foreign
@@ -42,6 +46,33 @@
   existing shared selection limit; no second persisted selection model exists.
 - Browser coverage must preserve the caller's storage and viewport: a synthetic
   directory left behind by a shared-page scenario can retire the next fixture's
-  selection. The held-marquee race starts inside a frame now that an outer
+  selection. Each nested scenario must also establish its required panel
+  visibility; navigation retains panel preferences. Drain beforeunload persistence
+  after restoring viewport and before restoring storage, so a later navigation
+  cannot flush the synthetic state over it. The held-marquee race
+  starts inside a frame now that an outer
   marquee selects scene frames without runtime element reads; its stale-result
   assertion remains unchanged.
+- Symptom: reference-only sends parked successfully but lost their cold-send
+  arm, draft indicators or protection against restoration/close. Cause:
+  downstream consumers still equated editor emptiness with payload emptiness.
+  Rule: share a validated reference-aware predicate across parking, recovery,
+  persistence, live restoration, presence and close; retain explicit null pins
+  without counting them as payload. Queued cloud edits keep their own frozen
+  additional factory, not the current canvas selection. Encoded in all affected
+  consumer suites and the seeded cold-recovery eval.
+- Symptom: removing an unlinked restored pin allowed an older held marquee to
+  revive it. Cause: membership equality returned before retiring selection
+  intent. Rule: retire pending reads before the no-op membership return, without
+  allocating an explicit selection event. Encoded in the production selection
+  suite and real-pointer parked-removal smoke.
+- Symptom: deleting one selected frame discarded surviving references. Cause:
+  a real deletion consumer activated a fallback after correct catalog pruning.
+  Rule: qualify actual mutation consumers as well as collection helpers; retain
+  surviving canonical membership and its inspector before fallback activation.
+  Encoded in the keyboard deletion smoke.
+- Symptom: an inner marquee after catalog item 32 became an outer selection.
+  Cause: incidental catalog order spent the resource budget before locating the
+  gesture owner. Rule: query the owner first, keep the 32-target cap, disclose
+  overflow and assert highlight/chip/payload identity equality. Encoded in the
+  workflow suite and 40-frame real-pointer smoke.

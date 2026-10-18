@@ -141,7 +141,7 @@ export function isValidDesignNodeId(value: unknown): value is string {
   return true;
 }
 
-export function normalizeDesignSelectedTargets(value: unknown): DesignSelectionTarget[] {
+export function normalizeDesignSelectedTargets(value: unknown, onOverflow?: () => void): DesignSelectionTarget[] {
   if (!Array.isArray(value)) return [];
   const unique = new Map<string, DesignSelectionTarget>();
   for (const target of value) {
@@ -149,9 +149,12 @@ export function normalizeDesignSelectedTargets(value: unknown): DesignSelectionT
       (target.nodeId !== undefined && !isValidDesignNodeId(target.nodeId))) continue;
     const normalized = { frame: target.frame, ...(target.nodeId ? { nodeId: target.nodeId } : {}) };
     unique.set(designSelectionTargetKey(normalized), normalized);
-    if (unique.size === DESIGN_SELECTION_NODE_LIMIT) break;
+    if (unique.size > DESIGN_SELECTION_NODE_LIMIT) {
+      onOverflow?.();
+      break;
+    }
   }
-  return [...unique.values()];
+  return [...unique.values()].slice(0, DESIGN_SELECTION_NODE_LIMIT);
 }
 
 function designSelectionPatch(targets: readonly DesignSelectionTarget[], activeFrame: string | null) {

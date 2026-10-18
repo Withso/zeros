@@ -14,6 +14,9 @@ export const DESIGN_RUNTIME_VERSION = 2;
 export const DESIGN_RUNTIME_DOCUMENT_BODY_ID = "::zeros-document-body";
 /** Shared renderer/engine bound for one additive design selection. */
 export const DESIGN_SELECTION_NODE_LIMIT = 32;
+export const DESIGN_RUNTIME_AUDIT_WARNING_LIMIT = 128;
+export const DESIGN_RUNTIME_TREE_NODE_LIMIT = 20000;
+export const DESIGN_RUNTIME_TREE_DEPTH_LIMIT = 32;
 /** Reserve one operation for the container in a 256-operation transaction. */
 export const DESIGN_LAYOUT_CHILD_LIMIT = 255;
 /** Computed snapshots mirror a fixed, app-owned style catalog. Leave bounded
@@ -780,14 +783,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   // Viewport captures live only in renderer memory — the persisted-thumbnail
   // wire cap below does not apply to them.
   var MAX_VIEWPORT_CAPTURE_PIXELS = 9000000;
-  var MAX_AUDIT_WARNINGS = 128;
+  var MAX_AUDIT_WARNINGS = ${DESIGN_RUNTIME_AUDIT_WARNING_LIMIT};
   var MAX_MATCHED_DECLARATIONS = 256;
   var MAX_ACTIVE_REQUESTS = 128;
   var MAX_STYLE_SNAPSHOT_PROPERTIES = 256;
-  var MAX_TREE_NODES = 20000;
+  var MAX_TREE_NODES = ${DESIGN_RUNTIME_TREE_NODE_LIMIT};
   // Keep structured-clone payload nesting well below Chromium's IPC depth
   // ceiling; the outer protocol envelope adds several more object levels.
-  var MAX_TREE_DEPTH = 32;
+  var MAX_TREE_DEPTH = ${DESIGN_RUNTIME_TREE_DEPTH_LIMIT};
   var MAX_AUDIT_ELEMENTS = 5000;
   // Keep worst-case RGBA → PNG base64 within the engine's 12 MB wire cap.
   var MAX_CAPTURE_PIXELS = 2000000;
@@ -1871,7 +1874,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       }
     }
     var warnings = auditWarnings();
-    if (treeBudget.truncated && warnings.length < MAX_AUDIT_WARNINGS) {
+    if (treeBudget.truncated) {
       warnings.unshift({
         ruleId: "layer-tree-limit",
         oid: oidOf(frameElement()) || "frame",

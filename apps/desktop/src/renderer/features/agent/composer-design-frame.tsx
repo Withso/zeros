@@ -10,6 +10,7 @@ import type { DesignSelectionTarget } from "../design-workspace/design-selected-
 import { Button, Tooltip } from "../../shared/ui/primitives";
 import { designFrameAttachmentTargets, type DesignFrameAttachmentSelection, type DesignFrameAttachmentTarget } from "./design-frame-attachment";
 import { designWorkspaceSnapshotCache } from "../design-workspace/state/design-workspace-cache";
+import { hasDesignFrameAttachmentSelection } from "./design-frame-selection";
 
 function selectionEvent(workspaceId: string | undefined): string {
   const view = designWorkspaceView(workspaceId);
@@ -24,7 +25,10 @@ function clearLinkedSelection(selection: DesignFrameAttachmentSelection, consume
   const view = designWorkspaceView(first.workspaceId);
   if (owner.directoryId !== first.directoryId || (first.pageId !== undefined && owner.pageId !== first.pageId) ||
     (first.ownerRevision !== undefined && owner.revision !== first.ownerRevision) ||
-    (consumed && first.selectionEvent !== undefined && view.selectionEvent !== first.selectionEvent)) return;
+    (consumed && first.selectionEvent !== undefined && view.selectionEvent !== first.selectionEvent)) {
+    if (!consumed) clearDesignCanvasSelection(first.workspaceId, owner, []);
+    return;
+  }
   clearDesignCanvasSelection(first.workspaceId, owner, targets.map(target => ({ frame: target.frame, ...(target.nodeId ? { nodeId: target.nodeId } : {}) })));
 }
 
@@ -49,10 +53,11 @@ export function useComposerDesignFrame(options: {
   const snapshot = useSyncExternalStore(subscribe, readSnapshot, readSnapshot);
   const [includeScreenshot, setIncludeScreenshot] = useState(false);
   const { onPin } = options;
-  const [pinned, setPinned] = useState<{ target: DesignFrameAttachmentSelection | null | undefined; event: string | null }>(() => ({ target: options.initialFrame, event: workspaceId ? selectionEvent(workspaceId) : null }));
+  const [pinned, setPinned] = useState<{ target: DesignFrameAttachmentSelection | null | undefined; event: string | null }>(() => ({ target: options.initialFrame && !hasDesignFrameAttachmentSelection(options.initialFrame) ? null : options.initialFrame, event: workspaceId ? selectionEvent(workspaceId) : null }));
   const pinnedRef = useRef(pinned);
   const captureLink = useRef<{ workspaceId: string; event: number | undefined; revision: number } | null>(null);
   const pin = useCallback((target: DesignFrameAttachmentSelection | null | undefined) => {
+    if (target && !hasDesignFrameAttachmentSelection(target)) target = null;
     const next = { target, event: workspaceId ? selectionEvent(workspaceId) : null };
     pinnedRef.current = next;
     setPinned(next);
@@ -150,7 +155,7 @@ export function useComposerDesignFrame(options: {
       pin(Array.isArray(pinnedRef.current.target) ? targets : targets[0]);
     } else setIncludeScreenshot(value => !value);
   }, [pin]);
-  return { selection, hasContext: Boolean(selection || (!options.active && pinned.target)), remove, capture, pin, consume, clear, toggleScreenshot };
+  return { selection, hasContext: hasDesignFrameAttachmentSelection(selection || (!options.active && pinned.target)), remove, capture, pin, consume, clear, toggleScreenshot };
 }
 
 export function ComposerDesignFrame({ selection, onRemove, onToggleScreenshot }: {

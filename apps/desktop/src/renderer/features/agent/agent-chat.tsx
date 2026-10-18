@@ -130,6 +130,7 @@ import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import { ComposerDesignTag } from "./composer-design-tag";
 import { ComposerDesignFrame, useComposerDesignFrame } from "./composer-design-frame";
 import { prepareDesignFrameAttachments } from "./design-frame-attachment";
+import { hasDesignFrameAttachmentSelection } from "./design-frame-selection";
 import { setComposerMode } from "./composer-mode";
 import {
   Conversation,
@@ -1923,6 +1924,7 @@ function AgentChatBody({
   } = composer;
   const clearComposer = () => { clearComposerEditor(); designFrameContext.clear(); };
   const composerHasContent = !composerEmpty || designFrameContext.hasContext;
+  const queuedEditHasContent = !composerEmpty || Boolean(editingQueuedId && cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.getQueuedDraft?.(editingQueuedId)?.prepareAdditional);
   composerFocusRef.current = focusComposer;
   // The composer stays editable in EVERY session state. `failed` /
   // `auth-required` used to flip the editor read-only here (mirroring the old
@@ -3201,7 +3203,7 @@ function AgentChatBody({
       // live persistence.
       if (editingQueuedRef.current) return false;
       const current = serializeComposerState();
-      if (current && !current.isEmpty) return false;
+      if (current && !current.isEmpty || hasDesignFrameAttachmentSelection(composerLiveRef.current.designFrame)) return false;
       setComposerContent({
         json: draft.json ?? (draft.text.trim() ? textToDoc(draft.text) : null),
         attachments: draft.attachments,
@@ -3678,7 +3680,7 @@ function AgentChatBody({
     const snapshot = override === undefined ? serializeComposerState() : null;
     const action = unreadableTranscriptSendAction({
       hasPayload: snapshot
-        ? !snapshot.isEmpty
+        ? !snapshot.isEmpty || hasDesignFrameAttachmentSelection(composerLiveRef.current.designFrame)
         : (override ?? "").trim().length > 0,
       payloadInComposer: snapshot !== null,
       alreadyRetried: transcriptParkedChatRef.current === parkChatId,
@@ -3758,7 +3760,8 @@ function AgentChatBody({
     // — happens further down, so awaiting here (or at the session rebuild below)
     // opens a window in which a second Enter re-enters, snapshots the same
     // composer state, and sends it again.
-    const submittedDesignFrame = override === undefined ? designFrameContext.capture() : null;
+    const capturedDesignFrame = override === undefined ? designFrameContext.capture() : null;
+    const submittedDesignFrame = hasDesignFrameAttachmentSelection(capturedDesignFrame) ? capturedDesignFrame : null;
     const cloudSubmission = cloudComputerV2 && !!chatId && isCloudWorkspace(chatThread?.folder);
     const sendGeneration = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
     const hydrateNeeded = !cloudSubmission && session.transcriptState !== "resident";
@@ -4281,8 +4284,8 @@ function AgentChatBody({
     const s = serializeComposerState();
     const displayText = (s?.displayText ?? "").trim();
     const localAttachments = s?.attachments ?? [];
-    // Nothing to save — the tick is disabled; Esc cancels, Delete removes.
-    if (displayText.length === 0 && localAttachments.length === 0) return false;
+    const prepareAdditional = cloudComputerV2 && isCloudWorkspace(chatThread?.folder) ? session.getQueuedDraft?.(id)?.prepareAdditional : undefined;
+    if (displayText.length === 0 && localAttachments.length === 0 && !prepareAdditional) return false;
     queueSaveInFlightRef.current = true;
     try {
       const wireText = expandMentionsInText(
@@ -4291,7 +4294,7 @@ function AgentChatBody({
       );
       if (cloudComputerV2 && chatId && s && isCloudWorkspace(chatThread?.folder)) {
         const queued = cloudQueuedPrompt({ cwd: chatThread!.folder, chatId, agentId: session.agentId,
-          text: wireText, displayText, snapshot: s, prepareAdditional: session.getQueuedDraft?.(id)?.prepareAdditional });
+          text: wireText, displayText, snapshot: s, prepareAdditional });
         session.editQueued?.(id, queued);
         exitQueuedEdit(releaseQueue); return true;
       }
@@ -5232,7 +5235,7 @@ function AgentChatBody({
             onSelect={setQueueSelectedId}
             onEdit={startQueuedEdit}
             onSaveEdit={() => void saveQueuedEdit()}
-            saveDisabled={composerEmpty}
+            saveDisabled={!queuedEditHasContent}
             onDelete={deleteQueued}
             onSendNow={(id) => void sendNowQueued(id)}
             steeringSupported={steeringSupported}
@@ -5520,7 +5523,7 @@ function AgentChatBody({
                               : sendPreparing
                                 ? true
                                 : editingQueuedId
-                                  ? composerEmpty
+                                  ? !queuedEditHasContent
                                   : !runtimeSendBlocked && !canSend
                           }
                           className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-8 disabled:opacity-100"
@@ -5540,7 +5543,7 @@ function AgentChatBody({
                           <Button
                             type="button"
                             onClick={() => void saveQueuedEdit()}
-                            disabled={composerEmpty}
+                            disabled={!queuedEditHasContent}
                             aria-label="Save queued message"
                             className="disabled:bg-bg2-hover disabled:text-fg2 size-8 shrink-0 rounded-sm p-0 disabled:opacity-100"
                           >

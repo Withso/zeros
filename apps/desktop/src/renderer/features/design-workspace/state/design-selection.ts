@@ -22,7 +22,11 @@ import {
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
   DESIGN_RUNTIME_GEOMETRY_CHILD_LIMIT,
   DESIGN_SELECTION_NODE_LIMIT,
+  DESIGN_RUNTIME_AUDIT_WARNING_LIMIT,
+  DESIGN_RUNTIME_TREE_NODE_LIMIT,
+  DESIGN_RUNTIME_TREE_DEPTH_LIMIT,
 } from "@zeros/protocol/design-runtime";
+import { toast } from "../../../shared/ui/primitives/elements/toast";
 import type { DesignStyleProvenance } from "@zeros/design-web";
 
 import {
@@ -1119,7 +1123,7 @@ export async function selectDesignTargets(input: {
 }): Promise<DesignRuntimeNodeDetails[] | null> {
   const owner = input.owner ?? captureDesignPageOwner(input.workspaceId);
   if (owner.workspaceId !== input.workspaceId || !selectionPageOwnerIsCurrent(owner)) return null;
-  const targets = normalizeDesignSelectedTargets(input.targets);
+  const targets = normalizeDesignSelectedTargets(input.targets, input.explicit === false ? undefined : reportDesignSelectionLimit);
   const primary = targets[0];
   const frame = (input.frames ?? readSelectionSnapshot(input.workspaceId)?.frames)?.find(candidate => candidate.file === primary?.frame);
   if (primary?.nodeId && frame) return selectDesignNodes({ ...input, targets, frame,
@@ -1139,16 +1143,19 @@ export async function selectDesignTargets(input: {
 
 export function clearDesignCanvasSelection(workspaceId: string, owner: DesignPageOwner, targets: readonly DesignSelectionTarget[]): void {
   if (owner.workspaceId !== workspaceId || !selectionPageOwnerIsCurrent(owner)) return;
+  clearSelectionDetailDemand(workspaceId);
+  nextGeneration(selectionGenerationByWorkspace, workspaceId);
   const current = designWorkspaceView(workspaceId);
   const removed = new Set(targets.map(designSelectionTargetKey));
   const remaining = current.selectedTargets.filter(target => !removed.has(designSelectionTargetKey(target)));
-  if (remaining.length === current.selectedTargets.length) return;
+  if (remaining.length === current.selectedTargets.length) {
+    notifyDesignSelectionSnapshot(workspaceId);
+    return;
+  }
   if (remaining.length) {
     void selectDesignTargets({ workspaceId, folder: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.folder ?? "", targets: remaining, owner, explicit: false }).catch(() => {});
     return;
   }
-  clearSelectionDetailDemand(workspaceId);
-  nextGeneration(selectionGenerationByWorkspace, workspaceId);
   useDesignWorkspaceUiStore.getState().setSelectedTargets(workspaceId, remaining, { owner, explicit: false });
   void designSetSelection(workspaceId, null, nextSelectionVersion()).catch(() => {});
 }
@@ -1454,10 +1461,12 @@ export async function selectDesignTargetsInRect(input: {
   const initial = designWorkspaceView(input.workspaceId);
   const overlaps = (frame: DesignCanvasFrameWire) => frame.x < input.rect.x + input.rect.width && frame.y < input.rect.y + input.rect.height &&
     frame.x + frame.width > input.rect.x && frame.y + frame.height > input.rect.y;
-  const frames = input.frames.filter(frame => (!frame.pageId || !owner.pageId || frame.pageId === owner.pageId) && overlaps(frame)).slice(0, DESIGN_SELECTION_NODE_LIMIT);
+  const frames = input.frames.filter(frame => (!frame.pageId || !owner.pageId || frame.pageId === owner.pageId) && overlaps(frame));
   const targets: DesignSelectionTarget[] = [];
   const startFrame = frames.find(frame => frame.file === input.startFrame?.file);
+  if (input.startFrame && !startFrame) return null;
   const runtime = startFrame ? designFrameRuntime(input.workspaceId, startFrame.file) : null;
+  if (startFrame && !runtime) return null;
   const runtimeSource = runtime?.sourceVersion;
   let details: DesignRuntimeNodeDetails[] = [];
   if (startFrame) {
@@ -1468,7 +1477,15 @@ export async function selectDesignTargetsInRect(input: {
   targets.push(...frames.filter(frame => frame !== startFrame).map(frame => ({ frame: frame.file })));
   if (!selectionPageOwnerIsCurrent(owner) || selectionGenerationByWorkspace.get(input.workspaceId) !== generation ||
     (startFrame && (designFrameRuntime(input.workspaceId, startFrame.file) !== runtime || runtime?.sourceVersion !== runtimeSource || runtime?.isActive?.() === false))) return null;
+  if (details.length >= DESIGN_SELECTION_NODE_LIMIT) reportDesignSelectionLimit();
   return selectDesignTargets({ ...input, owner, details, targets: input.additive ? [...targets, ...initial.selectedTargets] : targets });
+}
+
+function reportDesignSelectionLimit(): void {
+  toast.info(`Selection limited to ${DESIGN_SELECTION_NODE_LIMIT} targets`, {
+    id: "design-selection-limit",
+    description: "Only highlighted targets are included. Narrow the marquee or deselect targets to choose others.",
+  });
 }
 
 /** Everything one gesture frame paints from, in one round trip.
@@ -2011,7 +2028,18 @@ export function reconcileDesignRuntimeSnapshot(input: {
     warnings: snapshot.warnings,
   });
   const view = designWorkspaceView(workspaceId);
-  const completeTree = !snapshot.warnings.some(warning => warning.ruleId === "layer-tree-limit");
+  let completeTree = snapshot.warnings.length < DESIGN_RUNTIME_AUDIT_WARNING_LIMIT && !snapshot.warnings.some(warning => warning.ruleId === "layer-tree-limit");
+  const pending = completeTree ? snapshot.tree.map(node => ({ node, depth: 0 })) : [];
+  let nodeCount = 0;
+  while (completeTree && pending.length) {
+    const { node, depth } = pending.pop()!;
+    nodeCount++;
+    if (depth >= DESIGN_RUNTIME_TREE_DEPTH_LIMIT || nodeCount + pending.length + node.children.length >= DESIGN_RUNTIME_TREE_NODE_LIMIT) {
+      completeTree = false;
+      break;
+    }
+    for (const child of node.children) pending.push({ node: child, depth: depth + 1 });
+  }
   const survivingTargets = view.selectedTargets.filter(target => !completeTree || target.frame !== frame.file || !target.nodeId ||
     target.nodeId === snapshot.frame.oid || treeContainsOid(snapshot.tree, target.nodeId));
   if (survivingTargets.length !== view.selectedTargets.length) {

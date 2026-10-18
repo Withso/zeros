@@ -31,6 +31,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { ChatThread, ComposerDraft } from "../../state/store";
+import { composerDraftHasPayload } from "../../state/composer-draft-payload";
 
 /** The seeded title every fresh chat is born with (spawn-default-chat's
  *  bornChatThread) and the CAS expectation the AI auto-title races against.
@@ -44,8 +45,7 @@ const UNTITLED_TITLE = "Untitled";
 export function draftHasContent(
   draft: ComposerDraft | null | undefined,
 ): boolean {
-  if (!draft) return false;
-  return draft.text.trim() !== "" || draft.attachments.length > 0;
+  return composerDraftHasPayload(draft);
 }
 
 export interface ChatCloseInputs {

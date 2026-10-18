@@ -622,12 +622,19 @@ per-page renderer state in this version.
 The composer follows the exact workspace's canvas selection in Local Personal,
 organization-local and cloud workspaces. One target shows its frame path; several
 unique targets show one counted selection chip. Shift-click toggles frame or
-element membership, and an outer marquee selects all intersecting scene frames.
-A marquee begun inside a frame keeps that frame's scoped element query and can
-also include other scene frames. Clearing selection removes the live chip;
-removing the chip clears only its linked selection, preserves source view and
-editor focus, and permits an explicit click on the same target to attach again.
-Background refreshes are not explicit selection events.
+element membership. An outer marquee selects intersecting scene frames up to
+the existing 32-target bound. An inner marquee queries its gesture-owning frame
+before spending the remaining budget on other scene frames, even when that
+owner is later in catalog order. Exceeding the collection budget or reaching a
+bounded element-query result shows a limit notice; only highlighted membership
+appears in the chip and submitted payload. Clearing selection removes the live
+chip. Removing the chip retires pending selection reads even when a restored
+pin has no linked current targets, without clearing unrelated targets or
+publishing a new explicit-selection event. Source view and editor focus remain
+intact, and a subsequent explicit click can attach the same target again.
+Deleting one frame retains surviving references and their primary inspector;
+fallback activation is used only when no references survive. Background
+refreshes and pruning are not explicit selection events.
 
 Send freezes every individual workspace, directory, page, frame ID/file, optional
 node, source revision and editing intent. Each target becomes an ordinary persisted
@@ -635,6 +642,12 @@ source attachment; grouping never reduces the payload to its primary target.
 The existing `designFrame` draft key still accepts a legacy single target or null;
 multi-target drafts use an array. A parked reconnect retains its frozen group,
 including explicit removal. Send/clear never consume a newer explicit selection.
+Valid legacy/grouped reference-only drafts count as payload for transcript
+parking, prepared sends, cold auto-send recovery, live restoration, draft
+indicators and destructive-close guards. Null, empty and invalid references do
+not arm sends; explicit null pins still survive persistence and quota fallback.
+Queued cloud edits retain their existing frozen additional-payload factory even
+when the editor is empty; they never borrow a newer canvas selection.
 Newer source or replaced identity produces an actionable stale-context error.
 The adjacent image toggle adds on-demand PNGs through the existing attachment
 path; changed-during-capture results are rejected. Cloud context capture requires
@@ -653,6 +666,13 @@ retires away-and-back page/directory replies. Neither epoch is persisted.
 `designSelectionMutationTargets` projection: selected ancestors suppress their
 descendants only for mutations, and a selected scene frame dominates its node
 targets only in that projection. Reference payloads retain all explicit targets.
+
+Missing nodes prove deletion only in an exact-source tree below the producer's
+node/depth bounds, with an unsaturated warning buffer and no truncation warning.
+The runtime retains its existing `layer-tree-limit` warning ahead of audit
+warnings when truncating. Older producers can omit that warning under
+saturation, so its absence alone is not a completeness certificate. No new
+wire format or runtime geometry field is introduced.
 
 The existing engine CLI now implements:
 

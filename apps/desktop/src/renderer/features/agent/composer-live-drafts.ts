@@ -21,6 +21,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { ComposerDraft } from "../../state/store";
+import { composerDraftHasPayload } from "../../state/composer-draft-payload";
 
 const liveChatDrafts = new Map<string, ComposerDraft>();
 
@@ -93,13 +94,6 @@ export function registerLiveChatDraftRestorer(
   };
 }
 
-function draftHasContent(draft: ComposerDraft | null): boolean {
-  return Boolean(
-    draft &&
-      (draft.text.trim().length > 0 || draft.attachments.length > 0),
-  );
-}
-
 /** Restore a dropped send only when no newer live edit exists. A mounted
  * composer gets first refusal; on success the shared live snapshot is updated
  * synchronously so navigation and later unmount persistence see the same text.
@@ -109,7 +103,7 @@ export function tryRestoreLiveChatDraft(
   chatId: string,
   draft: ComposerDraft,
 ): boolean {
-  if (draftHasContent(getLiveChatDraft(chatId))) return false;
+  if (composerDraftHasPayload(getLiveChatDraft(chatId))) return false;
   const restorer = liveChatDraftRestorers.get(chatId);
   if (restorer && !restorer(draft)) return false;
   setLiveChatDraft(chatId, draft);

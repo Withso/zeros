@@ -1,6 +1,7 @@
 import {
   DESIGN_SELECTION_NODE_LIMIT,
   type DesignRuntimeNodeDetails,
+  type DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,7 +11,10 @@ const mocks = vi.hoisted(() => ({
   designSetRuntimeAudit: vi.fn(async () => {}),
   designProvenance: vi.fn(),
   designFrameRuntime: vi.fn(),
+  selectionLimit: vi.fn(),
 }));
+
+vi.mock("../../../shared/ui/primitives/elements/toast", () => ({ toast: { info: mocks.selectionLimit } }));
 
 vi.mock("../../../platform/git", () => ({
   designSetSelection: mocks.designSetSelection,
@@ -165,6 +169,39 @@ describe("design selection workflows", () => {
     expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([]);
   });
 
+  it("does not allocate explicit intent when frame deletion activates an empty fallback", async () => {
+    await selectDesignFrame("workspace-a", FRAME, { selected: true });
+    const event = designWorkspaceView("workspace-a").selectionEvent;
+    await selectDesignFrame("workspace-a", null, { explicit: false });
+    expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([]);
+    expect(designWorkspaceView("workspace-a").selectedFrame).toBeNull();
+    expect(designWorkspaceView("workspace-a").selectionEvent).toBe(event);
+  });
+
+  it("retires a held marquee when removing an unlinked parked reference without changing unrelated membership or intent", async () => {
+    let release!: (nodes: DesignRuntimeNodeDetails[]) => void;
+    mocks.designFrameRuntime.mockReturnValue({ getElementsInRect: () => new Promise(resolve => { release = resolve; }) });
+    await selectDesignFrame("workspace-a", FRAME, { selected: true });
+    const before = designWorkspaceView("workspace-a");
+    const pending = selectDesignTargetsInRect({ workspaceId: "workspace-a", folder: "/design", frames: [FRAME], startFrame: FRAME, rect: { x: 0, y: 0, width: 100, height: 100 } });
+    clearDesignCanvasSelection("workspace-a", captureDesignPageOwner("workspace-a"), [{ frame: "parked.html" }]);
+    release([details("late")]);
+    expect(await pending).toBeNull();
+    expect(designWorkspaceView("workspace-a").selectedTargets).toEqual(before.selectedTargets);
+    expect(designWorkspaceView("workspace-a").selectionEvent).toBe(before.selectionEvent);
+  });
+
+  it("queries an inner marquee's owner after item 32 before bounding surrounding frames", async () => {
+    const frames = Array.from({ length: 40 }, (_, index) => ({ ...FRAME, file: `frame-${index}.html`, x: index * 10 }));
+    const getElementsInRect = vi.fn(async () => [details("owned")]);
+    mocks.designFrameRuntime.mockReturnValue({ getElementsInRect });
+    await selectDesignTargetsInRect({ workspaceId: "workspace-a", folder: "/design", frames, startFrame: frames[39], rect: { x: 0, y: 0, width: 2000, height: 1000 } });
+    expect(getElementsInRect).toHaveBeenCalledOnce();
+    expect(designWorkspaceView("workspace-a").selectedTargets[0]).toEqual({ frame: frames[39].file, nodeId: "owned" });
+    expect(designWorkspaceView("workspace-a").selectedTargets).toHaveLength(DESIGN_SELECTION_NODE_LIMIT);
+    expect(mocks.selectionLimit).toHaveBeenCalledWith("Selection limited to 32 targets", expect.anything());
+  });
+
   it("removes only corresponding targets and preserves source-view focus state", async () => {
     const store = useDesignWorkspaceUiStore.getState();
     store.setSelection("workspace-a", FRAME.file, "parent");
@@ -197,6 +234,20 @@ describe("design selection workflows", () => {
       viewport: { width: FRAME.width, height: FRAME.height, scrollX: 0, scrollY: 0 },
     } });
     expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: "other.html" }, { frame: FRAME.file, nodeId: "deep-node" }]);
+  });
+
+  it.each(["saturated warnings", "maximum depth", "maximum nodes"])("does not infer completeness from warning absence at %s", boundary => {
+    const node: DesignRuntimeTreeNode = { oid: "root", tag: "div", name: "Root", text: null, visible: true, children: [] };
+    let tree = [node];
+    if (boundary === "maximum depth") for (let depth = 31; depth >= 0; depth--) tree = [{ ...node, oid: `depth-${depth}`, children: tree }];
+    if (boundary === "maximum nodes") tree = Array.from({ length: 20_000 }, (_, index) => ({ ...node, oid: `node-${index}` }));
+    const warnings = boundary === "saturated warnings" ? Array.from({ length: 128 }, (_, index) => ({ ruleId: "spacing-scale" as const, oid: `warning-${index}`, message: "Spacing", fix: "Use a token" })) : [];
+    useDesignWorkspaceUiStore.getState().setSelection("workspace-a", FRAME.file, "deep-node");
+    reconcileDesignRuntimeSnapshot({ workspaceId: "workspace-a", folder: "/design", frame: FRAME, snapshot: {
+      sourceVersion: FRAME.sourceVersion, revision: 1, frame: details("root"), tree, warnings,
+      viewport: { width: FRAME.width, height: FRAME.height, scrollX: 0, scrollY: 0 },
+    } });
+    expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: FRAME.file, nodeId: "deep-node" }]);
   });
 
   it("ignores a late frame activation and null reply owned by a page the user left", async () => {
