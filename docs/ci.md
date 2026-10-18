@@ -371,12 +371,56 @@ The command lists sorted paths, including both sides of renames and deletions.
 A failed comparison exits nonzero so an unreadable diff cannot authorize an
 automatic merge. This is a definition detector, not a repository merge action.
 
-## Agent auto-merge
+## Agent merge wrapper
 
 Agents must arm merges with `pnpm agent:merge <pr-number>`. The wrapper uses
 the workspace's own `gh` identity, reads the complete PR diff and open-PR list,
 and queries GitHub's required checks. Use `pnpm agent:merge <pr-number> --dry-run`
 to print the decision without changing GitHub state. A refusal exits non-zero.
+The default remains auto-merge for existing callers. When authorization permits
+only an immediate merge, explicitly select that mode:
+
+```sh
+pnpm agent:merge <pr-number> --immediate --dry-run
+pnpm agent:merge <pr-number> --immediate
+```
+
+Immediate mode either performs one synchronous squash merge or refuses; it
+never enables auto-merge, admits a merge queue, disables an existing request,
+dequeues a PR, retargets its base, or retries a write. It calls GraphQL
+`mergePullRequest` with `expectedHeadOid` and the checked PR title/body, not
+`gh pr merge`: that CLI can enable auto-merge or enqueue on a merge-queue branch
+even without `--auto`. The dry-run prints the actual mode and expected head and
+performs only reads. Success requires both the mutation's merged result and a
+fresh matching readback, and prints the merge commit SHA. An unconfirmed outcome
+exits non-zero; inspect GitHub before deciding whether to retry.
+
+Immediate mode preserves all shared guards below and additionally requires
+`MERGEABLE` / `CLEAN`, successful nonempty required CI, no pending/failed/unknown
+checks, and a satisfied GitHub review decision (`APPROVED`, or no review
+requirement). Known skipped/neutral optional checks are allowed; required checks
+must succeed. It does not invent a writer-approval requirement when repository
+policy requires none. Independent engineering review and merge authorization
+remain separate operator responsibilities.
+
+Two complete preflights refresh the head, base, diff, checks, identity and
+open-PR guard, including a final PR read after each batch and after the live
+hourly gate. Changed heads, bases,
+titles, bodies or labels refuse rather than silently qualifying a different
+request. GitHub enforces the expected head and current branch protections at
+the write boundary. There is no expected-base CAS in this API: a base update
+after the final read is subject to GitHub's current protection policy, not an
+immutable base lease. The wrapper never changes the PR's existing base, including
+an ordinary branch-based stack; unsupported GitHub native-stack merges refuse
+without falling back to another API or queue.
+
+Merge-queue branches, any queued or auto-armed open PR (including the target),
+unavailable safety metadata and viewers with administrator bypass capability
+are unsupported in immediate mode and refuse without cancelling existing work.
+This keeps a check/review race from implicitly using a policy bypass. Immediate
+mode rejects `--force`, `--admin`, auto/queue flags and branch-deletion flags.
+The repository-wide one-armed-PR guard is still a snapshot, not an atomic lock
+across workspaces; serialize authorized landing attempts.
 
 CI-definition PRs require the owner to review and merge them. The shared
 `scripts/ci/ci-definition.mjs` policy must export `isCiDefinitionPath(path)`;
@@ -384,7 +428,7 @@ the wrapper refuses to arm a merge when that policy is unavailable. Renamed
 files are checked under both paths. Drafts, forks, closed PRs, changes to
 `.github/ci-incidents/*.json` (including removals), skip markers in PR titles or
 bodies, and failed or cancelled required checks are also refused. Pending checks
-may wait for GitHub's normal auto-merge requirements.
+may wait for GitHub's normal auto-merge requirements in the default mode only.
 
 Only one open PR may have auto-merge enabled. Only a human may override this
 guard: first document the justification in a comment on the target PR using the
@@ -394,7 +438,7 @@ the comment's author and PR. This flag cannot override any other guard. Agents
 must never supply `--force`. The open-PR guard reads a snapshot; avoid concurrent
 arming from separate workspaces.
 
-The merge request uses `gh pr merge --auto --squash --match-head-commit` with the
+The default merge request uses `gh pr merge --auto --squash --match-head-commit` with the
 checked head SHA and explicit checked PR title and body. This keeps GitHub's
 squash-message defaults or later PR text changes from introducing a skip marker.
 Do not call `gh pr merge` or the bot merge command directly.
