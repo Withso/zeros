@@ -8,6 +8,7 @@ import "../../../../../styles/globals.css";
 import "../features/settings/settings-page.css";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { flushSync } from "react-dom";
 import type { AgentControlFamily } from "@zeros/protocol/browser-tools";
 import type { DeviceAgentTouch, DeviceUseHolder } from "@zeros/protocol/device-tools";
 import type { ConversationId, WorkspaceId } from "@zeros/protocol/identities";
@@ -60,6 +61,7 @@ import { orientationTurns, turnedArea } from "../features/simulators/simulator-g
 import { WorkbenchTabContent } from "../shell/workbench/tab-content";
 import { createSimulatorTab } from "../shell/workbench/tab-model";
 import { selectWorkbench, useWorkspaceStore } from "../state/workspace-store";
+import { warmSimulatorTab } from "../features/simulators/simulator-tab";
 
 const params = new URLSearchParams(location.search);
 const cloudTarget = {
@@ -712,7 +714,7 @@ useWorkspaceStore.setState({
   newAgentFolder: folder,
   activePage: "workspace",
 });
-useWorkspaceStore
+if (!params.has("intent")) useWorkspaceStore
   .getState()
   .dispatch({ type: "ADD_WORKBENCH_TAB", tab: createSimulatorTab(android ? "android" : "ios") });
 
@@ -720,6 +722,11 @@ let setActive: (active: boolean) => void = () => {};
 
 Object.assign(window, {
   simulatorFixture: {
+    warm: () => warmSimulatorTab(folder),
+    openNow: () => {
+      flushSync(() => useWorkspaceStore.getState().dispatch({ type: "ADD_WORKBENCH_TAB", tab: createSimulatorTab("ios") }));
+      return document.querySelector("[data-simulator-setup-screen]") !== null;
+    },
     inputs,
     touches,
     calls,
