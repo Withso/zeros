@@ -20,7 +20,7 @@ const state = vi.hoisted(() => {
 function component(name: string, args: unknown[]) {
   const stop = vi.fn(async () => {});
   const value = { name, args, start: vi.fn(() => stop), stop, notify: vi.fn(),
-    enqueue: vi.fn(), read: vi.fn(), close: vi.fn(), handleUpgrade: vi.fn(() => false) };
+    enqueue: vi.fn(), read: vi.fn(), close: vi.fn(), handleUpgrade: vi.fn(() => false), drain: vi.fn(async () => {}) };
   state.instances.push(value);
   return value;
 }
@@ -50,7 +50,8 @@ vi.mock("./email.js", () => ({ loadEmailConfig: () => ({ apiKey: "synthetic", fr
 vi.mock("./github.js", () => ({ startGithubOauthCleanup: state.cleanup }));
 vi.mock("@hono/node-server", () => ({ serve: state.serve }));
 vi.mock("./cloud-workspaces/worker-notifications.js", () => ({ startCloudWorkerNotifications: state.notifications }));
-vi.mock("./cloud-workspaces/engine-checkpoint-hints.js", () => ({
+vi.mock("./cloud-workspaces/engine-checkpoint-hints.js", async original => ({
+  ...(await original<typeof import("./cloud-workspaces/engine-checkpoint-hints.js")>()),
   CloudEngineCheckpointHints: class { wait() {} close() {} }, startCloudEngineCheckpointHintNotifications: state.checkpoint,
 }));
 vi.mock("./security-events.js", () => ({
@@ -97,6 +98,7 @@ beforeEach(async () => {
     ["object-maintenance", "CloudWorkspaceObjectMaintenanceWorker"], ["outbox", "CloudWorkspaceOutboxWorker"],
     ["health-alerts", "CloudWorkspaceHealthAlertWorker"], ["pro-allowance", "DatabaseProMonthlyAllowance"],
     ["computer-template-retention", "CloudComputerTemplateRetentionWorker"], ["object-store", "DatabaseCloudWorkspaceBlobService"],
+    ["runtime-bridge", "CloudRuntimeBridgeRelay"],
   ];
   for (const [file, name] of modules) vi.doMock(`./cloud-workspaces/${file}.js`, async () => ({
     ...(await vi.importActual(`./cloud-workspaces/${file}.js`)), [name!]: stubClass(name!),
@@ -176,6 +178,51 @@ describe("cloud workload ownership", () => {
     expect(state.createPool.mock.calls.map(call => call[1].workload).sort()).toEqual(["listener", "retirement-lock", "worker"]);
     const socket = { destroy: vi.fn() };
     state.upgrade.mock.calls[0]![1]({}, socket, Buffer.alloc(0)); expect(socket.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("serves only WebSocket upgrades on a realtime replica, with no queue workers or engine waits", async () => {
+    state.config!.processRole = "realtime"; await import("./index.js");
+    expect(started().map(value => value.name)).toEqual([]);
+    expect(state.createPool.mock.calls.map(call => call[1].workload).sort()).toEqual(["api", "listener"]);
+    expect(state.createPool.mock.calls.find(call => call[1].workload === "api")![1].applicationName).toBe("zeros-realtime");
+    expect(state.app.mock.calls[0]![1]).toBe(state.api);
+    expect(state.checkpoint).not.toHaveBeenCalled(); expect(state.notifications).not.toHaveBeenCalled();
+    expect(state.cleanup).not.toHaveBeenCalled(); expect(state.readCleanup).not.toHaveBeenCalled();
+    expect(state.writeCleanup).not.toHaveBeenCalled();
+    const relay = instance("CloudRuntimeBridgeRelay"); relay.handleUpgrade.mockReturnValue(true);
+    const socket = { destroy: vi.fn() };
+    state.upgrade.mock.calls[0]![1]({}, socket, Buffer.alloc(0));
+    expect(relay.handleUpgrade).toHaveBeenCalledOnce(); expect(socket.destroy).not.toHaveBeenCalled();
+  });
+
+  it("closes sessions at once without a drain window, as before", async () => {
+    await import("./index.js");
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    const relay = instance("CloudRuntimeBridgeRelay");
+    process.listeners("SIGTERM").find(handler => !oldTerm.includes(handler))!();
+    expect(relay.drain).not.toHaveBeenCalled(); expect(relay.close).toHaveBeenCalledOnce();
+    expect(state.close).toHaveBeenCalledOnce();
+    // Shutdown exits only after the stops settle; returning before that leaks
+    // the real process.exit into the next test once the spy is restored.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(exit).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
+  it("drains relay sessions before closing the server when a window is configured", async () => {
+    state.config!.shutdownDrainMs = 20_000; await import("./index.js");
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    const relay = instance("CloudRuntimeBridgeRelay");
+    let finish!: () => void;
+    relay.drain.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+    process.listeners("SIGTERM").find(handler => !oldTerm.includes(handler))!();
+    expect(relay.drain).toHaveBeenCalledExactlyOnceWith(20_000);
+    const socket = { destroy: vi.fn() };
+    state.upgrade.mock.calls[0]![1]({}, socket, Buffer.alloc(0)); expect(socket.destroy).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(19_000);
+    expect(relay.close).not.toHaveBeenCalled(); expect(state.close).not.toHaveBeenCalled(); expect(exit).not.toHaveBeenCalled();
+    finish(); await vi.advanceTimersByTimeAsync(0);
+    expect(relay.close).toHaveBeenCalledOnce(); expect(state.close).toHaveBeenCalledOnce();
+    expect(exit).toHaveBeenCalledExactlyOnceWith(0);
   });
 
   it.each(["combined", "worker"] as const)("drains queue work before ending every distinct pool exactly once (%s)", async role => {

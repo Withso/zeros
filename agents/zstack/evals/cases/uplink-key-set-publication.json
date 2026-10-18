@@ -1,0 +1,9 @@
+{
+  "id": "uplink-key-set-publication",
+  "kind": "replay",
+  "area": "access-authority",
+  "fixedBy": "pr:590",
+  "symptom": "Connected verifiers retained an older key set after a control-plane key update, and delayed reads could replace newer state.",
+  "rule": "Exercise the real key-store subscription through the uplink and verifier; hold initial reads, fetches and signature verification across a key-set change.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/realtime/uplink-key-revocation.integration.test.ts src/realtime/uplink-server.test.ts src/cloud-workspaces/capability-keys.test.ts src/cloud-workspaces/capability-verifier.test.ts"
+}

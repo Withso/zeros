@@ -31,6 +31,11 @@ export const CloudActorAdmissionResponseSchema = z.object({
   role:CloudActorRoleSchema,
   fingerprint:z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
+/** Capability-backed admission: the actor session is already consumed, and
+ * the engine renews it with `renewalToken` exactly like a redeemed grant. */
+export const CloudCapabilityActorAdmissionResponseSchema = CloudActorAdmissionResponseSchema.extend({
+  renewalToken:z.string().regex(/^zwa_[A-Za-z0-9_-]{43}$/),
+}).strict();
 
 /** Public one-use grant. The engine resolves the bound actor/session itself;
  * clients cannot choose another user's role, device or session metadata. */

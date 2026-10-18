@@ -2,6 +2,7 @@ import type { CodexFingerprintKeys } from "./cloud-workspaces/codex-fingerprint-
 import type { RuntimeOidcConfig } from "./cloud-workspaces/runtime-oidc.js";
 import type { RuntimeArtifactStoreConfig } from "./cloud-workspaces/runtime-artifact-store.js";
 import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type CloudAgentCredentialConfig } from "./cloud-workspaces/agent-credential-config.js";
+import { loadCapabilityKeyring, type CapabilityKeyring } from "./cloud-workspaces/capability-keyring.js";
 // ──────────────────────────────────────────────────────────
 // Config — every knob comes from the environment, validated at boot.
 //
@@ -23,6 +24,7 @@ import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 import { validateDatabaseConnections } from "./database-config.js";
 import { developmentIdentity, type DevelopmentIdentity } from "./development-environment.js";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
+import { UPLINK_PATH } from "./realtime/uplink-protocol.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
 import { loadCloudRuntimeConfig, type CloudRuntimeConfig } from "./cloud-workspaces/runtime-config.js";
 import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
@@ -58,8 +60,12 @@ const EnvSchema = z.object({
   DATABASE_MIGRATIONS_ON_BOOT: z.enum(["true", "false"]).default("true"),
   DATABASE_MAINTENANCE_MODE: z.enum(["true", "false"]).default("false"),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(6),
-  CONTROL_PLANE_PROCESS_ROLE: z.enum(["api", "worker", "combined"]).default("combined"),
+  CONTROL_PLANE_PROCESS_ROLE: z.enum(["api", "worker", "realtime", "combined"]).default("combined"),
+  /** Graceful drain window on SIGTERM; 0 keeps the immediate close. */
+  CONTROL_PLANE_DRAIN_SECONDS: z.coerce.number().int().min(0).max(120).default(0),
   SLOW_REQUEST_LOG_MS: z.coerce.number().int().min(50).max(60_000).default(DEFAULT_SLOW_REQUEST_LOG_MS),
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: z.string().optional(),
+  CONTROL_PLANE_TRACE_SAMPLE_RATIO: z.coerce.number().min(0).max(1).default(0),
   DESKTOP_RELEASE_LEDGER_URL: z.string().optional(),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
@@ -225,6 +231,10 @@ export type CloudWorkspaceBackendConfig = {
    * It is independent from setup execution so settings can be prepared while
    * the unqualified image worker remains disabled. */
   settingsSecretEncryptionKeys: Readonly<Record<number, string>>;
+  /** S1 issuer origin (iss claim); absent while capabilities are unconfigured. */
+  capabilityIssuer?: string | null;
+  /** Dedicated CLOUD_CAPABILITY_KEYS_JSON keyring for signing-key envelopes. */
+  capabilityKeyring?: CapabilityKeyring;
   codexRefreshFingerprints?: CodexFingerprintKeys;
   currentSettingsSecretEncryptionKeyVersion: number | null;
   /** Legacy V1 alias retained while deployments move to the keyring vars. */
@@ -270,6 +280,11 @@ export type CloudWorkspaceBackendConfig = {
     timeoutSeconds: number;
     leaseMs: number;
     admissionTtlSeconds: number;
+    /** Public realtime origin (as a `wss` URL) advertised to engines that
+     * opt into the uplink at registration, while their organization's
+     * `realtime_uplink` flag is on. Null keeps registration answers
+     * uplink-free. */
+    engineUplinkEndpoint: string | null;
   } | null;
 };
 
@@ -316,11 +331,17 @@ export type Config = {
   databaseMigrationRole?: string;
   databaseMigrationsOnBoot?: boolean;
   databasePoolMax?: number;
-  /** Combined preserves existing deployments; dedicated workers scale independently. */
-  processRole?: "api" | "worker" | "combined";
+  /** Combined preserves existing deployments; dedicated workers and realtime
+   * replicas scale independently (docs/cloud-workspace/realtime.md). */
+  processRole?: "api" | "worker" | "realtime" | "combined";
+  /** SIGTERM drain window for WebSocket sessions; 0 closes them at once. */
+  shutdownDrainMs?: number;
   workerPollIntervalsMs?: WorkerPollIntervals;
   /** Requests at least this slow are logged once by route template. */
   slowRequestLogMs?: number;
+  /** Absent when tracing is disabled; see `traceExportUrl`. */
+  tracesUrl?: string;
+  traceSampleRatio?: number;
   /** Receives aggregate cloud health alerts; null disables them. */
   operationsAlertEmail?: string | null;
   /** All application routes and background writers are disabled during cutover. */
@@ -371,6 +392,11 @@ const CloudWorkspaceEnvSchema = z.object({
   CLOUD_WORKSPACES_ENABLED: z.literal("true"),
   CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
   CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: z.coerce.number().int().min(1).max(32).default(2),
+  // S1 capability issuer origin and its dedicated signing keyring (never the
+  // settings keyring). Optional until the capabilities rollout starts.
+  CLOUD_CAPABILITY_ISSUER: z.string().regex(/^https:\/\/[^/\s]+$/).optional(),
+  CLOUD_CAPABILITY_KEYS_JSON: z.string().min(2).max(4096).optional(),
+  CLOUD_CAPABILITY_CURRENT_KEY_VERSION: z.string().regex(/^[1-9][0-9]{0,4}$/).optional(),
   CLOUD_WORKSPACE_PROVIDER: z.literal("boat").default("boat"),
   BOAT_API_KEY: z
     .string()
@@ -590,6 +616,29 @@ function validatedServiceUrl(
       }`,
     );
   }
+  return url.toString().replace(/\/+$/, "");
+}
+
+/** The realtime service origin engines dial for the uplink: a
+ * credential-free HTTPS/WSS origin, normalized to `wss`. */
+function validatedRealtimeOrigin(raw: string, name: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`Invalid environment: ${name} must be a credential-free HTTPS or WSS origin`);
+  }
+  if (
+    (url.protocol !== "https:" && url.protocol !== "wss:") ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== "/"
+  ) {
+    throw new Error(`Invalid environment: ${name} must be a credential-free HTTPS or WSS origin`);
+  }
+  url.protocol = "wss:";
   return url.toString().replace(/\/+$/, "");
 }
 
@@ -1152,6 +1201,7 @@ function loadCloudWorkspaceConfig(
     : null;
   const { settingsSecretEncryptionKeys, currentSettingsSecretEncryptionKeyVersion, settingsSecretKeyV1, codexRefreshFingerprints } =
     loadCloudAgentCredentialConfig(env);
+  const capabilityKeyring = loadCapabilityKeyring(env);
   const durabilityRequested =
     setupEnabled === "true" ||
     [
@@ -1342,6 +1392,9 @@ function loadCloudWorkspaceConfig(
       leaseMs: setup.data.CLOUD_WORKSPACE_SETUP_LEASE_MS,
       admissionTtlSeconds:
         setup.data.CLOUD_WORKSPACE_SETUP_ADMISSION_TTL_SECONDS,
+      engineUplinkEndpoint: env.CLOUD_WORKSPACE_REALTIME_URL?.trim()
+        ? `${validatedRealtimeOrigin(env.CLOUD_WORKSPACE_REALTIME_URL.trim(), "CLOUD_WORKSPACE_REALTIME_URL")}${UPLINK_PATH}`
+        : null,
     };
   }
   const outboxRequested = [
@@ -1411,6 +1464,8 @@ function loadCloudWorkspaceConfig(
     backgroundWorkersEnabled: value.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED === "true",
     computerMaxConcurrentBuilds: value.CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS,
     settingsSecretEncryptionKeys,
+    capabilityIssuer: value.CLOUD_CAPABILITY_ISSUER ?? null,
+    ...(capabilityKeyring?{capabilityKeyring}:{}),
     ...(codexRefreshFingerprints?{codexRefreshFingerprints}:{}),
     currentSettingsSecretEncryptionKeyVersion,
     settingsSecretKeyV1,
@@ -1582,6 +1637,19 @@ function loadOperationsAlertEmail(env: NodeJS.ProcessEnv, diagnostics: ConfigDia
   return null;
 }
 
+/** OTLP over https, or plain http only to a Railway private host or this machine. */
+function traceExportUrl(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT must be a URL"); }
+  const privateHttp = url.protocol === "http:" &&
+    (url.hostname.endsWith(".railway.internal") || url.hostname === "localhost" || url.hostname === "127.0.0.1");
+  if ((url.protocol !== "https:" && !privateHttp) || url.username || url.password || url.search || url.hash)
+    throw new Error("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT must be https (or http on a Railway private host) without credentials or a query");
+  return url.toString();
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: ConfigDiagnostics = console): Config {
   const development = developmentIdentity(env);
   const parsed = EnvSchema.safeParse(env);
@@ -1647,6 +1715,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   }
 
   const cloudWorkspaces = cloudChannel ? loadCloudWorkspaceConfig(env, github) : null;
+  const tracesUrl = traceExportUrl(e.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
   return {
     databaseUrl: parseDatabaseTarget(e.DATABASE_URL).toString(),
     ...(e.DATABASE_LISTEN_URL ? {databaseListenUrl: parseDatabaseTarget(e.DATABASE_LISTEN_URL).toString()} : {}),
@@ -1655,8 +1724,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
     databasePoolMax: e.DATABASE_POOL_MAX,
     processRole: e.CONTROL_PLANE_PROCESS_ROLE,
+    shutdownDrainMs: e.CONTROL_PLANE_DRAIN_SECONDS * 1_000,
     workerPollIntervalsMs: loadWorkerPollIntervals(env, cloudWorkspaces !== null),
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
+    ...(tracesUrl ? { tracesUrl } : {}),
+    traceSampleRatio: e.CONTROL_PLANE_TRACE_SAMPLE_RATIO,
     operationsAlertEmail: loadOperationsAlertEmail(env, diagnostics),
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,

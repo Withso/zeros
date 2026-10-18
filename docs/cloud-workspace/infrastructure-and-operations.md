@@ -229,6 +229,32 @@ scripts through Boat's command API, whose command text and output Boat retains
 unless monitoring is off; never pass secrets through it. Boat's account-level
 **Monitoring off** is not evidence for any existing or replayed allocation.
 
+### Request tracing
+
+The control plane records OpenTelemetry traces and exports them over OTLP/HTTP
+to the self-hosted Tempo service on Railway, reached on the private network at
+`http://<service>.railway.internal:4318/v1/traces`. Tempo keeps traces for seven
+days; that retention is set on the Tempo service.
+
+Two environment variables control tracing. An unset
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` disables it. Otherwise the endpoint must use
+`https`, or `http` only on a Railway private host or `localhost`, and must carry
+no credentials or query. `CONTROL_PLANE_TRACE_SAMPLE_RATIO` (0 to 1, default 0)
+sets the share of requests without a remote parent that are recorded. A request
+that carries a W3C `traceparent` header follows its caller's sampling decision,
+so at the default only requests whose `traceparent` is sampled are recorded.
+
+Each recorded request has one server span named by its route template. Child
+spans cover pool waits, shared transactions and provider locks, and Boat API
+calls, which are named `boat <method> <route template>`. Span attributes come
+from a closed list, `TRACE_ATTRIBUTE_TYPES` in `apps/control-plane/src/tracing.ts`,
+and carry no identifiers, tokens, prompts, payloads, raw paths or error messages.
+Health probes are not traced.
+
+WebSockets and the VM leg are not traced yet; an optional S2 1.1 envelope member is approved for a
+later slice. If the exporter is down, spans are dropped rather than queued
+without bound (the queue holds 2,048 spans), and requests are never affected.
+
 ## Health alerts
 
 `/healthz` reports aggregate cloud health: `operationalState` is `healthy` or
@@ -264,7 +290,7 @@ target-bound approval, and change nothing until rerun unchanged with
 | --- | --- | --- |
 | `lifecycle_stalled` | A queued or observing lifecycle intent has not advanced for 15 minutes. | Confirm background workers run, then read the intent `error_code` (for example provider rate limits, `compute_previous_lease_pending` or `provider_absence_unconfirmed`). Fix the provider or credential cause. For a create the provider can no longer certify, prove absence from the full account inventory with `cloud-provider-absence:manage`. |
 | `setup_lease_expired` | A running setup run's lease expired. | The setup worker or its provider exec died mid-run. Check the setup worker log and the provider; recovery re-admits the generation. Repeats point to a crash loop or an exec that exceeds the setup timeout. |
-| `engine_lease_expired` | A ready engine missed its 90-second heartbeat lease. | Check the sandbox at the provider and the engine log. A healthy engine that cannot reach the control plane (network, TLS or a 429 on registration or heartbeat) stops itself when its lease runs out. |
+| `engine_lease_expired` | A ready engine's lease ran out: 90 s after its last HTTP heartbeat, or up to 36 min after its last uplink renewal when the organization has `engine_lease_over_uplink` on (S2 `lease.v1`). | Check the sandbox at the provider and the engine log. A healthy engine that cannot reach the control plane (network, TLS or a 429 on registration or heartbeat) stops itself when its lease runs out. |
 | `access_revocation_stalled` | A client access grant failed or waited more than 15 minutes for revocation. | Check the provider's revoke API and credential. The worker retries; a failed grant needs the provider cause fixed first. |
 | `outbox_stalled` | A cloud outbox entry is dead, or queued or processing for 15 minutes. | Check the configured outbox sink's reachability and signing secret. |
 | `deletion_jobs_failed` | A workspace deletion job failed. | Fix the cause first. A record purge with completed provider/object evidence can use the owner-approved `cloud-workspace-deletion:manage --retry-records` plan below; never purge around unconfirmed deletion. |

@@ -7,7 +7,7 @@ import { CloudLocalAgentBootRuntime } from "../cloud-local-command-queue-boot";
 import { testCloudBootFixture } from "../agents/__tests__/helpers/test-cloud-boot";
 import { cloudBootNativeAuthority, isCloudBootAgentExecutionFactory, isCloudBootAgentSelection, type CloudBootAgentExecutionFactory } from "../agents/cloud-provider-execution";
 import type { CloudLocalCommandQueue } from "../cloud-local-command-queue";
-import { CloudRuntimeRegistration, type CloudCheckpointDirective } from "../cloud-runtime-registration";
+import { CloudClientAuthorityTransientError, CloudRuntimeRegistration, type CloudCheckpointDirective } from "../cloud-runtime-registration";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { CloudAgentAdmissionError, CloudAgentExecutionError, type CloudAgentBootResponses } from "../cloud-agent-execution-client";
 import { CloudAgentBootSyncResponseSchema, CloudAgentBootRefreshResponseSchema } from "@zeros/protocol/cloud-agent-bootstrap";
@@ -26,7 +26,9 @@ type Readiness = ReturnType<CloudRuntimeRegistration["readiness"]>;
 const engineMethods = ZerosEngine.prototype as unknown as {
   cloudRuntimeReadiness(this: unknown): Readiness;
   verifyCloudActorClient(this: unknown, token: string, renew?: boolean): Promise<unknown>;
+  admitCloudCapabilityActor(this: unknown, client: unknown, route: "direct" | "relay"): Promise<unknown>;
   initializeCloudAgentBoot(this: unknown): Promise<void>;
+  cloudEngineUplinkReadiness(this: unknown): { ready: boolean; phase: string };
   handleConnect(this: unknown, client: TransportClient): Promise<void>;
   handleDisconnect(this: unknown, client: TransportClient): void;
 };
@@ -78,7 +80,10 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
   const options = { file: path.join(directory, "queue.sqlite"), scope, runtimeBootId: f.scope.bootId, registration, observeStartup: startup,
     legacy: f.legacy, supervisor: { onRetirementFailure: vi.fn() }, engineLive: () => live,
     isAdmittedCwd: (cwd: string) => cwd === f.input.cwd, resolveConversation: () => ({ cwd: f.input.cwd, provider: f.input.provider, model: f.input.model }),
-    history: () => ({ recordSequence: 1, eventSequence: 1 }), beforeActivate, install, changed };
+    history: () => ({ recordSequence: 1, eventSequence: 1 }), beforeActivate, install, changed,
+    controlsPollIntervalMs: undefined as (() => number) | undefined,
+    controlsExchange: undefined as ((ok: boolean) => void) | undefined,
+    turnJournalChanged: undefined as (() => void) | undefined };
   const boot = new CloudLocalAgentBootRuntime(options); cleanups.push(() => boot.dispose());
   const admission = { accountUserId: f.provenance.actor.userId, authorityEpoch: f.provenance.authorityEpoch,
     actor: { sessionId: f.provenance.actorSessionId, deviceId: f.provenance.actor.deviceId,
@@ -872,6 +877,81 @@ describe("engine boot-mode orchestration", () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(f.controls).toHaveBeenCalled();
   });
+  it("backs the credential-control poll off to the wired fallback cadence and back", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    let controlsIntervalMs = 500;
+    const f = await fixture();
+    f.options.controlsPollIntervalMs = () => controlsIntervalMs;
+    await f.boot.initialize();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(1);
+    // Uplink established: the engine wires the slow fallback cadence. The
+    // already-armed 500 ms timer fires once more; the next schedule reads it.
+    controlsIntervalMs = 30_000;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(29_500);
+    expect(f.controls).toHaveBeenCalledTimes(3);
+    // Uplink lost: after the armed slow timer fires, the cadence is 500 ms again.
+    controlsIntervalMs = 500;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.controls).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(5);
+  });
+  it("reports credential-control exchange outcomes", async () => {
+    const outcomes: boolean[] = [];
+    const f = await fixture();
+    f.options.controlsExchange = ok => outcomes.push(ok);
+    await f.boot.initialize();
+    await f.boot.pollCredentialControls();
+    f.controls.mockRejectedValueOnce(new Error("exchange unavailable"));
+    await expect(f.boot.pollCredentialControls()).rejects.toThrow("exchange unavailable");
+    expect(outcomes).toEqual([true, false]);
+  });
+  it("reschedules the controls poll immediately when the uplink's gate closes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    let controlsIntervalMs = 30_000; // uplink established: the slow safety cadence
+    const f = await fixture();
+    f.options.controlsPollIntervalMs = () => controlsIntervalMs;
+    await f.boot.initialize();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.controls).toHaveBeenCalledTimes(1);
+    // The gate closes right after the 30 s timer was armed: without an
+    // immediate reschedule nothing polls for up to 30 s.
+    controlsIntervalMs = 500;
+    f.boot.rescheduleControls();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.controls).toHaveBeenCalledTimes(3);
+  });
+  it("a pushed revision runs a fresh exchange instead of joining an in-flight poll", async () => {
+    const f = await fixture();
+    await f.boot.initialize();
+    let release: (() => void) | null = null;
+    // Hold a timer-started flight open: it began before the push's bump
+    // committed, so joining it would ack applied against stale controls.
+    f.controls.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { version: 1 as const, mode: "boot-owner-v1" as const, controls: [] as unknown[] };
+    });
+    const stale = f.boot.pollCredentialControls();
+    await Promise.resolve();
+    expect(f.controls).toHaveBeenCalledTimes(1);
+    const pushed = f.boot.refreshCredentialControls();
+    release!();
+    await Promise.all([stale, pushed]);
+    expect(f.controls).toHaveBeenCalledTimes(2); // a second exchange ran after the push
+  });
+  it("reports the uplink readiness phase as stopping while the engine stops", () => {
+    const readiness = (state: { running: boolean; engineStopping: boolean }) => engineMethods.cloudEngineUplinkReadiness.call(state);
+    expect(readiness({ running: false, engineStopping: false })).toEqual({ ready: false, phase: "starting" });
+    expect(readiness({ running: true, engineStopping: false })).toEqual({ ready: true, phase: "ready" });
+    expect(readiness({ running: false, engineStopping: true })).toEqual({ ready: false, phase: "stopping" });
+  });
   it.each(["Local Personal", "organization-local"])("keeps %s off the cloud boot path", async _owner => {
     const registration = { localCommandsNegotiated: vi.fn(() => true) }, restore = vi.fn();
     await engineMethods.initializeCloudAgentBoot.call({ cloudWorker: null, cloudRuntimeRegistration: registration,
@@ -998,7 +1078,46 @@ describe("engine boot-mode orchestration", () => {
     await expect(engineMethods.verifyCloudActorClient.call(engine, "synthetic-legacy-token")).resolves.toBe(admission);
     expect(initialize).not.toHaveBeenCalled(); expect(verify).toHaveBeenCalledOnce();
   });
-  it("keeps exact final authority usable while an admission barrier refuses new starts", async () => {
+  it("admits a verified capability's actor behind the grant gates, refusing only on the control plane's answer", async () => {
+    const client = { capability: "synthetic.capability.token", proof: { timestampMs: 1, nonce: "n", signature: "s" } };
+    const admitted = { admission: { accountUserId: randomUUID(), authorityEpoch: 1, actor: { sessionId: randomUUID(),
+      deviceId: randomUUID(), role: "developer", fingerprint: "a".repeat(64) } }, renewalToken: `zwa_${"Q".repeat(43)}` };
+    let answer: () => Promise<unknown> = async () => admitted;
+    const admitCapabilityClient = vi.fn(async (..._args: unknown[]) => answer());
+    const registration = { localCommandsNegotiated: () => false, admitCapabilityClient };
+    const engine = { cloudRuntimeAuthorityStopping: false, cloudLegacyResidentRequiresFreshView: false,
+      cloudRuntimeRegistration: registration, verifyCloudActorClient: engineMethods.verifyCloudActorClient };
+    const admit = () => engineMethods.admitCloudCapabilityActor.call(engine, client, "direct");
+    await expect(admit()).resolves.toBe(admitted);
+    expect(admitCapabilityClient).toHaveBeenCalledWith(client, "direct");
+    answer = async () => null;
+    await expect(admit()).resolves.toBeNull();
+    answer = async () => { throw new CloudClientAuthorityTransientError(); };
+    await expect(admit()).rejects.toMatchObject({ code: "cloud_client_authority_transient" });
+    // A gate this engine cannot pass yet is transient, never a refusal.
+    answer = async () => admitted;
+    engine.cloudLegacyResidentRequiresFreshView = true;
+    await expect(admit()).rejects.toMatchObject({ code: "cloud_client_authority_transient" });
+    engine.cloudLegacyResidentRequiresFreshView = false;
+    answer = async () => { engine.cloudRuntimeRegistration = { ...registration }; return admitted; };
+    await expect(admit()).rejects.toMatchObject({ code: "cloud_client_authority_transient" });
+    expect(admitCapabilityClient).toHaveBeenCalledTimes(4);
+  });
+  it.each(["authority_transport", "authority_http_5xx", "access_denied", "lifecycle_superseded"] as const)(
+    "keeps a capability admission's actor-confirm %s transient only when it is", async category => {
+      const error = new CloudAgentExecutionError(category, "validation");
+      const admitted = { admission: { accountUserId: randomUUID(), authorityEpoch: 1, actor: { sessionId: randomUUID(),
+        deviceId: randomUUID(), role: "developer", fingerprint: "a".repeat(64) } }, renewalToken: `zwa_${"Q".repeat(43)}` };
+      const confirmAdmission = vi.fn(async () => { throw error; });
+      const engine = { cloudLocalHistoryRestored: true, cloudLocalEvents: {}, cloudRuntimeAuthorityStopping: false,
+        cloudRuntimeRegistration: { localCommandsNegotiated: () => true, admitCapabilityClient: async () => admitted },
+        cloudAgentBoot: { active: true, initialize: async () => true, confirmAdmission },
+        verifyCloudActorClient: engineMethods.verifyCloudActorClient };
+      const admission = engineMethods.admitCloudCapabilityActor.call(engine, {}, "direct");
+      if (category.startsWith("authority_")) await expect(admission).rejects.toMatchObject({ code: "cloud_client_authority_transient" });
+      else await expect(admission).rejects.toBe(error);
+      expect(confirmAdmission).toHaveBeenCalledWith(admitted.admission, false);
+    });  it("keeps exact final authority usable while an admission barrier refuses new starts", async () => {
     const f = await fixture(); let startsAllowed = true;
     Object.assign(f.options, { startsAllowed: () => startsAllowed });
     await f.boot.initialize(); startsAllowed = false;
@@ -1364,5 +1483,14 @@ describe("engine boot-mode orchestration", () => {
       .rejects.toMatchObject({ code: "cloud_actor_authority_rejected" });
     f.retire(); expect(f.boot.active).toBe(false);
     expect(() => f.boot.metadata).toThrow();
+  });
+  it("exposes the turn journal only while authority is active and notes it at activation", async () => {
+    const f = await fixture(); const noted = vi.fn(); f.options.turnJournalChanged = noted;
+    expect(f.boot.turnJournal).toBeNull();
+    await expect(f.boot.initialize()).resolves.toBe(true);
+    expect(noted).toHaveBeenCalled();
+    expect(f.boot.turnJournal!.turnJournal(0, 10)).toEqual([]);
+    f.retire();
+    expect(f.boot.turnJournal).toBeNull();
   });
 });

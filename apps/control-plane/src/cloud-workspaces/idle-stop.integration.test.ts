@@ -17,6 +17,7 @@ import { withSystemTx } from "../db.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import { seedRecordedCloudWorkspaceActor } from "./recorded-actor-test-fixture.js";
 import { DatabaseCloudIdleStop } from "./idle-stop.js";
+import { DatabaseUplinkIdleStopStore } from "../realtime/uplink-idle.js";
 import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { completeWorkspaceCheckpointRequest, deliverWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 
@@ -275,5 +276,34 @@ suite("verified inactivity shutdown", () => {
     await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [stopId]);
     expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [stopId])).rows[0].state)
       .toBe(observed === "stopped" ? "succeeded" : "observing");
+  });
+  describe("uplink idle stop store (idle.v1)", () => {
+    const identity = () => ({ workspaceId: actor.workspaceId, organizationId: actor.organizationId, generation: actor.generation,
+      engineInstanceId: actor.engineInstanceId, bootId: randomUUID() });
+    const intents = async () => (await pool.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND idempotency_key LIKE 'system:idle:%'",
+      [fixture.workspaceId])).rows[0]!.n;
+
+    it("declines a young engine, then requests exactly one idle stop for the same open request", async () => {
+      const store = new DatabaseUplinkIdleStopStore(service);
+      expect(await store.request(identity(), actor.heartbeatToken, randomUUID())).toBe("declined");
+      expect(await intents()).toBe(0);
+      await oldEngine();
+      expect(await store.request(identity(), actor.heartbeatToken, randomUUID())).toBe("requested");
+      expect(await store.request(identity(), actor.heartbeatToken, randomUUID())).toBe("requested");
+      expect(await intents()).toBe(1);
+    });
+
+    it("answers authority for a foreign credential and unavailable when the database is unreachable", async () => {
+      await oldEngine();
+      const store = new DatabaseUplinkIdleStopStore(service);
+      expect(await store.request(identity(), `zwh_${"Z".repeat(43)}`, randomUUID())).toBe("authority");
+      const down = new pg.Pool({ connectionString: "postgres://127.0.0.1:1/none", connectionTimeoutMillis: 200 });
+      try {
+        expect(await new DatabaseUplinkIdleStopStore(new DatabaseCloudIdleStop(down, false))
+          .request(identity(), actor.heartbeatToken, randomUUID())).toBe("unavailable");
+      } finally { await down.end(); }
+      expect(await intents()).toBe(0);
+    });
   });
 });

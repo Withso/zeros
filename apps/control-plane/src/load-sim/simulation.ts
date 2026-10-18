@@ -21,10 +21,18 @@ export type Cadence = {
 export const STEADY_STATE_CADENCES = {
   "engine.credentialControls": { periodSeconds: 0.5, afterCompletion: true, role: "engine",
     source: "apps/desktop/src/engine/cloud-local-command-queue-boot.ts: controls poll 500 ms after each exchange" },
-  "engine.heartbeat": { periodSeconds: 10, afterCompletion: false, role: "engine",
-    source: "engine-heartbeat.ts DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS, sent in the registration document" },
+  // S2 lease.v1 (engine_lease_over_uplink): the uplink renews the lease and a
+  // periodic HTTP heartbeat posts only when it carries something, so
+  // engine.heartbeat keeps a per-request budget but no steady-state cadence.
+  "engine.uplinkLeaseRenewal": { periodSeconds: 300, afterCompletion: false, role: "engine",
+    source: "uplink-server.ts renewLease on every UPLINK_WATERMARK_INTERVAL_MS (5 min) tick of a lease.v1 uplink" },
   "engine.durableRecordHead": { periodSeconds: 10, afterCompletion: false, role: "engine",
-    source: "cloud-runtime-registration.ts synchronizeDurableRecord after each accepted heartbeat" },
+    source: "cloud-runtime-registration.ts synchronizeDurableRecord on every heartbeat tick, posted or skipped" },
+  // S2 checkpoint.v1 (checkpoint_push): the uplink pushes queued checkpoint
+  // requests and the engine pauses its checkpoint-hint wait, so
+  // engine.checkpointHintWait keeps a per-request budget but no cadence.
+  "engine.uplinkCheckpointSweep": { periodSeconds: 30, afterCompletion: false, role: "engine",
+    source: "uplink-checkpoint.ts SWEEP_TICKS: queued requests are re-read every 30 s while LISTEN is current; one statement serves up to 500 uplinks, counted here as one per engine (an upper bound)" },
   "engine.actorConfirm": { periodSeconds: 5, afterCompletion: false, role: "client",
     source: "cloud-local-command-queue-boot.ts: re-confirm at half of the 10 s confirmedUntil" },
   "client.renew": { periodSeconds: 5, afterCompletion: false, role: "client",
@@ -39,13 +47,14 @@ export type SteadyOperation = keyof typeof STEADY_STATE_CADENCES;
 
 /** Reconciler work that grows with each running workspace. The background
  * reconciler drives these itself; `marginal` costs are measured as the
- * difference between one seeded workspace and an empty inventory. */
+ * difference between one seeded workspace and an empty inventory, and
+ * `runningOnly` work stops when the workspace does. */
 export const WORKER_PER_WORKSPACE_CADENCES = {
-  "worker.reconcileDrift": { periodSeconds: 60, marginal: false,
+  "worker.reconcileDrift": { periodSeconds: 60, marginal: false, runningOnly: false,
     source: "reconciler.ts driftCandidate: due once last_observed_at is older than intervalMs (60 s default)" },
-  "worker.reconcileOrphans": { periodSeconds: 60, marginal: true,
+  "worker.reconcileOrphans": { periodSeconds: 60, marginal: true, runningOnly: false,
     source: "reconciler.ts orphanSweepAt: one sweep per 60 s, work per managed provider resource" },
-} as const satisfies Partial<Record<SimulatorOperationName, { periodSeconds: number; marginal: boolean; source: string }>>;
+} as const satisfies Partial<Record<SimulatorOperationName, { periodSeconds: number; marginal: boolean; runningOnly: boolean; source: string }>>;
 
 export type WorkerPerWorkspaceOperation = keyof typeof WORKER_PER_WORKSPACE_CADENCES;
 
@@ -138,6 +147,11 @@ export type ScenarioResult = {
   transactionsPerSecond: number;
   statementsPerSecond: number;
   roundTripsPerSecond: number;
+  /** Commits carrying a NOTIFY per second; the database serializes them.
+   * Includes authority-cache hints, counted per delivery, so an upper bound. */
+  notifyingCommitsPerSecond: number;
+  /** Authority-cache invalidation hints delivered per second (0151 triggers). */
+  authorityCacheNotificationsPerSecond: number;
   /** Client-measured database wall time per second (loopback). */
   clientDbMsPerSecond: number;
   /** Control-plane process CPU (user+system), simulator included. */
@@ -203,6 +217,7 @@ export async function runScenario(sim: Simulator, options: {
   await new Promise(resolve => setTimeout(resolve, options.warmupMs));
   const close = options.server ? await options.server.begin() : null;
   const providerBefore = new Map(sim.boat.calls);
+  const notificationsBefore = sim.notifications.count, authorityNotificationsBefore = sim.notifications.authorityCache;
   const before = sim.meter.snapshot();
   const cpuBefore = process.cpuUsage();
   const started = performance.now();
@@ -233,6 +248,12 @@ export async function runScenario(sim: Simulator, options: {
     transactionsPerSecond: totals.transactions / seconds,
     statementsPerSecond: totals.statements / seconds,
     roundTripsPerSecond: totals.roundTrips / seconds,
+    // Client-visible pg_notify commits (e.g. checkpoint hints) plus
+    // trigger-issued job wake-ups and authority-cache hints counted by the
+    // listener.
+    notifyingCommitsPerSecond: (totals.notifyingCommits + sim.notifications.count - notificationsBefore +
+      sim.notifications.authorityCache - authorityNotificationsBefore) / seconds,
+    authorityCacheNotificationsPerSecond: (sim.notifications.authorityCache - authorityNotificationsBefore) / seconds,
     clientDbMsPerSecond: totals.clientDbMs / seconds,
     processCpuMsPerSecond: (cpu.user + cpu.system) / 1000 / seconds,
     operations: [...costs].filter(([, cost]) => cost.roundTrips || cost.calls).map(([operation, cost]) => ({
@@ -258,6 +279,8 @@ export type Projection = {
     byOperation: Array<{ operation: SteadyOperation; role: Cadence["role"]; requestsPerSecond: number; transactionsPerSecond: number }> };
   /** A running workspace with no desktop connected: engine loops and its reconciler share. */
   perRunningEngineTransactionsPerSecond: number;
+  /** A stopped workspace: no engine loops, only drift and its sweep share. */
+  perStoppedWorkspaceTransactionsPerSecond: number;
   /** The reconciler's share of perRunningEngineTransactionsPerSecond. */
   perWorkspaceWorker: Array<{ operation: WorkerPerWorkspaceOperation; transactionsPerCycle: number; transactionsPerSecond: number;
     statementsPerSecond: number }>;
@@ -281,6 +304,9 @@ export function projectSteadyState(hotPaths: readonly HotPathResult[], quietTran
     });
   const workerPerSecond = perWorkspaceWorker.reduce((total, row) => total + row.transactionsPerSecond, 0);
   const workerStatementsPerSecond = perWorkspaceWorker.reduce((total, row) => total + row.statementsPerSecond, 0);
+  const stoppedWorkerPerSecond = perWorkspaceWorker
+    .filter(row => !WORKER_PER_WORKSPACE_CADENCES[row.operation].runningOnly)
+    .reduce((total, row) => total + row.transactionsPerSecond, 0);
   const byOperation = (Object.entries(STEADY_STATE_CADENCES) as [SteadyOperation, Cadence][]).map(([operation, cadence]) => {
     const hot = hotPaths.find(result => result.operation === operation);
     if (!hot) throw new Error(`missing hot-path measurement for ${operation}`);
@@ -297,6 +323,9 @@ export function projectSteadyState(hotPaths: readonly HotPathResult[], quietTran
   return {
     perWorkspace,
     perRunningEngineTransactionsPerSecond: sum("transactionsPerSecond", "engine") + workerPerSecond,
+    // The quiet floor is global, not per workspace; a stopped workspace adds
+    // only its non-running worker cycles (drift and sweep share).
+    perStoppedWorkspaceTransactionsPerSecond: stoppedWorkerPerSecond,
     perWorkspaceWorker,
     perConnectedClientTransactionsPerSecond: sum("transactionsPerSecond", "client"),
     atWorkspaces: workspaceCounts.map(workspaces => ({ workspaces,

@@ -52,6 +52,9 @@ export async function runCloudDiagnosticCleanup(pool: pg.Pool): Promise<void> {
     if (!job.rowCount) return;
     await tx.query(retentionLock());
     await tx.query("DELETE FROM cloud_workspace_diagnostic_incidents WHERE last_at<clock_timestamp()-interval '30 days'");
+    // S1 access-loss rows are read only inside the 36-minute revocation
+    // retention window; twice that is ample slack for this hourly pass.
+    await tx.query("DELETE FROM cloud_capability_access_losses WHERE lost_at<clock_timestamp()-interval '2 hours'");
     await tx.query(`UPDATE cloud_workspace_diagnostic_incidents SET
       events=(SELECT coalesce(jsonb_agg(event),'[]'::jsonb) FROM jsonb_array_elements(events) event
         WHERE (event->>'lastAt')::timestamptz>=clock_timestamp()-interval '7 days'),

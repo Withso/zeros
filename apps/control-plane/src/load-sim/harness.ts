@@ -18,8 +18,10 @@ import { DatabaseCloudAgentExecutionService } from "../cloud-workspaces/agent-ex
 import { CloudAgentBootCredentialResponseSchema } from "../cloud-workspaces/agent-boot-contract.js";
 import { CloudWorkspaceCheckpointRequestWorker } from "../cloud-workspaces/checkpoint-requests.js";
 import { DatabaseCloudWorkspaceDurableRecordService } from "../cloud-workspaces/durable-record.js";
+import { CloudEngineCheckpointHints } from "../cloud-workspaces/engine-checkpoint-hints.js";
 import { DatabaseCloudWorkspaceEngineClientAdmissionService } from "../cloud-workspaces/engine-client-admission.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "../cloud-workspaces/engine-protocol-version.js";
+import { DatabaseCloudIdleStop } from "../cloud-workspaces/idle-stop.js";
 import { readLifecycleDeadlines } from "../cloud-workspaces/lifecycle-deadlines.js";
 import { cloudRuntimeRelayLimits } from "../cloud-workspaces/runtime-bridge-limits.js";
 import type { CloudProviderResource, CloudWorkspaceAccessProvider, CloudWorkspaceProvider } from "../cloud-workspaces/provider.js";
@@ -32,7 +34,12 @@ import { DatabaseCloudWorkspaceSetupMaterialService } from "../cloud-workspaces/
 import { computerTestAccount, computerTestWallet } from "../cloud-workspaces/computer-workspace-test-fixtures.js";
 import { runtimeBase } from "../cloud-workspaces/runtime-test-fixtures.js";
 import { seedReadyCloudWorkspace, withCloudFixtureOwnerTx, type ReadyCloudWorkspaceFixture } from "../cloud-workspaces/test-fixtures.js";
+import { DatabaseUplinkCheckpointStore } from "../realtime/uplink-checkpoint.js";
+import { DatabaseUplinkIdleStopStore } from "../realtime/uplink-idle.js";
+import { DatabaseUplinkLeaseStore } from "../realtime/uplink-lease.js";
+import { DatabaseUplinkTurnStore } from "../realtime/uplink-turns.js";
 import { DatabaseCostMeter } from "./instrument.js";
+import { AUTHORITY_CACHE_CHANNEL } from "../cloud-workspaces/engine-authority-cache.js";
 
 const ORIGIN = "https://control.load-sim.test";
 const ENGINE_PORT = 39393;
@@ -103,6 +110,8 @@ export class FakeBoatProvider implements CloudWorkspaceProvider, CloudWorkspaceA
 export type SimulatedWorkspace = {
   fixture: ReadyCloudWorkspaceFixture;
   engine: { organizationId: string; workspaceId: string; generation: number; engineInstanceId: string; heartbeatToken: string };
+  /** The registered runtime boot, which the engine's uplink hello names. */
+  runtimeBootId: string;
   bootId: string;
   writerEpoch: string;
   actorSessionId: string;
@@ -123,6 +132,20 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
   const rawApi = createPool(databaseUrl, { workload: "api", applicationName: "zeros-load-sim-api" });
   const rawWorker = createPool(databaseUrl, { workload: "worker", applicationName: "zeros-load-sim-worker" });
   const seed = new pg.Pool({ connectionString: databaseUrl, max: 4, application_name: "zeros-load-sim-seed" });
+  // Job-queue wake-ups and authority-cache hints are NOTIFYs issued by
+  // database triggers, invisible to client instrumentation; count deliveries
+  // on their channels instead. Identical job notifications dedupe per
+  // transaction, so job deliveries equal notifying commits on that channel.
+  // One commit can carry several authority scopes (w:, o:, u:), so those
+  // deliveries are an upper bound on its notifying commits.
+  const notifications = { count: 0, authorityCache: 0 };
+  const listener = new pg.Client({ connectionString: databaseUrl, application_name: "zeros-load-sim-listen" });
+  await listener.connect();
+  listener.on("notification", message => {
+    if (message.channel === AUTHORITY_CACHE_CHANNEL) notifications.authorityCache += 1;
+    else notifications.count += 1;
+  });
+  await listener.query(`LISTEN zeros_control_plane_job_work; LISTEN ${AUTHORITY_CACHE_CHANNEL}`);
   const api = meter.instrument(rawApi);
   const worker = meter.instrument(rawWorker);
   const boat = new FakeBoatProvider();
@@ -167,6 +190,14 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
   const reconciler = new CloudWorkspaceReconciler({
     pool: worker, provider: boat, providerResolver: workerResolver, workosEnabled, logger: quiet,
   });
+  // `realtime` runs the lease.v1 renewals and checkpoint.v1 reads; the API
+  // pool measures them the same.
+  const leases = new DatabaseUplinkLeaseStore({ pool: api, workosEnabled });
+  const idleStops = new DatabaseUplinkIdleStopStore(new DatabaseCloudIdleStop(api, workosEnabled));
+  const turnEvents = new DatabaseUplinkTurnStore(api);
+  const checkpointQueue = new DatabaseUplinkCheckpointStore(api);
+  // A zero-length wait is exactly one of the reads a held wait repeats.
+  const checkpointHints = new CloudEngineCheckpointHints(api, { waitMs: 0 });
 
   // /v1 requests re-resolve the account from its verified claims on every
   // request, exactly as createAuthMiddleware does after JWT verification.
@@ -213,6 +244,8 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
       credentialRevision: 1, models: ["grok-4.6"], consent: "zeros-managed" });
     const engine = { organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, generation: 1,
       engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
+    const runtimeBootId = (await seed.query<{ runtime_boot_id: string }>(
+      "SELECT runtime_boot_id FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0]!.runtime_boot_id;
     const request = { version: 1, mode: "boot-owner-v1", organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
       generation: 1, engineInstanceId: fixture.engineInstanceId };
     const bound = CloudAgentBootCredentialResponseSchema.parse(await seedExecutions.boot(engine, "bootstrap", request));
@@ -239,7 +272,7 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
       actorUserId: user.id, proof, authenticatedUser: user });
     const consumed = await seedAdmission.consumeActor({ ...engine, token: grant.grantToken });
     identities.set(user.id, identity);
-    const workspace = { fixture, engine, bootId: bound.bootId, writerEpoch: bound.writerEpoch,
+    const workspace = { fixture, engine, runtimeBootId, bootId: bound.bootId, writerEpoch: bound.writerEpoch,
       actorSessionId: consumed.actorSessionId, grantToken: grant.grantToken, user, identity };
     workspaces.push(workspace);
     return workspace;
@@ -254,6 +287,38 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
       organizationId: w.engine.organizationId, generation: 1, engineInstanceId: w.engine.engineInstanceId,
       token: w.engine.heartbeatToken, observedPorts: [] }),
     "engine.durableRecordHead": (w: SimulatedWorkspace) => records.headForEngine({ ...w.engine, afterEntityKind: null, afterEntityId: null }),
+    // S2 lease.v1: the renewal `realtime` runs on each uplink watermark tick.
+    "engine.uplinkLeaseRenewal": async (w: SimulatedWorkspace) => {
+      const renewed = await leases.renew({ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
+        engineInstanceId: w.engine.engineInstanceId, bootId: w.runtimeBootId }, w.engine.heartbeatToken);
+      if (!renewed.ok) throw new Error(`uplink lease renewal was refused (${renewed.reason})`);
+    },
+    // S2 idle.v1: one stop request `realtime` makes after 10 quiet minutes.
+    // The simulated engine is younger than 10 min, so this measures the
+    // declined path and creates no lifecycle intent.
+    "engine.uplinkIdleStopRequest": async (w: SimulatedWorkspace) => {
+      const result = await idleStops.request({ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
+        engineInstanceId: w.engine.engineInstanceId, bootId: w.runtimeBootId }, w.engine.heartbeatToken, randomUUID());
+      if (result !== "declined") throw new Error(`uplink idle stop request answered ${result}`);
+    },
+    // S2 checkpoint.v1: one uplink's read of queued checkpoint requests.
+    "engine.uplinkCheckpointSweep": async (w: SimulatedWorkspace) => {
+      await checkpointQueue.queued([{ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
+        engineInstanceId: w.engine.engineInstanceId, bootId: w.runtimeBootId }]);
+    },
+    // S2 turns.v1: one stored terminal transition, the first for its turn,
+    // so the device-stream notice is included. A fresh boot per call keeps
+    // every call on the stored path (sequence 1 of a new stream).
+    "engine.uplinkTurnEvent": async (w: SimulatedWorkspace) => {
+      const result = await turnEvents.record({ workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId,
+        generation: 1, engineInstanceId: w.engine.engineInstanceId, bootId: randomUUID() },
+        { journalSeq: 1, chatId: "load-sim-chat", turnId: randomUUID(), state: "completed", atMs: Date.now() });
+      if (result.result !== "stored") throw new Error(`uplink turn event answered ${result.result}`);
+    },
+    // One read of the engine's checkpoint-hint wait; a held 25 s wait reads six times.
+    "engine.checkpointHintWait": (w: SimulatedWorkspace) => checkpointHints.wait({ token: w.engine.heartbeatToken,
+      workspaceId: w.engine.workspaceId, organizationId: w.engine.organizationId, generation: 1,
+      engineInstanceId: w.engine.engineInstanceId }, new AbortController().signal),
     "engine.credentialControls": (w: SimulatedWorkspace) => executions.credentialControls(w.engine, { ...request(w), acknowledgements: [] }),
     "engine.actorConfirm": (w: SimulatedWorkspace) => executions.boot(w.engine, "actor-confirm", { ...request(w), actorSessionId: w.actorSessionId }),
     "client.renew": (w: SimulatedWorkspace) => admission.consumeActor({ ...w.engine, token: w.grantToken, renew: true }),
@@ -306,7 +371,12 @@ export async function createSimulator(options: { databaseUrl: string; meter: Dat
     seedPool: seed,
     /** The instrumented pools every simulated service uses. */
     pools: { api, worker },
+    /** Job-channel notifications delivered so far (one per notifying commit)
+     * and authority-cache hints (at least one per notifying commit). */
+    notifications,
     async close() {
+      listener.removeAllListeners();
+      await listener.end().catch(() => {});
       await Promise.all([rawApi.end(), rawWorker.end(), seed.end()]);
     },
   };

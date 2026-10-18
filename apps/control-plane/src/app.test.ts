@@ -1,11 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 import {Context} from "hono";
+import { SpanKind } from "@opentelemetry/api";
+import { InMemorySpanExporter } from "@opentelemetry/sdk-trace";
 import {HttpError} from "./authz.js";
 import { DatabaseAcquireTimeoutError } from "./db.js";
 
 import { createApp } from "./app.js";
 import type { Config, GithubBackendConfig } from "./config.js";
+import { configureControlPlaneTracing, shutdownControlPlaneTracing } from "./tracing.js";
 
 // These assert POSITION in the middleware chain, which no per-router test can
 // see. `github.test.ts` proved `createGithubUnconfiguredRoutes()` answers 503
@@ -93,9 +96,9 @@ function config(github: GithubBackendConfig | null): Config {
   };
 }
 
-it("exposes only liveness and release readiness on a worker process", async () => {
+it.each(["worker", "realtime"] as const)("exposes only liveness and release readiness on a %s process", async processRole => {
   const query = vi.fn(async () => ({ rows: [] }));
-  const app = createApp({ ...config(null), processRole: "worker" }, { query } as unknown as pg.Pool, emailConfig as never);
+  const app = createApp({ ...config(null), processRole }, { query } as unknown as pg.Pool, emailConfig as never);
   expect((await app.request("/healthz")).status).toBe(200);
   for (const path of ["/v1/me", "/v1/cloud-workspaces", "/v1/auth/events", "/auth/login", "/internal/v1/runtime-bases"]) {
     expect((await app.request(path)).status).toBe(404);
@@ -849,6 +852,47 @@ describe("app assembly — isolated cloud preview proxy", () => {
       "x-zeros-access-credential",
     );
     expect(response.headers.get("access-control-allow-headers")).toContain("x-zeros-runtime-admission");
+  });
+});
+
+describe("app assembly — tracing", () => {
+  const PARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+  let exporter: InMemorySpanExporter;
+  beforeEach(() => {
+    exporter = new InMemorySpanExporter();
+    configureControlPlaneTracing({ exporter, sampleRatio: 1, processRole: "api", processor: "simple" });
+  });
+  afterEach(async () => {
+    await shutdownControlPlaneTracing();
+  });
+
+  it("records one server span on the caller's trace without the organization identifier", async () => {
+    const app = createApp(config(null), pool, emailConfig as never);
+    await app.request("/v1/organizations/11111111-1111-4111-8111-111111111111/does-not-exist", {
+      headers: { traceparent: PARENT },
+    });
+    const servers = exporter.getFinishedSpans().filter(span => span.kind === SpanKind.SERVER);
+    expect(servers).toHaveLength(1);
+    expect(servers[0]!.spanContext().traceId).toBe("0af7651916cd43dd8448eb211c80319c");
+    const text = [servers[0]!.name, ...Object.values(servers[0]!.attributes).map(String)].join(" ");
+    expect(text).not.toContain("11111111-1111-4111-8111-111111111111");
+  });
+
+  it("allows the traceparent header through CORS preflight", async () => {
+    const app = createApp(config(null), pool, emailConfig as never);
+    const response = await app.request(
+      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-workspaces/22222222-2222-4222-8222-222222222222/access/33333333-3333-4333-8333-333333333333",
+      {
+        method: "OPTIONS",
+        headers: {
+          origin: "app://zeros",
+          "access-control-request-method": "DELETE",
+          "access-control-request-headers": "authorization,traceparent",
+        },
+      },
+    );
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-headers")).toContain("traceparent");
   });
 });
 

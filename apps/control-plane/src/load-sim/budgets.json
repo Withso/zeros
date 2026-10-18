@@ -6,8 +6,11 @@
     "perActiveWorkspaceTransactionsPerSecond": 0.01
   },
   "steadyState": {
-    "perActiveWorkspaceTransactionsPerSecond": 3.29,
-    "perRunningEngineTransactionsPerSecond": 2.55
+    "perActiveWorkspaceTransactionsPerSecond": 3.09,
+    "perRunningEngineTransactionsPerSecond": 2.36,
+    "perStoppedWorkspaceTransactionsPerSecond": 0.13,
+    "notifyingCommitsPerActiveWorkspacePerSecond": 0.07,
+    "authorityCacheNotificationsPerActiveWorkspacePerSecond": 0.03
   },
   "perRequest": {
     "engine.heartbeat": {
@@ -19,6 +22,31 @@
       "transactions": 1,
       "statements": 9,
       "roundTrips": 7
+    },
+    "engine.uplinkLeaseRenewal": {
+      "transactions": 1,
+      "statements": 9,
+      "roundTrips": 7
+    },
+    "engine.uplinkIdleStopRequest": {
+      "transactions": 1,
+      "statements": 8,
+      "roundTrips": 5
+    },
+    "engine.uplinkCheckpointSweep": {
+      "transactions": 1,
+      "statements": 7,
+      "roundTrips": 2
+    },
+    "engine.uplinkTurnEvent": {
+      "transactions": 1,
+      "statements": 12,
+      "roundTrips": 9
+    },
+    "engine.checkpointHintWait": {
+      "transactions": 1,
+      "statements": 7,
+      "roundTrips": 4
     },
     "engine.credentialControls": {
       "transactions": 1,
