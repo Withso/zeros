@@ -170,6 +170,14 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): { docker
     lines.push(`COPY ${JSON.stringify([archivePath, "/opt/zeros-runtime/lib/zeros/cloud-setup-process.mjs"])}`);
   }
   {
+    const sourcePath = path.join(here, "sandbox", "cloud-setup-performance.mjs");
+    const archivePath = `sandbox/${path.basename(sourcePath)}`;
+    const target = "/opt/zeros-runtime/lib/zeros/cloud-setup-performance.mjs";
+    contextList.push({ sourcePath, archivePath });
+    lines.push(`COPY ${JSON.stringify([archivePath, target])}`);
+    lines.push(`RUN chown root:root ${target} && chmod 0444 ${target}`);
+  }
+  {
     const sourcePath = path.join(here, "sandbox", "image-build-contract.mjs");
     const archivePath = `sandbox/${path.basename(sourcePath)}`;
     contextList.push({ sourcePath, archivePath });

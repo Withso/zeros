@@ -99,6 +99,7 @@ describe("computer template repository projection", () => {
         tree.write(`${runtime.workerRoot}/gitconfig`, "[core]\n", 0o444);
         for (const name of [
           "cloud-engine-launcher.mjs",
+          "cloud-setup-performance.mjs",
           "cloud-engine-view.mjs",
           "cloud-computer-checkout.mjs",
           "cloud-engine-cgroup.mjs",

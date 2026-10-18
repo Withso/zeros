@@ -18,3 +18,10 @@ stream bounds, proof equality and failure controls. Root observations cannot be
 overwritten by inner timings. A cached install still hashes its tree and retires
 and restarts its host; measure those calls before changing them. Encoded in the
 guest performance, root launch, setup attestation/helper and bootstrap tests.
+
+An imported helper must also reach every installed layout and namespace fixture.
+The v4 bundle inventory included the performance helper, but the real Computer
+projection fixture and legacy image recipes omitted it. Run the projection and
+all cloud script suites before handoff; keep a staged import that succeeds after
+the source checkout is removed. Encoded in the runtime-bundle closure, image
+artifact and Computer projection tests.
