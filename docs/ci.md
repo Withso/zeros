@@ -120,6 +120,9 @@ critical browser entry; it does not authorize substituting full composer smoke.
 
 | Lane                     | Ownership or selection                                                                    |
 | ------------------------ | ----------------------------------------------------------------------------------------- |
+| `cloud-chaos`            | Control-plane chaos scenarios (advisory; `ci:cloud-chaos` or its path rule)               |
+| `cloud-client`           | `packages/cloud-client/**` SDK and conformance suites (advisory)                          |
+| `cloud-scale`            | Load-simulator 10×/100× budget scenarios (advisory; `ci:cloud-scale` or load-sim paths)   |
 | `docs-only`              | Modified documentation in the audited allowlist                                           |
 | `ci-config`              | CI definitions; shared invalidators select the full PR set                                |
 | `web`                    | Web hub, handoff, Functions, and shared web inputs                                        |
@@ -186,6 +189,27 @@ and contributes to the macOS workload floor. The reserved critical-composer
 entry has no executable suite yet and is advisory; it never substitutes for
 `composer-full`. These execution-owner annotations do not add workflow steps.
 
+Four advisory cloud-program jobs (`local-untouched`, `cloud-chaos`,
+`cloud-scale`, `cloud-client`) run in `ci.yml` outside the trusted job
+inventory. Each lane-gated job reads its lane bit from the scope ledger and
+skips green while the trusted base policy lacks the lane, so the introducing
+change cannot wedge itself; each workload passes empty until its track lands
+the test files. They sit under `zeros/ci-gate` with tolerated results, so a
+failure shows on the PR without blocking it, until the owner promotes a lane
+into the required selection. `local-untouched` runs on every PR: it fails a
+cloud-program change that touches Local-only files (per
+`docs/cloud-workspace/local-seams.json`, judged by the base commit's copy so a
+PR cannot weaken its own gate; the manifest is itself a CI-definition path, so
+editing it needs an owner merge, and a PR whose head copy does not parse or
+validate fails) without the `local-seams-sign-off`
+label, or that crosses a shared seam (engine core, renderer bridge, protocol,
+account auth) while the Local test lanes are unselected. Only the owner
+applies `local-seams-sign-off`; agents never add it — the label is the owner's
+explicit sign-off, and agents act with the owner's GitHub identity. The load-simulator
+budget check itself runs in the control-plane database lane on every CP
+change; `cloud-scale` adds the 10×/100× scenario suite by label or load-sim
+path, with a nightly promotion deferred to the track G rollout.
+
 ## Local preview and additive labels
 
 Run before the final push:
@@ -217,9 +241,13 @@ It does not provide an immutable merge request or an App-owned merge gate.
 | `ci:control-plane-db` | Control-plane static and database suites       |
 | `ci:packaging`        | Packaging, with dependent execution predicates |
 | `ci:web`              | Offline web verification                       |
+| `ci:cloud-chaos`      | Advisory cloud chaos lane                      |
+| `ci:cloud-scale`      | Advisory 10×/100× load-budget lane             |
 
 The vocabulary is closed. An unknown `ci:*` label fails with the supported list;
-ordinary labels have no effect. `LABELS_JSON` accepts a JSON array of strings or
+ordinary labels have no effect. `local-seams-sign-off` is not a `ci:*` label
+and selects nothing; it only satisfies `local-untouched`, and only the owner
+applies it; agents never add it. `LABELS_JSON` accepts a JSON array of strings or
 GitHub label objects with `name`. Preview requests with:
 
 ```sh
@@ -358,8 +386,10 @@ CI-definition PRs need an owner merge. Agents must not auto-merge changes to the
 paths recognized by `scripts/ci/ci-definition.mjs`: workflows/actions,
 `.github/actionlint.yaml`, `.github/CODEOWNERS`, `scripts/ci/**`, `scripts/agent-runtime/**`, `scripts/check-*`,
 the explicit Vitest runner, composer entry and `scripts/ui-smoke/**`, release
-scripts, root Vitest/ESLint configs, root package/lock/workspace files, and the
-control-plane/web package and lockfiles.
+scripts, root Vitest/ESLint configs, root package/lock/workspace files, the
+control-plane/web package and lockfiles, and the Local seams manifest
+`docs/cloud-workspace/local-seams.json` (the `local-untouched` gate trusts the
+base copy, so an unreviewed edit would let the next PR cross a weakened seam).
 
 List definition paths in a committed diff with:
 

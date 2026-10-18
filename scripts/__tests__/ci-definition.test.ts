@@ -42,6 +42,10 @@ describe("CI-definition paths", () => {
     "apps/control-plane/pnpm-lock.yaml",
     "apps/web/package.json",
     "apps/web/package-lock.json",
+    // The local-untouched gate judges seams by the base manifest, so a PR
+    // that edits it must not merge without the owner, or the next PR could
+    // cross the weakened seam freely.
+    "docs/cloud-workspace/local-seams.json",
   ])("requires an owner merge for %s", (file) => {
     expect(isCiDefinitionPath(file)).toBe(true);
   });

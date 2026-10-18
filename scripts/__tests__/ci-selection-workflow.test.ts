@@ -279,13 +279,60 @@ describe("selective pull-request CI", () => {
     expect(outputs.ledger).toBe(classifier.ledger);
     const ledger = JSON.parse(outputs.ledger);
     expect(ledger.schema).toBe("zeros.ci-selection/v1");
-    expect(Object.keys(ledger.lanes)).toHaveLength(20);
+    expect(Object.keys(ledger.lanes)).toHaveLength(23);
     expect(ledger.jobs).toEqual(OUTPUT_LEDGER.jobs);
     for (const id of JOBS)
       expect(outputs[`job-${id}`]).toBe(classifier[`job-${id}`]);
     expect(scopeStep().run).not.toMatch(
       /labelLanes|REQUEST_LANES|selectChecks|decideScope/,
     );
+  });
+
+  it("keeps the advisory cloud lanes out of the required inventory and gated on their policy lane", () => {
+    // The trusted inventory comparison (scope and ci-gate) rejects unknown
+    // jobs, so advisory lanes must not join JOB_IDS, ci-gate or the policy
+    // jobs map. Each lane job guards on its ledger lane bit and skips green
+    // while the introducing PR's trusted base lacks the lane.
+    const scopeScript = scopeStep().run!;
+    const jobIdsLine = scopeScript.match(/const JOB_IDS = \[[^\]]*\]/)![0];
+    for (const lane of ["local-untouched", "cloud-chaos", "cloud-scale", "cloud-client"])
+      expect(jobIdsLine).not.toContain(lane);
+    // Advisory lanes sit under ci-gate (the gate tolerates their results)
+    // but never join the trusted classifier's job inventory.
+    const gate = ci.jobs["ci-gate"]!;
+    for (const lane of ["local-untouched", "cloud-chaos", "cloud-scale", "cloud-client"])
+      expect(gate.needs as string[]).toContain(lane);
+
+    const localUntouched = ci.jobs["local-untouched"]!;
+    expect(localUntouched.needs).toEqual("scope");
+    expect(localUntouched.if).toBe("${{ !cancelled() }}");
+    const seamStep = localUntouched.steps.find(
+      (step) => step.name === "Check Local seams",
+    )!;
+    expect(seamStep.run).toBe("node scripts/ci/local-untouched.mjs");
+    expect(seamStep.env).toMatchObject({
+      PULL_REQUEST_BASE_SHA: "${{ github.event.pull_request.base.sha }}",
+      PULL_REQUEST_HEAD_SHA: "${{ github.event.pull_request.head.sha }}",
+      LABELS_JSON: "${{ toJSON(github.event.pull_request.labels.*.name) }}",
+    });
+
+    for (const [id, lane] of [
+      ["cloud-chaos", "cloud-chaos"],
+      ["cloud-scale", "cloud-scale"],
+      ["cloud-client", "cloud-client"],
+    ] as const) {
+      const job = ci.jobs[id]!;
+      expect(job.needs).toEqual("scope");
+      expect(job.if).toContain(`lanes['${lane}'] == true`);
+      expect(job.if).toContain("needs.scope.result == 'success'");
+      // A lane with no test files yet must pass empty, not fail the PR.
+      const runs = job.steps.map((step) => step.run ?? "").join("\n");
+      expect(runs).toMatch(/passes empty/);
+    }
+    // Chaos and scale lanes carry their own Postgres service; the SDK lane
+    // keeps one for the future conformance-against-CP scenarios.
+    for (const id of ["cloud-chaos", "cloud-scale", "cloud-client"])
+      expect(ci.jobs[id]!.services?.postgres?.image).toBe("postgres:18");
   });
 
   it("executes base policy and relative imports even when the PR replaces them", () => {

@@ -30,6 +30,10 @@ failing input, or a reproduction. Drop anything you can't substantiate.
 - Authentication changes don't relax a check that ordinary users rely on. A
   test-only path stays gated, pinned, audited and absent on other channels.
 - SQL is parameterized and RLS context is transaction-local.
+- A destructive tool guarded by a connection URL validates the effective
+  target: refuse query parameters (pg applies `?host=` over the URL host),
+  accept only loopback IP literals (`127.example.com` is a name), resolve
+  `localhost`, and allow-list the database name.
 
 **Concurrency and time**
 - Read paths don't take mutation locks. Real mutations keep their locks, CAS
@@ -56,8 +60,14 @@ failing input, or a reproduction. Drop anything you can't substantiate.
 - Bug fixes include a regression that fails without the fix.
 - No fixed sleeps standing in for contention. Hold the condition until the
   code under test has actually observed it.
+- When several sources can wake a loop (hint, poll, retry timer), assert
+  structural conditions, not absolute timing floors on `performance.now()`
+  deltas: a gate cannot tell a late hint from the first poll.
 - Provider-shaped fixtures match the real wire shape. Qualify against a real
   response at least once.
+- Retry waits and terminal codes come from the provider's documented error
+  envelope, not HTTP convention. Pin each documented wait field and each code
+  that ends an operation with a wire-shaped test.
 - Replay provider updates through the shared history reducer as well as the
   producer. An emitted replacement can look correct while an immutable consumer
   silently ignores it.

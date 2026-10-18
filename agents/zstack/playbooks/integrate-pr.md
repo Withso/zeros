@@ -24,6 +24,11 @@ session itself.
    Replace any `"fixedBy": "pending"` in `agents/zstack/evals/cases/*.json` (or
    the legacy `cases.json`) with `pr:<n>`, validate, amend and push with
    `--force-with-lease`. CI restarts on the new head.
+   A hosted `gh` wrapper can replace `GH_TOKEN` with an app token; confirm
+   the acting identity (`gh api user`) before owner-only operations. If
+   `gh pr edit` is refused for review-request access, update the body with
+   `gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -F body=@<file>`. Confirm
+   a push with `git ls-remote`, not with a pipeline's exit status.
 7. **Merge** with `pnpm agent:merge <n>`, which arms auto-merge. Only one armed
    PR at a time: queue the rest and arm each one after the previous merges.
    CI-definition PRs need the owner's merge.

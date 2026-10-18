@@ -1,7 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { runMigrations } from "../migrate.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx } from "../db.js";
 import { seedRuntimeBase, seedRuntimeBundle, runtimeBase, runtimeWitness } from "./runtime-test-fixtures.js";
@@ -23,8 +22,7 @@ d("organization agent accounts", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     service = new DatabaseCloudAgentCredentialService(pool, {
       keys: { 1: randomBytes(32).toString("base64url") },
