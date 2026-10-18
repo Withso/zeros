@@ -1,0 +1,9 @@
+{
+  "id": "design-relocation-rollback",
+  "kind": "replay",
+  "area": "design-workspace",
+  "fixedBy": "68a84b435dd70e639d096fe78c7f0ddb5e75400b",
+  "symptom": "A failed destination-file write left the source subtree removed, and extraction discarded inherited styles and affine geometry.",
+  "rule": "zstack-learn: prove source preservation with browser-measured corners and inspect source immediately after an injected partial disk failure, before recovery-capable reads.",
+  "check": "pnpm test:git apps/desktop/src/engine/design/__tests__/relocation.test.ts apps/desktop/src/engine/design/__tests__/relocation-geometry.test.ts"
+}
