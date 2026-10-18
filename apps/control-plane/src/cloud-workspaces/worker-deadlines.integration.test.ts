@@ -3,7 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
-import { readLifecycleDeadlines } from "./lifecycle-deadlines.js";
+import { readLifecycleDueInMs } from "./lifecycle-jobs.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -79,13 +79,14 @@ d("worker deadline projections", () => {
   it("keeps engine expiry independent of the quiet fallback and discovers renewal and revocation on re-read", async () => {
     const f = await seedReadyCloudWorkspace(pool);
     await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=now()+interval '10 seconds' WHERE id=$1", [f.engineInstanceId]);
-    within((await readLifecycleDeadlines(pool, null, 60_000)).engineHealth, 10_000);
+    const engineDue = () => readLifecycleDueInMs(pool, "engineHealth", f.workspaceId, { provider: null, driftIntervalMs: 60_000 });
+    within(await engineDue(), 10_000);
     await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=now()+interval '90 seconds' WHERE id=$1", [f.engineInstanceId]);
-    within((await readLifecycleDeadlines(pool, null, 60_000)).engineHealth, 90_000);
+    within(await engineDue(), 90_000);
     await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked',revoked_at=now() WHERE id=$1", [f.engineInstanceId]);
-    expect((await readLifecycleDeadlines(pool, null, 60_000)).engineHealth).toBeLessThanOrEqual(0);
+    expect(await engineDue()).toBeLessThanOrEqual(0);
     await pool.query("UPDATE cloud_workspaces SET desired_state='stopped',status='stopped' WHERE id=$1", [f.workspaceId]);
-    expect((await readLifecycleDeadlines(pool, null, 60_000)).engineHealth).toBeUndefined();
+    expect(await engineDue()).toBeNull();
   });
 
   it("does not run deletion claims before provider proof or while a legal hold remains", async () => {

@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { loadCapabilityKeyring } from "./capability-keyring.js";
 import {

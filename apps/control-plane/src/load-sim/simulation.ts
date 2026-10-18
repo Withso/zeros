@@ -50,10 +50,12 @@ export type SteadyOperation = keyof typeof STEADY_STATE_CADENCES;
  * difference between one seeded workspace and an empty inventory, and
  * `runningOnly` work stops when the workspace does. */
 export const WORKER_PER_WORKSPACE_CADENCES = {
-  "worker.reconcileDrift": { periodSeconds: 60, marginal: false, runningOnly: false,
-    source: "reconciler.ts driftCandidate: due once last_observed_at is older than intervalMs (60 s default)" },
+  "worker.engineHealthJob": { periodSeconds: 1_800, marginal: false, runningOnly: true,
+    source: "lifecycle-jobs.ts DUE.engineHealth: one job run at each engine lease expiry while the workspace runs; lease.v1 renewals keep it 31-36 min out" },
+  "worker.reconcileDrift": { periodSeconds: 21_600, marginal: false, runningOnly: false,
+    source: "reconciler.ts sweepScopeInventory: the paged inventory keeps matched bindings pushed to the 6 h inventoryFallbackMs horizon; only then does a per-workspace drift inspect run" },
   "worker.reconcileOrphans": { periodSeconds: 60, marginal: true, runningOnly: false,
-    source: "reconciler.ts orphanSweepAt: one sweep per 60 s, work per managed provider resource" },
+    source: "reconciler.ts orphanSweepAt: one paged inventory sweep per 60 s, work per managed provider resource" },
 } as const satisfies Partial<Record<SimulatorOperationName, { periodSeconds: number; marginal: boolean; runningOnly: boolean; source: string }>>;
 
 export type WorkerPerWorkspaceOperation = keyof typeof WORKER_PER_WORKSPACE_CADENCES;
@@ -279,15 +281,29 @@ export type Projection = {
     byOperation: Array<{ operation: SteadyOperation; role: Cadence["role"]; requestsPerSecond: number; transactionsPerSecond: number }> };
   /** A running workspace with no desktop connected: engine loops and its reconciler share. */
   perRunningEngineTransactionsPerSecond: number;
-  /** A stopped workspace: no engine loops, only drift and its sweep share. */
+  /** A settled stopped workspace: no engine loops, no engine-health job, the
+   * drift fallback horizon and its sweep share only. */
   perStoppedWorkspaceTransactionsPerSecond: number;
   /** The reconciler's share of perRunningEngineTransactionsPerSecond. */
   perWorkspaceWorker: Array<{ operation: WorkerPerWorkspaceOperation; transactionsPerCycle: number; transactionsPerSecond: number;
     statementsPerSecond: number }>;
   /** Added by each connected desktop. */
   perConnectedClientTransactionsPerSecond: number;
-  atWorkspaces: Array<{ workspaces: number; transactionsPerSecond: number; statementsPerSecond: number }>;
+  atWorkspaces: Array<{ workspaces: number; transactionsPerSecond: number; statementsPerSecond: number;
+    /** One replica's sweeps plus fallback drift inspects; every replica shares Boat's 1000/min/IP. */
+    boatCallsPerMinutePerReplica: number }>;
 };
+
+/** Boat calls one replica issues at N workspaces: one paged list per minute
+ * (100 per page), one inspect per fallback drift run (6 h horizon), and its
+ * half of the running allocations' compute calls: one inspect per lease check
+ * (at most 10 minutes apart), one usage read per hour, one renewal per half
+ * of the 3600 s maximum TTL. The budget doubles this per-replica figure. */
+const COMPUTE_BOAT_CALLS_PER_MINUTE = 60 / 600 + 60 / 3600 + 60 / 1800;
+function projectedBoatCallsPerMinute(workspaces: number): number {
+  return Math.max(1, Math.ceil(workspaces / 100)) + workspaces * (60 / 21_600) +
+    (workspaces * COMPUTE_BOAT_CALLS_PER_MINUTE) / 2;
+}
 
 export function projectSteadyState(hotPaths: readonly HotPathResult[], quietTransactionsPerSecond: number,
   workspaceCounts: readonly number[], emptyInventory: readonly HotPathResult[] = []): Projection {
@@ -324,12 +340,13 @@ export function projectSteadyState(hotPaths: readonly HotPathResult[], quietTran
     perWorkspace,
     perRunningEngineTransactionsPerSecond: sum("transactionsPerSecond", "engine") + workerPerSecond,
     // The quiet floor is global, not per workspace; a stopped workspace adds
-    // only its non-running worker cycles (drift and sweep share).
+    // only its non-running worker cycles (drift fallback, sweep share).
     perStoppedWorkspaceTransactionsPerSecond: stoppedWorkerPerSecond,
     perWorkspaceWorker,
     perConnectedClientTransactionsPerSecond: sum("transactionsPerSecond", "client"),
     atWorkspaces: workspaceCounts.map(workspaces => ({ workspaces,
       transactionsPerSecond: quietTransactionsPerSecond + workspaces * perWorkspace.transactionsPerSecond,
-      statementsPerSecond: workspaces * perWorkspace.statementsPerSecond })),
+      statementsPerSecond: workspaces * perWorkspace.statementsPerSecond,
+      boatCallsPerMinutePerReplica: projectedBoatCallsPerMinute(workspaces) })),
   };
 }

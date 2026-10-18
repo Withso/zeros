@@ -489,6 +489,11 @@
       "lanes": ["control-plane", "control-plane-db"]
     },
     {
+      "id": "cloud-chaos",
+      "include": ["apps/control-plane/src/chaos/**"],
+      "lanes": ["cloud-chaos"]
+    },
+    {
       "id": "cloud-load-scale",
       "include": ["apps/control-plane/src/load-sim/**"],
       "lanes": ["cloud-scale"]

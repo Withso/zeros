@@ -22,11 +22,12 @@ describe("cloud worker notifications", () => {
     const first = client(), second = client();
     const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValue(second);
     const workers = { outbox: vi.fn(), access: vi.fn(), invitations: vi.fn(), security: vi.fn(),
-      recovery: vi.fn(), forks: vi.fn(), checkpoints: vi.fn(), operations: vi.fn(), retirement: vi.fn(), templates: vi.fn() };
+      recovery: vi.fn(), forks: vi.fn(), checkpoints: vi.fn(), operations: vi.fn(), retirement: vi.fn(), templates: vi.fn(), jobs: vi.fn() };
     const channels = { outbox: "zeros_cloud_outbox_work", access: "zeros_cloud_access_work",
       invitations: "zeros_cloud_invitation_work", security: "zeros_security_publication_work",
       recovery: "zeros_cloud_recovery_work", forks: "zeros_cloud_fork_work", checkpoints: "zeros_cloud_checkpoint_work",
-      operations: "zeros_cloud_operations_work", retirement: "zeros_cloud_retirement_work", templates: "zeros_cloud_template_work" };
+      operations: "zeros_cloud_operations_work", retirement: "zeros_cloud_retirement_work", templates: "zeros_cloud_template_work",
+      jobs: "zeros_control_plane_job_work" };
     const stop = startCloudWorkerNotifications({ connect } as unknown as pg.Pool, workers);
     await vi.advanceTimersByTimeAsync(0);
     for (const name of Object.keys(workers) as Array<keyof typeof workers>) {

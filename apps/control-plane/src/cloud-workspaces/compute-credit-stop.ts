@@ -12,7 +12,10 @@ import { recordCloudWorkspaceStopUnsealed } from "./stop-seal.js";
 /** Budget expiry preserves the VM's recoverable snapshot. Give the engine a
  * final-checkpoint window while it is still funded; if that fails, retain the
  * last durable checkpoint and stop compute without declaring a new checkpoint
- * durable or permanently deleting the allocation. */
+ * durable or permanently deleting the allocation. A checking worker may pass
+ * its schedule token to acknowledge only the re-check this stop itself causes;
+ * an earlier concurrent request is retained, and later requests still differ
+ * from the returned token. */
 export async function requestManagedComputeStop(
   pool: pg.Pool,
   input: {
@@ -24,11 +27,12 @@ export async function requestManagedComputeStop(
     checkpointDeadlineMs?: number;
     expectedLeaseOwner?: string;
     expectedGeneration?: number;
+    expectedNextCheckAt?: string;
   },
-): Promise<void> {
+): Promise<string | undefined> {
   if (!/^[a-z][a-z0-9_]{0,127}$/.test(input.reason))
     throw new Error("Invalid compute stop reason");
-  await withRetryableSystemTx(pool, async (tx) => {
+  return withRetryableSystemTx(pool, async (tx) => {
     const scope = (
       await tx.query<{
         workspace_id: string;
@@ -59,9 +63,9 @@ export async function requestManagedComputeStop(
     [input.leaseId,scope.workspace_id,scope.org_id,scope.generation])).rows[0]!.generation;
     if (input.expectedGeneration !== undefined && scope.generation !== input.expectedGeneration) return;
     const lease = (
-      await tx.query<{ state: string; stop_intent_id: string | null; lease_owner: string | null; claim_live: boolean }>(
-        "SELECT state,stop_intent_id,lease_owner,lease_expires_at>clock_timestamp() AS claim_live FROM managed_compute_allocation_leases WHERE id=$1 FOR UPDATE",
-        [input.leaseId],
+      await tx.query<{ state: string; stop_intent_id: string | null; lease_owner: string | null; claim_live: boolean; check_current: boolean | null }>(
+        "SELECT state,stop_intent_id,lease_owner,lease_expires_at>clock_timestamp() AS claim_live,next_check_at=$2::timestamptz AS check_current FROM managed_compute_allocation_leases WHERE id=$1 FOR UPDATE",
+        [input.leaseId, input.expectedNextCheckAt ?? null],
       )
     ).rows[0];
     if (!lease || lease.state === "settled") return;
@@ -69,6 +73,15 @@ export async function requestManagedComputeStop(
     // recovered. Check ownership while holding the same row lock as Stop.
     if (input.expectedLeaseOwner !== undefined &&
         (lease.lease_owner !== input.expectedLeaseOwner || !lease.claim_live)) return;
+    const handledNextCheckAt = async (): Promise<string | undefined> => {
+      if (!lease.check_current) return;
+      // This transaction still owns the lease row. Only our own workspace
+      // trigger can have changed its schedule since check_current was read.
+      return (await tx.query<{ at: string }>(
+        "SELECT next_check_at::text AS at FROM managed_compute_allocation_leases WHERE id=$1",
+        [input.leaseId],
+      )).rows[0]?.at;
+    };
     await tx.query(
       "UPDATE managed_compute_allocation_leases SET state='draining',updated_at=now() WHERE id=$1",
       [input.leaseId],
@@ -170,7 +183,7 @@ export async function requestManagedComputeStop(
           ordinaryStop ? null : `${reason.message}${incidentId ? ` (incident ${incidentId})` : ''}`,
           pending.operation === "stop" ? "stopped" : "archived", pending.operation === "stop" ? "stopping" : "archiving"]);
       }
-      return;
+      return handledNextCheckAt();
     }
     const key = `system:compute-stop:${randomUUID()}`;
     if (affectsWorkspace) {
@@ -261,5 +274,6 @@ export async function requestManagedComputeStop(
         deadlineFallback: input.force === true,
       },
     );
+    return handledNextCheckAt();
   });
 }

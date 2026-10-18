@@ -10,6 +10,7 @@ import {
 } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
+import { runDueLifecycleJobs } from "./lifecycle-job-test-utils.js";
 import { stopUnavailableCloudEngine } from "./engine-health.js";
 import {
   seedReadyCloudWorkspace,
@@ -87,12 +88,8 @@ suite("cloud engine liveness and compute convergence", () => {
     });
     return {
       provider,
-      tick: async () => {
-        const scheduled = reconciler as unknown as { readNextDelayMs(): Promise<number | null>; tick(): Promise<void> };
-        // Exercise the same durable preflight as the production scheduler.
-        await scheduled.readNextDelayMs();
-        await scheduled.tick();
-      },
+      // Exercise the same durable jobs as the production runner.
+      tick: () => runDueLifecycleJobs(pool, reconciler),
     };
   }
   it.each(["expired", "revoked", "missing"])(

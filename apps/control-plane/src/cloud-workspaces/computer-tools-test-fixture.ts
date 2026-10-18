@@ -127,7 +127,7 @@ export async function seedComputerToolsFixture(pool: pg.Pool, marked = true, qua
     renewComputeLease: async (_id: string, ttl: number) => ({ expiresAt: new Date(Date.now() + ttl * 1000).toISOString() }),
     readComputeUsage: async () => { throw new Error("Unexpected fixture metering"); },
   } as unknown as CloudWorkspaceProvider;
-  await new CloudWorkspaceComputeLeaseCoordinator({ pool, workosEnabled: false,
+  await new CloudWorkspaceComputeLeaseCoordinator({ pool, workosEnabled: false, usageMeterWindowMs: 0,
     policy: { provider: "boat", policyId: "zeros-v2-test-price", secondsPerDollar: 100_000, minimumTtlSeconds: 600,
       maximumTtlSeconds: 900, requestMarginSeconds: 60 } }).allocate({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
     generation: 2, intentId, idempotencyKey: intentId, imageRef: sourceImageRef, architecture: "linux/amd64",

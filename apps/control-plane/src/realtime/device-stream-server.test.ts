@@ -199,7 +199,7 @@ class ReferenceClient {
     this.drainAfterMs = null;
     this.lastWasUnauthenticated = code === DEVICE_STREAM_CLOSE.unauthenticated;
     this.delays.push(delay);
-    setTimeout(() => { void this.connect(); }, delay);
+    setTimeout(() => { void this.connect(); }, Math.min(delay, 30_000));
   }
 }
 

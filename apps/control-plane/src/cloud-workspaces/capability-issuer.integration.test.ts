@@ -10,7 +10,6 @@ import { loadCapabilityKeyring } from "./capability-keyring.js";
 import { CapabilitySigningKeyStore } from "./capability-keys.js";
 import { manageCloudCapabilityKey } from "../manage-cloud-capability-key.js";
 import {
-  CapabilityIssuanceError,
   CapabilityIssuerUnavailableError,
   issueClientCapability,
   issueEngineCapability,

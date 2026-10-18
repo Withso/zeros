@@ -17,11 +17,15 @@ function database() {
   const statements: string[] = [];
   const query = vi.fn(async (sql: string) => {
     statements.push(sql);
-    return { rows: sql.includes("delay_ms") ? [{ delay_ms: null }] : [], rowCount: 0 };
+    const result = { rows: sql.includes("delay_ms") ? [{ delay_ms: null }] : [], rowCount: 0 };
+    // withSystemStatement sends BEGIN, role, system flag, statement and COMMIT
+    // as one batch and expects one result per statement.
+    return /^BEGIN; /.test(sql) ? Array.from({ length: 5 }, () => result) : result;
   });
   const client = { query, release: vi.fn() };
   return { pool: { connect: async () => client, query } as unknown as pg.Pool, statements };
 }
+const isEmptyJobClaim = (sql: string) => /\bUPDATE control_plane_jobs job SET\b/.test(sql) && /\bFROM due, policy\b/.test(sql);
 const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
 // Idle tests fail on any claim/provider action; only the empty inventory sweep
 // is expected to run, at its maintenance cadence.
@@ -51,9 +55,25 @@ describe("idle worker demand", () => {
       await vi.advanceTimersByTimeAsync(60_000);
       const begins = statements.filter(sql => /^BEGIN\b/.test(sql));
       expect(begins.length).toBeLessThanOrEqual(3);
-      expect(statements.filter(sql => /\b(?:DELETE|INSERT|pg_advisory_xact_lock)\b|(?<!FOR )\bUPDATE\b/.test(sql))).toEqual([]);
+      // A job claim over an empty queue updates no row and takes no
+      // transaction id; it is the lifecycle reconciler's only idle read.
+      const writes = statements.filter(sql => !isEmptyJobClaim(sql));
+      expect(writes.filter(sql => /\b(?:DELETE|INSERT|pg_advisory_xact_lock)\b|(?<!FOR )\bUPDATE\b/.test(sql))).toEqual([]);
     } finally { await stop(); }
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("reads no lifecycle deadline while idle: one job claim per poll and nothing else", async () => {
+    const { pool, statements } = database();
+    const stop = new CloudWorkspaceReconciler({ pool, provider, intervalMs: 60_000, logger }).start();
+    try {
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(statements.length).toBeGreaterThan(0);
+      // Start plus a jittered 45-60 s poll; the inventory sweep lists the
+      // provider, not the database, and the hourly audit is not yet due.
+      expect(statements.length).toBeLessThanOrEqual(1 + 10 * 60 / 45);
+      expect(statements.filter(sql => !isEmptyJobClaim(sql))).toEqual([]);
+    } finally { await stop(); }
   });
 
   it("does not issue access expiry UPDATEs on a direct empty claim", async () => {
