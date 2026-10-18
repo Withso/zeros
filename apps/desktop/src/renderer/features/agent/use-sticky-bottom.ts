@@ -28,12 +28,14 @@
 
 import {
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
 } from "react";
 
+import { ActivityScope } from "../../shared/ui/loading/activity-scope";
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT, type ChatScrollNavigation } from "./chat-scroll-navigation";
 
 export interface StickyBottomState {
@@ -111,6 +113,11 @@ export function useStickyBottom(
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [isAtBottom, setIsAtBottom] = useState(options.initialAtBottom ?? true);
+  const local = useContext(ActivityScope) !== undefined;
+  // An eager React bailout still queues its updater until the next render.
+  // Keep the last published UI value separate from reader intent so unchanged
+  // Local resize measurements never enter that queue while only a leaf streams.
+  const publishedBottomRef = useRef(options.initialAtBottom ?? true);
   /** Mirror of isAtBottom kept in a ref so the layout-effect can
    *  read the user's pre-render intent without triggering an extra
    *  re-render of the hook's consumer. */
@@ -176,7 +183,10 @@ export function useStickyBottom(
       if (!jumpingRef.current && !readingNavigationRef.current && !awaitingSpacerResize) {
         stickRef.current = atBottom;
       }
-      setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
+      if (!local || publishedBottomRef.current !== atBottom) {
+        publishedBottomRef.current = atBottom;
+        setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
+      }
     };
     let gestureFrame = 0;
     const onScroll = () => measure();
@@ -240,7 +250,7 @@ export function useStickyBottom(
       scrollEl.removeEventListener("keydown", onKeyDown);
       ro?.disconnect();
     };
-  }, [scrollEl, threshold, enabled]);
+  }, [scrollEl, threshold, enabled, local]);
 
   // Snap to bottom on content change, but only when the user was
   // already there before the change. useLayoutEffect runs after
@@ -290,7 +300,10 @@ export function useStickyBottom(
         if (!enabledRef.current || scrollEl.clientHeight === 0) return;
         scrollEl.scrollTo({ top: target(), behavior: "instant" });
         stickRef.current = true;
-        setIsAtBottom(true);
+        if (!local || !publishedBottomRef.current) {
+          publishedBottomRef.current = true;
+          setIsAtBottom(true);
+        }
       };
       stickRef.current = true;
       if (
@@ -313,7 +326,7 @@ export function useStickyBottom(
       // isAtBottom describes actual geometry, not the destination. Publishing
       // true here would let AgentChat trim paged history during the animation.
     },
-    [scrollEl],
+    [scrollEl, local],
   );
 
   return { isAtBottom, jumpToBottom };
