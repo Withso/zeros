@@ -250,6 +250,25 @@ authority supplies keys, epochs and engine tokens
   never shortens the lease (decision G), so an engine that dies while its
   VM keeps running holds its workspace for up to 36 min instead of about
   90 s (S2, failure and outage behavior).
+- **Checkpoint requests (`checkpoint.v1`).** `uplink-checkpoint.ts` pushes
+  queued checkpoint requests to an uplink that negotiated `checkpoint.v1`
+  (S2 1.2.0), selected while the organization's `checkpoint_push` flag is
+  on; a flip closes the affected uplinks with `1001 features_changed`. One
+  system statement (`withSystemStatement`) reads the queued, unexpired
+  requests of each uplink's exact workspace, organization and generation,
+  oldest first and at most eight per uplink, for up to 500 uplinks at a
+  time, and `realtime` sends each as a reliable `checkpoint.request`. It
+  reads an uplink when its gate opens, when
+  `zeros_cloud_checkpoint_request` names its workspace and generation,
+  when the notification listener is ready again (every owned uplink), on
+  each 5 s tick while that listener is not current, and every 30 s
+  otherwise, which bounds a missed notification on a silently dead LISTEN
+  connection. Reads are single-flight and batched; a failed read leaves the
+  uplinks pending for the next tick and never retries at once. The frame is
+  only a hint: the engine fetches, fences and acknowledges the request
+  through its heartbeat as before, so the push writes nothing and a
+  foreign or stale frame costs one heartbeat. Without `checkpoint.v1` the
+  engine keeps its checkpoint-hint long-poll on `api`.
 
 ## Device stream server
 
@@ -473,6 +492,20 @@ registration there is no uplink client at all.
   backs off to a 60 s cap. A `4401` or `4403` park asks for an immediate
   heartbeat, so the engine checks its authority over HTTP at once instead
   of on the next beat the long lease would allow.
+- **Checkpoint requests (`checkpoint.v1`).** The engine also offers
+  `checkpoint.v1`. A `checkpoint.request` on a connection that negotiated
+  it is checked against the S2 schema (a lowercase UUID `requestId`, a
+  `code`-shaped `reason`, a non-negative safe-integer `deadlineAtMs`;
+  anything else closes `4400 frame_invalid`) and asks for an immediate
+  heartbeat (`CloudRuntimeRegistration.checkpointRequested`); the frame's
+  fields are never used as the directive. While `checkpointPushActive`
+  holds (current connection welcomed, gate open, `checkpoint.v1`
+  negotiated), the checkpoint-hint wait sends nothing, and the skip rule
+  counts the push in place of an answering hint wait. Each flip of
+  `checkpointPushActive` wakes the paused wait
+  (`uplinkCheckpointPushChanged`), and it re-checks every 30 s regardless,
+  so the long-poll resumes, with a fresh backoff, as soon as the uplink is
+  lost.
 
 ## Railway configuration (planned)
 

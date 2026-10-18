@@ -1726,7 +1726,7 @@ describe("engine lease over the uplink (lease.v1)", () => {
   /** A cloud engine whose uplink renews its lease. The heartbeat answers like
    * the control plane, `greatest(lease, clock + 90 s)`; the hint wait answers
    * idle once and then holds, unless told otherwise. */
-  function harness(options: { hints?: "healthy" | "absent" | "failing" | "unanswered" } = {}) {
+  function harness(options: { hints?: "healthy" | "absent" | "failing" | "unanswered"; push?: boolean } = {}) {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
@@ -1734,7 +1734,8 @@ describe("engine lease over the uplink (lease.v1)", () => {
     let uplinkLease = 0;
     let answer: (now: number) => number = now => Math.max(uplinkLease, now + 90_000);
     let failStatus: number | null = null;
-    let hintsAnswered = 0;
+    let hintCalls = 0;
+    const hintAnswers: boolean[] = (options.hints ?? "healthy") === "healthy" ? [false] : [];
     let directive: Record<string, unknown> | null = null;
     const checkpoints: unknown[] = [];
     const held = (init?: RequestInit) =>
@@ -1744,10 +1745,12 @@ describe("engine lease over the uplink (lease.v1)", () => {
       if (href === registrationEndpoint)
         return Response.json(registrationResponse(), { headers: { "x-zeros-cloud-local-commands": "1" } });
       if (href === hintEndpoint) {
+        hintCalls += 1;
         if (options.hints === "absent") return Response.json({ error: { code: "not_found" } }, { status: 404 });
         if (options.hints === "failing") return Response.json({ error: { code: "unavailable" } }, { status: 503 });
-        if (options.hints === "unanswered" || hintsAnswered++ > 0) return held(init);
-        return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-checkpoint-hint-v1", pending: false });
+        const pending = hintAnswers.shift();
+        if (pending === undefined) return held(init);
+        return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-checkpoint-hint-v1", pending });
       }
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       beats.push({ at: Date.now(), body });
@@ -1759,6 +1762,7 @@ describe("engine lease over the uplink (lease.v1)", () => {
           ? { repositoryCredential: { requestGeneration: refresh.generation, outcome: "unavailable" } } : {}) });
     });
     let active = true;
+    let push = options.push === true;
     let ports: Ports = [{ port: 3_000, protocol: "tcp" }];
     let pendingRefresh: typeof refresh | null = null;
     const sync = completedDurableRecordSync();
@@ -1769,8 +1773,18 @@ describe("engine lease over the uplink (lease.v1)", () => {
       onCheckpointRequested: async value => { checkpoints.push(value); },
       readObservedPorts: async () => ports, readRepositoryCredentialRefresh: () => pendingRefresh });
     registration.attachUplinkLease(() => active);
+    registration.attachUplinkCheckpointPush(() => push);
     return {
       registration, beats, sync, lost, checkpoints,
+      hintCalls: () => hintCalls,
+      /** The uplink's checkpoint push started or ended; without `notify` the
+       * change report was missed. */
+      setPush: (value: boolean, notify = true) => {
+        push = value;
+        if (notify) registration.uplinkCheckpointPushChanged();
+      },
+      /** The next hint wait answers instead of holding. */
+      queueHint: (pending: boolean) => { hintAnswers.push(pending); },
       /** The uplink renewed the lease now and reported it (pong). */
       renew: () => { const at = Date.now(); uplinkLease = at + LEASE; registration.adoptUplinkLease(uplinkLease, at); },
       remaining: () => registration.agentBootAuthorityRemainingMs() + 1_000,
@@ -2008,5 +2022,98 @@ describe("engine lease over the uplink (lease.v1)", () => {
       expect(h.beats).toHaveLength(8);
       expect(h.lost).not.toHaveBeenCalled();
     } finally { await h.registration.stop(); }
+  });
+
+  describe("checkpoint requests pushed over the uplink (checkpoint.v1)", () => {
+    const queued = { id: "77777777-7777-4777-8777-777777777777", reason: "manual", deadlineAtMs: NOW + 10 * 60_000 };
+
+    it("sends no checkpoint hint wait while the uplink pushes requests, and re-checks every 30 s", async () => {
+      const h = await started({ push: true, hints: "unanswered" });
+      try {
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        expect(h.hintCalls()).toBe(0);
+        expect(h.beats).toHaveLength(1);
+        h.setPush(false, false); // the change report was missed
+        await vi.advanceTimersByTimeAsync(29_000);
+        expect(h.hintCalls()).toBe(0);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(h.hintCalls()).toBe(1);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("resumes the hint wait at once when the push ends, so its first read sees a request queued meanwhile", async () => {
+      const h = await started({ push: true, hints: "unanswered" });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(h.hintCalls()).toBe(0);
+        h.setDirective(queued);
+        h.queueHint(true);
+        h.setPush(false);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.hintCalls()).toBe(1);
+        expect(h.beats).toHaveLength(2);
+        expect(h.checkpoints).toEqual([expect.objectContaining({ id: queued.id })]);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("re-checks at once when another uplink attaches", async () => {
+      const h = await started({ push: true, hints: "unanswered" });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(h.hintCalls()).toBe(0);
+        h.registration.attachUplinkCheckpointPush(() => false);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.hintCalls()).toBe(1);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("restarts the hint backoff once the push ends", async () => {
+      const h = await started({ hints: "failing" });
+      try {
+        await vi.advanceTimersByTimeAsync(40_000); // failed waits back off to 30 s
+        h.setPush(true);
+        await vi.advanceTimersByTimeAsync(60_000); // the current backoff ends, then the wait pauses
+        const paused = h.hintCalls();
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(h.hintCalls()).toBe(paused);
+        h.setPush(false);
+        await vi.advanceTimersByTimeAsync(1_000);
+        // A fresh series: the first failure retries after 1 s, not 30 s.
+        expect(h.hintCalls()).toBe(paused + 2);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("posts a beat at once for a pushed request; the beat fetches it", async () => {
+      const h = await started({ push: true });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(h.beats).toHaveLength(1);
+        h.setDirective(queued);
+        h.registration.checkpointRequested();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.beats).toHaveLength(2);
+        expect(h.checkpoints).toEqual([expect.objectContaining({ id: queued.id })]);
+        expect(h.hintCalls()).toBe(0);
+      } finally { await h.registration.stop(); }
+    });
+
+    it.each(["absent", "failing", "unanswered"] as const)(
+      "skips periodic beats that carry nothing while the uplink pushes requests, even when the hint wait is %s",
+      async hints => {
+        const h = await started({ hints });
+        try {
+          await vi.advanceTimersByTimeAsync(3 * 30_000);
+          expect(h.beats).toHaveLength(3);
+          h.setPush(true);
+          const hintCalls = h.hintCalls();
+          await vi.advanceTimersByTimeAsync(3 * 30_000);
+          expect(h.beats).toHaveLength(3);
+          expect(h.hintCalls()).toBe(hintCalls);
+          h.setPush(false);
+          await vi.advanceTimersByTimeAsync(3 * 30_000);
+          expect(h.beats).toHaveLength(6);
+          expect(h.lost).not.toHaveBeenCalled();
+        } finally { await h.registration.stop(); }
+      });
   });
 });

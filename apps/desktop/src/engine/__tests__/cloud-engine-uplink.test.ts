@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 import type { EngineCapabilityResult } from "../../../../control-plane/src/realtime/uplink-auth-source";
+import { UplinkCheckpointPush } from "../../../../control-plane/src/realtime/uplink-checkpoint";
 import { UplinkCredentialPush } from "../../../../control-plane/src/realtime/uplink-cred";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "../../../../control-plane/src/realtime/uplink-authority";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "../../../../control-plane/src/realtime/uplink-presence";
@@ -840,6 +841,108 @@ describe("engine uplink client (socket level)", () => {
     expect(client.leaseActive).toBe(false);
     client.stop();
   });
+  describe("checkpoint request push (checkpoint.v1)", () => {
+    const request = { requestId: "55555555-5555-4555-8555-555555555555", reason: "before_stop", deadlineAtMs: 1_800_000_000_000 };
+
+    it("reports each checkpoint.request of a checkpoint.v1 connection once", async () => {
+      const requests: unknown[] = [];
+      const { client, sockets } = fakeClient({ features: ["cred.v1", "checkpoint.v1"], onCheckpointRequest: value => { requests.push(value); } });
+      client.start();
+      await flush();
+      expect(sockets[0]!.ofType("sys.hello")[0]!.d).toMatchObject({ features: ["cred.v1", "checkpoint.v1"] });
+      await serveHandshake(sockets[0]!, { features: ["cred.v1", "checkpoint.v1"] });
+      sockets[0]!.frame({ t: "checkpoint.request", s: 1, d: request });
+      // A retransmitted sequence is acked again but reported once.
+      sockets[0]!.frame({ t: "checkpoint.request", s: 1, d: request });
+      const archive = { requestId: "66666666-6666-4666-8666-666666666666", reason: "before_archive", deadlineAtMs: 0, extra: true };
+      sockets[0]!.frame({ t: "checkpoint.request", s: 2, d: archive });
+      await flush();
+      expect(requests).toEqual([request, { requestId: archive.requestId, reason: "before_archive", deadlineAtMs: 0 }]);
+      expect(sockets[0]!.closeCalls).toEqual([]);
+      client.stop();
+    });
+
+    it.each([
+      ["an uppercase request id", { ...request, requestId: "AAAAAAAA-5555-4555-8555-555555555555" }],
+      ["a non-uuid request id", { ...request, requestId: "request-1" }],
+      ["no request id", { reason: request.reason, deadlineAtMs: request.deadlineAtMs }],
+      ["a reason outside the code shape", { ...request, reason: "Before_stop" }],
+      ["a two-character reason", { ...request, reason: "ab" }],
+      ["a negative deadline", { ...request, deadlineAtMs: -1 }],
+      ["a fractional deadline", { ...request, deadlineAtMs: 1.5 }],
+      ["a string deadline", { ...request, deadlineAtMs: "1800000000000" }],
+    ])("closes 4400 on a checkpoint.request with %s", async (_name, d) => {
+      const requests: unknown[] = [];
+      const { client, sockets } = fakeClient({ features: ["checkpoint.v1"], onCheckpointRequest: value => { requests.push(value); } });
+      client.start();
+      await flush();
+      await serveHandshake(sockets[0]!, { features: ["checkpoint.v1"] });
+      sockets[0]!.frame({ t: "checkpoint.request", s: 1, d });
+      await flush();
+      expect(sockets[0]!.closeCalls).toEqual([{ code: 4400, reason: "frame_invalid" }]);
+      expect(requests).toEqual([]);
+      client.stop();
+    });
+
+    it("acks and ignores a checkpoint.request on a connection that did not negotiate checkpoint.v1", async () => {
+      const requests: unknown[] = [];
+      const { client, sockets } = fakeClient({ features: ["cred.v1", "checkpoint.v1"], onCheckpointRequest: value => { requests.push(value); } });
+      client.start();
+      await flush();
+      await serveHandshake(sockets[0]!, { features: ["cred.v1"] });
+      sockets[0]!.frame({ t: "checkpoint.request", s: 1, d: { requestId: "request-1" } });
+      await flush();
+      await vi.advanceTimersByTimeAsync(300);
+      expect(sockets[0]!.ofType("sys.ack").at(-1)).toMatchObject({ a: 1 });
+      expect(requests).toEqual([]);
+      expect(sockets[0]!.closeCalls).toEqual([]);
+      expect(client.checkpointPushActive).toBe(false);
+      client.stop();
+    });
+
+    it("reports checkpointPushActive flips at the gate, on loss, across a drain handoff and on stop", async () => {
+      const changes: boolean[] = [];
+      const { client, sockets } = fakeClient({ features: ["checkpoint.v1"], onCheckpointPushChange: active => { changes.push(active); } });
+      client.start();
+      await flush();
+      sockets[0]!.frame({ t: "sys.welcome", d: { protocol: 1, resumeToken: "r1", resumed: false, pingIntervalMs: 20_000, features: ["checkpoint.v1"] } });
+      await flush();
+      // Pushes flow only once the gate opens.
+      expect(client.checkpointPushActive).toBe(false);
+      sockets[0]!.frame({ t: "auth.keys", d: { keys: [KEY] } });
+      sockets[0]!.frame({ t: "auth.sync", d: { syncId: "sync-1", epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: "c-9", complete: true } });
+      await flush();
+      sockets[0]!.frame({ t: "auth.capability", d: { audience: "zeros:api", token: "cap-1", expiresAtMs: Date.now() + 300_000 } });
+      await flush();
+      expect(client.checkpointPushActive).toBe(true);
+      expect(changes).toEqual([true]);
+      sockets[0]!.fail();
+      await flush();
+      expect(client.checkpointPushActive).toBe(false);
+      expect(changes).toEqual([true, false]);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(sockets).toHaveLength(2);
+      await serveHandshake(sockets[1]!, { features: ["checkpoint.v1"], token: "r2" });
+      expect(changes).toEqual([true, false, true]);
+      sockets[1]!.frame({ t: "sys.drain", d: { reconnectAfterMs: 0, deadlineMs: 30_000 } });
+      await flush();
+      // The drained uplink still pushes until the replacement is welcomed,
+      // whose gate is closed until its own capability lands.
+      expect(client.checkpointPushActive).toBe(true);
+      sockets[2]!.frame({ t: "sys.welcome", d: { protocol: 1, resumeToken: "r3", resumed: true, pingIntervalMs: 20_000, features: ["checkpoint.v1"] } });
+      await flush();
+      expect(client.checkpointPushActive).toBe(false);
+      sockets[2]!.frame({ t: "auth.keys", d: { keys: [KEY] } });
+      sockets[2]!.frame({ t: "auth.sync", d: { syncId: "sync-3", epochs: { wa: 4, wr: 2 }, revocations: [], authCursor: "c-9", complete: true } });
+      await flush();
+      sockets[2]!.frame({ t: "auth.capability", d: { audience: "zeros:api", token: "cap-3", expiresAtMs: Date.now() + 300_000 } });
+      await flush();
+      expect(changes).toEqual([true, false, true, false, true]);
+      client.stop();
+      expect(client.checkpointPushActive).toBe(false);
+      expect(changes).toEqual([true, false, true, false, true, false]);
+    });
+  });
   it("acks in-order reliable CP frames and closes on a sequence gap, then redials", async () => {
     const { client, sockets } = fakeClient({ random: () => 0.5 });
     client.start();
@@ -960,6 +1063,7 @@ describe("engine uplink client against the real control-plane server", () => {
   let capability: EngineCapabilityResult;
   let enabled: boolean;
   let leaseEnabled: boolean;
+  let checkpointEnabled: boolean;
   const flagListeners = new Set<() => void>();
   const clients: CloudEngineUplinkClient[] = [];
   type Instance = { uplink: CloudEngineUplinkServer; http: Server; url: string };
@@ -970,7 +1074,8 @@ describe("engine uplink client against the real control-plane server", () => {
       authority, realtimeInstance: "realtime-test",
       flags: {
         enabled: (orgId, flag) => enabled && orgId === identity.organizationId &&
-          (flag === "realtime_uplink" || flag === "credential_push" || (flag === "engine_lease_over_uplink" && leaseEnabled)),
+          (flag === "realtime_uplink" || flag === "credential_push" || (flag === "engine_lease_over_uplink" && leaseEnabled) ||
+            (flag === "checkpoint_push" && checkpointEnabled)),
         anyEnabled: flag => enabled && flag === "realtime_uplink",
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
@@ -1011,6 +1116,7 @@ describe("engine uplink client against the real control-plane server", () => {
     snapshotCursors = [];
     enabled = true;
     leaseEnabled = false;
+    checkpointEnabled = false;
     capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 300_000 };
   });
 
@@ -1066,6 +1172,40 @@ describe("engine uplink client against the real control-plane server", () => {
     expect(acks[1]).toMatchObject({ kind: "agent-controls", revision: 8, result: "applied" });
     // An engine without the feature is left to its poll (negotiation).
     expect(client.established).toBe(true);
+  });
+
+  it("pushes queued checkpoint requests to a checkpoint.v1 engine at the gate and once one is queued", async () => {
+    const stop = { requestId: "55555555-5555-4555-8555-555555555555", reason: "before_stop", deadlineAtMs: Date.now() + 300_000 };
+    const archive = { requestId: "66666666-6666-4666-8666-666666666666", reason: "before_archive", deadlineAtMs: Date.now() + 300_000 };
+    let queued = [stop];
+    const push = new UplinkCheckpointPush({
+      readQueued: async identities => new Map(identities.map(entry => [entry.engineInstanceId, queued] as const)),
+      notificationsCurrent: () => true,
+    });
+    const requests: unknown[] = [];
+    const changes: boolean[] = [];
+    try {
+      // Off for the organization: never negotiated, so the engine keeps its hint wait.
+      const off = await start({ extensions: [push] });
+      const legacy = makeClient({ endpoint: off.url, features: ["checkpoint.v1"], onCheckpointRequest: request => { requests.push(request); } });
+      legacy.start();
+      await until(() => off.uplink.counters.admitted === 1 && writes.some(write => write.ready));
+      expect(legacy.checkpointPushActive).toBe(false);
+      legacy.stop();
+      checkpointEnabled = true;
+      const a = await start({ extensions: [push] });
+      const client = makeClient({ endpoint: a.url, features: ["checkpoint.v1"],
+        onCheckpointRequest: request => { requests.push(request); }, onCheckpointPushChange: active => { changes.push(active); } });
+      client.start();
+      await until(() => requests.length === 1);
+      expect(requests).toEqual([stop]);
+      expect(client.checkpointPushActive).toBe(true);
+      expect(changes).toEqual([true]);
+      queued = [archive];
+      push.requested(identity.workspaceId, identity.generation);
+      await until(() => requests.length === 2);
+      expect(requests[1]).toEqual(archive);
+    } finally { push.close(); }
   });
 
   it("resumes after an unannounced loss and offers the applied auth cursor", async () => {

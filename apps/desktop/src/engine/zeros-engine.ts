@@ -3748,7 +3748,7 @@ export class ZerosEngine {
       runtimeVersion: VERSION,
       auth: capabilityAuth,
       readiness: () => this.cloudEngineUplinkReadiness(),
-      features: ["cred.v1", "lease.v1"],
+      features: ["cred.v1", "lease.v1", "checkpoint.v1"],
       // Credential-control push (P0.10 C01): a pushed revision runs the same
       // credential-controls exchange the 500 ms poll runs; the poll itself
       // stays as the fallback (see controlsPollIntervalMs at the boot).
@@ -3778,6 +3778,8 @@ export class ZerosEngine {
         if (!established) this.cloudAgentBoot?.rescheduleControls();
       },
       onLease: (leaseExpiresAtMs, sentAtMs) => registration.adoptUplinkLease(leaseExpiresAtMs, sentAtMs),
+      onCheckpointRequest: () => registration.checkpointRequested(),
+      onCheckpointPushChange: () => registration.uplinkCheckpointPushChanged(),
       onReverifyAuthority: () => registration.requestHeartbeatSoon(),
       onParked: reason => {
         console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`);
@@ -3791,6 +3793,7 @@ export class ZerosEngine {
     });
     this.cloudEngineUplink = uplink;
     registration.attachUplinkLease(() => this.cloudEngineUplink === uplink && uplink.leaseActive);
+    registration.attachUplinkCheckpointPush(() => this.cloudEngineUplink === uplink && uplink.checkpointPushActive);
     // The hello offers the last durable cursor; an unreadable file starts
     // from a complete snapshot.
     void capabilityAuth.restore().catch(() => undefined).then(() => {

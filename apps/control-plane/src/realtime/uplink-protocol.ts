@@ -83,6 +83,9 @@ export const UPLINK_FEATURES = {
   relay: "relay.v1",
   /** The uplink renews the engine lease (36 min, every watermark). */
   lease: "lease.v1",
+  /** Queued checkpoint requests are pushed (`checkpoint.request`) instead
+   * of the engine holding the checkpoint-hint long-poll. */
+  checkpoint: "checkpoint.v1",
 } as const;
 
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);

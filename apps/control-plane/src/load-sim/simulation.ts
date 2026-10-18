@@ -28,8 +28,11 @@ export const STEADY_STATE_CADENCES = {
     source: "uplink-server.ts renewLease on every UPLINK_WATERMARK_INTERVAL_MS (5 min) tick of a lease.v1 uplink" },
   "engine.durableRecordHead": { periodSeconds: 10, afterCompletion: false, role: "engine",
     source: "cloud-runtime-registration.ts synchronizeDurableRecord on every heartbeat tick, posted or skipped" },
-  "engine.checkpointHintWait": { periodSeconds: 25 / 6, afterCompletion: false, role: "engine",
-    source: "engine-checkpoint-hints.ts: a 25 s wait reads at its start and every 5 s (six reads), and the engine waits again at once" },
+  // S2 checkpoint.v1 (checkpoint_push): the uplink pushes queued checkpoint
+  // requests and the engine pauses its checkpoint-hint wait, so
+  // engine.checkpointHintWait keeps a per-request budget but no cadence.
+  "engine.uplinkCheckpointSweep": { periodSeconds: 30, afterCompletion: false, role: "engine",
+    source: "uplink-checkpoint.ts SWEEP_TICKS: queued requests are re-read every 30 s while LISTEN is current; one statement serves up to 500 uplinks, counted here as one per engine (an upper bound)" },
   "engine.actorConfirm": { periodSeconds: 5, afterCompletion: false, role: "client",
     source: "cloud-local-command-queue-boot.ts: re-confirm at half of the 10 s confirmedUntil" },
   "client.renew": { periodSeconds: 5, afterCompletion: false, role: "client",

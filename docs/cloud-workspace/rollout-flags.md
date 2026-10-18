@@ -42,6 +42,7 @@ registered `whileFeedUnavailable` value:
 | `presence_in_memory` | retain | Transport choice; database presence remains. |
 | `runtime_connect` | retain | Additive endpoints; while off they answer 404 and clients keep `runtime/admission`. |
 | `engine_lease_over_uplink` | retain | Changes which path renews the engine lease, not who may hold it: every renewal re-checks authority in SQL and the HTTP heartbeat stays as the fallback. A flip closes the affected uplinks (`1001 features_changed`), so flapping would bounce engines between the two paths. |
+| `checkpoint_push` | retain | Transport choice for a timing hint; the heartbeat still delivers and fences every checkpoint request, and the long-poll remains as fallback. A flip closes the affected uplinks (`1001 features_changed`). |
 
 `retain` keeps the last loaded value, still corrected by the safety refresh.
 Use `off` for any new flag that relaxes a database check or a security
@@ -69,6 +70,16 @@ lapse and stop the workspace. Turning the flag off closes the organization's
 without it and the engines return to the 10 s HTTP heartbeat. A lease the
 uplink already renewed stays in force until it ends (up to 36 min), because
 the heartbeat never shortens it.
+
+`checkpoint_push` requires `realtime_uplink`: `realtime` pushes queued
+checkpoint requests (S2 `checkpoint.v1`) and engines pause their
+checkpoint-hint long-poll while the push is active. The push is only a
+timing hint: delivery, fencing and acknowledgement stay on the HTTP
+heartbeat, so unlike `engine_lease_over_uplink` it needs no particular
+`api` version. Turning the flag off
+closes the organization's `checkpoint.v1` uplinks with
+`1001 features_changed`; the redial negotiates without it and the engines
+return to the long-poll.
 
 ## Changing a flag
 

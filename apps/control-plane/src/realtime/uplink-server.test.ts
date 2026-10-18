@@ -7,6 +7,7 @@ import WebSocket from "ws";
 import type { UplinkSecurityAlertKind } from "./uplink-alerts.js";
 import type { EngineCapabilityResult } from "./uplink-auth-source.js";
 import type { UplinkAuthority, UplinkAuthorityResult, UplinkIdentity } from "./uplink-authority.js";
+import { UplinkCheckpointPush, type UplinkCheckpointRequest } from "./uplink-checkpoint.js";
 import { UplinkCredentialPush } from "./uplink-cred.js";
 import { UPLINK_ENGINE_LEASE_MS, type UplinkLeaseRenewal, type UplinkLeaseStore } from "./uplink-lease.js";
 import { UplinkPresenceWriter, type UplinkPresenceSnapshot } from "./uplink-presence.js";
@@ -80,6 +81,7 @@ describe("engine uplink server", () => {
   let url: string;
   let enabled: boolean;
   let credentialPush: boolean;
+  let checkpointPush: boolean;
   let leaseFlag: boolean;
   let lease: FakeLease;
   const flagListeners = new Set<() => void>();
@@ -94,7 +96,7 @@ describe("engine uplink server", () => {
       flags: {
         enabled: (orgId, flag) => orgId === identity.organizationId &&
           (flag === "realtime_uplink" ? enabled : flag === "credential_push" ? credentialPush :
-            flag === "engine_lease_over_uplink" ? leaseFlag : false),
+            flag === "engine_lease_over_uplink" ? leaseFlag : flag === "checkpoint_push" ? checkpointPush : false),
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
       authSource: {
@@ -136,7 +138,7 @@ describe("engine uplink server", () => {
 
   beforeEach(() => {
     authority = new FakeAuthority(); writes = []; alerts = []; metrics = []; enabled = true; credentialPush = true; authFails = false;
-    lease = new FakeLease(); leaseFlag = true;
+    lease = new FakeLease(); leaseFlag = true; checkpointPush = true;
     capability = { ok: true, token: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`, expiresAtMs: Date.now() + 300_000 };
     identity = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 3, engineInstanceId: randomUUID(), bootId: randomUUID() };
   });
@@ -930,6 +932,190 @@ describe("engine uplink server", () => {
       leaseFlag = false;
       for (const listener of flagListeners) listener();
       await expect(on.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.goingAway, reason: "features_changed" });
+    });
+  });
+
+  describe("checkpoint request push (checkpoint.v1)", () => {
+    const CHECKPOINT = ["checkpoint.v1"];
+    let reads: UplinkIdentity[][];
+    let queued: Map<string, UplinkCheckpointRequest[]>;
+    let failReads: number;
+    let held: Promise<void> | null;
+    let push: UplinkCheckpointPush;
+    const request = (reason = "before_stop"): UplinkCheckpointRequest => ({ requestId: randomUUID(), reason, deadlineAtMs: Date.now() + 300_000 });
+    const pushed = (peer: Peer) => peer.frames.filter(frame => frame.t === "checkpoint.request");
+    const settle = () => new Promise(resolve => setTimeout(resolve, 50));
+
+    beforeEach(() => {
+      reads = []; queued = new Map(); failReads = 0; held = null;
+      push = new UplinkCheckpointPush({
+        readQueued: async identities => {
+          reads.push([...identities]);
+          if (held) await held;
+          if (failReads > 0) { failReads -= 1; throw new Error("database unavailable"); }
+          return new Map(identities.flatMap(entry => {
+            const requests = queued.get(entry.engineInstanceId);
+            return requests ? [[entry.engineInstanceId, requests] as const] : [];
+          }));
+        },
+        notificationsCurrent: () => uplink.notificationsCurrent,
+      });
+    });
+    afterEach(() => { push.close(); });
+
+    it.each([
+      ["offered and on for the organization", true, true, CHECKPOINT],
+      ["not offered", false, true, []],
+      ["off for the organization", true, false, []],
+    ] as const)("negotiates checkpoint.v1 only when %s, and then pushes every queued request once the gate opens", async (_name, offered, flag, features) => {
+      checkpointPush = flag;
+      const stop = request("before_stop");
+      const archive = request("before_archive");
+      queued.set(identity.engineInstanceId, [stop, archive]);
+      await start({ extensions: [push] });
+      const { peer, welcome } = await connect(offered ? { features: CHECKPOINT } : {});
+      expect(welcome.d!.features).toEqual(features);
+      if (features.length) {
+        const first = await peer.next("checkpoint.request");
+        const second = await peer.next("checkpoint.request");
+        expect([first.s, first.d, second.s, second.d]).toEqual([1, stop, 2, archive]);
+      }
+      await settle();
+      expect(pushed(peer)).toEqual([]);
+      expect(reads).toEqual(features.length ? [[identity]] : []);
+    });
+
+    it("pushes a notified request only to the owned checkpoint.v1 uplinks of that exact workspace and generation", async () => {
+      await start({ extensions: [push] });
+      const { peer } = await connect({ features: CHECKPOINT });
+      const legacyEngine = randomUUID();
+      const legacy = await connect({ engineInstanceId: legacyEngine });
+      const otherWorkspace = { workspaceId: randomUUID(), engineInstanceId: randomUUID() };
+      const other = await connect({ ...otherWorkspace, features: CHECKPOINT });
+      await until(() => reads.length === 2);
+      await settle();
+      reads = [];
+      const pending = request();
+      for (const id of [identity.engineInstanceId, legacyEngine, otherWorkspace.engineInstanceId]) queued.set(id, [pending]);
+      push.requested(identity.workspaceId, identity.generation + 1);
+      push.requested(randomUUID(), identity.generation);
+      await settle();
+      expect(reads).toEqual([]);
+      push.requested(identity.workspaceId, identity.generation);
+      expect((await peer.next("checkpoint.request")).d).toEqual(pending);
+      expect(reads).toEqual([[identity]]);
+      await settle();
+      expect(pushed(legacy.peer)).toEqual([]);
+      expect(pushed(other.peer)).toEqual([]);
+    });
+
+    it("resyncs only the given owned checkpoint.v1 uplinks", async () => {
+      await start({ extensions: [push] });
+      const { peer } = await connect({ features: CHECKPOINT });
+      const legacy = await connect({ engineInstanceId: randomUUID() });
+      await until(() => reads.length === 1);
+      const pending = request();
+      queued.set(identity.engineInstanceId, [pending]);
+      await push.resync([randomUUID(), ...uplink.ownedEngineInstances()]);
+      expect((await peer.next("checkpoint.request")).d).toEqual(pending);
+      expect(reads).toEqual([[identity], [identity]]);
+      await settle();
+      expect(pushed(legacy.peer)).toEqual([]);
+    });
+
+    it("retries a failed read on the next tick, never at once", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      const pending = request();
+      queued.set(identity.engineInstanceId, [pending]);
+      failReads = 1;
+      await start({ extensions: [push] });
+      uplink.notificationsCurrent = true;
+      const { peer } = await connect({ features: CHECKPOINT });
+      await until(() => reads.length === 1);
+      await settle();
+      expect(reads).toHaveLength(1);
+      expect(pushed(peer)).toEqual([]);
+      vi.advanceTimersByTime(5_000);
+      expect((await peer.next("checkpoint.request")).d).toEqual(pending);
+      expect(reads).toHaveLength(2);
+      // Nothing stays pending once a read succeeded.
+      vi.advanceTimersByTime(5_000);
+      await settle();
+      expect(reads).toHaveLength(2);
+    });
+
+    it("re-reads every checkpoint.v1 uplink in one batch on each tick while notifications are not current, and every sixth tick while they are", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      await start({ extensions: [push] });
+      const { peer } = await connect({ features: CHECKPOINT });
+      const second = { ...identity, engineInstanceId: randomUUID() };
+      await connect({ engineInstanceId: second.engineInstanceId, features: CHECKPOINT });
+      await connect({ engineInstanceId: randomUUID() });
+      await until(() => reads.length === 2);
+      expect(uplink.notificationsCurrent).toBe(false);
+      vi.advanceTimersByTime(5_000);
+      await until(() => reads.length === 3);
+      expect(reads[2]).toEqual([identity, second]);
+      const pending = request();
+      queued.set(identity.engineInstanceId, [pending]);
+      vi.advanceTimersByTime(5_000);
+      expect((await peer.next("checkpoint.request")).d).toEqual(pending);
+      expect(reads).toHaveLength(4);
+      uplink.notificationsCurrent = true;
+      queued.clear();
+      for (let tick = 0; tick < 5; tick++) vi.advanceTimersByTime(5_000);
+      await settle();
+      expect(reads).toHaveLength(4);
+      vi.advanceTimersByTime(5_000);
+      await until(() => reads.length === 5);
+      expect(reads[4]).toEqual([identity, second]);
+    });
+
+    it("reads one batch at a time and folds requests notified meanwhile into one follow-up read", async () => {
+      let release!: () => void;
+      held = new Promise<void>(resolve => { release = resolve; });
+      await start({ extensions: [push] });
+      const { peer } = await connect({ features: CHECKPOINT });
+      await until(() => reads.length === 1);
+      push.requested(identity.workspaceId, identity.generation);
+      push.requested(identity.workspaceId, identity.generation);
+      await settle();
+      expect(reads).toHaveLength(1);
+      const pending = request();
+      queued.set(identity.engineInstanceId, [pending]);
+      held = null;
+      release();
+      expect((await peer.next("checkpoint.request")).d).toEqual(pending);
+      expect((await peer.next("checkpoint.request")).d).toEqual(pending);
+      await settle();
+      expect(reads).toHaveLength(2);
+    });
+
+    it("forgets a closed uplink", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      await start({ extensions: [push] });
+      const { peer } = await connect({ features: CHECKPOINT });
+      await until(() => reads.length === 1);
+      peer.ws.close();
+      await until(() => uplink.size === 0);
+      push.requested(identity.workspaceId, identity.generation);
+      await push.resync([identity.engineInstanceId]);
+      vi.advanceTimersByTime(30_000);
+      await settle();
+      expect(reads).toHaveLength(1);
+    });
+
+    it("renegotiates when checkpoint_push flips", async () => {
+      checkpointPush = false;
+      await start({ extensions: [push] });
+      const off = await connect({ features: CHECKPOINT });
+      expect(off.welcome.d!.features).toEqual([]);
+      checkpointPush = true;
+      for (const listener of flagListeners) listener();
+      await expect(off.peer.closed).resolves.toMatchObject({ code: UPLINK_CLOSE.goingAway, reason: "features_changed" });
+      const on = await connect({ features: CHECKPOINT });
+      expect(on.welcome.d!.features).toEqual(CHECKPOINT);
+      await until(() => reads.length === 1);
     });
   });
 });
