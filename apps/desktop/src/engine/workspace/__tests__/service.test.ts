@@ -19,6 +19,8 @@ import { createDesignWebDocumentState } from "@zeros/design-web";
 import { WorkspaceService, LOCAL_MAIN_WORKSPACE_ID } from "../service";
 import * as mcpRegistry from "../../agents/mcp-registry";
 import * as git from "../../git";
+import * as gitCommands from "../../git/git-exec";
+import * as designDirectories from "../../design/directory";
 import {
   setStateRootForTesting,
   closeState,
@@ -137,8 +139,12 @@ describe("WorkspaceService", () => {
     const initialized = await cloud.handle("design.initialize", target, options);
     expect(initialized).toMatchObject({ snapshot: { protocolCapability: null } });
     const created = await cloud.handle("design.frame.create", { ...target, title: "Cloud frame" }, options) as { frame: { file: string } };
-    expect(await cloud.handle("design.foundation.open", { ...target, frame: created.frame.file }, options)).toHaveProperty("summary.revision");
-    expect(await cloud.handle("design.snapshot", target, options)).toMatchObject({ snapshot: { protocolCapability: null } });
+    const discovery = vi.spyOn(designDirectories, "discoverDesignDirectories");
+    try {
+      expect(await cloud.handle("design.foundation.open", { ...target, frame: created.frame.file }, options)).toHaveProperty("summary.revision");
+      expect(await cloud.handle("design.snapshot", target, options)).toMatchObject({ snapshot: { protocolCapability: null } });
+      expect(discovery).toHaveBeenCalledTimes(2);
+    } finally { discovery.mockRestore(); }
     fs.writeFileSync(path.join(dir, ".env"), "QUALIFICATION_SECRET=fixture\n");
     await expect(cloud.handle("file.read", { ...target, path: ".env" }, options)).rejects.toThrow(/secret|credential/i);
     for (const workspaceId of [dir, "/etc", "unrelated-workspace"]) {
@@ -1227,6 +1233,30 @@ describe("WorkspaceService", () => {
         workspaceId: design.workspaceId,
         includeBranch: true,
       });
+    }
+  });
+
+  it("reads a selected Local Design without scanning the rest of the repository again", async () => {
+    execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "initial"], { cwd: dir });
+    const design = await createWorkspace({ repoRoot: dir, repoSlug: "design-selected-read", kind: "design" });
+    try {
+      const target = { workspaceId: design.workspaceId };
+      await svc.handle("design.frame.create", { ...target, title: "Read fixture" });
+      const initial = await svc.handle("design.snapshot", target) as { snapshot: { frames: { file: string }[] } };
+      const frame = initial.snapshot.frames[0]!.file;
+      await svc.handle("design.foundation.open", { ...target, frame });
+      const discovery = vi.spyOn(designDirectories, "discoverDesignDirectories");
+      const reads = vi.spyOn(gitCommands, "runGit");
+      try {
+        const started = performance.now();
+        await Promise.all([svc.handle("design.snapshot", target), svc.handle("design.foundation.open", { ...target, frame })]);
+        console.info("Local Design warm reads", JSON.stringify({ repositoryScans: discovery.mock.calls.length, gitReads: reads.mock.calls.length, elapsedMs: Math.round(performance.now() - started) }));
+        expect(discovery).not.toHaveBeenCalled();
+        expect(reads).not.toHaveBeenCalled();
+      } finally { discovery.mockRestore(); reads.mockRestore(); }
+    } finally {
+      await svc.handle("workspace.delete", { workspaceId: design.workspaceId, includeBranch: true });
     }
   });
 
