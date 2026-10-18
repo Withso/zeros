@@ -154,7 +154,8 @@ export class CloudActorAuthorityRegistry {
       throw failure("authority_response_invalid");
     }
     if (!previous) {
-      // Retain each session's epoch/key/grant high-water for the whole boot.
+      // Retain each admitted session's epoch/key/grant high-water until its
+      // owner explicitly releases the lifetime and fences all old producers.
       // Even an expired newer proof may replace an older still-future proof.
       // Capacity is finite; exhaustion refuses new sessions, never evicts a
       // replay fence, switches writer, or falls back to a legacy admission.
@@ -194,6 +195,16 @@ export class CloudActorAuthorityRegistry {
     if (!record || !sameBinding(record.confirmation, parsed.data)) throw failure("access_denied");
     this.assertRecord(record, capability);
     return record.actor;
+  }
+  /** Only the owning boot runtime may release an unused session, after fencing
+   * its confirmation flights and proving no socket or pending command holds it.
+   * A later admission needs a new CP observation; old opaque principals remain
+   * aborted. This is not expiry eviction, and never clears revoke tombstones. */
+  release(actorSessionId: string): void {
+    const record = this.records.get(actorSessionId);
+    if (!record) return;
+    this.records.delete(actorSessionId);
+    this.retire(record, failure("lifecycle_superseded"));
   }
   revoke(actorSessionId: string): void {
     // Tombstones are retained for this boot: a late positive renewal cannot

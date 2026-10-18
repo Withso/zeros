@@ -478,6 +478,7 @@ export class CloudWorkspaceReconciler {
           })) return null;
 
       let desiredState = row.desired_state;
+      let authorityEpoch = row.authority_epoch;
       if (
         row.affects_workspace &&
         row.checkpoint_request_id !== null &&
@@ -493,15 +494,17 @@ export class CloudWorkspaceReconciler {
             : row.operation === "archive"
               ? "archiving"
               : "deleting";
-        await tx.query(
+        const advanced = await tx.query<{ authority_epoch: string }>(
           `UPDATE cloud_workspaces
            SET desired_state = $2, status = $3::cloud_workspace_status,
                authority_epoch = authority_epoch + 1,
                version = version + 1, updated_at = now(),
                last_error_code = NULL, last_error_message = NULL
-           WHERE id = $1 AND current_generation = $4`,
+           WHERE id = $1 AND current_generation = $4
+           RETURNING authority_epoch`,
           [row.workspace_id, desiredState, status, row.generation],
         );
+        authorityEpoch = advanced.rows[0]!.authority_epoch;
         await retireCloudWorkspaceRuntimeAccess(tx, {
           workspaceId: row.workspace_id,
           organizationId: row.org_id,
@@ -542,7 +545,7 @@ export class CloudWorkspaceReconciler {
         affectsWorkspace: row.affects_workspace,
         generationWasCurrent: row.generation === row.current_generation,
         generationTransitionId: row.generation_transition_id,
-        authorityEpoch: row.authority_epoch,
+        authorityEpoch,
       };
     });
   }
@@ -596,8 +599,9 @@ export class CloudWorkspaceReconciler {
       return true;
     }
 
+    let current: CloudProviderResource | null = null;
     try {
-      let current = await this.observe(provider, intent);
+      current = await this.observe(provider, intent);
       let providerAccessRevocationProven =
         current === null || current.state === "deleted";
 
@@ -667,7 +671,7 @@ export class CloudWorkspaceReconciler {
         await this.recordResult(intent, current, "observing");
       }
     } catch (error) {
-      await this.recordFailure(intent, error);
+      await this.recordFailure(intent, error, current);
     }
     return true;
   }
@@ -985,6 +989,7 @@ export class CloudWorkspaceReconciler {
   private async recordFailure(
     intent: ClaimedIntent,
     error: unknown,
+    observed: CloudProviderResource | null = null,
   ): Promise<void> {
     const failure = safeFailure(error);
     await withSystemTx(this.pool, async (tx) => {
@@ -1057,6 +1062,26 @@ export class CloudWorkspaceReconciler {
           },
         );
         return;
+      }
+
+      // Compute can stop between delete polls while its snapshot still uploads.
+      // If DELETE then reports a storage hold, retain that positive observation
+      // so retirement can obtain fresh receipt proof. A partial/failed snapshot
+      // becomes `deleting`, never a resumable archive. Leaving the old `archiving`
+      // binding would veto retirement throughout the storage hold.
+      // This is neither physical deletion nor a release of reserved storage.
+      if (intent.operation === "delete" && row.affects_workspace && row.state === "dispatching" && row.lease_current &&
+          workspace?.authority_epoch === intent.authorityEpoch && failure.retryable &&
+          ["provider_deletion_blocked", "provider_deletion_pending"].includes(failure.code) &&
+          observed && (["stopped", "archived"].includes(observed.state) || observed.computeStopped === true)) {
+        assertProviderResourceIdentity(observed, intent);
+        const observedState = ["stopped", "archived"].includes(observed.state) ? observed.state : "deleting";
+        await tx.query(`UPDATE cloud_workspace_provider_bindings
+          SET observed_state=$4, observed_metadata=$7::jsonb, last_observed_at=now(), updated_at=now()
+          WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND provider=$5
+            AND provider_resource_id=$6 AND deletion_verified_at IS NULL`,
+        [intent.workspaceId, intent.orgId, intent.generation, observedState, intent.provider, observed.resourceId,
+          boundedMetadata(observed.metadata)]);
       }
 
       if (await deferCloudRecoveryResourceBlock(tx, {workspaceId:intent.workspaceId,transitionId:intent.generationTransitionId,intentId:intent.id,code:failure.code})) return;

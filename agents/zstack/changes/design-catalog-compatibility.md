@@ -41,3 +41,10 @@ Base integration: adjacent package-export additions are independent contracts.
 Retain both entries and exercise both public imports on the combined tree.
 Preserve the reviewed parent, but qualify the new head with fresh checks and
 interdiff review rather than carrying its predecessor's green forward.
+
+Disconnect composes two lifetimes: retire only that connection's catalog before
+releasing its cloud actor reference. Neither action acknowledges a producer's
+settlement. Keep executing read slots and snapshot charges until their final
+lease ends, and keep native work until its exact scope proves retirement.
+Actual engine/boot/catalog regressions reject either one-sided merge and cover
+shared actors, other catalog owners, readmission and held producer settlement.

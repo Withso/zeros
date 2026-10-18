@@ -1,0 +1,9 @@
+{
+  "id": "canary-stopped-observation",
+  "kind": "replay",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:585",
+  "symptom": "A storage-blocked DELETE discarded stopped compute evidence while its snapshot was unfinished, leaving an archiving binding that refused fixture retirement until physical deletion.",
+  "rule": "bug-fix.md: exercise the real provider adapter and reconciler before reading retirement; preserve stopped compute only under the same live claim, authority and binding, without declaring a partial snapshot resumable or completing deletion.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/reconciler.integration.test.ts src/cloud-workspaces/deletion-retirement.integration.test.ts"
+}

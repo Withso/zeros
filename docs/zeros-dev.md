@@ -295,6 +295,12 @@ erasure or measured disk usage. Ordinary CLI cleanup still waits for physical
 deletion. A positive physical completion receipt can retire carried work after
 content purge; a missing row or 404 cannot.
 
+Actions also emits one `Zeros dev cleanup backlog` warning from the final signed
+summary whenever storage remains pending, including on a green run. It reports
+the last confirmed counts, reserved storage, oldest delete, unconfirmed workspace
+count and admission limits. Product failures keep their original result; the
+warning does not turn unknown compute into an admissible backlog.
+
 Before allocation, the runner rereads every carried retirement and compares it
 with the complete organization workspace and pending-deletion inventories. It
 does this again after Computer preparation. Proof must remain within 60 seconds
@@ -312,6 +318,10 @@ hours of reconciliation. New observations or provider estimates never reset
 that clock. `cleanup_backlog_exceeded` blocks another allocation; old debt is
 never evicted to make room. The signed artifact carries at most nine run
 records, including a failed current attempt, within its existing 1 MiB bound.
+Boat's [14-day stopped-disk retention](https://docs.boat.dev/snapshots) does not
+extend this eight-hour limit or prove a requested deletion completed. Automatic
+snapshots are included in Boat's pricing; the reserved MiB limit still bounds
+cleanup debt and unavailable capacity, rather than estimating a storage bill.
 Readers retain v1's physical-deletion success rule; new writers emit
 `zeros.dev-hourly/v2` so the two outcomes cannot be confused.
 
