@@ -1288,17 +1288,55 @@ interface EngineGitPolicyCacheEntry {
   refreshAfter: number;
 }
 
-const engineExecutableCache = new Map<string, string>();
+interface EngineExecutableCacheEntry {
+  binary: string;
+  localSelection?: { candidate: string; paths: string[]; fingerprint: string };
+}
+
+const engineExecutableCache = new Map<string, EngineExecutableCacheEntry>();
+
+/** Local installations can replace symlinks, change execute permission, or
+ * create an earlier PATH candidate while the app remains open. Metadata is
+ * cheap to recheck and avoids reopening executable contents on every spawn. */
+function executableSelectionFingerprint(paths: readonly string[]): string | null {
+  const stamps: string[] = [];
+  for (const file of paths) {
+    try {
+      const link = lstatSync(file);
+      const target = link.isSymbolicLink() ? statSync(file) : link;
+      stamps.push([link.dev, link.ino, link.size, link.mode, link.mtimeMs, link.ctimeMs,
+        target.dev, target.ino, target.size, target.mode, target.mtimeMs, target.ctimeMs].join(":"));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return null;
+      stamps.push("missing");
+    }
+  }
+  return stamps.join("\0");
+}
+
+function localExecutableSelectionUnchanged(cached: EngineExecutableCacheEntry): boolean {
+  const selection = cached.localSelection;
+  if (!selection) return false;
+  try {
+    return realpathSync(selection.candidate) === cached.binary &&
+      executableSelectionFingerprint(selection.paths) === selection.fingerprint;
+  } catch {
+    return false;
+  }
+}
 
 function engineExecutable(name: string, enginePath = process.env.PATH ?? ""): string {
   const localGit = name === "git" && !gitExecutionIdentity();
+  if (localGit) enginePath = enginePath.split(path.delimiter).filter(Boolean).map((directory) => path.resolve(directory)).join(path.delimiter);
   const cacheKey = `${name}\0${localGit}\0${enginePath}`;
   const cached = engineExecutableCache.get(cacheKey);
-  if (cached) {
+  if (cached && (!localGit || localExecutableSelectionUnchanged(cached))) {
     engineExecutableCache.delete(cacheKey);
     engineExecutableCache.set(cacheKey, cached);
-    return cached;
+    return cached.binary;
   }
+  engineExecutableCache.delete(cacheKey);
   const localBinary = localGit ? findLocalGitExecutable(enginePath) : null;
   const candidates = localGit ? (localBinary ? [localBinary] : []) : enginePath.split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, name));
   for (const candidate of candidates) {
@@ -1306,7 +1344,18 @@ function engineExecutable(name: string, enginePath = process.env.PATH ?? ""): st
       accessSync(candidate, fsConstants.X_OK);
       const resolved = realpathSync(candidate);
       if (statSync(resolved).isFile()) {
-        engineExecutableCache.set(cacheKey, resolved);
+        const entry: EngineExecutableCacheEntry = { binary: resolved };
+        if (localGit) {
+          const paths: string[] = [];
+          for (const directory of enginePath.split(path.delimiter)) {
+            paths.push(directory, path.join(directory, name));
+            if (path.join(directory, name) === candidate) break;
+          }
+          paths.push(resolved);
+          const fingerprint = executableSelectionFingerprint(paths);
+          if (fingerprint !== null) entry.localSelection = { candidate, paths, fingerprint };
+        }
+        if (!localGit || entry.localSelection) engineExecutableCache.set(cacheKey, entry);
         while (engineExecutableCache.size > 128) engineExecutableCache.delete(engineExecutableCache.keys().next().value!);
         return resolved;
       }
