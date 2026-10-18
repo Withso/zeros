@@ -354,6 +354,22 @@ export interface ClaudeTranslatorOptions {
    * by native message id, parent and block index. Full messages remain usable
    * when partial streaming is disabled or a transport omits its deltas. */
   streamPartials?: boolean;
+  /** Observe a tool call's arguments while they stream (`input_json_delta`),
+   * keyed by native tool id. Advisory and transient: the transcript keeps its
+   * own complete-input contract and nothing here is persisted. */
+  onToolInput?: (event: ClaudeToolInputEvent) => void;
+}
+
+/** One streamed piece of a tool call's arguments. Replays are never sent. */
+export interface ClaudeToolInputEvent {
+  nativeToolId: string;
+  /** Zeros transcript id minted for the same native call. */
+  toolCallId?: string;
+  name: string;
+  /** Root calls omit it; subagent calls carry their native parent. */
+  parentToolUseId?: string;
+  phase: "start" | "delta" | "stop";
+  chunk?: string;
 }
 
 /** Native message-start and block-index metadata owns partial reconciliation. */
@@ -683,12 +699,20 @@ export class ClaudeStreamTranslator {
   budgetCapUsd: number | null = null;
 
   private readonly streamPartials: boolean;
+  private readonly onToolInput?: (event: ClaudeToolInputEvent) => void;
+  /** Streaming tool_use blocks by parent and block index. Small and bounded:
+   * an entry lives from content_block_start to content_block_stop. */
+  private readonly streamingToolInputs = new Map<
+    string,
+    { nativeToolId: string; name: string; parentToolUseId?: string }
+  >();
 
   constructor(opts: ClaudeTranslatorOptions) {
     this.sessionId = opts.sessionId;
     this.emit = opts.emit;
     this.onUnknown = opts.onUnknown;
     this.streamPartials = opts.streamPartials ?? false;
+    this.onToolInput = opts.onToolInput;
   }
 
   /** User-visible work. Ambient watchers never contribute to activity. */
@@ -1035,6 +1059,8 @@ export class ClaudeStreamTranslator {
     const parent = event.parent_tool_use_id ?? "";
     const block = event.event.content_block;
     const delta = event.event.delta;
+    const toolInputReplay =
+      this.onToolInput !== undefined && this.transcript.isStreamReplay(event.event, parent);
     // A provider may recover inside the query. Headers or a child's activity
     // do not supersede its setup error, but fresh parent model content does.
     if (this.pendingUserActionFailure && !parent && !this.transcript.isStreamReplay(event.event, parent) && (
@@ -1047,7 +1073,54 @@ export class ClaudeStreamTranslator {
     if (!this.transcript.isStreamReplay(event.event, parent) && event.event.type === "content_block_start" && event.event.content_block?.type === "tool_use") {
       this.onAssistantTool(event.event.content_block, parent || undefined, this.toolCallIds.get(parent), true);
     }
+    if (this.onToolInput && !toolInputReplay) this.forwardToolInput(event.event, parent);
     this.transcript.stream(event.event, parent, this.toolCallIds.get(parent));
+  }
+
+  /** Report a tool_use block's streamed arguments to the optional observer.
+   * A start resets the block slot; deltas append; stop ends the input. */
+  private forwardToolInput(
+    event: NonNullable<ClaudeStreamEvent["event"]>,
+    parent: string,
+  ): void {
+    const observe = this.onToolInput;
+    if (!observe) return;
+    const report = (value: ClaudeToolInputEvent) => {
+      try {
+        observe(value);
+      } catch {
+        // An observer can never interrupt the transcript stream.
+      }
+    };
+    if (event.type === "message_start") {
+      for (const slot of [...this.streamingToolInputs.keys()])
+        if (slot.startsWith(`${parent}\0`)) this.streamingToolInputs.delete(slot);
+      return;
+    }
+    const slot = `${parent}\0${event.index ?? 0}`;
+    if (event.type === "content_block_start") {
+      const block = event.content_block;
+      if (block?.type !== "tool_use" || typeof block.id !== "string" || typeof block.name !== "string") return;
+      const active = { nativeToolId: block.id, name: block.name, ...(parent ? { parentToolUseId: parent } : {}) };
+      this.streamingToolInputs.delete(slot);
+      this.streamingToolInputs.set(slot, active);
+      while (this.streamingToolInputs.size > 64)
+        this.streamingToolInputs.delete(this.streamingToolInputs.keys().next().value!);
+      const toolCallId = this.scopedTools.get(JSON.stringify([parent, block.id]))?.id;
+      report({ ...active, ...(toolCallId ? { toolCallId } : {}), phase: "start" });
+      return;
+    }
+    const active = this.streamingToolInputs.get(slot);
+    if (!active) return;
+    if (event.type === "content_block_delta") {
+      const chunk = event.delta?.type === "input_json_delta" ? event.delta.partial_json : undefined;
+      if (typeof chunk === "string" && chunk) report({ ...active, phase: "delta", chunk });
+      return;
+    }
+    if (event.type === "content_block_stop") {
+      this.streamingToolInputs.delete(slot);
+      report({ ...active, phase: "stop" });
+    }
   }
 
   /** Retrieve the last terminal reason the translator saw. Defaults

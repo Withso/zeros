@@ -141,7 +141,7 @@ describe("RunManager", () => {
     }
   });
 
-  // The env builder is stubbed: the real one probes `$SHELL -ilc 'echo $PATH'`,
+  // The env builder is stubbed: the real one probes `$SHELL -ilc` for PATH,
   // which would make this suite spawn a login shell (slow, and dependent on
   // whatever dotfiles the machine running CI has). envCalls records what the
   // manager asked for so the wiring is still asserted.

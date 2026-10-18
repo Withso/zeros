@@ -1,0 +1,9 @@
+{
+  "id": "archive-suspends-all-design-tools",
+  "kind": "replay",
+  "area": "engine-design-territory",
+  "fixedBy": "pr:584",
+  "symptom": "Archiving one Local workspace failed a Codex prompt in another workspace with Bun's bare \"The operation was aborted.\" protocol-error card; the provider was never called.",
+  "rule": "Drive scoped-gate selection through the real WORKSPACE_REQUEST dispatcher for every lifecycle op it names, and hold (not fail) prompt preparation while Design grants are suspended. See playbooks/bug-fix.md and the archive-suspends-all-design-tools change fragment.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/workspace-lifecycle-design-scope.test.ts apps/desktop/src/engine/design/__tests__/conversation-tools.test.ts apps/desktop/src/engine/agents/__tests__/session-tools.test.ts apps/desktop/src/engine/agents/__tests__/gateway-product-tools.test.ts"
+}

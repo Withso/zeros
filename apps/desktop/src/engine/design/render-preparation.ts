@@ -250,6 +250,23 @@ async function linkLocalStylesheets(
   return { html: applyDesignSourceEdits(source, edits), sheets, assetBytes };
 }
 
+/** In-flight text of a linked Design stylesheet, processed exactly as its
+ * saved form renders for frames beside `entryFile`: references rebased and
+ * local assets inlined. Null when nothing renderable remains. */
+export async function prepareDesignStylesheetPreview(
+  workspacePath: string,
+  cssFile: string,
+  css: string,
+  entryFile: string,
+): Promise<string | null> {
+  const directory = designDirectory(workspacePath);
+  const resolved = path.join(directory, ...cssFile.split("/"));
+  const prepared = await prepareStylesheet(directory, resolved, cssFile, entryFile, {
+    [cssFile]: css,
+  });
+  return prepared?.css ?? null;
+}
+
 /** Put each sheet's CSS inside its empty placeholder. Sanitizing edits the
  * skeleton by source location, so placeholders survive byte for byte. */
 function spliceStylesheets(skeleton: string, sheets: readonly LinkedStylesheet[]): string {
@@ -484,8 +501,18 @@ async function importedStylesheets(
     sheets.push({ token, css: source.css.replace(/<\/style/gi, "<\\/style"), ...(source.bytes === undefined ? {} : { bytes: source.bytes }) });
     markup += `<style data-zeros-style-source="${source.id}" data-zeros-sheet="${token}"></style>`;
   }
+  // Imported sources come first in head, so their layers (Tailwind's
+  // `theme, base, components, utilities`) would otherwise precede the `reset`
+  // layer every seeded tokens.css declares, and a later-declared layer wins.
+  // Naming `reset` first keeps it the weakest layer for every directory,
+  // including those created before this ordering, without editing tokens.css.
+  if (markup) markup = `${DESIGN_RESET_LAYER_ORDER}${markup}`;
   return { markup, sheets };
 }
+
+/** Zeros' seeded reset layer always precedes imported source layers. */
+export const DESIGN_RESET_LAYER_ORDER =
+  '<style data-zeros-layer-order="">@layer reset;</style>';
 
 export interface FrameRenderOptions {
   /** Return only the generation; `sanitized` is then a skeleton whose

@@ -33,6 +33,7 @@ import type {
   AgentTextMessageAttachment,
   MessageContentSegment,
 } from "./agent-messages";
+import type { DesignAgentDraft } from "./design-agent-drafts";
 import type {
   ConversationId,
   ExecutionId,
@@ -795,6 +796,16 @@ export interface AgentProviderQuotaUpdatedMessage extends BaseMessage {
   quota: AgentProviderQuota | null;
 }
 
+/** Engine → trusted local desktop only: a transient preview of a Local
+ * agent's in-flight native edit of the active Design directory. Never
+ * persisted, journaled, replayed or relayed; older clients ignore the type. */
+export interface DesignAgentDraftMessage extends BaseMessage {
+  type: "DESIGN_AGENT_DRAFT";
+  /** Opaque engine workspace id (the Design snapshot owner). */
+  workspaceId: string;
+  draft: DesignAgentDraft;
+}
+
 /** Goal lifecycle stays session-scoped and provider-neutral. */
 export interface AgentGoalSetMessage extends BaseMessage {
   type: "AGENT_GOAL_SET";
@@ -1473,6 +1484,7 @@ export type BridgeMessage =
   | AgentConfigurationProvenanceMessage
   | AgentProviderQuotaMessage
   | AgentProviderQuotaUpdatedMessage
+  | DesignAgentDraftMessage
   | AgentGoalChangedMessage
   | AgentSafetyReviewRetriedMessage
   | AgentSteeredMessage

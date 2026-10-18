@@ -36,3 +36,8 @@ ownership until the last reader finishes. These are encoded in
 the retirement/default-budget cases in `catalog.test.ts`. The unchanged synthetic
 independent proofs were six red contract assertions before these repairs; they
 are review regressions, not escaped production incidents or capacity evidence.
+
+Base integration: adjacent package-export additions are independent contracts.
+Retain both entries and exercise both public imports on the combined tree.
+Preserve the reviewed parent, but qualify the new head with fresh checks and
+interdiff review rather than carrying its predecessor's green forward.

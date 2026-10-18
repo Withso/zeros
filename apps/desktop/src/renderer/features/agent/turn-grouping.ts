@@ -37,9 +37,10 @@ export interface Turn {
    *  in their arrival order. Includes assistant text, thinking,
    *  tool calls, and any other AgentMessage variants. */
   events: AgentMessage[];
-  /** All events belonging to the shared provider turn. This is the same array
-   *  as `events` for ordinary turns and a combined stable-by-elements array on
-   *  the final steer segment. Used by footer copy/duration fallbacks. */
+  /** Provider-turn history through this segment, including preceding steers.
+   *  The final segment spans the whole provider turn for footer copy/duration.
+   *  Earlier prefixes stay unchanged when later steers or output arrive, so
+   *  usage projection and render identity survive a change of tail. */
   providerEvents: AgentMessage[];
 }
 
@@ -131,15 +132,13 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
     }
   }
   if (current && !isSleepOnlySystemTurn(current)) turns.push(current);
-  let providerStart = 0;
-  for (let index = 0; index < turns.length; index += 1) {
-    if (!isProviderTurnTail(turns, index)) continue;
-    if (providerStart !== index) {
-      turns[index].providerEvents = turns
-        .slice(providerStart, index + 1)
-        .flatMap((turn) => turn.events);
-    }
-    providerStart = index + 1;
+  for (let index = 1; index < turns.length; index += 1) {
+    if (isProviderTurnTail(turns, index - 1)) continue;
+    const preceding = turns[index - 1].providerEvents;
+    const events = turns[index].events;
+    turns[index].providerEvents = events.length > 0
+      ? [...preceding, ...events]
+      : preceding;
   }
   return turns;
 }

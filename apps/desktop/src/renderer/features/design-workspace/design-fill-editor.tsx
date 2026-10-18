@@ -39,6 +39,9 @@ interface DesignFillEditorProps {
   size: string;
   repeat: string;
   disabled?: boolean;
+  /** The token a solid fill's winning declaration reads, if any. */
+  tokenName?: string;
+  tokenDescription?: string;
   onPreview?: (styles: Record<string, string | null>) => void;
   onCancelPreview?: () => void;
   onCommit: (styles: Record<string, string | null>) => void;
@@ -105,6 +108,8 @@ export function DesignFillEditor({
   size,
   repeat,
   disabled,
+  tokenName,
+  tokenDescription,
   onPreview,
   onCancelPreview,
   onCommit,
@@ -152,6 +157,8 @@ export function DesignFillEditor({
           value={color}
           label="Fill"
           disabled={disabled}
+          tokenName={tokenName}
+          tokenDescription={tokenDescription}
           onPreview={(next) => onPreview?.({ "background-color": next })}
           onCommit={(next) =>
             onCommit({ "background-color": next, "background-image": "none" })
