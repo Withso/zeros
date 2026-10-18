@@ -3,6 +3,7 @@ import { parseSetupObservations, type SetupObservations } from "./setup-observat
 
 import type pg from "pg";
 import { parseSetupTimings, type SetupTimings } from "./setup-timings.js";
+import { parseSetupPerformance, type SetupPerformance } from "./setup-performance.js";
 
 import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
@@ -102,6 +103,7 @@ export type CloudWorkspaceSetupReadiness = {
 export type CloudWorkspaceSetupResult = {
   timings?: SetupTimings | undefined;
   observations?: SetupObservations | undefined;
+  performance?: SetupPerformance | undefined;
   /** Exact helper/engine proof required before the worker publishes `ready`. */
   readiness: CloudWorkspaceSetupReadiness;
   /** Raw bounded excerpt; the worker applies its required sanitizer. */
@@ -123,6 +125,7 @@ export interface CloudWorkspaceSetupExecutor {
 export class CloudWorkspaceSetupError extends Error {
   timings?: SetupTimings | undefined;
   observations?: SetupObservations | undefined;
+  performance?: SetupPerformance | undefined;
   hookLog?: CloudWorkspaceSetupHookLog;
   providerDiagnostic?: CloudDiagnostic;
   failureDiagnostic?: CloudDiagnostic;
@@ -176,6 +179,7 @@ type DispatchDecision =
 type SafeSetupFailure = {
   timings?: SetupTimings | undefined;
   observations?: SetupObservations | undefined;
+  performance?: SetupPerformance | undefined;
   code: string;
   retryable: boolean;
   restoreEvidence?: string | undefined;
@@ -266,6 +270,7 @@ function safeFailure(error: unknown): SafeSetupFailure {
       retryable: error.retryable,
       timings: parseSetupTimings(error.timings),
       observations: parseSetupObservations(error.observations),
+      performance: parseSetupPerformance(error.performance),
       providerDiagnostic: providerDiagnostic.success ? providerDiagnostic.data : undefined,
       failureDiagnostic: failureDiagnostic.success ? failureDiagnostic.data : undefined,
       diagnostic: parseSetupDiagnostic(error.diagnostic) ?? undefined,
@@ -857,6 +862,7 @@ export class CloudWorkspaceSetupWorker {
     log: { value: string; truncated: boolean },
     timings?: SetupTimings,
     observations?: SetupObservations,
+    performance?: SetupPerformance,
   ): Promise<boolean> {
     return withSystemTx(this.pool, async (tx) => {
       await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [setup.organizationId]);
@@ -1008,6 +1014,7 @@ export class CloudWorkspaceSetupWorker {
           attempt: setup.attempt, claimCount: setup.claimCount, executionFence: setup.executionFence,
           failure: { code: "setup_publish_ineligible", phase: "authority_check", retryable: false },
           ...(timings ? { timings } : {}), ...(observations ? { observations } : {}),
+          ...(performance ? { performance } : {}),
         });
         return false;
       }
@@ -1089,6 +1096,7 @@ export class CloudWorkspaceSetupWorker {
           logTruncated: log.truncated,
           ...(timings ? { timings } : {}),
           ...(observations ? { observations } : {}),
+          ...(performance ? { performance } : {}),
         },
       );
       return true;
@@ -1111,6 +1119,7 @@ export class CloudWorkspaceSetupWorker {
       attempt: setup.attempt, claimCount: setup.claimCount, executionFence: setup.executionFence,
       diagnostic, ...(failure.timings ? { timings: failure.timings } : {}),
       ...(failure.observations ? { observations: failure.observations } : {}),
+      ...(failure.performance ? { performance: failure.performance } : {}),
       ...(failure.cleanupDiagnostic ? { cleanupDiagnostic: failure.cleanupDiagnostic } : {}),
     });
     return diagnostic;
@@ -1418,6 +1427,7 @@ export class CloudWorkspaceSetupWorker {
 
     if (controller.signal.aborted) failure ??= { code: "setup_worker_stopped", retryable: true };
     if (failure) {
+      failure.performance ??= parseSetupPerformance(result?.performance);
       await this.recordFailure(setup, failure);
       return;
     }
@@ -1429,14 +1439,17 @@ export class CloudWorkspaceSetupWorker {
         code: "setup_readiness_invalid",
         retryable: false,
         timings: parseSetupTimings(result?.timings), observations: parseSetupObservations(result?.observations),
+        performance: parseSetupPerformance(result?.performance),
       });
       return;
     }
     try {
-      await this.recordSuccess(setup, result.readiness, this.executionLog(result), parseSetupTimings(result.timings), parseSetupObservations(result.observations));
+      await this.recordSuccess(setup, result.readiness, this.executionLog(result), parseSetupTimings(result.timings), parseSetupObservations(result.observations),
+        parseSetupPerformance(result.performance));
     } catch (error) {
       if (!(error instanceof CloudRuntimeError) && !(error instanceof HttpError && error.code === CLOUD_WORKSPACE_V2_REQUIRED)) throw error;
-      await this.recordFailure(setup, { ...safeFailure(error), timings: parseSetupTimings(result.timings), observations: parseSetupObservations(result.observations) });
+      await this.recordFailure(setup, { ...safeFailure(error), timings: parseSetupTimings(result.timings), observations: parseSetupObservations(result.observations),
+        performance: parseSetupPerformance(result.performance) });
     }
   }
 

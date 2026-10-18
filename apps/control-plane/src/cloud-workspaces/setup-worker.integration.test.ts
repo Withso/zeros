@@ -866,22 +866,41 @@ d("cloud workspace setup worker", () => {
   it.each([true, false])("persists closed stage timings for a current setup claim (success=%s)", async success => {
     const seeded = await seedSetup({ v4: true });
     const observations = { version: 1 as const, preparation: "reused" as const, readiness: success ? "ready" as const : "transport_error" as const };
+    const performance = { version: 1 as const, truncated: false, groups: [{ source: "transport" as const,
+      stages: [{ stage: "key_install" as const, count: 1, totalMs: 400, maxMs: 400, lastOutcome: "passed" as const }] }] };
     const timings = { version: 1, clocks: [{ source: "setup", clockId: randomUUID(), startedAt: "2026-10-06T00:00:00.000Z",
       spans: [{ stage: "repository", startMs: 10, endMs: 25, outcome: success ? "passed" : "failed" }] }] };
     const executor = new FakeExecutor([async execution => {
-      if (!success) throw Object.assign(new CloudWorkspaceSetupError("setup_command_failed", "closed", false), { timings, observations });
-      return { ...await registeredSuccessfulSetup(execution, ""), timings, observations };
+      if (!success) throw Object.assign(new CloudWorkspaceSetupError("setup_command_failed", "closed", false), { timings, observations, performance });
+      return { ...await registeredSuccessfulSetup(execution, ""), timings, observations, performance };
     }]);
     await worker(executor).runOnce();
     const stored = (await pool.query("SELECT stage_timings FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0];
     expect(stored.stage_timings).toEqual(timings);
     const receipts = (await pool.query(`SELECT subject FROM audit_log WHERE org_id=$1 AND subject->>'setupRunId'=$2
       AND action=$3`, [organizationId, seeded.setupRunId, success ? "cloud_workspace.setup_succeeded" : "cloud_workspace.setup_claim_failed"])).rows;
-    expect(receipts).toEqual([{ subject: expect.objectContaining({ timings, observations, executionFence: 1 }) }]);
+    expect(receipts).toEqual([{ subject: expect.objectContaining({ timings, observations, performance, executionFence: 1 }) }]);
     for (const invalid of [{ ...timings, text: "private" }, { version: 1, clocks: [{ ...timings.clocks[0], source: "private" }] },
       { version: 1, clocks: [{ ...timings.clocks[0], spans: [{ stage: "repository", startMs: 25, endMs: 10, outcome: "passed" }] }] }]) {
       await expect(pool.query("UPDATE cloud_workspace_setup_runs SET stage_timings=$2 WHERE id=$1", [seeded.setupRunId, invalid])).rejects.toMatchObject({ code: "23514" });
     }
+  });
+
+  it.each([true, false])("omits invalid performance without changing setup outcome (success=%s)", async success => {
+    const seeded = await seedSetup({ v4: true });
+    const performance = { version: 1, truncated: false, groups: [], privateText: "synthetic private performance" };
+    const executor = new FakeExecutor([async execution => {
+      if (!success) throw Object.assign(new CloudWorkspaceSetupError("setup_command_failed", "closed", false), { performance });
+      return { ...await registeredSuccessfulSetup(execution, ""), performance };
+    }]);
+    await worker(executor).runOnce();
+    const receipts = (await pool.query(`SELECT subject FROM audit_log WHERE org_id=$1 AND subject->>'setupRunId'=$2 AND action=$3`,
+      [organizationId, seeded.setupRunId, success ? "cloud_workspace.setup_succeeded" : "cloud_workspace.setup_claim_failed"])).rows;
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].subject).not.toHaveProperty("performance");
+    expect(JSON.stringify(receipts)).not.toContain("synthetic private performance");
+    expect((await pool.query("SELECT state FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0].state)
+      .toBe(success ? "succeeded" : "failed");
   });
 
   it("retains each failed claim's closed stage and timings after retry admission, cleanup, and eventual success", async () => {
@@ -1409,17 +1428,21 @@ d("cloud workspace setup worker", () => {
     const winnerTimings = { version: 1 as const, clocks: [{ source: "setup" as const, clockId: randomUUID(), startedAt: "2026-10-06T00:00:00.000Z",
       spans: [{ stage: "repository" as const, startMs: 0, endMs: 10, outcome: "passed" as const }] }] };
     const loserTimings = { ...winnerTimings, clocks: [{ ...winnerTimings.clocks[0]!, clockId: randomUUID() }] };
+    const winnerPerformance = { version: 1 as const, truncated: false, groups: [{ source: "transport" as const,
+      stages: [{ stage: "total" as const, count: 1, totalMs: 50, maxMs: 50, lastOutcome: "passed" as const }] }] };
+    const loserPerformance = { ...winnerPerformance, groups: [{ source: "transport" as const,
+      stages: [{ stage: "total" as const, count: 1, totalMs: 999, maxMs: 999, lastOutcome: "passed" as const }] }] };
     await pool.query("UPDATE cloud_workspace_setup_runs SET stage_timings=$2 WHERE id=$1", [seeded.setupRunId, loserTimings]);
     const secondExecutor = new FakeExecutor([
       async (execution) => {
         expect((await pool.query("SELECT stage_timings FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0].stage_timings).toBeNull();
-        return { ...await registeredSuccessfulSetup(execution, "winner"), timings: winnerTimings };
+        return { ...await registeredSuccessfulSetup(execution, "winner"), timings: winnerTimings, performance: winnerPerformance };
       },
     ]);
     await expect(
       worker(secondExecutor, { workerId: "worker-two" }).runOnce(),
     ).resolves.toBe(true);
-    firstRelease.resolve({ ...successfulSetup(firstClaim, "late loser"), timings: loserTimings });
+    firstRelease.resolve({ ...successfulSetup(firstClaim, "late loser"), timings: loserTimings, performance: loserPerformance });
     await expect(firstRun).resolves.toBe(true);
 
     const stored = await pool.query(
@@ -1438,6 +1461,9 @@ d("cloud workspace setup worker", () => {
       log_excerpt: "winner",
       stage_timings: winnerTimings,
     });
+    expect((await pool.query(`SELECT subject->'performance' AS performance,subject->>'executionFence' AS fence
+      FROM audit_log WHERE org_id=$1 AND subject->>'setupRunId'=$2 AND subject ? 'performance'`,
+    [organizationId, seeded.setupRunId])).rows).toEqual([{ performance: winnerPerformance, fence: "2" }]);
   });
 
   it("cannot publish after its lease expires even before another worker reclaims it", async () => {

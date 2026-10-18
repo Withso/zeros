@@ -7,6 +7,7 @@ export type { BoatBootstrapChannel } from "./boat-pinned-ssh.js";
 import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./linux-setup-executor.js";
 import { RuntimeBaseStatusSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES } from "./runtime-contract.js";
 import { setupTimingClock } from "./setup-timings.js";
+import { measureSetupPerformance, reportSetupPerformance, setupPerformance, type SetupPerformanceRecorder } from "./setup-performance.js";
 import {
   CloudProviderError,
   type CloudWorkspaceCommandRunner,
@@ -39,7 +40,7 @@ function baseHostStopped(response: Record<string, unknown>, expectedBase: string
  * A nonzero restoreCeilingMs is used only before setup authority exists.
  */
 async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, resourceId: string, expectedBase: string, signal: AbortSignal,
-  timeoutSeconds: number, restoreCeilingMs = 0) {
+  timeoutSeconds: number, restoreCeilingMs = 0, performance?: SetupPerformanceRecorder) {
   const started = Date.now();
   const boot = new AbortController(), restore = new AbortController();
   const restoreMs = Math.min(restoreCeilingMs, timeoutSeconds * 1000);
@@ -52,13 +53,15 @@ async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, res
   // the claim into a backed-off retry that would wait for the same restore.
   let restoring = false;
   const deadline = () => restoring ? restore.signal : boot.signal;
-  const pause = (ms: number, error: unknown) => new Promise<void>((resolve, reject) => {
+  const pause = (ms: number, error: unknown) => {
     const readinessSignal = AbortSignal.any([signal, deadline()]);
-    const abort = () => { clearTimeout(wait); reject(error); };
-    const wait = setTimeout(() => { readinessSignal.removeEventListener("abort", abort); resolve(); }, ms);
-    readinessSignal.addEventListener("abort", abort, { once: true });
-    if (readinessSignal.aborted) abort();
-  });
+    return measureSetupPerformance(performance, "sleep", () => new Promise<void>((resolve, reject) => {
+      const abort = () => { clearTimeout(wait); reject(error); };
+      const wait = setTimeout(() => { readinessSignal.removeEventListener("abort", abort); resolve(); }, ms);
+      readinessSignal.addEventListener("abort", abort, { once: true });
+      if (readinessSignal.aborted) abort();
+    }), readinessSignal);
+  };
   const hostPending = Object.assign(new CloudProviderError("provider_bootstrap_unavailable", "Boat runtime broker is not ready", true),
     { diagnostic: { version: 1, phase: "bootstrap", exit: "unknown" } });
   let previousError: unknown;
@@ -67,14 +70,16 @@ async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, res
       signal.throwIfAborted();
       const polled = Date.now();
       try {
-        const response = await client.request(`/sandboxes/${resourceId}/commands`, {
+        const requestSignal = AbortSignal.any([signal, deadline()]);
+        const response = await measureSetupPerformance(performance, "status_request", () => client.request(`/sandboxes/${resourceId}/commands`, {
           method: "POST", body: { command: BASE_STATUS_COMMAND, timeoutSeconds: BASE_STATUS_TIMEOUT_SECONDS },
-          signal: AbortSignal.any([signal, deadline()]),
-        });
+          signal: requestSignal,
+        }), requestSignal);
         // Commands may work before the enabled host unit starts after overlay
         // restoration. Observe only; never restart the host or accept a failed,
         // malformed or foreign base as transient readiness.
-        if (baseHostStopped(response, expectedBase)) throw hostPending;
+        if (baseHostStopped(response, expectedBase)) { performance?.count("host_stopped"); throw hostPending; }
+        if (response.timedOut === true) performance?.count("status_timeout");
         if (response.timedOut === true && response.stdoutTruncated !== true &&
             restoreMs - (Date.now() - started) >= (BASE_STATUS_TIMEOUT_SECONDS + 2) * 1000) {
           restoring = true;
@@ -83,12 +88,15 @@ async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, res
           if (early > 0) await pause(early, hostPending);
           continue;
         }
+        performance?.count("definitive_response");
         return response;
       } catch (error) {
         signal.throwIfAborted();
         if (deadline().aborted) throw previousError ?? error;
         const bootPending = error === hostPending || error instanceof BoatBootPendingError || (error instanceof CloudProviderError &&
           error.retryable && error.httpStatus !== undefined && error.httpStatus >= 500);
+        if (error instanceof BoatBootPendingError) performance?.count("boot_pending");
+        else if (error !== hostPending && bootPending) performance?.count("server_retryable");
         if (!bootPending || (error instanceof CloudProviderError && (error.retryAfterMs ?? 0) > 2000)) throw error;
         previousError = error;
         await pause(2000, error);
@@ -132,10 +140,18 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
     if (!BOAT_RESOURCE_ID_PATTERN.test(input.resourceId) || !/^bc1-[a-f0-9]{64}$/.test(input.runtimeBaseCompatibilityId) ||
       !Number.isSafeInteger(input.timeoutSeconds) || input.timeoutSeconds < 1 || input.timeoutSeconds > this.options.maxTimeoutSeconds)
       throw new CloudProviderError("provider_command_invalid", "Boat accepts only the fixed setup admission", false);
-    signal.throwIfAborted();
-    await this.options.assertOwned(input.resourceId);
-    await waitForBoatBaseStatus(this.options.client, input.resourceId, input.runtimeBaseCompatibilityId, signal, input.timeoutSeconds,
-      BASE_RESTORE_GATE_MS);
+    const performance = input.onPerformance ? setupPerformance("readiness") : undefined;
+    const finished = performance?.start("total");
+    try {
+      signal.throwIfAborted();
+      await this.options.assertOwned(input.resourceId);
+      await waitForBoatBaseStatus(this.options.client, input.resourceId, input.runtimeBaseCompatibilityId, signal, input.timeoutSeconds,
+        BASE_RESTORE_GATE_MS, performance);
+      finished?.();
+    } catch (error) {
+      finished?.(signal.aborted ? "cancelled" : "failed");
+      throw error;
+    } finally { reportSetupPerformance(input.onPerformance, performance); }
   }
 
   async execute(
@@ -175,18 +191,20 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
     await this.options.assertOwned(input.resourceId);
     const timings = v4 ? setupTimingClock("boat_transport") : undefined;
     const transportFinished = timings?.start("ssh_transport");
+    const performance = v4 && input.onPerformance ? setupPerformance("transport") : undefined;
+    const performanceFinished = performance?.start("total");
     let bootstrapFinished: ReturnType<ReturnType<typeof setupTimingClock>["start"]> | undefined;
     const operation = executeBoatPinnedSsh({
       resourceId: input.resourceId,
       command: `${input.command}${v4 ? "" : " --stdin"}`,
       stdin: encoded,
       timeoutSeconds: input.timeoutSeconds,
-    }, this.options, signal, async () => {
+    }, { ...this.options, ...(performance ? { performance } : {}) }, signal, async () => {
       bootstrapFinished = timings?.start("bootstrap_probe");
       // Boat cold resume restores disk, not the image's OCI entrypoint or /run.
       // This fixed, secret-free helper probes or starts the one root broker;
       // it cannot replace an active engine or consume a launch admission.
-      const prepared = v4 ? await waitForBoatBaseStatus(this.options.client, input.resourceId, input.runtimeBaseCompatibilityId!, signal, input.timeoutSeconds)
+      const prepared = v4 ? await waitForBoatBaseStatus(this.options.client, input.resourceId, input.runtimeBaseCompatibilityId!, signal, input.timeoutSeconds, 0, performance)
         : await this.options.client.request(
         `/sandboxes/${input.resourceId}/commands`,
         {
@@ -228,12 +246,14 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
     try {
       const result = await operation;
       transportFinished?.(result.exitCode === 0 ? "passed" : "failed");
+      performanceFinished?.(result.exitCode === 0 ? "passed" : "failed");
       return { ...result, ...(timings ? { timings: timings.snapshot() } : {}) };
     } catch (error) {
       bootstrapFinished?.(signal.aborted ? "cancelled" : "failed");
       transportFinished?.(signal.aborted ? "cancelled" : "failed");
+      performanceFinished?.(signal.aborted ? "cancelled" : "failed");
       if (timings && error instanceof Error) Object.assign(error, { timings: timings.snapshot() });
       throw error;
-    }
+    } finally { reportSetupPerformance(input.onPerformance, performance); }
   }
 }

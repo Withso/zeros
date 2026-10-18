@@ -159,6 +159,130 @@ describe("CloudWorkspaceLinuxSetupExecutor", () => {
     return { ...f, executor, runtimeArtifacts, resolveRuntimeArtifact, descriptor, pin, objectKey, artifact, artifactUrl, installerDiagnostic, output };
   };
 
+  const performanceReport = (source: "readiness" | "transport") => ({ version: 1 as const, truncated: false,
+    groups: [{ source, stages: [{ stage: "total" as const, count: 1, totalMs: 123, maxMs: 123, lastOutcome: "passed" as const }] }] });
+
+  it.each(["success", "readiness_failure", "transport_failure", "cleanup_failure"])(
+    "retains closed CP performance outside the helper proof (%s)", async outcome => {
+      const f = v4(), before = performanceReport("readiness"), transport = performanceReport("transport");
+      f.runner.awaitReadiness = vi.fn(async input => {
+        input.onPerformance?.(before);
+        if (outcome === "readiness_failure") throw new CloudProviderError("provider_request_failed", "closed", true);
+      });
+      vi.mocked(f.runner.execute).mockImplementation(async input => {
+        input.onPerformance?.(transport);
+        if (outcome === "transport_failure") throw new CloudProviderError("provider_command_unconfirmed", "closed", true);
+        return { exitCode: 0, output: f.output, outputTruncated: false };
+      });
+      if (outcome === "cleanup_failure") vi.mocked(f.broker.revoke).mockRejectedValue(new Error("synthetic private cleanup"));
+      const value = await f.executor.execute(f.input, new AbortController().signal).catch(error => error);
+      expect(value.performance).toEqual({ version: 1, truncated: false,
+        groups: [...before.groups, ...(outcome === "readiness_failure" ? [] : transport.groups)] });
+      if (outcome === "success") {
+        expect(value.readiness).toEqual(readiness(f.input));
+        expect(value.readiness).not.toHaveProperty("performance");
+        expect(f.broker.revoke).toHaveBeenCalledWith(f.grant, "completed");
+      } else expect(value).toMatchObject({ code: {
+        readiness_failure: "setup_provider_request_failed", transport_failure: "setup_provider_command_unconfirmed",
+        cleanup_failure: "setup_admission_revoke_failed",
+      }[outcome], retryable: true });
+      expect(JSON.stringify(value)).not.toContain("synthetic private cleanup");
+      expect(f.runner.awaitReadiness).toHaveBeenCalledOnce();
+      if (outcome === "readiness_failure") {
+        expect(f.broker.issue).not.toHaveBeenCalled();
+        expect(f.runner.execute).not.toHaveBeenCalled();
+      } else expect(f.runner.execute).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("drops malformed performance and ignores a late observer after execution closes", async () => {
+    const f = v4(), report = performanceReport("transport");
+    let observe: ((value: unknown) => void) | undefined;
+    vi.mocked(f.runner.execute).mockImplementation(async input => {
+      observe = input.onPerformance;
+      observe?.(report);
+      observe?.({ ...report, text: "synthetic private performance" });
+      return { exitCode: 0, output: f.output, outputTruncated: false };
+    });
+    const result = await f.executor.execute(f.input, new AbortController().signal);
+    expect(result.performance).toEqual(report);
+    observe?.(performanceReport("readiness"));
+    expect(result.performance).toEqual(report);
+    expect(JSON.stringify(result)).not.toContain("synthetic private performance");
+  });
+
+  it("still refuses unnegotiated performance injected into a strict helper result", async () => {
+    const f = v4();
+    const [helper, installer] = f.output.trim().split("\n");
+    vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 0, outputTruncated: false,
+      output: JSON.stringify({ ...JSON.parse(helper!), performance: performanceReport("transport") }) + "\n" + installer + "\n" });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_readiness_invalid" });
+    expect(f.broker.revoke).toHaveBeenCalledWith(f.grant, "failed");
+  });
+
+  it.each([true, false])("retains negotiated helper and installer performance without changing proof or failure (ready=%s)", async ready => {
+    const f = v4();
+    const metrics = (source: string, stage: string) => ({ version: 1, truncated: false,
+      groups: [{ source, stages: [{ stage, count: 1, totalMs: 17, maxMs: 17, lastOutcome: "passed" }] }] });
+    const helperPerformance = metrics("helper", "materials");
+    const installerPerformance = metrics("installer", "cache_verify");
+    const helper = { version: 6, audience: "zeros-cloud-workspace-setup-result-v1",
+      timings: { version: 1, clocks: [] }, observations: { version: 1 }, performance: helperPerformance,
+      ...(ready ? { outcome: "ready", readiness: readiness(f.input) } : {
+        outcome: "error", code: "repository_temporarily_unavailable", diagnostic: { version: 1, phase: "repository" },
+      }) };
+    const diagnostic = ready ? f.installerDiagnostic : { ...f.installerDiagnostic, stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] };
+    vi.mocked(f.runner.execute).mockImplementationOnce(async input => {
+      input.onPerformance?.(performanceReport("transport"));
+      return { exitCode: ready ? 0 : 1, outputTruncated: false, output: JSON.stringify(helper) + "\n" +
+        JSON.stringify({ schema: "zeros.diagnostic/v2", diagnostic, performance: installerPerformance }) + "\n" };
+    });
+    const value = await f.executor.execute(f.input, new AbortController().signal).catch(error => error);
+    if (ready) expect(value.readiness).toEqual(readiness(f.input));
+    else expect(value).toMatchObject({ code: "setup_repository_unavailable", retryable: true });
+    expect(value.performance?.groups).toEqual(expect.arrayContaining([
+      ...helperPerformance.groups, ...installerPerformance.groups, ...performanceReport("transport").groups,
+    ]));
+    expect(value).not.toHaveProperty("readiness.performance");
+    expect(f.runner.execute).toHaveBeenCalledOnce();
+    expect(f.broker.revoke).toHaveBeenCalledOnce();
+  });
+
+  it.each(["malformed", "foreign-source", "cleanup"])("keeps guest performance observation-only on %s", async mode => {
+    const f = v4();
+    const helperPerformance = { version: 1, truncated: false, groups: [{ source: "helper",
+      stages: [{ stage: "materials", count: 1, totalMs: 17, maxMs: 17, lastOutcome: "passed" }] }] };
+    const [legacy] = f.output.trim().split("\n");
+    const output = { ...JSON.parse(legacy!), version: 6, timings: { version: 1, clocks: [] }, observations: { version: 1 },
+      performance: mode === "malformed" ? { ...helperPerformance, text: "private telemetry" }
+        : mode === "foreign-source" ? performanceReport("transport") : helperPerformance };
+    vi.mocked(f.runner.execute).mockImplementationOnce(async input => {
+      input.onPerformance?.(performanceReport("readiness"));
+      return { exitCode: 0, outputTruncated: false, output: JSON.stringify(output) + "\n" + JSON.stringify({
+        schema: "zeros.diagnostic/v2", diagnostic: f.installerDiagnostic, performance: { text: "private installer" },
+      }) + "\n" };
+    });
+    if (mode === "cleanup") vi.mocked(f.broker.revoke).mockRejectedValueOnce(new Error("private cleanup"));
+    const result = await f.executor.execute(f.input, new AbortController().signal).catch(error => error);
+    if (mode === "cleanup") {
+      expect(result.code).toBe("setup_admission_revoke_failed");
+      expect(result.performance?.groups).toContainEqual(helperPerformance.groups[0]);
+    } else expect(result.readiness).toEqual(readiness(f.input));
+    expect(result.performance?.groups).toContainEqual(performanceReport("readiness").groups[0]);
+    expect(result.performance?.groups.some((group: { source: string }) => group.source === "transport")).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("private");
+  });
+
+  it("cannot turn a mismatched v6 readiness proof into success with valid performance", async () => {
+    const f = v4();
+    const proof = { ...readiness(f.input), generation: f.input.generation + 1 };
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 0, outputTruncated: false, output: JSON.stringify({
+      version: 6, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "ready", readiness: proof,
+      timings: { version: 1, clocks: [] }, observations: { version: 1 }, performance: { version: 1, truncated: false, groups: [] },
+    }) + "\n" + JSON.stringify(f.installerDiagnostic) + "\n" });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_readiness_invalid", retryable: false });
+  });
+
   it("waits for a restoring base before minting any setup authority", async () => {
     const f = v4(), order: string[] = [];
     f.runner.awaitReadiness = vi.fn(async (input: { resourceId: string; runtimeBaseCompatibilityId: string; timeoutSeconds: number }) => {

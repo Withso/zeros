@@ -199,6 +199,96 @@ describe("Boat bootstrap transport", () => {
     ({ resourceId: f.input.resourceId, runtimeBaseCompatibilityId: f.input.runtimeBaseCompatibilityId!, timeoutSeconds });
   const statusCalls = (f: ReturnType<typeof v4Fixture>) => f.request.mock.calls.filter(([, init]) =>
     String((init as { body?: { command?: string } } | undefined)?.body?.command).includes("bootstrap.py status")).length;
+
+  it("separates readiness request time from retry sleep without adding provider calls", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    const f = v4Fixture(), onPerformance = vi.fn();
+    f.request.mockReset()
+      .mockImplementationOnce(() => new Promise((_, reject) => setTimeout(() => reject(new BoatBootPendingError()), 100)))
+      .mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve(f.prepared), 300)));
+    const waiting = f.runner.awaitReadiness({ ...readinessInput(f), onPerformance }, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(2400);
+    await waiting;
+    expect(f.request).toHaveBeenCalledTimes(2);
+    expect(f.assertOwned).toHaveBeenCalledOnce();
+    expect(f.openChannel).not.toHaveBeenCalled();
+    expect(onPerformance).toHaveBeenCalledExactlyOnceWith({ version: 1, truncated: false, groups: [{ source: "readiness",
+      stages: expect.arrayContaining([
+        { stage: "total", count: 1, totalMs: 2400, maxMs: 2400, lastOutcome: "passed" },
+        { stage: "status_request", count: 2, totalMs: 400, maxMs: 300, lastOutcome: "passed" },
+        { stage: "sleep", count: 1, totalMs: 2000, maxMs: 2000, lastOutcome: "passed" },
+        { stage: "boot_pending", count: 1, totalMs: 0, maxMs: 0, lastOutcome: "passed" },
+      ]) }] });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("measures each pinned transport boundary independently of helper output", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    const f = v4Fixture(), onPerformance = vi.fn();
+    const delay = <T,>(value: T, ms: number) => new Promise<T>(resolve => setTimeout(() => resolve(value), ms));
+    const reply = fixture().request.getMockImplementation()!;
+    f.request.mockReset().mockImplementationOnce(() => delay(f.prepared, 100));
+    for (const ms of [200, 300, 400, 500])
+      f.request.mockImplementationOnce(async (path, input) => delay(await reply(path, input), ms));
+    f.openChannel.mockImplementation(() => delay(f.channel, 40));
+    f.channel.execute.mockImplementation(() => delay({ exitCode: 0, output: "ready", outputTruncated: false }, 700));
+    f.channel.dispose.mockImplementation(() => delay(undefined, 60));
+    const running = f.runner.execute({ ...f.input, onPerformance }, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(2300);
+    expect(await running).toMatchObject({ exitCode: 0, output: "ready", outputTruncated: false });
+    expect(f.request).toHaveBeenCalledTimes(5);
+    expect(f.channel.execute).toHaveBeenCalledOnce();
+    expect(onPerformance).toHaveBeenCalledExactlyOnceWith({ version: 1, truncated: false, groups: [{ source: "transport",
+      stages: expect.arrayContaining(Object.entries({ total: 2300, channel_open: 40, prepare: 100, status_request: 100,
+        host_key: 200, endpoint: 300, key_install: 400, ssh_command: 700, key_revoke: 500, channel_dispose: 60 })
+        .map(([stage, ms]) => ({ stage, count: 1, totalMs: ms, maxMs: ms, lastOutcome: "passed" }))) }] });
+    const retained = JSON.stringify(onPerformance.mock.calls);
+    for (const privateValue of [RESOURCE, HOST_KEY, PUBLIC_KEY, SECRET, f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64])
+      expect(retained).not.toContain(privateValue);
+  });
+
+  it.each(["request", "sleep"])("closes readiness performance on cancellation during %s", async phase => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    const f = v4Fixture(), onPerformance = vi.fn(), controller = new AbortController();
+    f.request.mockReset();
+    if (phase === "sleep") f.request.mockRejectedValue(new BoatBootPendingError());
+    else f.request.mockImplementation((_path, input) => new Promise((_, reject) => {
+      const signal = (input as { signal: AbortSignal }).signal;
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }));
+    const waiting = f.runner.awaitReadiness({ ...readinessInput(f), onPerformance }, controller.signal).catch(error => error);
+    await vi.advanceTimersByTimeAsync(250);
+    controller.abort();
+    expect(await waiting).toBeInstanceOf(Error);
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(f.openChannel).not.toHaveBeenCalled();
+    expect(onPerformance).toHaveBeenCalledExactlyOnceWith({ version: 1, truncated: false, groups: [{ source: "readiness",
+      stages: expect.arrayContaining([
+        { stage: "total", count: 1, totalMs: 250, maxMs: 250, lastOutcome: "cancelled" },
+        { stage: phase === "request" ? "status_request" : "sleep", count: 1, totalMs: 250, maxMs: 250, lastOutcome: "cancelled" },
+      ]) }] });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([false, true])("keeps the transport outcome when a performance observer throws (failure=%s)", async failed => {
+    const f = v4Fixture();
+    if (failed) f.channel.execute.mockRejectedValue(new Error("synthetic private transport failure"));
+    const onPerformance = vi.fn(() => { throw new Error("synthetic private observer failure"); });
+    const running = f.runner.execute({ ...f.input, onPerformance }, new AbortController().signal);
+    if (failed) await expect(running).rejects.toMatchObject({ code: "provider_command_unconfirmed" });
+    else await expect(running).resolves.toMatchObject({ exitCode: 0 });
+    expect(f.request).toHaveBeenCalledTimes(5);
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("keeps legacy transport output and provider traffic unchanged without performance collection", async () => {
+    const f = fixture(), onPerformance = vi.fn();
+    expect(await f.runner.execute({ ...f.input, onPerformance }, new AbortController().signal))
+      .toEqual({ exitCode: 0, output: "ready", outputTruncated: false });
+    expect(f.request).toHaveBeenCalledTimes(5);
+    expect(onPerformance).not.toHaveBeenCalled();
+  });
+
   it("waits out a restoring base before setup authority exists, without opening access", async () => {
     vi.useFakeTimers();
     const f = v4Fixture();

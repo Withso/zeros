@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { mergeSetupTimings, parseSetupTimings, setupTimingClock, type SetupTimings } from "./setup-timings.js";
+import { mergeSetupPerformance, selectSetupPerformance, unwrapSetupPerformanceDiagnostic, type SetupPerformance, type SetupPerformanceObserver } from "./setup-performance.js";
 import { parseSetupObservations } from "./setup-observations.js";
 import { parseCloudWorkspaceSetupHookLog } from "./setup-log.js";
 import { ClosedDiagnosticSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES, type RuntimeDescriptor } from "./runtime-contract.js";
@@ -85,13 +86,14 @@ export type CloudWorkspaceLinuxSetupExecutorOptions = {
 };
 
 type SetupHelperReady = {
-  version: 1 | 4 | 5;
+  version: 1 | 4 | 5 | 6;
   audience: typeof SETUP_RESULT_AUDIENCE;
   outcome: "ready";
   readiness: CloudWorkspaceSetupReadiness;
   logExcerpt?: string;
   timings?: unknown;
   observations?: unknown;
+  performance?: unknown;
 };
 
 const HELPER_FAILURES: Readonly<
@@ -349,10 +351,13 @@ function parseReadyResponse(
     );
   }
   const value = parsed as Partial<SetupHelperReady>;
+  const timed = value.version === 4 || value.version === 5 || value.version === 6;
+  const observed = value.version === 5 || value.version === 6;
   const expectedKeys = [
     "audience",
-    ...(value.version === 4 || value.version === 5 ? ["timings"] : []),
-    ...(value.version === 5 ? ["observations"] : []),
+    ...(timed ? ["timings"] : []),
+    ...(observed ? ["observations"] : []),
+    ...(value.version === 6 ? ["performance"] : []),
     ...(value.logExcerpt === undefined ? [] : ["logExcerpt"]),
     "outcome",
     "readiness",
@@ -360,7 +365,7 @@ function parseReadyResponse(
   ];
   if (
     !exactKeys(parsed, expectedKeys) ||
-    !(value.version === 1 || (value.version === 4 || value.version === 5) && execution.runtime?.profile === "zeros-cloud-worker-v4") ||
+    !(value.version === 1 || timed && execution.runtime?.profile === "zeros-cloud-worker-v4") ||
     value.audience !== SETUP_RESULT_AUDIENCE ||
     value.outcome !== "ready" ||
     !value.readiness ||
@@ -379,8 +384,9 @@ function parseReadyResponse(
   }
   return {
     readiness: value.readiness,
-    ...(value.version === 4 || value.version === 5 ? { timings: parseSetupTimings(value.timings) } : {}),
-    ...(value.version === 5 ? { observations: parseSetupObservations(value.observations) } : {}),
+    ...(timed ? { timings: parseSetupTimings(value.timings) } : {}),
+    ...(observed ? { observations: parseSetupObservations(value.observations) } : {}),
+    ...(value.version === 6 ? { performance: selectSetupPerformance(value.performance, ["helper", "attester_preflight", "attester_launch"]) } : {}),
     ...(value.logExcerpt !== undefined ? { logExcerpt: value.logExcerpt } : {}),
     logTruncated: false,
   };
@@ -396,15 +402,18 @@ function withInstallerDiagnostic(error: CloudWorkspaceSetupError, installer: Ins
   return error;
 }
 
-function runtimeInstallerOutput(output: string, exitCode: number): { output: string; diagnostic: InstallerDiagnostic } {
+function runtimeInstallerOutput(output: string, exitCode: number, observe?: SetupPerformanceObserver): { output: string; diagnostic: InstallerDiagnostic } {
   // The installer appends one closed diagnostic after the unchanged helper
   // result. Never expose raw installer output or parser errors to diagnostics.
   let installer: InstallerDiagnostic | undefined;
   try {
     const lines = output.trim().split("\n");
-    const diagnostic = ClosedDiagnosticSchema.safeParse(JSON.parse(lines.pop()!));
+    const envelope = unwrapSetupPerformanceDiagnostic(JSON.parse(lines.pop()!));
+    const diagnostic = ClosedDiagnosticSchema.safeParse(envelope.diagnostic);
     if (diagnostic.success && diagnostic.data.component === "installer") {
       installer = diagnostic.data;
+      const performance = selectSetupPerformance(envelope.performance, ["installer"]);
+      try { if (performance) observe?.(performance); } catch { /* Observation cannot replace an installer failure. */ }
       if (installer.exitCode === exitCode && lines.length > 0 && (exitCode === 0
         ? installer.ok && !installer.timedOut && installer.failedChecks.length === 0
         : !installer.ok && installer.stage === "run_setup" && installer.failedChecks.length === 1 && installer.failedChecks[0] === "setup_exit")) {
@@ -432,13 +441,15 @@ function helperFailure(
 ): CloudWorkspaceSetupError {
   try {
     const parsed = JSON.parse(output) as Record<string, unknown>;
-    // A v4/v5 envelope carries optional telemetry around the unchanged closed
+    // A v4/v5/v6 envelope carries optional telemetry around the unchanged closed
     // v1/v2/v3 failure. Parse it independently; it cannot alter rejection.
-    if ((parsed.version === 4 || parsed.version === 5) && execution.runtime?.profile === "zeros-cloud-worker-v4" &&
-      exactKeys(parsed, ["version", "audience", "outcome", "code", "diagnostic", "timings", ...(parsed.version === 5 ? ["observations"] : []), ...(parsed.hookLog === undefined ? [] : ["hookLog"])])) {
-      const { timings, observations, ...legacy } = parsed;
+    if ((parsed.version === 4 || parsed.version === 5 || parsed.version === 6) && execution.runtime?.profile === "zeros-cloud-worker-v4" &&
+      exactKeys(parsed, ["version", "audience", "outcome", "code", "diagnostic", "timings", ...(parsed.version === 5 || parsed.version === 6 ? ["observations"] : []),
+        ...(parsed.version === 6 ? ["performance"] : []), ...(parsed.hookLog === undefined ? [] : ["hookLog"])])) {
+      const { timings, observations, performance, ...legacy } = parsed;
       return Object.assign(helperFailure(JSON.stringify({ ...legacy, version: parsed.hookLog === undefined ? 2 : 3 }), execution),
-        { timings: parseSetupTimings(timings), observations: parseSetupObservations(observations) });
+        { timings: parseSetupTimings(timings), observations: parseSetupObservations(observations),
+          performance: selectSetupPerformance(performance, ["helper", "attester_preflight", "attester_launch"]) });
     }
     if (
       ((parsed.version === 1 && exactKeys(parsed, ["audience", "code", "outcome", "version"])) ||
@@ -580,6 +591,26 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
     execution: CloudWorkspaceSetupExecution,
     signal: AbortSignal,
   ): Promise<CloudWorkspaceSetupResult> {
+    let performance: SetupPerformance | undefined;
+    let closed = false;
+    const observe: SetupPerformanceObserver | undefined = execution.runtime ? value => {
+      if (!closed) performance = mergeSetupPerformance(performance, value);
+    } : undefined;
+    try {
+      const result = await this.executeObserved(execution, signal, observe);
+      const combined = mergeSetupPerformance(performance, result.performance);
+      return combined ? { ...result, performance: combined } : result;
+    } catch (error) {
+      if (error instanceof CloudWorkspaceSetupError) error.performance = mergeSetupPerformance(performance, error.performance);
+      throw error;
+    } finally { closed = true; }
+  }
+
+  private async executeObserved(
+    execution: CloudWorkspaceSetupExecution,
+    signal: AbortSignal,
+    onPerformance: SetupPerformanceObserver | undefined,
+  ): Promise<CloudWorkspaceSetupResult> {
     if (signal.aborted) {
       throw setupError(
         "setup_execution_aborted",
@@ -607,7 +638,8 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       const readinessFinished = clock?.start("bootstrap_probe");
       try {
         await commandRunner.awaitReadiness({ resourceId: execution.provider.resourceId,
-          runtimeBaseCompatibilityId: execution.runtime.baseCompatibilityId, timeoutSeconds: this.timeoutSeconds }, signal);
+          runtimeBaseCompatibilityId: execution.runtime.baseCompatibilityId, timeoutSeconds: this.timeoutSeconds,
+          ...(onPerformance ? { onPerformance } : {}) }, signal);
         readinessFinished?.();
       } catch (error) {
         readinessFinished?.(signal.aborted ? "cancelled" : "failed");
@@ -683,6 +715,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
           env: { [SETUP_REQUEST_ENV]: encoded },
           ...(execution.runtime ? { runtimeBaseCompatibilityId: execution.runtime.baseCompatibilityId } : {}),
           timeoutSeconds: this.timeoutSeconds,
+          ...(onPerformance ? { onPerformance } : {}),
         },
         signal,
       );
@@ -703,7 +736,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
           false,
         );
       }
-      const installed = execution.runtime ? runtimeInstallerOutput(response.output, response.exitCode) : null;
+      const installed = execution.runtime ? runtimeInstallerOutput(response.output, response.exitCode, onPerformance) : null;
       const output = installed?.output ?? response.output;
       if (response.exitCode !== 0) throw withInstallerDiagnostic(helperFailure(output, execution), installed?.diagnostic);
       result = parseReadyResponse(
@@ -713,7 +746,8 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       );
       // V4 installer output is a closed diagnostic boundary. The helper sees
       // only its nested payload, but never persist arbitrary installer stdout.
-      if (execution.runtime) result = { readiness: result.readiness, logTruncated: false, timings: result.timings, observations: result.observations };
+      if (execution.runtime) result = { readiness: result.readiness, logTruncated: false, timings: result.timings,
+        observations: result.observations, performance: result.performance };
       disposition = "completed";
     } catch (error) {
       commandFinished?.(signal.aborted ? "cancelled" : "failed");
@@ -738,6 +772,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       if (failure && revokeFailure.failureDiagnostic) primary.cleanupDiagnostic = revokeFailure.failureDiagnostic;
       primary.timings = mergeSetupTimings(result?.timings ?? failure?.timings, transportTimings, clock?.snapshot());
       primary.observations = result?.observations ?? failure?.observations;
+      primary.performance = result?.performance ?? failure?.performance;
       throw primary;
     }
     if (failure) {
