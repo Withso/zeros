@@ -176,6 +176,8 @@ export type ClientCapabilityRequest = {
 
 export type IssuedClientCapabilities<A extends ClientCapabilityAudience> = {
   generation: number;
+  /** Exactly the workspace authority epoch carried in every token's ep.wa. */
+  authorityEpoch: number;
   /** The engine instance the tokens name in `ein`; null when none is live. */
   engineInstanceId: string | null;
   capabilities: Record<A, IssuedCapability>;
@@ -289,5 +291,5 @@ export async function issueClientCapabilities<A extends ClientCapabilityAudience
   for (const audience of new Set(audiences)) {
     capabilities[audience] = await sign(store, { ...baseClaims(issuer, scope), aud: audience, ...shared });
   }
-  return { generation: row.generation, engineInstanceId: row.engine_instance_id, capabilities };
+  return { generation: row.generation, authorityEpoch, engineInstanceId: row.engine_instance_id, capabilities };
 }

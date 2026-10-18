@@ -9,7 +9,7 @@ import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
 import { consumeCloudWorkspaceDeviceProof, type CloudWorkspaceDeviceProof } from "./replicas.js";
 import type { CloudEngineRelayGrant } from "./engine-client-admission.js";
 import { requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
-import {readCurrentCloudAgentBootBinding} from "./agent-boot-credentials.js";
+import {readActiveCloudAgentBootScope} from "./agent-boot-credentials.js";
 import {CloudAgentBootScopeSchema,type CloudAgentBootScope} from "./agent-boot-contract.js";
 import { CloudRuntimeAdmissionError, type CloudRuntimeAdmissionPhase } from "./runtime-admission-errors.js";
 import type { CapabilityClaims } from "./capability-contract.js";
@@ -236,10 +236,8 @@ export class DatabaseCloudWorkspaceActorSessionService {
     }
   }
   private async directBootScope(tx:Tx,grant:z.infer<typeof actorGrantSchema>,authority:CloudEngineRelayGrant):Promise<CloudAgentBootScope|null> {
-    const current=await readCurrentCloudAgentBootBinding(tx,{organizationId:grant.organizationId,workspaceId:grant.workspaceId});
-    if(current.mode==="legacy")return null;
-    if(current.binding.writerState!=="active"||current.binding.generation!==authority.generation||current.binding.engineInstanceId!==authority.engineInstanceId)rejected();
-    return CloudAgentBootScopeSchema.parse(Object.fromEntries(Object.keys(CloudAgentBootScopeSchema.shape).map(field=>[field,current.binding[field as keyof typeof current.binding]])));
+    return readActiveCloudAgentBootScope(tx,{organizationId:grant.organizationId,workspaceId:grant.workspaceId,
+      generation:authority.generation,engineInstanceId:authority.engineInstanceId},rejected);
   }
 
   /** Admits a client that authenticated to this engine with its S1

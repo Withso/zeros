@@ -214,6 +214,8 @@ describe("device stream server", () => {
   let flags: Record<RolloutFlagName, boolean>;
   /** Organizations for which `flags` are on. */
   let flaggedOrganizations: Set<string>;
+  let flagOverrides: Map<string, Partial<Record<RolloutFlagName, boolean>>>;
+  let flagFeedCurrent: boolean;
   let subscriber: SecurityEventSubscriber | null;
   const flagListeners = new Set<() => void>();
   const peers: Peer[] = [];
@@ -228,8 +230,9 @@ describe("device stream server", () => {
     server = new DeviceStreamServer({
       authority, catalog,
       flags: {
-        enabled: (orgId, flag) => flaggedOrganizations.has(orgId) && flags[flag],
+        enabled: (orgId, flag) => flaggedOrganizations.has(orgId) && (flagOverrides.get(orgId)?.[flag] ?? flags[flag]),
         anyEnabled: flag => flaggedOrganizations.size > 0 && flags[flag],
+        feedCurrent: () => flagFeedCurrent,
         onChange: listener => { flagListeners.add(listener); return () => { flagListeners.delete(listener); }; },
       },
       securityEvents: { subscribe: value => { subscriber = value; return () => { subscriber = null; }; } },
@@ -273,6 +276,8 @@ describe("device stream server", () => {
     catalog = new FakeCatalog();
     organizationId = randomUUID();
     flaggedOrganizations = new Set([organizationId]);
+    flagOverrides = new Map();
+    flagFeedCurrent = true;
     catalog.defaultOrganizations = [organizationId];
     subscriber = null;
     flags = { device_stream: true, presence_in_memory: true, authority_cache_shadow: false, authority_cache_enforce: false,
@@ -310,6 +315,219 @@ describe("device stream server", () => {
     await reuse.opened;
     reuse.send({ t: "hello", d: { contract: { min: 1, max: 1 }, ticket } });
     expect(await reuse.closed).toEqual({ code: 4401, reason: "unauthenticated" });
+  });
+
+  it("ready_covers_only_authorized_organizations_with_current_flags", async () => {
+    const other = randomUUID(), disabled = randomUUID(), foreign = randomUUID();
+    const who = principal();
+    catalog.organizations.set(who.accountUserId, [organizationId, other, disabled]);
+    flaggedOrganizations.add(other);
+    flaggedOrganizations.add(foreign);
+    flagOverrides.set(other, { presence_in_memory: false });
+    await start();
+    const { ready } = await connect(who);
+    expect(ready.d.organizationFeatures).toEqual([
+      { organizationId, deviceStream: true, presence: true },
+      { organizationId: other, deviceStream: true, presence: false },
+      { organizationId: disabled, deviceStream: false, presence: false },
+    ].sort((a, b) => a.organizationId.localeCompare(b.organizationId)));
+  });
+
+  it("a stale flag feed supplies no positive organization coverage", async () => {
+    flagFeedCurrent = false;
+    await start();
+    const { ready } = await connect(principal());
+    expect(ready.d.organizationFeatures).toEqual([]);
+  });
+
+  it("disable_org_a_while_org_b_stays_enabled_invalidates_coverage", async () => {
+    const other = randomUUID(), mixed = principal(), onlyOther = principal();
+    flaggedOrganizations.add(other);
+    catalog.organizations.set(mixed.accountUserId, [organizationId, other]);
+    catalog.organizations.set(onlyOther.accountUserId, [other]);
+    await start();
+    const a = await connect(mixed), b = await connect(onlyOther);
+    flaggedOrganizations.delete(organizationId);
+    for (const listener of flagListeners) listener();
+    expect((await a.peer.next("drain")).d).toMatchObject({ reconnectAfterMs: expect.any(Number) });
+    expect((await a.peer.closed).code).toBe(4503);
+    b.peer.send({ t: "ping", d: { ts: 123 } });
+    expect((await b.peer.next("pong")).d).toEqual({ ts: 123 });
+    expect(b.peer.frames).toEqual([]);
+    const fresh = await connect(mixed, { cursor: String(a.ready.d.cursor) });
+    expect(fresh.ready.d.organizationFeatures).toContainEqual({ organizationId, deviceStream: false, presence: false });
+    expect(fresh.ready.d.organizationFeatures).toContainEqual({ organizationId: other, deviceStream: true, presence: true });
+  });
+
+  it.each([false, true])("resumed_stream_rechecks_membership_and_flags_before_ready: resumed=%s", async resume => {
+    const other = randomUUID(), who = principal();
+    flaggedOrganizations.add(other);
+    catalog.organizations.set(who.accountUserId, [organizationId, other]);
+    await start();
+    let cursor: string | undefined;
+    if (resume) {
+      const first = await connect(who);
+      cursor = String(first.ready.d.cursor);
+      first.peer.ws.terminate();
+      await until(() => server.size === 0);
+    }
+    const read = catalog.read.bind(catalog);
+    let release: (() => void) | undefined;
+    vi.spyOn(catalog, "read").mockImplementationOnce(async (account, ids) => {
+      const snapshot = await read(account, ids);
+      await new Promise<void>(resolve => { release = resolve; });
+      return snapshot;
+    });
+    const opening = connect(who, cursor ? { cursor } : undefined);
+    await until(() => release !== undefined);
+    // A membership hint and a flag change arrive while the initial snapshot
+    // is in flight. Neither a parked set nor that older read proves coverage.
+    catalog.organizations.set(who.accountUserId, [other]);
+    flagOverrides.set(other, { presence_in_memory: false });
+    subscriber!.events([event("organization.access_revoked", { userId: who.accountUserId, organizationId })]);
+    for (const listener of flagListeners) listener();
+    release?.();
+    const { ready } = await opening;
+    expect(ready.d.organizationFeatures).toEqual([{ organizationId: other, deviceStream: true, presence: false }]);
+    expect(release).toBeTypeOf("function");
+  });
+
+  it("membership coverage changes drain only the affected connection", async () => {
+    const other = randomUUID(), mixed = principal(), bystander = principal();
+    flaggedOrganizations.add(other);
+    catalog.organizations.set(mixed.accountUserId, [organizationId, other]);
+    await start();
+    const a = await connect(mixed), b = await connect(bystander);
+    catalog.organizations.set(mixed.accountUserId, [other]);
+    subscriber!.events([event("organization.access_revoked", { userId: mixed.accountUserId, organizationId })]);
+    await a.peer.next("drain");
+    expect((await a.peer.closed).code).toBe(4503);
+    b.peer.send({ t: "ping", d: { ts: 456 } });
+    expect((await b.peer.next("pong")).d).toEqual({ ts: 456 });
+    expect(b.peer.frames).toEqual([]);
+  });
+
+  it("presence and flag-feed changes invalidate coverage, while unrelated flags do not", async () => {
+    await start();
+    const who = principal(), first = await connect(who);
+    flags.runtime_connect = true;
+    for (const listener of flagListeners) listener();
+    first.peer.send({ t: "ping", d: { ts: 1 } });
+    await first.peer.next("pong");
+    expect(first.peer.frames).toEqual([]);
+    flags.presence_in_memory = false;
+    for (const listener of flagListeners) listener();
+    await first.peer.next("drain");
+    const second = await connect(who, { cursor: String(first.ready.d.cursor) });
+    expect(second.ready.d.organizationFeatures).toEqual([{ organizationId, deviceStream: true, presence: false }]);
+    flagFeedCurrent = false;
+    for (const listener of flagListeners) listener();
+    await second.peer.next("drain");
+    const third = await connect(who, { cursor: String(second.ready.d.cursor) });
+    expect(third.ready.d.organizationFeatures).toEqual([]);
+  });
+
+  it("bounds organization coverage and leaves omitted organizations unproven", async () => {
+    const who = principal();
+    const organizations = Array.from({ length: 1_002 }, () => randomUUID());
+    for (const id of organizations) flaggedOrganizations.add(id);
+    catalog.organizations.set(who.accountUserId, organizations);
+    await start();
+    const { ready } = await connect(who);
+    expect(ready.d.organizationFeatures).toEqual([...organizations].sort().slice(0, 1_000)
+      .map(organizationId => ({ organizationId, deviceStream: true, presence: true })));
+  });
+
+  it("a revoked device session cannot finish a pending coverage read", async () => {
+    await start();
+    const who = principal(), read = catalog.read.bind(catalog);
+    let release: (() => void) | undefined;
+    vi.spyOn(catalog, "read").mockImplementationOnce(async (account, ids) => {
+      const snapshot = await read(account, ids);
+      await new Promise<void>(resolve => { release = resolve; });
+      return snapshot;
+    });
+    const opening = refusedHello(who);
+    await until(() => release !== undefined);
+    authority.states.set(who.deviceSessionId, "session");
+    subscriber!.events([event("session.revoked", { userId: who.accountUserId, providerSessionId: who.providerSessionId })]);
+    release!();
+    const result = await opening;
+    expect(result.closed?.code).toBe(4401);
+    expect(result.frames).not.toContain("ready");
+  });
+
+  it("bounds handshake retries when access changes throughout every read", async () => {
+    await start();
+    const who = principal(), read = catalog.read.bind(catalog);
+    vi.spyOn(catalog, "read").mockImplementation(async (account, ids) => {
+      const snapshot = await read(account, ids);
+      subscriber!.events([event("organization.access_revoked", { userId: account, organizationId })]);
+      return snapshot;
+    });
+    const result = await refusedHello(who);
+    expect(result.closed?.code).toBe(4503);
+    expect(result.frames).not.toContain("ready");
+    expect(catalog.reads).toBe(3);
+  });
+
+  it("unrelated account changes do not restart a handshake's membership read", async () => {
+    await start();
+    const who = principal(), unrelated = principal(), read = catalog.read.bind(catalog);
+    vi.spyOn(catalog, "read").mockImplementation(async (account, ids) => {
+      const snapshot = await read(account, ids);
+      subscriber!.events([event("organization.access_revoked", { userId: unrelated.accountUserId, organizationId })]);
+      return snapshot;
+    });
+    const { ready } = await connect(who);
+    expect(ready.d.organizationFeatures).toEqual([{ organizationId, deviceStream: true, presence: true }]);
+    expect(server.counters.admitted).toBe(1);
+  });
+
+  it("does not replay buffered documents or notifications after access was lost while parked", async () => {
+    await start();
+    const who = principal(), held = workspace(organizationId);
+    catalog.grant(who.accountUserId, held);
+    const first = await connect(who);
+    catalog.update(held.id, {});
+    server.workspaceChanged(held.id);
+    await first.peer.next("catalog.changed");
+    first.peer.ws.terminate();
+    await until(() => server.size === 0);
+    server.publishNotification({ id: randomUUID(), kind: "turn.failed", workspaceId: held.id,
+      title: "Failed", createdAt: new Date().toISOString() });
+    catalog.revoke(who.accountUserId, held.id);
+    const second = await connect(who, { cursor: String(first.ready.d.cursor) });
+    const frames = await second.peer.drainFrames();
+    expect(frames.map(frame => [frame.t, frame.d.op])).toEqual([
+      ["capability.revoked", undefined], ["catalog.changed", "remove"],
+    ]);
+  });
+
+  it("a pending resume snapshot cannot remove a workspace learned during its read", async () => {
+    await start();
+    const who = principal(), held = workspace(organizationId), added = workspace(organizationId);
+    catalog.grant(who.accountUserId, held);
+    const first = await connect(who);
+    await until(() => catalog.reads >= 2);
+    const read = catalog.read.bind(catalog);
+    let release: (() => void) | undefined;
+    vi.spyOn(catalog, "read").mockImplementationOnce(async (account, ids) => {
+      const snapshot = await read(account, ids);
+      await new Promise<void>(resolve => { release = resolve; });
+      return snapshot;
+    });
+    const opening = connect(who, { cursor: String(first.ready.d.cursor) });
+    await until(() => release !== undefined);
+    catalog.grant(who.accountUserId, added);
+    server.workspaceChanged(added.id);
+    expect((await first.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: added.id, op: "upsert" });
+    release!();
+    const second = await opening;
+    const frames = await second.peer.drainFrames();
+    expect(frames.some(frame => frame.t === "capability.revoked" && frame.d.workspaceId === added.id)).toBe(false);
+    expect(frames.some(frame => frame.t === "catalog.changed" && frame.d.op === "remove" && frame.d.workspaceId === added.id)).toBe(false);
+    expect(frames.some(frame => frame.t === "catalog.changed" && frame.d.op === "upsert" && frame.d.workspaceId === added.id)).toBe(true);
   });
 
   it("closes 4426 without a common contract, 4408 without a hello, 4400 for a non-hello first frame", async () => {
@@ -433,6 +651,9 @@ describe("device stream server", () => {
     const member = principal(), stranger = principal(), held = workspace(organizationId), other = workspace(organizationId);
     catalog.grant(member.accountUserId, held);
     catalog.grant(member.accountUserId, other);
+    const strangerOrganization = randomUUID();
+    flaggedOrganizations.add(strangerOrganization);
+    catalog.organizations.set(stranger.accountUserId, [strangerOrganization]);
     const m = await connect(member), s = await connect(stranger);
     await Promise.all([m.peer.drainFrames(), s.peer.drainFrames()]);
     vi.spyOn(catalog, "candidates").mockResolvedValue(new Set<string>());
@@ -445,6 +666,23 @@ describe("device stream server", () => {
     subscriber!.events([event("organization.authorization_changed", { organizationId })]);
     expect((await m.peer.next("catalog.changed")).d).toMatchObject({ workspaceId: other.id, op: "remove" });
     expect(reads.mock.calls.filter(([account]) => account === stranger.accountUserId)).toEqual([]);
+  });
+
+  it("invalidates advertised organization coverage even without a retained workspace in that organization", async () => {
+    await start();
+    const member = principal(), otherOrganization = randomUUID();
+    flaggedOrganizations.add(otherOrganization);
+    catalog.organizations.set(member.accountUserId, [organizationId, otherOrganization]);
+    const { peer, ready } = await connect(member);
+    await peer.drainFrames();
+    expect(ready.d.organizationFeatures).toEqual(expect.arrayContaining([{ organizationId, deviceStream: true, presence: true }]));
+    // A removed member/guest is absent from the current candidate lookup. A
+    // bounded catalog may also have retained no workspace from that owner.
+    vi.spyOn(catalog, "organizationAccounts").mockResolvedValue(new Set<string>());
+    catalog.organizations.set(member.accountUserId, [otherOrganization]);
+    subscriber!.events([event("organization.authorization_changed", { organizationId })]);
+    await peer.next("drain");
+    expect((await peer.closed).code).toBe(DEVICE_STREAM_CLOSE.draining);
   });
 
   it("never applies to a device session a re-read that started before its own baseline read", async () => {
