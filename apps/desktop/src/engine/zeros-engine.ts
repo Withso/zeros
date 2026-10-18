@@ -238,6 +238,16 @@ import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "./agents/conta
 import { CloudActionRuntime, type CloudActionDeliveryGuard } from "./cloud-action-runtime";
 import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
+import { CloudEngineUplinkClient, sanitizeCredAckCode, type EngineUplinkActivity, type EngineUplinkReadiness } from "./cloud-engine-uplink";
+import {
+  EngineCapabilityAuth,
+  capabilitySessionClose,
+  fileCapabilityAuthStore,
+  jwksFetcher,
+  type CapabilityActorAdmission,
+  type CapabilityRoute,
+  type EngineClientAuth,
+} from "./cloud-capability-auth";
 import { CloudEventRuntime } from "./cloud-event-runtime";
 import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome, type CloudAgentHistoryRestoreMetadata,
@@ -356,6 +366,7 @@ import {
   CloudClientAuthorityTransientError,
   consumeCloudRuntimeEnvironment,
   type CloudCheckpointDirective,
+  type CloudRuntimeClientAdmission,
   type CloudRuntimeConfig,
 } from "./cloud-runtime-registration";
 import {
@@ -1235,6 +1246,10 @@ export class ZerosEngine {
   private localCatalogBindingEpoch?: number;
   private readonly cloudRuntimeConfig: CloudRuntimeConfig | null;
   private readonly cloudRuntimeRegistration: CloudRuntimeRegistration | null;
+  /** S2 uplink client; null on Local placements and whenever the control
+   * plane did not advertise an endpoint (rollout flag off or older CP). */
+  private cloudEngineUplink: CloudEngineUplinkClient | null = null;
+  private cloudCapabilityAuth: EngineCapabilityAuth | null = null;
   private readonly cloudDurabilityRuntime: CloudWorkspaceDurabilityRuntime | null;
   private readonly cloudRecordRuntime: CloudWorkspaceRecordRuntime | null;
   private readonly cloudCheckpointScheduler: CloudCheckpointScheduler | null;
@@ -1310,6 +1325,8 @@ export class ZerosEngine {
   private cloudFinalCheckpointReconciliationTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly cloudIdleStop = new CloudIdleStopScheduler({
     busy: () => this.cloudIdleBusy(),
+    delegated: () => this.cloudEngineUplink?.idleActive === true,
+    changed: () => this.cloudEngineUplink?.reportActivity(),
     retireIdleWorkloads: async () => {
       await this.retireObservedIdleCloudBootAgents();
       await this.retireObservedLegacyResident();
@@ -1388,6 +1405,9 @@ export class ZerosEngine {
   private actualPort = 0;
   private framework: Framework = "unknown";
   private running = false;
+  /** Set once stop() begins tearing a running engine down; the uplink then
+   * reports `stopping` rather than `starting`. */
+  private engineStopping = false;
 
   constructor(options?: EngineOptions) {
     this.cloudRuntimeConfig = consumeCloudRuntimeEnvironment();
@@ -2205,7 +2225,7 @@ export class ZerosEngine {
           },
           onDurableRecordConnected: () => this.cloudCommands?.wakePending(),
           onCheckpointRequested: (directive, authority) =>
-            this.handleCloudCheckpointRequest(directive, authority),
+            this.routeCloudCheckpointRequest(directive, authority),
           readRepositoryCredentialRefresh: () =>
             readCloudGithubCredentialRefreshRequest(),
           installRepositoryCredential: (document) => {
@@ -2294,6 +2314,8 @@ export class ZerosEngine {
               },
               verifyToken: (token: string) => this.verifyCloudActorClient(token),
               renewToken: (token: string) => this.verifyCloudActorClient(token, true),
+              // S3 Part 3 direct route; null until an advertised uplink starts the verifier.
+              capabilityAuth: () => this.cloudCapabilityAuth,
               verifyServiceAccess: (token: string) => this.cloudRuntimeCheckpointQuiescing || this.cloudLegacyResidentRequiresFreshView
                 ? Promise.resolve(null) : this.cloudRuntimeRegistration!.verifyServiceAccess(token),
               resolveAgentPreviewTarget: (target) => this.agents.resolveNativePreviewTarget(target),
@@ -3601,10 +3623,12 @@ export class ZerosEngine {
       if (t !== this.local) await t.start();
     }
 
+    this.engineStopping = false;
     this.running = true;
     try {
       this.cloudStartupPhase = "registration";
       await this.cloudRuntimeRegistration?.start();
+      this.startCloudEngineUplink();
       this.cloudEvents?.start();
       await this.initializeCloudAgentBoot();
     } catch (error) {
@@ -3697,6 +3721,10 @@ export class ZerosEngine {
       return;
     }
     this.running = false;
+    this.engineStopping = true;
+    // The CP records the not-ready transition before the uplink closes
+    // (the uplink itself is stopped a few steps below).
+    this.cloudEngineUplink?.reportReadiness();
     if (this.localOrchestration) {
       this.localOrchestration.registry.clear();
       await settle(() => this.localOrchestration?.server.stop());
@@ -3726,6 +3754,11 @@ export class ZerosEngine {
       setDesignCaptureConfig(undefined);
       await settle(() => captureService.stop());
     }
+    const cloudEngineUplink = this.cloudEngineUplink;
+    this.cloudEngineUplink = null;
+    if (cloudEngineUplink) await settle(() => cloudEngineUplink.stop());
+    this.cloudCapabilityAuth?.stop();
+    this.cloudCapabilityAuth = null;
     if (this.cloudRuntimeRegistration && !this.cloudLegacyResidentRequiresFreshView) {
       await settle(() => this.cloudRuntimeRegistration!.stop());
     }
@@ -3829,6 +3862,125 @@ export class ZerosEngine {
     if (failures.length > 0) {
       throw new AggregateError(failures, "Zeros engine teardown failed");
     }
+  }
+
+  private cloudEngineUplinkReadiness(): EngineUplinkReadiness {
+    return { ready: this.running, phase: this.running ? "ready" : this.engineStopping ? "stopping" : "starting" };
+  }
+
+  /** `activity.report`: counts the control plane can read, plus the
+   * scheduler's own quiet time, which already folds in every busy guard. */
+  private cloudEngineUplinkActivity(): EngineUplinkActivity {
+    return {
+      clients: this.cloudUserPresence.count(),
+      runningTurns: this.activeAgentExecutionCount() + this.activePromptContexts.size,
+      liveTerminals: (this.pty.hasRecentInput() ? 1 : 0) + (this.residentTerminals?.hasRecentInput() === true ? 1 : 0),
+      windowMs: this.cloudIdleStop.readActivity().quietForMs,
+    };
+  }
+
+  /** S2 engine uplink (contracts/s2-uplink.md): cloud placements only, and
+   * only when the control plane advertised an endpoint to this opted-in
+   * engine (the organization's `realtime_uplink` rollout flag was on at
+   * registration). The uplink carries push traffic and presence, renews the
+   * engine lease when `lease.v1` is negotiated (the HTTP heartbeat stays the
+   * fallback renewal), and parks without redialing when the control plane
+   * definitively refuses it. */
+  private startCloudEngineUplink(): void {
+    const registration = this.cloudRuntimeRegistration;
+    const config = this.cloudRuntimeConfig;
+    if (!registration || !config) return;
+    const advertised = registration.engineUplink();
+    if (!advertised) return;
+    // The durable S1 verifier state. An advertised uplink means the
+    // organization's realtime_uplink flag, which requires capabilities.
+    const capabilityAuth = new EngineCapabilityAuth({
+      identity: {
+        workspaceId: config.execution.workspaceId,
+        organizationId: config.execution.organizationId,
+        generation: config.execution.generation,
+        engineInstanceId: config.engine.instanceId,
+      },
+      issuer: advertised.controlPlaneOrigin,
+      store: fileCapabilityAuthStore(path.join(engineRuntimeDir(this.root), "cloud-capability-auth.json")),
+      fetchKeys: jwksFetcher(advertised.controlPlaneOrigin),
+      requestEngineCapability: () => registration.requestEngineCapability(),
+      admitActor: (client, route) => this.admitCloudCapabilityActor(client, route),
+      onSessionsClosed: closures => this.cloud?.closeCapabilitySessions(closures.map(capabilitySessionClose)),
+    });
+    this.cloudCapabilityAuth = capabilityAuth;
+    const uplink = new CloudEngineUplinkClient({
+      endpoint: advertised.endpoint,
+      token: advertised.token,
+      identity: {
+        workspaceId: config.execution.workspaceId,
+        organizationId: config.execution.organizationId,
+        generation: config.execution.generation,
+        engineInstanceId: config.engine.instanceId,
+        bootId: registration.runtimeBootId,
+      },
+      runtimeVersion: VERSION,
+      auth: capabilityAuth,
+      readiness: () => this.cloudEngineUplinkReadiness(),
+      activity: () => this.cloudEngineUplinkActivity(),
+      features: ["cred.v1", "lease.v1", "checkpoint.v1", "idle.v1", "turns.v1"],
+      // Credential-control push (P0.10 C01): a pushed revision runs the same
+      // credential-controls exchange the 500 ms poll runs; the poll itself
+      // stays as the fallback (see controlsPollIntervalMs at the boot).
+      onCredentialRevision: async () => {
+        // Only agent-controls reaches here: the uplink acks any other kind
+        // failed/cred_kind_unsupported before calling this handler.
+        const boot = this.cloudAgentBoot;
+        if (!boot) return { result: "applied" as const }; // pre-boot: the activation exchange converges
+        try {
+          // A fresh exchange, never a flight that predates the bump (C3
+          // review SHOULD-3: joining a stale flight acks applied falsely).
+          await boot.refreshCredentialControls();
+          return { result: "applied" as const };
+        } catch (error) {
+          // error.code can be ECONNRESET, a number or arbitrarily long —
+          // none are contract codes; non-conforming values map to
+          // cred_fetch_failed so the CP never 4400s us into a re-push loop.
+          return { result: "failed" as const,
+            code: sanitizeCredAckCode(error && typeof error === "object" && "code" in error ? error.code : undefined) };
+        }
+      },
+      // The moment the gate closes (or never negotiates the push), the
+      // credential poll returns to its fast fallback cadence instead of
+      // waiting out an armed 30 s timer.
+      onEstablishedChange: established => {
+        capabilityAuth.uplinkEstablished(established);
+        if (!established) this.cloudAgentBoot?.rescheduleControls();
+      },
+      onLease: (leaseExpiresAtMs, sentAtMs) => registration.adoptUplinkLease(leaseExpiresAtMs, sentAtMs),
+      // The boot's journal reads stay valid through the final drain; before
+      // activation they read empty and the activation note sends them.
+      turns: {
+        read: (afterSeq, limit) => this.cloudAgentBoot?.turnJournal?.turnJournal(afterSeq, limit) ?? [],
+        acked: () => this.cloudAgentBoot?.turnJournal?.turnJournalAcked() ?? 0,
+        ack: journalSeq => this.cloudAgentBoot?.turnJournal?.acknowledgeTurnJournal(journalSeq),
+      },
+      onCheckpointRequest: () => registration.checkpointRequested(),
+      onCheckpointPushChange: () => registration.uplinkCheckpointPushChanged(),
+      onReverifyAuthority: () => registration.requestHeartbeatSoon(),
+      onParked: reason => {
+        console.info(`[engine-uplink] uplink parked (${reason}); the HTTP heartbeat continues`);
+        // A refused credential or identity may mean lost authority: verify it
+        // over HTTP now rather than on the next beat the lease would allow.
+        if (reason === "unauthenticated" || reason === "forbidden") registration.requestHeartbeatSoon();
+      },
+      // No engine metrics pipeline exists yet; the durations are per-connect
+      // and per-sync rarities, so the uplink log channel carries them.
+      metric: (name, valueMs) => console.info(`[engine-uplink] metric ${name}=${Math.round(valueMs)}ms`),
+    });
+    this.cloudEngineUplink = uplink;
+    registration.attachUplinkLease(() => this.cloudEngineUplink === uplink && uplink.leaseActive);
+    registration.attachUplinkCheckpointPush(() => this.cloudEngineUplink === uplink && uplink.checkpointPushActive);
+    // The hello offers the last durable cursor; an unreadable file starts
+    // from a complete snapshot.
+    void capabilityAuth.restore().catch(() => undefined).then(() => {
+      if (this.cloudEngineUplink === uplink) uplink.start();
+    });
   }
 
   private handleCloudRuntimeAuthorityLoss(): void {
@@ -4114,7 +4266,7 @@ export class ZerosEngine {
     return hasCloudUserProcesses({inspect:()=>this.cloudWorkloads!.inspect()});
   }
 
-  private async stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void> {
+  private async stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean, delegated?: CloudCheckpointDirective): Promise<void> {
     const runtime = this.cloudRuntimeRegistration;
     if (!runtime || this.cloudRuntimeCheckpointQuiescing || this.cloudRuntimeHandoffFenced || !stillIdle()) return;
     this.cloudRuntimeCheckpointQuiescing = true;
@@ -4138,7 +4290,7 @@ export class ZerosEngine {
         await this.joinCloudPreservedWorkloads(this.cloudWorkloadIdleFence, this.cloudResidentIdleFence);
       }
       if (!stillIdle() || await this.cloudIdleUserProcesses() || !stillIdle()) return;
-      const directive = await runtime.idleStopRequest({ kind: "request", attemptId: randomUUID() });
+      const directive = delegated ?? await runtime.idleStopRequest({ kind: "request", attemptId: randomUUID() });
       if (!directive) return;
       await this.handleCloudCheckpointRequest(directive, authority);
     } finally {
@@ -4147,6 +4299,21 @@ export class ZerosEngine {
         await this.resumeCloudCheckpointAdmission();
       }
     }
+  }
+
+  /** `idle.v1`: an idle directive the control plane created runs the
+   * engine's own idle preparation; one the engine cannot prove idle is
+   * cancelled (`workspace_active`). Everything else, including every idle
+   * directive once the uplink is gone, keeps today's path. */
+  private routeCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void> {
+    if (!directive.idleStop || this.cloudIdleReservation !== null || this.cloudIdleCheckpoint?.id === directive.id ||
+        this.cloudEngineUplink?.idleActive !== true) return this.handleCloudCheckpointRequest(directive, authority);
+    return this.cloudIdleStop.delegate(async stillIdle => {
+      await this.stopIdleCloudWorkspace(authority, stillIdle, directive);
+      return this.cloudRuntimeCheckpointQuiescing && this.cloudIdleReservation === null;
+    }).then(async completed => {
+      if (!completed) await this.cloudRuntimeRegistration?.idleStopRequest({ kind: "cancel", requestId: directive.id }).catch(() => undefined);
+    });
   }
 
   private handleCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void> {
@@ -4585,6 +4752,14 @@ export class ZerosEngine {
         generation: config.execution.generation, engineInstanceId: config.engine.instanceId },
       supervisor: { onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss() },
       engineLive: () => this.running && !this.cloudRuntimeAuthorityStopping,
+      // While the uplink's gate is open, cred.revision pushes carry control
+      // changes and the poll drops to a 30 s safety net; any uplink loss
+      // returns it to the 500 ms fallback cadence.
+      controlsPollIntervalMs: () => (this.cloudEngineUplink?.established ? 30_000 : 500),
+      // A successful poll clears the uplink's failed-push mark, so a
+      // transient push failure recovers the slow cadence after one poll.
+      controlsExchange: ok => { if (ok) this.cloudEngineUplink?.noteCredentialExchangeSucceeded(); },
+      turnJournalChanged: () => this.cloudEngineUplink?.noteTurnJournal(),
       startsAllowed: () => !this.cloudRuntimeHandoffFenced && !this.cloudRuntimeCheckpointQuiescing && !this.cloudLegacyResidentRequiresFreshView,
       isAdmittedCwd: cwd => {
         try {
@@ -4982,7 +5157,13 @@ export class ZerosEngine {
     } catch { return null; }
   }
 
-  private async verifyCloudActorClient(token: string, renew = false) {
+  /** Redeems a client's credential behind this engine's admission gates: a
+   * grant token (renewed with `renew`), or the control plane's admission of
+   * a verified capability's actor. */
+  private async verifyCloudActorClient(
+    credential: string | ((registration: CloudRuntimeRegistration) => Promise<CloudRuntimeClientAdmission | null>),
+    renew = false,
+  ) {
     if (this.cloudLegacyResidentRequiresFreshView) return null;
     const registration = this.cloudRuntimeRegistration;
     if (!registration) return null;
@@ -4995,7 +5176,8 @@ export class ZerosEngine {
       if (registration !== this.cloudRuntimeRegistration || boot !== this.cloudAgentBoot || !boot.active ||
           !this.cloudLocalEvents || this.cloudRuntimeAuthorityStopping) return null;
     }
-    const admission = await registration.verifyClientAdmission(token, renew);
+    const admission = typeof credential === "string"
+      ? await registration.verifyClientAdmission(credential, renew) : await credential(registration);
     if (!admission || registration !== this.cloudRuntimeRegistration) return null;
     if (registration.localCommandsNegotiated()) {
       if (!boot || boot !== this.cloudAgentBoot || !boot.active || this.cloudRuntimeAuthorityStopping) return null;
@@ -5010,6 +5192,29 @@ export class ZerosEngine {
           this.cloudRuntimeAuthorityStopping) return null;
     }
     return admission;
+  }
+
+  /** S3 Part 3 direct route: the control plane admits the actor of a
+   * capability this engine verified, behind the same gates as a redeemed
+   * grant. Only the control plane refuses (null, a 4403 close); anything
+   * this engine cannot answer yet is transient, so the client retries. */
+  private async admitCloudCapabilityActor(client: EngineClientAuth, route: CapabilityRoute): Promise<CapabilityActorAdmission | null> {
+    const outcome: { admitted?: CapabilityActorAdmission; refused?: true } = {};
+    let admission: CloudRuntimeClientAdmission | null;
+    try {
+      admission = await this.verifyCloudActorClient(async registration => {
+        const admitted = await registration.admitCapabilityClient(client, route);
+        if (admitted) outcome.admitted = admitted;
+        else outcome.refused = true;
+        return admitted?.admission ?? null;
+      });
+    } catch (error) {
+      if (isTransientCloudAgentAuthorityError(error)) throw new CloudClientAuthorityTransientError();
+      throw error;
+    }
+    if (admission && outcome.admitted) return outcome.admitted;
+    if (outcome.refused) return null;
+    throw new CloudClientAuthorityTransientError();
   }
 
   private async handleCloudCommandOperation(op: string, params: Record<string, unknown>,client:TransportClient): Promise<unknown> {

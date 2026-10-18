@@ -4,6 +4,7 @@ import { z } from "zod";
 import { CloudCommandError, CloudCommandRequestSchema, CloudLocalCommandMirrorBatchSchema, CloudLocalCommandWriterSealSchema, legacyCloudCommandResponse, withoutCloudClaudePreferences, type DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import { HttpError } from "../authz.js";
+import { checkEngineCapability, ENGINE_CAPABILITY_HEADER, type EngineCapabilityGate } from "./capability-service-verifier.js";
 
 export const CLOUD_COMMAND_PATH = "/internal/v1/cloud-workspaces/engine/commands";
 export const CLOUD_COMMAND_MIRROR_PATH = "/internal/v2/cloud-workspaces/engine/commands/mirror";
@@ -21,7 +22,8 @@ const bodySchema = z.object({
 
 /** No browser bearer or provider key grants queue authority. Every operation
  * rechecks the live engine, workspace, organization and execution fence. */
-export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandService): Hono {
+export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandService,
+  options: { capabilities?: EngineCapabilityGate } = {}): Hono {
   const routes = new Hono();
   routes.use(CLOUD_COMMAND_SEAL_PATH, bodyLimit({ maxSize: 16 * 1024 }));
   routes.post(CLOUD_COMMAND_SEAL_PATH, async c => {
@@ -33,7 +35,11 @@ export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandS
     const parsed = sealBodySchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: "invalid_command" }, 422);
     const { seal, ...scope } = parsed.data;
-    try { return c.json({ result: await service.seal({ ...scope, heartbeatToken: token }, seal) }); }
+    try {
+      const denied = await checkEngineCapability(options.capabilities, c.req.header(ENGINE_CAPABILITY_HEADER), scope, "engine:history.write");
+      if (denied) return c.json({ error: denied.code }, denied.status);
+      return c.json({ result: await service.seal({ ...scope, heartbeatToken: token }, seal) });
+    }
     catch (error) {
       if (error instanceof CloudWorkspaceEngineAuthorityError) return c.json({ error: "engine_authority_rejected" }, 401);
       if (error instanceof CloudCommandError) return c.json({ error: error.code },
@@ -53,7 +59,11 @@ export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandS
     const parsed = mirrorBodySchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: "invalid_command" }, 422);
     const { batch, ...scope } = parsed.data;
-    try { return c.json({ result: await service.mirror({ ...scope, heartbeatToken: token }, batch) }); }
+    try {
+      const denied = await checkEngineCapability(options.capabilities, c.req.header(ENGINE_CAPABILITY_HEADER), scope, "engine:history.write");
+      if (denied) return c.json({ error: denied.code }, denied.status);
+      return c.json({ result: await service.mirror({ ...scope, heartbeatToken: token }, batch) });
+    }
     catch (error) {
       if (error instanceof CloudWorkspaceEngineAuthorityError) return c.json({ error: "engine_authority_rejected" }, 401);
       if (error instanceof CloudCommandError) return c.json({ error: error.code },

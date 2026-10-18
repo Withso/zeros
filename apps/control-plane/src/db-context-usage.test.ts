@@ -16,6 +16,8 @@ const ALLOWED: Record<string, string> = {
   "src/db.ts#withSystemStatement": "The helper itself: sets the system RLS context on the acquired client.",
   "src/db.ts#withSystemTx": "The helper itself: sets the system RLS context on the acquired client.",
   "src/app.ts#createApp": "Health and readiness probes run SELECT 1 only.",
+  "src/chaos/fault-pool.ts#faultInjectingPool":
+    "Chaos tests only: forwards connect and query to the wrapped pool unchanged, so the context helpers still run.",
   "src/postgres-notifications.ts#acquire": "Dedicated LISTEN session; it issues only LISTEN/UNLISTEN.",
   "src/workos-provider-locks.ts#connectBeforeDeadline": "Session holder for WorkOS advisory locks; it never reads tables.",
   "src/cloud-workspaces/computer-retirement.ts#retire":
@@ -34,6 +36,7 @@ const ALLOWED: Record<string, string> = {
   "src/dev-connections/quarantine.ts#quarantineRestoredConnections":
     "Separate dev_connections database; sets its own broker authority per transaction.",
   "src/dev-connections/store.ts#tx": "Separate dev_connections database; sets role and broker authority per transaction.",
+  "src/load-sim/harness.ts#createSimulator": "Load simulator LISTEN client on a scratch database.",
   "src/load-sim/server-stats.ts#open": "Load simulator statistics setup on a scratch database.",
   "src/load-sim/server-stats.ts#transactions": "Load simulator reads pg_stat views only.",
   "src/load-sim/server-stats.ts#begin": "Load simulator resets and reads pg_stat views only.",
@@ -45,12 +48,16 @@ const ALLOWED: Record<string, string> = {
   // table access, on the pool the operator supplies.
   "src/manage-account-pro.ts#manageAccountPro": "Operator CLI; sets app.system in its own transaction.",
   "src/manage-cloud-agent-runtime.ts#manageCloudAgentRuntime": "Operator CLI; sets app.system in its own transaction.",
+  "src/manage-cloud-capability-key.ts#manageCloudCapabilityKey":
+    "Operator CLI on the migration-owner pool; sets app.system in its own transaction.",
   "src/manage-cloud-computer-snapshots.ts#manageCloudComputerSnapshots":
     "Operator CLI; sets app.system in its own transaction.",
   "src/manage-cloud-provider-absence.ts#manageCloudProviderAbsence":
     "Operator CLI; beginProviderAttestation sets app.system in its own transaction.",
   "src/manage-cloud-provider-loss.ts#manageCloudProviderLoss":
     "Operator CLI; beginProviderAttestation sets app.system in its own transaction.",
+  "src/manage-cloud-rollout-flag.ts#manageCloudRolloutFlag":
+    "Operator CLI on the migration-owner pool; sets app.system in its own transaction.",
   "src/manage-cloud-workspace-deletion.ts#manageCloudWorkspaceDeletion":
     "Operator CLI; sets app.system in its own transaction.",
   "src/manage-cloud-workspace-entitlement.ts#manageCloudWorkspaceEntitlement":

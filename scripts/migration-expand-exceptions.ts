@@ -10,8 +10,61 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
     "enrollment-trigger": ["cloud_engine_runtime_binding", "cloud_engine_current_setup_fence"].map(trigger =>
       `DROP TRIGGER ${trigger} ON cloud_workspace_engine_instances;`),
   },
+  // 0004's default privileges grant zeros_app writes on every new table.
+  "0152_cloud_capability_keys.sql": {
+    "new-table-privileges": [
+      "REVOKE ALL ON cloud_capability_signing_keys FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_capability_key_changes FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_capability_member_epochs FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_capability_access_losses FROM PUBLIC, zeros_app;",
+    ],
+    // PUBLIC's default EXECUTE on functions created in the same migration.
+    "privilege-tightening": [
+      "preserve_cloud_capability_key()",
+      "bump_cloud_capability_member_epoch(uuid, uuid)",
+      "bump_cloud_capability_org_epochs(uuid)",
+      "bump_cloud_capability_user_epochs(uuid)",
+      "record_cloud_capability_access_loss(uuid, uuid, uuid)",
+      "bump_cloud_capability_member_epoch_trigger()",
+      "bump_cloud_capability_writer_slot_epoch()",
+      "bump_cloud_capability_user_epochs_trigger()",
+      "bump_cloud_capability_org_epochs_trigger()",
+      "bump_cloud_capability_invitation_epoch()",
+      "reject_cloud_capability_key_change_mutation()",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+    // A guard that rejects TRUNCATE cannot truncate.
+    "truncate-guard": [`CREATE TRIGGER cloud_capability_key_changes_no_truncate
+  BEFORE TRUNCATE ON cloud_capability_key_changes FOR EACH STATEMENT
+  EXECUTE FUNCTION reject_cloud_capability_key_change_mutation();`],
+  },
+  "0151_cloud_authority_cache_invalidation.sql": {
+    // PUBLIC's default EXECUTE on functions created in the same migration.
+    "privilege-tightening": [
+      "cloud_workspace_engine_authority_snapshot(uuid, uuid, integer, uuid, boolean)",
+      "notify_cloud_authority_cache()",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+  },
   "0145_cloud_computer_named_snapshots.sql": {},
   "0146_cloud_provider_snapshot_recovery.sql": {},
+  "0155_cloud_capability_epoch_events.sql": {
+    // PUBLIC's default EXECUTE on functions created in the same migration.
+    "privilege-tightening": [
+      "record_cloud_capability_epoch_event(uuid, uuid, jsonb)",
+      "record_cloud_capability_epoch_event_trigger()",
+    ].map(signature => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`),
+  },
+  "0149_cloud_rollout_flags.sql": {
+    // A guard that rejects TRUNCATE cannot truncate.
+    "truncate-guard": [`CREATE TRIGGER cloud_rollout_flag_changes_no_truncate
+  BEFORE TRUNCATE ON cloud_rollout_flag_changes FOR EACH STATEMENT
+  EXECUTE FUNCTION reject_cloud_rollout_flag_change_mutation();`],
+    // REVOKE only narrows the 0004 default DML grant and PUBLIC's EXECUTE.
+    "privilege-tightening": [
+      "REVOKE ALL ON FUNCTION reject_cloud_rollout_flag_change_mutation() FROM PUBLIC;",
+      "REVOKE ALL ON cloud_rollout_flags FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_rollout_flag_changes FROM PUBLIC, zeros_app;",
+    ],
+  },
   // The constraint is re-added at once with one more allowed purpose.
   "0141_cloud_runtime_images.sql": {
     "widen-check": ["ALTER TABLE cloud_builder_vm_operations DROP CONSTRAINT cloud_builder_vm_operations_purpose_check;"],

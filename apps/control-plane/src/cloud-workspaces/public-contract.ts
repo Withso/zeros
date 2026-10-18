@@ -45,6 +45,15 @@ const messages: Record<string, string> = {
     "This workspace's compute allowance is unavailable",
   compute_usage_unavailable: "Compute usage is temporarily unavailable",
   cloud_workspace_unavailable: "The cloud workspace is temporarily unavailable",
+  cloud_workspace_not_running: "Start the cloud workspace to connect",
+  cloud_workspace_runtime_not_configured: "Cloud workspace connections are not configured",
+  capability_issuer_unavailable: "Cloud workspace connections are temporarily unavailable",
+  capability_revoked: "Sign in again to connect to this workspace",
+  capability_expired: "Sign in again to connect to this workspace",
+  workspace_role_required: "You no longer have access to this workspace",
+  device_session_expired: "The device session ended. Reconnect and try again.",
+  workspace_replica_device_proof_rejected: "A current device proof is required",
+  workspace_replica_device_proof_replayed: "This device proof was already used",
 };
 export function publicCloudError(code: string): {
   code: string;

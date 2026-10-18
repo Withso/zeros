@@ -58,6 +58,17 @@ type Options = {
   startsAllowed?(): boolean;
   /** Closed, content-free evidence only; never readiness or admission. */
   observeStartup?(observation: StartupObservation): void;
+  /** Credential-control poll cadence, read at every schedule. The engine
+   * wires 500 ms while the S2 uplink is down (today's behavior, the
+   * fallback) and a slow safety cadence once the uplink's cred push carries
+   * revisions (P0.10 C01). Defaults to 500 ms. */
+  controlsPollIntervalMs?(): number;
+  /** The outcome of each credential-control exchange. The engine clears its
+   * failed-push-outstanding mark on a poll success so the uplink's
+   * `established` recovers without waiting for the CP to push again. */
+  controlsExchange?(ok: boolean): void;
+  /** The queue committed turn journal entries, or the boot activated. */
+  turnJournalChanged?(): void;
 };
 
 /** Registration establishes a candidate; only an exact activation response
@@ -163,6 +174,8 @@ export class CloudLocalAgentBootRuntime {
     if (!this.active || !this.fencesValue) throw new CloudCommandRuntimeError("cloud_commands_unavailable");
     return this.fencesValue;
   }
+  /** Readable while final replication is still permitted, unlike `queue`. */
+  get turnJournal(): CloudLocalCommandQueue | null { return this.authorityActive ? this.queueValue ?? null : null; }
   private reference() {
     const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...reference } = this.scope;
     return { ...reference, version: 1 as const, mode: "boot-owner-v1" as const };
@@ -320,7 +333,7 @@ export class CloudLocalAgentBootRuntime {
         }, selectionRolledBack: claimId => {
           const record = this.selections.get(claimId);
           if (record) { this.closeUnused(record.lifetime); this.selections.delete(claimId); }
-        } });
+        }, turnJournalChanged: () => this.options.turnJournalChanged?.() });
     }
     this.enterStartupPhase("boot_credentials");
     const credentials = this.credentials, metadata = credentials.metadata;
@@ -351,7 +364,7 @@ export class CloudLocalAgentBootRuntime {
     this.enterStartupPhase("boot_install");
     await this.options.install(this.factory!, this.queueValue!);
     this.startupRemainingMs();
-    this.activated = true; this.scheduleCache(); this.scheduleControls(); this.options.changed(); return true;
+    this.activated = true; this.scheduleCache(); this.scheduleControls(); this.options.changed(); this.options.turnJournalChanged?.(); return true;
   }
   /** Independent of Send and socket lifetime. The FULL ACK is retained until
    * the entire strict current-scope exchange succeeds; unknown HTTP responses
@@ -375,7 +388,9 @@ export class CloudLocalAgentBootRuntime {
       // refresh or native retirement. No later control is hidden behind I/O.
       await Promise.all(response.controls.map(control => this.fencesValue!.handle(control)));
       this.options.changed(); this.scheduleCache();
+      this.options.controlsExchange?.(true);
     })().catch(error => {
+      this.options.controlsExchange?.(false);
       if (error && typeof error === "object" && "code" in error &&
           ["engine_authority_rejected", "credential_control_authority_rejected"].includes(String(error.code))) {
         this.activated = false; this.options.supervisor.onRetirementFailure(error);
@@ -386,10 +401,28 @@ export class CloudLocalAgentBootRuntime {
     void task.finally(() => { if (this.controlsFlight === task) this.controlsFlight = null; this.flights.delete(task); this.scheduleControls(); }).catch(() => {});
     return task;
   }
+  /** The uplink's established state changed: re-read the poll cadence and
+   * re-arm now instead of waiting out a timer set under the old cadence
+   * (a 30 s timer would otherwise outlive the gate that justified it). */
+  rescheduleControls(): void {
+    if (!this.active) return;
+    this.scheduleControls();
+  }
+  /** A pushed credential revision must not join a flight that started before
+   * the bump committed (it could return the old controls and the push would
+   * be acked applied against them). Await any in-flight exchange, then run
+   * one that starts now; concurrent pushes coalesce onto that new flight. */
+  async refreshCredentialControls(): Promise<void> {
+    const inFlight = this.controlsFlight;
+    if (inFlight) await inFlight.catch(() => {});
+    await this.pollCredentialControls();
+  }
   private scheduleControls(): void {
     if (this.controlsTimer) clearTimeout(this.controlsTimer);
     if (!this.active) return;
-    this.controlsTimer = setTimeout(() => { this.controlsTimer = null; void this.pollCredentialControls().catch(() => {}); }, 500);
+    const intervalMs = this.options.controlsPollIntervalMs?.() ?? 500;
+    this.controlsTimer = setTimeout(() => { this.controlsTimer = null; void this.pollCredentialControls().catch(() => {}); },
+      Math.min(30_000, Math.max(100, intervalMs)));
     this.controlsTimer.unref?.();
   }
   async confirmAdmission(admission: CloudRuntimeClientAdmission, renewal = false): Promise<void> {

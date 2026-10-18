@@ -1587,6 +1587,7 @@ d("cloud workspace API contracts", () => {
     await expect(listed.json()).resolves.toEqual({
       workspaces: [],
       nextCursor: null,
+      catalogVersion: expect.any(Number),
     });
 
     const direct = await request(

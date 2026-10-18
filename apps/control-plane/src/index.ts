@@ -56,6 +56,7 @@ import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks
 import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
 import type { DatabaseCloudWorkspaceHealthService } from "./cloud-workspaces/health.js";
 import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
+import type { CloudDirectProviderEndpointLookup } from "./cloud-workspaces/actor-sessions.js";
 import { DatabaseCloudRuntimeAccessAdmissionService } from "./cloud-workspaces/runtime-access-admission.js";
 import { CloudRuntimeBridgeRelay } from "./cloud-workspaces/runtime-bridge.js";
 import { CloudPreviewWebSocketRelay } from "./cloud-workspaces/preview-websocket-relay.js";
@@ -64,21 +65,53 @@ import { createCloudRuntimeServiceRelay } from "./cloud-workspaces/runtime-servi
 import { DatabaseCloudWorkspaceCommandService } from "./cloud-workspaces/commands.js";
 import { DatabaseCloudWorkspaceEventService } from "./cloud-workspaces/event-streams.js";
 import { PostgresSecurityEventBroker, SecurityEventPublisher } from "./security-events.js";
+import { RolloutFlagSnapshot } from "./rollout-flags.js";
+import { EngineAuthorityCache, installEngineAuthorityCache } from "./cloud-workspaces/engine-authority-cache.js";
+import { CapabilitySigningKeyStore } from "./cloud-workspaces/capability-keys.js";
+import { AuditUplinkSecurityAlerts } from "./realtime/uplink-alerts.js";
+import { DatabaseUplinkCheckpointStore, UplinkCheckpointPush } from "./realtime/uplink-checkpoint.js";
+import { DatabaseUplinkCredentialStore, UplinkCredentialPush } from "./realtime/uplink-cred.js";
+import { uplinkCapabilityAuthority } from "./realtime/uplink-auth-source.js";
+import { DatabaseUplinkAuthority } from "./realtime/uplink-authority.js";
+import { DatabaseUplinkIdleStopStore } from "./realtime/uplink-idle.js";
+import { DatabaseUplinkLeaseStore } from "./realtime/uplink-lease.js";
+import { startUplinkNotifications } from "./realtime/uplink-notifications.js";
+import { DatabaseUplinkPresenceStore, UplinkPresenceWriter } from "./realtime/uplink-presence.js";
+import { CloudEngineUplinkServer, realtimeInstanceId } from "./realtime/uplink-server.js";
+import { DatabaseUplinkTurnStore, UplinkTurnJournal } from "./realtime/uplink-turns.js";
+import { DatabaseDeviceSessionAuthority } from "./realtime/device-sessions.js";
+import { DatabaseDeviceStreamCatalogSource } from "./realtime/device-stream-catalog.js";
+import { startDeviceStreamNotifications } from "./realtime/device-stream-notifications.js";
+import { DEVICE_STREAM_PATH } from "./realtime/device-stream-protocol.js";
+import { DeviceStreamServer } from "./realtime/device-stream-server.js";
+import { DatabaseRealtimeSecurityEventFeed, DatabaseSecurityEventSource } from "./realtime/security-event-feed.js";
+import { CapabilityRevocationPush, DatabaseCapabilityRevocationSource } from "./realtime/capability-revocation-push.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
+import { configureControlPlaneTracing, createOtlpTraceExporter, shutdownControlPlaneTracing } from "./tracing.js";
 
 const config = loadConfig();
 const runtimeArtifacts = createRuntimeArtifactStore({
   s3: config.cloudRuntimePublication?.s3 ?? config.cloudWorkspaces?.durability?.s3 ?? null,
 });
-const servesApi = config.processRole !== "worker";
-const workerPool = config.processRole !== "api"
+const processRole = config.processRole ?? "combined";
+if (config.tracesUrl) {
+  configureControlPlaneTracing({ exporter: createOtlpTraceExporter(config.tracesUrl), sampleRatio: config.traceSampleRatio ?? 0,
+    processRole, deploymentChannel: config.deploymentChannel });
+}
+// `servesApi`: an interactive pool and the cloud services behind requests and
+// WebSocket upgrades. Realtime replicas serve only upgrades; they never mount
+// the HTTP API and never start durable queue consumers (realtime.md).
+const servesApi = processRole !== "worker";
+const servesHttpApi = processRole === "api" || processRole === "combined";
+const workerPool = processRole === "worker" || processRole === "combined"
   ? createPool(config.databaseUrl, { workload: "worker", applicationName: "zeros-workers" }) : null;
 // A worker-only process uses its worker pool for readiness. It never creates
 // an unused API pool, and API replicas never start durable queue consumers.
 const pool = servesApi ? createPool(config.databaseUrl, {
   workload: "api", maxConnections: config.databasePoolMax ?? 6,
+  ...(processRole === "realtime" ? { applicationName: "zeros-realtime" } : {}),
 }) : workerPool!;
 if (config.development && "generation" in config.development) {
   await assertHostedDatabaseOwnership(pool, config.development);
@@ -184,13 +217,38 @@ let cloudWorkspaceEngineClientAdmissionService:
   | DatabaseCloudWorkspaceEngineClientAdmissionService
   | undefined;
 let cloudWorkspaceProviderResolver: CloudWorkspaceProviderResolver | undefined;
+let cloudDirectRoute: { enginePort: number; endpoint: CloudDirectProviderEndpointLookup } | undefined;
 const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending";
+// Per-organization rollout flags for new cloud paths, read from memory on hot
+// paths. Without the cloud runtime (maintenance, a pending controlled
+// migration) every flag reads as off.
+const rolloutFlagSnapshot = config.cloudWorkspaces && runtimeReady
+  ? new RolloutFlagSnapshot({ pool, listenerPool }) : null;
+const rolloutFlagsStarted = rolloutFlagSnapshot?.start();
+// Engine authority cache: shadow comparison and fence-free reads, each behind
+// its rollout flag. Without flags it only holds a LISTEN subscription.
+const engineAuthorityCache = rolloutFlagSnapshot
+  ? new EngineAuthorityCache({ pool, listenerPool, flags: rolloutFlagSnapshot }) : null;
+engineAuthorityCache?.start();
+installEngineAuthorityCache(engineAuthorityCache ?? undefined);
+// S1 capability signing keys: a dedicated keyring opens the sealed current
+// key; the store reloads on the keys NOTIFY. Without both envs there is no
+// issuer and every capability route fails closed.
+const capabilityKeyStore = rolloutFlagSnapshot && config.cloudWorkspaces?.capabilityKeyring
+  ? new CapabilitySigningKeyStore({ pool, listenerPool, keyring: config.cloudWorkspaces.capabilityKeyring }) : null;
+void capabilityKeyStore?.start();
+const cloudCapabilities = capabilityKeyStore && config.cloudWorkspaces?.capabilityIssuer
+  ? {
+      pool, keyStore: capabilityKeyStore, issuer: config.cloudWorkspaces.capabilityIssuer,
+      flags: rolloutFlagSnapshot!, workosEnabled: config.auth.provider === "workos",
+    }
+  : undefined;
 // Historical Computer retirement holds session locks across provider I/O and
 // query-pool callbacks. WorkOS may independently hold one worker query slot.
 const retirementLockPool = workerPool && runtimeReady && config.cloudWorkspaces?.boat &&
   config.cloudWorkspaces.backgroundWorkersEnabled !== false
   ? createPool(config.databaseUrl, { workload: "retirement-lock", applicationName: "zeros-retirement-locks" }) : null;
-const runtimeQualification = servesApi && runtimeReady
+const runtimeQualification = servesHttpApi && runtimeReady
   ? createRuntimeQualificationWorker(config, pool, runtimeArtifacts) : null;
 const runtimeQualificationWorker = workerPool && runtimeReady
   ? createRuntimeQualificationWorker(config, workerPool, runtimeArtifacts) : null;
@@ -415,6 +473,13 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     const setup = cloud.setupExecution;
     const blobs = blobService;
     const endpoint = (path: string) => `${setup.controlPlaneOrigin}${path}`;
+    const directProviderEndpoint: CloudDirectProviderEndpointLookup = async scope=>{
+      const {provider}=await providerResolver.resolve({organizationId:scope.organizationId,workspaceId:scope.workspaceId,generation:scope.generation,purpose:"preview"});
+      if(provider.name!=="boat"||!provider.getEngineEndpoint||scope.remotePort!==setup.enginePort)
+        throw new Error("cloud_actor_runtime_unavailable");
+      return provider.getEngineEndpoint(scope.resourceId,setup.enginePort);
+    };
+    cloudDirectRoute = { enginePort: setup.enginePort, endpoint: directProviderEndpoint };
     cloudWorkspaceEngineClientAdmissionService =
       new DatabaseCloudWorkspaceEngineClientAdmissionService({
         pool,
@@ -422,12 +487,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
         enginePort: setup.enginePort,
         workosEnabled: config.auth.provider === "workos",
         relayEnabled: true,
-        directProviderEndpoint:async scope=>{
-          const {provider}=await providerResolver.resolve({organizationId:scope.organizationId,workspaceId:scope.workspaceId,generation:scope.generation,purpose:"preview"});
-          if(provider.name!=="boat"||!provider.getEngineEndpoint||scope.remotePort!==setup.enginePort)
-            throw new Error("cloud_actor_runtime_unavailable");
-          return provider.getEngineEndpoint(scope.resourceId,setup.enginePort);
-        },
+        directProviderEndpoint,
       });
     const clientAdmission = cloudWorkspaceEngineClientAdmissionService;
     const sameRelayAuthority = (
@@ -537,7 +597,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     // waiting engines share the dedicated notification session.
     const checkpointHints = new CloudEngineCheckpointHints(pool);
     const checkpointProgress = new CloudEngineCheckpointProgress(pool, { workosEnabled: config.auth.provider === "workos" });
-    stopCloudCheckpointHintNotifications = startCloudEngineCheckpointHintNotifications(listenerPool, checkpointHints);
+    if (servesHttpApi) stopCloudCheckpointHintNotifications = startCloudEngineCheckpointHintNotifications(listenerPool, checkpointHints);
     closeCloudCheckpointHints = () => checkpointHints.close();
     cloudWorkspaceInternalSetupService = {
       ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos",undefined,
@@ -555,6 +615,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       admitEngineClient: (input) =>
         cloudWorkspaceEngineClientAdmissionService!.consume(input),
       admitActorClient: (input) => cloudWorkspaceEngineClientAdmissionService!.consumeActor(input),
+      admitCapabilityActor: (input) => cloudWorkspaceEngineClientAdmissionService!.admitCapabilityActor(input),
       admitRuntimeAccess: (input) => runtimeAccess.admit(input),
       appendRecord: (input) => recordService.append(input),
       readRecordHead: (input) => recordService.headForEngine(input),
@@ -718,9 +779,9 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   };
 }
 
-const cloudGithubWriteGrants = config.github && cloudWorkspaceInternalSetupService
+const cloudGithubWriteGrants = config.github && cloudWorkspaceInternalSetupService && servesHttpApi
   ? new DatabaseCloudGithubWriteGrants(pool, config.auth.provider === "workos") : undefined;
-const cloudGithubReads = config.github && cloudWorkspaceInternalSetupService
+const cloudGithubReads = config.github && cloudWorkspaceInternalSetupService && servesHttpApi
   ? new DatabaseCloudGithubReads(pool, config.auth.provider === "workos", new GithubCloudWorkspaceCredentialBroker(config.github)) : undefined;
 const cloudGithubWriteCleanup = workerPool && config.github && runtimeReady &&
   config.cloudWorkspaces?.setupExecution && config.cloudWorkspaces.durability
@@ -741,6 +802,21 @@ const app = createApp(config, pool, emailConfig, {
   ...(cloudWorkspaceInternalSetupService
     ? { cloudWorkspaceInternalSetupService }
     : {}),
+  // Advertise the uplink only where engines register (the API surface), only
+  // with a configured realtime origin, and read the same flag the realtime
+  // server enforces so an off flag never attracts dials it would refuse.
+  ...(cloudWorkspaceInternalSetupService && rolloutFlagSnapshot && config.cloudWorkspaces?.setupExecution?.engineUplinkEndpoint
+    ? { cloudWorkspaceEngineUplink: {
+        endpoint: config.cloudWorkspaces.setupExecution.engineUplinkEndpoint,
+        flags: rolloutFlagSnapshot } }
+    : {}),
+  // The device-stream ticket names the stream on the same realtime origin.
+  ...(rolloutFlagSnapshot && config.cloudWorkspaces?.setupExecution?.engineUplinkEndpoint
+    ? { deviceSessions: {
+        flags: rolloutFlagSnapshot,
+        streamUrl: new URL(DEVICE_STREAM_PATH, config.cloudWorkspaces.setupExecution.engineUplinkEndpoint).toString(),
+        workosEnabled: config.auth.provider === "workos" } }
+    : {}),
   ...(cloudWorkspaceAccessService ? { cloudWorkspaceAccessService } : {}),
   ...(cloudWorkspaceProviderResolver ? { cloudWorkspaceProviderResolver } : {}),
   ...(cloudRuntimeServiceAccess ? { cloudRuntimeServiceAccess } : {}),
@@ -753,6 +829,10 @@ const app = createApp(config, pool, emailConfig, {
     ? { cloudWorkspaceEngineClientAdmissionService }
     : {}),
   ...(cloudWorkspaceHealthService ? { cloudWorkspaceHealthService } : {}),
+  ...(cloudCapabilities ? { cloudCapabilities } : {}),
+  // The relay route joins once realtime serves /v1/relay.
+  ...(cloudCapabilities ? { cloudRuntimeConnect: { capabilities: cloudCapabilities, cloudWorkspaces: config.cloudWorkspaces,
+    ...(cloudDirectRoute ? { direct: cloudDirectRoute } : {}) } } : {}),
 });
 
 let shuttingDown = false;
@@ -794,8 +874,114 @@ if (servesApi && cloudWorkspaceAccessService && migrationResult.status.state !==
     revalidate: (request, grant) => access.revalidatePreviewWebSocket(request, grant),
   });
 }
+// The S2 engine uplink is served by realtime and combined processes once the
+// capability authority supplies keys, epochs and engine tokens; each
+// organization is admitted only while its `realtime_uplink` flag is on. The
+// capability authority mounts once the first flag load shows `capabilities`
+// on for any organization (and again if a later change turns it on), so a
+// flags-off deployment never mounts the socket.
+let cloudEngineUplink: CloudEngineUplinkServer | undefined;
+let uplinkPresence: UplinkPresenceWriter | undefined;
+let uplinkCheckpointPush: UplinkCheckpointPush | undefined;
+let stopUplinkNotifications: () => Promise<void> = async () => {};
+// One security-event feed per realtime process, shared by the device stream
+// and the S1 revocation producer (auth.epochs to owned uplinks,
+// capability.revoked to device streams), started by whichever mounts first.
+let realtimeSecurityEvents: DatabaseRealtimeSecurityEventFeed | undefined;
+let capabilityRevocationPush: CapabilityRevocationPush | undefined;
+let uplinkAuthSource: ReturnType<typeof uplinkCapabilityAuthority> = null;
+const sharedSecurityEvents = () => {
+  realtimeSecurityEvents ??= new DatabaseRealtimeSecurityEventFeed(new DatabaseSecurityEventSource(pool), { listenerPool });
+  void realtimeSecurityEvents.start();
+  return realtimeSecurityEvents;
+};
+const startCapabilityRevocationPush = () => {
+  if (capabilityRevocationPush || !rolloutFlagSnapshot) return;
+  capabilityRevocationPush = new CapabilityRevocationPush({
+    feed: sharedSecurityEvents(), source: new DatabaseCapabilityRevocationSource(pool), flags: rolloutFlagSnapshot,
+    uplink: () => cloudEngineUplink && uplinkAuthSource ? { server: cloudEngineUplink, auth: uplinkAuthSource.source } : null,
+    deviceStreams: () => deviceStream,
+  });
+};
+const mountEngineUplink = () => {
+  if (cloudEngineUplink || shuttingDown) return;
+  if (processRole !== "realtime" && processRole !== "combined") return;
+  const uplinkAuth = uplinkCapabilityAuthority({
+    pool, keyStore: capabilityKeyStore,
+    issuer: config.cloudWorkspaces?.capabilityIssuer ?? null, flags: rolloutFlagSnapshot,
+  });
+  if (!uplinkAuth || !rolloutFlagSnapshot || migrationResult.status.state !== "current") return;
+  const presenceStore = new DatabaseUplinkPresenceStore(pool);
+  const alerts = new AuditUplinkSecurityAlerts({ pool });
+  uplinkPresence = new UplinkPresenceWriter(presenceStore);
+  // Credential-control push (S2 cred channel): the binding's desired
+  // revision is read at the gate and on every notified bump. The engine's
+  // exchange re-reads authority; the notification is only a hint. The table
+  // is RLS-hidden from the runtime role, so the read goes through the
+  // system-statement store.
+  const uplinkCredStore = new DatabaseUplinkCredentialStore(pool);
+  const uplinkCredPush = new UplinkCredentialPush({
+    sessionFor: engineInstanceId => cloudEngineUplink?.session(engineInstanceId) ?? null,
+    readRevision: identity => uplinkCredStore.desiredRevision(identity.engineInstanceId),
+    readRevisions: engineInstanceIds => uplinkCredStore.desiredRevisions(engineInstanceIds),
+  });
+  // Checkpoint-request push (S2 checkpoint channel): a timing hint only;
+  // the engine's heartbeat still delivers and fences the directive.
+  const uplinkCheckpointStore = new DatabaseUplinkCheckpointStore(pool);
+  const checkpointPush = new UplinkCheckpointPush({
+    readQueued: identities => uplinkCheckpointStore.queued(identities),
+    notificationsCurrent: () => cloudEngineUplink?.notificationsCurrent === true,
+  });
+  uplinkCheckpointPush = checkpointPush;
+  cloudEngineUplink = new CloudEngineUplinkServer({
+    authority: new DatabaseUplinkAuthority({ pool, workosEnabled: config.auth.provider === "workos", alerts }),
+    lease: new DatabaseUplinkLeaseStore({ pool, workosEnabled: config.auth.provider === "workos" }),
+    idle: new DatabaseUplinkIdleStopStore(new DatabaseCloudIdleStop(pool, config.auth.provider === "workos")),
+    authSource: uplinkAuth.source,
+    capabilities: uplinkAuth.issuer,
+    flags: rolloutFlagSnapshot,
+    realtimeInstance: realtimeInstanceId(),
+    presence: uplinkPresence,
+    alerts,
+    extensions: [uplinkCredPush, checkpointPush, new UplinkTurnJournal({ store: new DatabaseUplinkTurnStore(pool) })],
+  });
+  uplinkAuthSource = uplinkAuth;
+  startCapabilityRevocationPush();
+  const stopNotifications = startUplinkNotifications(listenerPool, cloudEngineUplink, presenceStore, console, uplinkCredPush, checkpointPush);
+  stopUplinkNotifications = async () => {
+    capabilityRevocationPush?.stop();
+    await Promise.allSettled([stopNotifications(), realtimeSecurityEvents?.stop()]);
+  };
+};
+void rolloutFlagsStarted?.then(mountEngineUplink);
+rolloutFlagSnapshot?.onChange(mountEngineUplink);
+// The S3 device stream is served by realtime and combined processes once any
+// organization has `device_stream` on; until then no feed, LISTEN or socket
+// exists and clients keep polling. Access is re-evaluated on the process's
+// security-event feed and workspace catalog notifications.
+let deviceStream: DeviceStreamServer | undefined;
+let deviceStreamSecurityEvents: DatabaseRealtimeSecurityEventFeed | undefined;
+let stopDeviceStreamNotifications: () => Promise<void> = async () => {};
+const mountDeviceStream = () => {
+  if (deviceStream || shuttingDown) return;
+  if (processRole !== "realtime" && processRole !== "combined") return;
+  if (!rolloutFlagSnapshot || migrationResult.status.state !== "current" || !rolloutFlagSnapshot.anyEnabled("device_stream")) return;
+  deviceStreamSecurityEvents = sharedSecurityEvents();
+  deviceStream = new DeviceStreamServer({
+    authority: new DatabaseDeviceSessionAuthority(pool),
+    catalog: new DatabaseDeviceStreamCatalogSource(pool, config.cloudWorkspaces ?? null),
+    flags: rolloutFlagSnapshot,
+    securityEvents: deviceStreamSecurityEvents,
+  });
+  startCapabilityRevocationPush();
+  stopDeviceStreamNotifications = startDeviceStreamNotifications(listenerPool, deviceStream);
+};
+void rolloutFlagsStarted?.then(mountDeviceStream);
+rolloutFlagSnapshot?.onChange(mountDeviceStream);
 server.on("upgrade", (request, socket, head) => {
   if (!servesApi || shuttingDown || migrationResult.status.state !== "current") { socket.destroy(); return; }
+  if (cloudEngineUplink?.handleUpgrade(request, socket, head)) return;
+  if (deviceStream?.handleUpgrade(request, socket, head)) return;
   if (cloudRuntimeServiceRelay?.handleUpgrade(request, socket, head)) return;
   if (cloudPreviewWebSocketRelay?.handleUpgrade(request, socket, head)) return;
   if (!cloudRuntimeBridge?.handleUpgrade(request, socket, head)) socket.destroy();
@@ -806,12 +992,8 @@ function shutdown(signal: string): void {
   shuttingDown = true;
   stopGithubCleanup();
   if (githubWriteCleanup) clearInterval(githubWriteCleanup);
-  cloudRuntimeBridge?.close();
-  // Held engine hints would otherwise keep the server open past its exit deadline.
-  closeCloudCheckpointHints();
-  cloudPreviewWebSocketRelay?.close();
-  cloudRuntimeServiceRelay?.close();
-  console.log(`[control-plane] ${signal}; draining`);
+  const drainMs = config.shutdownDrainMs ?? 0;
+  console.log(`[control-plane] ${signal}; draining${drainMs ? ` sessions over ${drainMs}ms` : ""}`);
   const backgroundStopped = Promise.allSettled([
     stopCloudWorkerNotifications(),
     stopCloudCheckpointHintNotifications(),
@@ -837,12 +1019,46 @@ function shutdown(signal: string): void {
     workosSync?.stop() ?? Promise.resolve(),
     securityEventBroker.stop(),
     stopSecurityEventPublisher(),
+    rolloutFlagSnapshot?.stop(),
+    engineAuthorityCache?.stop(),
+    capabilityKeyStore?.stop(),
   ]);
-  const deadline = setTimeout(() => process.exit(1), 15_000);
+  const deadline = setTimeout(() => process.exit(1), 15_000 + drainMs);
   deadline.unref();
+  // Upgrades are refused from here on. With a drain window, open sessions
+  // keep working and are told to reconnect gradually while the replacement
+  // instance takes new ones; HTTP keeps serving until they are gone.
+  if (drainMs > 0) {
+    void Promise.allSettled([
+      cloudRuntimeBridge?.drain(drainMs),
+      cloudPreviewWebSocketRelay?.drain(drainMs),
+      cloudRuntimeServiceRelay?.drain(drainMs),
+      cloudEngineUplink?.drain(drainMs),
+      deviceStream?.drain(drainMs),
+    ]).then(() => closeServer(backgroundStopped, deadline));
+  } else closeServer(backgroundStopped, deadline);
+}
+
+function closeServer(backgroundStopped: Promise<unknown>, deadline: ReturnType<typeof setTimeout>): void {
+  cloudRuntimeBridge?.close();
+  // Held engine hints would otherwise keep the server open past its exit deadline.
+  closeCloudCheckpointHints();
+  cloudPreviewWebSocketRelay?.close();
+  cloudRuntimeServiceRelay?.close();
+  cloudEngineUplink?.close();
+  uplinkCheckpointPush?.close();
+  // The uplink LISTEN outlives the drain: engines still on this instance keep
+  // credential pushes and authority teardown until their uplink is closed.
+  const uplinkNotificationsStopped = stopUplinkNotifications();
+  deviceStream?.close();
+  const deviceStreamStopped = Promise.allSettled([stopDeviceStreamNotifications(), deviceStreamSecurityEvents?.stop()]);
   server.close(() => {
-    void backgroundStopped
+    void Promise.allSettled([backgroundStopped, uplinkNotificationsStopped, deviceStreamStopped])
       .then(async () => {
+        // A lost-uplink write that misses this window is overwritten by the
+        // next owner's connect; until then its stale last_seen_at marks it.
+        await uplinkPresence?.close(2_000);
+        await shutdownControlPlaneTracing(2_000);
         const pools = new Set([pool, listenerPool]);
         if (workerPool) pools.add(workerPool);
         if (retirementLockPool) pools.add(retirementLockPool);

@@ -24,19 +24,37 @@ const baseBudgets = (perRequest: LoadBudgets["perRequest"]): LoadBudgets => ({
   version: 1,
   policy: BUDGET_POLICY,
   targets: { quietTransactionsPerSecond: 0.5, perActiveWorkspaceTransactionsPerSecond: 0.01 },
-  steadyState: { perActiveWorkspaceTransactionsPerSecond: 10, perRunningEngineTransactionsPerSecond: 10 },
+  steadyState: { perActiveWorkspaceTransactionsPerSecond: 10, perRunningEngineTransactionsPerSecond: 10, perStoppedWorkspaceTransactionsPerSecond: 1,
+    notifyingCommitsPerActiveWorkspacePerSecond: 0.5, authorityCacheNotificationsPerActiveWorkspacePerSecond: 0.25 },
   perRequest,
 });
 
 const baseProjection = (): Projection => ({
   perWorkspace: { transactionsPerSecond: 1, statementsPerSecond: 1, roundTripsPerSecond: 1, byOperation: [] },
   perRunningEngineTransactionsPerSecond: 1,
+  perStoppedWorkspaceTransactionsPerSecond: 0.5,
   perWorkspaceWorker: [],
   perConnectedClientTransactionsPerSecond: 0,
   atWorkspaces: [],
 });
 
 describe("checkBudgets", () => {
+  it("flags notifying commits per active workspace above the budget", () => {
+    const budgets = baseBudgets({});
+    expect(checkBudgets(budgets, [], baseProjection(), 1)).toEqual([
+      { subject: "steadyState", metric: "notifyingCommitsPerActiveWorkspacePerSecond", measured: 1, budget: 0.5 },
+    ]);
+    expect(checkBudgets(budgets, [], baseProjection(), 0.5)).toEqual([]);
+  });
+
+  it("flags authority-cache hints per active workspace above the budget", () => {
+    const budgets = baseBudgets({});
+    expect(checkBudgets(budgets, [], baseProjection(), 0.4, 0.3)).toEqual([
+      { subject: "steadyState", metric: "authorityCacheNotificationsPerActiveWorkspacePerSecond", measured: 0.3, budget: 0.25 },
+    ]);
+    expect(checkBudgets(budgets, [], baseProjection(), 0.4, 0.25)).toEqual([]);
+  });
+
   it("flags a budgeted operation that was not measured", () => {
     const budgets = baseBudgets({ "engine.heartbeat": { transactions: 1, statements: 1, roundTrips: 1 } });
     expect(checkBudgets(budgets, [], baseProjection())).toEqual([

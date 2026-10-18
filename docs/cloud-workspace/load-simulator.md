@@ -72,9 +72,9 @@ otherwise. It takes about 10 seconds and checks:
 | --- | --- |
 | Migrated schema, SQL, transactions and stored functions on PostgreSQL 18 | Network distance to the database (see the round-trip floor column) |
 | `createPool` API and worker pools with production pool settings | Boat provider (`FakeBoatProvider` returns immediately) |
-| Engine services: heartbeat, durable record head, credential controls, actor confirmation | Engine and desktop processes, relay sockets and HTTP framing (except the catalog route) |
+| Engine services: heartbeat, uplink lease renewal, uplink checkpoint-request read, checkpoint-hint wait, durable record head, credential controls, actor confirmation | Engine and desktop processes, relay sockets and HTTP framing (except the catalog route) |
 | Desktop paths: actor-session renew, relay authority revalidation, catalog through the Hono route with `resolveAuthenticatedUser` | WorkOS network calls |
-| Provider resolver, reconciler tick/drift/orphan sweep, access revocation, checkpoint request and security-event workers | WorkOS sync, outbox and other workers not listed |
+| Provider resolver, lifecycle deadline scan, reconciler intent/drift/orphan sweep, access revocation, checkpoint request and security-event workers | WorkOS sync, outbox and other workers not listed |
 
 Each workspace is seeded as a ready workspace with a WorkOS link, a database
 qualification, a cursor credential, an activated boot, a user, session and
@@ -87,16 +87,32 @@ Per active workspace, one running engine and one connected desktop:
 | Operation | Role | Interval | Source |
 | --- | --- | --- | --- |
 | `engine.credentialControls` | engine | 500 ms after completion | `apps/desktop/src/engine/cloud-local-command-queue-boot.ts` |
-| `engine.heartbeat` | engine | 10 s | `DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS` in `apps/control-plane/src/cloud-workspaces/engine-heartbeat.ts` |
-| `engine.durableRecordHead` | engine | after each heartbeat | `synchronizeDurableRecord` in cloud runtime registration |
+| `engine.uplinkLeaseRenewal` | engine | 300 s | `UPLINK_WATERMARK_INTERVAL_MS` in `apps/control-plane/src/realtime/uplink-protocol.ts` (S2 `lease.v1`) |
+| `engine.uplinkCheckpointSweep` | engine | 30 s (one read per uplink, an upper bound: one statement serves up to 500) | `SWEEP_TICKS` in `apps/control-plane/src/realtime/uplink-checkpoint.ts` (S2 `checkpoint.v1`) |
+| `engine.durableRecordHead` | engine | 10 s, every heartbeat tick, posted or skipped | `synchronizeDurableRecord` in cloud runtime registration |
 | `engine.actorConfirm` | client | 5 s (half of `confirmedUntil`) | engine actor confirmation |
 | `client.renew` | client | 5 s (lease / 2) | `apps/desktop/src/engine/transport/cloud.ts` |
 | `client.relayRevalidate` | client | 5 s | `authorityCheckMs` in `apps/control-plane/src/cloud-workspaces/runtime-bridge.ts` |
 | `client.catalog` | client | 30 s, `limit=100` | `apps/desktop/src/renderer/state/cloud-workspace-lifecycle.tsx` |
 
-The background workers run once per process at their configured intervals
-(`apps/control-plane/src/worker-polling-config.ts`). The reconciler checks drift for a workspace when its
-`last_observed_at` is older than the interval, and sweeps orphans every 60 s.
+`engine.heartbeat` keeps its per-request budget but has no steady-state
+cadence: with `lease.v1` the uplink renews the lease and a periodic beat posts
+only when it carries something (S2 1.2.0). An engine without `lease.v1` still
+posts every 10 s (`DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS` in
+`apps/control-plane/src/cloud-workspaces/engine-heartbeat.ts`), 0.1 tx/s more
+per running engine. `engine.checkpointHintWait` likewise keeps its
+per-request budget without a cadence: with `checkpoint.v1` the uplink pushes
+queued checkpoint requests and the engine pauses its hint wait (S2 1.2.0).
+An engine without `checkpoint.v1` still runs the wait (six reads per 25 s,
+`apps/control-plane/src/cloud-workspaces/engine-checkpoint-hints.ts`),
+0.24 tx/s more per running engine.
+
+Turn events (`engine.uplinkTurnEvent`, S2 `turns.v1`) cost one transaction per
+turn transition, two or three per turn, and are not part of the steady state.
+
+The background workers still use the existing polling lifecycle loop. Drift
+and orphan scans run every 60 seconds; `worker.lifecycleDeadlines` measures the
+idle deadline read. No lifecycle job or inventory-pacing operation is modeled.
 
 ## Metrics
 
@@ -107,6 +123,16 @@ The background workers run once per process at their configured intervals
 - **Round trips**: network exchanges with the server; a batched setup with
   several statements counts as one.
 - **Checkouts**: pool connection acquisitions.
+- **Notify commits/s**: commits that issued a NOTIFY. Explicit `pg_notify`
+  statements are counted client-side; job-queue wake-ups are issued by the existing
+  database trigger, so a LISTEN connection counts their deliveries (identical
+  notifications dedupe per transaction, so deliveries equal notifying commits
+  on that channel). Authority-cache hints (`zeros_cloud_authority_cache`,
+  migration 0151) are counted the same way and included; one commit can
+  carry several scopes, so with them the column is an upper bound.
+  PostgreSQL serializes notifying commits at commit time. `load:db` prints the
+  projected notifying commits at 100, 500 and 1000 active workspaces.
+- **Authority hints/s**: authority-cache hint deliveries alone.
 - **RTT floor**: round trips multiplied by an assumed 5 ms database distance;
   the minimum added latency for a remote database.
 - **CP CPU ms/s**: control-plane process CPU time per wall second.
@@ -116,76 +142,20 @@ The background workers run once per process at their configured intervals
 
 ## Budgets
 
-`src/load-sim/budgets.json` stores today's cost plus headroom:
+`src/load-sim/budgets.json` records measured transactions per request, 25%
+headroom for statements and round trips, and 10% for nominal steady-state
+transactions and observed notification rates. Every modeled operation must
+have exactly one entry. Budgets are regenerated on this tree, with the existing
+polling lifecycle worker and per-workspace drift and orphan inspections.
 
-- transactions per request: measured, no headroom, because a new transaction is
-  a deliberate change;
-- statements and round trips per request: `ceil(measured × 1.25)`;
-- steady-state transactions per second: measured × 1.1, rounded up to 0.01.
+The measured baseline on this tree is 0.108 tx/s quiet and 2.920 tx/s per
+active workspace. A stopped workspace still costs 0.117 tx/s in drift and
+orphan inspections; the budget retains that existing lifecycle cost.
 
-Budgets are a ratchet. When a change makes a path cheaper, regenerate them with
-`--write-budgets src/load-sim/budgets.json` and commit the lower numbers. Do not
-raise a budget to pass the check without explaining the new cost in the pull
-request. The plan targets (0.5 tx/s quiet and 0.01 tx/s per active workspace)
-are recorded in the file and reported, but not enforced until the hot paths are
-rebuilt.
-
-## Baseline (October 2026)
-
-PostgreSQL 18.6 on loopback, Node 24, 4 CPUs, WorkOS authority on.
-
-### Per request
-
-| Operation | Tx | Statements | Round trips | p50 ms | RTT floor @5 ms |
-| --- | --- | --- | --- | --- | --- |
-| `engine.heartbeat` | 1 | 9 | 7 | 9.5 | 35 |
-| `engine.durableRecordHead` | 1 | 7 | 5 | 3.2 | 25 |
-| `engine.credentialControls` | 1 | 10 | 8 | 4.6 | 40 |
-| `engine.actorConfirm` | 1 | 11 | 9 | 10.1 | 45 |
-| `client.renew` | 1 | 12 | 10 | 9.7 | 50 |
-| `client.relayRevalidate` | 1 | 10 | 8 | 5.7 | 40 |
-| `client.catalog` (including authentication) | 2 | 14 | 10 | 15.9 | 50 |
-| `provider.resolve` | 1 | 7 | 5 | 2.2 | 25 |
-| `worker.lifecycleDeadlines` | 1 | 5 | 3 | 5.3 | 15 |
-| `worker.reconcileOnce` | 1 | 5 | 3 | 4.5 | 15 |
-| `worker.reconcileDrift` (due) | 6 | 36 | 24 | 12.3 | 120 |
-| `worker.reconcileOrphans` | 1 empty, 2 at 1 workspace, 51 at 50 | | | | |
-
-### Real time
-
-| Active workspaces | Tx/s | Tx/s per active | Statements/s | CP CPU ms/s | Server exec ms/s | Failures |
-| --- | --- | --- | --- | --- | --- | --- |
-| 0 (120 s) | 0.15 | n/a | 0.75 | 1.4 | 0.01 | 0 |
-| 1 | 2.90 | 2.75 | 28.5 | 7.2 | 13.2 | 0 |
-| 10 | 28.6 | 2.84 | 284.9 | 52.2 | 68.8 | 0 |
-| 50 | 145.1 | 2.90 | 1439.7 | 142.6 | 323.1 | 0 |
-
-The quiet control plane is within the 0.5 tx/s target. Server-side counts for
-the quiet run (0.62 tx/s) include autovacuum and statistics activity.
-
-### Projection at nominal cadence
-
-One active workspace costs **2.98 tx/s** and 29.4 statements/s, about 300 times
-the 0.01 tx/s target. A running engine alone costs 2.32 tx/s; each connected
-desktop adds 0.67 tx/s. The reconciler adds 0.10 tx/s for drift checks and
-0.017 tx/s for the orphan sweep per workspace.
-
-### Findings
-
-1. `engine.credentialControls` polls every 500 ms: 2.0 tx/s per running engine,
-   about 67% of all transactions.
-2. The authority check `SELECT` in `assertCurrentCloudEngineAuthority` runs on
-   every engine request and takes about 57% of server execution time at 50
-   active workspaces (5.6 s per 30 s window, 1.6 ms mean).
-3. The engine lease and `cloud_workspace_runtime_authority_live` check is the
-   second-largest statement (1.6 s per window).
-4. The actor role and fingerprint `SELECT` behind renew and actor confirmation
-   is third (0.8 s per window).
-5. The orphan sweep costs one transaction per workspace each 60 s, so its cost
-   grows linearly with inventory.
-
-The provider resolver's connection query took 9.5 ms mean on loopback,
-compared with 25.4 ms measured on Alpha.
+The plan targets remain 0.5 tx/s quiet and 0.01 tx/s per active workspace.
+Uplink rows describe enabled capabilities; the legacy routes are also measured
+individually. The projection uses `lease.v1` and `checkpoint.v1` cadences.
+They do not imply that the flags are enabled by default.
 
 ## Gaps
 

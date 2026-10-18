@@ -24,7 +24,7 @@ const actorSessionId = randomUUID();
 const now = 1_000_000;
 function fixture(options: { file?: string; writer?: typeof scope; limits?: ConstructorParameters<typeof CloudLocalCommandQueue>[0]["limits"];
   selectExecution?: ConstructorParameters<typeof CloudLocalCommandQueue>[0]["selectExecution"];
-  captureHistory?: ConstructorParameters<typeof CloudLocalCommandQueue>[0]["captureHistory"] } = {}) {
+  captureHistory?: ConstructorParameters<typeof CloudLocalCommandQueue>[0]["captureHistory"]; turnJournalChanged?: () => void } = {}) {
   const writer = options.writer ?? scope;
   const directory = options.file ? null : mkdtempSync(join(tmpdir(), "zeros-local-queue-"));
   if (directory) temporary.push(directory);
@@ -37,7 +37,8 @@ function fixture(options: { file?: string; writer?: typeof scope; limits?: Const
   const ready = vi.fn(() => true);
   const queue = new CloudLocalCommandQueue({ file, scope: writer, actors, engineLive, now: () => now, history, ready, limits: options.limits,
     ...(options.selectExecution ? { selectExecution: options.selectExecution } : {}),
-    ...(options.captureHistory ? { captureHistory: options.captureHistory } : {}) });
+    ...(options.captureHistory ? { captureHistory: options.captureHistory } : {}),
+    ...(options.turnJournalChanged ? { turnJournalChanged: options.turnJournalChanged } : {}) });
   handles.push(queue);
   const request = (input: CloudCommandEngineRequest, epoch = writer.writerEpoch, session = actorSessionId) =>
     queue.handle(input, { writerEpoch: epoch, actorSessionId: session });
@@ -947,5 +948,65 @@ describe("engine-local cloud command ledger", () => {
     reopened.queue.acknowledgeMirror({ version: 1, writerEpoch: scope.writerEpoch, batchId: batch.batchId, through: batch.through });
     expect(reopened.queue.peekMirrorBatch()?.changes[0]?.entry?.state).toBe("uncertain");
     expect(reopened.queue.mirrorDrained()).toBe(false);
+  });
+});
+
+describe("turn journal", () => {
+  const entries = (f: ReturnType<typeof fixture>) => f.queue.turnJournal(0, 100);
+  it("appends started at an authorized claim and the settled state, once each", async () => {
+    const changed = vi.fn(); const f = fixture({ turnJournalChanged: changed });
+    const value = f.payload(); f.request(f.enqueue(value));
+    const claimId = randomUUID(), executionId = randomUUID(); const claim = f.claim("chat", claimId, executionId)!;
+    expect(f.claim("chat", claimId, executionId)).toEqual(claim); // replayed claim appends nothing
+    await Promise.resolve();
+    expect(changed).toHaveBeenCalled();
+    const settle = { kind: "settle" as const, result: { commandId: claim.commandId, claimId: claim.claimId, state: "succeeded" as const,
+      resultCode: null, result: { version: 1 as const } } };
+    f.request(settle); f.request(settle); // replayed settle appends nothing
+    expect(entries(f)).toEqual([
+      { journalSeq: 1, chatId: "chat", turnId: value.userMessageId, state: "started", atMs: now, actorUserId: actor.userId },
+      { journalSeq: 2, chatId: "chat", turnId: value.userMessageId, state: "completed", atMs: now, actorUserId: actor.userId },
+    ]);
+    expect(f.queue.turnJournal(1, 100).map(entry => entry.journalSeq)).toEqual([2]);
+    expect(f.queue.turnJournal(0, 1)).toHaveLength(1);
+  });
+  it.each([["failed", "cloud_provider_prompt_auth_required", "failed"], ["cancelled", "stopped_before_dispatch", "interrupted"]] as const)(
+    "maps a %s settle to %s", (state, resultCode, expected) => {
+      const f = fixture(); f.request(f.enqueue()); const claim = f.claim()!;
+      f.request({ kind: "settle", result: { commandId: claim.commandId, claimId: claim.claimId, state, resultCode, result: { version: 1 } } });
+      expect(entries(f).map(entry => entry.state)).toEqual(["started", expected]);
+    });
+  it("marks an in-flight turn interrupted on reopen and never re-dispatches it", () => {
+    const f = fixture(); const value = f.payload(); f.request(f.enqueue(value)); f.claim();
+    f.queue.close(); const reopened = fixture({ file: f.file });
+    expect(entries(reopened).map(entry => [entry.journalSeq, entry.state, entry.turnId])).toEqual(
+      [[1, "started", value.userMessageId], [2, "interrupted", value.userMessageId]]);
+    expect(reopened.claim()).toBeNull();
+  });
+  it("renumbers the predecessor's unacknowledged entries for a new writer, then its interruptions", () => {
+    const f = fixture(); const first = f.payload(); f.request(f.enqueue(first)); const claim = f.claim()!;
+    f.request({ kind: "settle", result: { commandId: claim.commandId, claimId: claim.claimId, state: "succeeded", resultCode: null, result: { version: 1 } } });
+    f.queue.acknowledgeTurnJournal(1);
+    const second = f.payload(); f.request(f.enqueue(second, f.snapshot().revision)); f.claim();
+    f.queue.close();
+    const writer = { ...scope, writerEpoch: randomUUID(), bootId: randomUUID(), generation: 4 };
+    const next = fixture({ file: f.file, writer });
+    expect(next.queue.turnJournalAcked()).toBe(0);
+    expect(entries(next).map(entry => [entry.journalSeq, entry.state, entry.turnId])).toEqual([
+      [1, "completed", first.userMessageId], [2, "started", second.userMessageId], [3, "interrupted", second.userMessageId]]);
+    const db = openSqlite(f.file);
+    try { expect(db.prepare("SELECT DISTINCT writer_epoch AS epoch FROM local_turn_journal").all()).toEqual([{ epoch: writer.writerEpoch }]); }
+    finally { db.close(); }
+  });
+  it("persists a monotonic ack within the head and prunes below it", () => {
+    const f = fixture(); for (let i = 0; i < 3; i++) settleCanonical(f);
+    expect(entries(f)).toHaveLength(6);
+    f.queue.acknowledgeTurnJournal(4); f.queue.acknowledgeTurnJournal(2); f.queue.acknowledgeTurnJournal(99);
+    expect(f.queue.turnJournalAcked()).toBe(4);
+    expect(entries(f).map(entry => entry.journalSeq)).toEqual([4, 5, 6]);
+    f.queue.close(); const reopened = fixture({ file: f.file });
+    expect(reopened.queue.turnJournalAcked()).toBe(4);
+    settleCanonical(reopened);
+    expect(entries(reopened).map(entry => entry.journalSeq)).toEqual([4, 5, 6, 7, 8]);
   });
 });

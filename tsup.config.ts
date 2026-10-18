@@ -49,6 +49,12 @@ export default defineConfig([
     // so the engine runs on every supported Node runtime.
     noExternal: [
       "@decimalturn/toml-patch",
+      // The shared S1 verifier (control-plane capability-verifier.ts and
+      // capability-contract.ts) runs in the engine. Bundle jose (ESM-only)
+      // and zod so each importer keeps the zod it is tested with (the
+      // control plane's zod 3, the engine's zod 4) instead of the root zod.
+      "jose",
+      "zod",
       /^@zeros\/(?:design-core|design-web|protocol)/,
     ],
     define: {

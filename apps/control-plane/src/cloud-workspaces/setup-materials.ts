@@ -1570,7 +1570,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     const renewed = await withSystemTx(this.pool, async (tx) => {
       // Lifecycle and liveness retirement hold workspace -> grants -> engine.
       // Serialize heartbeat renewal with that same workspace authority before
-      // touching the engine row. An expired token never creates a fresh lease.
+      // touching the engine row. An expired token never creates a fresh lease,
+      // and a lease the uplink renewed further out (lease.v1) never shortens.
       await tx.query(
         "SELECT 1 FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE",
         [input.workspaceId, input.organizationId],
@@ -1581,7 +1582,10 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       }>(
         `UPDATE cloud_workspace_engine_instances ei
          SET last_heartbeat_at = clock_timestamp(),
-             lease_expires_at = clock_timestamp() + ($6::bigint * interval '1 millisecond'),
+             lease_expires_at = greatest(
+               ei.lease_expires_at,
+               clock_timestamp() + ($6::bigint * interval '1 millisecond')
+             ),
              updated_at = now()
          FROM cloud_workspaces cw, organizations organization, teams team,
               organization_members om, team_members tm, users account

@@ -3,6 +3,7 @@ import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 
 import {
   CLOUD_RUNTIME_ENV,
+  CloudClientAuthorityTransientError,
   CloudRuntimeRegistration,
   consumeCloudRuntimeEnvironment,
   type CloudDurableRecordSyncContext,
@@ -1548,4 +1549,571 @@ it.each(["manual", "before_fork"] as const)("keeps %s outside final-only control
     await vi.advanceTimersByTimeAsync(30_000);
     expect(onCheckpointRequested).not.toHaveBeenCalled(); expect(sync).toHaveBeenCalledTimes(2);
   } finally { await registration.stop(); }
+});
+
+describe("engine uplink advertisement", () => {
+  const advertised = { uplink: { endpoint: "wss://realtime.example.test/v1/uplink" } };
+
+  function fixture(responseOverrides: Record<string, unknown> = {}) {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const response = { ...registrationResponse(), ...responseOverrides };
+    const fetcher = vi.fn<typeof fetch>(async url => new URL(String(url)).pathname.endsWith("/register")
+      ? Response.json(response)
+      : Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+          engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: NOW + 90_000 }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    return { registration, fetcher, runtime };
+  }
+
+  it("opts in with the uplink header on the registration POST", async () => {
+    const f = fixture();
+    await f.registration.start();
+    expect(f.fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({ "x-zeros-cloud-engine-uplink": "1" });
+    await f.registration.stop();
+  });
+
+  it("exposes the advertised endpoint with the heartbeat credential until stop", async () => {
+    const f = fixture(advertised);
+    await f.registration.start();
+    expect(f.registration.engineUplink()).toEqual({
+      endpoint: "wss://realtime.example.test/v1/uplink", token: `zwh_${"H".repeat(43)}`,
+      controlPlaneOrigin: new URL(registrationResponse().heartbeat.endpoint).origin,
+    });
+    await f.registration.stop();
+    expect(f.registration.engineUplink()).toBeNull();
+  });
+
+  it("keeps working without the advertisement (older control plane or flag off)", async () => {
+    const f = fixture();
+    await f.registration.start();
+    expect(f.registration.engineUplink()).toBeNull();
+    expect(f.registration.readiness()).not.toBeNull();
+    await f.registration.stop();
+  });
+
+  it.each([
+    ["an https endpoint", { uplink: { endpoint: "https://realtime.example.test/v1/uplink" } }],
+    ["a credential-bearing endpoint", { uplink: { endpoint: "wss://u:p@realtime.example.test/v1/uplink" } }],
+    ["an endpoint with a query", { uplink: { endpoint: "wss://realtime.example.test/v1/uplink?x=1" } }],
+    ["extra uplink keys", { uplink: { endpoint: "wss://realtime.example.test/v1/uplink", token: "x" } }],
+    ["an unknown top-level member", { ...advertised, surprise: true }],
+  ])("rejects the registration document with %s", async (_label, overrides) => {
+    const f = fixture(overrides);
+    await expect(f.registration.start()).rejects.toThrow("registration");
+    await f.registration.stop();
+  });
+
+  it("requestHeartbeatSoon schedules an immediate beat on the heartbeat endpoint", async () => {
+    const f = fixture(advertised);
+    await f.registration.start();
+    expect(f.fetcher).toHaveBeenCalledTimes(1);
+    f.registration.requestHeartbeatSoon();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(String(f.fetcher.mock.calls[1]?.[0])).toBe(heartbeatEndpoint);
+    await f.registration.stop();
+  });
+
+  it("requests an engine capability by REST with the heartbeat credential and the registered boot id", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const token = `${"a".repeat(20)}.${"b".repeat(40)}.${"c".repeat(43)}`;
+    let answer: unknown = { capability: { token, expiresAt: new Date(NOW + 300_000).toISOString() } };
+    const fetcher = vi.fn<typeof fetch>(async url => {
+      const route = new URL(String(url)).pathname;
+      if (route.endsWith("/register")) return Response.json({ ...registrationResponse(), ...advertised });
+      if (route === "/internal/v2/cloud-workspaces/engine/capability") return Response.json(answer, { status: 201 });
+      return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: NOW + 90_000 });
+    });
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start();
+      expect(await registration.requestEngineCapability()).toEqual({ token, expiresAtMs: NOW + 300_000 });
+      const call = fetcher.mock.calls.find(([url]) => new URL(String(url)).pathname.endsWith("/engine/capability"))!;
+      expect(new URL(String(call[0])).origin).toBe(new URL(heartbeatEndpoint).origin);
+      expect(call[1]?.headers).toMatchObject({ authorization: `Bearer zwh_${"H".repeat(43)}`, "content-type": "application/json" });
+      expect(JSON.parse(String(call[1]?.body))).toEqual({
+        workspaceId: runtime.execution.workspaceId, organizationId: runtime.execution.organizationId,
+        generation: runtime.execution.generation, engineInstanceId: runtime.engine.instanceId, bootId: registration.runtimeBootId,
+      });
+      for (const invalid of [{ capability: { token } }, { capability: { token: "x", expiresAt: new Date(NOW).toISOString() } },
+        { capability: { token, expiresAt: "soon" } }, { capability: { token, expiresAt: new Date(NOW).toISOString() }, extra: 1 }]) {
+        answer = invalid;
+        await expect(registration.requestEngineCapability()).rejects.toThrow();
+      }
+    } finally { await registration.stop(); }
+    await expect(registration.requestEngineCapability()).rejects.toThrow();
+  });
+
+  it("asks the control plane to admit a verified capability's actor through the heartbeat authority", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const renewalToken = `zwa_${"R".repeat(43)}`;
+    const admitted = { ...actorAdmissionResponse(4), renewalToken };
+    let answer: () => Response = () => Response.json(admitted);
+    const fetcher = vi.fn<typeof fetch>(async url => {
+      const route = new URL(String(url)).pathname;
+      if (route.endsWith("/register")) return Response.json({ ...registrationResponse(), ...advertised });
+      if (route === "/internal/v2/cloud-workspaces/engine/capability-admission") return answer();
+      return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: NOW + 90_000 });
+    });
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    const client = { capability: `${"a".repeat(20)}.${"b".repeat(40)}.${"c".repeat(43)}`,
+      proof: { timestampMs: NOW, nonce: "N".repeat(22), signature: "S".repeat(86) } };
+    const transient = () => expect(registration.admitCapabilityClient(client, "direct")).rejects.toBeInstanceOf(CloudClientAuthorityTransientError);
+    await transient();
+    expect(fetcher).not.toHaveBeenCalled();
+    try {
+      await registration.start();
+      expect(await registration.admitCapabilityClient(client, "direct")).toEqual({
+        admission: { accountUserId: ACCOUNT_USER_ID, authorityEpoch: 4, actor: { sessionId: admitted.actorSessionId,
+          deviceId: admitted.deviceId, role: "developer", fingerprint: admitted.fingerprint } },
+        renewalToken,
+      });
+      const calls = () => fetcher.mock.calls.filter(([url]) => new URL(String(url)).pathname.endsWith("/engine/capability-admission"));
+      const [call] = calls();
+      expect(new URL(String(call![0])).origin).toBe(new URL(heartbeatEndpoint).origin);
+      expect(call![1]?.headers).toMatchObject({ authorization: `Bearer zwh_${"H".repeat(43)}`, "content-type": "application/json" });
+      expect(JSON.parse(String(call![1]?.body))).toEqual({
+        workspaceId: runtime.execution.workspaceId, organizationId: runtime.execution.organizationId,
+        generation: runtime.execution.generation, engineInstanceId: runtime.engine.instanceId,
+        capability: client.capability, proof: client.proof, route: "direct",
+      });
+      // The control plane's refusals.
+      for (const status of [401, 403, 404, 422]) {
+        answer = () => Response.json({ error: { code: "cloud_actor_admission_rejected" } }, { status });
+        expect(await registration.admitCapabilityClient(client, "relay")).toBeNull();
+      }
+      expect(JSON.parse(String(calls().at(-1)![1]?.body))).toMatchObject({ route: "relay" });
+      for (const invalid of [actorAdmissionResponse(4), { ...admitted, renewalToken: "zwa_short" }, { ...admitted, extra: 1 }]) {
+        answer = () => Response.json(invalid);
+        expect(await registration.admitCapabilityClient(client, "direct")).toBeNull();
+      }
+      // Not answered yet: the client retries.
+      for (const next of [408, 429, 500, 503].map(status => () => Response.json({ error: { code: "later" } }, { status })))  {
+        answer = next;
+        await transient();
+      }
+      answer = () => new Response("<html>", { headers: { "content-type": "text/html" } });
+      await transient();
+      answer = () => { throw new TypeError("network"); };
+      await transient();
+      let stopping: Promise<void> | undefined;
+      answer = () => { stopping = registration.stop(); return Response.json(admitted); };
+      await transient();
+      await stopping;
+    } finally { await registration.stop(); }
+    answer = () => Response.json(admitted);
+    await transient();
+  });});
+
+describe("engine lease over the uplink (lease.v1)", () => {
+  const LEASE = 36 * 60_000;
+  const hintEndpoint = "https://control.example.test/internal/v1/cloud-workspaces/engine/checkpoint-hint";
+  const refresh = { version: 1 as const, audience: "zeros-cloud-github-refresh-v1" as const, generation: "G".repeat(24),
+    requestedAt: NOW, ownerSubjectSha256: "d".repeat(64), method: "github-app" as const, reason: "credential-invalid" as const };
+  type Ports = { port: number; protocol: "tcp" }[];
+
+  /** A cloud engine whose uplink renews its lease. The heartbeat answers like
+   * the control plane, `greatest(lease, clock + 90 s)`; the hint wait answers
+   * idle once and then holds, unless told otherwise. */
+  function harness(options: { hints?: "healthy" | "absent" | "failing" | "unanswered"; push?: boolean } = {}) {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+    const beats: Array<{ at: number; body: Record<string, unknown> }> = [];
+    let uplinkLease = 0;
+    let answer: (now: number) => number = now => Math.max(uplinkLease, now + 90_000);
+    let failStatus: number | null = null;
+    let hintCalls = 0;
+    const hintAnswers: boolean[] = (options.hints ?? "healthy") === "healthy" ? [false] : [];
+    let directive: Record<string, unknown> | null = null;
+    const checkpoints: unknown[] = [];
+    const held = (init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+    const fetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      const href = String(url);
+      if (href === registrationEndpoint)
+        return Response.json(registrationResponse(), { headers: { "x-zeros-cloud-local-commands": "1" } });
+      if (href === hintEndpoint) {
+        hintCalls += 1;
+        if (options.hints === "absent") return Response.json({ error: { code: "not_found" } }, { status: 404 });
+        if (options.hints === "failing") return Response.json({ error: { code: "unavailable" } }, { status: 503 });
+        const pending = hintAnswers.shift();
+        if (pending === undefined) return held(init);
+        return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-checkpoint-hint-v1", pending });
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      beats.push({ at: Date.now(), body });
+      if (failStatus !== null) return Response.json({ error: { code: "engine_heartbeat_unavailable" } }, { status: failStatus });
+      return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: answer(Date.now()),
+        ...(directive ? { checkpointRequest: directive } : {}),
+        ...(body.repositoryCredentialRefresh
+          ? { repositoryCredential: { requestGeneration: refresh.generation, outcome: "unavailable" } } : {}) });
+    });
+    let active = true;
+    let push = options.push === true;
+    let ports: Ports = [{ port: 3_000, protocol: "tcp" }];
+    let pendingRefresh: typeof refresh | null = null;
+    const sync = completedDurableRecordSync();
+    const lost = vi.fn();
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION,
+      fetch: fetch as unknown as typeof globalThis.fetch, now: Date.now, negotiateLocalCommands: true,
+      checkpointHints: true, onAuthorityLost: lost, onDurableRecordSync: sync,
+      onCheckpointRequested: async value => { checkpoints.push(value); },
+      readObservedPorts: async () => ports, readRepositoryCredentialRefresh: () => pendingRefresh });
+    registration.attachUplinkLease(() => active);
+    registration.attachUplinkCheckpointPush(() => push);
+    return {
+      registration, beats, sync, lost, checkpoints,
+      hintCalls: () => hintCalls,
+      /** The uplink's checkpoint push started or ended; without `notify` the
+       * change report was missed. */
+      setPush: (value: boolean, notify = true) => {
+        push = value;
+        if (notify) registration.uplinkCheckpointPushChanged();
+      },
+      /** The next hint wait answers instead of holding. */
+      queueHint: (pending: boolean) => { hintAnswers.push(pending); },
+      /** The uplink renewed the lease now and reported it (pong). */
+      renew: () => { const at = Date.now(); uplinkLease = at + LEASE; registration.adoptUplinkLease(uplinkLease, at); },
+      remaining: () => registration.agentBootAuthorityRemainingMs() + 1_000,
+      setActive: (value: boolean) => { active = value; },
+      setPorts: (value: Ports) => { ports = value; },
+      setRefresh: (value: typeof refresh | null) => { pendingRefresh = value; },
+      failWith: (status: number | null) => { failStatus = status; },
+      answerWith: (value: (now: number) => number) => { answer = value; },
+      /** The checkpoint request each beat delivers until it completes (null). */
+      setDirective: (value: Record<string, unknown> | null) => { directive = value; },
+    };
+  }
+  type Harness = ReturnType<typeof harness>;
+
+  async function started(options: Parameters<typeof harness>[0] = {}): Promise<Harness> {
+    const h = harness(options);
+    await h.registration.start();
+    await vi.advanceTimersByTimeAsync(0); // the hint wait answers (or not) before the first tick
+    h.renew();
+    return h;
+  }
+
+  it("skips a periodic beat that would carry nothing while the uplink renews the lease, and still syncs the record", async () => {
+    const h = await started();
+    try {
+      expect(h.remaining()).toBe(LEASE);
+      await vi.advanceTimersByTimeAsync(30_000);
+      // The first beat reports the observed ports; the control plane keeps the longer lease.
+      expect(h.beats).toHaveLength(1);
+      expect(h.beats[0]!.body).toMatchObject({ observedPorts: [{ port: 3_000, protocol: "tcp" }] });
+      expect(h.remaining()).toBe(LEASE - 30_000);
+      await vi.advanceTimersByTimeAsync(5 * 30_000);
+      expect(h.beats).toHaveLength(1);
+      // A skipped tick still synchronizes the durable record on the beat's cadence.
+      expect(h.sync).toHaveBeenCalledTimes(1 + 6);
+      expect(h.sync.mock.calls.slice(1).every(([, context]) => context.initial === false)).toBe(true);
+      expect(h.lost).not.toHaveBeenCalled();
+    } finally { await h.registration.stop(); }
+  });
+
+  it.each([
+    ["the uplink stops renewing", (h: Harness) => h.setActive(false), 3],
+    ["a repository credential refresh is pending", (h: Harness) => h.setRefresh(refresh), 3],
+    ["the observed ports changed", (h: Harness) => h.setPorts([{ port: 3_000, protocol: "tcp" }, { port: 8_080, protocol: "tcp" }]), 2],
+  ] as const)("beats on the next tick when %s", async (_label, change, afterTwoTicks) => {
+    const h = await started();
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.beats).toHaveLength(1);
+      change(h);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(h.beats).toHaveLength(2);
+      // A changed listener set is reported once; the other conditions persist.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(h.beats).toHaveLength(afterTwoTicks);
+      expect(h.lost).not.toHaveBeenCalled();
+    } finally { await h.registration.stop(); }
+  });
+
+  it.each(["absent", "failing", "unanswered"] as const)("keeps every periodic beat while the checkpoint hint wait is %s", async hints => {
+    const h = await started({ hints });
+    try {
+      await vi.advanceTimersByTimeAsync(3 * 30_000);
+      expect(h.beats).toHaveLength(3);
+    } finally { await h.registration.stop(); }
+  });
+
+  it("returns to the HTTP heartbeat once 25 minutes or less of an unrenewed lease remain", async () => {
+    const h = await started();
+    try {
+      await vi.advanceTimersByTimeAsync(630_000);
+      expect(h.beats).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(30_000); // 25 minutes left
+      expect(h.beats).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(h.beats).toHaveLength(3);
+      // A renewal reported over the uplink restores the skip.
+      h.renew();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.beats).toHaveLength(3);
+    } finally { await h.registration.stop(); }
+  });
+
+  it("posts a forced beat at once even while the uplink renews the lease", async () => {
+    const h = await started();
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.beats).toHaveLength(1);
+      h.registration.requestHeartbeatSoon();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.beats).toHaveLength(2);
+    } finally { await h.registration.stop(); }
+  });
+
+  it("keeps every periodic beat while the control plane redelivers a checkpoint request", async () => {
+    const h = await started();
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.beats).toHaveLength(1);
+      h.setDirective({ id: "66666666-6666-4666-8666-666666666666", reason: "manual", deadlineAtMs: NOW + 10 * 60_000 });
+      h.registration.requestHeartbeatSoon(); // the hint wait reported a queued request
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.beats).toHaveLength(2);
+      expect(h.checkpoints).toHaveLength(1);
+      // An incomplete request is redelivered on every beat, so the beat is
+      // not empty: one that waited behind another capture is fetched here.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(h.beats).toHaveLength(3);
+      h.setDirective(null); // completed
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(h.beats).toHaveLength(4);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.beats).toHaveLength(4);
+      expect(h.lost).not.toHaveBeenCalled();
+    } finally { await h.registration.stop(); }
+  });
+
+  it.each([[LEASE + 60_000, true], [LEASE + 60_001, false]] as const)(
+    "accepts a heartbeat lease up to the uplink lease plus a minute, stored no later than the request plus the uplink lease (%s ms)",
+    async (ahead, accepted) => {
+      const h = harness();
+      h.answerWith(now => now + ahead);
+      try {
+        await h.registration.start();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(h.beats).toHaveLength(1);
+        if (accepted) {
+          expect(h.lost).not.toHaveBeenCalled();
+          expect(h.remaining()).toBe(LEASE);
+        } else {
+          expect(h.lost).toHaveBeenCalledOnce();
+        }
+      } finally { await h.registration.stop(); }
+    });
+
+  it("backs off failed beats while a long lease remains and retries every 5 s in its last two minutes", async () => {
+    const h = await started();
+    try {
+      h.setActive(false); // the uplink is gone, so every periodic beat posts
+      h.failWith(503);
+      await vi.advanceTimersByTimeAsync(225_000);
+      expect(h.beats.map(beat => beat.at - NOW)).toEqual([30_000, 35_000, 45_000, 65_000, 105_000, 165_000, 225_000]);
+      await vi.advanceTimersByTimeAsync(LEASE);
+      const at = h.beats.map(beat => beat.at - NOW);
+      // A minute apart until the last two minutes, then every 5 s until one
+      // second before the lease ends, when authority is retired.
+      expect(at.filter(value => value > 225_000 && value <= 2_085_000).every((value, index, all) =>
+        (index === 0 ? value - 225_000 : value - all[index - 1]!) === 60_000)).toBe(true);
+      expect(at.slice(-4)).toEqual([2_145_000, 2_150_000, 2_155_000, LEASE - 1_000]);
+      expect(at.filter(value => value > 2_085_000)).toHaveLength(15);
+      expect(h.lost).toHaveBeenCalledOnce();
+    } finally { await h.registration.stop(); }
+  });
+
+  it("keeps the 5 s retry for a 90-second HTTP lease and retires authority one second before it ends", async () => {
+    const h = harness();
+    try {
+      await h.registration.start();
+      h.failWith(503);
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(h.beats.map(beat => beat.at - NOW)).toEqual([30_000, 35_000, 40_000, 45_000, 50_000, 55_000, 60_000,
+        65_000, 70_000, 75_000, 80_000, 85_000, 89_000]);
+      expect(h.lost).toHaveBeenCalledOnce();
+    } finally { await h.registration.stop(); }
+  });
+
+  it("adopts an uplink lease only upward and never past the request time plus the uplink lease", async () => {
+    let now = NOW;
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => now)!;
+    const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), {
+      headers: { "x-zeros-cloud-local-commands": "1" },
+    }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => now, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    const remaining = () => registration.agentBootAuthorityRemainingMs() + 1_000;
+    registration.adoptUplinkLease(NOW + LEASE, NOW); // nothing to raise before registration
+    try {
+      await registration.start();
+      expect(remaining()).toBe(90_000);
+      registration.adoptUplinkLease(NOW + LEASE + 10 * 60_000, NOW); // a skewed report
+      expect(remaining()).toBe(LEASE);
+      registration.adoptUplinkLease(NOW + 60_000, NOW); // never lowers
+      expect(remaining()).toBe(LEASE);
+      now += 5 * 60_000;
+      registration.adoptUplinkLease(now + LEASE, now - 1_000); // a pong answering a ping sent a second ago
+      expect(remaining()).toBe(LEASE - 1_000);
+      for (const [lease, sentAt] of [[Number.NaN, now], [now + LEASE + 0.5, now], [now + LEASE, now + 1], [now + LEASE, Number.NaN]])
+        registration.adoptUplinkLease(lease!, sentAt!); // malformed, or a request from the future
+      expect(remaining()).toBe(LEASE - 1_000);
+      expect(fetcher).toHaveBeenCalledOnce();
+    } finally { await registration.stop(); }
+    registration.adoptUplinkLease(now + LEASE, now);
+    expect(registration.agentBootAuthorityRemainingMs()).toBe(0);
+  });
+
+  it("never revives a lapsed lease from an uplink report", async () => {
+    let now = NOW;
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => now)!;
+    const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), {
+      headers: { "x-zeros-cloud-local-commands": "1" },
+    }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => now, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start();
+      now = NOW + 90_000; // the 90-second lease ends; no beat ran
+      registration.adoptUplinkLease(now + LEASE, now);
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(0);
+    } finally { await registration.stop(); }
+  });
+
+  it("retries a failed forced beat until one is accepted, even while the uplink renews the lease", async () => {
+    const h = await started();
+    const at = () => h.beats.map(beat => beat.at - NOW);
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(at()).toEqual([30_000]);
+      h.failWith(503);
+      h.registration.requestHeartbeatSoon();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(at()).toEqual([30_000, 60_000, 65_000, 75_000]);
+      h.failWith(null);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(at()).toEqual([30_000, 60_000, 65_000, 75_000, 95_000]);
+      // An accepted beat ends the failure series: the next one backs off from 5 s.
+      h.failWith(503);
+      h.registration.requestHeartbeatSoon();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(at().slice(5)).toEqual([95_000, 100_000]);
+      h.failWith(null);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(at().slice(5)).toEqual([95_000, 100_000, 110_000]);
+      // Periodic beats that carry nothing are skipped again.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.beats).toHaveLength(8);
+      expect(h.lost).not.toHaveBeenCalled();
+    } finally { await h.registration.stop(); }
+  });
+
+  describe("checkpoint requests pushed over the uplink (checkpoint.v1)", () => {
+    const queued = { id: "77777777-7777-4777-8777-777777777777", reason: "manual", deadlineAtMs: NOW + 10 * 60_000 };
+
+    it("sends no checkpoint hint wait while the uplink pushes requests, and re-checks every 30 s", async () => {
+      const h = await started({ push: true, hints: "unanswered" });
+      try {
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        expect(h.hintCalls()).toBe(0);
+        expect(h.beats).toHaveLength(1);
+        h.setPush(false, false); // the change report was missed
+        await vi.advanceTimersByTimeAsync(29_000);
+        expect(h.hintCalls()).toBe(0);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(h.hintCalls()).toBe(1);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("resumes the hint wait at once when the push ends, so its first read sees a request queued meanwhile", async () => {
+      const h = await started({ push: true, hints: "unanswered" });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(h.hintCalls()).toBe(0);
+        h.setDirective(queued);
+        h.queueHint(true);
+        h.setPush(false);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.hintCalls()).toBe(1);
+        expect(h.beats).toHaveLength(2);
+        expect(h.checkpoints).toEqual([expect.objectContaining({ id: queued.id })]);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("re-checks at once when another uplink attaches", async () => {
+      const h = await started({ push: true, hints: "unanswered" });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(h.hintCalls()).toBe(0);
+        h.registration.attachUplinkCheckpointPush(() => false);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.hintCalls()).toBe(1);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("restarts the hint backoff once the push ends", async () => {
+      const h = await started({ hints: "failing" });
+      try {
+        await vi.advanceTimersByTimeAsync(40_000); // failed waits back off to 30 s
+        h.setPush(true);
+        await vi.advanceTimersByTimeAsync(60_000); // the current backoff ends, then the wait pauses
+        const paused = h.hintCalls();
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(h.hintCalls()).toBe(paused);
+        h.setPush(false);
+        await vi.advanceTimersByTimeAsync(1_000);
+        // A fresh series: the first failure retries after 1 s, not 30 s.
+        expect(h.hintCalls()).toBe(paused + 2);
+      } finally { await h.registration.stop(); }
+    });
+
+    it("posts a beat at once for a pushed request; the beat fetches it", async () => {
+      const h = await started({ push: true });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(h.beats).toHaveLength(1);
+        h.setDirective(queued);
+        h.registration.checkpointRequested();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.beats).toHaveLength(2);
+        expect(h.checkpoints).toEqual([expect.objectContaining({ id: queued.id })]);
+        expect(h.hintCalls()).toBe(0);
+      } finally { await h.registration.stop(); }
+    });
+
+    it.each(["absent", "failing", "unanswered"] as const)(
+      "skips periodic beats that carry nothing while the uplink pushes requests, even when the hint wait is %s",
+      async hints => {
+        const h = await started({ hints });
+        try {
+          await vi.advanceTimersByTimeAsync(3 * 30_000);
+          expect(h.beats).toHaveLength(3);
+          h.setPush(true);
+          const hintCalls = h.hintCalls();
+          await vi.advanceTimersByTimeAsync(3 * 30_000);
+          expect(h.beats).toHaveLength(3);
+          expect(h.hintCalls()).toBe(hintCalls);
+          h.setPush(false);
+          await vi.advanceTimersByTimeAsync(3 * 30_000);
+          expect(h.beats).toHaveLength(6);
+          expect(h.lost).not.toHaveBeenCalled();
+        } finally { await h.registration.stop(); }
+      });
+  });
 });

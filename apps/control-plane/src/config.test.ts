@@ -280,6 +280,7 @@ describe("database authority configuration", () => {
       databaseMigrationsOnBoot: true,
       databasePoolMax: 6,
       processRole: "combined",
+      shutdownDrainMs: 0,
     });
     expect(loadConfig({ ...baseEnv(), DATABASE_MIGRATION_URL: "postgres://migrator@database.test/zeros", DATABASE_MIGRATIONS_ON_BOOT: "false", DATABASE_POOL_MAX: "6" })).toMatchObject({
       databaseMigrationUrl: "postgres://migrator@database.test:5432/zeros",
@@ -321,10 +322,15 @@ describe("database authority configuration", () => {
     expect(loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: "2" }).databasePoolMax).toBe(2);
   });
   it("separates API replica and worker roles without changing placement gates", () => {
-    for (const role of ["api", "worker", "combined"]) {
+    for (const role of ["api", "worker", "realtime", "combined"]) {
       expect(loadConfig({ ...baseEnv(), CONTROL_PLANE_PROCESS_ROLE: role }).processRole).toBe(role);
     }
     expect(() => loadConfig({ ...baseEnv(), CONTROL_PLANE_PROCESS_ROLE: "all" })).toThrow(/CONTROL_PLANE_PROCESS_ROLE/);
+  });
+  it("keeps the immediate shutdown unless a bounded drain window is configured", () => {
+    expect(loadConfig({ ...baseEnv(), CONTROL_PLANE_DRAIN_SECONDS: "30" }).shutdownDrainMs).toBe(30_000);
+    for (const value of ["-1", "121", "2.5", "bad"])
+      expect(() => loadConfig({ ...baseEnv(), CONTROL_PLANE_DRAIN_SECONDS: value })).toThrow(/CONTROL_PLANE_DRAIN_SECONDS/);
   });
   const psFixture = new URL("postgres://region.horizon.psdb.cloud:5432/zeros?sslmode=verify-full");
   psFixture.username = "app.branchtest";
@@ -347,6 +353,39 @@ describe("database authority configuration", () => {
     expect(() => loadConfig({ ...env, [key]: ps.replace("app.branchtest", "migrator.otherbranch") })).toThrow(new RegExp(key));
     expect(() => loadConfig({ ...env, [key]: ps.replace("/zeros?", "/other?") })).toThrow(new RegExp(key));
     expect(loadConfig({ ...env, [key]: ps.replace("app.branchtest", "migrator.branchtest") }).databaseUrl).toBe(ps);
+  });
+});
+
+describe("trace export configuration", () => {
+  it("disables tracing unless an endpoint is configured", () => {
+    const config = loadConfig(baseEnv());
+    expect(config.tracesUrl).toBeUndefined();
+    expect(config.traceSampleRatio).toBe(0);
+    for (const value of ["", "   "])
+      expect(loadConfig({ ...baseEnv(), OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: value }).tracesUrl).toBeUndefined();
+  });
+
+  it("accepts https endpoints and plain http only on private hosts", () => {
+    expect(loadConfig({ ...baseEnv(), OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://tempo.example.com/v1/traces" }).tracesUrl)
+      .toBe("https://tempo.example.com/v1/traces");
+    for (const value of ["http://tempo.railway.internal:4318/v1/traces", "http://localhost:4318/v1/traces"])
+      expect(loadConfig({ ...baseEnv(), OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: value }).tracesUrl).toBe(value);
+  });
+
+  it.each([
+    "http://tempo.example.com/v1/traces",
+    "https://user:pass@tempo.example.com/v1/traces",
+    "https://tempo.example.com/v1/traces?x=1",
+    "not a url",
+  ])("rejects trace endpoint %s", value => {
+    expect(() => loadConfig({ ...baseEnv(), OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: value }))
+      .toThrow(/OTEL_EXPORTER_OTLP_TRACES_ENDPOINT/);
+  });
+
+  it("bounds the trace sample ratio to 0 through 1", () => {
+    expect(loadConfig({ ...baseEnv(), CONTROL_PLANE_TRACE_SAMPLE_RATIO: "0.25" }).traceSampleRatio).toBe(0.25);
+    for (const value of ["1.5", "-0.1"])
+      expect(() => loadConfig({ ...baseEnv(), CONTROL_PLANE_TRACE_SAMPLE_RATIO: value })).toThrow();
   });
 });
 
@@ -1061,8 +1100,33 @@ describe("cloud workspace backend configuration", () => {
         timeoutSeconds: 1_800,
         leaseMs: 60_000,
         admissionTtlSeconds: 120,
+        engineUplinkEndpoint: null,
       },
     });
+  });
+
+  it("advertises the uplink only from an explicit credential-free realtime origin", () => {
+    expect(
+      loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_REALTIME_URL: "https://realtime.example.test" })
+        .cloudWorkspaces?.setupExecution?.engineUplinkEndpoint,
+    ).toBe("wss://realtime.example.test/v1/uplink");
+    expect(
+      loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_REALTIME_URL: "wss://realtime.example.test/" })
+        .cloudWorkspaces?.setupExecution?.engineUplinkEndpoint,
+    ).toBe("wss://realtime.example.test/v1/uplink");
+    expect(
+      loadConfig(cloudSetupEnv()).cloudWorkspaces?.setupExecution?.engineUplinkEndpoint,
+    ).toBeNull();
+    for (const bad of [
+      "http://realtime.example.test",
+      "https://user:secret@realtime.example.test",
+      "https://realtime.example.test/some/path",
+      "https://realtime.example.test/?x=1",
+    ]) {
+      expect(() => loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_REALTIME_URL: bad })).toThrow(
+        /CLOUD_WORKSPACE_REALTIME_URL/,
+      );
+    }
   });
 
   it("defaults cloud setup to the shared engine protocol while retaining an explicit compatible-image override", () => {
