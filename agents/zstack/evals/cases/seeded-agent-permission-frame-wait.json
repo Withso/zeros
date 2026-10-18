@@ -1,0 +1,9 @@
+{
+  "id": "seeded-agent-permission-frame-wait",
+  "kind": "seeded",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:570",
+  "symptom": "A hidden window parked permission requests, including previously authorized policy responses, until a later flush.",
+  "rule": "Control events must drain synchronously in arrival order instead of depending on animation frames. Execute the real provider listener with frames suspended, including exact Local and cloud ownership.",
+  "check": "pnpm test:git apps/desktop/src/renderer/features/agent/__tests__/agent-notification-flush.test.ts"
+}

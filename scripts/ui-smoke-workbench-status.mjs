@@ -53,6 +53,47 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
   // pauseAt refuses past targets, so jump 1 s past the page's current time.
   const pauseClock = async () =>
     page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  for (const theme of ["dark", "light"]) for (const workspace of ["local", "organization-local"]) {
+    await page.goto(`${harnessBase}/harness-workbench-status.html?cold`);
+    await page.waitForFunction(() => !!window.workbenchStatusFixture);
+    await pauseClock();
+    await page.evaluate(({ theme, workspace }) => {
+      window.workbenchStatusFixture.theme(theme);
+      window.workbenchStatusFixture.render("files", { workspace });
+    }, { theme, workspace });
+    await page.clock.fastForward(15_000);
+    await expect(banner()).toHaveCount(0);
+    await expect(empty()).toHaveCount(0);
+    await noToast();
+    // An actual remote connection still gets its own status. Switching back
+    // cannot copy that cloud banner into either Local owner.
+    await page.evaluate(() => window.workbenchStatusFixture.render("files", { workspace: "a" }));
+    await expect(banner()).toContainText("Connecting…");
+    await page.evaluate(workspace => window.workbenchStatusFixture.render("files", { workspace }), workspace);
+    await expect(banner()).toHaveCount(0);
+    await page.evaluate(() => window.workbenchStatusFixture.connection("connected"));
+    for (const type of types) {
+      await page.evaluate(({ type, workspace }) => window.workbenchStatusFixture.render(type, { workspace }), { type, workspace });
+      const content = page.locator("[data-confirmed-content]:visible");
+      await expect(content).toHaveCount(1);
+      await page.evaluate(() => window.workbenchStatusFixture.connection("disconnected"));
+      await page.clock.fastForward(15_000);
+      await expect(banner()).toHaveCount(0);
+      await expect(empty()).toHaveCount(0);
+      await expect(content).toHaveCount(1);
+      await noToast();
+      await page.evaluate(() => window.workbenchStatusFixture.connection("connected"));
+    }
+    // Capture the actual file viewer, the surface in the reported restart.
+    await page.evaluate(workspace => window.workbenchStatusFixture.render("files", { workspace, surface: "feature", target: "fixture.txt" }), workspace);
+    await expect(page.getByText("Confirmed file content", { exact: false }).first()).toBeVisible();
+    await page.evaluate(() => window.workbenchStatusFixture.connection("disconnected"));
+    await page.clock.fastForward(15_000);
+    await expect(banner()).toHaveCount(0);
+    await screenshot("files", `${workspace}-engine-restart`, theme);
+    await page.evaluate(() => window.workbenchStatusFixture.theme("dark"));
+    check(`${theme} ${workspace}: startup and reconnect stay banner-free across all tabs, retain content and isolate cloud status`, true);
+  }
   // Every tab retains its exact-key pixels through short and prolonged gaps.
   // Observe the DOM during the interval too: a banner/icon that flashes and
   // clears before an assertion is still a regression.

@@ -36,6 +36,87 @@ function deferred<T>() {
 }
 
 describe("workspace file data cache", () => {
+  it("keeps one oversized Local patch warm without evicting ordinary primed patches", async () => {
+    const query = { workspaceId: "workspace", path: "generated.txt", fullContext: true };
+    const small = { ...query, path: "normal.txt" };
+    primeWorkspaceFileDiff(small, "small patch");
+    const patch = "x".repeat(40_000_000);
+    primeWorkspaceFileDiff(query, patch);
+    expect(peekWorkspaceFileDiff(query) === patch).toBe(true);
+    expect(await loadWorkspaceFileDiff(query, { maxAgeMs: 60_000 }) === patch).toBe(true);
+    expect(diffFile).not.toHaveBeenCalled();
+    expect(peekWorkspaceFileDiff(small)).toBe("small patch");
+    primeWorkspaceFileDiff({ ...query, path: "newer.txt" }, "y".repeat(40_000_000));
+    expect(peekWorkspaceFileDiff(query) === undefined).toBe(true);
+    expect(peekWorkspaceFileDiff(small)).toBe("small patch");
+  });
+
+  it("bounds inactive Local text payloads while keeping recent files immediately available", async () => {
+    const queries = Array.from({ length: 96 }, (_, index) => ({ cwd: "/repo", path: `file-${index}.txt` }));
+    for (const [index, query] of queries.entries()) {
+      primeWorkspaceFileRead(query, textResult(query.path, `${index}:` + "x".repeat(2_000_000 - 3)));
+    }
+    expect(peekWorkspaceFileRead(queries[0]!) === undefined).toBe(true);
+    const recent = queries.at(-1)!;
+    const cached = peekWorkspaceFileRead(recent);
+    expect(cached?.content?.length).toBeGreaterThan(1_999_990);
+    await expect(loadWorkspaceFileRead(recent, { maxAgeMs: 60_000 })).resolves.toBe(cached);
+    expect(readFile).not.toHaveBeenCalled();
+    const retained = queries.reduce((sum, query) => sum + (peekWorkspaceFileRead(query)?.content?.length ?? 0) * 2, 0);
+    expect(retained).toBeLessThanOrEqual(128 * 1024 * 1024);
+  });
+
+  it("accounts for image data URLs rather than only on-disk byte counts", () => {
+    const queries = Array.from({ length: 40 }, (_, index) => ({ cwd: "/repo", path: `image-${index}.png` }));
+    for (const query of queries) primeWorkspaceFileRead(query, {
+      kind: "image", path: query.path, bytes: 3_000_000,
+      dataUrl: "data:image/png;base64," + "x".repeat(4_000_000),
+    });
+    expect(peekWorkspaceFileRead(queries[0]!) === undefined).toBe(true);
+    expect(peekWorkspaceFileRead(queries.at(-1)!)?.kind).toBe("image");
+    const retained = queries.reduce((sum, query) => sum + (peekWorkspaceFileRead(query)?.dataUrl?.length ?? 0) * 2, 0);
+    expect(retained).toBeLessThanOrEqual(128 * 1024 * 1024);
+  });
+
+  it("bounds inactive Local patches without repeating a recent primed Git read", async () => {
+    const queries = Array.from({ length: 80 }, (_, index) => ({ workspaceId: "workspace", path: `file-${index}.txt` }));
+    for (const [index, query] of queries.entries()) primeWorkspaceFileDiff(query, `${index}:` + "x".repeat(1_000_000));
+    expect(peekWorkspaceFileDiff(queries[0]!) === undefined).toBe(true);
+    const recent = queries.at(-1)!;
+    const cached = peekWorkspaceFileDiff(recent);
+    await expect(loadWorkspaceFileDiff(recent, { maxAgeMs: 60_000 })).resolves.toBe(cached);
+    expect(diffFile).not.toHaveBeenCalled();
+    const retained = queries.reduce((sum, query) => sum + (peekWorkspaceFileDiff(query)?.length ?? 0) * 2, 0);
+    expect(retained).toBeLessThanOrEqual(64 * 1024 * 1024);
+  });
+
+  it("preserves the entry limits and warm hits for ordinary small Local files", async () => {
+    for (let index = 0; index < 96; index++) primeWorkspaceFileRead(
+      { cwd: "/repo", path: `${index}.txt` }, textResult(`${index}.txt`, "small file"),
+    );
+    for (let index = 0; index < 160; index++) primeWorkspaceFileDiff(
+      { workspaceId: "workspace", path: `${index}.txt` }, "small patch",
+    );
+    expect(peekWorkspaceFileRead({ cwd: "/repo", path: "0.txt" })?.content).toBe("small file");
+    expect(peekWorkspaceFileDiff({ workspaceId: "workspace", path: "0.txt" })).toBe("small patch");
+    expect(readFile).not.toHaveBeenCalled();
+    expect(diffFile).not.toHaveBeenCalled();
+  });
+
+  it("keeps the existing Cloud cache policy independent of Local byte pressure", () => {
+    const cloud = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const read = { cwd: cloud, path: "cloud.txt" };
+    const diff = { workspaceId: cloud, path: "cloud.txt" };
+    primeWorkspaceFileRead(read, textResult(read.path, "cloud contents"));
+    primeWorkspaceFileDiff(diff, "cloud patch");
+    for (let index = 0; index < 90; index++) {
+      primeWorkspaceFileRead({ cwd: "/repo", path: `${index}.txt` }, textResult(`${index}.txt`, "x".repeat(2_000_000)));
+      primeWorkspaceFileDiff({ workspaceId: "workspace", path: `${index}.txt` }, "x".repeat(1_000_000));
+    }
+    expect(peekWorkspaceFileRead(read)?.content).toBe("cloud contents");
+    expect(peekWorkspaceFileDiff(diff)).toBe("cloud patch");
+  });
+
   it("keeps rename context requests distinct and passes their original path to Git", async () => {
     const query = {
       workspaceId: "workspace",

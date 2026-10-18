@@ -1,0 +1,9 @@
+{
+  "id": "local-workbench-startup-quiet",
+  "kind": "replay",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:570",
+  "symptom": "Normal Local engine startup displayed a yellow Connecting banner over retained workbench content.",
+  "rule": "Apply placement-specific availability presentation and test the owning clock plus visible consumers, as required by the bug-fix playbook. Local startup and reconnect stay quiet while cloud pending states and actionable failures remain visible.",
+  "check": "pnpm test:git apps/desktop/src/renderer/shell/workbench/__tests__/tab-status-calm.test.ts apps/desktop/src/renderer/state/__tests__/workbench-availability.test.ts"
+}

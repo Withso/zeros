@@ -2,30 +2,34 @@ import path from "node:path";
 
 import type { Workspace } from "./types";
 
-interface QueuedProbe {
-  read: () => Promise<boolean>;
-  promise: Promise<boolean>;
-  resolve: (value: boolean) => void;
+interface QueuedProbe<T> {
+  read: () => Promise<T>;
+  promise: Promise<T>;
+  resolve: (value: T) => void;
   reject: (reason: unknown) => void;
 }
 
-interface ProbeFlight {
+interface ProbeIdentity {
   workspaceId: string;
   root: string;
   revision: number;
-  running: { revision: number; promise: Promise<boolean> };
-  queued?: QueuedProbe;
+}
+
+interface ProbeFlight<T> extends ProbeIdentity {
+  running: { revision: number; promise: Promise<T> };
+  queued?: QueuedProbe<T>;
 }
 
 // Only running reads are retained. Each exact target gets one running probe
 // and, after invalidation, at most one follow-up for the latest requested state.
-const flights = new Map<string, ProbeFlight>();
+const activeFlights = new Set<ProbeIdentity>();
 
-function startProbe(
+function startProbe<T>(
+  flights: Map<string, ProbeFlight<T>>,
   key: string,
-  flight: ProbeFlight,
-  read: () => Promise<boolean>,
-): Promise<boolean> {
+  flight: ProbeFlight<T>,
+  read: () => Promise<T>,
+): Promise<T> {
   const promise = Promise.resolve().then(read);
   flight.running = { revision: flight.revision, promise };
   const settled = () => {
@@ -33,64 +37,73 @@ function startProbe(
     const queued = flight.queued;
     if (!queued) {
       flights.delete(key);
+      activeFlights.delete(flight);
       return;
     }
     flight.queued = undefined;
-    void startProbe(key, flight, queued.read).then(queued.resolve, queued.reject);
+    void startProbe(flights, key, flight, queued.read).then(queued.resolve, queued.reject);
   };
   void promise.then(settled, settled);
   return promise;
 }
 
-export function shareWorkspaceChangeProbe(
-  workspace: Workspace,
-  remote: string,
-  read: () => Promise<boolean>,
-): Promise<boolean> {
-  // Resolve this identity for every caller, before sharing: a replacement
-  // checkout or changed comparison target must never inherit an older read.
-  const key = JSON.stringify([
-    workspace.id,
-    workspace.path,
-    workspace.repoRoot,
-    workspace.branch,
-    workspace.baseBranch,
-    remote,
-    workspace.createdAt,
-    workspace.archivedAt,
-    workspace.present,
-  ]);
-  const existing = flights.get(key);
-  if (existing) {
-    if (existing.queued) {
-      existing.queued.read = read;
-      return existing.queued.promise;
+/** Separate read kinds share the same watcher/mutation fence, never payloads.
+ * A factory keeps the payload type tied to its own exact-key flight map. */
+export function createWorkspaceChangeProbe<T>(): (
+  workspace: Workspace, remote: string, read: () => Promise<T>,
+) => Promise<T> {
+  const flights = new Map<string, ProbeFlight<T>>();
+  return (workspace, remote, read) => {
+    // Resolve this identity for every caller, before sharing: a replacement
+    // checkout or changed comparison target must never inherit an older read.
+    const key = JSON.stringify([
+      workspace.id,
+      workspace.path,
+      workspace.repoRoot,
+      workspace.branch,
+      workspace.baseBranch,
+      remote,
+      workspace.createdAt,
+      workspace.archivedAt,
+      workspace.present,
+      workspace.organizationId ?? null,
+      workspace.placement ?? "local",
+    ]);
+    const existing = flights.get(key);
+    if (existing) {
+      if (existing.queued) {
+        existing.queued.read = read;
+        return existing.queued.promise;
+      }
+      if (existing.running.revision === existing.revision) return existing.running.promise;
+      let resolve!: QueuedProbe<T>["resolve"];
+      let reject!: QueuedProbe<T>["reject"];
+      const promise = new Promise<T>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      existing.queued = { read, promise, resolve, reject };
+      return promise;
     }
-    if (existing.running.revision === existing.revision) return existing.running.promise;
-    let resolve!: QueuedProbe["resolve"];
-    let reject!: QueuedProbe["reject"];
-    const promise = new Promise<boolean>((done, fail) => {
-      resolve = done;
-      reject = fail;
-    });
-    existing.queued = { read, promise, resolve, reject };
+    const flight = {
+      workspaceId: workspace.id,
+      root: path.resolve(workspace.path),
+      revision: 0,
+    } as ProbeFlight<T>;
+    const promise = startProbe(flights, key, flight, read);
+    flights.set(key, flight);
+    activeFlights.add(flight);
     return promise;
-  }
-  const flight = {
-    workspaceId: workspace.id,
-    root: path.resolve(workspace.path),
-    revision: 0,
-  } as ProbeFlight;
-  const promise = startProbe(key, flight, read);
-  flights.set(key, flight);
-  return promise;
+  };
 }
+
+export const shareWorkspaceChangeProbe = createWorkspaceChangeProbe<boolean>();
 
 /** Exact watcher/mutation invalidation; omitted ids are the coarse fallback.
  * Invalidation does not start work or retain a settled answer. */
 export function invalidateWorkspaceChangeProbes(workspaceIds?: readonly string[]): void {
   const ids = workspaceIds ? new Set(workspaceIds) : null;
-  for (const flight of flights.values()) {
+  for (const flight of activeFlights) {
     if (!ids || ids.has(flight.workspaceId)) flight.revision += 1;
   }
 }
@@ -98,7 +111,7 @@ export function invalidateWorkspaceChangeProbes(workspaceIds?: readonly string[]
 /** Checkout suspension uses the exact semantic root, preserving nested owners. */
 export function invalidateWorkspaceChangeProbesForRoot(root: string): void {
   const resolved = path.resolve(root);
-  for (const flight of flights.values()) {
+  for (const flight of activeFlights) {
     if (flight.root === resolved) flight.revision += 1;
   }
 }

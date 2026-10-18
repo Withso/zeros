@@ -50,8 +50,10 @@ The full guide is `docs/design-system.md`; token values are in
    use toasts. Connection failures fall back to their existing app toast only
    while no affected frame is visible. Report each read with
    `useWorkbenchStatusSource`; one failed read gets a silent retry after 1.5
-   seconds. Connection gaps stay quiet for 10 seconds. Retain confirmed exact-key
-   content and never add a second error paragraph or Retry button.
+   seconds. Local startup/reconnection has no pending banner; cloud connection
+   gaps stay quiet for 10 seconds. Both expose actionable failure at 45 seconds.
+   Retain confirmed exact-key content and never add a second error paragraph or
+   Retry button.
 7. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
    ratchet) plus `pnpm typecheck`, `pnpm lint`, and the nearby tests. Fix
    findings; never raise `styles/policy/ui-debt.json`, add a `check:ui ignore`
