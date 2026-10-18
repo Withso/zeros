@@ -19,3 +19,8 @@ engine catalog/storage/service tests and the Design roadmap's catalog contract.
 The partial-snapshot assertion was red before the guard; the new API examples
 are feature qualification, not claims of an escaped production pagination bug
 or measured 10k rendering support.
+
+CI follow-up: capability advertisement also has exact-array assertions outside
+the catalog suites. Include those handshake consumers when adding a capability;
+update their explicit expected read-only list without weakening the checks that
+Local engines must not advertise cloud command or timing authority.
