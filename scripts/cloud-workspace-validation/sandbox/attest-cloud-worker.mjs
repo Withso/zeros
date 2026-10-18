@@ -107,7 +107,7 @@ function containerInitStartTicks() {
 
 // Component-local vocabulary. Arbitrary child output and exception messages
 // never enter this vocabulary.
-const V4_CHECKS = new Set([
+export const CLOUD_V4_ATTESTER_CHECKS = Object.freeze([
   "active_descriptor", "host_marker", "installer_receipt", "receipt_digest",
   "manifest_digest", "manifest_schema", "base_compatibility", "root_ownership",
   "file_mode", "file_inventory", "hard_link", "symlink_escape", "boot_identity",
@@ -115,9 +115,11 @@ const V4_CHECKS = new Set([
   "finite_resources", "engine_lifecycle", "containment_smoke", "seccomp", "setup_exit", "input_schema",
   "lock_busy", "launch_proof", "pointer_publish", "timeout", "process_signal", "diagnostic_missing",
 ]);
-const V4_STAGES = new Set([
+const V4_CHECKS = new Set(CLOUD_V4_ATTESTER_CHECKS);
+export const CLOUD_V4_ATTESTER_STAGES = Object.freeze([
   "validate_input", "lock", "verify_tree", "qualify_engine", "run_setup", "publish_proof", "consume_proof", "done",
 ]);
+const V4_STAGES = new Set(CLOUD_V4_ATTESTER_STAGES);
 export const CLOUD_V4_IDENTITY_FIELDS = Object.freeze([
   "runtimeId", "manifestSha256", "baseCompatibilityId", "installerReceiptSha256", "bootId", "supervisorSessionId",
 ]);

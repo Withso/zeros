@@ -78,6 +78,13 @@ describe("v4 attester to setup admission", () => {
     await attestImage(material(), profile, vi.fn(), recordTimings);
     expect(recordTimings).toHaveBeenCalledWith(diagnostic.timings);
   });
+  it("keeps a timing observer failure outside admission", async () => {
+    const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+    returnOutput(attesterOutput());
+    await expect(attestImage(material(), profile, vi.fn(), () => { throw new Error("private-observer-canary"); }))
+      .resolves.toBeUndefined();
+  });
+
   it("admits the real report against the resolver witness without legacy metadata", async () => {
     const { cloudWorkspaceImageAdmissionChecks } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
     const result = attesterOutput(), report = JSON.parse(result.stdout.split("\n")[0]);
@@ -108,11 +115,34 @@ describe("v4 attester to setup admission", () => {
     expect(result.exitCode).toBe(1);
     expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, failedChecks: ["file_inventory"] });
     returnOutput({ ...result, code: result.exitCode });
-    await expect(attestImage(material(), profile, record)).rejects.toMatchObject({ code: "image_contract_invalid" });
+    const error = await attestImage(material(), profile, record).catch((failure: unknown) => failure);
+    const attester = { stage: "verify_tree", failedChecks: ["file_inventory"] };
+    expect(error).toMatchObject({ code: "image_contract_invalid", diagnostic: { attester } });
+    expect(JSON.stringify(error)).not.toContain(tree.root);
     expect(record).toHaveBeenCalledTimes(1);
     expect(record.mock.calls[0][0]).toMatchObject({ execution: false, report: false });
-    const diagnostic = { version: 1, phase: "image_preflight", checks: record.mock.calls[0][0] };
+    const diagnostic = { version: 1, phase: "image_preflight", checks: record.mock.calls[0][0], attester };
     expect(parseSetupDiagnostic(diagnostic)).toEqual(diagnostic);
+  });
+
+  it.each([
+    ["extra field", (value: Record<string, unknown>) => JSON.stringify({ ...value, message: "private-canary" })],
+    ["unknown stage", (value: Record<string, unknown>) => JSON.stringify({ ...value, stage: "private-canary" })],
+    ["unknown check", (value: Record<string, unknown>) => JSON.stringify({ ...value, failedChecks: ["private-canary"] })],
+    ["duplicate check", (value: Record<string, unknown>) => JSON.stringify({ ...value, failedChecks: ["file_inventory", "file_inventory"] })],
+    ["duplicate key", (value: Record<string, unknown>) => JSON.stringify(value).replace('"ok":false', '"ok":true,"ok":false')],
+    ["wrong component", (value: Record<string, unknown>) => JSON.stringify({ ...value, component: "installer" })],
+    ["extra output", (value: Record<string, unknown>) => `private-canary\n${JSON.stringify(value)}`],
+    ["wrong exit", (value: Record<string, unknown>) => JSON.stringify({ ...value, exitCode: 0 })],
+  ])("does not retain malformed failed attester output: %s", async (_name, corrupt) => {
+    const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+    tree.write(`${tree.root}.incomplete`, "", 0o600);
+    const result = tree.execute(), record = vi.fn();
+    returnOutput({ ...result, code: result.exitCode, stdout: corrupt(JSON.parse(result.stdout)) + "\n" });
+    const error = await attestImage(material(), profile, record).catch((failure: any) => failure);
+    expect(error.code).toBe("image_contract_invalid");
+    expect(error.diagnostic.attester).toBeUndefined();
+    expect(JSON.stringify([error, record.mock.calls])).not.toContain("private-canary");
   });
 
   it.each([1, 2, 3])("refuses worker v%i before attestation or material access", async version => {

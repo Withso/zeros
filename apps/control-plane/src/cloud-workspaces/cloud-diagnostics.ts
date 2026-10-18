@@ -55,12 +55,27 @@ export const setupEngineStartupSchema = z.object({
     ...(["admission", "validation"] as const).flatMap(stage => bootFailureCategories.map(category => `cloud_${stage}_${category}` as const))]),
   errno: z.number().int().refine(value => [-1, -2, -5, -13, -16, -17, -20, -21, -23, -24, -28, -30, -40, -104, -110, -111, -122].includes(value)).nullable(),
 }).strict();
+// Mirrors the v4 attester's closed vocabulary; never accept arbitrary child text.
+export const setupAttesterStages = ["validate_input", "lock", "verify_tree", "qualify_engine", "run_setup", "publish_proof", "consume_proof", "done"] as const;
+export const setupAttesterChecks = [
+  "active_descriptor", "host_marker", "installer_receipt", "receipt_digest",
+  "manifest_digest", "manifest_schema", "base_compatibility", "root_ownership",
+  "file_mode", "file_inventory", "hard_link", "symlink_escape", "boot_identity",
+  "namespace_binding", "uid_map", "apparmor", "cgroup_controllers", "finite_resources",
+  "engine_lifecycle", "containment_smoke", "seccomp", "setup_exit", "input_schema",
+  "lock_busy", "launch_proof", "pointer_publish", "timeout", "process_signal", "diagnostic_missing",
+] as const;
+export const setupAttesterFailureSchema = z.object({ stage: z.enum(setupAttesterStages),
+  failedChecks: z.array(z.enum(setupAttesterChecks)).min(1).max(32),
+}).strict().refine(value => new Set(value.failedChecks).size === value.failedChecks.length);
+
 export const setupDiagnosticSchema = z.object({ version: z.literal(1), phase: z.enum(diagnosticPhases), checks: imageChecks.optional(),
   digests: z.object({ osRelease: digestPair.optional(), packageInventory: digestPair.optional(), node: digestPair.optional() }).strict().optional(),
   files: z.object({ node: z.boolean(), supervisor: z.boolean(), setup: z.boolean(), engine: z.boolean() }).strict().optional(),
   exit: z.enum(["nonzero", "timeout", "signal", "overflow", "unknown"]).optional(),
   installer: ClosedDiagnosticSchema.refine(value => value.component === "installer").optional(),
   engineStartup: setupEngineStartupSchema.optional(),
+  attester: setupAttesterFailureSchema.optional(),
 }).strict();
 export type SetupDiagnostic = z.infer<typeof setupDiagnosticSchema>;
 export function parseSetupDiagnostic(value: unknown): SetupDiagnostic | null {

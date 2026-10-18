@@ -1,0 +1,9 @@
+{
+  "id": "closed-attester-refusals",
+  "kind": "replay",
+  "area": "control-plane-workers",
+  "fixedBy": "pr:597",
+  "symptom": "A failed attester completion lost its closed refusal, repeated qualification failures exhausted setup retries, and missing reports looked like proved immutable drift.",
+  "rule": "Retain only strict attester stage/check evidence through helper, audit and evidence reads; terminal contract refusals end once, while absent reports cannot authorize automatic replacement.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/linux-setup-executor.test.ts src/cloud-workspaces/cloud-diagnostics.test.ts src/cloud-workspaces/automatic-recovery.test.ts src/cloud-workspaces/setup-worker.integration.test.ts"
+}

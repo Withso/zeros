@@ -49,6 +49,16 @@ describe("bounded cloud diagnostics", () => {
     for (const value of [{ ...valid, message: "secret" }, { ...valid, checks: { source: { value: true } } }, { ...valid, phase: "arbitrary" }, { ...valid, checks: { source: "x".repeat(5000) } }])
       expect(parseSetupDiagnostic(value)).toBeNull();
   });
+  it("retains only closed nonempty attester refusal checks", () => {
+    const attester = { stage: "qualify_engine", failedChecks: ["seccomp"] };
+    const diagnostic = { version: 1, phase: "image_preflight", attester };
+    expect(parseSetupDiagnostic(diagnostic)).toEqual(diagnostic);
+    for (const invalid of [{ ...attester, stage: "private-canary" }, { ...attester, failedChecks: ["private-canary"] },
+      { ...attester, failedChecks: [] }, { ...attester, failedChecks: ["seccomp", "seccomp"] },
+      { ...attester, output: "private-canary" }, { ...attester, failedChecks: Array(33).fill("seccomp") }])
+      expect(parseSetupDiagnostic({ ...diagnostic, attester: invalid })).toBeNull();
+  });
+
   it("retains a closed engine startup cause in an additive setup readiness diagnostic", () => {
     const valid = { version: 1, phase: "engine_readiness", engineStartup: {
       phase: "history_restore", name: "Error", code: "ENOENT", errno: -2,
