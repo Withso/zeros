@@ -120,6 +120,11 @@ type Build = {
   operation_id: string;
   rebuilt_from_build_id: string | null;
   worker_fence: string;
+  helper_fence: string | null;
+  handoff_at: Date | null;
+  install_started: boolean;
+  install_log_after: string;
+  install_log_discard_streams: Array<"stdout" | "stderr">;
   base_image_id: string | null;
   runtime_id: string | null;
   repository_manifest: CloudComputerV2RepositoryManifest | null;
@@ -160,6 +165,9 @@ export type CloudComputerV2WorkerResult = {
 export type CloudComputerV2Claim = {
   organizationId: string;
   workerFence: number;
+  helperFence: number;
+  installProgress: CloudComputerV2InstallProgress;
+  repositoryManifest: CloudComputerV2RepositoryManifest | null;
   deadlineAt: string;
   build: CloudComputerV2BuildSummary;
   config: {
@@ -168,6 +176,11 @@ export type CloudComputerV2Claim = {
     timeoutSeconds: number;
     repositories: CloudComputerV2Repository[];
   };
+};
+export type CloudComputerV2InstallProgress = {
+  started: boolean;
+  after: number;
+  discardStreams: Array<"stdout" | "stderr">;
 };
 
 const iso = (value: Date | null) =>
@@ -1406,6 +1419,7 @@ export class DatabaseCloudComputerV2Service {
    * API processes. Take the org lock before locking its build, as all writers do. */
   async claimNextBuild(fence: number, builder?: {
     selectRuntime: (tx: Tx) => Promise<{ baseImageId: string; runtimeId: string } | null>;
+    loadRuntime?: (tx: Tx, pin: { baseImageId: string; runtimeId: string }) => Promise<boolean>;
     operations: BuilderVmOperationStore;
     accountScope: string; billingOrg: string; namePrefix?: string;
     runtimeImageChannel?: RuntimeImageChannel;
@@ -1413,6 +1427,37 @@ export class DatabaseCloudComputerV2Service {
     const workerFence = parse(positive, fence);
     return withSystemTx(this.pool, async (tx) => {
       await tx.query("SELECT pg_advisory_xact_lock(62173) /*lock_purpose='computer-gc'*/");
+      // A cooperative handoff already occupies a slot. Only an explicit
+      // checkpoint permits adoption; a crashed worker keeps its deadline.
+      if (builder?.loadRuntime) {
+        const candidate = (await tx.query<{ id: string }>(`SELECT build.id FROM cloud_computer_v2_builds build
+          JOIN cloud_computer_templates template ON template.build_id=build.id
+          WHERE build.state='running' AND build.handoff_at IS NOT NULL AND build.cancel_requested_at IS NULL
+            AND build.deadline_at>clock_timestamp() AND template.state='pending'
+            AND template.account_scope=$1 AND template.billing_org=$2 AND template.builder_operation_key IS NOT NULL
+          ORDER BY build.handoff_at,build.id LIMIT 1`, [builder.accountScope, builder.billingOrg])).rows[0];
+        if (candidate) {
+          const { build } = await this.lockedBuild(tx, candidate.id);
+          if (build.state !== "running" || !build.handoff_at || build.cancel_requested_at) return null;
+          const config = await configuration(tx, build.org_id, build.config_id);
+          const pin = { baseImageId: build.base_image_id!, runtimeId: build.runtime_id! };
+          const admitted = await builder.loadRuntime(tx, pin);
+          // Recheck the original clock after waiting on registry locks.
+          const expired = (await tx.query<{ expired: boolean }>(
+            "SELECT deadline_at<=clock_timestamp() AS expired FROM cloud_computer_v2_builds WHERE id=$1", [build.id],
+          )).rows[0]!.expired;
+          if (!admitted || expired) {
+            await tx.query(`UPDATE cloud_computer_v2_builds SET state='failed',error_code=$2,
+              completed_at=clock_timestamp(),handoff_at=NULL,worker_fence=worker_fence+1 WHERE id=$1`,
+            [build.id, expired ? "build_timeout" : "runtime_unavailable"]);
+            await tx.query("UPDATE cloud_computer_templates SET state='quarantined' WHERE build_id=$1", [build.id]);
+            return null;
+          }
+          const nextFence = parse(positive, Math.max(workerFence, Number(build.worker_fence) + 1));
+          await tx.query("UPDATE cloud_computer_v2_builds SET handoff_at=NULL,worker_fence=$2 WHERE id=$1", [build.id, nextFence]);
+          return this.buildClaim(build, config, nextFence);
+        }
+      }
       const running = (
         await tx.query<{ count: string }>(
           `SELECT count(*) FROM cloud_computer_v2_builds build LEFT JOIN cloud_computer_templates template ON template.build_id=build.id
@@ -1440,7 +1485,7 @@ export class DatabaseCloudComputerV2Service {
       }
       const runtimePin = selected === undefined ? undefined : parse(StagePinsSchema, selected);
       await tx.query(
-        `UPDATE cloud_computer_v2_builds SET state='running',stage='allocating',worker_fence=$2,
+        `UPDATE cloud_computer_v2_builds SET state='running',stage='allocating',worker_fence=$2,helper_fence=$2,
         started_at=now(),deadline_at=now()+interval '30 minutes',base_image_id=$3,runtime_id=$4 WHERE id=$1`,
         [build.id, workerFence, runtimePin?.baseImageId ?? null, runtimePin?.runtimeId ?? null],
       );
@@ -1468,18 +1513,35 @@ export class DatabaseCloudComputerV2Service {
           image?.imageId ?? null]);
       }
       const claimed = await buildRow(tx, build.org_id, build.id);
-      return {
-        organizationId: build.org_id,
-        workerFence,
-        deadlineAt: claimed.deadline_at!.toISOString(),
-        build: summary(claimed),
-        config: {
-          id: config.id,
-          installScript: config.install_script,
-          timeoutSeconds: config.timeout_seconds,
-          repositories: config.repositories,
-        },
-      };
+      return this.buildClaim(claimed, config, workerFence);
+    });
+  }
+  private buildClaim(build: Build, config: Configuration, workerFence: number): CloudComputerV2Claim {
+    return {
+      organizationId: build.org_id, workerFence, helperFence: integer(build.helper_fence!),
+      deadlineAt: build.deadline_at!.toISOString(), build: summary(build),
+      repositoryManifest: build.repository_manifest,
+      installProgress: { started: build.install_started, after: Number(build.install_log_after),
+        discardStreams: build.install_log_discard_streams },
+      config: { id: config.id, installScript: config.install_script, timeoutSeconds: config.timeout_seconds,
+        repositories: config.repositories },
+    };
+  }
+
+  /** Called only between acknowledged steps, after local credentials have been
+   * revoked. Advancing the CP fence makes every late predecessor write inert;
+   * the VM helper keeps the immutable fence under which its job was started. */
+  async handoffBuild(buildId: string, fence: number, progress: CloudComputerV2InstallProgress): Promise<boolean> {
+    const id = uuid(buildId), workerFence = parse(positive, fence);
+    const input = parse(z.object({ started: z.boolean(), after: z.number().int().nonnegative().safe(),
+      discardStreams: z.array(z.enum(["stdout", "stderr"])).max(2) }).strict(), progress);
+    return withSystemTx(this.pool, async tx => {
+      await this.lockedBuild(tx, id);
+      return (await tx.query(`UPDATE cloud_computer_v2_builds SET handoff_at=clock_timestamp(),worker_fence=worker_fence+1,
+        install_started=$3,install_log_after=$4,install_log_discard_streams=$5
+        WHERE id=$1 AND state='running' AND worker_fence=$2 AND handoff_at IS NULL
+          AND helper_fence IS NOT NULL AND cancel_requested_at IS NULL AND deadline_at>clock_timestamp()`,
+      [id, workerFence, input.started, input.after, input.discardStreams])).rowCount === 1;
     });
   }
   private async verifyManifest(

@@ -14,6 +14,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx } from "../db.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
+import type { CloudComputerV2Repository } from "./computer-v2-contract.js";
 import { ComputerTemplateWorker, type ComputerTemplateWorkerDependencies } from "./computer-template-worker.js";
 import { sanitizeComputerTemplateLog } from "./computer-template-logs.js";
 import type {
@@ -70,6 +71,7 @@ database("Cloud Computer template worker", () => {
     runFixed: ReturnType<typeof vi.fn>,
     remove: ReturnType<typeof vi.fn>;
   let selectRuntime: ReturnType<typeof vi.fn>,
+    loadRuntime: ReturnType<typeof vi.fn>,
     validateRuntime: ReturnType<typeof vi.fn>;
   let installCode: number,
     modified: boolean,
@@ -113,6 +115,7 @@ database("Cloud Computer template worker", () => {
     operations = memoryBuilderOperations();
     vi.spyOn(operations, "closeUnallocatedCreate");
     selectRuntime = vi.fn(async () => runtime);
+    loadRuntime = vi.fn(async () => runtime);
     validateRuntime = vi.fn(async () => true);
     create = vi.fn(async (input) => {
       const pin = (
@@ -250,7 +253,7 @@ database("Cloud Computer template worker", () => {
       github,
       accountScope: "fixture-account",
       billingOrg: "fixture-wallet",
-      runtime: { select: selectRuntime, validate: validateRuntime },
+      runtime: { select: selectRuntime, load: loadRuntime, validate: validateRuntime },
       artifacts: { presignGet },
       snapshots: new ComputerTemplateSnapshots(pool, { channel: "alpha", accountScope: "fixture-account", billingOrg: "fixture-wallet", pollMs: 0,
         provider: (() => {
@@ -272,7 +275,8 @@ database("Cloud Computer template worker", () => {
     worker = new ComputerTemplateWorker(workerOptions);
   });
   const request = (
-    draft = { repositories: [], installScript: "true", timeoutSeconds: 900 },
+    draft: { repositories: CloudComputerV2Repository[]; installScript: string; timeoutSeconds: number } =
+      { repositories: [], installScript: "true", timeoutSeconds: 900 },
   ) =>
     service.build(fixture.organizationId, fixture.userId, {
       expectedRevision: 0,
@@ -280,6 +284,317 @@ database("Cloud Computer template worker", () => {
       draft,
     });
   const read = () => service.read(fixture.organizationId, fixture.userId);
+  const buildRow = async () => (await pool.query(`SELECT id,state,stage,error_code,config_id,base_image_id,runtime_id,
+    started_at,deadline_at,worker_fence,helper_fence,handoff_at,install_started,install_log_after,install_log_discard_streams
+    FROM cloud_computer_v2_builds`)).rows[0];
+  const barrier = () => {
+    let reached!: () => void, release!: () => void;
+    const waiting = new Promise<void>(resolve => { reached = resolve; });
+    const released = new Promise<void>(resolve => { release = resolve; });
+    return { waiting, release, hold: async () => { reached(); await released; } };
+  };
+
+  it("hands an in-flight install to the next worker on shutdown without failing or rerunning the recipe", async () => {
+    const build = await request({ repositories: [], installScript: "", timeoutSeconds: 900 });
+    let reached!: () => void, resume!: () => void;
+    const atPoll = new Promise<void>(resolve => { reached = resolve; });
+    const releasePoll = new Promise<void>(resolve => { resume = resolve; });
+    pollHook = async () => { reached(); await releasePoll; };
+    const stop = worker.start();
+    try {
+      await atPoll;
+      // A second worker cannot adopt an active predecessor or allocate again.
+      await new ComputerTemplateWorker(workerOptions).tick();
+      expect(create).toHaveBeenCalledOnce();
+      const stopping = stop();
+      resume();
+      await stopping;
+      const paused = (await read()).latestBuild!;
+      expect(["queued", "running"]).toContain(paused.state);
+      expect(paused.errorCode).toBeNull();
+      expect(remove).not.toHaveBeenCalled();
+
+      // The production scheduler must see the persistent handoff immediately,
+      // even though its capacity slot is still occupied.
+      const completion = barrier();
+      const complete = service.completeBuild.bind(service);
+      vi.spyOn(service, "completeBuild").mockImplementation(async (...args) => {
+        const value = await complete(...args);
+        await completion.hold();
+        return value;
+      });
+      const successorStop = new ComputerTemplateWorker(workerOptions).start();
+      try { await completion.waiting; }
+      finally { completion.release(); await successorStop(); }
+      expect((await read()).active?.id).toBe(build.build.id);
+      expect(create).toHaveBeenCalledOnce();
+      expect(remove).not.toHaveBeenCalled();
+      expect(inputs.filter(({ command }) => command === "computer:clone-repos")).toHaveLength(1);
+      expect(inputs.filter(({ command, value }) => command === "computer:verify-tcb" && value.action === "baseline")).toHaveLength(1);
+      // Frozen base helpers key their durable install marker by these two
+      // values. A handoff cannot change that key and run the script again.
+      const starts = inputs.filter(({ command, value }) => command === "computer:run-install" && value.action === "start");
+      expect(starts.length).toBeGreaterThan(0);
+      expect(new Set(starts.map(({ value }) => JSON.stringify([value.buildId, value.workerFence]))).size).toBe(1);
+    } finally {
+      resume();
+      await stop();
+    }
+  });
+
+  it.each([
+    ["allocation", "runtime"], ["runtime install", "repositories"], ["clone", "install"],
+    ["integrity", "sanitation"], ["sanitation", "stopping"], ["stop", "stopping"], ["capture", "capture_confirmed"],
+  ])("hands off after verified %s without repeating completed steps", async (boundary, stage) => {
+    const repo = await repository();
+    const build = await request({ repositories: [repo], installScript: "true", timeoutSeconds: 900 });
+    const gate = barrier();
+    const originalCreate = create.getMockImplementation()!;
+    const originalFixed = runFixed.getMockImplementation()!;
+    const originalStop = vm.stop;
+    const originalCapture = workerOptions.snapshots.capture.bind(workerOptions.snapshots);
+    create.mockImplementation(async input => {
+      const value = await originalCreate(input);
+      if (boundary === "allocation") await gate.hold();
+      return value;
+    });
+    runFixed.mockImplementation(async (target, command, input) => {
+      const value = await originalFixed(target, command, input);
+      if ((boundary === "runtime install" && command === "install-runtime") ||
+        (boundary === "clone" && command === "computer:clone-repos") ||
+        (boundary === "sanitation" && command === "computer:sanitize") ||
+        (boundary === "integrity" && command === "computer:verify-tcb" && JSON.parse(input.toString()).action === "verify"))
+        await gate.hold();
+      return value;
+    });
+    vm.stop = vi.fn(async (...args) => {
+      const value = await originalStop(...args);
+      if (boundary === "stop") await gate.hold();
+      return value;
+    });
+    const capture = vi.spyOn(workerOptions.snapshots, "capture").mockImplementation(async input => {
+      const value = await originalCapture(input);
+      if (boundary === "capture") await gate.hold();
+      return value;
+    });
+    const stop = worker.start();
+    try {
+      await gate.waiting;
+      const original = await buildRow();
+      const stopping = stop();
+      gate.release();
+      await stopping;
+      expect(await buildRow()).toMatchObject({ state: "running", stage, handoff_at: expect.any(Date),
+        helper_fence: original.helper_fence, started_at: original.started_at, deadline_at: original.deadline_at });
+      if (["clone", "integrity", "sanitation", "stop", "capture"].includes(boundary)) expect(github.revoke).toHaveBeenCalledOnce();
+      // N-1 knows only the queued claim. Even a stopped handed-off builder is
+      // invisible to it, and stale CP writes cannot revoke a successor.
+      expect(await service.claimNextBuild(Number(original.worker_fence) + 10)).toBeNull();
+      expect(await service.markBuildStage(build.build.id, Number(original.worker_fence), "capture_confirmed")).toMatchObject({ applied: false });
+      expect(await service.failBuild(build.build.id, Number(original.worker_fence), "build_failed")).toMatchObject({ applied: false });
+      expect(await service.appendBuildLog(build.build.id, Number(original.worker_fence), { stage: "install", stream: "stdout", text: "stale" })).toMatchObject({ applied: false });
+      await Promise.all([new ComputerTemplateWorker(workerOptions).tick(), new ComputerTemplateWorker(workerOptions).tick()]);
+      expect((await read()).active?.id).toBe(build.build.id);
+      expect(create).toHaveBeenCalledOnce();
+      for (const command of ["install-runtime", "computer:clone-repos", "runtime-self-test", "computer:sanitize"])
+        expect(inputs.filter(input => input.command === command)).toHaveLength(1);
+      expect(inputs.filter(input => input.command === "computer:verify-tcb")).toHaveLength(2);
+      expect(vm.stop).toHaveBeenCalledOnce();
+      expect(capture).toHaveBeenCalledOnce();
+      expect(github.mintContentsRead).toHaveBeenCalledOnce();
+      expect(github.revoke).toHaveBeenCalledOnce();
+      expect(remove).not.toHaveBeenCalled();
+      expect(selectRuntime).toHaveBeenCalledOnce();
+      expect(loadRuntime).toHaveBeenCalledWith(expect.anything(), { baseImageId: runtime.baseImageId, runtimeId: runtime.descriptor.runtimeId });
+      const completed = await buildRow();
+      expect(completed).toMatchObject({ helper_fence: original.helper_fence, started_at: original.started_at, deadline_at: original.deadline_at });
+      expect(Number(completed.worker_fence)).toBeGreaterThan(Number(original.worker_fence));
+      expect(new Set(inputs.filter(input => input.value.workerFence).map(input => input.value.workerFence))).toEqual(new Set([Number(original.helper_fence)]));
+    } finally {
+      gate.release();
+      await stop();
+    }
+  });
+
+  it("preserves the install cursor across repeated handoffs without persisting or exposing split secret tails", async () => {
+    const repo = await repository();
+    const build = await request({ repositories: [repo], installScript: "true", timeoutSeconds: 900 });
+    const gates = [barrier(), barrier()];
+    const original = runFixed.getMockImplementation()!;
+    let page = 0;
+    runFixed.mockImplementation(async (target, command, input) => {
+      const output = await original(target, command, input);
+      if (command !== "computer:run-install") return output;
+      const value = JSON.parse(output.stdout);
+      const pages = [
+        [{ seq: 1, stream: "stdout", text: "first\nsynthetic-clone-cre" }],
+        [{ seq: 2, stream: "stdout", text: "dential\nsecond\n" }, { seq: 3, stream: "stderr", text: "Authorization: Bearer synthetic" }],
+        [{ seq: 4, stream: "stderr", text: "-tail\nthird\n" }],
+      ];
+      const current = page++;
+      Object.assign(value, { state: current < 2 ? "running" : "succeeded", exitCode: current < 2 ? null : 0,
+        chunks: pages[current], nextAfter: [1, 3, 4][current] });
+      if (gates[current]) await gates[current]!.hold();
+      return { ...output, stdout: JSON.stringify(value) };
+    });
+    for (const [index, gate] of gates.entries()) {
+      const stop = new ComputerTemplateWorker(workerOptions).start();
+      try {
+        await gate.waiting;
+        const stopping = stop();
+        gate.release();
+        await stopping;
+        expect(await buildRow()).toMatchObject({ state: "running", stage: "install", install_started: true,
+          install_log_after: String([1, 3][index]), install_log_discard_streams: [["stdout"], ["stderr"]][index] });
+      } finally {
+        gate.release();
+        await stop();
+      }
+    }
+    await new ComputerTemplateWorker(workerOptions).tick();
+    expect((await read()).active?.id).toBe(build.build.id);
+    const calls = inputs.filter(input => input.command === "computer:run-install").map(input => input.value);
+    expect(calls.map(call => [call.action, call.after])).toEqual([["start", 0], ["poll", 1], ["poll", 3]]);
+    expect(new Set(calls.map(call => call.workerFence)).size).toBe(1);
+    const logs = await service.logs(fixture.organizationId, fixture.userId, build.build.id);
+    expect(logs.entries.map(entry => entry.text).join("")).toBe("first\n\nsecond\n\nthird\n");
+    expect(create).toHaveBeenCalledOnce();
+    expect(github.revoke).toHaveBeenCalledOnce();
+  });
+
+  it.each(["failure", "cancellation", "deadline"])("does not turn %s during shutdown into an adoptable build", async reason => {
+    const build = await request();
+    const gate = barrier();
+    pollHook = gate.hold;
+    if (reason === "failure") installCode = 1;
+    const stop = worker.start();
+    try {
+      await gate.waiting;
+      const stopping = stop();
+      if (reason === "cancellation") await service.cancel(fixture.organizationId, fixture.userId, build.build.id, { expectedRevision: build.revision });
+      if (reason === "deadline") await pool.query("UPDATE cloud_computer_v2_builds SET deadline_at=clock_timestamp()-interval '1 second' WHERE id=$1", [build.build.id]);
+      gate.release();
+      await stopping;
+      expect(await buildRow()).toMatchObject({ state: reason === "cancellation" ? "cancelled" : "failed", handoff_at: null,
+        error_code: reason === "cancellation" ? null : reason === "deadline" ? "build_timeout" : "install_failed" });
+      expect(remove).toHaveBeenCalledOnce();
+      await new ComputerTemplateWorker(workerOptions).tick();
+      expect(loadRuntime).not.toHaveBeenCalled();
+      expect(create).toHaveBeenCalledOnce();
+    } finally {
+      gate.release();
+      await stop();
+    }
+  });
+
+  it("leaves an unacknowledged handoff on its original deadline when the database is unavailable", async () => {
+    await request();
+    const gate = barrier();
+    pollHook = gate.hold;
+    vi.spyOn(service, "handoffBuild").mockRejectedValueOnce(new Error("synthetic database outage"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const stop = worker.start();
+    try {
+      await gate.waiting;
+      const original = await buildRow();
+      const stopping = stop();
+      gate.release();
+      await stopping;
+      expect(await buildRow()).toMatchObject({ state: "running", handoff_at: null, deadline_at: original.deadline_at });
+      await new ComputerTemplateWorker(workerOptions).tick();
+      expect(loadRuntime).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+      await pool.query("UPDATE cloud_computer_v2_builds SET deadline_at=clock_timestamp()-interval '1 second'");
+      await new ComputerTemplateWorker(workerOptions).tick();
+      expect(await buildRow()).toMatchObject({ state: "failed", error_code: "build_timeout" });
+      expect(remove).toHaveBeenCalledOnce();
+    } finally {
+      gate.release();
+      await stop();
+      log.mockRestore();
+    }
+  });
+
+  it("adopts a committed handoff after the predecessor loses its commit reply", async () => {
+    const build = await request();
+    const gate = barrier();
+    pollHook = gate.hold;
+    const handoff = service.handoffBuild.bind(service);
+    vi.spyOn(service, "handoffBuild").mockImplementationOnce(async (...args) => {
+      expect(await handoff(...args)).toBe(true);
+      throw new Error("synthetic lost commit reply");
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const stop = worker.start();
+    try {
+      await gate.waiting;
+      const stopping = stop();
+      gate.release();
+      await stopping;
+      expect(await buildRow()).toMatchObject({ state: "running", handoff_at: expect.any(Date) });
+      await new ComputerTemplateWorker(workerOptions).tick();
+      expect((await read()).active?.id).toBe(build.build.id);
+      expect(create).toHaveBeenCalledOnce();
+      expect(remove).not.toHaveBeenCalled();
+    } finally {
+      gate.release();
+      await stop();
+      log.mockRestore();
+    }
+  });
+
+  it("never adopts an uncheckpointed clone and cleans it only after its original deadline", async () => {
+    await request();
+    const gate = barrier();
+    const original = runFixed.getMockImplementation()!;
+    runFixed.mockImplementation(async (...args) => {
+      const output = await original(...args);
+      if (args[1] === "computer:clone-repos") await gate.hold();
+      return output;
+    });
+    const running = worker.tick();
+    try {
+      await gate.waiting;
+      expect(await buildRow()).toMatchObject({ stage: "repositories", handoff_at: null });
+      await new ComputerTemplateWorker(workerOptions).tick();
+      expect(create).toHaveBeenCalledOnce();
+      expect(loadRuntime).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+      await pool.query("UPDATE cloud_computer_v2_builds SET deadline_at=clock_timestamp()-interval '1 second'");
+      await new ComputerTemplateWorker(workerOptions).tick();
+      expect(await buildRow()).toMatchObject({ state: "failed", error_code: "build_timeout" });
+      expect(remove).toHaveBeenCalledOnce();
+    } finally {
+      gate.release();
+      await running;
+    }
+    expect(inputs.filter(input => input.command === "computer:clone-repos")).toHaveLength(1);
+    expect(inputs.some(input => input.command === "computer:run-install")).toBe(false);
+  });
+
+  it("refuses a changed protected contract after handoff without taking a new baseline", async () => {
+    await request();
+    const gate = barrier();
+    pollHook = gate.hold;
+    const stop = worker.start();
+    try {
+      await gate.waiting;
+      const stopping = stop();
+      gate.release();
+      await stopping;
+      modified = true;
+      await new ComputerTemplateWorker(workerOptions).tick();
+      expect(await buildRow()).toMatchObject({ state: "failed", error_code: "tcb_modified" });
+      expect((await read()).active).toBeNull();
+      expect(remove).toHaveBeenCalledOnce();
+      expect(inputs.filter(input => input.command === "computer:verify-tcb" && input.value.action === "baseline")).toHaveLength(1);
+      expect(inputs.some(input => input.command === "computer:sanitize")).toBe(false);
+    } finally {
+      gate.release();
+      await stop();
+    }
+  });
+
   const imageRow = async (imageId: string) => withSystemTx(pool, async tx => (await tx.query(
     "SELECT state,diagnostic FROM cloud_runtime_images WHERE image_id=$1", [imageId],
   )).rows[0]);
@@ -821,7 +1136,7 @@ database("Cloud Computer template worker", () => {
       accountScope: "fixture-account",
       billingOrg: "fixture-wallet",
       pollMs: 0,
-      runtime: { select: selectRuntime, validate: validateRuntime },
+      runtime: { select: selectRuntime, load: loadRuntime, validate: validateRuntime },
       artifacts: { presignGet: vi.fn() },
     });
     await restarted.tick();

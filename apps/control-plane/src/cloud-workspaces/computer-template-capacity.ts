@@ -15,6 +15,8 @@ export type TemplateAllocation = {
   account_scope: string;
   billing_org: string;
   provider_resource_id: string | null;
+  protected_contract_digest: Buffer | null;
+  manifest_sha256: Buffer | null;
   allocation_requested_at: Date;
   stopped_at: Date | null;
   cleanup_confirmed_at: Date | null;
@@ -44,7 +46,7 @@ export class ComputerTemplateJournal {
             WHERE active.state='running' OR (template.builder_operation_key IS NOT NULL AND template.stopped_at IS NULL
               AND template.cleanup_confirmed_at IS NULL))<$3
         UNION ALL SELECT CASE WHEN build.state='running' THEN
-            CASE WHEN build.cancel_requested_at IS NOT NULL THEN now() ELSE build.deadline_at END
+            CASE WHEN build.cancel_requested_at IS NOT NULL OR build.handoff_at IS NOT NULL THEN now() ELSE build.deadline_at END
           ELSE greatest(coalesce(template.cleanup_retry_at,now()),template.cleanup_lease_until) END
         FROM cloud_computer_v2_builds build JOIN cloud_computer_templates template ON template.build_id=build.id
         WHERE template.account_scope=$1 AND template.billing_org=$2 AND template.builder_operation_key IS NOT NULL
@@ -87,10 +89,11 @@ export class ComputerTemplateJournal {
         await tx.query<{
           state: string;
           worker_fence: string;
+          handoff_at: Date | null;
           cancelled: boolean;
           expired: boolean;
         }>(
-          `SELECT state,worker_fence,cancel_requested_at IS NOT NULL AS cancelled,deadline_at<=clock_timestamp() AS expired
+          `SELECT state,worker_fence,handoff_at,cancel_requested_at IS NOT NULL AS cancelled,deadline_at<=clock_timestamp() AS expired
          FROM cloud_computer_v2_builds WHERE id=$1`,
           [id],
         )
@@ -100,6 +103,7 @@ export class ComputerTemplateJournal {
           row &&
           row.state === "running" &&
           Number(row.worker_fence) === fence &&
+          row.handoff_at === null &&
           !row.cancelled &&
           !row.expired,
         ),

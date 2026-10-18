@@ -31,7 +31,7 @@ type Stream = { literal: string; line: string; dropping: boolean };
 export class ComputerTemplateLogRedactor {
   private readonly secrets: string[];
   private readonly streams = new Map<string, Stream>();
-  constructor(values: readonly string[]) {
+  constructor(values: readonly string[], discardStreams: readonly ("stdout" | "stderr")[] = []) {
     this.secrets = [
       ...new Set(
         values
@@ -44,6 +44,15 @@ export class ComputerTemplateLogRedactor {
       this.secrets.some((value) => value.length > 16_384)
     )
       throw new Error("Invalid build redaction input");
+    for (const key of discardStreams) this.stream(key).dropping = true;
+  }
+  /** Never persist secret literals or an unfiltered partial line. A successor
+   * discards the rest of each interrupted line before accepting fresh output. */
+  handoffStreams(): Array<"stdout" | "stderr"> {
+    return (["stdout", "stderr"] as const).filter(key => {
+      const stream = this.streams.get(key);
+      return stream && (stream.literal || stream.line || stream.dropping);
+    });
   }
   private stream(key: string): Stream {
     if (key !== "stdout" && key !== "stderr")

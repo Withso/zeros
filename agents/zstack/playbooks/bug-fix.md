@@ -41,6 +41,9 @@
    and pin a transition that must still be refused.
    For worker failures, retain the first closed diagnostic before cleanup and
    across reconciliation, including late heartbeats and expired-claim recovery.
+   For deploy handoffs, hold the real stop callback across in-flight work. Yield
+   only at verified checkpoints; retain helper identity and the original deadline
+   while fencing the old process. Never infer safe replay from a dead worker.
    For optional lifecycle evidence, test old strict wires and isolate reporting
    from authority/ingress budgets. Race cancellation against exact-request
    receipts; canonicalize identifiers before applying replay and storage bounds.
