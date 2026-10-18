@@ -2,7 +2,7 @@
   "id": "provider-session-proof",
   "kind": "replay",
   "area": "cloud-workspaces",
-  "fixedBy": "pending",
+  "fixedBy": "pr:600",
   "symptom": "The provider session adapter discarded identity and finite expiry, and a session-created webhook without expiry cleared a previously known deadline.",
   "rule": "Retain exact finite enrollment evidence and preserve it when a webhook omits a field; bound external I/O and fence late results against source and account changes. See changes/finite-provider-session-proof.md.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/workos-provider.test.ts src/workos-sync-events.integration.test.ts src/auth-session-proof.integration.test.ts -t 'provider expiry|webhook_omission|bounds retained waiter callbacks'"
