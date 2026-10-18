@@ -33,7 +33,7 @@ import { pruneLauncherScriptEnv } from "../env/launcher-env";
 import { gitExecutionIdentity, gitProcessOptions } from "./git-execution-identity";
 import { withoutLocalDevelopment } from "../env/local-development";
 import { scopedCloudGitAuthorEnvironment } from "./cloud-git-author";
-import { isBackgroundGitRead } from "./git-read-lane";
+import { currentGitReadLane, type GitReadLane } from "./git-read-lane";
 export { gitExecutionIdentity } from "./git-execution-identity";
 
 const execFileAsync = promisify(execFile);
@@ -1978,36 +1978,49 @@ export async function runGitRead(
   const read = () => runGit(cwd, args, { ...opts, readOnly: true });
   // Only summary fan-out uses the bounded lane. Interactive diff/log/history
   // reads must start immediately even when slow background reads fill it.
-  return !isBackgroundGitRead() || gitExecutionIdentity(opts.identity) ? read() : queueLocalGitRead(read, opts.signal);
+  const lane = currentGitReadLane();
+  return !lane?.background || gitExecutionIdentity(opts.identity) ? read() : queueLocalGitRead(read, lane, opts.signal);
 }
 
 const LOCAL_GIT_READ_CONCURRENCY = 4;
 let activeLocalGitReads = 0;
 const waitingLocalGitReads: Array<() => void> = [];
 
-function queueLocalGitRead(read: () => Promise<RunGitResult>, signal?: AbortSignal): Promise<RunGitResult> {
+function queueLocalGitRead(read: () => Promise<RunGitResult>, lane: GitReadLane, signal?: AbortSignal): Promise<RunGitResult> {
   return new Promise((resolve, reject) => {
     const cancelled = () => new GitError({ code: "GIT_COMMAND_FAILED", message: "Git observation was cancelled." });
     if (signal?.aborted) { reject(cancelled()); return; }
+    let removePromotion = () => {};
     const onAbort = () => {
       const index = waitingLocalGitReads.indexOf(start);
       if (index < 0) return;
       waitingLocalGitReads.splice(index, 1);
       signal?.removeEventListener("abort", onAbort);
+      removePromotion();
       reject(cancelled());
     };
     const start = () => {
       signal?.removeEventListener("abort", onAbort);
-      activeLocalGitReads += 1;
+      removePromotion();
+      const background = lane.background;
+      if (background) activeLocalGitReads += 1;
       void Promise.resolve().then(read).then(resolve, reject).finally(() => {
-        activeLocalGitReads -= 1;
-        waitingLocalGitReads.shift()?.();
+        if (background) {
+          activeLocalGitReads -= 1;
+          waitingLocalGitReads.shift()?.();
+        }
       });
     };
     if (activeLocalGitReads < LOCAL_GIT_READ_CONCURRENCY) start();
     else {
       waitingLocalGitReads.push(start);
       signal?.addEventListener("abort", onAbort, { once: true });
+      removePromotion = lane.onPromotion(() => {
+        const index = waitingLocalGitReads.indexOf(start);
+        if (index < 0) return;
+        waitingLocalGitReads.splice(index, 1);
+        start();
+      });
     }
   });
 }
